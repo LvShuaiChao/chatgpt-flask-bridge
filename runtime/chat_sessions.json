@@ -1,0 +1,179 @@
+{
+  "version": 2,
+  "current_session_id": "fd8574e9-c996-4ae6-ac1a-2049cdb72049",
+  "tab_order": [
+    "e804fadc-9832-421d-9361-ad461395ca0d",
+    "fd8574e9-c996-4ae6-ac1a-2049cdb72049"
+  ],
+  "sessions": [
+    {
+      "session_id": "e804fadc-9832-421d-9361-ad461395ca0d",
+      "title": "4121",
+      "created_at": 1779201870.8695009,
+      "updated_at": 1779202095.4621696,
+      "task_type": "",
+      "context_mode": "",
+      "summary": "",
+      "pinned_context": "",
+      "remote_chatgpt": {
+        "conversation_id": "",
+        "conversation_url": "",
+        "enabled": false
+      },
+      "has_pending_reply": false,
+      "messages": [
+        {
+          "message_id": "",
+          "turn_id": "",
+          "role": "system",
+          "content": "请先启动服务，然后刷新 ChatGPT 页面并确认油猴脚本在线。",
+          "created_at": 1779201871.0947485,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "",
+          "turn_id": "",
+          "role": "system",
+          "content": "服务已启动：http://127.0.0.1:5000",
+          "created_at": 1779201873.8270755,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "0374bc0c-0aee-4178-95ba-8b98d0041395",
+          "turn_id": "2fceb900-76d0-4d2c-9afb-d426cd5ac664",
+          "role": "user",
+          "content": "4121",
+          "created_at": 1779201877.854318,
+          "status": "已加入队列",
+          "bridge_message_id": "3534c52a-d16a-48b4-89ec-54c994250bcb",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "eb65a145-5133-45f7-82b7-c739523ffb57",
+          "turn_id": "2fceb900-76d0-4d2c-9afb-d426cd5ac664",
+          "role": "assistant",
+          "content": "收到 4121。\n\n这看起来还是一条测试输入。如果你是在测链路，说明当前消息可以正常到达对话。",
+          "created_at": 1779201877.854318,
+          "status": "已回复",
+          "bridge_message_id": "3534c52a-d16a-48b4-89ec-54c994250bcb",
+          "parent_message_id": "0374bc0c-0aee-4178-95ba-8b98d0041395",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "",
+          "turn_id": "",
+          "role": "system",
+          "content": "请先启动服务。",
+          "created_at": 1779202065.9945128,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "",
+          "turn_id": "",
+          "role": "system",
+          "content": "请先启动服务。",
+          "created_at": 1779202068.8724601,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "",
+          "turn_id": "",
+          "role": "system",
+          "content": "服务已启动：http://127.0.0.1:5000",
+          "created_at": 1779202072.1381125,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "43ee15fe-e0e3-4ddb-a1f9-f58fcc00714f",
+          "turn_id": "ec4bb211-d666-43ee-8e7c-25409e6d0266",
+          "role": "user",
+          "content": "5221212",
+          "created_at": 1779202080.6197054,
+          "status": "已加入队列",
+          "bridge_message_id": "1f926b38-7453-4455-9529-012c0e4d1e0c",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "e510787f-3042-4a0e-9ed7-f6946184b328",
+          "turn_id": "ec4bb211-d666-43ee-8e7c-25409e6d0266",
+          "role": "assistant",
+          "content": "收到 5221212。\n\n这条消息也能正常到达。如果这是测试输入链路，当前链路是通的。",
+          "created_at": 1779202080.6197054,
+          "status": "已回复",
+          "bridge_message_id": "1f926b38-7453-4455-9529-012c0e4d1e0c",
+          "parent_message_id": "43ee15fe-e0e3-4ddb-a1f9-f58fcc00714f",
+          "visible_in_chat": true
+        }
+      ]
+    },
+    {
+      "session_id": "fd8574e9-c996-4ae6-ac1a-2049cdb72049",
+      "title": "新对话",
+      "created_at": 1779203016.6232257,
+      "updated_at": 1779203366.218969,
+      "task_type": "",
+      "context_mode": "",
+      "summary": "",
+      "pinned_context": "",
+      "remote_chatgpt": {
+        "conversation_id": "",
+        "conversation_url": "",
+        "enabled": false
+      },
+      "has_pending_reply": false,
+      "messages": [
+        {
+          "message_id": "0ee9755b-84f9-415b-8160-71aa17b10b17",
+          "turn_id": "",
+          "role": "system",
+          "content": "请先启动服务。",
+          "created_at": 1779203019.6031766,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        },
+        {
+          "message_id": "cf022658-ad7c-41c7-be06-8b04e59145b7",
+          "turn_id": "",
+          "role": "system",
+          "content": "服务已启动：http://127.0.0.1:5000",
+          "created_at": 1779203366.218969,
+          "status": "",
+          "bridge_message_id": "",
+          "parent_message_id": "",
+          "visible_in_chat": true
+        }
+      ]
+    }
+  ],
+  "message_to_session": {
+    "3534c52a-d16a-48b4-89ec-54c994250bcb": "e804fadc-9832-421d-9361-ad461395ca0d",
+    "1f926b38-7453-4455-9529-012c0e4d1e0c": "e804fadc-9832-421d-9361-ad461395ca0d"
+  },
+  "message_to_turn": {
+    "3534c52a-d16a-48b4-89ec-54c994250bcb": "2fceb900-76d0-4d2c-9afb-d426cd5ac664",
+    "1f926b38-7453-4455-9529-012c0e4d1e0c": "ec4bb211-d666-43ee-8e7c-25409e6d0266"
+  },
+  "finalized_bridge_message_ids": [
+    "3534c52a-d16a-48b4-89ec-54c994250bcb",
+    "1f926b38-7453-4455-9529-012c0e4d1e0c"
+  ]
+}
