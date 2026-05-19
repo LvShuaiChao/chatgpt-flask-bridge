@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 客户端 - Flask 轮询联动
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  与本地 Flask 服务端双向交互：轮询消息、发送到 ChatGPT、回执确认、回传回复
 // @author       You
 // @match        https://chatgpt.com/*
@@ -262,19 +262,35 @@
         return null;
     }
 
-    function getLatestAssistantText() {
+    function getAssistantMessageNodes() {
         const selectors = [
             '[data-message-author-role="assistant"]',
-            '[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]'
+            '[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]',
+            'article[data-turn="assistant"]',
+            'div[data-turn="assistant"]'
         ];
 
-        let nodes = [];
+        const seen = new Set();
+        const nodes = [];
 
         for (const selector of selectors) {
-            nodes = nodes.concat(Array.from(document.querySelectorAll(selector)));
+            for (const node of document.querySelectorAll(selector)) {
+                if (!seen.has(node) && isVisible(node)) {
+                    seen.add(node);
+                    nodes.push(node);
+                }
+            }
         }
 
-        nodes = nodes.filter(node => isVisible(node));
+        return nodes;
+    }
+
+    function countAssistantMessages() {
+        return getAssistantMessageNodes().length;
+    }
+
+    function getLatestAssistantText() {
+        const nodes = getAssistantMessageNodes();
 
         if (!nodes.length) {
             return '';
@@ -297,15 +313,21 @@
         });
     }
 
-    async function waitForAssistantReply(beforeText, timeoutMs) {
+    async function waitForAssistantReply(beforeText, beforeCount, timeoutMs) {
         const start = Date.now();
         let latestText = '';
         let lastChangedAt = Date.now();
 
         while (Date.now() - start < timeoutMs) {
+            const currentCount = countAssistantMessages();
             const currentText = getLatestAssistantText();
+            const hasNewMessage = currentCount > beforeCount;
+            const textChanged = currentText && currentText !== beforeText;
 
-            if (currentText && currentText !== beforeText && currentText !== latestText) {
+            if (currentText && (hasNewMessage || textChanged) && currentText !== latestText) {
+                latestText = currentText;
+                lastChangedAt = Date.now();
+            } else if (currentText && hasNewMessage && !latestText) {
                 latestText = currentText;
                 lastChangedAt = Date.now();
             }
@@ -389,6 +411,7 @@
         }
 
         const beforeReply = getLatestAssistantText();
+        const beforeCount = countAssistantMessages();
         const sendResult = await sendToChatGPT(result.content);
 
         try {
@@ -406,30 +429,33 @@
             return;
         }
 
-        waitForAssistantReply(beforeReply, ASSISTANT_REPLY_WAIT_MS)
-            .then(replyText => {
-                if (!replyText) {
-                    return report('assistant_reply_empty', {
-                        detail: '已发送，但未读取到 ChatGPT 回复内容'
-                    }, messageId);
-                }
+        try {
+            const replyText = await waitForAssistantReply(
+                beforeReply,
+                beforeCount,
+                ASSISTANT_REPLY_WAIT_MS
+            );
 
-                let text = replyText;
-
-                if (text.length > MAX_REPLY_LENGTH) {
-                    text = text.slice(0, MAX_REPLY_LENGTH) + '\n\n[回复内容过长，已截断]';
-                }
-
-                return report('assistant_reply', {
-                    text: text
+            if (!replyText) {
+                await report('assistant_reply_empty', {
+                    detail: '已发送，但未读取到 ChatGPT 回复内容'
                 }, messageId);
-            })
-            .catch(error => {
-                console.error('[联动] 读取 ChatGPT 回复失败:', error);
-                return report('assistant_reply_failed', {
-                    detail: error.message
-                }, messageId);
-            });
+                return;
+            }
+
+            let text = replyText;
+
+            if (text.length > MAX_REPLY_LENGTH) {
+                text = text.slice(0, MAX_REPLY_LENGTH) + '\n\n[回复内容过长，已截断]';
+            }
+
+            await report('assistant_reply', { text: text }, messageId);
+        } catch (error) {
+            console.error('[联动] 读取 ChatGPT 回复失败:', error);
+            await report('assistant_reply_failed', {
+                detail: error.message
+            }, messageId);
+        }
     }
 
     async function pollBridge() {
