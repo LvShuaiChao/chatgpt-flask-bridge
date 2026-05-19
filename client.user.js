@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 客户端 - Flask 轮询联动
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      2.0
 // @description  与本地 Flask 服务端双向交互：轮询消息、发送到 ChatGPT、回执确认、回传回复
 // @author       You
 // @match        https://chatgpt.com/*
@@ -11,14 +11,25 @@
 // @connect      127.0.0.1
 // @connect      localhost
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @grant        window.close
 // @run-at       document-idle
+// @noframes
+// @exclude      https://chatgpt.com/backend-api/*
+// @exclude      https://*.chatgpt.com/backend-api/*
 // ==/UserScript==
 
 (function () {
     'use strict';
+    if (window.top !== window.self) {
+        console.log('[联动] 跳过 iframe 内运行:', location.href);
+        return;
+    }
     const BRIDGE_URL = 'http://127.0.0.1:5000/api/bridge';
     const SOURCE = 'tampermonkey';
+    const SCRIPT_VERSION = '2.0';
     const CLIENT_ID_KEY = 'tm_bridge_client_id';
+    const PAGE_INSTANCE_ID = 'page-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     const CLIENT_ID = (function () {
         try {
             const saved = sessionStorage.getItem(CLIENT_ID_KEY);
@@ -45,6 +56,38 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    function getPageIdentity() {
+        const url = new URL(location.href);
+        const path = url.pathname || '';
+        let pageType = 'unknown';
+        let conversationId = '';
+        const conversationMatch = path.match(/^\/c\/([^/?#]+)/);
+        if (conversationMatch) {
+            pageType = 'conversation';
+            conversationId = conversationMatch[1];
+        } else if (path === '/' || path === '') {
+            pageType = 'home';
+        } else if (path.startsWith('/backend-api/') || path.includes('/sentinel/')) {
+            pageType = 'ignored';
+        } else {
+            pageType = 'other';
+        }
+        return {
+            client_id: CLIENT_ID,
+            page_instance_id: PAGE_INSTANCE_ID,
+            script_version: SCRIPT_VERSION,
+            page_url: location.href,
+            page_title: document.title || '',
+            page_type: pageType,
+            conversation_id: conversationId,
+            is_top_frame: window.top === window.self,
+            visibility_state: document.visibilityState,
+            has_focus: document.hasFocus(),
+            pathname: location.pathname,
+            last_seen: Date.now() / 1000
+        };
+    }
+
     function apiRequest(body) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -55,8 +98,7 @@
                     'X-Request-Source': SOURCE
                 },
                 data: JSON.stringify({
-                    client_id: CLIENT_ID,
-                    page_url: location.href,
+                    ...getPageIdentity(),
                     ...body
                 }),
                 onload: function (response) {
@@ -95,6 +137,117 @@
             success: success,
             detail: detail || ''
         });
+    }
+
+    function openUrlInNewTab(url, active = true) {
+        try {
+            const parsed = new URL(url);
+
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                return {
+                    ok: false,
+                    detail: `不允许打开非 http/https 地址: ${url}`
+                };
+            }
+
+            if (typeof GM_openInTab === 'function') {
+                GM_openInTab(parsed.href, {
+                    active: active,
+                    insert: true,
+                    setParent: true
+                });
+
+                return {
+                    ok: true,
+                    detail: `已通过 GM_openInTab 打开: ${parsed.href}`
+                };
+            }
+
+            const win = window.open(parsed.href, '_blank', 'noopener,noreferrer');
+
+            if (!win) {
+                return {
+                    ok: false,
+                    detail: 'window.open 被浏览器拦截'
+                };
+            }
+
+            return {
+                ok: true,
+                detail: `已通过 window.open 打开: ${parsed.href}`
+            };
+        } catch (error) {
+            console.error('[联动] 打开网页失败:', error);
+            return {
+                ok: false,
+                detail: `打开网页失败: ${error.message}`
+            };
+        }
+    }
+
+    function closeCurrentPage() {
+        try {
+            console.log('[联动] 收到关闭当前页面命令:', location.href);
+            window.close();
+            return {
+                ok: true,
+                detail: '已执行 window.close()'
+            };
+        } catch (error) {
+            console.error('[联动] 关闭当前页面失败:', error);
+            return {
+                ok: false,
+                detail: `关闭当前页面失败: ${error.message}`
+            };
+        }
+    }
+
+    async function handleCommandMessage(result) {
+        const messageId = result.message_id || result.id;
+
+        if (result.command === 'close_self') {
+            const closeResult = closeCurrentPage();
+
+            try {
+                await ack(messageId, closeResult.ok, closeResult.detail);
+            } catch (error) {
+                console.error('[联动] close_self ack 失败:', messageId, error);
+            }
+
+            await report(
+                closeResult.ok ? 'close_page_success' : 'close_page_failed',
+                {
+                    detail: closeResult.detail,
+                    page_url: location.href
+                },
+                messageId
+            );
+
+            return true;
+        }
+
+        if (result.command === 'open_url') {
+            const openResult = openUrlInNewTab(result.url, result.active !== false);
+
+            try {
+                await ack(result.message_id, openResult.ok, openResult.detail);
+            } catch (error) {
+                console.error('[联动] open_url ack 失败:', result.message_id, error);
+            }
+
+            await report(
+                openResult.ok ? 'open_url_success' : 'open_url_failed',
+                {
+                    url: result.url,
+                    detail: openResult.detail
+                },
+                result.message_id
+            );
+
+            return true;
+        }
+
+        return false;
     }
 
     function isVisible(element) {
@@ -460,10 +613,52 @@
     }
 
     async function handleOutboundMessage(result) {
-        if (!result.has_message || !result.content) {
+        if (!result.has_message) {
             return;
         }
         const messageId = result.message_id;
+        if (result.type === 'command') {
+            if (!messageId) {
+                console.error('[联动] 命令消息缺少 message_id');
+                return;
+            }
+            if (handlingMessageId && handlingMessageId !== messageId) {
+                console.log(
+                    '[联动] 跳过命令，当前正在处理:',
+                    handlingMessageId,
+                    '新命令:',
+                    messageId
+                );
+                return;
+            }
+            if (handlingMessageId === messageId && !result.retry) {
+                return;
+            }
+            handlingMessageId = messageId;
+            console.log('[联动] claim command message_id=', messageId, 'command=', result.command);
+            try {
+                const handled = await handleCommandMessage(result);
+                if (!handled) {
+                    console.error('[联动] 未知命令:', result.command);
+                    try {
+                        await ack(messageId, false, `未知命令: ${result.command || '-'}`);
+                    } catch (error) {
+                        console.error('[联动] 未知命令 ack 失败:', messageId, error);
+                    }
+                    await report('command_failed', {
+                        detail: `未知命令: ${result.command || '-'}`
+                    }, messageId);
+                }
+            } finally {
+                if (handlingMessageId === messageId) {
+                    handlingMessageId = null;
+                }
+            }
+            return;
+        }
+        if (!result.content) {
+            return;
+        }
         if (!messageId) {
             console.error('[联动] 服务端未返回 message_id');
             return;
@@ -479,6 +674,27 @@
         }
         if (handlingMessageId === messageId && !result.retry) {
             return;
+        }
+        if (result.target_client_id && result.target_client_id !== CLIENT_ID) {
+            console.log(
+                '[联动] 跳过消息：target_client_id 不匹配',
+                'expected=', result.target_client_id,
+                'self=', CLIENT_ID,
+                'message_id=', messageId
+            );
+            return;
+        }
+        if (result.target_page_url) {
+            const target = String(result.target_page_url).trim();
+            const current = location.href.split('#')[0];
+            if (target && current !== target) {
+                console.log(
+                    '[联动] target_page_url 与当前页面不一致（第一阶段仅记录，不自动跳转）',
+                    'current=', current,
+                    'target=', target,
+                    'message_id=', messageId
+                );
+            }
         }
         handlingMessageId = messageId;
         if (result.retry) {
@@ -557,7 +773,15 @@
         }
     }
 
-    console.log('[联动] ChatGPT 油猴脚本已启动 CLIENT_ID=', CLIENT_ID);
+    const identity = getPageIdentity();
+    console.log(
+        '[联动] ChatGPT 油猴脚本已启动',
+        'client_id=', identity.client_id,
+        'page_instance_id=', identity.page_instance_id,
+        'page_type=', identity.page_type,
+        'conversation_id=', identity.conversation_id || '-',
+        'page_url=', identity.page_url
+    );
     pollBridge();
     setInterval(pollBridge, POLL_INTERVAL_MS);
 })();
