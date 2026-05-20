@@ -10,6 +10,9 @@ import server
 from app.constants import CHATGPT_HOME_URL
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
+    BIND_STATE_PREBOUND_HOME,
+    BIND_STATE_WAITING_CONVERSATION_CREATED,
+    BIND_STATE_WAITING_HOME,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
@@ -108,7 +111,7 @@ class PageOpenCloseMixin:
         url = (remote.get("conversation_url") or "").strip()
         if url and self._is_bindable_chatgpt_url(url):
             return url
-        conversation_id = (remote.get("conversation_id") or "").strip()
+        conversation_id = self._remote_conversation_id(remote)
         if conversation_id:
             return f"https://chatgpt.com/c/{conversation_id}"
         return ""
@@ -152,7 +155,14 @@ class PageOpenCloseMixin:
             return
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bound_client = (remote.get("client_id") or "").strip()
+        bind_state = self._remote_bind_state(remote)
         if remote.get("enabled") and bound_client and bound_client != client_id:
+            if bind_state in (
+                BIND_STATE_PREBOUND_HOME,
+                BIND_STATE_WAITING_HOME,
+                BIND_STATE_WAITING_CONVERSATION_CREATED,
+            ):
+                return
             bound_conv = (remote.get("conversation_id") or "").strip()
             if not bound_conv:
                 bound_conv = parse_conversation_id(
@@ -192,11 +202,7 @@ class PageOpenCloseMixin:
             return False
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
 
         url = ""
         if conversation_id:
@@ -302,9 +308,7 @@ class PageOpenCloseMixin:
             or ""
         ).strip()
 
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(bound_url)
+        conversation_id = self._remote_conversation_id(remote)
 
         if isinstance(bound_info, dict):
             if not bound_url:

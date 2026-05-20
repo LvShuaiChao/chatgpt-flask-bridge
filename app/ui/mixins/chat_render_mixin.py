@@ -1,4 +1,5 @@
 import time
+import traceback
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
@@ -14,7 +15,13 @@ from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
 from app.utils.text_utils import format_ts
 
 
+MAX_RENDER_MESSAGES_ON_SWITCH = 120
+
+
 class ChatRenderMixin:
+    def _chat_primary_scroll_area(self):
+        return getattr(self, "chat_scroll", None)
+
     @staticmethod
     def _format_ts(ts):
         return format_ts(ts)
@@ -38,12 +45,25 @@ class ChatRenderMixin:
             index += 1
         self._reply_bubbles_by_message_id.clear()
         self._user_bubbles_by_message_id.clear()
+        self._last_rendered_chat_signature = None
+        self._last_rendered_session_id = ""
 
     def _update_chat_empty_state(self, session=None):
         if not hasattr(self, "empty_state_widget"):
             return
         # 空对话不显示「还没有消息」占位；仅保留 system 等真实消息气泡
         self.empty_state_widget.setVisible(False)
+    def _visible_messages_for_render(self, session):
+        visible = [
+            message
+            for message in session.messages
+            if getattr(message, "visible_in_chat", True)
+        ]
+        if len(visible) <= MAX_RENDER_MESSAGES_ON_SWITCH:
+            return visible, 0
+        skipped = len(visible) - MAX_RENDER_MESSAGES_ON_SWITCH
+        return visible[-MAX_RENDER_MESSAGES_ON_SWITCH:], skipped
+
     def _session_chat_render_signature(self, session):
         rows = []
         for message in session.messages:
@@ -58,15 +78,52 @@ class ChatRenderMixin:
         return tuple(rows)
 
     def _render_session_chat(self, session, *, force_bottom=False):
-        scroll_state = capture_scroll_state(self.chat_scroll)
+        if session is None:
+            return
 
-        self._clear_chat_widgets()
-        for message in session.messages:
-            if not message.visible_in_chat:
-                continue
-            self._add_bubble_from_message(message, register_only=False)
-        self._update_chat_empty_state(session)
-        self._last_rendered_chat_signature = self._session_chat_render_signature(session)
+        new_signature = self._session_chat_render_signature(session)
+        old_signature = getattr(self, "_last_rendered_chat_signature", None)
+        old_session_id = getattr(self, "_last_rendered_session_id", "")
+
+        if (
+            old_session_id == session.session_id
+            and old_signature == new_signature
+        ):
+            self._update_chat_empty_state(session)
+            if force_bottom:
+                self._scroll_to_bottom()
+            return
+
+        scroll_state = capture_scroll_state(self._chat_primary_scroll_area())
+
+        scroll = self._chat_primary_scroll_area()
+        if scroll is not None:
+            scroll.setUpdatesEnabled(False)
+
+        try:
+            self._clear_chat_widgets()
+            messages, skipped = self._visible_messages_for_render(session)
+            if skipped > 0:
+                fold_text = f"已折叠较早的 {skipped} 条消息，避免切换卡顿。"
+                fold_bubble = SystemBubble(fold_text, "")
+                fold_row = create_bubble_row_widget(
+                    fold_bubble, "system", spacing=8
+                )
+                insert_index = max(0, self.chat_list_layout.count() - 1)
+                self.chat_list_layout.insertWidget(insert_index, fold_row)
+            for message in messages:
+                self._add_bubble_from_message(message, register_only=False)
+
+            self._update_chat_empty_state(session)
+            self._last_rendered_chat_signature = new_signature
+            self._last_rendered_session_id = session.session_id
+        except Exception:
+            traceback.print_exc()
+            raise
+        finally:
+            if scroll is not None:
+                scroll.setUpdatesEnabled(True)
+
         self._scroll_to_bottom_if_user_was_near_bottom(
             scroll_state,
             force_bottom=force_bottom,
@@ -120,7 +177,7 @@ class ChatRenderMixin:
         session = self._ensure_current_session()
         self._append_session_message(session, "system", text)
         if session.session_id == self._current_session_id:
-            scroll_state = capture_scroll_state(self.chat_scroll)
+            scroll_state = capture_scroll_state(self._chat_primary_scroll_area())
             self._add_bubble_from_message(session.messages[-1])
             self._scroll_to_bottom_if_user_was_near_bottom(scroll_state)
         self._refresh_session_list(select_session_id=session.session_id)
@@ -142,13 +199,13 @@ class ChatRenderMixin:
         self._add_system_message(text)
     def _scroll_to_bottom(self):
         schedule_scroll_to_bottom(
-            self.chat_scroll,
+            self._chat_primary_scroll_area(),
             enabled=self._auto_scroll_to_bottom,
         )
 
     def _scroll_to_bottom_if_user_was_near_bottom(self, scroll_state, *, force_bottom=False):
         schedule_scroll_to_bottom_if_needed(
-            self.chat_scroll,
+            self._chat_primary_scroll_area(),
             scroll_state,
             enabled=self._auto_scroll_to_bottom,
             force_bottom=force_bottom,
@@ -189,7 +246,7 @@ class ChatRenderMixin:
         return True
 
     def _apply_reply_ui_change(self, session, target):
-        scroll_state = capture_scroll_state(self.chat_scroll)
+        scroll_state = capture_scroll_state(self._chat_primary_scroll_area())
 
         if session.session_id == self._current_session_id:
             updated = self._update_existing_reply_bubble(target)
@@ -198,6 +255,7 @@ class ChatRenderMixin:
             else:
                 sig = self._session_chat_render_signature(session)
                 self._last_rendered_chat_signature = sig
+                self._last_rendered_session_id = session.session_id
                 self._scroll_to_bottom_if_user_was_near_bottom(scroll_state)
         else:
             self._mark_session_pending(session.session_id)

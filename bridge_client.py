@@ -562,6 +562,41 @@ class BridgeClient:
             "client_name": client_name,
         }
 
+    def _request_chat_action(
+        self,
+        endpoint: str,
+        text: str,
+        *,
+        session_id: str = "",
+        auto_create_session: bool = True,
+        auto_open_home: bool = True,
+        new_session: bool = False,
+        reuse_last_session: bool = True,
+        force_new_session_after_turns: Optional[int] = None,
+        timeout: Optional[float] = None,
+        client_name: str = DEFAULT_CLIENT_NAME,
+        request_timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        timeout = self.default_timeout if timeout is None else float(timeout)
+        if request_timeout is None:
+            request_timeout = timeout + 30
+        return self._request(
+            "POST",
+            endpoint,
+            json_body=self._chat_ask_payload(
+                text,
+                session_id=session_id,
+                auto_create_session=auto_create_session,
+                auto_open_home=auto_open_home,
+                new_session=new_session,
+                reuse_last_session=reuse_last_session,
+                force_new_session_after_turns=force_new_session_after_turns,
+                timeout=timeout,
+                client_name=client_name,
+            ),
+            timeout=request_timeout,
+        )
+
     def ask(
         self,
         text: str,
@@ -581,22 +616,17 @@ class BridgeClient:
 
         返回 assistant 回复文本；return_meta=True 时返回完整响应 dict。
         """
-        timeout = self.default_timeout if timeout is None else float(timeout)
-        data = self._request(
-            "POST",
+        data = self._request_chat_action(
             "/api/v1/chat/ask",
-            json_body=self._chat_ask_payload(
-                text,
-                session_id=session_id,
-                auto_create_session=auto_create_session,
-                auto_open_home=auto_open_home,
-                new_session=new_session,
-                reuse_last_session=reuse_last_session,
-                force_new_session_after_turns=force_new_session_after_turns,
-                timeout=timeout,
-                client_name=client_name,
-            ),
-            timeout=timeout + 30,
+            text,
+            session_id=session_id,
+            auto_create_session=auto_create_session,
+            auto_open_home=auto_open_home,
+            new_session=new_session,
+            reuse_last_session=reuse_last_session,
+            force_new_session_after_turns=force_new_session_after_turns,
+            timeout=timeout,
+            client_name=client_name,
         )
         if return_meta:
             return data
@@ -620,22 +650,18 @@ class BridgeClient:
 
         返回含 request_id、session_id、status 的字典。
         """
-        timeout = self.default_timeout if timeout is None else float(timeout)
-        return self._request(
-            "POST",
+        return self._request_chat_action(
             "/api/v1/chat/send",
-            json_body=self._chat_ask_payload(
-                text,
-                session_id=session_id,
-                auto_create_session=auto_create_session,
-                auto_open_home=auto_open_home,
-                new_session=new_session,
-                reuse_last_session=reuse_last_session,
-                force_new_session_after_turns=force_new_session_after_turns,
-                timeout=timeout,
-                client_name=client_name,
-            ),
-            timeout=60,
+            text,
+            session_id=session_id,
+            auto_create_session=auto_create_session,
+            auto_open_home=auto_open_home,
+            new_session=new_session,
+            reuse_last_session=reuse_last_session,
+            force_new_session_after_turns=force_new_session_after_turns,
+            timeout=timeout,
+            client_name=client_name,
+            request_timeout=60,
         )
 
     def get_result(self, request_id: str) -> dict[str, Any]:

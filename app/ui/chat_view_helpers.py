@@ -1,26 +1,27 @@
 """聊天区气泡行布局与滚动等 GUI 共用工具。"""
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QHBoxLayout, QWidget
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
 
 
 def create_bubble_row_widget(bubble, role, *, spacing=0, margins=(0, 0, 0, 0)):
     row = QWidget()
+    row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
     row_layout = QHBoxLayout(row)
     row_layout.setContentsMargins(*margins)
     if spacing:
         row_layout.setSpacing(spacing)
 
     if role == "user":
-        row_layout.addStretch()
-        row_layout.addWidget(bubble)
+        row_layout.addStretch(1)
+        row_layout.addWidget(bubble, 0, Qt.AlignVCenter)
     elif role in ("system", "error"):
-        row_layout.addStretch()
-        row_layout.addWidget(bubble)
-        row_layout.addStretch()
+        row_layout.addStretch(1)
+        row_layout.addWidget(bubble, 0, Qt.AlignCenter)
+        row_layout.addStretch(1)
     else:
-        row_layout.addWidget(bubble)
-        row_layout.addStretch()
+        row_layout.addWidget(bubble, 0, Qt.AlignVCenter)
+        row_layout.addStretch(1)
 
     return row
 

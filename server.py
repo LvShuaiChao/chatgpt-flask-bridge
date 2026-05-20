@@ -8,6 +8,7 @@ from collections import deque
 from pathlib import Path
 from flask import Flask, jsonify, request
 from log_utils import append_log, clear_log_file
+from app.core import job_scheduler as _job_scheduler
 from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
 from flask_cors import CORS
 from werkzeug.serving import make_server
@@ -25,7 +26,6 @@ _server_thread = None
 _server_bind_host = None
 _server_port = None
 _server_public_host = None
-_last_start_result = {}
 FALLBACK_PORTS = [5001, 5055, 8765, 18080, 18765]
 RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
 SERVER_URL_FILE = RUNTIME_DIR / "server_url.txt"
@@ -38,6 +38,7 @@ bound_session_id = None
 _tampermonkey_clients = {}
 _known_page_instances = set()
 _last_heartbeat_log = {}
+_tm_prev_snapshot = {}
 _last_tm_activity_classify_log = {}
 _last_tm_response_state_log = {}
 _poll_summaries = {}
@@ -76,11 +77,15 @@ def _format_log_fields(fields):
             continue
         parts.append(f"{key}={value}")
     return " ".join(parts)
+MAX_OUTBOUND_QUEUE_SIZE = 50
+MAX_CONTROL_QUEUE_SIZE = 50
+MAX_INBOUND_HISTORY_SIZE = 100
+MAX_OUTBOUND_HISTORY_SIZE = 50
 # 出站：服务端 -> 油猴 -> ChatGPT
-_outbound_queue = deque(maxlen=50)
+_outbound_queue = deque()
 _outbound_waiting = {}
 # 控制命令（close_self 等）：独立于聊天队列，避免被 waiting 阻塞
-_control_queue = deque(maxlen=50)
+_control_queue = deque()
 _control_waiting = {}
 # Cursor Bridge：GUI / 插件 任务队列与回报
 cursor_task_queue = deque()
@@ -110,9 +115,9 @@ def _cursor_now_ts():
 def _cursor_safe_text(value):
     return str(value or "").strip()
 # 入站：油猴 -> 服务端（事件、回执、页面信息等）
-_inbound_messages = deque(maxlen=100)
+_inbound_messages = deque(maxlen=MAX_INBOUND_HISTORY_SIZE)
 # 历史出站（已确认或失败）
-_outbound_history = deque(maxlen=50)
+_outbound_history = deque(maxlen=MAX_OUTBOUND_HISTORY_SIZE)
 ONLINE_TIMEOUT_SEC = 15
 LEASE_SEC = 30
 
@@ -198,6 +203,15 @@ def _log(message):
         _log_callback(f"[SERVER] {text}")
     else:
         append_log(text, source="SERVER", echo=True)
+
+
+def _init_job_scheduler_hooks():
+    _job_scheduler.set_job_log_callback(lambda msg: _log(msg))
+    _job_scheduler.set_job_status_callback(lambda _snapshot: _notify_status())
+
+
+_init_job_scheduler_hooks()
+
 
 def _notify_status():
     if _status_callback:
@@ -385,6 +399,7 @@ def get_bridge_status():
             "recent_inbound": list(_inbound_messages)[-10:],
             "recent_outbound": list(_outbound_history)[-10:],
             "cursor_bridge": get_cursor_bridge_status(),
+            "job_scheduler": _job_scheduler.get_job_scheduler_snapshot(),
         }
 
 def set_bound_client_id(client_id, session_id=None):
@@ -402,12 +417,6 @@ def set_bound_client_id(client_id, session_id=None):
                 _tampermonkey_clients[client_id]["bound_session_id"] = session_id
     _notify_status()
 
-def get_bound_client_id():
-    """@deprecated 当前推荐使用 GUI 的 session.remote_chatgpt 读取每个对话绑定。"""
-    _log("[DEPRECATED][GET_BOUND_CLIENT] get_bound_client_id called")
-    with _state_lock:
-        return bound_client_id
-
 def push_message(data):
     """GUI 或其它本地程序：向油猴下发一条待发送消息。"""
     if isinstance(data, str):
@@ -423,7 +432,7 @@ def push_message(data):
         payload.get("final_prompt") or payload.get("content") or raw_user_text or ""
     ).strip()
     if not final_prompt:
-        final_prompt = "Hello World"
+        raise ValueError("final_prompt/content/raw_user_text 不能为空")
     if not raw_user_text:
         raw_user_text = final_prompt
     target_client_id = (payload.get("target_client_id") or "").strip() or None
@@ -441,11 +450,13 @@ def push_message(data):
         or None
     )
     launch_token = (payload.get("launch_token") or bind_request_id or "").strip() or None
+    trace_id = (payload.get("trace_id") or "").strip() or None
     msg = {
         "id": str(uuid.uuid4()),
         "type": "chat",
         "session_id": session_id,
         "turn_id": turn_id,
+        "trace_id": trace_id,
         "raw_user_text": raw_user_text,
         "content": final_prompt,
         "target_client_id": target_client_id,
@@ -466,17 +477,30 @@ def push_message(data):
         "error_detail": None,
     }
     with _state_lock:
+        queue_before = len(_outbound_queue)
+        if queue_before >= MAX_OUTBOUND_QUEUE_SIZE:
+            _log(
+                f"[CHAT_QUEUE][PUT_FAIL] trace_id={trace_id or '-'} "
+                f"reason=queue_full queue_before={queue_before} "
+                f"max={MAX_OUTBOUND_QUEUE_SIZE} session_id={session_id or '-'}"
+            )
+            raise RuntimeError(
+                "发送队列已满，请等待油猴页面处理完已有消息后再发送"
+            )
         _outbound_queue.append(msg)
+        queue_after = len(_outbound_queue)
     preview = final_prompt if len(final_prompt) <= 80 else final_prompt[:80] + "..."
     target_hint = target_client_id or "-"
     page_hint = target_page_url or "-"
     if len(page_hint) > 60:
         page_hint = page_hint[:60] + "..."
     _log(
-        f"[发送] 已加入队列 ({msg['id'][:8]}…) "
-        f"session={session_id[:8] + '…' if session_id else '-'} "
-        f"turn={turn_id[:8] + '…' if turn_id else '-'} "
-        f"target_client={target_hint} page={page_hint}：{preview}"
+        f"[CHAT_QUEUE][PUT_OK] trace_id={trace_id or '-'} "
+        f"message_id={msg['id']} target_client={target_hint} "
+        f"target_conv={conversation_id or '-'} text_len={len(final_prompt)} "
+        f"queue_before={queue_before} queue_after={queue_after} "
+        f"session_id={session_id or '-'} turn_id={turn_id or '-'} "
+        f"page={page_hint} preview={preview}"
     )
     _notify_status()
     return msg
@@ -508,7 +532,7 @@ def cancel_message(message_id, reason="cancelled"):
         return False
     cancelled = False
     with _state_lock:
-        kept = deque(maxlen=_outbound_queue.maxlen)
+        kept = deque()
         while _outbound_queue:
             msg = _outbound_queue.popleft()
             if msg.get("id") == message_id:
@@ -538,6 +562,13 @@ def cancel_message(message_id, reason="cancelled"):
 def _queue_control_message(command, *, log_label="", **extra):
     msg = _make_command_message(command, **extra)
     with _state_lock:
+        if len(_control_queue) >= MAX_CONTROL_QUEUE_SIZE:
+            _log(
+                f"[BRIDGE][CONTROL][QUEUE_FULL] command={command} "
+                f"control_queue_size={len(_control_queue)} "
+                f"max={MAX_CONTROL_QUEUE_SIZE}"
+            )
+            return None
         _control_queue.append(msg)
 
     label = log_label or command
@@ -545,6 +576,10 @@ def _queue_control_message(command, *, log_label="", **extra):
     target_page_url = msg.get("target_page_url") or "-"
     page_instance = msg.get("target_page_instance_id") or "-"
     conversation = msg.get("target_conversation_id") or "-"
+    request_id = ""
+    payload = msg.get("payload")
+    if isinstance(payload, dict):
+        request_id = (payload.get("request_id") or "").strip()
     _log(
         f"[BRIDGE][CONTROL][QUEUE] command={command} "
         f"message_id={msg['id'][:8]}… "
@@ -554,6 +589,10 @@ def _queue_control_message(command, *, log_label="", **extra):
         f"conversation={conversation} "
         f"label={label}"
     )
+    _log(
+        f"[TM_CONTROL][ENQUEUE] type={command} request_id={request_id or '-'} "
+        f"target_client_id={target_client_id} message_id={msg['id'][:8]}…"
+    )
     _notify_status()
     return msg
 
@@ -562,6 +601,13 @@ def _append_control_messages(msgs, *, log_label="batch", log_detail=""):
     if not msgs:
         return []
     with _state_lock:
+        if len(_control_queue) + len(msgs) > MAX_CONTROL_QUEUE_SIZE:
+            _log(
+                f"[BRIDGE][CONTROL][QUEUE_FULL] label={log_label} "
+                f"control_queue_size={len(_control_queue)} "
+                f"incoming={len(msgs)} max={MAX_CONTROL_QUEUE_SIZE}"
+            )
+            return []
         _control_queue.extend(msgs)
     count = len(msgs)
     first_id = (msgs[0].get("id") or "")[:8] or "-"
@@ -606,31 +652,51 @@ def _make_command_message(command, **extra):
     msg.update(extra)
     return msg
 
-def push_close_page(client_id, target_page_url=None):
-    """向指定油猴客户端下发关闭当前页面命令。"""
+def _copy_existing_fields(dst, src, fields):
+    for field in fields:
+        value = src.get(field)
+        if value is not None and value != "":
+            dst[field] = value
+    return dst
+
+
+def _push_targeted_page_command(command, log_label, client_id, target_page_url=None):
     client_id = (client_id or "").strip()
     if not client_id:
         raise ValueError("client_id 不能为空")
 
     return _queue_control_message(
-        "close_self",
-        log_label="close_page",
+        command,
+        log_label=log_label,
         target_client_id=client_id,
         target_page_url=(target_page_url or "").strip() or None,
     )
 
 
+def push_close_page(client_id, target_page_url=None):
+    """向指定油猴客户端下发关闭当前页面命令。"""
+    return _push_targeted_page_command(
+        "close_self",
+        "close_page",
+        client_id,
+        target_page_url,
+    )
+
+
+# TODO: 当前 GUI 没有入口调用 push_reload_page。若后续不做「刷新绑定页面」功能，
+# 应成组删除：server.push_reload_page、client.user.js 的 reload_self 分支、
+# bridge_mixin.py 的 reload_page_requested / reload_page_failed 日志分支。
 def push_reload_page(client_id, target_page_url=None):
     """向指定油猴客户端下发刷新当前页面命令。"""
-    client_id = (client_id or "").strip()
-    if not client_id:
-        raise ValueError("client_id 不能为空")
-
-    return _queue_control_message(
+    _log(
+        "[RELOAD_PAGE] push_reload_page called; "
+        "当前 GUI 无调用入口，保留供后续「刷新 ChatGPT 页面」功能"
+    )
+    return _push_targeted_page_command(
         "reload_self",
-        log_label="reload_page",
-        target_client_id=client_id,
-        target_page_url=(target_page_url or "").strip() or None,
+        "reload_page",
+        client_id,
+        target_page_url,
     )
 
 
@@ -763,6 +829,13 @@ def append_cursor_task_report(report):
         f"status={status or '-'} "
         f"message={message or '-'}"
     )
+    try:
+        _job_scheduler.handle_cursor_task_report(report)
+    except Exception as exc:
+        _log(
+            "[JOB][CURSOR_REPORT_SYNC_FAILED] "
+            f"task_id={task_id} error={exc}\n{traceback.format_exc()}"
+        )
     _notify_status()
     return True, "ok"
 
@@ -913,38 +986,6 @@ def push_close_other_pages(except_client_id):
         msgs,
         log_label="close_other",
         log_detail=f"command=close_self keep_client_id={except_client_id}",
-    )
-
-
-def push_close_pages_by_url(url):
-    """@deprecated 当前 GUI 优先按 client_id 关闭页面，建议使用 push_close_page(client_id)。"""
-    _log(
-        "[DEPRECATED][CLOSE_BY_URL] push_close_pages_by_url called; "
-        "use push_close_page(client_id)"
-    )
-    url = (url or "").strip()
-    if not url:
-        raise ValueError("url 不能为空")
-    msgs = []
-    with _state_lock:
-        clients_snapshot = list(_tampermonkey_clients.items())
-    for client_id, info in clients_snapshot:
-        page_url = (info.get("page_url") or "").strip()
-        if page_url != url:
-            continue
-        if not _client_online(info.get("last_seen")):
-            continue
-        msgs.append(
-            _make_command_message(
-                "close_self",
-                target_client_id=client_id,
-                target_page_url=page_url,
-            )
-        )
-    return _append_control_messages(
-        msgs,
-        log_label="close_by_url",
-        log_detail=f"command=close_self url={url}",
     )
 
 
@@ -1126,6 +1167,49 @@ def _touch_tampermonkey(meta, action="poll"):
                 f"input={input_txt} url={page_url or '-'}"
             )
             _last_heartbeat_log[f"{client_id}:state"] = state_key
+        prev_snap = _tm_prev_snapshot.get(client_id) or {}
+        new_snap = {
+            "page_type": page_type or "-",
+            "conversation_id": conversation_id or "-",
+            "url": page_url or "-",
+            "responding": responding,
+            "input": input_txt,
+            "visible": visible,
+        }
+        if prev_snap and any(prev_snap.get(k) != new_snap.get(k) for k in new_snap):
+            _log(
+                f"[TM][STATE_CHANGE] client_id={client_id} "
+                f"old_page_type={prev_snap.get('page_type') or '-'} "
+                f"new_page_type={new_snap.get('page_type') or '-'} "
+                f"old_conv={prev_snap.get('conversation_id') or '-'} "
+                f"new_conv={new_snap.get('conversation_id') or '-'} "
+                f"old_url={prev_snap.get('url') or '-'} "
+                f"new_url={new_snap.get('url') or '-'} "
+                f"old_responding={prev_snap.get('responding') or '-'} "
+                f"new_responding={new_snap.get('responding') or '-'} "
+                f"old_input={prev_snap.get('input') or '-'} "
+                f"new_input={new_snap.get('input') or '-'} "
+                f"reason=heartbeat_diff"
+            )
+        old_pt = (prev_snap.get("page_type") or "").strip()
+        old_conv = (prev_snap.get("conversation_id") or "").strip()
+        new_pt = (new_snap.get("page_type") or "").strip()
+        new_conv = (new_snap.get("conversation_id") or "").strip()
+        if (
+            prev_snap
+            and old_pt == "home"
+            and (not old_conv or old_conv == "-")
+            and new_pt == "conversation"
+            and new_conv
+            and new_conv != "-"
+        ):
+            _log(
+                f"[TM][HOME_TO_CONVERSATION] client_id={client_id} "
+                f"old_conv=- new_conv={new_conv} "
+                f"old_url={prev_snap.get('url') or 'https://chatgpt.com/'} "
+                f"new_url={new_snap.get('url') or '-'}"
+            )
+        _tm_prev_snapshot[client_id] = new_snap
 
     response_key = (
         bool(entry.get("is_responding")),
@@ -1278,6 +1362,10 @@ def _targeted_control_matches(msg, body):
 
     if target_page_instance_id and target_page_instance_id != body_page_instance_id:
         return False
+
+    if command == "sync_conversation":
+        return True
+
     if target_conversation_id and target_conversation_id != body_conversation_id:
         return False
     return True
@@ -1383,6 +1471,11 @@ def _pop_control_command_for_client(body):
             f"message_id={msg['id'][:8]}… client_id={client_id} "
             f"page_instance_id={(body.get('page_instance_id') or '-')} "
             f"conversation_id={(body.get('conversation_id') or '-')}"
+        )
+        _log(
+            f"[TM_CONTROL][POLL_RESULT] client_id={client_id} "
+            f"command={(msg.get('command') or '-')} message_id={msg['id'][:8]}… "
+            f"command_count=1"
         )
         return msg
     # 2) 定向 close_self（匹配 target_client_id）
@@ -1507,54 +1600,174 @@ def _poll_response(msg, retry):
         "message_id": msg["id"],
         "type": msg.get("type", "chat"),
         "retry": retry,
+        "trace_id": (msg.get("trace_id") or "").strip() or None,
     }
+    common_target_fields = (
+        "target_client_id",
+        "target_page_url",
+        "target_page_instance_id",
+        "target_conversation_id",
+    )
     if msg.get("type") == "command":
         resp["command"] = msg.get("command")
         resp["url"] = msg.get("url")
         resp["active"] = msg.get("active", True)
-        if msg.get("target_client_id"):
-            resp["target_client_id"] = msg.get("target_client_id")
-        if msg.get("target_page_url"):
-            resp["target_page_url"] = msg.get("target_page_url")
-        if msg.get("target_page_instance_id"):
-            resp["target_page_instance_id"] = msg.get("target_page_instance_id")
-        if msg.get("target_conversation_id"):
-            resp["target_conversation_id"] = msg.get("target_conversation_id")
+        _copy_existing_fields(resp, msg, common_target_fields)
         if msg.get("payload") is not None:
             resp["payload"] = msg.get("payload")
     else:
         resp["content"] = msg.get("content") or ""
-        if msg.get("session_id"):
-            resp["session_id"] = msg.get("session_id")
-        if msg.get("turn_id"):
-            resp["turn_id"] = msg.get("turn_id")
-        if msg.get("target_client_id"):
-            resp["target_client_id"] = msg.get("target_client_id")
-        if msg.get("target_page_url"):
-            resp["target_page_url"] = msg.get("target_page_url")
-        if msg.get("conversation_url"):
-            resp["conversation_url"] = msg.get("conversation_url")
-        if msg.get("conversation_id"):
-            resp["conversation_id"] = msg.get("conversation_id")
+        _copy_existing_fields(
+            resp,
+            msg,
+            (
+                "session_id",
+                "turn_id",
+                *common_target_fields,
+                "conversation_url",
+                "conversation_id",
+                "bind_request_id",
+                "launch_token",
+            ),
+        )
         if msg.get("bootstrap_conversation"):
             resp["bootstrap_conversation"] = True
-        if msg.get("target_page_instance_id"):
-            resp["target_page_instance_id"] = msg.get("target_page_instance_id")
-        if msg.get("bind_request_id"):
-            resp["bind_request_id"] = msg.get("bind_request_id")
-        if msg.get("launch_token"):
-            resp["launch_token"] = msg.get("launch_token")
     return resp
+
+def _outbound_queue_stats(client_id="", conversation_id=""):
+    client_id = (client_id or "").strip()
+    conversation_id = (conversation_id or "").strip()
+    pending_total = 0
+    pending_for_client = 0
+    pending_for_conversation = 0
+    with _state_lock:
+        for msg in _outbound_queue:
+            if msg.get("type") == "command":
+                continue
+            pending_total += 1
+            if client_id and _message_matches_client(msg, client_id):
+                pending_for_client += 1
+            msg_conv = (msg.get("conversation_id") or msg.get("target_conversation_id") or "").strip()
+            if conversation_id and msg_conv == conversation_id:
+                pending_for_conversation += 1
+    return pending_total, pending_for_client, pending_for_conversation
+
+
+def _poll_no_message_reason(body, waiting=None):
+    client_id = (body.get("client_id") or "").strip()
+    page_type = (body.get("page_type") or "").strip()
+    conversation_id = (body.get("conversation_id") or "").strip()
+    if waiting and not _is_finalized(waiting):
+        status = (waiting.get("status") or "").strip()
+        owner = (waiting.get("delivered_to") or "").strip()
+        if status in ("acked", "delivered") and owner == client_id:
+            return "client_busy"
+        return "client_busy"
+    if page_type == "home":
+        has_bootstrap = False
+        with _state_lock:
+            for msg in _outbound_queue:
+                if msg.get("bootstrap_conversation") and _message_matches_client(msg, client_id):
+                    has_bootstrap = True
+                    break
+        if has_bootstrap:
+            return "home_bootstrap_only"
+        return "home_bootstrap_only"
+    if page_type != "conversation":
+        return "not_target_client"
+    pending_total, pending_for_client, pending_for_conversation = _outbound_queue_stats(
+        client_id, conversation_id
+    )
+    if pending_total <= 0:
+        return "queue_empty"
+    if pending_for_client <= 0:
+        return "not_target_client"
+    for msg in list(_outbound_queue):
+        if msg.get("type") == "command":
+            continue
+        if not _message_matches_client(msg, client_id):
+            continue
+        target_conv = (
+            (msg.get("conversation_id") or msg.get("target_conversation_id") or "")
+            .strip()
+        )
+        if target_conv and conversation_id and target_conv != conversation_id:
+            return "target_conversation_mismatch"
+    entry = _tampermonkey_clients.get(client_id) or {}
+    if not entry.get("can_accept_input", True):
+        return "input_not_ready"
+    if entry.get("is_responding"):
+        return "client_busy"
+    return "queue_empty"
+
+
+def _log_poll_request(body):
+    client_id = (body.get("client_id") or "").strip()
+    page_type = (body.get("page_type") or "").strip()
+    conversation_id = (body.get("conversation_id") or "").strip()
+    visible = (body.get("visibility_state") or body.get("visible") or "-")
+    focus = "yes" if body.get("has_focus") else "no"
+    responding = "yes" if body.get("is_responding") else "no"
+    input_txt = "yes" if body.get("can_accept_input", True) else "no"
+    state = (body.get("response_state") or "-").strip() or "-"
+    _poll_log_immediate(
+        f"[BRIDGE][POLL][REQUEST] client_id={client_id} "
+        f"page_instance_id={(body.get('page_instance_id') or '-')} "
+        f"page_type={page_type or '-'} conversation_id={conversation_id or '-'} "
+        f"url={(body.get('page_url') or '-')} visible={visible} focus={focus} "
+        f"responding={responding} input={input_txt} state={state}"
+    )
+
+
+def _log_poll_no_message(body, waiting=None):
+    client_id = (body.get("client_id") or "").strip()
+    page_type = (body.get("page_type") or "").strip()
+    conversation_id = (body.get("conversation_id") or "").strip()
+    reason = _poll_no_message_reason(body, waiting)
+    pending_total, pending_for_client, pending_for_conversation = _outbound_queue_stats(
+        client_id, conversation_id
+    )
+    _poll_log_immediate(
+        f"[BRIDGE][POLL][NO_MESSAGE] client_id={client_id} "
+        f"conversation_id={conversation_id or '-'} page_type={page_type or '-'} "
+        f"reason={reason} pending_total={pending_total} "
+        f"pending_for_client={pending_for_client} "
+        f"pending_for_conversation={pending_for_conversation}"
+    )
+
+
+def _log_poll_message_found(body, msg, *, delivered=False):
+    client_id = (body.get("client_id") or "").strip()
+    conversation_id = (body.get("conversation_id") or "").strip()
+    text = (msg.get("content") or msg.get("raw_user_text") or "")
+    _poll_log_immediate(
+        f"[BRIDGE][POLL][MESSAGE_FOUND] client_id={client_id} "
+        f"conversation_id={conversation_id or '-'} "
+        f"message_id={msg.get('id') or '-'} "
+        f"trace_id={(msg.get('trace_id') or '-')} text_len={len(text)} "
+        f"target_client={(msg.get('target_client_id') or '-')} "
+        f"target_conv={(msg.get('conversation_id') or msg.get('target_conversation_id') or '-')}"
+    )
+    if delivered:
+        _poll_log_immediate(
+            f"[BRIDGE][POLL][MESSAGE_DELIVERED] client_id={client_id} "
+            f"message_id={msg.get('id') or '-'} "
+            f"trace_id={(msg.get('trace_id') or '-')}"
+        )
+
 
 def _handle_poll(body):
     client_id = (body.get("client_id") or "").strip()
     if not client_id:
         _poll_log_immediate("[BRIDGE][POLL] 拒绝：缺少 client_id")
-        return {"ok": False, "error": "缺少 client_id"}
+        return {"ok": False, "error": "缺少 client_id"}, False
     page_type = (body.get("page_type") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
     identity_changed = _poll_identity_changed(client_id, page_type, conversation_id)
     _touch_tampermonkey(body, action="poll")
+    if _debug_mode or identity_changed:
+        _log_poll_request(body)
+    need_notify = False
     now = _now()
     cmd = _pop_control_command_for_client(body)
     if cmd:
@@ -1570,8 +1783,8 @@ def _handle_poll(body):
             f"[命令] 控制命令已下发 ({cmd['id'][:8]}…) "
             f"command={cmd.get('command')} client_id={client_id}"
         )
-        _notify_status()
-        return _poll_response(cmd, retry=False)
+        need_notify = True
+        return _poll_response(cmd, retry=False), need_notify
     waiting = _get_waiting_message_for_client(client_id)
     if waiting and waiting.get("status") == "delivered":
         owner = waiting.get("delivered_to")
@@ -1583,7 +1796,7 @@ def _handle_poll(body):
                 f"conversation_id={conversation_id or '-'} "
                 f"message_id={waiting['id'][:8]}… status=retry_same_owner has_message=True"
             )
-            return _poll_response(waiting, retry=True)
+            return _poll_response(waiting, retry=True), need_notify
         if _is_finalized(waiting):
             _archive_waiting(waiting["id"])
             waiting = _get_waiting_message_for_client(client_id)
@@ -1595,24 +1808,18 @@ def _handle_poll(body):
                 f"conversation_id={conversation_id or '-'} "
                 f"message_id={waiting['id'][:8]}… status=lease_reclaim has_message=True"
             )
-            return _poll_response(waiting, retry=True)
+            return _poll_response(waiting, retry=True), need_notify
     if waiting and not _is_finalized(waiting):
         if waiting.get("status") in ("acked", "delivered"):
             owner = waiting.get("delivered_to")
             if owner == client_id:
                 if _debug_mode or identity_changed:
-                    _poll_log_immediate(
-                        f"[BRIDGE][POLL] client_id={client_id} message_id={waiting['id'][:8]}… "
-                        f"status=awaiting_report has_message=False"
-                    )
+                    _log_poll_no_message(body, waiting)
                 else:
                     _record_poll_empty(client_id, page_type, conversation_id)
-                return {"ok": True, "has_message": False}
-        _poll_log_immediate(
-            f"[BRIDGE][POLL] client_id={client_id} queue blocked by "
-            f"message_id={waiting.get('id', '?')[:8]}… status={waiting.get('status')}"
-        )
-        return {"ok": True, "has_message": False}
+                return {"ok": True, "has_message": False}, need_notify
+        _log_poll_no_message(body, waiting)
+        return {"ok": True, "has_message": False}, need_notify
     if page_type == "home":
         msg = _pop_message_for_client(body)
         if msg and msg.get("bootstrap_conversation"):
@@ -1625,33 +1832,21 @@ def _handle_poll(body):
                 f"client_id={client_id} bootstrap=home"
             )
             _record_poll_claimed(client_id, page_type, conversation_id)
-            _poll_log_immediate(
-                f"[BRIDGE][POLL] client_id={client_id} page_type=home "
-                f"conversation_id=- has_message=True "
-                f"message_id={msg['id'][:8]}… type=chat bootstrap"
-            )
+            _log_poll_message_found(body, msg, delivered=True)
             _log(f"[发送] 油猴已取走 bootstrap ({msg['id'][:8]}…) client_id={client_id}")
-            _notify_status()
-            return _poll_response(msg, retry=False)
+            need_notify = True
+            return _poll_response(msg, retry=False), need_notify
         if _debug_mode or identity_changed:
-            _poll_log_immediate(
-                f"[BRIDGE][POLL] client_id={client_id} page_type=home "
-                f"conversation_id=- has_message=False "
-                f"(首页仅领取 bootstrap 消息)"
-            )
+            _log_poll_no_message(body, waiting)
         else:
             _record_poll_empty(client_id, page_type, conversation_id)
-        return {"ok": True, "has_message": False}
+        return {"ok": True, "has_message": False}, need_notify
     if page_type != "conversation":
         if _debug_mode or identity_changed:
-            _poll_log_immediate(
-                f"[BRIDGE][POLL] client_id={client_id} page_type={page_type or '-'} "
-                f"conversation_id={conversation_id or '-'} has_message=False "
-                f"(非对话页不领取聊天消息)"
-            )
+            _log_poll_no_message(body, waiting)
         else:
             _record_poll_empty(client_id, page_type, conversation_id)
-        return {"ok": True, "has_message": False}
+        return {"ok": True, "has_message": False}, need_notify
     msg = _pop_message_for_client(body)
     if msg:
         _claim_message(msg, client_id)
@@ -1664,22 +1859,15 @@ def _handle_poll(body):
             f"conversation_id={msg.get('conversation_id') or conversation_id or '-'}"
         )
         _record_poll_claimed(client_id, page_type, conversation_id)
-        _poll_log_immediate(
-            f"[BRIDGE][POLL] client_id={client_id} page_type={page_type or '-'} "
-            f"conversation_id={conversation_id or '-'} has_message=True "
-            f"message_id={msg['id'][:8]}… type=chat"
-        )
+        _log_poll_message_found(body, msg, delivered=True)
         _log(f"[发送] 油猴已取走 ({msg['id'][:8]}…) client_id={client_id}")
-        _notify_status()
-        return _poll_response(msg, retry=False)
+        need_notify = True
+        return _poll_response(msg, retry=False), need_notify
     if _debug_mode or identity_changed:
-        _poll_log_immediate(
-            f"[BRIDGE][POLL] client_id={client_id} page_type={page_type or '-'} "
-            f"conversation_id={conversation_id or '-'} has_message=False"
-        )
+        _log_poll_no_message(body, waiting)
     else:
         _record_poll_empty(client_id, page_type, conversation_id)
-    return {"ok": True, "has_message": False}
+    return {"ok": True, "has_message": False}, need_notify
 
 def _handle_ack(body):
     client_id = (body.get("client_id") or "").strip()
@@ -2037,6 +2225,13 @@ def _handle_report(body):
                     f"conversation_id={(payload.get('conversation_id') or '-')} "
                     f"count={message_count} total_text_len={total_text_len}"
                 )
+                _log(
+                    f"[WEB_SYNC][SNAPSHOT_RECEIVED] request_id="
+                    f"{(payload.get('request_id') or '-')} "
+                    f"client_id={client_id} "
+                    f"conversation_id={(payload.get('conversation_id') or '-')} "
+                    f"message_count={message_count}"
+                )
                 _add_inbound(
                     event,
                     payload,
@@ -2075,6 +2270,19 @@ def _handle_report(body):
         if event == "assistant_reply":
             text = (payload.get("text") or payload.get("content") or "").strip()
             msg["reply_text"] = text
+            try:
+                _job_scheduler.on_assistant_reply(
+                    text,
+                    outbound_message_id=message_id,
+                    auto_send_hook=lambda jid: _job_scheduler.send_job_to_cursor(
+                        jid, enqueue_cursor_task
+                    ),
+                )
+            except Exception as exc:
+                _log(
+                    "[JOB][ASSISTANT_REPLY_HOOK_FAILED] "
+                    f"message_id={message_id or '-'} error={exc}\n{traceback.format_exc()}"
+                )
             _finalize_message(msg, "replied")
             client_entry = _tampermonkey_clients.get(client_id)
             if isinstance(client_entry, dict):
@@ -2106,13 +2314,24 @@ def _handle_report(body):
                 )
         elif event in ("assistant_reply_empty", "assistant_reply_failed"):
             if not _is_finalized(msg):
-                _finalize_message(msg, "failed")
-                msg["error_detail"] = (
+                fail_detail = (
                     payload.get("reason")
                     or payload.get("detail")
                     or payload.get("error_message")
                     or ""
                 )
+                try:
+                    _job_scheduler.on_assistant_reply_failed(
+                        fail_detail or event,
+                        outbound_message_id=message_id,
+                    )
+                except Exception as exc:
+                    _log(
+                        "[JOB][ASSISTANT_REPLY_FAILED_HOOK] "
+                        f"message_id={message_id or '-'} error={exc}\n{traceback.format_exc()}"
+                    )
+                _finalize_message(msg, "failed")
+                msg["error_detail"] = fail_detail
                 _log_finalized(msg, message_id, event)
                 _add_inbound(event, payload, **inbound_kw)
                 if message_id in _outbound_waiting:
@@ -2719,9 +2938,10 @@ def api_v1_chat_ask():
                 result.get("force_new_session_after_turns") or 0
             ),
         }
-        timeout = float(body.get("timeout") or 120)
+        timeout = float(body.get("timeout") or 30)
         if timeout <= 0:
-            timeout = 120
+            timeout = 30
+        timeout = max(1, min(timeout, 30))
         _log(
             f"[EXTERNAL_API][ASK] request_id={request_id} session_id={session_id} "
             f"text_len={text_len} timeout={timeout}"
@@ -2892,15 +3112,18 @@ def api_bridge():
             f"client_id={body.get('client_id') or '-'}"
         )
     action = body.get("action", "poll")
+    need_notify = False
     with _state_lock:
         if action == "poll":
-            result = _handle_poll(body)
+            result, need_notify = _handle_poll(body)
         elif action == "ack":
             result = _handle_ack(body)
         elif action == "report":
             result = _handle_report(body)
         else:
             return jsonify({"ok": False, "error": f"未知 action: {action}"}), 400
+    if need_notify:
+        _notify_status()
     result["server_time"] = _now()
     result["tampermonkey_online"] = True
     return jsonify(result)
@@ -3016,6 +3239,106 @@ def api_cursor_client_heartbeat():
     })
 
 
+def send_job_chatgpt_message(job_id, payload_extra=None):
+    """将 Job 的 ChatGPT prompt 加入出站队列。"""
+    return _job_scheduler.send_job_to_chatgpt(job_id, push_message, payload_extra)
+
+
+def send_job_to_cursor(job_id):
+    """将 Job 的 ChatGPT 回复原文发送到 Cursor 任务队列。"""
+    return _job_scheduler.send_job_to_cursor(job_id, enqueue_cursor_task)
+
+
+@app.route("/api/jobs/create", methods=["POST"])
+def api_jobs_create():
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(f"[JOB][API_CREATE_FAILED] reason=json_error error={exc}")
+        return jsonify({"ok": False, "error": f"invalid json: {exc}"}), 400
+
+    requirement = (body.get("user_requirement") or body.get("requirement") or "").strip()
+    title = (body.get("title") or "").strip()
+    auto_send = bool(body.get("auto_send_to_cursor"))
+    project_root = (body.get("project_root") or "").strip()
+
+    job_id, result = _job_scheduler.create_job(
+        requirement,
+        title=title,
+        auto_send_to_cursor=auto_send,
+        project_root=project_root,
+    )
+    if not job_id:
+        return jsonify({"ok": False, "error": result}), 400
+
+    return jsonify({"ok": True, "job_id": job_id, "job": _job_scheduler.get_job(job_id)})
+
+
+@app.route("/api/jobs/list", methods=["GET"])
+def api_jobs_list():
+    limit = request.args.get("limit", 50)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    return jsonify({
+        "ok": True,
+        "jobs": _job_scheduler.list_jobs(limit=limit),
+        "snapshot": _job_scheduler.get_job_scheduler_snapshot(limit=limit),
+    })
+
+
+@app.route("/api/jobs/status", methods=["GET"])
+def api_jobs_status():
+    job_id = (request.args.get("job_id") or "").strip()
+    if job_id:
+        job = _job_scheduler.get_job(job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "job not found"}), 404
+        return jsonify({"ok": True, "job": job})
+    return jsonify({
+        "ok": True,
+        "snapshot": _job_scheduler.get_job_scheduler_snapshot(),
+    })
+
+
+@app.route("/api/jobs/send_to_cursor", methods=["POST"])
+def api_jobs_send_to_cursor():
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(f"[JOB][API_SEND_CURSOR_FAILED] reason=json_error error={exc}")
+        return jsonify({"ok": False, "error": f"invalid json: {exc}"}), 400
+
+    job_id = (body.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "job_id is required"}), 400
+
+    ok, result = send_job_to_cursor(job_id)
+    if not ok:
+        return jsonify({"ok": False, "error": result}), 400
+    return jsonify({"ok": True, "task_id": result, "job": _job_scheduler.get_job(job_id)})
+
+
+@app.route("/api/jobs/cancel", methods=["POST"])
+def api_jobs_cancel():
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(f"[JOB][API_CANCEL_FAILED] reason=json_error error={exc}")
+        return jsonify({"ok": False, "error": f"invalid json: {exc}"}), 400
+
+    job_id = (body.get("job_id") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "job_id is required"}), 400
+
+    ok, result = _job_scheduler.cancel_job(job_id, reason=reason)
+    if not ok:
+        return jsonify({"ok": False, "error": result}), 400
+    return jsonify({"ok": True, "job": _job_scheduler.get_job(job_id)})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """轻量健康检查（无需鉴权），供 bridge_client 等探测。"""
@@ -3042,8 +3365,11 @@ def process_legacy():
             body["action"] = "poll"
         if not body.get("client_id"):
             body["client_id"] = "legacy-client"
+        need_notify = False
         with _state_lock:
-            result = _handle_poll(body)
+            result, need_notify = _handle_poll(body)
+        if need_notify:
+            _notify_status()
         return jsonify(
             {
                 "status": "new data" if result.get("has_message") else "no new data",
@@ -3057,15 +3383,31 @@ def process_legacy():
             data_from_client = request.json.get("data")
         else:
             data_from_client = request.data.decode("utf-8")
-        push_message(data_from_client)
+        try:
+            push_message(data_from_client)
+        except ValueError as error:
+            return jsonify({
+                "ok": False,
+                "error": str(error),
+                "code": "EMPTY_MESSAGE",
+            }), 400
+        except RuntimeError as error:
+            return jsonify({
+                "ok": False,
+                "error": str(error),
+                "code": "QUEUE_FULL",
+            }), 503
         return jsonify(
             {
                 "status": "new data",
                 "processed_data": "我是服务器端，谢谢客户端的来信",
             }
         )
+    need_notify = False
     with _state_lock:
-        result = _handle_poll({"client_id": "anonymous"})
+        result, need_notify = _handle_poll({"client_id": "anonymous"})
+    if need_notify:
+        _notify_status()
     return jsonify(
         {
             "status": "new data" if result.get("has_message") else "no new data",
@@ -3107,12 +3449,6 @@ def get_server_bridge_url():
     if not url:
         return ""
     return f"{url}/api/bridge"
-
-
-def get_last_start_result():
-    """@deprecated 启动结果请直接使用 start_server() 返回值。"""
-    _log("[DEPRECATED][LAST_START_RESULT] get_last_start_result called")
-    return dict(_last_start_result)
 
 
 def _public_host_for_bind(bind_host):
@@ -3203,7 +3539,7 @@ def _clear_server_url_file():
 
 def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
     global _http_server, _server_thread
-    global _server_bind_host, _server_port, _server_public_host, _last_start_result
+    global _server_bind_host, _server_port, _server_public_host
 
     bind_host = (host or "").strip() or "127.0.0.1"
     configured_port = int(port)
@@ -3217,7 +3553,6 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
             "port": get_server_port(),
             "url": get_server_url(),
         }
-        _last_start_result = result
         return result
 
     extra_ports = list(fallback_ports if fallback_ports is not None else FALLBACK_PORTS)
@@ -3284,7 +3619,6 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
             "bridge_url": bridge_url,
             "message": f"服务已启动：{server_url}",
         }
-        _last_start_result = result
         _notify_status()
         return result
 
@@ -3312,14 +3646,13 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
         "message": combined_message,
         "failures": failures,
     }
-    _last_start_result = result
     _log(f"[SERVER][START_FAILED] all_candidates_exhausted bind_host={bind_host} ports={candidates}")
     return result
 
 
 def stop_server():
     global _http_server, _server_thread
-    global _server_bind_host, _server_port, _server_public_host, _last_start_result
+    global _server_bind_host, _server_port, _server_public_host
     if _http_server is None:
         return False
     _http_server.shutdown()
@@ -3329,7 +3662,6 @@ def stop_server():
     _server_port = None
     _server_public_host = None
     _clear_server_url_file()
-    _last_start_result = {}
     _log("服务已停止")
     _notify_status()
     return True

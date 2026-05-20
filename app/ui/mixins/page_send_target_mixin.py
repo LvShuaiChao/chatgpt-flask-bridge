@@ -10,6 +10,7 @@ from app.models import (
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_BOUND_CONVERSATION,
+    BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
     normalize_remote_chatgpt,
 )
@@ -17,6 +18,20 @@ from app.url_utils import parse_conversation_id
 
 
 class PageSendTargetMixin:
+
+    def _send_target_result(self, client_id="", page_url="", ok=False, reason=""):
+        return (
+            (client_id or "").strip(),
+            (page_url or "").strip(),
+            bool(ok),
+            str(reason or ""),
+        )
+
+    def _send_target_ok(self, client_id, page_url, reason=""):
+        return self._send_target_result(client_id, page_url, True, reason)
+
+    def _send_target_blocked(self, reason):
+        return self._send_target_result("", "", False, reason)
 
     def _is_sendable_chatgpt_client(self, client_info, expected_conversation_id=""):
         if not isinstance(client_info, dict):
@@ -77,10 +92,8 @@ class PageSendTargetMixin:
 
         bound_client_id = (remote.get("client_id") or "").strip()
         bound_page_instance_id = (remote.get("page_instance_id") or "").strip()
-        bound_url = (remote.get("conversation_url") or "").strip()
-        bound_conversation_id = (remote.get("conversation_id") or "").strip()
-        if not bound_conversation_id:
-            bound_conversation_id = parse_conversation_id(bound_url)
+        bound_conversation_id = self._remote_conversation_id(remote)
+        bound_url = (remote.get("conversation_url") or remote.get("url") or "").strip()
 
         if not bound_conversation_id:
             return None
@@ -156,11 +169,7 @@ class PageSendTargetMixin:
         candidate = self._find_online_client_for_remote(remote)
         if not candidate:
             return False
-        expected = (remote.get("conversation_id") or "").strip()
-        if not expected:
-            expected = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        expected = self._remote_conversation_id(remote)
         return self._is_sendable_chatgpt_client(candidate, expected)
     def _session_bound_page_online(self, session, bridge_status=None):
         if session is None:
@@ -168,11 +177,7 @@ class PageSendTargetMixin:
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         if not remote.get("enabled"):
             return False
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
         if not conversation_id:
             return False
         candidate = self._find_online_client_for_remote(remote, bridge_status=bridge_status)
@@ -188,11 +193,7 @@ class PageSendTargetMixin:
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         if not remote.get("enabled"):
             return False
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
         if not conversation_id:
             return False
         status = bridge_status if bridge_status is not None else self._last_bridge_status
@@ -445,7 +446,12 @@ class PageSendTargetMixin:
             home_client = self._find_prebound_home_client(remote)
             if home_client:
                 home_url = (home_client.get("page_url") or page_url or CHATGPT_HOME_URL).strip()
-                home_id = (home_client.get("client_id") or client_id).strip()
+                home_id = (
+                    client_id
+                    or remote.get("prebound_home_client_id")
+                    or home_client.get("client_id")
+                    or ""
+                ).strip()
                 return (
                     home_id,
                     home_url,
@@ -496,9 +502,11 @@ class PageSendTargetMixin:
                 if client_id:
                     ok_send, _ = self._client_sendable_for_bridge(client_id)
                     if ok_send:
-                        return client_id, page_url, True, "已自动绑定在线 ChatGPT 页面。"
+                        return self._send_target_ok(
+                            client_id, page_url, "已自动绑定在线 ChatGPT 页面。"
+                        )
 
-            return "", "", False, "当前对话未绑定 ChatGPT 页面。"
+            return self._send_target_blocked("当前对话未绑定 ChatGPT 页面。")
 
         bound_info, bound_state, bound_reason = self._resolve_bound_page_info(
             status=status
@@ -515,6 +523,7 @@ class PageSendTargetMixin:
                 bound_reason == "matched_by_conversation"
                 and resolved_client_id
                 and resolved_client_id != client_id
+                and bind_state != BIND_STATE_PREBOUND_HOME
             ):
                 self._bind_page_to_session(session, bound_info, silent=True)
                 remote = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -524,7 +533,7 @@ class PageSendTargetMixin:
                     or resolved_page_url
                 )
             return (
-                resolved_client_id or client_id,
+                client_id or resolved_client_id,
                 resolved_page_url or page_url,
                 True,
                 "绑定页面在线。",
@@ -532,7 +541,7 @@ class PageSendTargetMixin:
 
         ok_send, stale_detail = self._client_sendable_for_bridge(client_id)
         if ok_send:
-            return client_id, page_url, True, "绑定页面在线。"
+            return self._send_target_ok(client_id, page_url, "绑定页面在线。")
         if client_id and self._is_client_online(client_id) and stale_detail:
             self._append_log(
                 f"[SEND][PAGE_ACTIVITY_REJECT] session_id={session_id} "
@@ -542,9 +551,7 @@ class PageSendTargetMixin:
                 f"activity={stale_detail.get('activity')}"
             )
 
-        bound_conversation_id = (remote.get("conversation_id") or "").strip()
-        if not bound_conversation_id:
-            bound_conversation_id = parse_conversation_id(page_url)
+        bound_conversation_id = self._remote_conversation_id(remote)
         if bound_conversation_id:
             details = self._binding_status_details(session)
             active_conv = (details.get("online_conversation_id") or "").strip()
@@ -609,7 +616,7 @@ class PageSendTargetMixin:
                         "未找到在线 ChatGPT 页面，已打开绑定页面，"
                         "请等待油猴上线后重新发送。"
                     )
-                return "", "", False, hint
+                return self._send_target_blocked(hint)
             if rebind_attempted:
                 hint = (
                     "当前绑定页面离线，已尝试自动换绑；"
@@ -621,7 +628,7 @@ class PageSendTargetMixin:
                     "未找到在线 ChatGPT 页面。绑定页面已在近期打开，"
                     "请等待油猴上线后重新发送。"
                 )
-            return "", "", False, hint
+            return self._send_target_blocked(hint)
 
         if self._allow_fallback_to_any_page:
             return (
@@ -631,7 +638,7 @@ class PageSendTargetMixin:
                 "绑定页面未在线，按设置退回任意在线页面发送。",
             )
 
-        return "", "", False, "绑定页面未打开，请先打开当前对话绑定页面。"
+        return self._send_target_blocked("绑定页面未打开，请先打开当前对话绑定页面。")
     def _best_live_conversation_client(self, status=None):
         status = status or self._last_bridge_status or {}
         live_client_id = (status.get("tampermonkey_client_id") or "").strip()
@@ -672,12 +679,7 @@ class PageSendTargetMixin:
             session.remote_chatgpt if session else None
         )
         bound_client_id = (remote.get("client_id") or "").strip() or "-"
-        bound_conv_id = (remote.get("conversation_id") or "").strip()
-        if not bound_conv_id:
-            bound_conv_id = parse_conversation_id(
-                remote.get("conversation_url") or ""
-            )
-        bound_conv_id = bound_conv_id or "-"
+        bound_conv_id = self._remote_conversation_id(remote) or "-"
 
         live_client = self._best_live_conversation_client(status)
         online_client_id = "-"
@@ -686,8 +688,16 @@ class PageSendTargetMixin:
             online_client_id = (live_client.get("client_id") or "").strip() or "-"
             online_conv_id = self._client_conversation_id(live_client) or "-"
 
+        bind_state = self._remote_bind_state(remote)
+        is_prebound_home = bind_state in (
+            BIND_STATE_PREBOUND_HOME,
+            BIND_STATE_WAITING_HOME,
+            BIND_STATE_WAITING_CONVERSATION_CREATED,
+        )
         if not remote.get("enabled"):
             match = "未绑定"
+        elif is_prebound_home or bound_conv_id in ("", "-"):
+            match = "预绑定首页"
         elif bound_client_id == "-" or online_client_id == "-":
             match = "无法比对"
         elif (
@@ -708,11 +718,11 @@ class PageSendTargetMixin:
         }
     def _verify_send_target_binding(self, session, target_client_id, target_page_url):
         if not self._bind_each_chat_to_page:
-            return target_client_id, target_page_url, True, ""
+            return self._send_target_ok(target_client_id, target_page_url, "")
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         if not remote.get("enabled"):
-            return target_client_id, target_page_url, True, ""
+            return self._send_target_ok(target_client_id, target_page_url, "")
 
         if self._session_has_wrong_existing_conversation_bind(session):
             return (
@@ -783,7 +793,7 @@ class PageSendTargetMixin:
                     f"client_id={target_client_id or prebound_client} "
                     f"conversation_id=- activity={act} allow=True"
                 )
-                return target_client_id, home_url, True, ""
+                return self._send_target_ok(target_client_id, home_url, "")
             self._append_log(
                 f"[SEND][PAGE_ACTIVITY_REJECT] session_id={session_sid} "
                 f"reason=stale_hidden_or_offline code={rej_code} "
@@ -832,11 +842,7 @@ class PageSendTargetMixin:
             )
 
         bound_client_id = (remote.get("client_id") or "").strip()
-        bound_conv_id = (remote.get("conversation_id") or "").strip()
-        if not bound_conv_id:
-            bound_conv_id = parse_conversation_id(
-                remote.get("conversation_url") or ""
-            )
+        bound_conv_id = self._remote_conversation_id(remote)
         bound_url = (remote.get("conversation_url") or "").strip()
 
         target_client_id = (target_client_id or "").strip()
@@ -886,7 +892,7 @@ class PageSendTargetMixin:
                     f"conversation_id={online_conv or '-'} "
                     f"activity={act} allow=True"
                 )
-                return target_client_id, target_page_url, True, ""
+                return self._send_target_ok(target_client_id, target_page_url, "")
             self._append_log(
                 f"[SEND][PAGE_ACTIVITY_REJECT] session_id={session_sid} "
                 f"reason=stale_hidden_or_offline code={reject_code} "
@@ -946,5 +952,5 @@ class PageSendTargetMixin:
                 "绑定的 client_id 不在线，且未找到可用的同会话在线页面。",
             )
 
-        return target_client_id, target_page_url, True, ""
+        return self._send_target_ok(target_client_id, target_page_url, "")
 

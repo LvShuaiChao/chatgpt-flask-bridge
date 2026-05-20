@@ -16,6 +16,8 @@ from PyQt5.QtWidgets import (
 from app.ui.mixins.bridge_mixin import BridgeMixin
 from app.ui.mixins.chat_render_mixin import ChatRenderMixin
 from app.ui.mixins.cursor_bridge_mixin import CursorBridgeMixin
+from app.ui.mixins.job_scheduler_mixin import JobSchedulerMixin
+from app.ui.mixins.log_tab_mixin import LogTabMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
 from app.ui.mixins.settings_mixin import SettingsMixin
@@ -31,6 +33,8 @@ class MainWindow(
     PageBindMixin,
     BridgeMixin,
     CursorBridgeMixin,
+    JobSchedulerMixin,
+    LogTabMixin,
 ):
     def __init__(self):
         super().__init__()
@@ -46,6 +50,9 @@ class MainWindow(
         self._session_send_queues = {}
         self._external_client_last_session = {}
         self._processed_inbound_ids = set()
+        self._pending_upload_sends = {}
+        self._pending_web_sync_requests = {}
+        self._pending_sync_requests = {}
         self._finalized_bridge_message_ids = set()
         self._ack_success_message_ids = set()
         self._reply_bubbles_by_message_id = {}
@@ -70,11 +77,28 @@ class MainWindow(
         self._session_search_text = ""
         self._applying_bridge_status = False
         self._pending_bridge_status = None
+        self._status_apply_pending = False
+        self._pending_status_payload = None
+        self._pending_status_apply_reason = ""
+        self._last_status_apply_at = 0.0
+        self._last_status_snapshot_key = ""
+        self._last_page_selector_key = ""
+        self._last_tm_table_key = ""
+        self._last_chat_area_style_key = ""
+        self._last_page_relation_key = ""
+        self._last_bind_mismatch_key = ""
+        self._last_bind_mismatch_at = 0.0
+        self._last_bind_mismatch_ui_key = ""
+        self._pending_log_lines = []
+        self._log_flush_scheduled = False
+        self._log_tab_load_pending = False
         self._load_app_settings_values()
         server.set_debug_mode(self._debug_mode)
         self._notifier = BridgeNotifier()
         self._notifier.log_signal.connect(self._append_log)
-        self._notifier.status_signal.connect(self._apply_bridge_status)
+        self._notifier.status_signal.connect(
+            lambda status: self._schedule_status_apply(status, reason="status_signal")
+        )
         server.set_log_callback(self._notifier.log_signal.emit)
         server.set_status_callback(self._notifier.status_signal.emit)
         server.set_external_gui_dispatch(self._notifier.external_dispatch_signal.emit)

@@ -570,9 +570,10 @@ class CursorBridgeMixin:
 
 
 
+        self._last_cursor_bridge_status = status
         self._set_cursor_bridge_status_badge(text, level, tooltip)
-
-
+        if hasattr(self, "_update_task_queue_card"):
+            self._update_task_queue_card()
 
     def _set_cursor_bridge_status_badge(self, text, level="neutral", tooltip=""):
 
@@ -613,14 +614,6 @@ class CursorBridgeMixin:
         label.style().unpolish(label)
 
         label.style().polish(label)
-
-
-
-    def _apply_cursor_bridge_status(self, cursor_status=None):
-
-        """桥接状态轮询时刷新 Cursor 顶部徽章（可传入已缓存的 cursor_bridge）。"""
-
-        self._refresh_cursor_bridge_status(cursor_status)
 
 
 

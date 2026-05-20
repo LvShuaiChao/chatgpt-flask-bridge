@@ -1,3 +1,4 @@
+from collections import deque
 from pathlib import Path
 import threading
 import time
@@ -50,3 +51,22 @@ def clear_log_file():
 
 def get_log_file_path():
     return str(LOG_FILE.resolve())
+
+
+def read_last_lines(path, max_lines=1000, encoding="utf-8"):
+    """Read at most the last ``max_lines`` from a log file without loading the whole file."""
+    log_path = Path(path)
+    if not log_path.exists():
+        return []
+
+    lines = deque(maxlen=max_lines)
+    try:
+        with log_path.open("r", encoding=encoding, errors="replace") as file:
+            for line in file:
+                lines.append(line.rstrip("\n"))
+    except Exception as error:
+        print(f"[LOG_READ_FAILED] path={log_path} error={error}")
+        print(traceback.format_exc())
+        raise
+
+    return list(lines)

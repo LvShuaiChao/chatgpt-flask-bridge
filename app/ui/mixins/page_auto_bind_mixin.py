@@ -85,11 +85,7 @@ class PageAutoBindMixin:
             return False
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
         bind_state = self._remote_bind_state(remote)
 
         if conversation_id:
@@ -126,11 +122,7 @@ class PageAutoBindMixin:
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
 
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
 
         if conversation_id:
             return False
@@ -147,11 +139,7 @@ class PageAutoBindMixin:
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         if not remote.get("enabled"):
             return False
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
         if not conversation_id:
             return False
         bind_state = self._remote_bind_state(remote)
@@ -329,7 +317,13 @@ class PageAutoBindMixin:
         vis = (item.get("visibility_state") or item.get("visible") or "").strip()
         return vis == "visible"
 
-    def _idle_home_skip_reason(self, item, status=None, require_user_visible=False):
+    def _idle_home_skip_reason(
+        self,
+        item,
+        status=None,
+        require_user_visible=False,
+        exclude_session_id="",
+    ):
         page_type = (item.get("page_type") or "").strip()
         if page_type != "home":
             return "not_home"
@@ -345,7 +339,11 @@ class PageAutoBindMixin:
         conversation_id = (item.get("conversation_id") or "").strip()
         if conversation_id and conversation_id != "-":
             return "has_conversation"
-        if self._is_home_client_used_by_any_session(client_id, page_instance_id):
+        if self._is_home_client_used_by_any_session(
+            client_id,
+            page_instance_id,
+            exclude_session_id=exclude_session_id,
+        ):
             return "used_by_other_session"
         if self._home_client_has_pending_bridge_work(
             client_id, page_instance_id, status
@@ -466,11 +464,16 @@ class PageAutoBindMixin:
             return True
 
         return False
-    def _is_home_client_used_by_any_session(self, client_id, page_instance_id):
+    def _is_home_client_used_by_any_session(
+        self, client_id, page_instance_id, exclude_session_id=""
+    ):
         client_id = (client_id or "").strip()
         page_instance_id = (page_instance_id or "").strip()
+        exclude_session_id = (exclude_session_id or "").strip()
 
         for session in self._sessions.values():
+            if exclude_session_id and session.session_id == exclude_session_id:
+                continue
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             bind_state = self._remote_bind_state(remote)
 
@@ -535,7 +538,10 @@ class PageAutoBindMixin:
         for item in self._iter_tm_clients(status, online_only=True, page_type="home"):
             client_id = self._tm_client_id(item)
             skip_reason = self._idle_home_skip_reason(
-                item, status, require_user_visible=require_user_visible
+                item,
+                status,
+                require_user_visible=require_user_visible,
+                exclude_session_id=session_id,
             )
             if skip_reason:
                 if client_id:
@@ -621,7 +627,7 @@ class PageAutoBindMixin:
         return True
     def _session_needs_first_message_bind(self, session):
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        conversation_id = (remote.get("conversation_id") or "").strip()
+        conversation_id = self._remote_conversation_id(remote)
         if conversation_id:
             return False
         bind_state = self._remote_bind_state(remote)
@@ -902,11 +908,7 @@ class PageAutoBindMixin:
             return True
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
+        conversation_id = self._remote_conversation_id(remote)
         if not conversation_id or not remote.get("enabled"):
             return True
 
@@ -1122,13 +1124,51 @@ class PageAutoBindMixin:
         if not client_id:
             self._add_system_message("缺少 client_id，无法预绑定首页。")
             return False
-        if self._is_home_client_used_by_any_session(client_id, page_instance_id):
-            self._add_system_message("该 ChatGPT 首页已被其他对话占用。")
-            return False
         if not self._is_bindable_chatgpt_url(page_url):
             self._add_system_message("该 URL 不是可绑定的 ChatGPT 首页。")
             return False
         remote_prev = normalize_remote_chatgpt(session.remote_chatgpt)
+        old_client_id = (
+            remote_prev.get("prebound_home_client_id")
+            or remote_prev.get("client_id")
+            or ""
+        ).strip()
+        old_page_instance_id = (
+            remote_prev.get("prebound_home_page_instance_id")
+            or remote_prev.get("page_instance_id")
+            or ""
+        ).strip()
+        old_bind_state = self._remote_bind_state(remote_prev)
+        same_current_home = (
+            old_bind_state == BIND_STATE_PREBOUND_HOME
+            and old_client_id
+            and old_client_id == client_id
+            and (
+                not page_instance_id
+                or not old_page_instance_id
+                or old_page_instance_id == page_instance_id
+            )
+        )
+        if same_current_home:
+            self._append_log(
+                f"[BIND][PREBOUND_HOME_ALREADY_CURRENT] "
+                f"session_id={session.session_id} "
+                f"client_id={client_id} "
+                f"page_instance_id={page_instance_id or '-'}"
+            )
+            self._update_bound_page_display()
+            self._apply_chat_bind_visual_state()
+            self._refresh_session_list(select_session_id=session.session_id)
+            if not silent:
+                self._add_system_message("当前对话已预绑定该 ChatGPT 首页。")
+            return True
+        if self._is_home_client_used_by_any_session(
+            client_id,
+            page_instance_id,
+            exclude_session_id=session.session_id,
+        ):
+            self._add_system_message("该 ChatGPT 首页已被其他对话占用。")
+            return False
         client_bind_token = (
             client_info.get("bind_request_id")
             or client_info.get("launch_token")
@@ -1287,8 +1327,8 @@ class PageAutoBindMixin:
         if silent:
             self._set_settings_hint("已绑定 ChatGPT 对话页到当前对话。")
         else:
-            self._add_system_message(
-                f"已绑定 ChatGPT 对话页。conversation_id={conversation_id}"
+            self._set_settings_hint(
+                f"已绑定 ChatGPT 对话页（conversation_id={conversation_id}）"
             )
         self._append_log(
             f"[绑定][CONVERSATION] session={session.session_id[:8]}… "
@@ -1733,7 +1773,11 @@ class PageAutoBindMixin:
                 )
                 if not is_new_client and not is_new_instance:
                     continue
-            if self._is_home_client_used_by_any_session(client_id, page_instance_id):
+            if self._is_home_client_used_by_any_session(
+                client_id,
+                page_instance_id,
+                exclude_session_id=session_id,
+            ):
                 continue
             if self._home_client_has_pending_bridge_work(
                 client_id, page_instance_id, status
@@ -1802,12 +1846,17 @@ class PageAutoBindMixin:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             if not remote.get("enabled"):
                 continue
+            bind_state = self._remote_bind_state(remote)
             session_conversation_id = (remote.get("conversation_id") or "").strip()
             if not session_conversation_id:
                 session_conversation_id = parse_conversation_id(
                     remote.get("conversation_url") or remote.get("url") or ""
                 )
             client_id = (remote.get("client_id") or "").strip()
+            if not client_id:
+                prebound_client = (remote.get("prebound_home_client_id") or "").strip()
+                if prebound_client:
+                    client_id = prebound_client
             if not client_id:
                 continue
             item = client_map.get(client_id)
@@ -1819,6 +1868,87 @@ class PageAutoBindMixin:
             client_conversation_id = (item.get("conversation_id") or "").strip()
             if not client_conversation_id:
                 client_conversation_id = parse_conversation_id(page_url)
+            client_page_type = (item.get("page_type") or "").strip()
+            if (
+                bind_state
+                in (
+                    BIND_STATE_PREBOUND_HOME,
+                    BIND_STATE_WAITING_CONVERSATION_CREATED,
+                )
+                and not session_conversation_id
+                and client_page_type == "conversation"
+                and client_conversation_id
+            ):
+                can_update = client_id == (
+                    remote.get("prebound_home_client_id") or remote.get("client_id") or ""
+                ).strip()
+                self._append_log(
+                    "[BIND][HOME_TO_CONVERSATION][CHECK] "
+                    f"session_id={session.session_id} "
+                    f"bound_client={client_id} heartbeat_client={client_id} "
+                    f"old_bound_conv=- new_heartbeat_conv={client_conversation_id} "
+                    f"can_update={'true' if can_update else 'false'} "
+                    f"reason=same_client_and_waiting_conversation_created"
+                )
+                if can_update:
+                    old_url = (
+                        remote.get("conversation_url") or remote.get("url") or ""
+                    ).strip() or "https://chatgpt.com/"
+                    session.remote_chatgpt = {
+                        **remote,
+                        "bind_state": BIND_STATE_BOUND_CONVERSATION,
+                        "conversation_id": client_conversation_id,
+                        "conversation_url": page_url,
+                        "url": page_url,
+                        "client_id": client_id,
+                        "page_type": "conversation",
+                        "bootstrap_in_progress": False,
+                    }
+                    session.updated_at = time.time()
+                    changed = True
+                    self._append_log(
+                        "[BIND][HOME_TO_CONVERSATION][UPDATED] "
+                        f"session_id={session.session_id} client_id={client_id} "
+                        f"old_conv=- new_conv={client_conversation_id} "
+                        f"old_url={old_url} new_url={page_url} "
+                        f"old_state=prebound_home new_state=bound_online"
+                    )
+                    continue
+                self._append_log(
+                    "[BIND][HOME_TO_CONVERSATION][SKIP] "
+                    f"session_id={session.session_id} reason=client_not_match_or_not_waiting"
+                )
+            bind_state = self._remote_bind_state(remote)
+            old_conversation_id = (remote.get("conversation_id") or "").strip()
+            if bind_state in (
+                BIND_STATE_PREBOUND_HOME,
+                BIND_STATE_WAITING_HOME,
+                BIND_STATE_WAITING_CONVERSATION_CREATED,
+            ):
+                if old_conversation_id in ("", "-") and client_conversation_id:
+                    remote = normalize_remote_chatgpt(
+                        {
+                            **remote,
+                            "conversation_id": client_conversation_id,
+                            "conversation_url": page_url,
+                            "url": page_url,
+                            "page_type": "conversation",
+                            "bind_state": BIND_STATE_BOUND_CONVERSATION,
+                            "page_title": (item.get("page_title") or "").strip(),
+                            "last_seen": float(item.get("last_seen") or time.time()),
+                        }
+                    )
+                    session.remote_chatgpt = remote
+                    session.updated_at = time.time()
+                    changed = True
+                    self._append_log(
+                        "[BIND][HOME_TO_CONVERSATION] "
+                        f"session_id={session.session_id} "
+                        f"client_id={client_id} "
+                        f"conversation_id={client_conversation_id} "
+                        f"url={page_url}"
+                    )
+                    continue
             if session_conversation_id and client_conversation_id:
                 if client_conversation_id != session_conversation_id:
                     self._append_log(

@@ -154,7 +154,6 @@ PAGE_BIND_METHODS = {
     "_bind_page_to_session",
     "_client_info_from_status",
     "_on_bind_current_page",
-    "_on_bind_selected_tm_page",
     "_on_unbind_current_page",
     "_open_url_in_browser",
     "_open_tampermonkey_page",

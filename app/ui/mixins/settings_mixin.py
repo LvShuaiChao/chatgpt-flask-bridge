@@ -1,12 +1,56 @@
 import traceback
 
 import server
-from log_utils import append_log, clear_log_file
+from log_utils import append_log
 
 from app.constants import (
     DEFAULT_APP_SETTINGS,
     RUNTIME_DIR,
 )
+
+BOOL_SETTING_BINDINGS = {
+    "remember_window_geometry": "_remember_window_geometry",
+    "remember_window_position": "_remember_window_position",
+    "restore_main_tab": "_restore_main_tab",
+    "restore_chat_tab": "_restore_chat_tab",
+    "show_page_url": "_show_page_url",
+    "show_top_status_bar": "_show_top_status_bar",
+    "debug_mode": "_debug_mode",
+    "show_raw_payload": "_show_raw_payload",
+    "log_ack_events": "_log_ack_events",
+    "log_assistant_reply_events": "_log_assistant_reply_events",
+    "log_send_failed_events": "_log_send_failed_events",
+    "auto_clear_input_after_send": "_auto_clear_input_after_send",
+    "auto_scroll_to_bottom": "_auto_scroll_to_bottom",
+    "auto_name_new_chat": "_auto_name_new_chat",
+    "show_timestamp": "_show_timestamp",
+    "show_assistant_placeholder": "_show_assistant_placeholder",
+    "bind_each_chat_to_page": "_bind_each_chat_to_page",
+    "auto_open_bound_page_when_missing": "_auto_open_bound_page_when_missing",
+    "allow_fallback_to_any_page": "_allow_fallback_to_any_page",
+    "auto_bind_unbound_page": "_auto_bind_unbound_page",
+    "upload_before_send_enabled": "_upload_before_send_enabled",
+    "sync_full_conversation_enabled": "_sync_full_conversation_enabled",
+    "auto_sync_conversation_on_bind": "_auto_sync_conversation_on_bind",
+    "auto_sync_conversation_after_reply": "_auto_sync_conversation_after_reply",
+}
+
+BOOL_SETTING_SAVE_KEYS = frozenset({
+    "remember_window_geometry",
+    "remember_window_position",
+    "restore_main_tab",
+    "restore_chat_tab",
+    "show_page_url",
+    "show_top_status_bar",
+    "bind_each_chat_to_page",
+    "auto_open_bound_page_when_missing",
+    "allow_fallback_to_any_page",
+    "auto_bind_unbound_page",
+    "upload_before_send_enabled",
+    "sync_full_conversation_enabled",
+    "auto_sync_conversation_on_bind",
+    "auto_sync_conversation_after_reply",
+})
 
 
 class SettingsMixin:
@@ -17,95 +61,29 @@ class SettingsMixin:
         if value is None:
             return bool(default)
         return str(value).lower() in ("1", "true", "yes", "on")
+    def _load_bool_settings(self):
+        defaults = DEFAULT_APP_SETTINGS
+        for key, attr in BOOL_SETTING_BINDINGS.items():
+            setattr(
+                self,
+                attr,
+                self._qsettings_bool(
+                    self._settings.value(key),
+                    defaults[key],
+                ),
+            )
+
+    def _save_bool_settings(self):
+        for key in BOOL_SETTING_SAVE_KEYS:
+            attr = BOOL_SETTING_BINDINGS[key]
+            self._settings.setValue(key, bool(getattr(self, attr)))
+
     def _load_ui_and_bind_settings_from_qsettings(self):
         defaults = DEFAULT_APP_SETTINGS
         self._chat_font_pt = int(self._settings.value("font_size", defaults["font_size"]))
-        self._remember_window_geometry = self._qsettings_bool(
-            self._settings.value("remember_window_geometry"),
-            defaults["remember_window_geometry"],
-        )
-        self._remember_window_position = self._qsettings_bool(
-            self._settings.value("remember_window_position"),
-            defaults["remember_window_position"],
-        )
-        self._restore_main_tab = self._qsettings_bool(
-            self._settings.value("restore_main_tab"),
-            defaults["restore_main_tab"],
-        )
-        self._restore_chat_tab = self._qsettings_bool(
-            self._settings.value("restore_chat_tab"),
-            defaults["restore_chat_tab"],
-        )
-        self._show_page_url = self._qsettings_bool(
-            self._settings.value("show_page_url"),
-            defaults["show_page_url"],
-        )
-        self._show_top_status_bar = self._qsettings_bool(
-            self._settings.value("show_top_status_bar"),
-            defaults["show_top_status_bar"],
-        )
-        self._debug_mode = self._qsettings_bool(
-            self._settings.value("debug_mode"),
-            defaults["debug_mode"],
-        )
-        self._show_raw_payload = self._qsettings_bool(
-            self._settings.value("show_raw_payload"),
-            defaults["show_raw_payload"],
-        )
-        self._log_ack_events = self._qsettings_bool(
-            self._settings.value("log_ack_events"),
-            defaults["log_ack_events"],
-        )
-        self._log_assistant_reply_events = self._qsettings_bool(
-            self._settings.value("log_assistant_reply_events"),
-            defaults["log_assistant_reply_events"],
-        )
-        self._log_send_failed_events = self._qsettings_bool(
-            self._settings.value("log_send_failed_events"),
-            defaults["log_send_failed_events"],
-        )
+        self._load_bool_settings()
         self._enter_send_mode = str(
             self._settings.value("enter_send_mode", defaults["enter_send_mode"])
-        )
-        self._auto_clear_input_after_send = self._qsettings_bool(
-            self._settings.value("auto_clear_input_after_send"),
-            defaults["auto_clear_input_after_send"],
-        )
-        self._auto_scroll_to_bottom = self._qsettings_bool(
-            self._settings.value("auto_scroll_to_bottom"),
-            defaults["auto_scroll_to_bottom"],
-        )
-        self._auto_name_new_chat = self._qsettings_bool(
-            self._settings.value("auto_name_new_chat"),
-            defaults["auto_name_new_chat"],
-        )
-        self._show_timestamp = self._qsettings_bool(
-            self._settings.value("show_timestamp"),
-            defaults["show_timestamp"],
-        )
-        self._show_assistant_placeholder = self._qsettings_bool(
-            self._settings.value("show_assistant_placeholder"),
-            defaults["show_assistant_placeholder"],
-        )
-        self._bind_each_chat_to_page = self._qsettings_bool(
-            self._settings.value("bind_each_chat_to_page"),
-            defaults["bind_each_chat_to_page"],
-        )
-        self._auto_bind_unbound_page = self._qsettings_bool(
-            self._settings.value("auto_bind_unbound_page"),
-            defaults["auto_bind_unbound_page"],
-        )
-        self._auto_open_bound_page_when_missing = self._qsettings_bool(
-            self._settings.value("auto_open_bound_page_when_missing"),
-            defaults["auto_open_bound_page_when_missing"],
-        )
-        self._allow_fallback_to_any_page = self._qsettings_bool(
-            self._settings.value("allow_fallback_to_any_page"),
-            defaults["allow_fallback_to_any_page"],
-        )
-        self._upload_before_send_enabled = self._qsettings_bool(
-            self._settings.value("upload_before_send_enabled"),
-            defaults["upload_before_send_enabled"],
         )
         self._force_new_session_after_turns = int(
             self._settings.value(
@@ -113,18 +91,6 @@ class SettingsMixin:
                 defaults["force_new_session_after_turns"],
             )
             or 0
-        )
-        self._sync_full_conversation_enabled = self._qsettings_bool(
-            self._settings.value("sync_full_conversation_enabled"),
-            defaults["sync_full_conversation_enabled"],
-        )
-        self._auto_sync_conversation_on_bind = self._qsettings_bool(
-            self._settings.value("auto_sync_conversation_on_bind"),
-            defaults["auto_sync_conversation_on_bind"],
-        )
-        self._auto_sync_conversation_after_reply = self._qsettings_bool(
-            self._settings.value("auto_sync_conversation_after_reply"),
-            defaults["auto_sync_conversation_after_reply"],
         )
         self._sync_conversation_max_messages = int(
             self._settings.value(
@@ -232,40 +198,10 @@ class SettingsMixin:
         self._settings.setValue("port", self._port_text)
         self._settings.setValue("auto_start_server", self._auto_start_server)
         self._settings.setValue("font_size", self._chat_font_pt)
-        self._settings.setValue("remember_window_geometry", self._remember_window_geometry)
-        self._settings.setValue("remember_window_position", self._remember_window_position)
-        self._settings.setValue("restore_main_tab", self._restore_main_tab)
-        self._settings.setValue("restore_chat_tab", self._restore_chat_tab)
-        self._settings.setValue("show_page_url", self._show_page_url)
-        self._settings.setValue("show_top_status_bar", self._show_top_status_bar)
-        self._settings.setValue(
-            "bind_each_chat_to_page", self._bind_each_chat_to_page
-        )
-        self._settings.setValue(
-            "auto_open_bound_page_when_missing",
-            self._auto_open_bound_page_when_missing,
-        )
-        self._settings.setValue(
-            "allow_fallback_to_any_page", self._allow_fallback_to_any_page
-        )
-        self._settings.setValue("auto_bind_unbound_page", self._auto_bind_unbound_page)
-        self._settings.setValue(
-            "upload_before_send_enabled",
-            self._upload_before_send_enabled,
-        )
+        self._save_bool_settings()
         self._settings.setValue(
             "force_new_session_after_turns",
             int(self._force_new_session_after_turns or 0),
-        )
-        self._settings.setValue(
-            "sync_full_conversation_enabled", self._sync_full_conversation_enabled
-        )
-        self._settings.setValue(
-            "auto_sync_conversation_on_bind", self._auto_sync_conversation_on_bind
-        )
-        self._settings.setValue(
-            "auto_sync_conversation_after_reply",
-            self._auto_sync_conversation_after_reply,
         )
         self._settings.setValue(
             "sync_conversation_max_messages", int(self._sync_conversation_max_messages)
@@ -418,15 +354,61 @@ class SettingsMixin:
             self._stop_server()
         self._start_server()
     def _clear_log_widget(self, widget, name):
-        widget.clear()
-        self._append_log(f"已清空{name}。")
-        self._set_settings_hint(f"已清空{name}。")
+        if widget is None:
+            msg = f"清空{name}失败：未找到日志控件。"
+            self._append_log(f"[LOG_CLEAR][FAILED] name={name} reason=no_widget", echo=True)
+            self._set_tm_action_hint(msg)
+            return
+        try:
+            widget.clear()
+        except Exception as exc:
+            import traceback
+
+            detail = f"{exc}\n{traceback.format_exc()}"
+            msg = f"清空{name}失败：{exc}"
+            self._append_log(
+                f"[LOG_CLEAR][FAILED] name={name} error={detail}",
+                echo=True,
+            )
+            print(f"[LOG_CLEAR][FAILED] name={name} error={detail}")
+            self._set_tm_action_hint(msg)
+            return
+        self._append_log(f"已清空{name}。", echo=True)
+        self._set_tm_action_hint(f"已清空{name}")
+
     def _clear_runtime_log(self):
-        clear_log_file()
+        import traceback
+        from pathlib import Path
+
+        from log_utils import LOG_FILE, _LOG_LOCK, get_log_file_path
+
+        log_path = get_log_file_path()
+        try:
+            with _LOG_LOCK:
+                path = Path(log_path) if log_path else LOG_FILE
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+        except Exception as exc:
+            detail = f"{exc}\n{traceback.format_exc()}"
+            msg = f"清空运行日志失败：{exc}"
+            self._append_log(
+                f"[LOG_CLEAR][FAILED] path={log_path} error={detail}",
+                echo=True,
+            )
+            print(f"[LOG_CLEAR][FAILED] path={log_path} error={detail}")
+            self._set_tm_action_hint(msg)
+            return
+
         if hasattr(self, "log_edit") and self.log_edit is not None:
             self.log_edit.clear()
-        self._append_log("已清空 log.txt。")
-        self._set_settings_hint("已清空 log.txt。")
+        if hasattr(self, "_loaded_log_lines"):
+            self._loaded_log_lines = []
+        if hasattr(self, "_log_tab_loaded"):
+            self._log_tab_loaded = False
+        if hasattr(self, "_on_refresh_log_clicked"):
+            self._on_refresh_log_clicked()
+        self._append_log("已清空运行日志。", echo=True)
+        self._set_tm_action_hint("已清空运行日志")
     def _on_save_settings_clicked(self):
         self._save_app_settings()
         self._apply_settings(immediate_only=False)
@@ -435,3 +417,9 @@ class SettingsMixin:
         index = self.main_tabs.indexOf(self.log_page)
         if index >= 0:
             self.main_tabs.setCurrentIndex(index)
+        if hasattr(self, "_ensure_log_tab_loaded"):
+            self._ensure_log_tab_loaded()
+        if hasattr(self, "_refresh_log_subtabs_from_cache") and getattr(
+            self, "_pending_log_subtabs_refresh", False
+        ):
+            self._refresh_log_subtabs_from_cache()
