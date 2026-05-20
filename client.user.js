@@ -40,8 +40,9 @@
             sessionStorage.setItem(CLIENT_ID_KEY, created);
             return created;
         } catch (error) {
+            const tempId = 'tm-' + Math.random().toString(36).slice(2, 10);
             console.error('[联动] 无法使用 sessionStorage，使用临时 CLIENT_ID:', error);
-            return 'tm-' + Math.random().toString(36).slice(2, 10);
+            return tempId;
         }
     })();
     const POLL_INTERVAL_MS = 1000;
@@ -126,8 +127,89 @@
             payload: payload || {},
             message_id: messageId || null
         }).catch(error => {
-            console.error('[联动] report 失败:', event, messageId, error);
+            tmError('[TM][REPORT][ERROR]', error, {
+                event: event,
+                message_id: messageId || ''
+            });
         });
+    }
+
+    function clientLog(level, message, extra) {
+        const payload = {
+            level: level || 'info',
+            message: String(message || ''),
+            extra: extra || {},
+            page_url: location.href,
+            client_id: CLIENT_ID,
+            page_instance_id: PAGE_INSTANCE_ID,
+            script_version: SCRIPT_VERSION
+        };
+
+        if (level === 'error') {
+            console.error('[联动]', message, extra || {});
+        } else if (level === 'warn') {
+            console.warn('[联动]', message, extra || {});
+        } else {
+            console.log('[联动]', message, extra || {});
+        }
+
+        return report('client_log', payload, null);
+    }
+
+    function tmLog(tag, fields) {
+        return clientLog('info', tag, fields || {});
+    }
+
+    function tmError(tag, error, fields) {
+        const extra = Object.assign({}, fields || {});
+        if (error) {
+            extra.error_type = error.name || 'Error';
+            extra.error_message = error.message || String(error);
+            extra.stack = error.stack || '';
+        }
+        return clientLog('error', tag, extra);
+    }
+
+    function textHash(text) {
+        const value = String(text || '');
+        let hash = 0;
+        for (let i = 0; i < value.length; i += 1) {
+            hash = ((hash << 5) - hash) + value.charCodeAt(i);
+            hash |= 0;
+        }
+        return (hash >>> 0).toString(16);
+    }
+
+    function textPreview(text, maxLen) {
+        const value = String(text || '').replace(/\s+/g, ' ').trim();
+        if (value.length <= maxLen) {
+            return value;
+        }
+        return value.slice(0, maxLen) + '…';
+    }
+
+    function getBusyReason() {
+        if (isGenerating()) {
+            return 'stop_button_visible';
+        }
+        if (isThinking()) {
+            return 'thinking_indicator';
+        }
+        return '';
+    }
+
+    function getComposerTextLen(composer) {
+        if (!composer) {
+            return 0;
+        }
+        const tagName = composer.tagName.toLowerCase();
+        if (tagName === 'textarea' || tagName === 'input') {
+            return String(composer.value || '').length;
+        }
+        if (composer.isContentEditable) {
+            return String(composer.textContent || '').length;
+        }
+        return 0;
     }
 
     function ack(messageId, success, detail) {
@@ -178,6 +260,7 @@
             };
         } catch (error) {
             console.error('[联动] 打开网页失败:', error);
+            clientLog('error', '打开网页失败', { error: error.message, url });
             return {
                 ok: false,
                 detail: `打开网页失败: ${error.message}`
@@ -185,48 +268,87 @@
         }
     }
 
-    function closeCurrentPage() {
+    async function closeCurrentPageCommand(messageId) {
+        clientLog('info', '执行命令 close_self', {
+            message_id: messageId,
+            page_url: location.href
+        });
         try {
-            console.log('[联动] 收到关闭当前页面命令:', location.href);
-            window.close();
-            return {
-                ok: true,
-                detail: '已执行 window.close()'
-            };
+            await ack(messageId, true, '已收到关闭当前页面命令');
         } catch (error) {
-            console.error('[联动] 关闭当前页面失败:', error);
-            return {
-                ok: false,
-                detail: `关闭当前页面失败: ${error.message}`
-            };
+            console.error('[联动] close_self ack 失败:', messageId, error);
         }
+
+        await report('close_page_requested', {
+            detail: '已收到关闭命令，准备关闭当前页面',
+            page_url: location.href
+        }, messageId);
+
+        setTimeout(() => {
+            try {
+                window.open('', '_self');
+                window.close();
+            } catch (error) {
+                console.error('[联动] window.close 执行异常:', error);
+                clientLog('error', 'window.close 执行异常', {
+                    error: error.message,
+                    message_id: messageId
+                });
+                report('close_page_failed', {
+                    detail: `window.close 执行异常: ${error.message}`,
+                    page_url: location.href
+                }, messageId);
+                return;
+            }
+
+            setTimeout(() => {
+                report('close_page_still_open', {
+                    detail: 'window.close 已执行，但页面仍在运行，浏览器可能拦截了关闭操作',
+                    page_url: location.href
+                }, messageId);
+            }, 1500);
+        }, 200);
+    }
+
+    async function reloadCurrentPageCommand(messageId) {
+        clientLog('info', '执行命令 reload_self', {
+            message_id: messageId,
+            page_url: location.href
+        });
+        try {
+            await ack(messageId, true, '已收到刷新当前页面命令');
+        } catch (error) {
+            console.error('[联动] reload_self ack 失败:', messageId, error);
+        }
+
+        await report('reload_page_requested', {
+            detail: '已收到刷新命令，准备刷新当前页面',
+            page_url: location.href
+        }, messageId);
+
+        setTimeout(() => {
+            location.reload();
+        }, 200);
     }
 
     async function handleCommandMessage(result) {
         const messageId = result.message_id || result.id;
 
+        if (result.command === 'reload_self') {
+            await reloadCurrentPageCommand(messageId);
+            return true;
+        }
+
         if (result.command === 'close_self') {
-            const closeResult = closeCurrentPage();
-
-            try {
-                await ack(messageId, closeResult.ok, closeResult.detail);
-            } catch (error) {
-                console.error('[联动] close_self ack 失败:', messageId, error);
-            }
-
-            await report(
-                closeResult.ok ? 'close_page_success' : 'close_page_failed',
-                {
-                    detail: closeResult.detail,
-                    page_url: location.href
-                },
-                messageId
-            );
-
+            await closeCurrentPageCommand(messageId);
             return true;
         }
 
         if (result.command === 'open_url') {
+            clientLog('info', '执行命令 open_url', {
+                url: result.url,
+                message_id: result.message_id || result.id
+            });
             const openResult = openUrlInNewTab(result.url, result.active !== false);
 
             try {
@@ -460,21 +582,22 @@
     }
 
     function isThinking() {
-        const pageSelectors = [
-            '[data-testid="thinking-indicator"]',
-            '[data-testid*="thinking"]',
-            '[aria-label*="Thinking"]',
-            '[aria-label*="思考"]',
-            '.result-streaming',
-            '[class*="thinking"]'
-        ];
-        if (pageSelectors.some(selector => {
-            const node = document.querySelector(selector);
-            return node && isVisible(node);
-        })) {
-            return true;
+        const count = countAssistantMessages();
+        if (count <= 0) {
+            return false;
         }
-        const latest = getAssistantTextAtIndex(countAssistantMessages() - 1);
+        const latest = getAssistantTextAtIndex(count - 1);
+        if (isStableReply(latest)) {
+            return false;
+        }
+        const nodes = getAssistantMessageNodes();
+        const lastNode = nodes[nodes.length - 1];
+        if (lastNode) {
+            const indicator = lastNode.querySelector('[data-testid="thinking-indicator"]');
+            if (indicator && isVisible(indicator)) {
+                return true;
+            }
+        }
         return isReplyPlaceholder(latest);
     }
 
@@ -505,110 +628,263 @@
 
     async function waitForAssistantReply(beforeText, beforeCount, messageId, timeoutMs) {
         const start = Date.now();
+        const identity = getPageIdentity();
         let latestText = '';
-        let lastChangedAt = Date.now();
+        let lastChangedAt = 0;
+        let lastLoggedHash = '';
+        let stableWhileBusyAt = 0;
+        let lastLoopLogAt = 0;
+        let lastLoopState = '';
         const stableMs = 1500;
-        console.log(
-            '[联动] wait reply start message_id=',
-            messageId,
-            'beforeCount=',
-            beforeCount
-        );
+        const busyStableGraceMs = 3000;
+        const beforeTextLen = (beforeText || '').length;
+
+        await tmLog('[TM][WAIT_REPLY][START]', {
+            message_id: messageId,
+            before_assistant_count: beforeCount,
+            before_text_len: beforeTextLen,
+            timeout_ms: timeoutMs,
+            url: identity.page_url,
+            conversation_id: identity.conversation_id || ''
+        });
+
         while (Date.now() - start < timeoutMs) {
-            if (isBusyGenerating()) {
-                await sleep(800);
-                continue;
-            }
+            const elapsedMs = Date.now() - start;
+            const assistantCount = countAssistantMessages();
             const candidate = getNewAssistantText(beforeCount, beforeText);
-            if (isStableReply(candidate) && candidate !== latestText) {
-                latestText = candidate;
-                lastChangedAt = Date.now();
-            }
-            if (
-                isStableReply(latestText) &&
-                !isBusyGenerating() &&
-                Date.now() - lastChangedAt >= stableMs
-            ) {
-                console.log('[联动] wait reply end message_id=', messageId, 'ok=true');
-                return latestText;
-            }
-            await sleep(800);
-        }
-        const graceStart = Date.now();
-        const graceMs = 30000;
-        while (Date.now() - graceStart < graceMs) {
-            if (!isBusyGenerating() && isStableReply(latestText)) {
-                console.log('[联动] wait reply grace end message_id=', messageId, 'ok=true');
-                return latestText;
-            }
-            if (isBusyGenerating()) {
-                const candidate = getNewAssistantText(beforeCount, beforeText);
-                if (isStableReply(candidate)) {
+            const busy = isBusyGenerating();
+            const busyReason = getBusyReason();
+
+            if (isStableReply(candidate)) {
+                if (candidate !== latestText) {
+                    const oldLen = latestText.length;
+                    const oldHash = latestText ? textHash(latestText) : '';
                     latestText = candidate;
                     lastChangedAt = Date.now();
+                    stableWhileBusyAt = 0;
+                    const newHash = textHash(latestText);
+                    if (newHash !== lastLoggedHash) {
+                        lastLoggedHash = newHash;
+                        await tmLog('[TM][WAIT_REPLY][CANDIDATE]', {
+                            message_id: messageId,
+                            text_len: latestText.length,
+                            text_hash: newHash,
+                            preview: textPreview(latestText, 80)
+                        });
+                    }
+                    if (oldHash && oldHash !== newHash) {
+                        await tmLog('[TM][WAIT_REPLY][TEXT_CHANGED]', {
+                            message_id: messageId,
+                            old_len: oldLen,
+                            new_len: latestText.length,
+                            old_hash: oldHash,
+                            new_hash: newHash
+                        });
+                    }
                 }
             }
-            if (
-                isStableReply(latestText) &&
-                !isBusyGenerating() &&
-                Date.now() - lastChangedAt >= stableMs
-            ) {
-                console.log('[联动] wait reply grace stable message_id=', messageId, 'ok=true');
-                return latestText;
+
+            const stableDuration =
+                latestText && lastChangedAt ? Date.now() - lastChangedAt : 0;
+            const loopState = [
+                assistantCount,
+                latestText.length,
+                textHash(latestText),
+                stableDuration,
+                busy,
+                busyReason
+            ].join('|');
+            if (elapsedMs - lastLoopLogAt >= 1000 || loopState !== lastLoopState) {
+                lastLoopLogAt = elapsedMs;
+                lastLoopState = loopState;
+                await tmLog('[TM][WAIT_REPLY][LOOP]', {
+                    message_id: messageId,
+                    elapsed_ms: elapsedMs,
+                    assistant_count: assistantCount,
+                    latest_text_len: latestText.length,
+                    latest_text_hash: latestText ? textHash(latestText) : '',
+                    stable_ms: stableDuration,
+                    busy: busy,
+                    busy_reason: busyReason || ''
+                });
             }
-            await sleep(800);
+
+            if (isStableReply(latestText) && stableDuration >= stableMs) {
+                if (!busy) {
+                    await tmLog('[TM][WAIT_REPLY][STABLE_RETURN]', {
+                        message_id: messageId,
+                        reply_len: latestText.length,
+                        stable_ms: stableDuration,
+                        busy: false,
+                        busy_reason: ''
+                    });
+                    return latestText;
+                }
+                if (!stableWhileBusyAt) {
+                    stableWhileBusyAt = Date.now();
+                }
+                if (Date.now() - stableWhileBusyAt >= busyStableGraceMs) {
+                    await tmLog('[TM][WAIT_REPLY][STABLE_RETURN]', {
+                        message_id: messageId,
+                        reply_len: latestText.length,
+                        stable_ms: stableDuration,
+                        busy: true,
+                        busy_reason: busyReason || 'busy'
+                    });
+                    return latestText;
+                }
+            } else {
+                stableWhileBusyAt = 0;
+            }
+
+            await sleep(400);
         }
-        console.log(
-            '[联动] wait reply end message_id=',
-            messageId,
-            'ok=false text_len=',
-            latestText.length,
-            'busy=',
-            isBusyGenerating()
-        );
-        if (isBusyGenerating()) {
-            return '';
+
+        const elapsedMs = Date.now() - start;
+        const busy = isBusyGenerating();
+        const busyReason = getBusyReason();
+        const assistantCount = countAssistantMessages();
+        await tmLog('[TM][WAIT_REPLY][TIMEOUT]', {
+            message_id: messageId,
+            elapsed_ms: elapsedMs,
+            busy: busy,
+            busy_reason: busyReason || '',
+            latest_text_len: latestText.length,
+            latest_text_hash: latestText ? textHash(latestText) : '',
+            assistant_count: assistantCount
+        });
+        if (isStableReply(latestText)) {
+            await tmLog('[TM][WAIT_REPLY][STABLE_RETURN]', {
+                message_id: messageId,
+                reply_len: latestText.length,
+                stable_ms: 0,
+                busy: busy,
+                busy_reason: busyReason || 'timeout_with_text'
+            });
+            return latestText;
         }
-        return isStableReply(latestText) ? latestText : '';
+        return '';
     }
 
-    async function sendToChatGPT(text) {
+    async function reportAssistantReplyFailed(messageId, reason, extra) {
+        const fields = Object.assign(
+            {
+                reason: reason || 'unknown',
+                busy: isBusyGenerating(),
+                busy_reason: getBusyReason() || '',
+                latest_text_len: 0,
+                elapsed_ms: 0
+            },
+            extra || {}
+        );
+        await report('assistant_reply_failed', fields, messageId);
+    }
+
+    async function sendToChatGPT(text, context) {
+        const messageId = (context && context.message_id) || '';
+        const identity = getPageIdentity();
+        const assistantCountBefore = countAssistantMessages();
+        const latestBefore = assistantCountBefore > 0
+            ? getAssistantTextAtIndex(assistantCountBefore - 1)
+            : '';
         const composer = findComposer();
+        const probeButton = findSendButton();
+
+        await tmLog('[TM][SEND][BEFORE]', {
+            message_id: messageId,
+            input_found: Boolean(composer),
+            send_button_found: Boolean(probeButton),
+            send_button_disabled: probeButton
+                ? Boolean(probeButton.disabled || probeButton.getAttribute('aria-disabled') === 'true')
+                : false,
+            assistant_count_before: assistantCountBefore,
+            latest_assistant_text_len_before: latestBefore.length
+        });
+
         if (!composer) {
             return {
                 ok: false,
-                detail: '未找到 ChatGPT 输入框。可能页面未加载完成、未登录、弹窗遮挡，或者 ChatGPT DOM 已变化。'
+                detail: '未找到 ChatGPT 输入框。可能页面未加载完成、未登录、弹窗遮挡，或者 ChatGPT DOM 已变化。',
+                input_found: false,
+                send_button_found: Boolean(probeButton)
             };
         }
+
+        let inputWriteSuccess = false;
         try {
             setComposerText(composer, text);
+            inputWriteSuccess = getComposerTextLen(composer) > 0;
         } catch (error) {
-            console.error('[联动] 写入输入框失败:', error);
+            await tmError('[TM][SEND][ERROR]', error, {
+                message_id: messageId,
+                stage: 'set_composer_text'
+            });
             return {
                 ok: false,
-                detail: `写入输入框失败: ${error.message}`
+                detail: `写入输入框失败: ${error.message}`,
+                input_found: true,
+                input_write_success: false
             };
         }
+
+        await tmLog('[TM][SEND][AFTER_INPUT]', {
+            message_id: messageId,
+            input_text_len: getComposerTextLen(composer),
+            input_write_success: inputWriteSuccess
+        });
+
         const sendButton = await waitForSendButton(SEND_BUTTON_WAIT_MS);
+        let clickSuccess = false;
+        let detail = '';
+
         if (sendButton) {
-            sendButton.scrollIntoView({ block: 'center', inline: 'center' });
-            sendButton.click();
-            return {
-                ok: true,
-                detail: '已写入输入框并点击发送按钮'
-            };
+            try {
+                sendButton.scrollIntoView({ block: 'center', inline: 'center' });
+                sendButton.click();
+                clickSuccess = true;
+                detail = '已写入输入框并点击发送按钮';
+            } catch (error) {
+                await tmError('[TM][SEND][ERROR]', error, {
+                    message_id: messageId,
+                    stage: 'click_send_button'
+                });
+                detail = `点击发送按钮失败: ${error.message}`;
+            }
+        } else {
+            const form = composer.closest('form')
+                || document.querySelector('main form')
+                || document.querySelector('form');
+            if (form && typeof form.requestSubmit === 'function') {
+                try {
+                    form.requestSubmit();
+                    clickSuccess = true;
+                    detail = '未找到显式发送按钮，已使用 form.requestSubmit() 提交';
+                } catch (error) {
+                    await tmError('[TM][SEND][ERROR]', error, {
+                        message_id: messageId,
+                        stage: 'form_request_submit'
+                    });
+                    detail = `form.requestSubmit 失败: ${error.message}`;
+                }
+            } else {
+                detail = '已写入输入框，但未找到可用发送按钮。可能按钮选择器变化，或者输入框状态没有被 ChatGPT 前端接受。';
+            }
         }
-        const form = composer.closest('form') || document.querySelector('main form') || document.querySelector('form');
-        if (form && typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-            return {
-                ok: true,
-                detail: '未找到显式发送按钮，已使用 form.requestSubmit() 提交'
-            };
-        }
+
+        await tmLog('[TM][SEND][CLICK]', {
+            message_id: messageId,
+            click_success: clickSuccess,
+            detail: detail,
+            url: identity.page_url,
+            conversation_id: identity.conversation_id || ''
+        });
+
         return {
-            ok: false,
-            detail: '已写入输入框，但未找到可用发送按钮。可能按钮选择器变化，或者输入框状态没有被 ChatGPT 前端接受。'
+            ok: clickSuccess,
+            detail: detail,
+            input_found: true,
+            input_write_success: inputWriteSuccess,
+            click_success: clickSuccess
         };
     }
 
@@ -675,78 +951,195 @@
         if (handlingMessageId === messageId && !result.retry) {
             return;
         }
+        const identity = getPageIdentity();
         if (result.target_client_id && result.target_client_id !== CLIENT_ID) {
-            console.log(
-                '[联动] 跳过消息：target_client_id 不匹配',
-                'expected=', result.target_client_id,
-                'self=', CLIENT_ID,
-                'message_id=', messageId
-            );
+            await ack(messageId, false, 'target_client_id 不匹配');
+            await report('send_failed', {
+                reason: 'target_client_id_mismatch',
+                target_client_id: result.target_client_id,
+                current_client_id: CLIENT_ID
+            }, messageId);
+            return;
+        }
+        if (result.conversation_id && result.conversation_id !== identity.conversation_id) {
+            await ack(messageId, false, 'conversation_id 不匹配');
+            await report('send_failed', {
+                reason: 'conversation_id_mismatch',
+                target_conversation_id: result.conversation_id,
+                current_conversation_id: identity.conversation_id,
+                page_url: location.href
+            }, messageId);
             return;
         }
         if (result.target_page_url) {
-            const target = String(result.target_page_url).trim();
+            const target = String(result.target_page_url).trim().split('#')[0];
             const current = location.href.split('#')[0];
             if (target && current !== target) {
-                console.log(
-                    '[联动] target_page_url 与当前页面不一致（第一阶段仅记录，不自动跳转）',
-                    'current=', current,
-                    'target=', target,
-                    'message_id=', messageId
-                );
+                await ack(messageId, false, 'target_page_url 与当前页面不一致');
+                await report('send_failed', {
+                    reason: 'target_page_url_mismatch',
+                    target_page_url: result.target_page_url,
+                    current_page_url: location.href
+                }, messageId);
+                return;
             }
         }
+        if (identity.page_type !== 'conversation') {
+            await ack(messageId, false, '当前页面不是 ChatGPT 对话页');
+            await report('send_failed', {
+                reason: 'not_conversation_page',
+                page_type: identity.page_type,
+                page_url: location.href
+            }, messageId);
+            return;
+        }
         handlingMessageId = messageId;
+        const waitStartAt = Date.now();
+        let finalReported = false;
+
         if (result.retry) {
             console.log('[联动] claim retry message_id=', messageId);
         } else {
             console.log('[联动] claim message_id=', messageId);
         }
-        const beforeReply = getAssistantTextAtIndex(countAssistantMessages() - 1);
+
+        await tmLog('[TM][SEND][START]', {
+            message_id: messageId,
+            client_id: CLIENT_ID,
+            conversation_id: identity.conversation_id || '',
+            url: identity.page_url,
+            text_len: String(result.content || '').length
+        });
+
         const beforeCount = countAssistantMessages();
-        const sendResult = await sendToChatGPT(result.content);
-        console.log('[联动] send result message_id=', messageId, 'ok=', sendResult.ok);
+        const beforeReply = beforeCount > 0
+            ? getAssistantTextAtIndex(beforeCount - 1)
+            : '';
+
+        let sendResult;
         try {
-            await ack(messageId, sendResult.ok, sendResult.detail);
+            sendResult = await sendToChatGPT(result.content, { message_id: messageId });
         } catch (error) {
-            console.error('[联动] ack 回传失败:', messageId, error);
+            await tmError('[TM][SEND][ERROR]', error, {
+                message_id: messageId,
+                stage: 'send_to_chatgpt'
+            });
+            sendResult = {
+                ok: false,
+                detail: error.message || String(error)
+            };
         }
-        if (!sendResult.ok) {
-            await report('send_failed', { detail: sendResult.detail }, messageId);
-            handlingMessageId = null;
-            return;
-        }
+
+        console.log('[联动] send result message_id=', messageId, 'ok=', sendResult.ok);
+        let ackSuccess = false;
+        let ackDetail = sendResult.detail || '';
         try {
-            const replyText = await waitForAssistantReply(
-                beforeReply,
-                beforeCount,
-                messageId,
-                ASSISTANT_REPLY_WAIT_MS
-            );
-            if (!replyText) {
-                if (isBusyGenerating()) {
-                    console.log(
-                        '[联动] 仍在生成/思考，跳过 assistant_reply_empty message_id=',
-                        messageId
-                    );
-                    return;
-                }
-                await report('assistant_reply_empty', {
-                    detail: '已发送，但未读取到 ChatGPT 回复内容'
-                }, messageId);
+            await ack(messageId, sendResult.ok, ackDetail);
+            ackSuccess = sendResult.ok;
+        } catch (error) {
+            await tmError('[TM][SEND][ERROR]', error, {
+                message_id: messageId,
+                stage: 'ack'
+            });
+            ackDetail = error.message || String(error);
+            ackSuccess = false;
+        }
+
+        await tmLog('[TM][SEND][ACK]', {
+            message_id: messageId,
+            success: ackSuccess,
+            detail: ackDetail || '-'
+        });
+
+        try {
+            if (!sendResult.ok) {
+                await tmError('[TM][SEND][ERROR]', new Error(sendResult.detail || 'send failed'), {
+                    message_id: messageId,
+                    stage: 'send_failed'
+                });
+                await report('send_failed', { detail: sendResult.detail }, messageId);
+                finalReported = true;
                 return;
             }
+
+            let replyText = '';
+            try {
+                replyText = await waitForAssistantReply(
+                    beforeReply,
+                    beforeCount,
+                    messageId,
+                    ASSISTANT_REPLY_WAIT_MS
+                );
+            } catch (error) {
+                await tmError('[TM][WAIT_REPLY][ERROR]', error, {
+                    message_id: messageId,
+                    elapsed_ms: Date.now() - waitStartAt
+                });
+                await reportAssistantReplyFailed(
+                    messageId,
+                    error.message || String(error),
+                    {
+                        error_type: error.name || 'Error',
+                        error_message: error.message || String(error),
+                        stack: error.stack || '',
+                        elapsed_ms: Date.now() - waitStartAt
+                    }
+                );
+                finalReported = true;
+                return;
+            }
+
+            const elapsedMs = Date.now() - waitStartAt;
+            if (!replyText) {
+                const busy = isBusyGenerating();
+                const reason = busy
+                    ? '等待超时：页面仍被判断为生成中，未能稳定读取 ChatGPT 回复。'
+                    : '已发送，但未读取到 ChatGPT 回复内容。';
+                await reportAssistantReplyFailed(messageId, reason, {
+                    elapsed_ms: elapsedMs,
+                    latest_text_len: 0
+                });
+                finalReported = true;
+                return;
+            }
+
             let text = replyText;
             if (text.length > MAX_REPLY_LENGTH) {
                 text = text.slice(0, MAX_REPLY_LENGTH) + '\n\n[回复内容过长，已截断]';
             }
             await report('assistant_reply', { text: text }, messageId);
+            finalReported = true;
         } catch (error) {
-            console.error('[联动] 读取 ChatGPT 回复失败:', messageId, error);
-            await report('assistant_reply_failed', {
-                detail: error.message
-            }, messageId);
+            await tmError('[TM][SEND][ERROR]', error, {
+                message_id: messageId,
+                stage: 'handle_outbound_message'
+            });
+            if (!finalReported) {
+                await reportAssistantReplyFailed(
+                    messageId,
+                    error.message || String(error),
+                    {
+                        error_type: error.name || 'Error',
+                        error_message: error.message || String(error),
+                        stack: error.stack || '',
+                        elapsed_ms: Date.now() - waitStartAt
+                    }
+                );
+                finalReported = true;
+            }
         } finally {
+            if (!finalReported && sendResult && sendResult.ok) {
+                reportAssistantReplyFailed(
+                    messageId,
+                    '未收到 assistant_reply 最终状态（兜底）',
+                    { elapsed_ms: Date.now() - waitStartAt }
+                ).catch(error => {
+                    tmError('[TM][SEND][ERROR]', error, {
+                        message_id: messageId,
+                        stage: 'final_report_fallback'
+                    });
+                });
+            }
             if (handlingMessageId === messageId) {
                 handlingMessageId = null;
             }
@@ -767,21 +1160,41 @@
             await handleOutboundMessage(result);
         } catch (error) {
             console.error('[联动] 连接服务端失败:', error);
+            clientLog('error', '连接服务端失败', { error: error.message });
         } finally {
             polling = false;
             console.log('[联动] poll end CLIENT_ID=', CLIENT_ID);
         }
     }
 
+    let lastIdentityKey = '';
+
+    function identityKey(identity) {
+        return [
+            identity.page_type || '',
+            identity.conversation_id || '',
+            identity.page_url || ''
+        ].join('|');
+    }
+
+    function checkPageIdentityChange() {
+        const identity = getPageIdentity();
+        const key = identityKey(identity);
+        if (key === lastIdentityKey) {
+            return;
+        }
+        if (lastIdentityKey) {
+            clientLog('info', '页面身份变化', identity);
+        }
+        lastIdentityKey = key;
+    }
+
     const identity = getPageIdentity();
-    console.log(
-        '[联动] ChatGPT 油猴脚本已启动',
-        'client_id=', identity.client_id,
-        'page_instance_id=', identity.page_instance_id,
-        'page_type=', identity.page_type,
-        'conversation_id=', identity.conversation_id || '-',
-        'page_url=', identity.page_url
-    );
+    lastIdentityKey = identityKey(identity);
+    clientLog('info', '油猴脚本已启动', identity);
     pollBridge();
-    setInterval(pollBridge, POLL_INTERVAL_MS);
+    setInterval(() => {
+        checkPageIdentityChange();
+        pollBridge();
+    }, POLL_INTERVAL_MS);
 })();
