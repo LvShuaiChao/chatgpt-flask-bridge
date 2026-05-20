@@ -23,7 +23,14 @@ from app.constants import (
     SETTINGS_APP,
     SETTINGS_ORG,
 )
-from app.models import ChatMessage, ChatSession, default_remote_chatgpt, normalize_remote_chatgpt
+from app.models import (
+    BIND_STATE_UNBOUND,
+    BIND_STATE_WAITING_HOME,
+    ChatMessage,
+    ChatSession,
+    default_remote_chatgpt,
+    normalize_remote_chatgpt,
+)
 from app.url_utils import parse_conversation_id
 from app.ui.widgets.bridge_notifier import BridgeNotifier
 from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
@@ -69,6 +76,7 @@ class SessionMixin:
             created_at=now,
             updated_at=now,
             messages=[],
+            remote_chatgpt=default_remote_chatgpt(),
         )
         self._sessions[session.session_id] = session
         if session.session_id not in self._tab_session_ids:
@@ -78,8 +86,23 @@ class SessionMixin:
         else:
             self._refresh_session_list()
         self._save_sessions_to_disk()
-        if auto_open_chatgpt and self._auto_open_and_bind_on_new_chat:
-            self._start_auto_bind_for_new_session(session.session_id)
+        return session
+
+    def _create_new_local_session(self):
+        session = self._create_session(select=True)
+        session.remote_chatgpt = default_remote_chatgpt()
+        self._append_log(
+            f"[CHAT][NEW_LOCAL_SESSION] session_id={session.session_id} "
+            f"action=create_only open_browser=False"
+        )
+        self._append_session_message(
+            session,
+            "system",
+            "已新建本地对话。\n"
+            "输入内容并点击发送后，将自动选择空闲 ChatGPT 首页或打开新首页。",
+        )
+        self._render_session_chat(session)
+        self._save_sessions_to_disk()
         return session
     def _current_session(self):
         if not self._current_session_id:
@@ -112,6 +135,9 @@ class SessionMixin:
     def _session_list_subtitle(self, session):
         ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
 
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
+            return f"{ts} · 等待首页上线..."
         if self._pending_auto_bind_session_id == session.session_id:
             return f"{ts} · 等待绑定..."
 
@@ -143,7 +169,7 @@ class SessionMixin:
 
             return f"{ts} · {text}"
 
-        return f"{ts} · 还没有聊天消息"
+        return ts
     def _session_list_item_text(self, session):
         return f"{self._session_display_title(session)}\n{self._session_list_subtitle(session)}"
     def _update_current_session_title(self, session=None):

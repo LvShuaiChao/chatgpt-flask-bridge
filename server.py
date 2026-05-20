@@ -203,6 +203,7 @@ def _snapshot_clients():
                 "is_top_frame": bool(info.get("is_top_frame", True)),
                 "visibility_state": info.get("visibility_state") or "",
                 "has_focus": bool(info.get("has_focus")),
+                "last_focus_at": info.get("last_focus_at"),
                 "pathname": info.get("pathname") or "",
                 "last_seen": last_seen,
                 "online": _client_online(last_seen),
@@ -276,10 +277,14 @@ def push_message(data):
         raw_user_text = final_prompt
     target_client_id = (payload.get("target_client_id") or "").strip() or None
     target_page_url = (payload.get("target_page_url") or "").strip() or None
+    target_page_instance_id = (
+        (payload.get("target_page_instance_id") or "").strip() or None
+    )
     conversation_id = (payload.get("conversation_id") or "").strip() or None
     conversation_url = (
         (payload.get("conversation_url") or target_page_url or "").strip() or None
     )
+    bootstrap_conversation = bool(payload.get("bootstrap_conversation"))
     msg = {
         "id": str(uuid.uuid4()),
         "type": "chat",
@@ -289,8 +294,10 @@ def push_message(data):
         "content": final_prompt,
         "target_client_id": target_client_id,
         "target_page_url": target_page_url,
+        "target_page_instance_id": target_page_instance_id,
         "conversation_id": conversation_id,
         "conversation_url": conversation_url,
+        "bootstrap_conversation": bootstrap_conversation,
         "status": "queued",
         "created_at": _now(),
         "delivered_to": None,
@@ -315,6 +322,60 @@ def push_message(data):
     )
     _notify_status()
     return msg
+
+
+def get_message_state(message_id):
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return None
+    with _state_lock:
+        for msg in _outbound_queue:
+            if msg.get("id") == message_id:
+                return dict(msg)
+        msg = _outbound_waiting.get(message_id)
+        if msg:
+            return dict(msg)
+        msg = _control_waiting.get(message_id)
+        if msg:
+            return dict(msg)
+        for msg in _outbound_history:
+            if msg.get("id") == message_id:
+                return dict(msg)
+    return None
+
+
+def cancel_message(message_id, reason="cancelled"):
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return False
+    cancelled = False
+    with _state_lock:
+        kept = deque(maxlen=_outbound_queue.maxlen)
+        while _outbound_queue:
+            msg = _outbound_queue.popleft()
+            if msg.get("id") == message_id:
+                msg["status"] = "cancelled"
+                msg["finalized_at"] = _now()
+                msg["error_detail"] = reason
+                _outbound_history.append(dict(msg))
+                cancelled = True
+            else:
+                kept.append(msg)
+        _outbound_queue.extend(kept)
+
+        msg = _outbound_waiting.pop(message_id, None)
+        if msg:
+            msg["status"] = "cancelled"
+            msg["finalized_at"] = _now()
+            msg["error_detail"] = reason
+            _outbound_history.append(dict(msg))
+            cancelled = True
+
+    if cancelled:
+        _log(f"[BRIDGE][CANCEL] message_id={message_id[:8]}… reason={reason}")
+        _notify_status()
+    return cancelled
+
 
 def push_open_url(url, active=True):
     """GUI：通过油猴在新标签页打开 URL。"""
@@ -384,6 +445,48 @@ def push_reload_page(client_id, target_page_url=None):
     )
     _notify_status()
     return msg
+
+
+def enqueue_control_command(
+    command,
+    target_client_id,
+    target_page_instance_id="",
+    target_conversation_id="",
+    payload=None,
+):
+    """GUI：向指定油猴页面下发控制命令（如 flash_page）。"""
+    command = (command or "").strip()
+    target_client_id = (target_client_id or "").strip()
+    target_page_instance_id = (target_page_instance_id or "").strip()
+    target_conversation_id = (target_conversation_id or "").strip()
+
+    if not command or not target_client_id:
+        _log(
+            f"[BRIDGE][CONTROL][ERROR] invalid command={command!r} "
+            f"target_client_id={target_client_id!r}"
+        )
+        return False
+
+    msg = _make_command_message(
+        command,
+        target_client_id=target_client_id,
+        target_page_instance_id=target_page_instance_id or None,
+        target_conversation_id=target_conversation_id or None,
+        payload=dict(payload or {}),
+    )
+
+    with _state_lock:
+        _control_queue.append(msg)
+
+    message_id = msg["id"]
+    _log(
+        f"[BRIDGE][CONTROL][QUEUE] command={command} "
+        f"message_id={message_id[:8]}… target_client={target_client_id} "
+        f"page_instance={target_page_instance_id or '-'} "
+        f"conversation={target_conversation_id or '-'}"
+    )
+    _notify_status()
+    return True
 
 def push_close_other_pages(except_client_id):
     """关闭除 except_client_id 外所有在线 ChatGPT 页面。"""
@@ -465,6 +568,7 @@ def _touch_tampermonkey(meta, action="poll"):
             "is_top_frame": True,
             "visibility_state": "",
             "has_focus": False,
+            "last_focus_at": None,
             "pathname": "",
             "last_seen": None,
             "online": False,
@@ -480,7 +584,10 @@ def _touch_tampermonkey(meta, action="poll"):
     entry["conversation_id"] = conversation_id or entry.get("conversation_id") or ""
     entry["is_top_frame"] = bool(meta.get("is_top_frame", entry.get("is_top_frame", True)))
     entry["visibility_state"] = (meta.get("visibility_state") or entry.get("visibility_state") or "").strip()
-    entry["has_focus"] = bool(meta.get("has_focus", entry.get("has_focus")))
+    has_focus = bool(meta.get("has_focus", entry.get("has_focus")))
+    entry["has_focus"] = has_focus
+    if has_focus:
+        entry["last_focus_at"] = now
     entry["pathname"] = (meta.get("pathname") or entry.get("pathname") or "").strip()
     entry["last_seen"] = now
     entry["online"] = True
@@ -616,10 +723,54 @@ def _message_matches_client(msg, client_id):
     return True
 
 
+def _flash_page_matches(msg, body):
+    client_id = (body.get("client_id") or "").strip()
+    if not _message_matches_client(msg, client_id):
+        return False
+    if (msg.get("command") or "").strip() != "flash_page":
+        return False
+
+    target_page_instance_id = (msg.get("target_page_instance_id") or "").strip()
+    target_conversation_id = (msg.get("target_conversation_id") or "").strip()
+    body_page_instance_id = (body.get("page_instance_id") or "").strip()
+    body_conversation_id = (body.get("conversation_id") or "").strip()
+
+    if target_page_instance_id and target_page_instance_id != body_page_instance_id:
+        return False
+    if target_conversation_id and target_conversation_id != body_conversation_id:
+        return False
+    return True
+
+
 def _message_matches_page(msg, body):
     client_id = (body.get("client_id") or "").strip()
     if not _message_matches_client(msg, client_id):
         return False
+
+    if msg.get("bootstrap_conversation"):
+        page_type = (body.get("page_type") or "").strip()
+        if page_type != "home":
+            return False
+        body_conv = (body.get("conversation_id") or "").strip()
+        if body_conv:
+            return False
+        target_client = (msg.get("target_client_id") or "").strip()
+        target_instance = (msg.get("target_page_instance_id") or "").strip()
+        body_client = (body.get("client_id") or "").strip()
+        body_instance = (body.get("page_instance_id") or "").strip()
+        if target_client and target_client != body_client:
+            return False
+        if target_instance and target_instance != body_instance:
+            return False
+        target_conv = (msg.get("conversation_id") or "").strip()
+        if target_conv:
+            return False
+        return True
+
+    page_type = (body.get("page_type") or "").strip()
+    if page_type != "conversation":
+        return False
+
     target_conv = (msg.get("conversation_id") or "").strip()
     target_page = _normalize_page_url(msg.get("target_page_url") or "")
     body_conv = (body.get("conversation_id") or "").strip()
@@ -655,7 +806,8 @@ def _pop_message_for_client(body):
         _outbound_queue.append(msg)
     return None
 
-def _pop_control_command_for_client(client_id):
+def _pop_control_command_for_client(body):
+    client_id = (body.get("client_id") or "").strip()
     if not _control_queue:
         return None
     attempts = len(_control_queue)
@@ -668,7 +820,17 @@ def _pop_control_command_for_client(client_id):
             _control_queue.append(msg)
         return None
 
-    # 1) 定向 close_self（匹配 target_client_id）
+    # 1) flash_page（严格匹配 client / page_instance / conversation）
+    msg = _rotate(lambda m: _flash_page_matches(m, body))
+    if msg:
+        _log(
+            f"[BRIDGE][CONTROL][CLAIM] command=flash_page "
+            f"message_id={msg['id'][:8]}… client_id={client_id} "
+            f"page_instance_id={(body.get('page_instance_id') or '-')} "
+            f"conversation_id={(body.get('conversation_id') or '-')}"
+        )
+        return msg
+    # 2) 定向 close_self（匹配 target_client_id）
     msg = _rotate(
         lambda m: m.get("command") == "close_self"
         and _message_target_client_id(m)
@@ -676,15 +838,18 @@ def _pop_control_command_for_client(client_id):
     )
     if msg:
         return msg
-    # 2) open_url（无 target 或匹配当前 client）
+    # 3) open_url（无 target 或匹配当前 client）
     msg = _rotate(
         lambda m: m.get("command") == "open_url"
         and _message_matches_client(m, client_id)
     )
     if msg:
         return msg
-    # 3) 其余控制命令（含 refresh_page、批量 close_self 等）
-    return _rotate(lambda m: _message_matches_client(m, client_id))
+    # 4) 其余控制命令（含 reload_self、批量 close_self 等，不匹配 flash_page）
+    return _rotate(
+        lambda m: (m.get("command") or "").strip() != "flash_page"
+        and _message_matches_client(m, client_id)
+    )
 
 def _claim_message(msg, client_id):
     now = _now()
@@ -791,6 +956,12 @@ def _poll_response(msg, retry):
             resp["target_client_id"] = msg.get("target_client_id")
         if msg.get("target_page_url"):
             resp["target_page_url"] = msg.get("target_page_url")
+        if msg.get("target_page_instance_id"):
+            resp["target_page_instance_id"] = msg.get("target_page_instance_id")
+        if msg.get("target_conversation_id"):
+            resp["target_conversation_id"] = msg.get("target_conversation_id")
+        if msg.get("payload") is not None:
+            resp["payload"] = msg.get("payload")
     else:
         resp["content"] = msg.get("content") or ""
         if msg.get("session_id"):
@@ -805,6 +976,10 @@ def _poll_response(msg, retry):
             resp["conversation_url"] = msg.get("conversation_url")
         if msg.get("conversation_id"):
             resp["conversation_id"] = msg.get("conversation_id")
+        if msg.get("bootstrap_conversation"):
+            resp["bootstrap_conversation"] = True
+        if msg.get("target_page_instance_id"):
+            resp["target_page_instance_id"] = msg.get("target_page_instance_id")
     return resp
 
 def _handle_poll(body):
@@ -817,7 +992,7 @@ def _handle_poll(body):
     identity_changed = _poll_identity_changed(client_id, page_type, conversation_id)
     _touch_tampermonkey(body, action="poll")
     now = _now()
-    cmd = _pop_control_command_for_client(client_id)
+    cmd = _pop_control_command_for_client(body)
     if cmd:
         _claim_message(cmd, client_id)
         _control_waiting[cmd["id"]] = cmd
@@ -873,6 +1048,35 @@ def _handle_poll(body):
             f"[BRIDGE][POLL] client_id={client_id} queue blocked by "
             f"message_id={waiting.get('id', '?')[:8]}… status={waiting.get('status')}"
         )
+        return {"ok": True, "has_message": False}
+    if page_type == "home":
+        msg = _pop_message_for_client(body)
+        if msg and msg.get("bootstrap_conversation"):
+            _claim_message(msg, client_id)
+            _outbound_waiting[msg["id"]] = msg
+            _log(
+                f"[BRIDGE][WAITING_ADD] message_id={msg['id'][:8]}… "
+                f"session_id={(msg.get('session_id') or '-')[:8]} "
+                f"turn_id={(msg.get('turn_id') or '-')[:8]} "
+                f"client_id={client_id} bootstrap=home"
+            )
+            _record_poll_claimed(client_id, page_type, conversation_id)
+            _poll_log_immediate(
+                f"[BRIDGE][POLL] client_id={client_id} page_type=home "
+                f"conversation_id=- has_message=True "
+                f"message_id={msg['id'][:8]}… type=chat bootstrap"
+            )
+            _log(f"[发送] 油猴已取走 bootstrap ({msg['id'][:8]}…) client_id={client_id}")
+            _notify_status()
+            return _poll_response(msg, retry=False)
+        if _debug_mode or identity_changed:
+            _poll_log_immediate(
+                f"[BRIDGE][POLL] client_id={client_id} page_type=home "
+                f"conversation_id=- has_message=False "
+                f"(首页仅领取 bootstrap 消息)"
+            )
+        else:
+            _record_poll_empty(client_id, page_type, conversation_id)
         return {"ok": True, "has_message": False}
     if page_type != "conversation":
         if _debug_mode or identity_changed:
@@ -965,8 +1169,9 @@ def _handle_ack(body):
                 control["status"] = "acked"
             else:
                 _finalize_control_message(message_id, "failed", detail)
+            control_command = (control.get("command") or "-").strip()
             _log(
-                f"[BRIDGE][ACK] control client_id={client_id} "
+                f"[BRIDGE][ACK] command={control_command} client_id={client_id} "
                 f"message_id={message_id[:8]}… success={success} detail={detail or '-'}"
             )
             _add_inbound(
@@ -1215,13 +1420,17 @@ def _handle_report(body):
                 "close_page_success",
                 "close_page_failed",
                 "close_page_still_open",
+                "control_done",
                 "command_failed",
             )
             if event == "close_page_requested":
                 msg["status"] = "requested"
                 _add_inbound(event, payload, **inbound_kw)
             elif event in control_events_finalize:
-                if event.endswith("_success") or event == "close_page_still_open":
+                if (
+                    event.endswith("_success")
+                    or event in ("close_page_still_open", "control_done")
+                ):
                     status = "replied"
                     error_detail = None
                 else:
@@ -1231,9 +1440,11 @@ def _handle_report(body):
                 _finalize_control_message(message_id, status, error_detail)
             else:
                 _add_inbound(event, payload, **inbound_kw)
+            control_command = (msg.get("command") or payload.get("command") or "-").strip()
             _log(
-                f"[BRIDGE][REPORT] control client_id={client_id} "
-                f"message_id={message_id[:8] if message_id else '?'}… event={event}"
+                f"[BRIDGE][REPORT] event={event} command={control_command} "
+                f"client_id={client_id} "
+                f"message_id={message_id[:8] if message_id else '?'}…"
             )
             _notify_status()
             return {"ok": True}
@@ -1277,6 +1488,20 @@ def _handle_report(body):
                     {"event": event, "payload": payload},
                     **inbound_kw,
                 )
+        elif event == "conversation_created":
+            conv_id = (payload.get("conversation_id") or body.get("conversation_id") or "").strip()
+            page_url = (payload.get("url") or body.get("page_url") or "").strip()
+            _log(
+                f"[BIND][CONVERSATION_CREATED] message_id={message_id[:8] if message_id else '?'}… "
+                f"session_id={(msg.get('session_id') or '-')[:8]} "
+                f"client_id={client_id} "
+                f"page_instance_id={(body.get('page_instance_id') or '-')[:16]} "
+                f"conversation_id={conv_id or '-'} url={page_url or '-'}"
+            )
+            msg["conversation_id"] = conv_id or msg.get("conversation_id")
+            if page_url:
+                msg["conversation_url"] = page_url
+            _add_inbound(event, payload, **inbound_kw)
         elif event in (
             "open_url_success",
             "open_url_failed",

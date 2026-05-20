@@ -137,6 +137,7 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         "node_modules",
         ".venv",
         "venv",
+        "runtime",
     }
 )
 
@@ -156,6 +157,8 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
     if bn.startswith("0_merged_for_chatgpt") or bn.startswith("0_export_logs_for_chatgpt"):
         return True
     if bn.endswith(".pyc"):
+        return True
+    if bn == "log.txt" or bn.endswith(".log"):
         return True
 
     if not INCLUDE_CLAUDE and any(p == ".claude" for p in parts):
@@ -359,6 +362,7 @@ IGNORE_FILE_BASENAMES = frozenset(
         ".env.local",
         ".env.credentials",
         "workspace.xml",
+        "log.txt",
     }
 )
 

@@ -30,7 +30,7 @@ from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
+from PyQt5.QtGui import QDesktopServices, QFont, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -49,6 +49,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
     QSplitter,
     QTabWidget,
@@ -109,6 +110,8 @@ class MainWindow(
         self._pending_open_until = 0
         self._list_refreshing = False
         self._session_search_text = ""
+        self._applying_bridge_status = False
+        self._pending_bridge_status = None
         self._load_app_settings_values()
         server.set_debug_mode(self._debug_mode)
         self._notifier = BridgeNotifier()
@@ -117,6 +120,7 @@ class MainWindow(
         server.set_log_callback(self._notifier.log_signal.emit)
         server.set_status_callback(self._notifier.status_signal.emit)
         self._build_ui()
+        self._setup_window_shortcuts()
         self._load_sessions_from_disk()
         if self._restore_chat_tab:
             saved_session_id = self._settings.value("current_session_id")
@@ -139,4 +143,9 @@ class MainWindow(
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
         if self._auto_start_server and not server.is_server_running():
-            self._start_server()
+            QTimer.singleShot(300, self._start_server)
+
+    def _setup_window_shortcuts(self):
+        shortcut = QShortcut(QKeySequence.New, self)
+        shortcut.setContext(Qt.WindowShortcut)
+        shortcut.activated.connect(self._create_new_local_session)

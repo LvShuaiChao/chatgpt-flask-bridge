@@ -6,7 +6,7 @@ import re
 import textwrap
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 GUI_PATH = ROOT / "gui.py"
 
 SETTINGS_METHODS = {

@@ -331,8 +331,139 @@
         }, 200);
     }
 
+    function flashBoundPage(payload) {
+        const durationMs = Number(payload.duration_ms || 3500);
+        const blinkCount = Number(payload.blink_count || 6);
+        const title = String(payload.title || 'GUI 已定位此页面');
+        let message = String(payload.message || '当前页面已绑定到当前 GUI 对话。');
+        const payloadClientId = String(payload.client_id || CLIENT_ID || '').trim();
+        const payloadConversationId = String(payload.conversation_id || '').trim();
+        const identity = getPageIdentity();
+        const conversationId = payloadConversationId
+            || identity.conversation_id
+            || '';
+        if (!payload.message && payloadClientId) {
+            let convShort = conversationId;
+            if (convShort.length > 16) {
+                convShort = `${convShort.slice(0, 16)}…`;
+            }
+            message = [
+                '当前页面已绑定到 GUI 对话',
+                `client=${payloadClientId}`,
+                `conversation=${convShort || '-'}`
+            ].join('\n');
+        }
+
+        const oldTitle = document.title;
+
+        const overlay = document.createElement('div');
+        overlay.id = '__gui_bound_page_flash_overlay__';
+        overlay.textContent = message;
+        overlay.style.position = 'fixed';
+        overlay.style.zIndex = '2147483647';
+        overlay.style.left = '50%';
+        overlay.style.top = '24px';
+        overlay.style.transform = 'translateX(-50%)';
+        overlay.style.padding = '14px 22px';
+        overlay.style.borderRadius = '12px';
+        overlay.style.background = 'rgba(220, 38, 38, 0.95)';
+        overlay.style.color = '#fff';
+        overlay.style.fontSize = '16px';
+        overlay.style.fontWeight = '700';
+        overlay.style.boxShadow = '0 8px 28px rgba(0,0,0,0.28)';
+        overlay.style.pointerEvents = 'none';
+        overlay.style.whiteSpace = 'pre-line';
+        overlay.style.textAlign = 'center';
+        overlay.style.fontFamily = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+        const border = document.createElement('div');
+        border.id = '__gui_bound_page_flash_border__';
+        border.style.position = 'fixed';
+        border.style.zIndex = '2147483646';
+        border.style.left = '0';
+        border.style.top = '0';
+        border.style.right = '0';
+        border.style.bottom = '0';
+        border.style.border = '8px solid rgba(220, 38, 38, 0.95)';
+        border.style.boxSizing = 'border-box';
+        border.style.pointerEvents = 'none';
+
+        const oldOverlay = document.getElementById('__gui_bound_page_flash_overlay__');
+        if (oldOverlay) {
+            oldOverlay.remove();
+        }
+
+        const oldBorder = document.getElementById('__gui_bound_page_flash_border__');
+        if (oldBorder) {
+            oldBorder.remove();
+        }
+
+        document.documentElement.appendChild(border);
+        document.documentElement.appendChild(overlay);
+
+        if (
+            typeof Notification !== 'undefined'
+            && Notification.permission === 'granted'
+        ) {
+            try {
+                new Notification(title, { body: message.replace(/\n/g, ' ') });
+            } catch (error) {
+                clientLog('warn', '[TM][CONTROL][FLASH_PAGE] 浏览器通知失败', {
+                    error_message: error.message || String(error)
+                });
+            }
+        }
+
+        let count = 0;
+        const intervalMs = Math.max(
+            180,
+            Math.floor(durationMs / Math.max(1, blinkCount * 2))
+        );
+        const timer = window.setInterval(() => {
+            count += 1;
+            const visible = count % 2 === 0;
+            border.style.display = visible ? 'block' : 'none';
+            overlay.style.display = visible ? 'block' : 'none';
+            document.title = visible ? `>>> ${title} <<<` : oldTitle;
+
+            if (count >= blinkCount * 2) {
+                window.clearInterval(timer);
+                border.remove();
+                overlay.remove();
+                document.title = oldTitle;
+            }
+        }, intervalMs);
+    }
+
     async function handleCommandMessage(result) {
         const messageId = result.message_id || result.id;
+
+        if (result.command === 'flash_page') {
+            const payload = result.payload || {};
+            await tmLog('[TM][CONTROL][FLASH_PAGE]', {
+                message_id: messageId,
+                client_id: CLIENT_ID,
+                page_instance_id: PAGE_INSTANCE_ID,
+                conversation_id: getPageIdentity().conversation_id || ''
+            });
+            try {
+                await ack(messageId, true, '收到 flash_page 命令');
+            } catch (error) {
+                await tmError('[TM][CONTROL][FLASH_PAGE][ACK_ERROR]', error, {
+                    message_id: messageId
+                });
+            }
+            flashBoundPage(payload);
+            await tmLog('[TM][CONTROL][FLASH_PAGE][DONE]', {
+                message_id: messageId,
+                page_url: location.href
+            });
+            await report('control_done', {
+                command: 'flash_page',
+                detail: '页面已闪烁定位'
+            }, messageId);
+            return true;
+        }
 
         if (result.command === 'reload_self') {
             await reloadCurrentPageCommand(messageId);
@@ -780,6 +911,27 @@
         await report('assistant_reply_failed', fields, messageId);
     }
 
+    async function waitForConversationCreated(messageId, timeoutMs) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const identity = getPageIdentity();
+            if (
+                identity.page_type === 'conversation'
+                && identity.conversation_id
+            ) {
+                await tmLog('[TM][BOOTSTRAP][CONVERSATION_CREATED]', {
+                    message_id: messageId,
+                    conversation_id: identity.conversation_id,
+                    url: identity.page_url,
+                    elapsed_ms: Date.now() - start
+                });
+                return identity;
+            }
+            await sleep(400);
+        }
+        return null;
+    }
+
     async function sendToChatGPT(text, context) {
         const messageId = (context && context.message_id) || '';
         const identity = getPageIdentity();
@@ -961,37 +1113,74 @@
             }, messageId);
             return;
         }
-        if (result.conversation_id && result.conversation_id !== identity.conversation_id) {
-            await ack(messageId, false, 'conversation_id 不匹配');
-            await report('send_failed', {
-                reason: 'conversation_id_mismatch',
-                target_conversation_id: result.conversation_id,
-                current_conversation_id: identity.conversation_id,
-                page_url: location.href
-            }, messageId);
-            return;
-        }
-        if (result.target_page_url) {
-            const target = String(result.target_page_url).trim().split('#')[0];
-            const current = location.href.split('#')[0];
-            if (target && current !== target) {
-                await ack(messageId, false, 'target_page_url 与当前页面不一致');
+        const isBootstrap = Boolean(result.bootstrap_conversation);
+        if (isBootstrap) {
+            if (identity.page_type !== 'home') {
+                await ack(messageId, false, 'bootstrap 消息要求当前为 ChatGPT 首页');
                 await report('send_failed', {
-                    reason: 'target_page_url_mismatch',
-                    target_page_url: result.target_page_url,
-                    current_page_url: location.href
+                    reason: 'not_home_page',
+                    page_type: identity.page_type,
+                    page_url: location.href
                 }, messageId);
                 return;
             }
-        }
-        if (identity.page_type !== 'conversation') {
-            await ack(messageId, false, '当前页面不是 ChatGPT 对话页');
-            await report('send_failed', {
-                reason: 'not_conversation_page',
-                page_type: identity.page_type,
-                page_url: location.href
-            }, messageId);
-            return;
+            if (identity.conversation_id) {
+                await ack(messageId, false, '首页不应已有 conversation_id');
+                await report('send_failed', {
+                    reason: 'home_already_has_conversation',
+                    conversation_id: identity.conversation_id,
+                    page_url: location.href
+                }, messageId);
+                return;
+            }
+            if (
+                result.target_page_instance_id
+                && result.target_page_instance_id !== PAGE_INSTANCE_ID
+            ) {
+                await ack(messageId, false, 'target_page_instance_id 不匹配');
+                await report('send_failed', {
+                    reason: 'target_page_instance_id_mismatch',
+                    target_page_instance_id: result.target_page_instance_id,
+                    current_page_instance_id: PAGE_INSTANCE_ID
+                }, messageId);
+                return;
+            }
+        } else {
+            if (result.target_page_url) {
+                const target = String(result.target_page_url).trim().split('#')[0];
+                const current = location.href.split('#')[0];
+                if (target && current !== target) {
+                    await ack(messageId, false, 'target_page_url 与当前页面不一致');
+                    await report('send_failed', {
+                        reason: 'target_page_url_mismatch',
+                        target_page_url: result.target_page_url,
+                        current_page_url: location.href
+                    }, messageId);
+                    return;
+                }
+            }
+            if (identity.page_type !== 'conversation') {
+                await ack(messageId, false, '当前页面不是 ChatGPT 对话页');
+                await report('send_failed', {
+                    reason: 'not_conversation_page',
+                    page_type: identity.page_type,
+                    page_url: location.href
+                }, messageId);
+                return;
+            }
+            if (
+                result.conversation_id
+                && result.conversation_id !== identity.conversation_id
+            ) {
+                await ack(messageId, false, 'conversation_id 不匹配');
+                await report('send_failed', {
+                    reason: 'conversation_id_mismatch',
+                    target_conversation_id: result.conversation_id,
+                    current_conversation_id: identity.conversation_id,
+                    page_url: location.href
+                }, messageId);
+                return;
+            }
         }
         handlingMessageId = messageId;
         const waitStartAt = Date.now();
@@ -1060,6 +1249,31 @@
                 await report('send_failed', { detail: sendResult.detail }, messageId);
                 finalReported = true;
                 return;
+            }
+
+            if (isBootstrap) {
+                const createdIdentity = await waitForConversationCreated(
+                    messageId,
+                    ASSISTANT_REPLY_WAIT_MS
+                );
+                if (createdIdentity) {
+                    await report('conversation_created', {
+                        message_id: messageId,
+                        old_page_type: 'home',
+                        new_page_type: 'conversation',
+                        conversation_id: createdIdentity.conversation_id,
+                        url: createdIdentity.page_url,
+                        client_id: CLIENT_ID,
+                        page_instance_id: PAGE_INSTANCE_ID
+                    }, messageId);
+                } else {
+                    await report('send_failed', {
+                        reason: 'conversation_created_timeout',
+                        detail: '首条消息已发送，但未检测到跳转到对话页 /c/xxx'
+                    }, messageId);
+                    finalReported = true;
+                    return;
+                }
             }
 
             let replyText = '';

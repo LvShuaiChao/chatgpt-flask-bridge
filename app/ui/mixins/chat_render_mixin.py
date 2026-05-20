@@ -97,9 +97,8 @@ class ChatRenderMixin:
     def _update_chat_empty_state(self, session=None):
         if not hasattr(self, "empty_state_widget"):
             return
-        self.empty_state_widget.setVisible(
-            not self._session_has_chat_messages(session)
-        )
+        # 空对话不显示「还没有消息」占位；仅保留 system 等真实消息气泡
+        self.empty_state_widget.setVisible(False)
     def _render_session_chat(self, session):
         self._clear_chat_widgets()
         for message in session.messages:

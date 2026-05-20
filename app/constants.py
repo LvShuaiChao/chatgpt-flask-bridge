@@ -52,5 +52,5 @@ DEFAULT_APP_SETTINGS = {
     "auto_open_bound_page_when_missing": True,
     "allow_fallback_to_any_page": False,
     "auto_bind_unbound_page": True,
-    "auto_open_and_bind_on_new_chat": True,
+    "auto_open_and_bind_on_new_chat": False,
 }

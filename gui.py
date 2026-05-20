@@ -1,14 +1,28 @@
+import faulthandler
 import sys
+import traceback
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
-from log_utils import clear_log_file
+from log_utils import append_log, clear_log_file
 
 
 def main():
+    faulthandler.enable()
+
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        detail = "".join(
+            traceback.format_exception(exc_type, exc_value, exc_traceback)
+        )
+        append_log(
+            "[PYTHON_UNCAUGHT_EXCEPTION]\n" + detail, source="GUI", echo=True
+        )
+
+    sys.excepthook = handle_exception
+
     clear_log_file()
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     app = QApplication(sys.argv)

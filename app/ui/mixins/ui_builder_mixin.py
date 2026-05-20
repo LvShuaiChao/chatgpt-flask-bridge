@@ -112,6 +112,12 @@ class UiBuilderMixin:
             self._on_open_bound_chatgpt_page,
             tooltip="打开当前对话绑定的 ChatGPT 页面",
         )
+        self.flash_bound_page_btn = self._create_tm_ghost_button(
+            "闪烁绑定页",
+            self._flash_bound_chatgpt_page,
+            tooltip="在绑定的 ChatGPT 页面上闪烁提示，便于定位对应网页",
+        )
+        self.flash_bound_page_btn.setObjectName("flash_bound_page_btn")
         self.close_bound_page_btn = self._create_tm_ghost_button(
             "关闭绑定页面",
             self._on_close_bound_tm_page,
@@ -172,6 +178,7 @@ class UiBuilderMixin:
                 self.bind_selected_page_btn,
                 self.unbind_page_btn,
                 self.chat_open_bound_btn,
+                self.flash_bound_page_btn,
                 self.close_bound_page_btn,
                 self.close_other_pages_btn,
             ):
@@ -186,6 +193,12 @@ class UiBuilderMixin:
                 self._on_open_bound_chatgpt_page,
                 False,
                 "打开当前对话绑定的页面",
+            ),
+            (
+                "闪烁绑定页",
+                self._flash_bound_chatgpt_page,
+                False,
+                "在绑定的 ChatGPT 页面上闪烁提示",
             ),
             ("绑定当前页面", self._on_bind_current_page, False, ""),
             ("绑定选中页面", self._on_bind_selected_tm_page, False, ""),
@@ -206,12 +219,16 @@ class UiBuilderMixin:
         page_type = (item.get("page_type") or "").strip() or "-"
         online_tag = "[在线]" if item.get("online") else "[离线]"
         conv = self._short_conv_id(self._client_conversation_id(item))
-        visibility = (item.get("visibility_state") or "-").strip()
+        visibility = (
+            item.get("visibility_state") or item.get("visible") or "-"
+        ).strip()
         focus = "yes" if item.get("has_focus") else "no"
-        ago = self._format_last_seen_ago(item.get("last_seen"))
+        last_focus_ago = self._format_last_seen_ago(item.get("last_focus_at"))
+        heartbeat_ago = self._format_last_seen_ago(item.get("last_seen"))
         return (
-            f"{online_tag} {page_type:<12} | {client_id} | conv={conv} | "
-            f"{visibility} | focus={focus} | {ago}"
+            f"{online_tag} {page_type} | {client_id} | conv={conv} | "
+            f"{visibility} | focus={focus} | 最近焦点={last_focus_ago} | "
+            f"心跳={heartbeat_ago}"
         )
     def _tm_page_combo_sort_key(self, item):
         online_rank = 1 if item.get("online") else 0
@@ -767,7 +784,11 @@ class UiBuilderMixin:
             "未绑定但检测到在线页面时，自动绑定到当前对话"
         )
         self.auto_open_and_bind_on_new_chat_cb = QCheckBox(
-            "新建对话时自动打开并绑定 ChatGPT 页面"
+            "（已停用）新建对话时自动打开 ChatGPT 页面"
+        )
+        self.auto_open_and_bind_on_new_chat_cb.setEnabled(False)
+        self.auto_open_and_bind_on_new_chat_cb.setToolTip(
+            "首条消息发送时会自动选择空闲首页或打开新首页，新建对话不再自动打开浏览器。"
         )
         for widget in (
             self.bind_each_chat_to_page_cb,
@@ -787,7 +808,7 @@ class UiBuilderMixin:
                 "页面类型",
                 "会话ID",
                 "可见",
-                "焦点",
+                "焦点/最近焦点",
                 "最后心跳",
                 "URL",
                 "本对话绑定",
@@ -943,9 +964,8 @@ class UiBuilderMixin:
         sidebar_layout.setSpacing(8)
         self.new_session_btn = QPushButton("新建对话")
         self.new_session_btn.setObjectName("NewSessionButton")
-        self.new_session_btn.clicked.connect(
-            lambda: self._create_session(select=True, auto_open_chatgpt=True)
-        )
+        self.new_session_btn.setToolTip("新建本地对话 (Ctrl+N)")
+        self.new_session_btn.clicked.connect(self._create_new_local_session)
         sidebar_layout.addWidget(self.new_session_btn)
         self.session_search_edit = QLineEdit()
         self.session_search_edit.setObjectName("SessionSearchInput")
@@ -998,18 +1018,7 @@ class UiBuilderMixin:
         self.chat_list_layout.setSpacing(11)
         self.empty_state_widget = QWidget()
         self.empty_state_widget.setObjectName("ChatEmptyState")
-        empty_layout = QVBoxLayout(self.empty_state_widget)
-        empty_layout.setContentsMargins(0, 40, 0, 40)
-        empty_layout.addStretch()
-        self.empty_title_label = QLabel("还没有消息")
-        self.empty_title_label.setObjectName("EmptyTitle")
-        self.empty_title_label.setAlignment(Qt.AlignCenter)
-        empty_layout.addWidget(self.empty_title_label)
-        self.empty_subtitle_label = QLabel("启动服务并输入内容后开始对话")
-        self.empty_subtitle_label.setObjectName("EmptySubtitle")
-        self.empty_subtitle_label.setAlignment(Qt.AlignCenter)
-        empty_layout.addWidget(self.empty_subtitle_label)
-        empty_layout.addStretch()
+        self.empty_state_widget.setVisible(False)
         self.chat_list_layout.addWidget(self.empty_state_widget)
         self.chat_bottom_spacer = QWidget()
         self.chat_bottom_spacer.setFixedHeight(1)
