@@ -1140,20 +1140,21 @@
         const isBootstrap = Boolean(result.bootstrap_conversation);
         if (isBootstrap) {
             if (identity.page_type !== 'home') {
-                await ack(messageId, false, 'bootstrap 消息要求当前为 ChatGPT 首页');
+                await ack(messageId, false, 'bootstrap 只能发送到 ChatGPT 首页');
                 await report('send_failed', {
-                    reason: 'not_home_page',
+                    reason: 'bootstrap_target_not_home',
                     page_type: identity.page_type,
-                    page_url: location.href
+                    conversation_id: identity.conversation_id,
+                    url: location.href
                 }, messageId);
                 return;
             }
             if (identity.conversation_id) {
-                await ack(messageId, false, '首页不应已有 conversation_id');
+                await ack(messageId, false, '当前页面已有 conversation_id，不能作为新对话首页');
                 await report('send_failed', {
-                    reason: 'home_already_has_conversation',
+                    reason: 'bootstrap_target_has_conversation',
                     conversation_id: identity.conversation_id,
-                    page_url: location.href
+                    url: location.href
                 }, messageId);
                 return;
             }

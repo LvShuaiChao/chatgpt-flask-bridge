@@ -99,6 +99,19 @@ class ChatRenderMixin:
             return
         # 空对话不显示「还没有消息」占位；仅保留 system 等真实消息气泡
         self.empty_state_widget.setVisible(False)
+    def _session_chat_render_signature(self, session):
+        rows = []
+        for message in session.messages:
+            if not message.visible_in_chat:
+                continue
+            rows.append((
+                message.message_id,
+                message.role,
+                message.content,
+                message.status,
+            ))
+        return tuple(rows)
+
     def _render_session_chat(self, session):
         self._clear_chat_widgets()
         for message in session.messages:
@@ -106,7 +119,20 @@ class ChatRenderMixin:
                 continue
             self._add_bubble_from_message(message, register_only=False)
         self._update_chat_empty_state(session)
+        self._last_rendered_chat_signature = self._session_chat_render_signature(session)
         self._scroll_to_bottom()
+
+    def _update_existing_reply_bubble(self, message):
+        if not message or not message.message_id:
+            return False
+        bubble = self._reply_bubbles_by_message_id.get(message.message_id)
+        if bubble is None:
+            return False
+        if message.role == "error":
+            bubble.set_error(message.text, message.status)
+        else:
+            bubble.set_text(message.text, message.status)
+        return True
     def _add_bubble_from_message(self, message, register_only=False):
         ts_text = self._format_message_ts(message.created_at)
         if message.role == "system":
@@ -196,16 +222,39 @@ class ChatRenderMixin:
             target.role = "error"
         session.updated_at = time.time()
         return True
-    def _apply_session_change(self, session_id):
+    def _apply_session_change(self, session_id, *, force_full_render=False):
         session = self._sessions.get(session_id)
         if not session:
             return
         self._refresh_session_list(select_session_id=self._current_session_id)
         if session_id == self._current_session_id:
-            self._render_session_chat(session)
+            sig = self._session_chat_render_signature(session)
+            if (
+                not force_full_render
+                and getattr(self, "_last_rendered_chat_signature", None) == sig
+                and self._reply_bubbles_by_message_id
+            ):
+                pass
+            else:
+                self._render_session_chat(session)
         else:
             self._mark_session_pending(session_id)
         self._save_sessions_to_disk()
+
+    def _apply_reply_ui_change(self, session, target):
+        if session.session_id == self._current_session_id:
+            updated = self._update_existing_reply_bubble(target)
+            if not updated:
+                self._render_session_chat(session)
+            else:
+                sig = self._session_chat_render_signature(session)
+                self._last_rendered_chat_signature = sig
+                self._scroll_to_bottom()
+        else:
+            self._mark_session_pending(session.session_id)
+        self._refresh_session_list(select_session_id=self._current_session_id)
+        self._save_sessions_to_disk()
+
     def _set_reply_text(self, session, turn_id, text, status_text="已回复"):
         target = self._find_assistant_by_turn(session, turn_id)
         if not self._update_session_assistant(
@@ -216,7 +265,7 @@ class ChatRenderMixin:
         self._log_chat_update_assistant(
             session, turn_id, status_text, len(text or ""), msg_id
         )
-        self._apply_session_change(session.session_id)
+        self._apply_reply_ui_change(session, target)
 
     def _set_reply_error(self, session, turn_id, text, status_text="失败"):
         target = self._find_assistant_by_turn(session, turn_id)
@@ -233,7 +282,7 @@ class ChatRenderMixin:
         self._log_chat_update_assistant(
             session, turn_id, status_text, len(text or ""), msg_id
         )
-        self._apply_session_change(session.session_id)
+        self._apply_reply_ui_change(session, target)
     def _set_reply_waiting(self, session, turn_id):
         target = self._find_assistant_by_turn(session, turn_id)
         if target is None:

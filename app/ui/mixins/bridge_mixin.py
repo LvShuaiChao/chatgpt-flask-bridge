@@ -69,6 +69,13 @@ from PyQt5.QtWidgets import (
 
 
 class BridgeMixin:
+    BRIDGE_STATUS_UI_MIN_INTERVAL_MS = 300
+
+    def _debug_status_step(self, text):
+        if not getattr(self, "_debug_mode", False):
+            return
+        self._append_log(text)
+
     def _render_status_summary(self, status):
         status = status or {}
         host = self.host_edit.text().strip() or "127.0.0.1"
@@ -125,13 +132,31 @@ class BridgeMixin:
         style = label.style()
         style.unpolish(label)
         style.polish(label)
+    def _flush_deferred_bridge_status(self):
+        self._bridge_status_defer_timer_active = False
+        pending = getattr(self, "_deferred_bridge_status", None)
+        self._deferred_bridge_status = None
+        if pending is not None:
+            self._apply_bridge_status(pending)
+
     def _apply_bridge_status(self, status):
         status = status or {}
+        now_ms = int(time.time() * 1000)
+        last_ms = getattr(self, "_last_bridge_status_ui_apply_ms", 0)
+        interval = self.BRIDGE_STATUS_UI_MIN_INTERVAL_MS
+        if now_ms - last_ms < interval:
+            self._deferred_bridge_status = status
+            if not getattr(self, "_bridge_status_defer_timer_active", False):
+                self._bridge_status_defer_timer_active = True
+                delay = max(1, interval - (now_ms - last_ms))
+                QTimer.singleShot(delay, self._flush_deferred_bridge_status)
+            return
 
         if getattr(self, "_applying_bridge_status", False):
             self._pending_bridge_status = status
             return
 
+        self._last_bridge_status_ui_apply_ms = now_ms
         self._applying_bridge_status = True
         try:
             self._apply_bridge_status_impl(status)
@@ -148,7 +173,7 @@ class BridgeMixin:
     def _apply_bridge_status_impl(self, status):
         status = status or {}
         self._last_bridge_status = status
-        self._append_log("[STATUS_APPLY][STEP] start")
+        self._debug_status_step("[STATUS_APPLY][STEP] start")
         server_running = bool(status.get("server_running"))
         if server_running:
             self.status_label.setText("服务：运行中")
@@ -158,7 +183,7 @@ class BridgeMixin:
             self.status_label.setText("服务：未启动")
             self.statusBar().showMessage("服务未启动")
             self._refresh_status_chip(self.status_label, "")
-        self._append_log("[STATUS_APPLY][STEP] service_label")
+        self._debug_status_step("[STATUS_APPLY][STEP] service_label")
         last_seen = status.get("tampermonkey_last_seen")
         last_seen_text = self._format_ts(last_seen)
         summary = self._tm_summary_for_session()
@@ -188,30 +213,31 @@ class BridgeMixin:
         chat_q = status.get("queue_length", 0)
         ctrl_q = status.get("control_queue_length", 0)
         self.tm_queue_label.setText(f"聊天队列：{chat_q}  控制队列：{ctrl_q}")
-        self._append_log("[STATUS_APPLY][STEP] tm_summary")
+        self._debug_status_step("[STATUS_APPLY][STEP] tm_summary")
         live_url = status.get("tampermonkey_page_url") if summary.get("online_clients") else None
         self._update_live_page_display(live_url, summary=summary)
-        self._append_log("[STATUS_APPLY][STEP] live_page")
+        self._debug_status_step("[STATUS_APPLY][STEP] live_page")
         QTimer.singleShot(0, lambda s=status: self._try_finish_pending_auto_bind(s))
         QTimer.singleShot(0, lambda: self._check_bootstrap_claim_timeouts())
         QTimer.singleShot(0, lambda s=status: self._sync_bound_session_urls_from_clients(s))
         QTimer.singleShot(0, lambda s=status: self._auto_bind_current_session_if_needed(s))
         self._update_bound_page_display(summary=summary)
-        self._append_log("[STATUS_APPLY][STEP] bound_page")
+        self._debug_status_step("[STATUS_APPLY][STEP] bound_page")
         self._refresh_tm_page_selector(summary=summary)
-        self._append_log("[STATUS_APPLY][STEP] page_selector")
+        self._debug_status_step("[STATUS_APPLY][STEP] page_selector")
         self._render_tampermonkey_clients(status)
-        self._append_log("[STATUS_APPLY][STEP] tm_table")
+        self._debug_status_step("[STATUS_APPLY][STEP] tm_table")
         inbound_items = status.get("recent_inbound") or []
         outbound_items = status.get("recent_outbound") or []
         self._handle_inbound_events(inbound_items)
         self._render_inbound_log(inbound_items)
         self._render_outbound(outbound_items)
         self._render_status_summary(status)
-        self._append_log("[STATUS_APPLY][STEP] status_summary")
+        self._debug_status_step("[STATUS_APPLY][STEP] status_summary")
         self._update_tampermonkey_settings_labels(status)
         self._update_service_settings_status()
-        self._append_log("[STATUS_APPLY][STEP] done")
+        self._refresh_session_list(select_session_id=self._current_session_id)
+        self._debug_status_step("[STATUS_APPLY][STEP] done")
     def _handle_inbound_events(self, items):
         for item in items:
             event_key = (
@@ -396,7 +422,9 @@ class BridgeMixin:
                     "target_page_url_mismatch": "目标页面 URL 与当前页面不一致",
                     "not_conversation_page": "当前页面不是 ChatGPT 对话页",
                     "not_home_page": "bootstrap 要求 ChatGPT 首页",
+                    "bootstrap_target_not_home": "bootstrap 只能发送到 ChatGPT 首页",
                     "home_already_has_conversation": "首页不应已有 conversation_id",
+                    "bootstrap_target_has_conversation": "首页不应已有 conversation_id",
                     "target_page_instance_id_mismatch": "预绑定首页 page_instance_id 不一致",
                     "bind_request_id_mismatch": "绑定令牌与当前页面不一致",
                     "conversation_created_timeout": "首条消息已发送，但未检测到新对话页",
@@ -779,11 +807,12 @@ class BridgeMixin:
             self._add_system_message(f"消息入队失败：{error}")
             return
         if not target_client_id:
-            live_client = (
-                self._last_bridge_status.get("tampermonkey_client_id") or ""
-            ).strip()
-            if live_client:
-                self._remember_session_page_from_client(session, live_client)
+            if not self._session_is_local_new_chat_flow(session):
+                live_client = (
+                    self._last_bridge_status.get("tampermonkey_client_id") or ""
+                ).strip()
+                if live_client:
+                    self._remember_session_page_from_client(session, live_client)
         bridge_message_id = msg.get("id") if isinstance(msg, dict) else None
         if not bridge_message_id:
             self._add_system_message("服务端未返回 bridge_message_id，无法跟踪回复。")

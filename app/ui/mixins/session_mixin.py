@@ -17,9 +17,11 @@ from app.constants import (
     ASSISTANT_WAIT_TEXTS,
     CHATGPT_HOME_URL,
     DEFAULT_APP_SETTINGS,
+    PENDING_ASSISTANT_STATUSES,
     RUNTIME_DIR,
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
+    SESSION_BIND_LIST_STYLES,
     SETTINGS_APP,
     SETTINGS_ORG,
 )
@@ -36,7 +38,8 @@ from app.ui.widgets.bridge_notifier import BridgeNotifier
 from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
+from app.ui.widgets.session_list_item import SessionListItemWidget
+from PyQt5.QtCore import QObject, QSettings, QSize, QUrl, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -172,6 +175,164 @@ class SessionMixin:
         return ts
     def _session_list_item_text(self, session):
         return f"{self._session_display_title(session)}\n{self._session_list_subtitle(session)}"
+
+    def _session_list_title_text(self, session):
+        return session.title or "新对话"
+
+    def _session_has_pending_assistant_reply(self, session):
+        if session.has_pending_reply:
+            return True
+        for message in reversed(session.messages):
+            if not message.visible_in_chat:
+                continue
+            if message.role != "assistant":
+                continue
+            status = (message.status or "").strip()
+            if status in PENDING_ASSISTANT_STATUSES:
+                return True
+            text = (message.content or "").strip()
+            if text in ASSISTANT_WAIT_TEXTS:
+                return True
+        return False
+
+    def _session_preview_text(self, session):
+        ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
+            return f"{ts} · 等待首页上线..."
+        if self._pending_auto_bind_session_id == session.session_id:
+            return f"{ts} · 等待绑定..."
+        if remote.get("enabled") and (remote.get("client_id") or "").strip():
+            has_chat = any(
+                m.visible_in_chat and m.role in ("user", "assistant")
+                for m in session.messages
+            )
+            if not has_chat:
+                return f"{ts} · 已绑定 ChatGPT 页面"
+        for message in reversed(session.messages):
+            if not message.visible_in_chat:
+                continue
+            if message.role not in ("user", "assistant"):
+                continue
+            text = (message.content or "").strip().replace("\n", " ")
+            if not text:
+                continue
+            if text in ASSISTANT_WAIT_TEXTS:
+                return f"{ts} · 等待回复..."
+            if len(text) > 36:
+                text = text[:36] + "…"
+            return f"{ts} · {text}"
+        return ts
+
+    def _session_list_visual_signature(self):
+        self._ensure_session_order()
+        rows = []
+        for sid in self._tab_session_ids:
+            session = self._sessions.get(sid)
+            if not session:
+                continue
+            bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+            preview = self._session_preview_text(session)
+            pending = self._session_has_pending_assistant_reply(session)
+            rows.append((
+                sid,
+                self._session_list_title_text(session),
+                preview,
+                bind_state,
+                pending,
+                sid == self._current_session_id,
+            ))
+        return tuple(rows)
+
+    def _session_list_item_tooltip(self, session, bind_state):
+        style = SESSION_BIND_LIST_STYLES.get(
+            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
+        )
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        title = self._session_list_title_text(session)
+        lines = [
+            f"标题：{title}",
+            f"绑定状态：{style['label']}",
+        ]
+        client_id = (
+            remote.get("client_id")
+            or remote.get("prebound_home_client_id")
+            or ""
+        ).strip()
+        page_instance_id = (
+            remote.get("page_instance_id")
+            or remote.get("prebound_home_page_instance_id")
+            or ""
+        ).strip()
+        conversation_id = (remote.get("conversation_id") or "").strip()
+        if not conversation_id:
+            conversation_id = parse_conversation_id(
+                remote.get("conversation_url") or remote.get("url") or ""
+            )
+        page_url = (
+            remote.get("conversation_url")
+            or remote.get("url")
+            or ""
+        ).strip()
+        if bind_state == "unbound" and not remote.get("enabled"):
+            lines.append("发送首条消息时将自动选择空闲 ChatGPT 首页或打开新首页。")
+        else:
+            lines.extend([
+                f"client_id：{client_id or '-'}",
+                f"page_instance_id：{page_instance_id or '-'}",
+                f"conversation_id：{conversation_id or '-'}",
+                f"url：{page_url or '-'}",
+            ])
+            client_info = self._client_info_by_id(client_id) if client_id else None
+            if client_info:
+                lines.append(
+                    f"最后在线：{self._format_last_seen_ago(client_info.get('last_seen'))}"
+                )
+                lines.append(
+                    f"最近焦点：{self._format_last_seen_ago(client_info.get('last_focus_at'))}"
+                )
+            elif remote.get("last_seen"):
+                lines.append(
+                    f"最后记录：{self._format_ts(remote.get('last_seen'))}"
+                )
+        if self._session_has_pending_assistant_reply(session):
+            lines.append("消息状态：等待回复")
+        return "\n".join(lines)
+
+    def _apply_session_list_item_widget(self, item, session, *, selected=False):
+        bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+        widget = self.session_list.itemWidget(item)
+        if widget is None:
+            widget = SessionListItemWidget()
+            self.session_list.setItemWidget(item, widget)
+        widget.apply_state(
+            title=self._session_list_title_text(session),
+            subtitle=self._session_preview_text(session),
+            bind_state=bind_state,
+            pending_reply=self._session_has_pending_assistant_reply(session),
+            selected=selected,
+            tooltip=self._session_list_item_tooltip(session, bind_state),
+        )
+        widget.adjustSize()
+        hint = widget.sizeHint()
+        height = max(hint.height(), 72)
+        item.setSizeHint(QSize(hint.width(), height))
+
+    def _update_session_list_item_bind_state(self, session_id):
+        if not hasattr(self, "session_list"):
+            return
+        index = self._list_index_for_session(session_id)
+        if index < 0:
+            return
+        item = self.session_list.item(index)
+        session = self._sessions.get(session_id)
+        if not item or not session:
+            return
+        selected = session_id == self._current_session_id
+        self._apply_session_list_item_widget(item, session, selected=selected)
+
+    def _session_list_signature(self):
+        return self._session_list_visual_signature()
     def _update_current_session_title(self, session=None):
         if not hasattr(self, "current_session_title"):
             return
@@ -219,24 +380,71 @@ class SessionMixin:
             if not needle:
                 item.setHidden(False)
                 continue
-            title = (session.title or "新对话").lower()
-            subtitle = self._session_list_subtitle(session).lower()
-            item.setHidden(needle not in title and needle not in subtitle)
+            title = self._session_list_title_text(session).lower()
+            preview = self._session_preview_text(session).lower()
+            bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+            status_label = SESSION_BIND_LIST_STYLES.get(bind_state, {}).get("label", "")
+            item.setHidden(
+                needle not in title
+                and needle not in preview
+                and needle not in status_label.lower()
+            )
     def _refresh_session_list(self, select_session_id=None):
         if not hasattr(self, "session_list"):
             return
+        self._ensure_session_order()
+        new_sig = self._session_list_visual_signature()
+        old_sig = getattr(self, "_last_session_list_visual_signature", None)
+        target_id = select_session_id or self._current_session_id
+
+        if old_sig == new_sig:
+            if target_id:
+                list_index = self._list_index_for_session(target_id)
+                if list_index >= 0 and self.session_list.currentRow() != list_index:
+                    self._list_refreshing = True
+                    self.session_list.blockSignals(True)
+                    self.session_list.setCurrentRow(list_index)
+                    self.session_list.blockSignals(False)
+                    self._list_refreshing = False
+            return
+
+        structure_same = (
+            old_sig
+            and len(old_sig) == len(new_sig)
+            and all(old_row[0] == new_row[0] for old_row, new_row in zip(old_sig, new_sig))
+        )
+
         self._list_refreshing = True
         self.session_list.blockSignals(True)
-        self.session_list.clear()
-        self._ensure_session_order()
-        for session_id in self._tab_session_ids:
-            session = self._sessions.get(session_id)
-            if not session:
-                continue
-            item = QListWidgetItem(self._session_list_item_text(session))
-            item.setData(Qt.UserRole, session_id)
-            self.session_list.addItem(item)
-        target_id = select_session_id or self._current_session_id
+
+        if structure_same:
+            for index, row in enumerate(new_sig):
+                session_id = row[0]
+                session = self._sessions.get(session_id)
+                item = self.session_list.item(index)
+                if not item or not session:
+                    continue
+                self._apply_session_list_item_widget(
+                    item,
+                    session,
+                    selected=(session_id == self._current_session_id),
+                )
+        else:
+            self.session_list.clear()
+            for row in new_sig:
+                session_id = row[0]
+                session = self._sessions.get(session_id)
+                if not session:
+                    continue
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, session_id)
+                self.session_list.addItem(item)
+                self._apply_session_list_item_widget(
+                    item,
+                    session,
+                    selected=(session_id == self._current_session_id),
+                )
+
         if target_id:
             list_index = self._list_index_for_session(target_id)
             if list_index >= 0:
@@ -244,6 +452,8 @@ class SessionMixin:
         self._apply_session_search_filter()
         self.session_list.blockSignals(False)
         self._list_refreshing = False
+        self._last_session_list_visual_signature = new_sig
+        self._last_session_list_signature = new_sig
     def _on_session_search_changed(self, text):
         self._session_search_text = text or ""
         self._apply_session_search_filter()

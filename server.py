@@ -807,11 +807,16 @@ def _message_matches_page(msg, body):
     if page_type != "conversation":
         return False
 
-    target_conv = (msg.get("conversation_id") or "").strip()
+    target_conv = (
+        (msg.get("conversation_id") or msg.get("target_conversation_id") or "")
+        .strip()
+    )
+    if not target_conv:
+        return False
     target_page = _normalize_page_url(msg.get("target_page_url") or "")
     body_conv = (body.get("conversation_id") or "").strip()
     body_page = _normalize_page_url(body.get("page_url") or "")
-    if target_conv and target_conv != body_conv:
+    if target_conv != body_conv:
         return False
     if target_page and target_page != body_page:
         return False

@@ -236,6 +236,22 @@ class UiBuilderMixin:
         conv_rank = 1 if page_type == "conversation" else 0
         last_seen = float(item.get("last_seen") or 0)
         return (online_rank, conv_rank, last_seen)
+
+    def _tm_page_selector_signature(self, clients):
+        rows = []
+        for item in clients:
+            rows.append((
+                item.get("client_id") or "",
+                item.get("page_instance_id") or "",
+                item.get("page_type") or "",
+                item.get("conversation_id") or "",
+                item.get("online"),
+                item.get("visible") or item.get("visibility_state") or "",
+                item.get("has_focus"),
+                int(float(item.get("last_seen") or 0)),
+            ))
+        return tuple(rows)
+
     def _refresh_tm_page_selector(self, summary=None):
         if not hasattr(self, "tm_page_combo"):
             return
@@ -246,6 +262,10 @@ class UiBuilderMixin:
             self.tm_page_count_label.setText(
                 f"在线 {summary.get('online_clients', 0)} / 总 {summary.get('total_clients', 0)}"
             )
+        signature = self._tm_page_selector_signature(clients)
+        if getattr(self, "_last_tm_page_selector_signature", None) == signature:
+            return
+        self._last_tm_page_selector_signature = signature
         keep_id = ""
         if self.tm_page_combo.currentIndex() >= 0:
             keep_id = (self.tm_page_combo.currentData(Qt.UserRole) or "").strip()
@@ -523,6 +543,10 @@ class UiBuilderMixin:
                 background: #fffbeb;
                 border: 1px solid #f0d060;
             }
+            QWidget#ChatPanel[bindState="prebound_home"] {
+                background: #f3fbf5;
+                border: 1px solid #b7e4c7;
+            }
             QWidget#SessionSidebar {
                 background: #f3f4f6;
                 border: 1px solid #e5e7eb;
@@ -541,18 +565,112 @@ class UiBuilderMixin:
                 padding: 4px;
             }
             QListWidget#SessionList::item {
-                border-radius: 8px;
-                padding: 10px 12px;
+                border: none;
+                padding: 0px;
                 margin: 2px 0;
-                color: #374151;
-            }
-            QListWidget#SessionList::item:hover {
-                background: #e8eaed;
+                background: transparent;
             }
             QListWidget#SessionList::item:selected {
+                background: transparent;
+                border: none;
+            }
+            QWidget#SessionListItem {
+                border-radius: 8px;
+                border: 1px solid #e5e7eb;
+                border-left: 4px solid #9ca3af;
                 background: #ffffff;
+            }
+            QWidget#SessionListItem[bindState="bound_online"] {
+                background: #eefaf1;
+                border: 1px solid #b7e4c7;
+                border-left: 4px solid #22c55e;
+            }
+            QWidget#SessionListItem[bindState="bound_offline"] {
+                background: #fff1f2;
+                border: 1px solid #fecdd3;
+                border-left: 4px solid #ef4444;
+            }
+            QWidget#SessionListItem[bindState="prebound_home"] {
+                background: #eff6ff;
+                border: 1px solid #bfdbfe;
+                border-left: 4px solid #3b82f6;
+            }
+            QWidget#SessionListItem[bindState="waiting_home"],
+            QWidget#SessionListItem[bindState="waiting_conversation_created"] {
+                background: #fffbeb;
+                border: 1px solid #fde68a;
+                border-left: 4px solid #f59e0b;
+            }
+            QWidget#SessionListItem[bindState="unbound"] {
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-left: 4px solid #9ca3af;
+            }
+            QWidget#SessionListItem[bindState="bind_mismatch"] {
+                background: #fef2f2;
+                border: 1px solid #ef4444;
+                border-left: 4px solid #dc2626;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="bound_online"] {
+                border: 2px solid #16a34a;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="bound_offline"] {
+                border: 2px solid #dc2626;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="prebound_home"] {
+                border: 2px solid #2563eb;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="waiting_home"],
+            QWidget#SessionListItem[selected="true"][bindState="waiting_conversation_created"] {
+                border: 2px solid #d97706;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="unbound"] {
+                border: 2px solid #6b7280;
+            }
+            QWidget#SessionListItem[selected="true"][bindState="bind_mismatch"] {
+                border: 2px solid #dc2626;
+            }
+            QLabel#SessionItemTitle {
                 color: #111827;
-                border: 1px solid #d8dce3;
+                font-size: 14px;
+                font-weight: 600;
+                background: transparent;
+            }
+            QLabel#SessionItemSubtitle {
+                color: #6b7280;
+                font-size: 12px;
+                background: transparent;
+            }
+            QLabel#SessionBindStatusLabel {
+                color: #4b5563;
+                font-size: 11px;
+                background: transparent;
+            }
+            QWidget#SessionListItem[bindState="bound_online"] QLabel#SessionBindStatusLabel {
+                color: #14532d;
+            }
+            QWidget#SessionListItem[bindState="bound_offline"] QLabel#SessionBindStatusLabel,
+            QWidget#SessionListItem[bindState="bind_mismatch"] QLabel#SessionBindStatusLabel {
+                color: #7f1d1d;
+            }
+            QWidget#SessionListItem[bindState="prebound_home"] QLabel#SessionBindStatusLabel {
+                color: #1e3a8a;
+            }
+            QWidget#SessionListItem[bindState="waiting_home"] QLabel#SessionBindStatusLabel,
+            QWidget#SessionListItem[bindState="waiting_conversation_created"] QLabel#SessionBindStatusLabel {
+                color: #78350f;
+            }
+            QLabel#SessionPendingDot {
+                color: #3b82f6;
+                font-size: 10px;
+                background: transparent;
+            }
+            QLabel#SessionCurrentBadge {
+                color: #6b7280;
+                font-size: 10px;
+                font-weight: 600;
+                background: transparent;
+                padding-top: 2px;
             }
             QLineEdit#SessionSearchInput {
                 background: #ffffff;
@@ -585,6 +703,10 @@ class UiBuilderMixin:
                 background: #fffbeb;
                 border: 1px solid #f0d060;
             }
+            QScrollArea#ChatScrollArea[bindState="prebound_home"] {
+                background: #f6fff8;
+                border: 1px solid #c8ead2;
+            }
             QWidget#ChatViewport {
                 background: #f7f8fa;
             }
@@ -602,6 +724,9 @@ class UiBuilderMixin:
             }
             QWidget#ChatViewport[bindState="pending_bind"] {
                 background: #fffbeb;
+            }
+            QWidget#ChatViewport[bindState="prebound_home"] {
+                background: #f6fff8;
             }
             QLabel#EmptyTitle {
                 color: #6b7280;

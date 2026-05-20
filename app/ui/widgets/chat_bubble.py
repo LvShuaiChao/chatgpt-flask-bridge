@@ -84,6 +84,9 @@ class ChatBubble(QFrame):
             f"font-size: {self._body_pt}px; background: transparent;"
         )
 
+    def set_status(self, status_text):
+        self.set_text(self.body_label.text() or "", status_text)
+
     def set_text(self, text, status_text=None):
         if status_text is not None:
             self.status_text = status_text
