@@ -26,7 +26,9 @@ from app.constants import (
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
+    BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
+    BIND_STATE_UNBOUND,
     ChatMessage,
     ChatSession,
     default_remote_chatgpt,
@@ -817,6 +819,9 @@ class BridgeMixin:
         if not bridge_message_id:
             self._add_system_message("服务端未返回 bridge_message_id，无法跟踪回复。")
             return
+        server.attach_external_request_bridge(
+            session.session_id, bridge_message_id, turn_id
+        )
         self._message_to_session[bridge_message_id] = session.session_id
         self._message_to_turn[bridge_message_id] = turn_id
         if self._auto_name_new_chat and session.title == "新对话":
@@ -856,6 +861,376 @@ class BridgeMixin:
             return
         QApplication.clipboard().setText(text)
         self._add_system_message("已复制最后一条 ChatGPT 回复。")
+
+    def _handle_external_gui_dispatch(self, action_id, action, payload):
+        try:
+            if action == "chat_send":
+                result = self._external_api_chat_send(payload or {})
+            elif action == "sessions_list":
+                result = self._external_api_sessions_list()
+            elif action == "sessions_create":
+                result = self._external_api_sessions_create(payload or {})
+            elif action == "sessions_get":
+                result = self._external_api_sessions_get(payload or {})
+            elif action == "sessions_bind":
+                result = self._external_api_sessions_bind(payload or {})
+            elif action == "sessions_summary":
+                result = self._external_api_sessions_summary()
+            else:
+                result = {
+                    "ok": False,
+                    "error": f"未知 action: {action}",
+                    "code": "INTERNAL_ERROR",
+                }
+        except Exception as error:
+            detail = f"{error}\n{traceback.format_exc()}"
+            self._append_log(
+                f"[EXTERNAL_API][ERROR] action={action} {detail}", echo=True
+            )
+            result = {
+                "ok": False,
+                "error": str(error),
+                "code": "INTERNAL_ERROR",
+            }
+        server.complete_gui_dispatch(action_id, result)
+
+    def _external_api_sessions_summary(self):
+        total = 0
+        bound_online = 0
+        bound_offline = 0
+        unbound = 0
+        status = self._last_bridge_status or {}
+        for session in self._sessions.values():
+            total += 1
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bind_state = self._effective_bind_state(session)
+            if bind_state == BIND_STATE_UNBOUND or not remote.get("enabled"):
+                unbound += 1
+                continue
+            if bind_state == BIND_STATE_BOUND_OFFLINE:
+                bound_offline += 1
+                continue
+            if bind_state == BIND_STATE_BOUND_CONVERSATION:
+                client_id = (remote.get("client_id") or "").strip()
+                online = False
+                for item in status.get("tampermonkey_clients") or []:
+                    if (item.get("client_id") or "").strip() == client_id:
+                        online = bool(item.get("online"))
+                        break
+                if online:
+                    bound_online += 1
+                else:
+                    bound_offline += 1
+                continue
+            if bind_state == BIND_STATE_PREBOUND_HOME:
+                if self._session_has_prebound_home_online(remote):
+                    bound_online += 1
+                else:
+                    bound_offline += 1
+                continue
+            unbound += 1
+        return {
+            "ok": True,
+            "summary": {
+                "total": total,
+                "bound_online": bound_online,
+                "bound_offline": bound_offline,
+                "unbound": unbound,
+            },
+        }
+
+    def _external_api_sessions_list(self):
+        items = []
+        for session in sorted(
+            self._sessions.values(),
+            key=lambda s: float(s.updated_at or 0),
+            reverse=True,
+        ):
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            items.append(
+                {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "updated_at": session.updated_at,
+                    "bind_state": self._effective_bind_state(session),
+                    "conversation_id": (remote.get("conversation_id") or "").strip(),
+                    "client_id": (remote.get("client_id") or "").strip(),
+                }
+            )
+        return {"ok": True, "sessions": items}
+
+    def _external_api_sessions_create(self, payload):
+        title = (payload.get("title") or "新对话").strip() or "新对话"
+        session = self._create_session(title=title, select=False)
+        session.remote_chatgpt = default_remote_chatgpt()
+        self._save_sessions_to_disk()
+        return {"ok": True, "session": self._external_session_payload(session)}
+
+    def _external_api_sessions_get(self, payload):
+        session_id = (payload.get("session_id") or "").strip()
+        session = self._sessions.get(session_id)
+        if not session:
+            return {
+                "ok": False,
+                "error": "会话不存在",
+                "code": "SESSION_NOT_FOUND",
+            }
+        return {"ok": True, "session": self._external_session_payload(session)}
+
+    def _external_session_payload(self, session):
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        return {
+            "session_id": session.session_id,
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "bind_state": self._effective_bind_state(session),
+            "remote_chatgpt": dict(remote),
+        }
+
+    def _external_api_sessions_bind(self, payload):
+        session_id = (payload.get("session_id") or "").strip()
+        session = self._sessions.get(session_id)
+        if not session:
+            return {
+                "ok": False,
+                "error": "会话不存在",
+                "code": "SESSION_NOT_FOUND",
+            }
+        client_id = (payload.get("client_id") or "").strip()
+        if not client_id:
+            return {
+                "ok": False,
+                "error": "client_id 不能为空",
+                "code": "EMPTY_TEXT",
+            }
+        client_info = self._client_info_from_status(client_id)
+        if not isinstance(client_info, dict):
+            client_info = {"client_id": client_id}
+        page_url = (payload.get("page_url") or "").strip()
+        if page_url:
+            client_info["page_url"] = page_url
+        conversation_id = (payload.get("conversation_id") or "").strip()
+        if conversation_id:
+            client_info["conversation_id"] = conversation_id
+        if not self._bind_page_to_session(session, client_info, silent=True):
+            return {
+                "ok": False,
+                "error": "绑定失败",
+                "code": "BIND_PAGE_OFFLINE",
+            }
+        self._save_sessions_to_disk()
+        return {"ok": True, "session": self._external_session_payload(session)}
+
+    def _external_api_chat_send(self, payload):
+        if not server.is_server_running():
+            return {
+                "ok": False,
+                "error": "服务未启动",
+                "code": "INTERNAL_ERROR",
+            }
+        text = (payload.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "text 不能为空", "code": "EMPTY_TEXT"}
+
+        session_id = (payload.get("session_id") or "").strip()
+        auto_create_session = bool(payload.get("auto_create_session", True))
+        auto_open_home = bool(payload.get("auto_open_home", True))
+
+        session = self._sessions.get(session_id) if session_id else None
+        if session is None:
+            if not session_id and auto_create_session:
+                session = self._create_session(select=False)
+                session.remote_chatgpt = default_remote_chatgpt()
+                self._save_sessions_to_disk()
+            else:
+                return {
+                    "ok": False,
+                    "error": "会话不存在",
+                    "code": "SESSION_NOT_FOUND",
+                }
+
+        if self._session_has_pending_assistant_reply(session):
+            return {
+                "ok": False,
+                "error": "当前会话仍有未完成回复",
+                "code": "INTERNAL_ERROR",
+            }
+
+        if self._bind_each_chat_to_page and self._session_needs_first_message_bind(
+            session
+        ):
+            if not auto_open_home:
+                idle_home = self._find_idle_chatgpt_home_client(
+                    session_id=session.session_id
+                )
+                if not idle_home and not self._session_has_sendable_bound_page(
+                    normalize_remote_chatgpt(session.remote_chatgpt)
+                ):
+                    return {
+                        "ok": False,
+                        "error": "没有可用的 ChatGPT 页面",
+                        "code": "NO_AVAILABLE_CHATGPT_PAGE",
+                    }
+            ready, reason = self._prepare_first_message_binding(session, text)
+            if not ready:
+                if reason == "__WAITING_HOME_PENDING__":
+                    return {
+                        "ok": True,
+                        "session_id": session.session_id,
+                        "pending_home": True,
+                        "bridge_message_id": "",
+                        "turn_id": "",
+                    }
+                return {
+                    "ok": False,
+                    "error": reason or "绑定首页失败",
+                    "code": "NO_AVAILABLE_CHATGPT_PAGE",
+                }
+
+        send_result = self._external_push_message_text(session, text)
+        if not send_result.get("ok"):
+            return send_result
+        return {
+            "ok": True,
+            "session_id": session.session_id,
+            "bridge_message_id": send_result.get("bridge_message_id") or "",
+            "turn_id": send_result.get("turn_id") or "",
+            "pending_home": False,
+        }
+
+    def _external_push_message_text(self, session, content):
+        raw_user_text = content.strip()
+        if not raw_user_text:
+            return {"ok": False, "error": "text 为空", "code": "EMPTY_TEXT"}
+
+        turn_id = str(uuid.uuid4())
+        user_message_id = str(uuid.uuid4())
+        assistant_message_id = str(uuid.uuid4())
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state = self._effective_bind_state(session)
+
+        prereq_ok, prereq_reason = self._check_tm_send_prerequisites(session)
+        if not prereq_ok:
+            code = "BIND_PAGE_OFFLINE"
+            if "离线" in prereq_reason or "未连接" in prereq_reason:
+                code = "BIND_PAGE_OFFLINE"
+            elif "没有" in prereq_reason or "未找到" in prereq_reason:
+                code = "NO_AVAILABLE_CHATGPT_PAGE"
+            return {"ok": False, "error": prereq_reason, "code": code}
+
+        self._rebind_current_session_to_online_client_if_needed()
+        target_client_id, target_page_url, allowed, reason = (
+            self._resolve_target_page_for_session(session)
+        )
+        if not allowed:
+            code = "BIND_PAGE_OFFLINE"
+            if "未找到" in (reason or "") or "没有" in (reason or ""):
+                code = "NO_AVAILABLE_CHATGPT_PAGE"
+            return {"ok": False, "error": reason or "无法解析发送目标", "code": code}
+
+        target_client_id, target_page_url, allowed, verify_reason = (
+            self._verify_send_target_binding(
+                session, target_client_id, target_page_url
+            )
+        )
+        if not allowed:
+            return {
+                "ok": False,
+                "error": verify_reason or "发送前绑定校验失败",
+                "code": "BIND_PAGE_OFFLINE",
+            }
+
+        payload = {
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "raw_user_text": raw_user_text,
+            "final_prompt": raw_user_text,
+        }
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state = self._effective_bind_state(session)
+        if bind_state == BIND_STATE_PREBOUND_HOME:
+            payload["bootstrap_conversation"] = True
+            page_instance_id = (
+                remote.get("prebound_home_page_instance_id")
+                or remote.get("page_instance_id")
+                or ""
+            ).strip()
+            if page_instance_id:
+                payload["target_page_instance_id"] = page_instance_id
+            bind_request_id = self._session_bind_request_id(remote)
+            if bind_request_id:
+                payload["bind_request_id"] = bind_request_id
+                payload["launch_token"] = bind_request_id
+            session.remote_chatgpt = {
+                **remote,
+                "bootstrap_in_progress": True,
+            }
+            self._save_sessions_to_disk()
+        if target_client_id:
+            payload["target_client_id"] = target_client_id
+        if target_page_url:
+            payload["target_page_url"] = target_page_url
+            if bind_state == BIND_STATE_BOUND_CONVERSATION:
+                payload["conversation_url"] = target_page_url
+                conversation_id = (remote.get("conversation_id") or "").strip()
+                if not conversation_id:
+                    conversation_id = parse_conversation_id(target_page_url)
+                if conversation_id:
+                    payload["conversation_id"] = conversation_id
+
+        try:
+            msg = server.push_message(payload)
+        except Exception as error:
+            detail = f"消息入队失败：{error}\n{traceback.format_exc()}"
+            self._append_log(detail, echo=True)
+            return {
+                "ok": False,
+                "error": str(error),
+                "code": "INTERNAL_ERROR",
+            }
+
+        bridge_message_id = msg.get("id") if isinstance(msg, dict) else ""
+        if not bridge_message_id:
+            return {
+                "ok": False,
+                "error": "服务端未返回 bridge_message_id",
+                "code": "INTERNAL_ERROR",
+            }
+
+        server.attach_external_request_bridge(
+            session.session_id, bridge_message_id, turn_id
+        )
+        self._message_to_session[bridge_message_id] = session.session_id
+        self._message_to_turn[bridge_message_id] = turn_id
+        self._append_session_message(
+            session,
+            "user",
+            raw_user_text,
+            message_id=user_message_id,
+            turn_id=turn_id,
+            bridge_message_id=bridge_message_id,
+            status="已加入队列",
+        )
+        if self._show_assistant_placeholder:
+            self._append_session_message(
+                session,
+                "assistant",
+                ASSISTANT_WAIT_TEXT,
+                message_id=assistant_message_id,
+                turn_id=turn_id,
+                bridge_message_id=bridge_message_id,
+                parent_message_id=user_message_id,
+                status="等待中",
+            )
+        session.updated_at = time.time()
+        self._save_sessions_to_disk()
+        return {
+            "ok": True,
+            "bridge_message_id": bridge_message_id,
+            "turn_id": turn_id,
+        }
+
     def closeEvent(self, event):
         self._save_sessions_to_disk()
         self._save_app_settings()

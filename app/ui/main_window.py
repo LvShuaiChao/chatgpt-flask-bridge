@@ -119,6 +119,8 @@ class MainWindow(
         self._notifier.status_signal.connect(self._apply_bridge_status)
         server.set_log_callback(self._notifier.log_signal.emit)
         server.set_status_callback(self._notifier.status_signal.emit)
+        server.set_external_gui_dispatch(self._notifier.external_dispatch_signal.emit)
+        self._notifier.external_dispatch_signal.connect(self._handle_external_gui_dispatch)
         self._build_ui()
         self._setup_window_shortcuts()
         self._load_sessions_from_disk()

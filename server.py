@@ -1,5 +1,7 @@
+import os
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from flask import Flask, jsonify, request
@@ -14,6 +16,7 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 _state_lock = threading.RLock()
 _log_callback = None
 _status_callback = None
+_external_gui_dispatch = None
 _http_server = None
 _server_thread = None
 # 油猴连接状态
@@ -29,6 +32,12 @@ _poll_summaries = {}
 _last_poll_identity = {}
 _debug_mode = False
 POLL_SUMMARY_INTERVAL_SEC = 10
+API_TOKEN = os.environ.get("CHATGPT_PAGE_BRIDGE_TOKEN", "")
+_external_requests = {}
+_bridge_message_to_external = {}
+_session_external_pending = {}
+_pending_gui_actions = {}
+_external_action_lock = threading.Lock()
 
 
 def set_debug_mode(enabled):
@@ -71,6 +80,74 @@ def set_log_callback(callback):
 def set_status_callback(callback):
     global _status_callback
     _status_callback = callback
+
+
+def set_external_gui_dispatch(callback):
+    """GUI 注册：在主线程执行 external API 动作。callback(action_id, action, payload)。"""
+    global _external_gui_dispatch
+    _external_gui_dispatch = callback
+
+
+def complete_gui_dispatch(action_id, result):
+    with _external_action_lock:
+        pending = _pending_gui_actions.get(action_id)
+    if not pending:
+        return False
+    pending["result"] = dict(result or {})
+    pending["event"].set()
+    return True
+
+
+def _dispatch_to_gui(action, payload, timeout_sec=30):
+    if not _external_gui_dispatch:
+        return {
+            "ok": False,
+            "error": "GUI 未就绪，请先启动 ChatGPT 联动窗口。",
+            "code": "GUI_NOT_AVAILABLE",
+        }
+    action_id = str(uuid.uuid4())
+    event = threading.Event()
+    with _external_action_lock:
+        _pending_gui_actions[action_id] = {
+            "event": event,
+            "result": None,
+            "action": action,
+        }
+    try:
+        _external_gui_dispatch(action_id, action, payload)
+    except Exception as error:
+        detail = f"{error}\n{traceback.format_exc()}"
+        _log(f"[EXTERNAL_API][ERROR] gui_dispatch_failed action={action} error={detail}")
+        with _external_action_lock:
+            _pending_gui_actions.pop(action_id, None)
+        return {
+            "ok": False,
+            "error": str(error),
+            "code": "INTERNAL_ERROR",
+        }
+    if not event.wait(timeout=max(1.0, float(timeout_sec))):
+        with _external_action_lock:
+            _pending_gui_actions.pop(action_id, None)
+        _log(
+            f"[EXTERNAL_API][TIMEOUT] gui_dispatch action={action} "
+            f"action_id={action_id[:8]}… timeout={timeout_sec}"
+        )
+        return {
+            "ok": False,
+            "error": f"GUI 处理超时（{timeout_sec}s）",
+            "code": "INTERNAL_ERROR",
+        }
+    with _external_action_lock:
+        pending = _pending_gui_actions.pop(action_id, None)
+    result = (pending or {}).get("result") or {}
+    if not isinstance(result, dict):
+        return {
+            "ok": False,
+            "error": "GUI 返回了无效结果",
+            "code": "INTERNAL_ERROR",
+        }
+    return result
+
 
 def _log(message):
     text = str(message or "")
@@ -898,6 +975,7 @@ def _claim_message(msg, client_id):
     msg["delivered_to"] = client_id
     msg["delivered_at"] = now
     msg["lease_until"] = now + LEASE_SEC
+    _update_external_status_for_bridge(msg.get("id"), "sent")
     _log(
         f"[BRIDGE][CLAIM] client_id={client_id} message_id={msg['id'][:8]}… "
         f"lease_until={_format_time(msg['lease_until'])}"
@@ -1290,10 +1368,17 @@ def _handle_ack(body):
         if success:
             waiting["status"] = "acked"
             status_text = "成功"
+            _update_external_status_for_bridge(message_id, "waiting")
         else:
             _finalize_message(waiting, "failed")
             status_text = "失败"
             _archive_waiting(message_id)
+            _notify_external_request_from_bridge(
+                message_id,
+                "send_failed",
+                {"detail": detail, "reason": detail},
+                waiting,
+            )
     _log(
         f"[BRIDGE][ACK] client_id={client_id} message_id={message_id[:8]}… "
         f"success={success} detail={detail or '-'}"
@@ -1500,6 +1585,7 @@ def _handle_report(body):
             _log_finalized(msg, message_id, event)
             _add_inbound(event, payload, **inbound_kw)
             _archive_waiting(message_id)
+            _notify_external_request_from_bridge(message_id, event, payload, msg)
         elif event == "send_failed":
             if not _is_finalized(msg):
                 _finalize_message(msg, "failed")
@@ -1508,6 +1594,7 @@ def _handle_report(body):
                 _add_inbound(event, payload, **inbound_kw)
                 if message_id in _outbound_waiting:
                     _archive_waiting(message_id)
+                _notify_external_request_from_bridge(message_id, event, payload, msg)
             else:
                 _add_inbound(
                     "report_ignored",
@@ -1527,6 +1614,7 @@ def _handle_report(body):
                 _add_inbound(event, payload, **inbound_kw)
                 if message_id in _outbound_waiting:
                     _archive_waiting(message_id)
+                _notify_external_request_from_bridge(message_id, event, payload, msg)
             else:
                 _add_inbound(
                     "report_ignored",
@@ -1584,14 +1672,535 @@ def _handle_report(body):
     _notify_status()
     return {"ok": True}
 
+
+def _external_auth_ok():
+    token = (API_TOKEN or "").strip()
+    if not token:
+        return True
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        provided = auth_header[7:].strip()
+    else:
+        provided = (request.headers.get("X-API-Key") or "").strip()
+    return provided == token
+
+
+def _external_json_error(error, code, status=400):
+    return jsonify({"ok": False, "error": error, "code": code}), status
+
+
+def _external_json_ok(**fields):
+    payload = {"ok": True}
+    payload.update(fields)
+    return jsonify(payload)
+
+
+def _new_external_request_id():
+    return f"req_{uuid.uuid4().hex}"
+
+
+def _register_external_request(
+    request_id,
+    session_id,
+    text,
+    timeout,
+    turn_id="",
+    bridge_message_id="",
+    status="queued",
+):
+    now = _now()
+    entry = {
+        "request_id": request_id,
+        "session_id": session_id or "",
+        "turn_id": turn_id or "",
+        "bridge_message_id": bridge_message_id or "",
+        "text": text or "",
+        "status": status,
+        "reply": "",
+        "error": "",
+        "created_at": now,
+        "updated_at": now,
+        "timeout": float(timeout or 120),
+    }
+    with _state_lock:
+        _external_requests[request_id] = entry
+        if bridge_message_id:
+            _bridge_message_to_external[bridge_message_id] = request_id
+        if session_id and not bridge_message_id:
+            _session_external_pending[session_id] = request_id
+    return entry
+
+
+def attach_external_request_bridge(session_id, bridge_message_id, turn_id=""):
+    session_id = (session_id or "").strip()
+    bridge_message_id = (bridge_message_id or "").strip()
+    turn_id = (turn_id or "").strip()
+    if not session_id or not bridge_message_id:
+        return False
+    with _state_lock:
+        request_id = _session_external_pending.pop(session_id, None)
+        if not request_id:
+            for rid, req in _external_requests.items():
+                if req.get("session_id") == session_id and not req.get("bridge_message_id"):
+                    request_id = rid
+                    break
+        if not request_id:
+            return False
+        req = _external_requests.get(request_id)
+        if not req:
+            return False
+        req["bridge_message_id"] = bridge_message_id
+        req["turn_id"] = turn_id or req.get("turn_id") or ""
+        req["updated_at"] = _now()
+        if req.get("status") in ("queued", "waiting"):
+            req["status"] = "queued"
+        _bridge_message_to_external[bridge_message_id] = request_id
+    _log(
+        f"[EXTERNAL_API][ATTACH] request_id={request_id} session_id={session_id} "
+        f"bridge_message_id={bridge_message_id[:8]}… turn_id={turn_id[:8] + '…' if turn_id else '-'}"
+    )
+    return True
+
+
+def _update_external_status_for_bridge(bridge_message_id, status):
+    bridge_message_id = (bridge_message_id or "").strip()
+    if not bridge_message_id:
+        return
+    with _state_lock:
+        request_id = _bridge_message_to_external.get(bridge_message_id)
+        if not request_id:
+            return
+        req = _external_requests.get(request_id)
+        if not req or req.get("status") in ("done", "failed", "timeout"):
+            return
+        req["status"] = status
+        req["updated_at"] = _now()
+
+
+def _notify_external_request_from_bridge(message_id, event, payload, msg=None):
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return
+    payload = payload or {}
+    with _state_lock:
+        request_id = _bridge_message_to_external.get(message_id)
+        if not request_id:
+            return
+        req = _external_requests.get(request_id)
+        if not req:
+            return
+        if req.get("status") in ("done", "failed", "timeout"):
+            return
+        session_id = req.get("session_id") or ""
+        if event == "assistant_reply":
+            text = (payload.get("text") or payload.get("content") or "").strip()
+            req["status"] = "done"
+            req["reply"] = text
+            req["error"] = ""
+            req["updated_at"] = _now()
+            _log(
+                f"[EXTERNAL_API][REQUEST_DONE] request_id={request_id} "
+                f"session_id={session_id} bridge_message_id={message_id} "
+                f"reply_len={len(text)}"
+            )
+        elif event in ("assistant_reply_empty", "assistant_reply_failed", "send_failed"):
+            reason = (
+                payload.get("reason")
+                or payload.get("detail")
+                or payload.get("error_message")
+                or (msg or {}).get("error_detail")
+                or event
+            )
+            req["status"] = "failed"
+            req["error"] = str(reason)
+            req["updated_at"] = _now()
+            _log(
+                f"[EXTERNAL_API][REQUEST_FAILED] request_id={request_id} "
+                f"reason={reason}"
+            )
+
+
+def _check_external_request_timeout(req):
+    timeout = float(req.get("timeout") or 120)
+    created = float(req.get("created_at") or 0)
+    if created and (_now() - created) > timeout:
+        req["status"] = "timeout"
+        req["error"] = f"等待回复超时（{int(timeout)}s）"
+        req["updated_at"] = _now()
+        return True
+    return False
+
+
+def _get_external_request(request_id):
+    request_id = (request_id or "").strip()
+    if not request_id:
+        return None
+    with _state_lock:
+        req = _external_requests.get(request_id)
+        if not req:
+            return None
+        req = dict(req)
+    if req.get("status") not in ("done", "failed", "timeout"):
+        if _check_external_request_timeout(req):
+            with _state_lock:
+                stored = _external_requests.get(request_id)
+                if stored:
+                    stored["status"] = "timeout"
+                    stored["error"] = req["error"]
+                    stored["updated_at"] = _now()
+            _log(
+                f"[EXTERNAL_API][TIMEOUT] request_id={request_id} "
+                f"session_id={req.get('session_id') or '-'} "
+                f"bridge_message_id={req.get('bridge_message_id') or '-'}"
+            )
+    return req
+
+
+def _external_sessions_summary_from_gui():
+    result = _dispatch_to_gui("sessions_summary", {}, timeout_sec=5)
+    if result.get("ok") and isinstance(result.get("summary"), dict):
+        return result["summary"]
+    return {
+        "total": 0,
+        "bound_online": 0,
+        "bound_offline": 0,
+        "unbound": 0,
+    }
+
+
+def _external_create_chat_send(body):
+    text = (body.get("text") or "").strip()
+    if not text:
+        return None, _external_json_error("text 不能为空", "EMPTY_TEXT", 400)
+    session_id = (body.get("session_id") or "").strip()
+    auto_create_session = bool(body.get("auto_create_session", True))
+    auto_open_home = bool(body.get("auto_open_home", True))
+    timeout = float(body.get("timeout") or 120)
+    if timeout <= 0:
+        timeout = 120
+
+    gui_payload = {
+        "session_id": session_id,
+        "text": text,
+        "auto_create_session": auto_create_session,
+        "auto_open_home": auto_open_home,
+    }
+    gui_result = _dispatch_to_gui("chat_send", gui_payload, timeout_sec=min(60, timeout))
+    if not gui_result.get("ok"):
+        code = gui_result.get("code") or "INTERNAL_ERROR"
+        error = gui_result.get("error") or "发送失败"
+        _log(
+            f"[EXTERNAL_API][ERROR] chat_send code={code} error={error} "
+            f"session_id={session_id or '-'} text_len={len(text)}"
+        )
+        status = 404 if code == "SESSION_NOT_FOUND" else 400
+        if code in ("UNAUTHORIZED",):
+            status = 401
+        return None, _external_json_error(error, code, status)
+
+    session_id = (gui_result.get("session_id") or session_id or "").strip()
+    bridge_message_id = (gui_result.get("bridge_message_id") or "").strip()
+    turn_id = (gui_result.get("turn_id") or "").strip()
+    pending_home = bool(gui_result.get("pending_home"))
+    request_id = _new_external_request_id()
+    initial_status = "waiting" if pending_home else "queued"
+    _register_external_request(
+        request_id,
+        session_id,
+        text,
+        timeout,
+        turn_id=turn_id,
+        bridge_message_id=bridge_message_id,
+        status=initial_status,
+    )
+    _log(
+        f"[EXTERNAL_API][SEND] request_id={request_id} session_id={session_id} "
+        f"bridge_message_id={bridge_message_id or '-'} text_len={len(text)} "
+        f"status={initial_status} pending_home={pending_home}"
+    )
+    return {
+        "request_id": request_id,
+        "session_id": session_id,
+        "status": initial_status,
+    }, None
+
+
+def _require_external_auth():
+    if _external_auth_ok():
+        return None
+    return _external_json_error("未授权", "UNAUTHORIZED", 401)
+
+
+@app.route("/api/v1/status", methods=["GET"])
+def api_v1_status():
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    tm = get_tm_online_summary()
+    with _state_lock:
+        waiting_count = len(_outbound_waiting)
+        queue_len = len(_outbound_queue)
+        control_len = len(_control_queue)
+    sessions = _external_sessions_summary_from_gui()
+    return _external_json_ok(
+        server="running",
+        tm={
+            "online_clients": tm.get("online_clients", 0),
+            "online_home_clients": tm.get("online_home_clients", 0),
+            "online_conversation_clients": tm.get("online_conversation_clients", 0),
+        },
+        queues={
+            "chat_queue": queue_len,
+            "control_queue": control_len,
+            "waiting": waiting_count,
+        },
+        sessions=sessions,
+    )
+
+
+@app.route("/api/v1/chat/send", methods=["POST"])
+def api_v1_chat_send():
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    try:
+        result, err_resp = _external_create_chat_send(body)
+        if err_resp:
+            return err_resp
+        return _external_json_ok(
+            request_id=result["request_id"],
+            session_id=result["session_id"],
+            status=result["status"],
+        )
+    except Exception as error:
+        detail = f"{error}\n{traceback.format_exc()}"
+        _log(f"[EXTERNAL_API][ERROR] send exception={detail}")
+        return _external_json_error(str(error), "INTERNAL_ERROR", 500)
+
+
+@app.route("/api/v1/chat/result/<request_id>", methods=["GET"])
+def api_v1_chat_result(request_id):
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    req = _get_external_request(request_id)
+    if not req:
+        return _external_json_error("request_id 不存在", "SESSION_NOT_FOUND", 404)
+    status = req.get("status") or "waiting"
+    _log(
+        f"[EXTERNAL_API][RESULT] request_id={request_id} session_id={req.get('session_id') or '-'} "
+        f"bridge_message_id={req.get('bridge_message_id') or '-'} status={status} "
+        f"error={req.get('error') or '-'}"
+    )
+    if status == "done":
+        return _external_json_ok(
+            request_id=request_id,
+            status="done",
+            reply=req.get("reply") or "",
+        )
+    if status in ("failed", "timeout"):
+        return jsonify(
+            {
+                "ok": False,
+                "request_id": request_id,
+                "status": status,
+                "error": req.get("error") or status,
+                "code": "REPLY_TIMEOUT" if status == "timeout" else "INTERNAL_ERROR",
+            }
+        )
+    return _external_json_ok(
+        request_id=request_id,
+        status="waiting",
+        reply="",
+    )
+
+
+@app.route("/api/v1/chat/ask", methods=["POST"])
+def api_v1_chat_ask():
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    text_len = len(text)
+    try:
+        result, err_resp = _external_create_chat_send(body)
+        if err_resp:
+            return err_resp
+        request_id = result["request_id"]
+        session_id = result["session_id"]
+        timeout = float(body.get("timeout") or 120)
+        if timeout <= 0:
+            timeout = 120
+        _log(
+            f"[EXTERNAL_API][ASK] request_id={request_id} session_id={session_id} "
+            f"text_len={text_len} timeout={timeout}"
+        )
+        deadline = _now() + timeout
+        while _now() < deadline:
+            req = _get_external_request(request_id)
+            if not req:
+                return _external_json_error("request_id 丢失", "INTERNAL_ERROR", 500)
+            status = req.get("status") or "waiting"
+            if status == "done":
+                return _external_json_ok(
+                    request_id=request_id,
+                    session_id=req.get("session_id") or session_id,
+                    reply=req.get("reply") or "",
+                )
+            if status in ("failed", "timeout"):
+                code = "REPLY_TIMEOUT" if status == "timeout" else "INTERNAL_ERROR"
+                return jsonify(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "session_id": req.get("session_id") or session_id,
+                        "status": status,
+                        "error": req.get("error") or status,
+                        "code": code,
+                    }
+                )
+            time.sleep(0.2)
+        with _state_lock:
+            req = _external_requests.get(request_id)
+            if req:
+                req["status"] = "timeout"
+                req["error"] = f"等待回复超时（{int(timeout)}s）"
+                req["updated_at"] = _now()
+        _log(
+            f"[EXTERNAL_API][TIMEOUT] request_id={request_id} session_id={session_id} "
+            f"bridge_message_id={(req or {}).get('bridge_message_id') or '-'} "
+            f"text_len={text_len}"
+        )
+        return jsonify(
+            {
+                "ok": False,
+                "request_id": request_id,
+                "session_id": session_id,
+                "status": "timeout",
+                "error": f"等待回复超时（{int(timeout)}s）",
+                "code": "REPLY_TIMEOUT",
+            }
+        )
+    except Exception as error:
+        detail = f"{error}\n{traceback.format_exc()}"
+        _log(f"[EXTERNAL_API][ERROR] ask exception={detail}")
+        return _external_json_error(str(error), "INTERNAL_ERROR", 500)
+
+
+@app.route("/api/v1/sessions", methods=["GET", "POST"])
+def api_v1_sessions():
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    if request.method == "GET":
+        gui_result = _dispatch_to_gui("sessions_list", {}, timeout_sec=10)
+        if not gui_result.get("ok"):
+            return _external_json_error(
+                gui_result.get("error") or "获取会话列表失败",
+                gui_result.get("code") or "INTERNAL_ERROR",
+                500,
+            )
+        return _external_json_ok(sessions=gui_result.get("sessions") or [])
+    gui_result = _dispatch_to_gui(
+        "sessions_create",
+        {"title": (request.get_json(silent=True) or {}).get("title") or "新对话"},
+        timeout_sec=10,
+    )
+    if not gui_result.get("ok"):
+        return _external_json_error(
+            gui_result.get("error") or "创建会话失败",
+            gui_result.get("code") or "INTERNAL_ERROR",
+            500,
+        )
+    return _external_json_ok(session=gui_result.get("session") or {})
+
+
+@app.route("/api/v1/sessions/<session_id>", methods=["GET"])
+def api_v1_session_detail(session_id):
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    gui_result = _dispatch_to_gui(
+        "sessions_get",
+        {"session_id": session_id},
+        timeout_sec=10,
+    )
+    if not gui_result.get("ok"):
+        code = gui_result.get("code") or "INTERNAL_ERROR"
+        status = 404 if code == "SESSION_NOT_FOUND" else 500
+        return _external_json_error(
+            gui_result.get("error") or "会话不存在",
+            code,
+            status,
+        )
+    return _external_json_ok(session=gui_result.get("session") or {})
+
+
+@app.route("/api/v1/sessions/<session_id>/bind", methods=["POST"])
+def api_v1_session_bind(session_id):
+    denied = _require_external_auth()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    client_id = (body.get("client_id") or "").strip()
+    if not client_id:
+        return _external_json_error("client_id 不能为空", "EMPTY_TEXT", 400)
+    gui_result = _dispatch_to_gui(
+        "sessions_bind",
+        {
+            "session_id": session_id,
+            "client_id": client_id,
+            "page_url": (body.get("page_url") or "").strip(),
+            "conversation_id": (body.get("conversation_id") or "").strip(),
+        },
+        timeout_sec=15,
+    )
+    if not gui_result.get("ok"):
+        code = gui_result.get("code") or "INTERNAL_ERROR"
+        status = 404 if code == "SESSION_NOT_FOUND" else 400
+        return _external_json_error(
+            gui_result.get("error") or "绑定失败",
+            code,
+            status,
+        )
+    return _external_json_ok(session=gui_result.get("session") or {})
+
+
+def _is_local_remote_addr(remote_addr):
+    addr = (remote_addr or "").strip().lower()
+    if not addr:
+        return True
+    if addr in ("127.0.0.1", "localhost", "::1"):
+        return True
+    if addr.startswith("::ffff:127."):
+        return True
+    return False
+
+
 @app.route("/api/bridge", methods=["POST"])
 
 def api_bridge():
     """油猴专用交互接口：poll / ack / report"""
+    denied = _require_external_auth()
+    if denied:
+        return denied
     source = request.headers.get("X-Request-Source")
     if source != "tampermonkey":
         return jsonify({"ok": False, "error": "需要 X-Request-Source: tampermonkey"}), 403
     body = request.get_json(silent=True) or {}
+    remote_addr = (request.remote_addr or "").strip() or "-"
+    if body.get("test_connection"):
+        _log(
+            f"[BRIDGE][TEST] remote={remote_addr} "
+            f"client_id={body.get('client_id') or '-'}"
+        )
+    elif not _is_local_remote_addr(remote_addr) and is_debug_mode():
+        _log(
+            f"[BRIDGE] remote={remote_addr} action={body.get('action', 'poll')} "
+            f"client_id={body.get('client_id') or '-'}"
+        )
     action = body.get("action", "poll")
     with _state_lock:
         if action == "poll":
@@ -1667,6 +2276,9 @@ def start_server(host="127.0.0.1", port=5000):
     _server_thread.start()
     _log(f"服务已启动：http://{host}:{port}")
     _log(f"  油猴接口 POST /api/bridge")
+    _log(f"  外部 API GET/POST /api/v1/*")
+    if (API_TOKEN or "").strip():
+        _log(f"  外部 API 鉴权：已启用（CHATGPT_PAGE_BRIDGE_TOKEN）")
     _notify_status()
     return True
 

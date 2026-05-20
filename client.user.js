@@ -1,16 +1,18 @@
 // ==UserScript==
-// @name         ChatGPT 客户端 - Flask 轮询联动
+// @name         ChatGPT 浏览器桥接 - 油猴浏览器端
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  与本地 Flask 服务端双向交互：轮询消息、发送到 ChatGPT、回执确认、回传回复
+// @version      2.1.1
+// @description  浏览器端 Tampermonkey 脚本：在 ChatGPT 网页内轮询本地 Flask，发送消息并回传回复（非 Python 客户端）
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://*.chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @match        https://*.chat.openai.com/*
-// @connect      127.0.0.1
-// @connect      localhost
+// @connect      *
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        GM_openInTab
 // @grant        window.close
 // @run-at       document-idle
@@ -25,9 +27,10 @@
         console.log('[联动] 跳过 iframe 内运行:', location.href);
         return;
     }
-    const BRIDGE_URL = 'http://127.0.0.1:5000/api/bridge';
+    const DEFAULT_BRIDGE_BASE_URL = 'http://127.0.0.1:5000';
+    const DEFAULT_BRIDGE_PATH = '/api/bridge';
     const SOURCE = 'tampermonkey';
-    const SCRIPT_VERSION = '2.0';
+    const SCRIPT_VERSION = '2.1.1';
     const CLIENT_ID_KEY = 'tm_bridge_client_id';
     const PAGE_INSTANCE_ID = 'page-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     const CLIENT_ID = (function () {
@@ -52,6 +55,102 @@
 
     let handlingMessageId = null;
     let polling = false;
+
+    function gmGet(key, fallback) {
+        try {
+            if (typeof GM_getValue === 'function') {
+                const value = GM_getValue(key, undefined);
+                return value === undefined ? fallback : value;
+            }
+        } catch (error) {
+            console.error('[联动][SETTINGS] GM_getValue failed:', key, error);
+        }
+
+        try {
+            const raw = localStorage.getItem(`chatgpt_bridge:${key}`);
+            return raw == null ? fallback : JSON.parse(raw);
+        } catch (error) {
+            console.error('[联动][SETTINGS] localStorage get failed:', key, error);
+            return fallback;
+        }
+    }
+
+    function gmSet(key, value) {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(key, value);
+                return;
+            }
+        } catch (error) {
+            console.error('[联动][SETTINGS] GM_setValue failed:', key, error);
+        }
+
+        try {
+            localStorage.setItem(`chatgpt_bridge:${key}`, JSON.stringify(value));
+        } catch (error) {
+            console.error('[联动][SETTINGS] localStorage set failed:', key, error);
+        }
+    }
+
+    function normalizeBridgeBaseUrl(value) {
+        let text = String(value || '').trim();
+        if (!text) {
+            return DEFAULT_BRIDGE_BASE_URL;
+        }
+        text = text.replace(/\/+$/, '');
+        if (!/^https?:\/\//i.test(text)) {
+            text = `http://${text}`;
+        }
+        return text;
+    }
+
+    function getBridgeBaseUrl() {
+        const saved = gmGet('bridge_base_url', DEFAULT_BRIDGE_BASE_URL);
+        return normalizeBridgeBaseUrl(saved);
+    }
+
+    function getBridgePath() {
+        const saved = gmGet('bridge_path', DEFAULT_BRIDGE_PATH);
+        const text = String(saved || DEFAULT_BRIDGE_PATH).trim();
+        return text.startsWith('/') ? text : `/${text}`;
+    }
+
+    function getBridgeUrl() {
+        return `${getBridgeBaseUrl()}${getBridgePath()}`;
+    }
+
+    function getApiToken() {
+        return String(gmGet('api_token', '') || '').trim();
+    }
+
+    function getDebugEnabled() {
+        return !!gmGet('debug_enabled', false);
+    }
+
+    function getRequestTimeoutMs() {
+        const saved = Number(gmGet('request_timeout_ms', 30000));
+        return Number.isFinite(saved) && saved > 0 ? saved : 30000;
+    }
+
+    function buildBridgeHeaders() {
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Request-Source': SOURCE
+        };
+        const token = getApiToken();
+        if (token) {
+            headers.Authorization = `Bearer ${token}`;
+            headers['X-API-Key'] = token;
+        }
+        return headers;
+    }
+
+    function bridgeDebugLog(message, extra) {
+        if (!getDebugEnabled()) {
+            return;
+        }
+        console.log('[联动][DEBUG]', message, extra || {});
+    }
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
@@ -115,17 +214,16 @@
 
     function apiRequest(body) {
         return new Promise((resolve, reject) => {
+            bridgeDebugLog('apiRequest', { url: getBridgeUrl(), action: body.action });
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: BRIDGE_URL,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Request-Source': SOURCE
-                },
+                url: getBridgeUrl(),
+                headers: buildBridgeHeaders(),
                 data: JSON.stringify({
                     ...getPageIdentity(),
                     ...body
                 }),
+                timeout: getRequestTimeoutMs(),
                 onload: function (response) {
                     if (response.status < 200 || response.status >= 300) {
                         reject(new Error(`HTTP ${response.status}: ${response.responseText || ''}`));
@@ -139,9 +237,142 @@
                 },
                 onerror: function (error) {
                     reject(error);
+                },
+                ontimeout: function () {
+                    reject(new Error(`请求超时 (${getRequestTimeoutMs()}ms): ${getBridgeUrl()}`));
                 }
             });
         });
+    }
+
+    function openBridgeSettingsDialog() {
+        const currentBaseUrl = getBridgeBaseUrl();
+        const currentPath = getBridgePath();
+        const currentToken = getApiToken();
+        const debugEnabled = getDebugEnabled();
+
+        const nextBaseUrl = window.prompt(
+            '请输入 Python Bridge 服务地址，例如：\nhttp://127.0.0.1:5000\nhttp://192.168.1.20:5000',
+            currentBaseUrl
+        );
+
+        if (nextBaseUrl === null) {
+            return;
+        }
+
+        const nextPath = window.prompt(
+            '请输入 Bridge 接口路径：',
+            currentPath
+        );
+
+        if (nextPath === null) {
+            return;
+        }
+
+        const nextToken = window.prompt(
+            '请输入 API Token。如果服务端未启用 token，可留空：',
+            currentToken
+        );
+
+        if (nextToken === null) {
+            return;
+        }
+
+        const nextDebug = window.confirm(
+            `是否开启调试日志？\n当前：${debugEnabled ? '开启' : '关闭'}\n点击“确定”开启，点击“取消”关闭。`
+        );
+
+        gmSet('bridge_base_url', normalizeBridgeBaseUrl(nextBaseUrl));
+        gmSet('bridge_path', nextPath || DEFAULT_BRIDGE_PATH);
+        gmSet('api_token', String(nextToken || '').trim());
+        gmSet('debug_enabled', !!nextDebug);
+
+        alert(`已保存 Bridge 设置：\n${getBridgeUrl()}\n\n请刷新 ChatGPT 页面使设置完全生效。`);
+    }
+
+    function testBridgeConnection() {
+        const payload = {
+            action: 'poll',
+            source: SOURCE,
+            test_connection: true,
+            client_id: CLIENT_ID,
+            page_instance_id: PAGE_INSTANCE_ID,
+            page_url: location.href,
+            page_title: document.title,
+            script_version: SCRIPT_VERSION,
+            ...getPageIdentity()
+        };
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: getBridgeUrl(),
+            headers: buildBridgeHeaders(),
+            data: JSON.stringify(payload),
+            timeout: 5000,
+            onload: function (response) {
+                alert(
+                    `Bridge 连接测试完成。\n` +
+                    `URL: ${getBridgeUrl()}\n` +
+                    `HTTP: ${response.status}\n` +
+                    `Response: ${String(response.responseText || '').slice(0, 500)}`
+                );
+            },
+            onerror: function (error) {
+                console.error('[联动][SETTINGS] Bridge test failed:', error);
+                alert(
+                    `Bridge 连接测试失败。\n` +
+                    `URL: ${getBridgeUrl()}\n` +
+                    `请检查 Python GUI 服务、地址、端口、防火墙和 Token。`
+                );
+            },
+            ontimeout: function () {
+                alert(`Bridge 连接测试超时。\nURL: ${getBridgeUrl()}`);
+            }
+        });
+    }
+
+    function resetBridgeSettings() {
+        const ok = window.confirm(
+            `确定恢复默认 Bridge 地址 ${DEFAULT_BRIDGE_BASE_URL}${DEFAULT_BRIDGE_PATH} 吗？`
+        );
+        if (!ok) {
+            return;
+        }
+
+        gmSet('bridge_base_url', DEFAULT_BRIDGE_BASE_URL);
+        gmSet('bridge_path', DEFAULT_BRIDGE_PATH);
+        gmSet('api_token', '');
+        gmSet('debug_enabled', false);
+
+        alert('已恢复默认 Bridge 设置，请刷新 ChatGPT 页面。');
+    }
+
+    function copyBridgeUrlToClipboard() {
+        const url = getBridgeUrl();
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(url).then(
+                function () {
+                    alert(`已复制 Bridge 地址：\n${url}`);
+                },
+                function (error) {
+                    console.error('[联动][SETTINGS] clipboard failed:', error);
+                    window.prompt('复制 Bridge 地址（Ctrl+C）：', url);
+                }
+            );
+            return;
+        }
+        window.prompt('复制 Bridge 地址（Ctrl+C）：', url);
+    }
+
+    function registerSettingsMenu() {
+        if (typeof GM_registerMenuCommand !== 'function') {
+            return;
+        }
+
+        GM_registerMenuCommand('浏览器桥接 · 设置', openBridgeSettingsDialog);
+        GM_registerMenuCommand('浏览器桥接 · 测试连接', testBridgeConnection);
+        GM_registerMenuCommand('浏览器桥接 · 恢复默认地址', resetBridgeSettings);
+        GM_registerMenuCommand('浏览器桥接 · 复制 Bridge 地址', copyBridgeUrlToClipboard);
     }
 
     function report(event, payload, messageId) {
@@ -1447,9 +1678,14 @@
         lastIdentityKey = key;
     }
 
+    registerSettingsMenu();
+
     const identity = getPageIdentity();
     lastIdentityKey = identityKey(identity);
-    clientLog('info', '油猴脚本已启动', identity);
+    clientLog('info', '浏览器端油猴脚本已启动', Object.assign({}, identity, {
+        bridge_url: getBridgeUrl(),
+        debug_enabled: getDebugEnabled()
+    }));
     pollBridge();
     setInterval(() => {
         checkPageIdentityChange();

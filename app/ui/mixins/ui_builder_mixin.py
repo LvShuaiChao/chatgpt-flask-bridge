@@ -1,5 +1,6 @@
 import html
 import json
+import os
 import re
 import sys
 import time
@@ -318,11 +319,48 @@ class UiBuilderMixin:
             self.input_hint_label.setText("Ctrl + Enter 发送，Shift + Enter 换行")
         else:
             self.input_hint_label.setText("Enter 发送，Shift + Enter 换行")
+    def _tampermonkey_bridge_url_text(self, host, port):
+        host = (host or "").strip() or "127.0.0.1"
+        port = (port or "").strip() or "5000"
+        if host in ("0.0.0.0", "::"):
+            return (
+                f"油猴接口（本机）：http://127.0.0.1:{port}/api/bridge\n"
+                f"油猴接口（局域网）：http://<本机局域网IP>:{port}/api/bridge"
+            )
+        return f"油猴接口：http://{host}:{port}/api/bridge"
+
+    def _tampermonkey_bridge_hint_text(self, host):
+        host = (host or "").strip() or "127.0.0.1"
+        lines = [
+            "请在油猴菜单「浏览器桥接 · 设置」中填写与上方一致的地址。"
+        ]
+        if host in ("127.0.0.1", "localhost", "::1"):
+            lines.append("当前监听本机地址，仅本机浏览器可用。")
+        elif host in ("0.0.0.0", "::"):
+            lines.append(
+                "当前监听全部网卡。局域网浏览器请填写本机局域网 IP，"
+                "例如 http://192.168.1.20:端口/api/bridge。"
+            )
+        else:
+            lines.append(f"当前监听 {host}，请确保油猴中的地址可从浏览器访问。")
+        token = (os.environ.get("CHATGPT_PAGE_BRIDGE_TOKEN") or "").strip()
+        if host not in ("127.0.0.1", "localhost", "::1") and not token:
+            lines.append(
+                "警告：未设置 CHATGPT_PAGE_BRIDGE_TOKEN，Bridge 可能被局域网访问，建议设置 API Token。"
+            )
+        return "\n".join(lines)
+
     def _update_tampermonkey_settings_labels(self, status=None):
         status = status or self._last_bridge_status or {}
         host = self._host or self.host_edit.text().strip()
         port = self._port_text or self.port_edit.text().strip()
-        self.tm_bridge_url_label.setText(f"油猴接口：http://{host}:{port}/api/bridge")
+        self.tm_bridge_url_label.setText(
+            self._tampermonkey_bridge_url_text(host, port)
+        )
+        if hasattr(self, "tm_bridge_hint_label"):
+            self.tm_bridge_hint_label.setText(
+                self._tampermonkey_bridge_hint_text(host)
+            )
         global_bound = status.get("bound_client_id") or "-"
         session_bound = self._session_bound_client_id() or "-"
         session = self._current_session()
@@ -877,11 +915,15 @@ class UiBuilderMixin:
         tm_form = QFormLayout(tm_page)
         self.tm_bridge_url_label = QLabel("-")
         self.tm_bridge_url_label.setWordWrap(True)
+        self.tm_bridge_hint_label = QLabel("-")
+        self.tm_bridge_hint_label.setWordWrap(True)
+        self.tm_bridge_hint_label.setStyleSheet("color: #666;")
         self.tm_client_id_label = QLabel("-")
         self.tm_last_seen_settings_label = QLabel("-")
         self.tm_page_settings_label = QLabel("-")
         self.tm_page_settings_label.setWordWrap(True)
         tm_form.addRow("接口地址", self.tm_bridge_url_label)
+        tm_form.addRow("配置说明", self.tm_bridge_hint_label)
         tm_form.addRow("client_id", self.tm_client_id_label)
         tm_form.addRow("最后心跳", self.tm_last_seen_settings_label)
         tm_form.addRow("页面 URL", self.tm_page_settings_label)
