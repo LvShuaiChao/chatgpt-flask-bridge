@@ -209,6 +209,8 @@ def _snapshot_clients():
                 "online": _client_online(last_seen),
                 "bound_session_id": info.get("bound_session_id") or "",
                 "is_bound": client_id == bound_client_id,
+                "bind_request_id": info.get("bind_request_id") or "",
+                "launch_token": info.get("launch_token") or "",
             }
         )
     return items
@@ -285,6 +287,11 @@ def push_message(data):
         (payload.get("conversation_url") or target_page_url or "").strip() or None
     )
     bootstrap_conversation = bool(payload.get("bootstrap_conversation"))
+    bind_request_id = (
+        (payload.get("bind_request_id") or payload.get("launch_token") or "").strip()
+        or None
+    )
+    launch_token = (payload.get("launch_token") or bind_request_id or "").strip() or None
     msg = {
         "id": str(uuid.uuid4()),
         "type": "chat",
@@ -298,6 +305,8 @@ def push_message(data):
         "conversation_id": conversation_id,
         "conversation_url": conversation_url,
         "bootstrap_conversation": bootstrap_conversation,
+        "bind_request_id": bind_request_id,
+        "launch_token": launch_token,
         "status": "queued",
         "created_at": _now(),
         "delivered_to": None,
@@ -550,10 +559,18 @@ def _touch_tampermonkey(meta, action="poll"):
     ignored = _is_ignored_page(meta)
     if page_instance_id and page_instance_id not in _known_page_instances:
         _known_page_instances.add(page_instance_id)
+        hello_bind = (
+            (meta.get("bind_request_id") or meta.get("launch_token") or "").strip()
+        )
         _log(
             f"[TM][HELLO] client_id={client_id} page_type={page_type or '-'} "
             f"conversation_id={conversation_id or '-'} "
             f"page_instance_id={page_instance_id} url={page_url or '-'}"
+        )
+        _log(
+            f"[TM][IDENTITY] client_id={client_id} "
+            f"page_instance_id={page_instance_id} page_type={page_type or '-'} "
+            f"bind_request_id={hello_bind or '-'}"
         )
     entry = _tampermonkey_clients.setdefault(
         client_id,
@@ -573,9 +590,19 @@ def _touch_tampermonkey(meta, action="poll"):
             "last_seen": None,
             "online": False,
             "bound_session_id": "",
+            "bind_request_id": "",
+            "launch_token": "",
         },
     )
     entry["client_id"] = client_id
+    bind_request_id = (
+        (meta.get("bind_request_id") or meta.get("launch_token") or "").strip()
+    )
+    launch_token = (meta.get("launch_token") or bind_request_id or "").strip()
+    if bind_request_id:
+        entry["bind_request_id"] = bind_request_id
+    if launch_token:
+        entry["launch_token"] = launch_token
     if page_instance_id:
         entry["page_instance_id"] = page_instance_id
     entry["script_version"] = (meta.get("script_version") or entry.get("script_version") or "").strip()
@@ -762,6 +789,15 @@ def _message_matches_page(msg, body):
             return False
         if target_instance and target_instance != body_instance:
             return False
+        target_bind = (
+            (msg.get("bind_request_id") or msg.get("launch_token") or "").strip()
+        )
+        body_bind = (
+            (body.get("bind_request_id") or body.get("launch_token") or "").strip()
+        )
+        if target_bind:
+            if not body_bind or body_bind != target_bind:
+                return False
         target_conv = (msg.get("conversation_id") or "").strip()
         if target_conv:
             return False
@@ -980,6 +1016,10 @@ def _poll_response(msg, retry):
             resp["bootstrap_conversation"] = True
         if msg.get("target_page_instance_id"):
             resp["target_page_instance_id"] = msg.get("target_page_instance_id")
+        if msg.get("bind_request_id"):
+            resp["bind_request_id"] = msg.get("bind_request_id")
+        if msg.get("launch_token"):
+            resp["launch_token"] = msg.get("launch_token")
     return resp
 
 def _handle_poll(body):
@@ -1491,9 +1531,17 @@ def _handle_report(body):
         elif event == "conversation_created":
             conv_id = (payload.get("conversation_id") or body.get("conversation_id") or "").strip()
             page_url = (payload.get("url") or body.get("page_url") or "").strip()
+            report_bind = (
+                payload.get("bind_request_id")
+                or payload.get("launch_token")
+                or body.get("bind_request_id")
+                or body.get("launch_token")
+                or ""
+            ).strip()
             _log(
                 f"[BIND][CONVERSATION_CREATED] message_id={message_id[:8] if message_id else '?'}… "
                 f"session_id={(msg.get('session_id') or '-')[:8]} "
+                f"bind_request_id={report_bind or '-'} "
                 f"client_id={client_id} "
                 f"page_instance_id={(body.get('page_instance_id') or '-')[:16]} "
                 f"conversation_id={conv_id or '-'} url={page_url or '-'}"

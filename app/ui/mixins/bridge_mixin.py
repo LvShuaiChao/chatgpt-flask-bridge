@@ -314,14 +314,25 @@ class BridgeMixin:
                         f"[命令] 失败 client_id={client_id} {detail}".strip()
                     )
                 continue
-            session, turn_id, bridge_id = self._resolve_inbound_binding(item)
             if kind == "conversation_created":
-                if session is not None:
+                conv_session = self._resolve_session_for_conversation_created(item)
+                if conv_session is not None:
                     report_client = (item.get("client_id") or "").strip()
                     self._apply_conversation_created_binding(
-                        session, payload, client_id=report_client
+                        conv_session, payload, client_id=report_client
+                    )
+                else:
+                    payload = item.get("payload") or {}
+                    self._append_log(
+                        f"[BIND][MISMATCH] reason=conversation_created_no_session "
+                        f"message_id={(item.get('message_id') or '-')[:8]} "
+                        f"bind_request_id="
+                        f"{payload.get('bind_request_id') or payload.get('launch_token') or '-'} "
+                        f"client_id={item.get('client_id') or '-'} "
+                        f"page_instance_id={payload.get('page_instance_id') or '-'}"
                     )
                 continue
+            session, turn_id, bridge_id = self._resolve_inbound_binding(item)
             if session is None or not turn_id:
                 continue
             if kind == "ack":
@@ -387,6 +398,7 @@ class BridgeMixin:
                     "not_home_page": "bootstrap 要求 ChatGPT 首页",
                     "home_already_has_conversation": "首页不应已有 conversation_id",
                     "target_page_instance_id_mismatch": "预绑定首页 page_instance_id 不一致",
+                    "bind_request_id_mismatch": "绑定令牌与当前页面不一致",
                     "conversation_created_timeout": "首条消息已发送，但未检测到新对话页",
                 }
                 if payload.get("reason") in reason_labels:
@@ -728,6 +740,10 @@ class BridgeMixin:
             ).strip()
             if page_instance_id:
                 payload["target_page_instance_id"] = page_instance_id
+            bind_request_id = self._session_bind_request_id(remote)
+            if bind_request_id:
+                payload["bind_request_id"] = bind_request_id
+                payload["launch_token"] = bind_request_id
             session.remote_chatgpt = {
                 **remote,
                 "bootstrap_in_progress": True,

@@ -57,6 +57,27 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    function getBindRequestToken() {
+        try {
+            const url = new URL(location.href);
+            const fromQuery = url.searchParams.get('xz_bind_token');
+            if (fromQuery) {
+                sessionStorage.setItem('xz_bind_token', fromQuery);
+                return fromQuery;
+            }
+            const hash = String(location.hash || '');
+            const match = hash.match(/xz_bind_token=([a-zA-Z0-9_-]+)/);
+            if (match && match[1]) {
+                sessionStorage.setItem('xz_bind_token', match[1]);
+                return match[1];
+            }
+            return sessionStorage.getItem('xz_bind_token') || '';
+        } catch (error) {
+            console.error('[联动] getBindRequestToken 失败:', error);
+            return '';
+        }
+    }
+
     function getPageIdentity() {
         const url = new URL(location.href);
         const path = url.pathname || '';
@@ -73,6 +94,7 @@
         } else {
             pageType = 'other';
         }
+        const bindToken = getBindRequestToken();
         return {
             client_id: CLIENT_ID,
             page_instance_id: PAGE_INSTANCE_ID,
@@ -81,6 +103,8 @@
             page_title: document.title || '',
             page_type: pageType,
             conversation_id: conversationId,
+            bind_request_id: bindToken,
+            launch_token: bindToken,
             is_top_frame: window.top === window.self,
             visibility_state: document.visibilityState,
             has_focus: document.hasFocus(),
@@ -1145,6 +1169,22 @@
                 }, messageId);
                 return;
             }
+            const msgBindToken = String(
+                result.bind_request_id || result.launch_token || ''
+            ).trim();
+            if (msgBindToken) {
+                const pageToken = getBindRequestToken();
+                if (!pageToken || pageToken !== msgBindToken) {
+                    await ack(messageId, false, 'bind_request_id 不匹配');
+                    await report('send_failed', {
+                        reason: 'bind_request_id_mismatch',
+                        bind_request_id: msgBindToken,
+                        current_bind_request_id: pageToken || '',
+                        page_instance_id: PAGE_INSTANCE_ID
+                    }, messageId);
+                    return;
+                }
+            }
         } else {
             if (result.target_page_url) {
                 const target = String(result.target_page_url).trim().split('#')[0];
@@ -1257,6 +1297,7 @@
                     ASSISTANT_REPLY_WAIT_MS
                 );
                 if (createdIdentity) {
+                    const bindToken = getBindRequestToken();
                     await report('conversation_created', {
                         message_id: messageId,
                         old_page_type: 'home',
@@ -1264,7 +1305,9 @@
                         conversation_id: createdIdentity.conversation_id,
                         url: createdIdentity.page_url,
                         client_id: CLIENT_ID,
-                        page_instance_id: PAGE_INSTANCE_ID
+                        page_instance_id: PAGE_INSTANCE_ID,
+                        bind_request_id: bindToken,
+                        launch_token: bindToken
                     }, messageId);
                 } else {
                     await report('send_failed', {

@@ -39,6 +39,12 @@ def default_remote_chatgpt():
         "pending_bootstrap_text": "",
         "pending_bootstrap_created_at": 0,
         "opened_home_at": 0,
+        "bind_request_id": "",
+        "launch_token": "",
+        "bind_started_at": 0,
+        "reserved_client_id": "",
+        "reserved_page_instance_id": "",
+        "reserved_at": 0,
     }
 
 
@@ -70,6 +76,8 @@ def normalize_remote_chatgpt(remote):
     base["last_seen"] = float(remote.get("last_seen", 0) or 0)
     base["created_from_home"] = bool(remote.get("created_from_home", False))
     base["bootstrap_in_progress"] = bool(remote.get("bootstrap_in_progress", False))
+    base["bind_started_at"] = float(remote.get("bind_started_at", 0) or 0)
+    base["reserved_at"] = float(remote.get("reserved_at", 0) or 0)
     if not (base.get("conversation_url") or "").strip():
         legacy_url = (remote.get("url") or "").strip()
         if legacy_url:
