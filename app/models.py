@@ -40,6 +40,8 @@ def default_remote_chatgpt():
         "prebound_home_page_instance_id": "",
         "created_from_home": False,
         "bootstrap_in_progress": False,
+        "bootstrap_message_id": "",
+        "bootstrap_started_at": 0,
         "pending_bootstrap_text": "",
         "pending_bootstrap_created_at": 0,
         "opened_home_at": 0,
@@ -50,6 +52,7 @@ def default_remote_chatgpt():
         "reserved_page_instance_id": "",
         "reserved_at": 0,
         "pending_send_text": "",
+        "pending_send_message_id": "",
         "pending_send_created_at": 0,
         "reopen_request_id": "",
         "reopen_started_at": 0,
@@ -85,6 +88,7 @@ def normalize_remote_chatgpt(remote):
     base["last_seen"] = float(remote.get("last_seen", 0) or 0)
     base["created_from_home"] = bool(remote.get("created_from_home", False))
     base["bootstrap_in_progress"] = bool(remote.get("bootstrap_in_progress", False))
+    base["bootstrap_started_at"] = float(remote.get("bootstrap_started_at", 0) or 0)
     base["bind_started_at"] = float(remote.get("bind_started_at", 0) or 0)
     base["reserved_at"] = float(remote.get("reserved_at", 0) or 0)
     legacy_url = (

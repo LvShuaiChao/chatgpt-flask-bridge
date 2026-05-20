@@ -107,6 +107,16 @@ class ChatRenderMixin:
             self._update_chat_empty_state()
         return bubble
     def _add_system_message(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        now = time.time()
+        last_text = (getattr(self, "_last_system_message_text", "") or "").strip()
+        last_at = float(getattr(self, "_last_system_message_at", 0) or 0)
+        if last_text == text and (now - last_at) < 5.0:
+            return
+        self._last_system_message_text = text
+        self._last_system_message_at = now
         session = self._ensure_current_session()
         self._append_session_message(session, "system", text)
         if session.session_id == self._current_session_id:
@@ -115,6 +125,21 @@ class ChatRenderMixin:
             self._scroll_to_bottom_if_user_was_near_bottom(scroll_state)
         self._refresh_session_list(select_session_id=session.session_id)
         self._save_sessions_to_disk()
+    def _add_system_message_once(self, text, dedupe_seconds=10):
+        text = (text or "").strip()
+        if not text:
+            return
+        now = time.time()
+        key = (getattr(self, "_current_session_id", "") or "", text)
+        cache = getattr(self, "_system_message_once_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._system_message_once_cache = cache
+        last_at = float(cache.get(key) or 0)
+        if (now - last_at) < max(0.0, float(dedupe_seconds or 0)):
+            return
+        cache[key] = now
+        self._add_system_message(text)
     def _scroll_to_bottom(self):
         schedule_scroll_to_bottom(
             self.chat_scroll,

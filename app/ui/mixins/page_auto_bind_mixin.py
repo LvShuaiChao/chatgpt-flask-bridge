@@ -32,7 +32,8 @@ from PyQt5.QtCore import QTimer
 class PageAutoBindMixin:
     IDLE_HOME_FRESH_SECONDS = float(TM_POLL_FRESH_SECONDS)
     BOOTSTRAP_CLAIM_TIMEOUT_SECONDS = 5.0
-    REOPEN_BOUND_CONVERSATION_TIMEOUT_SECONDS = 30
+    REOPEN_BOUND_CONVERSATION_TIMEOUT_SECONDS = 45
+    BOOTSTRAP_CREATE_TIMEOUT_SECONDS = 90.0
 
     def _session_has_prebound_home_online(self, remote, bridge_status=None):
         remote = normalize_remote_chatgpt(remote)
@@ -782,7 +783,9 @@ class PageAutoBindMixin:
             clean_url = url.split("#")[0]
             url = f"{clean_url}#xz_reopen_token={request_id}"
         return self._open_page_once(url, "打开绑定的 ChatGPT 对话页")
-    def _prepare_bound_conversation_reopen_if_needed(self, session, text):
+    def _prepare_bound_conversation_reopen_if_needed(
+        self, session, text, user_message_id=""
+    ):
         if not self._bind_each_chat_to_page or session is None:
             return True
 
@@ -803,17 +806,21 @@ class PageAutoBindMixin:
 
         pending_text = (text or "").strip()
         if bind_state == BIND_STATE_WAITING_BOUND_CONVERSATION:
-            if pending_text:
-                session.remote_chatgpt = {
-                    **normalize_remote_chatgpt(session.remote_chatgpt),
-                    "pending_send_text": pending_text,
-                    "pending_send_created_at": time.time(),
-                }
-                session.updated_at = time.time()
-                self._save_sessions_to_disk()
+            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+            session.remote_chatgpt = {
+                **remote_now,
+                "pending_send_text": pending_text
+                or (remote_now.get("pending_send_text") or ""),
+                "pending_send_message_id": (user_message_id or "").strip()
+                or (remote_now.get("pending_send_message_id") or ""),
+                "pending_send_created_at": time.time(),
+            }
+            session.updated_at = time.time()
+            self._save_sessions_to_disk()
             if session.session_id == self._current_session_id:
-                self._add_system_message(
-                    "绑定的 ChatGPT 对话页未打开，正在自动打开原对话页面..."
+                self._add_system_message_once(
+                    "绑定的 ChatGPT 对话页离线，正在自动打开原对话页。该消息会在页面上线后自动发送。",
+                    dedupe_seconds=10,
                 )
             self._apply_chat_bind_visual_state()
             return False
@@ -830,6 +837,7 @@ class PageAutoBindMixin:
             **remote,
             "bind_state": BIND_STATE_WAITING_BOUND_CONVERSATION,
             "pending_send_text": pending_text,
+            "pending_send_message_id": (user_message_id or "").strip(),
             "pending_send_created_at": now if pending_text else 0,
             "reopen_request_id": reopen_request_id,
             "reopen_started_at": now,
@@ -841,14 +849,15 @@ class PageAutoBindMixin:
             target_url, reopen_request_id=reopen_request_id
         )
         self._append_log(
-            f"[REOPEN][START] session_id={session.session_id} "
+            f"[BIND][REOPEN_BOUND_CONVERSATION] session_id={session.session_id} "
             f"conversation_id={conversation_id} url={target_url} "
             f"reopen_request_id={reopen_request_id} opened={opened} "
             f"pending_text_len={len(pending_text)}"
         )
         if session.session_id == self._current_session_id:
-            self._add_system_message(
-                "绑定的 ChatGPT 对话页离线，正在自动打开原对话页面..."
+            self._add_system_message_once(
+                "绑定的 ChatGPT 对话页离线，正在自动打开原对话页。该消息会在页面上线后自动发送。",
+                dedupe_seconds=10,
             )
         self._refresh_session_list(select_session_id=self._current_session_id)
         self._apply_chat_bind_visual_state()
@@ -880,64 +889,123 @@ class PageAutoBindMixin:
                 now - started > self.REOPEN_BOUND_CONVERSATION_TIMEOUT_SECONDS
             ):
                 self._append_log(
-                    f"[REOPEN][TIMEOUT] session_id={session.session_id} "
-                    f"conversation_id={remote.get('conversation_id') or '-'}"
+                    f"[BIND][REOPEN_BOUND_TIMEOUT] session_id={session.session_id} "
+                    f"conversation_id={remote.get('conversation_id') or '-'} "
+                    f"pending_text_len={len((remote.get('pending_send_text') or '').strip())}"
                 )
                 session.remote_chatgpt = {
                     **remote,
                     "bind_state": BIND_STATE_BOUND_OFFLINE,
-                    "pending_send_text": "",
-                    "pending_send_created_at": 0,
                     "reopen_started_at": 0,
                     "reopen_target_url": "",
                 }
                 session.updated_at = now
+                pending_message_id = (remote.get("pending_send_message_id") or "").strip()
+                if pending_message_id:
+                    self._set_user_message_status(
+                        session, pending_message_id, "发送失败"
+                    )
                 self._save_sessions_to_disk()
                 if session.session_id == self._current_session_id:
-                    self._add_system_message(
-                        "等待绑定的 ChatGPT 对话页上线超时。"
-                        "请手动打开该对话页后重新发送。"
+                    self._add_system_message_once(
+                        "自动打开绑定页面超时，消息未发送。请打开绑定页面后点击重新发送。",
+                        dedupe_seconds=10,
                     )
                 self._refresh_session_list(
                     select_session_id=self._current_session_id
                 )
+                if session.session_id == self._current_session_id:
+                    self._render_session_chat(session)
                 self._update_bound_page_display()
                 self._apply_chat_bind_visual_state()
                 continue
 
-            client_info = self._find_online_client_for_remote(remote)
+            expected_conversation_id = (
+                (remote.get("conversation_id") or "").strip()
+                or parse_conversation_id(
+                    remote.get("conversation_url") or remote.get("url") or ""
+                )
+            )
+            client_info = None
+            for item in self._iter_tm_clients(status, online_only=True):
+                page_type = (item.get("page_type") or "").strip()
+                actual_conversation_id = (
+                    (item.get("conversation_id") or "").strip()
+                    or parse_conversation_id((item.get("page_url") or "").strip())
+                )
+                if page_type != "conversation":
+                    self._append_log(
+                        "[SEND][WAIT_BOUND_SKIP_CLIENT] "
+                        f"reason=not_conversation_page expected={expected_conversation_id or '-'} "
+                        f"actual={actual_conversation_id or '-'} "
+                        f"client_id={(item.get('client_id') or '-').strip()}"
+                    )
+                    continue
+                if expected_conversation_id and actual_conversation_id != expected_conversation_id:
+                    self._append_log(
+                        "[SEND][WAIT_BOUND_SKIP_CLIENT] "
+                        f"reason=conversation_mismatch expected={expected_conversation_id} "
+                        f"actual={actual_conversation_id or '-'} "
+                        f"client_id={(item.get('client_id') or '-').strip()}"
+                    )
+                    continue
+                client_info = dict(item)
+                break
             if not client_info:
                 continue
 
             pending_text = (remote.get("pending_send_text") or "").strip()
+            pending_message_id = (remote.get("pending_send_message_id") or "").strip()
             if not self._bind_conversation_to_session(
                 session, client_info, silent=True
             ):
                 continue
 
-            session.remote_chatgpt = {
-                **normalize_remote_chatgpt(session.remote_chatgpt),
-                "pending_send_text": "",
-                "pending_send_created_at": 0,
-                "reopen_started_at": 0,
-                "reopen_target_url": "",
-            }
-            session.updated_at = time.time()
             self._append_log(
                 f"[REOPEN][MATCH] session_id={session.session_id} "
                 f"client_id={client_info.get('client_id') or '-'} "
                 f"pending_text_len={len(pending_text)}"
             )
-            self._save_sessions_to_disk()
+            if pending_message_id and pending_text:
+                self._push_message_text(
+                    session,
+                    pending_text,
+                    reuse_user_message_id=pending_message_id,
+                )
+                remote_after_send = normalize_remote_chatgpt(session.remote_chatgpt)
+                session.remote_chatgpt = {
+                    **remote_after_send,
+                    "pending_send_text": "",
+                    "pending_send_message_id": "",
+                    "pending_send_created_at": 0,
+                    "reopen_request_id": "",
+                    "reopen_started_at": 0,
+                    "reopen_target_url": "",
+                }
+                session.updated_at = time.time()
+                self._save_sessions_to_disk()
+                self._append_log(
+                    "[SEND][RESUME_AFTER_BOUND_REOPEN] "
+                    f"session_id={session.session_id} "
+                    f"user_message_id={pending_message_id} "
+                    f"conversation_id={(session.remote_chatgpt or {}).get('conversation_id') or '-'} "
+                    f"text_len={len(pending_text)}"
+                )
+            else:
+                session.remote_chatgpt = {
+                    **normalize_remote_chatgpt(session.remote_chatgpt),
+                    "pending_send_text": "",
+                    "pending_send_message_id": "",
+                    "pending_send_created_at": 0,
+                    "reopen_request_id": "",
+                    "reopen_started_at": 0,
+                    "reopen_target_url": "",
+                }
+                session.updated_at = time.time()
+                self._save_sessions_to_disk()
             self._refresh_session_list(select_session_id=self._current_session_id)
             self._update_bound_page_display()
             self._apply_chat_bind_visual_state()
-            if pending_text:
-                if session.session_id == self._current_session_id:
-                    self._add_system_message(
-                        "绑定的 ChatGPT 对话页已上线，正在发送消息..."
-                    )
-                self._flush_pending_bound_send_message(session, pending_text)
     def _prebound_home_bind_to_session(
         self, session, client_info, silent=False, reserve_reason=""
     ):
@@ -1023,16 +1091,23 @@ class PageAutoBindMixin:
             f"url={page_url}"
         )
         return True
-    def _bind_conversation_to_session(self, session, client_info, silent=False):
+    def _bind_conversation_to_session(
+        self,
+        session,
+        client_info,
+        silent=False,
+        allow_existing_conversation_for_new_session=False,
+    ):
         if not isinstance(client_info, dict):
             return False
-        rejected, reject_msg = self._reject_bind_existing_conversation_for_new_session(
-            session, client_info
-        )
-        if rejected:
-            if not silent:
-                self._add_system_message(reject_msg)
-            return False
+        if not allow_existing_conversation_for_new_session:
+            rejected, reject_msg = self._reject_bind_existing_conversation_for_new_session(
+                session, client_info
+            )
+            if rejected:
+                if not silent:
+                    self._add_system_message(reject_msg)
+                return False
         page_url = (
             client_info.get("page_url")
             or client_info.get("url")
@@ -1162,6 +1237,11 @@ class PageAutoBindMixin:
             "bind_started_at": float(remote.get("bind_started_at") or 0),
             "created_from_home": True,
             "bootstrap_in_progress": False,
+            "pending_bootstrap_text": "",
+            "pending_bootstrap_created_at": 0,
+            "bootstrap_message_id": "",
+            "bootstrap_started_at": 0,
+            "opened_home_at": 0,
         }
         session.updated_at = time.time()
         if server.is_server_running() and bound_client_id:
@@ -1186,6 +1266,66 @@ class PageAutoBindMixin:
             f"page_instance_id={page_instance_id or '-'} "
             f"url={page_url or '-'}"
         )
+
+    def _mark_latest_pending_assistant_error(self, session, text, status_text):
+        if session is None:
+            return False
+        for message in reversed(getattr(session, "messages", [])):
+            if getattr(message, "role", "") != "assistant":
+                continue
+            current_status = (getattr(message, "status", "") or "").strip()
+            current_text = (getattr(message, "content", "") or "").strip()
+            if current_status in PENDING_ASSISTANT_STATUSES or current_text in ASSISTANT_WAIT_TEXTS:
+                message.role = "error"
+                message.content = (text or "").strip()
+                message.status = (status_text or "失败").strip()
+                session.updated_at = time.time()
+                return True
+        return False
+
+    def _recover_stuck_bootstrap_sessions(self):
+        now = time.time()
+        changed = False
+        for session in self._sessions.values():
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bind_state = self._remote_bind_state(remote)
+            if bind_state != BIND_STATE_WAITING_CONVERSATION_CREATED:
+                continue
+            if (remote.get("conversation_id") or "").strip():
+                continue
+            started_at = float(
+                remote.get("bootstrap_started_at")
+                or remote.get("bind_started_at")
+                or 0
+            )
+            if started_at <= 0:
+                continue
+            elapsed = now - started_at
+            if elapsed < float(self.BOOTSTRAP_CREATE_TIMEOUT_SECONDS):
+                continue
+
+            session.remote_chatgpt = {
+                **default_remote_chatgpt(),
+                "bind_state": BIND_STATE_UNBOUND,
+            }
+            session.updated_at = now
+            changed = True
+
+            self._append_log(
+                f"[BIND][BOOTSTRAP_TIMEOUT_RESET] session_id={session.session_id} "
+                f"elapsed={elapsed:.1f}"
+            )
+            self._mark_latest_pending_assistant_error(
+                session,
+                "创建 ChatGPT 对话超时，请重新发送。",
+                "创建超时",
+            )
+
+        if changed:
+            self._save_sessions_to_disk()
+            self._refresh_session_list(select_session_id=self._current_session_id)
+            if self._current_session():
+                self._render_session_chat(self._current_session())
     def _is_client_bound_to_other_session(self, client_info, current_session_id):
         if not isinstance(client_info, dict):
             return False

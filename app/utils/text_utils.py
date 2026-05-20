@@ -30,15 +30,6 @@ def format_ts(ts=None):
         return "-"
 
 
-def format_chat_ts(ts=None):
-    ts = ts or time.time()
-    try:
-        return time.strftime("%H:%M", time.localtime(float(ts)))
-    except (TypeError, ValueError, OSError) as error:
-        append_log(f"[TIME][WARN] 聊天时间格式化失败：ts={ts!r} error={error}")
-        return time.strftime("%H:%M")
-
-
 def short_page_display(url, max_path_len=36, max_raw_len=80):
     raw = (url or "").strip()
     if not raw or raw == "-":

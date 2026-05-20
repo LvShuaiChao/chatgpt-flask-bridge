@@ -38,17 +38,6 @@ def schedule_scroll_to_bottom(scroll_area, *, enabled=True):
     QTimer.singleShot(0, do_scroll)
 
 
-def is_scroll_near_bottom(scroll_area, threshold=80):
-    if scroll_area is None:
-        return True
-
-    bar = scroll_area.verticalScrollBar()
-    if bar is None:
-        return True
-
-    return bar.maximum() - bar.value() <= threshold
-
-
 def capture_scroll_state(scroll_area, threshold=80):
     if scroll_area is None:
         return {

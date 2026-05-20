@@ -463,7 +463,7 @@ class PageSendTargetMixin:
                     "",
                     "",
                     False,
-                    "当前对话错误绑定到已有 ChatGPT 对话页。请解除绑定后重新发送。",
+                    "当前对话错误绑定到已有 ChatGPT 对话页。请点击“绑定当前页面”覆盖后重新发送。",
                 )
 
             if (
@@ -700,7 +700,7 @@ class PageSendTargetMixin:
                 "",
                 "",
                 False,
-                "当前对话错误绑定到已有 ChatGPT 对话页。请解除绑定后重新发送。",
+                "当前对话错误绑定到已有 ChatGPT 对话页。请点击“绑定当前页面”覆盖后重新发送。",
             )
 
         bind_state = self._effective_bind_state(session)

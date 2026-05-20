@@ -638,13 +638,23 @@ def enqueue_control_command(
 def push_close_other_pages(except_client_id):
     """关闭除 except_client_id 外所有在线 ChatGPT 页面。"""
     except_client_id = (except_client_id or "").strip()
-    msgs = []
+    if not except_client_id:
+        raise ValueError("except_client_id 不能为空")
     with _state_lock:
         clients_snapshot = list(_tampermonkey_clients.items())
-    for client_id, info in clients_snapshot:
+    online_clients = [
+        (client_id, info)
+        for client_id, info in clients_snapshot
+        if _client_online(info.get("last_seen")) and not _is_ignored_page(info)
+    ]
+    keep_online = any(client_id == except_client_id for client_id, _ in online_clients)
+    if not keep_online:
+        raise ValueError(
+            f"保留页面不在线或不存在，已取消关闭其他页面：client_id={except_client_id}"
+        )
+    msgs = []
+    for client_id, info in online_clients:
         if client_id == except_client_id:
-            continue
-        if not _client_online(info.get("last_seen")):
             continue
         msgs.append(
             _make_command_message(
@@ -656,7 +666,7 @@ def push_close_other_pages(except_client_id):
     return _append_control_messages(
         msgs,
         log_label="close_other",
-        log_detail=f"command=close_self (保留 client_id={except_client_id or '-'})",
+        log_detail=f"command=close_self keep_client_id={except_client_id}",
     )
 
 

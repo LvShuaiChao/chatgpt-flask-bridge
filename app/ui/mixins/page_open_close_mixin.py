@@ -1,6 +1,7 @@
 """打开 / 关闭 / 刷新 ChatGPT 页面与油猴页面表格。"""
 
 import traceback
+import time
 import uuid
 import webbrowser
 from urllib.parse import urlparse
@@ -541,10 +542,42 @@ class PageOpenCloseMixin:
             self._append_log("[关闭页面] 服务未启动，无法下发命令。")
             self._set_tm_action_hint("请先启动服务。")
             return
+        status = server.get_bridge_status()
+        self._last_bridge_status = status
         except_id = self._session_bound_client_id()
         if not except_id:
             self._set_tm_action_hint("当前对话未绑定页面，无法关闭其他页面。")
             self._append_log("[关闭页面] 当前对话未绑定 client_id，已取消。")
+            return
+        keep_info = self._client_info_by_id(except_id, status=status)
+        if not keep_info:
+            self._set_tm_action_hint(
+                "当前绑定页面不在页面列表中，为避免误关所有页面，已取消。"
+            )
+            self._append_log(
+                f"[关闭页面][取消] 绑定页面不存在，已阻止关闭其他页面。"
+                f" keep_client_id={except_id}"
+            )
+            return
+        if not bool(keep_info.get("online")):
+            current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+            self._set_tm_action_hint(
+                "当前绑定页面已离线，为避免误关所有在线页面，已取消。请先点击「绑定当前页面」。"
+            )
+            self._append_log(
+                f"[关闭页面][取消] 绑定页面离线，已阻止关闭其他页面"
+                f" keep_client_id={except_id} current_client_id={current_client_id or '-'}"
+            )
+            return
+        current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+        if current_client_id and current_client_id != except_id:
+            self._set_tm_action_hint(
+                "当前可见页面不是本对话绑定页，请先绑定当前页面后再关闭其他页面。"
+            )
+            self._append_log(
+                "[关闭页面][取消] 当前可见页面不是本对话绑定页，已阻止关闭其他页面。"
+                f" keep_client_id={except_id} current_client_id={current_client_id}"
+            )
             return
         try:
             msgs = server.push_close_other_pages(except_id)

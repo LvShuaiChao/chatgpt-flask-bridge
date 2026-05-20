@@ -52,35 +52,13 @@ class UiBuilderMixin:
             self._on_open_chatgpt_home,
             tooltip="打开 ChatGPT 首页",
         )
-        self.open_new_chat_btn = self._create_tm_ghost_button(
-            "打开新对话",
-            self._on_open_new_chatgpt_tab,
-            tooltip="打开新的 ChatGPT 页面",
-        )
-        self.refresh_status_btn = self._create_tm_ghost_button(
-            "刷新状态",
-            self._on_refresh_tm_pages,
-            tooltip="刷新 GUI 中的油猴页面列表和连接状态（不刷新浏览器页面）",
-        )
-        self.reload_bound_page_btn = self._create_tm_ghost_button(
-            "刷新绑定网页",
-            self._on_reload_bound_tm_page,
-            tooltip="刷新当前对话绑定的 ChatGPT 页面",
-        )
         self.bind_current_page_btn = self._create_tm_ghost_button(
             "绑定当前页面",
             self._on_bind_current_page,
-            tooltip="将油猴最近活跃页面绑定到当前对话",
-        )
-        self.bind_selected_page_btn = self._create_tm_ghost_button(
-            "绑定选中页面",
-            self._on_bind_selected_tm_page,
-            tooltip="绑定下拉框或设置页表格中选中的页面",
-        )
-        self.unbind_page_btn = self._create_tm_ghost_button(
-            "解除绑定",
-            self._on_unbind_current_page,
-            tooltip="解除当前对话的 ChatGPT 页面绑定",
+            tooltip=(
+                "把当前浏览器最近活跃的 ChatGPT 页面绑定到左侧当前本地对话。"
+                "请先切换到目标 ChatGPT 页面，再点击本按钮。"
+            ),
         )
         self.chat_open_bound_btn = self._create_tm_ghost_button(
             "打开绑定页面",
@@ -109,7 +87,10 @@ class UiBuilderMixin:
             "关闭其他 ChatGPT 页面",
             self._on_close_other_tm_pages,
             danger=True,
-            tooltip="关闭除当前绑定页面以外的其他 ChatGPT 页面",
+            tooltip=(
+                "关闭除当前对话绑定页以外的其他在线 ChatGPT 页面；"
+                "如果绑定页离线，将自动取消。"
+            ),
         )
     def _build_tm_action_buttons(
         self, layout, *, include_page_selector=False, include_view_logs=False
@@ -120,9 +101,6 @@ class UiBuilderMixin:
         row1.setSpacing(6)
         for btn in (
             self.open_chatgpt_btn,
-            self.open_new_chat_btn,
-            self.refresh_status_btn,
-            self.reload_bound_page_btn,
         ):
             row1.addWidget(btn)
         if include_view_logs:
@@ -147,7 +125,7 @@ class UiBuilderMixin:
                     QSizePolicy.Expanding, QSizePolicy.Fixed
                 )
                 self.tm_page_combo.setToolTip(
-                    "选择要绑定的在线 ChatGPT 页面（用于「绑定选中页面」）"
+                    "显示当前检测到的 ChatGPT 页面状态（不用于选择绑定目标）"
                 )
             page_label = QLabel("页面")
             page_label.setObjectName("StatusChip")
@@ -172,8 +150,6 @@ class UiBuilderMixin:
             row2.addWidget(self.tm_page_combo, stretch=1)
             for btn in (
                 self.bind_current_page_btn,
-                self.bind_selected_page_btn,
-                self.unbind_page_btn,
                 self.chat_open_bound_btn,
                 self.flash_bound_page_btn,
                 self.sync_web_conversation_btn,
@@ -185,7 +161,6 @@ class UiBuilderMixin:
     def _build_tm_debug_action_buttons(self, layout):
         specs = [
             ("打开 ChatGPT", self._on_open_chatgpt_home, False, "打开 ChatGPT 首页"),
-            ("打开新对话", self._on_open_new_chatgpt_tab, False, "打开新 ChatGPT 标签页"),
             (
                 "打开绑定页面",
                 self._on_open_bound_chatgpt_page,
@@ -204,11 +179,22 @@ class UiBuilderMixin:
                 False,
                 "从绑定的 ChatGPT 网页同步完整对话到当前 GUI",
             ),
-            ("绑定当前页面", self._on_bind_current_page, False, ""),
-            ("绑定选中页面", self._on_bind_selected_tm_page, False, ""),
-            ("解除绑定", self._on_unbind_current_page, False, ""),
+            (
+                "绑定当前页面",
+                self._on_bind_current_page,
+                False,
+                (
+                    "把当前浏览器最近活跃的 ChatGPT 页面绑定到左侧当前本地对话。"
+                    "请先切换到目标 ChatGPT 页面，再点击本按钮。"
+                ),
+            ),
             ("关闭选中页面", self._on_close_selected_tm_page, True, ""),
-            ("关闭其他 ChatGPT 页面", self._on_close_other_tm_pages, True, ""),
+            (
+                "关闭其他 ChatGPT 页面",
+                self._on_close_other_tm_pages,
+                True,
+                "关闭除当前对话绑定页以外的其他在线 ChatGPT 页面；如果绑定页离线，将自动取消。",
+            ),
             ("关闭当前绑定页面", self._on_close_bound_tm_page, True, ""),
         ]
         layout.setSpacing(6)
@@ -221,11 +207,16 @@ class UiBuilderMixin:
     def _tm_page_combo_label(self, item):
         client_id = (item.get("client_id") or "").strip() or "-"
         page_type = (item.get("page_type") or "").strip() or "-"
-        online_tag = "[在线]" if item.get("online") else "[离线]"
+        profile = self._tm_client_sync_profile(item)
+        state_tag_map = {
+            "syncable": "[可同步]",
+            "stale": "[在线不可同步]",
+            "online": "[在线]",
+            "offline": "[离线]",
+        }
+        online_tag = state_tag_map.get(profile.get("state"), "[离线]")
         conv = self._short_conv_id(self._client_conversation_id(item))
-        visibility = (
-            item.get("visibility_state") or item.get("visible") or "-"
-        ).strip()
+        visibility = profile.get("visibility") or "-"
         focus = "yes" if item.get("has_focus") else "no"
         last_focus_ago = self._format_last_seen_ago(item.get("last_focus_at"))
         heartbeat_ago = self._format_last_seen_ago(item.get("last_seen"))
@@ -235,11 +226,17 @@ class UiBuilderMixin:
             f"心跳={heartbeat_ago}"
         )
     def _tm_page_combo_sort_key(self, item):
-        online_rank = 1 if item.get("online") else 0
+        profile = self._tm_client_sync_profile(item)
+        state_rank = {
+            "syncable": 3,
+            "online": 2,
+            "stale": 1,
+            "offline": 0,
+        }.get(profile.get("state"), 0)
         page_type = (item.get("page_type") or "").strip()
         conv_rank = 1 if page_type == "conversation" else 0
         last_seen = float(item.get("last_seen") or 0)
-        return (online_rank, conv_rank, last_seen)
+        return (state_rank, conv_rank, last_seen)
 
     def _tm_page_selector_signature(self, clients):
         rows = []
@@ -1122,6 +1119,15 @@ class UiBuilderMixin:
         self.tm_bound_page_label.setMaximumHeight(24)
         bound_row.addWidget(self.tm_bound_page_label, stretch=1)
         outer.addLayout(bound_row)
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.tm_sync_target_label = ElidedLabel("实际同步目标：-")
+        self.tm_sync_target_label.setObjectName("StatusChip")
+        self.tm_sync_target_label.setFixedHeight(24)
+        self.tm_sync_target_label.setMinimumHeight(24)
+        self.tm_sync_target_label.setMaximumHeight(24)
+        target_row.addWidget(self.tm_sync_target_label, stretch=1)
+        outer.addLayout(target_row)
         self.tm_bind_mismatch_label = ElidedLabel(" ")
         self.tm_bind_mismatch_label.setObjectName("TmBindMismatchHint")
         self.tm_bind_mismatch_label.setFixedHeight(22)

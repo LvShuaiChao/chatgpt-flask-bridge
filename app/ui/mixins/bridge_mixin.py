@@ -13,6 +13,8 @@ from app.models import (
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
+    BIND_STATE_WAITING_HOME,
+    BIND_STATE_WAITING_CONVERSATION_CREATED,
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
@@ -23,9 +25,34 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
 )
 
+# 防御性兜底：避免导入列表改动后运行期出现 NameError。
+if "BIND_STATE_WAITING_HOME" not in globals():
+    BIND_STATE_WAITING_HOME = "WAITING_HOME"
+
 
 class BridgeMixin:
     BRIDGE_STATUS_UI_MIN_INTERVAL_MS = 300
+
+    def _find_session_message_by_id(self, session, message_id):
+        if session is None:
+            return None
+        target_id = (message_id or "").strip()
+        if not target_id:
+            return None
+        for message in session.messages:
+            if (message.message_id or "").strip() == target_id:
+                return message
+        return None
+
+    def _set_user_message_status(self, session, message_id, status):
+        message = self._find_session_message_by_id(session, message_id)
+        if message is None:
+            return False
+        if message.role != "user":
+            return False
+        message.status = (status or "").strip()
+        session.updated_at = time.time()
+        return True
 
     def _debug_status_step(self, text):
         if not getattr(self, "_debug_mode", False):
@@ -167,14 +194,27 @@ class BridgeMixin:
             self._refresh_status_chip(self.tm_online_label, chip_state or "")
         if last_seen is not None or int(summary.get("total_clients") or 0) > 0:
             recent_focus_id = self._recent_focus_home_client_id(status)
+            bound_client_id = (self._session_bound_client_id() or "").strip()
+            if not bound_client_id:
+                bind_detail = "当前对话未绑定页面"
+                bound_state_text = "unbound"
+            else:
+                bound_info = self._client_info_by_id(bound_client_id, status=status)
+                bound_online = bool(bound_info and bound_info.get("online"))
+                if bound_online:
+                    bind_detail = f"绑定 client={bound_client_id}，状态=在线"
+                    bound_state_text = "online"
+                else:
+                    bind_detail = f"绑定 client={bound_client_id}，状态=离线"
+                    bound_state_text = "offline"
             tooltip_lines = [
                 f"最后全局心跳：{last_seen_text}",
                 f"在线 {summary.get('online_clients', 0)} / 总 {summary.get('total_clients', 0)}",
                 f"会话页 {summary.get('online_conversation_clients', 0)} / "
                 f"首页 {summary.get('online_home_clients', 0)}",
                 f"最近焦点首页：{recent_focus_id or '-'}",
-                f"绑定 client={summary.get('bound_client_id') or '-'} "
-                f"在线={summary.get('bound_online')}",
+                f"当前对话绑定：{bind_detail}",
+                f"bound_state={bound_state_text}",
                 f"活跃 client={summary.get('active_client_id') or '-'}",
             ]
             self.tm_online_label.setToolTip("\n".join(tooltip_lines))
@@ -208,6 +248,7 @@ class BridgeMixin:
         self._update_tampermonkey_settings_labels(status)
         self._update_service_settings_status()
         self._refresh_session_list(select_session_id=self._current_session_id)
+        self._recover_stuck_bootstrap_sessions()
         self._debug_status_step("[STATUS_APPLY][STEP] done")
     def _handle_inbound_events(self, items):
         for item in items:
@@ -377,12 +418,27 @@ class BridgeMixin:
                     continue
                 self._ack_success_message_ids.discard(bridge_id)
                 remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                if remote_now.get("bootstrap_in_progress"):
+                bind_state_now = self._remote_bind_state(remote_now)
+                if (
+                    remote_now.get("bootstrap_in_progress")
+                    or bind_state_now == BIND_STATE_WAITING_CONVERSATION_CREATED
+                    or (
+                        bind_state_now == BIND_STATE_PREBOUND_HOME
+                        and not (remote_now.get("conversation_id") or "").strip()
+                    )
+                ):
                     session.remote_chatgpt = {
-                        **remote_now,
-                        "bootstrap_in_progress": False,
+                        **default_remote_chatgpt(),
+                        "bind_state": BIND_STATE_UNBOUND,
                     }
+                    session.updated_at = time.time()
                     self._save_sessions_to_disk()
+                    self._append_log(
+                        "[BIND][BOOTSTRAP_FAILED_RESET] "
+                        f"session_id={session.session_id} "
+                        f"message_id={bridge_id[:8] if bridge_id else '-'} "
+                        f"reason={payload.get('reason') or payload.get('detail') or '-'}"
+                    )
                 detail = (
                     payload.get("detail")
                     or payload.get("reason")
@@ -405,6 +461,26 @@ class BridgeMixin:
                     detail = reason_labels[payload["reason"]]
                 self._set_reply_error(
                     session, turn_id, f"发送失败：{detail}", "发送失败"
+                )
+                target_user = None
+                for message in reversed(session.messages):
+                    if (
+                        message.role == "user"
+                        and (message.turn_id or "").strip() == (turn_id or "").strip()
+                    ):
+                        target_user = message
+                        break
+                if target_user is not None:
+                    target_user.status = "发送失败"
+                    session.updated_at = time.time()
+                    failed_text = (target_user.content or "").strip()
+                    if failed_text and hasattr(self, "message_input"):
+                        self.message_input.setPlainText(failed_text)
+                    elif failed_text and hasattr(self, "message_edit"):
+                        self.message_edit.setPlainText(failed_text)
+                self._add_system_message_once(
+                    "消息发送失败，请检查绑定页面后重试。已将失败消息恢复到输入框。",
+                    dedupe_seconds=10,
                 )
                 self._finalize_bridge(bridge_id)
                 continue
@@ -677,6 +753,7 @@ class BridgeMixin:
             self._add_system_message("请输入要发送的内容。")
             return
         session = self._ensure_current_session()
+        self._recover_stuck_bootstrap_sessions()
         if self._session_has_pending_assistant_reply(session):
             if self._session_has_retryable_unclaimed_bootstrap(session):
                 self._retry_bootstrap_after_claim_timeout(session)
@@ -691,14 +768,46 @@ class BridgeMixin:
             return
 
         if self._bind_each_chat_to_page:
-            reopen_result = self._prepare_bound_conversation_reopen_if_needed(
-                session, content
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bind_state = self._remote_bind_state(remote)
+            has_conversation = bool((remote.get("conversation_id") or "").strip())
+            needs_reopen_wait = (
+                remote.get("enabled")
+                and has_conversation
+                and bind_state not in (BIND_STATE_PREBOUND_HOME, BIND_STATE_WAITING_HOME)
+                and not self._session_has_sendable_bound_page(remote)
             )
-            if reopen_result is False:
-                if self._auto_clear_input_after_send:
-                    self.message_edit.clear()
-                self._apply_chat_bind_visual_state()
-                return
+            if needs_reopen_wait:
+                pending_turn_id = str(uuid.uuid4())
+                pending_user_message = self._append_session_message(
+                    session,
+                    "user",
+                    content,
+                    turn_id=pending_turn_id,
+                    status="等待绑定页上线",
+                )
+                reopen_result = self._prepare_bound_conversation_reopen_if_needed(
+                    session,
+                    content,
+                    user_message_id=pending_user_message.message_id,
+                )
+                if reopen_result is False:
+                    self._refresh_session_list(select_session_id=session.session_id)
+                    self._render_session_chat(session)
+                    self._save_sessions_to_disk()
+                    if self._auto_clear_input_after_send:
+                        self.message_edit.clear()
+                    self._apply_chat_bind_visual_state()
+                    return
+            else:
+                reopen_result = self._prepare_bound_conversation_reopen_if_needed(
+                    session, content
+                )
+                if reopen_result is False:
+                    if self._auto_clear_input_after_send:
+                        self.message_edit.clear()
+                    self._apply_chat_bind_visual_state()
+                    return
 
         if self._bind_each_chat_to_page and self._session_needs_first_message_bind(
             session
@@ -730,16 +839,33 @@ class BridgeMixin:
             return
         self._push_message_text(session, text, from_pending_bootstrap=True)
 
-    def _push_message_text(self, session, content, from_pending_bootstrap=False):
+    def _push_message_text(
+        self,
+        session,
+        content,
+        from_pending_bootstrap=False,
+        reuse_user_message_id="",
+    ):
         raw_user_text = content.strip()
         if not raw_user_text:
             return
         final_prompt = raw_user_text
-        turn_id = str(uuid.uuid4())
-        user_message_id = str(uuid.uuid4())
+        reuse_user_message_id = (reuse_user_message_id or "").strip()
+        existing_user_message = self._find_session_message_by_id(
+            session, reuse_user_message_id
+        )
+        turn_id = (
+            (existing_user_message.turn_id or "").strip()
+            if existing_user_message is not None
+            else ""
+        ) or str(uuid.uuid4())
+        user_message_id = (
+            reuse_user_message_id if existing_user_message is not None else str(uuid.uuid4())
+        )
         assistant_message_id = str(uuid.uuid4())
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
+        is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
         if bind_state == BIND_STATE_PREBOUND_HOME:
             client_id = (
                 remote.get("prebound_home_client_id") or remote.get("client_id") or ""
@@ -793,7 +919,7 @@ class BridgeMixin:
         }
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
-        if bind_state == BIND_STATE_PREBOUND_HOME:
+        if is_bootstrap:
             payload["bootstrap_conversation"] = True
             page_instance_id = (
                 remote.get("prebound_home_page_instance_id")
@@ -806,11 +932,6 @@ class BridgeMixin:
             if bind_request_id:
                 payload["bind_request_id"] = bind_request_id
                 payload["launch_token"] = bind_request_id
-            session.remote_chatgpt = {
-                **remote,
-                "bootstrap_in_progress": True,
-            }
-            self._save_sessions_to_disk()
             self._append_log(
                 f"[发送][BOOTSTRAP] 目标 client_id={target_client_id} "
                 f"page_instance_id={page_instance_id or '-'} "
@@ -856,19 +977,51 @@ class BridgeMixin:
         )
         self._message_to_session[bridge_message_id] = session.session_id
         self._message_to_turn[bridge_message_id] = turn_id
+        if is_bootstrap:
+            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+            target_client = (payload.get("target_client_id") or "").strip()
+            target_instance = (payload.get("target_page_instance_id") or "").strip()
+            session.remote_chatgpt = {
+                **remote_now,
+                "bind_state": BIND_STATE_WAITING_CONVERSATION_CREATED,
+                "bootstrap_in_progress": True,
+                "bootstrap_message_id": bridge_message_id,
+                "bootstrap_started_at": time.time(),
+                "client_id": target_client or (remote_now.get("client_id") or ""),
+                "page_instance_id": target_instance or (remote_now.get("page_instance_id") or ""),
+            }
+            session.updated_at = time.time()
+            self._append_log(
+                "[SEND][BOOTSTRAP_START] "
+                f"session_id={session.session_id} "
+                f"bridge_message_id={bridge_message_id} "
+                f"client_id={target_client or '-'} "
+                f"page_instance_id={target_instance or '-'}"
+            )
+            self._append_log(
+                f"[BIND][WAITING_CONVERSATION_CREATED] session_id={session.session_id} "
+                f"bridge_message_id={bridge_message_id}"
+            )
         if self._auto_name_new_chat and session.title == "新对话":
             session.title = raw_user_text[:20] + (
                 "…" if len(raw_user_text) > 20 else ""
             )
-        self._append_session_message(
-            session,
-            "user",
-            raw_user_text,
-            message_id=user_message_id,
-            turn_id=turn_id,
-            bridge_message_id=bridge_message_id,
-            status="已加入队列",
-        )
+        if existing_user_message is not None:
+            existing_user_message.bridge_message_id = bridge_message_id
+            existing_user_message.turn_id = turn_id
+            existing_user_message.status = "已加入队列"
+            existing_user_message.content = raw_user_text
+            session.updated_at = time.time()
+        else:
+            self._append_session_message(
+                session,
+                "user",
+                raw_user_text,
+                message_id=user_message_id,
+                turn_id=turn_id,
+                bridge_message_id=bridge_message_id,
+                status="已加入队列",
+            )
         if self._show_assistant_placeholder:
             self._append_session_message(
                 session,
@@ -1267,6 +1420,7 @@ class BridgeMixin:
         assistant_message_id = str(uuid.uuid4())
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
+        is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
 
         prereq_ok, prereq_reason = self._check_tm_send_prerequisites(session)
         if not prereq_ok:
@@ -1307,7 +1461,7 @@ class BridgeMixin:
         }
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
-        if bind_state == BIND_STATE_PREBOUND_HOME:
+        if is_bootstrap:
             payload["bootstrap_conversation"] = True
             page_instance_id = (
                 remote.get("prebound_home_page_instance_id")
@@ -1320,11 +1474,6 @@ class BridgeMixin:
             if bind_request_id:
                 payload["bind_request_id"] = bind_request_id
                 payload["launch_token"] = bind_request_id
-            session.remote_chatgpt = {
-                **remote,
-                "bootstrap_in_progress": True,
-            }
-            self._save_sessions_to_disk()
         if target_client_id:
             payload["target_client_id"] = target_client_id
         if target_page_url:
@@ -1361,6 +1510,20 @@ class BridgeMixin:
         )
         self._message_to_session[bridge_message_id] = session.session_id
         self._message_to_turn[bridge_message_id] = turn_id
+        if is_bootstrap:
+            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+            session.remote_chatgpt = {
+                **remote_now,
+                "bind_state": BIND_STATE_WAITING_CONVERSATION_CREATED,
+                "bootstrap_in_progress": True,
+                "bootstrap_message_id": bridge_message_id,
+                "bootstrap_started_at": time.time(),
+                "client_id": (payload.get("target_client_id") or "").strip()
+                or (remote_now.get("client_id") or ""),
+                "page_instance_id": (payload.get("target_page_instance_id") or "").strip()
+                or (remote_now.get("page_instance_id") or ""),
+            }
+            session.updated_at = time.time()
         self._append_session_message(
             session,
             "user",
