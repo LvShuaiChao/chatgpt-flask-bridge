@@ -1,11 +1,14 @@
 import os
+import socket
 import threading
 import time
 import traceback
 import uuid
 from collections import deque
+from pathlib import Path
 from flask import Flask, jsonify, request
 from log_utils import append_log, clear_log_file
+from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
 from flask_cors import CORS
 from werkzeug.serving import make_server
 
@@ -19,6 +22,13 @@ _status_callback = None
 _external_gui_dispatch = None
 _http_server = None
 _server_thread = None
+_server_bind_host = None
+_server_port = None
+_server_public_host = None
+_last_start_result = {}
+FALLBACK_PORTS = [5001, 5055, 8765, 18080, 18765]
+RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
+SERVER_URL_FILE = RUNTIME_DIR / "server_url.txt"
 # 油猴连接状态
 tampermonkey_last_seen = None
 tampermonkey_client_id = None
@@ -28,16 +38,22 @@ bound_session_id = None
 _tampermonkey_clients = {}
 _known_page_instances = set()
 _last_heartbeat_log = {}
+_last_tm_activity_classify_log = {}
+_last_tm_response_state_log = {}
 _poll_summaries = {}
 _last_poll_identity = {}
 _debug_mode = False
 POLL_SUMMARY_INTERVAL_SEC = 10
 API_TOKEN = os.environ.get("CHATGPT_PAGE_BRIDGE_TOKEN", "")
+# 0 = 不强制；N > 0 表示同一 session 已有 N 条用户消息后，下一条自动新建 session
+DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS = 0
 _external_requests = {}
 _bridge_message_to_external = {}
 _session_external_pending = {}
 _pending_gui_actions = {}
 _external_action_lock = threading.Lock()
+# external API 客户端最近一次成功使用的 session_id（按 client_name / remote_addr）
+_external_client_sessions = {}
 
 
 def set_debug_mode(enabled):
@@ -164,9 +180,9 @@ def _now():
     return time.time()
 
 def _format_time(ts):
-    if not ts:
-        return "-"
-    return time.strftime("%H:%M:%S", time.localtime(ts))
+    from app.utils.text_utils import format_ts
+
+    return format_ts(ts)
 
 def is_tampermonkey_online():
     if tampermonkey_last_seen is None:
@@ -266,8 +282,12 @@ def get_tm_online_summary(bound_client_id=None, bound_conversation_id=None):
 
 def _snapshot_clients():
     items = []
+    now = _now()
     for client_id, info in sorted(_tampermonkey_clients.items()):
         last_seen = info.get("last_seen")
+        visibility = (info.get("visibility_state") or "").strip()
+        activity_state = classify_tm_client_activity(info, now=now)
+        _, seen_age, poll_age, _ = compute_tm_activity_metrics(info, now=now)
         items.append(
             {
                 "client_id": client_id,
@@ -279,15 +299,31 @@ def _snapshot_clients():
                 "conversation_id": info.get("conversation_id") or "",
                 "is_top_frame": bool(info.get("is_top_frame", True)),
                 "visibility_state": info.get("visibility_state") or "",
+                "visible": visibility,
                 "has_focus": bool(info.get("has_focus")),
                 "last_focus_at": info.get("last_focus_at"),
                 "pathname": info.get("pathname") or "",
                 "last_seen": last_seen,
+                "last_heartbeat_at": info.get("last_heartbeat_at"),
+                "last_poll_at": info.get("last_poll_at"),
+                "last_claim_at": info.get("last_claim_at"),
+                "last_report_at": info.get("last_report_at"),
+                "activity_state": activity_state,
+                "seen_age_seconds": round(seen_age, 3),
+                "poll_age_seconds": round(poll_age, 3),
                 "online": _client_online(last_seen),
                 "bound_session_id": info.get("bound_session_id") or "",
                 "is_bound": client_id == bound_client_id,
                 "bind_request_id": info.get("bind_request_id") or "",
                 "launch_token": info.get("launch_token") or "",
+                "is_responding": bool(info.get("is_responding", False)),
+                "response_state": info.get("response_state") or "unknown",
+                "response_state_reason": info.get("response_state_reason") or "",
+                "response_state_at": info.get("response_state_at"),
+                "can_accept_input": bool(info.get("can_accept_input", True)),
+                "last_response_state_seen_at": info.get("last_response_state_seen_at"),
+                "response_started_at": info.get("response_started_at"),
+                "response_last_text_changed_at": info.get("response_last_text_changed_at"),
             }
         )
     return items
@@ -296,8 +332,13 @@ def get_bridge_status():
     with _state_lock:
         waiting_acks = [dict(msg) for msg in _outbound_waiting.values()]
         waiting = waiting_acks[0] if waiting_acks else None
+        server_url = get_server_url() if is_server_running() else ""
         return {
             "server_running": is_server_running(),
+            "server_url": server_url,
+            "server_host": get_server_public_host() if is_server_running() else "",
+            "server_port": get_server_port() if is_server_running() else None,
+            "server_bind_host": get_server_bind_host() if is_server_running() else "",
             "tampermonkey_online": is_tampermonkey_online(),
             "tampermonkey_last_seen": tampermonkey_last_seen,
             "tampermonkey_client_id": tampermonkey_client_id,
@@ -333,6 +374,7 @@ def set_bound_client_id(client_id, session_id=None):
 
 def get_bound_client_id():
     """@deprecated 当前推荐使用 GUI 的 session.remote_chatgpt 读取每个对话绑定。"""
+    _log("[DEPRECATED][GET_BOUND_CLIENT] get_bound_client_id called")
     with _state_lock:
         return bound_client_id
 
@@ -463,17 +505,57 @@ def cancel_message(message_id, reason="cancelled"):
     return cancelled
 
 
+def _queue_control_message(command, *, log_label="", **extra):
+    msg = _make_command_message(command, **extra)
+    with _state_lock:
+        _control_queue.append(msg)
+
+    label = log_label or command
+    target_client_id = msg.get("target_client_id") or "-"
+    target_page_url = msg.get("target_page_url") or "-"
+    page_instance = msg.get("target_page_instance_id") or "-"
+    conversation = msg.get("target_conversation_id") or "-"
+    _log(
+        f"[BRIDGE][CONTROL][QUEUE] command={command} "
+        f"message_id={msg['id'][:8]}… "
+        f"target_client_id={target_client_id} "
+        f"target_page_url={target_page_url} "
+        f"page_instance={page_instance} "
+        f"conversation={conversation} "
+        f"label={label}"
+    )
+    _notify_status()
+    return msg
+
+
+def _append_control_messages(msgs, *, log_label="batch", log_detail=""):
+    if not msgs:
+        return []
+    with _state_lock:
+        _control_queue.extend(msgs)
+    count = len(msgs)
+    first_id = (msgs[0].get("id") or "")[:8] or "-"
+    detail = f" {log_detail}" if log_detail else ""
+    _log(
+        f"[BRIDGE][CONTROL][QUEUE] label={log_label} count={count} "
+        f"first_message_id={first_id}…{detail}"
+    )
+    _notify_status()
+    return msgs
+
+
 def push_open_url(url, active=True):
     """GUI：通过油猴在新标签页打开 URL。"""
     url = (url or "").strip()
     if not url:
         raise ValueError("url 不能为空")
-    msg = _make_command_message("open_url", url=url, active=bool(active))
-    with _state_lock:
-        _control_queue.append(msg)
-    _log(f"[命令] open_url 已加入控制队列 ({msg['id'][:8]}…) url={url}")
-    _notify_status()
-    return msg
+
+    return _queue_control_message(
+        "open_url",
+        log_label="open_url",
+        url=url,
+        active=bool(active),
+    )
 
 def _make_command_message(command, **extra):
     msg = {
@@ -499,38 +581,27 @@ def push_close_page(client_id, target_page_url=None):
     client_id = (client_id or "").strip()
     if not client_id:
         raise ValueError("client_id 不能为空")
-    msg = _make_command_message(
+
+    return _queue_control_message(
         "close_self",
+        log_label="close_page",
         target_client_id=client_id,
         target_page_url=(target_page_url or "").strip() or None,
     )
-    with _state_lock:
-        _control_queue.append(msg)
-    _log(
-        f"[命令] close_self 已加入控制队列 ({msg['id'][:8]}…) "
-        f"target_client_id={client_id}"
-    )
-    _notify_status()
-    return msg
+
 
 def push_reload_page(client_id, target_page_url=None):
     """向指定油猴客户端下发刷新当前页面命令。"""
     client_id = (client_id or "").strip()
     if not client_id:
         raise ValueError("client_id 不能为空")
-    msg = _make_command_message(
+
+    return _queue_control_message(
         "reload_self",
+        log_label="reload_page",
         target_client_id=client_id,
         target_page_url=(target_page_url or "").strip() or None,
     )
-    with _state_lock:
-        _control_queue.append(msg)
-    _log(
-        f"[命令] reload_self 已加入控制队列 ({msg['id'][:8]}…) "
-        f"target_client_id={client_id}"
-    )
-    _notify_status()
-    return msg
 
 
 def enqueue_control_command(
@@ -553,75 +624,99 @@ def enqueue_control_command(
         )
         return False
 
-    msg = _make_command_message(
+    _queue_control_message(
         command,
+        log_label=command,
         target_client_id=target_client_id,
         target_page_instance_id=target_page_instance_id or None,
         target_conversation_id=target_conversation_id or None,
         payload=dict(payload or {}),
     )
-
-    with _state_lock:
-        _control_queue.append(msg)
-
-    message_id = msg["id"]
-    _log(
-        f"[BRIDGE][CONTROL][QUEUE] command={command} "
-        f"message_id={message_id[:8]}… target_client={target_client_id} "
-        f"page_instance={target_page_instance_id or '-'} "
-        f"conversation={target_conversation_id or '-'}"
-    )
-    _notify_status()
     return True
+
 
 def push_close_other_pages(except_client_id):
     """关闭除 except_client_id 外所有在线 ChatGPT 页面。"""
     except_client_id = (except_client_id or "").strip()
     msgs = []
     with _state_lock:
-        for client_id, info in _tampermonkey_clients.items():
-            if client_id == except_client_id:
-                continue
-            if not _client_online(info.get("last_seen")):
-                continue
-            msg = _make_command_message(
+        clients_snapshot = list(_tampermonkey_clients.items())
+    for client_id, info in clients_snapshot:
+        if client_id == except_client_id:
+            continue
+        if not _client_online(info.get("last_seen")):
+            continue
+        msgs.append(
+            _make_command_message(
                 "close_self",
                 target_client_id=client_id,
                 target_page_url=info.get("page_url"),
             )
-            _control_queue.append(msg)
-            msgs.append(msg)
-    _log(
-        f"[命令] close_self 批量入队控制队列 {len(msgs)} 条 "
-        f"(保留 client_id={except_client_id or '-'})"
+        )
+    return _append_control_messages(
+        msgs,
+        log_label="close_other",
+        log_detail=f"command=close_self (保留 client_id={except_client_id or '-'})",
     )
-    _notify_status()
-    return msgs
+
 
 def push_close_pages_by_url(url):
     """@deprecated 当前 GUI 优先按 client_id 关闭页面，建议使用 push_close_page(client_id)。"""
-    _log("[DEPRECATED] push_close_pages_by_url called; prefer push_close_page(client_id)")
+    _log(
+        "[DEPRECATED][CLOSE_BY_URL] push_close_pages_by_url called; "
+        "use push_close_page(client_id)"
+    )
     url = (url or "").strip()
     if not url:
         raise ValueError("url 不能为空")
     msgs = []
     with _state_lock:
-        for client_id, info in _tampermonkey_clients.items():
-            page_url = (info.get("page_url") or "").strip()
-            if page_url != url:
-                continue
-            if not _client_online(info.get("last_seen")):
-                continue
-            msg = _make_command_message(
+        clients_snapshot = list(_tampermonkey_clients.items())
+    for client_id, info in clients_snapshot:
+        page_url = (info.get("page_url") or "").strip()
+        if page_url != url:
+            continue
+        if not _client_online(info.get("last_seen")):
+            continue
+        msgs.append(
+            _make_command_message(
                 "close_self",
                 target_client_id=client_id,
                 target_page_url=page_url,
             )
-            _control_queue.append(msg)
-            msgs.append(msg)
-    _log(f"[命令] close_self 按 URL 入队控制队列 {len(msgs)} 条 url={url}")
-    _notify_status()
-    return msgs
+        )
+    return _append_control_messages(
+        msgs,
+        log_label="close_by_url",
+        log_detail=f"command=close_self url={url}",
+    )
+
+
+def _maybe_log_tm_activity_classify(client_id, entry, meta):
+    """在活跃度分类变化时写 [TM_ACTIVITY][CLASSIFY]（调试模式下每次 touch 都写）。"""
+    now = _now()
+    state = classify_tm_client_activity(entry, now=now)
+    _, seen_age, poll_age, _ = compute_tm_activity_metrics(entry, now=now)
+    visible = (entry.get("visibility_state") or meta.get("visibility_state") or "-").strip()
+    focus_b = bool(entry.get("has_focus"))
+    token = (
+        state,
+        int(round(seen_age * 10)) / 10.0,
+        int(round(poll_age * 10)) / 10.0,
+    )
+    prev = _last_tm_activity_classify_log.get(client_id)
+    if prev == token and not _debug_mode:
+        return
+    _last_tm_activity_classify_log[client_id] = token
+    page_type = (entry.get("page_type") or meta.get("page_type") or "-").strip()
+    conversation_id = (entry.get("conversation_id") or meta.get("conversation_id") or "-").strip()
+    _log(
+        f"[TM_ACTIVITY][CLASSIFY] client_id={client_id} "
+        f"page_type={page_type} conversation_id={conversation_id} "
+        f"visible={visible} focus={focus_b} "
+        f"seen_age={seen_age:.3f} poll_age={poll_age:.3f} state={state}"
+    )
+
 
 def _touch_tampermonkey(meta, action="poll"):
     global tampermonkey_last_seen, tampermonkey_client_id, tampermonkey_page_url
@@ -665,10 +760,22 @@ def _touch_tampermonkey(meta, action="poll"):
             "last_focus_at": None,
             "pathname": "",
             "last_seen": None,
+            "last_heartbeat_at": None,
+            "last_poll_at": None,
+            "last_claim_at": None,
+            "last_report_at": None,
             "online": False,
             "bound_session_id": "",
             "bind_request_id": "",
             "launch_token": "",
+            "is_responding": False,
+            "response_state": "unknown",
+            "response_state_reason": "",
+            "response_state_at": None,
+            "can_accept_input": True,
+            "last_response_state_seen_at": None,
+            "response_started_at": None,
+            "response_last_text_changed_at": None,
         },
     )
     entry["client_id"] = client_id
@@ -693,8 +800,36 @@ def _touch_tampermonkey(meta, action="poll"):
     if has_focus:
         entry["last_focus_at"] = now
     entry["pathname"] = (meta.get("pathname") or entry.get("pathname") or "").strip()
+    is_responding = bool(meta.get("is_responding"))
+    response_state = (meta.get("response_state") or "").strip() or entry.get("response_state") or "unknown"
+    response_state_reason = (meta.get("response_state_reason") or "").strip()
+    response_state_at = meta.get("response_state_at") or entry.get("response_state_at")
+    can_accept_input = bool(meta.get("can_accept_input", True))
+    response_started_at = meta.get("response_started_at") or entry.get("response_started_at")
+    response_last_text_changed_at = (
+        meta.get("response_last_text_changed_at")
+        or entry.get("response_last_text_changed_at")
+    )
+    prev_response_state = entry.get("response_state") or "unknown"
+    prev_response_reason = entry.get("response_state_reason") or ""
+    entry["is_responding"] = is_responding
+    entry["response_state"] = response_state
+    entry["response_state_reason"] = response_state_reason
+    entry["response_state_at"] = response_state_at
+    entry["can_accept_input"] = can_accept_input
+    entry["last_response_state_seen_at"] = now
+    entry["response_started_at"] = response_started_at
+    entry["response_last_text_changed_at"] = response_last_text_changed_at
     entry["last_seen"] = now
     entry["online"] = True
+    if action == "poll":
+        entry["last_poll_at"] = now
+        entry["last_heartbeat_at"] = now
+    elif action == "ack":
+        entry["last_heartbeat_at"] = now
+    elif action == "report":
+        entry["last_report_at"] = now
+        entry["last_heartbeat_at"] = now
     if page_url:
         entry["page_url"] = page_url
     if not ignored:
@@ -704,23 +839,50 @@ def _touch_tampermonkey(meta, action="poll"):
     if action == "poll":
         visible = entry.get("visibility_state") or "-"
         focus = "yes" if entry.get("has_focus") else "no"
+        responding = "yes" if entry.get("is_responding") else "no"
+        response_state_txt = entry.get("response_state") or "unknown"
+        input_txt = "yes" if entry.get("can_accept_input", True) else "no"
         state_key = (
-            f"{page_type}|{conversation_id}|{visible}|{focus}|{page_url}"
+            f"{page_type}|{conversation_id}|{visible}|{focus}|{responding}|{response_state_txt}|{input_txt}|{page_url}"
         )
         prev_key = _last_heartbeat_log.get(f"{client_id}:state")
         if _debug_mode:
             _log(
                 f"[TM][HEARTBEAT] client_id={client_id} page_type={page_type or '-'} "
                 f"conversation_id={conversation_id or '-'} visible={visible} "
-                f"focus={focus} url={page_url or '-'}"
+                f"focus={focus} responding={responding} state={response_state_txt} "
+                f"input={input_txt} url={page_url or '-'}"
             )
         elif state_key != prev_key:
             _log(
                 f"[TM][HEARTBEAT] client_id={client_id} page_type={page_type or '-'} "
                 f"conversation_id={conversation_id or '-'} visible={visible} "
-                f"focus={focus} url={page_url or '-'}"
+                f"focus={focus} responding={responding} state={response_state_txt} "
+                f"input={input_txt} url={page_url or '-'}"
             )
             _last_heartbeat_log[f"{client_id}:state"] = state_key
+
+    response_key = (
+        bool(entry.get("is_responding")),
+        entry.get("response_state") or "unknown",
+        entry.get("response_state_reason") or "",
+        bool(entry.get("can_accept_input", True)),
+    )
+    prev_response_key = _last_tm_response_state_log.get(client_id)
+    if response_key != prev_response_key:
+        if prev_response_key is not None:
+            _log(
+                f"[TM_RESPONSE_STATE][CHANGE] client_id={client_id} "
+                f"conversation_id={conversation_id or '-'} "
+                f"old={prev_response_state} new={entry.get('response_state') or 'unknown'} "
+                f"reason={entry.get('response_state_reason') or prev_response_reason or '-'} "
+                f"responding={'yes' if entry.get('is_responding') else 'no'} "
+                f"input={'yes' if entry.get('can_accept_input', True) else 'no'}"
+            )
+        _last_tm_response_state_log[client_id] = response_key
+
+    _maybe_log_tm_activity_classify(client_id, entry, meta)
+
 
 def _add_inbound(
     kind,
@@ -827,11 +989,13 @@ def _message_matches_client(msg, client_id):
     return True
 
 
-def _flash_page_matches(msg, body):
+def _targeted_control_matches(msg, body):
+    """flash_page / sync_conversation：严格匹配 client、page_instance、conversation。"""
     client_id = (body.get("client_id") or "").strip()
     if not _message_matches_client(msg, client_id):
         return False
-    if (msg.get("command") or "").strip() != "flash_page":
+    command = (msg.get("command") or "").strip()
+    if command not in ("flash_page", "sync_conversation"):
         return False
 
     target_page_instance_id = (msg.get("target_page_instance_id") or "").strip()
@@ -938,11 +1102,11 @@ def _pop_control_command_for_client(body):
             _control_queue.append(msg)
         return None
 
-    # 1) flash_page（严格匹配 client / page_instance / conversation）
-    msg = _rotate(lambda m: _flash_page_matches(m, body))
+    # 1) 定向控制命令（flash_page / sync_conversation，严格匹配）
+    msg = _rotate(lambda m: _targeted_control_matches(m, body))
     if msg:
         _log(
-            f"[BRIDGE][CONTROL][CLAIM] command=flash_page "
+            f"[BRIDGE][CONTROL][CLAIM] command={(msg.get('command') or '-')} "
             f"message_id={msg['id'][:8]}… client_id={client_id} "
             f"page_instance_id={(body.get('page_instance_id') or '-')} "
             f"conversation_id={(body.get('conversation_id') or '-')}"
@@ -963,9 +1127,10 @@ def _pop_control_command_for_client(body):
     )
     if msg:
         return msg
-    # 4) 其余控制命令（含 reload_self、批量 close_self 等，不匹配 flash_page）
+    # 4) 其余控制命令（含 reload_self、批量 close_self 等，不匹配定向命令）
     return _rotate(
-        lambda m: (m.get("command") or "").strip() != "flash_page"
+        lambda m: (m.get("command") or "").strip()
+        not in ("flash_page", "sync_conversation")
         and _message_matches_client(m, client_id)
     )
 
@@ -976,6 +1141,9 @@ def _claim_message(msg, client_id):
     msg["delivered_at"] = now
     msg["lease_until"] = now + LEASE_SEC
     _update_external_status_for_bridge(msg.get("id"), "sent")
+    entry = _tampermonkey_clients.get(client_id)
+    if entry is not None:
+        entry["last_claim_at"] = now
     _log(
         f"[BRIDGE][CLAIM] client_id={client_id} message_id={msg['id'][:8]}… "
         f"lease_until={_format_time(msg['lease_until'])}"
@@ -1553,6 +1721,33 @@ def _handle_report(body):
                 "control_done",
                 "command_failed",
             )
+            if event == "conversation_snapshot":
+                session_id = (payload.get("session_id") or "").strip()
+                message_count = len(payload.get("messages") or [])
+                total_text_len = 0
+                for web_msg in payload.get("messages") or []:
+                    if isinstance(web_msg, dict):
+                        total_text_len += len(
+                            str(
+                                web_msg.get("text") or web_msg.get("content") or ""
+                            ).strip()
+                        )
+                _log(
+                    f"[SYNC_CONVERSATION][RECV] session_id={session_id or '-'} "
+                    f"message_id={message_id[:8] if message_id else '?'}… "
+                    f"conversation_id={(payload.get('conversation_id') or '-')} "
+                    f"count={message_count} total_text_len={total_text_len}"
+                )
+                _add_inbound(
+                    event,
+                    payload,
+                    message_id=message_id,
+                    session_id=session_id,
+                    client_id=client_id,
+                )
+                _finalize_control_message(message_id, "replied", None)
+                _notify_status()
+                return {"ok": True}
             if event == "close_page_requested":
                 msg["status"] = "requested"
                 _add_inbound(event, payload, **inbound_kw)
@@ -1582,6 +1777,15 @@ def _handle_report(body):
             text = (payload.get("text") or payload.get("content") or "").strip()
             msg["reply_text"] = text
             _finalize_message(msg, "replied")
+            client_entry = _tampermonkey_clients.get(client_id)
+            if isinstance(client_entry, dict):
+                now = _now()
+                client_entry["is_responding"] = False
+                client_entry["response_state"] = "idle"
+                client_entry["response_state_reason"] = "assistant_reply_received"
+                client_entry["response_state_at"] = int(now * 1000)
+                client_entry["can_accept_input"] = True
+                client_entry["last_response_state_seen_at"] = now
             _log_finalized(msg, message_id, event)
             _add_inbound(event, payload, **inbound_kw)
             _archive_waiting(message_id)
@@ -1856,6 +2060,66 @@ def _get_external_request(request_id):
     return req
 
 
+def count_user_turns(session):
+    """统计 session 中非空用户消息条数（对象或 dict 均兼容）。"""
+    if not session:
+        return 0
+    messages = getattr(session, "messages", None)
+    if messages is None and isinstance(session, dict):
+        messages = session.get("messages") or []
+    messages = messages or []
+    count = 0
+    for message in messages:
+        if isinstance(message, dict):
+            role = message.get("role", "")
+            text = message.get("text") or message.get("content") or ""
+        else:
+            role = getattr(message, "role", "")
+            text = getattr(message, "text", None)
+            if text is None:
+                text = getattr(message, "content", "")
+        if role == "user" and str(text or "").strip():
+            count += 1
+    return count
+
+
+def _parse_force_new_session_after_turns(body):
+    if not isinstance(body, dict):
+        return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS
+    if "force_new_session_after_turns" in body:
+        return int(body.get("force_new_session_after_turns") or 0)
+    return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS
+
+
+def _external_session_meta_from_gui(gui_result):
+    if not isinstance(gui_result, dict):
+        gui_result = {}
+    return {
+        "new_session_created": bool(gui_result.get("new_session_created")),
+        "new_session_reason": (gui_result.get("new_session_reason") or "").strip(),
+        "previous_session_id": (gui_result.get("previous_session_id") or "").strip(),
+        "previous_turn_count": int(gui_result.get("previous_turn_count") or 0),
+        "force_new_session_after_turns": int(
+            gui_result.get("force_new_session_after_turns") or 0
+        ),
+    }
+
+
+def _log_force_new_session_if_needed(body, gui_result):
+    meta = _external_session_meta_from_gui(gui_result)
+    if meta.get("new_session_reason") != "force_new_session_after_turns":
+        return
+    client_name = (body.get("client_name") or "default").strip() or "default"
+    _log(
+        "[EXTERNAL_API][FORCE_NEW_SESSION] "
+        f"client_name={client_name} "
+        f"previous_session_id={meta.get('previous_session_id') or '-'} "
+        f"previous_turn_count={meta.get('previous_turn_count')} "
+        f"limit={meta.get('force_new_session_after_turns')} "
+        f"new_session_id={(gui_result.get('session_id') or '-')}"
+    )
+
+
 def _external_sessions_summary_from_gui():
     result = _dispatch_to_gui("sessions_summary", {}, timeout_sec=5)
     if result.get("ok") and isinstance(result.get("summary"), dict):
@@ -1868,22 +2132,100 @@ def _external_sessions_summary_from_gui():
     }
 
 
+def _external_client_key(body):
+    client_name = (body.get("client_name") or body.get("client_id") or "").strip()
+    if client_name:
+        return client_name
+    try:
+        addr = (request.remote_addr or "").strip()
+    except RuntimeError:
+        addr = ""
+    return addr or "unknown"
+
+
+def _resolve_external_session_for_send(body):
+    """
+    解析外部 API 应使用的 session_id。
+    返回 (session_id, new_session_flag, log_reason)。
+    """
+    new_session = bool(body.get("new_session", False))
+    reuse_last_session = body.get("reuse_last_session", True) is not False
+    session_id = str(body.get("session_id") or "").strip()
+    auto_create_session = bool(body.get("auto_create_session", True))
+    client_key = _external_client_key(body)
+
+    if new_session:
+        return "", True, "new_session_true"
+
+    if session_id:
+        return session_id, False, "client_session_id"
+
+    if reuse_last_session:
+        with _state_lock:
+            last = (_external_client_sessions.get(client_key) or "").strip()
+        if last:
+            return last, False, "reuse_last_session"
+
+    if auto_create_session:
+        return "", False, "no_session_id"
+
+    return "", False, ""
+
+
+def _remember_external_client_session(body, session_id):
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return
+    client_key = _external_client_key(body)
+    with _state_lock:
+        _external_client_sessions[client_key] = session_id
+
+
 def _external_create_chat_send(body):
     text = (body.get("text") or "").strip()
     if not text:
         return None, _external_json_error("text 不能为空", "EMPTY_TEXT", 400)
-    session_id = (body.get("session_id") or "").strip()
+    client_name = (body.get("client_name") or "").strip() or "default"
+    client_key = _external_client_key(body)
     auto_create_session = bool(body.get("auto_create_session", True))
     auto_open_home = bool(body.get("auto_open_home", True))
+    new_session = bool(body.get("new_session", False))
+    reuse_last_session = body.get("reuse_last_session", True) is not False
+    force_new_session_after_turns = _parse_force_new_session_after_turns(body)
     timeout = float(body.get("timeout") or 120)
     if timeout <= 0:
         timeout = 120
+
+    session_id, force_new_session_flag, resolve_reason = _resolve_external_session_for_send(
+        body
+    )
+    if new_session or force_new_session_flag:
+        new_session = True
+        session_id = ""
+        _log(
+            f"[EXTERNAL_API][CREATE_SESSION] client_name={client_key} "
+            f"reason={resolve_reason or 'new_session_true'}"
+        )
+    elif session_id and resolve_reason in ("client_session_id", "reuse_last_session"):
+        _log(
+            f"[EXTERNAL_API][REUSE_SESSION] client_name={client_key} "
+            f"session_id={session_id} reason={resolve_reason}"
+        )
+    elif not session_id and auto_create_session:
+        _log(
+            f"[EXTERNAL_API][CREATE_SESSION] client_name={client_key} "
+            f"reason={resolve_reason or 'no_session_id'}"
+        )
 
     gui_payload = {
         "session_id": session_id,
         "text": text,
         "auto_create_session": auto_create_session,
         "auto_open_home": auto_open_home,
+        "new_session": new_session,
+        "reuse_last_session": reuse_last_session,
+        "client_name": client_name,
+        "force_new_session_after_turns": force_new_session_after_turns,
     }
     gui_result = _dispatch_to_gui("chat_send", gui_payload, timeout_sec=min(60, timeout))
     if not gui_result.get("ok"):
@@ -1899,9 +2241,17 @@ def _external_create_chat_send(body):
         return None, _external_json_error(error, code, status)
 
     session_id = (gui_result.get("session_id") or session_id or "").strip()
+    _remember_external_client_session(body, session_id)
     bridge_message_id = (gui_result.get("bridge_message_id") or "").strip()
     turn_id = (gui_result.get("turn_id") or "").strip()
     pending_home = bool(gui_result.get("pending_home"))
+    session_meta = _external_session_meta_from_gui(gui_result)
+    _log_force_new_session_if_needed(body, gui_result)
+    if pending_home and session_id:
+        _log(
+            f"[EXTERNAL_API][OPEN_HOME] session_id={session_id} "
+            f"reason=no_bound_conversation_and_no_idle_home"
+        )
     request_id = _new_external_request_id()
     initial_status = "waiting" if pending_home else "queued"
     _register_external_request(
@@ -1922,6 +2272,7 @@ def _external_create_chat_send(body):
         "request_id": request_id,
         "session_id": session_id,
         "status": initial_status,
+        **session_meta,
     }, None
 
 
@@ -1931,9 +2282,17 @@ def _require_external_auth():
     return _external_json_error("未授权", "UNAUTHORIZED", 401)
 
 
+def _external_auth_denied():
+    return _require_external_auth()
+
+
+def _external_request_body():
+    return request.get_json(silent=True) or {}
+
+
 @app.route("/api/v1/status", methods=["GET"])
 def api_v1_status():
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
     tm = get_tm_online_summary()
@@ -1944,6 +2303,14 @@ def api_v1_status():
     sessions = _external_sessions_summary_from_gui()
     return _external_json_ok(
         server="running",
+        bridge="ready",
+        bridge_endpoint="/api/bridge",
+        external_api="ready",
+        tampermonkey={
+            "online_clients": tm.get("online_clients", 0),
+            "online_home_clients": tm.get("online_home_clients", 0),
+            "online_conversation_clients": tm.get("online_conversation_clients", 0),
+        },
         tm={
             "online_clients": tm.get("online_clients", 0),
             "online_home_clients": tm.get("online_home_clients", 0),
@@ -1960,10 +2327,10 @@ def api_v1_status():
 
 @app.route("/api/v1/chat/send", methods=["POST"])
 def api_v1_chat_send():
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
-    body = request.get_json(silent=True) or {}
+    body = _external_request_body()
     try:
         result, err_resp = _external_create_chat_send(body)
         if err_resp:
@@ -1972,6 +2339,13 @@ def api_v1_chat_send():
             request_id=result["request_id"],
             session_id=result["session_id"],
             status=result["status"],
+            new_session_created=bool(result.get("new_session_created")),
+            new_session_reason=result.get("new_session_reason") or "",
+            previous_session_id=result.get("previous_session_id") or "",
+            previous_turn_count=int(result.get("previous_turn_count") or 0),
+            force_new_session_after_turns=int(
+                result.get("force_new_session_after_turns") or 0
+            ),
         )
     except Exception as error:
         detail = f"{error}\n{traceback.format_exc()}"
@@ -1981,7 +2355,7 @@ def api_v1_chat_send():
 
 @app.route("/api/v1/chat/result/<request_id>", methods=["GET"])
 def api_v1_chat_result(request_id):
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
     req = _get_external_request(request_id)
@@ -2018,10 +2392,10 @@ def api_v1_chat_result(request_id):
 
 @app.route("/api/v1/chat/ask", methods=["POST"])
 def api_v1_chat_ask():
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
-    body = request.get_json(silent=True) or {}
+    body = _external_request_body()
     text = (body.get("text") or "").strip()
     text_len = len(text)
     try:
@@ -2030,6 +2404,15 @@ def api_v1_chat_ask():
             return err_resp
         request_id = result["request_id"]
         session_id = result["session_id"]
+        ask_session_meta = {
+            "new_session_created": bool(result.get("new_session_created")),
+            "new_session_reason": result.get("new_session_reason") or "",
+            "previous_session_id": result.get("previous_session_id") or "",
+            "previous_turn_count": int(result.get("previous_turn_count") or 0),
+            "force_new_session_after_turns": int(
+                result.get("force_new_session_after_turns") or 0
+            ),
+        }
         timeout = float(body.get("timeout") or 120)
         if timeout <= 0:
             timeout = 120
@@ -2048,6 +2431,7 @@ def api_v1_chat_ask():
                     request_id=request_id,
                     session_id=req.get("session_id") or session_id,
                     reply=req.get("reply") or "",
+                    **ask_session_meta,
                 )
             if status in ("failed", "timeout"):
                 code = "REPLY_TIMEOUT" if status == "timeout" else "INTERNAL_ERROR"
@@ -2091,7 +2475,7 @@ def api_v1_chat_ask():
 
 @app.route("/api/v1/sessions", methods=["GET", "POST"])
 def api_v1_sessions():
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
     if request.method == "GET":
@@ -2105,7 +2489,7 @@ def api_v1_sessions():
         return _external_json_ok(sessions=gui_result.get("sessions") or [])
     gui_result = _dispatch_to_gui(
         "sessions_create",
-        {"title": (request.get_json(silent=True) or {}).get("title") or "新对话"},
+        {"title": _external_request_body().get("title") or "新对话"},
         timeout_sec=10,
     )
     if not gui_result.get("ok"):
@@ -2119,7 +2503,7 @@ def api_v1_sessions():
 
 @app.route("/api/v1/sessions/<session_id>", methods=["GET"])
 def api_v1_session_detail(session_id):
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
     gui_result = _dispatch_to_gui(
@@ -2140,10 +2524,10 @@ def api_v1_session_detail(session_id):
 
 @app.route("/api/v1/sessions/<session_id>/bind", methods=["POST"])
 def api_v1_session_bind(session_id):
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
-    body = request.get_json(silent=True) or {}
+    body = _external_request_body()
     client_id = (body.get("client_id") or "").strip()
     if not client_id:
         return _external_json_error("client_id 不能为空", "EMPTY_TEXT", 400)
@@ -2183,13 +2567,13 @@ def _is_local_remote_addr(remote_addr):
 
 def api_bridge():
     """油猴专用交互接口：poll / ack / report"""
-    denied = _require_external_auth()
+    denied = _external_auth_denied()
     if denied:
         return denied
     source = request.headers.get("X-Request-Source")
     if source != "tampermonkey":
         return jsonify({"ok": False, "error": "需要 X-Request-Source: tampermonkey"}), 403
-    body = request.get_json(silent=True) or {}
+    body = _external_request_body()
     remote_addr = (request.remote_addr or "").strip() or "-"
     if body.get("test_connection"):
         _log(
@@ -2215,6 +2599,12 @@ def api_bridge():
     result["tampermonkey_online"] = True
     return jsonify(result)
 
+@app.route("/health", methods=["GET"])
+def health():
+    """轻量健康检查（无需鉴权），供 bridge_client 等探测。"""
+    return jsonify({"ok": True, "server": "running"})
+
+
 @app.route("/api/status", methods=["GET"])
 
 def api_status():
@@ -2224,7 +2614,10 @@ def api_status():
 
 def process_legacy():
     """@deprecated 旧版接口。当前油猴应使用 /api/bridge。"""
-    _log("[DEPRECATED] /process legacy endpoint was called")
+    _log(
+        "[DEPRECATED][PROCESS_LEGACY] /process was called; "
+        "current client.user.js should use /api/bridge"
+    )
     source = request.headers.get("X-Request-Source")
     if source == "tampermonkey":
         body = request.get_json(silent=True) or {}
@@ -2267,28 +2660,258 @@ def process_legacy():
 def is_server_running():
     return _http_server is not None
 
-def start_server(host="127.0.0.1", port=5000):
+
+def get_server_bind_host():
+    return _server_bind_host or ""
+
+
+def get_server_port():
+    return _server_port
+
+
+def get_server_public_host():
+    if _server_public_host:
+        return _server_public_host
+    bind_host = get_server_bind_host()
+    if bind_host in ("0.0.0.0", "::"):
+        return "127.0.0.1"
+    return bind_host or "127.0.0.1"
+
+
+def get_server_url():
+    port = get_server_port()
+    if not port:
+        return ""
+    return f"http://{get_server_public_host()}:{port}"
+
+
+def get_server_bridge_url():
+    url = get_server_url()
+    if not url:
+        return ""
+    return f"{url}/api/bridge"
+
+
+def get_last_start_result():
+    """@deprecated 启动结果请直接使用 start_server() 返回值。"""
+    _log("[DEPRECATED][LAST_START_RESULT] get_last_start_result called")
+    return dict(_last_start_result)
+
+
+def _public_host_for_bind(bind_host):
+    bind_host = (bind_host or "").strip() or "127.0.0.1"
+    if bind_host in ("0.0.0.0", "::"):
+        return "127.0.0.1"
+    return bind_host
+
+
+def is_port_available(host, port):
+    host = (host or "").strip() or "127.0.0.1"
+    port = int(port)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+        return True, ""
+    except OSError as error:
+        detail = (
+            f"host={host} port={port} "
+            f"errno={getattr(error, 'errno', None)} "
+            f"winerror={getattr(error, 'winerror', None)} "
+            f"error={error}"
+        )
+        return False, detail
+    finally:
+        sock.close()
+
+
+def _format_bind_error_message(error, host, port):
+    winerror = getattr(error, "winerror", None)
+    url = f"http://{_public_host_for_bind(host)}:{int(port)}"
+    if winerror == 10013:
+        return (
+            "服务启动失败：Windows 拒绝绑定该地址或端口。\n"
+            "请检查端口是否被系统保留、防火墙是否拦截、监听地址是否正确。\n"
+            f"当前地址：{url}"
+        )
+    if winerror == 10048:
+        return (
+            "服务启动失败：端口已被占用。\n"
+            "请关闭旧的 GUI.py / python.exe，或更换端口。"
+        )
+    return (
+        f"服务启动失败：{error}\n"
+        f"host={host} port={port} "
+        f"errno={getattr(error, 'errno', None)} "
+        f"winerror={winerror}"
+    )
+
+
+def _log_start_failure(error, host, port):
+    detail = (
+        f"[SERVER][START_FAILED] "
+        f"host={host} port={port} "
+        f"errno={getattr(error, 'errno', None)} "
+        f"winerror={getattr(error, 'winerror', None)} "
+        f"error={error}\n{traceback.format_exc()}"
+    )
+    _log(detail)
+
+
+def _write_server_url_file(url):
+    if not url:
+        return
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        SERVER_URL_FILE.write_text(url.strip() + "\n", encoding="utf-8")
+    except OSError as error:
+        _log(
+            f"[SERVER][URL_FILE] 写入失败 path={SERVER_URL_FILE} "
+            f"errno={getattr(error, 'errno', None)} "
+            f"winerror={getattr(error, 'winerror', None)} error={error}"
+        )
+
+
+def _clear_server_url_file():
+    try:
+        if SERVER_URL_FILE.exists():
+            SERVER_URL_FILE.unlink()
+    except OSError as error:
+        _log(
+            f"[SERVER][URL_FILE] 删除失败 path={SERVER_URL_FILE} "
+            f"errno={getattr(error, 'errno', None)} "
+            f"winerror={getattr(error, 'winerror', None)} error={error}"
+        )
+
+
+def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
     global _http_server, _server_thread
+    global _server_bind_host, _server_port, _server_public_host, _last_start_result
+
+    bind_host = (host or "").strip() or "127.0.0.1"
+    configured_port = int(port)
     if _http_server is not None:
-        return False
-    _http_server = make_server(host, int(port), app, threaded=True)
-    _server_thread = threading.Thread(target=_http_server.serve_forever, daemon=True)
-    _server_thread.start()
-    _log(f"服务已启动：http://{host}:{port}")
-    _log(f"  油猴接口 POST /api/bridge")
-    _log(f"  外部 API GET/POST /api/v1/*")
-    if (API_TOKEN or "").strip():
-        _log(f"  外部 API 鉴权：已启用（CHATGPT_PAGE_BRIDGE_TOKEN）")
-    _notify_status()
-    return True
+        result = {
+            "ok": False,
+            "already_running": True,
+            "message": "服务已经在运行中。",
+            "bind_host": get_server_bind_host(),
+            "host": get_server_public_host(),
+            "port": get_server_port(),
+            "url": get_server_url(),
+        }
+        _last_start_result = result
+        return result
+
+    extra_ports = list(fallback_ports if fallback_ports is not None else FALLBACK_PORTS)
+    candidates = []
+    for candidate in [configured_port, *extra_ports]:
+        if candidate not in candidates:
+            candidates.append(int(candidate))
+
+    failures = []
+    for candidate_port in candidates:
+        available, check_detail = is_port_available(bind_host, candidate_port)
+        _log(
+            f"[SERVER][BIND_CHECK] host={bind_host} port={candidate_port} "
+            f"available={available} reason={check_detail or '-'}"
+        )
+        try:
+            http_server = make_server(bind_host, candidate_port, app, threaded=True)
+        except OSError as error:
+            _log_start_failure(error, bind_host, candidate_port)
+            failures.append(
+                {
+                    "port": candidate_port,
+                    "message": _format_bind_error_message(error, bind_host, candidate_port),
+                    "errno": getattr(error, "errno", None),
+                    "winerror": getattr(error, "winerror", None),
+                }
+            )
+            continue
+
+        _http_server = http_server
+        _server_thread = threading.Thread(
+            target=_http_server.serve_forever, daemon=True
+        )
+        _server_thread.start()
+        _server_bind_host = bind_host
+        _server_port = candidate_port
+        _server_public_host = _public_host_for_bind(bind_host)
+        server_url = get_server_url()
+        bridge_url = get_server_bridge_url()
+
+        if candidate_port != configured_port:
+            _log(
+                f"[SERVER][FALLBACK_PORT] old_port={configured_port} "
+                f"new_port={candidate_port}"
+            )
+        _log(f"[SERVER][STARTED] url={server_url}")
+        _log(f"服务已启动：{server_url}")
+        _log(f"  油猴接口 POST {bridge_url}")
+        _log(f"  外部 API GET/POST /api/v1/*")
+        if (API_TOKEN or "").strip():
+            _log(f"  外部 API 鉴权：已启用（CHATGPT_PAGE_BRIDGE_TOKEN）")
+        _write_server_url_file(server_url)
+
+        result = {
+            "ok": True,
+            "already_running": False,
+            "bind_host": bind_host,
+            "host": _server_public_host,
+            "port": candidate_port,
+            "configured_port": configured_port,
+            "fallback_used": candidate_port != configured_port,
+            "url": server_url,
+            "bridge_url": bridge_url,
+            "message": f"服务已启动：{server_url}",
+        }
+        _last_start_result = result
+        _notify_status()
+        return result
+
+    combined_message = "\n\n".join(item["message"] for item in failures if item.get("message"))
+    if not combined_message:
+        combined_message = (
+            f"服务启动失败：无法在 {bind_host} 上绑定端口 "
+            f"{', '.join(str(p) for p in candidates)}。"
+        )
+    else:
+        combined_message = (
+            "所有候选端口均启动失败。\n" + combined_message
+        )
+
+    result = {
+        "ok": False,
+        "already_running": False,
+        "bind_host": bind_host,
+        "host": _public_host_for_bind(bind_host),
+        "port": None,
+        "configured_port": configured_port,
+        "fallback_used": False,
+        "url": "",
+        "bridge_url": "",
+        "message": combined_message,
+        "failures": failures,
+    }
+    _last_start_result = result
+    _log(f"[SERVER][START_FAILED] all_candidates_exhausted bind_host={bind_host} ports={candidates}")
+    return result
+
 
 def stop_server():
     global _http_server, _server_thread
+    global _server_bind_host, _server_port, _server_public_host, _last_start_result
     if _http_server is None:
         return False
     _http_server.shutdown()
     _http_server = None
     _server_thread = None
+    _server_bind_host = None
+    _server_port = None
+    _server_public_host = None
+    _clear_server_url_file()
+    _last_start_result = {}
     _log("服务已停止")
     _notify_status()
     return True

@@ -1,71 +1,23 @@
-import html
-import json
-import re
-import sys
 import time
-import traceback
-import uuid
-import webbrowser
-from pathlib import Path
-from urllib.parse import urlparse
-
-import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
     ASSISTANT_WAIT_TEXTS,
-    CHATGPT_HOME_URL,
-    DEFAULT_APP_SETTINGS,
-    RUNTIME_DIR,
-    SESSIONS_FILE,
-    SESSIONS_JSON_VERSION,
-    SETTINGS_APP,
-    SETTINGS_ORG,
 )
-from app.models import ChatMessage, ChatSession, default_remote_chatgpt, normalize_remote_chatgpt
-from app.url_utils import parse_conversation_id
-from app.ui.widgets.bridge_notifier import BridgeNotifier
+from app.ui.chat_view_helpers import (
+    capture_scroll_state,
+    create_bubble_row_widget,
+    schedule_scroll_to_bottom,
+    schedule_scroll_to_bottom_if_needed,
+)
 from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
-from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
-from PyQt5.QtWidgets import (
-    QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
-    QMainWindow,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from app.utils.text_utils import format_ts
 
 
 class ChatRenderMixin:
     @staticmethod
     def _format_ts(ts):
-        if not ts:
-            return "-"
-        return time.strftime("%H:%M:%S", time.localtime(ts))
+        return format_ts(ts)
     def _format_message_ts(self, created_at):
         if not self._show_timestamp:
             return ""
@@ -86,14 +38,7 @@ class ChatRenderMixin:
             index += 1
         self._reply_bubbles_by_message_id.clear()
         self._user_bubbles_by_message_id.clear()
-    def _session_has_chat_messages(self, session=None):
-        session = session or self._current_session()
-        if not session:
-            return False
-        for message in session.messages:
-            if message.visible_in_chat and message.role in ("user", "assistant"):
-                return True
-        return False
+
     def _update_chat_empty_state(self, session=None):
         if not hasattr(self, "empty_state_widget"):
             return
@@ -112,7 +57,9 @@ class ChatRenderMixin:
             ))
         return tuple(rows)
 
-    def _render_session_chat(self, session):
+    def _render_session_chat(self, session, *, force_bottom=False):
+        scroll_state = capture_scroll_state(self.chat_scroll)
+
         self._clear_chat_widgets()
         for message in session.messages:
             if not message.visible_in_chat:
@@ -120,7 +67,10 @@ class ChatRenderMixin:
             self._add_bubble_from_message(message, register_only=False)
         self._update_chat_empty_state(session)
         self._last_rendered_chat_signature = self._session_chat_render_signature(session)
-        self._scroll_to_bottom()
+        self._scroll_to_bottom_if_user_was_near_bottom(
+            scroll_state,
+            force_bottom=force_bottom,
+        )
 
     def _update_existing_reply_bubble(self, message):
         if not message or not message.message_id:
@@ -145,24 +95,7 @@ class ChatRenderMixin:
                 message.status,
                 body_pt=self._chat_font_pt,
             )
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
-        if message.role == "user":
-            row_layout.addStretch()
-            row_layout.addWidget(bubble)
-        elif message.role == "system":
-            row_layout.addStretch()
-            row_layout.addWidget(bubble)
-            row_layout.addStretch()
-        elif message.role == "error":
-            row_layout.addStretch()
-            row_layout.addWidget(bubble)
-            row_layout.addStretch()
-        else:
-            row_layout.addWidget(bubble)
-            row_layout.addStretch()
+        row = create_bubble_row_widget(bubble, message.role, spacing=8)
         insert_index = max(0, self.chat_list_layout.count() - 1)
         self.chat_list_layout.insertWidget(insert_index, row)
         if message.message_id:
@@ -177,17 +110,24 @@ class ChatRenderMixin:
         session = self._ensure_current_session()
         self._append_session_message(session, "system", text)
         if session.session_id == self._current_session_id:
+            scroll_state = capture_scroll_state(self.chat_scroll)
             self._add_bubble_from_message(session.messages[-1])
-            self._scroll_to_bottom()
+            self._scroll_to_bottom_if_user_was_near_bottom(scroll_state)
         self._refresh_session_list(select_session_id=session.session_id)
         self._save_sessions_to_disk()
     def _scroll_to_bottom(self):
-        if not self._auto_scroll_to_bottom:
-            return
-        QTimer.singleShot(0, self._do_scroll_to_bottom)
-    def _do_scroll_to_bottom(self):
-        bar = self.chat_scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        schedule_scroll_to_bottom(
+            self.chat_scroll,
+            enabled=self._auto_scroll_to_bottom,
+        )
+
+    def _scroll_to_bottom_if_user_was_near_bottom(self, scroll_state, *, force_bottom=False):
+        schedule_scroll_to_bottom_if_needed(
+            self.chat_scroll,
+            scroll_state,
+            enabled=self._auto_scroll_to_bottom,
+            force_bottom=force_bottom,
+        )
     def _last_assistant_text(self, session=None):
         session = session or self._current_session()
         if not session:
@@ -222,26 +162,10 @@ class ChatRenderMixin:
             target.role = "error"
         session.updated_at = time.time()
         return True
-    def _apply_session_change(self, session_id, *, force_full_render=False):
-        session = self._sessions.get(session_id)
-        if not session:
-            return
-        self._refresh_session_list(select_session_id=self._current_session_id)
-        if session_id == self._current_session_id:
-            sig = self._session_chat_render_signature(session)
-            if (
-                not force_full_render
-                and getattr(self, "_last_rendered_chat_signature", None) == sig
-                and self._reply_bubbles_by_message_id
-            ):
-                pass
-            else:
-                self._render_session_chat(session)
-        else:
-            self._mark_session_pending(session_id)
-        self._save_sessions_to_disk()
 
     def _apply_reply_ui_change(self, session, target):
+        scroll_state = capture_scroll_state(self.chat_scroll)
+
         if session.session_id == self._current_session_id:
             updated = self._update_existing_reply_bubble(target)
             if not updated:
@@ -249,9 +173,10 @@ class ChatRenderMixin:
             else:
                 sig = self._session_chat_render_signature(session)
                 self._last_rendered_chat_signature = sig
-                self._scroll_to_bottom()
+                self._scroll_to_bottom_if_user_was_near_bottom(scroll_state)
         else:
             self._mark_session_pending(session.session_id)
+
         self._refresh_session_list(select_session_id=self._current_session_id)
         self._save_sessions_to_disk()
 

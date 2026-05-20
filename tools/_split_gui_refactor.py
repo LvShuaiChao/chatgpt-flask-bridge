@@ -380,7 +380,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
+from log_utils import append_log, clear_log_file, get_log_file_path
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,

@@ -18,10 +18,89 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin
 
 import requests
+
+DEFAULT_CLIENT_NAME = "bridge_client"
+DEFAULT_BASE_URL = "http://127.0.0.1:5000"
+RUNTIME_SERVER_URL_FILE = (
+    Path(__file__).resolve().parent / "runtime" / "server_url.txt"
+)
+
+HEALTH_ENDPOINTS = (
+    "/api/v1/status",
+    "/api/status",
+    "/health",
+)
+
+# 0 = 不强制新建；N > 0 表示连续 N 条用户消息后下一条自动新建 GUI/ChatGPT 会话
+FORCE_NEW_SESSION_AFTER_TURNS = 0
+
+
+def resolve_default_base_url() -> str:
+    env_url = (os.environ.get("CHATGPT_PAGE_BRIDGE_URL") or "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    try:
+        if RUNTIME_SERVER_URL_FILE.is_file():
+            file_url = RUNTIME_SERVER_URL_FILE.read_text(encoding="utf-8").strip()
+            if file_url:
+                return file_url.rstrip("/")
+    except OSError as error:
+        print(
+            f"[CLIENT][CONFIG] 读取 {RUNTIME_SERVER_URL_FILE} 失败：{error}",
+            file=sys.stderr,
+        )
+    return DEFAULT_BASE_URL
+
+
+def format_connection_help(base_url: str) -> str:
+    status_url = f"{base_url.rstrip('/')}/api/v1/status"
+    runtime_hint = ""
+    if RUNTIME_SERVER_URL_FILE.is_file():
+        runtime_hint = (
+            f"\nGUI 最近一次启动地址见：{RUNTIME_SERVER_URL_FILE}"
+        )
+    return (
+        f"无法访问 {status_url}\n"
+        "请确认 GUI 已启动，并在「设置 → 服务设置」中查看实际服务端口。\n"
+        "若 GUI 自动切换到了备用端口（如 8765），请把客户端地址改为该端口，例如：\n"
+        "  python bridge_client.py --url http://127.0.0.1:8765\n"
+        "或设置环境变量 CHATGPT_PAGE_BRIDGE_URL。"
+        f"{runtime_hint}"
+    )
+
+
+@dataclass
+class ConnectionDiagnostics:
+    """启动时连接探测结果。"""
+
+    health_ok: bool = False
+    health_endpoint: str = ""
+    bridge_ok: bool = False
+    chat_api_ok: bool = False
+    external_v1: bool = False
+    tm_online_clients: int = 0
+    messages: list[str] = field(default_factory=list)
+
+    def summary_lines(self) -> list[str]:
+        health_text = "通过" if self.health_ok else "失败"
+        if self.health_ok and self.health_endpoint:
+            health_text = f"{health_text} ({self.health_endpoint})"
+        bridge_text = "可用" if self.bridge_ok else "不可用"
+        chat_text = "可用" if self.chat_api_ok else "未实现/不可用"
+        lines = [
+            f"健康检查: {health_text}",
+            f"油猴桥接 /api/bridge: {bridge_text}",
+            f"外部聊天 API /api/v1/chat/ask: {chat_text}",
+            f"油猴客户端: 在线 {self.tm_online_clients} 个",
+        ]
+        lines.extend(self.messages)
+        return lines
 
 
 class BridgeApiError(RuntimeError):
@@ -46,25 +125,273 @@ class BridgeClient:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:5000",
+        base_url: Optional[str] = None,
         token: Optional[str] = None,
         *,
         default_timeout: float = 120,
         http_timeout: float = 150,
         poll_interval: float = 0.2,
     ):
-        self.base_url = (base_url or "http://127.0.0.1:5000").rstrip("/")
+        self.base_url = (base_url or resolve_default_base_url()).rstrip("/")
         self.token = (token if token is not None else os.environ.get("CHATGPT_PAGE_BRIDGE_TOKEN", "")).strip()
         self.default_timeout = float(default_timeout)
         self.http_timeout = float(http_timeout)
         self.poll_interval = float(poll_interval)
         self._session = requests.Session()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, include_json: bool = False) -> dict[str, str]:
         headers = {"Accept": "application/json"}
+        if include_json:
+            headers["Content-Type"] = "application/json"
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+            headers["X-API-Key"] = self.token
         return headers
+
+    @staticmethod
+    def _health_payload_ok(data: dict[str, Any]) -> bool:
+        if data.get("ok") is True:
+            return True
+        if data.get("server_running") is True:
+            return True
+        if (data.get("server") or "").strip().lower() == "running":
+            return True
+        return False
+
+    @staticmethod
+    def _tm_online_count(data: dict[str, Any]) -> int:
+        tm = data.get("tm") or data.get("tampermonkey") or data.get("tm_online_summary") or {}
+        if isinstance(tm, dict):
+            return int(tm.get("online_clients") or 0)
+        return 0
+
+    def _probe_get_health(self, path: str, timeout: float = 5) -> tuple[bool, dict[str, Any], str]:
+        url = self._url(path)
+        try:
+            response = self._session.get(
+                url,
+                headers=self._headers(),
+                timeout=timeout,
+            )
+        except requests.RequestException as error:
+            print(f"[CLIENT][CHECK][ERROR] {url} -> {error}", file=sys.stderr)
+            return False, {}, str(error)
+
+        text_preview = (response.text or "")[:200]
+        try:
+            data = response.json()
+        except ValueError as error:
+            print(
+                f"[CLIENT][CHECK][ERROR] {url} JSON 解析失败：{error}；"
+                f"HTTP {response.status_code} body={text_preview}",
+                file=sys.stderr,
+            )
+            return False, {}, str(error)
+
+        if not isinstance(data, dict):
+            print(
+                f"[CLIENT][CHECK][WARN] {url} 响应不是对象：HTTP {response.status_code} {text_preview}",
+                file=sys.stderr,
+            )
+            return False, {}, "响应格式异常"
+
+        if response.status_code == 401:
+            print(
+                f"[CLIENT][CHECK][WARN] {url} HTTP 401 未授权：{text_preview}",
+                file=sys.stderr,
+            )
+            return False, data, "未授权"
+
+        if response.status_code != 200:
+            print(
+                f"[CLIENT][CHECK][WARN] {url} HTTP {response.status_code}: {text_preview}",
+                file=sys.stderr,
+            )
+            return False, data, f"HTTP {response.status_code}"
+
+        if not self._health_payload_ok(data):
+            print(
+                f"[CLIENT][CHECK][WARN] {url} 未通过健康判定：{data}",
+                file=sys.stderr,
+            )
+            return False, data, "健康检查未通过"
+
+        print(f"[CLIENT][CHECK] 服务可用：{url}", file=sys.stderr)
+        return True, data, ""
+
+    def _probe_bridge(self, timeout: float = 5) -> tuple[bool, dict[str, Any]]:
+        url = self._url("/api/bridge")
+        payload = {
+            "action": "poll",
+            "client_id": "bridge-client-probe",
+            "test_connection": True,
+        }
+        headers = self._headers(include_json=True)
+        headers["X-Request-Source"] = "tampermonkey"
+        try:
+            response = self._session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+        except requests.RequestException as error:
+            print(f"[CLIENT][CHECK][ERROR] {url} -> {error}", file=sys.stderr)
+            return False, {}
+
+        text_preview = (response.text or "")[:200]
+        try:
+            data = response.json()
+        except ValueError as error:
+            print(
+                f"[CLIENT][CHECK][ERROR] {url} JSON 解析失败：{error}；"
+                f"HTTP {response.status_code} body={text_preview}",
+                file=sys.stderr,
+            )
+            return False, {}
+
+        if response.status_code == 401:
+            print(f"[CLIENT][CHECK][WARN] {url} HTTP 401：{text_preview}", file=sys.stderr)
+            return False, data if isinstance(data, dict) else {}
+
+        if response.status_code != 200:
+            print(
+                f"[CLIENT][CHECK][WARN] {url} HTTP {response.status_code}: {text_preview}",
+                file=sys.stderr,
+            )
+            return False, data if isinstance(data, dict) else {}
+
+        if not isinstance(data, dict):
+            print(f"[CLIENT][CHECK][WARN] {url} 响应不是对象", file=sys.stderr)
+            return False, {}
+
+        print(f"[CLIENT][CHECK] 油猴桥接可用：{url}", file=sys.stderr)
+        return True, data
+
+    def check_chat_api(self, timeout: float = 8) -> tuple[bool, str]:
+        """探测 POST /api/v1/chat/ask 是否存在（不要求真正发送成功）。"""
+        url = self._url("/api/v1/chat/ask")
+        payload = {
+            "text": "__ping__",
+            "auto_create_session": False,
+            "auto_open_home": False,
+            "timeout": 5,
+        }
+        try:
+            response = self._session.post(
+                url,
+                json=payload,
+                headers=self._headers(include_json=True),
+                timeout=timeout,
+            )
+        except requests.RequestException as error:
+            print(f"[CLIENT][CHAT_API][ERROR] {url} -> {error}", file=sys.stderr)
+            return False, f"无法访问聊天接口：{error}"
+
+        text_preview = (response.text or "")[:200]
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+
+        if response.status_code == 404:
+            if isinstance(body, dict) and (
+                "ok" in body or body.get("code") or body.get("error")
+            ):
+                code = str(body.get("code") or "")
+                print(
+                    f"[CLIENT][CHAT_API] 接口存在（HTTP 404 业务响应 code={code}）",
+                    file=sys.stderr,
+                )
+                return True, ""
+
+            print(
+                "[CLIENT][CHAT_API] /api/v1/chat/ask 路由不存在（HTTP 404 HTML），"
+                "请完全退出 GUI 后重新启动以加载最新 server.py",
+                file=sys.stderr,
+            )
+            return False, "外部聊天接口 /api/v1/chat/ask 不存在（路由 404）。"
+
+        if response.status_code == 401:
+            print(f"[CLIENT][CHAT_API][WARN] {url} HTTP 401：{text_preview}", file=sys.stderr)
+            return False, "聊天接口鉴权失败，请设置 --token 或 CHATGPT_PAGE_BRIDGE_TOKEN。"
+
+        if response.status_code in (200, 400, 409, 503):
+            print(f"[CLIENT][CHAT_API] 接口存在：{url} HTTP {response.status_code}", file=sys.stderr)
+            return True, ""
+
+        if isinstance(body, dict) and ("ok" in body or body.get("code")):
+            print(
+                f"[CLIENT][CHAT_API] 接口存在：{url} HTTP {response.status_code} "
+                f"code={body.get('code')}",
+                file=sys.stderr,
+            )
+            return True, ""
+
+        print(
+            f"[CLIENT][CHAT_API][WARN] {url} HTTP {response.status_code}: {text_preview}",
+            file=sys.stderr,
+        )
+        return False, f"聊天接口异常：HTTP {response.status_code}"
+
+    def diagnose_connection(self) -> ConnectionDiagnostics:
+        diag = ConnectionDiagnostics()
+
+        for path in HEALTH_ENDPOINTS:
+            ok, data, _reason = self._probe_get_health(path)
+            if ok:
+                diag.health_ok = True
+                diag.health_endpoint = path
+                diag.tm_online_clients = max(
+                    diag.tm_online_clients,
+                    self._tm_online_count(data),
+                )
+                if path == "/api/v1/status":
+                    diag.external_v1 = True
+                break
+
+        bridge_ok, bridge_data = self._probe_bridge()
+        diag.bridge_ok = bridge_ok
+        if bridge_ok and not diag.health_ok:
+            diag.health_ok = True
+            diag.health_endpoint = "/api/bridge"
+            diag.messages.append(
+                "已通过 POST /api/bridge 确认服务运行（油猴桥接接口正常）。"
+            )
+        if bridge_ok and diag.tm_online_clients == 0:
+            if bridge_data.get("tampermonkey_online"):
+                diag.tm_online_clients = 1
+
+        if diag.health_ok and diag.external_v1:
+            chat_ok, chat_reason = self.check_chat_api()
+            diag.chat_api_ok = chat_ok
+            if not chat_ok and chat_reason:
+                diag.messages.append(chat_reason)
+        elif diag.health_ok and not diag.external_v1:
+            chat_ok, chat_reason = self.check_chat_api()
+            if chat_ok:
+                diag.chat_api_ok = True
+                diag.external_v1 = True
+            else:
+                diag.chat_api_ok = False
+                diag.messages.append(
+                    "服务已连接（旧版 /api/status 或 /health），但外部 API /api/v1 不可用。"
+                )
+                diag.messages.append(
+                    "请完全退出 GUI 后重新运行 python gui.py，以加载含 /api/v1/* 的最新 server.py。"
+                )
+                if chat_reason:
+                    diag.messages.append(chat_reason)
+        elif not diag.health_ok:
+            diag.messages.append(format_connection_help(self.base_url))
+
+        if diag.health_ok and diag.external_v1 and diag.chat_api_ok:
+            if diag.tm_online_clients == 0:
+                diag.messages.append(
+                    "提示：当前没有在线油猴页面，发送消息前请打开 ChatGPT 并确认脚本已启用。"
+                )
+
+        return diag
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -182,49 +509,13 @@ class BridgeClient:
         }
 
     def check_connection(self) -> tuple[bool, str]:
-        """
-        检查桥接服务是否可达。
-
-        返回 (是否可用, 说明)。旧版仅含 /api/status 时也算“可达”，但会提示需重启 GUI。
-        """
-        try:
-            self._request("GET", "/api/v1/status", timeout=10)
-            return True, "已连接，外部 API /api/v1 可用。"
-        except BridgeApiError as error:
-            if error.status_code == 401:
-                return (
-                    False,
-                    f"鉴权失败：{error}\n"
-                    "请在客户端设置 --token 或环境变量 CHATGPT_PAGE_BRIDGE_TOKEN。",
-                )
-            if error.status_code not in (404,):
-                return False, f"无法连接服务：{error}"
-
-        try:
-            legacy = self._get_legacy_health()
-        except BridgeApiError as error:
-            return (
-                False,
-                f"无法连接 {self.base_url}：{error}\n"
-                "请确认 GUI 已启动，并在「设置 → 服务设置」中点击「启动服务」。",
-            )
-
-        if not legacy.get("server_running"):
-            return (
-                False,
-                f"已访问 {self.base_url}，但桥接服务未运行（server_running=false）。\n"
-                "请在 GUI「设置 → 服务设置」中点击「启动服务」。",
-            )
-
-        tm_online = legacy.get("tampermonkey_online")
-        lines = [
-            f"已连接基础服务（{self.base_url}/api/status）。",
-            "当前运行的 GUI 服务较旧，缺少外部 API /api/v1/*。",
-            "请完全退出 GUI 后重新运行 python gui.py，再使用本客户端发送消息。",
-        ]
-        if tm_online is False:
-            lines.append("提示：油猴当前显示为离线，请打开 ChatGPT 页面并确认脚本已启用。")
-        return True, "\n".join(lines)
+        """检查服务是否可达；返回 (可否继续, 说明文本)。"""
+        diag = self.diagnose_connection()
+        if not diag.health_ok:
+            return False, "\n".join(diag.summary_lines())
+        if not diag.chat_api_ok:
+            return False, "\n".join(diag.summary_lines())
+        return True, "\n".join(diag.summary_lines())
 
     def status(self) -> dict[str, Any]:
         """GET /api/v1/status；旧服务自动回退到 /api/status。"""
@@ -236,6 +527,41 @@ class BridgeClient:
             legacy = self._get_legacy_health()
             return self._normalize_legacy_status(legacy)
 
+    def _chat_ask_payload(
+        self,
+        text: str,
+        *,
+        session_id: str = "",
+        auto_create_session: bool = True,
+        auto_open_home: bool = True,
+        new_session: bool = False,
+        reuse_last_session: bool = True,
+        force_new_session_after_turns: Optional[int] = None,
+        timeout: Optional[float] = None,
+        client_name: str = DEFAULT_CLIENT_NAME,
+    ) -> dict[str, Any]:
+        timeout = self.default_timeout if timeout is None else float(timeout)
+        if force_new_session_after_turns is None:
+            force_new_session_after_turns = FORCE_NEW_SESSION_AFTER_TURNS
+        if new_session:
+            print("[CLIENT][NEW_SESSION_REQUEST]", file=sys.stderr)
+        elif session_id:
+            print(
+                f"[CLIENT][REUSE_SESSION] session_id={session_id}",
+                file=sys.stderr,
+            )
+        return {
+            "text": text,
+            "session_id": session_id or "",
+            "auto_create_session": auto_create_session,
+            "auto_open_home": auto_open_home,
+            "new_session": new_session,
+            "reuse_last_session": reuse_last_session,
+            "force_new_session_after_turns": int(force_new_session_after_turns or 0),
+            "timeout": timeout,
+            "client_name": client_name,
+        }
+
     def ask(
         self,
         text: str,
@@ -243,26 +569,37 @@ class BridgeClient:
         session_id: str = "",
         auto_create_session: bool = True,
         auto_open_home: bool = True,
+        new_session: bool = False,
+        reuse_last_session: bool = True,
+        force_new_session_after_turns: Optional[int] = None,
         timeout: Optional[float] = None,
-    ) -> str:
+        client_name: str = DEFAULT_CLIENT_NAME,
+        return_meta: bool = False,
+    ) -> str | dict[str, Any]:
         """
         POST /api/v1/chat/ask — 同步发送并等待回复。
 
-        返回 assistant 回复文本。
+        返回 assistant 回复文本；return_meta=True 时返回完整响应 dict。
         """
         timeout = self.default_timeout if timeout is None else float(timeout)
         data = self._request(
             "POST",
             "/api/v1/chat/ask",
-            json_body={
-                "text": text,
-                "session_id": session_id,
-                "auto_create_session": auto_create_session,
-                "auto_open_home": auto_open_home,
-                "timeout": timeout,
-            },
+            json_body=self._chat_ask_payload(
+                text,
+                session_id=session_id,
+                auto_create_session=auto_create_session,
+                auto_open_home=auto_open_home,
+                new_session=new_session,
+                reuse_last_session=reuse_last_session,
+                force_new_session_after_turns=force_new_session_after_turns,
+                timeout=timeout,
+                client_name=client_name,
+            ),
             timeout=timeout + 30,
         )
+        if return_meta:
+            return data
         return str(data.get("reply") or "")
 
     def send(
@@ -272,7 +609,11 @@ class BridgeClient:
         session_id: str = "",
         auto_create_session: bool = True,
         auto_open_home: bool = True,
+        new_session: bool = False,
+        reuse_last_session: bool = True,
+        force_new_session_after_turns: Optional[int] = None,
         timeout: Optional[float] = None,
+        client_name: str = DEFAULT_CLIENT_NAME,
     ) -> dict[str, Any]:
         """
         POST /api/v1/chat/send — 异步发送。
@@ -283,13 +624,17 @@ class BridgeClient:
         return self._request(
             "POST",
             "/api/v1/chat/send",
-            json_body={
-                "text": text,
-                "session_id": session_id,
-                "auto_create_session": auto_create_session,
-                "auto_open_home": auto_open_home,
-                "timeout": timeout,
-            },
+            json_body=self._chat_ask_payload(
+                text,
+                session_id=session_id,
+                auto_create_session=auto_create_session,
+                auto_open_home=auto_open_home,
+                new_session=new_session,
+                reuse_last_session=reuse_last_session,
+                force_new_session_after_turns=force_new_session_after_turns,
+                timeout=timeout,
+                client_name=client_name,
+            ),
             timeout=60,
         )
 
@@ -350,7 +695,11 @@ class BridgeClient:
         session_id: str = "",
         auto_create_session: bool = True,
         auto_open_home: bool = True,
+        new_session: bool = False,
+        reuse_last_session: bool = True,
+        force_new_session_after_turns: Optional[int] = None,
         timeout: Optional[float] = None,
+        client_name: str = DEFAULT_CLIENT_NAME,
     ) -> str:
         """异步 send + 本地轮询 wait_result。"""
         sent = self.send(
@@ -358,7 +707,11 @@ class BridgeClient:
             session_id=session_id,
             auto_create_session=auto_create_session,
             auto_open_home=auto_open_home,
+            new_session=new_session,
+            reuse_last_session=reuse_last_session,
+            force_new_session_after_turns=force_new_session_after_turns,
             timeout=timeout,
+            client_name=client_name,
         )
         request_id = str(sent.get("request_id") or "")
         if not request_id:
@@ -415,9 +768,8 @@ class BridgeClient:
         return dict(session) if isinstance(session, dict) else {}
 
     def ping(self) -> bool:
-        """检查服务是否可达（含旧版仅 /api/status 的服务）。"""
-        ok, _message = self.check_connection()
-        return ok
+        """基础健康检查是否通过（不要求聊天 API）。"""
+        return self.diagnose_connection().health_ok
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -432,8 +784,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--url",
-        default=os.environ.get("CHATGPT_PAGE_BRIDGE_URL", "http://127.0.0.1:5000"),
-        help="桥接服务地址",
+        default=resolve_default_base_url(),
+        help="桥接服务地址（默认读 CHATGPT_PAGE_BRIDGE_URL 或 runtime/server_url.txt）",
     )
     parser.add_argument(
         "--token",
@@ -443,7 +795,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session",
         default="",
-        help="指定 session_id；默认自动创建新会话",
+        help="指定初始 session_id（交互模式会复用并在首条消息后更新）",
+    )
+    parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="本条消息强制新建 GUI 会话与 ChatGPT 对话",
     )
     parser.add_argument(
         "--timeout",
@@ -521,27 +878,95 @@ def _print_bridge_sessions(client: BridgeClient) -> None:
         print(f"{sid}…  {title}  [{bind_state}]")
 
 
-def _ask_once_cli(client: BridgeClient, text: str, args: argparse.Namespace) -> str:
+def _apply_ask_session_meta(
+    data: dict[str, Any],
+    *,
+    current_session_id: Optional[str],
+    current_session_turn_count: int,
+) -> tuple[Optional[str], int]:
+    """根据 ask 响应更新本地 session 与轮数。"""
+    new_sid = (data.get("session_id") or "").strip() or None
+    if data.get("new_session_created"):
+        reason = (data.get("new_session_reason") or "").strip()
+        limit = int(data.get("force_new_session_after_turns") or 0)
+        if reason == "force_new_session_after_turns" and limit > 0:
+            print(
+                f"已达到 {limit} 条消息上限，服务端已自动创建新会话：{new_sid or '-'}",
+                file=sys.stderr,
+            )
+        if new_sid and new_sid != (current_session_id or ""):
+            return new_sid, 1
+    if new_sid and new_sid != (current_session_id or ""):
+        return new_sid, 1
+    if new_sid:
+        return new_sid, current_session_turn_count + 1
+    return current_session_id, current_session_turn_count + 1
+
+
+def _ask_once_cli(
+    client: BridgeClient,
+    text: str,
+    args: argparse.Namespace,
+    *,
+    session_id: str = "",
+    new_session: bool = False,
+) -> tuple[str, str]:
+    sid = (session_id or args.session or "").strip()
+    use_new = new_session or bool(getattr(args, "new_session", False))
     kwargs = {
-        "session_id": args.session,
-        "auto_create_session": not args.session,
+        "session_id": sid,
+        "auto_create_session": True,
         "auto_open_home": not args.no_open_home,
+        "new_session": use_new,
+        "reuse_last_session": not use_new,
         "timeout": args.timeout,
     }
+    print(
+        f"[CLIENT][SESSION] current_session_id={sid or '(none)'}",
+        file=sys.stderr,
+    )
     if args.use_async:
-        return client.send_and_wait(text, **kwargs)
-    return client.ask(text, **kwargs)
+        sent = client.send(text, **kwargs)
+        request_id = str(sent.get("request_id") or "")
+        if not request_id:
+            raise BridgeApiError("send 未返回 request_id", payload=sent)
+        reply = client.wait_result(request_id, timeout=args.timeout)
+        return reply, str(sent.get("session_id") or sid)
+    data = client.ask(text, return_meta=True, **kwargs)
+    if not isinstance(data, dict):
+        return str(data), sid
+    return str(data.get("reply") or ""), str(data.get("session_id") or sid)
+
+
+def _print_startup_diagnostics(client: BridgeClient) -> ConnectionDiagnostics:
+    diag = client.diagnose_connection()
+    print(f"服务: {client.base_url}")
+    for line in diag.summary_lines():
+        print(line)
+    return diag
 
 
 def _interactive_cli(client: BridgeClient, args: argparse.Namespace) -> int:
     print("交互模式：输入内容回车发送，空行或 Ctrl+C 退出。")
-    print(f"服务: {client.base_url}")
-    connected, connection_message = client.check_connection()
-    if connected:
-        print(connection_message)
-    else:
-        print(f"警告: {connection_message}", file=sys.stderr)
-    session_id = args.session
+    print("命令：/new 下一条新建会话；/session 查看当前 session_id；/limit 查看强制新建阈值")
+    diag = _print_startup_diagnostics(client)
+    if not diag.health_ok:
+        print(
+            f"\n无法连接服务：请确认 GUI 已启动，地址为 {client.base_url}。",
+            file=sys.stderr,
+        )
+        return 1
+    if not diag.chat_api_ok:
+        print(
+            "\n服务已连接，但外部聊天接口 /api/v1/chat/ask 不可用。\n"
+            "当前仅 /api/bridge 油猴内部接口可用，bridge_client 无法直接发送聊天。\n"
+            "请完全退出 GUI 后重新运行 python gui.py 加载最新 server.py。",
+            file=sys.stderr,
+        )
+        return 1
+    current_session_id: Optional[str] = (args.session or "").strip() or None
+    current_session_turn_count = 0
+    manual_new_next = False
     while True:
         try:
             line = input("\n你> ").strip()
@@ -550,15 +975,59 @@ def _interactive_cli(client: BridgeClient, args: argparse.Namespace) -> int:
             return 0
         if not line:
             break
+        if line == "/limit":
+            limit = FORCE_NEW_SESSION_AFTER_TURNS
+            if limit > 0:
+                print(f"当前强制新建阈值：{limit} 条用户消息")
+            else:
+                print("当前强制新建阈值：已关闭（0 = 不强制新建）")
+            continue
+        if line == "/new":
+            current_session_id = None
+            current_session_turn_count = 0
+            manual_new_next = True
+            print("已切换为新会话模式，下一条消息将创建新的 GUI 对话。")
+            continue
+        if line == "/session":
+            if current_session_id:
+                print(f"当前 session_id: {current_session_id}")
+            else:
+                print("当前还没有绑定外部 session，下一条消息将自动创建。")
+            continue
         try:
-            reply = client.ask(
-                line,
-                session_id=session_id,
-                auto_create_session=not session_id,
-                auto_open_home=not args.no_open_home,
-                timeout=args.timeout,
+            use_new_session = manual_new_next
+            manual_new_next = False
+            print(
+                f"[CLIENT][SESSION] current_session_id={current_session_id or '(none)'}",
+                file=sys.stderr,
             )
-            print(f"\nChatGPT> {reply}")
+            data = client.ask(
+                line,
+                session_id=current_session_id or "",
+                auto_create_session=True,
+                auto_open_home=not args.no_open_home,
+                new_session=use_new_session,
+                reuse_last_session=not use_new_session,
+                timeout=args.timeout,
+                return_meta=True,
+            )
+            if not isinstance(data, dict):
+                data = {"reply": str(data)}
+            current_session_id, current_session_turn_count = _apply_ask_session_meta(
+                data,
+                current_session_id=current_session_id,
+                current_session_turn_count=current_session_turn_count,
+            )
+            if current_session_id:
+                print(
+                    f"[CLIENT][SESSION] current_session_id={current_session_id}",
+                    file=sys.stderr,
+                )
+            reply = str(data.get("reply") or "")
+            sid_hint = ""
+            if current_session_id:
+                sid_hint = f" [session {current_session_id[:8]}… 第{current_session_turn_count}轮]"
+            print(f"\nChatGPT>{sid_hint} {reply}")
         except BridgeApiError as error:
             print(f"\n[错误 {error.code}] {error}", file=sys.stderr)
     return 0
@@ -572,7 +1041,7 @@ def _pause_before_exit(enabled: bool) -> None:
     try:
         input("\n按 Enter 键退出...")
     except EOFError:
-        pass
+        return
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -598,7 +1067,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
 
         if args.message:
-            reply = _ask_once_cli(client, args.message, args)
+            diag = client.diagnose_connection()
+            if not diag.health_ok:
+                print(
+                    f"无法连接服务：请确认 GUI 已启动，地址为 {client.base_url}。",
+                    file=sys.stderr,
+                )
+                for line in diag.summary_lines():
+                    print(line, file=sys.stderr)
+                return 1
+            if not diag.chat_api_ok:
+                print(
+                    "服务已连接，但外部聊天接口 /api/v1/chat/ask 不可用。",
+                    file=sys.stderr,
+                )
+                for line in diag.summary_lines():
+                    print(line, file=sys.stderr)
+                return 1
+            reply, _sid = _ask_once_cli(client, args.message, args)
             print(reply)
             return 0
 
@@ -621,9 +1107,6 @@ if __name__ == "__main__":
         import traceback
 
         traceback.print_exc()
-        if sys.platform == "win32" and os.environ.get("BRIDGE_CLIENT_NO_PAUSE") != "1":
-            try:
-                input("\n按 Enter 键退出...")
-            except EOFError:
-                pass
+        if sys.platform == "win32":
+            _pause_before_exit(True)
         raise SystemExit(1) from error

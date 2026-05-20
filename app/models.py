@@ -1,12 +1,15 @@
 import time
 from dataclasses import dataclass, field
 
+from app.url_utils import parse_conversation_id
+
 BIND_STATE_UNBOUND = "UNBOUND"
 BIND_STATE_WAITING_HOME = "WAITING_HOME"
 BIND_STATE_PREBOUND_HOME = "PREBOUND_HOME"
 BIND_STATE_WAITING_CONVERSATION_CREATED = "WAITING_CONVERSATION_CREATED"
 BIND_STATE_BOUND_CONVERSATION = "BOUND_CONVERSATION"
 BIND_STATE_BOUND_OFFLINE = "BOUND_OFFLINE"
+BIND_STATE_WAITING_BOUND_CONVERSATION = "WAITING_BOUND_CONVERSATION"
 
 VALID_BIND_STATES = frozenset(
     {
@@ -16,6 +19,7 @@ VALID_BIND_STATES = frozenset(
         BIND_STATE_WAITING_CONVERSATION_CREATED,
         BIND_STATE_BOUND_CONVERSATION,
         BIND_STATE_BOUND_OFFLINE,
+        BIND_STATE_WAITING_BOUND_CONVERSATION,
     }
 )
 
@@ -45,6 +49,11 @@ def default_remote_chatgpt():
         "reserved_client_id": "",
         "reserved_page_instance_id": "",
         "reserved_at": 0,
+        "pending_send_text": "",
+        "pending_send_created_at": 0,
+        "reopen_request_id": "",
+        "reopen_started_at": 0,
+        "reopen_target_url": "",
     }
 
 
@@ -78,13 +87,51 @@ def normalize_remote_chatgpt(remote):
     base["bootstrap_in_progress"] = bool(remote.get("bootstrap_in_progress", False))
     base["bind_started_at"] = float(remote.get("bind_started_at", 0) or 0)
     base["reserved_at"] = float(remote.get("reserved_at", 0) or 0)
-    if not (base.get("conversation_url") or "").strip():
-        legacy_url = (remote.get("url") or "").strip()
-        if legacy_url:
+    legacy_url = (
+        (base.get("conversation_url") or "").strip()
+        or (remote.get("conversation_url") or "").strip()
+        or (remote.get("url") or "").strip()
+        or (remote.get("page_url") or "").strip()
+        or (remote.get("bound_url") or "").strip()
+        or (remote.get("bound_page_url") or "").strip()
+        or (remote.get("chatgpt_url") or "").strip()
+        or (remote.get("last_page_url") or "").strip()
+    )
+    if legacy_url:
+        if not (base.get("conversation_url") or "").strip():
             base["conversation_url"] = legacy_url
+        if not (base.get("url") or "").strip():
+            base["url"] = legacy_url
+
+    legacy_conversation_id = (
+        (base.get("conversation_id") or "").strip()
+        or (remote.get("conversation_id") or "").strip()
+        or (remote.get("bound_conversation_id") or "").strip()
+        or (remote.get("target_conversation_id") or "").strip()
+    )
+    if not legacy_conversation_id:
+        legacy_conversation_id = parse_conversation_id(legacy_url)
+    if legacy_conversation_id:
+        base["enabled"] = True
+        base["conversation_id"] = legacy_conversation_id
+        base["page_type"] = "conversation"
+        if not (base.get("conversation_url") or "").strip():
+            base["conversation_url"] = f"https://chatgpt.com/c/{legacy_conversation_id}"
+        if not (base.get("url") or "").strip():
+            base["url"] = base["conversation_url"]
+
     if not (base.get("url") or "").strip():
         base["url"] = (base.get("conversation_url") or "").strip()
+
     base["bind_state"] = _infer_bind_state(remote, base)
+    conversation_id = (base.get("conversation_id") or "").strip()
+    if conversation_id and base["bind_state"] in (
+        BIND_STATE_UNBOUND,
+        BIND_STATE_PREBOUND_HOME,
+        BIND_STATE_WAITING_HOME,
+        BIND_STATE_WAITING_CONVERSATION_CREATED,
+    ):
+        base["bind_state"] = BIND_STATE_BOUND_CONVERSATION
     if base["bind_state"] == BIND_STATE_PREBOUND_HOME:
         if not (base.get("prebound_home_client_id") or "").strip():
             base["prebound_home_client_id"] = (base.get("client_id") or "").strip()
@@ -129,3 +176,14 @@ class ChatSession:
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
     has_pending_reply: bool = False
+
+    @property
+    def conversation_id(self):
+        remote = normalize_remote_chatgpt(self.remote_chatgpt)
+        return (remote.get("conversation_id") or "").strip()
+
+    @conversation_id.setter
+    def conversation_id(self, value):
+        remote = normalize_remote_chatgpt(self.remote_chatgpt)
+        remote["conversation_id"] = (value or "").strip()
+        self.remote_chatgpt = remote

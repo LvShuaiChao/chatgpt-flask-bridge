@@ -1,32 +1,23 @@
-import html
 import json
-import re
-import sys
 import time
 import traceback
 import uuid
-import webbrowser
 from pathlib import Path
-from urllib.parse import urlparse
 
-import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
 
 from app.constants import (
-    ASSISTANT_WAIT_TEXT,
     ASSISTANT_WAIT_TEXTS,
-    CHATGPT_HOME_URL,
-    DEFAULT_APP_SETTINGS,
     PENDING_ASSISTANT_STATUSES,
     RUNTIME_DIR,
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
     SESSION_BIND_LIST_STYLES,
-    SETTINGS_APP,
-    SETTINGS_ORG,
 )
 from app.models import (
+    BIND_STATE_BOUND_CONVERSATION,
+    BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
+    BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
     ChatMessage,
     ChatSession,
@@ -34,43 +25,56 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.ui.widgets.bridge_notifier import BridgeNotifier
-from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
-from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.session_list import SessionListWidget
-from app.ui.widgets.session_list_item import SessionListItemWidget
-from PyQt5.QtCore import QObject, QSettings, QSize, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
+from app.ui.widgets.session_list_item import (
+    SESSION_LIST_ITEM_HEIGHT,
+    SessionListItemWidget,
+)
+from PyQt5.QtCore import QSize, Qt, QTimer
+from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
     QInputDialog,
-    QLabel,
-    QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QMenu,
-    QMainWindow,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
 )
 
 
 class SessionMixin:
+    def _message_input_widget(self):
+        widget = getattr(self, "message_input", None)
+        if widget is not None:
+            return widget
+        return getattr(self, "message_edit", None)
+
+    def _focus_message_input(self, *, select_all=False, force=False):
+        input_widget = self._message_input_widget()
+        if input_widget is None:
+            return
+        if not force:
+            focused = QApplication.focusWidget()
+            session_search = getattr(self, "session_search_edit", None)
+            if focused is session_search:
+                return
+        input_widget.setFocus(Qt.OtherFocusReason)
+        if select_all and hasattr(input_widget, "selectAll"):
+            input_widget.selectAll()
+        if hasattr(input_widget, "moveCursor"):
+            input_widget.moveCursor(QTextCursor.End)
+
+    def _focus_message_input_later(self, *, select_all=False, force=False):
+        QTimer.singleShot(
+            0,
+            lambda: self._focus_message_input(
+                select_all=select_all, force=force
+            ),
+        )
+        QTimer.singleShot(
+            80,
+            lambda: self._focus_message_input(
+                select_all=select_all, force=force
+            ),
+        )
+
     def _create_session(self, title="新对话", select=False, auto_open_chatgpt=False):
         now = time.time()
         session = ChatSession(
@@ -104,7 +108,8 @@ class SessionMixin:
             "已新建本地对话。\n"
             "输入内容并点击发送后，将自动选择空闲 ChatGPT 首页或打开新首页。",
         )
-        self._render_session_chat(session)
+        self._render_session_chat(session, force_bottom=True)
+        self._focus_message_input_later(force=True)
         self._save_sessions_to_disk()
         return session
     def _current_session(self):
@@ -122,12 +127,13 @@ class SessionMixin:
         self._current_session_id = session_id
         session = self._sessions[session_id]
         session.has_pending_reply = False
-        self._render_session_chat(session)
+        self._render_session_chat(session, force_bottom=True)
         self._refresh_session_list(select_session_id=session_id)
         self._update_current_session_title(session)
         self._update_bound_page_display()
         self._refresh_tm_page_selector()
         self._render_tampermonkey_clients(self._last_bridge_status)
+        self._focus_message_input_later()
         if save:
             self._save_sessions_to_disk()
     def _session_display_title(self, session):
@@ -135,73 +141,89 @@ class SessionMixin:
         if session.has_pending_reply:
             return f"{title} *"
         return title
-    def _session_list_subtitle(self, session):
-        ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
-            return f"{ts} · 等待首页上线..."
-        if self._pending_auto_bind_session_id == session.session_id:
-            return f"{ts} · 等待绑定..."
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if remote.get("enabled") and (remote.get("client_id") or "").strip():
-            has_chat = any(
-                m.visible_in_chat and m.role in ("user", "assistant")
-                for m in session.messages
-            )
-            if not has_chat:
-                return f"{ts} · 已绑定 ChatGPT 页面"
-
-        for message in reversed(session.messages):
-            if not message.visible_in_chat:
-                continue
-
-            if message.role not in ("user", "assistant"):
-                continue
-
-            text = (message.content or "").strip().replace("\n", " ")
-            if not text:
-                continue
-
-            if text in ASSISTANT_WAIT_TEXTS:
-                return f"{ts} · 等待回复..."
-
-            if len(text) > 36:
-                text = text[:36] + "…"
-
-            return f"{ts} · {text}"
-
-        return ts
-    def _session_list_item_text(self, session):
-        return f"{self._session_display_title(session)}\n{self._session_list_subtitle(session)}"
 
     def _session_list_title_text(self, session):
         return session.title or "新对话"
 
     def _session_has_pending_assistant_reply(self, session):
-        if session.has_pending_reply:
+        if not session:
+            return False
+
+        if getattr(session, "has_pending_reply", False):
             return True
+
         for message in reversed(session.messages):
-            if not message.visible_in_chat:
+            if not getattr(message, "visible_in_chat", True):
                 continue
+
             if message.role != "assistant":
                 continue
+
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
+                continue
+
             status = (message.status or "").strip()
             if status in PENDING_ASSISTANT_STATUSES:
                 return True
+
             text = (message.content or "").strip()
             if text in ASSISTANT_WAIT_TEXTS:
                 return True
+
         return False
+
+    def _session_bound_response_state(self, session):
+        if not session:
+            return {
+                "is_responding": False,
+                "response_state": "unknown",
+                "can_accept_input": True,
+            }
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        client_id = (
+            remote.get("client_id")
+            or remote.get("prebound_home_client_id")
+            or ""
+        ).strip()
+        if not client_id:
+            return {
+                "is_responding": False,
+                "response_state": "unknown",
+                "can_accept_input": True,
+            }
+        client_info = self._client_info_by_id(
+            client_id, getattr(self, "_last_bridge_status", None)
+        )
+        if not isinstance(client_info, dict):
+            return {
+                "is_responding": False,
+                "response_state": "unknown",
+                "can_accept_input": True,
+            }
+        return {
+            "is_responding": bool(client_info.get("is_responding", False)),
+            "response_state": (
+                client_info.get("response_state") or "unknown"
+            ).strip() or "unknown",
+            "can_accept_input": bool(client_info.get("can_accept_input", True)),
+        }
 
     def _session_preview_text(self, session):
         ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
+        response_state = self._session_bound_response_state(session)
+        has_pending = self._session_has_pending_assistant_reply(session)
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
             return f"{ts} · 等待首页上线..."
         if self._pending_auto_bind_session_id == session.session_id:
             return f"{ts} · 等待绑定..."
+        if has_pending:
+            return f"{ts} · 等待回复..."
+        if response_state["is_responding"]:
+            return f"{ts} · 正在回答..."
+        if response_state["response_state"] == "idle":
+            return f"{ts} · 已绑定在线"
         if remote.get("enabled") and (remote.get("client_id") or "").strip():
             has_chat = any(
                 m.visible_in_chat and m.role in ("user", "assistant")
@@ -254,6 +276,7 @@ class SessionMixin:
             f"标题：{title}",
             f"绑定状态：{style['label']}",
         ]
+        bridge_status = getattr(self, "_last_bridge_status", None)
         client_id = (
             remote.get("client_id")
             or remote.get("prebound_home_client_id")
@@ -274,6 +297,10 @@ class SessionMixin:
             or remote.get("url")
             or ""
         ).strip()
+        if bind_state == "bind_mismatch":
+            reason = self._session_bind_mismatch_tooltip_reason(session, bridge_status)
+            if reason:
+                lines.append(reason)
         if bind_state == "unbound" and not remote.get("enabled"):
             lines.append("发送首条消息时将自动选择空闲 ChatGPT 首页或打开新首页。")
         else:
@@ -283,20 +310,54 @@ class SessionMixin:
                 f"conversation_id：{conversation_id or '-'}",
                 f"url：{page_url or '-'}",
             ])
-            client_info = self._client_info_by_id(client_id) if client_id else None
+            client_info = (
+                self._client_info_by_id(client_id, bridge_status)
+                if client_id
+                else None
+            )
             if client_info:
+                focus_txt = "是" if client_info.get("has_focus") else "否"
+                lines.append(f"focus：{focus_txt}")
+                visibility_raw = (
+                    client_info.get("visibility_state")
+                    or client_info.get("visibility")
+                    or ""
+                ).strip()
+                if not visibility_raw:
+                    visible_flag = client_info.get("visible")
+                    if visible_flag is True:
+                        visibility_raw = "visible"
+                    elif visible_flag is False:
+                        visibility_raw = "hidden"
+                    else:
+                        visibility_raw = "-"
+                lines.append(f"visible：{visibility_raw}")
                 lines.append(
-                    f"最后在线：{self._format_last_seen_ago(client_info.get('last_seen'))}"
+                    f"last_seen：{self._format_last_seen_ago(client_info.get('last_seen'))}"
                 )
                 lines.append(
-                    f"最近焦点：{self._format_last_seen_ago(client_info.get('last_focus_at'))}"
+                    f"last_poll：{self._format_last_seen_ago(client_info.get('last_poll_at'))}"
                 )
+            elif client_id:
+                lines.extend([
+                    "focus：-",
+                    "visible：-",
+                    "last_seen：-",
+                    "last_poll：-",
+                ])
             elif remote.get("last_seen"):
                 lines.append(
-                    f"最后记录：{self._format_ts(remote.get('last_seen'))}"
+                    "last_seen："
+                    + self._format_last_seen_ago(remote.get("last_seen"))
                 )
         if self._session_has_pending_assistant_reply(session):
             lines.append("消息状态：等待回复")
+        else:
+            response_state = self._session_bound_response_state(session)
+            if response_state["is_responding"]:
+                lines.append("消息状态：正在回答")
+            elif response_state["response_state"] == "idle":
+                lines.append("消息状态：空闲可发送")
         return "\n".join(lines)
 
     def _apply_session_list_item_widget(self, item, session, *, selected=False):
@@ -313,26 +374,9 @@ class SessionMixin:
             selected=selected,
             tooltip=self._session_list_item_tooltip(session, bind_state),
         )
-        widget.adjustSize()
-        hint = widget.sizeHint()
-        height = max(hint.height(), 72)
-        item.setSizeHint(QSize(hint.width(), height))
+        item_w = max(0, self.session_list.viewport().width())
+        item.setSizeHint(QSize(item_w, SESSION_LIST_ITEM_HEIGHT))
 
-    def _update_session_list_item_bind_state(self, session_id):
-        if not hasattr(self, "session_list"):
-            return
-        index = self._list_index_for_session(session_id)
-        if index < 0:
-            return
-        item = self.session_list.item(index)
-        session = self._sessions.get(session_id)
-        if not item or not session:
-            return
-        selected = session_id == self._current_session_id
-        self._apply_session_list_item_widget(item, session, selected=selected)
-
-    def _session_list_signature(self):
-        return self._session_list_visual_signature()
     def _update_current_session_title(self, session=None):
         if not hasattr(self, "current_session_title"):
             return
@@ -453,7 +497,7 @@ class SessionMixin:
         self.session_list.blockSignals(False)
         self._list_refreshing = False
         self._last_session_list_visual_signature = new_sig
-        self._last_session_list_signature = new_sig
+
     def _on_session_search_changed(self, text):
         self._session_search_text = text or ""
         self._apply_session_search_filter()
@@ -579,7 +623,7 @@ class SessionMixin:
         session.updated_at = time.time()
         session.has_pending_reply = False
         self._append_session_message(session, "system", "当前对话已清空。")
-        self._render_session_chat(session)
+        self._render_session_chat(session, force_bottom=True)
         self._refresh_session_list(select_session_id=session.session_id)
         self._update_current_session_title(session)
         self._save_sessions_to_disk()
@@ -805,6 +849,65 @@ class SessionMixin:
         ) or []
         self._finalized_bridge_message_ids = set(finalized)
         self._migrate_loaded_session_messages()
+        self._migrate_loaded_remote_bindings()
+
+    def _migrate_loaded_remote_bindings(self):
+        changed = False
+        for session in self._sessions.values():
+            old_remote = dict(session.remote_chatgpt or {})
+            old_bind_state = (old_remote.get("bind_state") or "").strip()
+            remote = normalize_remote_chatgpt(old_remote)
+
+            conversation_id = (remote.get("conversation_id") or "").strip()
+            conversation_url = (
+                remote.get("conversation_url") or remote.get("url") or ""
+            ).strip()
+
+            if not conversation_id and conversation_url:
+                conversation_id = parse_conversation_id(conversation_url)
+
+            if conversation_id:
+                if not conversation_url:
+                    conversation_url = f"https://chatgpt.com/c/{conversation_id}"
+
+                remote["enabled"] = True
+                remote["conversation_id"] = conversation_id
+                remote["conversation_url"] = conversation_url
+                remote["url"] = conversation_url
+                remote["page_type"] = "conversation"
+
+                new_bind_state = remote.get("bind_state")
+                if remote.get("bind_state") in (
+                    BIND_STATE_UNBOUND,
+                    BIND_STATE_WAITING_HOME,
+                    BIND_STATE_PREBOUND_HOME,
+                    BIND_STATE_WAITING_CONVERSATION_CREATED,
+                    "",
+                    None,
+                ):
+                    remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
+                    new_bind_state = BIND_STATE_BOUND_CONVERSATION
+
+                remote["pending_bootstrap_text"] = ""
+                remote["bootstrap_in_progress"] = False
+
+                if remote != old_remote or old_bind_state != new_bind_state:
+                    self._append_log(
+                        "[SESSION][MIGRATE_REMOTE] "
+                        f"session_id={session.session_id} "
+                        f"old_bind_state={old_bind_state or '-'} "
+                        f"new_bind_state={new_bind_state or '-'} "
+                        f"conversation_id={conversation_id} "
+                        f"conversation_url={conversation_url}"
+                    )
+
+            if remote != old_remote:
+                session.remote_chatgpt = remote
+                changed = True
+
+        if changed:
+            self._save_sessions_to_disk()
+
     def _restore_ui_settings(self):
         if self._remember_window_geometry:
             geometry = self._settings.value("geometry")

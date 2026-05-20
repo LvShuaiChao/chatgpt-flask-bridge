@@ -55,6 +55,11 @@
 
     let handlingMessageId = null;
     let polling = false;
+    let lastResponseStateToken = '';
+    let lastResponseStateErrorAt = 0;
+    let activeFlashTimer = 0;
+    let activeFlashRestoreTitle = '';
+    let activeFlashRestoreFavicon = '';
 
     function gmGet(key, fallback) {
         try {
@@ -177,6 +182,137 @@
         }
     }
 
+    function detectChatGPTResponseState() {
+        try {
+            const stopSelectors = [
+                'button[aria-label*="Stop"]',
+                'button[aria-label*="停止"]',
+                'button[data-testid*="stop"]',
+                '[data-testid="stop-button"]',
+                'button:has(svg)'
+            ];
+            let stopVisible = false;
+            for (const selector of stopSelectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                for (const node of nodes) {
+                    const text = String(
+                        node.innerText || node.getAttribute('aria-label') || ''
+                    ).toLowerCase();
+                    const isStopButton =
+                        text.includes('stop') ||
+                        text.includes('停止') ||
+                        text.includes('中止');
+                    if (!isStopButton || !isVisible(node)) {
+                        continue;
+                    }
+                    stopVisible = true;
+                    break;
+                }
+                if (stopVisible) {
+                    break;
+                }
+            }
+
+            const composer = findComposer();
+            const composerText = composer
+                ? String(composer.innerText || composer.value || '').trim()
+                : '';
+            const sendButton = findSendButton();
+            const sendButtonDisabled = sendButton
+                ? Boolean(
+                    sendButton.disabled ||
+                    sendButton.getAttribute('aria-disabled') === 'true'
+                )
+                : false;
+            const streamingIndicators = Array.from(
+                document.querySelectorAll(
+                    [
+                        '[data-testid*="stream"]',
+                        '[class*="result-streaming"]',
+                        '[class*="streaming"]',
+                        '.result-streaming'
+                    ].join(',')
+                )
+            );
+            const hasStreamingIndicator = streamingIndicators.some((node) => isVisible(node));
+
+            let state = {
+                is_responding: false,
+                response_state: 'idle',
+                response_state_reason: 'no_indicator',
+                can_accept_input: !sendButtonDisabled,
+                response_state_at: Date.now()
+            };
+
+            if (stopVisible) {
+                state = {
+                    is_responding: true,
+                    response_state: 'generating',
+                    response_state_reason: 'stop_button_visible',
+                    can_accept_input: false,
+                    response_state_at: Date.now()
+                };
+            } else if (hasStreamingIndicator) {
+                state = {
+                    is_responding: true,
+                    response_state: 'generating',
+                    response_state_reason: 'streaming_indicator',
+                    can_accept_input: false,
+                    response_state_at: Date.now()
+                };
+            } else if (composerText) {
+                state = {
+                    is_responding: false,
+                    response_state: 'composing',
+                    response_state_reason: 'composer_has_text',
+                    can_accept_input: !sendButtonDisabled,
+                    response_state_at: Date.now()
+                };
+            }
+
+            const token = [
+                state.is_responding ? '1' : '0',
+                state.response_state,
+                state.response_state_reason,
+                state.can_accept_input ? '1' : '0'
+            ].join('|');
+            if (token !== lastResponseStateToken) {
+                if (lastResponseStateToken) {
+                    console.log(
+                        `[TM][RESPONSE_STATE][CHANGE] old=${lastResponseStateToken} new=${token} reason=${state.response_state_reason}`
+                    );
+                }
+                lastResponseStateToken = token;
+            }
+            return state;
+        } catch (error) {
+            console.error('[TM][RESPONSE_STATE][ERROR] detectChatGPTResponseState failed:', error);
+            const now = Date.now();
+            if (now - lastResponseStateErrorAt > 15000) {
+                lastResponseStateErrorAt = now;
+                window.setTimeout(() => {
+                    if (typeof clientLog === 'function') {
+                        clientLog('error', 'client_error', {
+                            stage: 'detect_chatgpt_response_state',
+                            error_type: error?.name || 'Error',
+                            error_message: error?.message || String(error),
+                            stack: error?.stack || ''
+                        }).catch((logError) => {
+                            console.error('[TM][RESPONSE_STATE][ERROR] client_error report failed:', logError);
+                        });
+                    }
+                }, 0);
+            }
+            return {
+                is_responding: false,
+                response_state: 'unknown',
+                response_state_reason: 'detect_error',
+                can_accept_input: true,
+                response_state_at: Date.now()
+            };
+        }
+    }
+
     function getPageIdentity() {
         const url = new URL(location.href);
         const path = url.pathname || '';
@@ -194,6 +330,7 @@
             pageType = 'other';
         }
         const bindToken = getBindRequestToken();
+        const responseState = detectChatGPTResponseState();
         return {
             client_id: CLIENT_ID,
             page_instance_id: PAGE_INSTANCE_ID,
@@ -208,7 +345,12 @@
             visibility_state: document.visibilityState,
             has_focus: document.hasFocus(),
             pathname: location.pathname,
-            last_seen: Date.now() / 1000
+            last_seen: Date.now() / 1000,
+            is_responding: Boolean(responseState.is_responding),
+            response_state: responseState.response_state || 'unknown',
+            response_state_reason: responseState.response_state_reason || '',
+            response_state_at: responseState.response_state_at || Date.now(),
+            can_accept_input: Boolean(responseState.can_accept_input)
         };
     }
 
@@ -586,30 +728,99 @@
         }, 200);
     }
 
-    function flashBoundPage(payload) {
-        const durationMs = Number(payload.duration_ms || 3500);
-        const blinkCount = Number(payload.blink_count || 6);
-        const title = String(payload.title || 'GUI 已定位此页面');
-        let message = String(payload.message || '当前页面已绑定到当前 GUI 对话。');
-        const payloadClientId = String(payload.client_id || CLIENT_ID || '').trim();
-        const payloadConversationId = String(payload.conversation_id || '').trim();
-        const identity = getPageIdentity();
-        const conversationId = payloadConversationId
-            || identity.conversation_id
-            || '';
-        if (!payload.message && payloadClientId) {
-            let convShort = conversationId;
-            if (convShort.length > 16) {
-                convShort = `${convShort.slice(0, 16)}…`;
-            }
-            message = [
-                '当前页面已绑定到 GUI 对话',
-                `client=${payloadClientId}`,
-                `conversation=${convShort || '-'}`
-            ].join('\n');
+    function buildFlashTitle(payload) {
+        const clientId = String(payload.client_id || CLIENT_ID || '').trim();
+        const conversationId = String(payload.conversation_id || '').trim();
+        const shortClient = clientId ? clientId.slice(0, 12) : '-';
+        const shortConv = conversationId ? conversationId.slice(0, 8) : '-';
+
+        return `【GUI绑定页】${shortClient}｜${shortConv}`;
+    }
+
+    function setPageTitleSafely(title) {
+        const text = String(title || '').trim();
+
+        try {
+            document.title = text;
+        } catch (error) {
+            console.error('[联动][FLASH][TITLE] document.title failed:', error);
         }
 
-        const oldTitle = document.title;
+        const titleEl = document.querySelector('title');
+        if (titleEl) {
+            try {
+                titleEl.textContent = text;
+            } catch (error) {
+                console.error('[联动][FLASH][TITLE] title element failed:', error);
+            }
+        }
+    }
+
+    function getCurrentFaviconHref() {
+        const icon = document.querySelector('link[rel~="icon"]');
+        return icon ? icon.href : '';
+    }
+
+    function setFaviconHref(href) {
+        let icon = document.querySelector('link[rel~="icon"]');
+
+        if (!icon) {
+            icon = document.createElement('link');
+            icon.rel = 'icon';
+            document.head.appendChild(icon);
+        }
+
+        icon.href = href;
+    }
+
+    function buildFlashFaviconDataUrl() {
+        const svg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+                <rect width="64" height="64" rx="12" fill="#dc2626"/>
+                <text x="32" y="42" text-anchor="middle" font-size="36" font-family="Arial" fill="white">!</text>
+            </svg>
+        `;
+        return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
+    function flashBoundPage(payload) {
+        payload = payload || {};
+
+        if (activeFlashTimer) {
+            window.clearInterval(activeFlashTimer);
+            activeFlashTimer = 0;
+            if (activeFlashRestoreTitle) {
+                setPageTitleSafely(activeFlashRestoreTitle);
+            }
+            if (activeFlashRestoreFavicon) {
+                setFaviconHref(activeFlashRestoreFavicon);
+            }
+        }
+
+        const durationMs = Number(payload.duration_ms || 5000);
+        const blinkCount = Number(payload.blink_count || 8);
+        const notifyTitle = String(payload.title || 'GUI 已定位此页面');
+        const message = String(payload.message || '当前 ChatGPT 页面已绑定到当前 GUI 对话。');
+        const flashTitleEnabled = payload.flash_title !== false;
+        const flashFaviconEnabled = payload.flash_favicon !== false;
+
+        const oldTitle = document.title || 'ChatGPT';
+        const flashTitle = buildFlashTitle(payload);
+        const oldFavicon = getCurrentFaviconHref();
+        const flashFavicon = buildFlashFaviconDataUrl();
+
+        activeFlashRestoreTitle = oldTitle;
+        activeFlashRestoreFavicon = oldFavicon;
+
+        const oldOverlay = document.getElementById('__gui_bound_page_flash_overlay__');
+        if (oldOverlay) {
+            oldOverlay.remove();
+        }
+
+        const oldBorder = document.getElementById('__gui_bound_page_flash_border__');
+        if (oldBorder) {
+            oldBorder.remove();
+        }
 
         const overlay = document.createElement('div');
         overlay.id = '__gui_bound_page_flash_overlay__';
@@ -627,8 +838,6 @@
         overlay.style.fontWeight = '700';
         overlay.style.boxShadow = '0 8px 28px rgba(0,0,0,0.28)';
         overlay.style.pointerEvents = 'none';
-        overlay.style.whiteSpace = 'pre-line';
-        overlay.style.textAlign = 'center';
         overlay.style.fontFamily = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 
         const border = document.createElement('div');
@@ -643,16 +852,6 @@
         border.style.boxSizing = 'border-box';
         border.style.pointerEvents = 'none';
 
-        const oldOverlay = document.getElementById('__gui_bound_page_flash_overlay__');
-        if (oldOverlay) {
-            oldOverlay.remove();
-        }
-
-        const oldBorder = document.getElementById('__gui_bound_page_flash_border__');
-        if (oldBorder) {
-            oldBorder.remove();
-        }
-
         document.documentElement.appendChild(border);
         document.documentElement.appendChild(overlay);
 
@@ -661,45 +860,190 @@
             && Notification.permission === 'granted'
         ) {
             try {
-                new Notification(title, { body: message.replace(/\n/g, ' ') });
+                new Notification(notifyTitle, { body: message.replace(/\n/g, ' ') });
             } catch (error) {
-                clientLog('warn', '[TM][CONTROL][FLASH_PAGE] 浏览器通知失败', {
-                    error_message: error.message || String(error)
-                });
+                console.error('[联动][FLASH][NOTIFY] 浏览器通知失败:', error);
             }
         }
 
         let count = 0;
-        const intervalMs = Math.max(
-            180,
-            Math.floor(durationMs / Math.max(1, blinkCount * 2))
-        );
-        const timer = window.setInterval(() => {
+        const intervalMs = Math.max(180, Math.floor(durationMs / Math.max(1, blinkCount * 2)));
+
+        activeFlashTimer = window.setInterval(() => {
             count += 1;
-            const visible = count % 2 === 0;
+            const visible = count % 2 === 1;
+
             border.style.display = visible ? 'block' : 'none';
             overlay.style.display = visible ? 'block' : 'none';
-            document.title = visible ? `>>> ${title} <<<` : oldTitle;
+
+            if (flashTitleEnabled) {
+                setPageTitleSafely(visible ? flashTitle : oldTitle);
+            }
+
+            if (flashFaviconEnabled) {
+                if (visible) {
+                    setFaviconHref(flashFavicon);
+                } else if (oldFavicon) {
+                    setFaviconHref(oldFavicon);
+                }
+            }
 
             if (count >= blinkCount * 2) {
-                window.clearInterval(timer);
+                window.clearInterval(activeFlashTimer);
+                activeFlashTimer = 0;
+
                 border.remove();
                 overlay.remove();
-                document.title = oldTitle;
+
+                if (flashTitleEnabled) {
+                    setPageTitleSafely(oldTitle);
+                }
+
+                if (flashFaviconEnabled && oldFavicon) {
+                    setFaviconHref(oldFavicon);
+                }
+
+                activeFlashRestoreTitle = '';
+                activeFlashRestoreFavicon = '';
             }
         }, intervalMs);
     }
 
+    async function handleSyncConversationCommand(result) {
+        const messageId = result.message_id || result.id;
+        const payload = result.payload || {};
+        const maxMessages = Number(payload.max_messages || 200);
+        const pageIdentity = getPageIdentity();
+        if (
+            pageIdentity.page_type !== 'conversation'
+            || !pageIdentity.conversation_id
+        ) {
+            await tmLog('[TM][SYNC_CONVERSATION][SKIP]', {
+                message_id: messageId,
+                page_type: pageIdentity.page_type,
+                conversation_id: pageIdentity.conversation_id || ''
+            });
+            try {
+                await ack(messageId, false, '当前页面不是 ChatGPT 对话页');
+            } catch (error) {
+                await tmError('[TM][SYNC_CONVERSATION][ACK_ERROR]', error, {
+                    message_id: messageId
+                });
+            }
+            await report(
+                'command_failed',
+                {
+                    command: 'sync_conversation',
+                    reason: 'not_conversation_page',
+                    detail: '当前页面不是 ChatGPT 对话页'
+                },
+                messageId
+            );
+            return true;
+        }
+        await tmLog('[TM][SYNC_CONVERSATION][START]', {
+            message_id: messageId,
+            max_messages: maxMessages,
+            session_id: payload.session_id || '',
+            conversation_id: getPageIdentity().conversation_id || ''
+        });
+        try {
+            await ack(messageId, true, '收到 sync_conversation 命令');
+        } catch (error) {
+            await tmError('[TM][SYNC_CONVERSATION][ACK_ERROR]', error, {
+                message_id: messageId
+            });
+        }
+        const snapshot = collectConversationSnapshot(payload);
+        let totalTextLen = 0;
+        for (const item of snapshot.messages) {
+            totalTextLen += String(item.text || '').length;
+        }
+        await tmLog('[TM][SYNC_CONVERSATION][COLLECTED]', {
+            message_id: messageId,
+            count: snapshot.message_count,
+            conversation_id: snapshot.conversation_id || '',
+            total_text_len: totalTextLen
+        });
+        for (const item of snapshot.messages) {
+            await tmLog('[TM][SYNC_CONVERSATION][MESSAGE]', {
+                message_id: messageId,
+                role: item.role,
+                text_len: String(item.text || '').length,
+                text_hash: textHash(item.text || ''),
+                preview: textPreview(item.text || '', 80)
+            });
+        }
+        await tmLog('[TM][SYNC_CONVERSATION][REPORT]', {
+            message_id: messageId,
+            count: snapshot.message_count,
+            total_text_len: totalTextLen
+        });
+        await report('conversation_snapshot', snapshot, messageId);
+        return true;
+    }
+
+    const commandHandlers = {
+        async reload_self(result) {
+            const messageId = result.message_id || result.id;
+            await reloadCurrentPageCommand(messageId);
+            return true;
+        },
+
+        async close_self(result) {
+            const messageId = result.message_id || result.id;
+            await closeCurrentPageCommand(messageId);
+            return true;
+        },
+
+        async open_url(result) {
+            const messageId = result.message_id || result.id;
+            clientLog('info', '执行命令 open_url', {
+                url: result.url,
+                message_id: messageId
+            });
+            const openResult = openUrlInNewTab(result.url, result.active !== false);
+
+            try {
+                await ack(messageId, openResult.ok, openResult.detail);
+            } catch (error) {
+                console.error('[联动] open_url ack 失败:', messageId, error);
+            }
+
+            await report(
+                openResult.ok ? 'open_url_success' : 'open_url_failed',
+                {
+                    url: result.url,
+                    detail: openResult.detail
+                },
+                messageId
+            );
+
+            return true;
+        },
+
+        sync_conversation: handleSyncConversationCommand
+    };
+
     async function handleCommandMessage(result) {
+        const command = result.command || '';
         const messageId = result.message_id || result.id;
 
-        if (result.command === 'flash_page') {
+        if (command === 'flash_page') {
             const payload = result.payload || {};
+            const flashClientId = String(payload.client_id || CLIENT_ID || '').trim();
+            const flashConversationId = String(
+                payload.conversation_id || getPageIdentity().conversation_id || ''
+            ).trim();
+            const flashTitleFlag = payload.flash_title !== false;
+            const flashFaviconFlag = payload.flash_favicon !== false;
+
             await tmLog('[TM][CONTROL][FLASH_PAGE]', {
                 message_id: messageId,
-                client_id: CLIENT_ID,
-                page_instance_id: PAGE_INSTANCE_ID,
-                conversation_id: getPageIdentity().conversation_id || ''
+                client_id: flashClientId,
+                conversation_id: flashConversationId,
+                flash_title: flashTitleFlag,
+                flash_favicon: flashFaviconFlag
             });
             try {
                 await ack(messageId, true, '收到 flash_page 命令');
@@ -715,47 +1059,17 @@
             });
             await report('control_done', {
                 command: 'flash_page',
-                detail: '页面已闪烁定位'
+                detail: '页面边框、标题和 favicon 已闪烁'
             }, messageId);
             return true;
         }
 
-        if (result.command === 'reload_self') {
-            await reloadCurrentPageCommand(messageId);
-            return true;
+        const handler = commandHandlers[command];
+        if (!handler) {
+            return false;
         }
 
-        if (result.command === 'close_self') {
-            await closeCurrentPageCommand(messageId);
-            return true;
-        }
-
-        if (result.command === 'open_url') {
-            clientLog('info', '执行命令 open_url', {
-                url: result.url,
-                message_id: result.message_id || result.id
-            });
-            const openResult = openUrlInNewTab(result.url, result.active !== false);
-
-            try {
-                await ack(result.message_id, openResult.ok, openResult.detail);
-            } catch (error) {
-                console.error('[联动] open_url ack 失败:', result.message_id, error);
-            }
-
-            await report(
-                openResult.ok ? 'open_url_success' : 'open_url_failed',
-                {
-                    url: result.url,
-                    detail: openResult.detail
-                },
-                result.message_id
-            );
-
-            return true;
-        }
-
-        return false;
+        return await handler(result);
     }
 
     function isVisible(element) {
@@ -941,6 +1255,114 @@
             return '';
         }
         return (nodes[index].innerText || '').trim();
+    }
+
+    function detectMessageRole(node) {
+        if (!node || !(node instanceof Element)) {
+            return '';
+        }
+        const attrRole = node.getAttribute('data-message-author-role');
+        if (attrRole === 'user' || attrRole === 'assistant') {
+            return attrRole;
+        }
+        if (node.querySelector('[data-message-author-role="user"]')) {
+            return 'user';
+        }
+        if (node.querySelector('[data-message-author-role="assistant"]')) {
+            return 'assistant';
+        }
+        const aria = String(node.getAttribute('aria-label') || '').toLowerCase();
+        if (aria.includes('user')) {
+            return 'user';
+        }
+        if (aria.includes('assistant') || aria.includes('chatgpt')) {
+            return 'assistant';
+        }
+        const turn = String(node.getAttribute('data-turn') || '').toLowerCase();
+        if (turn === 'user' || turn === 'assistant') {
+            return turn;
+        }
+        return '';
+    }
+
+    function extractMessageText(node) {
+        if (!node || !(node instanceof Element)) {
+            return '';
+        }
+        const clone = node.cloneNode(true);
+        const removeSelectors = [
+            'button',
+            'svg',
+            'style',
+            'script',
+            '[aria-hidden="true"]',
+            '[data-testid*="copy"]',
+            '[data-testid*="feedback"]'
+        ];
+        for (const sel of removeSelectors) {
+            clone.querySelectorAll(sel).forEach((el) => el.remove());
+        }
+        return String(clone.innerText || '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function extractChatMessagesFromPage() {
+        const result = [];
+        const selector = [
+            '[data-message-author-role]',
+            'article',
+            '[data-testid^="conversation-turn"]'
+        ].join(',');
+        const candidates = Array.from(document.querySelectorAll(selector));
+        const seen = new Set();
+
+        for (const node of candidates) {
+            if (!node || !(node instanceof Element)) {
+                continue;
+            }
+            const role = detectMessageRole(node);
+            if (role !== 'user' && role !== 'assistant') {
+                continue;
+            }
+            const text = extractMessageText(node);
+            if (!text) {
+                continue;
+            }
+            const key = `${role}:${text.slice(0, 120)}:${text.length}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            result.push({
+                role,
+                text,
+                html: '',
+                message_id: node.getAttribute('data-message-id') || '',
+                author_role: node.getAttribute('data-message-author-role') || role,
+                index: result.length
+            });
+        }
+        return result;
+    }
+
+    function collectConversationSnapshot(payload) {
+        const options = payload || {};
+        const maxMessages = Number(options.max_messages || 200);
+        const identity = getPageIdentity();
+        const messages = extractChatMessagesFromPage().slice(-maxMessages);
+        return {
+            session_id: options.session_id || '',
+            mode: options.mode || 'merge',
+            conversation_id: identity.conversation_id || '',
+            page_url: location.href,
+            page_title: document.title,
+            client_id: CLIENT_ID,
+            page_instance_id: PAGE_INSTANCE_ID,
+            message_count: messages.length,
+            messages,
+            collected_at: Date.now()
+        };
     }
 
     function getNewAssistantText(beforeCount, beforeText) {

@@ -1,39 +1,15 @@
-import html
-import json
 import os
-import re
-import sys
-import time
-import traceback
-import uuid
-import webbrowser
-from pathlib import Path
-from urllib.parse import urlparse
 
 import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
+from log_utils import get_log_file_path
 
-from app.constants import (
-    ASSISTANT_WAIT_TEXT,
-    ASSISTANT_WAIT_TEXTS,
-    CHATGPT_HOME_URL,
-    DEFAULT_APP_SETTINGS,
-    RUNTIME_DIR,
-    SESSIONS_FILE,
-    SESSIONS_JSON_VERSION,
-    SETTINGS_APP,
-    SETTINGS_ORG,
-)
-from app.models import ChatMessage, ChatSession, default_remote_chatgpt, normalize_remote_chatgpt
-from app.url_utils import parse_conversation_id
-from app.ui.widgets.bridge_notifier import BridgeNotifier
-from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
+from app.models import normalize_remote_chatgpt
 from app.ui.widgets.chat_input import ChatInput
+from app.ui.widgets.elided_label import ElidedLabel
 from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QApplication,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
@@ -41,20 +17,15 @@ from PyQt5.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
-    QMainWindow,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -68,6 +39,9 @@ class UiBuilderMixin:
         if tooltip:
             btn.setToolTip(tooltip)
         btn.clicked.connect(handler)
+        btn.setFixedHeight(30)
+        btn.setMinimumHeight(30)
+        btn.setMaximumHeight(30)
         return btn
     def _ensure_tm_action_buttons(self):
         if getattr(self, "_tm_action_buttons_ready", False):
@@ -114,11 +88,17 @@ class UiBuilderMixin:
             tooltip="打开当前对话绑定的 ChatGPT 页面",
         )
         self.flash_bound_page_btn = self._create_tm_ghost_button(
-            "闪烁绑定页",
+            "定位绑定页",
             self._flash_bound_chatgpt_page,
-            tooltip="在绑定的 ChatGPT 页面上闪烁提示，便于定位对应网页",
+            tooltip="让当前绑定的 ChatGPT 标签页边框、标题和 favicon 同时闪烁，方便确认对应关系",
         )
         self.flash_bound_page_btn.setObjectName("flash_bound_page_btn")
+        self.sync_web_conversation_btn = self._create_tm_ghost_button(
+            "同步网页对话",
+            self._sync_bound_web_conversation,
+            tooltip="从绑定的 ChatGPT 网页读取完整对话并同步到当前 GUI 聊天窗口",
+        )
+        self.sync_web_conversation_btn.setObjectName("sync_web_conversation_btn")
         self.close_bound_page_btn = self._create_tm_ghost_button(
             "关闭绑定页面",
             self._on_close_bound_tm_page,
@@ -152,6 +132,9 @@ class UiBuilderMixin:
                 self.view_logs_btn.setObjectName("GhostButton")
                 self.view_logs_btn.setToolTip("切换到日志页")
                 self.view_logs_btn.clicked.connect(self._show_log_tab)
+                self.view_logs_btn.setFixedHeight(30)
+                self.view_logs_btn.setMinimumHeight(30)
+                self.view_logs_btn.setMaximumHeight(30)
             row1.addWidget(self.view_logs_btn)
         layout.addLayout(row1)
         if include_page_selector:
@@ -168,11 +151,24 @@ class UiBuilderMixin:
                 )
             page_label = QLabel("页面")
             page_label.setObjectName("StatusChip")
+            page_label.setWordWrap(False)
+            page_label.setFixedHeight(30)
+            page_label.setMinimumHeight(30)
+            page_label.setMaximumHeight(30)
+            page_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             row2.addWidget(page_label)
             if not hasattr(self, "tm_page_count_label"):
                 self.tm_page_count_label = QLabel("在线 0 / 总 0")
                 self.tm_page_count_label.setObjectName("StatusChip")
+            self.tm_page_count_label.setWordWrap(False)
+            self.tm_page_count_label.setFixedHeight(30)
+            self.tm_page_count_label.setMinimumHeight(30)
+            self.tm_page_count_label.setMaximumHeight(30)
+            self.tm_page_count_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             row2.addWidget(self.tm_page_count_label)
+            self.tm_page_combo.setFixedHeight(30)
+            self.tm_page_combo.setMinimumHeight(30)
+            self.tm_page_combo.setMaximumHeight(30)
             row2.addWidget(self.tm_page_combo, stretch=1)
             for btn in (
                 self.bind_current_page_btn,
@@ -180,6 +176,7 @@ class UiBuilderMixin:
                 self.unbind_page_btn,
                 self.chat_open_bound_btn,
                 self.flash_bound_page_btn,
+                self.sync_web_conversation_btn,
                 self.close_bound_page_btn,
                 self.close_other_pages_btn,
             ):
@@ -196,10 +193,16 @@ class UiBuilderMixin:
                 "打开当前对话绑定的页面",
             ),
             (
-                "闪烁绑定页",
+                "定位绑定页",
                 self._flash_bound_chatgpt_page,
                 False,
-                "在绑定的 ChatGPT 页面上闪烁提示",
+                "让当前绑定的 ChatGPT 标签页边框、标题和 favicon 同时闪烁，方便确认对应关系",
+            ),
+            (
+                "同步网页对话",
+                self._sync_bound_web_conversation,
+                False,
+                "从绑定的 ChatGPT 网页同步完整对话到当前 GUI",
             ),
             ("绑定当前页面", self._on_bind_current_page, False, ""),
             ("绑定选中页面", self._on_bind_selected_tm_page, False, ""),
@@ -350,10 +353,26 @@ class UiBuilderMixin:
             )
         return "\n".join(lines)
 
+    def _service_host_port_for_display(self, status=None):
+        status = status or {}
+        if status.get("server_running") and status.get("server_port"):
+            return (
+                status.get("server_host") or server.get_server_public_host(),
+                str(status.get("server_port")),
+            )
+        if server.is_server_running():
+            return server.get_server_public_host(), str(server.get_server_port() or "")
+        bind_host = self._resolve_listen_host()
+        port = self._port_text or self.port_edit.text().strip()
+        if bind_host in ("0.0.0.0", "::"):
+            display_host = "127.0.0.1"
+        else:
+            display_host = bind_host or "127.0.0.1"
+        return display_host, port
+
     def _update_tampermonkey_settings_labels(self, status=None):
         status = status or self._last_bridge_status or {}
-        host = self._host or self.host_edit.text().strip()
-        port = self._port_text or self.port_edit.text().strip()
+        host, port = self._service_host_port_for_display(status)
         self.tm_bridge_url_label.setText(
             self._tampermonkey_bridge_url_text(host, port)
         )
@@ -426,6 +445,7 @@ class UiBuilderMixin:
         root.addWidget(self.main_tabs, stretch=1)
         self.statusBar().showMessage("未启动服务")
         self._apply_app_style()
+        self._sync_page_url_detail_widgets()
     def _apply_app_style(self):
         self.setStyleSheet(
             """
@@ -549,7 +569,7 @@ class UiBuilderMixin:
             QLabel#TmBindMismatchHint {
                 color: #b71c1c;
                 font-size: 12px;
-                padding: 2px 6px;
+                padding: 0px 4px;
             }
             QWidget#ChatStatusBar {
                 background: #ffffff;
@@ -577,7 +597,8 @@ class UiBuilderMixin:
                 background: #fff5f5;
                 border: 1px solid #f3b3b3;
             }
-            QWidget#ChatPanel[bindState="pending_bind"] {
+            QWidget#ChatPanel[bindState="pending_bind"],
+            QWidget#ChatPanel[bindState="waiting_bound_reopen"] {
                 background: #fffbeb;
                 border: 1px solid #f0d060;
             }
@@ -597,76 +618,23 @@ class UiBuilderMixin:
                 padding: 2px 4px 8px 4px;
             }
             QListWidget#SessionList {
-                background: transparent;
+                background: #f3f4f6;
                 border: none;
                 outline: none;
-                padding: 4px;
             }
             QListWidget#SessionList::item {
                 border: none;
-                padding: 0px;
-                margin: 2px 0;
                 background: transparent;
+                padding: 0px;
+                margin: 0px;
             }
             QListWidget#SessionList::item:selected {
                 background: transparent;
                 border: none;
             }
             QWidget#SessionListItem {
-                border-radius: 8px;
-                border: 1px solid #e5e7eb;
-                border-left: 4px solid #9ca3af;
-                background: #ffffff;
-            }
-            QWidget#SessionListItem[bindState="bound_online"] {
-                background: #eefaf1;
-                border: 1px solid #b7e4c7;
-                border-left: 4px solid #22c55e;
-            }
-            QWidget#SessionListItem[bindState="bound_offline"] {
-                background: #fff1f2;
-                border: 1px solid #fecdd3;
-                border-left: 4px solid #ef4444;
-            }
-            QWidget#SessionListItem[bindState="prebound_home"] {
-                background: #eff6ff;
-                border: 1px solid #bfdbfe;
-                border-left: 4px solid #3b82f6;
-            }
-            QWidget#SessionListItem[bindState="waiting_home"],
-            QWidget#SessionListItem[bindState="waiting_conversation_created"] {
-                background: #fffbeb;
-                border: 1px solid #fde68a;
-                border-left: 4px solid #f59e0b;
-            }
-            QWidget#SessionListItem[bindState="unbound"] {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-left: 4px solid #9ca3af;
-            }
-            QWidget#SessionListItem[bindState="bind_mismatch"] {
-                background: #fef2f2;
-                border: 1px solid #ef4444;
-                border-left: 4px solid #dc2626;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="bound_online"] {
-                border: 2px solid #16a34a;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="bound_offline"] {
-                border: 2px solid #dc2626;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="prebound_home"] {
-                border: 2px solid #2563eb;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="waiting_home"],
-            QWidget#SessionListItem[selected="true"][bindState="waiting_conversation_created"] {
-                border: 2px solid #d97706;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="unbound"] {
-                border: 2px solid #6b7280;
-            }
-            QWidget#SessionListItem[selected="true"][bindState="bind_mismatch"] {
-                border: 2px solid #dc2626;
+                background: transparent;
+                border: none;
             }
             QLabel#SessionItemTitle {
                 color: #111827;
@@ -680,35 +648,18 @@ class UiBuilderMixin:
                 background: transparent;
             }
             QLabel#SessionBindStatusLabel {
-                color: #4b5563;
                 font-size: 11px;
-                background: transparent;
-            }
-            QWidget#SessionListItem[bindState="bound_online"] QLabel#SessionBindStatusLabel {
-                color: #14532d;
-            }
-            QWidget#SessionListItem[bindState="bound_offline"] QLabel#SessionBindStatusLabel,
-            QWidget#SessionListItem[bindState="bind_mismatch"] QLabel#SessionBindStatusLabel {
-                color: #7f1d1d;
-            }
-            QWidget#SessionListItem[bindState="prebound_home"] QLabel#SessionBindStatusLabel {
-                color: #1e3a8a;
-            }
-            QWidget#SessionListItem[bindState="waiting_home"] QLabel#SessionBindStatusLabel,
-            QWidget#SessionListItem[bindState="waiting_conversation_created"] QLabel#SessionBindStatusLabel {
-                color: #78350f;
+                padding: 1px 6px;
+                border-radius: 6px;
             }
             QLabel#SessionPendingDot {
-                color: #3b82f6;
-                font-size: 10px;
+                color: #2563eb;
+                font-size: 14px;
                 background: transparent;
             }
             QLabel#SessionCurrentBadge {
-                color: #6b7280;
                 font-size: 10px;
                 font-weight: 600;
-                background: transparent;
-                padding-top: 2px;
             }
             QLineEdit#SessionSearchInput {
                 background: #ffffff;
@@ -737,7 +688,8 @@ class UiBuilderMixin:
                 background: #fff7f7;
                 border: 1px solid #f3b3b3;
             }
-            QScrollArea#ChatScrollArea[bindState="pending_bind"] {
+            QScrollArea#ChatScrollArea[bindState="pending_bind"],
+            QScrollArea#ChatScrollArea[bindState="waiting_bound_reopen"] {
                 background: #fffbeb;
                 border: 1px solid #f0d060;
             }
@@ -760,7 +712,8 @@ class UiBuilderMixin:
             QWidget#ChatViewport[bindState="unbound_required"] {
                 background: #fff7f7;
             }
-            QWidget#ChatViewport[bindState="pending_bind"] {
+            QWidget#ChatViewport[bindState="pending_bind"],
+            QWidget#ChatViewport[bindState="waiting_bound_reopen"] {
                 background: #fffbeb;
             }
             QWidget#ChatViewport[bindState="prebound_home"] {
@@ -843,7 +796,19 @@ class UiBuilderMixin:
         )
         layout.addLayout(tool_col)
         self._chat_status_group = self._build_chat_status_bar()
-        layout.addWidget(self._chat_status_group)
+        self.bridge_status_panel = QFrame()
+        self.bridge_status_panel.setObjectName("BridgeStatusPanel")
+        self.bridge_status_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        panel_layout = QVBoxLayout(self.bridge_status_panel)
+        panel_layout.setContentsMargins(8, 4, 8, 4)
+        panel_layout.setSpacing(0)
+        panel_layout.addWidget(self._chat_status_group)
+        _bridge_status_h = 126
+        self.bridge_status_panel.setFixedHeight(_bridge_status_h)
+        self.bridge_status_panel.setMinimumHeight(_bridge_status_h)
+        self.bridge_status_panel.setMaximumHeight(_bridge_status_h)
+        layout.addWidget(self.bridge_status_panel)
+        self.bridge_status_panel.setVisible(self._show_top_status_bar)
         self._chat_panel = self._build_chat_panel()
         layout.addWidget(self._chat_panel, stretch=1)
         return page
@@ -886,10 +851,16 @@ class UiBuilderMixin:
         # --- 服务设置
         service_page = QWidget()
         service_form = QFormLayout(service_page)
-        self.host_edit = QLineEdit(self._host)
+        self.enable_lan_access_cb = QCheckBox("允许局域网访问（监听 0.0.0.0）")
+        self.enable_lan_access_cb.setChecked(self._enable_lan_access)
+        self.enable_lan_access_cb.toggled.connect(self._on_enable_lan_access_changed)
+        self.listen_host_label = QLabel()
+        self.listen_host_label.setWordWrap(True)
+        self._update_listen_host_label()
         self.port_edit = QLineEdit(self._port_text)
         self.port_edit.setFixedWidth(80)
-        service_form.addRow("地址 host", self.host_edit)
+        service_form.addRow("局域网访问", self.enable_lan_access_cb)
+        service_form.addRow("监听地址", self.listen_host_label)
         service_form.addRow("端口 port", self.port_edit)
         self.auto_start_server_cb = QCheckBox("启动 GUI 时自动启动服务")
         self.auto_start_server_cb.setChecked(self._auto_start_server)
@@ -965,6 +936,39 @@ class UiBuilderMixin:
             self.auto_open_and_bind_on_new_chat_cb,
         ):
             bind_layout.addWidget(widget)
+        sync_group = QGroupBox("网页对话同步")
+        sync_layout = QVBoxLayout(sync_group)
+        self.sync_full_conversation_enabled_cb = QCheckBox(
+            "允许从网页同步完整对话"
+        )
+        self.auto_sync_conversation_on_bind_cb = QCheckBox(
+            "绑定 ChatGPT 页面后自动同步网页历史"
+        )
+        self.auto_sync_conversation_after_reply_cb = QCheckBox(
+            "每次收到回复后自动同步网页对话（可能较慢）"
+        )
+        sync_mode_row = QHBoxLayout()
+        sync_mode_row.addWidget(QLabel("同步模式"))
+        self.sync_conversation_mode_combo = QComboBox()
+        self.sync_conversation_mode_combo.addItem("安全合并（只补缺失）", "merge")
+        self.sync_conversation_mode_combo.addItem("强制覆盖（保留系统提示）", "replace")
+        sync_mode_row.addWidget(self.sync_conversation_mode_combo, stretch=1)
+        sync_max_row = QHBoxLayout()
+        sync_max_row.addWidget(QLabel("最多同步条数"))
+        self.sync_conversation_max_messages_spin = QSpinBox()
+        self.sync_conversation_max_messages_spin.setRange(10, 2000)
+        self.sync_conversation_max_messages_spin.setSingleStep(10)
+        sync_max_row.addWidget(self.sync_conversation_max_messages_spin)
+        sync_max_row.addStretch()
+        for widget in (
+            self.sync_full_conversation_enabled_cb,
+            self.auto_sync_conversation_on_bind_cb,
+            self.auto_sync_conversation_after_reply_cb,
+        ):
+            sync_layout.addWidget(widget)
+        sync_layout.addLayout(sync_mode_row)
+        sync_layout.addLayout(sync_max_row)
+        bind_layout.addWidget(sync_group)
         tm_form.addRow("", bind_group)
         self.tm_pages_table = QTableWidget(0, 10)
         self.tm_pages_table.setHorizontalHeaderLabels(
@@ -1049,70 +1053,81 @@ class UiBuilderMixin:
         bar = QWidget()
         bar.setObjectName("ChatStatusBar")
         outer = QVBoxLayout(bar)
-        outer.setContentsMargins(10, 6, 10, 6)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
         self.status_label = QLabel("服务：未启动")
         self.status_label.setObjectName("StatusChip")
-        top_row.addWidget(self.status_label)
         self.tm_online_label = QLabel("油猴：未连接")
         self.tm_online_label.setObjectName("StatusChip")
-        top_row.addWidget(self.tm_online_label)
         self.tm_queue_label = QLabel("队列：0")
         self.tm_queue_label.setObjectName("StatusChip")
+        for chip in (
+            self.status_label,
+            self.tm_online_label,
+            self.tm_queue_label,
+        ):
+            chip.setWordWrap(False)
+            chip.setFixedHeight(30)
+            chip.setMinimumHeight(30)
+            chip.setMaximumHeight(30)
+            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        top_row.addWidget(self.status_label)
+        top_row.addWidget(self.tm_online_label)
         top_row.addWidget(self.tm_queue_label)
         top_row.addStretch()
         self.chat_quick_start_btn = QPushButton("启动")
         self.chat_quick_start_btn.setObjectName("CompactButton")
         self.chat_quick_start_btn.setFixedWidth(48)
+        self.chat_quick_start_btn.setFixedHeight(30)
+        self.chat_quick_start_btn.setMinimumHeight(30)
+        self.chat_quick_start_btn.setMaximumHeight(30)
         self.chat_quick_start_btn.clicked.connect(self._start_server)
         top_row.addWidget(self.chat_quick_start_btn)
         self.chat_quick_stop_btn = QPushButton("停止")
         self.chat_quick_stop_btn.setObjectName("CompactButton")
         self.chat_quick_stop_btn.setFixedWidth(48)
+        self.chat_quick_stop_btn.setFixedHeight(30)
+        self.chat_quick_stop_btn.setMinimumHeight(30)
+        self.chat_quick_stop_btn.setMaximumHeight(30)
         self.chat_quick_stop_btn.clicked.connect(self._stop_server)
         self.chat_quick_stop_btn.setEnabled(False)
         top_row.addWidget(self.chat_quick_stop_btn)
         outer.addLayout(top_row)
         live_row = QHBoxLayout()
         live_row.setSpacing(6)
-        self.tm_live_page_label = QLabel("当前油猴页面：-")
+        self.tm_live_page_label = ElidedLabel("当前油猴页面：-")
         self.tm_live_page_label.setObjectName("StatusChip")
-        self.tm_live_page_label.setTextFormat(Qt.RichText)
-        self.tm_live_page_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.tm_live_page_label.setOpenExternalLinks(False)
-        self.tm_live_page_label.linkActivated.connect(self._open_tampermonkey_page)
+        self.tm_live_page_label.setFixedHeight(24)
+        self.tm_live_page_label.setMinimumHeight(24)
+        self.tm_live_page_label.setMaximumHeight(24)
         live_row.addWidget(self.tm_live_page_label, stretch=1)
         self.open_live_page_btn = QPushButton("打开")
         self.open_live_page_btn.setObjectName("CompactButton")
         self.open_live_page_btn.setFixedWidth(48)
+        self.open_live_page_btn.setFixedHeight(30)
+        self.open_live_page_btn.setMinimumHeight(30)
+        self.open_live_page_btn.setMaximumHeight(30)
         self.open_live_page_btn.setEnabled(False)
         self.open_live_page_btn.clicked.connect(lambda: self._open_tampermonkey_page())
         live_row.addWidget(self.open_live_page_btn)
         outer.addLayout(live_row)
         bound_row = QHBoxLayout()
         bound_row.setSpacing(6)
-        self.tm_bound_page_label = QLabel("绑定页面：未绑定")
+        self.tm_bound_page_label = ElidedLabel("绑定页面：未绑定")
         self.tm_bound_page_label.setObjectName("StatusChip")
-        self.tm_bound_page_label.setTextFormat(Qt.RichText)
-        self.tm_bound_page_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.tm_bound_page_label.setOpenExternalLinks(False)
-        self.tm_bound_page_label.linkActivated.connect(self._on_open_bound_chatgpt_page)
+        self.tm_bound_page_label.setFixedHeight(24)
+        self.tm_bound_page_label.setMinimumHeight(24)
+        self.tm_bound_page_label.setMaximumHeight(24)
         bound_row.addWidget(self.tm_bound_page_label, stretch=1)
         outer.addLayout(bound_row)
-        self.tm_bind_mismatch_label = QLabel("")
+        self.tm_bind_mismatch_label = ElidedLabel(" ")
         self.tm_bind_mismatch_label.setObjectName("TmBindMismatchHint")
-        self.tm_bind_mismatch_label.setWordWrap(True)
-        self.tm_bind_mismatch_label.setVisible(False)
+        self.tm_bind_mismatch_label.setFixedHeight(22)
+        self.tm_bind_mismatch_label.setMinimumHeight(22)
+        self.tm_bind_mismatch_label.setMaximumHeight(22)
         outer.addWidget(self.tm_bind_mismatch_label)
-        bar.setVisible(self._show_top_status_bar)
-        for widget in (
-            self.tm_live_page_label,
-            self.tm_bound_page_label,
-            self.open_live_page_btn,
-        ):
-            widget.setVisible(self._show_page_url)
         return bar
     def _build_chat_panel(self):
         panel = QWidget()
@@ -1122,11 +1137,10 @@ class UiBuilderMixin:
         layout.setSpacing(10)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setObjectName("ChatSplitter")
-        sidebar = QWidget()
-        sidebar.setObjectName("SessionSidebar")
-        sidebar.setMinimumWidth(220)
-        sidebar.setMaximumWidth(280)
-        sidebar_layout = QVBoxLayout(sidebar)
+        self.session_sidebar = QWidget()
+        self.session_sidebar.setObjectName("SessionSidebar")
+        self.session_sidebar.setFixedWidth(260)
+        sidebar_layout = QVBoxLayout(self.session_sidebar)
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
         sidebar_layout.setSpacing(8)
         self.new_session_btn = QPushButton("新建对话")
@@ -1141,7 +1155,8 @@ class UiBuilderMixin:
         sidebar_layout.addWidget(self.session_search_edit)
         self.session_list = SessionListWidget()
         self.session_list.setObjectName("SessionList")
-        self.session_list.setSpacing(2)
+        self.session_list.setUniformItemSizes(True)
+        self.session_list.setSpacing(4)
         self.session_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.session_list.setDefaultDropAction(Qt.MoveAction)
         self.session_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1229,10 +1244,10 @@ class UiBuilderMixin:
         tools_row.addWidget(self.copy_last_btn)
         input_layout.addLayout(tools_row)
         chat_layout.addWidget(input_block)
-        splitter.addWidget(sidebar)
+        splitter.addWidget(self.session_sidebar)
         splitter.addWidget(chat_area)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([250, 730])
+        splitter.setSizes([260, 720])
         layout.addWidget(splitter, stretch=1)
         return panel

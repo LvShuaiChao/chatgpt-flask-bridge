@@ -143,7 +143,10 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
 
 
 def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> bool:
-    """按相对路径（posix、小写）判断是否跳过扫描/合并。"""
+    """按相对路径（posix、小写）判断是否跳过扫描/合并。
+
+    默认排除（非源码）：log.txt、*.log、runtime/、__pycache__/、.git/、.venv/、venv/ 等。
+    """
     rel = str(rel_posix or "").strip().lower().replace("\\", "/")
     if not rel:
         return True
@@ -1030,6 +1033,7 @@ def _iter_export_artifact_paths(project_root: Path, output_path: Path) -> list[P
     patterns = (
         f"{stem}{suffix}",
         f"{stem}_part*{suffix}",
+        f"{stem}_export_metadata.txt",
         f"{stem}.zip",
         f"{stem}_part*.zip",
         "0_merged_for_chatgpt.txt",
@@ -1100,6 +1104,16 @@ def export_paths_to_exclude_from_scan(
     """全量扫描时排除主输出路径及历史分片，避免把导出结果再次合并进去。"""
     project_root = project_root.resolve()
     out: set[Path] = {output_path.resolve()}
+    try:
+        out.add(
+            output_path.with_name(f"{output_path.stem}_export_metadata.txt").resolve()
+        )
+    except OSError:
+        logger.warning(
+            "[export] resolve export metadata sibling failed output_path=%s",
+            output_path,
+            exc_info=True,
+        )
     for p in _split_export_part_paths(output_path):
         if p.is_file():
             out.add(p.resolve())
@@ -1485,10 +1499,9 @@ def write_merged_parts_from_file_blocks(
     body_parts: list[str],
     output_path: Path,
     *,
-    stats_tail: str = "",
     block_token_counts: list[int | None] | None = None,
 ) -> tuple[list[Path], list[ExportPartMeta]]:
-    """按完整 FILE 块边界拆分合并导出；首片含 header，末片可附加 stats_tail。"""
+    """按完整 FILE 块边界拆分合并导出；首片含 header。统计类元数据请另写 *_export_metadata.txt。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     enc = _get_tiktoken_encoder()
     max_tok = MAX_TOKENS_PER_OUTPUT_FILE
@@ -1552,9 +1565,7 @@ def write_merged_parts_from_file_blocks(
     part_metas: list[ExportPartMeta] = []
 
     for idx, (prefix, blocks) in enumerate(grouped, 1):
-        is_last = idx == len(grouped)
-        tail = stats_tail if is_last else ""
-        text = _assemble_merged_export_text(prefix, blocks, tail=tail)
+        text = _assemble_merged_export_text(prefix, blocks)
         if single_part:
             part_path = output_path
         else:
@@ -2036,6 +2047,7 @@ def export_bundle(
             stats_lines += "\n".join(_chatgpt_token_limit_lines(merged_export_tokens)) + "\n"
         stats_tail = (
             f"\n\n{'=' * 100}\n"
+            f"【以下为导出元数据，不属于上方任一 FILE 源码块】\n"
             f"导出附加统计（源码行数 + tokens，与上方「循环次数」为同一轮）\n"
             f"{stats_lines}"
             f"{'=' * 100}\n"
@@ -2052,9 +2064,16 @@ def export_bundle(
         header,
         body_parts,
         output_path,
-        stats_tail=stats_tail,
         block_token_counts=block_token_counts if block_token_counts else None,
     )
+    export_metadata_path: Path | None = None
+    if stats_tail.strip():
+        export_metadata_path = output_path.with_name(f"{output_path.stem}_export_metadata.txt")
+        export_metadata_path.write_text(stats_tail.strip() + "\n", encoding="utf-8")
+        print(
+            f"[导出] 统计与说明已单独写入: {export_metadata_path.name}（未并入 FILE 源码块）",
+            flush=True,
+        )
     write_sec = time.perf_counter() - t_write0
     if loop_iteration is not None:
         project_name = project_root.resolve().name
@@ -2157,6 +2176,12 @@ def export_bundle(
                 keep_artifacts.add(txt_path.resolve())
             except OSError:
                 keep_artifacts.add(txt_path)
+
+    if export_metadata_path is not None:
+        try:
+            keep_artifacts.add(export_metadata_path.resolve())
+        except OSError:
+            keep_artifacts.add(export_metadata_path)
 
     if export_zip and zip_paths_written:
         if not test_all_export_zips(zip_paths_written):

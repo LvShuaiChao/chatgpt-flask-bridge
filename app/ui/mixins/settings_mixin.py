@@ -1,62 +1,11 @@
-import html
-import json
-import re
-import sys
-import time
 import traceback
-import uuid
-import webbrowser
-from pathlib import Path
-from urllib.parse import urlparse
 
 import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
+from log_utils import append_log, clear_log_file
 
 from app.constants import (
-    ASSISTANT_WAIT_TEXT,
-    ASSISTANT_WAIT_TEXTS,
-    CHATGPT_HOME_URL,
     DEFAULT_APP_SETTINGS,
     RUNTIME_DIR,
-    SESSIONS_FILE,
-    SESSIONS_JSON_VERSION,
-    SETTINGS_APP,
-    SETTINGS_ORG,
-)
-from app.models import ChatMessage, ChatSession, default_remote_chatgpt, normalize_remote_chatgpt
-from app.url_utils import parse_conversation_id
-from app.ui.widgets.bridge_notifier import BridgeNotifier
-from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
-from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
-from PyQt5.QtWidgets import (
-    QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
-    QMainWindow,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
 )
 
 
@@ -158,6 +107,39 @@ class SettingsMixin:
             self._settings.value("auto_open_and_bind_on_new_chat"),
             defaults["auto_open_and_bind_on_new_chat"],
         )
+        self._force_new_session_after_turns = int(
+            self._settings.value(
+                "force_new_session_after_turns",
+                defaults["force_new_session_after_turns"],
+            )
+            or 0
+        )
+        self._sync_full_conversation_enabled = self._qsettings_bool(
+            self._settings.value("sync_full_conversation_enabled"),
+            defaults["sync_full_conversation_enabled"],
+        )
+        self._auto_sync_conversation_on_bind = self._qsettings_bool(
+            self._settings.value("auto_sync_conversation_on_bind"),
+            defaults["auto_sync_conversation_on_bind"],
+        )
+        self._auto_sync_conversation_after_reply = self._qsettings_bool(
+            self._settings.value("auto_sync_conversation_after_reply"),
+            defaults["auto_sync_conversation_after_reply"],
+        )
+        self._sync_conversation_max_messages = int(
+            self._settings.value(
+                "sync_conversation_max_messages",
+                defaults["sync_conversation_max_messages"],
+            )
+            or defaults["sync_conversation_max_messages"]
+        )
+        mode = str(
+            self._settings.value(
+                "sync_conversation_mode", defaults["sync_conversation_mode"]
+            )
+            or defaults["sync_conversation_mode"]
+        ).strip().lower()
+        self._sync_conversation_mode = mode if mode in ("merge", "replace") else "merge"
     def _force_ui_settings_to_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
         self._chat_font_pt = int(defaults["font_size"])
@@ -167,10 +149,22 @@ class SettingsMixin:
         self._restore_chat_tab = bool(defaults["restore_chat_tab"])
         self._show_page_url = bool(defaults["show_page_url"])
         self._show_top_status_bar = bool(defaults["show_top_status_bar"])
+    def _resolve_listen_host(self):
+        if getattr(self, "_enable_lan_access", False):
+            return "0.0.0.0"
+        return "127.0.0.1"
+
     def _load_app_settings_values(self):
         defaults = DEFAULT_APP_SETTINGS
         try:
-            self._host = str(self._settings.value("host", defaults["host"]))
+            saved_host = str(self._settings.value("host", defaults["host"])).strip()
+            self._enable_lan_access = self._qsettings_bool(
+                self._settings.value("enable_lan_access"),
+                defaults["enable_lan_access"],
+            )
+            if saved_host in ("0.0.0.0", "::"):
+                self._enable_lan_access = True
+            self._host = self._resolve_listen_host()
             self._port_text = str(self._settings.value("port", defaults["port"]))
             self._auto_start_server = self._qsettings_bool(
                 self._settings.value("auto_start_server"),
@@ -183,14 +177,18 @@ class SettingsMixin:
             detail = f"加载设置失败，已使用默认值：{error}\n{traceback.format_exc()}"
             append_log(detail, source="GUI", echo=True)
             defaults = DEFAULT_APP_SETTINGS
-            self._host = defaults["host"]
+            self._enable_lan_access = defaults["enable_lan_access"]
+            self._host = self._resolve_listen_host()
             self._port_text = str(defaults["port"])
             self._auto_start_server = defaults["auto_start_server"]
             self._force_ui_settings_to_defaults()
             self._chat_sessions_path = defaults["chat_sessions_path"]
             self._save_chat_history = defaults["save_chat_history"]
+        server.set_debug_mode(self._debug_mode)
     def _read_settings_from_widgets(self):
-        self._host = self.host_edit.text().strip() or "127.0.0.1"
+        if hasattr(self, "enable_lan_access_cb"):
+            self._enable_lan_access = self.enable_lan_access_cb.isChecked()
+        self._host = self._resolve_listen_host()
         self._port_text = self.port_edit.text().strip() or "5000"
         self._auto_start_server = self.auto_start_server_cb.isChecked()
         if hasattr(self, "bind_each_chat_to_page_cb"):
@@ -207,11 +205,29 @@ class SettingsMixin:
             self._auto_open_and_bind_on_new_chat = (
                 self.auto_open_and_bind_on_new_chat_cb.isChecked()
             )
+        if hasattr(self, "sync_full_conversation_enabled_cb"):
+            self._sync_full_conversation_enabled = (
+                self.sync_full_conversation_enabled_cb.isChecked()
+            )
+            self._auto_sync_conversation_on_bind = (
+                self.auto_sync_conversation_on_bind_cb.isChecked()
+            )
+            self._auto_sync_conversation_after_reply = (
+                self.auto_sync_conversation_after_reply_cb.isChecked()
+            )
+            self._sync_conversation_max_messages = int(
+                self.sync_conversation_max_messages_spin.value()
+            )
+            mode = self.sync_conversation_mode_combo.currentData()
+            self._sync_conversation_mode = (
+                mode if mode in ("merge", "replace") else "merge"
+            )
         self._chat_sessions_path = str(RUNTIME_DIR)
         self._save_chat_history = True
     def _save_app_settings(self):
         self._read_settings_from_widgets()
         self._settings.setValue("host", self._host)
+        self._settings.setValue("enable_lan_access", self._enable_lan_access)
         self._settings.setValue("port", self._port_text)
         self._settings.setValue("auto_start_server", self._auto_start_server)
         self._settings.setValue("font_size", self._chat_font_pt)
@@ -236,23 +252,47 @@ class SettingsMixin:
             "auto_open_and_bind_on_new_chat",
             self._auto_open_and_bind_on_new_chat,
         )
+        self._settings.setValue(
+            "force_new_session_after_turns",
+            int(self._force_new_session_after_turns or 0),
+        )
+        self._settings.setValue(
+            "sync_full_conversation_enabled", self._sync_full_conversation_enabled
+        )
+        self._settings.setValue(
+            "auto_sync_conversation_on_bind", self._auto_sync_conversation_on_bind
+        )
+        self._settings.setValue(
+            "auto_sync_conversation_after_reply",
+            self._auto_sync_conversation_after_reply,
+        )
+        self._settings.setValue(
+            "sync_conversation_max_messages", int(self._sync_conversation_max_messages)
+        )
+        self._settings.setValue("sync_conversation_mode", self._sync_conversation_mode)
         self._save_ui_settings()
+    def _sync_page_url_detail_widgets(self):
+        if not hasattr(self, "tm_live_page_label"):
+            return
+        if self._show_page_url:
+            self._update_live_page_display()
+            self._update_bound_page_display()
+            return
+        self.tm_live_page_label.setText(" ")
+        self.tm_bound_page_label.setText(" ")
+        if hasattr(self, "tm_bind_mismatch_label"):
+            self.tm_bind_mismatch_label.setText(" ")
+        if hasattr(self, "open_live_page_btn"):
+            self.open_live_page_btn.setEnabled(False)
     def _apply_settings(self, immediate_only=False):
         self._read_settings_from_widgets()
         server.set_debug_mode(self._debug_mode)
-        if self._chat_status_group is not None:
-            self._chat_status_group.setVisible(self._show_top_status_bar)
-        if hasattr(self, "tm_live_page_label"):
-            for widget in (
-                self.tm_live_page_label,
-                self.tm_bound_page_label,
-                self.open_live_page_btn,
-            ):
-                widget.setVisible(self._show_page_url)
+        if getattr(self, "bridge_status_panel", None) is not None:
+            self.bridge_status_panel.setVisible(self._show_top_status_bar)
         session = self._current_session()
         if session:
             self._render_session_chat(session)
-        self._update_bound_page_display()
+        self._sync_page_url_detail_widgets()
         self._apply_chat_bind_visual_state()
         if self.message_edit.placeholderText():
             self._update_input_placeholder()
@@ -288,7 +328,9 @@ class SettingsMixin:
         self._save_app_settings()
         self._set_settings_hint("已恢复默认设置。")
     def _sync_settings_widgets_from_values(self):
-        self.host_edit.setText(self._host)
+        if hasattr(self, "enable_lan_access_cb"):
+            self.enable_lan_access_cb.setChecked(self._enable_lan_access)
+        self._update_listen_host_label()
         self.port_edit.setText(self._port_text)
         self.auto_start_server_cb.setChecked(self._auto_start_server)
         if hasattr(self, "bind_each_chat_to_page_cb"):
@@ -303,6 +345,24 @@ class SettingsMixin:
             self.auto_open_and_bind_on_new_chat_cb.setChecked(
                 self._auto_open_and_bind_on_new_chat
             )
+        if hasattr(self, "sync_full_conversation_enabled_cb"):
+            self.sync_full_conversation_enabled_cb.setChecked(
+                self._sync_full_conversation_enabled
+            )
+            self.auto_sync_conversation_on_bind_cb.setChecked(
+                self._auto_sync_conversation_on_bind
+            )
+            self.auto_sync_conversation_after_reply_cb.setChecked(
+                self._auto_sync_conversation_after_reply
+            )
+            self.sync_conversation_max_messages_spin.setValue(
+                int(self._sync_conversation_max_messages or 200)
+            )
+            idx = self.sync_conversation_mode_combo.findData(
+                self._sync_conversation_mode
+            )
+            if idx >= 0:
+                self.sync_conversation_mode_combo.setCurrentIndex(idx)
         self._update_input_placeholder()
     def _set_settings_hint(self, text):
         self.settings_hint_label.setText(text or "")
@@ -311,12 +371,33 @@ class SettingsMixin:
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
+    def _update_listen_host_label(self):
+        if not hasattr(self, "listen_host_label"):
+            return
+        if self._enable_lan_access:
+            self.listen_host_label.setText("0.0.0.0（全部网卡，局域网可访问）")
+        else:
+            self.listen_host_label.setText("127.0.0.1（仅本机）")
+
+    def _on_enable_lan_access_changed(self, _checked=False):
+        self._read_settings_from_widgets()
+        self._update_listen_host_label()
+        if hasattr(self, "tm_bridge_url_label"):
+            self._update_tampermonkey_settings_labels(self._last_bridge_status)
+
     def _update_service_settings_status(self):
         if server.is_server_running():
-            host = self.host_edit.text().strip()
-            port = self.port_edit.text().strip()
+            service_url = server.get_server_url() or "-"
+            bridge_url = server.get_server_bridge_url() or "-"
             self.settings_service_status_label.setText(
-                f"当前状态：运行中（http://{host}:{port}）"
+                f"当前状态：运行中\n"
+                f"服务地址：{service_url}\n"
+                f"油猴填写：{bridge_url}"
+            )
+        elif getattr(self, "_server_start_failed", False):
+            message = getattr(self, "_server_start_error", "") or "未知错误"
+            self.settings_service_status_label.setText(
+                f"当前状态：启动失败\n{message}"
             )
         else:
             self.settings_service_status_label.setText("当前状态：未启动")

@@ -1,63 +1,16 @@
-import html
-import json
-import re
-import sys
-import time
-import traceback
-import uuid
-import webbrowser
-from pathlib import Path
-from urllib.parse import urlparse
 
 import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
 
 from app.constants import (
-    ASSISTANT_WAIT_TEXT,
-    ASSISTANT_WAIT_TEXTS,
-    CHATGPT_HOME_URL,
-    DEFAULT_APP_SETTINGS,
-    RUNTIME_DIR,
-    SESSIONS_FILE,
-    SESSIONS_JSON_VERSION,
     SETTINGS_APP,
     SETTINGS_ORG,
 )
-from app.models import ChatMessage, ChatSession, default_remote_chatgpt, normalize_remote_chatgpt
-from app.url_utils import parse_conversation_id
 from app.ui.widgets.bridge_notifier import BridgeNotifier
-from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
-from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont, QKeySequence
+from PyQt5.QtCore import QSettings, Qt, QTimer
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
     QMainWindow,
-    QPushButton,
-    QScrollArea,
     QShortcut,
-    QSizePolicy,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
 )
 
 from app.ui.mixins.bridge_mixin import BridgeMixin
@@ -88,6 +41,7 @@ class MainWindow(
         self._current_session_id = None
         self._message_to_session = {}
         self._message_to_turn = {}
+        self._external_client_last_session = {}
         self._processed_inbound_ids = set()
         self._finalized_bridge_message_ids = set()
         self._ack_success_message_ids = set()
@@ -95,19 +49,20 @@ class MainWindow(
         self._user_bubbles_by_message_id = {}
         self._tampermonkey_page_url = None
         self._saved_page_url = self._load_saved_page_url()
-        self._page_url_from_cache = False
         self._last_bridge_status = {}
+        self._server_start_failed = False
+        self._server_start_error = ""
         self._auto_bind_known_clients = set()
         self._auto_bind_wait_until = 0
         self._pending_auto_bind_session_id = ""
-        self._pending_auto_bind_started_at = 0
         self._pending_auto_bind_until = 0
         self._pending_auto_bind_known_clients = set()
         self._pending_auto_bind_known_page_instances = set()
+        self._last_bound_page_seen_by_session = {}
+        self._last_session_bind_display_state = {}
+        self._last_session_bind_state_log_at = {}
+        self._last_session_bind_debounce_log_at = {}
         self._last_auto_open_url_at = {}
-        self._pending_open_session_id = ""
-        self._pending_open_url = ""
-        self._pending_open_until = 0
         self._list_refreshing = False
         self._session_search_text = ""
         self._applying_bridge_status = False

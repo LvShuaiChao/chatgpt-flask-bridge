@@ -38,11 +38,6 @@ def append_log(message, source="", echo=False):
     return line
 
 
-def append_exception(prefix, error, source="", echo=True):
-    detail = f"{prefix}: {error}\n{traceback.format_exc()}"
-    return append_log(detail, source=source, echo=echo)
-
-
 def clear_log_file():
     try:
         with _LOG_LOCK:

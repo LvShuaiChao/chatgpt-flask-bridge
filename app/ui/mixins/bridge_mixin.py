@@ -1,72 +1,26 @@
-import html
-import json
-import re
-import sys
 import time
 import traceback
 import uuid
-import webbrowser
-from pathlib import Path
-from urllib.parse import urlparse
 
 import server
-from log_utils import append_log, append_exception, clear_log_file, get_log_file_path
+from log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
-    ASSISTANT_WAIT_TEXTS,
-    PENDING_ASSISTANT_STATUSES,
-    CHATGPT_HOME_URL,
-    DEFAULT_APP_SETTINGS,
-    RUNTIME_DIR,
-    SESSIONS_FILE,
-    SESSIONS_JSON_VERSION,
-    SETTINGS_APP,
-    SETTINGS_ORG,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
-    ChatMessage,
-    ChatSession,
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.ui.widgets.bridge_notifier import BridgeNotifier
-from app.ui.widgets.chat_bubble import ChatBubble, SystemBubble
-from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import QObject, QSettings, QUrl, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
-    QMainWindow,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
 )
 
 
@@ -80,8 +34,7 @@ class BridgeMixin:
 
     def _render_status_summary(self, status):
         status = status or {}
-        host = self.host_edit.text().strip() or "127.0.0.1"
-        port = self.port_edit.text().strip() or "5000"
+        host, port = self._service_host_port_for_display(status)
         last_seen = status.get("tampermonkey_last_seen")
         page_url = self._tampermonkey_page_url or status.get("tampermonkey_page_url") or "-"
         if status.get("tampermonkey_online"):
@@ -178,9 +131,24 @@ class BridgeMixin:
         self._debug_status_step("[STATUS_APPLY][STEP] start")
         server_running = bool(status.get("server_running"))
         if server_running:
-            self.status_label.setText("服务：运行中")
-            self.statusBar().showMessage("服务运行中")
+            service_url = (
+                status.get("server_url")
+                or server.get_server_url()
+                or ""
+            )
+            if service_url:
+                self.status_label.setText(f"服务：运行中 {service_url}")
+                self.statusBar().showMessage(f"服务运行中 {service_url}")
+            else:
+                self.status_label.setText("服务：运行中")
+                self.statusBar().showMessage("服务运行中")
+            self._server_start_failed = False
+            self._server_start_error = ""
             self._refresh_status_chip(self.status_label, "ok")
+        elif getattr(self, "_server_start_failed", False):
+            self.status_label.setText("服务：启动失败")
+            self.statusBar().showMessage("服务启动失败")
+            self._refresh_status_chip(self.status_label, "error")
         else:
             self.status_label.setText("服务：未启动")
             self.statusBar().showMessage("服务未启动")
@@ -220,6 +188,7 @@ class BridgeMixin:
         self._update_live_page_display(live_url, summary=summary)
         self._debug_status_step("[STATUS_APPLY][STEP] live_page")
         QTimer.singleShot(0, lambda s=status: self._try_finish_pending_auto_bind(s))
+        QTimer.singleShot(0, lambda s=status: self._try_finish_waiting_bound_conversations(s))
         QTimer.singleShot(0, lambda: self._check_bootstrap_claim_timeouts())
         QTimer.singleShot(0, lambda s=status: self._sync_bound_session_urls_from_clients(s))
         QTimer.singleShot(0, lambda s=status: self._auto_bind_current_session_if_needed(s))
@@ -342,6 +311,9 @@ class BridgeMixin:
                         f"[命令] 失败 client_id={client_id} {detail}".strip()
                     )
                 continue
+            if kind == "conversation_snapshot":
+                self._handle_conversation_snapshot_inbound(item)
+                continue
             if kind == "conversation_created":
                 conv_session = self._resolve_session_for_conversation_created(item)
                 if conv_session is not None:
@@ -376,9 +348,7 @@ class BridgeMixin:
                     report_client = (item.get("client_id") or "").strip()
                     if report_client:
                         remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                        if remote_now.get("bootstrap_in_progress"):
-                            pass
-                        else:
+                        if not remote_now.get("bootstrap_in_progress"):
                             self._remember_session_page_from_client(
                                 session, report_client
                             )
@@ -456,6 +426,10 @@ class BridgeMixin:
                             session, report_client
                         )
                         self._update_bound_page_display()
+                    if getattr(self, "_auto_sync_conversation_after_reply", False):
+                        self._schedule_auto_sync_conversation(
+                            session, request_reason="auto_after_reply"
+                        )
                 else:
                     self._set_reply_error(
                         session, turn_id, "ChatGPT 返回了空回复。", "空回复"
@@ -581,7 +555,8 @@ class BridgeMixin:
             self.log_edit.append(line)
         return line
     def _update_running_ui(self, running):
-        self.host_edit.setEnabled(not running)
+        if hasattr(self, "enable_lan_access_cb"):
+            self.enable_lan_access_cb.setEnabled(not running)
         self.port_edit.setEnabled(not running)
         self.settings_start_btn.setEnabled(not running)
         self.settings_stop_btn.setEnabled(running)
@@ -599,27 +574,60 @@ class BridgeMixin:
             return None
         return port
     def _start_server(self):
-        host = self.host_edit.text().strip() or "127.0.0.1"
+        bind_host = self._resolve_listen_host()
         port = self._parse_port()
         if port is None:
             return
+        self._read_settings_from_widgets()
         server.set_debug_mode(self._debug_mode)
         try:
-            started = server.start_server(host, port)
+            result = server.start_server(bind_host, port)
         except Exception as error:
-            detail = f"服务启动失败：{error}\n{traceback.format_exc()}"
+            detail = (
+                f"服务启动失败：{error}\n"
+                f"host={bind_host} port={port}\n"
+                f"{traceback.format_exc()}"
+            )
+            self._server_start_failed = True
+            self._server_start_error = str(error)
             self._append_log(detail, echo=True)
             self._add_system_message(f"服务启动失败：{error}")
+            self._update_running_ui(False)
+            self._update_service_settings_status()
             return
-        if started:
+
+        if result.get("ok"):
+            actual_port = result.get("port")
+            if actual_port and int(actual_port) != int(port):
+                self.port_edit.setText(str(actual_port))
+                self._port_text = str(actual_port)
+                self._settings.setValue("port", str(actual_port))
+            self._server_start_failed = False
+            self._server_start_error = ""
             self._update_running_ui(True)
             QTimer.singleShot(
                 200, lambda: self._apply_bridge_status(server.get_bridge_status())
             )
             self._update_service_settings_status()
-            self._append_log(f"服务已启动：http://{host}:{port}", echo=True)
-        else:
+            self._save_app_settings()
+            message = result.get("message") or server.get_server_url()
+            self._append_log(message, echo=True)
+            if result.get("fallback_used"):
+                self._add_system_message(
+                    f"默认端口 {result.get('configured_port')} 不可用，"
+                    f"已自动切换到 {actual_port}。\n"
+                    f"油猴请填写：{result.get('bridge_url')}"
+                )
+        elif result.get("already_running"):
             self._add_system_message("服务已经在运行中。")
+        else:
+            message = result.get("message") or "服务启动失败。"
+            self._server_start_failed = True
+            self._server_start_error = message
+            self._append_log(message, echo=True)
+            self._add_system_message(message)
+            self._update_running_ui(False)
+            self._update_service_settings_status()
     def _stop_server(self):
         try:
             stopped = server.stop_server()
@@ -629,26 +637,36 @@ class BridgeMixin:
             self._add_system_message(f"服务停止失败：{error}")
             return
         if stopped:
+            self._server_start_failed = False
+            self._server_start_error = ""
             self._update_running_ui(False)
             self._apply_bridge_status(server.get_bridge_status())
             self._update_service_settings_status()
             self._add_system_message("服务已停止。")
         else:
             self._add_system_message("服务当前没有运行。")
-    def _session_has_pending_assistant_reply(self, session):
-        if not session:
-            return False
-        for message in session.messages:
-            if message.role != "assistant":
-                continue
-            status = (message.status or "").strip()
-            if status not in PENDING_ASSISTANT_STATUSES:
-                continue
-            bridge_id = (message.bridge_message_id or "").strip()
-            if bridge_id and self._is_finalized(bridge_id):
-                continue
-            return True
-        return False
+
+    def _check_bound_client_response_ready(self, session):
+        if session is None:
+            return True, ""
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        client_id = (
+            remote.get("client_id")
+            or remote.get("prebound_home_client_id")
+            or ""
+        ).strip()
+        if not client_id:
+            return True, ""
+        client_info = self._client_info_by_id(client_id, self._last_bridge_status)
+        if not isinstance(client_info, dict):
+            return True, ""
+        if client_info.get("is_responding"):
+            return False, "当前 ChatGPT 页面仍在回答，请等待回复完成后再发送。"
+        can_accept_input = bool(client_info.get("can_accept_input", True))
+        if not can_accept_input:
+            state = (client_info.get("response_state") or "unknown").strip() or "unknown"
+            return False, f"当前 ChatGPT 页面暂不可发送（state={state}），请稍后重试。"
+        return True, ""
 
     def _push_message(self):
         if not server.is_server_running():
@@ -667,6 +685,20 @@ class BridgeMixin:
                 "当前对话上一条消息仍在等待回复，请等回复完成后再发送。"
             )
             return
+        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        if not response_ready:
+            self._add_system_message(response_msg)
+            return
+
+        if self._bind_each_chat_to_page:
+            reopen_result = self._prepare_bound_conversation_reopen_if_needed(
+                session, content
+            )
+            if reopen_result is False:
+                if self._auto_clear_input_after_send:
+                    self.message_edit.clear()
+                self._apply_chat_bind_visual_state()
+                return
 
         if self._bind_each_chat_to_page and self._session_needs_first_message_bind(
             session
@@ -853,6 +885,7 @@ class BridgeMixin:
         self._save_sessions_to_disk()
         if self._auto_clear_input_after_send and not from_pending_bootstrap:
             self.message_edit.clear()
+        self._focus_message_input_later()
     def _copy_last_reply(self):
         session = self._current_session()
         text = self._last_assistant_text(session)
@@ -1022,6 +1055,105 @@ class BridgeMixin:
         self._save_sessions_to_disk()
         return {"ok": True, "session": self._external_session_payload(session)}
 
+    def _resolve_external_chat_session(self, payload):
+        session_id = (payload.get("session_id") or "").strip()
+        new_session = bool(payload.get("new_session", False))
+        reuse_last_session = bool(payload.get("reuse_last_session", True))
+        auto_create_session = bool(payload.get("auto_create_session", True))
+        client_name = (payload.get("client_name") or "default").strip() or "default"
+        force_limit = int(payload.get("force_new_session_after_turns") or 0)
+        if force_limit <= 0:
+            force_limit = int(getattr(self, "_force_new_session_after_turns", 0) or 0)
+
+        session_meta = {
+            "new_session_created": False,
+            "new_session_reason": "",
+            "previous_session_id": "",
+            "previous_turn_count": 0,
+            "force_new_session_after_turns": force_limit,
+        }
+
+        if not hasattr(self, "_external_client_last_session"):
+            self._external_client_last_session = {}
+
+        def should_force_new(session):
+            if force_limit <= 0 or session is None:
+                return False
+            return server.count_user_turns(session) >= force_limit
+
+        def finish_force_new(previous_session):
+            prev_count = server.count_user_turns(previous_session)
+            session = self._create_session(select=False)
+            session.remote_chatgpt = default_remote_chatgpt()
+            self._external_client_last_session[client_name] = session.session_id
+            session_meta["new_session_created"] = True
+            session_meta["new_session_reason"] = "force_new_session_after_turns"
+            session_meta["previous_session_id"] = previous_session.session_id
+            session_meta["previous_turn_count"] = prev_count
+            self._append_session_message(
+                previous_session,
+                "system",
+                "当前会话已达到消息数量上限，后续外部客户端消息将进入新会话。",
+            )
+            self._append_session_message(
+                session,
+                "system",
+                "已达到当前会话的消息数量上限，已自动创建新的 ChatGPT 对话。",
+            )
+            self._append_log(
+                f"[EXTERNAL_API][FORCE_NEW_SESSION] client_name={client_name} "
+                f"previous_session_id={previous_session.session_id} "
+                f"previous_turn_count={prev_count} limit={force_limit} "
+                f"new_session_id={session.session_id}",
+                echo=True,
+            )
+            self._save_sessions_to_disk()
+            return session
+
+        if new_session:
+            session = self._create_session(select=False)
+            session.remote_chatgpt = default_remote_chatgpt()
+            self._external_client_last_session[client_name] = session.session_id
+            session_meta["new_session_created"] = True
+            session_meta["new_session_reason"] = "new_session"
+            self._save_sessions_to_disk()
+            return session, session_meta
+
+        if session_id:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                if should_force_new(session):
+                    return finish_force_new(session), session_meta
+                self._external_client_last_session[client_name] = session.session_id
+                return session, session_meta
+            if not auto_create_session:
+                return None, session_meta
+            self._append_log(
+                f"[EXTERNAL_API] session_id={session_id} 不存在，"
+                f"client_name={client_name}，将自动创建新会话",
+                echo=True,
+            )
+
+        if reuse_last_session:
+            last_id = (self._external_client_last_session.get(client_name) or "").strip()
+            if last_id:
+                session = self._sessions.get(last_id)
+                if session is not None:
+                    if should_force_new(session):
+                        return finish_force_new(session), session_meta
+                    return session, session_meta
+
+        if auto_create_session:
+            session = self._create_session(select=False)
+            session.remote_chatgpt = default_remote_chatgpt()
+            self._external_client_last_session[client_name] = session.session_id
+            session_meta["new_session_created"] = True
+            session_meta["new_session_reason"] = "auto_create"
+            self._save_sessions_to_disk()
+            return session, session_meta
+
+        return None, session_meta
+
     def _external_api_chat_send(self, payload):
         if not server.is_server_running():
             return {
@@ -1033,22 +1165,22 @@ class BridgeMixin:
         if not text:
             return {"ok": False, "error": "text 不能为空", "code": "EMPTY_TEXT"}
 
-        session_id = (payload.get("session_id") or "").strip()
-        auto_create_session = bool(payload.get("auto_create_session", True))
         auto_open_home = bool(payload.get("auto_open_home", True))
 
-        session = self._sessions.get(session_id) if session_id else None
+        session, session_meta = self._resolve_external_chat_session(payload)
         if session is None:
-            if not session_id and auto_create_session:
-                session = self._create_session(select=False)
-                session.remote_chatgpt = default_remote_chatgpt()
-                self._save_sessions_to_disk()
-            else:
+            session_id = (payload.get("session_id") or "").strip()
+            if session_id or not bool(payload.get("auto_create_session", True)):
                 return {
                     "ok": False,
                     "error": "会话不存在",
                     "code": "SESSION_NOT_FOUND",
                 }
+            return {
+                "ok": False,
+                "error": "无法解析会话",
+                "code": "SESSION_NOT_FOUND",
+            }
 
         if self._session_has_pending_assistant_reply(session):
             return {
@@ -1056,6 +1188,27 @@ class BridgeMixin:
                 "error": "当前会话仍有未完成回复",
                 "code": "INTERNAL_ERROR",
             }
+        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        if not response_ready:
+            return {
+                "ok": False,
+                "error": response_msg,
+                "code": "INTERNAL_ERROR",
+            }
+
+        if self._bind_each_chat_to_page:
+            reopen_result = self._prepare_bound_conversation_reopen_if_needed(
+                session, text
+            )
+            if reopen_result is False:
+                return {
+                    "ok": True,
+                    "session_id": session.session_id,
+                    "pending_bound_reopen": True,
+                    "bridge_message_id": "",
+                    "turn_id": "",
+                    **session_meta,
+                }
 
         if self._bind_each_chat_to_page and self._session_needs_first_message_bind(
             session
@@ -1081,6 +1234,7 @@ class BridgeMixin:
                         "pending_home": True,
                         "bridge_message_id": "",
                         "turn_id": "",
+                        **session_meta,
                     }
                 return {
                     "ok": False,
@@ -1091,12 +1245,16 @@ class BridgeMixin:
         send_result = self._external_push_message_text(session, text)
         if not send_result.get("ok"):
             return send_result
+        self._external_client_last_session[
+            (payload.get("client_name") or "default").strip() or "default"
+        ] = session.session_id
         return {
             "ok": True,
             "session_id": session.session_id,
             "bridge_message_id": send_result.get("bridge_message_id") or "",
             "turn_id": send_result.get("turn_id") or "",
             "pending_home": False,
+            **session_meta,
         }
 
     def _external_push_message_text(self, session, content):

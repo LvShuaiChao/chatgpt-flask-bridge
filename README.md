@@ -106,6 +106,16 @@ print(reply)
 | `client.list_sessions()` | 列出 GUI 会话 |
 | `client.create_session(title)` | 新建会话 |
 
+### 图形界面
+
+在保留命令行/库调用的前提下，可使用独立的 Bridge 客户端 GUI：
+
+```bash
+python bridge_client_gui.py
+```
+
+界面中可配置服务地址与 Token、查看连接诊断、选择或新建 GUI 会话，并通过聊天区发送消息。
+
 ### 命令行
 
 可直接运行 `bridge_client.py`（Windows 下双击会进入交互模式，退出前会等待按键，避免窗口闪退）：
@@ -149,8 +159,9 @@ python bridge_client.py --status
 
 ```
 油猴脚本与Python联动/
-├── gui.py                 # GUI 入口
-├── bridge_client.py       # 外部 API Python 客户端库
+├── gui.py                 # 主 GUI 入口（含桥接服务）
+├── bridge_client_gui.py   # Bridge API 客户端 GUI 入口
+├── bridge_client.py       # 外部 API Python 客户端库（含 CLI）
 ├── server.py              # Flask 桥接服务（也可单独 python server.py 调试）
 ├── examples/
 │   ├── external_client.py # 最小调用示例

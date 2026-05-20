@@ -22,6 +22,14 @@ PENDING_ASSISTANT_STATUSES = frozenset(
     }
 )
 CHATGPT_HOME_URL = "https://chatgpt.com/"
+# 油猴页面活跃度（与 server.ONLINE_TIMEOUT_SEC / GUI 判断一致）
+TM_POLL_FRESH_SECONDS = 5.0
+TM_HEARTBEAT_ONLINE_SECONDS = 15.0
+TM_HIDDEN_STALE_SECONDS = 8.0
+BOUND_PAGE_ONLINE_SECONDS = 30.0
+BOUND_PAGE_STALE_SECONDS = 60.0
+BOUND_PAGE_OFFLINE_GRACE_SECONDS = 45.0
+ACTIVE_POLL_SECONDS = 10.0
 SETTINGS_ORG = "TampermonkeyBridge"
 SETTINGS_APP = "ChatGUI"
 SESSION_BIND_LIST_STYLES = {
@@ -34,12 +42,12 @@ SESSION_BIND_LIST_STYLES = {
         "selected_border": "#16a34a",
     },
     "bound_offline": {
-        "bg": "#fff1f2",
-        "border": "#fecdd3",
-        "left": "#ef4444",
-        "text": "#7f1d1d",
+        "bg": "#fff7ed",
+        "border": "#fed7aa",
+        "left": "#f97316",
+        "text": "#9a3412",
         "label": "绑定离线",
-        "selected_border": "#dc2626",
+        "selected_border": "#ea580c",
     },
     "prebound_home": {
         "bg": "#eff6ff",
@@ -65,6 +73,14 @@ SESSION_BIND_LIST_STYLES = {
         "label": "创建中",
         "selected_border": "#d97706",
     },
+    "waiting_bound_conversation": {
+        "bg": "#fffbeb",
+        "border": "#fde68a",
+        "left": "#f59e0b",
+        "text": "#78350f",
+        "label": "等待打开绑定页",
+        "selected_border": "#d97706",
+    },
     "unbound": {
         "bg": "#ffffff",
         "border": "#e5e7eb",
@@ -86,6 +102,7 @@ SESSION_BIND_LIST_STYLES = {
 DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",
     "port": "5000",
+    "enable_lan_access": False,
     "auto_start_server": False,
     "font_size": 14,
     "remember_window_geometry": True,
@@ -112,4 +129,11 @@ DEFAULT_APP_SETTINGS = {
     "allow_fallback_to_any_page": False,
     "auto_bind_unbound_page": True,
     "auto_open_and_bind_on_new_chat": False,
+    "sync_full_conversation_enabled": True,
+    "auto_sync_conversation_on_bind": False,
+    "auto_sync_conversation_after_reply": False,
+    "sync_conversation_max_messages": 200,
+    "sync_conversation_mode": "merge",
+    # 0=不强制；N>0 时同一 GUI 会话连续 N 条用户消息后，外部 API 下一条自动新建会话
+    "force_new_session_after_turns": 0,
 }
