@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 
 from app.ui.mixins.bridge_mixin import BridgeMixin
 from app.ui.mixins.chat_render_mixin import ChatRenderMixin
+from app.ui.mixins.cursor_bridge_mixin import CursorBridgeMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
 from app.ui.mixins.settings_mixin import SettingsMixin
@@ -29,6 +30,7 @@ class MainWindow(
     ChatRenderMixin,
     PageBindMixin,
     BridgeMixin,
+    CursorBridgeMixin,
 ):
     def __init__(self):
         super().__init__()
@@ -41,6 +43,7 @@ class MainWindow(
         self._current_session_id = None
         self._message_to_session = {}
         self._message_to_turn = {}
+        self._session_send_queues = {}
         self._external_client_last_session = {}
         self._processed_inbound_ids = set()
         self._finalized_bridge_message_ids = set()
@@ -99,6 +102,7 @@ class MainWindow(
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
+        QTimer.singleShot(0, self._refresh_cursor_bridge_status)
         if self._auto_start_server and not server.is_server_running():
             QTimer.singleShot(300, self._start_server)
 

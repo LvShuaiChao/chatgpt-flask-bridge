@@ -7,12 +7,10 @@ from app.constants import BOUND_PAGE_ONLINE_SECONDS, BOUND_PAGE_STALE_SECONDS
 from app.utils.tm_activity import classify_tm_client_activity, tm_send_allowed
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
-    BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_BOUND_CONVERSATION,
     BIND_STATE_WAITING_HOME,
-    default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
@@ -216,7 +214,8 @@ class PageSendTargetMixin:
     def _try_auto_bind_online_page(self, session):
         if self._session_is_local_new_chat_flow(session):
             idle_home = self._find_idle_chatgpt_home_client(
-                session_id=(session.session_id if session else "") or ""
+                session_id=(session.session_id if session else "") or "",
+                require_user_visible=True,
             )
             if idle_home:
                 client_id = (idle_home.get("client_id") or "").strip()
@@ -274,6 +273,16 @@ class PageSendTargetMixin:
                 return False
 
         status = self._last_bridge_status or {}
+        bound_info, bound_state, _bound_reason = self._resolve_bound_page_info(
+            status=status
+        )
+        if bound_state == "online" and isinstance(bound_info, dict):
+            resolved_client_id = (bound_info.get("client_id") or "").strip()
+            if resolved_client_id and resolved_client_id != bound_client_id:
+                self._bind_page_to_session(session, bound_info, silent=True)
+                self._update_bound_page_display()
+                self._save_sessions_to_disk()
+            return False
         live_client_id = (status.get("tampermonkey_client_id") or "").strip()
         bound_conversation_id = (remote.get("conversation_id") or "").strip()
         bound_conversation_url = (remote.get("conversation_url") or "").strip()
@@ -426,6 +435,7 @@ class PageSendTargetMixin:
         remote = normalize_remote_chatgpt(
             session.remote_chatgpt if session else None
         )
+        status = self._last_bridge_status or {}
         enabled = bool(remote.get("enabled"))
         bind_state = self._remote_bind_state(remote)
         client_id = (remote.get("client_id") or "").strip()
@@ -490,23 +500,32 @@ class PageSendTargetMixin:
 
             return "", "", False, "当前对话未绑定 ChatGPT 页面。"
 
-        matched_client = self._find_online_client_for_remote(remote)
-        if matched_client:
-            matched_client_id = (matched_client.get("client_id") or "").strip()
-            matched_page_url = (matched_client.get("page_url") or "").strip()
-            if not matched_page_url:
-                matched_page_url = page_url
-            if matched_client_id and matched_client_id != client_id:
-                self._bind_page_to_session(session, matched_client, silent=True)
+        bound_info, bound_state, bound_reason = self._resolve_bound_page_info(
+            status=status
+        )
+        if bound_state == "online" and isinstance(bound_info, dict):
+            resolved_client_id = (bound_info.get("client_id") or "").strip()
+            resolved_page_url = (
+                bound_info.get("page_url")
+                or bound_info.get("url")
+                or page_url
+                or ""
+            ).strip()
+            if (
+                bound_reason == "matched_by_conversation"
+                and resolved_client_id
+                and resolved_client_id != client_id
+            ):
+                self._bind_page_to_session(session, bound_info, silent=True)
                 remote = normalize_remote_chatgpt(session.remote_chatgpt)
                 client_id = (remote.get("client_id") or "").strip()
-                page_url = (
+                resolved_page_url = (
                     (remote.get("conversation_url") or "").strip()
-                    or matched_page_url
+                    or resolved_page_url
                 )
             return (
-                matched_client_id or client_id,
-                page_url or matched_page_url,
+                resolved_client_id or client_id,
+                resolved_page_url or page_url,
                 True,
                 "绑定页面在线。",
             )

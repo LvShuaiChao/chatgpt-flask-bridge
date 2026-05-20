@@ -1,21 +1,19 @@
 """页面绑定主 mixin：UI 事件、同步、显示与入站桥接状态。"""
 
 import hashlib
+import re
 import time
 import traceback
 import uuid
-import webbrowser
 from urllib.parse import urlparse
 
 import server
-from log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
     BOUND_PAGE_OFFLINE_GRACE_SECONDS,
     BOUND_PAGE_ONLINE_SECONDS,
     BOUND_PAGE_STALE_SECONDS,
-    CHATGPT_HOME_URL,
     PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
@@ -26,6 +24,7 @@ from app.models import (
     BIND_STATE_WAITING_BOUND_CONVERSATION,
     BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
+    ChatMessage,
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
@@ -34,9 +33,7 @@ from app.ui.mixins.page_auto_bind_mixin import PageAutoBindMixin
 from app.ui.mixins.page_open_close_mixin import PageOpenCloseMixin
 from app.ui.mixins.page_send_target_mixin import PageSendTargetMixin
 from app.ui.mixins.page_tm_client_mixin import PageTmClientMixin
-from PyQt5.QtCore import QUrl, Qt, QTimer
-from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import QTableWidgetItem
+from PyQt5.QtCore import QTimer
 
 
 class PageBindMixin(
@@ -140,51 +137,6 @@ class PageBindMixin(
             f"new_client_id={new_client_id} new_conversation_id={new_conversation_id} "
             f"reason={reason or '-'}"
         )
-    def _format_tm_page_status_line(self, prefix, client_info):
-        if not isinstance(client_info, dict):
-            return f"{prefix}-"
-        profile = self._tm_client_sync_profile(client_info)
-        url = self._short_page_display((client_info.get("page_url") or "").strip()) or "-"
-        client_id = (client_info.get("client_id") or "").strip() or "-"
-        page_type = (client_info.get("page_type") or "").strip() or "-"
-        conv = self._short_conv_id(self._client_conversation_id(client_info))
-        bind_token = (
-            client_info.get("bind_request_id") or client_info.get("launch_token") or ""
-        ).strip()
-        token_part = f"token={bind_token[:8]}…" if len(bind_token) > 8 else (
-            f"token={bind_token}" if bind_token else "token=-"
-        )
-        focus_part = "focus=是" if client_info.get("has_focus") else "focus=否"
-        visible_part = profile.get("visibility") or "-"
-        activity = profile.get("activity") or "-"
-        responding_part = "responding=是" if client_info.get("is_responding") else "responding=否"
-        response_state = (client_info.get("response_state") or "").strip() or "unknown"
-        input_part = (
-            "input=可用"
-            if client_info.get("can_accept_input", True)
-            else "input=不可用"
-        )
-        state_map = {
-            "syncable": "可同步",
-            "stale": "在线不可同步",
-            "online": "在线",
-            "offline": "离线",
-        }
-        online_text = state_map.get(profile.get("state"), "离线")
-        ago = self._format_last_seen_ago(client_info.get("last_seen"))
-        poll_ago = self._format_last_seen_ago(client_info.get("last_poll_at"))
-        hb_ago = self._format_last_seen_ago(client_info.get("last_heartbeat_at"))
-        stale_hint = ""
-        if profile.get("stale"):
-            stale_hint = " | 页面可能已被冻结或长时间无轮询"
-        return (
-            f"{prefix}{url} | client={client_id} | page={page_type} | "
-            f"{token_part} | conv={conv} | visible={visible_part} | {focus_part} | "
-            f"activity={activity} | {responding_part} | state={response_state} | "
-            f"{input_part} | syncable={'yes' if profile.get('syncable') else 'no'} | "
-            f"poll={poll_ago} | heartbeat={hb_ago} | "
-            f"{online_text} | last_seen={ago}{stale_hint}"
-        )
     def _detect_bind_mismatch(self, summary):
         summary = summary or {}
         bound_client_id = (summary.get("bound_client_id") or "").strip()
@@ -231,57 +183,63 @@ class PageBindMixin(
         if not isinstance(summary, dict):
             return
         status = self._last_bridge_status or {}
-        bound_client_id = (self._session_bound_client_id() or "").strip()
-        if not bound_client_id:
-            bound_state = "unbound"
-        else:
-            bound_info = self._client_info_by_id(bound_client_id, status=status)
-            bound_state = (
-                "online" if bool(bound_info and bound_info.get("online")) else "offline"
-            )
-        active_client_id = (summary.get("active_client_id") or "").strip()
-        active_info = self._client_info_by_id(active_client_id, status=status)
-        active_page_syncable = bool(
-            self._tm_client_sync_profile(active_info).get("syncable")
+        service_state = "running" if bool(status.get("server_running")) else "stopped"
+        current_info = self._pick_current_page_client_info(status)
+        current_label = self._short_page_label(current_info) if current_info else "未检测到"
+        current_syncable = bool(
+            current_info and self._tm_client_sync_profile(current_info).get("syncable")
+        )
+        bound_info, bound_state, _bound_reason = self._resolve_bound_page_info(status=status)
+        bound_label = (
+            self._short_page_label(bound_info)
+            if isinstance(bound_info, dict)
+            else "未绑定"
+        )
+        target = self._sync_target_snapshot(status=status, bound_info=bound_info, current_info=current_info)
+        sync_target_label = target.get("short_label") or "不可用"
+        sync_target_state = "ready" if bool(target.get("syncable")) else "unavailable"
+        active_matches_bound = bool(
+            target.get("active_matches_bound")
+            if target.get("active_matches_bound") is not None
+            else False
         )
         key = (
-            summary.get("total_clients"),
+            service_state,
             summary.get("online_clients"),
-            summary.get("offline_clients"),
-            summary.get("online_conversation_clients"),
-            summary.get("online_home_clients"),
-            bound_client_id,
+            summary.get("total_clients"),
+            current_label,
+            current_syncable,
+            bound_label,
             bound_state,
-            active_client_id,
-            summary.get("active_conversation_id"),
-            active_page_syncable,
+            sync_target_label,
+            sync_target_state,
+            active_matches_bound,
         )
         if key == getattr(self, "_last_tm_summary_log_key", None):
             return
         self._last_tm_summary_log_key = key
         line = "\n".join(
             [
-                "[TM_STATUS]",
-                f"online={summary.get('online_clients', 0)} total={summary.get('total_clients', 0)} "
-                f"conversation_pages={summary.get('online_conversation_clients', 0)} "
-                f"home_pages={summary.get('online_home_clients', 0)}",
-                f"active_client={active_client_id or '-'}",
-                f"bound_client={bound_client_id or '-'}",
+                "[STATUS_SUMMARY]",
+                f"service={service_state}",
+                f"online={summary.get('online_clients', 0)}",
+                f"total={summary.get('total_clients', 0)}",
+                f"current_page={current_label}",
+                f"current_syncable={'true' if current_syncable else 'false'}",
+                f"bound_page={bound_label}",
                 f"bound_state={bound_state}",
-                f"active_page_syncable={active_page_syncable}",
+                f"sync_target={sync_target_label}",
+                f"sync_target_state={sync_target_state}",
+                f"active_matches_bound={'true' if active_matches_bound else 'false'}",
             ]
         )
         self._append_log(line)
     def _log_bind_mismatch_if_needed(self, summary):
-        if not getattr(self, "_show_page_url", True):
-            if hasattr(self, "tm_bind_mismatch_label"):
-                self.tm_bind_mismatch_label.setText(" ")
-            self._set_close_other_pages_enabled(True)
-            return
         mismatch = self._detect_bind_mismatch(summary)
         if not mismatch:
             if hasattr(self, "tm_bind_mismatch_label"):
                 self.tm_bind_mismatch_label.setText(" ")
+                self.tm_bind_mismatch_label.setProperty("state", "")
             self._set_close_other_pages_enabled(True)
             return
         key = tuple(mismatch.get(field) for field in (
@@ -302,9 +260,19 @@ class PageBindMixin(
                 f"reason={mismatch.get('reason')}"
             )
         if hasattr(self, "tm_bind_mismatch_label"):
-            self.tm_bind_mismatch_label.setText(
-                "当前浏览页不是本聊天绑定页；同步时将使用已绑定页面。"
-            )
+            bound_online = bool((summary or {}).get("bound_online"))
+            state = "warn" if bound_online else "warn"
+            text = "当前网页不是绑定网页，同步将使用绑定网页。"
+            self.tm_bind_mismatch_label.setText(text)
+            self.tm_bind_mismatch_label.setProperty("state", state)
+            try:
+                self.tm_bind_mismatch_label.style().unpolish(self.tm_bind_mismatch_label)
+                self.tm_bind_mismatch_label.style().polish(self.tm_bind_mismatch_label)
+            except Exception as error:
+                self._append_log(
+                    f"[STATUS][HINT_STYLE][FAILED] error={error}\n{traceback.format_exc()}",
+                    echo=True,
+                )
         self._set_close_other_pages_enabled(False)
         if hasattr(self, "close_other_pages_btn"):
             self.close_other_pages_btn.setToolTip(
@@ -337,74 +305,259 @@ class PageBindMixin(
         self._last_sync_target = dict(target or {})
         self._update_sync_target_display()
 
+    @staticmethod
+    def _elide_middle(text, max_len=42):
+        value = str(text or "").strip()
+        if len(value) <= max_len:
+            return value
+        keep = max(6, (max_len - 3) // 2)
+        return value[:keep] + "..." + value[-keep:]
+
+    def _short_page_label(self, info):
+        if not isinstance(info, dict):
+            return "未检测到"
+        page_type = (info.get("page_type") or "").strip()
+        page_url = (info.get("page_url") or "").strip()
+        conversation_id = (
+            info.get("conversation_id")
+            or info.get("conv")
+            or self._client_conversation_id(info)
+            or ""
+        ).strip()
+        if conversation_id:
+            return f"/c/{conversation_id[:8]}..."
+        if page_type == "home":
+            return "ChatGPT 首页"
+        if page_url:
+            return self._elide_middle(page_url, 42)
+        return "未知页面"
+
+    def _full_page_relation_label(
+        self,
+        title,
+        info,
+        *,
+        state_text="",
+        source_text="",
+        syncable=None,
+        note_text="",
+    ):
+        if not info:
+            return f"{title}：未检测到"
+
+        page_type = (info.get("page_type") or "").strip()
+        page_url = (info.get("page_url") or info.get("url") or "").strip()
+        client_id = (info.get("client_id") or "").strip()
+        conversation_id = (
+            info.get("conversation_id")
+            or info.get("conv")
+            or self._client_conversation_id(info)
+            or ""
+        ).strip()
+
+        if page_type == "conversation":
+            type_text = "ChatGPT 对话页"
+        elif page_type == "home":
+            type_text = "ChatGPT 首页"
+        else:
+            type_text = page_type or "未知页面"
+
+        parts = []
+        if state_text:
+            parts.append(f"状态={state_text}")
+        if source_text:
+            parts.append(f"来源={source_text}")
+        parts.append(f"类型={type_text}")
+        if syncable is not None:
+            parts.append(f"可同步={'是' if syncable else '否'}")
+        if client_id:
+            parts.append(f"client={client_id}")
+        if conversation_id:
+            parts.append(f"conv={conversation_id}")
+        if page_url:
+            parts.append(f"url={page_url}")
+        if note_text:
+            parts.append(f"备注={note_text}")
+        return f"{title}：" + " | ".join(parts)
+
+    def _pick_current_page_client_info(self, status=None):
+        status = status or self._last_bridge_status or {}
+        for key in ("tampermonkey_client_id", "active_client_id"):
+            cid = (status.get(key) or "").strip()
+            info = self._client_info_by_id(cid, status=status)
+            if isinstance(info, dict) and info.get("online"):
+                return info
+        focus_candidates = []
+        for item in self._iter_tm_clients(status, online_only=True):
+            if item.get("has_focus"):
+                return item
+            focus_candidates.append(
+                (float(item.get("last_focus_at") or 0), float(item.get("last_seen") or 0), item)
+            )
+        focus_candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        if focus_candidates and focus_candidates[0][0] > 0:
+            return focus_candidates[0][2]
+        if focus_candidates:
+            return focus_candidates[0][2]
+        return None
+
+    def _resolve_bound_page_info(self, status=None):
+        status = status or self._last_bridge_status or {}
+        session = self._current_session()
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        if not remote.get("enabled"):
+            return None, "unbound", "session_unbound"
+        matched = self._find_online_client_for_remote(remote, bridge_status=status)
+        if isinstance(matched, dict):
+            return matched, "online", "matched_by_conversation"
+        client_id = (remote.get("client_id") or "").strip()
+        bound_info = self._client_info_by_id(client_id, status=status) if client_id else None
+        if isinstance(bound_info, dict):
+            if bound_info.get("online"):
+                return bound_info, "online", "bound_client_online"
+            return bound_info, "offline", "bound_client_offline"
+        return {
+            "client_id": client_id,
+            "conversation_id": (remote.get("conversation_id") or "").strip(),
+            "page_url": (remote.get("conversation_url") or remote.get("url") or "").strip(),
+            "page_type": (remote.get("page_type") or "").strip(),
+        }, "offline", "bound_info_missing"
+
+    def _sync_target_snapshot(self, status=None, bound_info=None, current_info=None):
+        status = status or self._last_bridge_status or {}
+        session = self._current_session()
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        bound_info = bound_info if bound_info is not None else None
+        current_info = current_info if current_info is not None else self._pick_current_page_client_info(status)
+        active_client_id = (status.get("active_client_id") or "").strip()
+        bound_client_id = (remote.get("client_id") or "").strip()
+        active_matches_bound = bool(active_client_id and bound_client_id and active_client_id == bound_client_id)
+        if remote.get("enabled") and isinstance(bound_info, dict) and bound_info.get("online"):
+            return {
+                "syncable": True,
+                "source": "bound_page",
+                "source_label": "已绑定页",
+                "short_label": self._short_page_label(bound_info),
+                "client_id": (bound_info.get("client_id") or "").strip(),
+                "conversation_id": self._client_conversation_id(bound_info),
+                "page_url": (bound_info.get("page_url") or bound_info.get("url") or "").strip(),
+                "page_type": (bound_info.get("page_type") or "").strip(),
+                "reason": "bound_page_online",
+                "active_matches_bound": active_matches_bound,
+            }
+        if isinstance(current_info, dict):
+            profile = self._tm_client_sync_profile(current_info)
+            if profile.get("syncable"):
+                return {
+                    "syncable": True,
+                    "source": "current_page",
+                    "source_label": "当前网页",
+                    "short_label": self._short_page_label(current_info),
+                    "client_id": (current_info.get("client_id") or "").strip(),
+                    "conversation_id": self._client_conversation_id(current_info),
+                    "page_url": (current_info.get("page_url") or current_info.get("url") or "").strip(),
+                    "page_type": (current_info.get("page_type") or "").strip(),
+                    "reason": "fallback_current_page_syncable",
+                    "active_matches_bound": active_matches_bound,
+                }
+        if isinstance(bound_info, dict):
+            return {
+                "syncable": False,
+                "source": "bound_page",
+                "source_label": "已绑定页",
+                "short_label": self._short_page_label(bound_info),
+                "client_id": (bound_info.get("client_id") or "").strip(),
+                "conversation_id": self._client_conversation_id(bound_info),
+                "page_url": (bound_info.get("page_url") or bound_info.get("url") or "").strip(),
+                "page_type": (bound_info.get("page_type") or "").strip(),
+                "reason": "bound_page_not_syncable",
+                "active_matches_bound": active_matches_bound,
+            }
+        if isinstance(current_info, dict):
+            return {
+                "syncable": False,
+                "source": "current_page",
+                "source_label": "当前网页",
+                "short_label": self._short_page_label(current_info),
+                "client_id": (current_info.get("client_id") or "").strip(),
+                "conversation_id": self._client_conversation_id(current_info),
+                "page_url": (current_info.get("page_url") or current_info.get("url") or "").strip(),
+                "page_type": (current_info.get("page_type") or "").strip(),
+                "reason": "current_page_not_syncable",
+                "active_matches_bound": active_matches_bound,
+            }
+        return {
+            "syncable": False,
+            "source": "none",
+            "source_label": "不可用",
+            "short_label": "不可用",
+            "client_id": "",
+            "conversation_id": "",
+            "page_url": "",
+            "page_type": "",
+            "reason": "no_syncable_target",
+            "active_matches_bound": active_matches_bound,
+        }
+
     def _update_sync_target_display(self):
         if not hasattr(self, "tm_sync_target_label"):
             return
-        target = getattr(self, "_last_sync_target", None) or {}
-        client_id = (target.get("client_id") or "").strip() or "-"
-        conv_id = (target.get("conversation_id") or "").strip() or "-"
-        syncable = target.get("syncable")
-        syncable_text = "yes" if bool(syncable) else "no"
-        if client_id == "-" and conv_id == "-":
-            text = "实际同步目标：-"
-        else:
-            text = (
-                f"实际同步目标：client={client_id} | conv={conv_id} | "
-                f"syncable={syncable_text}"
-            )
+        status = self._last_bridge_status or {}
+        current_info = self._pick_current_page_client_info(status)
+        bound_info, _bound_state, _bound_reason = self._resolve_bound_page_info(status=status)
+        target = self._sync_target_snapshot(status=status, bound_info=bound_info, current_info=current_info)
+        syncable = bool(target.get("syncable"))
+        text = "同步目标：已就绪" if syncable else "同步目标：不可用"
         self.tm_sync_target_label.setText(text)
+        self._refresh_status_chip(self.tm_sync_target_label, "ok" if syncable else "error")
         tooltip = (
-            f"client_id={client_id}\nconversation_id={conv_id}\n"
-            f"syncable={syncable_text}\nsource={(target.get('source') or '-')}"
+            f"target_client_id={(target.get('client_id') or '-')}\n"
+            f"target_conversation_id={(target.get('conversation_id') or '-')}\n"
+            f"source={(target.get('source') or 'none')}\n"
+            f"reason={(target.get('reason') or '-')}"
         )
         self.tm_sync_target_label.setToolTip(tooltip)
+        if hasattr(self, "tm_sync_target_relation_label"):
+            target_info = {
+                "client_id": (target.get("client_id") or "").strip(),
+                "conversation_id": (target.get("conversation_id") or "").strip(),
+                "page_url": (target.get("page_url") or "").strip(),
+                "page_type": (target.get("page_type") or "").strip(),
+            }
+            if any(target_info.values()):
+                self.tm_sync_target_relation_label.setText(
+                    self._full_page_relation_label(
+                        "同步目标",
+                        target_info,
+                        source_text=target.get("source_label") or "",
+                        state_text=("已就绪" if syncable else "不可用"),
+                        syncable=syncable,
+                    )
+                )
+            else:
+                self.tm_sync_target_relation_label.setText("同步目标：不可用")
+            self.tm_sync_target_relation_label.setToolTip(tooltip)
+        status = self._last_bridge_status or {}
+        current_info = self._pick_current_page_client_info(status)
+        bound_info, _bound_state, _bound_reason = self._resolve_bound_page_info(status=status)
+        self._append_log(
+            "[PAGE_RELATION_DISPLAY]\n"
+            f"current_client={((current_info or {}).get('client_id') or '-').strip() or '-'}\n"
+            f"current_conv={self._client_conversation_id(current_info) or '-'}\n"
+            f"current_url={((current_info or {}).get('page_url') or (current_info or {}).get('url') or '-').strip() or '-'}\n"
+            f"bound_client={((bound_info or {}).get('client_id') or '-').strip() or '-'}\n"
+            f"bound_conv={self._client_conversation_id(bound_info) or '-'}\n"
+            f"bound_url={((bound_info or {}).get('page_url') or (bound_info or {}).get('url') or '-').strip() or '-'}\n"
+            f"target_client={(target.get('client_id') or '-').strip() or '-'}\n"
+            f"target_conv={(target.get('conversation_id') or '-').strip() or '-'}\n"
+            f"target_url={(target.get('page_url') or '-').strip() or '-'}"
+        )
     def _format_tm_online_chip_text(self, summary):
         summary = summary or {}
         online = int(summary.get("online_clients") or 0)
         total = int(summary.get("total_clients") or 0)
-        conv = int(summary.get("online_conversation_clients") or 0)
-        home = int(summary.get("online_home_clients") or 0)
-        status = self._last_bridge_status or {}
-        active_client_id = (summary.get("active_client_id") or "").strip()
-        active_info = self._client_info_by_id(active_client_id, status=status)
-        active_profile = self._tm_client_sync_profile(active_info)
-        active_page_syncable = bool(active_profile.get("syncable"))
-        bound_client_id = (self._session_bound_client_id() or "").strip()
-        if not bound_client_id:
-            bound_state = "unbound"
-            bind_text = "当前对话：未绑定"
-        else:
-            bound_info = self._client_info_by_id(bound_client_id, status=status)
-            bound_online = bool(bound_info and bound_info.get("online"))
-            if bound_online:
-                bound_state = "online"
-                bind_text = "当前对话：已绑定在线"
-            else:
-                bound_state = "offline"
-                bind_text = "当前对话：已绑定离线"
-        if online <= 0:
-            text = (
-                f"油猴：在线 {online} / 总 {total}"
-                f"｜会话页 {conv} / 首页 {home}"
-                f"｜当前页：不可同步"
-                f"｜{bind_text}"
-            )
-            return text, "error"
-        parts = [
-            f"油猴：在线 {online} / 总 {total}",
-            f"会话页 {conv} / 首页 {home}",
-            f"当前页：{'可同步' if active_page_syncable else '不可同步'}",
-            bind_text,
-        ]
-        recent_focus_id = self._recent_focus_home_client_id()
-        if recent_focus_id:
-            parts.append(f"最近焦点：首页 {recent_focus_id}")
-        text = "｜".join(parts)
-        if bound_state == "online":
-            return text, "ok"
-        if bound_state == "offline":
-            return text, "error"
-        return text, "warn"
+        text = f"油猴：在线 {online} / 总 {total}"
+        return text, ("ok" if online > 0 else "error")
     def _check_tm_send_prerequisites(self, session):
         if not self._bind_each_chat_to_page:
             return True, ""
@@ -618,33 +771,10 @@ class PageBindMixin(
             return
         self._saved_page_url = url.strip()
         self._settings.setValue("last_page_url", self._saved_page_url)
-    def _set_page_link_label(self, label, prefix, url, open_btn=None):
-        if not url:
-            label.setText(f"{prefix}-")
-            label.setToolTip("")
-            if open_btn is not None:
-                open_btn.setEnabled(False)
-            return
-        display = self._short_page_display(url)
-        label.setText(f"{prefix}{display}")
-        label.setToolTip(url)
-        if open_btn is not None:
-            open_btn.setEnabled(True)
     def _update_live_page_display(self, live_url=None, summary=None):
-        if not getattr(self, "_show_page_url", True):
-            return
         summary = summary or self._tm_summary_for_session()
         status = self._last_bridge_status or {}
-        active_id = (summary.get("active_client_id") or "").strip()
-        client_info = self._client_info_by_id(active_id, status)
-        if client_info is None and live_url:
-            live_client_id = (status.get("tampermonkey_client_id") or "").strip()
-            client_info = self._client_info_by_id(live_client_id, status)
-        if client_info is None:
-            for item in status.get("tampermonkey_clients") or []:
-                if item.get("online"):
-                    client_info = item
-                    break
+        client_info = self._pick_current_page_client_info(status)
         show_url = None
         if isinstance(client_info, dict):
             page_url = (client_info.get("page_url") or "").strip()
@@ -657,37 +787,38 @@ class PageBindMixin(
         if show_url:
             self._persist_page_url(show_url)
         self._tampermonkey_page_url = show_url
-        if client_info:
-            line = self._format_tm_page_status_line("当前油猴页面：", client_info)
-            session = self._current_session()
-            if session:
-                remote = normalize_remote_chatgpt(session.remote_chatgpt)
-                session_token = self._session_bind_request_id(remote)
-                live_token = (
-                    client_info.get("bind_request_id")
-                    or client_info.get("launch_token")
-                    or ""
-                ).strip()
-                bind_state_raw = self._remote_bind_state(remote)
-                if (
-                    session_token
-                    and live_token
-                    and live_token != session_token
-                    and bind_state_raw
-                    in (BIND_STATE_WAITING_HOME, BIND_STATE_PREBOUND_HOME)
-                ):
-                    line = (
-                        f"{line}｜⚠ 当前页面不是本会话打开的 ChatGPT 首页，不能用于当前新对话"
-                    )
-            self.tm_live_page_label.setText(line)
-            self.tm_live_page_label.setToolTip((client_info.get("page_url") or "").strip())
-            if hasattr(self, "open_live_page_btn"):
-                self.open_live_page_btn.setEnabled(bool(show_url))
-            self._update_sync_target_display()
-            return
-        self._set_page_link_label(
-            self.tm_live_page_label, "当前油猴页面：", show_url, self.open_live_page_btn
-        )
+        page_state = "未检测到"
+        chip_state = "warn"
+        tooltip_lines = []
+        relation_line = "当前网页：未检测到"
+        if isinstance(client_info, dict):
+            profile = self._tm_client_sync_profile(client_info)
+            syncable = bool(profile.get("syncable"))
+            page_state = "可同步" if syncable else "不可同步"
+            chip_state = "ok" if syncable else "warn"
+            relation_line = self._full_page_relation_label(
+                "当前网页",
+                client_info,
+                state_text=page_state,
+                syncable=syncable,
+            )
+            tooltip_lines = [
+                f"URL: {(client_info.get('page_url') or '-').strip() or '-'}",
+                f"client_id: {(client_info.get('client_id') or '-').strip() or '-'}",
+                f"conversation_id: {self._client_conversation_id(client_info) or '-'}",
+                f"page_type: {(client_info.get('page_type') or '-').strip() or '-'}",
+                f"visible: {(client_info.get('visibility_state') or client_info.get('visible') or '-').strip() or '-'}",
+                f"focus: {'yes' if client_info.get('has_focus') else 'no'}",
+                f"syncable: {'yes' if syncable else 'no'}",
+                f"heartbeat: {self._format_last_seen_ago(client_info.get('last_heartbeat_at'))}",
+                f"last_seen: {self._format_last_seen_ago(client_info.get('last_seen'))}",
+            ]
+        self.tm_live_page_label.setText(f"当前页：{page_state}")
+        self._refresh_status_chip(self.tm_live_page_label, chip_state)
+        self.tm_live_page_label.setToolTip("\n".join(tooltip_lines))
+        if hasattr(self, "tm_current_page_relation_label"):
+            self.tm_current_page_relation_label.setText(relation_line)
+            self.tm_current_page_relation_label.setToolTip("\n".join(tooltip_lines))
         self._update_sync_target_display()
     def _session_bind_list_state(self, session, bridge_status=None):
         if session is None:
@@ -911,34 +1042,81 @@ class PageBindMixin(
 
     def _current_bind_visual_state(self):
         session = self._current_session()
-        if (
-            session
-            and self._pending_auto_bind_session_id == session.session_id
+        if session and self._pending_auto_bind_session_id == session.session_id:
+            return "pending_bind"
+        if not session:
+            return (
+                "unbound_required"
+                if self._bind_each_chat_to_page
+                else "unbound_optional"
+            )
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        if self._remote_bind_state(remote) == BIND_STATE_WAITING_BOUND_CONVERSATION:
+            return "waiting_bound_reopen"
+        if not remote.get("enabled"):
+            return (
+                "unbound_required"
+                if self._bind_each_chat_to_page
+                else "unbound_optional"
+            )
+        list_state = self._session_bind_list_state(session, self._last_bridge_status)
+        if list_state == "bound_online":
+            return "bound_online"
+        if list_state == "prebound_home":
+            return "prebound_home"
+        if list_state in (
+            "waiting_home",
+            "waiting_conversation_created",
+            "waiting_bound_conversation",
         ):
             return "pending_bind"
-        if session:
-            remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            if (
-                self._remote_bind_state(remote)
-                == BIND_STATE_WAITING_BOUND_CONVERSATION
-            ):
-                return "waiting_bound_reopen"
-        if not session:
-            return "unbound_required" if self._bind_each_chat_to_page else "unbound_optional"
-        if self._session_has_wrong_existing_conversation_bind(session):
-            return "bind_mismatch"
-        bind_state = self._effective_bind_state(session)
-        if bind_state == BIND_STATE_PREBOUND_HOME:
-            return "prebound_home"
-        if bind_state == BIND_STATE_BOUND_CONVERSATION:
-            return "bound_online"
-        if bind_state == BIND_STATE_BOUND_OFFLINE:
+        if list_state == "unbound":
+            return (
+                "unbound_required"
+                if self._bind_each_chat_to_page
+                else "unbound_optional"
+            )
+        if list_state == "bind_mismatch":
             return "bound_offline"
-        if self._bind_each_chat_to_page:
-            return "unbound_required"
-        return "unbound_optional"
+        return "bound_offline"
+
+    def _log_chat_area_style(self, state):
+        session = self._current_session()
+        session_id = (session.session_id if session else "") or "-"
+        status = self._last_bridge_status or {}
+        bound_info, resolved_bound_state, _bound_reason = self._resolve_bound_page_info(
+            status=status
+        )
+        bound_client_id = ((bound_info or {}).get("client_id") or "").strip()
+        active_client_id = (self._tm_summary_for_session(session).get("active_client_id") or "").strip()
+        active_info = self._client_info_by_id(active_client_id, status=status)
+        active_page_syncable = bool(self._tm_client_sync_profile(active_info).get("syncable"))
+        if not bound_client_id:
+            bound_state = "unbound"
+        else:
+            bound_state = "online" if resolved_bound_state == "online" else "offline"
+        active_matches_bound = bool(
+            bound_client_id and active_client_id and active_client_id == bound_client_id
+        )
+        style = "yellow"
+        if state in ("bound_online", "prebound_home"):
+            style = "green"
+        elif state == "bound_offline":
+            style = "red"
+        self._append_log(
+            "[CHAT_AREA_STYLE] "
+            f"session_id={session_id} "
+            f"bound_client={bound_client_id or '-'} "
+            f"bound_state={bound_state} "
+            f"active_client={active_client_id or '-'} "
+            f"active_matches_bound={'true' if active_matches_bound else 'false'} "
+            f"active_page_syncable={'true' if active_page_syncable else 'false'} "
+            f"style={style}"
+        )
+
     def _apply_chat_bind_visual_state(self):
         state = self._current_bind_visual_state()
+        self._log_chat_area_style(state)
         last_state = getattr(self, "_last_chat_bind_visual_state", None)
         if state == last_state:
             return
@@ -962,155 +1140,164 @@ class PageBindMixin(
             style.unpolish(widget)
             style.polish(widget)
             widget.update()
-    def _has_online_bindable_chatgpt_page(self):
-        if self._live_openable_chatgpt_url():
-            return True
-        status = self._last_bridge_status or {}
-        for item in status.get("tampermonkey_clients") or []:
-            if not isinstance(item, dict):
-                continue
-            if not item.get("online"):
-                continue
-            page_url = (item.get("page_url") or "").strip()
-            if self._is_bindable_chatgpt_url(page_url):
-                return True
-        return False
     def _update_bound_page_display(self, summary=None):
-        if not getattr(self, "_show_page_url", True):
-            return
         summary = summary or self._tm_summary_for_session()
+        status = self._last_bridge_status or {}
         session = self._current_session()
-        remote = normalize_remote_chatgpt(
-            session.remote_chatgpt if session else None
-        )
-        if not self._bind_each_chat_to_page:
-            hint = "页面绑定功能未启用，当前使用任意在线页面发送"
-            url = self._session_openable_chatgpt_url(session)
-            if url:
-                client_id = (remote.get("client_id") or "").strip()
-                online = self._session_has_sendable_bound_page(remote)
-                status_text = "在线" if online else "离线"
-                bind_note = "已绑定" if remote.get("enabled") else "已关联"
-                short = self._short_page_display(url)
-                self.tm_bound_page_label.setText(
-                    f"{hint} | {bind_note}：{short} | client_id：{client_id or '-'} | {status_text}"
-                )
-                self.tm_bound_page_label.setToolTip(url)
-                self._set_chat_open_bound_enabled(True)
-                self._set_chat_flash_bound_enabled(bool(client_id))
-            else:
-                live = self._live_openable_chatgpt_url()
-                if live:
-                    self.tm_bound_page_label.setText(
-                        f"{hint} | 可打开当前在线页面：{self._short_page_display(live)}"
-                    )
-                    self.tm_bound_page_label.setToolTip(live)
-                    self._set_chat_open_bound_enabled(True)
-                    self._set_chat_flash_bound_enabled(bool(client_id))
-                else:
-                    self.tm_bound_page_label.setText(hint)
-                    self.tm_bound_page_label.setToolTip("")
-                    self._set_chat_open_bound_enabled(False)
-                    self._set_chat_flash_bound_enabled(False)
-            self._apply_chat_bind_visual_state()
-            self._update_sync_target_display()
-            return
-
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        bind_text = "当前对话：未绑定"
+        bind_chip = "warn"
+        tooltip_lines = []
+        relation_line = "绑定网页：未绑定"
+        bound_info, bound_state, bound_reason = self._resolve_bound_page_info(status=status)
         if remote.get("enabled"):
-            bind_state = self._effective_bind_state(session)
-            url = (
-                remote.get("conversation_url") or remote.get("url") or ""
-            ).strip()
+            url = (remote.get("conversation_url") or remote.get("url") or "").strip()
             client_id = (remote.get("client_id") or "").strip()
-            bound_info = self._client_info_by_id(client_id) or {
-                "client_id": client_id,
-                "page_url": url,
-                "page_type": remote.get("page_type") or "",
-                "conversation_id": remote.get("conversation_id") or "",
-                "last_seen": remote.get("last_seen"),
-                "online": bind_state
-                in (BIND_STATE_PREBOUND_HOME, BIND_STATE_BOUND_CONVERSATION),
-            }
-            if bind_state == BIND_STATE_PREBOUND_HOME:
-                prefix = "预绑定首页："
-                hint = (
-                    "发送第一条消息后将自动创建并绑定 ChatGPT 对话。"
-                )
-            elif bind_state == BIND_STATE_BOUND_CONVERSATION:
-                conv = (remote.get("conversation_id") or "").strip()
-                prefix = "绑定对话页："
-                hint = f"conversation_id={conv or '-'}"
-            elif bind_state == BIND_STATE_WAITING_BOUND_CONVERSATION:
-                prefix = "绑定对话页："
-                hint = "绑定页离线，正在打开原 ChatGPT 对话页..."
-            elif bind_state == BIND_STATE_BOUND_OFFLINE:
-                if self._remote_bind_state(remote) == BIND_STATE_PREBOUND_HOME:
-                    prefix = "预绑定首页："
-                    hint = "预绑定首页已离线，正在重新选择空闲首页或打开新的 ChatGPT 首页。"
+            conv_id = (remote.get("conversation_id") or "").strip() or parse_conversation_id(url)
+            if bound_state == "online":
+                bind_text = "当前对话：已绑定在线"
+                bind_chip = "ok"
+                if bound_reason == "matched_by_conversation" and (
+                    (bound_info.get("client_id") or "").strip() != client_id
+                ):
+                    relation_line = self._full_page_relation_label(
+                        "绑定网页",
+                        bound_info,
+                        state_text="已绑定在线",
+                        note_text="已按同会话自动匹配",
+                    )
                 else:
-                    prefix = "绑定对话页："
-                    hint = "对话页离线，请打开绑定的 ChatGPT 对话页。"
+                    relation_line = self._full_page_relation_label(
+                        "绑定网页",
+                        bound_info,
+                        state_text="已绑定在线",
+                    )
+            elif bound_state == "offline":
+                bind_text = "当前对话：已绑定离线"
+                bind_chip = "error"
+                relation_line = self._full_page_relation_label(
+                    "绑定网页",
+                    bound_info,
+                    state_text="已绑定离线",
+                )
             else:
-                prefix = "绑定页面："
-                hint = ""
-            line = self._format_tm_page_status_line(prefix, bound_info)
-            session_token = self._session_bind_request_id(remote)
-            if session_token:
-                line = f"{line}｜bind_request_id={session_token[:12]}…"
-            if hint:
-                line = f"{line}｜{hint}"
-            if session and session_token and bound_info:
-                live_token = (
-                    bound_info.get("bind_request_id")
-                    or bound_info.get("launch_token")
+                bind_text = "当前对话：未绑定"
+                bind_chip = "warn"
+            tooltip_lines = [
+                f"URL: {((bound_info or {}).get('page_url') or url or '-').strip() or '-'}",
+                f"client_id: {((bound_info or {}).get('client_id') or client_id or '-').strip() or '-'}",
+                f"conversation_id: {self._client_conversation_id(bound_info) or conv_id or '-'}",
+                f"online: {'yes' if bound_state == 'online' else 'no'}",
+                f"syncable: {'yes' if bool(bound_info and self._tm_client_sync_profile(bound_info).get('syncable')) else 'no'}",
+                f"last_seen: {self._format_last_seen_ago((bound_info or {}).get('last_seen'))}",
+            ]
+        else:
+            tooltip_lines = ["URL: -", "client_id: -", "conversation_id: -", "bind_state: unbound"]
+
+        bound_url = (
+            remote.get("conversation_url")
+            or remote.get("url")
+            or ""
+        ).strip()
+
+        bound_conversation_id = (
+            remote.get("conversation_id")
+            or parse_conversation_id(bound_url)
+            or ""
+        ).strip()
+
+        if isinstance(bound_info, dict):
+            if not bound_url:
+                bound_url = (
+                    bound_info.get("page_url")
+                    or bound_info.get("url")
+                    or bound_info.get("conversation_url")
                     or ""
                 ).strip()
-                bind_state_raw = self._remote_bind_state(remote)
-                if (
-                    bind_state_raw in (BIND_STATE_WAITING_HOME, BIND_STATE_PREBOUND_HOME)
-                    and live_token
-                    and live_token != session_token
-                ):
-                    line = (
-                        f"{line}｜⚠ 当前页面不是本会话打开的 ChatGPT 首页，不能用于当前新对话"
-                    )
-            self.tm_bound_page_label.setText(line)
-            self.tm_bound_page_label.setToolTip(
-                f"{url}\n绑定状态={bind_state}\nclient_id={client_id or '-'}\n"
-                f"bind_request_id={session_token or '-'}\n"
-                f"online={bind_state in (BIND_STATE_PREBOUND_HOME, BIND_STATE_BOUND_CONVERSATION)}"
-            )
-            self._set_chat_open_bound_enabled(
-                bind_state
-                in (BIND_STATE_PREBOUND_HOME, BIND_STATE_BOUND_CONVERSATION)
-            )
-            self._set_chat_flash_bound_enabled(bool(client_id))
+            if not bound_conversation_id:
+                bound_conversation_id = (self._client_conversation_id(bound_info) or "").strip()
+
+        current_info = self._pick_current_page_client_info(status)
+        current_client_id = ""
+        if isinstance(current_info, dict):
+            current_client_id = (current_info.get("client_id") or "").strip()
+
+        bound_client_id = ""
+        if isinstance(bound_info, dict):
+            bound_client_id = (bound_info.get("client_id") or "").strip()
         else:
-            if self._has_online_bindable_chatgpt_page():
-                live = self._live_openable_chatgpt_url()
-                short = self._short_page_display(live) if live else "-"
-                self.tm_bound_page_label.setText(
-                    "当前对话：未绑定 | "
-                    f"检测到在线 ChatGPT 页面：{short}。"
-                    "可点击「绑定当前页面」。"
+            bound_client_id = (remote.get("client_id") or "").strip()
+
+        if remote.get("enabled"):
+            tooltip_lines.append(f"bound_url: {bound_url or '-'}")
+            if current_client_id:
+                tooltip_lines.append(f"current_client_id: {current_client_id}")
+                is_bound_page = bool(
+                    bound_client_id and current_client_id == bound_client_id
                 )
-                if session is not None and self._session_is_local_new_chat_flow(session):
-                    self.tm_bound_page_label.setText(
-                        "当前对话：未绑定 | "
-                        "当前页是已有 ChatGPT 对话。"
-                        "如需接管，请手动点击「绑定当前页面」。"
-                    )
-                self.tm_bound_page_label.setToolTip(live or "当前对话未绑定页面")
+                tooltip_lines.append(
+                    f"当前选中页是绑定页: {'yes' if is_bound_page else 'no'}"
+                )
+            if (
+                current_client_id
+                and bound_client_id
+                and current_client_id != bound_client_id
+            ):
+                tooltip_lines.append(
+                    f"注意：当前选中页不是绑定页，current_client_id={current_client_id}"
+                )
+
+        can_open_bound_page = bool(
+            remote.get("enabled")
+            and (bound_url or bound_conversation_id)
+        )
+
+        flash_client_id = ""
+        if isinstance(bound_info, dict):
+            flash_client_id = (bound_info.get("client_id") or "").strip()
+        if not flash_client_id:
+            flash_client_id = (remote.get("client_id") or "").strip()
+
+        can_flash_bound_page = bool(remote.get("enabled") and flash_client_id)
+
+        self.tm_bound_page_label.setText(bind_text)
+        self._refresh_status_chip(self.tm_bound_page_label, bind_chip)
+        self.tm_bound_page_label.setToolTip("\n".join(tooltip_lines))
+        if hasattr(self, "tm_bound_page_relation_label"):
+            self.tm_bound_page_relation_label.setText(relation_line)
+            self.tm_bound_page_relation_label.setToolTip("\n".join(tooltip_lines))
+
+        self._set_chat_open_bound_enabled(can_open_bound_page)
+        self._set_chat_flash_bound_enabled(can_flash_bound_page)
+
+        if hasattr(self, "chat_open_bound_btn"):
+            if can_open_bound_page:
+                open_target = bound_url or f"https://chatgpt.com/c/{bound_conversation_id}"
+                self.chat_open_bound_btn.setToolTip(
+                    "打开当前对话绑定的 ChatGPT 页面\n"
+                    f"conversation_id: {bound_conversation_id or '-'}\n"
+                    f"url: {open_target or '-'}"
+                )
             else:
-                self.tm_bound_page_label.setText(
-                    "当前对话：未绑定（等待自动绑定，或在设置中关闭页面绑定）"
+                self.chat_open_bound_btn.setToolTip(
+                    "当前对话没有可打开的绑定页面。请先绑定当前页面。"
                 )
-                self.tm_bound_page_label.setToolTip("当前对话未绑定页面")
-            self._set_chat_open_bound_enabled(False)
-            self._set_chat_flash_bound_enabled(False)
+
+        if hasattr(self, "flash_bound_page_btn"):
+            if can_flash_bound_page:
+                self.flash_bound_page_btn.setToolTip(
+                    "定位当前对话已在线的绑定页，让对应浏览器标签页闪烁。"
+                )
+            else:
+                self.flash_bound_page_btn.setToolTip(
+                    "当前绑定页不在线，无法定位闪烁；可以先点击“打开绑定页面”。"
+                )
 
         self._apply_chat_bind_visual_state()
         self._update_sync_target_display()
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
+
     def _set_chat_open_bound_enabled(self, enabled):
         if hasattr(self, "chat_open_bound_btn"):
             self.chat_open_bound_btn.setEnabled(bool(enabled))
@@ -1240,12 +1427,7 @@ class PageBindMixin(
         ):
             replaced = old_client_id != "-" and old_client_id != client_id
             if replaced:
-                self._set_tm_action_hint(
-                    f"已重新绑定当前页面：old={old_client_id} -> new={client_id}"
-                )
-                self._add_system_message(
-                    f"已重新绑定当前页面：old={old_client_id} -> new={client_id}"
-                )
+                self._set_tm_action_hint("当前对话已重新绑定")
                 self._append_log(
                     "[BIND_CURRENT_PAGE][REPLACE] "
                     f"session_id={session.session_id} "
@@ -1253,8 +1435,7 @@ class PageBindMixin(
                     f"new_client_id={client_id}"
                 )
             else:
-                self._set_tm_action_hint(f"已绑定当前页面：client={client_id}")
-                self._add_system_message(f"已绑定当前页面：client={client_id}")
+                self._set_tm_action_hint("当前对话已绑定当前页面")
             self._append_log(
                 "[BIND_CURRENT_PAGE][DONE] "
                 f"session_id={session.session_id} "
@@ -1263,11 +1444,13 @@ class PageBindMixin(
                 f"conversation_id={conversation_id} "
                 f"page_url={page_url}"
             )
-            self._add_system_message("已手动绑定已有 ChatGPT 对话页，正在同步网页端历史内容。")
+            self._set_tm_action_hint("同步中...")
             self._sync_after_manual_bind_existing_conversation(session, client_info)
             return
         self._append_log("[BIND_CURRENT_PAGE][FAILED] reason=bind_page_to_session_returned_false")
+
     def _on_bind_selected_tm_page(self):
+        """@deprecated 无 UI 按钮绑定；已由「绑定当前页面」(_on_bind_current_page) 替代。"""
         self._append_log(
             "[BIND][SELECTED_PAGE][DEPRECATED_UI_ENTRY] "
             "此函数已不再作为 UI 入口，仅保留兼容。"
@@ -1315,7 +1498,7 @@ class PageBindMixin(
             allow_existing_conversation_for_new_session=True,
         ):
             self._set_tm_action_hint(f"已绑定页面 {client_id} 到当前对话。")
-            self._add_system_message("已手动绑定已有 ChatGPT 对话页，正在同步网页端历史内容。")
+            self._set_tm_action_hint("同步中...")
             self._sync_after_manual_bind_existing_conversation(session, client_info)
     def _sync_after_manual_bind_existing_conversation(self, session, client_info):
         if session is None:
@@ -1359,9 +1542,47 @@ class PageBindMixin(
                 ),
             )
     def _message_fingerprint(self, role, text):
-        normalized = " ".join(str(text or "").split())
+        normalized_text = self._normalize_synced_message_text(text)
+        normalized = " ".join(normalized_text.split())
         digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
         return f"{role}:{digest}"
+    def _normalize_synced_message_text(self, text):
+        value = str(text or "")
+        value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+        value = value.strip()
+        if not value:
+            return ""
+
+        value = re.sub(
+            r"^(你说|您说|ChatGPT\s*说|You said|ChatGPT said|Assistant said)\s*[:：]\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        drop_lines = {
+            "复制",
+            "编辑",
+            "重试",
+            "分享",
+            "赞",
+            "踩",
+            "展开",
+            "收起",
+            "展开收起",
+        }
+        lines = []
+        for line in value.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line in drop_lines:
+                continue
+            lines.append(line)
+        value = "\n".join(lines)
+        value = re.sub(r"\s*(展开收起|展开|收起)\s*$", "", value)
+        value = re.sub(r"[ \t]{2,}", " ", value)
+        value = re.sub(r"\n{3,}", "\n\n", value)
+        return value.strip()
     def _is_protected_local_message(self, message):
         if message.role == "system":
             return True
@@ -1388,6 +1609,31 @@ class PageBindMixin(
                 continue
             fingerprints.add(self._message_fingerprint(message.role, text))
         return fingerprints
+    def _dedupe_synced_messages_in_session(self, session):
+        deduped = []
+        fingerprints = set()
+        removed = 0
+        for message in session.messages:
+            role = (message.role or "").strip()
+            if role not in ("user", "assistant"):
+                deduped.append(message)
+                continue
+            if self._is_protected_local_message(message):
+                deduped.append(message)
+                continue
+            text = self._normalize_synced_message_text(message.content or "")
+            if not text:
+                deduped.append(message)
+                continue
+            fp = self._message_fingerprint(role, text)
+            if fp in fingerprints:
+                removed += 1
+                continue
+            fingerprints.add(fp)
+            deduped.append(message)
+        if removed:
+            session.messages = deduped
+        return removed
     def _refresh_local_conversation_after_sync(
         self, session_id, *, force_bottom=True, reason="sync"
     ):
@@ -1416,6 +1662,7 @@ class PageBindMixin(
             self._update_current_session_title(session)
 
         self._refresh_session_list(select_session_id=session.session_id)
+        self._apply_chat_bind_visual_state()
         self._update_bound_page_display()
         self._refresh_tm_page_selector()
         self._render_tampermonkey_clients(self._last_bridge_status)
@@ -1429,6 +1676,59 @@ class PageBindMixin(
             echo=True,
         )
         return True
+
+    def _clear_pending_wait_messages_after_web_sync(self, session, normalized_web):
+        if session is None:
+            return 0
+
+        if not normalized_web:
+            return 0
+
+        last_role = (normalized_web[-1].get("role") or "").strip()
+        if last_role != "assistant":
+            return 0
+
+        kept = []
+        removed = 0
+
+        for message in session.messages:
+            role = (message.role or "").strip()
+            status = (message.status or "").strip()
+            text = (message.content or "").strip()
+
+            is_waiting_assistant = (
+                role == "assistant"
+                and (
+                    status in PENDING_ASSISTANT_STATUSES
+                    or text in ASSISTANT_WAIT_TEXTS
+                )
+            )
+
+            if is_waiting_assistant:
+                removed += 1
+                continue
+
+            if role == "user" and status in PENDING_ASSISTANT_STATUSES:
+                message.status = "已同步"
+
+            kept.append(message)
+
+        if removed:
+            session.messages = kept
+
+        session.has_pending_reply = False
+        session.updated_at = time.time()
+
+        self._append_log(
+            "[SYNC_CONVERSATION][CLEAR_PENDING] "
+            f"session_id={session.session_id} "
+            f"removed={removed} "
+            f"last_web_role={last_role}",
+            echo=True,
+        )
+
+        return removed
+
     def _sync_session_messages_from_web_snapshot(
         self, session_id, web_messages, mode="merge", source="manual"
     ):
@@ -1453,32 +1753,58 @@ class PageBindMixin(
             role = (item.get("role") or "").strip()
             if role not in ("user", "assistant"):
                 continue
-            text = (item.get("text") or item.get("content") or "").strip()
+            raw_text = item.get("text") or item.get("content") or ""
+            text = self._normalize_synced_message_text(raw_text)
             if not text:
                 continue
             normalized_web.append({"role": role, "text": text})
+
+        if not normalized_web:
+            self._append_log(
+                f"[SYNC_CONVERSATION][FAILED] reason=empty_web_snapshot "
+                f"session_id={session.session_id}",
+                echo=True,
+            )
+            return False, "网页端没有导出到有效聊天消息，本地内容已保持不变"
 
         added = 0
         skipped = 0
 
         if mode == "replace":
-            kept = [
-                message
-                for message in session.messages
-                if self._is_protected_local_message(message)
-            ]
-            session.messages = kept
-            fingerprints = self._existing_message_fingerprints(session)
+            old_count = len(session.messages)
+            new_messages = []
+            fingerprints = set()
             for item in normalized_web:
-                fp = self._message_fingerprint(item["role"], item["text"])
+                role = item["role"]
+                text = item["text"]
+                fp = self._message_fingerprint(role, text)
                 if fp in fingerprints:
                     skipped += 1
                     continue
-                self._append_session_message(
-                    session, item["role"], item["text"], status="已同步"
-                )
                 fingerprints.add(fp)
-                added += 1
+                new_messages.append(
+                    ChatMessage(
+                        role=role,
+                        content=text,
+                        created_at=time.time(),
+                        message_id=str(uuid.uuid4()),
+                        status="已同步",
+                        visible_in_chat=True,
+                    )
+                )
+
+            session.messages = new_messages
+            added = len(new_messages)
+            self._append_log(
+                "[SYNC_CONVERSATION][REPLACE_LOCAL_WITH_WEB] "
+                f"session_id={session.session_id} "
+                f"old_count={old_count} "
+                f"web_count={len(normalized_web)} "
+                f"new_count={len(new_messages)} "
+                f"skipped={skipped} "
+                f"source={source}",
+                echo=True,
+            )
         else:
             fingerprints = self._existing_message_fingerprints(session)
             for item in normalized_web:
@@ -1492,25 +1818,58 @@ class PageBindMixin(
                 fingerprints.add(fp)
                 added += 1
 
-        summary = (
-            f"已从 ChatGPT 网页同步对话内容：新增 {added} 条，跳过 {skipped} 条。"
+        if mode == "merge":
+            removed_existing = self._dedupe_synced_messages_in_session(session)
+            if removed_existing:
+                skipped += removed_existing
+
+        self._auto_rename_session_from_messages(session)
+
+        cleared_pending = self._clear_pending_wait_messages_after_web_sync(
+            session,
+            normalized_web,
         )
-        self._append_session_message(session, "system", summary)
+
+        summary = (
+            "同步完成"
+        )
+        self._set_tm_action_hint(summary)
+        self._append_log(
+            "[SYNC_CONVERSATION][SUMMARY] "
+            f"session_id={session.session_id} "
+            f"mode={mode} "
+            f"web_count={len(normalized_web)} "
+            f"local_count={len(session.messages)} "
+            f"added={added} "
+            f"skipped={skipped} "
+            f"cleared_pending={cleared_pending}",
+            echo=True,
+        )
         session.updated_at = time.time()
         self._save_sessions_to_disk()
         self._refresh_local_conversation_after_sync(
             session.session_id,
             force_bottom=True,
-            reason="snapshot_applied",
+            reason="snapshot_replaced" if mode == "replace" else "snapshot_applied",
         )
 
         self._append_log(
             "[SYNC_CONVERSATION][APPLIED] "
             f"session_id={session.session_id} mode={mode} "
-            f"added={added} skipped={skipped} total_web={len(normalized_web)} "
+            f"total_web={len(normalized_web)} local_count={len(session.messages)} "
+            f"added={added} skipped={skipped} "
             f"source={source}",
             echo=True,
         )
+        self._append_log(
+            "[SYNC_CONVERSATION][DONE] "
+            f"session_id={session.session_id} "
+            f"added={added} skipped={skipped} total_web={len(normalized_web)} "
+            f"cleared_pending={cleared_pending}",
+            echo=True,
+        )
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
         return True, summary
     def _validate_sync_conversation_binding(self, session, payload):
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -1555,38 +1914,86 @@ class PageBindMixin(
         return True, ""
     def _handle_conversation_snapshot_inbound(self, item):
         payload = item.get("payload") or {}
-        session_id = (payload.get("session_id") or item.get("session_id") or "").strip()
+        message_id = (item.get("message_id") or "").strip()
+        pending_sync = {}
+        if message_id:
+            pending_sync = dict(
+                getattr(self, "_pending_sync_requests", {}).pop(message_id, {}) or {}
+            )
+        session_id = (
+            payload.get("session_id")
+            or item.get("session_id")
+            or pending_sync.get("session_id")
+            or ""
+        ).strip()
+        conversation_id = (
+            payload.get("conversation_id")
+            or pending_sync.get("conversation_id")
+            or ""
+        ).strip()
+        web_messages = payload.get("messages")
+        if not isinstance(web_messages, list):
+            web_messages = []
+        if not conversation_id:
+            conversation_id = "-"
+        total_text_len = 0
+        for msg in web_messages:
+            if isinstance(msg, dict):
+                total_text_len += len(str(msg.get("text") or msg.get("content") or "").strip())
+        self._append_log(
+            "[SYNC_CONVERSATION][RECV] "
+            f"session_id={session_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"count={len(web_messages)} "
+            f"total_text_len={total_text_len}",
+            echo=True,
+        )
         if not session_id:
             self._append_log(
-                "[SYNC_CONVERSATION][FAILED] reason=missing_session_id", echo=True
+                "[SYNC_CONVERSATION][FAILED] reason=missing_session_id "
+                f"session_id=- conversation_id={conversation_id or '-'} "
+                f"message_id={message_id or '-'}",
+                echo=True,
             )
-            self._add_system_message("同步网页对话失败：缺少 session_id。")
+            self._set_tm_action_hint("同步网页对话失败：缺少 session_id。")
             return
 
         session = self._sessions.get(session_id)
         if session is None:
             self._append_log(
                 f"[SYNC_CONVERSATION][FAILED] reason=session_not_found "
-                f"session_id={session_id}",
+                f"session_id={session_id} conversation_id={conversation_id or '-'} "
+                f"message_id={message_id or '-'}",
                 echo=True,
             )
-            self._add_system_message("同步网页对话失败：未找到对应对话。")
+            self._set_tm_action_hint("同步网页对话失败：未找到对应对话。")
             return
 
         ok, reason = self._validate_sync_conversation_binding(session, payload)
         if not ok:
             self._append_log(
                 f"[SYNC_CONVERSATION][FAILED] session_id={session_id} "
-                f"reason={reason}",
+                f"conversation_id={conversation_id or '-'} "
+                f"message_id={message_id or '-'} reason={reason}",
                 echo=True,
             )
             if session.session_id == self._current_session_id:
-                self._add_system_message(f"同步网页对话失败：{reason}")
+                self._set_tm_action_hint(f"同步失败：{reason}")
             return
 
         mode = (payload.get("mode") or self._sync_conversation_mode or "merge").strip()
-        web_messages = payload.get("messages") or []
         count = len(web_messages)
+        if count <= 0:
+            self._append_log(
+                "[SYNC_CONVERSATION][FAILED] reason=empty_messages_from_tm "
+                f"session_id={session_id or '-'} "
+                f"conversation_id={conversation_id or '-'} "
+                f"message_id={message_id or '-'}",
+                echo=True,
+            )
+            if session.session_id == self._current_session_id:
+                self._set_tm_action_hint("绑定成功，但同步失败：网页端没有回传有效消息。")
+            return
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         status = self._last_bridge_status or {}
         current_client_id = (status.get("tampermonkey_client_id") or "").strip()
@@ -1610,12 +2017,6 @@ class PageBindMixin(
             "targetConversationId": target_conversation_id or "-",
             "targetSyncable": bool(count > 0),
         }
-        total_text_len = 0
-        for msg in web_messages:
-            if isinstance(msg, dict):
-                total_text_len += len(
-                    str(msg.get("text") or msg.get("content") or "").strip()
-                )
         self._append_log(
             "[SYNC][RESPONSE_RECEIVED] "
             + self._sync_log_context_fields(recv_context, reason="response_received")
@@ -1625,8 +2026,6 @@ class PageBindMixin(
             + f"count={count} total_text_len={total_text_len}",
             echo=True,
         )
-        if session.session_id == self._current_session_id:
-            self._add_system_message("已收到网页端对话内容...")
         applied_ok, apply_reason = self._sync_session_messages_from_web_snapshot(
             session_id,
             web_messages,
@@ -1641,17 +2040,17 @@ class PageBindMixin(
             echo=True,
         )
         if not applied_ok:
+            self._append_log(
+                "[SYNC_CONVERSATION][FAILED] "
+                f"reason={apply_reason or 'apply_failed'} "
+                f"session_id={session_id or '-'} "
+                f"conversation_id={conversation_id or '-'} "
+                f"message_id={message_id or '-'}",
+                echo=True,
+            )
             if session.session_id == self._current_session_id:
-                self._add_system_message(f"同步网页对话失败：{apply_reason}")
+                self._set_tm_action_hint(f"同步失败：{apply_reason}")
             return
-        self._append_session_message(session, "system", f"同步完成：消息数 {count} 条")
-        session.updated_at = time.time()
-        self._save_sessions_to_disk()
-        self._refresh_local_conversation_after_sync(
-            session.session_id,
-            force_bottom=True,
-            reason="sync_done",
-        )
     def _enqueue_sync_conversation_command(
         self, session, request_reason="manual_button", delay_ms=0
     ):
@@ -1685,18 +2084,45 @@ class PageBindMixin(
             "[SYNC][TARGET_SELECTED] "
             + self._sync_log_context_fields(target.get("log_context"), reason=reason)
         )
-        if request_reason == "manual_button" and session.session_id == (
-            self._current_session_id or ""
-        ):
-            source_text_map = {
-                "bound": "已绑定页面",
-                "auto_rebind_by_conv": "同会话自动换绑页面",
-                "current_page": "当前浏览页面",
-                "selected_page": "下拉框选中页面",
-            }
-            source_text = source_text_map.get(target.get("source"), "目标页面")
-            self._add_system_message(
-                f"使用{source_text}同步：client={client_id} | conv={conversation_id or '-'}"
+        try:
+            current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bound_client_id = (remote.get("client_id") or "").strip()
+            conv_id = (remote.get("conversation_id") or "").strip() or parse_conversation_id(
+                remote.get("conversation_url") or ""
+            )
+            target_client_id = (target.get("client_id") or "").strip()
+            active_matches_bound = bool(
+                current_client_id
+                and bound_client_id
+                and current_client_id == bound_client_id
+            )
+            self._append_log(
+                "[SYNC_CONVERSATION][START] "
+                f"session_id={session.session_id} "
+                f"active_client={current_client_id or '-'} "
+                f"bound_client={bound_client_id or '-'} "
+                f"target_client={target_client_id or '-'} "
+                f"conversation_id={conv_id or '-'} "
+                f"active_matches_bound={'true' if active_matches_bound else 'false'}",
+                echo=True,
+            )
+            if current_client_id and bound_client_id and current_client_id != bound_client_id:
+                if target.get("source") in ("bound", "auto_rebind_by_conv"):
+                    self._append_log(
+                        "[SYNC_CONVERSATION][ACTIVE_PAGE_MISMATCH] "
+                        f"active_client={current_client_id or '-'} "
+                        f"bound_client={bound_client_id or '-'} "
+                        f"target_client={target_client_id or '-'} "
+                        "action=use_bound_page",
+                        echo=True,
+                    )
+        except Exception as error:
+            self._append_log(
+                "[SYNC_CONVERSATION][START][FAILED] "
+                f"session_id={(session.session_id if session else '-')}"
+                f" error={error}\n{traceback.format_exc()}",
+                echo=True,
             )
         mode = (self._sync_conversation_mode or "merge").strip().lower()
         if mode not in ("merge", "replace"):
@@ -1710,7 +2136,9 @@ class PageBindMixin(
             "max_messages": max_messages,
             "session_id": session.session_id,
             "conversation_id": conversation_id,
-            "request_reason": request_reason,
+            "target_client_id": client_id,
+            "source": request_reason or "manual",
+            "request_reason": request_reason or "manual",
         }
 
         def _send():
@@ -1718,14 +2146,33 @@ class PageBindMixin(
                 "[SYNC][REQUEST_EXPORT] "
                 + self._sync_log_context_fields(target.get("log_context"), reason=reason)
             )
-            ok = server.enqueue_control_command(
+            queued = server.enqueue_control_command(
                 command="sync_conversation",
                 target_client_id=client_id,
                 target_page_instance_id=page_instance_id,
                 target_conversation_id=conversation_id,
                 payload=payload,
             )
-            if ok:
+            if queued:
+                message_id = ""
+                if isinstance(queued, dict):
+                    message_id = (queued.get("id") or "").strip()
+                if message_id:
+                    if not hasattr(self, "_pending_sync_requests"):
+                        self._pending_sync_requests = {}
+                    self._pending_sync_requests[message_id] = {
+                        "session_id": session.session_id,
+                        "conversation_id": conversation_id,
+                        "target_client_id": client_id,
+                    }
+                self._append_log(
+                    "[SYNC_CONVERSATION][COMMAND_PAYLOAD] "
+                    f"session_id={session.session_id} "
+                    f"conversation_id={conversation_id or '-'} "
+                    f"target_client_id={client_id or '-'} "
+                    f"message_id={message_id or '-'}",
+                    echo=True,
+                )
                 self._append_log(
                     "[SYNC_CONVERSATION][REQUEST] "
                     f"session_id={session.session_id} "
@@ -1739,7 +2186,12 @@ class PageBindMixin(
                 if request_reason == "manual_button" and session.session_id == (
                     self._current_session_id or ""
                 ):
-                    self._add_system_message("已请求网页端导出对话...")
+                    self._append_log(
+                        "[SYNC_CONVERSATION][REQUESTED] manual_button=true "
+                        f"session_id={session.session_id} client_id={client_id} "
+                        f"conversation_id={conversation_id or '-'}",
+                        echo=True,
+                    )
             else:
                 self._append_log(
                     f"[SYNC_CONVERSATION][FAILED] reason=enqueue_failed "
@@ -1747,7 +2199,7 @@ class PageBindMixin(
                     echo=True,
                 )
                 if session.session_id == self._current_session_id:
-                    self._add_system_message("同步网页对话失败：命令入队失败。")
+                    self._set_tm_action_hint("同步失败：命令入队失败。")
 
         if delay_ms > 0:
             QTimer.singleShot(delay_ms, _send)
@@ -1929,12 +2381,15 @@ class PageBindMixin(
                 "已在设置中关闭「允许从网页同步完整对话」。"
             )
             return
-        self._add_system_message("正在解析同步目标...")
+        self._append_log(
+            f"[SYNC_CONVERSATION][CLICK] session_id={session.session_id}", echo=True
+        )
+        self._set_tm_action_hint("同步中...")
         ok, reason = self._enqueue_sync_conversation_command(
             session, request_reason="manual_button"
         )
         if not ok and reason:
-            self._add_system_message(f"同步网页对话失败：{reason}")
+            self._set_tm_action_hint(f"同步失败：{reason}")
     def _session_bound_client_id(self):
         session = self._current_session()
         if not session:

@@ -204,6 +204,8 @@ class ChatRenderMixin:
 
         self._refresh_session_list(select_session_id=self._current_session_id)
         self._save_sessions_to_disk()
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
 
     def _set_reply_text(self, session, turn_id, text, status_text="已回复"):
         target = self._find_assistant_by_turn(session, turn_id)

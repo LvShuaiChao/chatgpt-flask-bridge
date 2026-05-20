@@ -103,9 +103,9 @@ class SettingsMixin:
             self._settings.value("allow_fallback_to_any_page"),
             defaults["allow_fallback_to_any_page"],
         )
-        self._auto_open_and_bind_on_new_chat = self._qsettings_bool(
-            self._settings.value("auto_open_and_bind_on_new_chat"),
-            defaults["auto_open_and_bind_on_new_chat"],
+        self._upload_before_send_enabled = self._qsettings_bool(
+            self._settings.value("upload_before_send_enabled"),
+            defaults["upload_before_send_enabled"],
         )
         self._force_new_session_after_turns = int(
             self._settings.value(
@@ -202,8 +202,9 @@ class SettingsMixin:
                 self.allow_fallback_to_any_page_cb.isChecked()
             )
             self._auto_bind_unbound_page = self.auto_bind_unbound_page_cb.isChecked()
-            self._auto_open_and_bind_on_new_chat = (
-                self.auto_open_and_bind_on_new_chat_cb.isChecked()
+        if hasattr(self, "upload_before_send_enabled_cb"):
+            self._upload_before_send_enabled = (
+                self.upload_before_send_enabled_cb.isChecked()
             )
         if hasattr(self, "sync_full_conversation_enabled_cb"):
             self._sync_full_conversation_enabled = (
@@ -249,8 +250,8 @@ class SettingsMixin:
         )
         self._settings.setValue("auto_bind_unbound_page", self._auto_bind_unbound_page)
         self._settings.setValue(
-            "auto_open_and_bind_on_new_chat",
-            self._auto_open_and_bind_on_new_chat,
+            "upload_before_send_enabled",
+            self._upload_before_send_enabled,
         )
         self._settings.setValue(
             "force_new_session_after_turns",
@@ -274,16 +275,8 @@ class SettingsMixin:
     def _sync_page_url_detail_widgets(self):
         if not hasattr(self, "tm_live_page_label"):
             return
-        if self._show_page_url:
-            self._update_live_page_display()
-            self._update_bound_page_display()
-            return
-        self.tm_live_page_label.setText(" ")
-        self.tm_bound_page_label.setText(" ")
-        if hasattr(self, "tm_bind_mismatch_label"):
-            self.tm_bind_mismatch_label.setText(" ")
-        if hasattr(self, "open_live_page_btn"):
-            self.open_live_page_btn.setEnabled(False)
+        self._update_live_page_display()
+        self._update_bound_page_display()
     def _apply_settings(self, immediate_only=False):
         self._read_settings_from_widgets()
         server.set_debug_mode(self._debug_mode)
@@ -342,8 +335,9 @@ class SettingsMixin:
                 self._allow_fallback_to_any_page
             )
             self.auto_bind_unbound_page_cb.setChecked(self._auto_bind_unbound_page)
-            self.auto_open_and_bind_on_new_chat_cb.setChecked(
-                self._auto_open_and_bind_on_new_chat
+        if hasattr(self, "upload_before_send_enabled_cb"):
+            self.upload_before_send_enabled_cb.setChecked(
+                self._upload_before_send_enabled
             )
         if hasattr(self, "sync_full_conversation_enabled_cb"):
             self.sync_full_conversation_enabled_cb.setChecked(
@@ -368,6 +362,9 @@ class SettingsMixin:
         self.settings_hint_label.setText(text or "")
     def _set_tm_action_hint(self, text):
         text = (text or "").strip()
+        if text == getattr(self, "_last_tm_action_hint_text", None):
+            return
+        self._last_tm_action_hint_text = text
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
@@ -413,6 +410,9 @@ class SettingsMixin:
             self._set_settings_hint("油猴离线（曾连接过）。")
         else:
             self._set_settings_hint("油猴未连接。")
+        session = self._current_session() if hasattr(self, "_current_session") else None
+        if session is not None and hasattr(self, "_try_send_next_queued_message"):
+            self._try_send_next_queued_message(session)
     def _restart_server_with_settings(self):
         if server.is_server_running():
             self._stop_server()

@@ -82,6 +82,33 @@ _outbound_waiting = {}
 # 控制命令（close_self 等）：独立于聊天队列，避免被 waiting 阻塞
 _control_queue = deque(maxlen=50)
 _control_waiting = {}
+# Cursor Bridge：GUI / 插件 任务队列与回报
+cursor_task_queue = deque()
+cursor_task_reports = deque(maxlen=200)
+cursor_task_history = deque(maxlen=200)
+cursor_task_lock = threading.RLock()
+cursor_client_state = {
+    "client_id": "",
+    "name": "",
+    "version": "",
+    "status": "never_seen",
+    "last_seen": 0.0,
+    "last_seen_text": "",
+    "last_task_claim_at": 0.0,
+    "last_task_id": "",
+    "last_report_at": 0.0,
+    "last_report_status": "",
+    "last_report_message": "",
+}
+CURSOR_ONLINE_TIMEOUT_SEC = 15
+
+
+def _cursor_now_ts():
+    return time.time()
+
+
+def _cursor_safe_text(value):
+    return str(value or "").strip()
 # 入站：油猴 -> 服务端（事件、回执、页面信息等）
 _inbound_messages = deque(maxlen=100)
 # 历史出站（已确认或失败）
@@ -324,6 +351,8 @@ def _snapshot_clients():
                 "last_response_state_seen_at": info.get("last_response_state_seen_at"),
                 "response_started_at": info.get("response_started_at"),
                 "response_last_text_changed_at": info.get("response_last_text_changed_at"),
+                "upload_bridge_supported": bool(info.get("upload_bridge_supported")),
+                "upload_bridge_version": int(info.get("upload_bridge_version") or 0),
             }
         )
     return items
@@ -355,6 +384,7 @@ def get_bridge_status():
             "inbound_count": len(_inbound_messages),
             "recent_inbound": list(_inbound_messages)[-10:],
             "recent_outbound": list(_outbound_history)[-10:],
+            "cursor_bridge": get_cursor_bridge_status(),
         }
 
 def set_bound_client_id(client_id, session_id=None):
@@ -604,6 +634,222 @@ def push_reload_page(client_id, target_page_url=None):
     )
 
 
+def enqueue_cursor_task(task):
+    """
+    将 Python GUI 创建的 Cursor 任务加入队列。
+    Cursor 插件通过 /api/cursor/tasks/next 拉取。
+    """
+    if not isinstance(task, dict):
+        _log("[CURSOR_BRIDGE][TASK_CREATE_FAILED] reason=task_not_dict")
+        return False, "task must be dict"
+
+    task_id = _cursor_safe_text(task.get("task_id"))
+    command = _cursor_safe_text(task.get("command")) or "send_message"
+    if command not in ("send_message", "new_chat", "new_chat_and_send"):
+        command = "send_message"
+    task["command"] = command
+
+    content_raw = task.get("content")
+    if command != "new_chat":
+        if content_raw is None or not str(content_raw).strip():
+            if not task_id:
+                task_id = f"cursor_task_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            _log(
+                "[CURSOR_BRIDGE][TASK_CREATE_FAILED] "
+                f"task_id={task_id} command={command} reason=empty_content"
+            )
+            return False, "content is empty"
+
+    if not task_id:
+        task_id = f"cursor_task_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        task["task_id"] = task_id
+
+    task.setdefault("type", "cursor_agent_prompt")
+    task.setdefault("command", "send_message")
+    task.setdefault("delivery_mode", task.get("mode") or "auto_send")
+    task.setdefault("mode", task.get("delivery_mode") or "auto_send")
+    task.setdefault("prompt_mode", "raw")
+    task.setdefault("submit_mode", "enter")
+    task.setdefault("title", "Cursor Bridge 任务")
+    task.setdefault("files", [])
+    task.setdefault("target", "agent")
+
+    delivery_mode = task.get("delivery_mode") or task.get("mode") or "auto_send"
+    if delivery_mode == "auto_send":
+        task["delivery_mode"] = "auto_send"
+        task["mode"] = "auto_send"
+        task["require_confirm"] = False
+    else:
+        task["delivery_mode"] = "manual_confirm"
+        task["mode"] = "manual_confirm"
+        task.setdefault("require_confirm", True)
+
+    task.setdefault("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    task.setdefault("updated_at", _cursor_now_ts())
+    task.setdefault("status", "queued")
+
+    with cursor_task_lock:
+        cursor_task_queue.append(task)
+        cursor_task_history.append({
+            "task_id": task_id,
+            "title": task.get("title") or "",
+            "status": "queued",
+            "created_at": task.get("created_at") or "",
+            "updated_at": task.get("updated_at") or _cursor_now_ts(),
+        })
+
+    _log(
+        "[CURSOR_BRIDGE][TASK_CREATE] "
+        f"task_id={task_id} "
+        f"title={task.get('title') or '-'} "
+        f"delivery_mode={task.get('delivery_mode') or '-'} "
+        f"prompt_mode={task.get('prompt_mode') or '-'} "
+        f"submit_mode={task.get('submit_mode') or '-'} "
+        f"mode={task.get('mode') or '-'} "
+        f"require_confirm={task.get('require_confirm')}"
+    )
+    _notify_status()
+    return True, task_id
+
+
+def claim_next_cursor_task(client=""):
+    """Cursor 插件领取下一条任务。"""
+    with cursor_task_lock:
+        if not cursor_task_queue:
+            return None
+
+        task = cursor_task_queue.popleft()
+        task["status"] = "claimed"
+        task["claimed_at"] = _cursor_now_ts()
+        task["claimed_by"] = _cursor_safe_text(client) or "cursor-extension"
+
+        cursor_client_state["last_task_claim_at"] = _cursor_now_ts()
+        cursor_client_state["last_task_id"] = task.get("task_id") or ""
+
+    _log(
+        "[CURSOR_BRIDGE][TASK_CLAIM] "
+        f"task_id={task.get('task_id') or '-'} "
+        f"client={client or '-'}"
+    )
+    _notify_status()
+    return task
+
+
+def append_cursor_task_report(report):
+    """保存 Cursor 插件回报。"""
+    if not isinstance(report, dict):
+        _log("[CURSOR_BRIDGE][REPORT_FAILED] reason=report_not_dict")
+        return False, "report must be dict"
+
+    task_id = _cursor_safe_text(report.get("task_id"))
+    status = _cursor_safe_text(report.get("status"))
+    message = _cursor_safe_text(report.get("message"))
+
+    if not task_id:
+        _log("[CURSOR_BRIDGE][REPORT_FAILED] reason=empty_task_id")
+        return False, "task_id is empty"
+
+    report.setdefault("updated_at", _cursor_now_ts())
+
+    with cursor_task_lock:
+        cursor_task_reports.append(report)
+        cursor_client_state["last_report_at"] = _cursor_now_ts()
+        cursor_client_state["last_report_status"] = status
+        cursor_client_state["last_report_message"] = message
+
+    _log(
+        "[CURSOR_BRIDGE][REPORT] "
+        f"task_id={task_id} "
+        f"status={status or '-'} "
+        f"message={message or '-'}"
+    )
+    _notify_status()
+    return True, "ok"
+
+
+def update_cursor_client_heartbeat(payload):
+    """
+    Cursor 插件心跳。
+    插件启动 Python Bridge 后，应每 5 秒调用一次。
+    """
+    if not isinstance(payload, dict):
+        _log("[CURSOR_BRIDGE][HEARTBEAT_FAILED] reason=payload_not_dict")
+        return False, "payload must be dict"
+
+    client_id = _cursor_safe_text(payload.get("client_id")) or "cursor-extension"
+    name = _cursor_safe_text(payload.get("name")) or "Cursor Extension"
+    version = _cursor_safe_text(payload.get("version"))
+    now = _cursor_now_ts()
+
+    with cursor_task_lock:
+        cursor_client_state.update({
+            "client_id": client_id,
+            "name": name,
+            "version": version,
+            "status": "online",
+            "last_seen": now,
+            "last_seen_text": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    _log(
+        "[CURSOR_BRIDGE][HEARTBEAT] "
+        f"client_id={client_id} "
+        f"name={name} "
+        f"version={version or '-'}"
+    )
+    _notify_status()
+    return True, "ok"
+
+
+def get_cursor_bridge_status():
+    """
+    返回 Cursor Bridge 当前状态。
+    Python GUI 顶部状态栏用这个函数刷新 Cursor 在线状态。
+    """
+    now = _cursor_now_ts()
+
+    with cursor_task_lock:
+        state = dict(cursor_client_state)
+        pending_count = len(cursor_task_queue)
+        reports = list(cursor_task_reports)[-20:]
+        history = list(cursor_task_history)[-20:]
+
+    last_seen = float(state.get("last_seen") or 0.0)
+    age = now - last_seen if last_seen > 0 else None
+
+    if last_seen <= 0:
+        online = False
+        status = "never_seen"
+    elif age is not None and age <= CURSOR_ONLINE_TIMEOUT_SEC:
+        online = True
+        status = "online"
+    else:
+        online = False
+        status = "offline"
+
+    state["online"] = online
+    state["status"] = status
+    state["age_seconds"] = age
+    state["pending_count"] = pending_count
+    state["reports"] = reports
+    state["history"] = history
+
+    return state
+
+
+def print_registered_routes():
+    try:
+        _log("[SERVER][ROUTES]")
+        for rule in app.url_map.iter_rules():
+            _log(
+                f"  {rule.rule} "
+                f"methods={sorted(rule.methods)} "
+                f"endpoint={rule.endpoint}"
+            )
+    except Exception as exc:
+        _log(f"[SERVER][ROUTES][FAILED] error={exc}")
+
+
 def enqueue_control_command(
     command,
     target_client_id,
@@ -624,7 +870,7 @@ def enqueue_control_command(
         )
         return False
 
-    _queue_control_message(
+    msg = _queue_control_message(
         command,
         log_label=command,
         target_client_id=target_client_id,
@@ -632,7 +878,7 @@ def enqueue_control_command(
         target_conversation_id=target_conversation_id or None,
         payload=dict(payload or {}),
     )
-    return True
+    return msg
 
 
 def push_close_other_pages(except_client_id):
@@ -786,6 +1032,8 @@ def _touch_tampermonkey(meta, action="poll"):
             "last_response_state_seen_at": None,
             "response_started_at": None,
             "response_last_text_changed_at": None,
+            "upload_bridge_supported": False,
+            "upload_bridge_version": 0,
         },
     )
     entry["client_id"] = client_id
@@ -800,6 +1048,13 @@ def _touch_tampermonkey(meta, action="poll"):
     if page_instance_id:
         entry["page_instance_id"] = page_instance_id
     entry["script_version"] = (meta.get("script_version") or entry.get("script_version") or "").strip()
+    if "upload_bridge_supported" in meta:
+        entry["upload_bridge_supported"] = bool(meta.get("upload_bridge_supported"))
+    if "upload_bridge_version" in meta:
+        try:
+            entry["upload_bridge_version"] = int(meta.get("upload_bridge_version") or 0)
+        except (TypeError, ValueError):
+            entry["upload_bridge_version"] = int(entry.get("upload_bridge_version") or 0)
     entry["page_title"] = (meta.get("page_title") or entry.get("page_title") or "").strip()
     entry["page_type"] = page_type or entry.get("page_type") or ""
     entry["conversation_id"] = conversation_id or entry.get("conversation_id") or ""
@@ -999,13 +1254,21 @@ def _message_matches_client(msg, client_id):
     return True
 
 
+STRICT_TARGET_CONTROL_COMMANDS = frozenset({
+    "flash_page",
+    "sync_conversation",
+    "start_upload",
+})
+
+
 def _targeted_control_matches(msg, body):
-    """flash_page / sync_conversation：严格匹配 client、page_instance、conversation。"""
+    """严格定向控制命令：按 client、page_instance、conversation 精确匹配。"""
     client_id = (body.get("client_id") or "").strip()
     if not _message_matches_client(msg, client_id):
         return False
+
     command = (msg.get("command") or "").strip()
-    if command not in ("flash_page", "sync_conversation"):
+    if command not in STRICT_TARGET_CONTROL_COMMANDS:
         return False
 
     target_page_instance_id = (msg.get("target_page_instance_id") or "").strip()
@@ -1112,7 +1375,7 @@ def _pop_control_command_for_client(body):
             _control_queue.append(msg)
         return None
 
-    # 1) 定向控制命令（flash_page / sync_conversation，严格匹配）
+    # 1) 严格定向控制命令（flash_page / sync_conversation / start_upload 等）
     msg = _rotate(lambda m: _targeted_control_matches(m, body))
     if msg:
         _log(
@@ -1137,10 +1400,10 @@ def _pop_control_command_for_client(body):
     )
     if msg:
         return msg
-    # 4) 其余控制命令（含 reload_self、批量 close_self 等，不匹配定向命令）
+    # 4) 其余控制命令（含 reload_self、批量 close_self 等；排除严格定向命令）
     return _rotate(
         lambda m: (m.get("command") or "").strip()
-        not in ("flash_page", "sync_conversation")
+        not in STRICT_TARGET_CONTROL_COMMANDS
         and _message_matches_client(m, client_id)
     )
 
@@ -1644,6 +1907,32 @@ def _handle_report(body):
     _report_recv_fields(body, event, payload, message_id)
     with _state_lock:
         msg = _find_outbound_message(message_id)
+        if event == "conversation_created" and not msg:
+            conv_report = (payload.get("conversation_id") or "").strip()
+            if conv_report:
+                orphan_session = (
+                    (payload.get("local_session_id") or body.get("session_id") or "")
+                ).strip()
+                turn_extra = (
+                    (payload.get("turn_id") or body.get("turn_id") or "")
+                ).strip()
+                _add_inbound(
+                    event,
+                    payload,
+                    message_id=message_id or "",
+                    session_id=orphan_session,
+                    turn_id=turn_extra,
+                    client_id=client_id,
+                )
+                mid_log = message_id or "-"
+                if isinstance(mid_log, str) and len(mid_log) > 8:
+                    mid_log = f"{mid_log[:8]}…"
+                _log(
+                    f"[BRIDGE][REPORT] event=conversation_created client_id={client_id} "
+                    f"conv={conv_report} message_id={mid_log} inbound=orphan_no_outbound"
+                )
+                _notify_status()
+                return {"ok": True}
         if not msg:
             waiting_ids = sorted(_outbound_waiting.keys())
             _add_inbound(
@@ -1837,7 +2126,10 @@ def _handle_report(body):
                 )
         elif event == "conversation_created":
             conv_id = (payload.get("conversation_id") or body.get("conversation_id") or "").strip()
-            page_url = (payload.get("url") or body.get("page_url") or "").strip()
+            page_url = (
+                (payload.get("page_url") or payload.get("url") or body.get("page_url") or "")
+                .strip()
+            )
             report_bind = (
                 payload.get("bind_request_id")
                 or payload.get("launch_token")
@@ -1845,6 +2137,10 @@ def _handle_report(body):
                 or body.get("launch_token")
                 or ""
             ).strip()
+            _log(
+                f"[BRIDGE][REPORT] event=conversation_created client_id={client_id} "
+                f"conv={conv_id or '-'} message_id={message_id[:8] if message_id else '?'}…"
+            )
             _log(
                 f"[BIND][CONVERSATION_CREATED] message_id={message_id[:8] if message_id else '?'}… "
                 f"session_id={(msg.get('session_id') or '-')[:8]} "
@@ -2609,6 +2905,117 @@ def api_bridge():
     result["tampermonkey_online"] = True
     return jsonify(result)
 
+@app.route("/api/cursor/tasks/create", methods=["POST"])
+def api_cursor_tasks_create():
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(
+            "[CURSOR_BRIDGE][TASK_CREATE_FAILED] "
+            f"reason=json_error error={exc}"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"invalid json: {exc}",
+        }), 400
+
+    task = body.get("task") if isinstance(body.get("task"), dict) else body
+
+    ok, result = enqueue_cursor_task(task)
+
+    if not ok:
+        return jsonify({
+            "ok": False,
+            "error": result,
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "task_id": result,
+    })
+
+
+@app.route("/api/cursor/tasks/next", methods=["GET"])
+def api_cursor_tasks_next():
+    client = (request.args.get("client") or "").strip()
+    task = claim_next_cursor_task(client=client)
+
+    return jsonify({
+        "ok": True,
+        "task": task,
+    })
+
+
+@app.route("/api/cursor/tasks/report", methods=["POST"])
+def api_cursor_tasks_report():
+    try:
+        report = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(
+            "[CURSOR_BRIDGE][REPORT_FAILED] "
+            f"reason=json_error error={exc}"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"invalid json: {exc}",
+        }), 400
+
+    ok, result = append_cursor_task_report(report)
+
+    if not ok:
+        return jsonify({
+            "ok": False,
+            "error": result,
+        }), 400
+
+    return jsonify({
+        "ok": True,
+    })
+
+
+@app.route("/api/cursor/tasks/status", methods=["GET"])
+def api_cursor_tasks_status():
+    """查询 Cursor Bridge 状态与队列摘要。"""
+    status = get_cursor_bridge_status()
+    return jsonify(
+        {
+            "ok": True,
+            "cursor": status,
+            "pending_count": status.get("pending_count", 0),
+            "reports": status.get("reports") or [],
+            "history": status.get("history") or [],
+        }
+    )
+
+
+@app.route("/api/cursor/client/heartbeat", methods=["POST"])
+def api_cursor_client_heartbeat():
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception as exc:
+        _log(
+            "[CURSOR_BRIDGE][HEARTBEAT_FAILED] "
+            f"reason=json_error error={exc}"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"invalid json: {exc}",
+        }), 400
+
+    ok, result = update_cursor_client_heartbeat(payload)
+
+    if not ok:
+        return jsonify({
+            "ok": False,
+            "error": result,
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "status": get_cursor_bridge_status(),
+    })
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """轻量健康检查（无需鉴权），供 bridge_client 等探测。"""
@@ -2860,6 +3267,7 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
         _log(f"服务已启动：{server_url}")
         _log(f"  油猴接口 POST {bridge_url}")
         _log(f"  外部 API GET/POST /api/v1/*")
+        print_registered_routes()
         if (API_TOKEN or "").strip():
             _log(f"  外部 API 鉴权：已启用（CHATGPT_PAGE_BRIDGE_TOKEN）")
         _write_server_url_file(server_url)

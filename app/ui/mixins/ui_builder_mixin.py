@@ -1,4 +1,5 @@
 import os
+import traceback
 
 import server
 from log_utils import get_log_file_path
@@ -11,6 +12,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -26,6 +28,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTableWidget,
+    QPlainTextEdit,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -33,6 +36,52 @@ from PyQt5.QtWidgets import (
 
 
 class UiBuilderMixin:
+    def _restore_chat_splitter_sizes(self):
+        splitter = getattr(self, "chat_splitter", None)
+        if splitter is None:
+            return
+        raw = self._settings.value("ui/chat_splitter_sizes", "")
+        if raw:
+            parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+            if len(parts) == 2:
+                try:
+                    left = int(parts[0])
+                    right = int(parts[1])
+                except ValueError as error:
+                    self._append_log(
+                        "[UI_SPLITTER][RESTORE_FAILED] "
+                        f"invalid={raw} error={error}\n{traceback.format_exc()}",
+                        echo=True,
+                    )
+                else:
+                    if left >= 120 and right >= 300:
+                        splitter.setSizes([left, right])
+                        self._append_log(
+                            f"[UI_SPLITTER][RESTORE] chat_splitter sizes={[left, right]}"
+                        )
+                        return
+        default_sizes = [260, 1000]
+        splitter.setSizes(default_sizes)
+        self._append_log(
+            f"[UI_SPLITTER][DEFAULT] chat_splitter sizes={default_sizes}"
+        )
+
+    def _save_chat_splitter_sizes(self, *args):
+        splitter = getattr(self, "chat_splitter", None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left = int(sizes[0])
+        right = int(sizes[1])
+        if left <= 0 or right <= 0:
+            return
+        value = f"{left},{right}"
+        self._settings.setValue("ui/chat_splitter_sizes", value)
+        self._settings.sync()
+        self._append_log(f"[UI_SPLITTER][SAVE] chat_splitter sizes={[left, right]}")
+
     def _create_tm_ghost_button(self, text, handler, *, danger=False, tooltip=""):
         btn = QPushButton(text)
         btn.setObjectName("DangerGhostButton" if danger else "GhostButton")
@@ -503,9 +552,26 @@ class UiBuilderMixin:
                 background: #1e40af;
             }
             QPushButton#PrimaryButton:disabled {
-                background: #93b4f5;
-                border-color: #93b4f5;
-                color: #eef2ff;
+                background: #e5e7eb;
+                border-color: #d1d5db;
+                color: #9ca3af;
+            }
+            QPushButton#SuccessPrimaryButton {
+                background: #15803d;
+                color: #ffffff;
+                border: 1px solid #166534;
+                font-weight: 600;
+            }
+            QPushButton#SuccessPrimaryButton:hover {
+                background: #166534;
+            }
+            QPushButton#SuccessPrimaryButton:pressed {
+                background: #14532d;
+            }
+            QPushButton#SuccessPrimaryButton:disabled {
+                background: #e5e7eb;
+                border-color: #d1d5db;
+                color: #9ca3af;
             }
             QPushButton#GhostButton {
                 background: transparent;
@@ -563,8 +629,47 @@ class UiBuilderMixin:
                 border-color: #ef9a9a;
                 color: #b71c1c;
             }
+            QLabel#StatusBadgeOk {
+                background: #dcfce7;
+                color: #166534;
+                border: 1px solid #86efac;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QLabel#StatusBadgeWarn {
+                background: #fef3c7;
+                color: #92400e;
+                border: 1px solid #fcd34d;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QLabel#StatusBadgeError {
+                background: #fee2e2;
+                color: #991b1b;
+                border: 1px solid #fca5a5;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QLabel#StatusBadgeNeutral {
+                background: #f3f4f6;
+                color: #374151;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
             QLabel#TmBindMismatchHint {
+                color: #8d6e00;
+                font-size: 12px;
+                padding: 0px 4px;
+            }
+            QLabel#TmBindMismatchHint[state="warn"] {
+                color: #8d6e00;
+            }
+            QLabel#TmBindMismatchHint[state="error"] {
                 color: #b71c1c;
+            }
+            QLabel#StatusRelationLine {
+                color: #5b6472;
                 font-size: 12px;
                 padding: 0px 4px;
             }
@@ -583,16 +688,16 @@ class UiBuilderMixin:
                 border: 1px solid #b7e4c7;
             }
             QWidget#ChatPanel[bindState="bound_offline"] {
-                background: #fffaf0;
-                border: 1px solid #f3d08a;
-            }
-            QWidget#ChatPanel[bindState="unbound_optional"] {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-            }
-            QWidget#ChatPanel[bindState="unbound_required"] {
                 background: #fff5f5;
                 border: 1px solid #f3b3b3;
+            }
+            QWidget#ChatPanel[bindState="unbound_optional"] {
+                background: #fffbeb;
+                border: 1px solid #f0d060;
+            }
+            QWidget#ChatPanel[bindState="unbound_required"] {
+                background: #fffbeb;
+                border: 1px solid #f0d060;
             }
             QWidget#ChatPanel[bindState="pending_bind"],
             QWidget#ChatPanel[bindState="waiting_bound_reopen"] {
@@ -674,16 +779,16 @@ class UiBuilderMixin:
                 border: 1px solid #c8ead2;
             }
             QScrollArea#ChatScrollArea[bindState="bound_offline"] {
-                background: #fffaf0;
-                border: 1px solid #f3d08a;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_optional"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_required"] {
                 background: #fff7f7;
                 border: 1px solid #f3b3b3;
+            }
+            QScrollArea#ChatScrollArea[bindState="unbound_optional"] {
+                background: #fffbeb;
+                border: 1px solid #f0d060;
+            }
+            QScrollArea#ChatScrollArea[bindState="unbound_required"] {
+                background: #fffbeb;
+                border: 1px solid #f0d060;
             }
             QScrollArea#ChatScrollArea[bindState="pending_bind"],
             QScrollArea#ChatScrollArea[bindState="waiting_bound_reopen"] {
@@ -701,13 +806,13 @@ class UiBuilderMixin:
                 background: #f6fff8;
             }
             QWidget#ChatViewport[bindState="bound_offline"] {
-                background: #fffaf0;
+                background: #fff7f7;
             }
             QWidget#ChatViewport[bindState="unbound_optional"] {
-                background: #f7f8fa;
+                background: #fffbeb;
             }
             QWidget#ChatViewport[bindState="unbound_required"] {
-                background: #fff7f7;
+                background: #fffbeb;
             }
             QWidget#ChatViewport[bindState="pending_bind"],
             QWidget#ChatViewport[bindState="waiting_bound_reopen"] {
@@ -800,7 +905,7 @@ class UiBuilderMixin:
         panel_layout.setContentsMargins(8, 4, 8, 4)
         panel_layout.setSpacing(0)
         panel_layout.addWidget(self._chat_status_group)
-        _bridge_status_h = 126
+        _bridge_status_h = 118
         self.bridge_status_panel.setFixedHeight(_bridge_status_h)
         self.bridge_status_panel.setMinimumHeight(_bridge_status_h)
         self.bridge_status_panel.setMaximumHeight(_bridge_status_h)
@@ -813,8 +918,19 @@ class UiBuilderMixin:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        log_toolbar_layout = QHBoxLayout()
+        log_toolbar_layout.setContentsMargins(8, 4, 8, 0)
+        log_toolbar_layout.addStretch(1)
+        self.copy_current_log_btn = QPushButton("复制当前日志")
+        self.copy_current_log_btn.setToolTip("复制当前日志页中的全部文本到剪贴板。")
+        self.copy_current_log_btn.clicked.connect(self._copy_current_log_tab_text)
+        log_toolbar_layout.addWidget(self.copy_current_log_btn)
+
         self.log_tabs = QTabWidget()
-        layout.addWidget(self.log_tabs)
+        layout.addLayout(log_toolbar_layout)
+        layout.addWidget(self.log_tabs, stretch=1)
         self.log_edit = QTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setFont(QFont("Consolas", 9))
@@ -838,6 +954,68 @@ class UiBuilderMixin:
         self.status_log_edit.setFont(QFont("Consolas", 9))
         self.log_tabs.addTab(self.status_log_edit, "服务状态")
         return page
+
+    def _copy_current_log_tab_text(self):
+        log_tabs = getattr(self, "log_tabs", None)
+        if log_tabs is None:
+            self._set_tm_action_hint("未找到日志页。")
+            self._append_log("[LOG_COPY][FAILED] reason=no_log_tabs", echo=True)
+            return
+
+        current_widget = log_tabs.currentWidget()
+        if current_widget is None:
+            self._set_tm_action_hint("未找到当前日志页。")
+            self._append_log("[LOG_COPY][FAILED] reason=no_current_widget", echo=True)
+            return
+
+        text = ""
+
+        if isinstance(current_widget, QTableWidget):
+            headers = []
+            for col in range(current_widget.columnCount()):
+                header_item = current_widget.horizontalHeaderItem(col)
+                headers.append((header_item.text() if header_item else "").strip())
+            lines = []
+            if any(headers):
+                lines.append("\t".join(headers))
+            for row in range(current_widget.rowCount()):
+                row_cells = []
+                for col in range(current_widget.columnCount()):
+                    item = current_widget.item(row, col)
+                    row_cells.append((item.text() if item else "").replace("\t", " ").strip())
+                lines.append("\t".join(row_cells))
+            text = "\n".join(lines)
+        else:
+            text_widget = None
+            if hasattr(current_widget, "toPlainText"):
+                text_widget = current_widget
+            else:
+                plain_children = current_widget.findChildren(QPlainTextEdit)
+                if plain_children:
+                    text_widget = plain_children[0]
+                if text_widget is None:
+                    text_children = current_widget.findChildren(QTextEdit)
+                    if text_children:
+                        text_widget = text_children[0]
+            if text_widget is None:
+                self._set_tm_action_hint("当前日志页没有可复制的文本。")
+                self._append_log("[LOG_COPY][FAILED] reason=no_text_widget", echo=True)
+                return
+            text = text_widget.toPlainText()
+
+        if not (text or "").strip():
+            self._set_tm_action_hint("当前日志为空。")
+            self._append_log("[LOG_COPY][EMPTY]", echo=True)
+            return
+
+        QApplication.clipboard().setText(text)
+
+        tab_name = log_tabs.tabText(log_tabs.currentIndex())
+        self._set_tm_action_hint(f"已复制当前日志，共 {len(text)} 个字符。")
+        self._append_log(
+            f"[LOG_COPY][DONE] tab={tab_name} chars={len(text)}",
+            echo=True,
+        )
     def _build_settings_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -918,21 +1096,24 @@ class UiBuilderMixin:
         self.auto_bind_unbound_page_cb = QCheckBox(
             "未绑定但检测到在线页面时，自动绑定到当前对话"
         )
-        self.auto_open_and_bind_on_new_chat_cb = QCheckBox(
-            "（已停用）新建对话时自动打开 ChatGPT 页面"
-        )
-        self.auto_open_and_bind_on_new_chat_cb.setEnabled(False)
-        self.auto_open_and_bind_on_new_chat_cb.setToolTip(
-            "首条消息发送时会自动选择空闲首页或打开新首页，新建对话不再自动打开浏览器。"
-        )
         for widget in (
             self.bind_each_chat_to_page_cb,
             self.auto_open_bound_page_when_missing_cb,
             self.allow_fallback_to_any_page_cb,
             self.auto_bind_unbound_page_cb,
-            self.auto_open_and_bind_on_new_chat_cb,
         ):
             bind_layout.addWidget(widget)
+        upload_link_group = QGroupBox("上传联动")
+        upload_link_layout = QVBoxLayout(upload_link_group)
+        self.upload_before_send_enabled_cb = QCheckBox(
+            "发送消息前先触发油猴上传当前队列"
+        )
+        self.upload_before_send_enabled_cb.setToolTip(
+            "开启后，GUI 点击发送时会先向绑定的 ChatGPT 页面下发 start_upload 命令；"
+            "油猴上传成功后再发送文本。若上传失败，将阻止本条消息裸发。"
+        )
+        upload_link_layout.addWidget(self.upload_before_send_enabled_cb)
+        bind_layout.addWidget(upload_link_group)
         sync_group = QGroupBox("网页对话同步")
         sync_layout = QVBoxLayout(sync_group)
         self.sync_full_conversation_enabled_cb = QCheckBox(
@@ -948,7 +1129,7 @@ class UiBuilderMixin:
         sync_mode_row.addWidget(QLabel("同步模式"))
         self.sync_conversation_mode_combo = QComboBox()
         self.sync_conversation_mode_combo.addItem("安全合并（只补缺失）", "merge")
-        self.sync_conversation_mode_combo.addItem("强制覆盖（保留系统提示）", "replace")
+        self.sync_conversation_mode_combo.addItem("以网页为准（完全覆盖本地聊天）", "replace")
         sync_mode_row.addWidget(self.sync_conversation_mode_combo, stretch=1)
         sync_max_row = QHBoxLayout()
         sync_max_row.addWidget(QLabel("最多同步条数"))
@@ -1021,6 +1202,41 @@ class UiBuilderMixin:
         debug_btn_row.addWidget(self.clear_runtime_log_btn)
         debug_btn_row.addWidget(self.clear_event_log_btn)
         debug_form.addRow("", debug_btn_row)
+        cursor_group = QGroupBox("Cursor 联动测试")
+        cursor_layout = QVBoxLayout(cursor_group)
+        cursor_btn_row = QHBoxLayout()
+        self.cursor_cli_test_btn = QPushButton("测试 Cursor CLI")
+        self.cursor_cli_test_btn.setObjectName("SecondaryButton")
+        self.cursor_cli_test_btn.setToolTip(
+            "调用 cursor-agent --version，检测 Python 是否可以找到 Cursor CLI"
+        )
+        self.cursor_send_test_task_btn = QPushButton("发送 Cursor 测试任务")
+        self.cursor_send_test_task_btn.setObjectName("PrimaryButton")
+        self.cursor_send_test_task_btn.setToolTip(
+            "向本地 server.py 的 Cursor 任务队列发送一条只读测试任务"
+        )
+        self.cursor_open_task_dir_btn = QPushButton("打开任务目录")
+        self.cursor_open_task_dir_btn.setObjectName("SecondaryButton")
+        self.cursor_open_task_dir_btn.setToolTip(
+            "打开当前项目下的 .cursor_tasks/inbox 目录"
+        )
+        cursor_btn_row.addWidget(self.cursor_cli_test_btn)
+        cursor_btn_row.addWidget(self.cursor_send_test_task_btn)
+        cursor_btn_row.addWidget(self.cursor_open_task_dir_btn)
+        cursor_btn_row.addStretch()
+        cursor_layout.addLayout(cursor_btn_row)
+        self.cursor_status_label = QLabel("Cursor 状态：未测试")
+        self.cursor_status_label.setWordWrap(True)
+        self.cursor_status_label.setStyleSheet("color: #555;")
+        cursor_layout.addWidget(self.cursor_status_label)
+        self.cursor_cli_test_btn.clicked.connect(self._on_test_cursor_cli_clicked)
+        self.cursor_send_test_task_btn.clicked.connect(
+            self._on_send_cursor_test_task_clicked
+        )
+        self.cursor_open_task_dir_btn.clicked.connect(
+            self._on_open_cursor_task_dir_clicked
+        )
+        debug_form.addRow("", cursor_group)
         self.log_file_path_label = QLabel(f"日志文件：{get_log_file_path()}")
         self.log_file_path_label.setWordWrap(True)
         self.log_file_path_label.setStyleSheet("color: #555;")
@@ -1056,23 +1272,43 @@ class UiBuilderMixin:
         top_row.setSpacing(8)
         self.status_label = QLabel("服务：未启动")
         self.status_label.setObjectName("StatusChip")
-        self.tm_online_label = QLabel("油猴：未连接")
+        self.tm_online_label = QLabel("油猴：在线 0 / 总 0")
         self.tm_online_label.setObjectName("StatusChip")
-        self.tm_queue_label = QLabel("队列：0")
+        self.tm_queue_label = QLabel("当前页：未检测到")
         self.tm_queue_label.setObjectName("StatusChip")
+        self.tm_bound_page_label = QLabel("当前对话：未绑定")
+        self.tm_bound_page_label.setObjectName("StatusChip")
+        self.tm_sync_target_label = QLabel("同步目标：不可用")
+        self.tm_sync_target_label.setObjectName("StatusChip")
+        self.cursor_bridge_status_label = QLabel("Cursor：未连接")
+        self.cursor_bridge_status_label.setObjectName("StatusBadgeNeutral")
+        self.cursor_bridge_status_label.setToolTip("Cursor Bridge 状态：未连接")
         for chip in (
             self.status_label,
             self.tm_online_label,
             self.tm_queue_label,
+            self.tm_bound_page_label,
+            self.tm_sync_target_label,
+            self.cursor_bridge_status_label,
         ):
             chip.setWordWrap(False)
             chip.setFixedHeight(30)
             chip.setMinimumHeight(30)
             chip.setMaximumHeight(30)
-            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.status_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tm_online_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tm_queue_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tm_bound_page_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tm_sync_target_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.cursor_bridge_status_label.setSizePolicy(
+            QSizePolicy.Fixed, QSizePolicy.Fixed
+        )
         top_row.addWidget(self.status_label)
         top_row.addWidget(self.tm_online_label)
+        top_row.addWidget(self.cursor_bridge_status_label)
         top_row.addWidget(self.tm_queue_label)
+        top_row.addWidget(self.tm_bound_page_label)
+        top_row.addWidget(self.tm_sync_target_label)
         top_row.addStretch()
         self.chat_quick_start_btn = QPushButton("启动")
         self.chat_quick_start_btn.setObjectName("CompactButton")
@@ -1092,47 +1328,39 @@ class UiBuilderMixin:
         self.chat_quick_stop_btn.setEnabled(False)
         top_row.addWidget(self.chat_quick_stop_btn)
         outer.addLayout(top_row)
-        live_row = QHBoxLayout()
-        live_row.setSpacing(6)
-        self.tm_live_page_label = ElidedLabel("当前油猴页面：-")
-        self.tm_live_page_label.setObjectName("StatusChip")
-        self.tm_live_page_label.setFixedHeight(24)
-        self.tm_live_page_label.setMinimumHeight(24)
-        self.tm_live_page_label.setMaximumHeight(24)
-        live_row.addWidget(self.tm_live_page_label, stretch=1)
+        self.tm_live_page_label = self.tm_queue_label
         self.open_live_page_btn = QPushButton("打开")
         self.open_live_page_btn.setObjectName("CompactButton")
-        self.open_live_page_btn.setFixedWidth(48)
-        self.open_live_page_btn.setFixedHeight(30)
-        self.open_live_page_btn.setMinimumHeight(30)
-        self.open_live_page_btn.setMaximumHeight(30)
-        self.open_live_page_btn.setEnabled(False)
-        self.open_live_page_btn.clicked.connect(lambda: self._open_tampermonkey_page())
-        live_row.addWidget(self.open_live_page_btn)
-        outer.addLayout(live_row)
-        bound_row = QHBoxLayout()
-        bound_row.setSpacing(6)
-        self.tm_bound_page_label = ElidedLabel("绑定页面：未绑定")
-        self.tm_bound_page_label.setObjectName("StatusChip")
-        self.tm_bound_page_label.setFixedHeight(24)
-        self.tm_bound_page_label.setMinimumHeight(24)
-        self.tm_bound_page_label.setMaximumHeight(24)
-        bound_row.addWidget(self.tm_bound_page_label, stretch=1)
-        outer.addLayout(bound_row)
-        target_row = QHBoxLayout()
-        target_row.setSpacing(6)
-        self.tm_sync_target_label = ElidedLabel("实际同步目标：-")
-        self.tm_sync_target_label.setObjectName("StatusChip")
-        self.tm_sync_target_label.setFixedHeight(24)
-        self.tm_sync_target_label.setMinimumHeight(24)
-        self.tm_sync_target_label.setMaximumHeight(24)
-        target_row.addWidget(self.tm_sync_target_label, stretch=1)
-        outer.addLayout(target_row)
+        self.open_live_page_btn.setVisible(False)
         self.tm_bind_mismatch_label = ElidedLabel(" ")
         self.tm_bind_mismatch_label.setObjectName("TmBindMismatchHint")
         self.tm_bind_mismatch_label.setFixedHeight(22)
         self.tm_bind_mismatch_label.setMinimumHeight(22)
         self.tm_bind_mismatch_label.setMaximumHeight(22)
+        self.tm_current_page_relation_label = QLabel("当前网页：未检测到")
+        self.tm_current_page_relation_label.setObjectName("StatusRelationLine")
+        self.tm_current_page_relation_label.setWordWrap(True)
+        self.tm_current_page_relation_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tm_current_page_relation_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        self.tm_bound_page_relation_label = QLabel("绑定网页：未绑定")
+        self.tm_bound_page_relation_label.setObjectName("StatusRelationLine")
+        self.tm_bound_page_relation_label.setWordWrap(True)
+        self.tm_bound_page_relation_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tm_bound_page_relation_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        self.tm_sync_target_relation_label = QLabel("同步目标：不可用")
+        self.tm_sync_target_relation_label.setObjectName("StatusRelationLine")
+        self.tm_sync_target_relation_label.setWordWrap(True)
+        self.tm_sync_target_relation_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tm_sync_target_relation_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        outer.addWidget(self.tm_current_page_relation_label)
+        outer.addWidget(self.tm_bound_page_relation_label)
+        outer.addWidget(self.tm_sync_target_relation_label)
         outer.addWidget(self.tm_bind_mismatch_label)
         return bar
     def _build_chat_panel(self):
@@ -1141,11 +1369,27 @@ class UiBuilderMixin:
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(10)
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setObjectName("ChatSplitter")
+        self.chat_splitter = QSplitter(Qt.Horizontal)
+        self.chat_splitter.setObjectName("ChatSplitter")
+        self.chat_splitter.setChildrenCollapsible(False)
+        self.chat_splitter.setHandleWidth(6)
+        self.chat_splitter.setStyleSheet(
+            """
+            QSplitter::handle {
+                background: #d8dee9;
+            }
+            QSplitter::handle:horizontal {
+                width: 6px;
+            }
+            QSplitter::handle:hover {
+                background: #9ca3af;
+            }
+            """
+        )
         self.session_sidebar = QWidget()
         self.session_sidebar.setObjectName("SessionSidebar")
-        self.session_sidebar.setFixedWidth(260)
+        self.session_sidebar.setMinimumWidth(180)
+        self.session_sidebar.setMaximumWidth(420)
         sidebar_layout = QVBoxLayout(self.session_sidebar)
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
         sidebar_layout.setSpacing(8)
@@ -1188,6 +1432,7 @@ class UiBuilderMixin:
         sidebar_layout.addLayout(sidebar_btn_row)
         chat_area = QWidget()
         chat_area.setObjectName("ChatMainArea")
+        chat_area.setMinimumWidth(600)
         chat_layout = QVBoxLayout(chat_area)
         chat_layout.setContentsMargins(0, 0, 0, 0)
         chat_layout.setSpacing(10)
@@ -1218,6 +1463,67 @@ class UiBuilderMixin:
         input_layout = QVBoxLayout(input_block)
         input_layout.setContentsMargins(0, 4, 0, 0)
         input_layout.setSpacing(6)
+        cursor_cmd_row = QHBoxLayout()
+        cursor_cmd_row.setSpacing(8)
+        cursor_cmd_label = QLabel("Cursor 操作：")
+        cursor_cmd_label.setObjectName("InputHint")
+        cursor_cmd_row.addWidget(cursor_cmd_label)
+        self.cursor_command_combo = QComboBox()
+        self.cursor_command_combo.addItem("发送到当前 Cursor Chat", "send_message")
+        self.cursor_command_combo.addItem("新建 Cursor Chat", "new_chat")
+        self.cursor_command_combo.addItem(
+            "新建 Cursor Chat 并发送", "new_chat_and_send"
+        )
+        self.cursor_command_combo.setCurrentIndex(0)
+        self.cursor_command_combo.setToolTip(
+            "send_message：发送到当前 Cursor Chat；"
+            "new_chat：仅新建 Chat；"
+            "new_chat_and_send：新建 Chat 并发送输入框原文"
+        )
+        cursor_cmd_row.addWidget(self.cursor_command_combo)
+        cursor_cmd_row.addStretch()
+        input_layout.addLayout(cursor_cmd_row)
+        cursor_mode_row = QHBoxLayout()
+        cursor_mode_row.setSpacing(8)
+        delivery_label = QLabel("发送方式：")
+        delivery_label.setObjectName("InputHint")
+        cursor_mode_row.addWidget(delivery_label)
+        self.delivery_mode_combo = QComboBox()
+        self.delivery_mode_combo.addItem("弹窗确认后发送", "manual_confirm")
+        self.delivery_mode_combo.addItem("直接发送到 Cursor Agent", "auto_send")
+        self.delivery_mode_combo.setCurrentIndex(1)
+        self.delivery_mode_combo.setToolTip(
+            "manual_confirm：Cursor 插件收到任务后弹窗确认；"
+            "auto_send：插件收到后直接发送给 Cursor Agent"
+        )
+        cursor_mode_row.addWidget(self.delivery_mode_combo)
+        cursor_mode_row.addSpacing(12)
+        prompt_label = QLabel("内容模式：")
+        prompt_label.setObjectName("InputHint")
+        cursor_mode_row.addWidget(prompt_label)
+        self.prompt_mode_combo = QComboBox()
+        self.prompt_mode_combo.addItem("原文发送，不添加前缀", "raw")
+        self.prompt_mode_combo.addItem("包装成 Cursor 指令", "wrapped")
+        self.prompt_mode_combo.setCurrentIndex(0)
+        self.prompt_mode_combo.setToolTip(
+            "raw：content 为输入框原文；wrapped：由 Cursor 插件按元数据包装后发送"
+        )
+        cursor_mode_row.addWidget(self.prompt_mode_combo)
+        cursor_mode_row.addSpacing(12)
+        submit_label = QLabel("提交方式：")
+        submit_label.setObjectName("InputHint")
+        cursor_mode_row.addWidget(submit_label)
+        self.submit_mode_combo = QComboBox()
+        self.submit_mode_combo.addItem("填入并按回车发送", "enter")
+        self.submit_mode_combo.addItem("只填入输入框，不发送", "paste_only")
+        self.submit_mode_combo.setCurrentIndex(0)
+        self.submit_mode_combo.setToolTip(
+            "enter：填入 Cursor Chat 后模拟回车发送；"
+            "paste_only：仅粘贴到输入框，不自动提交"
+        )
+        cursor_mode_row.addWidget(self.submit_mode_combo)
+        cursor_mode_row.addStretch()
+        input_layout.addLayout(cursor_mode_row)
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
         self.message_edit = ChatInput(self)
@@ -1227,6 +1533,33 @@ class UiBuilderMixin:
         self.message_edit.setFont(QFont("Microsoft YaHei UI", 10))
         self.message_edit.send_requested.connect(self._push_message)
         compose_row.addWidget(self.message_edit, stretch=1)
+        self.trigger_upload_btn = QPushButton("触发上传")
+        self.trigger_upload_btn.setObjectName("SuccessPrimaryButton")
+        self.trigger_upload_btn.setFixedHeight(96)
+        self.trigger_upload_btn.setMinimumWidth(82)
+        self.trigger_upload_btn.setToolTip(
+            "仅向当前绑定的油猴页面下发 start_upload，不发送聊天文字"
+        )
+        self.trigger_upload_btn.clicked.connect(self._on_trigger_upload_clicked)
+        compose_row.addWidget(self.trigger_upload_btn)
+        self.upload_and_send_btn = QPushButton("上传并发送")
+        self.upload_and_send_btn.setObjectName("PrimaryButton")
+        self.upload_and_send_btn.setFixedHeight(96)
+        self.upload_and_send_btn.setMinimumWidth(90)
+        self.upload_and_send_btn.setToolTip(
+            "先向绑定页面上传工具箱队列中的文件，成功后再发送输入框中的文字（队列顺序由桥接保证）"
+        )
+        self.upload_and_send_btn.clicked.connect(self._on_upload_and_send_clicked)
+        compose_row.addWidget(self.upload_and_send_btn)
+        self.send_to_cursor_btn = QPushButton("发送到 Cursor")
+        self.send_to_cursor_btn.setObjectName("SecondaryButton")
+        self.send_to_cursor_btn.setFixedHeight(96)
+        self.send_to_cursor_btn.setMinimumWidth(96)
+        self.send_to_cursor_btn.setToolTip(
+            "将输入框内容通过 /api/cursor/tasks/create 发送到 Cursor Bridge 任务队列"
+        )
+        self.send_to_cursor_btn.clicked.connect(self._on_send_to_cursor_clicked)
+        compose_row.addWidget(self.send_to_cursor_btn)
         self.send_btn = QPushButton("发送")
         self.send_btn.setObjectName("PrimaryButton")
         self.send_btn.setFixedSize(90, 96)
@@ -1250,10 +1583,11 @@ class UiBuilderMixin:
         tools_row.addWidget(self.copy_last_btn)
         input_layout.addLayout(tools_row)
         chat_layout.addWidget(input_block)
-        splitter.addWidget(self.session_sidebar)
-        splitter.addWidget(chat_area)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 720])
-        layout.addWidget(splitter, stretch=1)
+        self.chat_splitter.addWidget(self.session_sidebar)
+        self.chat_splitter.addWidget(chat_area)
+        self.chat_splitter.setStretchFactor(0, 0)
+        self.chat_splitter.setStretchFactor(1, 1)
+        self.chat_splitter.splitterMoved.connect(self._save_chat_splitter_sizes)
+        self._restore_chat_splitter_sizes()
+        layout.addWidget(self.chat_splitter, stretch=1)
         return panel

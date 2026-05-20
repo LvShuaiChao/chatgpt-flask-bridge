@@ -100,17 +100,19 @@ class SessionMixin:
         session.remote_chatgpt = default_remote_chatgpt()
         self._append_log(
             f"[CHAT][NEW_LOCAL_SESSION] session_id={session.session_id} "
-            f"action=create_only open_browser=False"
+            f"action=create_and_prepare_visible_home"
         )
         self._append_session_message(
             session,
             "system",
             "已新建本地对话。\n"
-            "输入内容并点击发送后，将自动选择空闲 ChatGPT 首页或打开新首页。",
+            "将优先使用「可见」的 ChatGPT 首页；若无可见首页则自动打开新首页。",
         )
         self._render_session_chat(session, force_bottom=True)
         self._focus_message_input_later(force=True)
         self._save_sessions_to_disk()
+        if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
+            self._ensure_visible_chatgpt_home_for_new_session(session)
         return session
     def _current_session(self):
         if not self._current_session_id:
@@ -133,6 +135,8 @@ class SessionMixin:
         self._update_bound_page_display()
         self._refresh_tm_page_selector()
         self._render_tampermonkey_clients(self._last_bridge_status)
+        if hasattr(self, "_try_send_next_queued_message"):
+            self._try_send_next_queued_message(session)
         self._focus_message_input_later()
         if save:
             self._save_sessions_to_disk()
@@ -142,7 +146,85 @@ class SessionMixin:
             return f"{title} *"
         return title
 
+    @staticmethod
+    def _is_default_session_title(title):
+        value = str(title or "").strip()
+        return value in ("", "新对话", "新的对话", "New chat")
+
+    @staticmethod
+    def _compact_session_title_from_text(text, max_len=24):
+        value = str(text or "")
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        value = " ".join(value.split())
+        value = value.strip()
+        if not value:
+            return ""
+        if len(value) > max_len:
+            return value[:max_len] + "…"
+        return value
+
+    def _first_visible_chat_message_text(self, session, *, prefer_user=True):
+        if session is None:
+            return ""
+        roles = ("user", "assistant") if prefer_user else ("assistant", "user")
+        for role in roles:
+            for message in session.messages:
+                if not getattr(message, "visible_in_chat", True):
+                    continue
+                if message.role != role:
+                    continue
+                text = str(message.content or "").strip()
+                if not text:
+                    continue
+                if text in ASSISTANT_WAIT_TEXTS:
+                    continue
+                return text
+        return ""
+
+    def _latest_visible_chat_message_text(self, session):
+        if session is None:
+            return ""
+        for message in reversed(session.messages):
+            if not getattr(message, "visible_in_chat", True):
+                continue
+            if message.role not in ("user", "assistant"):
+                continue
+            text = str(message.content or "").strip()
+            if not text:
+                continue
+            if text in ASSISTANT_WAIT_TEXTS:
+                return ""
+            return text
+        return ""
+
+    def _auto_rename_session_from_messages(self, session, *, force=False):
+        if session is None:
+            return False
+        if not force and not self._is_default_session_title(session.title):
+            return False
+        text = self._first_visible_chat_message_text(session, prefer_user=True)
+        title = self._compact_session_title_from_text(text, max_len=24)
+        if not title:
+            return False
+        old_title = session.title
+        session.title = title
+        session.updated_at = time.time()
+        self._append_log(
+            "[SESSION_TITLE][AUTO_FROM_MESSAGES] "
+            f"session_id={session.session_id} "
+            f"old={old_title or '-'} "
+            f"new={title}"
+        )
+        return True
+
     def _session_list_title_text(self, session):
+        if session is None:
+            return "新对话"
+        if self._is_default_session_title(session.title):
+            text = self._first_visible_chat_message_text(session, prefer_user=True)
+            title = self._compact_session_title_from_text(text, max_len=24)
+            if title:
+                return title
         return session.title or "新对话"
 
     def _session_has_pending_assistant_reply(self, session):
@@ -222,28 +304,16 @@ class SessionMixin:
             return f"{ts} · 等待回复..."
         if response_state["is_responding"]:
             return f"{ts} · 正在回答..."
-        if response_state["response_state"] == "idle":
-            return f"{ts} · 已绑定在线"
-        if remote.get("enabled") and (remote.get("client_id") or "").strip():
-            has_chat = any(
-                m.visible_in_chat and m.role in ("user", "assistant")
-                for m in session.messages
-            )
-            if not has_chat:
-                return f"{ts} · 已绑定 ChatGPT 页面"
-        for message in reversed(session.messages):
-            if not message.visible_in_chat:
-                continue
-            if message.role not in ("user", "assistant"):
-                continue
-            text = (message.content or "").strip().replace("\n", " ")
-            if not text:
-                continue
-            if text in ASSISTANT_WAIT_TEXTS:
-                return f"{ts} · 等待回复..."
+        text = self._latest_visible_chat_message_text(session)
+        if text:
+            text = text.replace("\n", " ")
             if len(text) > 36:
                 text = text[:36] + "…"
             return f"{ts} · {text}"
+        if response_state["response_state"] == "idle":
+            return f"{ts} · 已绑定在线"
+        if remote.get("enabled") and (remote.get("client_id") or "").strip():
+            return f"{ts} · 已绑定 ChatGPT 页面"
         return ts
 
     def _session_list_visual_signature(self):
@@ -384,6 +454,8 @@ class SessionMixin:
         if not session:
             self.current_session_title.setText("新对话")
             return
+        if self._is_default_session_title(session.title):
+            self._auto_rename_session_from_messages(session)
         self.current_session_title.setText(self._session_display_title(session))
     def _list_index_for_session(self, session_id):
         for index in range(self.session_list.count()):
@@ -586,6 +658,8 @@ class SessionMixin:
                 del self._message_to_session[message_id]
         if session_id in self._tab_session_ids:
             self._tab_session_ids.remove(session_id)
+        if isinstance(getattr(self, "_session_send_queues", None), dict):
+            self._session_send_queues.pop(session_id, None)
         del self._sessions[session_id]
         next_index = min(max(list_index, 0), len(self._tab_session_ids) - 1)
         next_id = self._tab_session_ids[next_index]
@@ -613,6 +687,8 @@ class SessionMixin:
         session = self._current_session()
         if not session:
             return
+        if isinstance(getattr(self, "_session_send_queues", None), dict):
+            self._session_send_queues.pop(session.session_id, None)
         for bridge_id, sid in list(self._message_to_session.items()):
             if sid == session.session_id:
                 del self._message_to_session[bridge_id]
@@ -927,6 +1003,8 @@ class SessionMixin:
             self._settings.setValue("geometry", self.saveGeometry())
         if self._remember_window_position:
             self._settings.setValue("window_state", self.saveState())
+        if hasattr(self, "_save_chat_splitter_sizes"):
+            self._save_chat_splitter_sizes()
         self._settings.setValue("main_tab_index", self.main_tabs.currentIndex())
         self._settings.setValue("tab_session_ids", self._tab_session_ids)
         if self._current_session_id:

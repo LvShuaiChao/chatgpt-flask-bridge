@@ -1,11 +1,9 @@
 """自动绑定、首页预绑定、bootstrap 与对话创建绑定。"""
 
 import time
-import traceback
 import uuid
 
 import server
-from log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
@@ -26,14 +24,13 @@ from app.models import (
 )
 from app.url_utils import parse_conversation_id
 from app.utils.tm_activity import classify_tm_client_activity
-from PyQt5.QtCore import QTimer
 
 
 class PageAutoBindMixin:
     IDLE_HOME_FRESH_SECONDS = float(TM_POLL_FRESH_SECONDS)
     BOOTSTRAP_CLAIM_TIMEOUT_SECONDS = 5.0
     REOPEN_BOUND_CONVERSATION_TIMEOUT_SECONDS = 45
-    BOOTSTRAP_CREATE_TIMEOUT_SECONDS = 90.0
+    BOOTSTRAP_CREATE_TIMEOUT_SECONDS = 30.0
 
     def _session_has_prebound_home_online(self, remote, bridge_status=None):
         remote = normalize_remote_chatgpt(remote)
@@ -257,6 +254,11 @@ class PageAutoBindMixin:
 
     def _resolve_session_for_conversation_created(self, item):
         payload = item.get("payload") or {}
+        local_sid = (
+            (payload.get("local_session_id") or item.get("session_id") or "")
+        ).strip()
+        if local_sid and local_sid in self._sessions:
+            return self._sessions[local_sid]
         bridge_id = (
             item.get("message_id") or payload.get("message_id") or ""
         ).strip()
@@ -317,7 +319,17 @@ class PageAutoBindMixin:
                     return session
 
         return None
-    def _idle_home_skip_reason(self, item, status=None):
+    @staticmethod
+    def _idle_home_is_user_visible(item):
+        """用户是否容易看到该首页（非后台 hidden 标签）。"""
+        if not isinstance(item, dict):
+            return False
+        if item.get("has_focus"):
+            return True
+        vis = (item.get("visibility_state") or item.get("visible") or "").strip()
+        return vis == "visible"
+
+    def _idle_home_skip_reason(self, item, status=None, require_user_visible=False):
         page_type = (item.get("page_type") or "").strip()
         if page_type != "home":
             return "not_home"
@@ -346,6 +358,8 @@ class PageAutoBindMixin:
             return "offline_home"
         if not self._is_fresh_idle_home_client(item):
             return "stale_home"
+        if require_user_visible and not self._idle_home_is_user_visible(item):
+            return "hidden_or_background_home"
         return ""
     def _recent_focus_home_client_id(self, status=None):
         status = status or self._last_bridge_status or {}
@@ -512,13 +526,17 @@ class PageAutoBindMixin:
                         return True
 
         return False
-    def _find_idle_chatgpt_home_client(self, status=None, session_id=""):
+    def _find_idle_chatgpt_home_client(
+        self, status=None, session_id="", require_user_visible=False
+    ):
         status = status or self._last_bridge_status or {}
         session_id = (session_id or "").strip()
         candidates = []
         for item in self._iter_tm_clients(status, online_only=True, page_type="home"):
             client_id = self._tm_client_id(item)
-            skip_reason = self._idle_home_skip_reason(item, status)
+            skip_reason = self._idle_home_skip_reason(
+                item, status, require_user_visible=require_user_visible
+            )
             if skip_reason:
                 if client_id:
                     self._append_log(
@@ -722,10 +740,15 @@ class PageAutoBindMixin:
                     False,
                     "正在等待 ChatGPT 首页上线，首条消息将在页面上线后自动发送。",
                 )
-            return False, "正在等待 ChatGPT 首页上线，请稍候。"
+            self._try_finish_pending_auto_bind(self._last_bridge_status or {})
+            remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+            bind_state = self._remote_bind_state(remote)
+            if bind_state == BIND_STATE_WAITING_HOME:
+                return False, "正在等待 ChatGPT 首页上线，请稍候。"
 
         idle_home = self._find_idle_chatgpt_home_client(
-            session_id=session.session_id if session else ""
+            session_id=session.session_id if session else "",
+            require_user_visible=True,
         )
         if idle_home:
             client_id = (idle_home.get("client_id") or "").strip()
@@ -772,6 +795,95 @@ class PageAutoBindMixin:
             "未发现空闲 ChatGPT 首页，正在打开新的 ChatGPT 首页..."
         )
         return False, "__WAITING_HOME_PENDING__"
+
+    def _ensure_visible_chatgpt_home_for_new_session(self, session):
+        """新建本地会话后：绑定用户可见的空闲首页，或通过绑定令牌打开新的可见首页。"""
+        if session is None:
+            return
+        if self._session_has_wrong_existing_conversation_bind(session):
+            self._append_log(
+                f"[BIND][RESET_WRONG_CONVERSATION] session_id={session.session_id} "
+                f"reason=new_local_session_cannot_keep_existing_conversation"
+            )
+            session.remote_chatgpt = default_remote_chatgpt()
+            session.updated_at = time.time()
+            self._save_sessions_to_disk()
+
+        if not self._session_is_local_new_chat_flow(session):
+            return
+
+        sid = session.session_id
+        vhome = self._find_idle_chatgpt_home_client(
+            session_id=sid, require_user_visible=True
+        )
+        if vhome:
+            client_id = (vhome.get("client_id") or "").strip()
+            page_instance_id = (vhome.get("page_instance_id") or "").strip()
+            reason = self._idle_home_selection_reason(vhome)
+            if self._prebound_home_bind_to_session(
+                session, vhome, silent=True, reserve_reason=reason
+            ):
+                self._append_log(
+                    f"[NEW_SESSION][HOME_READY] session_id={sid} client_id={client_id} "
+                    f"page_instance_id={page_instance_id or '-'} reason={reason} "
+                    f"user_visible=true"
+                )
+                self._append_session_message(
+                    session,
+                    "system",
+                    "已准备可见的 ChatGPT 首页，可以发送首条消息。",
+                )
+                self._render_session_chat(session, force_bottom=True)
+                self._update_bound_page_display()
+                self._apply_chat_bind_visual_state()
+                self._save_sessions_to_disk()
+            return
+
+        hhome = self._find_idle_chatgpt_home_client(
+            session_id=sid, require_user_visible=False
+        )
+        if hhome and not self._idle_home_is_user_visible(hhome):
+            cid = (hhome.get("client_id") or "").strip()
+            pid = (hhome.get("page_instance_id") or "").strip()
+            self._append_log(
+                f"[NEW_SESSION][HOME_HIDDEN] client_id={cid} "
+                f"page_instance_id={pid or '-'} action=open_visible_bind_token_home"
+            )
+
+        open_reason = "no_visible_idle_home" if hhome else "no_idle_home"
+        self._append_log(
+            f"[NEW_SESSION][OPEN_HOME] session_id={sid} reason={open_reason}"
+        )
+        now = time.time()
+        bind_request_id = uuid.uuid4().hex
+        session.remote_chatgpt = {
+            **default_remote_chatgpt(),
+            "bind_state": BIND_STATE_WAITING_HOME,
+            "bind_request_id": bind_request_id,
+            "launch_token": bind_request_id,
+            "bind_started_at": now,
+            "opened_home_at": now,
+        }
+        session.updated_at = now
+        self._save_sessions_to_disk()
+        self._start_waiting_home_on_send(session)
+        self._append_session_message(
+            session,
+            "system",
+            "正在打开可见的 ChatGPT 首页（已避免直接使用后台隐藏标签页），"
+            "页面就绪后即可发送首条消息。",
+        )
+        self._render_session_chat(session, force_bottom=True)
+        status = (
+            server.get_bridge_status()
+            if server.is_server_running()
+            else (self._last_bridge_status or {})
+        )
+        self._try_finish_pending_auto_bind(status)
+        self._refresh_session_list(select_session_id=sid)
+        self._update_bound_page_display()
+        self._apply_chat_bind_visual_state()
+
     def _bound_conversation_target_url(self, remote):
         return self._chatgpt_url_from_remote(remote)
     def _open_bound_conversation_url(self, target_url, reopen_request_id=""):
@@ -862,20 +974,7 @@ class PageAutoBindMixin:
         self._refresh_session_list(select_session_id=self._current_session_id)
         self._apply_chat_bind_visual_state()
         return False
-    def _flush_pending_bound_send_message(self, session, text):
-        text = (text or "").strip()
-        if not text or session is None:
-            return
-        if not server.is_server_running():
-            self._add_system_message("请先启动服务。")
-            return
-        if self._session_has_pending_assistant_reply(session):
-            self._append_log(
-                f"[REOPEN][FLUSH_SKIP] session_id={session.session_id} "
-                f"reason=pending_assistant_reply"
-            )
-            return
-        self._push_message_text(session, text)
+
     def _try_finish_waiting_bound_conversations(self, status):
         status = status or self._last_bridge_status or {}
         now = time.time()
@@ -1006,6 +1105,8 @@ class PageAutoBindMixin:
             self._refresh_session_list(select_session_id=self._current_session_id)
             self._update_bound_page_display()
             self._apply_chat_bind_visual_state()
+            if hasattr(self, "_try_send_next_queued_message"):
+                self._try_send_next_queued_message(session)
     def _prebound_home_bind_to_session(
         self, session, client_info, silent=False, reserve_reason=""
     ):
@@ -1176,6 +1277,9 @@ class PageAutoBindMixin:
         if server.is_server_running():
             server.set_bound_client_id(client_id, session.session_id)
         self._save_sessions_to_disk()
+        self._refresh_session_list(select_session_id=session.session_id)
+        if session.session_id == (self._current_session_id or ""):
+            self._update_current_session_title(session)
         self._update_bound_page_display()
         self._apply_chat_bind_visual_state()
         self._refresh_tm_page_selector()
@@ -1200,7 +1304,9 @@ class PageAutoBindMixin:
         if session is None:
             return
         conversation_id = (payload.get("conversation_id") or "").strip()
-        page_url = (payload.get("url") or "").strip()
+        page_url = (
+            (payload.get("page_url") or payload.get("url") or "").strip()
+        )
         if conversation_id and not page_url:
             page_url = f"https://chatgpt.com/c/{conversation_id}"
         if not conversation_id:
@@ -1249,14 +1355,19 @@ class PageAutoBindMixin:
         self._save_sessions_to_disk()
         self._update_bound_page_display()
         self._apply_chat_bind_visual_state()
-        self._add_system_message(
-            f"已自动创建并绑定 ChatGPT 对话：conversation_id={conversation_id}"
-        )
-        bind_request_id = self._session_bind_request_id(remote)
+        self._add_system_message("新 ChatGPT 对话已创建并绑定。")
         report_bind = (
             payload.get("bind_request_id") or payload.get("launch_token") or ""
         ).strip()
         message_id = (payload.get("message_id") or "").strip()
+        self._append_log(
+            f"[NEW_SESSION][BOUND] session_id={session.session_id} "
+            f"conv={conversation_id} client_id={bound_client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"message_id={message_id[:8] if message_id else '-'} "
+            f"bind_request_id={bind_request_id or report_bind or '-'} "
+            f"url={page_url or '-'}"
+        )
         self._append_log(
             f"[BIND][CONVERSATION_CREATED] session_id={session.session_id} "
             f"message_id={message_id[:8] if message_id else '-'} "
@@ -1266,6 +1377,9 @@ class PageAutoBindMixin:
             f"page_instance_id={page_instance_id or '-'} "
             f"url={page_url or '-'}"
         )
+        self._refresh_session_list(select_session_id=session.session_id)
+        if session.session_id == (self._current_session_id or ""):
+            self._render_session_chat(session, force_bottom=True)
 
     def _mark_latest_pending_assistant_error(self, session, text, status_text):
         if session is None:
@@ -1312,12 +1426,18 @@ class PageAutoBindMixin:
             changed = True
 
             self._append_log(
+                f"[NEW_SESSION][CREATE_TIMEOUT] session_id={session.session_id} "
+                f"client_id={(remote.get('client_id') or remote.get('prebound_home_client_id') or '-')} "
+                f"page_instance_id={(remote.get('page_instance_id') or remote.get('prebound_home_page_instance_id') or '-')} "
+                f"elapsed={elapsed:.1f}s"
+            )
+            self._append_log(
                 f"[BIND][BOOTSTRAP_TIMEOUT_RESET] session_id={session.session_id} "
                 f"elapsed={elapsed:.1f}"
             )
             self._mark_latest_pending_assistant_error(
                 session,
-                "创建 ChatGPT 对话超时，请重新发送。",
+                "新 ChatGPT 对话创建超时，请点击「打开 ChatGPT」或「定位绑定页」后重试。",
                 "创建超时",
             )
 
@@ -1668,6 +1788,8 @@ class PageAutoBindMixin:
         self._apply_chat_bind_visual_state()
         if pending_text:
             self._flush_pending_bootstrap_message(session, pending_text)
+        if hasattr(self, "_try_send_next_queued_message"):
+            self._try_send_next_queued_message(session)
     def _sync_bound_session_urls_from_clients(self, status):
         client_map = {}
         for item in self._iter_tm_clients(status, online_only=True):

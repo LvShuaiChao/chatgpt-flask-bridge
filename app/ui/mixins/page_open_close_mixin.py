@@ -4,14 +4,12 @@ import traceback
 import time
 import uuid
 import webbrowser
-from urllib.parse import urlparse
 
 import server
 
 from app.constants import CHATGPT_HOME_URL
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
-    default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
@@ -105,14 +103,6 @@ class PageOpenCloseMixin:
             self._add_system_message(f"打开页面失败：{error}")
             return False
         return False
-    def _open_tampermonkey_page(self, url=None):
-        target = (url or self._tampermonkey_page_url or "").strip()
-        if not target or target == "-":
-            self._add_system_message("当前没有可打开的 ChatGPT 页面地址。")
-            return
-        if self._open_url_in_browser(target, target):
-            return
-        self._add_system_message(f"无法打开页面：{target}")
     def _chatgpt_url_from_remote(self, remote):
         remote = normalize_remote_chatgpt(remote)
         url = (remote.get("conversation_url") or "").strip()
@@ -292,144 +282,221 @@ class PageOpenCloseMixin:
         self._add_system_message(
             "无法打开 ChatGPT。请检查默认浏览器，或确认服务和油猴在线。"
         )
-    def _on_open_new_chatgpt_tab(self):
-        self._mark_auto_bind_waiting()
-        label = "新 ChatGPT 标签页"
-        if self._open_url_in_browser(CHATGPT_HOME_URL, label):
-            self._set_settings_hint("已在默认浏览器中打开新的 ChatGPT 页面。")
-            self._append_log("[打开网页] 已通过系统浏览器打开新的 ChatGPT 页面。")
-            return
-        if server.is_server_running():
-            msg = self._push_open_url(CHATGPT_HOME_URL, active=True, label=label)
-            if msg is not None:
-                self._set_settings_hint("系统浏览器打开失败，已通过油猴尝试打开新页面。")
-                return
-        self._add_system_message(
-            "无法打开新 ChatGPT 页面。请检查默认浏览器，或确认服务和油猴在线。"
-        )
     def _on_open_bound_chatgpt_page(self, _url=None):
         session = self._current_session()
         if session is None:
             self._add_system_message("当前没有选中的对话。")
+            self._append_log(
+                "[OPEN_BOUND_PAGE][FAILED] reason=no_current_session",
+                echo=True,
+            )
             return
+
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        status = self._last_bridge_status or {}
+        bound_info, _, _ = self._resolve_bound_page_info(status=status)
+
+        bound_url = (
+            remote.get("conversation_url")
+            or remote.get("url")
+            or ""
+        ).strip()
+
         conversation_id = (remote.get("conversation_id") or "").strip()
         if not conversation_id:
-            conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
-            )
-            if conversation_id:
-                conversation_url = f"https://chatgpt.com/c/{conversation_id}"
-                session.remote_chatgpt = {
-                    **remote,
-                    "enabled": True,
-                    "conversation_id": conversation_id,
-                    "conversation_url": conversation_url,
-                    "url": conversation_url,
-                    "page_type": "conversation",
-                }
-                session.updated_at = time.time()
-                self._save_sessions_to_disk()
-                remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            conversation_id = parse_conversation_id(bound_url)
 
-        if conversation_id:
-            target_url = self._bound_conversation_target_url(remote)
-            if not target_url:
-                target_url = f"https://chatgpt.com/c/{conversation_id}"
-            self._append_log(
-                "[OLD_SESSION][OPEN] "
-                f"session_id={session.session_id} "
-                f"conversation_id={conversation_id} "
-                f"url={target_url}"
+        if isinstance(bound_info, dict):
+            if not bound_url:
+                bound_url = (
+                    bound_info.get("page_url")
+                    or bound_info.get("url")
+                    or bound_info.get("conversation_url")
+                    or ""
+                ).strip()
+            if not conversation_id:
+                conversation_id = (self._client_conversation_id(bound_info) or "").strip()
+                if not conversation_id:
+                    conversation_id = parse_conversation_id(bound_url)
+
+        if not bound_url and conversation_id:
+            bound_url = f"https://chatgpt.com/c/{conversation_id}"
+
+        if not bound_url:
+            self._add_system_message(
+                "当前对话没有可打开的绑定页面 URL。请先打开目标 ChatGPT 页面，然后点击“绑定当前页面”。"
             )
-            reopen_request_id = (remote.get("reopen_request_id") or "").strip()
-            if not reopen_request_id:
-                reopen_request_id = uuid.uuid4().hex
-            self._open_bound_conversation_url(
-                target_url, reopen_request_id=reopen_request_id
+            self._append_log(
+                f"[OPEN_BOUND_PAGE][FAILED] session_id={session.session_id} "
+                "reason=no_bound_url",
+                echo=True,
             )
             return
 
-        self._open_bound_page_for_session(
-            session, label="当前对话 ChatGPT 页面", fallback_live=False
+        self._append_log(
+            "[OPEN_BOUND_PAGE][START] "
+            f"session_id={session.session_id} "
+            f"conversation_id={conversation_id or '-'} "
+            f"url={bound_url}",
+            echo=True,
         )
-    def _flash_bound_chatgpt_page(self):
-        session = self._current_session()
-        if not session:
+
+        ok = self._open_bound_conversation_url(
+            bound_url,
+            reopen_request_id=(remote.get("reopen_request_id") or uuid.uuid4().hex),
+        )
+
+        if ok:
+            self._add_system_message(f"已打开绑定页面：{bound_url}")
             self._append_log(
-                "[BIND][FLASH] 当前没有选中的 GUI 对话", echo=True
-            )
-            self._add_system_message("当前没有选中的 GUI 对话。")
-            return
-
-        if not server.is_server_running():
-            self._append_log("[BIND][FLASH] 服务未启动", echo=True)
-            self._add_system_message("请先启动服务。")
-            return
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        client_id = (remote.get("client_id") or remote.get("bound_client_id") or "").strip()
-        page_instance_id = (remote.get("page_instance_id") or "").strip()
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        page_type = (remote.get("page_type") or "").strip()
-        url = (remote.get("url") or remote.get("page_url") or remote.get("conversation_url") or "").strip()
-
-        if not client_id:
-            self._append_log(
-                "[BIND][FLASH] 当前 GUI 对话尚未绑定 ChatGPT 页面", echo=True
-            )
-            self._add_system_message("当前 GUI 对话尚未绑定 ChatGPT 页面。")
-            return
-
-        status = server.get_bridge_status()
-        client_info = self._client_info_by_id(client_id, status=status)
-
-        if not client_info or not client_info.get("online"):
-            self._append_log(
-                f"[BIND][FLASH] 绑定页面离线 client_id={client_id} "
+                "[OPEN_BOUND_PAGE][DONE] "
+                f"session_id={session.session_id} "
                 f"conversation_id={conversation_id or '-'}",
                 echo=True,
             )
-            self._add_system_message("绑定的 ChatGPT 页面当前离线，无法定位绑定页。")
+        else:
+            self._add_system_message(f"打开绑定页面失败：{bound_url}")
+            self._append_log(
+                "[OPEN_BOUND_PAGE][FAILED] "
+                f"session_id={session.session_id} "
+                "reason=open_failed "
+                f"url={bound_url}",
+                echo=True,
+            )
+    def _flash_bound_chatgpt_page(self):
+        session = self._current_session()
+        if not session:
+            self._set_tm_action_hint("当前没有选中的本地对话。")
+            self._append_log("[BIND][FLASH][FAILED] reason=no_current_session", echo=True)
             return
+
+        if not server.is_server_running():
+            self._set_tm_action_hint("服务未启动，无法定位绑定页。")
+            self._append_log("[BIND][FLASH][FAILED] reason=server_not_running", echo=True)
+            return
+
+        status = server.get_bridge_status()
+        self._last_bridge_status = status
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        remote_client_id = (remote.get("client_id") or "").strip()
+        remote_conversation_id = (remote.get("conversation_id") or "").strip()
+        if not remote_conversation_id:
+            remote_conversation_id = self._client_conversation_id(remote)
+        self._append_log(
+            "[BIND][FLASH][START] "
+            f"session_id={session.session_id} "
+            f"remote_client={remote_client_id or '-'} "
+            f"remote_conv={remote_conversation_id or '-'}",
+            echo=True,
+        )
+        bound_info, bound_state, bound_reason = self._resolve_bound_page_info(status=status)
+        self._append_log(
+            "[BIND][FLASH][RESOLVE] "
+            f"state={bound_state} "
+            f"reason={bound_reason} "
+            f"target_client={((bound_info or {}).get('client_id') or '-').strip() or '-'} "
+            f"target_conv={self._client_conversation_id(bound_info) or '-'} "
+            f"target_url={((bound_info or {}).get('page_url') or (bound_info or {}).get('url') or '-').strip() or '-'}",
+            echo=True,
+        )
+
+        if bound_state != "online" or not isinstance(bound_info, dict):
+            self._append_log(
+                "[BIND][FLASH][FAILED] "
+                f"reason=bound_page_offline "
+                f"session_id={session.session_id} "
+                f"remote_client={remote_client_id or '-'} "
+                f"remote_conv={remote_conversation_id or '-'} "
+                f"bound_state={bound_state} "
+                f"bound_reason={bound_reason}",
+                echo=True,
+            )
+            self._set_tm_action_hint("绑定页当前不可用，无法定位。")
+            return
+
+        target_client_id = (bound_info.get("client_id") or "").strip()
+        target_page_instance_id = (bound_info.get("page_instance_id") or "").strip()
+        target_conversation_id = self._client_conversation_id(bound_info)
+        target_url = (bound_info.get("page_url") or bound_info.get("url") or "").strip()
+        target_page_type = (bound_info.get("page_type") or "").strip()
+
+        if not target_client_id:
+            self._set_tm_action_hint("绑定页缺少 client_id，无法定位。")
+            self._append_log(
+                "[BIND][FLASH][FAILED] reason=missing_target_client_id",
+                echo=True,
+            )
+            return
+
+        if bound_reason == "matched_by_conversation":
+            old_client_id = remote_client_id
+            remote["enabled"] = True
+            remote["client_id"] = target_client_id
+            remote["bound_client_id"] = target_client_id
+            remote["page_instance_id"] = target_page_instance_id
+            remote["conversation_id"] = target_conversation_id
+            remote["conversation_url"] = target_url
+            remote["url"] = target_url
+            remote["page_url"] = target_url
+            remote["page_type"] = target_page_type
+            remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
+            session.remote_chatgpt = remote
+            session.updated_at = time.time()
+            self._append_log(
+                "[BIND][FLASH][REBIND_BY_CONVERSATION] "
+                f"session_id={session.session_id} "
+                f"old_client_id={old_client_id or '-'} "
+                f"new_client_id={target_client_id} "
+                f"conversation_id={target_conversation_id or '-'} "
+                f"url={target_url or '-'}",
+                echo=True,
+            )
+            self._save_sessions_to_disk()
 
         ok = server.enqueue_control_command(
             command="flash_page",
-            target_client_id=client_id,
-            target_page_instance_id=page_instance_id,
-            target_conversation_id=conversation_id,
+            target_client_id=target_client_id,
+            target_page_instance_id=target_page_instance_id,
+            target_conversation_id=target_conversation_id,
             payload={
                 "title": "GUI 已定位此页面",
                 "message": "当前 ChatGPT 页面已绑定到当前 GUI 对话。",
                 "duration_ms": 5000,
                 "blink_count": 8,
-                "page_type": page_type,
-                "url": url,
-                "client_id": client_id,
-                "conversation_id": conversation_id,
-                "page_instance_id": page_instance_id,
+                "page_type": target_page_type,
+                "url": target_url,
+                "client_id": target_client_id,
+                "conversation_id": target_conversation_id,
+                "page_instance_id": target_page_instance_id,
                 "flash_title": True,
                 "flash_favicon": True,
             },
         )
 
         if ok:
+            self._set_tm_action_hint("已定位绑定页。")
             self._append_log(
-                f"[BIND][FLASH] 已发送定位命令 "
-                f"client_id={client_id} page_instance_id={page_instance_id or '-'} "
-                f"conversation_id={conversation_id or '-'} "
-                f"flash_title=true flash_favicon=true",
+                "[BIND][FLASH][DONE] "
+                f"session_id={session.session_id} "
+                f"client_id={target_client_id} "
+                f"page_instance_id={target_page_instance_id or '-'} "
+                f"conversation_id={target_conversation_id or '-'} "
+                f"url={target_url or '-'} "
+                f"reason={bound_reason}",
                 echo=True,
             )
-            self._add_system_message(
-                "已向绑定的 ChatGPT 页面发送定位命令（边框、标题、favicon 将闪烁）。"
-            )
+            self._update_bound_page_display()
+            self._refresh_session_list(select_session_id=session.session_id)
+            self._apply_chat_bind_visual_state()
         else:
+            self._set_tm_action_hint("定位绑定页命令发送失败，请查看日志。")
             self._append_log(
-                f"[BIND][FLASH][ERROR] 定位命令发送失败 client_id={client_id}",
+                "[BIND][FLASH][FAILED] "
+                f"reason=enqueue_failed "
+                f"client_id={target_client_id} "
+                f"conversation_id={target_conversation_id or '-'}",
                 echo=True,
             )
-            self._add_system_message("定位绑定页命令发送失败，请查看日志。")
     def _render_tampermonkey_clients(self, status=None):
         status = status or {}
         session_bound_id = self._session_bound_client_id()
@@ -484,31 +551,6 @@ class PageOpenCloseMixin:
         self._apply_bridge_status(status)
         count = len(status.get("tampermonkey_clients") or [])
         self._set_tm_action_hint(f"已刷新，共 {count} 个页面。")
-    def _on_reload_bound_tm_page(self):
-        if not server.is_server_running():
-            self._add_system_message("请先启动服务。")
-            self._append_log("[刷新网页] 服务未启动，无法刷新绑定页面。")
-            return
-        client_id = self._session_bound_client_id()
-        if not client_id:
-            self._add_system_message(
-                "当前对话未绑定在线 ChatGPT 页面，无法刷新绑定网页。"
-            )
-            self._append_log("[刷新网页] 当前对话未绑定 client_id。")
-            return
-        try:
-            msg = server.push_reload_page(client_id)
-        except Exception as error:
-            detail = f"reload_self 入队失败：{error}\n{traceback.format_exc()}"
-            self._append_log(detail, echo=True)
-            self._add_system_message(f"刷新绑定网页失败：{error}")
-            return
-        short_id = (msg.get("id") or "")[:8]
-        self._append_log(
-            f"[刷新网页] 已向绑定页面下发 reload_self ({short_id}…) "
-            f"client_id={client_id}"
-        )
-        self._set_settings_hint(f"已向绑定页面 {client_id} 下发刷新命令。")
     def _enqueue_close_page(self, client_id, label=""):
         if not server.is_server_running():
             self._append_log("[关闭页面] 服务未启动，无法下发命令。")

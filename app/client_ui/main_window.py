@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
-import uuid
 from typing import Any, Callable, Optional
 
 from PyQt5.QtCore import QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
@@ -21,8 +19,6 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
-    QSplitter,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,

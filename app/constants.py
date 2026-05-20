@@ -28,7 +28,6 @@ TM_HEARTBEAT_ONLINE_SECONDS = 15.0
 BOUND_PAGE_ONLINE_SECONDS = 30.0
 BOUND_PAGE_STALE_SECONDS = 60.0
 BOUND_PAGE_OFFLINE_GRACE_SECONDS = 45.0
-ACTIVE_POLL_SECONDS = 10.0
 SETTINGS_ORG = "TampermonkeyBridge"
 SETTINGS_APP = "ChatGUI"
 SESSION_BIND_LIST_STYLES = {
@@ -127,12 +126,12 @@ DEFAULT_APP_SETTINGS = {
     "auto_open_bound_page_when_missing": True,
     "allow_fallback_to_any_page": False,
     "auto_bind_unbound_page": True,
-    "auto_open_and_bind_on_new_chat": False,
     "sync_full_conversation_enabled": True,
     "auto_sync_conversation_on_bind": False,
     "auto_sync_conversation_after_reply": False,
     "sync_conversation_max_messages": 200,
-    "sync_conversation_mode": "merge",
+    "sync_conversation_mode": "replace",
+    "upload_before_send_enabled": False,
     # 0=不强制；N>0 时同一 GUI 会话连续 N 条用户消息后，外部 API 下一条自动新建会话
     "force_new_session_after_turns": 0,
 }

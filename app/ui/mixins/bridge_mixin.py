@@ -7,12 +7,15 @@ from log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
+    ASSISTANT_WAIT_TEXTS,
+    PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
+    BIND_STATE_WAITING_BOUND_CONVERSATION,
     BIND_STATE_WAITING_HOME,
     BIND_STATE_WAITING_CONVERSATION_CREATED,
     default_remote_chatgpt,
@@ -32,6 +35,529 @@ if "BIND_STATE_WAITING_HOME" not in globals():
 
 class BridgeMixin:
     BRIDGE_STATUS_UI_MIN_INTERVAL_MS = 300
+
+    def _enqueue_upload_before_send_command(
+        self,
+        session,
+        payload,
+        target_client_id,
+    ):
+        target_client_id = (target_client_id or "").strip()
+        if not target_client_id:
+            self._append_log(
+                "[UPLOAD_BEFORE_SEND][SKIP] reason=empty_target_client_id",
+                echo=True,
+            )
+            return False
+
+        target_page_instance_id = (
+            (payload.get("target_page_instance_id") or "").strip()
+        )
+        target_conversation_id = (
+            (payload.get("conversation_id") or "").strip()
+        )
+
+        queued = server.enqueue_control_command(
+            command="start_upload",
+            target_client_id=target_client_id,
+            target_page_instance_id=target_page_instance_id,
+            target_conversation_id=target_conversation_id,
+            payload={
+                "source": "gui-send-before-message",
+                "session_id": session.session_id if session else "",
+                "turn_id": payload.get("turn_id") or "",
+                "reset_before_start": True,
+                "force_restart": True,
+                "require_all_success": True,
+                "block_next_chat_on_failed": True,
+            },
+        )
+
+        if not queued:
+            self._append_log(
+                "[UPLOAD_BEFORE_SEND][FAILED] reason=enqueue_failed "
+                f"session_id={(session.session_id if session else '-')} "
+                f"client_id={target_client_id or '-'} "
+                f"page_instance_id={target_page_instance_id or '-'} "
+                f"conversation_id={target_conversation_id or '-'}",
+                echo=True,
+            )
+            return False
+
+        message_id = ""
+        if isinstance(queued, dict):
+            message_id = (queued.get("id") or "").strip()
+
+        self._append_log(
+            "[UPLOAD_BEFORE_SEND][QUEUED] "
+            f"session_id={(session.session_id if session else '-')} "
+            f"client_id={target_client_id or '-'} "
+            f"page_instance_id={target_page_instance_id or '-'} "
+            f"conversation_id={target_conversation_id or '-'} "
+            f"command_message_id={message_id or '-'}",
+            echo=True,
+        )
+
+        return True
+
+    def _strict_targets_for_upload_command(self, session):
+        """
+        解析用于 start_upload 严格定向的 client / page_instance / conversation。
+        返回 (target_client_id, page_instance_id, conversation_id, err)。
+        err 非空表示当前不允许从 GUI 触发上传。
+        """
+        if session is None:
+            return "", "", "", "没有当前会话"
+        if not server.is_server_running():
+            return "", "", "", "请先启动桥接服务"
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        if not remote.get("enabled"):
+            return "", "", "", "当前对话未启用远程 ChatGPT 联动"
+        bind_eff = self._effective_bind_state(session)
+        if bind_eff != BIND_STATE_BOUND_CONVERSATION:
+            return (
+                "",
+                "",
+                "",
+                f"上传仅适用于已绑定且在线的对话页（当前状态：{bind_eff}）",
+            )
+        target_client_id = (remote.get("client_id") or "").strip()
+        page_instance_id = (remote.get("page_instance_id") or "").strip()
+        conv = (remote.get("conversation_id") or "").strip()
+        if not conv:
+            conv = (
+                parse_conversation_id(
+                    remote.get("conversation_url") or remote.get("url") or ""
+                )
+                or ""
+            ).strip()
+        if not target_client_id:
+            return "", "", "", "缺少绑定页面的 client_id"
+        if not page_instance_id:
+            return "", "", "", "缺少 page_instance_id，请重新绑定对话页面"
+        if not conv:
+            return "", "", "", "缺少 conversation_id，请打开已绑定的 ChatGPT 对话页"
+        info = self._client_info_by_id(
+            target_client_id, getattr(self, "_last_bridge_status", None)
+        )
+        if not isinstance(info, dict):
+            return "", "", "", "无法从桥接状态解析绑定页面信息"
+        if not info.get("online"):
+            return "", "", "", "当前绑定页面离线，请打开对应浏览器标签页"
+        if not bool(info.get("upload_bridge_supported")):
+            return (
+                "",
+                "",
+                "",
+                "绑定页面油猴脚本不支持 start_upload，请更新 Tampermonkey 脚本并刷新 ChatGPT 页面",
+            )
+        return target_client_id, page_instance_id, conv, ""
+
+    def _trigger_upload_for_current_bound_page(
+        self, block_next_chat_on_failed=True
+    ):
+        """
+        向当前绑定的油猴页面下发 start_upload 控制命令。
+        只负责触发上传，不负责发送文本。
+        """
+        session = self._current_session()
+        cid, pins, conv, err = self._strict_targets_for_upload_command(session)
+        if err:
+            self._add_system_message(err)
+            self._append_log(
+                f"[UPLOAD_TRIGGER][FAILED] reason=precheck {err}",
+                echo=True,
+            )
+            return False
+        self._append_log(
+            "[UPLOAD_TRIGGER][TARGET] "
+            f"client_id={cid or '-'} "
+            f"page_instance_id={pins or '-'} "
+            f"conversation_id={conv or '-'}",
+            echo=True,
+        )
+        self._add_system_message(
+            "上传命令将发送到绑定页："
+            f"client_id={cid}，page_instance_id={pins}，conversation_id={conv}。"
+        )
+        current_client_id = (self._selected_tm_page_client_id() or "").strip()
+        if current_client_id and current_client_id != cid:
+            self._add_system_message(
+                "注意：当前选中的页面不是绑定页，上传命令会发送到当前会话的绑定页。"
+                "如果当前页面没有反应，请点击「定位绑定页」查看。"
+            )
+            self._append_log(
+                "[UPLOAD_TRIGGER][TARGET_NOT_CURRENT] "
+                f"current_client_id={current_client_id} target_client_id={cid}",
+                echo=True,
+            )
+        payload = {
+            "source": "gui-manual-upload",
+            "session_id": session.session_id if session else "",
+            "reset_before_start": True,
+            "force_restart": True,
+            "require_all_success": True,
+            "block_next_chat_on_failed": block_next_chat_on_failed,
+        }
+        try:
+            queued = server.enqueue_control_command(
+                command="start_upload",
+                target_client_id=cid,
+                target_page_instance_id=pins,
+                target_conversation_id=conv,
+                payload=payload,
+            )
+        except Exception as error:
+            detail = (
+                f"[UPLOAD_TRIGGER][FAILED] reason=exception {error}\n"
+                f"{traceback.format_exc()}"
+            )
+            self._append_log(detail, echo=True)
+            return False
+        if not queued:
+            self._append_log(
+                "[UPLOAD_TRIGGER][FAILED] reason=enqueue_returned_falsy",
+                echo=True,
+            )
+            return False
+        message_id = ""
+        if isinstance(queued, dict):
+            message_id = (queued.get("id") or "").strip()
+        self._append_log(
+            "[UPLOAD_TRIGGER][QUEUED] "
+            f"session_id={(session.session_id if session else '-')} "
+            f"client_id={cid} "
+            f"page_instance_id={pins} "
+            f"conversation_id={conv} "
+            f"command_message_id={message_id or '-'} "
+            f"block_next_chat_on_failed={block_next_chat_on_failed}",
+            echo=True,
+        )
+        return True
+
+    def _clear_stale_pending_reply_if_bound_page_idle(self, session, reason=""):
+        """
+        当 GUI 本地残留 pending_reply，但绑定的 ChatGPT 页面实际已经空闲时，
+        清理陈旧的等待占位，避免上传/发送流程被永久锁死。
+        """
+        if session is None:
+            return False
+
+        if not self._session_has_pending_assistant_reply(session):
+            return False
+
+        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        response_state = self._session_bound_response_state(session)
+        state = (response_state.get("response_state") or "").strip().lower()
+
+        if (
+            not response_ready
+            or bool(response_state.get("is_responding"))
+            or state in ("generating", "waiting", "pending", "queued")
+        ):
+            if (reason or "").strip() != "bridge_status_tick":
+                self._append_log(
+                    "[PENDING_REPLY][KEEP] "
+                    f"session_id={session.session_id} "
+                    f"reason={reason or '-'} "
+                    f"response_ready={response_ready} "
+                    f"response_msg={response_msg or '-'} "
+                    f"state={state or '-'}",
+                    echo=True,
+                )
+            return False
+
+        cleared = 0
+
+        for message in reversed(session.messages):
+            if not getattr(message, "visible_in_chat", True):
+                continue
+
+            if message.role != "assistant":
+                continue
+
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
+                continue
+
+            status = (message.status or "").strip()
+            text = (message.content or "").strip()
+
+            if status in PENDING_ASSISTANT_STATUSES or text in ASSISTANT_WAIT_TEXTS:
+                message.role = "error"
+                message.status = "已重置"
+                message.content = (
+                    "上一条回复的本地等待状态已重置。"
+                    "如果网页中已有回复，请点击「同步网页对话」刷新完整内容。"
+                )
+
+                if bridge_id:
+                    self._finalize_bridge(bridge_id)
+                    if hasattr(self, "_ack_success_message_ids"):
+                        self._ack_success_message_ids.discard(bridge_id)
+
+                cleared += 1
+                break
+
+        if getattr(session, "has_pending_reply", False):
+            session.has_pending_reply = False
+            cleared += 1
+
+        if cleared <= 0:
+            return False
+
+        session.updated_at = time.time()
+
+        self._append_log(
+            "[PENDING_REPLY][CLEARED_STALE] "
+            f"session_id={session.session_id} "
+            f"reason={reason or '-'} "
+            f"state={state or '-'} "
+            f"cleared={cleared}",
+            echo=True,
+        )
+
+        self._add_system_message(
+            "检测到当前绑定页面已空闲，但本地仍残留“等待回复”状态，已自动重置。"
+            "如需网页里的完整回复，请点击「同步网页对话」。"
+        )
+
+        if session.session_id == self._current_session_id:
+            self._render_session_chat(session, force_bottom=True)
+
+        self._refresh_session_list(select_session_id=self._current_session_id)
+        self._save_sessions_to_disk()
+
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
+
+        return True
+
+    def _update_upload_action_buttons_state(self):
+        if not hasattr(self, "trigger_upload_btn") or not hasattr(
+            self, "upload_and_send_btn"
+        ):
+            return
+
+        session = self._current_session()
+        server_running = server.is_server_running()
+
+        if session is None:
+            self.trigger_upload_btn.setEnabled(False)
+            self.upload_and_send_btn.setEnabled(False)
+            return
+
+        _, _, _, err = self._strict_targets_for_upload_command(session)
+        target_ready = bool(server_running and not err)
+
+        response_ready = True
+        if target_ready and session is not None:
+            response_ready, _response_msg = self._check_bound_client_response_ready(
+                session
+            )
+
+        busy_reason = self._session_send_busy_reason(session)
+        is_busy = bool(busy_reason)
+
+        # 只触发上传：检查绑定目标与网页端可接收输入，不受本地 pending_reply 禁用。
+        self.trigger_upload_btn.setEnabled(bool(target_ready and response_ready))
+
+        if err:
+            self.trigger_upload_btn.setToolTip(f"当前可能无法触发上传：{err}")
+        elif not response_ready:
+            self.trigger_upload_btn.setToolTip(
+                "当前绑定页面仍在回答或暂不可接收输入，请等待完成后再触发上传。"
+            )
+        elif busy_reason == "pending_reply":
+            self.trigger_upload_btn.setToolTip(
+                "本地存在 pending_reply，但不影响仅触发上传；点击后会先检查绑定页是否已空闲。"
+            )
+        elif is_busy:
+            self.trigger_upload_btn.setToolTip(
+                f"当前会话状态：{busy_reason}。仅触发上传仍可用。"
+            )
+        else:
+            self.trigger_upload_btn.setToolTip(
+                "向当前绑定的油猴页面下发 start_upload，只上传工具箱队列中的文件，不发送文字。"
+            )
+
+        # 上传并发送：需要绑定目标就绪、网页可接收输入，且本地无 pending_reply 等忙状态。
+        self.upload_and_send_btn.setEnabled(
+            bool(target_ready and response_ready and not is_busy)
+        )
+
+        if err:
+            self.upload_and_send_btn.setToolTip(f"当前不能上传并发送：{err}")
+        elif is_busy:
+            self.upload_and_send_btn.setToolTip(
+                f"当前会话正在处理上一条消息：{busy_reason}，请等待完成或同步网页对话后再上传并发送。"
+            )
+        else:
+            self.upload_and_send_btn.setToolTip(
+                "先触发油猴上传工具箱队列中的文件，成功后再发送输入框文字。"
+            )
+
+    def _on_trigger_upload_clicked(self):
+        self._append_log("[UPLOAD_TRIGGER][CLICK]", echo=True)
+
+        if not server.is_server_running():
+            self._add_system_message("请先启动服务。")
+            self._append_log(
+                "[UPLOAD_TRIGGER][FAILED] reason=server_not_running",
+                echo=True,
+            )
+            return
+
+        session = self._current_session()
+        if session is None:
+            self._add_system_message("没有当前会话，无法触发上传。")
+            self._append_log(
+                "[UPLOAD_TRIGGER][FAILED] reason=no_current_session",
+                echo=True,
+            )
+            return
+
+        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        if not response_ready:
+            self._add_system_message(
+                response_msg or "当前绑定页面暂不可上传，请等待 ChatGPT 回复完成后再试。"
+            )
+            self._append_log(
+                "[UPLOAD_TRIGGER][BLOCKED] "
+                f"reason=response_not_ready detail={response_msg or '-'}",
+                echo=True,
+            )
+            return
+
+        busy_reason = self._session_send_busy_reason(session)
+        if busy_reason == "pending_reply":
+            self._clear_stale_pending_reply_if_bound_page_idle(
+                session,
+                reason="manual_trigger_upload",
+            )
+            busy_reason = self._session_send_busy_reason(session)
+
+        if busy_reason and busy_reason != "pending_reply":
+            self._add_system_message(
+                f"当前会话状态仍不可上传：{busy_reason}。"
+                "请先同步网页对话或等待绑定状态恢复。"
+            )
+            self._append_log(
+                f"[UPLOAD_TRIGGER][BLOCKED] reason=session_busy detail={busy_reason}",
+                echo=True,
+            )
+            return
+
+        if busy_reason == "pending_reply":
+            self._append_log(
+                "[UPLOAD_TRIGGER][PENDING_REPLY_BYPASS] "
+                f"session_id={session.session_id} "
+                "本地仍有 pending_reply，但绑定页已空闲，继续触发上传",
+                echo=True,
+            )
+
+        ok = self._trigger_upload_for_current_bound_page(
+            block_next_chat_on_failed=False
+        )
+
+        if ok:
+            self._add_system_message(
+                "已向绑定页发送 start_upload，请等待油猴完成工具箱上传。"
+            )
+            self.statusBar().showMessage(
+                "已下发上传指令，请等待油猴侧完成上传",
+                5000,
+            )
+        else:
+            self._add_system_message(
+                "触发上传失败，请查看日志中的 [UPLOAD_TRIGGER][FAILED] 详情。"
+            )
+
+    def _on_upload_and_send_clicked(self):
+        self._append_log("[UPLOAD_AND_SEND][CLICK]", echo=True)
+        if not server.is_server_running():
+            self._add_system_message("请先启动服务。")
+            self._append_log(
+                "[UPLOAD_AND_SEND][BLOCKED] reason=server_not_running",
+                echo=True,
+            )
+            return
+        content = self.message_edit.toPlainText().strip()
+        if not content:
+            self._append_log(
+                "[UPLOAD_AND_SEND][EMPTY_TEXT_TO_UPLOAD_ONLY] 输入框为空，自动退化为只触发上传",
+                echo=True,
+            )
+            self._add_system_message("输入框为空，已按「只触发上传」处理。")
+            self._on_trigger_upload_clicked()
+            return
+        session = self._ensure_current_session()
+        busy_reason = self._session_send_busy_reason(session)
+
+        if busy_reason == "pending_reply":
+            self._clear_stale_pending_reply_if_bound_page_idle(
+                session,
+                reason="upload_and_send",
+            )
+            busy_reason = self._session_send_busy_reason(session)
+
+        if busy_reason:
+            self._add_system_message(
+                f"当前会话正忙（{busy_reason}），请等待完成后再使用上传并发送。"
+            )
+            self._append_log(
+                f"[UPLOAD_AND_SEND][BLOCKED] reason=session_busy detail={busy_reason}",
+                echo=True,
+            )
+            return
+        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        if not response_ready:
+            self._add_system_message(
+                response_msg or "当前绑定页面暂不可发送，请稍后再试。"
+            )
+            self._append_log(
+                "[UPLOAD_AND_SEND][BLOCKED] reason=response_not_ready",
+                echo=True,
+            )
+            return
+        _, _, _, pre_err = self._strict_targets_for_upload_command(session)
+        if pre_err:
+            self._add_system_message(pre_err)
+            self._append_log(
+                f"[UPLOAD_AND_SEND][BLOCKED] reason=precheck {pre_err}",
+                echo=True,
+            )
+            return
+        if not self._trigger_upload_for_current_bound_page(
+            block_next_chat_on_failed=True
+        ):
+            self._append_log(
+                "[UPLOAD_AND_SEND][BLOCKED] reason=upload_enqueue_failed",
+                echo=True,
+            )
+            self._add_system_message(
+                "上传指令未能入队，已取消本次发送，请查看日志。"
+            )
+            return
+        self._append_log("[UPLOAD_AND_SEND][UPLOAD_QUEUED]", echo=True)
+        send_result = self._push_message(skip_upload_before_send=True)
+        if isinstance(send_result, dict) and send_result.get("ok"):
+            self._append_log("[UPLOAD_AND_SEND][SEND_QUEUED]", echo=True)
+        else:
+            reason = (
+                (send_result or {}).get("reason")
+                if isinstance(send_result, dict)
+                else send_result
+            )
+            self._append_log(
+                f"[UPLOAD_AND_SEND][BLOCKED] reason=send_not_queued detail={reason}",
+                echo=True,
+            )
+            if send_result is None:
+                self._add_system_message(
+                    "上传指令已入队，但本次文字未能进入发送流程（例如仍在等待绑定页或首页）；"
+                    "请不要重复点「上传并发送」，并留意聊天区与日志。"
+                )
 
     def _find_session_message_by_id(self, session, message_id):
         if session is None:
@@ -88,7 +614,10 @@ class BridgeMixin:
             f"绑定在线：{summary.get('bound_online')}",
             f"活跃 client：{summary.get('active_client_id') or '-'}",
         ])
+        current_queue = self._current_session_queue_size()
+        total_queue = self._total_session_queue_size()
         lines.extend([
+            f"聊天队列：当前 {current_queue} / 总 {total_queue}",
             f"待发队列：{status.get('queue_length', 0)}",
             f"控制命令队列：{status.get('control_queue_length', 0)}",
             f"控制命令等待：{status.get('control_waiting_count', 0)}",
@@ -107,7 +636,9 @@ class BridgeMixin:
                     f"status={waiting.get('status', '?')} "
                     f"delivered_to={waiting.get('delivered_to', '-')}"
                 )
-        self.status_log_edit.setPlainText("\n".join(lines))
+        summary_text = "\n".join(lines)
+        self.status_log_edit.setPlainText(summary_text)
+        return summary_text
     @staticmethod
     def _refresh_status_chip(label, state=""):
         label.setProperty("state", state or "")
@@ -163,23 +694,26 @@ class BridgeMixin:
                 or server.get_server_url()
                 or ""
             )
+            self.status_label.setText("服务：运行中")
             if service_url:
-                self.status_label.setText(f"服务：运行中 {service_url}")
+                self.status_label.setToolTip(f"服务地址：{service_url}")
                 self.statusBar().showMessage(f"服务运行中 {service_url}")
             else:
-                self.status_label.setText("服务：运行中")
+                self.status_label.setToolTip("")
                 self.statusBar().showMessage("服务运行中")
             self._server_start_failed = False
             self._server_start_error = ""
             self._refresh_status_chip(self.status_label, "ok")
         elif getattr(self, "_server_start_failed", False):
             self.status_label.setText("服务：启动失败")
+            self.status_label.setToolTip("")
             self.statusBar().showMessage("服务启动失败")
             self._refresh_status_chip(self.status_label, "error")
         else:
-            self.status_label.setText("服务：未启动")
-            self.statusBar().showMessage("服务未启动")
-            self._refresh_status_chip(self.status_label, "")
+            self.status_label.setText("服务：停止")
+            self.status_label.setToolTip("")
+            self.statusBar().showMessage("服务已停止")
+            self._refresh_status_chip(self.status_label, "error")
         self._debug_status_step("[STATUS_APPLY][STEP] service_label")
         last_seen = status.get("tampermonkey_last_seen")
         last_seen_text = self._format_ts(last_seen)
@@ -220,9 +754,12 @@ class BridgeMixin:
             self.tm_online_label.setToolTip("\n".join(tooltip_lines))
         self._log_tm_status_summary(summary)
         self._log_bind_mismatch_if_needed(summary)
-        chat_q = status.get("queue_length", 0)
         ctrl_q = status.get("control_queue_length", 0)
-        self.tm_queue_label.setText(f"聊天队列：{chat_q}  控制队列：{ctrl_q}")
+        current_q = self._current_session_queue_size()
+        total_q = self._total_session_queue_size()
+        self.tm_queue_label.setText(
+            f"聊天队列：当前 {current_q}/总 {total_q}  控制队列：{ctrl_q}"
+        )
         self._debug_status_step("[STATUS_APPLY][STEP] tm_summary")
         live_url = status.get("tampermonkey_page_url") if summary.get("online_clients") else None
         self._update_live_page_display(live_url, summary=summary)
@@ -247,8 +784,23 @@ class BridgeMixin:
         self._debug_status_step("[STATUS_APPLY][STEP] status_summary")
         self._update_tampermonkey_settings_labels(status)
         self._update_service_settings_status()
+        self._refresh_cursor_bridge_status(status.get("cursor_bridge"))
         self._refresh_session_list(select_session_id=self._current_session_id)
         self._recover_stuck_bootstrap_sessions()
+        for session in list(self._sessions.values()):
+            if self._session_send_queue(session.session_id):
+                self._try_send_next_queued_message(session)
+        current_session = self._current_session()
+        if (
+            current_session is not None
+            and self._session_has_pending_assistant_reply(current_session)
+        ):
+            self._clear_stale_pending_reply_if_bound_page_idle(
+                current_session,
+                reason="bridge_status_tick",
+            )
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
         self._debug_status_step("[STATUS_APPLY][STEP] done")
     def _handle_inbound_events(self, items):
         for item in items:
@@ -335,9 +887,44 @@ class BridgeMixin:
                     "页面仍在运行，浏览器可能拦截了 window.close()"
                 )
                 continue
+            if kind == "control_done":
+                client_id = item.get("client_id") or "-"
+                command = (payload.get("command") or "").strip()
+                if command == "start_upload":
+                    result = payload.get("result") or {}
+                    if not isinstance(result, dict):
+                        result = {}
+                    upload_status = result.get("upload_status") or {}
+                    if not isinstance(upload_status, dict):
+                        upload_status = {}
+                    success = int(result.get("success", 0) or 0)
+                    failed = int(result.get("failed", 0) or 0)
+                    attached = int(upload_status.get("attached", 0) or 0)
+                    total = int(upload_status.get("total", 0) or 0)
+                    self._append_log(
+                        "[上传] 完成 "
+                        f"client_id={client_id} "
+                        f"success={success} failed={failed} attached={attached} total={total}",
+                        echo=True,
+                    )
+                    self._add_system_message(
+                        f"上传完成：成功 {success} 个，失败 {failed} 个，已挂载 {attached} 个，总数 {total}。"
+                    )
+                    continue
+                self._append_log(
+                    f"[控制完成] command={command or '-'} client_id={client_id}",
+                    echo=True,
+                )
+                continue
             if kind in ("close_page_success", "close_page_failed", "command_failed"):
                 page_url = payload.get("page_url") or ""
-                detail = payload.get("detail") or ""
+                detail = (
+                    payload.get("detail")
+                    or payload.get("reason")
+                    or payload.get("error")
+                    or ""
+                )
+                command = (payload.get("command") or "").strip()
                 client_id = item.get("client_id") or "-"
                 if kind == "close_page_success":
                     self._append_log(
@@ -347,9 +934,25 @@ class BridgeMixin:
                     self._append_log(
                         f"[关闭页面] 失败 client_id={client_id} {page_url} {detail}".strip()
                     )
+                elif command == "start_upload":
+                    if not detail:
+                        result_obj = payload.get("result")
+                        if isinstance(result_obj, dict):
+                            detail = (
+                                (result_obj.get("reason") or "")
+                                or (result_obj.get("detail") or "")
+                            ).strip() or detail
+                    self._append_log(
+                        f"[上传] 失败 client_id={client_id} reason={detail or '-'}",
+                        echo=True,
+                    )
+                    self._add_system_message(
+                        f"上传失败：{detail or '未返回具体原因，请查看油猴日志'}"
+                    )
                 else:
                     self._append_log(
-                        f"[命令] 失败 client_id={client_id} {detail}".strip()
+                        f"[命令] 失败 command={command or '-'} client_id={client_id} {detail}".strip(),
+                        echo=True,
                     )
                 continue
             if kind == "conversation_snapshot":
@@ -362,6 +965,8 @@ class BridgeMixin:
                     self._apply_conversation_created_binding(
                         conv_session, payload, client_id=report_client
                     )
+                    if hasattr(self, "_try_send_next_queued_message"):
+                        self._try_send_next_queued_message(conv_session)
                 else:
                     payload = item.get("payload") or {}
                     self._append_log(
@@ -483,6 +1088,7 @@ class BridgeMixin:
                     dedupe_seconds=10,
                 )
                 self._finalize_bridge(bridge_id)
+                self._try_send_next_queued_message(session)
                 continue
             if kind == "assistant_reply":
                 if self._is_finalized(bridge_id):
@@ -506,11 +1112,13 @@ class BridgeMixin:
                         self._schedule_auto_sync_conversation(
                             session, request_reason="auto_after_reply"
                         )
+                    self._try_send_next_queued_message(session)
                 else:
                     self._set_reply_error(
                         session, turn_id, "ChatGPT 返回了空回复。", "空回复"
                     )
                     self._finalize_bridge(bridge_id)
+                    self._try_send_next_queued_message(session)
                 continue
             if kind in ("assistant_reply_empty", "assistant_reply_failed"):
                 if not self._has_assistant_for_turn(
@@ -542,6 +1150,7 @@ class BridgeMixin:
                 status_text = "读取失败" if kind == "assistant_reply_failed" else "空回复"
                 self._set_reply_error(session, turn_id, detail, status_text)
                 self._finalize_bridge(bridge_id)
+                self._try_send_next_queued_message(session)
                 continue
             continue
     def _render_inbound_log(self, items):
@@ -744,28 +1353,215 @@ class BridgeMixin:
             return False, f"当前 ChatGPT 页面暂不可发送（state={state}），请稍后重试。"
         return True, ""
 
-    def _push_message(self):
+    def _session_send_queue(self, session_id):
+        sid = (session_id or "").strip()
+        if not sid:
+            return []
+        if not hasattr(self, "_session_send_queues") or not isinstance(
+            self._session_send_queues, dict
+        ):
+            self._session_send_queues = {}
+        return self._session_send_queues.setdefault(sid, [])
+
+    def _session_send_busy_reason(self, session):
+        if session is None:
+            return ""
+        if self._session_has_pending_assistant_reply(session):
+            return "pending_reply"
+        response_state = self._session_bound_response_state(session)
+        if bool(response_state.get("is_responding")):
+            return "responding"
+        state = (response_state.get("response_state") or "").strip().lower()
+        if state in ("generating", "waiting", "pending", "queued"):
+            return state
+        if self._pending_auto_bind_session_id == session.session_id:
+            return "waiting_bind"
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state = self._remote_bind_state(remote)
+        if bind_state in (
+            BIND_STATE_WAITING_HOME,
+            BIND_STATE_WAITING_CONVERSATION_CREATED,
+            BIND_STATE_WAITING_BOUND_CONVERSATION,
+        ):
+            return bind_state.lower()
+        return ""
+
+    def _current_session_queue_size(self):
+        session = self._current_session()
+        if session is None:
+            return 0
+        return len(self._session_send_queue(session.session_id))
+
+    def _total_session_queue_size(self):
+        queues = getattr(self, "_session_send_queues", {})
+        if not isinstance(queues, dict):
+            return 0
+        total = 0
+        for items in queues.values():
+            if isinstance(items, list):
+                total += len(items)
+        return total
+
+    def _update_queue_badge(self):
+        if not hasattr(self, "status_log_edit"):
+            return
+        summary = self._render_status_summary(getattr(self, "_last_bridge_status", {}) or {})
+        self.status_log_edit.setPlainText(summary)
+
+    def _enqueue_user_message_for_session(self, session, text):
+        if session is None:
+            return False
+        text = str(text or "").strip()
+        if not text:
+            return False
+        queue = self._session_send_queue(session.session_id)
+        item = {
+            "message_id": str(uuid.uuid4()),
+            "text": text,
+            "created_at": time.time(),
+        }
+        queue.append(item)
+        self._append_session_message(
+            session,
+            "user",
+            text,
+            message_id=item["message_id"],
+            created_at=item["created_at"],
+            status="已加入队列",
+            visible_in_chat=True,
+        )
+        session.updated_at = time.time()
+        self._append_log(
+            "[CHAT_QUEUE][ENQUEUE] "
+            f"session_id={session.session_id} "
+            f"message_id={item['message_id']} "
+            f"queue_size={len(queue)} "
+            f"text_len={len(text)}",
+            echo=True,
+        )
+        self._set_tm_action_hint(
+            f"当前对话正在处理上一条消息，已加入队列：{len(queue)} 条等待发送。"
+        )
+        self._refresh_local_conversation_after_sync(
+            session.session_id,
+            force_bottom=True,
+            reason="queue_enqueue",
+        )
+        self._save_sessions_to_disk()
+        self._update_queue_badge()
+        return True
+
+    def _try_send_next_queued_message(self, session):
+        if session is None:
+            return False
+        queue = self._session_send_queue(session.session_id)
+        busy_reason = self._session_send_busy_reason(session)
+        if busy_reason:
+            self._append_log(
+                "[CHAT_QUEUE][WAIT] "
+                f"session_id={session.session_id} "
+                f"reason={busy_reason} "
+                f"queue_size={len(queue)}",
+                echo=True,
+            )
+            return False
+        if not queue:
+            self._append_log(
+                f"[CHAT_QUEUE][EMPTY] session_id={session.session_id}",
+                echo=True,
+            )
+            self._update_queue_badge()
+            return False
+        item = queue.pop(0)
+        text = str(item.get("text") or "").strip()
+        message_id = str(item.get("message_id") or "").strip()
+        if not text:
+            self._append_log(
+                "[CHAT_QUEUE][SKIP_EMPTY] "
+                f"session_id={session.session_id} "
+                f"message_id={message_id or '-'}",
+                echo=True,
+            )
+            self._update_queue_badge()
+            return self._try_send_next_queued_message(session)
+        self._append_log(
+            "[CHAT_QUEUE][DEQUEUE_SEND] "
+            f"session_id={session.session_id} "
+            f"message_id={message_id or '-'} "
+            f"queue_left={len(queue)} "
+            f"text_len={len(text)}",
+            echo=True,
+        )
+        self._set_tm_action_hint(f"正在发送队列中的下一条消息，剩余 {len(queue)} 条。")
+        if message_id:
+            self._set_user_message_status(session, message_id, "正在发送")
+        self._refresh_local_conversation_after_sync(
+            session.session_id,
+            force_bottom=True,
+            reason="queue_dequeue_send",
+        )
+        result = self._push_message_text(
+            session,
+            text,
+            reuse_user_message_id=message_id,
+            suppress_system_message=True,
+            source="queue",
+        )
+        if not isinstance(result, dict):
+            result = {"ok": False, "reason": "unknown"}
+        if not result.get("ok"):
+            reason = (result.get("reason") or "send_failed").strip() or "send_failed"
+            retryable = bool(result.get("retryable", True))
+            if retryable:
+                queue.insert(0, item)
+                if message_id:
+                    self._set_user_message_status(session, message_id, "已加入队列")
+            else:
+                if message_id:
+                    self._set_user_message_status(session, message_id, "发送失败")
+            self._append_log(
+                "[CHAT_QUEUE][SEND_FAILED] "
+                f"session_id={session.session_id} "
+                f"message_id={message_id or '-'} "
+                f"reason={reason} "
+                f"queue_left={len(queue)}",
+                echo=True,
+            )
+            self._refresh_local_conversation_after_sync(
+                session.session_id,
+                force_bottom=True,
+                reason="queue_send_failed",
+            )
+            self._update_queue_badge()
+            return retryable
+        self._update_queue_badge()
+        return True
+
+    def _push_message(self, *, skip_upload_before_send=False):
         if not server.is_server_running():
             self._add_system_message("请先启动服务。")
-            return
+            return None
         content = self.message_edit.toPlainText().strip()
         if not content:
             self._add_system_message("请输入要发送的内容。")
-            return
+            return None
         session = self._ensure_current_session()
         self._recover_stuck_bootstrap_sessions()
-        if self._session_has_pending_assistant_reply(session):
-            if self._session_has_retryable_unclaimed_bootstrap(session):
-                self._retry_bootstrap_after_claim_timeout(session)
-                return
-            self._add_system_message(
-                "当前对话上一条消息仍在等待回复，请等回复完成后再发送。"
-            )
-            return
-        response_ready, response_msg = self._check_bound_client_response_ready(session)
+        busy_reason = self._session_send_busy_reason(session)
+        if busy_reason:
+            if busy_reason == "waiting_conversation_created":
+                self._add_system_message("正在创建 ChatGPT 对话，请稍候…")
+                return None
+            self._enqueue_user_message_for_session(session, content)
+            if self._auto_clear_input_after_send:
+                self.message_edit.clear()
+            return None
+        response_ready, _response_msg = self._check_bound_client_response_ready(session)
         if not response_ready:
-            self._add_system_message(response_msg)
-            return
+            self._enqueue_user_message_for_session(session, content)
+            if self._auto_clear_input_after_send:
+                self.message_edit.clear()
+            return None
 
         if self._bind_each_chat_to_page:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -798,7 +1594,7 @@ class BridgeMixin:
                     if self._auto_clear_input_after_send:
                         self.message_edit.clear()
                     self._apply_chat_bind_visual_state()
-                    return
+                    return None
             else:
                 reopen_result = self._prepare_bound_conversation_reopen_if_needed(
                     session, content
@@ -807,7 +1603,7 @@ class BridgeMixin:
                     if self._auto_clear_input_after_send:
                         self.message_edit.clear()
                     self._apply_chat_bind_visual_state()
-                    return
+                    return None
 
         if self._bind_each_chat_to_page and self._session_needs_first_message_bind(
             session
@@ -818,12 +1614,16 @@ class BridgeMixin:
                     if self._auto_clear_input_after_send:
                         self.message_edit.clear()
                     self._save_sessions_to_disk()
-                    return
+                    return None
                 if reason:
                     self._add_system_message(reason)
-                return
+                return None
 
-        self._push_message_text(session, content)
+        return self._push_message_text(
+            session,
+            content,
+            skip_upload_before_send=skip_upload_before_send,
+        )
 
     def _flush_pending_bootstrap_message(self, session, text):
         text = (text or "").strip()
@@ -845,10 +1645,13 @@ class BridgeMixin:
         content,
         from_pending_bootstrap=False,
         reuse_user_message_id="",
+        suppress_system_message=False,
+        source="direct",
+        skip_upload_before_send=False,
     ):
         raw_user_text = content.strip()
         if not raw_user_text:
-            return
+            return {"ok": False, "reason": "empty_text", "retryable": False}
         final_prompt = raw_user_text
         reuse_user_message_id = (reuse_user_message_id or "").strip()
         existing_user_message = self._find_session_message_by_id(
@@ -880,12 +1683,18 @@ class BridgeMixin:
                 f"client_id={client_id} page_instance_id={page_instance_id or '-'} "
                 f"text_len={len(raw_user_text)} pending={from_pending_bootstrap}"
             )
+            self._append_log(
+                f"[NEW_SESSION][FIRST_SEND] session_id={session.session_id} "
+                f"client_id={client_id} page_instance_id={page_instance_id or '-'} "
+                f"text_len={len(raw_user_text)}"
+            )
         prereq_ok, prereq_reason = self._check_tm_send_prerequisites(session)
         if not prereq_ok:
             self._append_log(f"[发送] {prereq_reason}")
-            self._add_system_message(prereq_reason)
+            if not suppress_system_message:
+                self._add_system_message(prereq_reason)
             self._apply_chat_bind_visual_state()
-            return
+            return {"ok": False, "reason": prereq_reason, "retryable": True}
 
         self._rebind_current_session_to_online_client_if_needed()
         self._log_send_bind_check(session, action="before_send")
@@ -895,9 +1704,10 @@ class BridgeMixin:
         )
         self._append_log(f"[发送] {reason}")
         if not allowed:
-            self._add_system_message(reason)
+            if not suppress_system_message:
+                self._add_system_message(reason)
             self._apply_chat_bind_visual_state()
-            return
+            return {"ok": False, "reason": reason or "target_not_allowed", "retryable": True}
 
         target_client_id, target_page_url, allowed, verify_reason = (
             self._verify_send_target_binding(
@@ -907,9 +1717,14 @@ class BridgeMixin:
         if verify_reason:
             self._append_log(f"[发送] {verify_reason}")
         if not allowed:
-            self._add_system_message(verify_reason or "发送前绑定校验失败。")
+            if not suppress_system_message:
+                self._add_system_message(verify_reason or "发送前绑定校验失败。")
             self._apply_chat_bind_visual_state()
-            return
+            return {
+                "ok": False,
+                "reason": verify_reason or "send_target_verify_failed",
+                "retryable": True,
+            }
 
         payload = {
             "session_id": session.session_id,
@@ -948,19 +1763,37 @@ class BridgeMixin:
                     conversation_id = parse_conversation_id(target_page_url)
                 if conversation_id:
                     payload["conversation_id"] = conversation_id
+                page_inst_bind = (remote.get("page_instance_id") or "").strip()
+                if page_inst_bind:
+                    payload["target_page_instance_id"] = page_inst_bind
             self._append_log(
                 f"[发送] 目标 client_id={target_client_id} "
                 f"conversation_id={payload.get('conversation_id') or '-'} "
                 f"bootstrap={payload.get('bootstrap_conversation', False)} "
                 f"page={self._short_page_display(target_page_url)}"
             )
+        if getattr(self, "_upload_before_send_enabled", False) and not skip_upload_before_send:
+            upload_queued = self._enqueue_upload_before_send_command(
+                session=session,
+                payload=payload,
+                target_client_id=target_client_id,
+            )
+
+            if not upload_queued:
+                self._add_system_message(
+                    "发送前上传命令入队失败，已取消本次发送。"
+                )
+                self._apply_chat_bind_visual_state()
+                return {"ok": False, "reason": "upload_before_send_enqueue_failed", "retryable": True}
+
         try:
             msg = server.push_message(payload)
         except Exception as error:
             detail = f"消息入队失败：{error}\n{traceback.format_exc()}"
             self._append_log(detail, echo=True)
-            self._add_system_message(f"消息入队失败：{error}")
-            return
+            if not suppress_system_message:
+                self._add_system_message(f"消息入队失败：{error}")
+            return {"ok": False, "reason": str(error), "retryable": False}
         if not target_client_id:
             if not self._session_is_local_new_chat_flow(session):
                 live_client = (
@@ -970,8 +1803,13 @@ class BridgeMixin:
                     self._remember_session_page_from_client(session, live_client)
         bridge_message_id = msg.get("id") if isinstance(msg, dict) else None
         if not bridge_message_id:
-            self._add_system_message("服务端未返回 bridge_message_id，无法跟踪回复。")
-            return
+            if not suppress_system_message:
+                self._add_system_message("服务端未返回 bridge_message_id，无法跟踪回复。")
+            return {
+                "ok": False,
+                "reason": "missing_bridge_message_id",
+                "retryable": False,
+            }
         server.attach_external_request_bridge(
             session.session_id, bridge_message_id, turn_id
         )
@@ -1009,7 +1847,7 @@ class BridgeMixin:
         if existing_user_message is not None:
             existing_user_message.bridge_message_id = bridge_message_id
             existing_user_message.turn_id = turn_id
-            existing_user_message.status = "已加入队列"
+            existing_user_message.status = "等待回复"
             existing_user_message.content = raw_user_text
             session.updated_at = time.time()
         else:
@@ -1039,6 +1877,21 @@ class BridgeMixin:
         if self._auto_clear_input_after_send and not from_pending_bootstrap:
             self.message_edit.clear()
         self._focus_message_input_later()
+        self._append_log(
+            "[CHAT_QUEUE][SEND_OK] "
+            f"session_id={session.session_id} "
+            f"source={source} "
+            f"message_id={reuse_user_message_id or user_message_id} "
+            f"bridge_message_id={bridge_message_id}",
+            echo=True,
+        )
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
+        return {
+            "ok": True,
+            "bridge_message_id": bridge_message_id,
+            "turn_id": turn_id,
+        }
     def _copy_last_reply(self):
         session = self._current_session()
         text = self._last_assistant_text(session)
@@ -1335,18 +2188,51 @@ class BridgeMixin:
                 "code": "SESSION_NOT_FOUND",
             }
 
-        if self._session_has_pending_assistant_reply(session):
+        busy_reason = self._session_send_busy_reason(session)
+        if busy_reason:
+            queued = self._enqueue_user_message_for_session(session, text)
+            if not queued:
+                return {
+                    "ok": False,
+                    "error": "消息入队失败",
+                    "code": "INTERNAL_ERROR",
+                }
+            queue = self._session_send_queue(session.session_id)
+            queued_id = ""
+            if queue:
+                queued_id = (queue[-1].get("message_id") or "").strip()
             return {
-                "ok": False,
-                "error": "当前会话仍有未完成回复",
-                "code": "INTERNAL_ERROR",
+                "ok": True,
+                "session_id": session.session_id,
+                "pending_home": False,
+                "pending_queued": True,
+                "queued_message_id": queued_id,
+                "bridge_message_id": "",
+                "turn_id": "",
+                **session_meta,
             }
         response_ready, response_msg = self._check_bound_client_response_ready(session)
         if not response_ready:
+            queued = self._enqueue_user_message_for_session(session, text)
+            if not queued:
+                return {
+                    "ok": False,
+                    "error": response_msg,
+                    "code": "INTERNAL_ERROR",
+                }
+            queue = self._session_send_queue(session.session_id)
+            queued_id = ""
+            if queue:
+                queued_id = (queue[-1].get("message_id") or "").strip()
             return {
-                "ok": False,
-                "error": response_msg,
-                "code": "INTERNAL_ERROR",
+                "ok": True,
+                "session_id": session.session_id,
+                "pending_home": False,
+                "pending_queued": True,
+                "queued_message_id": queued_id,
+                "bridge_message_id": "",
+                "turn_id": "",
+                **session_meta,
             }
 
         if self._bind_each_chat_to_page:
@@ -1553,6 +2439,8 @@ class BridgeMixin:
         }
 
     def closeEvent(self, event):
+        if hasattr(self, "_save_chat_splitter_sizes"):
+            self._save_chat_splitter_sizes()
         self._save_sessions_to_disk()
         self._save_app_settings()
         if server.is_server_running():
