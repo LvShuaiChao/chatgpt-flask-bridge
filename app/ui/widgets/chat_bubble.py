@@ -5,8 +5,8 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayou
 
 
 class SystemBubble(QFrame):
-    def __init__(self, text, ts_text=""):
-        super().__init__()
+    def __init__(self, text, ts_text="", parent=None):
+        super().__init__(parent)
         self.ts_text = ts_text
         self.setObjectName("SystemBubble")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
@@ -30,15 +30,25 @@ class SystemBubble(QFrame):
 
 
 class ChatBubble(QFrame):
-    def __init__(self, role, text, ts_text, status_text="", body_pt=14):
-        super().__init__()
+    def __init__(
+        self,
+        role,
+        text,
+        ts_text,
+        status_text="",
+        body_pt=14,
+        parent=None,
+    ):
+        super().__init__(parent)
         self.role = role
         self.ts_text = ts_text
         self.status_text = status_text
         self._body_pt = body_pt
-        self.setObjectName("ChatBubble")
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self.setObjectName("ChatMessageBubble")
+        self.setProperty("bubbleRole", role)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.setMinimumWidth(140)
+        self.setMinimumHeight(32)
         if role == "error":
             self.setMaximumWidth(520)
         else:
@@ -53,7 +63,10 @@ class ChatBubble(QFrame):
         self.body_label.setWordWrap(True)
         self.body_label.setTextFormat(Qt.PlainText)
         self.body_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.body_label.setObjectName("BubbleBody")
+        self.body_label.setObjectName("ChatMessageText")
+        self.body_label.setProperty("altObjectName", "BubbleBody")
+        self.body_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.body_label.setMinimumHeight(20)
         layout.addWidget(self.body_label)
         self.set_text(text, status_text)
         self._apply_style()

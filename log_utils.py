@@ -53,7 +53,7 @@ def get_log_file_path():
     return str(LOG_FILE.resolve())
 
 
-def read_last_lines(path, max_lines=1000, encoding="utf-8"):
+def read_last_lines(path, max_lines=1000, encoding="utf-8", max_read_bytes=2 * 1024 * 1024):
     """Read at most the last ``max_lines`` from a log file without loading the whole file."""
     log_path = Path(path)
     if not log_path.exists():
@@ -61,9 +61,17 @@ def read_last_lines(path, max_lines=1000, encoding="utf-8"):
 
     lines = deque(maxlen=max_lines)
     try:
-        with log_path.open("r", encoding=encoding, errors="replace") as file:
-            for line in file:
+        file_size = log_path.stat().st_size
+        if file_size > max_read_bytes:
+            with log_path.open("rb") as raw:
+                raw.seek(max(0, file_size - max_read_bytes))
+                chunk = raw.read().decode(encoding, errors="replace")
+            for line in chunk.splitlines():
                 lines.append(line.rstrip("\n"))
+        else:
+            with log_path.open("r", encoding=encoding, errors="replace") as file:
+                for line in file:
+                    lines.append(line.rstrip("\n"))
     except Exception as error:
         print(f"[LOG_READ_FAILED] path={log_path} error={error}")
         print(traceback.format_exc())

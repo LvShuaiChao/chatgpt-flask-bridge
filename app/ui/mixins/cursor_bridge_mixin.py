@@ -576,44 +576,35 @@ class CursorBridgeMixin:
             self._update_task_queue_card()
 
     def _set_cursor_bridge_status_badge(self, text, level="neutral", tooltip=""):
-
         label = getattr(self, "cursor_bridge_status_label", None)
-
         if label is None:
-
             return
 
+        text = text or ""
+        tooltip = tooltip or text
+        signature = (text, level, tooltip)
+        if getattr(self, "_last_cursor_bridge_badge_signature", None) == signature:
+            return
+        self._last_cursor_bridge_badge_signature = signature
 
-
-        label.setText(text)
-
-        label.setToolTip(tooltip or text)
-
-
+        if label.text() != text:
+            label.setText(text)
+        if label.toolTip() != tooltip:
+            label.setToolTip(tooltip)
 
         if level == "ok":
-
             object_name = "StatusBadgeOk"
-
         elif level == "warn":
-
             object_name = "StatusBadgeWarn"
-
         elif level == "error":
-
             object_name = "StatusBadgeError"
-
         else:
-
             object_name = "StatusBadgeNeutral"
 
-
-
-        label.setObjectName(object_name)
-
-        label.style().unpolish(label)
-
-        label.style().polish(label)
+        if label.objectName() != object_name:
+            label.setObjectName(object_name)
+            label.style().unpolish(label)
+            label.style().polish(label)
 
 
 

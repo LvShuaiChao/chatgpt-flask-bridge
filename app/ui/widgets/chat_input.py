@@ -4,9 +4,10 @@ from PyQt5.QtWidgets import QTextEdit
 
 class ChatInput(QTextEdit):
     send_requested = pyqtSignal()
-    def __init__(self, main_window=None):
-        super().__init__()
-        self._main_window = main_window
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._main_window = parent
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             mods = event.modifiers()

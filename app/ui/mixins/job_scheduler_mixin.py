@@ -346,14 +346,48 @@ class JobSchedulerMixin:
             return f"[{ts}] [{tag}] {msg}".strip()
         return str(entry)
 
+    def _set_task_log_plain_text(self, edit, text):
+        scrollbar = edit.verticalScrollBar()
+        old_value = scrollbar.value() if scrollbar else 0
+        old_max = scrollbar.maximum() if scrollbar else 0
+        at_bottom = old_value >= old_max - 3
+
+        edit.setPlainText(text)
+
+        if scrollbar:
+            if at_bottom:
+                scrollbar.setValue(scrollbar.maximum())
+            else:
+                scrollbar.setValue(min(old_value, scrollbar.maximum()))
+
     def _set_task_log_lines(self, lines):
         formatted = [self._format_job_log_line(x) for x in (lines or [])]
         safe_lines = formatted[-50:]
         text = "\n".join(safe_lines)
-        for widget_name in ("cursor_task_log_edit", "job_log_edit"):
-            edit = getattr(self, widget_name, None)
-            if edit is not None:
-                edit.setPlainText(text)
+
+        if getattr(self, "_last_task_log_text", None) == text:
+            return
+        self._last_task_log_text = text
+
+        edit = getattr(self, "cursor_task_log_edit", None)
+        if edit is None:
+            return
+        if not edit.isVisible():
+            self._pending_task_log_text = text
+            return
+        self._set_task_log_plain_text(edit, text)
+
+    def _flush_pending_task_log_if_needed(self):
+        text = getattr(self, "_pending_task_log_text", None)
+        if text is None:
+            return
+        self._pending_task_log_text = None
+        edit = getattr(self, "cursor_task_log_edit", None)
+        if edit is None or not edit.isVisible():
+            return
+        if edit.toPlainText() == text:
+            return
+        self._set_task_log_plain_text(edit, text)
 
     def _job_is_running(self, job):
         if not job:

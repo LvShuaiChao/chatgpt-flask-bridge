@@ -1,15 +1,18 @@
 import os
+import time
 import traceback
 
 import server
+from app.utils.page_status import get_page_liveness, is_page_online
 from log_utils import get_log_file_path
 
 from app.models import normalize_remote_chatgpt
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.elided_label import ElidedLabel
+from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
 from app.ui.widgets.session_list import SessionListWidget
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -17,7 +20,9 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
+    QLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,6 +45,64 @@ class UiBuilderMixin:
     CHAT_SUB_TAB_CURSOR_FLOW = 1
     CURSOR_FLOW_TAB_TITLE_BASE = "Cursor 动作编排"
 
+    def _reconnect_button(self, button, slot, *, tag=""):
+        if button is None:
+            return
+        name = button.objectName() or type(button).__name__
+        try:
+            button.clicked.disconnect(slot)
+        except TypeError as error:
+            self._append_log(
+                f"[UI_BIND] button has no previous connection: "
+                f"name={name} tag={tag or '-'} error={error}",
+                echo=False,
+            )
+        button.clicked.connect(slot)
+
+    def _connect_signal_once(self, key, signal, slot):
+        bound = getattr(self, "_bound_signal_keys", None)
+        if not isinstance(bound, set):
+            bound = set()
+            self._bound_signal_keys = bound
+        if key in bound:
+            self._append_log(
+                f"[UI_BIND][DUPLICATE] key={key} skipped second connect",
+                echo=True,
+            )
+            return
+        signal.connect(slot)
+        bound.add(key)
+
+    def _bind_chat_panel_signals(self):
+        if getattr(self, "_chat_panel_signals_bound", False):
+            return
+        self._reconnect_button(
+            self.send_btn,
+            self._push_message,
+            tag="send_btn",
+        )
+        self._connect_signal_once(
+            "message_edit.send_requested",
+            self.message_edit.send_requested,
+            self._push_message,
+        )
+        self._reconnect_button(
+            self.clear_session_btn,
+            self._clear_current_session,
+            tag="clear_session_btn",
+        )
+        self._reconnect_button(
+            self.copy_last_btn,
+            self._copy_last_reply,
+            tag="copy_last_btn",
+        )
+        self._chat_panel_signals_bound = True
+
+    def _init_splitter_save_timer(self):
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.timeout.connect(self._save_splitter_sizes_now)
+
     def _restore_chat_splitter_sizes(self):
         splitter = getattr(self, "chat_splitter", None)
         if splitter is None:
@@ -52,26 +115,37 @@ class UiBuilderMixin:
                     left = int(parts[0])
                     right = int(parts[1])
                 except ValueError as error:
-                    self._append_log(
-                        "[UI_SPLITTER][RESTORE_FAILED] "
-                        f"invalid={raw} error={error}\n{traceback.format_exc()}",
-                        echo=True,
-                    )
+                    if getattr(self, "_debug_mode", False):
+                        self._append_log(
+                            "[UI_SPLITTER][RESTORE_FAILED] "
+                            f"invalid={raw} error={error}\n{traceback.format_exc()}",
+                            echo=True,
+                        )
                 else:
                     left = max(190, min(260, left))
                     if right >= 300:
                         splitter.setSizes([left, right])
-                        self._append_log(
-                            f"[UI_SPLITTER][RESTORE] chat_splitter sizes={[left, right]}"
-                        )
+                        if getattr(self, "_debug_mode", False):
+                            self._append_log(
+                                f"[UI_SPLITTER][RESTORE] "
+                                f"chat_splitter sizes={[left, right]}"
+                            )
                         return
         default_sizes = [220, 1000]
         splitter.setSizes(default_sizes)
-        self._append_log(
-            f"[UI_SPLITTER][DEFAULT] chat_splitter sizes={default_sizes}"
-        )
+        if getattr(self, "_debug_mode", False):
+            self._append_log(
+                f"[UI_SPLITTER][DEFAULT] chat_splitter sizes={default_sizes}"
+            )
 
-    def _save_chat_splitter_sizes(self, *args):
+    def _schedule_save_chat_splitter_sizes(self, *args):
+        timer = getattr(self, "_splitter_save_timer", None)
+        if timer is None:
+            self._save_splitter_sizes_now()
+            return
+        timer.start(500)
+
+    def _save_splitter_sizes_now(self):
         splitter = getattr(self, "chat_splitter", None)
         if splitter is None:
             return
@@ -84,8 +158,13 @@ class UiBuilderMixin:
             return
         value = f"{left},{right}"
         self._settings.setValue("ui/chat_splitter_sizes", value)
-        self._settings.sync()
-        self._append_log(f"[UI_SPLITTER][SAVE] chat_splitter sizes={[left, right]}")
+        if getattr(self, "_debug_mode", False):
+            self._append_log(
+                f"[UI_SPLITTER][SAVE] chat_splitter sizes={[left, right]}"
+            )
+
+    def _save_chat_splitter_sizes(self, *args):
+        self._schedule_save_chat_splitter_sizes(*args)
 
     def _restore_chat_sub_tab_index(self):
         tabs = getattr(self, "chat_sub_tabs", None)
@@ -114,7 +193,16 @@ class UiBuilderMixin:
     def _on_chat_sub_tab_changed(self, index):
         self._save_chat_sub_tab_index()
         self._update_cursor_flow_tab_title_indicator()
+        tabs = getattr(self, "chat_sub_tabs", None)
+        if tabs is not None:
+            current_text = tabs.tabText(index).strip()
+            if "聊天" in current_text and hasattr(
+                self, "_render_pending_chat_if_needed"
+            ):
+                QTimer.singleShot(30, self._render_pending_chat_if_needed)
         if int(index) == self.CHAT_SUB_TAB_CURSOR_FLOW:
+            if hasattr(self, "_flush_pending_task_log_if_needed"):
+                self._flush_pending_task_log_if_needed()
             if hasattr(self, "_refresh_job_scheduler_panel"):
                 self._refresh_job_scheduler_panel()
 
@@ -177,8 +265,9 @@ class UiBuilderMixin:
                 "handler": self._on_bind_current_page,
                 "danger": False,
                 "tooltip": (
-                    "把当前浏览器最近活跃的 ChatGPT 页面绑定到左侧当前本地对话。"
-                    "请先切换到目标 ChatGPT 页面，再点击本按钮。"
+                    "把手动选中页或当前焦点页绑定到左侧当前本地对话。"
+                    "优先使用「可用页面列表」中的手动选中页；"
+                    "若无手动选中页，则使用 document.hasFocus()=true 的焦点页。"
                 ),
             },
             "open_bound": {
@@ -279,9 +368,7 @@ class UiBuilderMixin:
             btn.setObjectName("DangerButton")
             btn.setEnabled(True)
 
-    def _build_tm_action_buttons(
-        self, layout, *, include_page_selector=False
-    ):
+    def _build_tm_action_buttons(self, layout):
         self._ensure_tm_action_buttons()
         layout.setSpacing(6)
         row = QHBoxLayout()
@@ -298,27 +385,7 @@ class UiBuilderMixin:
         for btn in (self.close_bound_page_btn, self.close_other_pages_btn):
             row.addWidget(btn)
         layout.addLayout(row)
-        if include_page_selector:
-            if not hasattr(self, "tm_page_combo"):
-                self.tm_page_combo = QComboBox()
-                self.tm_page_combo.setMinimumWidth(180)
-                self.tm_page_combo.setSizePolicy(
-                    QSizePolicy.Expanding, QSizePolicy.Fixed
-                )
-                self.tm_page_combo.setToolTip(
-                    "显示当前检测到的 ChatGPT 页面状态（不用于选择绑定目标）"
-                )
-            if not hasattr(self, "tm_page_count_label"):
-                self.tm_page_count_label = QLabel("在线 0 / 总 0")
-                self.tm_page_count_label.setObjectName("StatusChip")
-            self.tm_page_count_label.setWordWrap(False)
-            self.tm_page_count_label.setFixedHeight(30)
-            self.tm_page_count_label.setMinimumHeight(30)
-            self.tm_page_count_label.setMaximumHeight(30)
-            self.tm_page_count_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            self.tm_page_combo.setFixedHeight(30)
-            self.tm_page_combo.setMinimumHeight(30)
-            self.tm_page_combo.setMaximumHeight(30)
+
     def _build_tm_debug_action_buttons(self, layout):
         specs = self._tm_action_button_specs()
         debug_specs = [
@@ -357,52 +424,288 @@ class UiBuilderMixin:
                     tooltip=spec["tooltip"],
                 )
             )
-    def _tm_page_combo_label(self, item):
-        client_id = (item.get("client_id") or "").strip() or "-"
-        page_type = (item.get("page_type") or "").strip() or "页面"
-        profile = self._tm_client_sync_profile(item)
-        state_tag_map = {
-            "syncable": "[可同步]",
-            "stale": "[不可同步]",
-            "online": "[在线]",
-            "offline": "[离线]",
-        }
-        online_tag = state_tag_map.get(profile.get("state"), "[离线]")
+    def _format_tm_page_option_label(
+        self, page, bound_client_id="", current_client_id=""
+    ):
+        if not isinstance(page, dict):
+            return "无效页面"
+
+        client_id = str(page.get("client_id") or "").strip()
+        page_type = str(page.get("page_type") or "").strip()
+        url = (
+            self._page_full_url(page)
+            or str(
+                page.get("url")
+                or page.get("page_url")
+                or page.get("normalized_url")
+                or ""
+            ).strip()
+        )
+        if not url:
+            conversation_id = self._page_chatgpt_conversation_id(page)
+            if conversation_id:
+                url = f"https://chatgpt.com/c/{conversation_id}"
+            else:
+                url = "未知页面 URL"
+
+        visible = str(page.get("visible") or "").strip().lower()
+        focus = str(page.get("focus") or "").strip().lower()
+        responding = str(page.get("responding") or "").strip().lower()
+        state = str(page.get("state") or "").strip().lower()
+        input_ready = str(page.get("input") or "").strip().lower()
+
+        tags = []
+        is_online = self._page_is_online(page)
+        if is_online:
+            tags.append("在线")
+        else:
+            tags.append("离线")
+
+        if bound_client_id and client_id == bound_client_id:
+            tags.append("已绑定")
+
+        if current_client_id and client_id == current_client_id:
+            tags.append("当前对话")
+        elif visible == "hidden":
+            tags.append("后台")
+        elif focus in {"yes", "true", "1"}:
+            tags.append("焦点")
+
         if page_type == "conversation":
-            type_text = "对话页"
+            tags.append("对话")
         elif page_type == "home":
-            type_text = "首页"
-        else:
-            type_text = page_type
-        conv = self._short_conv_id(self._client_conversation_id(item))
-        path_hint = self._short_page_label(item)
-        last_focus_ago = self._format_last_seen_ago(item.get("last_focus_at"))
-        if last_focus_ago and last_focus_ago != "-":
-            focus_text = f"焦点{last_focus_ago}"
-        else:
-            focus_text = self._format_last_seen_ago(item.get("last_seen"))
-        return (
-            f"{online_tag} {type_text} | {client_id} | {path_hint} | {focus_text}"
+            tags.append("首页")
+        elif page_type:
+            tags.append(page_type)
+
+        tag_text = "".join(f"[{tag}]" for tag in tags)
+        if tag_text:
+            return f"{tag_text} {url}"
+        return url
+
+    def _tm_page_combo_label(self, item, bound_client_id="", current_client_id=""):
+        return self._format_tm_page_option_label(
+            item,
+            bound_client_id=bound_client_id,
+            current_client_id=current_client_id,
         )
 
+    TM_PAGE_ITEM_DICT_ROLE = Qt.UserRole + 1
+
+    def _tm_page_combo_client_id_from_data(self, data):
+        if isinstance(data, dict):
+            return str(data.get("client_id") or "").strip()
+        return str(data or "").strip()
+
+    def _tm_page_combo_page_from_index(self, index):
+        if not hasattr(self, "tm_page_combo") or index < 0:
+            return None
+        combo = self.tm_page_combo
+        page = combo.itemData(index, self.TM_PAGE_ITEM_DICT_ROLE)
+        if isinstance(page, dict):
+            return page
+        client_id = self._tm_page_combo_client_id_from_data(
+            combo.itemData(index, Qt.UserRole)
+        )
+        if client_id:
+            return self._find_tm_client_by_client_id(client_id)
+        return None
+
+    def _tm_page_combo_find_index_by_client_id(self, client_id):
+        client_id = str(client_id or "").strip()
+        if not client_id or not hasattr(self, "tm_page_combo"):
+            return -1
+        for idx in range(self.tm_page_combo.count()):
+            if self._tm_page_combo_client_id_from_data(
+                self.tm_page_combo.itemData(idx, Qt.UserRole)
+            ) == client_id:
+                return idx
+        return -1
+
+    def _find_combo_index_by_client_id(self, client_id):
+        return self._tm_page_combo_find_index_by_client_id(client_id)
+
+    def _tm_page_combo_find_index_for_page(self, page):
+        if not isinstance(page, dict) or not hasattr(self, "tm_page_combo"):
+            return -1
+        target_instance = (page.get("page_instance_id") or "").strip()
+        target_conv = (page.get("conversation_id") or "").strip()
+        if not target_conv:
+            target_conv = (
+                self._client_conversation_id(page) if hasattr(self, "_client_conversation_id") else ""
+            )
+        target_client = (page.get("client_id") or "").strip()
+        for idx in range(self.tm_page_combo.count()):
+            item_page = self._tm_page_combo_page_from_index(idx)
+            if not isinstance(item_page, dict):
+                continue
+            item_instance = (item_page.get("page_instance_id") or "").strip()
+            item_conv = (item_page.get("conversation_id") or "").strip()
+            if not item_conv and hasattr(self, "_client_conversation_id"):
+                item_conv = self._client_conversation_id(item_page)
+            item_client = (item_page.get("client_id") or "").strip()
+            if target_instance and item_instance == target_instance:
+                return idx
+            if (
+                target_conv
+                and item_conv == target_conv
+                and (not target_client or item_client == target_client)
+            ):
+                return idx
+        if target_client:
+            return self._tm_page_combo_find_index_by_client_id(target_client)
+        return -1
+
+    def _pick_tm_page_selector_restore_index(self, pages, session=None):
+        if not pages or not hasattr(self, "tm_page_combo"):
+            return -1
+
+        remote = normalize_remote_chatgpt(
+            session.remote_chatgpt if session else None
+        )
+        bound_instance = (remote.get("page_instance_id") or "").strip()
+        bound_conv = (
+            self._remote_conversation_id(remote)
+            if hasattr(self, "_remote_conversation_id")
+            else (remote.get("conversation_id") or "").strip()
+        )
+        bound_client = (remote.get("client_id") or "").strip()
+        manual_instance = (
+            getattr(self, "_manual_current_tm_page_instance_id", "") or ""
+        ).strip()
+        manual_conv = (
+            getattr(self, "_manual_current_tm_conversation_id", "") or ""
+        ).strip()
+        manual_client = (getattr(self, "_manual_current_tm_client_id", "") or "").strip()
+
+        def page_index_in_list(match_fn):
+            for idx, item in enumerate(pages):
+                if isinstance(item, dict) and match_fn(item):
+                    return idx
+            return -1
+
+        def combo_index_for_list_index(list_index):
+            if list_index < 0:
+                return -1
+            target = pages[list_index]
+            return self._tm_page_combo_find_index_for_page(target)
+
+        if bound_instance:
+            list_idx = page_index_in_list(
+                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance
+            )
+            combo_idx = combo_index_for_list_index(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        if bound_conv:
+            list_idx = page_index_in_list(
+                lambda p: (
+                    (self._client_conversation_id(p) if hasattr(self, "_client_conversation_id") else (p.get("conversation_id") or "").strip())
+                    == bound_conv
+                )
+            )
+            combo_idx = combo_index_for_list_index(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        if manual_instance:
+            list_idx = page_index_in_list(
+                lambda p: (p.get("page_instance_id") or "").strip() == manual_instance
+            )
+            combo_idx = combo_index_for_list_index(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        if manual_conv:
+            for idx, item in enumerate(pages):
+                if not isinstance(item, dict):
+                    continue
+                item_conv = (
+                    self._client_conversation_id(item)
+                    if hasattr(self, "_client_conversation_id")
+                    else (item.get("conversation_id") or "").strip()
+                )
+                if item_conv != manual_conv:
+                    continue
+                if self._tm_page_is_online_simple(item):
+                    combo_idx = combo_index_for_list_index(idx)
+                    if combo_idx >= 0:
+                        return combo_idx
+
+        for candidate_client in (manual_client, bound_client):
+            if not candidate_client:
+                continue
+            combo_idx = self._tm_page_combo_find_index_by_client_id(candidate_client)
+            if combo_idx >= 0:
+                return combo_idx
+
+        for idx, item in enumerate(pages):
+            if isinstance(item, dict) and self._tm_page_is_online_simple(item):
+                combo_idx = combo_index_for_list_index(idx)
+                if combo_idx >= 0:
+                    return combo_idx
+
+        return 0 if pages else -1
+
+    def _page_is_online(self, item):
+        """判断 Tampermonkey 页面是否在线（仅心跳/轮询新鲜度）。"""
+        if hasattr(self, "_tm_page_is_online_simple"):
+            return self._tm_page_is_online_simple(item)
+        if not isinstance(item, dict):
+            return False
+        client_id = str(item.get("client_id") or "").strip()
+        if not client_id:
+            return False
+        return not self._page_is_stale(item)
+
+    def _tm_page_combo_apply_item_colors(self, index, page):
+        if not hasattr(self, "tm_page_combo") or index < 0:
+            return
+        if not isinstance(page, dict):
+            return
+
+        combo = self.tm_page_combo
+        is_online = self._page_is_online(page)
+        if is_online:
+            combo.setItemData(index, QColor("#16a34a"), Qt.ForegroundRole)
+        else:
+            combo.setItemData(index, QColor("#6b7280"), Qt.ForegroundRole)
+
     def _tm_page_combo_tooltip(self, item):
-        client_id = (item.get("client_id") or "").strip() or "-"
-        page_url = (item.get("page_url") or "").strip() or "-"
-        conv = self._client_conversation_id(item) or "-"
-        profile = self._tm_client_sync_profile(item)
-        return "\n".join([
-            f"client_id: {client_id}",
-            f"conversation_id: {conv}",
-            f"url: {page_url}",
-            f"page_type: {(item.get('page_type') or '-').strip() or '-'}",
-            f"visibility: {profile.get('visibility') or '-'}",
-            f"has_focus: {'yes' if item.get('has_focus') else 'no'}",
-            f"last_focus: {self._format_last_seen_ago(item.get('last_focus_at'))}",
-            f"heartbeat: {self._format_last_seen_ago(item.get('last_seen'))}",
-        ])
+        self._maybe_log_conversation_id_mismatch(item)
+
+        full_url = self._page_full_url(item) or "-"
+        chatgpt_id = self._page_chatgpt_conversation_id(item) or "-"
+        client_id = (item.get("client_id") or "-").strip() or "-"
+        page_instance_id = (item.get("page_instance_id") or "-").strip() or "-"
+        type_text = self._page_type_text(item)
+        visible_text = self._page_visible_text(item)
+        focus_text = "有焦点" if self._page_has_focus(item) else "无焦点"
+        input_text = self._page_input_text(item)
+        responding_text = self._page_responding_text(item)
+        syncable_text = self._page_syncable_text(item)
+
+        last_seen_text = self._format_last_seen_ago(item.get("last_seen"))
+
+        return (
+            f"完整URL：{full_url}\n"
+            f"conversation_id：{chatgpt_id}\n"
+            f"client_id：{client_id}\n"
+            f"page_instance_id：{page_instance_id}\n"
+            f"last_seen：{last_seen_text}\n"
+            f"页面类型：{type_text}\n"
+            f"窗口：{visible_text}\n"
+            f"焦点：{focus_text}（仅辅助状态，不影响列表显示）\n"
+            f"可输入：{input_text}\n"
+            f"正在生成：{responding_text}\n"
+            f"可同步：{syncable_text}"
+        )
+
     def _tm_page_combo_sort_key(self, item):
         profile = self._tm_client_sync_profile(item)
         state_rank = {
+            "sendable": 4,
             "syncable": 3,
             "online": 2,
             "stale": 1,
@@ -413,69 +716,214 @@ class UiBuilderMixin:
         last_seen = float(item.get("last_seen") or 0)
         return (state_rank, conv_rank, last_seen)
 
-    def _tm_page_selector_signature(self, clients):
-        rows = []
-        for item in clients:
-            rows.append((
-                item.get("client_id") or "",
-                item.get("page_instance_id") or "",
-                item.get("page_type") or "",
-                item.get("conversation_id") or "",
-                item.get("online"),
-                item.get("visible") or item.get("visibility_state") or "",
-                item.get("has_focus"),
-                int(float(item.get("last_seen") or 0)),
-            ))
-        return tuple(rows)
+    def _tm_page_selector_signature(self, pages):
+        now = time.time()
+        signature_items = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            last_seen = float(page.get("last_seen") or 0)
+            last_seen_bucket = int(last_seen // 2) if last_seen > 0 else 0
+            liveness = get_page_liveness(page, now=now)
+            signature_items.append(
+                (
+                    page.get("client_id") or "",
+                    page.get("page_instance_id") or "",
+                    page.get("conversation_id") or "",
+                    page.get("url")
+                    or page.get("page_url")
+                    or page.get("normalized_url")
+                    or "",
+                    page.get("visible") or page.get("visibility_state") or "",
+                    page.get("focus")
+                    or page.get("has_focus")
+                    or page.get("focused")
+                    or "",
+                    page.get("responding") or page.get("is_responding") or "",
+                    page.get("input") or page.get("can_accept_input") or "",
+                    page.get("state") or page.get("response_state") or "",
+                    is_page_online(page, now=now),
+                    liveness,
+                    last_seen_bucket,
+                )
+            )
+        return tuple(signature_items)
 
-    def _refresh_tm_page_selector(self, summary=None):
+    def _update_tm_page_selector_display_state(self, index=-1):
+        """自动刷新后仅更新展示/提示，不写入 manual_current_tm_client_id。"""
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None or combo.count() <= 0:
+            return
+        if index < 0:
+            index = combo.currentIndex()
+        if index < 0:
+            return
+        page = None
+        if hasattr(self, "_tm_page_combo_page_from_index"):
+            page = self._tm_page_combo_page_from_index(index)
+        if isinstance(page, dict) and hasattr(self, "_tm_selector_action_hint_for_page"):
+            self._set_tm_action_hint(self._tm_selector_action_hint_for_page(page))
+        if hasattr(self, "_refresh_manual_current_page_display"):
+            self._refresh_manual_current_page_display()
+
+    def _refresh_tm_page_selector(self, status=None):
         if not hasattr(self, "tm_page_combo"):
             return
-        summary = summary or self._tm_summary_for_session()
-        clients = list(self._last_bridge_status.get("tampermonkey_clients") or [])
-        clients.sort(key=self._tm_page_combo_sort_key, reverse=True)
+        full_status = status if isinstance(status, dict) else None
+        client_keys = (
+            "clients",
+            "tm_clients",
+            "tampermonkey_clients",
+            "pages",
+            "tm_pages",
+        )
+        if not full_status or not any(key in full_status for key in client_keys):
+            full_status = getattr(self, "_last_bridge_status", None) or {}
+        pages = self._extract_tm_pages_from_status(full_status)
+        has_page_source_keys = any(key in full_status for key in client_keys)
+
+        if not pages and self.tm_page_combo.count() > 0 and not has_page_source_keys:
+            self._append_log(
+                "[TM_SELECTOR][KEEP_LAST] "
+                "reason=empty_status_without_page_source "
+                f"combo_count={self.tm_page_combo.count()} "
+                f"status_keys={list(full_status.keys())}",
+                echo=False,
+            )
+            return
+        self._append_log(
+            "[TM_SELECTOR][SOURCE] "
+            f"status_keys={list((getattr(self, '_last_bridge_status', None) or {}).keys())} "
+            f"pages={len(pages)} "
+            f"clients={[p.get('client_id') for p in pages]}",
+            echo=False,
+        )
+        if not pages:
+            self._append_log(
+                "[TM_SELECTOR][EMPTY] "
+                "reason=no_pages_extracted_from_status "
+                f"status_keys={list(full_status.keys())}",
+                echo=False,
+            )
+        summary = self._tm_summary_for_session()
+        online_count, total_count = self._tm_display_counts_from_status(
+            full_status, summary=summary
+        )
+        bound_client_id = self._session_bound_client_id()
+        if not bound_client_id:
+            bound_client_id = str(full_status.get("bound_client_id") or "").strip()
+        current_client_id = str(
+            full_status.get("tampermonkey_client_id") or ""
+        ).strip()
+
+        pages.sort(key=self._tm_page_combo_sort_key, reverse=True)
+        if hasattr(self, "tm_page_combo") and self.tm_page_combo.count() > 0:
+            for item in pages:
+                client_id = (item.get("client_id") or "").strip()
+                if not client_id:
+                    continue
+                idx = self._tm_page_combo_find_index_by_client_id(client_id)
+                if idx < 0:
+                    continue
+                old_label = self.tm_page_combo.itemText(idx)
+                new_label = self._tm_page_combo_label(
+                    item,
+                    bound_client_id=bound_client_id,
+                    current_client_id=current_client_id,
+                )
+                if old_label and new_label and old_label != new_label:
+                    self._append_log(
+                        "[PAGE_SYNC][STALE_URL] "
+                        f"old_url={old_label} new_url={new_label} "
+                        f"client_id={client_id} "
+                        f"page_instance_id={(item.get('page_instance_id') or '-').strip() or '-'}",
+                        echo=False,
+                    )
         if hasattr(self, "tm_page_count_label"):
             self.tm_page_count_label.setText(
-                f"在线 {summary.get('online_clients', 0)} / 总 {summary.get('total_clients', 0)}"
+                f"在线 {online_count} / 总 {total_count}"
             )
-        signature = self._tm_page_selector_signature(clients)
-        if getattr(self, "_last_tm_page_selector_signature", None) == signature:
+        page_selector_key = self._tm_page_selector_signature(pages)
+        if page_selector_key == getattr(self, "_last_page_selector_key", ""):
             return
-        self._last_tm_page_selector_signature = signature
-        keep_id = ""
-        if self.tm_page_combo.currentIndex() >= 0:
-            keep_id = (self.tm_page_combo.currentData(Qt.UserRole) or "").strip()
-        session_bound = self._session_bound_client_id()
+        self._last_page_selector_key = page_selector_key
+        manual_client_id = (
+            getattr(self, "_manual_current_tm_client_id", "") or ""
+        ).strip()
+        session_bound = bound_client_id
+        self._tm_page_selector_refreshing = True
+        self.tm_page_combo.setUpdatesEnabled(False)
         self.tm_page_combo.blockSignals(True)
+
         self.tm_page_combo.clear()
-        for item in clients:
-            client_id = (item.get("client_id") or "").strip()
-            if not client_id:
-                continue
-            label = self._tm_page_combo_label(item)
+
+        for item in pages:
+            label = self._tm_page_combo_label(
+                item,
+                bound_client_id=bound_client_id,
+                current_client_id=current_client_id,
+            )
             idx = self.tm_page_combo.count()
-            self.tm_page_combo.addItem(label, client_id)
+            client_id = (item.get("client_id") or "").strip()
+            self.tm_page_combo.addItem(label)
+            self.tm_page_combo.setItemData(
+                idx,
+                client_id if client_id else item,
+                Qt.UserRole,
+            )
+            self.tm_page_combo.setItemData(
+                idx, dict(item), self.TM_PAGE_ITEM_DICT_ROLE
+            )
             self.tm_page_combo.setItemData(
                 idx, self._tm_page_combo_tooltip(item), Qt.ToolTipRole
             )
-        select_id = ""
-        for candidate in (keep_id, session_bound):
-            if not candidate:
-                continue
-            if self.tm_page_combo.findData(candidate, Qt.UserRole) >= 0:
-                select_id = candidate
-                break
-        if select_id:
-            idx = self.tm_page_combo.findData(select_id, Qt.UserRole)
-            self.tm_page_combo.setCurrentIndex(idx)
-        elif self.tm_page_combo.count() > 0:
-            self.tm_page_combo.setCurrentIndex(0)
-        self.tm_page_combo.blockSignals(False)
+            self._tm_page_combo_apply_item_colors(idx, item)
+            if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
+                self._append_log(
+                    "[TM_SELECTOR][ITEM] "
+                    f"index={idx} "
+                    f"label={label} "
+                    f"client_id={(item.get('client_id') or '-').strip() or '-'} "
+                    f"page_type={(item.get('page_type') or '-').strip() or '-'} "
+                    f"conversation_id={(item.get('conversation_id') or '-').strip() or '-'} "
+                    f"visible={(item.get('visible') or '-').strip() or '-'} "
+                    f"focus={(item.get('focus') or '-').strip() or '-'} "
+                    f"responding={(item.get('responding') or '-').strip() or '-'} "
+                    f"state={(item.get('state') or '-').strip() or '-'} "
+                    f"input={(item.get('input') or '-').strip() or '-'} "
+                    f"url={(item.get('url') or item.get('page_url') or item.get('normalized_url') or '-').strip() or '-'}",
+                    echo=False,
+                )
+
+        session = self._current_session() if hasattr(self, "_current_session") else None
+        restore_index = self._pick_tm_page_selector_restore_index(pages, session=session)
+        if restore_index < 0 and self.tm_page_combo.count() > 0:
+            restore_index = 0
+
+        try:
+            if restore_index >= 0:
+                self.tm_page_combo.setCurrentIndex(restore_index)
+        finally:
+            self._tm_page_selector_refreshing = False
+            self.tm_page_combo.blockSignals(False)
+            self.tm_page_combo.setUpdatesEnabled(True)
+
+        self._append_log(
+            "[PAGE_SELECTOR][AUTO_REFRESH] "
+            f"restore_index={restore_index} "
+            f"manual_client_id={manual_client_id or '-'} "
+            f"session_bound={session_bound or '-'} "
+            f"page_count={self.tm_page_combo.count()}",
+            echo=False,
+        )
+        self._update_tm_page_selector_display_state(restore_index)
     def _selected_tm_page_client_id(self):
         if hasattr(self, "tm_page_combo") and self.tm_page_combo.count() > 0:
-            client_id = self.tm_page_combo.currentData(Qt.UserRole)
+            client_id = self._tm_page_combo_client_id_from_data(
+                self.tm_page_combo.currentData(Qt.UserRole)
+            )
             if client_id:
-                return str(client_id).strip()
+                return client_id
         return self._selected_tm_client_id_from_table()
     def _selected_tm_client_id_from_table(self):
         if not hasattr(self, "tm_pages_table"):
@@ -602,7 +1050,7 @@ class UiBuilderMixin:
         client_id = self._selected_tm_client_id_from_table()
         if not client_id or not hasattr(self, "tm_page_combo"):
             return
-        idx = self.tm_page_combo.findData(client_id, Qt.UserRole)
+        idx = self._tm_page_combo_find_index_by_client_id(client_id)
         if idx >= 0:
             self.tm_page_combo.setCurrentIndex(idx)
     def _build_ui(self):
@@ -627,733 +1075,10 @@ class UiBuilderMixin:
         self._apply_app_style()
         self._sync_page_url_detail_widgets()
     def _apply_app_style(self):
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background: #f0f2f5;
-            }
-            QTabWidget::pane {
-                border: 1px solid #e0e3e8;
-                border-radius: 8px;
-                background: #ffffff;
-                top: -1px;
-            }
-            QTabWidget#MainTabs::pane {
-                margin-top: 0px;
-                padding: 0px;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                top: -1px;
-            }
-            QTabWidget#MainTabs QTabBar::tab {
-                padding: 7px 16px;
-                margin-right: 2px;
-            }
-            QTabWidget#LogSubTabs::pane {
-                margin-top: 0px;
-                padding: 4px;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                top: -1px;
-            }
-            QTabWidget#LogSubTabs QTabBar::tab {
-                padding: 6px 14px;
-                margin-right: 2px;
-            }
-            QTabWidget#ChatSubTabs::pane {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background: #ffffff;
-                top: -1px;
-            }
-            QTabWidget#ChatSubTabs QTabBar::tab {
-                min-width: 120px;
-                min-height: 30px;
-                padding: 6px 14px;
-                border: 1px solid #d1d5db;
-                border-bottom: none;
-                background: #f8fafc;
-                color: #374151;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                margin-right: 2px;
-            }
-            QTabWidget#ChatSubTabs QTabBar::tab:selected {
-                background: #2563eb;
-                color: #ffffff;
-                border-color: #1d4ed8;
-                font-weight: 600;
-            }
-            QTabWidget#ChatSubTabs QTabBar::tab:hover:!selected {
-                background: #eff6ff;
-                color: #1d4ed8;
-            }
-            QLabel#LogSectionTitle {
-                font-size: 13px;
-                font-weight: 700;
-                color: #111827;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPlainTextEdit#RuntimeLogText {
-                font-family: Consolas, Monaco, monospace;
-                font-size: 12px;
-                border: 1px solid #d1d5db;
-                background: #ffffff;
-            }
-            QTabBar::tab {
-                background: #e8eaed;
-                color: #444;
-                padding: 8px 18px;
-                margin-right: 2px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                min-height: 20px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #111;
-                font-weight: 600;
-            }
-            QTabBar::tab:hover:!selected {
-                background: #dfe3e8;
-            }
-            QPushButton {
-                background: #2563eb;
-                color: #ffffff;
-                border: 1px solid #1d4ed8;
-                border-radius: 6px;
-                padding: 5px 12px;
-                min-height: 28px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #1d4ed8;
-                color: #ffffff;
-                border: 1px solid #1e40af;
-            }
-            QPushButton:pressed {
-                background: #1e40af;
-                color: #ffffff;
-                border: 1px solid #1e3a8a;
-            }
-            QPushButton:disabled {
-                background: #3b82f6;
-                color: #ffffff;
-                border: 1px solid #2563eb;
-            }
-            QPushButton[btnRole="blueSolid"],
-            QPushButton[btnRole="blueGraySolid"],
-            QPushButton[btnRole="primary"],
-            QPushButton[btnRole="action"],
-            QPushButton[btnRole="bluePrimary"],
-            QPushButton[btnRole="secondary"] {
-                background: #2563eb;
-                color: #ffffff;
-                border: 1px solid #1d4ed8;
-                font-weight: 600;
-            }
-            QPushButton[btnRole="blueSolid"]:hover,
-            QPushButton[btnRole="blueGraySolid"]:hover,
-            QPushButton[btnRole="primary"]:hover,
-            QPushButton[btnRole="action"]:hover,
-            QPushButton[btnRole="bluePrimary"]:hover,
-            QPushButton[btnRole="secondary"]:hover {
-                background: #1d4ed8;
-                color: #ffffff;
-                border-color: #1e40af;
-            }
-            QPushButton[btnRole="blueSolid"]:pressed,
-            QPushButton[btnRole="blueGraySolid"]:pressed,
-            QPushButton[btnRole="primary"]:pressed,
-            QPushButton[btnRole="action"]:pressed,
-            QPushButton[btnRole="bluePrimary"]:pressed,
-            QPushButton[btnRole="secondary"]:pressed {
-                background: #1e40af;
-                color: #ffffff;
-                border-color: #1e3a8a;
-            }
-            QPushButton[btnRole="blueSolid"]:disabled,
-            QPushButton[btnRole="blueGraySolid"]:disabled,
-            QPushButton[btnRole="primary"]:disabled,
-            QPushButton[btnRole="action"]:disabled,
-            QPushButton[btnRole="bluePrimary"]:disabled,
-            QPushButton[btnRole="secondary"]:disabled {
-                background: #3b82f6;
-                color: #ffffff;
-                border: 1px solid #2563eb;
-            }
-            QPushButton[btnRole="redSolid"],
-            QPushButton[btnRole="danger"],
-            QPushButton[btnRole="dangerPrimary"] {
-                background: #dc2626;
-                color: #ffffff;
-                border: 1px solid #b91c1c;
-                font-weight: 600;
-            }
-            QPushButton[btnRole="redSolid"]:hover,
-            QPushButton[btnRole="danger"]:hover,
-            QPushButton[btnRole="dangerPrimary"]:hover {
-                background: #b91c1c;
-                color: #ffffff;
-            }
-            QPushButton[btnRole="redSolid"]:pressed,
-            QPushButton[btnRole="danger"]:pressed,
-            QPushButton[btnRole="dangerPrimary"]:pressed {
-                background: #991b1b;
-                color: #ffffff;
-            }
-            QPushButton[btnRole="redSolid"]:disabled,
-            QPushButton[btnRole="danger"]:disabled,
-            QPushButton[btnRole="dangerPrimary"]:disabled {
-                background: #ef4444;
-                color: #ffffff;
-                border: 1px solid #dc2626;
-            }
-            QPushButton#PrimaryButton,
-            QPushButton#GhostButton,
-            QPushButton#CompactButton,
-            QPushButton#PrimaryButtonCompact,
-            QPushButton#NewSessionButton,
-            QPushButton#CopySessionUrlButton,
-            QPushButton#OpenSessionUrlButton,
-            QPushButton#CopyCurrentLogButton {
-                background: #2563eb;
-                color: #ffffff;
-                border: 1px solid #1d4ed8;
-                border-radius: 6px;
-                padding: 5px 12px;
-                font-weight: 600;
-            }
-            QPushButton#PrimaryButton:hover,
-            QPushButton#GhostButton:hover,
-            QPushButton#CompactButton:hover,
-            QPushButton#PrimaryButtonCompact:hover,
-            QPushButton#NewSessionButton:hover,
-            QPushButton#CopySessionUrlButton:hover,
-            QPushButton#OpenSessionUrlButton:hover,
-            QPushButton#CopyCurrentLogButton:hover {
-                background: #1d4ed8;
-                color: #ffffff;
-            }
-            QPushButton#PrimaryButton:pressed,
-            QPushButton#GhostButton:pressed,
-            QPushButton#CompactButton:pressed,
-            QPushButton#PrimaryButtonCompact:pressed,
-            QPushButton#NewSessionButton:pressed,
-            QPushButton#CopySessionUrlButton:pressed,
-            QPushButton#OpenSessionUrlButton:pressed,
-            QPushButton#CopyCurrentLogButton:pressed {
-                background: #1e40af;
-                color: #ffffff;
-            }
-            QPushButton#PrimaryButton:disabled,
-            QPushButton#GhostButton:disabled,
-            QPushButton#CompactButton:disabled,
-            QPushButton#PrimaryButtonCompact:disabled,
-            QPushButton#NewSessionButton:disabled,
-            QPushButton#CopySessionUrlButton:disabled,
-            QPushButton#OpenSessionUrlButton:disabled,
-            QPushButton#CopyCurrentLogButton:disabled {
-                background: #3b82f6;
-                color: #ffffff;
-                border: 1px solid #2563eb;
-            }
-            QPushButton#PrimaryButtonCompact {
-                font-size: 12px;
-                padding: 0px 10px;
-                min-height: 42px;
-            }
-            QPushButton#GhostButton {
-                padding: 4px 10px;
-            }
-            QPushButton#CompactButton {
-                padding: 3px 10px;
-                min-height: 20px;
-                font-size: 12px;
-            }
-            QPushButton#NewSessionButton {
-                padding: 8px 12px;
-                border-radius: 8px;
-            }
-            QPushButton#CopyCurrentLogButton {
-                min-height: 28px;
-                padding: 4px 12px;
-            }
-            QPushButton#CopySessionUrlButton,
-            QPushButton#OpenSessionUrlButton {
-                min-height: 26px;
-                padding: 3px 10px;
-            }
-            QPushButton#DangerButton,
-            QPushButton#DangerGhostButton {
-                background: #dc2626;
-                color: #ffffff;
-                border: 1px solid #b91c1c;
-                border-radius: 6px;
-                padding: 5px 12px;
-                font-weight: 600;
-            }
-            QPushButton#DangerButton:hover,
-            QPushButton#DangerGhostButton:hover {
-                background: #b91c1c;
-                color: #ffffff;
-            }
-            QPushButton#DangerButton:pressed,
-            QPushButton#DangerGhostButton:pressed {
-                background: #991b1b;
-                color: #ffffff;
-            }
-            QPushButton#DangerButton:disabled,
-            QPushButton#DangerGhostButton:disabled {
-                background: #ef4444;
-                color: #ffffff;
-                border: 1px solid #dc2626;
-            }
-            QPushButton#DangerGhostButton {
-                padding: 4px 10px;
-            }
-            QPushButton#WarningButton {
-                background: #f97316;
-                color: #ffffff;
-                border: 1px solid #ea580c;
-                border-radius: 6px;
-                padding: 5px 12px;
-                font-weight: 600;
-            }
-            QPushButton#WarningButton:hover {
-                background: #ea580c;
-                color: #ffffff;
-            }
-            QPushButton#WarningButton:pressed {
-                background: #c2410c;
-                color: #ffffff;
-            }
-            QPushButton#WarningButton:disabled {
-                background: #fb923c;
-                color: #ffffff;
-                border: 1px solid #f97316;
-            }
-            QPushButton#SuccessButton {
-                background: #16a34a;
-                color: #ffffff;
-                border: 1px solid #15803d;
-                border-radius: 6px;
-                padding: 5px 12px;
-                font-weight: 600;
-            }
-            QPushButton#SuccessButton:hover {
-                background: #15803d;
-                color: #ffffff;
-            }
-            QPushButton#SuccessButton:pressed {
-                background: #166534;
-                color: #ffffff;
-            }
-            QPushButton#SuccessButton:disabled {
-                background: #22c55e;
-                color: #ffffff;
-                border: 1px solid #16a34a;
-            }
-            QLabel#StatusChip {
-                background: #eef0f3;
-                border: 1px solid #e2e5ea;
-                border-radius: 8px;
-                padding: 4px 10px;
-                color: #444;
-                font-size: 12px;
-            }
-            QLabel#StatusChip[state="ok"] {
-                background: #e8f5e9;
-                border-color: #c8e6c9;
-                color: #1b5e20;
-            }
-            QLabel#StatusChip[state="warn"] {
-                background: #fff8e1;
-                border-color: #ffe082;
-                color: #8d6e00;
-            }
-            QLabel#StatusChip[state="error"] {
-                background: #ffebee;
-                border-color: #ef9a9a;
-                color: #b71c1c;
-            }
-            QLabel#StatusChip[state="info"] {
-                background: #eff6ff;
-                border-color: #bfdbfe;
-                color: #1d4ed8;
-            }
-            QLabel#StatusBadgeOk {
-                background: #dcfce7;
-                color: #166534;
-                border: 1px solid #86efac;
-                border-radius: 6px;
-                padding: 4px 10px;
-            }
-            QLabel#StatusBadgeWarn {
-                background: #fef3c7;
-                color: #92400e;
-                border: 1px solid #fcd34d;
-                border-radius: 6px;
-                padding: 4px 10px;
-            }
-            QLabel#StatusBadgeError {
-                background: #fee2e2;
-                color: #991b1b;
-                border: 1px solid #fca5a5;
-                border-radius: 6px;
-                padding: 4px 10px;
-            }
-            QLabel#StatusBadgeNeutral {
-                background: #f3f4f6;
-                color: #374151;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 4px 10px;
-            }
-            QLabel#TmBindMismatchHint {
-                color: #8d6e00;
-                font-size: 12px;
-                padding: 0px 4px;
-            }
-            QLabel#TmBindMismatchHint[state="info"] {
-                color: #1d4ed8;
-            }
-            QLabel#TmBindMismatchHint[state="warn"] {
-                color: #8d6e00;
-            }
-            QLabel#TmBindMismatchHint[state="error"] {
-                color: #b71c1c;
-            }
-            QLabel#StatusRelationLine {
-                color: #5b6472;
-                font-size: 12px;
-                padding: 0px 4px;
-            }
-            QWidget#ChatStatusBar {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QWidget#ChatPanel {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-            }
-            QWidget#ChatPanel[bindState="bound_online"] {
-                background: #ffffff;
-                border: 1px solid #b7e4c7;
-            }
-            QWidget#ChatPanel[bindState="bound_offline"] {
-                background: #ffffff;
-                border: 1px solid #fca5a5;
-            }
-            QWidget#ChatPanel[bindState="unbound_optional"] {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-            }
-            QWidget#ChatPanel[bindState="unbound_required"] {
-                background: #ffffff;
-                border: 1px solid #fcd34d;
-            }
-            QWidget#ChatPanel[bindState="pending_bind"],
-            QWidget#ChatPanel[bindState="waiting_bound_reopen"] {
-                background: #ffffff;
-                border: 1px solid #fcd34d;
-            }
-            QWidget#ChatPanel[bindState="prebound_home"] {
-                background: #ffffff;
-                border: 1px solid #b7e4c7;
-            }
-            QWidget#StatusDetailPanel {
-                background: #f8fafc;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QLabel#ChatBindWarning {
-                background: #fef2f2;
-                color: #991b1b;
-                border: 1px solid #fecaca;
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-size: 12px;
-            }
-            QWidget#JobTaskBar {
-                background: #eff6ff;
-                border: 1px solid #bfdbfe;
-                border-radius: 8px;
-            }
-            QLabel#JobTaskBarStatus {
-                color: #1e3a8a;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QWidget#SessionSidebar {
-                background: #f3f4f6;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-            }
-            QWidget#CurrentSessionHeader {
-                background: transparent;
-            }
-            QLabel#CurrentSessionTitle {
-                color: #111827;
-                font-size: 15px;
-                font-weight: 600;
-                padding: 0px 4px;
-            }
-            QLabel#CurrentSessionUrlLabel {
-                font-size: 12px;
-                color: #475569;
-                background: #f8fafc;
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
-                padding: 4px 8px;
-            }
-            QListWidget#SessionList {
-                background: #f3f4f6;
-                border: none;
-                outline: none;
-            }
-            QListWidget#SessionList::item {
-                border: none;
-                background: transparent;
-                padding: 0px;
-                margin: 0px;
-            }
-            QListWidget#SessionList::item:selected {
-                background: transparent;
-                border: none;
-            }
-            QWidget#SessionListItem {
-                background: transparent;
-                border: none;
-            }
-            QFrame#SessionCard {
-                background: #fff7ed;
-                border: 1px solid #fed7aa;
-                border-radius: 8px;
-            }
-            QFrame#SessionCard[currentSession="true"] {
-                background: #ecfdf5;
-                border: 1px solid #86efac;
-            }
-            QFrame#SessionCard:hover {
-                background: #f8fafc;
-                border-color: #93c5fd;
-            }
-            QFrame#SessionCard[currentSession="true"]:hover {
-                background: #dcfce7;
-                border-color: #4ade80;
-            }
-            QFrame#SessionListLeftBar[currentSession="true"] {
-                background: #22c55e;
-                min-width: 5px;
-                max-width: 5px;
-            }
-            QLabel#SessionItemTitle {
-                color: #111827;
-                font-size: 14px;
-                font-weight: 600;
-                background: transparent;
-            }
-            QLabel#SessionItemSubtitle {
-                color: #6b7280;
-                font-size: 12px;
-                background: transparent;
-            }
-            QLabel#SessionBindStatusLabel {
-                font-size: 11px;
-                padding: 1px 6px;
-                border-radius: 6px;
-            }
-            QLabel#SessionPendingDot {
-                color: #2563eb;
-                font-size: 14px;
-                background: transparent;
-            }
-            QLabel#SessionCurrentBadge {
-                font-size: 10px;
-                font-weight: 600;
-            }
-            QLineEdit#SessionSearchInput {
-                background: #ffffff;
-                border: 1px solid #d8dce3;
-                border-radius: 8px;
-                padding: 6px 10px;
-            }
-            QWidget#ChatPage {
-                background: #f8fafc;
-            }
-            QWidget#ChatHeaderBlock {
-                background: #ffffff;
-                border: none;
-            }
-            QScrollArea#ChatScrollArea {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-            }
-            QScrollArea#ChatScrollArea[bindState="bound_online"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="bound_offline"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_optional"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_required"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="pending_bind"],
-            QScrollArea#ChatScrollArea[bindState="waiting_bound_reopen"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="prebound_home"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QWidget#ChatViewport {
-                background: #f7f8fa;
-            }
-            QWidget#ChatViewport[bindState="bound_online"],
-            QWidget#ChatViewport[bindState="bound_offline"],
-            QWidget#ChatViewport[bindState="unbound_optional"],
-            QWidget#ChatViewport[bindState="unbound_required"],
-            QWidget#ChatViewport[bindState="pending_bind"],
-            QWidget#ChatViewport[bindState="waiting_bound_reopen"],
-            QWidget#ChatViewport[bindState="prebound_home"] {
-                background: #f7f8fa;
-            }
-            QLabel#EmptyTitle {
-                color: #6b7280;
-                font-size: 16px;
-                font-weight: 600;
-            }
-            QLabel#EmptySubtitle {
-                color: #9ca3af;
-                font-size: 13px;
-            }
-            QFrame#SystemBubble {
-                background: #eef0f3;
-                border: none;
-                border-radius: 8px;
-            }
-            QLabel#SystemBubbleBody {
-                color: #666;
-                font-size: 12px;
-                background: transparent;
-            }
-            QFrame#ChatBubble[bubbleRole="user"] {
-                background: #dcf8c6;
-                border: 1px solid #c5e8b0;
-                border-radius: 12px;
-            }
-            QFrame#ChatBubble[bubbleRole="assistant"] {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 12px;
-            }
-            QFrame#ChatBubble[bubbleRole="error"] {
-                background: #fef2f2;
-                border: 1px solid #fecaca;
-                border-radius: 10px;
-            }
-            QLabel#BubbleHeader {
-                color: #555;
-            }
-            QFrame#ChatBubble[bubbleRole="user"] QLabel#BubbleHeader {
-                color: #3b6b35;
-            }
-            QFrame#ChatBubble[bubbleRole="error"] QLabel#BubbleBody {
-                color: #7f1d1d;
-            }
-            QLabel#BubbleBody {
-                color: #111;
-            }
-            QWidget#ChatInputBlock {
-                background: transparent;
-            }
-            QTextEdit#MessageInput {
-                background: #ffffff;
-                border: 1px solid #d5d9e0;
-                border-radius: 10px;
-                padding: 10px 12px;
-                color: #111;
-            }
-            QTextEdit#MessageInput:focus {
-                border: 1px solid #2563eb;
-            }
-            QLabel#InputHint {
-                color: #9ca3af;
-                font-size: 12px;
-            }
-            QWidget#TaskStatusBar {
-                background: #f8fafc;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QLabel#TaskStatusSummary {
-                font-size: 12px;
-                color: #111827;
-            }
-            QWidget#TaskDetailPanel {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QScrollArea#TaskDetailScroll {
-                background: transparent;
-                border: none;
-            }
-            QWidget#TaskDetailContent {
-                background: #ffffff;
-            }
-            QFrame#TaskCard {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-            }
-            QLabel#TaskCardTitle {
-                font-size: 13px;
-                font-weight: 700;
-                color: #111827;
-            }
-            QLabel#TaskFieldName {
-                font-size: 12px;
-                font-weight: 600;
-                color: #374151;
-            }
-            QLabel#TaskFieldValue {
-                font-size: 12px;
-                color: #111827;
-            }
-            QLabel#TaskFlowLabel {
-                font-size: 12px;
-                color: #111827;
-            }
-            QLabel#TaskHintLabel {
-                font-size: 12px;
-                color: #6b7280;
-            }
-            QPlainTextEdit#JobLogText {
-                background: #111827;
-                color: #d1d5db;
-                border: 1px solid #374151;
-                border-radius: 8px;
-                padding: 8px;
-                font-family: Consolas, Monaco, monospace;
-                font-size: 12px;
-            }
-            """
-        )
+        from app.ui.styles import APP_STYLESHEET
+
+        self.setStyleSheet(APP_STYLESHEET)
+
     def _build_chat_page(self):
         page = QWidget()
         page.setObjectName("ChatPage")
@@ -1361,10 +1086,18 @@ class UiBuilderMixin:
         page_layout.setContentsMargins(8, 6, 8, 8)
         page_layout.setSpacing(8)
 
+        self.chat_page = page
+        self.chat_page_layout = page_layout
+
         self._chat_status_group = self._build_chat_status_bar()
         self.bridge_status_panel = QFrame()
         self.bridge_status_panel.setObjectName("BridgeStatusPanel")
-        self.bridge_status_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.bridge_status_panel.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.bridge_status_panel.setMinimumHeight(0)
+        self.bridge_status_panel.setMaximumHeight(16777215)
         panel_layout = QVBoxLayout(self.bridge_status_panel)
         panel_layout.setContentsMargins(8, 4, 8, 4)
         panel_layout.setSpacing(0)
@@ -1375,10 +1108,7 @@ class UiBuilderMixin:
 
         tool_col = QVBoxLayout()
         tool_col.setSpacing(4)
-        self._build_tm_action_buttons(
-            tool_col,
-            include_page_selector=False,
-        )
+        self._build_tm_action_buttons(tool_col)
         page_layout.addLayout(tool_col, 0)
 
         self._chat_panel = self._build_chat_panel()
@@ -1390,26 +1120,106 @@ class UiBuilderMixin:
         btn = getattr(self, "toggle_status_detail_btn", None)
         if panel is None or btn is None:
             return
+
         visible = not panel.isVisible()
         panel.setVisible(visible)
         btn.setText("收起" if visible else "详情")
+
+        panel.updateGeometry()
+
+        status_group = getattr(self, "_chat_status_group", None)
+        if status_group is not None:
+            status_group.updateGeometry()
+
+        bridge_panel = getattr(self, "bridge_status_panel", None)
+        if bridge_panel is not None:
+            bridge_panel.updateGeometry()
+
         self._sync_bridge_status_panel_height()
+        QTimer.singleShot(0, self._sync_bridge_status_panel_height)
+
+    def _refresh_status_page_relation_label_heights(self):
+        for attr in (
+            "current_page_status_label",
+            "manual_current_page_status_label",
+            "bound_page_status_label",
+            "sync_target_status_label",
+        ):
+            label = getattr(self, attr, None)
+            if label is None or not label.isVisible():
+                continue
+            label.adjustSize()
+            width = max(label.width(), label.sizeHint().width(), 1)
+            wrapped_height = label.heightForWidth(width)
+            if wrapped_height > 0:
+                label.setMinimumHeight(max(52, wrapped_height))
 
     def _sync_bridge_status_panel_height(self):
         panel = getattr(self, "bridge_status_panel", None)
         if panel is None:
             return
-        base_h = 44
+
         detail_panel = getattr(self, "tm_status_detail_panel", None)
-        if detail_panel is not None and detail_panel.isVisible():
-            base_h += detail_panel.sizeHint().height() + 6
-        mismatch = getattr(self, "tm_bind_mismatch_label", None)
-        if mismatch is not None and (mismatch.text() or "").strip():
-            base_h += 24
-        h = max(48, base_h)
-        panel.setFixedHeight(h)
-        panel.setMinimumHeight(h)
+        detail_visible = detail_panel is not None and detail_panel.isVisible()
+
+        panel.setMinimumHeight(0)
         panel.setMaximumHeight(16777215)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        panel.updateGeometry()
+
+        status_group = getattr(self, "_chat_status_group", None)
+        if not detail_visible:
+            for widget in (status_group, detail_panel):
+                if widget is None:
+                    continue
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                widget.updateGeometry()
+
+        panel_layout = panel.layout()
+        if panel_layout is not None:
+            panel_layout.invalidate()
+            panel_layout.activate()
+
+        if detail_visible:
+            for widget in (detail_panel, status_group):
+                if widget is None:
+                    continue
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                widget.updateGeometry()
+
+            self._refresh_status_page_relation_label_heights()
+            page_grid_host = getattr(self, "_status_page_grid_host", None)
+            if page_grid_host is not None:
+                page_grid_host.adjustSize()
+                page_grid_host.setMinimumHeight(page_grid_host.sizeHint().height())
+
+            if detail_panel is not None:
+                detail_panel.adjustSize()
+
+        chat_layout = getattr(self, "chat_page_layout", None)
+        if chat_layout is not None:
+            chat_layout.invalidate()
+            chat_layout.activate()
+
+        chat_page = getattr(self, "chat_page", None)
+        if chat_page is not None:
+            chat_page.updateGeometry()
+
+        if status_group is not None and status_group.isVisible():
+            status_group.adjustSize()
+            required_height = status_group.sizeHint().height()
+
+            panel_layout = panel.layout()
+            if panel_layout is not None:
+                margins = panel_layout.contentsMargins()
+                required_height += margins.top() + margins.bottom()
+
+            panel.setMinimumHeight(max(0, required_height))
+            panel.updateGeometry()
 
     def _build_log_page(self):
         page = QWidget()
@@ -1429,41 +1239,21 @@ class UiBuilderMixin:
         run_log_toolbar = QHBoxLayout()
         run_log_toolbar.setContentsMargins(0, 0, 0, 0)
         run_log_toolbar.setSpacing(6)
-        self.refresh_log_btn = QPushButton("刷新日志")
-        self.refresh_log_btn.setObjectName("PrimaryButton")
-        self.refresh_log_btn.setToolTip("从 log.txt 重新加载最近 1000 行（后台线程）")
-        self.refresh_log_btn.clicked.connect(self._on_refresh_log_clicked)
-        run_log_toolbar.addWidget(self.refresh_log_btn)
         self.copy_current_log_btn = QPushButton("复制日志")
         self.copy_current_log_btn.setObjectName("CopyCurrentLogButton")
         self.copy_current_log_btn.setToolTip(
-            "复制当前选中的日志子页内容（运行日志、油猴事件、发出消息、服务状态、任务日志）"
+            "复制当前选中的日志子页内容（运行日志、油猴事件、发出消息、服务状态）"
         )
         self.copy_current_log_btn.clicked.connect(self._copy_current_log_tab_text)
         run_log_toolbar.addWidget(self.copy_current_log_btn)
         self.clear_runtime_log_btn = QPushButton("清空运行日志")
         self.clear_runtime_log_btn.setObjectName("DangerButton")
-        self.clear_runtime_log_btn.clicked.connect(self._clear_runtime_log)
+        if not getattr(self, "_clear_log_button_connected", False):
+            self.clear_runtime_log_btn.clicked.connect(self._on_clear_runtime_log_clicked)
+            self._clear_log_button_connected = True
         run_log_toolbar.addWidget(self.clear_runtime_log_btn)
-        self.open_log_dir_btn = QPushButton("打开日志目录")
-        self.open_log_dir_btn.setObjectName("PrimaryButton")
-        self.open_log_dir_btn.setToolTip("在资源管理器中打开 log.txt 所在目录")
-        self.open_log_dir_btn.clicked.connect(self._on_open_log_dir_clicked)
-        run_log_toolbar.addWidget(self.open_log_dir_btn)
         run_log_toolbar.addStretch(1)
         run_log_layout.addLayout(run_log_toolbar)
-
-        filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(0, 0, 0, 0)
-        filter_row.setSpacing(6)
-        self.log_filter_edit = QLineEdit()
-        self.log_filter_edit.setPlaceholderText("过滤运行日志（300ms 防抖）")
-        self.log_filter_edit.setClearButtonEnabled(True)
-        self.log_filter_edit.textChanged.connect(
-            lambda: self._log_filter_timer.start(300)
-        )
-        filter_row.addWidget(self.log_filter_edit, stretch=1)
-        run_log_layout.addLayout(filter_row)
 
         self.log_edit = QPlainTextEdit()
         self.log_edit.setFont(QFont("Consolas", 9))
@@ -1510,30 +1300,6 @@ class UiBuilderMixin:
         self.status_log_edit.setFont(QFont("Consolas", 9))
         self.log_tabs.addTab(self.status_log_edit, "服务状态")
 
-        self.job_log_page = QWidget()
-        job_log_layout = QVBoxLayout(self.job_log_page)
-        job_log_layout.setContentsMargins(0, 0, 0, 0)
-        job_log_layout.setSpacing(6)
-        job_log_toolbar = QHBoxLayout()
-        job_log_toolbar.setContentsMargins(0, 0, 0, 0)
-        job_log_toolbar.setSpacing(6)
-        self.clear_job_log_btn = QPushButton("清空任务日志")
-        self.clear_job_log_btn.setObjectName("DangerButton")
-        self.clear_job_log_btn.clicked.connect(
-            lambda: self._clear_log_widget(self.job_log_edit, "任务日志")
-        )
-        job_log_toolbar.addWidget(self.clear_job_log_btn)
-        job_log_toolbar.addStretch(1)
-        job_log_layout.addLayout(job_log_toolbar)
-        self.job_log_edit = QPlainTextEdit()
-        self.job_log_edit.setObjectName("JobLogText")
-        self.job_log_edit.setReadOnly(True)
-        self.job_log_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.job_log_edit.setMaximumBlockCount(2000)
-        self.job_log_edit.setFont(QFont("Consolas", 9))
-        job_log_layout.addWidget(self.job_log_edit, stretch=1)
-        self.log_tabs.addTab(self.job_log_page, "任务日志")
-
         return page
 
     def _copy_current_log_tab_text(self):
@@ -1546,13 +1312,6 @@ class UiBuilderMixin:
         if hasattr(self, "_is_runtime_log_subtab_active") and self._is_runtime_log_subtab_active():
             if hasattr(self, "_on_copy_log_clicked"):
                 self._on_copy_log_clicked()
-            return
-
-        if (
-            log_tabs.currentWidget() is getattr(self, "log_edit", None)
-            and hasattr(self, "_on_copy_log_clicked")
-        ):
-            self._on_copy_log_clicked()
             return
 
         current_widget = log_tabs.currentWidget()
@@ -1655,6 +1414,25 @@ class UiBuilderMixin:
         self.auto_start_server_cb = QCheckBox("启动 GUI 时自动启动服务")
         self.auto_start_server_cb.setChecked(self._auto_start_server)
         service_form.addRow("", self.auto_start_server_cb)
+        chat_input_group = QGroupBox("聊天输入")
+        chat_input_layout = QVBoxLayout(chat_input_group)
+        chat_input_hint = QLabel(
+            "当底部输入框为空时自动填入（新建对话、切换对话、发送后清空时）。"
+            "留空表示不预填。"
+        )
+        chat_input_hint.setWordWrap(True)
+        chat_input_hint.setStyleSheet("color: #666;")
+        self.default_compose_message_edit = QPlainTextEdit()
+        self.default_compose_message_edit.setPlaceholderText(
+            "例如：请用中文简要回答…"
+        )
+        self.default_compose_message_edit.setPlainText(
+            getattr(self, "_default_compose_message", "") or ""
+        )
+        self.default_compose_message_edit.setFixedHeight(72)
+        chat_input_layout.addWidget(chat_input_hint)
+        chat_input_layout.addWidget(self.default_compose_message_edit)
+        service_form.addRow("", chat_input_group)
         service_btn_row = QHBoxLayout()
         self.settings_start_btn = QPushButton("启动服务")
         self.settings_stop_btn = QPushButton("停止服务")
@@ -1665,6 +1443,12 @@ class UiBuilderMixin:
         self.settings_start_btn.clicked.connect(self._start_server)
         self.settings_stop_btn.clicked.connect(self._stop_server)
         self.settings_restart_btn.clicked.connect(self._restart_server_with_settings)
+        for btn in (
+            self.settings_start_btn,
+            self.settings_stop_btn,
+            self.settings_restart_btn,
+        ):
+            btn.setEnabled(True)
         service_btn_row.addWidget(self.settings_start_btn)
         service_btn_row.addWidget(self.settings_stop_btn)
         service_btn_row.addWidget(self.settings_restart_btn)
@@ -1911,18 +1695,20 @@ class UiBuilderMixin:
         bar = QWidget()
         bar.setObjectName("ChatStatusBar")
         outer = QVBoxLayout(bar)
-        outer.setContentsMargins(4, 4, 4, 4)
-        outer.setSpacing(4)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
         top_row = QHBoxLayout()
-        top_row.setSpacing(6)
+        top_row.setSpacing(8)
         self.status_label = QLabel("服务：未启动")
         self.status_label.setObjectName("StatusChip")
         self.tm_online_label = QLabel("油猴：在线 0 / 总 0")
         self.tm_online_label.setObjectName("StatusChip")
         self.tm_blank_home_label = QLabel("空白页：0/0｜可用0｜已绑0")
         self.tm_blank_home_label.setObjectName("StatusChip")
-        self.tm_current_page_label = QLabel("当前页：未检测到")
+        self.tm_current_page_label = QLabel("焦点页：浏览器页面未获得焦点")
         self.tm_current_page_label.setObjectName("StatusChip")
+        self.tm_manual_page_label = QLabel("手动页：未选择")
+        self.tm_manual_page_label.setObjectName("StatusChip")
         self.tm_bound_page_label = QLabel("绑定页：未绑定")
         self.tm_bound_page_label.setObjectName("StatusChip")
         self.tm_sync_target_label = QLabel("同步：不可用")
@@ -1945,6 +1731,7 @@ class UiBuilderMixin:
             self.tm_online_label,
             self.tm_blank_home_label,
             self.tm_current_page_label,
+            self.tm_manual_page_label,
             self.tm_bound_page_label,
             self.tm_sync_target_label,
             self.tm_queue_label,
@@ -1966,32 +1753,49 @@ class UiBuilderMixin:
         top_row.addWidget(self.tm_online_label)
         top_row.addWidget(self.tm_blank_home_label)
         top_row.addWidget(self.tm_current_page_label)
+        top_row.addWidget(self.tm_manual_page_label)
         top_row.addWidget(self.tm_bound_page_label)
         top_row.addWidget(self.tm_sync_target_label)
         top_row.addWidget(self.tm_queue_label)
         top_row.addWidget(self.cursor_bridge_status_label)
         top_row.addWidget(self.job_status_chip)
-        top_row.addStretch()
+        top_row.addStretch(1)
+
+        status_action_row = QHBoxLayout()
+        status_action_row.setContentsMargins(12, 0, 8, 0)
+        status_action_row.setSpacing(10)
+
+        STATUS_ACTION_BUTTON_WIDTH = 68
+        STATUS_ACTION_BUTTON_HEIGHT = 34
+
+        def setup_status_action_button(button):
+            button.setFixedSize(STATUS_ACTION_BUTTON_WIDTH, STATUS_ACTION_BUTTON_HEIGHT)
+            button.setMinimumSize(STATUS_ACTION_BUTTON_WIDTH, STATUS_ACTION_BUTTON_HEIGHT)
+            button.setMaximumSize(STATUS_ACTION_BUTTON_WIDTH, STATUS_ACTION_BUTTON_HEIGHT)
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            return button
+
         self.toggle_status_detail_btn = QPushButton("详情")
         self.toggle_status_detail_btn.setObjectName("PrimaryButton")
-        self.toggle_status_detail_btn.setFixedHeight(30)
-        self.toggle_status_detail_btn.setMinimumHeight(30)
-        self.toggle_status_detail_btn.setMaximumHeight(30)
+        setup_status_action_button(self.toggle_status_detail_btn)
         self.toggle_status_detail_btn.clicked.connect(self._on_toggle_status_detail)
-        top_row.addWidget(self.toggle_status_detail_btn)
+        status_action_row.addWidget(self.toggle_status_detail_btn)
+
         self.chat_quick_start_btn = QPushButton("启动")
         self.chat_quick_start_btn.setObjectName("PrimaryButton")
-        self.chat_quick_start_btn.setFixedWidth(48)
-        self.chat_quick_start_btn.setFixedHeight(30)
+        setup_status_action_button(self.chat_quick_start_btn)
         self.chat_quick_start_btn.clicked.connect(self._start_server)
-        top_row.addWidget(self.chat_quick_start_btn)
+        self.chat_quick_start_btn.setEnabled(True)
+        status_action_row.addWidget(self.chat_quick_start_btn)
+
         self.chat_quick_stop_btn = QPushButton("停止")
         self.chat_quick_stop_btn.setObjectName("DangerButton")
-        self.chat_quick_stop_btn.setFixedWidth(48)
-        self.chat_quick_stop_btn.setFixedHeight(30)
+        setup_status_action_button(self.chat_quick_stop_btn)
         self.chat_quick_stop_btn.clicked.connect(self._stop_server)
         self.chat_quick_stop_btn.setEnabled(True)
-        top_row.addWidget(self.chat_quick_stop_btn)
+        status_action_row.addWidget(self.chat_quick_stop_btn)
+
+        top_row.addLayout(status_action_row)
         outer.addLayout(top_row)
 
         self.tm_bind_mismatch_label = ElidedLabel(" ")
@@ -2003,66 +1807,189 @@ class UiBuilderMixin:
 
         self.tm_status_detail_panel = QWidget()
         self.tm_status_detail_panel.setObjectName("StatusDetailPanel")
+        self.tm_status_detail_panel.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
         detail_layout = QVBoxLayout(self.tm_status_detail_panel)
-        detail_layout.setContentsMargins(8, 8, 8, 8)
-        detail_layout.setSpacing(4)
+        detail_layout.setContentsMargins(12, 12, 12, 12)
+        detail_layout.setSpacing(10)
+
+        summary_card = QFrame()
+        summary_card.setObjectName("StatusInfoCard")
+        summary_layout = QVBoxLayout(summary_card)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setSpacing(6)
+
+        summary_title = QLabel("页面概览")
+        summary_title.setObjectName("StatusSectionTitle")
+        summary_layout.addWidget(summary_title)
 
         self.monkey_window_summary_label = QLabel("窗口统计：总数 0｜新建 0｜已绑定 0｜未绑定 0")
         self.monkey_window_summary_label.setObjectName("StatusRelationLine")
         self.monkey_window_summary_label.setWordWrap(True)
+
         self.monkey_binding_summary_label = QLabel("绑定明细：已绑定：—｜未绑定：—")
         self.monkey_binding_summary_label.setObjectName("StatusRelationLine")
         self.monkey_binding_summary_label.setWordWrap(True)
-        detail_layout.addWidget(self.monkey_window_summary_label)
-        detail_layout.addWidget(self.monkey_binding_summary_label)
 
-        page_row = QHBoxLayout()
-        page_row.setSpacing(6)
-        page_label = QLabel("页面")
-        page_label.setObjectName("StatusChip")
-        page_label.setFixedHeight(30)
+        summary_layout.addWidget(self.monkey_window_summary_label)
+        summary_layout.addWidget(self.monkey_binding_summary_label)
+        detail_layout.addWidget(summary_card)
+
+        page_card = QFrame()
+        page_card.setObjectName("StatusInfoCard")
+        page_card_layout = QVBoxLayout(page_card)
+        page_card_layout.setContentsMargins(10, 8, 10, 8)
+        page_card_layout.setSpacing(8)
+
+        page_header_row = QHBoxLayout()
+        page_header_row.setSpacing(8)
+
+        page_label = QLabel("可用页面列表")
+        page_label.setObjectName("StatusSectionTitle")
+
         if not hasattr(self, "tm_page_count_label"):
             self.tm_page_count_label = QLabel("在线 0 / 总 0")
             self.tm_page_count_label.setObjectName("StatusChip")
-        self.tm_page_count_label.setFixedHeight(30)
+        self.tm_page_count_label.setFixedHeight(28)
+
         if not hasattr(self, "tm_page_combo"):
-            self.tm_page_combo = QComboBox()
-            self.tm_page_combo.setMinimumWidth(180)
+            self.tm_page_combo = NoWheelComboBox()
+            self.tm_page_combo.setObjectName("TmPageCombo")
+            self.tm_page_combo.setMinimumWidth(0)
+            self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+            self.tm_page_combo.setMinimumContentsLength(40)
             self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self.tm_page_combo.setToolTip(
-                "显示当前检测到的 ChatGPT 页面状态（不用于选择绑定目标）"
+                "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
             )
-        self.tm_page_combo.setFixedHeight(30)
-        page_row.addWidget(page_label)
-        page_row.addWidget(self.tm_page_count_label)
-        page_row.addWidget(self.tm_page_combo, stretch=1)
-        detail_layout.addLayout(page_row)
 
-        self.tm_current_page_relation_label = QLabel("当前网页：未检测到")
-        self.tm_current_page_relation_label.setObjectName("StatusRelationLine")
-        self.tm_current_page_relation_label.setWordWrap(True)
-        self.tm_current_page_relation_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
+        self.tm_page_selector = self.tm_page_combo
+
+        if not getattr(self, "_tm_page_selector_connected", False):
+            self.tm_page_combo.currentIndexChanged.connect(
+                self._on_tm_page_selector_changed
+            )
+            self._tm_page_selector_connected = True
+
+        self.tm_page_combo.setFixedHeight(30)
+
+        self.set_manual_current_page_btn = QPushButton("设为当前页")
+        self.set_manual_current_page_btn.setObjectName("PrimaryButton")
+        self.set_manual_current_page_btn.setFixedHeight(30)
+        self.set_manual_current_page_btn.setToolTip(
+            "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
         )
-        self.tm_bound_page_relation_label = QLabel("绑定网页：未绑定")
-        self.tm_bound_page_relation_label.setObjectName("StatusRelationLine")
-        self.tm_bound_page_relation_label.setWordWrap(True)
-        self.tm_bound_page_relation_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
+        self.set_manual_current_page_btn.clicked.connect(
+            self._on_set_manual_current_page_clicked
         )
-        self.tm_sync_target_relation_label = QLabel("同步目标：不可用")
-        self.tm_sync_target_relation_label.setObjectName("StatusRelationLine")
-        self.tm_sync_target_relation_label.setWordWrap(True)
-        self.tm_sync_target_relation_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
+
+        page_header_row.addWidget(page_label)
+        page_header_row.addWidget(self.tm_page_count_label)
+        page_header_row.addStretch()
+        page_header_row.addWidget(self.set_manual_current_page_btn)
+
+        page_card_layout.addLayout(page_header_row)
+        page_card_layout.addWidget(self.tm_page_combo)
+
+        detail_layout.addWidget(page_card)
+
+        page_grid_host = QWidget()
+        page_grid_host.setObjectName("StatusPageGridHost")
+        page_grid_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+
+        page_grid = QGridLayout(page_grid_host)
+        page_grid.setContentsMargins(0, 0, 0, 0)
+        page_grid.setHorizontalSpacing(10)
+        page_grid.setVerticalSpacing(10)
+
+        STATUS_PAGE_CARD_MIN_HEIGHT = 118
+
+        page_sections = (
+            (
+                "当前焦点页（自动检测）",
+                "current_page_url_edit",
+                "current_page_status_label",
+                "未检测到",
+            ),
+            (
+                "手动选中页（页面列表选择）",
+                "manual_current_page_url_edit",
+                "manual_current_page_status_label",
+                "未选择",
+            ),
+            (
+                "绑定网页（当前会话绑定）",
+                "bound_page_url_edit",
+                "bound_page_status_label",
+                "未绑定",
+            ),
+            (
+                "同步目标页（实际执行时使用）",
+                "sync_target_url_edit",
+                "sync_target_status_label",
+                "不可用",
+            ),
         )
-        for rel in (
-            self.tm_current_page_relation_label,
-            self.tm_bound_page_relation_label,
-            self.tm_sync_target_relation_label,
+
+        for index, (section_title, url_attr, status_attr, placeholder) in enumerate(
+            page_sections
         ):
-            rel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            detail_layout.addWidget(rel)
+            card = QFrame()
+            card.setObjectName("StatusPageCard")
+            card.setMinimumHeight(STATUS_PAGE_CARD_MIN_HEIGHT)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(8)
+
+            header = QLabel(section_title)
+            header.setObjectName("StatusSectionTitle")
+            header.setFixedHeight(20)
+            header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+            url_edit = QLineEdit()
+            url_edit.setObjectName("StatusUrlEdit")
+            url_edit.setReadOnly(True)
+            url_edit.setTextMargins(6, 0, 6, 0)
+            url_edit.setMinimumWidth(0)
+            url_edit.setFixedHeight(30)
+            url_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            url_edit.setPlaceholderText(placeholder)
+            url_edit.setToolTip(placeholder)
+
+            status_label = QLabel("")
+            status_label.setObjectName("StatusRelationLine")
+            status_label.setWordWrap(True)
+            status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            status_label.setMinimumHeight(52)
+            status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+
+            setattr(self, url_attr, url_edit)
+            setattr(self, status_attr, status_label)
+
+            card_layout.addWidget(header, 0)
+            card_layout.addWidget(url_edit, 0)
+            card_layout.addWidget(status_label, 1)
+            card_layout.setStretchFactor(status_label, 1)
+
+            row = index // 2
+            col = index % 2
+            page_grid.addWidget(card, row, col)
+
+        page_grid.setColumnStretch(0, 1)
+        page_grid.setColumnStretch(1, 1)
+        page_grid.setRowMinimumHeight(0, STATUS_PAGE_CARD_MIN_HEIGHT)
+        page_grid.setRowMinimumHeight(1, STATUS_PAGE_CARD_MIN_HEIGHT)
+
+        page_grid_host.setMinimumHeight(
+            STATUS_PAGE_CARD_MIN_HEIGHT * 2 + page_grid.verticalSpacing()
+        )
+        self._status_page_grid_host = page_grid_host
+
+        detail_layout.addWidget(page_grid_host)
 
         self.open_live_page_btn = QPushButton("打开")
         self.open_live_page_btn.setObjectName("PrimaryButton")
@@ -2241,11 +2168,6 @@ class UiBuilderMixin:
         self.new_session_btn.setToolTip("新建本地对话 (Ctrl+N)")
         self.new_session_btn.clicked.connect(self._create_new_local_session)
         sidebar_layout.addWidget(self.new_session_btn)
-        self.session_search_edit = QLineEdit()
-        self.session_search_edit.setObjectName("SessionSearchInput")
-        self.session_search_edit.setPlaceholderText("搜索对话…")
-        self.session_search_edit.textChanged.connect(self._on_session_search_changed)
-        sidebar_layout.addWidget(self.session_search_edit)
         self.session_list = SessionListWidget()
         self.session_list.setObjectName("SessionList")
         self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -2260,6 +2182,12 @@ class UiBuilderMixin:
         )
         self.session_list.delete_requested.connect(self._delete_current_session)
         self.session_list.currentItemChanged.connect(self._on_session_list_changed)
+        if hasattr(self.session_list, "fast_select_requested"):
+            self.session_list.fast_select_requested.connect(
+                self._on_session_list_pressed_fast
+            )
+        else:
+            self.session_list.itemPressed.connect(self._on_session_list_pressed_fast)
         self.session_list.itemDoubleClicked.connect(self._on_session_list_double_clicked)
         self.session_list.model().rowsMoved.connect(self._on_session_list_reordered)
         sidebar_layout.addWidget(self.session_list, stretch=1)
@@ -2287,7 +2215,7 @@ class UiBuilderMixin:
         chat_area_layout.setSpacing(0)
 
         self.chat_sub_tabs = QTabWidget()
-        self.chat_sub_tabs.setObjectName("ChatSubTabs")
+        self.chat_sub_tabs.setObjectName("ChatInnerTabs")
         self.chat_sub_tabs.setDocumentMode(True)
         self.chat_tab = QWidget()
         self.chat_tab.setObjectName("ChatSubTabChat")
@@ -2327,18 +2255,12 @@ class UiBuilderMixin:
         self.current_session_url_label.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Fixed
         )
-        self.copy_session_url_btn = QPushButton("复制网址")
-        self.copy_session_url_btn.setObjectName("CopySessionUrlButton")
-        self.copy_session_url_btn.setFixedHeight(28)
-        self.copy_session_url_btn.clicked.connect(self._copy_current_session_url)
-        self._set_button_role(self.copy_session_url_btn, "blueGraySolid")
         self.open_session_url_btn = QPushButton("打开网址")
         self.open_session_url_btn.setObjectName("OpenSessionUrlButton")
         self.open_session_url_btn.setFixedHeight(28)
         self.open_session_url_btn.clicked.connect(self._open_current_session_url)
         self._set_button_role(self.open_session_url_btn, "blueGraySolid")
         url_row.addWidget(self.current_session_url_label, 1)
-        url_row.addWidget(self.copy_session_url_btn, 0)
         url_row.addWidget(self.open_session_url_btn, 0)
         header_layout.addWidget(url_row_widget)
 
@@ -2356,26 +2278,42 @@ class UiBuilderMixin:
         self.chat_scroll.setFrameShape(QFrame.NoFrame)
         self.chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.chat_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.chat_scroll.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.chat_scroll.setMinimumHeight(80)
+        self.chat_scroll.setMaximumHeight(260)
         self.chat_container = QWidget()
-        self.chat_container.setObjectName("ChatViewport")
-        self.chat_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.chat_container.setObjectName("ChatMessagesContainer")
+        self.chat_container.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Minimum,
+        )
         self.chat_list_layout = QVBoxLayout(self.chat_container)
-        self.chat_list_layout.setContentsMargins(20, 18, 20, 18)
-        self.chat_list_layout.setSpacing(11)
+        self.chat_list_layout.setContentsMargins(12, 12, 12, 12)
+        self.chat_list_layout.setSpacing(10)
         self.chat_list_layout.setAlignment(Qt.AlignTop)
-        self.empty_state_widget = QWidget()
+        self.chat_list_layout.setSizeConstraint(QLayout.SetMinAndMaxSize)
+        # 统一聊天消息区容器别名，避免渲染写到不可见副本
+        self.chat_messages_scroll = self.chat_scroll
+        self.chat_messages_container = self.chat_container
+        self.chat_messages_layout = self.chat_list_layout
+        self.empty_state_widget = QWidget(self.chat_container)
         self.empty_state_widget.setObjectName("ChatEmptyState")
         self.empty_state_widget.setVisible(False)
-        self.empty_state_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.chat_list_layout.addWidget(self.empty_state_widget)
-        self.chat_bottom_spacer = QWidget()
-        self.chat_bottom_spacer.setObjectName("ChatBottomSpacer")
-        self.chat_bottom_spacer.setFixedHeight(0)
-        self.chat_bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.chat_list_layout.addWidget(self.chat_bottom_spacer, 0)
+        self.empty_state_widget.setMinimumHeight(80)
+        self.empty_state_widget.setMaximumHeight(120)
+        self.empty_state_widget.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed,
+        )
+        self.empty_state_widget.hide()
+        self.chat_bottom_spacer = None
+        self.chat_bottom_spacer_widget = None
         self.chat_scroll.setWidget(self.chat_container)
-        chat_tab_layout.addWidget(self.chat_scroll, 1)
+        chat_tab_layout.addWidget(self.chat_scroll, 0)
+        chat_tab_layout.addStretch(1)
 
         input_block = QWidget()
         input_block.setObjectName("ChatInputBlock")
@@ -2393,12 +2331,10 @@ class UiBuilderMixin:
         self._update_input_placeholder()
         self.message_edit.setFixedHeight(96)
         self.message_edit.setFont(QFont("Microsoft YaHei UI", 10))
-        self.message_edit.send_requested.connect(self._push_message)
         compose_row.addWidget(self.message_edit, stretch=1)
         self.send_btn = QPushButton("发送")
         self.send_btn.setObjectName("PrimaryButton")
         self.send_btn.setFixedSize(72, 96)
-        self.send_btn.clicked.connect(self._push_message)
         self.send_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.send_btn.setEnabled(True)
         compose_row.addWidget(self.send_btn, 0, Qt.AlignVCenter)
@@ -2412,14 +2348,13 @@ class UiBuilderMixin:
         bottom_action_row.addStretch(1)
         self.clear_session_btn = QPushButton("清空当前对话")
         self.clear_session_btn.setObjectName("DangerButton")
-        self.clear_session_btn.clicked.connect(self._clear_current_session)
         bottom_action_row.addWidget(self.clear_session_btn)
         self.copy_last_btn = QPushButton("复制最后回复")
         self.copy_last_btn.setObjectName("PrimaryButton")
-        self.copy_last_btn.clicked.connect(self._copy_last_reply)
         bottom_action_row.addWidget(self.copy_last_btn)
         input_layout.addLayout(bottom_action_row)
         chat_tab_layout.addWidget(input_block, 0)
+        self._bind_chat_panel_signals()
 
         cursor_flow_layout = QVBoxLayout(self.cursor_flow_tab)
         cursor_flow_layout.setContentsMargins(10, 10, 10, 10)
@@ -2432,7 +2367,9 @@ class UiBuilderMixin:
         self.chat_splitter.setStretchFactor(0, 0)
         self.chat_splitter.setStretchFactor(1, 1)
         self.chat_splitter.setSizes([220, 1200])
-        self.chat_splitter.splitterMoved.connect(self._save_chat_splitter_sizes)
+        if hasattr(self, "_init_splitter_save_timer"):
+            self._init_splitter_save_timer()
+        self.chat_splitter.splitterMoved.connect(self._schedule_save_chat_splitter_sizes)
         self._restore_chat_splitter_sizes()
         layout.addWidget(self.chat_splitter, 1)
         return panel

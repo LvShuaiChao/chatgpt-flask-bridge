@@ -398,26 +398,13 @@ class BridgeClient:
             path = "/" + path
         return urljoin(self.base_url + "/", path.lstrip("/"))
 
-    def _request(
+    def _decode_json_response(
         self,
-        method: str,
-        path: str,
+        response,
         *,
-        json_body: Optional[dict] = None,
-        timeout: Optional[float] = None,
+        path: str = "",
+        allow_not_ok: bool = False,
     ) -> dict[str, Any]:
-        timeout = self.http_timeout if timeout is None else timeout
-        try:
-            response = self._session.request(
-                method.upper(),
-                self._url(path),
-                json=json_body,
-                headers=self._headers(),
-                timeout=timeout,
-            )
-        except requests.RequestException as error:
-            raise BridgeApiError(f"网络请求失败：{error}") from error
-
         try:
             data = response.json()
         except ValueError as error:
@@ -441,7 +428,9 @@ class BridgeClient:
                 payload=data,
             )
 
-        if response.status_code >= 400 or not data.get("ok"):
+        if response.status_code >= 400 or (
+            not allow_not_ok and not data.get("ok")
+        ):
             raise BridgeApiError(
                 data.get("error") or f"HTTP {response.status_code}",
                 code=str(data.get("code") or ""),
@@ -449,6 +438,28 @@ class BridgeClient:
                 payload=data,
             )
         return data
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[dict] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        timeout = self.http_timeout if timeout is None else timeout
+        try:
+            response = self._session.request(
+                method.upper(),
+                self._url(path),
+                json=json_body,
+                headers=self._headers(),
+                timeout=timeout,
+            )
+        except requests.RequestException as error:
+            raise BridgeApiError(f"网络请求失败：{error}") from error
+
+        return self._decode_json_response(response, path=path)
 
     def _get_legacy_health(self) -> dict[str, Any]:
         """GET /api/status — GUI 内置状态接口（无 /api/v1 的旧服务也可用）。"""
@@ -461,27 +472,7 @@ class BridgeClient:
         except requests.RequestException as error:
             raise BridgeApiError(f"网络请求失败：{error}") from error
 
-        try:
-            data = response.json()
-        except ValueError as error:
-            text = (response.text or "")[:500]
-            raise BridgeApiError(
-                f"响应不是 JSON（HTTP {response.status_code}）：{text}",
-                status_code=response.status_code,
-            ) from error
-
-        if not isinstance(data, dict):
-            raise BridgeApiError(
-                f"响应格式异常（HTTP {response.status_code}）",
-                status_code=response.status_code,
-            )
-        if response.status_code >= 400:
-            raise BridgeApiError(
-                data.get("error") or f"HTTP {response.status_code}",
-                status_code=response.status_code,
-                payload=data,
-            )
-        return data
+        return self._decode_json_response(response, allow_not_ok=True)
 
     @staticmethod
     def _normalize_legacy_status(data: dict[str, Any]) -> dict[str, Any]:

@@ -48,6 +48,7 @@ def default_remote_chatgpt():
         "bind_request_id": "",
         "launch_token": "",
         "bind_started_at": 0,
+        "bound_at": 0,
         "reserved_client_id": "",
         "reserved_page_instance_id": "",
         "reserved_at": 0,
@@ -146,6 +147,55 @@ def normalize_remote_chatgpt(remote):
     return base
 
 
+def write_session_remote_chatgpt(session, **fields):
+    """
+    唯一推荐写入入口：更新 session.remote_chatgpt 并规范化 url / bind_state。
+    仅接受核心字段；其余 bootstrap 字段可通过关键字传入。
+    """
+    if session is None:
+        return default_remote_chatgpt()
+    remote = normalize_remote_chatgpt(session.remote_chatgpt)
+    core_keys = (
+        "enabled",
+        "bind_state",
+        "url",
+        "conversation_id",
+        "client_id",
+        "page_instance_id",
+        "page_type",
+        "page_title",
+        "last_seen",
+    )
+    for key in core_keys:
+        if key in fields and fields[key] is not None:
+            remote[key] = fields[key]
+    for key, value in fields.items():
+        if key not in core_keys and key in remote:
+            remote[key] = value
+    conversation_id = (remote.get("conversation_id") or "").strip()
+    if conversation_id:
+        canonical = f"https://chatgpt.com/c/{conversation_id}"
+        remote["url"] = canonical
+        remote["conversation_url"] = canonical
+        remote["page_type"] = "conversation"
+        remote["enabled"] = True
+        if (remote.get("bind_state") or "").strip() in (
+            BIND_STATE_UNBOUND,
+            BIND_STATE_PREBOUND_HOME,
+            BIND_STATE_WAITING_HOME,
+            BIND_STATE_WAITING_CONVERSATION_CREATED,
+            "",
+        ):
+            remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
+    elif (remote.get("bind_state") or "").strip() == BIND_STATE_PREBOUND_HOME:
+        url = (remote.get("url") or "").strip()
+        if conversation_id and "xz_bind_token=" not in url:
+            remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
+    remote = normalize_remote_chatgpt(remote)
+    session.remote_chatgpt = remote
+    return remote
+
+
 @dataclass
 class ChatMessage:
     role: str
@@ -154,6 +204,7 @@ class ChatMessage:
     message_id: str = ""
     turn_id: str = ""
     status: str = ""
+    detail: str = ""
     bridge_message_id: str = ""
     parent_message_id: str = ""
     visible_in_chat: bool = True

@@ -171,6 +171,15 @@ class PageOpenCloseMixin:
             new_conv = self._client_conversation_id(client_info)
             if not (bound_conv and new_conv and bound_conv == new_conv):
                 return
+        if hasattr(self, "set_bound_page"):
+            self.set_bound_page(
+                session,
+                client_info,
+                reason="remember_session_page_from_client",
+                silent=True,
+                allow_existing_conversation_for_new_session=True,
+            )
+            return
         conversation_id = (client_info.get("conversation_id") or "").strip()
         if not conversation_id:
             conversation_id = parse_conversation_id(page_url)
@@ -501,60 +510,118 @@ class PageOpenCloseMixin:
                 f"conversation_id={target_conversation_id or '-'}",
                 echo=True,
             )
+    def _tm_table_signature(self, status=None):
+        clients = list(self._iter_tm_clients(status or {}))
+        rows = []
+        for c in clients:
+            rows.append(
+                "|".join([
+                    str(c.get("client_id", "")),
+                    str(c.get("page_instance_id", "")),
+                    str(c.get("page_type", "")),
+                    str(c.get("conversation_id", "")),
+                    str(c.get("visibility_state", c.get("visible", ""))),
+                    str(bool(c.get("has_focus"))),
+                    str(c.get("last_focus_at", "")),
+                    str(c.get("last_seen", "")),
+                    str(bool(self._page_is_online(c))),
+                    str(c.get("page_url", "")),
+                ])
+            )
+        return tuple(sorted(rows))
+
     def _render_tampermonkey_clients(self, status=None):
+        table = getattr(self, "tm_pages_table", None)
+        if table is None:
+            return
+        if not table.isVisible():
+            return
+
         status = status or {}
+        tm_table_key = self._tm_table_signature(status)
+        if tm_table_key == getattr(self, "_last_tm_pages_table_signature", None):
+            return
+        self._last_tm_pages_table_signature = tm_table_key
         session_bound_id = self._session_bound_client_id()
-        self.tm_pages_table.setRowCount(0)
-        for item in self._iter_tm_clients(status):
-            row = self.tm_pages_table.rowCount()
-            self.tm_pages_table.insertRow(row)
-            client_id = item.get("client_id") or "-"
-            full_url = item.get("page_url") or ""
-            display_url = item.get("pathname") or self._short_page_display(full_url) or "-"
-            if len(display_url) > 80:
-                display_url = display_url[:80] + "..."
-            page_instance_id = item.get("page_instance_id") or "-"
-            if len(page_instance_id) > 24:
-                page_instance_id = page_instance_id[:24] + "…"
-            page_type = item.get("page_type") or "-"
-            conversation_id = item.get("conversation_id") or "-"
-            if len(conversation_id) > 16:
-                conversation_id = conversation_id[:16] + "…"
-            visibility = item.get("visibility_state") or "-"
-            has_focus = "是" if item.get("has_focus") else "否"
-            last_focus = self._format_last_seen_ago(item.get("last_focus_at"))
-            last_seen = self._format_ts(item.get("last_seen"))
-            online_text = "在线" if item.get("online") else "离线"
-            is_bound = "是" if session_bound_id and client_id == session_bound_id else "否"
-            online_item = QTableWidgetItem(online_text)
-            if item.get("online"):
-                online_item.setForeground(Qt.darkGreen)
-            else:
-                online_item.setForeground(Qt.gray)
-            self.tm_pages_table.setItem(row, 0, online_item)
-            self.tm_pages_table.setItem(row, 1, QTableWidgetItem(client_id))
-            self.tm_pages_table.setItem(row, 2, QTableWidgetItem(page_instance_id))
-            self.tm_pages_table.setItem(row, 3, QTableWidgetItem(page_type))
-            self.tm_pages_table.setItem(row, 4, QTableWidgetItem(conversation_id))
-            self.tm_pages_table.setItem(row, 5, QTableWidgetItem(visibility))
-            focus_text = f"{has_focus}/{last_focus}"
-            self.tm_pages_table.setItem(row, 6, QTableWidgetItem(focus_text))
-            self.tm_pages_table.setItem(row, 7, QTableWidgetItem(last_seen))
-            url_item = QTableWidgetItem(display_url)
-            url_item.setToolTip(full_url)
-            self.tm_pages_table.setItem(row, 8, url_item)
-            bound_item = QTableWidgetItem(is_bound)
-            if is_bound == "是":
-                bound_item.setForeground(Qt.darkGreen)
-            self.tm_pages_table.setItem(row, 9, bound_item)
+
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)
+            for item in self._iter_tm_clients(status):
+                row = table.rowCount()
+                table.insertRow(row)
+                client_id = item.get("client_id") or "-"
+                full_url = item.get("page_url") or ""
+                display_url = (
+                    item.get("pathname") or self._short_page_display(full_url) or "-"
+                )
+                if len(display_url) > 80:
+                    display_url = display_url[:80] + "..."
+                page_instance_id = item.get("page_instance_id") or "-"
+                if len(page_instance_id) > 24:
+                    page_instance_id = page_instance_id[:24] + "…"
+                page_type = item.get("page_type") or "-"
+                conversation_id = item.get("conversation_id") or "-"
+                if len(conversation_id) > 16:
+                    conversation_id = conversation_id[:16] + "…"
+                visibility = item.get("visibility_state") or "-"
+                has_focus = "是" if self._page_has_focus(item) else "否"
+                last_focus = self._format_last_seen_ago(item.get("last_focus_at"))
+                last_seen = self._format_ts(item.get("last_seen"))
+                page_online = self._page_is_online(item)
+                online_text = "在线" if page_online else "离线"
+                is_bound = (
+                    "是" if session_bound_id and client_id == session_bound_id else "否"
+                )
+                online_item = QTableWidgetItem(online_text)
+                if page_online:
+                    online_item.setForeground(Qt.darkGreen)
+                else:
+                    online_item.setForeground(Qt.gray)
+                table.setItem(row, 0, online_item)
+                table.setItem(row, 1, QTableWidgetItem(client_id))
+                table.setItem(row, 2, QTableWidgetItem(page_instance_id))
+                table.setItem(row, 3, QTableWidgetItem(page_type))
+                table.setItem(row, 4, QTableWidgetItem(conversation_id))
+                table.setItem(row, 5, QTableWidgetItem(visibility))
+                focus_text = f"{has_focus}/{last_focus}"
+                table.setItem(row, 6, QTableWidgetItem(focus_text))
+                table.setItem(row, 7, QTableWidgetItem(last_seen))
+                url_item = QTableWidgetItem(display_url)
+                url_item.setToolTip(full_url)
+                table.setItem(row, 8, url_item)
+                bound_item = QTableWidgetItem(is_bound)
+                if is_bound == "是":
+                    bound_item.setForeground(Qt.darkGreen)
+                table.setItem(row, 9, bound_item)
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            table.viewport().update()
+
     def _on_refresh_tm_pages(self):
         if not server.is_server_running():
             self._set_tm_action_hint("请先启动服务。")
+            status = {}
+        else:
+            status = server.get_bridge_status() or {}
+        self._last_bridge_status = status
+        pages = self._extract_tm_pages_from_status(status)
+        self._append_log(
+            "[TM_SELECTOR][MANUAL_REFRESH] "
+            f"pages={len(pages)} "
+            f"clients={[p.get('client_id') for p in pages]}",
+            echo=False,
+        )
+        self._refresh_tm_page_selector(status)
+        self._update_live_page_display()
+        self._update_manual_current_page_display()
+        self._update_bound_page_display()
+        if not server.is_server_running():
             return
-        status = server.get_bridge_status()
-        self._apply_bridge_status(status)
-        count = len(status.get("tampermonkey_clients") or [])
-        self._set_tm_action_hint(f"已刷新，共 {count} 个页面。")
+        self._schedule_status_apply(status, reason="refresh_tm_pages", force=True)
+        self._set_tm_action_hint(f"已刷新，共 {len(pages)} 个页面。")
     def _enqueue_close_page(self, client_id, label=""):
         if not server.is_server_running():
             self._append_log("[关闭页面] 服务未启动，无法下发命令。")
@@ -605,7 +672,7 @@ class PageOpenCloseMixin:
                 f" keep_client_id={except_id}"
             )
             return
-        if not bool(keep_info.get("online")):
+        if not self._page_is_online(keep_info):
             current_client_id = (status.get("tampermonkey_client_id") or "").strip()
             self._set_tm_action_hint(
                 "当前绑定页面已离线，为避免误关所有在线页面，已取消。请先点击「绑定当前页面」。"

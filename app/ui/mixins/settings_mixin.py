@@ -1,3 +1,4 @@
+import time
 import traceback
 
 import server
@@ -13,7 +14,6 @@ BOOL_SETTING_BINDINGS = {
     "remember_window_position": "_remember_window_position",
     "restore_main_tab": "_restore_main_tab",
     "restore_chat_tab": "_restore_chat_tab",
-    "show_page_url": "_show_page_url",
     "show_top_status_bar": "_show_top_status_bar",
     "debug_mode": "_debug_mode",
     "show_raw_payload": "_show_raw_payload",
@@ -40,8 +40,17 @@ BOOL_SETTING_SAVE_KEYS = frozenset({
     "remember_window_position",
     "restore_main_tab",
     "restore_chat_tab",
-    "show_page_url",
     "show_top_status_bar",
+    "debug_mode",
+    "show_raw_payload",
+    "log_ack_events",
+    "log_assistant_reply_events",
+    "log_send_failed_events",
+    "auto_clear_input_after_send",
+    "auto_scroll_to_bottom",
+    "auto_name_new_chat",
+    "show_timestamp",
+    "show_assistant_placeholder",
     "bind_each_chat_to_page",
     "auto_open_bound_page_when_missing",
     "allow_fallback_to_any_page",
@@ -105,7 +114,17 @@ class SettingsMixin:
             )
             or defaults["sync_conversation_mode"]
         ).strip().lower()
-        self._sync_conversation_mode = mode if mode in ("merge", "replace") else "merge"
+        default_mode = defaults["sync_conversation_mode"]
+        self._sync_conversation_mode = (
+            mode if mode in ("merge", "replace") else default_mode
+        )
+        self._default_compose_message = str(
+            self._settings.value(
+                "default_compose_message",
+                defaults["default_compose_message"],
+            )
+            or defaults["default_compose_message"]
+        )
     def _force_ui_settings_to_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
         self._chat_font_pt = int(defaults["font_size"])
@@ -113,7 +132,6 @@ class SettingsMixin:
         self._remember_window_position = bool(defaults["remember_window_position"])
         self._restore_main_tab = bool(defaults["restore_main_tab"])
         self._restore_chat_tab = bool(defaults["restore_chat_tab"])
-        self._show_page_url = bool(defaults["show_page_url"])
         self._show_top_status_bar = bool(defaults["show_top_status_bar"])
     def _resolve_listen_host(self):
         if getattr(self, "_enable_lan_access", False):
@@ -186,11 +204,16 @@ class SettingsMixin:
                 self.sync_conversation_max_messages_spin.value()
             )
             mode = self.sync_conversation_mode_combo.currentData()
+            default_mode = DEFAULT_APP_SETTINGS["sync_conversation_mode"]
             self._sync_conversation_mode = (
-                mode if mode in ("merge", "replace") else "merge"
+                mode if mode in ("merge", "replace") else default_mode
             )
         self._chat_sessions_path = str(RUNTIME_DIR)
         self._save_chat_history = True
+        if hasattr(self, "default_compose_message_edit"):
+            self._default_compose_message = (
+                self.default_compose_message_edit.toPlainText()
+            )
     def _save_app_settings(self):
         self._read_settings_from_widgets()
         self._settings.setValue("host", self._host)
@@ -207,6 +230,11 @@ class SettingsMixin:
             "sync_conversation_max_messages", int(self._sync_conversation_max_messages)
         )
         self._settings.setValue("sync_conversation_mode", self._sync_conversation_mode)
+        self._settings.setValue(
+            "default_compose_message",
+            getattr(self, "_default_compose_message", "") or "",
+        )
+        server.set_debug_mode(self._debug_mode)
         self._save_ui_settings()
     def _sync_page_url_detail_widgets(self):
         if not hasattr(self, "tm_live_page_label"):
@@ -225,6 +253,7 @@ class SettingsMixin:
         self._apply_chat_bind_visual_state()
         if self.message_edit.placeholderText():
             self._update_input_placeholder()
+        self._apply_default_compose_message_if_empty()
         if immediate_only:
             self._set_settings_hint("已应用当前可立即生效的设置。")
             return
@@ -241,7 +270,6 @@ class SettingsMixin:
             "remember_window_position",
             "restore_main_tab",
             "restore_chat_tab",
-            "show_page_url",
             "show_top_status_bar",
         }
         for key, value in DEFAULT_APP_SETTINGS.items():
@@ -294,6 +322,23 @@ class SettingsMixin:
             if idx >= 0:
                 self.sync_conversation_mode_combo.setCurrentIndex(idx)
         self._update_input_placeholder()
+        if hasattr(self, "default_compose_message_edit"):
+            self.default_compose_message_edit.setPlainText(
+                getattr(self, "_default_compose_message", "") or ""
+            )
+    def _default_compose_message_text(self):
+        return (getattr(self, "_default_compose_message", "") or "").strip()
+
+    def _apply_default_compose_message_if_empty(self):
+        text = self._default_compose_message_text()
+        if not text:
+            return
+        edit = getattr(self, "message_edit", None)
+        if edit is None:
+            return
+        if (edit.toPlainText() or "").strip():
+            return
+        edit.setPlainText(text)
     def _set_settings_hint(self, text):
         self.settings_hint_label.setText(text or "")
     def _set_tm_action_hint(self, text):
@@ -339,7 +384,7 @@ class SettingsMixin:
             self._set_settings_hint("请先启动服务，再检查油猴连接。")
             return
         status = server.get_bridge_status()
-        self._apply_bridge_status(status)
+        self._schedule_status_apply(status, reason="settings_refresh", force=True)
         if status.get("tampermonkey_online"):
             self._set_settings_hint("油猴在线。")
         elif status.get("tampermonkey_last_seen"):
@@ -376,6 +421,14 @@ class SettingsMixin:
         self._append_log(f"已清空{name}。", echo=True)
         self._set_tm_action_hint(f"已清空{name}")
 
+    def _on_clear_runtime_log_clicked(self):
+        now = time.time()
+        last_at = float(getattr(self, "_last_clear_log_at", 0.0) or 0.0)
+        if now - last_at < 1.0:
+            return
+        self._last_clear_log_at = now
+        self._clear_runtime_log()
+
     def _clear_runtime_log(self):
         import traceback
         from pathlib import Path
@@ -405,21 +458,11 @@ class SettingsMixin:
             self._loaded_log_lines = []
         if hasattr(self, "_log_tab_loaded"):
             self._log_tab_loaded = False
-        if hasattr(self, "_on_refresh_log_clicked"):
-            self._on_refresh_log_clicked()
+        if hasattr(self, "_runtime_log_loaded_once"):
+            self._runtime_log_loaded_once = False
         self._append_log("已清空运行日志。", echo=True)
         self._set_tm_action_hint("已清空运行日志")
     def _on_save_settings_clicked(self):
         self._save_app_settings()
         self._apply_settings(immediate_only=False)
         self._set_settings_hint("设置已保存。")
-    def _show_log_tab(self):
-        index = self.main_tabs.indexOf(self.log_page)
-        if index >= 0:
-            self.main_tabs.setCurrentIndex(index)
-        if hasattr(self, "_ensure_log_tab_loaded"):
-            self._ensure_log_tab_loaded()
-        if hasattr(self, "_refresh_log_subtabs_from_cache") and getattr(
-            self, "_pending_log_subtabs_refresh", False
-        ):
-            self._refresh_log_subtabs_from_cache()

@@ -9,19 +9,13 @@ from app.constants import (
     TM_HEARTBEAT_ONLINE_SECONDS,
     TM_POLL_FRESH_SECONDS,
 )
+from app.utils.time_utils import float_ts as _float_ts
 
 __all__ = [
     "classify_tm_client_activity",
     "compute_tm_activity_metrics",
     "tm_send_allowed",
 ]
-
-
-def _float_ts(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def compute_tm_activity_metrics(
@@ -72,8 +66,9 @@ def tm_send_allowed(
     item: Dict[str, Any], now: float | None = None
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
-    是否允许向该 client 发送桥接消息。
-    规则：必须在「在线」时间窗内，且 poll 足够新（与后台 hidden 无关）。
+    页面活跃度摘要（用于 UI 展示与候选排序）。
+    发送/同步硬拦截请使用 app.utils.page_status.evaluate_send_page / is_page_online。
+    仅 offline（心跳超时）时返回 allowed=False；poll_stale / stale_hidden 不拦截。
     """
     if not isinstance(item, dict):
         return False, "not_a_dict", {}
@@ -89,11 +84,5 @@ def tm_send_allowed(
 
     if seen_age > TM_HEARTBEAT_ONLINE_SECONDS:
         return False, "offline", detail
-
-    if poll_age > TM_POLL_FRESH_SECONDS:
-        return False, "poll_stale", detail
-
-    if state == "stale_hidden":
-        return False, "stale_hidden", detail
 
     return True, state, detail

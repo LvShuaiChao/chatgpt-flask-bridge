@@ -1,11 +1,9 @@
 import time
 import traceback
-from pathlib import Path
 
 from log_utils import get_log_file_path, read_last_lines
 
-from PyQt5.QtCore import QThread, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QPlainTextEdit
 
 
@@ -29,20 +27,19 @@ class LogLoadWorker(QThread):
 class LogTabMixin:
     LOG_TAB_MAX_DISPLAY_LINES = 1000
     LOG_TAB_MAX_BLOCK_COUNT = 3000
-    LOG_TAB_REFRESH_INTERVAL_SEC = 2
-    LOG_TAB_AUTO_REFRESH_INTERVAL_SEC = 5
+    LOG_TAB_LOAD_DEBOUNCE_MS = 500
+    LOG_FILE_TAIL_MAX_BYTES = 512 * 1024
 
     def _init_log_tab_state(self):
         self._log_tab_loaded = False
+        self._runtime_log_loaded_once = False
         self._log_loading = False
-        self._last_log_refresh_ts = 0.0
         self._loaded_log_lines = []
         self._log_worker = None
         self._pending_log_subtabs_refresh = False
-
-        self._log_filter_timer = QTimer(self)
-        self._log_filter_timer.setSingleShot(True)
-        self._log_filter_timer.timeout.connect(self._apply_log_filter)
+        self._log_tab_load_pending = False
+        self._pending_log_lines = []
+        self._log_flush_scheduled = False
 
     def _get_current_log_path(self):
         return get_log_file_path()
@@ -69,23 +66,66 @@ class LogTabMixin:
         if index < 0:
             return
         tab_text = self.main_tabs.tabText(index)
-        if tab_text == "日志":
-            self._ensure_log_tab_loaded()
-            if getattr(self, "_pending_log_subtabs_refresh", False):
-                self._refresh_log_subtabs_from_cache()
-
-    def _ensure_log_tab_loaded(self):
-        if self._log_loading:
+        if tab_text != "日志":
             return
+        if getattr(self, "_pending_log_subtabs_refresh", False):
+            self._refresh_log_subtabs_from_cache()
+        if not getattr(self, "_log_tab_loaded", False):
+            self._load_runtime_log_once()
 
-        now = time.time()
-        if self._log_tab_loaded and (now - self._last_log_refresh_ts) < self.LOG_TAB_REFRESH_INTERVAL_SEC:
+    def _load_runtime_log_once(self):
+        if getattr(self, "_runtime_log_loaded_once", False):
             return
+        self._runtime_log_loaded_once = True
+        self._reload_runtime_log_view()
 
-        self._last_log_refresh_ts = now
-        self._load_log_async()
+    def _reload_runtime_log_view(self, max_lines=None):
+        if max_lines is None:
+            max_lines = self.LOG_TAB_MAX_DISPLAY_LINES
+        try:
+            self._load_log_async(force_full=True, max_lines=max_lines)
+        except Exception as exc:
+            if hasattr(self, "_append_log"):
+                self._append_log(
+                    f"[LOG_TAB][LOAD_ERROR] {type(exc).__name__}: {exc}",
+                    echo=True,
+                )
 
-    def _load_log_async(self):
+    def _append_runtime_log_line_to_ui(self, line):
+        if hasattr(self, "_should_show_gui_log_line") and not self._should_show_gui_log_line(line):
+            return
+        log_edit = getattr(self, "log_edit", None)
+        if log_edit is None:
+            return
+        self._pending_log_lines.append(line)
+        if getattr(self, "_log_flush_scheduled", False):
+            return
+        self._log_flush_scheduled = True
+        QTimer.singleShot(120, self._flush_log_lines_to_ui)
+
+    def _flush_log_lines_to_ui(self):
+        self._log_flush_scheduled = False
+        log_edit = getattr(self, "log_edit", None)
+        if log_edit is None or not self._pending_log_lines:
+            self._pending_log_lines = []
+            return
+        lines = self._pending_log_lines
+        self._pending_log_lines = []
+        for line in lines:
+            log_edit.appendPlainText(line)
+        scrollbar = log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _load_log_async(self, force_full=False, max_lines=None):
+        if getattr(self, "_session_switching", False):
+            return
+        if not force_full and not self._is_log_tab_visible():
+            return
+        if getattr(self, "_log_tab_load_pending", False) or self._log_loading:
+            return
+        if max_lines is None:
+            max_lines = self.LOG_TAB_MAX_DISPLAY_LINES
+
         log_path = self._get_current_log_path()
         log_edit = getattr(self, "log_edit", None)
         if log_edit is None:
@@ -93,23 +133,28 @@ class LogTabMixin:
 
         if not log_path:
             log_edit.setPlainText("未找到日志文件路径。")
-            self._append_log("[LOG_TAB][LOAD_FAILED] reason=no_log_path", echo=True)
+            if hasattr(self, "_append_log"):
+                self._append_log("[LOG_TAB][LOAD_FAILED] reason=no_log_path", echo=True)
             return
 
-        self._append_log(
-            f"[LOG_TAB][LOAD_START] path={log_path} max_lines={self.LOG_TAB_MAX_DISPLAY_LINES}",
-            echo=True,
-        )
+        if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
+            self._append_log(
+                f"[LOG_TAB][LOAD_START] path={log_path} "
+                f"max_lines={self.LOG_TAB_MAX_DISPLAY_LINES}",
+                echo=False,
+            )
 
+        self._log_tab_load_pending = True
         self._log_loading = True
         self._log_load_started_at = time.perf_counter()
-        log_edit.setPlainText(
-            f"正在加载最近 {self.LOG_TAB_MAX_DISPLAY_LINES} 行日志..."
-        )
+        if not self._log_tab_loaded:
+            log_edit.setPlainText(
+                f"正在加载最近 {self.LOG_TAB_MAX_DISPLAY_LINES} 行日志..."
+            )
 
         worker = LogLoadWorker(
             log_path,
-            max_lines=self.LOG_TAB_MAX_DISPLAY_LINES,
+            max_lines=max_lines,
             parent=self,
         )
         self._log_worker = worker
@@ -125,85 +170,57 @@ class LogTabMixin:
             cost_ms = int((time.perf_counter() - start) * 1000)
 
         self._loaded_log_lines = list(lines or [])
-        keyword = ""
-        filter_edit = getattr(self, "log_filter_edit", None)
-        if filter_edit is not None:
-            keyword = (filter_edit.text() or "").strip().lower()
-
-        if keyword:
-            show_lines = [
-                line for line in self._loaded_log_lines if keyword in line.lower()
-            ]
-        else:
-            show_lines = self._loaded_log_lines
-
-        text = "\n".join(show_lines[-self.LOG_TAB_MAX_DISPLAY_LINES :])
+        text = "\n".join(
+            self._loaded_log_lines[-self.LOG_TAB_MAX_DISPLAY_LINES :]
+        )
         log_edit = getattr(self, "log_edit", None)
         if log_edit is not None:
             log_edit.setPlainText(text)
+            pending = list(getattr(self, "_pending_log_lines", []) or [])
+            self._pending_log_lines = []
+            for line in pending:
+                log_edit.appendPlainText(line)
             scrollbar = log_edit.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
         self._log_tab_loaded = True
 
-        slow = cost_ms > 1000
-        msg = (
-            f"[LOG_TAB][LOAD_DONE] lines={len(self._loaded_log_lines)} cost_ms={cost_ms}"
+        debug_enabled = (
+            hasattr(self, "_is_debug_mode_enabled")
+            and self._is_debug_mode_enabled()
         )
-        if slow:
-            msg += f" [LOG_TAB][SLOW_LOAD] cost_ms={cost_ms}"
-        self._append_log(msg, echo=True)
+
+        if debug_enabled:
+            self._append_log(
+                f"[LOG_TAB][LOAD_DONE] lines={len(self._loaded_log_lines)} "
+                f"cost_ms={cost_ms}",
+                echo=False,
+            )
+
+        if cost_ms >= 1000:
+            self._append_log(
+                f"[LOG_TAB][SLOW_LOAD] cost_ms={cost_ms}",
+                echo=False,
+            )
+        self._log_tab_load_pending = False
 
     def _on_log_load_failed(self, error):
         log_edit = getattr(self, "log_edit", None)
         if log_edit is not None:
             log_edit.setPlainText(f"日志加载失败：{error}")
-        self._append_log(f"[LOG_TAB][LOAD_FAILED] error={error}", echo=True)
+        if hasattr(self, "_append_log"):
+            self._append_log(f"[LOG_TAB][LOAD_FAILED] error={error}", echo=True)
         print(f"[LOG_TAB][LOAD_FAILED] error={error}")
         print(traceback.format_exc())
+        self._log_tab_load_pending = False
 
     def _on_log_load_finished(self):
         self._log_loading = False
+        self._log_tab_load_pending = False
         worker = getattr(self, "_log_worker", None)
         if worker is not None:
             worker.deleteLater()
             self._log_worker = None
-
-    def _on_refresh_log_clicked(self):
-        self._log_tab_loaded = False
-        self._last_log_refresh_ts = 0.0
-        self._load_log_async()
-
-    def _on_open_log_dir_clicked(self):
-        log_path = self._get_current_log_path()
-        if not log_path:
-            msg = "打开日志目录失败：未找到日志文件路径。"
-            self._append_log("[LOG_TAB][OPEN_DIR][FAILED] reason=no_log_path", echo=True)
-            self._set_tm_action_hint(msg)
-            return
-
-        log_dir = str(Path(log_path).resolve().parent)
-        url = QUrl.fromLocalFile(log_dir)
-        if not url.isValid():
-            msg = f"打开日志目录失败：路径无效（{log_dir}）"
-            self._append_log(
-                f"[LOG_TAB][OPEN_DIR][FAILED] reason=invalid_url path={log_dir}",
-                echo=True,
-            )
-            self._set_tm_action_hint(msg)
-            return
-
-        if QDesktopServices.openUrl(url):
-            self._set_tm_action_hint(f"已打开日志目录：{log_dir}")
-            self._append_log(f"[LOG_TAB][OPEN_DIR] path={log_dir}", echo=True)
-            return
-
-        msg = f"打开日志目录失败：无法打开（{log_dir}）"
-        self._append_log(
-            f"[LOG_TAB][OPEN_DIR][FAILED] reason=openUrl_failed path={log_dir}",
-            echo=True,
-        )
-        self._set_tm_action_hint(msg)
 
     def _on_copy_log_clicked(self):
         log_edit = getattr(self, "log_edit", None)
@@ -213,50 +230,16 @@ class LogTabMixin:
             return
 
         text = log_edit.toPlainText()
-        loading_hint = f"正在加载最近 {self.LOG_TAB_MAX_DISPLAY_LINES} 行日志"
-        if not (text or "").strip() or (loading_hint in text):
+        if not (text or "").strip():
             self._set_tm_action_hint("当前日志为空。")
-            self._append_log("[LOG_TAB][COPY][EMPTY]", echo=True)
+            if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
+                self._append_log("[LOG_TAB][COPY][EMPTY]", echo=True)
             return
 
         QApplication.clipboard().setText(text)
         self._set_tm_action_hint(f"已复制当前日志，共 {len(text)} 个字符。")
-        self._append_log(f"[LOG_TAB][COPY] chars={len(text)}", echo=True)
-
-    def _apply_log_filter(self):
-        log_edit = getattr(self, "log_edit", None)
-        if log_edit is None:
-            return
-
-        keyword = ""
-        filter_edit = getattr(self, "log_filter_edit", None)
-        if filter_edit is not None:
-            keyword = (filter_edit.text() or "").strip().lower()
-
-        lines = getattr(self, "_loaded_log_lines", []) or []
-        if not keyword:
-            show_lines = lines
-        else:
-            show_lines = [line for line in lines if keyword in line.lower()]
-
-        log_edit.setPlainText("\n".join(show_lines[-self.LOG_TAB_MAX_DISPLAY_LINES :]))
-        scrollbar = log_edit.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-
-    def _maybe_auto_refresh_log(self):
-        if not self._is_log_tab_visible():
-            return
-        if not self._is_runtime_log_subtab_active():
-            return
-        if self._log_loading:
-            return
-
-        now = time.time()
-        if now - self._last_log_refresh_ts < self.LOG_TAB_AUTO_REFRESH_INTERVAL_SEC:
-            return
-
-        self._last_log_refresh_ts = now
-        self._load_log_async()
+        if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
+            self._append_log(f"[LOG_TAB][COPY] chars={len(text)}", echo=True)
 
     def _refresh_log_subtabs_from_cache(self):
         status = getattr(self, "_last_bridge_status", None) or {}
@@ -289,4 +272,4 @@ class LogTabMixin:
         widget.setReadOnly(True)
         widget.setLineWrapMode(QPlainTextEdit.NoWrap)
         widget.setMaximumBlockCount(LogTabMixin.LOG_TAB_MAX_BLOCK_COUNT)
-        widget.setPlaceholderText("日志加载中...")
+        widget.setPlaceholderText("运行日志将随应用活动追加显示…")

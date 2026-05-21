@@ -108,11 +108,13 @@ print(reply)
 
 ### 图形界面
 
-在保留命令行/库调用的前提下，可使用独立的 Bridge 客户端 GUI：
+在保留命令行/库调用的前提下，可使用**独立的 Bridge API 调试客户端**（不参与主 `GUI.py` 桌面联动）：
 
 ```bash
-python bridge_client_gui.py
+python examples/bridge_client_gui.py
 ```
+
+根目录 `bridge_client_gui.py` 仅为兼容入口，启动时会打印 `[DEPRECATED]` 并转发到上述路径；主程序请勿导入该文件。
 
 界面中可配置服务地址与 Token、查看连接诊断、选择或新建 GUI 会话，并通过聊天区发送消息。
 

@@ -23,6 +23,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.utils.page_status import is_page_online
 from app.utils.tm_activity import classify_tm_client_activity
 
 
@@ -365,7 +366,7 @@ class PageAutoBindMixin:
         best_focus_at = 0.0
         best_has_focus = False
         for item in status.get("tampermonkey_clients") or []:
-            if not isinstance(item, dict) or not item.get("online"):
+            if not isinstance(item, dict) or not is_page_online(item):
                 continue
             if (item.get("page_type") or "").strip() != "home":
                 continue
@@ -1212,8 +1213,6 @@ class PageAutoBindMixin:
             "bootstrap_in_progress": False,
         }
         session.updated_at = time.time()
-        if server.is_server_running():
-            server.set_bound_client_id(client_id, session.session_id)
         self._save_sessions_to_disk()
         self._update_bound_page_display()
         self._apply_chat_bind_visual_state()
@@ -1267,8 +1266,8 @@ class PageAutoBindMixin:
         if not self._is_bindable_chatgpt_url(bind_check_url):
             self._add_system_message("该 URL 不是可绑定的 ChatGPT 对话页面。")
             return False
-        if not client_id:
-            self._add_system_message("缺少 client_id，无法绑定。")
+        if not client_id and not conversation_id and not page_url:
+            self._add_system_message("缺少页面身份信息，无法绑定。")
             return False
         if not conversation_id:
             self._add_system_message("缺少 conversation_id，无法正式绑定对话页。")
@@ -1314,8 +1313,6 @@ class PageAutoBindMixin:
                 f"new_client_id={client_id} "
                 f"url={conversation_url or page_url}"
             )
-        if server.is_server_running():
-            server.set_bound_client_id(client_id, session.session_id)
         self._save_sessions_to_disk()
         self._refresh_session_list(select_session_id=session.session_id)
         if session.session_id == (self._current_session_id or ""):
@@ -1390,8 +1387,6 @@ class PageAutoBindMixin:
             "opened_home_at": 0,
         }
         session.updated_at = time.time()
-        if server.is_server_running() and bound_client_id:
-            server.set_bound_client_id(bound_client_id, session.session_id)
         self._save_sessions_to_disk()
         self._update_bound_page_display()
         self._apply_chat_bind_visual_state()
@@ -1416,6 +1411,15 @@ class PageAutoBindMixin:
             f"client_id={bound_client_id or '-'} "
             f"page_instance_id={page_instance_id or '-'} "
             f"url={page_url or '-'}"
+        )
+        old_conv = self._remote_conversation_id(remote) or "-"
+        self._append_log(
+            "[BIND][HOME_TO_CONVERSATION][UPDATED] "
+            f"session_id={session.session_id} client_id={bound_client_id or '-'} "
+            f"old_conv={old_conv or '-'} new_conv={conversation_id} "
+            f"old_url={remote.get('conversation_url') or remote.get('url') or 'https://chatgpt.com/'} "
+            f"new_url={page_url or '-'} "
+            f"old_state=prebound_home new_state=bound_online"
         )
         self._refresh_session_list(select_session_id=session.session_id)
         if session.session_id == (self._current_session_id or ""):
@@ -1913,6 +1917,22 @@ class PageAutoBindMixin:
                         f"old_url={old_url} new_url={page_url} "
                         f"old_state=prebound_home new_state=bound_online"
                     )
+                    self._append_log(
+                        "[SYNC][PREBOUND_HOME_RESOLVED] "
+                        f"session_id={session.session_id} "
+                        f"old_url={old_url or '-'} "
+                        f"new_url={page_url or '-'} "
+                        f"conversation_id={client_conversation_id or '-'} "
+                        f"client_id={client_id or '-'}",
+                        echo=True,
+                    )
+                    wait_pending = getattr(self, "_wait_conversation_sync_by_session", None)
+                    if isinstance(wait_pending, dict):
+                        wait_pending.pop(session.session_id, None)
+                    if getattr(self, "_auto_sync_conversation_on_bind", False):
+                        self._schedule_auto_sync_conversation(
+                            session, request_reason="prebound_home_resolved"
+                        )
                     continue
                 self._append_log(
                     "[BIND][HOME_TO_CONVERSATION][SKIP] "
@@ -1948,6 +1968,24 @@ class PageAutoBindMixin:
                         f"conversation_id={client_conversation_id} "
                         f"url={page_url}"
                     )
+                    self._append_log(
+                        "[SYNC][PREBOUND_HOME_RESOLVED] "
+                        f"session_id={session.session_id} "
+                        f"old_url={(remote.get('conversation_url') or remote.get('url') or '-')} "
+                        f"new_url={page_url or '-'} "
+                        f"conversation_id={client_conversation_id or '-'} "
+                        f"client_id={client_id or '-'}",
+                        echo=True,
+                    )
+                    wait_pending = getattr(self, "_wait_conversation_sync_by_session", None)
+                    if isinstance(wait_pending, dict):
+                        wait_pending.pop(session.session_id, None)
+                    if hasattr(self, "_try_send_next_queued_message"):
+                        self._try_send_next_queued_message(session)
+                    if getattr(self, "_auto_sync_conversation_on_bind", False):
+                        self._schedule_auto_sync_conversation(
+                            session, request_reason="prebound_home_resolved"
+                        )
                     continue
             if session_conversation_id and client_conversation_id:
                 if client_conversation_id != session_conversation_id:

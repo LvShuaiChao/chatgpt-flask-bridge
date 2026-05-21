@@ -32,7 +32,6 @@ from app.ui.widgets.session_list_item import (
 from PyQt5.QtCore import QSize, Qt, QTimer
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
-    QApplication,
     QInputDialog,
     QListWidgetItem,
     QMenu,
@@ -50,11 +49,6 @@ class SessionMixin:
         input_widget = self._message_input_widget()
         if input_widget is None:
             return
-        if not force:
-            focused = QApplication.focusWidget()
-            session_search = getattr(self, "session_search_edit", None)
-            if focused is session_search:
-                return
         input_widget.setFocus(Qt.OtherFocusReason)
         if select_all and hasattr(input_widget, "selectAll"):
             input_widget.selectAll()
@@ -110,6 +104,8 @@ class SessionMixin:
         )
         self._render_session_chat(session, force_bottom=True)
         self._focus_message_input_later(force=True)
+        if hasattr(self, "_apply_default_compose_message_if_empty"):
+            self._apply_default_compose_message_if_empty()
         self._save_sessions_to_disk()
         if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
             self._ensure_visible_chatgpt_home_for_new_session(session)
@@ -123,39 +119,217 @@ class SessionMixin:
         if session:
             return session
         return self._create_session(select=True)
-    def _select_session(self, session_id, save=False):
+    def _is_tm_pages_table_visible(self):
+        table = getattr(self, "tm_pages_table", None)
+        if table is None:
+            return False
+        return table.isVisible()
+
+    def _is_chat_view_visible(self):
+        chat_scroll = getattr(self, "chat_scroll", None)
+        if chat_scroll is None:
+            return False
+        if not chat_scroll.isVisible():
+            return False
+        for attr_name in (
+            "chat_mode_tabs",
+            "chat_content_tabs",
+            "chat_sub_tabs",
+            "chat_right_tabs",
+        ):
+            tabs = getattr(self, attr_name, None)
+            if tabs is None:
+                continue
+            current_text = tabs.tabText(tabs.currentIndex()).strip()
+            if current_text and "聊天" not in current_text:
+                return False
+        return True
+
+    def _render_pending_chat_if_needed(self):
+        session_id = getattr(self, "_pending_chat_render_session_id", "")
+        if not session_id:
+            return
+        if session_id != getattr(self, "_current_session_id", ""):
+            self._pending_chat_render_session_id = ""
+            return
+        if not self._is_chat_view_visible():
+            return
+        session = self._sessions.get(session_id)
+        if session is None:
+            self._pending_chat_render_session_id = ""
+            return
+        self._pending_chat_render_session_id = ""
+        self._render_session_chat(session, force_bottom=True)
+
+    def _log_select_session_deferred_skip(self, phase, reason, session_id, switch_token):
+        if not self._is_debug_mode_enabled():
+            return
+        current_id = getattr(self, "_current_session_id", "") or "-"
+        token = getattr(self, "_deferred_session_switch_token", "") or "-"
+        self._append_log(
+            f"[SELECT_SESSION_{phase}][SKIP] "
+            f"reason={reason} "
+            f"session_id={session_id} "
+            f"current={current_id} "
+            f"token={switch_token or '-'} "
+            f"current_token={token}",
+            echo=False,
+        )
+
+    def _select_session(self, session_id, save=True):
         if session_id not in self._sessions:
             return
-
-        old_session_id = self._current_session_id
+        old_session_id = getattr(self, "_current_session_id", "")
         if old_session_id == session_id:
             return
 
-        start = time.perf_counter()
+        switch_token = uuid.uuid4().hex
+        self._deferred_session_switch_token = switch_token
+        self._session_switching = True
+
         self._current_session_id = session_id
+        self._suspend_status_ui_until = time.time() + 0.8
         session = self._sessions[session_id]
+
+        self._refresh_session_list_selection_only(
+            current_session_id=session_id,
+            previous_session_id=old_session_id,
+        )
+        self._update_current_session_title_fast(session)
+        self._force_session_list_repaint_now()
+
+        QTimer.singleShot(
+            350,
+            lambda sid=session_id, token=switch_token, should_save=save: self._finish_select_session_deferred(
+                sid,
+                token,
+                should_save,
+            ),
+        )
+
+    def _finish_select_session_deferred(self, session_id, switch_token, save=True):
+        if getattr(self, "_deferred_session_switch_token", "") != switch_token:
+            self._log_select_session_deferred_skip(
+                "DEFERRED",
+                "token_mismatch",
+                session_id,
+                switch_token,
+            )
+            return
+        if session_id != getattr(self, "_current_session_id", ""):
+            self._log_select_session_deferred_skip(
+                "DEFERRED",
+                "session_changed",
+                session_id,
+                switch_token,
+            )
+            return
+        session = self._sessions.get(session_id)
+        if session is None:
+            self._log_select_session_deferred_skip(
+                "DEFERRED",
+                "session_missing",
+                session_id,
+                switch_token,
+            )
+            self._session_switching = False
+            return
+
         session.has_pending_reply = self._session_has_pending_assistant_reply(session)
 
-        self._render_session_chat(session, force_bottom=True)
-        self._refresh_session_list_selection_only(old_session_id, session_id)
-        self._update_current_session_title(session)
-        self._update_bound_page_display()
-        self._schedule_deferred_session_switch_refresh(session_id)
-        self._focus_message_input_later()
+        t0 = time.perf_counter()
+        if self._is_chat_view_visible():
+            self._render_session_chat(session, force_bottom=True)
+            chat_rendered = True
+        else:
+            self._pending_chat_render_session_id = session_id
+            chat_rendered = False
+        render_ms = int((time.perf_counter() - t0) * 1000)
 
-        if hasattr(self, "_settings") and self._settings is not None:
-            self._settings.setValue("ui/current_session_id", session_id)
+        QTimer.singleShot(
+            300,
+            lambda sid=session_id, token=switch_token, render_ms=render_ms, chat_rendered=chat_rendered, should_save=save: self._finish_select_session_deferred_light_ui(
+                sid,
+                token,
+                render_ms,
+                chat_rendered,
+                should_save,
+            ),
+        )
 
-        if save:
-            self._save_sessions_to_disk()
-
-        cost_ms = (time.perf_counter() - start) * 1000
-        if cost_ms > 80:
-            self._append_log(
-                f"[PERF][SELECT_SESSION] session_id={session_id} "
-                f"messages={len(session.messages)} cost_ms={cost_ms:.1f}",
-                echo=True,
+    def _finish_select_session_deferred_light_ui(
+        self,
+        session_id,
+        switch_token,
+        render_ms,
+        chat_rendered,
+        save=True,
+    ):
+        if getattr(self, "_deferred_session_switch_token", "") != switch_token:
+            self._log_select_session_deferred_skip(
+                "DEFERRED_LIGHT",
+                "token_mismatch",
+                session_id,
+                switch_token,
             )
+            return
+        if session_id != getattr(self, "_current_session_id", ""):
+            self._log_select_session_deferred_skip(
+                "DEFERRED_LIGHT",
+                "session_changed",
+                session_id,
+                switch_token,
+            )
+            return
+        session = self._sessions.get(session_id)
+        if session is None:
+            self._log_select_session_deferred_skip(
+                "DEFERRED_LIGHT",
+                "session_missing",
+                session_id,
+                switch_token,
+            )
+            self._session_switching = False
+            return
+
+        if save and hasattr(self, "_settings"):
+            self._settings.setValue("current_session_id", session_id)
+
+        t0 = time.perf_counter()
+
+        new_sig = self._session_list_visual_signature()
+        old_sig = getattr(self, "_last_session_list_visual_signature", None)
+        if new_sig != old_sig:
+            self._refresh_session_list(select_session_id=session_id)
+        self._update_current_session_title(session)
+        if hasattr(self, "_update_bound_page_display"):
+            self._update_bound_page_display()
+        if hasattr(self, "_refresh_tm_page_selector"):
+            self._refresh_tm_page_selector()
+        if self._is_tm_pages_table_visible() and hasattr(
+            self, "_render_tampermonkey_clients"
+        ):
+            self._render_tampermonkey_clients(self._last_bridge_status)
+        if hasattr(self, "_try_send_next_queued_message"):
+            self._try_send_next_queued_message(session)
+        self._focus_message_input_later()
+        if hasattr(self, "_apply_default_compose_message_if_empty"):
+            self._apply_default_compose_message_if_empty()
+        light_ms = int((time.perf_counter() - t0) * 1000)
+
+        self._session_switching = False
+        if self._is_debug_mode_enabled():
+            self._append_log(
+                "[PERF][SELECT_SESSION_DEFERRED] "
+                f"session_id={session_id} "
+                f"chat_rendered={chat_rendered} "
+                f"render_ms={render_ms} "
+                f"light_ms={light_ms} "
+                f"list_refreshed={new_sig != old_sig}",
+                echo=False,
+            )
+        if hasattr(self, "_schedule_status_apply_after_session_switch"):
+            self._schedule_status_apply_after_session_switch()
     def _session_display_title(self, session):
         title = session.title or "新对话"
         if session.has_pending_reply:
@@ -337,7 +511,7 @@ class SessionMixin:
             return f"{ts} · 绑定异常"
 
         if bind_list_state == "prebound_home":
-            return f"{ts} · 预绑定首页"
+            return f"{ts} · 等待进入对话"
 
         if bind_list_state == "waiting_bound_conversation":
             return f"{ts} · 等待打开绑定页"
@@ -379,60 +553,71 @@ class SessionMixin:
             ))
         return tuple(rows)
 
-    def _refresh_session_list_selection_only(self, old_session_id, new_session_id):
+    def _set_session_item_selected_fast(self, session_id, selected):
+        index = self._list_index_for_session(session_id)
+        if index < 0:
+            return
+        item = self.session_list.item(index)
+        if item is None:
+            return
+        widget = self.session_list.itemWidget(item)
+        if widget is not None and hasattr(widget, "set_selected_fast"):
+            if widget.set_selected_fast(selected):
+                return
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        self._apply_session_list_item_widget(
+            item,
+            session,
+            selected=selected,
+        )
+
+    def _refresh_session_list_selection_only(
+        self, current_session_id, previous_session_id=None
+    ):
         if not hasattr(self, "session_list"):
             return
-
         self._list_refreshing = True
         self.session_list.blockSignals(True)
         try:
-            target_index = self._list_index_for_session(new_session_id)
-            if target_index >= 0 and self.session_list.currentRow() != target_index:
-                self.session_list.setCurrentRow(target_index)
-
-            for sid in {old_session_id, new_session_id}:
-                if not sid:
+            current_index = self._list_index_for_session(current_session_id)
+            if current_index >= 0 and self.session_list.currentRow() != current_index:
+                self.session_list.setCurrentRow(current_index)
+            changed_ids = []
+            if previous_session_id:
+                changed_ids.append(previous_session_id)
+            if current_session_id:
+                changed_ids.append(current_session_id)
+            seen = set()
+            for sid in changed_ids:
+                if sid in seen:
                     continue
-                index = self._list_index_for_session(sid)
-                if index < 0:
-                    continue
-                item = self.session_list.item(index)
-                session = self._sessions.get(sid)
-                if item is None or session is None:
-                    continue
-                self._apply_session_list_item_widget(
-                    item,
-                    session,
-                    selected=(sid == self._current_session_id),
+                seen.add(sid)
+                self._set_session_item_selected_fast(
+                    sid,
+                    selected=(sid == current_session_id),
                 )
         finally:
             self.session_list.blockSignals(False)
             self._list_refreshing = False
 
-    def _schedule_deferred_session_switch_refresh(self, session_id):
-        self._deferred_session_switch_id = session_id
-        if getattr(self, "_deferred_session_switch_timer_active", False):
+    def _force_session_list_repaint_now(self):
+        session_list = getattr(self, "session_list", None)
+        if session_list is None:
             return
+        viewport = session_list.viewport()
+        if viewport is not None:
+            viewport.update()
 
-        self._deferred_session_switch_timer_active = True
-        QTimer.singleShot(120, self._flush_deferred_session_switch_refresh)
-
-    def _flush_deferred_session_switch_refresh(self):
-        self._deferred_session_switch_timer_active = False
-        session_id = getattr(self, "_deferred_session_switch_id", "")
-        if not session_id or session_id != self._current_session_id:
+    def _update_current_session_title_fast(self, session):
+        label = getattr(self, "current_session_title", None)
+        if label is None:
             return
-
-        if hasattr(self, "_refresh_tm_page_selector"):
-            self._refresh_tm_page_selector()
-
-        table = getattr(self, "tm_pages_table", None)
-        if table is not None and table.isVisible():
-            self._render_tampermonkey_clients(self._last_bridge_status)
-
-        session = self._sessions.get(session_id)
-        if session is not None and hasattr(self, "_try_send_next_queued_message"):
-            self._try_send_next_queued_message(session)
+        if session is None:
+            label.setText("新对话")
+            return
+        label.setText(self._session_display_title(session))
 
     def _session_list_item_tooltip(self, session, bind_state):
         style = SESSION_BIND_LIST_STYLES.get(
@@ -584,31 +769,6 @@ class SessionMixin:
             if session_id not in valid:
                 valid.append(session_id)
         self._tab_session_ids = valid
-    def _apply_session_search_filter(self):
-        if not hasattr(self, "session_list"):
-            return
-        needle = (self._session_search_text or "").strip().lower()
-        for index in range(self.session_list.count()):
-            item = self.session_list.item(index)
-            if not item:
-                continue
-            session_id = item.data(Qt.UserRole)
-            session = self._sessions.get(session_id)
-            if not session:
-                item.setHidden(True)
-                continue
-            if not needle:
-                item.setHidden(False)
-                continue
-            title = self._session_list_title_text(session).lower()
-            preview = self._session_preview_text(session).lower()
-            bind_state = self._session_bind_list_state(session, self._last_bridge_status)
-            status_label = SESSION_BIND_LIST_STYLES.get(bind_state, {}).get("label", "")
-            item.setHidden(
-                needle not in title
-                and needle not in preview
-                and needle not in status_label.lower()
-            )
     def _refresh_session_list(self, select_session_id=None):
         if not hasattr(self, "session_list"):
             return
@@ -638,12 +798,22 @@ class SessionMixin:
         self.session_list.blockSignals(True)
 
         if structure_same:
+            old_by_id = {}
+            if old_sig:
+                old_by_id = {row[0]: row for row in old_sig}
+
             for index, row in enumerate(new_sig):
                 session_id = row[0]
+                old_row = old_by_id.get(session_id)
+
+                if old_row == row:
+                    continue
+
                 session = self._sessions.get(session_id)
                 item = self.session_list.item(index)
                 if not item or not session:
                     continue
+
                 self._apply_session_list_item_widget(
                     item,
                     session,
@@ -669,24 +839,30 @@ class SessionMixin:
             list_index = self._list_index_for_session(target_id)
             if list_index >= 0:
                 self.session_list.setCurrentRow(list_index)
-        self._apply_session_search_filter()
         self.session_list.blockSignals(False)
         self._list_refreshing = False
         self._last_session_list_visual_signature = new_sig
 
-    def _on_session_search_changed(self, text):
-        self._session_search_text = text or ""
-        self._apply_session_search_filter()
+    def _on_session_list_pressed_fast(self, item):
+        if self._list_refreshing or item is None:
+            return
+        session_id = item.data(Qt.UserRole)
+        if not session_id:
+            return
+        if session_id == getattr(self, "_current_session_id", ""):
+            return
+        self._select_session(session_id)
+
     def _on_session_list_changed(self, current, previous):
         if self._list_refreshing or current is None:
             return
         session_id = current.data(Qt.UserRole)
-        if not session_id or session_id == self._current_session_id:
+        if not session_id:
             return
-        self._select_session(session_id, save=False)
+        if session_id == getattr(self, "_current_session_id", ""):
+            return
+        self._select_session(session_id)
     def _on_session_list_reordered(self, parent, start, end, destination, row):
-        if self._session_search_text.strip():
-            return
         self._sync_session_order_from_list()
         self._save_sessions_to_disk()
     def _on_session_list_double_clicked(self, item):
@@ -750,24 +926,87 @@ class SessionMixin:
         if not session:
             return
         self._delete_session_by_id(session.session_id)
-    def _delete_session_by_id(self, session_id):
-        if session_id not in self._sessions:
-            return
-        if len(self._tab_session_ids) <= 1:
-            self._clear_current_session()
-            return
-        list_index = self._list_index_for_session(session_id)
-        for message_id, sid in list(self._message_to_session.items()):
-            if sid == session_id:
-                del self._message_to_session[message_id]
-        if session_id in self._tab_session_ids:
-            self._tab_session_ids.remove(session_id)
-        if isinstance(getattr(self, "_session_send_queues", None), dict):
-            self._session_send_queues.pop(session_id, None)
-        del self._sessions[session_id]
+
+    def _select_next_session_after_delete(self, *, deleted_session_id, list_index=-1):
+        if not self._tab_session_ids:
+            self._current_session_id = None
+            if hasattr(self, "_refresh_current_chat_panel"):
+                self._refresh_current_chat_panel()
+            return ""
+        if list_index < 0:
+            list_index = self._list_index_for_session(deleted_session_id)
+        if list_index < 0:
+            list_index = 0
         next_index = min(max(list_index, 0), len(self._tab_session_ids) - 1)
         next_id = self._tab_session_ids[next_index]
         self._select_session(next_id)
+        return next_id
+
+    def _delete_session_by_id(self, session_id):
+        if session_id not in self._sessions:
+            return
+
+        self._append_log(
+            f"[SESSION][DELETE][START] session_id={session_id}",
+            echo=True,
+        )
+
+        was_current = session_id == getattr(self, "_current_session_id", "")
+        is_last_session = len(self._tab_session_ids) <= 1
+
+        if hasattr(self, "_clear_session_binding"):
+            self._clear_session_binding(session_id, reason="session_deleted")
+        if hasattr(self, "_clear_pending_web_sync_for_session"):
+            self._clear_pending_web_sync_for_session(session_id)
+
+        list_index = self._list_index_for_session(session_id)
+        if is_last_session:
+            self._clear_current_session()
+            next_session_id = getattr(self, "_current_session_id", "") or ""
+            self._refresh_session_list(select_session_id=next_session_id or None)
+        else:
+            for message_id, sid in list(self._message_to_session.items()):
+                if sid == session_id:
+                    del self._message_to_session[message_id]
+                    self._message_to_turn.pop(message_id, None)
+            if session_id in self._tab_session_ids:
+                self._tab_session_ids.remove(session_id)
+            if isinstance(getattr(self, "_session_send_queues", None), dict):
+                self._session_send_queues.pop(session_id, None)
+            if hasattr(self, "_purge_session_binding_caches"):
+                self._purge_session_binding_caches(session_id)
+            del self._sessions[session_id]
+            if was_current:
+                next_session_id = self._select_next_session_after_delete(
+                    deleted_session_id=session_id,
+                    list_index=list_index,
+                )
+            else:
+                next_session_id = getattr(self, "_current_session_id", "") or ""
+            self._refresh_session_list(
+                select_session_id=next_session_id or None
+            )
+
+        self._append_log(
+            f"[SESSION][DELETE][DONE] session_id={session_id}",
+            echo=True,
+        )
+
+        current_bound_url = ""
+        current_session = self._current_session()
+        if current_session and hasattr(self, "_current_session_bound_url"):
+            current_bound_url, _state = self._current_session_bound_url()
+        if hasattr(self, "_refresh_current_session_binding_display"):
+            self._refresh_current_session_binding_display()
+        if was_current and hasattr(self, "_refresh_current_chat_panel"):
+            self._refresh_current_chat_panel()
+        self._append_log(
+            "[SESSION][DELETE][UI_REFRESH] "
+            f"deleted_session_id={session_id} "
+            f"next_session_id={next_session_id or '-'} "
+            f"current_bound_url={current_bound_url or '-'}",
+            echo=True,
+        )
         self._save_sessions_to_disk()
     def _rename_current_session(self):
         session = self._current_session()
@@ -833,6 +1072,7 @@ class SessionMixin:
             message_id=message_id or str(uuid.uuid4()),
             turn_id=turn_id or "",
             status=status or "",
+            detail="",
             bridge_message_id=bridge_message_id or "",
             parent_message_id=parent_message_id or "",
             visible_in_chat=bool(visible_in_chat),
@@ -906,6 +1146,7 @@ class SessionMixin:
         if not session:
             return
         session.has_pending_reply = True
+        session.pending_reply_since = time.time()
         self._refresh_session_list(select_session_id=self._current_session_id)
     @staticmethod
     def _message_to_dict(message):
@@ -916,6 +1157,7 @@ class SessionMixin:
             "content": message.content,
             "created_at": message.created_at,
             "status": message.status,
+            "detail": getattr(message, "detail", "") or "",
             "bridge_message_id": message.bridge_message_id,
             "parent_message_id": message.parent_message_id,
             "visible_in_chat": message.visible_in_chat,
@@ -932,6 +1174,7 @@ class SessionMixin:
             message_id=data.get("message_id", ""),
             turn_id=data.get("turn_id", ""),
             status=data.get("status", ""),
+            detail=data.get("detail", ""),
             bridge_message_id=data.get("bridge_message_id", ""),
             parent_message_id=data.get("parent_message_id", ""),
             visible_in_chat=bool(data.get("visible_in_chat", True)),
@@ -1050,6 +1293,8 @@ class SessionMixin:
         self._finalized_bridge_message_ids = set(finalized)
         self._migrate_loaded_session_messages()
         self._migrate_loaded_remote_bindings()
+        if hasattr(self, "_gc_orphan_bindings"):
+            self._gc_orphan_bindings()
 
     def _migrate_loaded_remote_bindings(self):
         changed = False
@@ -1129,7 +1374,9 @@ class SessionMixin:
             self._settings.setValue("geometry", self.saveGeometry())
         if self._remember_window_position:
             self._settings.setValue("window_state", self.saveState())
-        if hasattr(self, "_save_chat_splitter_sizes"):
+        if hasattr(self, "_save_splitter_sizes_now"):
+            self._save_splitter_sizes_now()
+        elif hasattr(self, "_save_chat_splitter_sizes"):
             self._save_chat_splitter_sizes()
         if hasattr(self, "_save_chat_sub_tab_index"):
             self._save_chat_sub_tab_index()

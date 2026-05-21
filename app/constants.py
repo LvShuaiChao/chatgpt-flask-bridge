@@ -22,9 +22,9 @@ PENDING_ASSISTANT_STATUSES = frozenset(
     }
 )
 CHATGPT_HOME_URL = "https://chatgpt.com/"
-# 油猴页面活跃度（与 server.ONLINE_TIMEOUT_SEC / GUI 判断一致）
+# 油猴页面在线/活跃度（server.ONLINE_TIMEOUT_SEC 与此同源）
 TM_POLL_FRESH_SECONDS = 5.0
-TM_HEARTBEAT_ONLINE_SECONDS = 15.0
+TM_HEARTBEAT_ONLINE_SECONDS = 10.0
 BOUND_PAGE_ONLINE_SECONDS = 30.0
 BOUND_PAGE_STALE_SECONDS = 60.0
 BOUND_PAGE_OFFLINE_GRACE_SECONDS = 10.0
@@ -32,20 +32,20 @@ SETTINGS_ORG = "TampermonkeyBridge"
 SETTINGS_APP = "ChatGUI"
 SESSION_BIND_LIST_STYLES = {
     "bound_online": {
-        "bg": "#eefaf1",
-        "border": "#b7e4c7",
+        "bg": "#ecfdf5",
+        "border": "#86efac",
         "left": "#22c55e",
-        "text": "#14532d",
+        "text": "#166534",
         "label": "已绑定在线",
         "selected_border": "#16a34a",
     },
     "bound_offline": {
-        "bg": "#fff7ed",
-        "border": "#fed7aa",
-        "left": "#f97316",
-        "text": "#9a3412",
+        "bg": "#fffbeb",
+        "border": "#fbbf24",
+        "left": "#f59e0b",
+        "text": "#92400e",
         "label": "绑定离线",
-        "selected_border": "#ea580c",
+        "selected_border": "#d97706",
     },
     "prebound_home": {
         "bg": "#eff6ff",
@@ -80,8 +80,8 @@ SESSION_BIND_LIST_STYLES = {
         "selected_border": "#d97706",
     },
     "unbound": {
-        "bg": "#ffffff",
-        "border": "#e5e7eb",
+        "bg": "#f9fafb",
+        "border": "#d1d5db",
         "left": "#9ca3af",
         "text": "#374151",
         "label": "未绑定",
@@ -89,9 +89,9 @@ SESSION_BIND_LIST_STYLES = {
     },
     "bind_mismatch": {
         "bg": "#fef2f2",
-        "border": "#ef4444",
-        "left": "#dc2626",
-        "text": "#7f1d1d",
+        "border": "#fca5a5",
+        "left": "#ef4444",
+        "text": "#991b1b",
         "label": "绑定异常",
         "selected_border": "#dc2626",
     },
@@ -107,9 +107,10 @@ DEFAULT_APP_SETTINGS = {
     "remember_window_position": True,
     "restore_main_tab": True,
     "restore_chat_tab": True,
-    "show_page_url": True,
     "show_top_status_bar": True,
     "enter_send_mode": "enter_send",
+    # 输入框为空时预填的默认内容（新建对话、切换对话、发送清空后回填）
+    "default_compose_message": "",
     "auto_clear_input_after_send": True,
     "auto_scroll_to_bottom": True,
     "auto_name_new_chat": True,
