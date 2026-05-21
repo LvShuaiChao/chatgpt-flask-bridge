@@ -7,10 +7,6 @@ from app.utils.page_status import get_page_liveness, is_page_online, page_url_fr
 from log_utils import get_log_file_path
 
 from app.constants import (
-    STATUS_CHIP_AUTO_FOCUS_PREFIX,
-    STATUS_CHIP_AUTO_FOCUS_TOOLTIP,
-    STATUS_CHIP_MANUAL_SELECT_PREFIX,
-    STATUS_CHIP_MANUAL_SELECT_TOOLTIP,
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
     status_chip_text,
@@ -22,7 +18,7 @@ from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
 from app.ui.widgets.no_wheel_tab_widget import NoWheelTabWidget
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -55,10 +51,13 @@ class UiBuilderMixin:
     CHAT_SUB_TAB_CURSOR_FLOW = 1
     CURSOR_FLOW_TAB_TITLE_BASE = "Cursor 动作编排"
     STATUS_DETAIL_EXPANDED_SETTING_KEY = "ui/status_detail_expanded"
-    CHAT_SIDEBAR_MIN_WIDTH = 190
-    CHAT_SIDEBAR_DEFAULT_WIDTH = 240
-    CHAT_SIDEBAR_MAX_WIDTH = 480
-    CHAT_MAIN_MIN_WIDTH = 420
+    CHAT_SIDEBAR_MIN_WIDTH = 260
+    CHAT_SIDEBAR_DEFAULT_WIDTH = 320
+    CHAT_SIDEBAR_MAX_WIDTH = 460
+    CHAT_MAIN_MIN_WIDTH = 700
+    CHAT_SPLITTER_INVALID_LEFT = 220
+    CHAT_SPLITTER_INVALID_RIGHT = 600
+    CHAT_SPLITTER_DEFAULT_RIGHT = 1280
 
     def _make_hint_label(self, text):
         label = QLabel(text)
@@ -146,21 +145,34 @@ class UiBuilderMixin:
         self._splitter_save_timer.setSingleShot(True)
         self._splitter_save_timer.timeout.connect(self._save_splitter_sizes_now)
 
+    def _normalize_chat_splitter_sizes(self, sizes):
+        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 260))
+        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 460))
+        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 700))
+        invalid_left = int(getattr(self, "CHAT_SPLITTER_INVALID_LEFT", 220))
+        invalid_right = int(getattr(self, "CHAT_SPLITTER_INVALID_RIGHT", 600))
+        default_left = int(getattr(self, "CHAT_SIDEBAR_DEFAULT_WIDTH", 320))
+        default_right = int(getattr(self, "CHAT_SPLITTER_DEFAULT_RIGHT", 1280))
+        if not sizes or len(sizes) < 2:
+            return [default_left, default_right]
+        left = int(sizes[0])
+        right = int(sizes[1])
+        if left < invalid_left or right < invalid_right:
+            return [default_left, default_right]
+        left = max(min_left, min(left, max_left))
+        right = max(min_right, right)
+        return [left, right]
+
     def _restore_chat_splitter_sizes(self):
         splitter = getattr(self, "chat_splitter", None)
         if splitter is None:
             return
-        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
-        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
-        default_left = int(getattr(self, "CHAT_SIDEBAR_DEFAULT_WIDTH", 240))
-        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
         raw = self._settings.value("ui/chat_splitter_sizes", "")
         if raw:
             parts = [part.strip() for part in str(raw).split(",") if part.strip()]
             if len(parts) == 2:
                 try:
-                    left = int(parts[0])
-                    right = int(parts[1])
+                    parsed = [int(parts[0]), int(parts[1])]
                 except ValueError as error:
                     self._append_log(
                         "[UI_SPLITTER][RESTORE_FAILED] "
@@ -168,17 +180,15 @@ class UiBuilderMixin:
                         echo=True,
                     )
                 else:
-                    left = max(min_left, min(max_left, left))
-                    right = max(min_right, right)
-                    splitter.setSizes([left, right])
+                    applied = self._normalize_chat_splitter_sizes(parsed)
+                    splitter.setSizes(applied)
                     if getattr(self, "_debug_mode", False):
                         self._append_log(
                             "[UI_SPLITTER][RESTORE] "
-                            f"raw={raw} applied={[left, right]} "
-                            f"min_left={min_left} max_left={max_left} min_right={min_right}"
+                            f"raw={raw} applied={applied}"
                         )
                     return
-        default_sizes = [default_left, 1000]
+        default_sizes = self._normalize_chat_splitter_sizes(None)
         splitter.setSizes(default_sizes)
         if getattr(self, "_debug_mode", False):
             self._append_log(
@@ -199,11 +209,7 @@ class UiBuilderMixin:
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
-        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
-        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
-        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
-        left = max(min_left, min(max_left, int(sizes[0])))
-        right = max(min_right, int(sizes[1]))
+        left, right = self._normalize_chat_splitter_sizes(sizes)
         if left <= 0 or right <= 0:
             return
         value = f"{left},{right}"
@@ -211,9 +217,11 @@ class UiBuilderMixin:
         if getattr(self, "_debug_mode", False):
             self._append_log(
                 "[UI_SPLITTER][SAVE] "
-                f"raw={sizes} saved={[left, right]} "
-                f"min_left={min_left} max_left={max_left} min_right={min_right}"
+                f"raw={sizes} saved={[left, right]}"
             )
+
+    def _save_chat_splitter_sizes(self):
+        self._save_splitter_sizes_now()
 
     def _restore_chat_sub_tab_index(self):
         tabs = getattr(self, "chat_sub_tabs", None)
@@ -432,9 +440,106 @@ class UiBuilderMixin:
         row.addStretch()
         return row
 
-    def _build_tm_action_buttons(self, layout):
-        """兼容旧调用：按钮已嵌入状态详情中的焦点/手动面板。"""
+    def _ensure_tm_page_combo(self):
+        if hasattr(self, "tm_page_combo"):
+            return
+        self.tm_page_combo = NoWheelComboBox()
+        self.tm_page_combo.setObjectName("TmPageCombo")
+        self.tm_page_combo.setMinimumWidth(0)
+        self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+        self.tm_page_combo.setMinimumContentsLength(40)
+        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.tm_page_combo.setToolTip(
+            "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
+        )
+        self.tm_page_selector = self.tm_page_combo
+        if not getattr(self, "_tm_page_selector_connected", False):
+            self.tm_page_combo.currentIndexChanged.connect(
+                self._on_tm_page_selector_changed
+            )
+            self._tm_page_selector_connected = True
+
+    def _ensure_bind_selected_page_button(self):
+        if getattr(self, "_bind_selected_page_btn_ready", False):
+            return
+        self._bind_selected_page_btn_ready = True
+        self.bind_selected_page_btn = QPushButton("设为当前页")
+        self.bind_selected_page_btn.setToolTip(
+            "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
+        )
+        self.bind_selected_page_btn.clicked.connect(self._on_bind_selected_tm_page)
+        self.set_manual_current_page_btn = self.bind_selected_page_btn
+
+    def _style_tm_page_selector_row_buttons(self):
+        self._ensure_tm_action_buttons()
+        self._ensure_bind_selected_page_button()
+        for page_row_btn in (
+            self.chat_open_bound_btn,
+            self.bind_selected_page_btn,
+        ):
+            page_row_btn.setObjectName("PrimaryButton")
+            page_row_btn.setFixedHeight(28)
+            page_row_btn.setMinimumWidth(88)
+            page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def _build_tm_page_selector_row(self, parent_layout):
+        """页面 [下拉列表] [打开绑定页面] [设为当前页]"""
+        self._ensure_tm_action_buttons()
+        self._ensure_tm_page_combo()
+        self._ensure_bind_selected_page_button()
+        self.tm_page_combo.setFixedHeight(28)
+        self._style_tm_page_selector_row_buttons()
+
+        if not hasattr(self, "tm_page_empty_label"):
+            self.tm_page_empty_label = QLabel("暂无可用页面")
+            self.tm_page_empty_label.setObjectName("StatusRelationLine")
+            self.tm_page_empty_label.setFixedHeight(20)
+            self.tm_page_empty_label.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Fixed
+            )
+            self.tm_page_empty_label.setVisible(False)
+
+        page_label = QLabel("页面")
+        page_label.setObjectName("StatusChip")
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(page_label)
+        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row.addWidget(self.tm_page_empty_label, 1)
+        row.addWidget(self.tm_page_combo, 1)
+        row.addWidget(self.chat_open_bound_btn, 0, Qt.AlignVCenter)
+        row.addWidget(self.bind_selected_page_btn, 0, Qt.AlignVCenter)
+        parent_layout.addLayout(row)
+        self._sync_tm_page_list_empty_ui()
+
+    def _build_tm_action_buttons(
+        self, layout, *, include_page_selector=False, include_view_logs=False
+    ):
+        self._ensure_tm_action_buttons()
         layout.setSpacing(6)
+        for btn in (
+            self.open_chatgpt_btn,
+            self.bind_current_page_btn,
+            self.sync_web_conversation_btn,
+        ):
+            layout.addWidget(btn)
+        if include_page_selector:
+            self._build_tm_page_selector_row(layout)
+        for btn in (
+            self.close_bound_page_btn,
+            self.close_other_pages_btn,
+        ):
+            layout.addWidget(btn)
+        if include_view_logs:
+            layout.addStretch()
+            if not hasattr(self, "view_logs_btn"):
+                self.view_logs_btn = QPushButton("日志")
+                self.view_logs_btn.setObjectName("GhostButton")
+                self.view_logs_btn.setToolTip("切换到日志页")
+                self.view_logs_btn.clicked.connect(self._show_log_tab)
+            layout.addWidget(self.view_logs_btn)
 
     def _build_tm_debug_action_buttons(self, layout):
         specs = self._tm_action_button_specs()
@@ -856,7 +961,9 @@ class UiBuilderMixin:
         return -1
 
     def _page_is_online(self, item):
-        """判断 Tampermonkey 页面是否在线（仅心跳/轮询新鲜度）。"""
+        """UI 展示用在线判断（含 recently_seen）；绑定/发送仍用 _tm_page_is_online_simple。"""
+        if hasattr(self, "_page_is_online_for_ui"):
+            return self._page_is_online_for_ui(item)
         if hasattr(self, "_tm_page_is_online_simple"):
             return self._tm_page_is_online_simple(item)
         if not isinstance(item, dict):
@@ -866,6 +973,9 @@ class UiBuilderMixin:
             return False
         return not self._page_is_stale(item)
 
+    TM_PAGE_COMBO_ONLINE_COLOR = "#16a34a"
+    TM_PAGE_COMBO_OFFLINE_COLOR = "#6b7280"
+
     def _tm_page_combo_apply_item_colors(self, index, page):
         if not hasattr(self, "tm_page_combo") or index < 0:
             return
@@ -873,11 +983,64 @@ class UiBuilderMixin:
             return
 
         combo = self.tm_page_combo
-        is_online = self._page_is_online(page)
-        if is_online:
-            combo.setItemData(index, QColor("#16a34a"), Qt.ForegroundRole)
-        else:
-            combo.setItemData(index, QColor("#6b7280"), Qt.ForegroundRole)
+        is_online = self._page_is_online_for_ui(page)
+        color = (
+            self.TM_PAGE_COMBO_ONLINE_COLOR
+            if is_online
+            else self.TM_PAGE_COMBO_OFFLINE_COLOR
+        )
+        combo.setItemData(
+            index,
+            QBrush(QColor(color)),
+            Qt.ForegroundRole,
+        )
+        if hasattr(self, "_append_log"):
+            liveness = get_page_liveness(page)
+            page_url = (
+                page.get("url")
+                or page.get("page_url")
+                or page.get("normalized_url")
+                or "-"
+            )
+            self._append_log(
+                "[PAGE_SELECTOR][ITEM_STYLE] "
+                f"index={index} "
+                f"client_id={(page.get('client_id') or '-').strip() or '-'} "
+                f"url={str(page_url).strip() or '-'} "
+                f"liveness={liveness} "
+                f"online_for_ui={str(is_online).lower()} "
+                f"color={color}",
+                echo=False,
+            )
+
+    def _refresh_page_combo_current_style(self):
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None:
+            return
+        page = None
+        if hasattr(self, "_get_selected_tm_page_from_combo"):
+            page = self._get_selected_tm_page_from_combo()
+        is_online = (
+            self._page_is_online_for_ui(page) if isinstance(page, dict) else False
+        )
+        color = (
+            self.TM_PAGE_COMBO_ONLINE_COLOR
+            if is_online
+            else self.TM_PAGE_COMBO_OFFLINE_COLOR
+        )
+        combo.setStyleSheet(
+            f"""
+            QComboBox#TmPageCombo {{
+                color: {color};
+            }}
+            QComboBox#TmPageCombo QAbstractItemView {{
+                background: #ffffff;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+                outline: none;
+            }}
+            """
+        )
 
     def _tm_page_combo_tooltip(self, item):
         self._maybe_log_conversation_id_mismatch(item)
@@ -976,10 +1139,33 @@ class UiBuilderMixin:
             )
         return tuple(signature_items)
 
+    def _sync_tm_page_list_empty_ui(self):
+        """无可用页面时用短文案占位，隐藏空白下拉框。"""
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None:
+            return
+        has_pages = combo.count() > 0
+        empty_label = getattr(self, "tm_page_empty_label", None)
+        if empty_label is not None:
+            empty_label.setVisible(not has_pages)
+            if not has_pages:
+                empty_label.setText("暂无可用页面")
+        combo.setVisible(has_pages)
+        bind_selected_btn = getattr(
+            self,
+            "bind_selected_page_btn",
+            getattr(self, "set_manual_current_page_btn", None),
+        )
+        if bind_selected_btn is not None:
+            bind_selected_btn.setVisible(has_pages)
+
     def _update_tm_page_selector_display_state(self, index=-1):
         """自动刷新后仅更新展示/提示，不写入 manual_current_tm_client_id。"""
         combo = getattr(self, "tm_page_combo", None)
-        if combo is None or combo.count() <= 0:
+        if combo is None:
+            return
+        self._sync_tm_page_list_empty_ui()
+        if combo.count() <= 0:
             return
         if index < 0:
             index = combo.currentIndex()
@@ -992,6 +1178,8 @@ class UiBuilderMixin:
             self._set_tm_action_hint(self._tm_selector_action_hint_for_page(page))
         if hasattr(self, "_refresh_manual_current_page_display"):
             self._refresh_manual_current_page_display()
+        if hasattr(self, "_refresh_page_combo_current_style"):
+            self._refresh_page_combo_current_style()
 
     def _refresh_tm_page_selector(self, status=None):
         if not hasattr(self, "tm_page_combo"):
@@ -1021,6 +1209,7 @@ class UiBuilderMixin:
                 f"status_keys={list(full_status.keys())}",
                 echo=False,
             )
+            self._sync_tm_page_list_empty_ui()
             return
         duplicate_count = max(0, len(raw_pages) - len(unique_pages))
         self._append_log(
@@ -1102,6 +1291,7 @@ class UiBuilderMixin:
                     )
         page_selector_key = self._tm_page_selector_signature(pages)
         if page_selector_key == getattr(self, "_last_page_selector_key", ""):
+            self._sync_tm_page_list_empty_ui()
             return
         self._last_page_selector_key = page_selector_key
         manual_client_id = (
@@ -1200,14 +1390,6 @@ class UiBuilderMixin:
             self.message_edit.setPlaceholderText("输入消息…")
         else:
             self.message_edit.setPlaceholderText("输入消息…")
-        self._update_input_hint_label()
-    def _update_input_hint_label(self):
-        if not hasattr(self, "input_hint_label"):
-            return
-        if self._enter_send_mode == "ctrl_enter_send":
-            self.input_hint_label.setText("Ctrl + Enter 发送，Shift + Enter 换行")
-        else:
-            self.input_hint_label.setText("Enter 发送，Shift + Enter 换行")
     def _tampermonkey_bridge_url_text(self, host, port):
         host = (host or "").strip() or "127.0.0.1"
         port = (port or "").strip() or "5000"
@@ -1985,16 +2167,6 @@ class UiBuilderMixin:
         self.tm_online_label.setObjectName("StatusChip")
         self.tm_blank_home_label = QLabel("空白页：0/0｜可用0｜已绑0")
         self.tm_blank_home_label.setObjectName("StatusChip")
-        self.tm_current_page_label = QLabel(
-            status_chip_text(STATUS_CHIP_AUTO_FOCUS_PREFIX, "浏览器页面未获得焦点")
-        )
-        self.tm_current_page_label.setObjectName("StatusChip")
-        self.tm_current_page_label.setToolTip(STATUS_CHIP_AUTO_FOCUS_TOOLTIP)
-        self.tm_manual_page_label = QLabel(
-            status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "未选择")
-        )
-        self.tm_manual_page_label.setObjectName("StatusChip")
-        self.tm_manual_page_label.setToolTip(STATUS_CHIP_MANUAL_SELECT_TOOLTIP)
         self.tm_bound_page_label = QLabel(
             status_chip_text(STATUS_CHIP_SESSION_BIND_PREFIX, "未绑定")
         )
@@ -2004,7 +2176,6 @@ class UiBuilderMixin:
         self.tm_sync_target_label.setObjectName("StatusChip")
         self.tm_queue_label = QLabel("队列：0 / 0 / 0")
         self.tm_queue_label.setObjectName("StatusChip")
-        self.tm_live_page_label = self.tm_current_page_label
         self.cursor_bridge_status_label = QLabel("Cursor：未连接")
         self.cursor_bridge_status_label.setObjectName("StatusBadgeNeutral")
         self.cursor_bridge_status_label.setToolTip("Cursor Bridge 状态：未连接")
@@ -2019,8 +2190,6 @@ class UiBuilderMixin:
             self.status_label,
             self.tm_online_label,
             self.tm_blank_home_label,
-            self.tm_current_page_label,
-            self.tm_manual_page_label,
             self.tm_bound_page_label,
             self.tm_sync_target_label,
             self.tm_queue_label,
@@ -2041,8 +2210,6 @@ class UiBuilderMixin:
         top_row.addWidget(self.status_label)
         top_row.addWidget(self.tm_online_label)
         top_row.addWidget(self.tm_blank_home_label)
-        top_row.addWidget(self.tm_current_page_label)
-        top_row.addWidget(self.tm_manual_page_label)
         top_row.addWidget(self.tm_bound_page_label)
         top_row.addWidget(self.tm_sync_target_label)
         # 顶部状态栏不再显示“队列”和“任务”两个状态块。
@@ -2103,31 +2270,6 @@ class UiBuilderMixin:
         top_row.addWidget(self.status_action_host, 0, Qt.AlignRight | Qt.AlignVCenter)
         outer.addLayout(top_row)
 
-        self.focus_sync_hint_label = QLabel(
-            "焦点页不是绑定网页，同步将使用绑定网页。"
-        )
-        self.focus_sync_hint_label.setObjectName("focus_sync_hint_label")
-        self.focus_sync_hint_label.setMinimumHeight(22)
-        self.focus_sync_hint_label.setFixedHeight(22)
-        self.focus_sync_hint_label.setWordWrap(False)
-        self.focus_sync_hint_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.focus_sync_hint_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        self.focus_sync_hint_label.setVisible(True)
-        self.focus_sync_hint_label.setStyleSheet(
-            "QLabel#focus_sync_hint_label {"
-            " color: #8a6d00;"
-            " background: transparent;"
-            " padding-left: 6px;"
-            " padding-right: 6px;"
-            " font-size: 12px;"
-            "}"
-        )
-        # 兼容旧引用
-        self.tm_bind_mismatch_label = self.focus_sync_hint_label
-        outer.addWidget(self.focus_sync_hint_label)
-
         self.sync_progress_panel = QFrame()
         self.sync_progress_panel.setObjectName("SyncProgressPanel")
         self.sync_progress_panel.setVisible(False)
@@ -2157,104 +2299,13 @@ class UiBuilderMixin:
         detail_layout.setContentsMargins(8, 6, 8, 6)
         detail_layout.setSpacing(6)
 
-        summary_card = QFrame()
-        summary_card.setObjectName("StatusInfoCard")
-        summary_layout = QVBoxLayout(summary_card)
-        summary_layout.setContentsMargins(8, 5, 8, 5)
-        summary_layout.setSpacing(3)
-
-        summary_title = QLabel("页面概览")
-        summary_title.setObjectName("StatusSectionTitle")
-        summary_layout.addWidget(summary_title)
-
-        self.monkey_window_summary_label = QLabel("窗口统计：总数 0｜新建 0｜已绑定 0｜未绑定 0")
-        self.monkey_window_summary_label.setObjectName("StatusRelationLine")
-        self.monkey_window_summary_label.setWordWrap(True)
-
-        self.monkey_binding_summary_label = QLabel("绑定明细：已绑定：—｜未绑定：—")
-        self.monkey_binding_summary_label.setObjectName("StatusRelationLine")
-        self.monkey_binding_summary_label.setWordWrap(True)
-
-        summary_layout.addWidget(self.monkey_window_summary_label)
-        summary_layout.addWidget(self.monkey_binding_summary_label)
-        detail_layout.addWidget(summary_card)
-
         page_card = QFrame()
         page_card.setObjectName("StatusInfoCard")
         page_card_layout = QVBoxLayout(page_card)
         page_card_layout.setContentsMargins(8, 5, 8, 5)
         page_card_layout.setSpacing(5)
 
-        page_header_row = QHBoxLayout()
-        page_header_row.setSpacing(8)
-
-        page_label = QLabel("可用页面列表")
-        page_label.setObjectName("StatusSectionTitle")
-
-        if not hasattr(self, "tm_page_combo"):
-            self.tm_page_combo = NoWheelComboBox()
-            self.tm_page_combo.setObjectName("TmPageCombo")
-            self.tm_page_combo.setMinimumWidth(0)
-            self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
-            self.tm_page_combo.setMinimumContentsLength(40)
-            self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.tm_page_combo.setToolTip(
-                "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
-            )
-
-        self.tm_page_selector = self.tm_page_combo
-
-        if not getattr(self, "_tm_page_selector_connected", False):
-            self.tm_page_combo.currentIndexChanged.connect(
-                self._on_tm_page_selector_changed
-            )
-            self._tm_page_selector_connected = True
-
-        self.tm_page_combo.setFixedHeight(28)
-
-        self._ensure_tm_action_buttons()
-
-        self.set_manual_current_page_btn = QPushButton("设为当前页")
-        self.set_manual_current_page_btn.setToolTip(
-            "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
-        )
-        self.set_manual_current_page_btn.clicked.connect(
-            self._on_set_manual_current_page_clicked
-        )
-
-        for page_row_btn in (
-            self.chat_open_bound_btn,
-            self.set_manual_current_page_btn,
-        ):
-            page_row_btn.setObjectName("PrimaryButton")
-            page_row_btn.setFixedHeight(28)
-            page_row_btn.setMinimumWidth(88)
-            page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        page_header_row.addWidget(page_label)
-        page_header_row.addStretch()
-
-        page_selector_row = QHBoxLayout()
-        page_selector_row.setContentsMargins(0, 0, 0, 0)
-        page_selector_row.setSpacing(8)
-        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        page_selector_row.addWidget(self.tm_page_combo, 1)
-        page_selector_row.addWidget(
-            self.chat_open_bound_btn,
-            0,
-            Qt.AlignRight | Qt.AlignVCenter,
-        )
-        page_selector_row.addWidget(
-            self.set_manual_current_page_btn,
-            0,
-            Qt.AlignRight | Qt.AlignVCenter,
-        )
-        self._append_log(
-            "[UI][LAYOUT] move chat_open_bound_btn before set_manual_current_page_btn"
-        )
-
-        page_card_layout.addLayout(page_header_row)
-        page_card_layout.addLayout(page_selector_row)
+        self._build_tm_page_selector_row(page_card_layout)
 
         detail_layout.addWidget(page_card)
 
@@ -2417,15 +2468,15 @@ class UiBuilderMixin:
         self.chat_splitter = QSplitter(Qt.Horizontal)
         self.chat_splitter.setObjectName("ChatMainSplitter")
         self.chat_splitter.setChildrenCollapsible(False)
-        self.chat_splitter.setHandleWidth(6)
+        self.chat_splitter.setHandleWidth(4)
         self.session_sidebar = QWidget()
         self.session_sidebar.setObjectName("SessionSidebar")
         self.session_sidebar.setMinimumWidth(self.CHAT_SIDEBAR_MIN_WIDTH)
         self.session_sidebar.setMaximumWidth(self.CHAT_SIDEBAR_MAX_WIDTH)
         self.session_sidebar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         sidebar_layout = QVBoxLayout(self.session_sidebar)
-        sidebar_layout.setContentsMargins(10, 10, 10, 10)
-        sidebar_layout.setSpacing(8)
+        sidebar_layout.setContentsMargins(8, 8, 10, 8)
+        sidebar_layout.setSpacing(6)
         self.new_session_btn = QPushButton("新建对话")
         self.new_session_btn.setObjectName("PrimaryButton")
         self.new_session_btn.setToolTip("新建本地对话 (Ctrl+N)")
@@ -2491,13 +2542,13 @@ class UiBuilderMixin:
 
         header_block = QWidget()
         header_block.setObjectName("ChatHeaderBlock")
-        header_block.setMinimumHeight(72)
+        header_block.setMinimumHeight(56)
         header_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         header_layout = QVBoxLayout(header_block)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
-        self.current_session_title = QLabel("新对话")
+        self.current_session_title = QLabel("当前会话：新对话")
         self.current_session_title.setObjectName("CurrentSessionTitle")
         self.current_session_title.setMinimumHeight(28)
         self.current_session_title.setSizePolicy(
@@ -2520,13 +2571,6 @@ class UiBuilderMixin:
         )
         url_row.addWidget(self.current_session_url_label, 1, Qt.AlignVCenter)
         header_layout.addWidget(url_row_widget)
-
-        self.chat_bind_warning_label = QLabel("")
-        self.chat_bind_warning_label.setObjectName("ChatBindWarning")
-        self.chat_bind_warning_label.setWordWrap(True)
-        self.chat_bind_warning_label.setMaximumHeight(34)
-        self.chat_bind_warning_label.setVisible(False)
-        header_layout.addWidget(self.chat_bind_warning_label)
         chat_tab_layout.addWidget(header_block, 0)
 
         self.chat_transcript = QTextBrowser()
@@ -2576,10 +2620,6 @@ class UiBuilderMixin:
         input_layout.addLayout(compose_row)
         bottom_action_row = QHBoxLayout()
         bottom_action_row.setSpacing(8)
-        self.input_hint_label = QLabel()
-        self.input_hint_label.setObjectName("InputHint")
-        self._update_input_hint_label()
-        bottom_action_row.addWidget(self.input_hint_label)
         bottom_action_row.addStretch(1)
         self.clear_session_btn = QPushButton("清空当前对话")
         self.clear_session_btn.setObjectName("DangerButton")
@@ -2605,7 +2645,12 @@ class UiBuilderMixin:
         self.chat_splitter.addWidget(chat_area)
         self.chat_splitter.setStretchFactor(0, 0)
         self.chat_splitter.setStretchFactor(1, 1)
-        self.chat_splitter.setSizes([self.CHAT_SIDEBAR_DEFAULT_WIDTH, 1200])
+        self.chat_splitter.setSizes(
+            [
+                self.CHAT_SIDEBAR_DEFAULT_WIDTH,
+                self.CHAT_SPLITTER_DEFAULT_RIGHT,
+            ]
+        )
         if hasattr(self, "_init_splitter_save_timer"):
             self._init_splitter_save_timer()
         self.chat_splitter.splitterMoved.connect(self._schedule_save_chat_splitter_sizes)

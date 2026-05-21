@@ -1,16 +1,16 @@
 ====================================================================================================
 PROJECT EXPORT FOR CHATGPT / CURSOR
-Export time: 2026-05-22 01:49:33
+Export time: 2026-05-22 02:15:15
 Project name: chatgpt-flask-bridge
 Project root: E:\Documents\Desktop\chatgpt-flask-bridge
 Export mode: full project scan
-循环次数: 第 108 次
-本次合并耗时: 0.32s（读取各文件并组装正文）
-当前代码总行数: 63344
-当前收录源码文件合计 tokens（cl100k_base）: 49.87万
-当前合并导出全文 tokens（cl100k_base）: 50.20万
+循环次数: 第 140 次
+本次合并耗时: 0.41s（读取各文件并组装正文）
+当前代码总行数: 63747
+当前收录源码文件合计 tokens（cl100k_base）: 50.19万
+当前合并导出全文 tokens（cl100k_base）: 50.52万
 ChatGPT 文档 token 参考上限（文本类）: 200万
-合并导出全文相对上述上限尚余约 149.80万。
+合并导出全文相对上述上限尚余约 149.48万。
 ====================================================================================================
 
 说明：
@@ -50,37 +50,38 @@ ChatGPT 文档 token 参考上限（文本类）: 200万
   28. app/ui/mixins/session_mixin.py
   29. app/ui/mixins/settings_mixin.py
   30. app/ui/mixins/ui_builder_mixin.py
-  31. app/ui/styles.py
-  32. app/ui/widgets/__init__.py
-  33. app/ui/widgets/bridge_notifier.py
-  34. app/ui/widgets/chat_input.py
-  35. app/ui/widgets/elided_label.py
-  36. app/ui/widgets/no_wheel_combo_box.py
-  37. app/ui/widgets/no_wheel_tab_widget.py
-  38. app/ui/widgets/session_list.py
-  39. app/ui/widgets/session_list_item.py
-  40. app/url_utils.py
-  41. app/utils/__init__.py
-  42. app/utils/bridge_payload.py
-  43. app/utils/page_status.py
-  44. app/utils/text_utils.py
-  45. app/utils/time_utils.py
-  46. app/utils/tm_activity.py
-  47. app/utils/trace_log.py
-  48. bridge_client.py
-  49. bridge_client_gui.py
-  50. client.user.js
-  51. examples/__init__.py
-  52. examples/bridge_client_gui.py
-  53. examples/chat_cli.py
-  54. examples/client_ui/__init__.py
-  55. examples/client_ui/main_window.py
-  56. examples/external_client.py
-  57. GUI.py
-  58. log_utils.py
-  59. README.md
-  60. requirements.txt
-  61. server.py
+  31. app/ui/mixins/waiting_timer_mixin.py
+  32. app/ui/styles.py
+  33. app/ui/widgets/__init__.py
+  34. app/ui/widgets/bridge_notifier.py
+  35. app/ui/widgets/chat_input.py
+  36. app/ui/widgets/elided_label.py
+  37. app/ui/widgets/no_wheel_combo_box.py
+  38. app/ui/widgets/no_wheel_tab_widget.py
+  39. app/ui/widgets/session_list.py
+  40. app/ui/widgets/session_list_item.py
+  41. app/url_utils.py
+  42. app/utils/__init__.py
+  43. app/utils/bridge_payload.py
+  44. app/utils/page_status.py
+  45. app/utils/text_utils.py
+  46. app/utils/time_utils.py
+  47. app/utils/tm_activity.py
+  48. app/utils/trace_log.py
+  49. bridge_client.py
+  50. bridge_client_gui.py
+  51. client.user.js
+  52. examples/__init__.py
+  53. examples/bridge_client_gui.py
+  54. examples/chat_cli.py
+  55. examples/client_ui/__init__.py
+  56. examples/client_ui/main_window.py
+  57. examples/external_client.py
+  58. GUI.py
+  59. log_utils.py
+  60. README.md
+  61. requirements.txt
+  62. server.py
 
 ----------------------------------------------------------------------------------------------------
 
@@ -96,7 +97,7 @@ TOKENS（cl100k_base）: 0万（0）
 
 ====================================================================================================
 FILE: app/constants.py
-TOKENS（cl100k_base）: 0.16万（1,629）
+TOKENS（cl100k_base）: 0.17万（1,717）
 ====================================================================================================
 
 from pathlib import Path
@@ -218,8 +219,12 @@ STATUS_CHIP_SESSION_BIND_TOOLTIP = (
 )
 
 STATUS_PAGE_ROLES_HINT = (
-    "自动焦点页用于自动检测；手动选中页用于临时选择；"
-    "会话绑定页才是当前对话实际发送和同步使用的目标页面。"
+    "会话绑定页是当前对话实际发送和同步使用的目标页面；"
+    "可用页面列表中的手动选中页仅用于绑定等操作前的临时选择。"
+)
+
+UNBOUND_SESSION_SEND_HINT = (
+    "当前会话未绑定 ChatGPT 页面，请先点击【打开 ChatGPT】或【绑定当前页面】。"
 )
 
 
@@ -256,6 +261,8 @@ DEFAULT_APP_SETTINGS = {
     "log_assistant_reply_events": True,
     "log_send_failed_events": True,
     "bind_each_chat_to_page": True,
+    # 新建本地对话时是否自动打开/绑定 ChatGPT 首页（默认仅创建本地会话）
+    "auto_open_chatgpt_on_new_session": False,
     "auto_open_bound_page_when_missing": True,
     "allow_fallback_to_any_page": False,
     "auto_bind_unbound_page": True,
@@ -829,7 +836,7 @@ def _log_line(line):
 
 ====================================================================================================
 FILE: app/models.py
-TOKENS（cl100k_base）: 0.24万（2,426）
+TOKENS（cl100k_base）: 0.25万（2,465）
 ====================================================================================================
 
 import logging
@@ -1130,6 +1137,10 @@ class ChatSession:
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
     has_pending_reply: bool = False
+    pending_reply_since: float = 0
+    waiting_for_reply: bool = False
+    waiting_since_ts: float = 0
+    waiting_elapsed_sec: int = 0
 
     @property
     def conversation_id(self):
@@ -1300,7 +1311,7 @@ TOKENS（cl100k_base）: 0万（0）
 
 ====================================================================================================
 FILE: app/ui/main_window.py
-TOKENS（cl100k_base）: 0.19万（1,889）
+TOKENS（cl100k_base）: 0.19万（1,917）
 ====================================================================================================
 
 import traceback
@@ -1329,12 +1340,14 @@ from app.ui.mixins.log_tab_mixin import LogTabMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
 from app.ui.mixins.settings_mixin import SettingsMixin
+from app.ui.mixins.waiting_timer_mixin import WaitingTimerMixin
 from app.ui.mixins.ui_builder_mixin import UiBuilderMixin
 
 
 class MainWindow(
     QMainWindow,
     SettingsMixin,
+    WaitingTimerMixin,
     UiBuilderMixin,
     SessionMixin,
     ChatSessionMixin,
@@ -1444,6 +1457,7 @@ class MainWindow(
         else:
             first_id = next(iter(self._sessions))
             self._select_session(first_id, save=False)
+        self._init_waiting_elapsed_timer()
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
@@ -1541,7 +1555,7 @@ TOKENS（cl100k_base）: 0万（0）
 
 ====================================================================================================
 FILE: app/ui/mixins/bridge_mixin.py
-TOKENS（cl100k_base）: 3.62万（36,159）
+TOKENS（cl100k_base）: 3.63万（36,307）
 ====================================================================================================
 
 import time
@@ -2041,6 +2055,8 @@ class BridgeMixin:
 
         session.has_pending_reply = True
         session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="send_queued")
         self._refresh_session_list(select_session_id=session.session_id)
         if hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
@@ -2396,6 +2412,11 @@ class BridgeMixin:
 
         if cleared <= 0:
             return False
+
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="clear_stale_pending"
+            )
 
         session.updated_at = time.time()
 
@@ -4454,6 +4475,12 @@ class BridgeMixin:
                     "source": "local_placeholder",
                 },
             )
+            session.has_pending_reply = True
+            session.pending_reply_since = time.time()
+            if hasattr(self, "_mark_session_waiting_started"):
+                self._mark_session_waiting_started(
+                    session, reason="send_click_local_placeholder"
+                )
         count_after = self._session_visible_message_count(session)
         self._append_log(
             "[CHAT_SEND][LOCAL_APPEND_AFTER] "
@@ -5822,6 +5849,10 @@ class BridgeMixin:
                 parent_message_id=user_message_id,
                 status="等待中",
             )
+        session.has_pending_reply = True
+        session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="bootstrap_queued")
         session.updated_at = time.time()
         self._save_sessions_to_disk()
         return {
@@ -5849,7 +5880,7 @@ class BridgeMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/chat_render_mixin.py
-TOKENS（cl100k_base）: 0.34万（3,393）
+TOKENS（cl100k_base）: 0.35万（3,515）
 ====================================================================================================
 
 import html
@@ -5908,11 +5939,16 @@ class ChatRenderMixin:
     def _html_escape(self, value):
         return html.escape(str(value or ""), quote=True)
 
-    def _message_plain_text(self, message):
-        return getattr(message, "text", "") or getattr(message, "content", "") or ""
+    def _message_plain_text(self, message, session=None):
+        plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
+        if session is None and hasattr(self, "_current_session"):
+            session = self._current_session()
+        if hasattr(self, "_display_text_for_message"):
+            return self._display_text_for_message(message, session)
+        return plain
 
-    def _message_text_html(self, message):
-        text = self._message_plain_text(message)
+    def _message_text_html(self, message, session=None):
+        text = self._message_plain_text(message, session=session)
         text = self._html_escape(text)
         return text.replace("\n", "<br>")
 
@@ -5951,8 +5987,8 @@ class ChatRenderMixin:
             "</table>"
         )
 
-    def _assistant_bubble_width(self, message):
-        text = self._message_plain_text(message).strip()
+    def _assistant_bubble_width(self, message, session=None):
+        text = self._message_plain_text(message, session=session).strip()
         text_len = len(text)
 
         if text_len <= 20:
@@ -6013,7 +6049,7 @@ class ChatRenderMixin:
 
         for message in messages:
             role = (getattr(message, "role", "") or "").strip().lower()
-            content = self._message_text_html(message)
+            content = self._message_text_html(message, session=session)
 
             if role == "user":
                 meta = self._message_status_html(message, align="right")
@@ -6048,7 +6084,7 @@ class ChatRenderMixin:
             if role == "assistant":
                 meta = self._message_status_html(message, align="left")
                 badge = self._role_badge_html("AI", "#9ca3af")
-                bubble_width = self._assistant_bubble_width(message)
+                bubble_width = self._assistant_bubble_width(message, session=session)
                 bubble = self._bubble_table_html(
                     content,
                     bg="#ffffff",
@@ -6239,6 +6275,8 @@ class ChatRenderMixin:
         return True
 
     def _apply_reply_ui_change(self, session):
+        if hasattr(self, "_sync_session_waiting_timer"):
+            self._sync_session_waiting_timer(session, reason="reply_ui_change")
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
         else:
@@ -6276,6 +6314,8 @@ class ChatRenderMixin:
         target.content = ASSISTANT_WAIT_TEXT
         target.status = "等待中"
         session.updated_at = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="set_reply_waiting")
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
         self._refresh_session_list(select_session_id=session.session_id)
@@ -8840,7 +8880,7 @@ class LogTabMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_auto_bind_mixin.py
-TOKENS（cl100k_base）: 1.95万（19,492）
+TOKENS（cl100k_base）: 1.94万（19,382）
 ====================================================================================================
 
 """自动绑定、首页预绑定、bootstrap 与对话创建绑定。"""
@@ -8855,6 +8895,7 @@ from app.constants import (
     CHATGPT_HOME_URL,
     PENDING_ASSISTANT_STATUSES,
     TM_POLL_FRESH_SECONDS,
+    UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
@@ -9657,24 +9698,11 @@ class PageAutoBindMixin:
             )
             return True, ""
 
-        now = time.time()
-        bind_request_id = uuid.uuid4().hex
-        session.remote_chatgpt = {
-            **default_remote_chatgpt(),
-            "bind_state": BIND_STATE_WAITING_HOME,
-            "bind_request_id": bind_request_id,
-            "launch_token": bind_request_id,
-            "bind_started_at": now,
-            "pending_bootstrap_text": text,
-            "pending_bootstrap_created_at": now,
-            "opened_home_at": now,
-        }
-        self._save_sessions_to_disk()
-        self._start_waiting_home_on_send(session)
-        self._add_system_message(
-            "未发现空闲 ChatGPT 首页，正在打开新的 ChatGPT 首页..."
+        self._append_log(
+            f"[AUTO_BIND][FIRST_SEND_BLOCKED] session_id={session.session_id} "
+            f"reason=no_idle_home auto_open=false"
         )
-        return False, "__WAITING_HOME_PENDING__"
+        return False, UNBOUND_SESSION_SEND_HINT
 
     def _ensure_visible_chatgpt_home_for_new_session(self, session):
         """新建本地会话后：绑定用户可见的空闲首页，或通过绑定令牌打开新的可见首页。"""
@@ -12207,7 +12235,7 @@ class PageBindMixin(
 
 ====================================================================================================
 FILE: app/ui/mixins/page_binding_diagnostics_mixin.py
-TOKENS（cl100k_base）: 0.56万（5,641）
+TOKENS（cl100k_base）: 0.55万（5,460）
 ====================================================================================================
 
 """绑定冲突检测与诊断日志。"""
@@ -12482,34 +12510,9 @@ class PageBindingDiagnosticsMixin:
         )
         self._append_log(line)
     def _set_focus_sync_hint(self, text=None, level="warning"):
-        label = getattr(self, "focus_sync_hint_label", None)
-        if label is None:
-            label = getattr(self, "tm_bind_mismatch_label", None)
-        if label is None:
-            return
         final_text = (text or "").strip()
         if not final_text:
             final_text = "焦点页不是绑定网页，同步将使用绑定网页。"
-        label.setText(final_text)
-        label.setVisible(True)
-        label.show()
-        label.setMinimumHeight(22)
-        label.setFixedHeight(22)
-        if level == "ok":
-            color = "#1f7a35"
-        elif level == "error":
-            color = "#b42318"
-        else:
-            color = "#8a6d00"
-        label.setStyleSheet(
-            "QLabel#focus_sync_hint_label {"
-            f" color: {color};"
-            " background: transparent;"
-            " padding-left: 6px;"
-            " padding-right: 6px;"
-            " font-size: 12px;"
-            "}"
-        )
         ui_key = f"{final_text}|{level}"
         if ui_key != getattr(self, "_last_focus_sync_hint_ui_key", ""):
             self._last_focus_sync_hint_ui_key = ui_key
@@ -12765,7 +12768,7 @@ class PageBindingDiagnosticsMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_binding_display_mixin.py
-TOKENS（cl100k_base）: 0.74万（7,411）
+TOKENS（cl100k_base）: 0.63万（6,282）
 ====================================================================================================
 
 """绑定/页面关系 UI 显示。"""
@@ -12774,10 +12777,6 @@ import time
 
 from app.constants import (
     BOUND_PAGE_OFFLINE_GRACE_SECONDS,
-    STATUS_CHIP_AUTO_FOCUS_PREFIX,
-    STATUS_CHIP_AUTO_FOCUS_TOOLTIP,
-    STATUS_CHIP_MANUAL_SELECT_PREFIX,
-    STATUS_CHIP_MANUAL_SELECT_TOOLTIP,
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
     status_chip_text,
@@ -12795,32 +12794,6 @@ from app.models import (
 
 class PageBindingDisplayMixin:
     def _update_manual_current_page_display(self):
-        manual_page = self._get_manual_current_tm_page()
-        manual_chip = getattr(self, "tm_manual_page_label", None)
-        if manual_chip is None:
-            return
-
-        if isinstance(manual_page, dict):
-            display_url = self._page_full_url(manual_page) or self._manual_current_tm_url
-            manual_chip.setText(
-                status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "已选择")
-            )
-            manual_chip_state = (
-                "warn"
-                if self._page_plugin_status_text(manual_page) == "离线"
-                else "ok"
-            )
-            self._refresh_status_chip(manual_chip, manual_chip_state)
-            manual_tip = STATUS_CHIP_MANUAL_SELECT_TOOLTIP
-            if display_url:
-                manual_tip = f"{display_url}\n\n{manual_tip}"
-            manual_chip.setToolTip(manual_tip)
-        else:
-            manual_chip.setText(
-                status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "未选择")
-            )
-            self._refresh_status_chip(manual_chip, "warn")
-            manual_chip.setToolTip(STATUS_CHIP_MANUAL_SELECT_TOOLTIP)
         if hasattr(self, "_log_bind_mismatch_if_needed"):
             self._log_bind_mismatch_if_needed(self._tm_summary_for_session())
 
@@ -13025,42 +12998,6 @@ class PageBindingDisplayMixin:
         if show_url:
             self._persist_page_url(show_url)
         self._tampermonkey_page_url = show_url
-        page_state = "浏览器页面未获得焦点"
-        chip_state = "warn"
-        bound_info, bound_state, _ = self._resolve_bound_page_info(status=status)
-        bound_client_id = ((bound_info or {}).get("client_id") or "").strip()
-        display_url = ""
-        if isinstance(client_info, dict):
-            display_url = self._page_full_url(client_info)
-            profile = self._tm_client_sync_profile(client_info)
-            syncable = bool(profile.get("sync_readable") or profile.get("syncable"))
-            current_client_id = (client_info.get("client_id") or "").strip()
-            if (
-                bound_client_id
-                and current_client_id
-                and current_client_id != bound_client_id
-            ):
-                if bound_state == "online":
-                    page_state = "已检测"
-                    chip_state = "info"
-                else:
-                    page_state = "已检测"
-                    chip_state = "warn"
-            else:
-                page_state = "已检测"
-                chip_state = "ok" if syncable else "warn"
-        page_chip = getattr(self, "tm_current_page_label", None) or getattr(
-            self, "tm_live_page_label", None
-        )
-        if page_chip is not None:
-            page_chip.setText(
-                status_chip_text(STATUS_CHIP_AUTO_FOCUS_PREFIX, page_state)
-            )
-            self._refresh_status_chip(page_chip, chip_state)
-            focus_tip = STATUS_CHIP_AUTO_FOCUS_TOOLTIP
-            if display_url:
-                focus_tip = f"{display_url}\n\n{focus_tip}"
-            page_chip.setToolTip(focus_tip)
         self._update_manual_current_page_display()
         self._update_sync_target_display()
 
@@ -13396,63 +13333,6 @@ class PageBindingDisplayMixin:
                 style.polish(widget)
                 widget.update()
 
-        warning = getattr(self, "chat_bind_warning_label", None)
-        if warning is not None:
-            if state == "bind_mismatch":
-                warning.setText(
-                    "绑定页面与当前会话不一致，请重新绑定当前 ChatGPT 对话页。"
-                )
-                warning.setProperty("state", "error")
-                warning.setVisible(True)
-            elif state == "bound_offline":
-                session = self._current_session()
-                remote = normalize_remote_chatgpt(
-                    session.remote_chatgpt if session else None
-                )
-                if remote.get("enabled"):
-                    bound_info = self._client_info_by_id(
-                        (remote.get("client_id") or "").strip()
-                    )
-                    profile = self._tm_client_sync_profile(bound_info or {})
-                    if remote.get("enabled") and profile.get("online") and not (
-                        profile.get("sync_readable") or profile.get("syncable")
-                    ):
-                        warning.setText(
-                            "当前会话已绑定网页，但绑定页当前无法读取对话快照；"
-                            "请确认绑定页是对话页、在线且 conversation_id 有效。"
-                        )
-                    elif remote.get("enabled") and profile.get("online") and not profile.get(
-                        "sendable"
-                    ):
-                        warning.setText(
-                            "绑定页在线，可同步读取网页对话；"
-                            "发送新消息需等待生成结束或输入框可用。"
-                        )
-                    else:
-                        warning.setText(
-                            "当前会话已绑定网页，但该网页当前离线；"
-                            "可以保留绑定，打开该页面后会自动恢复同步。"
-                        )
-                else:
-                    warning.setText(
-                        "当前会话未绑定网页，请在可用页面列表中选择页面并点击绑定。"
-                    )
-                warning.setProperty("state", "warn")
-                warning.setVisible(True)
-            elif state in ("unbound_required", "waiting_bound_reopen"):
-                warning.setText(
-                    "当前会话未绑定网页，请在可用页面列表中选择页面并点击绑定。"
-                )
-                warning.setProperty("state", "")
-                warning.setVisible(True)
-            else:
-                warning.setProperty("state", "")
-                warning.setVisible(False)
-            if warning.isVisible():
-                warn_style = warning.style()
-                warn_style.unpolish(warning)
-                warn_style.polish(warning)
-
     def _current_session_bound_url(self):
         session = self._current_session()
         if session is None:
@@ -13502,9 +13382,10 @@ class PageBindingDisplayMixin:
             bound_client = (remote.get("client_id") or "-").strip() or "-"
             bound_instance = (remote.get("page_instance_id") or "-").strip() or "-"
             bound_conv = conversation_id or "-"
-            text = f"绑定网址：{url}    [{state_text}]"
+            text = f"绑定网址：{url}"
             tooltip = (
                 f"{text}\n"
+                f"state={state_text} | "
                 f"bound_client_id={bound_client} | "
                 f"bound_page_instance_id={bound_instance} | "
                 f"bound_conversation_id={bound_conv}"
@@ -14591,7 +14472,7 @@ class PageOpenCloseMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_selector_mixin.py
-TOKENS（cl100k_base）: 0.41万（4,055）
+TOKENS（cl100k_base）: 0.41万（4,121）
 ====================================================================================================
 
 """手动当前页与页面选择器。"""
@@ -14764,6 +14645,8 @@ class PageSelectorMixin:
             auto=True,
         )
         self._set_tm_action_hint(self._tm_selector_action_hint_for_page(item))
+        if hasattr(self, "_refresh_page_combo_current_style"):
+            self._refresh_page_combo_current_style()
 
     def _tm_selector_action_hint_for_page(self, page):
         if not isinstance(page, dict):
@@ -14785,6 +14668,10 @@ class PageSelectorMixin:
         if online:
             return "已选中页面，可点击「绑定当前页面」建立绑定。"
         return "已选中离线页；绑定、同步和发送都需要页面在线。"
+
+    def _on_bind_selected_tm_page(self):
+        """「设为当前页」按钮：确认可用页面列表当前项为手动选中页。"""
+        self._on_set_manual_current_page_clicked()
 
     def _on_set_manual_current_page_clicked(self):
         self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)
@@ -15086,7 +14973,7 @@ class PageSelectorMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_send_target_mixin.py
-TOKENS（cl100k_base）: 1.04万（10,415）
+TOKENS（cl100k_base）: 1.04万（10,388）
 ====================================================================================================
 
 """发送目标解析、绑定校验与在线页面选择。"""
@@ -15094,7 +14981,7 @@ TOKENS（cl100k_base）: 1.04万（10,415）
 import re
 import time
 
-from app.constants import BOUND_PAGE_ONLINE_SECONDS
+from app.constants import BOUND_PAGE_ONLINE_SECONDS, UNBOUND_SESSION_SEND_HINT
 from app.utils.page_status import (
     evaluate_page_capability,
     evaluate_send_page,
@@ -15966,7 +15853,7 @@ class PageSendTargetMixin:
                     "",
                     "",
                     False,
-                    "当前对话尚未绑定 ChatGPT 页面，请先发送首条消息。",
+                    UNBOUND_SESSION_SEND_HINT,
                 )
 
             if self._session_has_wrong_existing_conversation_bind(session):
@@ -15985,7 +15872,7 @@ class PageSendTargetMixin:
                     "",
                     "",
                     False,
-                    "当前对话尚未绑定 ChatGPT 首页，请先发送首条消息。",
+                    UNBOUND_SESSION_SEND_HINT,
                 )
 
             if self._auto_bind_unbound_page and self._try_auto_bind_online_page(
@@ -16277,7 +16164,7 @@ class PageSendTargetMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_sync_mixin.py
-TOKENS（cl100k_base）: 2.24万（22,405）
+TOKENS（cl100k_base）: 2.24万（22,437）
 ====================================================================================================
 
 """同步网页对话、快照回收与 sync 决策。"""
@@ -18374,6 +18261,10 @@ class PageSyncMixin:
 
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="web_sync_cleared_pending"
+            )
         session.updated_at = time.time()
 
         self._append_log(
@@ -18847,7 +18738,7 @@ class PageSyncMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_tm_client_mixin.py
-TOKENS（cl100k_base）: 1.16万（11,632）
+TOKENS（cl100k_base）: 1.18万（11,837）
 ====================================================================================================
 
 """油猴客户端遍历、URL 摘要与绑定状态基础判断。"""
@@ -18892,6 +18783,39 @@ from app.utils.tm_activity import (
 
 
 class PageTmClientMixin:
+    def _page_is_online_for_ui(self, page):
+        """UI 展示用在线判断：与下拉框 [在线] 文案、绿色样式共用，含 recently_seen。"""
+        if not isinstance(page, dict):
+            return False
+        state = str(
+            page.get("liveness")
+            or page.get("page_liveness")
+            or page.get("state")
+            or ""
+        ).strip().lower()
+        if state in {
+            "online",
+            "recently_seen",
+            "active",
+            "active_visible",
+            "active_hidden",
+        }:
+            return True
+        if page.get("online") is True:
+            return True
+        liveness = get_page_liveness(page)
+        if liveness in ("online", "recently_seen"):
+            return True
+        last_seen = float(
+            page.get("last_seen")
+            or page.get("last_heartbeat_at")
+            or page.get("last_poll_at")
+            or 0
+        )
+        if last_seen > 0:
+            return time.time() - last_seen <= TM_HEARTBEAT_ONLINE_SECONDS
+        return False
+
     def _tm_page_is_online_simple(self, item):
         """仅按心跳 last_seen 判断在线（统一 get_page_liveness == online）。"""
         liveness = get_page_liveness(item)
@@ -20294,18 +20218,14 @@ class PageTmClientMixin:
         )
 
     def update_monkey_binding_summary(self, status=None, monkey_stats=None):
-        if not hasattr(self, "monkey_window_summary_label"):
-            return
-        monkey_stats = monkey_stats or self._collect_monkey_window_binding_stats(status)
-        window_line, detail_line = self.build_monkey_binding_summary_text(monkey_stats)
-        self.monkey_window_summary_label.setText(window_line)
-        self.monkey_binding_summary_label.setText(detail_line)
+        """页面概览 UI 已移除；统计仍由 _collect_monkey_window_binding_stats 供日志使用。"""
+        return
 
 
 
 ====================================================================================================
 FILE: app/ui/mixins/session_mixin.py
-TOKENS（cl100k_base）: 1.33万（13,295）
+TOKENS（cl100k_base）: 1.45万（14,491）
 ====================================================================================================
 
 import json
@@ -20325,6 +20245,7 @@ from app.constants import (
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
     SESSION_BIND_LIST_STYLES,
+    UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
@@ -20421,26 +20342,36 @@ class SessionMixin:
         self._save_sessions_to_disk()
         return session
 
+    def _auto_open_chatgpt_on_new_session_enabled(self):
+        if hasattr(self, "_settings"):
+            value = self._settings.value("auto_open_chatgpt_on_new_session")
+            if value is not None:
+                if isinstance(value, str):
+                    return value.strip().lower() in ("1", "true", "yes", "on")
+                return bool(value)
+        from app.constants import DEFAULT_APP_SETTINGS
+
+        return bool(DEFAULT_APP_SETTINGS.get("auto_open_chatgpt_on_new_session", False))
+
     def _create_new_local_session(self):
         session = self._create_session(select=True)
         session.remote_chatgpt = default_remote_chatgpt()
         self._append_log(
-            f"[CHAT][NEW_LOCAL_SESSION] session_id={session.session_id} "
-            f"action=create_and_prepare_visible_home"
-        )
-        self._append_session_message(
-            session,
-            "system",
-            "已新建本地对话。\n"
-            "将优先使用「可见」的 ChatGPT 首页；若无可见首页则自动打开新首页。",
+            f"[SESSION][CREATE_LOCAL_ONLY] session_id={session.session_id} "
+            f"title={session.title!r} auto_open_chatgpt=false"
         )
         self._render_session_chat(session, force_bottom=True)
+        if hasattr(self, "_update_bound_page_display"):
+            self._update_bound_page_display()
+        if hasattr(self, "_apply_chat_bind_visual_state"):
+            self._apply_chat_bind_visual_state()
         self._focus_message_input_later()
         if hasattr(self, "_apply_default_compose_message_if_empty"):
             self._apply_default_compose_message_if_empty()
         self._save_sessions_to_disk()
-        if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
-            self._ensure_visible_chatgpt_home_for_new_session(session)
+        if self._auto_open_chatgpt_on_new_session_enabled():
+            if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
+                self._ensure_visible_chatgpt_home_for_new_session(session)
         return session
     def _current_session(self):
         if not self._current_session_id:
@@ -20542,10 +20473,37 @@ class SessionMixin:
         self._suspend_status_ui_until = time.time() + 0.8
         session = self._sessions[session_id]
 
+        old_session = self._sessions.get(old_session_id) if old_session_id else None
+        old_title = (
+            self._session_display_title(old_session)
+            if old_session is not None and hasattr(self, "_session_display_title")
+            else "-"
+        )
+        new_title = (
+            self._session_display_title(session)
+            if session is not None and hasattr(self, "_session_display_title")
+            else "-"
+        )
+        if hasattr(self, "_append_log"):
+            self._append_log(
+                "[SESSION][CURRENT_CHANGED] "
+                f"old_session_id={old_session_id or '-'} "
+                f"new_session_id={session_id or '-'} "
+                f"old_title={old_title or '-'} "
+                f"new_title={new_title or '-'}",
+                echo=False,
+            )
+
         self._refresh_session_list_selection_only(
             current_session_id=session_id,
             previous_session_id=old_session_id,
         )
+        changed_ids = []
+        if old_session_id:
+            changed_ids.append(old_session_id)
+        if session_id:
+            changed_ids.append(session_id)
+        self._refresh_session_list_current_badges()
         self._update_current_session_title_fast(session)
         self._force_session_list_repaint_now()
 
@@ -20658,6 +20616,8 @@ class SessionMixin:
         old_sig = getattr(self, "_last_session_list_visual_signature", None)
         if new_sig != old_sig:
             self._refresh_session_list(select_session_id=session_id)
+        else:
+            self._refresh_session_list_current_badges([session_id])
         self._update_current_session_title(session)
         if hasattr(self, "_update_bound_page_display"):
             self._update_bound_page_display()
@@ -20899,6 +20859,11 @@ class SessionMixin:
             return f"{ts} · 等待绑定..."
 
         if has_pending:
+            elapsed = ""
+            if hasattr(self, "_session_waiting_preview_suffix"):
+                elapsed = self._session_waiting_preview_suffix(session)
+            if elapsed:
+                return f"{ts} · 等待回复 {elapsed}"
             return f"{ts} · 等待回复..."
 
         if response_state["is_responding"]:
@@ -20953,7 +20918,83 @@ class SessionMixin:
             ))
         return tuple(rows)
 
+    def _session_item_is_current(self, session_id):
+        current_id = getattr(self, "_current_session_id", "") or ""
+        return bool(session_id) and session_id == current_id
+
+    def _format_current_session_header_text(self, session=None):
+        if session is None:
+            return "当前会话：新对话"
+        title = self._session_display_title(session) if hasattr(self, "_session_display_title") else ""
+        if not title or title == "新对话":
+            return "当前会话：新对话"
+        return f"当前会话：{title}"
+
+    def _log_session_current_badge_refresh(self, session_id, is_current, title=""):
+        if not hasattr(self, "_append_log"):
+            return
+        self._append_log(
+            "[SESSION][CURRENT_BADGE_REFRESH] "
+            f"session_id={session_id or '-'} "
+            f"title={title or '-'} "
+            f"is_current={'true' if is_current else 'false'}",
+            echo=False,
+        )
+
+    def _refresh_session_list_current_badges(self, session_ids=None):
+        if not hasattr(self, "session_list"):
+            return
+        current_id = getattr(self, "_current_session_id", "") or ""
+        if session_ids is None:
+            session_ids = []
+            for index in range(self.session_list.count()):
+                item = self.session_list.item(index)
+                if item is None:
+                    continue
+                sid = item.data(Qt.UserRole) or ""
+                if sid:
+                    session_ids.append(sid)
+        seen = set()
+        for session_id in session_ids:
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            is_current = session_id == current_id
+            index = self._list_index_for_session(session_id)
+            if index < 0:
+                continue
+            item = self.session_list.item(index)
+            if item is None:
+                continue
+            widget = self.session_list.itemWidget(item)
+            prev_current = None
+            if widget is not None:
+                state = getattr(widget, "_last_apply_state", None)
+                if isinstance(state, dict):
+                    prev_current = bool(state.get("is_current"))
+            badge_updated = False
+            if widget is not None and hasattr(widget, "set_is_current_fast"):
+                badge_updated = bool(widget.set_is_current_fast(is_current))
+            if not badge_updated:
+                session = self._sessions.get(session_id)
+                if session is not None:
+                    self._apply_session_list_item_widget(
+                        item,
+                        session,
+                        selected=is_current,
+                    )
+            if prev_current is not None and prev_current == is_current:
+                continue
+            session = self._sessions.get(session_id)
+            badge_title = "-"
+            if session is not None and hasattr(self, "_session_list_title_text"):
+                badge_title = self._session_list_title_text(session)
+            self._log_session_current_badge_refresh(
+                session_id, is_current, badge_title
+            )
+
     def _set_session_item_selected_fast(self, session_id, selected):
+        is_current = self._session_item_is_current(session_id)
         index = self._list_index_for_session(session_id)
         if index < 0:
             return
@@ -20962,7 +21003,7 @@ class SessionMixin:
             return
         widget = self.session_list.itemWidget(item)
         if widget is not None and hasattr(widget, "set_selected_fast"):
-            if widget.set_selected_fast(selected):
+            if widget.set_selected_fast(selected, is_current=is_current):
                 return
         session = self._sessions.get(session_id)
         if session is None:
@@ -21014,10 +21055,7 @@ class SessionMixin:
         label = getattr(self, "current_session_title", None)
         if label is None:
             return
-        if session is None:
-            label.setText("新对话")
-            return
-        label.setText(self._session_display_title(session))
+        label.setText(self._format_current_session_header_text(session))
 
     def _session_list_item_tooltip(self, session, bind_state):
         style = SESSION_BIND_LIST_STYLES.get(
@@ -21055,7 +21093,7 @@ class SessionMixin:
             if reason:
                 lines.append(reason)
         if bind_state == "unbound" and not remote.get("enabled"):
-            lines.append("发送首条消息时将自动选择空闲 ChatGPT 首页或打开新首页。")
+            lines.append(UNBOUND_SESSION_SEND_HINT)
         else:
             lines.extend([
                 f"client_id：{client_id or '-'}",
@@ -21104,7 +21142,13 @@ class SessionMixin:
                     + self._format_last_seen_ago(remote.get("last_seen"))
                 )
         if self._session_has_pending_assistant_reply(session):
-            lines.append("消息状态：等待回复")
+            elapsed = ""
+            if hasattr(self, "_session_waiting_preview_suffix"):
+                elapsed = self._session_waiting_preview_suffix(session)
+            if elapsed:
+                lines.append(f"消息状态：等待回复 {elapsed}")
+            else:
+                lines.append("消息状态：等待回复")
         else:
             response_state = self._session_bound_response_state(session)
             if response_state["is_responding"]:
@@ -21115,6 +21159,7 @@ class SessionMixin:
 
     def _apply_session_list_item_widget(self, item, session, *, selected=False):
         bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+        is_current = self._session_item_is_current(session.session_id)
         widget = self.session_list.itemWidget(item)
         if widget is None:
             widget = SessionListItemWidget()
@@ -21125,6 +21170,7 @@ class SessionMixin:
             bind_state=bind_state,
             pending_reply=self._session_has_pending_assistant_reply(session),
             selected=selected,
+            is_current=is_current,
             tooltip=self._session_list_item_tooltip(session, bind_state),
         )
         viewport_w = max(0, self.session_list.viewport().width())
@@ -21137,13 +21183,15 @@ class SessionMixin:
             return
         session = session or self._current_session()
         if not session:
-            self.current_session_title.setText("新对话")
+            self.current_session_title.setText("当前会话：新对话")
             if hasattr(self, "_update_current_session_url_display"):
                 self._update_current_session_url_display()
             return
         if self._is_default_session_title(session.title):
             self._auto_rename_session_from_messages(session)
-        self.current_session_title.setText(self._session_display_title(session))
+        self.current_session_title.setText(
+            self._format_current_session_header_text(session)
+        )
         if hasattr(self, "_update_current_session_url_display"):
             self._update_current_session_url_display()
     def _list_index_for_session(self, session_id):
@@ -21186,6 +21234,9 @@ class SessionMixin:
                     self.session_list.setCurrentRow(list_index)
                     self.session_list.blockSignals(False)
                     self._list_refreshing = False
+            self._refresh_session_list_current_badges(
+                [target_id] if target_id else None
+            )
             return
 
         structure_same = (
@@ -21217,7 +21268,7 @@ class SessionMixin:
                 self._apply_session_list_item_widget(
                     item,
                     session,
-                    selected=(session_id == self._current_session_id),
+                    selected=self._session_item_is_current(session_id),
                 )
         else:
             self.session_list.clear()
@@ -21232,7 +21283,7 @@ class SessionMixin:
                 self._apply_session_list_item_widget(
                     item,
                     session,
-                    selected=(session_id == self._current_session_id),
+                    selected=self._session_item_is_current(session_id),
                 )
 
         if target_id:
@@ -21242,6 +21293,7 @@ class SessionMixin:
         self.session_list.blockSignals(False)
         self._list_refreshing = False
         self._last_session_list_visual_signature = new_sig
+        self._refresh_session_list_current_badges()
 
     def _on_session_list_pressed_fast(self, item):
         if self._list_refreshing or item is None:
@@ -21454,6 +21506,10 @@ class SessionMixin:
         session.updated_at = time.time()
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="clear_before_rebind_or_sync"
+            )
         if hasattr(session, "summary"):
             session.summary = ""
 
@@ -21531,6 +21587,8 @@ class SessionMixin:
         session.updated_at = time.time()
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(session, reason="clear_session")
         if hasattr(self, "_set_tm_action_hint"):
             self._set_tm_action_hint("当前对话已清空")
         if hasattr(self, "_append_log"):
@@ -21642,6 +21700,8 @@ class SessionMixin:
             return
         session.has_pending_reply = True
         session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="mark_session_pending")
         self._refresh_session_list(select_session_id=self._current_session_id)
     @staticmethod
     def _message_to_dict(message):
@@ -21865,6 +21925,8 @@ class SessionMixin:
         self._migrate_loaded_remote_bindings()
         if hasattr(self, "_gc_orphan_bindings"):
             self._gc_orphan_bindings()
+        if hasattr(self, "_restore_waiting_timers_after_load"):
+            self._restore_waiting_timers_after_load()
 
     def _migrate_loaded_remote_bindings(self):
         changed = False
@@ -22344,7 +22406,7 @@ class SettingsMixin:
         server.set_debug_mode(self._debug_mode)
         self._save_ui_settings()
     def _sync_page_url_detail_widgets(self):
-        if not hasattr(self, "tm_live_page_label"):
+        if not hasattr(self, "tm_bound_page_label"):
             return
         self._update_live_page_display()
         self._update_bound_page_display()
@@ -22588,7 +22650,7 @@ class SettingsMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/ui_builder_mixin.py
-TOKENS（cl100k_base）: 2.40万（23,983）
+TOKENS（cl100k_base）: 2.42万（24,190）
 ====================================================================================================
 
 import os
@@ -22600,10 +22662,6 @@ from app.utils.page_status import get_page_liveness, is_page_online, page_url_fr
 from log_utils import get_log_file_path
 
 from app.constants import (
-    STATUS_CHIP_AUTO_FOCUS_PREFIX,
-    STATUS_CHIP_AUTO_FOCUS_TOOLTIP,
-    STATUS_CHIP_MANUAL_SELECT_PREFIX,
-    STATUS_CHIP_MANUAL_SELECT_TOOLTIP,
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
     status_chip_text,
@@ -22615,7 +22673,7 @@ from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
 from app.ui.widgets.no_wheel_tab_widget import NoWheelTabWidget
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22648,10 +22706,13 @@ class UiBuilderMixin:
     CHAT_SUB_TAB_CURSOR_FLOW = 1
     CURSOR_FLOW_TAB_TITLE_BASE = "Cursor 动作编排"
     STATUS_DETAIL_EXPANDED_SETTING_KEY = "ui/status_detail_expanded"
-    CHAT_SIDEBAR_MIN_WIDTH = 190
-    CHAT_SIDEBAR_DEFAULT_WIDTH = 240
-    CHAT_SIDEBAR_MAX_WIDTH = 480
-    CHAT_MAIN_MIN_WIDTH = 420
+    CHAT_SIDEBAR_MIN_WIDTH = 260
+    CHAT_SIDEBAR_DEFAULT_WIDTH = 320
+    CHAT_SIDEBAR_MAX_WIDTH = 460
+    CHAT_MAIN_MIN_WIDTH = 700
+    CHAT_SPLITTER_INVALID_LEFT = 220
+    CHAT_SPLITTER_INVALID_RIGHT = 600
+    CHAT_SPLITTER_DEFAULT_RIGHT = 1280
 
     def _make_hint_label(self, text):
         label = QLabel(text)
@@ -22739,21 +22800,34 @@ class UiBuilderMixin:
         self._splitter_save_timer.setSingleShot(True)
         self._splitter_save_timer.timeout.connect(self._save_splitter_sizes_now)
 
+    def _normalize_chat_splitter_sizes(self, sizes):
+        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 260))
+        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 460))
+        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 700))
+        invalid_left = int(getattr(self, "CHAT_SPLITTER_INVALID_LEFT", 220))
+        invalid_right = int(getattr(self, "CHAT_SPLITTER_INVALID_RIGHT", 600))
+        default_left = int(getattr(self, "CHAT_SIDEBAR_DEFAULT_WIDTH", 320))
+        default_right = int(getattr(self, "CHAT_SPLITTER_DEFAULT_RIGHT", 1280))
+        if not sizes or len(sizes) < 2:
+            return [default_left, default_right]
+        left = int(sizes[0])
+        right = int(sizes[1])
+        if left < invalid_left or right < invalid_right:
+            return [default_left, default_right]
+        left = max(min_left, min(left, max_left))
+        right = max(min_right, right)
+        return [left, right]
+
     def _restore_chat_splitter_sizes(self):
         splitter = getattr(self, "chat_splitter", None)
         if splitter is None:
             return
-        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
-        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
-        default_left = int(getattr(self, "CHAT_SIDEBAR_DEFAULT_WIDTH", 240))
-        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
         raw = self._settings.value("ui/chat_splitter_sizes", "")
         if raw:
             parts = [part.strip() for part in str(raw).split(",") if part.strip()]
             if len(parts) == 2:
                 try:
-                    left = int(parts[0])
-                    right = int(parts[1])
+                    parsed = [int(parts[0]), int(parts[1])]
                 except ValueError as error:
                     self._append_log(
                         "[UI_SPLITTER][RESTORE_FAILED] "
@@ -22761,17 +22835,15 @@ class UiBuilderMixin:
                         echo=True,
                     )
                 else:
-                    left = max(min_left, min(max_left, left))
-                    right = max(min_right, right)
-                    splitter.setSizes([left, right])
+                    applied = self._normalize_chat_splitter_sizes(parsed)
+                    splitter.setSizes(applied)
                     if getattr(self, "_debug_mode", False):
                         self._append_log(
                             "[UI_SPLITTER][RESTORE] "
-                            f"raw={raw} applied={[left, right]} "
-                            f"min_left={min_left} max_left={max_left} min_right={min_right}"
+                            f"raw={raw} applied={applied}"
                         )
                     return
-        default_sizes = [default_left, 1000]
+        default_sizes = self._normalize_chat_splitter_sizes(None)
         splitter.setSizes(default_sizes)
         if getattr(self, "_debug_mode", False):
             self._append_log(
@@ -22792,11 +22864,7 @@ class UiBuilderMixin:
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
-        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
-        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
-        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
-        left = max(min_left, min(max_left, int(sizes[0])))
-        right = max(min_right, int(sizes[1]))
+        left, right = self._normalize_chat_splitter_sizes(sizes)
         if left <= 0 or right <= 0:
             return
         value = f"{left},{right}"
@@ -22804,9 +22872,11 @@ class UiBuilderMixin:
         if getattr(self, "_debug_mode", False):
             self._append_log(
                 "[UI_SPLITTER][SAVE] "
-                f"raw={sizes} saved={[left, right]} "
-                f"min_left={min_left} max_left={max_left} min_right={min_right}"
+                f"raw={sizes} saved={[left, right]}"
             )
+
+    def _save_chat_splitter_sizes(self):
+        self._save_splitter_sizes_now()
 
     def _restore_chat_sub_tab_index(self):
         tabs = getattr(self, "chat_sub_tabs", None)
@@ -23025,9 +23095,106 @@ class UiBuilderMixin:
         row.addStretch()
         return row
 
-    def _build_tm_action_buttons(self, layout):
-        """兼容旧调用：按钮已嵌入状态详情中的焦点/手动面板。"""
+    def _ensure_tm_page_combo(self):
+        if hasattr(self, "tm_page_combo"):
+            return
+        self.tm_page_combo = NoWheelComboBox()
+        self.tm_page_combo.setObjectName("TmPageCombo")
+        self.tm_page_combo.setMinimumWidth(0)
+        self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+        self.tm_page_combo.setMinimumContentsLength(40)
+        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.tm_page_combo.setToolTip(
+            "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
+        )
+        self.tm_page_selector = self.tm_page_combo
+        if not getattr(self, "_tm_page_selector_connected", False):
+            self.tm_page_combo.currentIndexChanged.connect(
+                self._on_tm_page_selector_changed
+            )
+            self._tm_page_selector_connected = True
+
+    def _ensure_bind_selected_page_button(self):
+        if getattr(self, "_bind_selected_page_btn_ready", False):
+            return
+        self._bind_selected_page_btn_ready = True
+        self.bind_selected_page_btn = QPushButton("设为当前页")
+        self.bind_selected_page_btn.setToolTip(
+            "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
+        )
+        self.bind_selected_page_btn.clicked.connect(self._on_bind_selected_tm_page)
+        self.set_manual_current_page_btn = self.bind_selected_page_btn
+
+    def _style_tm_page_selector_row_buttons(self):
+        self._ensure_tm_action_buttons()
+        self._ensure_bind_selected_page_button()
+        for page_row_btn in (
+            self.chat_open_bound_btn,
+            self.bind_selected_page_btn,
+        ):
+            page_row_btn.setObjectName("PrimaryButton")
+            page_row_btn.setFixedHeight(28)
+            page_row_btn.setMinimumWidth(88)
+            page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def _build_tm_page_selector_row(self, parent_layout):
+        """页面 [下拉列表] [打开绑定页面] [设为当前页]"""
+        self._ensure_tm_action_buttons()
+        self._ensure_tm_page_combo()
+        self._ensure_bind_selected_page_button()
+        self.tm_page_combo.setFixedHeight(28)
+        self._style_tm_page_selector_row_buttons()
+
+        if not hasattr(self, "tm_page_empty_label"):
+            self.tm_page_empty_label = QLabel("暂无可用页面")
+            self.tm_page_empty_label.setObjectName("StatusRelationLine")
+            self.tm_page_empty_label.setFixedHeight(20)
+            self.tm_page_empty_label.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Fixed
+            )
+            self.tm_page_empty_label.setVisible(False)
+
+        page_label = QLabel("页面")
+        page_label.setObjectName("StatusChip")
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(page_label)
+        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row.addWidget(self.tm_page_empty_label, 1)
+        row.addWidget(self.tm_page_combo, 1)
+        row.addWidget(self.chat_open_bound_btn, 0, Qt.AlignVCenter)
+        row.addWidget(self.bind_selected_page_btn, 0, Qt.AlignVCenter)
+        parent_layout.addLayout(row)
+        self._sync_tm_page_list_empty_ui()
+
+    def _build_tm_action_buttons(
+        self, layout, *, include_page_selector=False, include_view_logs=False
+    ):
+        self._ensure_tm_action_buttons()
         layout.setSpacing(6)
+        for btn in (
+            self.open_chatgpt_btn,
+            self.bind_current_page_btn,
+            self.sync_web_conversation_btn,
+        ):
+            layout.addWidget(btn)
+        if include_page_selector:
+            self._build_tm_page_selector_row(layout)
+        for btn in (
+            self.close_bound_page_btn,
+            self.close_other_pages_btn,
+        ):
+            layout.addWidget(btn)
+        if include_view_logs:
+            layout.addStretch()
+            if not hasattr(self, "view_logs_btn"):
+                self.view_logs_btn = QPushButton("日志")
+                self.view_logs_btn.setObjectName("GhostButton")
+                self.view_logs_btn.setToolTip("切换到日志页")
+                self.view_logs_btn.clicked.connect(self._show_log_tab)
+            layout.addWidget(self.view_logs_btn)
 
     def _build_tm_debug_action_buttons(self, layout):
         specs = self._tm_action_button_specs()
@@ -23449,7 +23616,9 @@ class UiBuilderMixin:
         return -1
 
     def _page_is_online(self, item):
-        """判断 Tampermonkey 页面是否在线（仅心跳/轮询新鲜度）。"""
+        """UI 展示用在线判断（含 recently_seen）；绑定/发送仍用 _tm_page_is_online_simple。"""
+        if hasattr(self, "_page_is_online_for_ui"):
+            return self._page_is_online_for_ui(item)
         if hasattr(self, "_tm_page_is_online_simple"):
             return self._tm_page_is_online_simple(item)
         if not isinstance(item, dict):
@@ -23459,6 +23628,9 @@ class UiBuilderMixin:
             return False
         return not self._page_is_stale(item)
 
+    TM_PAGE_COMBO_ONLINE_COLOR = "#16a34a"
+    TM_PAGE_COMBO_OFFLINE_COLOR = "#6b7280"
+
     def _tm_page_combo_apply_item_colors(self, index, page):
         if not hasattr(self, "tm_page_combo") or index < 0:
             return
@@ -23466,11 +23638,64 @@ class UiBuilderMixin:
             return
 
         combo = self.tm_page_combo
-        is_online = self._page_is_online(page)
-        if is_online:
-            combo.setItemData(index, QColor("#16a34a"), Qt.ForegroundRole)
-        else:
-            combo.setItemData(index, QColor("#6b7280"), Qt.ForegroundRole)
+        is_online = self._page_is_online_for_ui(page)
+        color = (
+            self.TM_PAGE_COMBO_ONLINE_COLOR
+            if is_online
+            else self.TM_PAGE_COMBO_OFFLINE_COLOR
+        )
+        combo.setItemData(
+            index,
+            QBrush(QColor(color)),
+            Qt.ForegroundRole,
+        )
+        if hasattr(self, "_append_log"):
+            liveness = get_page_liveness(page)
+            page_url = (
+                page.get("url")
+                or page.get("page_url")
+                or page.get("normalized_url")
+                or "-"
+            )
+            self._append_log(
+                "[PAGE_SELECTOR][ITEM_STYLE] "
+                f"index={index} "
+                f"client_id={(page.get('client_id') or '-').strip() or '-'} "
+                f"url={str(page_url).strip() or '-'} "
+                f"liveness={liveness} "
+                f"online_for_ui={str(is_online).lower()} "
+                f"color={color}",
+                echo=False,
+            )
+
+    def _refresh_page_combo_current_style(self):
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None:
+            return
+        page = None
+        if hasattr(self, "_get_selected_tm_page_from_combo"):
+            page = self._get_selected_tm_page_from_combo()
+        is_online = (
+            self._page_is_online_for_ui(page) if isinstance(page, dict) else False
+        )
+        color = (
+            self.TM_PAGE_COMBO_ONLINE_COLOR
+            if is_online
+            else self.TM_PAGE_COMBO_OFFLINE_COLOR
+        )
+        combo.setStyleSheet(
+            f"""
+            QComboBox#TmPageCombo {{
+                color: {color};
+            }}
+            QComboBox#TmPageCombo QAbstractItemView {{
+                background: #ffffff;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+                outline: none;
+            }}
+            """
+        )
 
     def _tm_page_combo_tooltip(self, item):
         self._maybe_log_conversation_id_mismatch(item)
@@ -23569,10 +23794,33 @@ class UiBuilderMixin:
             )
         return tuple(signature_items)
 
+    def _sync_tm_page_list_empty_ui(self):
+        """无可用页面时用短文案占位，隐藏空白下拉框。"""
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None:
+            return
+        has_pages = combo.count() > 0
+        empty_label = getattr(self, "tm_page_empty_label", None)
+        if empty_label is not None:
+            empty_label.setVisible(not has_pages)
+            if not has_pages:
+                empty_label.setText("暂无可用页面")
+        combo.setVisible(has_pages)
+        bind_selected_btn = getattr(
+            self,
+            "bind_selected_page_btn",
+            getattr(self, "set_manual_current_page_btn", None),
+        )
+        if bind_selected_btn is not None:
+            bind_selected_btn.setVisible(has_pages)
+
     def _update_tm_page_selector_display_state(self, index=-1):
         """自动刷新后仅更新展示/提示，不写入 manual_current_tm_client_id。"""
         combo = getattr(self, "tm_page_combo", None)
-        if combo is None or combo.count() <= 0:
+        if combo is None:
+            return
+        self._sync_tm_page_list_empty_ui()
+        if combo.count() <= 0:
             return
         if index < 0:
             index = combo.currentIndex()
@@ -23585,6 +23833,8 @@ class UiBuilderMixin:
             self._set_tm_action_hint(self._tm_selector_action_hint_for_page(page))
         if hasattr(self, "_refresh_manual_current_page_display"):
             self._refresh_manual_current_page_display()
+        if hasattr(self, "_refresh_page_combo_current_style"):
+            self._refresh_page_combo_current_style()
 
     def _refresh_tm_page_selector(self, status=None):
         if not hasattr(self, "tm_page_combo"):
@@ -23614,6 +23864,7 @@ class UiBuilderMixin:
                 f"status_keys={list(full_status.keys())}",
                 echo=False,
             )
+            self._sync_tm_page_list_empty_ui()
             return
         duplicate_count = max(0, len(raw_pages) - len(unique_pages))
         self._append_log(
@@ -23695,6 +23946,7 @@ class UiBuilderMixin:
                     )
         page_selector_key = self._tm_page_selector_signature(pages)
         if page_selector_key == getattr(self, "_last_page_selector_key", ""):
+            self._sync_tm_page_list_empty_ui()
             return
         self._last_page_selector_key = page_selector_key
         manual_client_id = (
@@ -23793,14 +24045,6 @@ class UiBuilderMixin:
             self.message_edit.setPlaceholderText("输入消息…")
         else:
             self.message_edit.setPlaceholderText("输入消息…")
-        self._update_input_hint_label()
-    def _update_input_hint_label(self):
-        if not hasattr(self, "input_hint_label"):
-            return
-        if self._enter_send_mode == "ctrl_enter_send":
-            self.input_hint_label.setText("Ctrl + Enter 发送，Shift + Enter 换行")
-        else:
-            self.input_hint_label.setText("Enter 发送，Shift + Enter 换行")
     def _tampermonkey_bridge_url_text(self, host, port):
         host = (host or "").strip() or "127.0.0.1"
         port = (port or "").strip() or "5000"
@@ -24578,16 +24822,6 @@ class UiBuilderMixin:
         self.tm_online_label.setObjectName("StatusChip")
         self.tm_blank_home_label = QLabel("空白页：0/0｜可用0｜已绑0")
         self.tm_blank_home_label.setObjectName("StatusChip")
-        self.tm_current_page_label = QLabel(
-            status_chip_text(STATUS_CHIP_AUTO_FOCUS_PREFIX, "浏览器页面未获得焦点")
-        )
-        self.tm_current_page_label.setObjectName("StatusChip")
-        self.tm_current_page_label.setToolTip(STATUS_CHIP_AUTO_FOCUS_TOOLTIP)
-        self.tm_manual_page_label = QLabel(
-            status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "未选择")
-        )
-        self.tm_manual_page_label.setObjectName("StatusChip")
-        self.tm_manual_page_label.setToolTip(STATUS_CHIP_MANUAL_SELECT_TOOLTIP)
         self.tm_bound_page_label = QLabel(
             status_chip_text(STATUS_CHIP_SESSION_BIND_PREFIX, "未绑定")
         )
@@ -24597,7 +24831,6 @@ class UiBuilderMixin:
         self.tm_sync_target_label.setObjectName("StatusChip")
         self.tm_queue_label = QLabel("队列：0 / 0 / 0")
         self.tm_queue_label.setObjectName("StatusChip")
-        self.tm_live_page_label = self.tm_current_page_label
         self.cursor_bridge_status_label = QLabel("Cursor：未连接")
         self.cursor_bridge_status_label.setObjectName("StatusBadgeNeutral")
         self.cursor_bridge_status_label.setToolTip("Cursor Bridge 状态：未连接")
@@ -24612,8 +24845,6 @@ class UiBuilderMixin:
             self.status_label,
             self.tm_online_label,
             self.tm_blank_home_label,
-            self.tm_current_page_label,
-            self.tm_manual_page_label,
             self.tm_bound_page_label,
             self.tm_sync_target_label,
             self.tm_queue_label,
@@ -24634,8 +24865,6 @@ class UiBuilderMixin:
         top_row.addWidget(self.status_label)
         top_row.addWidget(self.tm_online_label)
         top_row.addWidget(self.tm_blank_home_label)
-        top_row.addWidget(self.tm_current_page_label)
-        top_row.addWidget(self.tm_manual_page_label)
         top_row.addWidget(self.tm_bound_page_label)
         top_row.addWidget(self.tm_sync_target_label)
         # 顶部状态栏不再显示“队列”和“任务”两个状态块。
@@ -24696,31 +24925,6 @@ class UiBuilderMixin:
         top_row.addWidget(self.status_action_host, 0, Qt.AlignRight | Qt.AlignVCenter)
         outer.addLayout(top_row)
 
-        self.focus_sync_hint_label = QLabel(
-            "焦点页不是绑定网页，同步将使用绑定网页。"
-        )
-        self.focus_sync_hint_label.setObjectName("focus_sync_hint_label")
-        self.focus_sync_hint_label.setMinimumHeight(22)
-        self.focus_sync_hint_label.setFixedHeight(22)
-        self.focus_sync_hint_label.setWordWrap(False)
-        self.focus_sync_hint_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.focus_sync_hint_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        self.focus_sync_hint_label.setVisible(True)
-        self.focus_sync_hint_label.setStyleSheet(
-            "QLabel#focus_sync_hint_label {"
-            " color: #8a6d00;"
-            " background: transparent;"
-            " padding-left: 6px;"
-            " padding-right: 6px;"
-            " font-size: 12px;"
-            "}"
-        )
-        # 兼容旧引用
-        self.tm_bind_mismatch_label = self.focus_sync_hint_label
-        outer.addWidget(self.focus_sync_hint_label)
-
         self.sync_progress_panel = QFrame()
         self.sync_progress_panel.setObjectName("SyncProgressPanel")
         self.sync_progress_panel.setVisible(False)
@@ -24750,104 +24954,13 @@ class UiBuilderMixin:
         detail_layout.setContentsMargins(8, 6, 8, 6)
         detail_layout.setSpacing(6)
 
-        summary_card = QFrame()
-        summary_card.setObjectName("StatusInfoCard")
-        summary_layout = QVBoxLayout(summary_card)
-        summary_layout.setContentsMargins(8, 5, 8, 5)
-        summary_layout.setSpacing(3)
-
-        summary_title = QLabel("页面概览")
-        summary_title.setObjectName("StatusSectionTitle")
-        summary_layout.addWidget(summary_title)
-
-        self.monkey_window_summary_label = QLabel("窗口统计：总数 0｜新建 0｜已绑定 0｜未绑定 0")
-        self.monkey_window_summary_label.setObjectName("StatusRelationLine")
-        self.monkey_window_summary_label.setWordWrap(True)
-
-        self.monkey_binding_summary_label = QLabel("绑定明细：已绑定：—｜未绑定：—")
-        self.monkey_binding_summary_label.setObjectName("StatusRelationLine")
-        self.monkey_binding_summary_label.setWordWrap(True)
-
-        summary_layout.addWidget(self.monkey_window_summary_label)
-        summary_layout.addWidget(self.monkey_binding_summary_label)
-        detail_layout.addWidget(summary_card)
-
         page_card = QFrame()
         page_card.setObjectName("StatusInfoCard")
         page_card_layout = QVBoxLayout(page_card)
         page_card_layout.setContentsMargins(8, 5, 8, 5)
         page_card_layout.setSpacing(5)
 
-        page_header_row = QHBoxLayout()
-        page_header_row.setSpacing(8)
-
-        page_label = QLabel("可用页面列表")
-        page_label.setObjectName("StatusSectionTitle")
-
-        if not hasattr(self, "tm_page_combo"):
-            self.tm_page_combo = NoWheelComboBox()
-            self.tm_page_combo.setObjectName("TmPageCombo")
-            self.tm_page_combo.setMinimumWidth(0)
-            self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
-            self.tm_page_combo.setMinimumContentsLength(40)
-            self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.tm_page_combo.setToolTip(
-                "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
-            )
-
-        self.tm_page_selector = self.tm_page_combo
-
-        if not getattr(self, "_tm_page_selector_connected", False):
-            self.tm_page_combo.currentIndexChanged.connect(
-                self._on_tm_page_selector_changed
-            )
-            self._tm_page_selector_connected = True
-
-        self.tm_page_combo.setFixedHeight(28)
-
-        self._ensure_tm_action_buttons()
-
-        self.set_manual_current_page_btn = QPushButton("设为当前页")
-        self.set_manual_current_page_btn.setToolTip(
-            "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
-        )
-        self.set_manual_current_page_btn.clicked.connect(
-            self._on_set_manual_current_page_clicked
-        )
-
-        for page_row_btn in (
-            self.chat_open_bound_btn,
-            self.set_manual_current_page_btn,
-        ):
-            page_row_btn.setObjectName("PrimaryButton")
-            page_row_btn.setFixedHeight(28)
-            page_row_btn.setMinimumWidth(88)
-            page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        page_header_row.addWidget(page_label)
-        page_header_row.addStretch()
-
-        page_selector_row = QHBoxLayout()
-        page_selector_row.setContentsMargins(0, 0, 0, 0)
-        page_selector_row.setSpacing(8)
-        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        page_selector_row.addWidget(self.tm_page_combo, 1)
-        page_selector_row.addWidget(
-            self.chat_open_bound_btn,
-            0,
-            Qt.AlignRight | Qt.AlignVCenter,
-        )
-        page_selector_row.addWidget(
-            self.set_manual_current_page_btn,
-            0,
-            Qt.AlignRight | Qt.AlignVCenter,
-        )
-        self._append_log(
-            "[UI][LAYOUT] move chat_open_bound_btn before set_manual_current_page_btn"
-        )
-
-        page_card_layout.addLayout(page_header_row)
-        page_card_layout.addLayout(page_selector_row)
+        self._build_tm_page_selector_row(page_card_layout)
 
         detail_layout.addWidget(page_card)
 
@@ -25010,15 +25123,15 @@ class UiBuilderMixin:
         self.chat_splitter = QSplitter(Qt.Horizontal)
         self.chat_splitter.setObjectName("ChatMainSplitter")
         self.chat_splitter.setChildrenCollapsible(False)
-        self.chat_splitter.setHandleWidth(6)
+        self.chat_splitter.setHandleWidth(4)
         self.session_sidebar = QWidget()
         self.session_sidebar.setObjectName("SessionSidebar")
         self.session_sidebar.setMinimumWidth(self.CHAT_SIDEBAR_MIN_WIDTH)
         self.session_sidebar.setMaximumWidth(self.CHAT_SIDEBAR_MAX_WIDTH)
         self.session_sidebar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         sidebar_layout = QVBoxLayout(self.session_sidebar)
-        sidebar_layout.setContentsMargins(10, 10, 10, 10)
-        sidebar_layout.setSpacing(8)
+        sidebar_layout.setContentsMargins(8, 8, 10, 8)
+        sidebar_layout.setSpacing(6)
         self.new_session_btn = QPushButton("新建对话")
         self.new_session_btn.setObjectName("PrimaryButton")
         self.new_session_btn.setToolTip("新建本地对话 (Ctrl+N)")
@@ -25084,13 +25197,13 @@ class UiBuilderMixin:
 
         header_block = QWidget()
         header_block.setObjectName("ChatHeaderBlock")
-        header_block.setMinimumHeight(72)
+        header_block.setMinimumHeight(56)
         header_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         header_layout = QVBoxLayout(header_block)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
-        self.current_session_title = QLabel("新对话")
+        self.current_session_title = QLabel("当前会话：新对话")
         self.current_session_title.setObjectName("CurrentSessionTitle")
         self.current_session_title.setMinimumHeight(28)
         self.current_session_title.setSizePolicy(
@@ -25113,13 +25226,6 @@ class UiBuilderMixin:
         )
         url_row.addWidget(self.current_session_url_label, 1, Qt.AlignVCenter)
         header_layout.addWidget(url_row_widget)
-
-        self.chat_bind_warning_label = QLabel("")
-        self.chat_bind_warning_label.setObjectName("ChatBindWarning")
-        self.chat_bind_warning_label.setWordWrap(True)
-        self.chat_bind_warning_label.setMaximumHeight(34)
-        self.chat_bind_warning_label.setVisible(False)
-        header_layout.addWidget(self.chat_bind_warning_label)
         chat_tab_layout.addWidget(header_block, 0)
 
         self.chat_transcript = QTextBrowser()
@@ -25169,10 +25275,6 @@ class UiBuilderMixin:
         input_layout.addLayout(compose_row)
         bottom_action_row = QHBoxLayout()
         bottom_action_row.setSpacing(8)
-        self.input_hint_label = QLabel()
-        self.input_hint_label.setObjectName("InputHint")
-        self._update_input_hint_label()
-        bottom_action_row.addWidget(self.input_hint_label)
         bottom_action_row.addStretch(1)
         self.clear_session_btn = QPushButton("清空当前对话")
         self.clear_session_btn.setObjectName("DangerButton")
@@ -25198,7 +25300,12 @@ class UiBuilderMixin:
         self.chat_splitter.addWidget(chat_area)
         self.chat_splitter.setStretchFactor(0, 0)
         self.chat_splitter.setStretchFactor(1, 1)
-        self.chat_splitter.setSizes([self.CHAT_SIDEBAR_DEFAULT_WIDTH, 1200])
+        self.chat_splitter.setSizes(
+            [
+                self.CHAT_SIDEBAR_DEFAULT_WIDTH,
+                self.CHAT_SPLITTER_DEFAULT_RIGHT,
+            ]
+        )
         if hasattr(self, "_init_splitter_save_timer"):
             self._init_splitter_save_timer()
         self.chat_splitter.splitterMoved.connect(self._schedule_save_chat_splitter_sizes)
@@ -25209,8 +25316,271 @@ class UiBuilderMixin:
 
 
 ====================================================================================================
+FILE: app/ui/mixins/waiting_timer_mixin.py
+TOKENS（cl100k_base）: 0.21万（2,147）
+====================================================================================================
+
+import re
+import time
+
+from PyQt5.QtCore import QTimer
+
+from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
+
+
+_WAITING_ELAPSED_SUFFIX_RE = re.compile(
+    r"(?:\s*[\(\（]?已等待\s*)?\d{2}:\d{2}\s*[\)\）]?$"
+)
+
+
+class WaitingTimerMixin:
+    def _init_waiting_elapsed_timer(self):
+        self._waiting_tick_log_at = {}
+        self._tm_action_hint_base = ""
+        self._waiting_timer = QTimer(self)
+        self._waiting_timer.setInterval(1000)
+        self._waiting_timer.timeout.connect(self._refresh_waiting_elapsed_ui)
+        self._waiting_timer.start()
+
+    @staticmethod
+    def _format_elapsed_mmss(total_seconds):
+        total_seconds = max(0, int(total_seconds))
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _iter_all_chat_sessions(self):
+        sessions = getattr(self, "_sessions", None)
+        if not isinstance(sessions, dict):
+            return []
+        return list(sessions.values())
+
+    def _mark_session_waiting_started(self, session, reason=""):
+        if session is None:
+            return
+        if getattr(session, "waiting_for_reply", False):
+            since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
+            if since_ts > 0:
+                return
+        since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
+        if since_ts <= 0:
+            since_ts = time.time()
+        session.waiting_for_reply = True
+        session.waiting_since_ts = since_ts
+        session.waiting_elapsed_sec = max(0, int(time.time() - since_ts))
+        if not getattr(session, "pending_reply_since", 0):
+            session.pending_reply_since = since_ts
+        self._append_log(
+            "[CHAT][WAITING_START] "
+            f"session_id={session.session_id} "
+            f"reason={reason or '-'} "
+            f"waiting_since_ts={session.waiting_since_ts}",
+            echo=True,
+        )
+
+    def _mark_session_waiting_finished(self, session, reason=""):
+        if session is None:
+            return
+        was_waiting = bool(getattr(session, "waiting_for_reply", False))
+        old_elapsed = 0
+        since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
+        if since_ts > 0:
+            old_elapsed = max(0, int(time.time() - since_ts))
+        elif was_waiting:
+            old_elapsed = int(getattr(session, "waiting_elapsed_sec", 0) or 0)
+
+        session.waiting_for_reply = False
+        session.waiting_since_ts = 0
+        session.waiting_elapsed_sec = 0
+
+        if was_waiting or since_ts > 0:
+            self._append_log(
+                "[CHAT][WAITING_END] "
+                f"session_id={session.session_id} "
+                f"reason={reason or '-'} "
+                f"elapsed_sec={old_elapsed}",
+                echo=True,
+            )
+
+    def _sync_session_waiting_timer(self, session, reason=""):
+        if session is None:
+            return
+        has_pending = False
+        if hasattr(self, "_session_has_pending_assistant_reply"):
+            has_pending = self._session_has_pending_assistant_reply(session)
+        if has_pending:
+            self._mark_session_waiting_started(session, reason=reason or "sync_pending")
+        else:
+            if getattr(session, "waiting_for_reply", False):
+                self._mark_session_waiting_finished(
+                    session, reason=reason or "sync_idle"
+                )
+
+    def _restore_waiting_timers_after_load(self):
+        for session in self._iter_all_chat_sessions():
+            self._sync_session_waiting_timer(session, reason="load_sessions")
+
+    def _strip_waiting_elapsed_suffix(self, text):
+        return _WAITING_ELAPSED_SUFFIX_RE.sub("", (text or "").strip()).strip()
+
+    def _waiting_reply_display_base(self, text):
+        cleaned = self._strip_waiting_elapsed_suffix(text)
+        if not cleaned or cleaned in ASSISTANT_WAIT_TEXTS:
+            return "等待回复..."
+        if cleaned.endswith("…"):
+            return cleaned[:-1] + "..."
+        return cleaned
+
+    def _is_pending_wait_display_message(self, message):
+        if message is None:
+            return False
+        status = (getattr(message, "status", "") or "").strip()
+        text = (getattr(message, "content", "") or "").strip()
+        if status in PENDING_ASSISTANT_STATUSES:
+            return True
+        if text in ASSISTANT_WAIT_TEXTS:
+            return True
+        return False
+
+    def _display_text_for_message(self, message, session):
+        plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
+        if not session or not getattr(session, "waiting_for_reply", False):
+            return plain
+        if not self._is_pending_wait_display_message(message):
+            return plain
+        base = self._waiting_reply_display_base(plain)
+        elapsed = self._format_elapsed_mmss(
+            getattr(session, "waiting_elapsed_sec", 0) or 0
+        )
+        return f"{base} {elapsed}"
+
+    def _format_waiting_status_text(self, base_text, session):
+        base_text = (base_text or "").strip()
+        if not session or not getattr(session, "waiting_for_reply", False):
+            return base_text
+        elapsed = self._format_elapsed_mmss(
+            getattr(session, "waiting_elapsed_sec", 0) or 0
+        )
+        if not base_text:
+            return f"已等待 {elapsed}"
+        if "已等待" in base_text:
+            base_text = self._strip_waiting_elapsed_suffix(base_text)
+            if "已等待" in base_text:
+                base_text = re.sub(r"已等待\s*\d{2}:\d{2}", "", base_text).strip()
+        if base_text.endswith("。"):
+            return f"{base_text}已等待 {elapsed}"
+        return f"{base_text}。已等待 {elapsed}"
+
+    def _session_waiting_preview_suffix(self, session):
+        if not session or not getattr(session, "waiting_for_reply", False):
+            return ""
+        return self._format_elapsed_mmss(
+            getattr(session, "waiting_elapsed_sec", 0) or 0
+        )
+
+    def _maybe_log_waiting_tick(self, session, elapsed):
+        if not getattr(self, "_debug_mode", False):
+            return
+        session_id = (session.session_id or "").strip()
+        now_ts = time.time()
+        last_at = float(self._waiting_tick_log_at.get(session_id, 0) or 0)
+        if now_ts - last_at < 10:
+            return
+        self._waiting_tick_log_at[session_id] = now_ts
+        self._append_log(
+            "[CHAT][WAITING_TICK] "
+            f"session_id={session_id} "
+            f"elapsed_sec={elapsed}",
+            echo=False,
+        )
+
+    def _refresh_session_list_item_waiting_text(self, session):
+        if not hasattr(self, "_refresh_session_list"):
+            return
+        self._refresh_session_list(select_session_id=session.session_id)
+
+    def _refresh_current_chat_waiting_text(self, session):
+        if session is None:
+            return
+        if session.session_id != getattr(self, "_current_session_id", None):
+            return
+        if hasattr(self, "_render_session_chat"):
+            self._render_session_chat(session, force_bottom=False)
+        elif hasattr(self, "_render_current_chat_messages"):
+            self._render_current_chat_messages(
+                force_bottom=False,
+                reason="waiting_elapsed_tick",
+            )
+
+    def _refresh_status_bar_waiting_text(self):
+        if not hasattr(self, "_apply_tm_action_hint_with_waiting"):
+            return
+        self._apply_tm_action_hint_with_waiting()
+
+    def _set_tm_action_hint(self, text):
+        self._tm_action_hint_base = (text or "").strip()
+        self._apply_tm_action_hint_with_waiting()
+
+    def _apply_tm_action_hint_with_waiting(self):
+        text = (getattr(self, "_tm_action_hint_base", "") or "").strip()
+        session = None
+        if hasattr(self, "_current_session"):
+            session = self._current_session()
+        if session and getattr(session, "waiting_for_reply", False):
+            text = self._format_waiting_status_text(text, session)
+        if text == getattr(self, "_last_tm_action_hint_text", None):
+            return
+        self._last_tm_action_hint_text = text
+        if hasattr(self, "settings_hint_label"):
+            self.settings_hint_label.setText(text or "")
+        if text:
+            self.statusBar().showMessage(text, 8000)
+
+    def _refresh_waiting_elapsed_ui(self):
+        current_session_id = getattr(self, "_current_session_id", None)
+        now_ts = time.time()
+        changed = False
+        any_waiting = False
+        current_session = None
+
+        for session in self._iter_all_chat_sessions():
+            if not getattr(session, "waiting_for_reply", False):
+                continue
+
+            any_waiting = True
+            since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
+            if since_ts <= 0:
+                if hasattr(self, "_sync_session_waiting_timer"):
+                    self._sync_session_waiting_timer(
+                        session, reason="waiting_tick_resync"
+                    )
+                continue
+
+            elapsed = max(0, int(now_ts - since_ts))
+            if getattr(session, "waiting_elapsed_sec", -1) != elapsed:
+                session.waiting_elapsed_sec = elapsed
+                changed = True
+                self._maybe_log_waiting_tick(session, elapsed)
+
+            if session.session_id == current_session_id:
+                current_session = session
+
+        if not any_waiting:
+            self._waiting_tick_log_at.clear()
+            return
+
+        if changed:
+            if hasattr(self, "_refresh_session_list"):
+                self._refresh_session_list(select_session_id=current_session_id)
+            if current_session is not None:
+                self._refresh_current_chat_waiting_text(current_session)
+            self._refresh_status_bar_waiting_text()
+
+
+
+====================================================================================================
 FILE: app/ui/styles.py
-TOKENS（cl100k_base）: 0.46万（4,623）
+TOKENS（cl100k_base）: 0.45万（4,534）
 ====================================================================================================
 
 """主窗口 QSS 样式（从 ui_builder_mixin 抽出，避免业务逻辑文件过长）。"""
@@ -25495,20 +25865,6 @@ APP_STYLESHEET = """
                 border-radius: 6px;
                 padding: 4px 10px;
             }
-            QLabel#focus_sync_hint_label {
-                color: #8a6d00;
-                background: transparent;
-                font-size: 12px;
-                padding-left: 6px;
-                padding-right: 6px;
-            }
-            QLabel#TmBindMismatchHint {
-                color: #8a6d00;
-                background: transparent;
-                font-size: 12px;
-                padding-left: 6px;
-                padding-right: 6px;
-            }
             QLabel#StatusRelationLine {
                 color: #5b6472;
                 font-size: 12px;
@@ -25603,19 +25959,6 @@ APP_STYLESHEET = """
                 padding: 3px 6px;
                 color: #111827;
             }
-            QLabel#ChatBindWarning {
-                background: #fef2f2;
-                color: #991b1b;
-                border: 1px solid #fecaca;
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-size: 12px;
-            }
-            QLabel#ChatBindWarning[state="warn"] {
-                background: #fffbeb;
-                color: #92400e;
-                border: 1px solid #fbbf24;
-            }
             QWidget#JobTaskBar {
                 background: #eff6ff;
                 border: 1px solid #bfdbfe;
@@ -25635,10 +25978,26 @@ APP_STYLESHEET = """
                 background: #d1d5db;
             }
             QSplitter#ChatMainSplitter::handle:horizontal {
-                width: 6px;
+                width: 4px;
             }
             QSplitter#ChatMainSplitter::handle:hover {
+                background: #60a5fa;
+            }
+            QFrame#SessionCard[isCurrentSession="true"] {
+                background: #eff6ff;
+                border: 1px solid #93c5fd;
+                border-left: 4px solid #2563eb;
+                border-radius: 6px;
+            }
+            QLabel#CurrentSessionBadge {
+                color: #ffffff;
                 background: #2563eb;
+                border-radius: 6px;
+                padding: 1px 6px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 30px;
+                max-width: 42px;
             }
             QWidget#CurrentSessionHeader {
                 background: transparent;
@@ -25663,6 +26022,7 @@ APP_STYLESHEET = """
                 background: #f3f4f6;
                 border: none;
                 outline: none;
+                padding-right: 6px;
             }
             QListWidget#SessionList::item {
                 border: none;
@@ -25709,10 +26069,6 @@ APP_STYLESHEET = """
                 color: #2563eb;
                 font-size: 14px;
                 background: transparent;
-            }
-            QLabel#SessionCurrentBadge {
-                font-size: 10px;
-                font-weight: 600;
             }
             QWidget#ChatPage {
                 background: #f8fafc;
@@ -26077,7 +26433,7 @@ class SessionListWidget(QListWidget):
 
 ====================================================================================================
 FILE: app/ui/widgets/session_list_item.py
-TOKENS（cl100k_base）: 0.21万（2,083）
+TOKENS（cl100k_base）: 0.25万（2,527）
 ====================================================================================================
 
 from PyQt5.QtCore import Qt
@@ -26090,14 +26446,22 @@ SESSION_LIST_ITEM_HEIGHT = 94
 SESSION_LIST_ITEM_MIN_HEIGHT = 88
 SESSION_LIST_ITEM_MAX_HEIGHT = 110
 SESSION_LIST_ITEM_RADIUS = 8
-SESSION_CARD_MAX_WIDTH = 460
 
+_CURRENT_BADGE_STYLE = """
+QLabel#CurrentSessionBadge {
+    color: #ffffff;
+    background: #2563eb;
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 30px;
+    max-width: 42px;
+}
+"""
 
-def _hex_to_rgb_triplet(hex_color: str) -> tuple[int, int, int]:
-    h = (hex_color or "").strip().lstrip("#")
-    if len(h) != 6:
-        return 156, 163, 175
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+_CURRENT_CARD_BG = "#eff6ff"
+_CURRENT_LEFT_BAR = "#2563eb"
 
 
 class SessionListItemWidget(QWidget):
@@ -26111,7 +26475,7 @@ class SessionListItemWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(0, 4, 0, 4)
+        root.setContentsMargins(2, 3, 6, 3)
         root.setSpacing(0)
 
         self.left_bar = QFrame()
@@ -26129,12 +26493,12 @@ class SessionListItemWidget(QWidget):
         root.addWidget(self.card, stretch=1)
 
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(10, 8, 10, 8)
-        card_layout.setSpacing(4)
+        card_layout.setContentsMargins(10, 8, 14, 8)
+        card_layout.setSpacing(3)
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(4)
+        title_row.setSpacing(6)
 
         self.title_label = ElidedLabel()
         self.title_label.setObjectName("SessionItemTitle")
@@ -26148,12 +26512,13 @@ class SessionListItemWidget(QWidget):
         title_row.addWidget(self.pending_dot, alignment=Qt.AlignVCenter)
 
         self.current_badge = QLabel("当前")
-        self.current_badge.setObjectName("SessionCurrentBadge")
+        self.current_badge.setObjectName("CurrentSessionBadge")
         self.current_badge.setAlignment(Qt.AlignCenter)
-        self.current_badge.setMinimumHeight(22)
-        self.current_badge.setMinimumWidth(34)
+        self.current_badge.setMinimumHeight(20)
+        self.current_badge.setMinimumWidth(30)
+        self.current_badge.setMaximumWidth(42)
         self.current_badge.setVisible(False)
-        title_row.addWidget(self.current_badge, 0, Qt.AlignVCenter)
+        title_row.addWidget(self.current_badge, 0, Qt.AlignRight | Qt.AlignTop)
 
         self.subtitle_label = ElidedLabel()
         self.subtitle_label.setObjectName("SessionItemSubtitle")
@@ -26175,70 +26540,105 @@ class SessionListItemWidget(QWidget):
         for child in self.findChildren(QWidget):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
+    def _sync_current_badge(self, is_current):
+        self.current_badge.setVisible(bool(is_current))
+        if is_current:
+            self.current_badge.setStyleSheet(_CURRENT_BADGE_STYLE)
+
+    def _sync_current_card_property(self, is_current):
+        self.card.setProperty("isCurrentSession", "true" if is_current else "false")
+        style = self.card.style()
+        if style is not None:
+            style.unpolish(self.card)
+            style.polish(self.card)
+
+    def _reapply_visual_from_state(self):
+        state = getattr(self, "_last_apply_state", None)
+        if not isinstance(state, dict):
+            return False
+        bind_state = state.get("bind_state", "unbound")
+        style = SESSION_BIND_LIST_STYLES.get(
+            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
+        )
+        self._apply_selection_visual_style(
+            selected=bool(state.get("selected")),
+            is_current=bool(state.get("is_current")),
+            left_color=style.get("left") or "#9ca3af",
+            border_color=style.get("border") or "#d1d5db",
+            background_color=style.get("bg") or "#f9fafb",
+            selected_border=style.get("selected_border") or style.get("border") or "#d1d5db",
+        )
+        return True
+
     def _apply_selection_visual_style(
         self,
         *,
         selected,
+        is_current,
         left_color,
         border_color,
         background_color,
         selected_border,
     ):
-        self.current_badge.setVisible(bool(selected))
-        self.left_bar.setFixedWidth(5 if selected else 4)
+        is_current = bool(is_current)
+        selected = bool(selected)
+        self._sync_current_badge(is_current)
+        self._sync_current_card_property(is_current)
 
-        self.left_bar.setStyleSheet(
-            f"""
-            QFrame#SessionListLeftBar {{
-                background: {left_color};
-                border: none;
-                border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-            }}
-            """
-        )
-
-        border_width = 2 if selected else 1
-        self.card.setStyleSheet(
-            f"""
-            QFrame#SessionCard {{
-                background: {background_color};
-                border: {border_width}px solid {border_color};
-                border-radius: {SESSION_LIST_ITEM_RADIUS}px;
-            }}
-            """
-        )
-
-        if selected:
-            r, g, b = _hex_to_rgb_triplet(left_color)
-            self.current_badge.setStyleSheet(
+        if is_current:
+            self.left_bar.hide()
+            self.left_bar.setFixedWidth(0)
+            self.card.setStyleSheet(
                 f"""
-                QLabel#SessionCurrentBadge {{
-                    font-size: 10px;
-                    font-weight: 600;
-                    color: {selected_border};
-                    background: rgba({r}, {g}, {b}, 0.18);
-                    border: 1px solid {selected_border};
-                    border-radius: 4px;
-                    padding: 1px 6px;
+                QFrame#SessionCard {{
+                    background: {_CURRENT_CARD_BG};
+                    border: 1px solid #93c5fd;
+                    border-left: 4px solid {_CURRENT_LEFT_BAR};
+                    border-radius: {SESSION_LIST_ITEM_RADIUS}px;
                 }}
                 """
             )
-            title_weight = 700
         else:
-            self.current_badge.setStyleSheet(
-                """
-                QLabel#SessionCurrentBadge {
-                    font-size: 10px;
-                    font-weight: 600;
-                    background: transparent;
-                    border: 1px solid transparent;
-                    border-radius: 4px;
-                    padding: 1px 6px;
-                }
+            self.left_bar.show()
+            bar_color = left_color
+            card_border = selected_border if selected else border_color
+            card_bg = background_color
+            border_width = 1
+            bar_width = 5 if selected else 4
+            self.left_bar.setFixedWidth(bar_width)
+            self.left_bar.setStyleSheet(
+                f"""
+                QFrame#SessionListLeftBar {{
+                    background: {bar_color};
+                    border: none;
+                    border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                    border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                }}
                 """
             )
-            title_weight = 600
+            self.card.setStyleSheet(
+                f"""
+                QFrame#SessionCard {{
+                    background: {card_bg};
+                    border: {border_width}px solid {card_border};
+                    border-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                }}
+                """
+            )
+            title_weight = 700 if selected else 600
+            self.title_label.setStyleSheet(
+                f"""
+                QLabel#SessionItemTitle {{
+                    font-weight: {title_weight};
+                    color: #111827;
+                    font-size: 14px;
+                    background: transparent;
+                }}
+                """
+            )
+            return
+
+        title_weight = 700
 
         self.title_label.setStyleSheet(
             f"""
@@ -26251,36 +26651,47 @@ class SessionListItemWidget(QWidget):
             """
         )
 
-    def set_selected_fast(self, selected):
+    def set_is_current_fast(self, is_current):
+        """仅刷新「当前」角标与卡片高亮，与绑定/在线/等待状态无关。"""
+        is_current = bool(is_current)
+        state = getattr(self, "_last_apply_state", None)
+        if not isinstance(state, dict):
+            return False
+        old_current = bool(state.get("is_current"))
+        state["is_current"] = is_current
+        if old_current == is_current:
+            self._sync_current_badge(is_current)
+            return True
+
+        self._last_apply_state_key = None
+        self._reapply_visual_from_state()
+        self.card.update()
+        self.left_bar.update()
+        self.current_badge.update()
+        self.update()
+        return True
+
+    def set_selected_fast(self, selected, *, is_current=None):
         state = getattr(self, "_last_apply_state", None)
         if not isinstance(state, dict):
             return False
 
         selected = bool(selected)
+        if is_current is None:
+            is_current = bool(state.get("is_current"))
+        else:
+            is_current = bool(is_current)
+
         old_selected = bool(state.get("selected"))
-        if old_selected == selected:
+        old_current = bool(state.get("is_current"))
+        if old_selected == selected and old_current == is_current:
+            self._sync_current_badge(is_current)
             return True
 
         state["selected"] = selected
-
-        bind_state = state.get("bind_state", "unbound")
-        style = SESSION_BIND_LIST_STYLES.get(
-            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
-        )
-
-        left_color = style.get("left") or "#9ca3af"
-        border_color = style.get("border") or "#d1d5db"
-        background_color = style.get("bg") or "#f9fafb"
-        sel_border = style.get("selected_border") or border_color
-
-        self._apply_selection_visual_style(
-            selected=selected,
-            left_color=left_color,
-            border_color=border_color,
-            background_color=background_color,
-            selected_border=sel_border,
-        )
-
+        state["is_current"] = is_current
+        self._last_apply_state_key = None
+        self._reapply_visual_from_state()
         self.card.update()
         self.left_bar.update()
         self.current_badge.update()
@@ -26295,12 +26706,15 @@ class SessionListItemWidget(QWidget):
         bind_state,
         pending_reply=False,
         selected=False,
+        is_current=None,
         tooltip="",
     ):
         style = SESSION_BIND_LIST_STYLES.get(
             bind_state, SESSION_BIND_LIST_STYLES["unbound"]
         )
         bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+        if is_current is None:
+            is_current = False
 
         self._last_apply_state = {
             "title": title,
@@ -26308,6 +26722,7 @@ class SessionListItemWidget(QWidget):
             "bind_state": bind_state,
             "pending_reply": pending_reply,
             "selected": selected,
+            "is_current": is_current,
             "tooltip": tooltip,
         }
 
@@ -26316,11 +26731,14 @@ class SessionListItemWidget(QWidget):
         status_text = style["label"]
         tooltip_text = tooltip or ""
 
+        self._sync_current_badge(is_current)
+
         state_key = (
             title_text,
             subtitle,
             bind_state,
             bool(pending_reply),
+            bool(is_current),
             bool(selected),
             tooltip_text,
             status_text,
@@ -26335,35 +26753,29 @@ class SessionListItemWidget(QWidget):
 
         self.pending_dot.setText("●" if pending_reply else "")
         self.pending_dot.setVisible(bool(pending_reply))
-        self.current_badge.setVisible(bool(selected))
 
         self.setToolTip(tooltip_text)
 
-        style_key = (bind_state, bool(selected), bool(pending_reply))
+        style_key = (bind_state, bool(selected), bool(pending_reply), bool(is_current))
         if style_key == getattr(self, "_last_style_key", None):
             self.update()
             return
 
         self._last_style_key = style_key
 
-        bg = style["bg"]
-        border = style["border"]
-        left = style["left"]
-        sel_border = style["selected_border"]
-        text_color = style["text"]
-
         self._apply_selection_visual_style(
             selected=selected,
-            left_color=left,
-            border_color=border,
-            background_color=bg,
-            selected_border=sel_border,
+            is_current=is_current,
+            left_color=style["left"],
+            border_color=style["border"],
+            background_color=style["bg"],
+            selected_border=style["selected_border"],
         )
 
         self.status_label.setStyleSheet(
             f"""
             QLabel#SessionBindStatusLabel {{
-                color: {text_color};
+                color: {style["text"]};
                 font-size: 11px;
                 background: rgba(255, 255, 255, 0.45);
                 border-radius: 6px;

@@ -47,7 +47,6 @@ UI_BUILDER_METHODS = {
     "_selected_tm_page_client_id",
     "_selected_tm_client_id_from_table",
     "_update_input_placeholder",
-    "_update_input_hint_label",
     "_update_tampermonkey_settings_labels",
     "_on_tm_table_selection_changed",
 }

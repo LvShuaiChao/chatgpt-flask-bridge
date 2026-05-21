@@ -3,7 +3,7 @@
 import re
 import time
 
-from app.constants import BOUND_PAGE_ONLINE_SECONDS
+from app.constants import BOUND_PAGE_ONLINE_SECONDS, UNBOUND_SESSION_SEND_HINT
 from app.utils.page_status import (
     evaluate_page_capability,
     evaluate_send_page,
@@ -875,7 +875,7 @@ class PageSendTargetMixin:
                     "",
                     "",
                     False,
-                    "当前对话尚未绑定 ChatGPT 页面，请先发送首条消息。",
+                    UNBOUND_SESSION_SEND_HINT,
                 )
 
             if self._session_has_wrong_existing_conversation_bind(session):
@@ -894,7 +894,7 @@ class PageSendTargetMixin:
                     "",
                     "",
                     False,
-                    "当前对话尚未绑定 ChatGPT 首页，请先发送首条消息。",
+                    UNBOUND_SESSION_SEND_HINT,
                 )
 
             if self._auto_bind_unbound_page and self._try_auto_bind_online_page(

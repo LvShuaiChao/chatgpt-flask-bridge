@@ -495,6 +495,8 @@ class BridgeMixin:
 
         session.has_pending_reply = True
         session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="send_queued")
         self._refresh_session_list(select_session_id=session.session_id)
         if hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
@@ -850,6 +852,11 @@ class BridgeMixin:
 
         if cleared <= 0:
             return False
+
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="clear_stale_pending"
+            )
 
         session.updated_at = time.time()
 
@@ -2908,6 +2915,12 @@ class BridgeMixin:
                     "source": "local_placeholder",
                 },
             )
+            session.has_pending_reply = True
+            session.pending_reply_since = time.time()
+            if hasattr(self, "_mark_session_waiting_started"):
+                self._mark_session_waiting_started(
+                    session, reason="send_click_local_placeholder"
+                )
         count_after = self._session_visible_message_count(session)
         self._append_log(
             "[CHAT_SEND][LOCAL_APPEND_AFTER] "
@@ -4276,6 +4289,10 @@ class BridgeMixin:
                 parent_message_id=user_message_id,
                 status="等待中",
             )
+        session.has_pending_reply = True
+        session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="bootstrap_queued")
         session.updated_at = time.time()
         self._save_sessions_to_disk()
         return {

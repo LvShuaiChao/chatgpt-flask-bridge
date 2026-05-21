@@ -4,10 +4,6 @@ import time
 
 from app.constants import (
     BOUND_PAGE_OFFLINE_GRACE_SECONDS,
-    STATUS_CHIP_AUTO_FOCUS_PREFIX,
-    STATUS_CHIP_AUTO_FOCUS_TOOLTIP,
-    STATUS_CHIP_MANUAL_SELECT_PREFIX,
-    STATUS_CHIP_MANUAL_SELECT_TOOLTIP,
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
     status_chip_text,
@@ -25,32 +21,6 @@ from app.models import (
 
 class PageBindingDisplayMixin:
     def _update_manual_current_page_display(self):
-        manual_page = self._get_manual_current_tm_page()
-        manual_chip = getattr(self, "tm_manual_page_label", None)
-        if manual_chip is None:
-            return
-
-        if isinstance(manual_page, dict):
-            display_url = self._page_full_url(manual_page) or self._manual_current_tm_url
-            manual_chip.setText(
-                status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "已选择")
-            )
-            manual_chip_state = (
-                "warn"
-                if self._page_plugin_status_text(manual_page) == "离线"
-                else "ok"
-            )
-            self._refresh_status_chip(manual_chip, manual_chip_state)
-            manual_tip = STATUS_CHIP_MANUAL_SELECT_TOOLTIP
-            if display_url:
-                manual_tip = f"{display_url}\n\n{manual_tip}"
-            manual_chip.setToolTip(manual_tip)
-        else:
-            manual_chip.setText(
-                status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "未选择")
-            )
-            self._refresh_status_chip(manual_chip, "warn")
-            manual_chip.setToolTip(STATUS_CHIP_MANUAL_SELECT_TOOLTIP)
         if hasattr(self, "_log_bind_mismatch_if_needed"):
             self._log_bind_mismatch_if_needed(self._tm_summary_for_session())
 
@@ -255,42 +225,6 @@ class PageBindingDisplayMixin:
         if show_url:
             self._persist_page_url(show_url)
         self._tampermonkey_page_url = show_url
-        page_state = "浏览器页面未获得焦点"
-        chip_state = "warn"
-        bound_info, bound_state, _ = self._resolve_bound_page_info(status=status)
-        bound_client_id = ((bound_info or {}).get("client_id") or "").strip()
-        display_url = ""
-        if isinstance(client_info, dict):
-            display_url = self._page_full_url(client_info)
-            profile = self._tm_client_sync_profile(client_info)
-            syncable = bool(profile.get("sync_readable") or profile.get("syncable"))
-            current_client_id = (client_info.get("client_id") or "").strip()
-            if (
-                bound_client_id
-                and current_client_id
-                and current_client_id != bound_client_id
-            ):
-                if bound_state == "online":
-                    page_state = "已检测"
-                    chip_state = "info"
-                else:
-                    page_state = "已检测"
-                    chip_state = "warn"
-            else:
-                page_state = "已检测"
-                chip_state = "ok" if syncable else "warn"
-        page_chip = getattr(self, "tm_current_page_label", None) or getattr(
-            self, "tm_live_page_label", None
-        )
-        if page_chip is not None:
-            page_chip.setText(
-                status_chip_text(STATUS_CHIP_AUTO_FOCUS_PREFIX, page_state)
-            )
-            self._refresh_status_chip(page_chip, chip_state)
-            focus_tip = STATUS_CHIP_AUTO_FOCUS_TOOLTIP
-            if display_url:
-                focus_tip = f"{display_url}\n\n{focus_tip}"
-            page_chip.setToolTip(focus_tip)
         self._update_manual_current_page_display()
         self._update_sync_target_display()
 
@@ -626,63 +560,6 @@ class PageBindingDisplayMixin:
                 style.polish(widget)
                 widget.update()
 
-        warning = getattr(self, "chat_bind_warning_label", None)
-        if warning is not None:
-            if state == "bind_mismatch":
-                warning.setText(
-                    "绑定页面与当前会话不一致，请重新绑定当前 ChatGPT 对话页。"
-                )
-                warning.setProperty("state", "error")
-                warning.setVisible(True)
-            elif state == "bound_offline":
-                session = self._current_session()
-                remote = normalize_remote_chatgpt(
-                    session.remote_chatgpt if session else None
-                )
-                if remote.get("enabled"):
-                    bound_info = self._client_info_by_id(
-                        (remote.get("client_id") or "").strip()
-                    )
-                    profile = self._tm_client_sync_profile(bound_info or {})
-                    if remote.get("enabled") and profile.get("online") and not (
-                        profile.get("sync_readable") or profile.get("syncable")
-                    ):
-                        warning.setText(
-                            "当前会话已绑定网页，但绑定页当前无法读取对话快照；"
-                            "请确认绑定页是对话页、在线且 conversation_id 有效。"
-                        )
-                    elif remote.get("enabled") and profile.get("online") and not profile.get(
-                        "sendable"
-                    ):
-                        warning.setText(
-                            "绑定页在线，可同步读取网页对话；"
-                            "发送新消息需等待生成结束或输入框可用。"
-                        )
-                    else:
-                        warning.setText(
-                            "当前会话已绑定网页，但该网页当前离线；"
-                            "可以保留绑定，打开该页面后会自动恢复同步。"
-                        )
-                else:
-                    warning.setText(
-                        "当前会话未绑定网页，请在可用页面列表中选择页面并点击绑定。"
-                    )
-                warning.setProperty("state", "warn")
-                warning.setVisible(True)
-            elif state in ("unbound_required", "waiting_bound_reopen"):
-                warning.setText(
-                    "当前会话未绑定网页，请在可用页面列表中选择页面并点击绑定。"
-                )
-                warning.setProperty("state", "")
-                warning.setVisible(True)
-            else:
-                warning.setProperty("state", "")
-                warning.setVisible(False)
-            if warning.isVisible():
-                warn_style = warning.style()
-                warn_style.unpolish(warning)
-                warn_style.polish(warning)
-
     def _current_session_bound_url(self):
         session = self._current_session()
         if session is None:
@@ -732,9 +609,10 @@ class PageBindingDisplayMixin:
             bound_client = (remote.get("client_id") or "-").strip() or "-"
             bound_instance = (remote.get("page_instance_id") or "-").strip() or "-"
             bound_conv = conversation_id or "-"
-            text = f"绑定网址：{url}    [{state_text}]"
+            text = f"绑定网址：{url}"
             tooltip = (
                 f"{text}\n"
+                f"state={state_text} | "
                 f"bound_client_id={bound_client} | "
                 f"bound_page_instance_id={bound_instance} | "
                 f"bound_conversation_id={bound_conv}"

@@ -24,12 +24,14 @@ from app.ui.mixins.log_tab_mixin import LogTabMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
 from app.ui.mixins.settings_mixin import SettingsMixin
+from app.ui.mixins.waiting_timer_mixin import WaitingTimerMixin
 from app.ui.mixins.ui_builder_mixin import UiBuilderMixin
 
 
 class MainWindow(
     QMainWindow,
     SettingsMixin,
+    WaitingTimerMixin,
     UiBuilderMixin,
     SessionMixin,
     ChatSessionMixin,
@@ -139,6 +141,7 @@ class MainWindow(
         else:
             first_id = next(iter(self._sessions))
             self._select_session(first_id, save=False)
+        self._init_waiting_elapsed_timer()
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)

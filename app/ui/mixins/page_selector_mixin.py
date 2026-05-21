@@ -168,6 +168,8 @@ class PageSelectorMixin:
             auto=True,
         )
         self._set_tm_action_hint(self._tm_selector_action_hint_for_page(item))
+        if hasattr(self, "_refresh_page_combo_current_style"):
+            self._refresh_page_combo_current_style()
 
     def _tm_selector_action_hint_for_page(self, page):
         if not isinstance(page, dict):
@@ -189,6 +191,10 @@ class PageSelectorMixin:
         if online:
             return "已选中页面，可点击「绑定当前页面」建立绑定。"
         return "已选中离线页；绑定、同步和发送都需要页面在线。"
+
+    def _on_bind_selected_tm_page(self):
+        """「设为当前页」按钮：确认可用页面列表当前项为手动选中页。"""
+        self._on_set_manual_current_page_clicked()
 
     def _on_set_manual_current_page_clicked(self):
         self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)

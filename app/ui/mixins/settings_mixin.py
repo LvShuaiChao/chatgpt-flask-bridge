@@ -370,7 +370,7 @@ class SettingsMixin:
         server.set_debug_mode(self._debug_mode)
         self._save_ui_settings()
     def _sync_page_url_detail_widgets(self):
-        if not hasattr(self, "tm_live_page_label"):
+        if not hasattr(self, "tm_bound_page_label"):
             return
         self._update_live_page_display()
         self._update_bound_page_display()

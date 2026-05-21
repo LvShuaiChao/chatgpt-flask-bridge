@@ -10,6 +10,7 @@ from app.constants import (
     CHATGPT_HOME_URL,
     PENDING_ASSISTANT_STATUSES,
     TM_POLL_FRESH_SECONDS,
+    UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
@@ -812,24 +813,11 @@ class PageAutoBindMixin:
             )
             return True, ""
 
-        now = time.time()
-        bind_request_id = uuid.uuid4().hex
-        session.remote_chatgpt = {
-            **default_remote_chatgpt(),
-            "bind_state": BIND_STATE_WAITING_HOME,
-            "bind_request_id": bind_request_id,
-            "launch_token": bind_request_id,
-            "bind_started_at": now,
-            "pending_bootstrap_text": text,
-            "pending_bootstrap_created_at": now,
-            "opened_home_at": now,
-        }
-        self._save_sessions_to_disk()
-        self._start_waiting_home_on_send(session)
-        self._add_system_message(
-            "未发现空闲 ChatGPT 首页，正在打开新的 ChatGPT 首页..."
+        self._append_log(
+            f"[AUTO_BIND][FIRST_SEND_BLOCKED] session_id={session.session_id} "
+            f"reason=no_idle_home auto_open=false"
         )
-        return False, "__WAITING_HOME_PENDING__"
+        return False, UNBOUND_SESSION_SEND_HINT
 
     def _ensure_visible_chatgpt_home_for_new_session(self, session):
         """新建本地会话后：绑定用户可见的空闲首页，或通过绑定令牌打开新的可见首页。"""

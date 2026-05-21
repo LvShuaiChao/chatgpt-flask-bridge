@@ -280,20 +280,6 @@ APP_STYLESHEET = """
                 border-radius: 6px;
                 padding: 4px 10px;
             }
-            QLabel#focus_sync_hint_label {
-                color: #8a6d00;
-                background: transparent;
-                font-size: 12px;
-                padding-left: 6px;
-                padding-right: 6px;
-            }
-            QLabel#TmBindMismatchHint {
-                color: #8a6d00;
-                background: transparent;
-                font-size: 12px;
-                padding-left: 6px;
-                padding-right: 6px;
-            }
             QLabel#StatusRelationLine {
                 color: #5b6472;
                 font-size: 12px;
@@ -388,19 +374,6 @@ APP_STYLESHEET = """
                 padding: 3px 6px;
                 color: #111827;
             }
-            QLabel#ChatBindWarning {
-                background: #fef2f2;
-                color: #991b1b;
-                border: 1px solid #fecaca;
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-size: 12px;
-            }
-            QLabel#ChatBindWarning[state="warn"] {
-                background: #fffbeb;
-                color: #92400e;
-                border: 1px solid #fbbf24;
-            }
             QWidget#JobTaskBar {
                 background: #eff6ff;
                 border: 1px solid #bfdbfe;
@@ -420,10 +393,26 @@ APP_STYLESHEET = """
                 background: #d1d5db;
             }
             QSplitter#ChatMainSplitter::handle:horizontal {
-                width: 6px;
+                width: 4px;
             }
             QSplitter#ChatMainSplitter::handle:hover {
+                background: #60a5fa;
+            }
+            QFrame#SessionCard[isCurrentSession="true"] {
+                background: #eff6ff;
+                border: 1px solid #93c5fd;
+                border-left: 4px solid #2563eb;
+                border-radius: 6px;
+            }
+            QLabel#CurrentSessionBadge {
+                color: #ffffff;
                 background: #2563eb;
+                border-radius: 6px;
+                padding: 1px 6px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 30px;
+                max-width: 42px;
             }
             QWidget#CurrentSessionHeader {
                 background: transparent;
@@ -448,6 +437,7 @@ APP_STYLESHEET = """
                 background: #f3f4f6;
                 border: none;
                 outline: none;
+                padding-right: 6px;
             }
             QListWidget#SessionList::item {
                 border: none;
@@ -494,10 +484,6 @@ APP_STYLESHEET = """
                 color: #2563eb;
                 font-size: 14px;
                 background: transparent;
-            }
-            QLabel#SessionCurrentBadge {
-                font-size: 10px;
-                font-weight: 600;
             }
             QWidget#ChatPage {
                 background: #f8fafc;

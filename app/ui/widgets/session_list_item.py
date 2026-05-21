@@ -8,14 +8,22 @@ SESSION_LIST_ITEM_HEIGHT = 94
 SESSION_LIST_ITEM_MIN_HEIGHT = 88
 SESSION_LIST_ITEM_MAX_HEIGHT = 110
 SESSION_LIST_ITEM_RADIUS = 8
-SESSION_CARD_MAX_WIDTH = 460
 
+_CURRENT_BADGE_STYLE = """
+QLabel#CurrentSessionBadge {
+    color: #ffffff;
+    background: #2563eb;
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 30px;
+    max-width: 42px;
+}
+"""
 
-def _hex_to_rgb_triplet(hex_color: str) -> tuple[int, int, int]:
-    h = (hex_color or "").strip().lstrip("#")
-    if len(h) != 6:
-        return 156, 163, 175
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+_CURRENT_CARD_BG = "#eff6ff"
+_CURRENT_LEFT_BAR = "#2563eb"
 
 
 class SessionListItemWidget(QWidget):
@@ -29,7 +37,7 @@ class SessionListItemWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(0, 4, 0, 4)
+        root.setContentsMargins(2, 3, 6, 3)
         root.setSpacing(0)
 
         self.left_bar = QFrame()
@@ -47,12 +55,12 @@ class SessionListItemWidget(QWidget):
         root.addWidget(self.card, stretch=1)
 
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(10, 8, 10, 8)
-        card_layout.setSpacing(4)
+        card_layout.setContentsMargins(10, 8, 14, 8)
+        card_layout.setSpacing(3)
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(4)
+        title_row.setSpacing(6)
 
         self.title_label = ElidedLabel()
         self.title_label.setObjectName("SessionItemTitle")
@@ -66,12 +74,13 @@ class SessionListItemWidget(QWidget):
         title_row.addWidget(self.pending_dot, alignment=Qt.AlignVCenter)
 
         self.current_badge = QLabel("当前")
-        self.current_badge.setObjectName("SessionCurrentBadge")
+        self.current_badge.setObjectName("CurrentSessionBadge")
         self.current_badge.setAlignment(Qt.AlignCenter)
-        self.current_badge.setMinimumHeight(22)
-        self.current_badge.setMinimumWidth(34)
+        self.current_badge.setMinimumHeight(20)
+        self.current_badge.setMinimumWidth(30)
+        self.current_badge.setMaximumWidth(42)
         self.current_badge.setVisible(False)
-        title_row.addWidget(self.current_badge, 0, Qt.AlignVCenter)
+        title_row.addWidget(self.current_badge, 0, Qt.AlignRight | Qt.AlignTop)
 
         self.subtitle_label = ElidedLabel()
         self.subtitle_label.setObjectName("SessionItemSubtitle")
@@ -93,70 +102,105 @@ class SessionListItemWidget(QWidget):
         for child in self.findChildren(QWidget):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
+    def _sync_current_badge(self, is_current):
+        self.current_badge.setVisible(bool(is_current))
+        if is_current:
+            self.current_badge.setStyleSheet(_CURRENT_BADGE_STYLE)
+
+    def _sync_current_card_property(self, is_current):
+        self.card.setProperty("isCurrentSession", "true" if is_current else "false")
+        style = self.card.style()
+        if style is not None:
+            style.unpolish(self.card)
+            style.polish(self.card)
+
+    def _reapply_visual_from_state(self):
+        state = getattr(self, "_last_apply_state", None)
+        if not isinstance(state, dict):
+            return False
+        bind_state = state.get("bind_state", "unbound")
+        style = SESSION_BIND_LIST_STYLES.get(
+            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
+        )
+        self._apply_selection_visual_style(
+            selected=bool(state.get("selected")),
+            is_current=bool(state.get("is_current")),
+            left_color=style.get("left") or "#9ca3af",
+            border_color=style.get("border") or "#d1d5db",
+            background_color=style.get("bg") or "#f9fafb",
+            selected_border=style.get("selected_border") or style.get("border") or "#d1d5db",
+        )
+        return True
+
     def _apply_selection_visual_style(
         self,
         *,
         selected,
+        is_current,
         left_color,
         border_color,
         background_color,
         selected_border,
     ):
-        self.current_badge.setVisible(bool(selected))
-        self.left_bar.setFixedWidth(5 if selected else 4)
+        is_current = bool(is_current)
+        selected = bool(selected)
+        self._sync_current_badge(is_current)
+        self._sync_current_card_property(is_current)
 
-        self.left_bar.setStyleSheet(
-            f"""
-            QFrame#SessionListLeftBar {{
-                background: {left_color};
-                border: none;
-                border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-            }}
-            """
-        )
-
-        border_width = 2 if selected else 1
-        self.card.setStyleSheet(
-            f"""
-            QFrame#SessionCard {{
-                background: {background_color};
-                border: {border_width}px solid {border_color};
-                border-radius: {SESSION_LIST_ITEM_RADIUS}px;
-            }}
-            """
-        )
-
-        if selected:
-            r, g, b = _hex_to_rgb_triplet(left_color)
-            self.current_badge.setStyleSheet(
+        if is_current:
+            self.left_bar.hide()
+            self.left_bar.setFixedWidth(0)
+            self.card.setStyleSheet(
                 f"""
-                QLabel#SessionCurrentBadge {{
-                    font-size: 10px;
-                    font-weight: 600;
-                    color: {selected_border};
-                    background: rgba({r}, {g}, {b}, 0.18);
-                    border: 1px solid {selected_border};
-                    border-radius: 4px;
-                    padding: 1px 6px;
+                QFrame#SessionCard {{
+                    background: {_CURRENT_CARD_BG};
+                    border: 1px solid #93c5fd;
+                    border-left: 4px solid {_CURRENT_LEFT_BAR};
+                    border-radius: {SESSION_LIST_ITEM_RADIUS}px;
                 }}
                 """
             )
-            title_weight = 700
         else:
-            self.current_badge.setStyleSheet(
-                """
-                QLabel#SessionCurrentBadge {
-                    font-size: 10px;
-                    font-weight: 600;
-                    background: transparent;
-                    border: 1px solid transparent;
-                    border-radius: 4px;
-                    padding: 1px 6px;
-                }
+            self.left_bar.show()
+            bar_color = left_color
+            card_border = selected_border if selected else border_color
+            card_bg = background_color
+            border_width = 1
+            bar_width = 5 if selected else 4
+            self.left_bar.setFixedWidth(bar_width)
+            self.left_bar.setStyleSheet(
+                f"""
+                QFrame#SessionListLeftBar {{
+                    background: {bar_color};
+                    border: none;
+                    border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                    border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                }}
                 """
             )
-            title_weight = 600
+            self.card.setStyleSheet(
+                f"""
+                QFrame#SessionCard {{
+                    background: {card_bg};
+                    border: {border_width}px solid {card_border};
+                    border-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                }}
+                """
+            )
+            title_weight = 700 if selected else 600
+            self.title_label.setStyleSheet(
+                f"""
+                QLabel#SessionItemTitle {{
+                    font-weight: {title_weight};
+                    color: #111827;
+                    font-size: 14px;
+                    background: transparent;
+                }}
+                """
+            )
+            return
+
+        title_weight = 700
 
         self.title_label.setStyleSheet(
             f"""
@@ -169,36 +213,47 @@ class SessionListItemWidget(QWidget):
             """
         )
 
-    def set_selected_fast(self, selected):
+    def set_is_current_fast(self, is_current):
+        """仅刷新「当前」角标与卡片高亮，与绑定/在线/等待状态无关。"""
+        is_current = bool(is_current)
+        state = getattr(self, "_last_apply_state", None)
+        if not isinstance(state, dict):
+            return False
+        old_current = bool(state.get("is_current"))
+        state["is_current"] = is_current
+        if old_current == is_current:
+            self._sync_current_badge(is_current)
+            return True
+
+        self._last_apply_state_key = None
+        self._reapply_visual_from_state()
+        self.card.update()
+        self.left_bar.update()
+        self.current_badge.update()
+        self.update()
+        return True
+
+    def set_selected_fast(self, selected, *, is_current=None):
         state = getattr(self, "_last_apply_state", None)
         if not isinstance(state, dict):
             return False
 
         selected = bool(selected)
+        if is_current is None:
+            is_current = bool(state.get("is_current"))
+        else:
+            is_current = bool(is_current)
+
         old_selected = bool(state.get("selected"))
-        if old_selected == selected:
+        old_current = bool(state.get("is_current"))
+        if old_selected == selected and old_current == is_current:
+            self._sync_current_badge(is_current)
             return True
 
         state["selected"] = selected
-
-        bind_state = state.get("bind_state", "unbound")
-        style = SESSION_BIND_LIST_STYLES.get(
-            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
-        )
-
-        left_color = style.get("left") or "#9ca3af"
-        border_color = style.get("border") or "#d1d5db"
-        background_color = style.get("bg") or "#f9fafb"
-        sel_border = style.get("selected_border") or border_color
-
-        self._apply_selection_visual_style(
-            selected=selected,
-            left_color=left_color,
-            border_color=border_color,
-            background_color=background_color,
-            selected_border=sel_border,
-        )
-
+        state["is_current"] = is_current
+        self._last_apply_state_key = None
+        self._reapply_visual_from_state()
         self.card.update()
         self.left_bar.update()
         self.current_badge.update()
@@ -213,12 +268,15 @@ class SessionListItemWidget(QWidget):
         bind_state,
         pending_reply=False,
         selected=False,
+        is_current=None,
         tooltip="",
     ):
         style = SESSION_BIND_LIST_STYLES.get(
             bind_state, SESSION_BIND_LIST_STYLES["unbound"]
         )
         bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+        if is_current is None:
+            is_current = False
 
         self._last_apply_state = {
             "title": title,
@@ -226,6 +284,7 @@ class SessionListItemWidget(QWidget):
             "bind_state": bind_state,
             "pending_reply": pending_reply,
             "selected": selected,
+            "is_current": is_current,
             "tooltip": tooltip,
         }
 
@@ -234,11 +293,14 @@ class SessionListItemWidget(QWidget):
         status_text = style["label"]
         tooltip_text = tooltip or ""
 
+        self._sync_current_badge(is_current)
+
         state_key = (
             title_text,
             subtitle,
             bind_state,
             bool(pending_reply),
+            bool(is_current),
             bool(selected),
             tooltip_text,
             status_text,
@@ -253,35 +315,29 @@ class SessionListItemWidget(QWidget):
 
         self.pending_dot.setText("●" if pending_reply else "")
         self.pending_dot.setVisible(bool(pending_reply))
-        self.current_badge.setVisible(bool(selected))
 
         self.setToolTip(tooltip_text)
 
-        style_key = (bind_state, bool(selected), bool(pending_reply))
+        style_key = (bind_state, bool(selected), bool(pending_reply), bool(is_current))
         if style_key == getattr(self, "_last_style_key", None):
             self.update()
             return
 
         self._last_style_key = style_key
 
-        bg = style["bg"]
-        border = style["border"]
-        left = style["left"]
-        sel_border = style["selected_border"]
-        text_color = style["text"]
-
         self._apply_selection_visual_style(
             selected=selected,
-            left_color=left,
-            border_color=border,
-            background_color=bg,
-            selected_border=sel_border,
+            is_current=is_current,
+            left_color=style["left"],
+            border_color=style["border"],
+            background_color=style["bg"],
+            selected_border=style["selected_border"],
         )
 
         self.status_label.setStyleSheet(
             f"""
             QLabel#SessionBindStatusLabel {{
-                color: {text_color};
+                color: {style["text"]};
                 font-size: 11px;
                 background: rgba(255, 255, 255, 0.45);
                 border-radius: 6px;

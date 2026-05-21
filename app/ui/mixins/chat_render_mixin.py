@@ -54,11 +54,16 @@ class ChatRenderMixin:
     def _html_escape(self, value):
         return html.escape(str(value or ""), quote=True)
 
-    def _message_plain_text(self, message):
-        return getattr(message, "text", "") or getattr(message, "content", "") or ""
+    def _message_plain_text(self, message, session=None):
+        plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
+        if session is None and hasattr(self, "_current_session"):
+            session = self._current_session()
+        if hasattr(self, "_display_text_for_message"):
+            return self._display_text_for_message(message, session)
+        return plain
 
-    def _message_text_html(self, message):
-        text = self._message_plain_text(message)
+    def _message_text_html(self, message, session=None):
+        text = self._message_plain_text(message, session=session)
         text = self._html_escape(text)
         return text.replace("\n", "<br>")
 
@@ -97,8 +102,8 @@ class ChatRenderMixin:
             "</table>"
         )
 
-    def _assistant_bubble_width(self, message):
-        text = self._message_plain_text(message).strip()
+    def _assistant_bubble_width(self, message, session=None):
+        text = self._message_plain_text(message, session=session).strip()
         text_len = len(text)
 
         if text_len <= 20:
@@ -159,7 +164,7 @@ class ChatRenderMixin:
 
         for message in messages:
             role = (getattr(message, "role", "") or "").strip().lower()
-            content = self._message_text_html(message)
+            content = self._message_text_html(message, session=session)
 
             if role == "user":
                 meta = self._message_status_html(message, align="right")
@@ -194,7 +199,7 @@ class ChatRenderMixin:
             if role == "assistant":
                 meta = self._message_status_html(message, align="left")
                 badge = self._role_badge_html("AI", "#9ca3af")
-                bubble_width = self._assistant_bubble_width(message)
+                bubble_width = self._assistant_bubble_width(message, session=session)
                 bubble = self._bubble_table_html(
                     content,
                     bg="#ffffff",
@@ -385,6 +390,8 @@ class ChatRenderMixin:
         return True
 
     def _apply_reply_ui_change(self, session):
+        if hasattr(self, "_sync_session_waiting_timer"):
+            self._sync_session_waiting_timer(session, reason="reply_ui_change")
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
         else:
@@ -422,6 +429,8 @@ class ChatRenderMixin:
         target.content = ASSISTANT_WAIT_TEXT
         target.status = "等待中"
         session.updated_at = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="set_reply_waiting")
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
         self._refresh_session_list(select_session_id=session.session_id)

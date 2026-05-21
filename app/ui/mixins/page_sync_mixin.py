@@ -2092,6 +2092,10 @@ class PageSyncMixin:
 
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="web_sync_cleared_pending"
+            )
         session.updated_at = time.time()
 
         self._append_log(

@@ -15,6 +15,7 @@ from app.constants import (
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
     SESSION_BIND_LIST_STYLES,
+    UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
@@ -111,26 +112,36 @@ class SessionMixin:
         self._save_sessions_to_disk()
         return session
 
+    def _auto_open_chatgpt_on_new_session_enabled(self):
+        if hasattr(self, "_settings"):
+            value = self._settings.value("auto_open_chatgpt_on_new_session")
+            if value is not None:
+                if isinstance(value, str):
+                    return value.strip().lower() in ("1", "true", "yes", "on")
+                return bool(value)
+        from app.constants import DEFAULT_APP_SETTINGS
+
+        return bool(DEFAULT_APP_SETTINGS.get("auto_open_chatgpt_on_new_session", False))
+
     def _create_new_local_session(self):
         session = self._create_session(select=True)
         session.remote_chatgpt = default_remote_chatgpt()
         self._append_log(
-            f"[CHAT][NEW_LOCAL_SESSION] session_id={session.session_id} "
-            f"action=create_and_prepare_visible_home"
-        )
-        self._append_session_message(
-            session,
-            "system",
-            "已新建本地对话。\n"
-            "将优先使用「可见」的 ChatGPT 首页；若无可见首页则自动打开新首页。",
+            f"[SESSION][CREATE_LOCAL_ONLY] session_id={session.session_id} "
+            f"title={session.title!r} auto_open_chatgpt=false"
         )
         self._render_session_chat(session, force_bottom=True)
+        if hasattr(self, "_update_bound_page_display"):
+            self._update_bound_page_display()
+        if hasattr(self, "_apply_chat_bind_visual_state"):
+            self._apply_chat_bind_visual_state()
         self._focus_message_input_later()
         if hasattr(self, "_apply_default_compose_message_if_empty"):
             self._apply_default_compose_message_if_empty()
         self._save_sessions_to_disk()
-        if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
-            self._ensure_visible_chatgpt_home_for_new_session(session)
+        if self._auto_open_chatgpt_on_new_session_enabled():
+            if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
+                self._ensure_visible_chatgpt_home_for_new_session(session)
         return session
     def _current_session(self):
         if not self._current_session_id:
@@ -232,10 +243,37 @@ class SessionMixin:
         self._suspend_status_ui_until = time.time() + 0.8
         session = self._sessions[session_id]
 
+        old_session = self._sessions.get(old_session_id) if old_session_id else None
+        old_title = (
+            self._session_display_title(old_session)
+            if old_session is not None and hasattr(self, "_session_display_title")
+            else "-"
+        )
+        new_title = (
+            self._session_display_title(session)
+            if session is not None and hasattr(self, "_session_display_title")
+            else "-"
+        )
+        if hasattr(self, "_append_log"):
+            self._append_log(
+                "[SESSION][CURRENT_CHANGED] "
+                f"old_session_id={old_session_id or '-'} "
+                f"new_session_id={session_id or '-'} "
+                f"old_title={old_title or '-'} "
+                f"new_title={new_title or '-'}",
+                echo=False,
+            )
+
         self._refresh_session_list_selection_only(
             current_session_id=session_id,
             previous_session_id=old_session_id,
         )
+        changed_ids = []
+        if old_session_id:
+            changed_ids.append(old_session_id)
+        if session_id:
+            changed_ids.append(session_id)
+        self._refresh_session_list_current_badges()
         self._update_current_session_title_fast(session)
         self._force_session_list_repaint_now()
 
@@ -348,6 +386,8 @@ class SessionMixin:
         old_sig = getattr(self, "_last_session_list_visual_signature", None)
         if new_sig != old_sig:
             self._refresh_session_list(select_session_id=session_id)
+        else:
+            self._refresh_session_list_current_badges([session_id])
         self._update_current_session_title(session)
         if hasattr(self, "_update_bound_page_display"):
             self._update_bound_page_display()
@@ -589,6 +629,11 @@ class SessionMixin:
             return f"{ts} · 等待绑定..."
 
         if has_pending:
+            elapsed = ""
+            if hasattr(self, "_session_waiting_preview_suffix"):
+                elapsed = self._session_waiting_preview_suffix(session)
+            if elapsed:
+                return f"{ts} · 等待回复 {elapsed}"
             return f"{ts} · 等待回复..."
 
         if response_state["is_responding"]:
@@ -643,7 +688,83 @@ class SessionMixin:
             ))
         return tuple(rows)
 
+    def _session_item_is_current(self, session_id):
+        current_id = getattr(self, "_current_session_id", "") or ""
+        return bool(session_id) and session_id == current_id
+
+    def _format_current_session_header_text(self, session=None):
+        if session is None:
+            return "当前会话：新对话"
+        title = self._session_display_title(session) if hasattr(self, "_session_display_title") else ""
+        if not title or title == "新对话":
+            return "当前会话：新对话"
+        return f"当前会话：{title}"
+
+    def _log_session_current_badge_refresh(self, session_id, is_current, title=""):
+        if not hasattr(self, "_append_log"):
+            return
+        self._append_log(
+            "[SESSION][CURRENT_BADGE_REFRESH] "
+            f"session_id={session_id or '-'} "
+            f"title={title or '-'} "
+            f"is_current={'true' if is_current else 'false'}",
+            echo=False,
+        )
+
+    def _refresh_session_list_current_badges(self, session_ids=None):
+        if not hasattr(self, "session_list"):
+            return
+        current_id = getattr(self, "_current_session_id", "") or ""
+        if session_ids is None:
+            session_ids = []
+            for index in range(self.session_list.count()):
+                item = self.session_list.item(index)
+                if item is None:
+                    continue
+                sid = item.data(Qt.UserRole) or ""
+                if sid:
+                    session_ids.append(sid)
+        seen = set()
+        for session_id in session_ids:
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            is_current = session_id == current_id
+            index = self._list_index_for_session(session_id)
+            if index < 0:
+                continue
+            item = self.session_list.item(index)
+            if item is None:
+                continue
+            widget = self.session_list.itemWidget(item)
+            prev_current = None
+            if widget is not None:
+                state = getattr(widget, "_last_apply_state", None)
+                if isinstance(state, dict):
+                    prev_current = bool(state.get("is_current"))
+            badge_updated = False
+            if widget is not None and hasattr(widget, "set_is_current_fast"):
+                badge_updated = bool(widget.set_is_current_fast(is_current))
+            if not badge_updated:
+                session = self._sessions.get(session_id)
+                if session is not None:
+                    self._apply_session_list_item_widget(
+                        item,
+                        session,
+                        selected=is_current,
+                    )
+            if prev_current is not None and prev_current == is_current:
+                continue
+            session = self._sessions.get(session_id)
+            badge_title = "-"
+            if session is not None and hasattr(self, "_session_list_title_text"):
+                badge_title = self._session_list_title_text(session)
+            self._log_session_current_badge_refresh(
+                session_id, is_current, badge_title
+            )
+
     def _set_session_item_selected_fast(self, session_id, selected):
+        is_current = self._session_item_is_current(session_id)
         index = self._list_index_for_session(session_id)
         if index < 0:
             return
@@ -652,7 +773,7 @@ class SessionMixin:
             return
         widget = self.session_list.itemWidget(item)
         if widget is not None and hasattr(widget, "set_selected_fast"):
-            if widget.set_selected_fast(selected):
+            if widget.set_selected_fast(selected, is_current=is_current):
                 return
         session = self._sessions.get(session_id)
         if session is None:
@@ -704,10 +825,7 @@ class SessionMixin:
         label = getattr(self, "current_session_title", None)
         if label is None:
             return
-        if session is None:
-            label.setText("新对话")
-            return
-        label.setText(self._session_display_title(session))
+        label.setText(self._format_current_session_header_text(session))
 
     def _session_list_item_tooltip(self, session, bind_state):
         style = SESSION_BIND_LIST_STYLES.get(
@@ -745,7 +863,7 @@ class SessionMixin:
             if reason:
                 lines.append(reason)
         if bind_state == "unbound" and not remote.get("enabled"):
-            lines.append("发送首条消息时将自动选择空闲 ChatGPT 首页或打开新首页。")
+            lines.append(UNBOUND_SESSION_SEND_HINT)
         else:
             lines.extend([
                 f"client_id：{client_id or '-'}",
@@ -794,7 +912,13 @@ class SessionMixin:
                     + self._format_last_seen_ago(remote.get("last_seen"))
                 )
         if self._session_has_pending_assistant_reply(session):
-            lines.append("消息状态：等待回复")
+            elapsed = ""
+            if hasattr(self, "_session_waiting_preview_suffix"):
+                elapsed = self._session_waiting_preview_suffix(session)
+            if elapsed:
+                lines.append(f"消息状态：等待回复 {elapsed}")
+            else:
+                lines.append("消息状态：等待回复")
         else:
             response_state = self._session_bound_response_state(session)
             if response_state["is_responding"]:
@@ -805,6 +929,7 @@ class SessionMixin:
 
     def _apply_session_list_item_widget(self, item, session, *, selected=False):
         bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+        is_current = self._session_item_is_current(session.session_id)
         widget = self.session_list.itemWidget(item)
         if widget is None:
             widget = SessionListItemWidget()
@@ -815,6 +940,7 @@ class SessionMixin:
             bind_state=bind_state,
             pending_reply=self._session_has_pending_assistant_reply(session),
             selected=selected,
+            is_current=is_current,
             tooltip=self._session_list_item_tooltip(session, bind_state),
         )
         viewport_w = max(0, self.session_list.viewport().width())
@@ -827,13 +953,15 @@ class SessionMixin:
             return
         session = session or self._current_session()
         if not session:
-            self.current_session_title.setText("新对话")
+            self.current_session_title.setText("当前会话：新对话")
             if hasattr(self, "_update_current_session_url_display"):
                 self._update_current_session_url_display()
             return
         if self._is_default_session_title(session.title):
             self._auto_rename_session_from_messages(session)
-        self.current_session_title.setText(self._session_display_title(session))
+        self.current_session_title.setText(
+            self._format_current_session_header_text(session)
+        )
         if hasattr(self, "_update_current_session_url_display"):
             self._update_current_session_url_display()
     def _list_index_for_session(self, session_id):
@@ -876,6 +1004,9 @@ class SessionMixin:
                     self.session_list.setCurrentRow(list_index)
                     self.session_list.blockSignals(False)
                     self._list_refreshing = False
+            self._refresh_session_list_current_badges(
+                [target_id] if target_id else None
+            )
             return
 
         structure_same = (
@@ -907,7 +1038,7 @@ class SessionMixin:
                 self._apply_session_list_item_widget(
                     item,
                     session,
-                    selected=(session_id == self._current_session_id),
+                    selected=self._session_item_is_current(session_id),
                 )
         else:
             self.session_list.clear()
@@ -922,7 +1053,7 @@ class SessionMixin:
                 self._apply_session_list_item_widget(
                     item,
                     session,
-                    selected=(session_id == self._current_session_id),
+                    selected=self._session_item_is_current(session_id),
                 )
 
         if target_id:
@@ -932,6 +1063,7 @@ class SessionMixin:
         self.session_list.blockSignals(False)
         self._list_refreshing = False
         self._last_session_list_visual_signature = new_sig
+        self._refresh_session_list_current_badges()
 
     def _on_session_list_pressed_fast(self, item):
         if self._list_refreshing or item is None:
@@ -1144,6 +1276,10 @@ class SessionMixin:
         session.updated_at = time.time()
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason="clear_before_rebind_or_sync"
+            )
         if hasattr(session, "summary"):
             session.summary = ""
 
@@ -1221,6 +1357,8 @@ class SessionMixin:
         session.updated_at = time.time()
         session.has_pending_reply = False
         session.pending_reply_since = 0
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(session, reason="clear_session")
         if hasattr(self, "_set_tm_action_hint"):
             self._set_tm_action_hint("当前对话已清空")
         if hasattr(self, "_append_log"):
@@ -1332,6 +1470,8 @@ class SessionMixin:
             return
         session.has_pending_reply = True
         session.pending_reply_since = time.time()
+        if hasattr(self, "_mark_session_waiting_started"):
+            self._mark_session_waiting_started(session, reason="mark_session_pending")
         self._refresh_session_list(select_session_id=self._current_session_id)
     @staticmethod
     def _message_to_dict(message):
@@ -1555,6 +1695,8 @@ class SessionMixin:
         self._migrate_loaded_remote_bindings()
         if hasattr(self, "_gc_orphan_bindings"):
             self._gc_orphan_bindings()
+        if hasattr(self, "_restore_waiting_timers_after_load"):
+            self._restore_waiting_timers_after_load()
 
     def _migrate_loaded_remote_bindings(self):
         changed = False

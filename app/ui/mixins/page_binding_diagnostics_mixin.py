@@ -270,34 +270,9 @@ class PageBindingDiagnosticsMixin:
         )
         self._append_log(line)
     def _set_focus_sync_hint(self, text=None, level="warning"):
-        label = getattr(self, "focus_sync_hint_label", None)
-        if label is None:
-            label = getattr(self, "tm_bind_mismatch_label", None)
-        if label is None:
-            return
         final_text = (text or "").strip()
         if not final_text:
             final_text = "焦点页不是绑定网页，同步将使用绑定网页。"
-        label.setText(final_text)
-        label.setVisible(True)
-        label.show()
-        label.setMinimumHeight(22)
-        label.setFixedHeight(22)
-        if level == "ok":
-            color = "#1f7a35"
-        elif level == "error":
-            color = "#b42318"
-        else:
-            color = "#8a6d00"
-        label.setStyleSheet(
-            "QLabel#focus_sync_hint_label {"
-            f" color: {color};"
-            " background: transparent;"
-            " padding-left: 6px;"
-            " padding-right: 6px;"
-            " font-size: 12px;"
-            "}"
-        )
         ui_key = f"{final_text}|{level}"
         if ui_key != getattr(self, "_last_focus_sync_hint_ui_key", ""):
             self._last_focus_sync_hint_ui_key = ui_key

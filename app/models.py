@@ -296,6 +296,10 @@ class ChatSession:
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
     has_pending_reply: bool = False
+    pending_reply_since: float = 0
+    waiting_for_reply: bool = False
+    waiting_since_ts: float = 0
+    waiting_elapsed_sec: int = 0
 
     @property
     def conversation_id(self):

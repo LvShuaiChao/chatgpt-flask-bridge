@@ -40,6 +40,39 @@ from app.utils.tm_activity import (
 
 
 class PageTmClientMixin:
+    def _page_is_online_for_ui(self, page):
+        """UI 展示用在线判断：与下拉框 [在线] 文案、绿色样式共用，含 recently_seen。"""
+        if not isinstance(page, dict):
+            return False
+        state = str(
+            page.get("liveness")
+            or page.get("page_liveness")
+            or page.get("state")
+            or ""
+        ).strip().lower()
+        if state in {
+            "online",
+            "recently_seen",
+            "active",
+            "active_visible",
+            "active_hidden",
+        }:
+            return True
+        if page.get("online") is True:
+            return True
+        liveness = get_page_liveness(page)
+        if liveness in ("online", "recently_seen"):
+            return True
+        last_seen = float(
+            page.get("last_seen")
+            or page.get("last_heartbeat_at")
+            or page.get("last_poll_at")
+            or 0
+        )
+        if last_seen > 0:
+            return time.time() - last_seen <= TM_HEARTBEAT_ONLINE_SECONDS
+        return False
+
     def _tm_page_is_online_simple(self, item):
         """仅按心跳 last_seen 判断在线（统一 get_page_liveness == online）。"""
         liveness = get_page_liveness(item)
@@ -1442,9 +1475,5 @@ class PageTmClientMixin:
         )
 
     def update_monkey_binding_summary(self, status=None, monkey_stats=None):
-        if not hasattr(self, "monkey_window_summary_label"):
-            return
-        monkey_stats = monkey_stats or self._collect_monkey_window_binding_stats(status)
-        window_line, detail_line = self.build_monkey_binding_summary_text(monkey_stats)
-        self.monkey_window_summary_label.setText(window_line)
-        self.monkey_binding_summary_label.setText(detail_line)
+        """页面概览 UI 已移除；统计仍由 _collect_monkey_window_binding_stats 供日志使用。"""
+        return

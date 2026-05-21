@@ -117,8 +117,12 @@ STATUS_CHIP_SESSION_BIND_TOOLTIP = (
 )
 
 STATUS_PAGE_ROLES_HINT = (
-    "自动焦点页用于自动检测；手动选中页用于临时选择；"
-    "会话绑定页才是当前对话实际发送和同步使用的目标页面。"
+    "会话绑定页是当前对话实际发送和同步使用的目标页面；"
+    "可用页面列表中的手动选中页仅用于绑定等操作前的临时选择。"
+)
+
+UNBOUND_SESSION_SEND_HINT = (
+    "当前会话未绑定 ChatGPT 页面，请先点击【打开 ChatGPT】或【绑定当前页面】。"
 )
 
 
@@ -155,6 +159,8 @@ DEFAULT_APP_SETTINGS = {
     "log_assistant_reply_events": True,
     "log_send_failed_events": True,
     "bind_each_chat_to_page": True,
+    # 新建本地对话时是否自动打开/绑定 ChatGPT 首页（默认仅创建本地会话）
+    "auto_open_chatgpt_on_new_session": False,
     "auto_open_bound_page_when_missing": True,
     "allow_fallback_to_any_page": False,
     "auto_bind_unbound_page": True,
