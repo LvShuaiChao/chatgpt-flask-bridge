@@ -81,7 +81,6 @@ DISPLAY_METHODS = {
     "_open_current_session_url",
     "_update_bound_page_display",
     "_set_chat_open_bound_enabled",
-    "_set_chat_flash_bound_enabled",
 }
 
 

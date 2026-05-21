@@ -1,7 +1,12 @@
 """
-已迁移至 examples/bridge_client_gui.py（独立 Bridge API 调试客户端，不参与主 GUI）。
+@deprecated — 根目录兼容壳入口，真实逻辑已迁移至 examples/bridge_client_gui.py。
 
-请运行: python examples/bridge_client_gui.py
+独立 Bridge API 调试客户端，不参与主 GUI（主入口为 GUI.py / app/ui/main_window.py），
+主程序禁止导入本 legacy wrapper。
+源码仓库保留本文件以便旧命令 ``python bridge_client_gui.py`` 仍可运行；
+不参与正式打包；制作精简发布包时可排除本文件，请改用::
+
+    python examples/bridge_client_gui.py
 """
 
 import sys

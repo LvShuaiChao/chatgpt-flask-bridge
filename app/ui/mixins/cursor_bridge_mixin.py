@@ -608,191 +608,142 @@ class CursorBridgeMixin:
 
 
 
-    def _on_send_to_cursor_clicked(self):
+    def _set_cursor_feedback(
+        self,
+        *,
+        log_line="",
+        system_message="",
+        status_text="",
+        hint="",
+        echo=True,
+    ):
+        if log_line:
+            self._append_log(log_line, echo=echo)
+        if system_message:
+            self._add_system_message(system_message)
+        if status_text and hasattr(self, "cursor_status_label"):
+            self.cursor_status_label.setText(status_text)
+        if hint:
+            self._set_cursor_status_hint(hint)
 
-        """ChatGPT -> Cursor Bridge：将输入框原文发送到 Cursor 任务队列。"""
-
-        message_edit = getattr(self, "message_edit", None)
-
-        if message_edit is None:
-
-            self._append_log(
-
-                "[CURSOR_BRIDGE][SEND_TASK_FAILED] reason=no_message_edit",
-
-                echo=True,
-
-            )
-
-            self._add_system_message("未找到输入框，无法发送到 Cursor。")
-
-            return
-
-
-
-        raw_content = message_edit.toPlainText()
-
+    def _send_raw_content_to_cursor(self, raw_content, *, log_prefix="SEND_TASK"):
         command = self._get_cursor_command()
 
-
-
         if command == "new_chat_and_send" and not raw_content.strip():
-
             QMessageBox.warning(
-
                 self, "内容为空", "新建并发送需要输入消息内容。"
-
             )
-
             self._set_cursor_status_hint("发送失败：新建并发送需要输入消息内容。")
-
             return
-
-
 
         if command == "send_message" and not raw_content.strip():
-
             QMessageBox.warning(self, "内容为空", "请输入要发送给 Cursor 的内容。")
-
             self._set_cursor_status_hint("发送失败：内容为空。")
-
             return
-
-
 
         if not server.is_server_running():
-
             msg = "请先启动服务，再发送到 Cursor。"
-
-            self._append_log(
-
-                "[CURSOR_BRIDGE][SEND_TASK_FAILED] reason=server_not_running",
-
-                echo=True,
-
+            self._set_cursor_feedback(
+                log_line=f"[CURSOR_BRIDGE][{log_prefix}_FAILED] reason=server_not_running",
+                system_message=msg,
+                hint=msg,
             )
-
-            self._add_system_message(msg)
-
-            self._set_cursor_status_hint(msg)
-
             return
-
-
 
         delivery_mode = self._get_cursor_delivery_mode()
-
         prompt_mode = self._get_cursor_prompt_mode()
-
         submit_mode = self._get_cursor_submit_mode()
-
         task = self._build_cursor_task(
-
             raw_content,
-
             command=command,
-
             delivery_mode=delivery_mode,
-
             prompt_mode=prompt_mode,
-
             submit_mode=submit_mode,
-
         )
-
         task_type = task.get("type") or ""
-
         task_command = task.get("command") or command
-
         delivery_mode = task.get("delivery_mode") or "auto_send"
-
         submit_mode = task.get("submit_mode") or "enter"
-
         content_len = len(task.get("content") or "")
 
-
-
         self._append_log(
-
-            "[CURSOR_BRIDGE][SEND_TASK_START]\n"
-
+            f"[CURSOR_BRIDGE][{log_prefix}_START]\n"
             f"task_id={task['task_id']}\n"
-
             f"type={task_type}\n"
-
             f"command={task_command}\n"
-
             f"delivery_mode={delivery_mode}\n"
-
             f"prompt_mode={prompt_mode}\n"
-
             f"submit_mode={submit_mode}\n"
-
             f"content_len={content_len}",
-
             echo=True,
-
         )
-
-
 
         ok, result = self._post_cursor_task_create(task)
-
         if ok:
-
             task_id = (result or task.get("task_id") or "").strip()
-
             ok_msg = (
-
                 f"已发送到 Cursor 任务队列：\n"
-
                 f"task_id={task_id}\n"
-
                 f"操作：{task_command}\n"
-
                 f"提交方式：{submit_mode}"
-
             )
-
-            self._append_log(
-
-                f"[CURSOR_BRIDGE][SEND_TASK_OK]\n"
-
-                f"task_id={task_id}",
-
-                echo=True,
-
+            self._set_cursor_feedback(
+                log_line=f"[CURSOR_BRIDGE][{log_prefix}_OK]\ntask_id={task_id}",
+                system_message=ok_msg,
+                status_text=f"Cursor 状态：已排队 {task_id}",
+                hint=ok_msg.replace("\n", " | "),
             )
-
-            self._add_system_message(ok_msg)
-
-            self._set_cursor_status_hint(ok_msg.replace("\n", " | "))
-
-            if hasattr(self, "cursor_status_label"):
-
-                self.cursor_status_label.setText(f"Cursor 状态：已排队 {task_id}")
-
             self._refresh_cursor_bridge_status()
-
             return
 
-
-
         fail_msg = f"发送到 Cursor 失败：{result}"
-
-        self._append_log(
-
-            f"[CURSOR_BRIDGE][SEND_TASK_FAILED] error={result}",
-
-            echo=True,
-
+        self._set_cursor_feedback(
+            log_line=f"[CURSOR_BRIDGE][{log_prefix}_FAILED] error={result}",
+            system_message=fail_msg,
+            hint=fail_msg,
         )
 
-        self._add_system_message(fail_msg)
+    def _bind_send_last_to_cursor_button(self):
+        """绑定聊天面板「发送最后给 Cursor」按钮（由 UiBuilderMixin 在创建按钮后调用）。"""
+        button = getattr(self, "send_last_to_cursor_btn", None)
+        if button is None:
+            return
+        reconnect = getattr(self, "_reconnect_button", None)
+        if not callable(reconnect):
+            button.clicked.connect(self._on_send_last_message_to_cursor_clicked)
+            return
+        reconnect(
+            button,
+            self._on_send_last_message_to_cursor_clicked,
+            tag="send_last_to_cursor_btn",
+        )
 
-        self._set_cursor_status_hint(fail_msg)
+    def _on_send_to_cursor_clicked(self):
+        """ChatGPT -> Cursor Bridge：将输入框原文发送到 Cursor 任务队列。"""
+        message_edit = getattr(self, "message_edit", None)
+        if message_edit is None:
+            self._set_cursor_feedback(
+                log_line="[CURSOR_BRIDGE][SEND_TASK_FAILED] reason=no_message_edit",
+                system_message="未找到输入框，无法发送到 Cursor。",
+            )
+            return
+        self._send_raw_content_to_cursor(message_edit.toPlainText())
 
-
+    def _on_send_last_message_to_cursor_clicked(self):
+        """将当前会话最后一条 ChatGPT 回复发送到 Cursor 任务队列。"""
+        session = self._current_session()
+        raw_content = self._last_assistant_text(session)
+        if not raw_content.strip():
+            self._set_cursor_feedback(
+                log_line="[CURSOR_BRIDGE][SEND_LAST_REPLY_FAILED] reason=no_assistant_reply",
+                system_message="当前没有可发送的 ChatGPT 回复。",
+                hint="发送失败：没有可发送的 ChatGPT 回复。",
+            )
+            return
+        self._send_raw_content_to_cursor(
+            raw_content,
+            log_prefix="SEND_LAST_REPLY",
+        )
 
     def _on_test_cursor_cli_clicked(self):
 
@@ -1018,19 +969,12 @@ class CursorBridgeMixin:
 
             fail_msg = "发送 Cursor 测试任务失败：服务未启动。"
 
-            self._append_log(
-
-                "[CURSOR_TEST][TASK_FAILED] reason=server_not_running",
-
-                echo=True,
-
+            self._set_cursor_feedback(
+                log_line="[CURSOR_TEST][TASK_FAILED] reason=server_not_running",
+                system_message=fail_msg,
+                status_text="Cursor 状态：服务未启动",
+                hint=fail_msg,
             )
-
-            self._add_system_message(fail_msg)
-
-            self.cursor_status_label.setText("Cursor 状态：服务未启动")
-
-            self._set_cursor_status_hint(fail_msg)
 
             return
 
@@ -1100,19 +1044,12 @@ class CursorBridgeMixin:
 
             )
 
-            self._append_log(
-
-                f"[CURSOR_TEST][TASK_CREATED] task_id={task_id}",
-
-                echo=True,
-
+            self._set_cursor_feedback(
+                log_line=f"[CURSOR_TEST][TASK_CREATED] task_id={task_id}",
+                system_message=ok_msg,
+                status_text=f"Cursor 状态：已排队 {task_id}",
+                hint=ok_msg.replace("\n", " | "),
             )
-
-            self._add_system_message(ok_msg)
-
-            self.cursor_status_label.setText(f"Cursor 状态：已排队 {task_id}")
-
-            self._set_cursor_status_hint(ok_msg.replace("\n", " | "))
 
             self._refresh_cursor_bridge_status()
 
@@ -1120,19 +1057,12 @@ class CursorBridgeMixin:
 
             fail_msg = f"发送 Cursor 测试任务失败：{result}"
 
-            self._append_log(
-
-                f"[CURSOR_TEST][TASK_FAILED] reason=enqueue_failed error={result}",
-
-                echo=True,
-
+            self._set_cursor_feedback(
+                log_line=f"[CURSOR_TEST][TASK_FAILED] reason=enqueue_failed error={result}",
+                system_message=fail_msg,
+                status_text="Cursor 状态：任务入队失败",
+                hint=fail_msg,
             )
-
-            self._add_system_message(fail_msg)
-
-            self.cursor_status_label.setText("Cursor 状态：任务入队失败")
-
-            self._set_cursor_status_hint(fail_msg)
 
 
 

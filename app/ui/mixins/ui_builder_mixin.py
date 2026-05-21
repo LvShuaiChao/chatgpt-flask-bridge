@@ -3,13 +3,23 @@ import time
 import traceback
 
 import server
-from app.utils.page_status import get_page_liveness, is_page_online
+from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
 from log_utils import get_log_file_path
 
+from app.constants import (
+    STATUS_CHIP_AUTO_FOCUS_PREFIX,
+    STATUS_CHIP_AUTO_FOCUS_TOOLTIP,
+    STATUS_CHIP_MANUAL_SELECT_PREFIX,
+    STATUS_CHIP_MANUAL_SELECT_TOOLTIP,
+    STATUS_CHIP_SESSION_BIND_PREFIX,
+    STATUS_CHIP_SESSION_BIND_TOOLTIP,
+    status_chip_text,
+)
 from app.models import normalize_remote_chatgpt
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.elided_label import ElidedLabel
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
+from app.ui.widgets.no_wheel_tab_widget import NoWheelTabWidget
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QFont
@@ -20,12 +30,11 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QGroupBox,
-    QLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -45,6 +54,30 @@ class UiBuilderMixin:
     CHAT_SUB_TAB_CHAT = 0
     CHAT_SUB_TAB_CURSOR_FLOW = 1
     CURSOR_FLOW_TAB_TITLE_BASE = "Cursor 动作编排"
+    STATUS_DETAIL_EXPANDED_SETTING_KEY = "ui/status_detail_expanded"
+    CHAT_SIDEBAR_MIN_WIDTH = 190
+    CHAT_SIDEBAR_DEFAULT_WIDTH = 240
+    CHAT_SIDEBAR_MAX_WIDTH = 480
+    CHAT_MAIN_MIN_WIDTH = 420
+
+    def _make_hint_label(self, text):
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #666;")
+        return label
+
+    def _make_button(self, text, object_name="", clicked=None):
+        btn = QPushButton(text)
+        if object_name:
+            btn.setObjectName(object_name)
+        if clicked is not None:
+            btn.clicked.connect(clicked)
+        return btn
+
+    def _make_group_vbox(self, title):
+        group = QGroupBox(title)
+        layout = QVBoxLayout(group)
+        return group, layout
 
     def _reconnect_button(self, button, slot, *, tag=""):
         if button is None:
@@ -97,6 +130,15 @@ class UiBuilderMixin:
             self._copy_last_reply,
             tag="copy_last_btn",
         )
+        bind_send_last = getattr(self, "_bind_send_last_to_cursor_button", None)
+        if callable(bind_send_last):
+            bind_send_last()
+        else:
+            self._append_log(
+                "[UI_BIND][SKIP] send_last_to_cursor_btn: "
+                "CursorBridgeMixin._bind_send_last_to_cursor_button missing",
+                echo=True,
+            )
         self._chat_panel_signals_bound = True
 
     def _init_splitter_save_timer(self):
@@ -108,6 +150,10 @@ class UiBuilderMixin:
         splitter = getattr(self, "chat_splitter", None)
         if splitter is None:
             return
+        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
+        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
+        default_left = int(getattr(self, "CHAT_SIDEBAR_DEFAULT_WIDTH", 240))
+        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
         raw = self._settings.value("ui/chat_splitter_sizes", "")
         if raw:
             parts = [part.strip() for part in str(raw).split(",") if part.strip()]
@@ -116,23 +162,23 @@ class UiBuilderMixin:
                     left = int(parts[0])
                     right = int(parts[1])
                 except ValueError as error:
+                    self._append_log(
+                        "[UI_SPLITTER][RESTORE_FAILED] "
+                        f"invalid={raw} error={error}\n{traceback.format_exc()}",
+                        echo=True,
+                    )
+                else:
+                    left = max(min_left, min(max_left, left))
+                    right = max(min_right, right)
+                    splitter.setSizes([left, right])
                     if getattr(self, "_debug_mode", False):
                         self._append_log(
-                            "[UI_SPLITTER][RESTORE_FAILED] "
-                            f"invalid={raw} error={error}\n{traceback.format_exc()}",
-                            echo=True,
+                            "[UI_SPLITTER][RESTORE] "
+                            f"raw={raw} applied={[left, right]} "
+                            f"min_left={min_left} max_left={max_left} min_right={min_right}"
                         )
-                else:
-                    left = max(190, min(260, left))
-                    if right >= 300:
-                        splitter.setSizes([left, right])
-                        if getattr(self, "_debug_mode", False):
-                            self._append_log(
-                                f"[UI_SPLITTER][RESTORE] "
-                                f"chat_splitter sizes={[left, right]}"
-                            )
-                        return
-        default_sizes = [220, 1000]
+                    return
+        default_sizes = [default_left, 1000]
         splitter.setSizes(default_sizes)
         if getattr(self, "_debug_mode", False):
             self._append_log(
@@ -153,19 +199,21 @@ class UiBuilderMixin:
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
-        left = max(190, min(260, int(sizes[0])))
-        right = int(sizes[1])
+        min_left = int(getattr(self, "CHAT_SIDEBAR_MIN_WIDTH", 190))
+        max_left = int(getattr(self, "CHAT_SIDEBAR_MAX_WIDTH", 480))
+        min_right = int(getattr(self, "CHAT_MAIN_MIN_WIDTH", 420))
+        left = max(min_left, min(max_left, int(sizes[0])))
+        right = max(min_right, int(sizes[1]))
         if left <= 0 or right <= 0:
             return
         value = f"{left},{right}"
         self._settings.setValue("ui/chat_splitter_sizes", value)
         if getattr(self, "_debug_mode", False):
             self._append_log(
-                f"[UI_SPLITTER][SAVE] chat_splitter sizes={[left, right]}"
+                "[UI_SPLITTER][SAVE] "
+                f"raw={sizes} saved={[left, right]} "
+                f"min_left={min_left} max_left={max_left} min_right={min_right}"
             )
-
-    def _save_chat_splitter_sizes(self, *args):
-        self._schedule_save_chat_splitter_sizes(*args)
 
     def _restore_chat_sub_tab_index(self):
         tabs = getattr(self, "chat_sub_tabs", None)
@@ -197,10 +245,11 @@ class UiBuilderMixin:
         tabs = getattr(self, "chat_sub_tabs", None)
         if tabs is not None:
             current_text = tabs.tabText(index).strip()
-            if "聊天" in current_text and hasattr(
-                self, "_render_pending_chat_if_needed"
-            ):
-                QTimer.singleShot(30, self._render_pending_chat_if_needed)
+            if "聊天" in current_text:
+                if hasattr(self, "_flush_pending_chat_render"):
+                    QTimer.singleShot(30, self._flush_pending_chat_render)
+                elif hasattr(self, "_render_pending_chat_if_needed"):
+                    QTimer.singleShot(30, self._render_pending_chat_if_needed)
         if int(index) == self.CHAT_SUB_TAB_CURSOR_FLOW:
             if hasattr(self, "_flush_pending_task_log_if_needed"):
                 self._flush_pending_task_log_if_needed()
@@ -233,13 +282,6 @@ class UiBuilderMixin:
         on_chat_tab = tabs.currentIndex() == self.CHAT_SUB_TAB_CHAT
         title = f"{base} *" if show_star and on_chat_tab else base
         tabs.setTabText(self.CHAT_SUB_TAB_CURSOR_FLOW, title)
-
-    def _set_button_role(self, button, role):
-        if button is None:
-            return
-        button.setProperty("btnRole", role)
-        button.style().unpolish(button)
-        button.style().polish(button)
 
     def _create_tm_ghost_button(self, text, handler, *, danger=False, tooltip=""):
         btn = QPushButton(text)
@@ -276,15 +318,6 @@ class UiBuilderMixin:
                 "handler": self._on_open_bound_chatgpt_page,
                 "danger": False,
                 "tooltip": "打开当前对话绑定的 ChatGPT 页面",
-            },
-            "flash_bound": {
-                "text": "定位绑定页",
-                "handler": self._flash_bound_chatgpt_page,
-                "danger": False,
-                "tooltip": (
-                    "让当前绑定的 ChatGPT 标签页边框、标题和 favicon 同时闪烁，"
-                    "方便确认对应关系"
-                ),
             },
             "sync_web": {
                 "text": "同步网页对话",
@@ -341,9 +374,6 @@ class UiBuilderMixin:
         self.chat_open_bound_btn = self._create_tm_action_button_from_spec(
             "open_bound", specs
         )
-        self.flash_bound_page_btn = self._create_tm_action_button_from_spec(
-            "flash_bound", specs, object_name="flash_bound_page_btn"
-        )
         self.sync_web_conversation_btn = self._create_tm_action_button_from_spec(
             "sync_web", specs, object_name="sync_web_conversation_btn"
         )
@@ -360,7 +390,6 @@ class UiBuilderMixin:
             self.open_chatgpt_btn,
             self.bind_current_page_btn,
             self.chat_open_bound_btn,
-            self.flash_bound_page_btn,
             self.sync_web_conversation_btn,
         ):
             btn.setObjectName("PrimaryButton")
@@ -369,30 +398,49 @@ class UiBuilderMixin:
             btn.setObjectName("DangerButton")
             btn.setEnabled(True)
 
-    def _build_tm_action_buttons(self, layout):
+    def _build_page_action_row(self):
+        """详情区常驻操作按钮（与诊断卡片解耦，普通模式始终可见）。"""
         self._ensure_tm_action_buttons()
-        layout.setSpacing(6)
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         for btn in (
             self.open_chatgpt_btn,
             self.bind_current_page_btn,
-            self.chat_open_bound_btn,
-            self.flash_bound_page_btn,
             self.sync_web_conversation_btn,
+            self.close_bound_page_btn,
+            self.close_other_pages_btn,
         ):
+            btn.setFixedHeight(30)
+            btn.setMinimumHeight(30)
+            btn.setMaximumHeight(30)
             row.addWidget(btn)
         row.addStretch()
-        for btn in (self.close_bound_page_btn, self.close_other_pages_btn):
-            row.addWidget(btn)
-        layout.addLayout(row)
+        return row
+
+    def _build_auto_focus_action_row(self):
+        """兼容旧调用：操作按钮已移至 _build_page_action_row。"""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
+        return row
+
+    def _build_manual_focus_action_row(self):
+        """兼容旧调用：操作按钮已移至 _build_page_action_row。"""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
+        return row
+
+    def _build_tm_action_buttons(self, layout):
+        """兼容旧调用：按钮已嵌入状态详情中的焦点/手动面板。"""
+        layout.setSpacing(6)
 
     def _build_tm_debug_action_buttons(self, layout):
         specs = self._tm_action_button_specs()
         debug_specs = [
             ("open_chatgpt", specs["open_chatgpt"]),
             ("open_bound", specs["open_bound"]),
-            ("flash_bound", specs["flash_bound"]),
             ("sync_web", specs["sync_web"]),
             ("bind_current", specs["bind_current"]),
             (
@@ -426,22 +474,20 @@ class UiBuilderMixin:
                 )
             )
     def _format_tm_page_option_label(
-        self, page, bound_client_id="", current_client_id=""
+        self,
+        page,
+        bound_client_id="",
+        current_client_id="",
+        bound_page_instance_id="",
+        bound_conversation_id="",
+        resolved_bound_client_id="",
     ):
         if not isinstance(page, dict):
             return "无效页面"
 
         client_id = str(page.get("client_id") or "").strip()
         page_type = str(page.get("page_type") or "").strip()
-        url = (
-            self._page_full_url(page)
-            or str(
-                page.get("url")
-                or page.get("page_url")
-                or page.get("normalized_url")
-                or ""
-            ).strip()
-        )
+        url = self._page_full_url(page) or page_url_from(page)
         if not url:
             conversation_id = self._page_chatgpt_conversation_id(page)
             if conversation_id:
@@ -451,9 +497,6 @@ class UiBuilderMixin:
 
         visible = str(page.get("visible") or "").strip().lower()
         focus = str(page.get("focus") or "").strip().lower()
-        responding = str(page.get("responding") or "").strip().lower()
-        state = str(page.get("state") or "").strip().lower()
-        input_ready = str(page.get("input") or "").strip().lower()
 
         tags = []
         is_online = self._page_is_online(page)
@@ -462,21 +505,44 @@ class UiBuilderMixin:
         else:
             tags.append("离线")
 
-        if bound_client_id and client_id == bound_client_id:
-            tags.append("已绑定")
+        item_instance = (page.get("page_instance_id") or "").strip()
+        item_conv = (
+            self._client_conversation_id(page)
+            if hasattr(self, "_client_conversation_id")
+            else (page.get("conversation_id") or "").strip()
+        )
+        is_exact_bound_page = bool(
+            bound_page_instance_id
+            and item_instance
+            and item_instance == bound_page_instance_id
+        )
+        is_resolved_bound_client = bool(
+            resolved_bound_client_id
+            and client_id
+            and client_id == resolved_bound_client_id
+        )
+        is_same_conversation = bool(
+            bound_conversation_id
+            and item_conv
+            and item_conv == bound_conversation_id
+        )
+        if is_exact_bound_page or is_resolved_bound_client:
+            tags.append("绑定页")
+        elif is_same_conversation:
+            tags.append("同对话")
+        elif bound_client_id and client_id == bound_client_id:
+            tags.append("旧绑定")
 
         if current_client_id and client_id == current_client_id:
-            tags.append("当前对话")
+            tags.append("当前会话")
         elif visible == "hidden":
             tags.append("后台")
         elif focus in {"yes", "true", "1"}:
             tags.append("焦点")
 
-        if page_type == "conversation":
-            tags.append("对话")
-        elif page_type == "home":
+        if page_type == "home":
             tags.append("首页")
-        elif page_type:
+        elif page_type and page_type != "conversation":
             tags.append(page_type)
 
         tag_text = "".join(f"[{tag}]" for tag in tags)
@@ -484,11 +550,22 @@ class UiBuilderMixin:
             return f"{tag_text} {url}"
         return url
 
-    def _tm_page_combo_label(self, item, bound_client_id="", current_client_id=""):
+    def _tm_page_combo_label(
+        self,
+        item,
+        bound_client_id="",
+        current_client_id="",
+        bound_page_instance_id="",
+        bound_conversation_id="",
+        resolved_bound_client_id="",
+    ):
         return self._format_tm_page_option_label(
             item,
             bound_client_id=bound_client_id,
             current_client_id=current_client_id,
+            bound_page_instance_id=bound_page_instance_id,
+            bound_conversation_id=bound_conversation_id,
+            resolved_bound_client_id=resolved_bound_client_id,
         )
 
     TM_PAGE_ITEM_DICT_ROLE = Qt.UserRole + 1
@@ -523,8 +600,38 @@ class UiBuilderMixin:
                 return idx
         return -1
 
-    def _find_combo_index_by_client_id(self, client_id):
-        return self._tm_page_combo_find_index_by_client_id(client_id)
+    def _tm_page_combo_find_index_by_normalized_url(self, normalized_url):
+        normalized_url = (
+            self._normalize_chatgpt_page_url(normalized_url)
+            if hasattr(self, "_normalize_chatgpt_page_url")
+            else str(normalized_url or "").strip()
+        )
+        if not normalized_url or not hasattr(self, "tm_page_combo"):
+            return -1
+        for idx in range(self.tm_page_combo.count()):
+            page = self._tm_page_combo_page_from_index(idx)
+            if not isinstance(page, dict):
+                continue
+            page_url = (
+                self._normalize_chatgpt_page_url(
+                    str(
+                        page.get("url")
+                        or page.get("href")
+                        or page.get("page_url")
+                        or ""
+                    )
+                )
+                if hasattr(self, "_normalize_chatgpt_page_url")
+                else str(
+                    page.get("url")
+                    or page.get("href")
+                    or page.get("page_url")
+                    or ""
+                ).strip()
+            )
+            if page_url == normalized_url:
+                return idx
+        return -1
 
     def _tm_page_combo_find_index_for_page(self, page):
         if not isinstance(page, dict) or not hasattr(self, "tm_page_combo"):
@@ -536,6 +643,16 @@ class UiBuilderMixin:
                 self._client_conversation_id(page) if hasattr(self, "_client_conversation_id") else ""
             )
         target_client = (page.get("client_id") or "").strip()
+        target_url = ""
+        if hasattr(self, "_normalize_chatgpt_page_url"):
+            target_url = self._normalize_chatgpt_page_url(
+                str(
+                    page.get("url")
+                    or page.get("href")
+                    or page.get("page_url")
+                    or ""
+                )
+            )
         for idx in range(self.tm_page_combo.count()):
             item_page = self._tm_page_combo_page_from_index(idx)
             if not isinstance(item_page, dict):
@@ -553,8 +670,21 @@ class UiBuilderMixin:
                 and (not target_client or item_client == target_client)
             ):
                 return idx
+            if target_url and hasattr(self, "_normalize_chatgpt_page_url"):
+                item_url = self._normalize_chatgpt_page_url(
+                    str(
+                        item_page.get("url")
+                        or item_page.get("href")
+                        or item_page.get("page_url")
+                        or ""
+                    )
+                )
+                if item_url == target_url:
+                    return idx
         if target_client:
             return self._tm_page_combo_find_index_by_client_id(target_client)
+        if target_url:
+            return self._tm_page_combo_find_index_by_normalized_url(target_url)
         return -1
 
     def _pick_tm_page_selector_restore_index(self, pages, session=None):
@@ -579,10 +709,24 @@ class UiBuilderMixin:
         ).strip()
         manual_client = (getattr(self, "_manual_current_tm_client_id", "") or "").strip()
 
-        def page_index_in_list(match_fn):
+        resolved_bound_client_id = ""
+        if hasattr(self, "_resolve_bound_page_info"):
+            bound_info, _bound_state, _bound_reason = self._resolve_bound_page_info()
+            if isinstance(bound_info, dict):
+                resolved_bound_client_id = (bound_info.get("client_id") or "").strip()
+
+        def page_conv_id(page):
+            if hasattr(self, "_client_conversation_id"):
+                return self._client_conversation_id(page)
+            return (page.get("conversation_id") or "").strip()
+
+        def page_index_in_list(match_fn, *, online_only=False):
             for idx, item in enumerate(pages):
-                if isinstance(item, dict) and match_fn(item):
-                    return idx
+                if not isinstance(item, dict) or not match_fn(item):
+                    continue
+                if online_only and not self._tm_page_is_online_simple(item):
+                    continue
+                return idx
             return -1
 
         def combo_index_for_list_index(list_index):
@@ -591,48 +735,116 @@ class UiBuilderMixin:
             target = pages[list_index]
             return self._tm_page_combo_find_index_for_page(target)
 
-        if bound_instance:
-            list_idx = page_index_in_list(
-                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance
+        def try_restore(list_index):
+            return combo_index_for_list_index(list_index)
+
+        bound_url = ""
+        if session is not None:
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bound_url = (
+                self._normalize_chatgpt_page_url(
+                    str(
+                        remote.get("url")
+                        or remote.get("page_url")
+                        or remote.get("conversation_url")
+                        or ""
+                    )
+                )
+                if hasattr(self, "_normalize_chatgpt_page_url")
+                else str(
+                    remote.get("url")
+                    or remote.get("page_url")
+                    or remote.get("conversation_url")
+                    or ""
+                ).strip()
             )
-            combo_idx = combo_index_for_list_index(list_idx)
+        if not bound_url:
+            bound_url = (
+                self._normalize_chatgpt_page_url(
+                    getattr(self, "bound_page_url", "")
+                )
+                if hasattr(self, "_normalize_chatgpt_page_url")
+                else str(getattr(self, "bound_page_url", "") or "").strip()
+            )
+        if bound_url:
+            combo_idx = self._tm_page_combo_find_index_by_normalized_url(bound_url)
             if combo_idx >= 0:
                 return combo_idx
 
         if bound_conv:
             list_idx = page_index_in_list(
                 lambda p: (
-                    (self._client_conversation_id(p) if hasattr(self, "_client_conversation_id") else (p.get("conversation_id") or "").strip())
-                    == bound_conv
-                )
+                    page_conv_id(p) == bound_conv
+                    and (p.get("page_type") or "").strip() == "conversation"
+                ),
+                online_only=True,
             )
-            combo_idx = combo_index_for_list_index(list_idx)
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        if bound_instance:
+            list_idx = page_index_in_list(
+                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance,
+                online_only=True,
+            )
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        for candidate_client in (resolved_bound_client_id, bound_client):
+            if not candidate_client:
+                continue
+            list_idx = page_index_in_list(
+                lambda p, cid=candidate_client: (p.get("client_id") or "").strip() == cid,
+                online_only=True,
+            )
+            combo_idx = try_restore(list_idx)
             if combo_idx >= 0:
                 return combo_idx
 
         if manual_instance:
             list_idx = page_index_in_list(
-                lambda p: (p.get("page_instance_id") or "").strip() == manual_instance
+                lambda p: (p.get("page_instance_id") or "").strip() == manual_instance,
+                online_only=True,
             )
-            combo_idx = combo_index_for_list_index(list_idx)
+            combo_idx = try_restore(list_idx)
             if combo_idx >= 0:
                 return combo_idx
 
         if manual_conv:
-            for idx, item in enumerate(pages):
-                if not isinstance(item, dict):
-                    continue
-                item_conv = (
-                    self._client_conversation_id(item)
-                    if hasattr(self, "_client_conversation_id")
-                    else (item.get("conversation_id") or "").strip()
-                )
-                if item_conv != manual_conv:
-                    continue
-                if self._tm_page_is_online_simple(item):
-                    combo_idx = combo_index_for_list_index(idx)
-                    if combo_idx >= 0:
-                        return combo_idx
+            list_idx = page_index_in_list(
+                lambda p: page_conv_id(p) == manual_conv,
+                online_only=True,
+            )
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        for candidate_client in (manual_client,):
+            if not candidate_client:
+                continue
+            combo_idx = self._tm_page_combo_find_index_by_client_id(candidate_client)
+            if combo_idx >= 0:
+                page = self._tm_page_combo_page_from_index(combo_idx)
+                if isinstance(page, dict) and self._tm_page_is_online_simple(page):
+                    return combo_idx
+
+        if bound_instance:
+            list_idx = page_index_in_list(
+                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance,
+            )
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
+
+        if bound_conv:
+            list_idx = page_index_in_list(
+                lambda p: page_conv_id(p) == bound_conv,
+            )
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
 
         for candidate_client in (manual_client, bound_client):
             if not candidate_client:
@@ -641,13 +853,7 @@ class UiBuilderMixin:
             if combo_idx >= 0:
                 return combo_idx
 
-        for idx, item in enumerate(pages):
-            if isinstance(item, dict) and self._tm_page_is_online_simple(item):
-                combo_idx = combo_index_for_list_index(idx)
-                if combo_idx >= 0:
-                    return combo_idx
-
-        return 0 if pages else -1
+        return -1
 
     def _page_is_online(self, item):
         """判断 Tampermonkey 页面是否在线（仅心跳/轮询新鲜度）。"""
@@ -731,15 +937,30 @@ class UiBuilderMixin:
             last_seen = float(page.get("last_seen") or 0)
             last_seen_bucket = int(last_seen // 2) if last_seen > 0 else 0
             liveness = get_page_liveness(page, now=now)
+            page_url = (
+                page.get("_normalized_url")
+                or (
+                    self._normalize_chatgpt_page_url(
+                        page.get("url")
+                        or page.get("page_url")
+                        or page.get("normalized_url")
+                        or ""
+                    )
+                    if hasattr(self, "_normalize_chatgpt_page_url")
+                    else (
+                        page.get("url")
+                        or page.get("page_url")
+                        or page.get("normalized_url")
+                        or ""
+                    )
+                )
+            )
             signature_items.append(
                 (
                     page.get("client_id") or "",
                     page.get("page_instance_id") or "",
                     page.get("conversation_id") or "",
-                    page.get("url")
-                    or page.get("page_url")
-                    or page.get("normalized_url")
-                    or "",
+                    page_url,
                     page.get("visible") or page.get("visibility_state") or "",
                     page.get("focus")
                     or page.get("has_focus")
@@ -785,7 +1006,11 @@ class UiBuilderMixin:
         )
         if not full_status or not any(key in full_status for key in client_keys):
             full_status = getattr(self, "_last_bridge_status", None) or {}
+        raw_pages = []
         pages = self._extract_tm_pages_from_status(full_status)
+        raw_pages = list(getattr(self, "raw_available_pages", None) or [])
+        unique_pages = list(getattr(self, "available_pages", None) or pages)
+        pages = unique_pages
         has_page_source_keys = any(key in full_status for key in client_keys)
 
         if not pages and self.tm_page_combo.count() > 0 and not has_page_source_keys:
@@ -797,10 +1022,13 @@ class UiBuilderMixin:
                 echo=False,
             )
             return
+        duplicate_count = max(0, len(raw_pages) - len(unique_pages))
         self._append_log(
             "[TM_SELECTOR][SOURCE] "
             f"status_keys={list((getattr(self, '_last_bridge_status', None) or {}).keys())} "
-            f"pages={len(pages)} "
+            f"raw_pages={len(raw_pages)} "
+            f"unique_pages={len(unique_pages)} "
+            f"duplicate={duplicate_count} "
             f"clients={[p.get('client_id') for p in pages]}",
             echo=False,
         )
@@ -811,13 +1039,37 @@ class UiBuilderMixin:
                 f"status_keys={list(full_status.keys())}",
                 echo=False,
             )
-        summary = self._tm_summary_for_session()
-        online_count, total_count = self._tm_display_counts_from_status(
-            full_status, summary=summary
-        )
-        bound_client_id = self._session_bound_client_id()
-        if not bound_client_id:
-            bound_client_id = str(full_status.get("bound_client_id") or "").strip()
+        stored_bound_client_id = self._session_bound_client_id()
+        bound_client_id = stored_bound_client_id
+        bound_page_instance_id = ""
+        bound_conversation_id = ""
+        resolved_bound_client_id = ""
+        bound_state = ""
+        bound_reason = ""
+        if hasattr(self, "_resolve_bound_page_info"):
+            bound_info, bound_state, bound_reason = self._resolve_bound_page_info(
+                status=full_status
+            )
+            if isinstance(bound_info, dict):
+                resolved_bound_client_id = (bound_info.get("client_id") or "").strip()
+                bound_page_instance_id = (bound_info.get("page_instance_id") or "").strip()
+            session = self._current_session() if hasattr(self, "_current_session") else None
+            if session is not None:
+                remote = normalize_remote_chatgpt(session.remote_chatgpt)
+                if hasattr(self, "_remote_conversation_id"):
+                    bound_conversation_id = self._remote_conversation_id(remote) or ""
+                else:
+                    bound_conversation_id = (remote.get("conversation_id") or "").strip()
+            self._append_log(
+                "[TM_SELECTOR][BOUND_RESOLVE] "
+                f"stored_client_id={stored_bound_client_id or '-'} "
+                f"resolved_client_id={resolved_bound_client_id or '-'} "
+                f"resolved_page_instance_id={bound_page_instance_id or '-'} "
+                f"bound_conversation_id={bound_conversation_id or '-'} "
+                f"bound_state={bound_state or '-'} "
+                f"bound_reason={bound_reason or '-'}",
+                echo=False,
+            )
         current_client_id = str(
             full_status.get("tampermonkey_client_id") or ""
         ).strip()
@@ -836,6 +1088,9 @@ class UiBuilderMixin:
                     item,
                     bound_client_id=bound_client_id,
                     current_client_id=current_client_id,
+                    bound_page_instance_id=bound_page_instance_id,
+                    bound_conversation_id=bound_conversation_id,
+                    resolved_bound_client_id=resolved_bound_client_id,
                 )
                 if old_label and new_label and old_label != new_label:
                     self._append_log(
@@ -845,10 +1100,6 @@ class UiBuilderMixin:
                         f"page_instance_id={(item.get('page_instance_id') or '-').strip() or '-'}",
                         echo=False,
                     )
-        if hasattr(self, "tm_page_count_label"):
-            self.tm_page_count_label.setText(
-                f"在线 {online_count} / 总 {total_count}"
-            )
         page_selector_key = self._tm_page_selector_signature(pages)
         if page_selector_key == getattr(self, "_last_page_selector_key", ""):
             return
@@ -856,7 +1107,7 @@ class UiBuilderMixin:
         manual_client_id = (
             getattr(self, "_manual_current_tm_client_id", "") or ""
         ).strip()
-        session_bound = bound_client_id
+        session_bound = stored_bound_client_id
         self._tm_page_selector_refreshing = True
         self.tm_page_combo.setUpdatesEnabled(False)
         self.tm_page_combo.blockSignals(True)
@@ -868,6 +1119,9 @@ class UiBuilderMixin:
                 item,
                 bound_client_id=bound_client_id,
                 current_client_id=current_client_id,
+                bound_page_instance_id=bound_page_instance_id,
+                bound_conversation_id=bound_conversation_id,
+                resolved_bound_client_id=resolved_bound_client_id,
             )
             idx = self.tm_page_combo.count()
             client_id = (item.get("client_id") or "").strip()
@@ -903,12 +1157,11 @@ class UiBuilderMixin:
 
         session = self._current_session() if hasattr(self, "_current_session") else None
         restore_index = self._pick_tm_page_selector_restore_index(pages, session=session)
-        if restore_index < 0 and self.tm_page_combo.count() > 0:
-            restore_index = 0
-
         try:
             if restore_index >= 0:
                 self.tm_page_combo.setCurrentIndex(restore_index)
+            else:
+                self.tm_page_combo.setCurrentIndex(-1)
         finally:
             self._tm_page_selector_refreshing = False
             self.tm_page_combo.blockSignals(False)
@@ -919,7 +1172,10 @@ class UiBuilderMixin:
             f"restore_index={restore_index} "
             f"manual_client_id={manual_client_id or '-'} "
             f"session_bound={session_bound or '-'} "
-            f"page_count={self.tm_page_combo.count()}",
+            f"resolved_bound_client_id={resolved_bound_client_id or '-'} "
+            f"bound_conversation_id={bound_conversation_id or '-'} "
+            f"page_count={self.tm_page_combo.count()} "
+            f"reason={'matched' if restore_index >= 0 else 'no_matching_current_page'}",
             echo=False,
         )
         self._update_tm_page_selector_display_state(restore_index)
@@ -1062,21 +1318,28 @@ class UiBuilderMixin:
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
+
         root = QVBoxLayout(central)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
+
         self.main_tabs = QTabWidget()
         self.main_tabs.setObjectName("MainTabs")
+
         self.chat_page = self._build_chat_page()
-        self.log_page = self._build_log_page()
+        self.log_page = None
         self.settings_page = self._build_settings_page()
+
         self.main_tabs.addTab(self.chat_page, "聊天")
-        self.main_tabs.addTab(self.log_page, "日志")
         self.main_tabs.addTab(self.settings_page, "设置")
+
         root.addWidget(self.main_tabs, stretch=1)
+
         if hasattr(self, "_init_log_tab_state"):
             self._init_log_tab_state()
+
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
+
         self.statusBar().showMessage("未启动服务")
         self._apply_app_style()
         self._sync_page_url_detail_widgets()
@@ -1112,24 +1375,25 @@ class UiBuilderMixin:
         self.bridge_status_panel.setVisible(self._show_top_status_bar)
         self._sync_bridge_status_panel_height()
 
-        tool_col = QVBoxLayout()
-        tool_col.setSpacing(4)
-        self._build_tm_action_buttons(tool_col)
-        page_layout.addLayout(tool_col, 0)
-
         self._chat_panel = self._build_chat_panel()
         page_layout.addWidget(self._chat_panel, 1)
         return page
 
-    def _on_toggle_status_detail(self):
+    def _set_status_detail_expanded(self, visible, *, persist=True):
         panel = getattr(self, "tm_status_detail_panel", None)
         btn = getattr(self, "toggle_status_detail_btn", None)
         if panel is None or btn is None:
             return
 
-        visible = not panel.isVisible()
+        visible = bool(visible)
         panel.setVisible(visible)
         btn.setText("收起" if visible else "详情")
+        if persist:
+            self._settings.setValue(
+                self.STATUS_DETAIL_EXPANDED_SETTING_KEY,
+                visible,
+            )
+            self._settings.sync()
 
         panel.updateGeometry()
 
@@ -1144,21 +1408,22 @@ class UiBuilderMixin:
         self._sync_bridge_status_panel_height()
         QTimer.singleShot(0, self._sync_bridge_status_panel_height)
 
-    def _refresh_status_page_relation_label_heights(self):
-        for attr in (
-            "current_page_status_label",
-            "manual_current_page_status_label",
-            "bound_page_status_label",
-            "sync_target_status_label",
-        ):
-            label = getattr(self, attr, None)
-            if label is None or not label.isVisible():
-                continue
-            label.adjustSize()
-            width = max(label.width(), label.sizeHint().width(), 1)
-            wrapped_height = label.heightForWidth(width)
-            if wrapped_height > 0:
-                label.setMinimumHeight(max(52, wrapped_height))
+    def _restore_status_detail_expanded(self):
+        raw_value = self._settings.value(
+            self.STATUS_DETAIL_EXPANDED_SETTING_KEY,
+            False,
+        )
+        visible = self._qsettings_bool(raw_value, False)
+        self._set_status_detail_expanded(visible, persist=False)
+
+    def _on_toggle_status_detail(self):
+        panel = getattr(self, "tm_status_detail_panel", None)
+        if panel is None:
+            return
+        self._set_status_detail_expanded(
+            not panel.isVisible(),
+            persist=True,
+        )
 
     def _sync_bridge_status_panel_height(self):
         panel = getattr(self, "bridge_status_panel", None)
@@ -1197,14 +1462,8 @@ class UiBuilderMixin:
                 widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                 widget.updateGeometry()
 
-            self._refresh_status_page_relation_label_heights()
-            page_grid_host = getattr(self, "_status_page_grid_host", None)
-            if page_grid_host is not None:
-                page_grid_host.adjustSize()
-                page_grid_host.setMinimumHeight(page_grid_host.sizeHint().height())
-
             if detail_panel is not None:
-                detail_panel.adjustSize()
+                detail_panel.updateGeometry()
 
         chat_layout = getattr(self, "chat_page_layout", None)
         if chat_layout is not None:
@@ -1216,7 +1475,7 @@ class UiBuilderMixin:
             chat_page.updateGeometry()
 
         if status_group is not None and status_group.isVisible():
-            status_group.adjustSize()
+            status_group.updateGeometry()
             required_height = status_group.sizeHint().height()
 
             panel_layout = panel.layout()
@@ -1420,14 +1679,11 @@ class UiBuilderMixin:
         self.auto_start_server_cb = QCheckBox("启动 GUI 时自动启动服务")
         self.auto_start_server_cb.setChecked(self._auto_start_server)
         service_form.addRow("", self.auto_start_server_cb)
-        chat_input_group = QGroupBox("聊天输入")
-        chat_input_layout = QVBoxLayout(chat_input_group)
-        chat_input_hint = QLabel(
+        chat_input_group, chat_input_layout = self._make_group_vbox("聊天输入")
+        chat_input_hint = self._make_hint_label(
             "当底部输入框为空时自动填入（新建对话、切换对话、发送后清空时）。"
             "留空表示不预填。"
         )
-        chat_input_hint.setWordWrap(True)
-        chat_input_hint.setStyleSheet("color: #666;")
         self.default_compose_message_edit = QPlainTextEdit()
         self.default_compose_message_edit.setPlaceholderText(
             "例如：请用中文简要回答…"
@@ -1636,6 +1892,20 @@ class UiBuilderMixin:
         debug_form_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         debug_form = QFormLayout(debug_form_host)
         debug_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        log_group = QGroupBox("运行日志")
+        log_layout = QVBoxLayout(log_group)
+        self.debug_mode_cb = QCheckBox("详细调试日志")
+        self.show_raw_payload_cb = QCheckBox("显示原始 payload")
+        self.mirror_log_to_console_cb = QCheckBox("同步输出到运行窗口")
+        self.include_log_callsite_cb = QCheckBox("日志包含调用位置")
+        for widget in (
+            self.debug_mode_cb,
+            self.show_raw_payload_cb,
+            self.mirror_log_to_console_cb,
+            self.include_log_callsite_cb,
+        ):
+            log_layout.addWidget(widget)
+        debug_form.addRow("", log_group)
         cursor_group = QGroupBox("Cursor 联动测试")
         cursor_layout = QVBoxLayout(cursor_group)
         cursor_btn_row = QHBoxLayout()
@@ -1715,12 +1985,21 @@ class UiBuilderMixin:
         self.tm_online_label.setObjectName("StatusChip")
         self.tm_blank_home_label = QLabel("空白页：0/0｜可用0｜已绑0")
         self.tm_blank_home_label.setObjectName("StatusChip")
-        self.tm_current_page_label = QLabel("焦点页：浏览器页面未获得焦点")
+        self.tm_current_page_label = QLabel(
+            status_chip_text(STATUS_CHIP_AUTO_FOCUS_PREFIX, "浏览器页面未获得焦点")
+        )
         self.tm_current_page_label.setObjectName("StatusChip")
-        self.tm_manual_page_label = QLabel("手动页：未选择")
+        self.tm_current_page_label.setToolTip(STATUS_CHIP_AUTO_FOCUS_TOOLTIP)
+        self.tm_manual_page_label = QLabel(
+            status_chip_text(STATUS_CHIP_MANUAL_SELECT_PREFIX, "未选择")
+        )
         self.tm_manual_page_label.setObjectName("StatusChip")
-        self.tm_bound_page_label = QLabel("绑定页：未绑定")
+        self.tm_manual_page_label.setToolTip(STATUS_CHIP_MANUAL_SELECT_TOOLTIP)
+        self.tm_bound_page_label = QLabel(
+            status_chip_text(STATUS_CHIP_SESSION_BIND_PREFIX, "未绑定")
+        )
         self.tm_bound_page_label.setObjectName("StatusChip")
+        self.tm_bound_page_label.setToolTip(STATUS_CHIP_SESSION_BIND_TOOLTIP)
         self.tm_sync_target_label = QLabel("同步：不可用")
         self.tm_sync_target_label.setObjectName("StatusChip")
         self.tm_queue_label = QLabel("队列：0 / 0 / 0")
@@ -1766,17 +2045,33 @@ class UiBuilderMixin:
         top_row.addWidget(self.tm_manual_page_label)
         top_row.addWidget(self.tm_bound_page_label)
         top_row.addWidget(self.tm_sync_target_label)
-        top_row.addWidget(self.tm_queue_label)
+        # 顶部状态栏不再显示“队列”和“任务”两个状态块。
+        # 变量保留，避免状态刷新逻辑中 self.tm_queue_label.setText(...)
+        # 和 self._update_job_status_chip(...) 报错。
+        self.tm_queue_label.setVisible(False)
+        self.job_status_chip.setVisible(False)
         top_row.addWidget(self.cursor_bridge_status_label)
-        top_row.addWidget(self.job_status_chip)
         top_row.addStretch(1)
-
-        status_action_row = QHBoxLayout()
-        status_action_row.setContentsMargins(12, 0, 8, 0)
-        status_action_row.setSpacing(10)
 
         STATUS_ACTION_BUTTON_WIDTH = 68
         STATUS_ACTION_BUTTON_HEIGHT = 34
+        STATUS_ACTION_BUTTON_SPACING = 10
+        STATUS_ACTION_BUTTON_COUNT = 3
+        STATUS_ACTION_HOST_WIDTH = (
+            STATUS_ACTION_BUTTON_WIDTH * STATUS_ACTION_BUTTON_COUNT
+            + STATUS_ACTION_BUTTON_SPACING * (STATUS_ACTION_BUTTON_COUNT - 1)
+        )
+        self.status_action_host = QWidget()
+        self.status_action_host.setObjectName("StatusActionHost")
+        self.status_action_host.setFixedSize(
+            STATUS_ACTION_HOST_WIDTH,
+            STATUS_ACTION_BUTTON_HEIGHT,
+        )
+        self.status_action_host.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        status_action_row = QHBoxLayout(self.status_action_host)
+        status_action_row.setContentsMargins(0, 0, 0, 0)
+        status_action_row.setSpacing(STATUS_ACTION_BUTTON_SPACING)
 
         def setup_status_action_button(button):
             button.setFixedSize(STATUS_ACTION_BUTTON_WIDTH, STATUS_ACTION_BUTTON_HEIGHT)
@@ -1805,15 +2100,53 @@ class UiBuilderMixin:
         self.chat_quick_stop_btn.setEnabled(True)
         status_action_row.addWidget(self.chat_quick_stop_btn)
 
-        top_row.addLayout(status_action_row)
+        top_row.addWidget(self.status_action_host, 0, Qt.AlignRight | Qt.AlignVCenter)
         outer.addLayout(top_row)
 
-        self.tm_bind_mismatch_label = ElidedLabel(" ")
-        self.tm_bind_mismatch_label.setObjectName("TmBindMismatchHint")
-        self.tm_bind_mismatch_label.setFixedHeight(22)
-        self.tm_bind_mismatch_label.setMinimumHeight(22)
-        self.tm_bind_mismatch_label.setMaximumHeight(22)
-        outer.addWidget(self.tm_bind_mismatch_label)
+        self.focus_sync_hint_label = QLabel(
+            "焦点页不是绑定网页，同步将使用绑定网页。"
+        )
+        self.focus_sync_hint_label.setObjectName("focus_sync_hint_label")
+        self.focus_sync_hint_label.setMinimumHeight(22)
+        self.focus_sync_hint_label.setFixedHeight(22)
+        self.focus_sync_hint_label.setWordWrap(False)
+        self.focus_sync_hint_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.focus_sync_hint_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.focus_sync_hint_label.setVisible(True)
+        self.focus_sync_hint_label.setStyleSheet(
+            "QLabel#focus_sync_hint_label {"
+            " color: #8a6d00;"
+            " background: transparent;"
+            " padding-left: 6px;"
+            " padding-right: 6px;"
+            " font-size: 12px;"
+            "}"
+        )
+        # 兼容旧引用
+        self.tm_bind_mismatch_label = self.focus_sync_hint_label
+        outer.addWidget(self.focus_sync_hint_label)
+
+        self.sync_progress_panel = QFrame()
+        self.sync_progress_panel.setObjectName("SyncProgressPanel")
+        self.sync_progress_panel.setVisible(False)
+        sync_progress_layout = QHBoxLayout(self.sync_progress_panel)
+        sync_progress_layout.setContentsMargins(8, 4, 8, 4)
+        sync_progress_layout.setSpacing(8)
+        self.sync_progress_label = QLabel("同步准备中...")
+        self.sync_progress_label.setObjectName("SyncProgressLabel")
+        self.sync_progress_label.setMinimumWidth(260)
+        self.sync_progress_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.sync_progress_bar = QProgressBar()
+        self.sync_progress_bar.setObjectName("SyncProgressBar")
+        self.sync_progress_bar.setRange(0, 0)
+        self.sync_progress_bar.setTextVisible(False)
+        self.sync_progress_bar.setFixedHeight(10)
+        self.sync_progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sync_progress_layout.addWidget(self.sync_progress_label)
+        sync_progress_layout.addWidget(self.sync_progress_bar, 1)
+        outer.addWidget(self.sync_progress_panel)
 
         self.tm_status_detail_panel = QWidget()
         self.tm_status_detail_panel.setObjectName("StatusDetailPanel")
@@ -1821,14 +2154,14 @@ class UiBuilderMixin:
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         detail_layout = QVBoxLayout(self.tm_status_detail_panel)
-        detail_layout.setContentsMargins(12, 12, 12, 12)
-        detail_layout.setSpacing(10)
+        detail_layout.setContentsMargins(8, 6, 8, 6)
+        detail_layout.setSpacing(6)
 
         summary_card = QFrame()
         summary_card.setObjectName("StatusInfoCard")
         summary_layout = QVBoxLayout(summary_card)
-        summary_layout.setContentsMargins(10, 8, 10, 8)
-        summary_layout.setSpacing(6)
+        summary_layout.setContentsMargins(8, 5, 8, 5)
+        summary_layout.setSpacing(3)
 
         summary_title = QLabel("页面概览")
         summary_title.setObjectName("StatusSectionTitle")
@@ -1849,19 +2182,14 @@ class UiBuilderMixin:
         page_card = QFrame()
         page_card.setObjectName("StatusInfoCard")
         page_card_layout = QVBoxLayout(page_card)
-        page_card_layout.setContentsMargins(10, 8, 10, 8)
-        page_card_layout.setSpacing(8)
+        page_card_layout.setContentsMargins(8, 5, 8, 5)
+        page_card_layout.setSpacing(5)
 
         page_header_row = QHBoxLayout()
         page_header_row.setSpacing(8)
 
         page_label = QLabel("可用页面列表")
         page_label.setObjectName("StatusSectionTitle")
-
-        if not hasattr(self, "tm_page_count_label"):
-            self.tm_page_count_label = QLabel("在线 0 / 总 0")
-            self.tm_page_count_label.setObjectName("StatusChip")
-        self.tm_page_count_label.setFixedHeight(28)
 
         if not hasattr(self, "tm_page_combo"):
             self.tm_page_combo = NoWheelComboBox()
@@ -1882,11 +2210,11 @@ class UiBuilderMixin:
             )
             self._tm_page_selector_connected = True
 
-        self.tm_page_combo.setFixedHeight(30)
+        self.tm_page_combo.setFixedHeight(28)
+
+        self._ensure_tm_action_buttons()
 
         self.set_manual_current_page_btn = QPushButton("设为当前页")
-        self.set_manual_current_page_btn.setObjectName("PrimaryButton")
-        self.set_manual_current_page_btn.setFixedHeight(30)
         self.set_manual_current_page_btn.setToolTip(
             "再次确认「可用页面列表」当前项为手动选中页（下拉选择时已自动生效）"
         )
@@ -1894,119 +2222,57 @@ class UiBuilderMixin:
             self._on_set_manual_current_page_clicked
         )
 
+        for page_row_btn in (
+            self.chat_open_bound_btn,
+            self.set_manual_current_page_btn,
+        ):
+            page_row_btn.setObjectName("PrimaryButton")
+            page_row_btn.setFixedHeight(28)
+            page_row_btn.setMinimumWidth(88)
+            page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
         page_header_row.addWidget(page_label)
-        page_header_row.addWidget(self.tm_page_count_label)
         page_header_row.addStretch()
-        page_header_row.addWidget(self.set_manual_current_page_btn)
+
+        page_selector_row = QHBoxLayout()
+        page_selector_row.setContentsMargins(0, 0, 0, 0)
+        page_selector_row.setSpacing(8)
+        self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        page_selector_row.addWidget(self.tm_page_combo, 1)
+        page_selector_row.addWidget(
+            self.chat_open_bound_btn,
+            0,
+            Qt.AlignRight | Qt.AlignVCenter,
+        )
+        page_selector_row.addWidget(
+            self.set_manual_current_page_btn,
+            0,
+            Qt.AlignRight | Qt.AlignVCenter,
+        )
+        self._append_log(
+            "[UI][LAYOUT] move chat_open_bound_btn before set_manual_current_page_btn"
+        )
 
         page_card_layout.addLayout(page_header_row)
-        page_card_layout.addWidget(self.tm_page_combo)
+        page_card_layout.addLayout(page_selector_row)
 
         detail_layout.addWidget(page_card)
 
-        page_grid_host = QWidget()
-        page_grid_host.setObjectName("StatusPageGridHost")
-        page_grid_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-
-        page_grid = QGridLayout(page_grid_host)
-        page_grid.setContentsMargins(0, 0, 0, 0)
-        page_grid.setHorizontalSpacing(10)
-        page_grid.setVerticalSpacing(10)
-
-        STATUS_PAGE_CARD_MIN_HEIGHT = 118
-
-        page_sections = (
-            (
-                "当前焦点页（自动检测）",
-                "current_page_url_edit",
-                "current_page_status_label",
-                "未检测到",
-            ),
-            (
-                "手动选中页（页面列表选择）",
-                "manual_current_page_url_edit",
-                "manual_current_page_status_label",
-                "未选择",
-            ),
-            (
-                "绑定网页（当前会话绑定）",
-                "bound_page_url_edit",
-                "bound_page_status_label",
-                "未绑定",
-            ),
-            (
-                "同步目标页（实际执行时使用）",
-                "sync_target_url_edit",
-                "sync_target_status_label",
-                "不可用",
-            ),
-        )
-
-        for index, (section_title, url_attr, status_attr, placeholder) in enumerate(
-            page_sections
-        ):
-            card = QFrame()
-            card.setObjectName("StatusPageCard")
-            card.setMinimumHeight(STATUS_PAGE_CARD_MIN_HEIGHT)
-            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 8, 10, 8)
-            card_layout.setSpacing(8)
-
-            header = QLabel(section_title)
-            header.setObjectName("StatusSectionTitle")
-            header.setFixedHeight(20)
-            header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-            url_edit = QLineEdit()
-            url_edit.setObjectName("StatusUrlEdit")
-            url_edit.setReadOnly(True)
-            url_edit.setTextMargins(6, 0, 6, 0)
-            url_edit.setMinimumWidth(0)
-            url_edit.setFixedHeight(30)
-            url_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            url_edit.setPlaceholderText(placeholder)
-            url_edit.setToolTip(placeholder)
-
-            status_label = QLabel("")
-            status_label.setObjectName("StatusRelationLine")
-            status_label.setWordWrap(True)
-            status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            status_label.setMinimumHeight(52)
-            status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-
-            setattr(self, url_attr, url_edit)
-            setattr(self, status_attr, status_label)
-
-            card_layout.addWidget(header, 0)
-            card_layout.addWidget(url_edit, 0)
-            card_layout.addWidget(status_label, 1)
-            card_layout.setStretchFactor(status_label, 1)
-
-            row = index // 2
-            col = index % 2
-            page_grid.addWidget(card, row, col)
-
-        page_grid.setColumnStretch(0, 1)
-        page_grid.setColumnStretch(1, 1)
-        page_grid.setRowMinimumHeight(0, STATUS_PAGE_CARD_MIN_HEIGHT)
-        page_grid.setRowMinimumHeight(1, STATUS_PAGE_CARD_MIN_HEIGHT)
-
-        page_grid_host.setMinimumHeight(
-            STATUS_PAGE_CARD_MIN_HEIGHT * 2 + page_grid.verticalSpacing()
-        )
-        self._status_page_grid_host = page_grid_host
-
-        detail_layout.addWidget(page_grid_host)
+        page_action_card = QFrame()
+        page_action_card.setObjectName("StatusInfoCard")
+        page_action_layout = QVBoxLayout(page_action_card)
+        page_action_layout.setContentsMargins(8, 5, 8, 5)
+        page_action_layout.setSpacing(5)
+        page_action_layout.addLayout(self._build_page_action_row())
+        detail_layout.addWidget(page_action_card)
+        self.page_action_card = page_action_card
 
         self.open_live_page_btn = QPushButton("打开")
         self.open_live_page_btn.setObjectName("PrimaryButton")
         self.open_live_page_btn.setVisible(False)
 
-        self.tm_status_detail_panel.setVisible(False)
         outer.addWidget(self.tm_status_detail_panel)
+        self._restore_status_detail_expanded()
         return bar
 
     def _on_job_status_chip_clicked(self):
@@ -2149,27 +2415,14 @@ class UiBuilderMixin:
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(10)
         self.chat_splitter = QSplitter(Qt.Horizontal)
-        self.chat_splitter.setObjectName("ChatSplitter")
+        self.chat_splitter.setObjectName("ChatMainSplitter")
         self.chat_splitter.setChildrenCollapsible(False)
         self.chat_splitter.setHandleWidth(6)
-        self.chat_splitter.setStyleSheet(
-            """
-            QSplitter::handle {
-                background: #d8dee9;
-            }
-            QSplitter::handle:horizontal {
-                width: 6px;
-            }
-            QSplitter::handle:hover {
-                background: #9ca3af;
-            }
-            """
-        )
         self.session_sidebar = QWidget()
         self.session_sidebar.setObjectName("SessionSidebar")
-        self.session_sidebar.setMinimumWidth(190)
-        self.session_sidebar.setMaximumWidth(260)
-        self.session_sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.session_sidebar.setMinimumWidth(self.CHAT_SIDEBAR_MIN_WIDTH)
+        self.session_sidebar.setMaximumWidth(self.CHAT_SIDEBAR_MAX_WIDTH)
+        self.session_sidebar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         sidebar_layout = QVBoxLayout(self.session_sidebar)
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
         sidebar_layout.setSpacing(8)
@@ -2208,23 +2461,18 @@ class UiBuilderMixin:
         self.delete_session_btn.setToolTip("删除当前选中的对话（Delete）")
         self.delete_session_btn.setFixedHeight(34)
         self.delete_session_btn.clicked.connect(self._delete_current_session)
-        self.rename_session_btn = QPushButton("重命名")
-        self.rename_session_btn.setObjectName("PrimaryButton")
-        self.rename_session_btn.setToolTip("重命名当前选中的对话")
-        self.rename_session_btn.setFixedHeight(34)
-        self.rename_session_btn.clicked.connect(self._rename_current_session)
-        sidebar_btn_row.addWidget(self.delete_session_btn, 1)
-        sidebar_btn_row.addWidget(self.rename_session_btn, 1)
+        sidebar_btn_row.addWidget(self.delete_session_btn)
+        sidebar_btn_row.addStretch(1)
         sidebar_layout.addLayout(sidebar_btn_row)
         chat_area = QWidget()
         chat_area.setObjectName("ChatMainArea")
-        chat_area.setMinimumWidth(600)
+        chat_area.setMinimumWidth(self.CHAT_MAIN_MIN_WIDTH)
         chat_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         chat_area_layout = QVBoxLayout(chat_area)
         chat_area_layout.setContentsMargins(0, 0, 0, 0)
         chat_area_layout.setSpacing(0)
 
-        self.chat_sub_tabs = QTabWidget()
+        self.chat_sub_tabs = NoWheelTabWidget()
         self.chat_sub_tabs.setObjectName("ChatInnerTabs")
         self.chat_sub_tabs.setDocumentMode(True)
         self.chat_tab = QWidget()
@@ -2243,35 +2491,34 @@ class UiBuilderMixin:
 
         header_block = QWidget()
         header_block.setObjectName("ChatHeaderBlock")
-        header_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header_block.setMinimumHeight(72)
+        header_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         header_layout = QVBoxLayout(header_block)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(4)
+        header_layout.setSpacing(6)
 
         self.current_session_title = QLabel("新对话")
         self.current_session_title.setObjectName("CurrentSessionTitle")
-        self.current_session_title.setFixedHeight(26)
+        self.current_session_title.setMinimumHeight(28)
+        self.current_session_title.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
         header_layout.addWidget(self.current_session_title)
 
         url_row_widget = QWidget()
-        url_row_widget.setFixedHeight(28)
-        url_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        url_row_widget.setMinimumHeight(36)
+        url_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         url_row = QHBoxLayout(url_row_widget)
-        url_row.setContentsMargins(0, 0, 0, 0)
-        url_row.setSpacing(6)
-        self.current_session_url_label = QLabel("绑定网址：未绑定 ChatGPT 页面")
+        url_row.setContentsMargins(8, 6, 8, 6)
+        url_row.setSpacing(8)
+        self.current_session_url_label = ElidedLabel("绑定网址：未绑定 ChatGPT 页面")
         self.current_session_url_label.setObjectName("CurrentSessionUrlLabel")
-        self.current_session_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.current_session_url_label.setWordWrap(False)
+        self.current_session_url_label.setMinimumHeight(28)
         self.current_session_url_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
+            QSizePolicy.Expanding, QSizePolicy.Preferred
         )
-        self.open_session_url_btn = QPushButton("打开网址")
-        self.open_session_url_btn.setObjectName("OpenSessionUrlButton")
-        self.open_session_url_btn.setFixedHeight(28)
-        self.open_session_url_btn.clicked.connect(self._open_current_session_url)
-        self._set_button_role(self.open_session_url_btn, "blueGraySolid")
-        url_row.addWidget(self.current_session_url_label, 1)
-        url_row.addWidget(self.open_session_url_btn, 0)
+        url_row.addWidget(self.current_session_url_label, 1, Qt.AlignVCenter)
         header_layout.addWidget(url_row_widget)
 
         self.chat_bind_warning_label = QLabel("")
@@ -2282,50 +2529,9 @@ class UiBuilderMixin:
         header_layout.addWidget(self.chat_bind_warning_label)
         chat_tab_layout.addWidget(header_block, 0)
 
-        self.chat_scroll = QScrollArea()
-        self.chat_scroll.setObjectName("ChatScrollArea")
-        self.chat_scroll.setWidgetResizable(True)
-        self.chat_scroll.setFrameShape(QFrame.NoFrame)
-        self.chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.chat_scroll.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Expanding,
-        )
-        self.chat_scroll.setMinimumHeight(180)
-        self.chat_scroll.setMaximumHeight(16777215)
-        self.chat_container = QWidget()
-        self.chat_container.setObjectName("ChatMessagesContainer")
-        self.chat_container.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.MinimumExpanding,
-        )
-        self.chat_list_layout = QVBoxLayout(self.chat_container)
-        self.chat_list_layout.setContentsMargins(12, 12, 12, 12)
-        self.chat_list_layout.setSpacing(10)
-        self.chat_list_layout.setAlignment(Qt.AlignTop)
-        self.chat_list_layout.setSizeConstraint(QLayout.SetMinAndMaxSize)
-        # 统一聊天消息区容器别名，避免渲染写到不可见副本
-        self.chat_messages_scroll = self.chat_scroll
-        self.chat_messages_container = self.chat_container
-        self.chat_messages_layout = self.chat_list_layout
-        self.empty_state_widget = QWidget(self.chat_container)
-        self.empty_state_widget.setObjectName("ChatEmptyState")
-        self.empty_state_widget.setVisible(False)
-        self.empty_state_widget.setMinimumHeight(80)
-        self.empty_state_widget.setMaximumHeight(120)
-        self.empty_state_widget.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Fixed,
-        )
-        self.empty_state_widget.hide()
-        self.chat_bottom_spacer = None
-        self.chat_bottom_spacer_widget = None
-        self.chat_scroll.setWidget(self.chat_container)
-        chat_tab_layout.addWidget(self.chat_scroll, 1)
-
         self.chat_transcript = QTextBrowser()
         self.chat_transcript.setObjectName("ChatTranscript")
+        self.chat_transcript.document().setDocumentMargin(0)
         self.chat_transcript.setOpenExternalLinks(False)
         self.chat_transcript.setReadOnly(True)
         self.chat_transcript.setFrameShape(QFrame.NoFrame)
@@ -2336,7 +2542,7 @@ class UiBuilderMixin:
             QSizePolicy.Expanding,
         )
         self.chat_transcript.setMinimumHeight(180)
-        self.chat_transcript.setVisible(False)
+        self.chat_transcript.setVisible(True)
         chat_tab_layout.addWidget(self.chat_transcript, 1)
 
         input_block = QWidget()
@@ -2344,7 +2550,6 @@ class UiBuilderMixin:
         input_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         input_block.setMinimumHeight(132)
         input_block.setMaximumHeight(158)
-        self.chat_input_panel = input_block
         input_layout = QVBoxLayout(input_block)
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(6)
@@ -2352,6 +2557,12 @@ class UiBuilderMixin:
         compose_row.setSpacing(8)
         self.message_edit = ChatInput(self)
         self.message_edit.setObjectName("MessageInput")
+        self.message_edit.setReadOnly(False)
+        self.message_edit.setEnabled(True)
+        self.message_edit.setFocusPolicy(Qt.StrongFocus)
+        self.message_edit.setToolTip(
+            "本地消息输入框。点击后输入消息；Enter 发送，Shift+Enter 换行。"
+        )
         self._update_input_placeholder()
         self.message_edit.setFixedHeight(96)
         self.message_edit.setFont(QFont("Microsoft YaHei UI", 10))
@@ -2373,6 +2584,10 @@ class UiBuilderMixin:
         self.clear_session_btn = QPushButton("清空当前对话")
         self.clear_session_btn.setObjectName("DangerButton")
         bottom_action_row.addWidget(self.clear_session_btn)
+        self.send_last_to_cursor_btn = QPushButton("发送最后给 Cursor")
+        self.send_last_to_cursor_btn.setObjectName("send_last_to_cursor_btn")
+        self.send_last_to_cursor_btn.setProperty("class", "PrimaryButton")
+        bottom_action_row.addWidget(self.send_last_to_cursor_btn)
         self.copy_last_btn = QPushButton("复制最后回复")
         self.copy_last_btn.setObjectName("PrimaryButton")
         bottom_action_row.addWidget(self.copy_last_btn)
@@ -2390,7 +2605,7 @@ class UiBuilderMixin:
         self.chat_splitter.addWidget(chat_area)
         self.chat_splitter.setStretchFactor(0, 0)
         self.chat_splitter.setStretchFactor(1, 1)
-        self.chat_splitter.setSizes([220, 1200])
+        self.chat_splitter.setSizes([self.CHAT_SIDEBAR_DEFAULT_WIDTH, 1200])
         if hasattr(self, "_init_splitter_save_timer"):
             self._init_splitter_save_timer()
         self.chat_splitter.splitterMoved.connect(self._schedule_save_chat_splitter_sizes)

@@ -24,8 +24,16 @@ def compute_tm_activity_metrics(
     """返回 (now, seen_age, poll_age, last_poll_ts)。"""
     if now is None:
         now = time.time()
-    last_seen = _float_ts(item.get("last_seen"))
-    last_poll_at = _float_ts(item.get("last_poll_at"))
+    last_seen = _float_ts(
+        item.get("last_seen"),
+        context="tm_activity.last_seen",
+        log_on_error=True,
+    )
+    last_poll_at = _float_ts(
+        item.get("last_poll_at"),
+        context="tm_activity.last_poll_at",
+        log_on_error=True,
+    )
     if not last_poll_at:
         last_poll_at = last_seen
     seen_age = now - last_seen if last_seen else 999999.0

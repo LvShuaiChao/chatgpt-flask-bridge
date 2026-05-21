@@ -1,3 +1,4 @@
+import traceback
 
 import server
 
@@ -55,14 +56,13 @@ class MainWindow(
         self._processed_inbound_ids = set()
         self._pending_upload_sends = {}
         self._pending_web_sync_requests = {}
+        self._web_sync_hard_timed_out_request_ids = set()
         self._pending_sync_requests = {}
+        self._pending_chat_render = None
         self._pending_send_requests = {}
         self._web_sync_timeout_retry_done = set()
         self._finalized_bridge_message_ids = set()
         self._ack_success_message_ids = set()
-        self._reply_bubbles_by_message_id = {}
-        self._user_bubbles_by_message_id = {}
-        self._last_chat_bubble_row = None
         self._tampermonkey_page_url = None
         self._saved_page_url = self._load_saved_page_url()
         self._last_bridge_status = {}
@@ -143,7 +143,7 @@ class MainWindow(
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
         QTimer.singleShot(0, self._refresh_cursor_bridge_status)
-        QTimer.singleShot(0, self._load_runtime_log_once)
+        QTimer.singleShot(400, self._load_runtime_log_if_visible)
         QTimer.singleShot(
             0,
             lambda: self._render_current_chat_messages(
@@ -160,6 +160,32 @@ class MainWindow(
         )
         if self._auto_start_server and not server.is_server_running():
             QTimer.singleShot(300, self._start_server)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_flush_pending_chat_render"):
+            QTimer.singleShot(0, self._flush_pending_chat_render)
+        if hasattr(self, "_render_current_chat_messages"):
+            QTimer.singleShot(
+                50,
+                lambda: self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="show_event",
+                ),
+            )
+
+    def closeEvent(self, event):
+        if hasattr(self, "_save_splitter_sizes_now"):
+            self._save_splitter_sizes_now()
+        self._save_sessions_to_disk()
+        self._save_app_settings()
+        if server.is_server_running():
+            try:
+                server.stop_server()
+            except Exception as error:
+                detail = f"关闭窗口时停止服务失败：{error}\n{traceback.format_exc()}"
+                self._append_log(detail, echo=True)
+        event.accept()
 
     def dump_top_level_windows(self, tag: str):
         rows = []

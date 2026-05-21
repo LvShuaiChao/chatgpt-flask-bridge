@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 from app.utils.page_status import page_url_from
 
@@ -31,8 +31,6 @@ def normalize_inbound_push_payload(payload: Any) -> Dict[str, Any]:
             "raw_content": text,
             "url": "",
             "target_url": "",
-            "target_page_url": "",
-            "conversation_url": "",
         }
     if not isinstance(payload, dict):
         return {"content": "", "raw_content": "", "url": ""}
@@ -49,13 +47,12 @@ def normalize_inbound_push_payload(payload: Any) -> Dict[str, Any]:
             _log_deprecated_field(old_key, new_key)
             data[new_key] = data[old_key]
 
-    content = (
-        (data.get("content") or data.get("final_prompt") or data.get("text") or "")
-        .strip()
-    )
-    raw_content = (data.get("raw_content") or data.get("raw_user_text") or "").strip()
+    content = str(data.get("content") or "")
+    raw_content = str(data.get("raw_content") or "")
     if not raw_content:
         raw_content = content
+    if not content.strip():
+        raise ValueError("content is empty")
 
     url = page_url_from(
         {
@@ -69,9 +66,6 @@ def normalize_inbound_push_payload(payload: Any) -> Dict[str, Any]:
     if url:
         data["url"] = url
         data["target_url"] = url
-        data["target_page_url"] = url
-        if not (data.get("conversation_url") or "").strip():
-            data["conversation_url"] = url
 
     data["content"] = content
     data["raw_content"] = raw_content
@@ -107,8 +101,6 @@ def build_gui_push_payload(
         "url": url,
         "target_url": url,
         "target_client_id": (target_client_id or "").strip() or None,
-        "target_page_url": url or None,
-        "conversation_url": url or None,
         "conversation_id": (conversation_id or "").strip() or None,
         "target_page_instance_id": (page_instance_id or "").strip() or None,
         "bootstrap_conversation": bool(bootstrap_conversation),
@@ -121,13 +113,14 @@ def build_gui_push_payload(
 
 
 def normalize_outbound_bridge_message(msg: Dict[str, Any]) -> Dict[str, Any]:
-    """出站消息对外暴露 message_id / message_status，内部仍保留 id / status。"""
+    """出站消息对外暴露 message_id / message_status，并补旧 userscript 字段。"""
     if not isinstance(msg, dict):
         return {}
     out = dict(msg)
     mid = (out.get("message_id") or out.get("id") or "").strip()
     if mid:
         out["message_id"] = mid
+        # @deprecated Compatibility for older clients; internal code should use message_id.
         out["id"] = mid
     content = (out.get("content") or out.get("final_prompt") or out.get("raw_user_text") or "").strip()
     if content:
@@ -136,8 +129,6 @@ def normalize_outbound_bridge_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     if url:
         out["url"] = url
         out["target_url"] = url
-        if not (out.get("target_page_url") or "").strip():
-            out["target_page_url"] = url
     status = (out.get("message_status") or out.get("status") or "").strip()
     if status:
         out["message_status"] = status

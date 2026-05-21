@@ -12,6 +12,9 @@ from app.models import (
 from app.utils.trace_log import kv_line, page_type_label
 
 
+FOCUS_SYNC_HINT_DEFAULT = "当前同步目标：绑定网页；焦点页仅用于辅助判断。"
+
+
 class PageBindingDiagnosticsMixin:
     def _log_send_bind_check(self, session, action="send", *, trace_id=""):
         trace_id = (trace_id or self._get_active_send_trace_id() or "").strip()
@@ -266,17 +269,109 @@ class PageBindingDiagnosticsMixin:
             ]
         )
         self._append_log(line)
+    def _set_focus_sync_hint(self, text=None, level="warning"):
+        label = getattr(self, "focus_sync_hint_label", None)
+        if label is None:
+            label = getattr(self, "tm_bind_mismatch_label", None)
+        if label is None:
+            return
+        final_text = (text or "").strip()
+        if not final_text:
+            final_text = "焦点页不是绑定网页，同步将使用绑定网页。"
+        label.setText(final_text)
+        label.setVisible(True)
+        label.show()
+        label.setMinimumHeight(22)
+        label.setFixedHeight(22)
+        if level == "ok":
+            color = "#1f7a35"
+        elif level == "error":
+            color = "#b42318"
+        else:
+            color = "#8a6d00"
+        label.setStyleSheet(
+            "QLabel#focus_sync_hint_label {"
+            f" color: {color};"
+            " background: transparent;"
+            " padding-left: 6px;"
+            " padding-right: 6px;"
+            " font-size: 12px;"
+            "}"
+        )
+        ui_key = f"{final_text}|{level}"
+        if ui_key != getattr(self, "_last_focus_sync_hint_ui_key", ""):
+            self._last_focus_sync_hint_ui_key = ui_key
+            self._append_log(
+                f"[UI][FOCUS_SYNC_HINT] text={final_text} level={level}"
+            )
+
+    def _compute_focus_sync_hint_text(self, summary=None):
+        summary = summary or {}
+        status = self._last_bridge_status or {}
+        session = self._current_session()
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+
+        manual_hint = self._manual_bound_identity_mismatch_text(status=status)
+        if manual_hint:
+            return manual_hint, "warning"
+
+        bound_client_id = (summary.get("bound_client_id") or "").strip()
+        if not bound_client_id and not remote.get("enabled"):
+            return (
+                "尚未绑定 ChatGPT 页面，请先从可用页面列表选择页面并绑定。",
+                "warning",
+            )
+
+        active_client_id = (summary.get("active_client_id") or "").strip()
+        focused_info = self._find_focused_tm_page(status)
+        if not active_client_id and not focused_info:
+            return (
+                "浏览器页面未获得焦点，操作本软件时属正常情况；同步仍使用绑定网页。",
+                "warning",
+            )
+
+        mismatch = self._detect_bind_mismatch(summary, session=session)
+        if mismatch:
+            reason_code = (mismatch.get("reason_code") or "").strip()
+            bound_online = bool(summary.get("bound_online"))
+            if reason_code == "active_page_not_bound_but_bound_online":
+                if bound_online:
+                    return "焦点页不是绑定网页，同步将使用绑定网页。", "warning"
+                return (
+                    "绑定页当前离线；已保留绑定关系，打开绑定页后可恢复同步。",
+                    "warning",
+                )
+            if reason_code == "bound_offline_active_other_page":
+                return (
+                    "绑定页当前离线；已保留绑定关系，打开绑定页后可恢复同步。",
+                    "warning",
+                )
+            if reason_code == "bound_conversation_mismatch":
+                return (
+                    "当前焦点页与绑定页的 conversation_id 不一致，请检查绑定状态。",
+                    "warning",
+                )
+            return "当前焦点页与绑定页不一致，请检查绑定状态。", "warning"
+
+        if bound_client_id and active_client_id and bound_client_id == active_client_id:
+            return "焦点页为当前绑定网页，同步将使用该网页。", "ok"
+
+        return FOCUS_SYNC_HINT_DEFAULT, "ok"
+
+    def _refresh_focus_sync_hint(self, summary=None):
+        if summary is None:
+            summary = self._tm_summary_for_session()
+        text, level = self._compute_focus_sync_hint_text(summary)
+        self._set_focus_sync_hint(text, level=level)
+
     def _log_bind_mismatch_if_needed(self, summary):
+        summary = summary or {}
         manual_hint = self._manual_bound_identity_mismatch_text()
         if manual_hint:
             ui_key = manual_hint
             if ui_key != getattr(self, "_last_bind_mismatch_ui_key", ""):
                 self._last_bind_mismatch_ui_key = ui_key
-                if hasattr(self, "tm_bind_mismatch_label"):
-                    self.tm_bind_mismatch_label.setText(manual_hint)
-                    self.tm_bind_mismatch_label.setProperty("state", "warn")
-                    if hasattr(self, "_sync_bridge_status_panel_height"):
-                        self._sync_bridge_status_panel_height()
+            self._refresh_focus_sync_hint(summary)
             return
 
         session = self._current_session()
@@ -284,12 +379,8 @@ class PageBindingDiagnosticsMixin:
         if not mismatch:
             self._last_bind_mismatch_key = ""
             self._last_bind_mismatch_ui_key = ""
-            if hasattr(self, "tm_bind_mismatch_label"):
-                self.tm_bind_mismatch_label.setText(" ")
-                self.tm_bind_mismatch_label.setProperty("state", "")
-            if hasattr(self, "_sync_bridge_status_panel_height"):
-                self._sync_bridge_status_panel_height()
             self._set_close_other_pages_enabled(True)
+            self._refresh_focus_sync_hint(summary)
             return
         mismatch_key = "|".join([
             str(mismatch.get("bound_client_id") or "-"),
@@ -315,47 +406,6 @@ class PageBindingDiagnosticsMixin:
                 f"severity={mismatch.get('severity') or '-'} "
                 f"reason={mismatch.get('reason')}"
             )
-        if hasattr(self, "tm_bind_mismatch_label"):
-            reason_code = (mismatch.get("reason_code") or "").strip()
-            bound_online = bool((summary or {}).get("bound_online"))
-            if reason_code == "active_page_not_bound_but_bound_online":
-                if bound_online:
-                    text = "焦点页不是绑定网页，同步将使用绑定网页。"
-                    state = "warn"
-                else:
-                    text = (
-                        "绑定页当前离线；已保留绑定关系，打开绑定页后可恢复同步。"
-                    )
-                    state = "warn"
-            elif reason_code == "bound_offline_active_other_page":
-                text = (
-                    "绑定页当前离线；已保留绑定关系，打开绑定页后可恢复同步。"
-                )
-                state = "warn"
-            elif reason_code == "bound_conversation_mismatch":
-                text = "当前焦点页与绑定页的 conversation_id 不一致，请检查绑定状态。"
-                state = "warn"
-            else:
-                text = "当前焦点页与绑定页不一致，请检查绑定状态。"
-                state = (mismatch.get("severity") or "warn").strip()
-                if state not in ("warn", "error", "info"):
-                    state = "warn"
-            ui_key = f"{mismatch_key}|{text}|{state}"
-            if ui_key != getattr(self, "_last_bind_mismatch_ui_key", ""):
-                self._last_bind_mismatch_ui_key = ui_key
-                self.tm_bind_mismatch_label.setText(text)
-                self.tm_bind_mismatch_label.setProperty("state", state)
-                if (mismatch.get("severity") or "").strip() != "info":
-                    try:
-                        self.tm_bind_mismatch_label.style().unpolish(self.tm_bind_mismatch_label)
-                        self.tm_bind_mismatch_label.style().polish(self.tm_bind_mismatch_label)
-                    except Exception as error:
-                        self._append_log(
-                            f"[STATUS][HINT_STYLE][FAILED] error={error}\n{traceback.format_exc()}",
-                            echo=True,
-                        )
-            if hasattr(self, "_sync_bridge_status_panel_height"):
-                self._sync_bridge_status_panel_height()
         reason_code = (mismatch.get("reason_code") or "").strip()
         if reason_code == "active_page_not_bound_but_bound_online":
             self._set_close_other_pages_enabled(True)
@@ -370,6 +420,7 @@ class PageBindingDiagnosticsMixin:
                 else:
                     tip = "当前焦点页不是绑定页，已禁用「关闭其他页面」。"
                 self.close_other_pages_btn.setToolTip(tip)
+        self._refresh_focus_sync_hint(summary)
     def _set_close_other_pages_enabled(self, enabled):
         if hasattr(self, "close_other_pages_btn"):
             # 不再通过 disabled 表示不可用，避免按钮变灰；点击后走原有前置检查。

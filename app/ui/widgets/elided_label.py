@@ -11,7 +11,7 @@ class ElidedLabel(QLabel):
         self.setTextFormat(Qt.PlainText)
         self.setWordWrap(False)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setText(text)
 
     def setText(self, text, tooltip=None):

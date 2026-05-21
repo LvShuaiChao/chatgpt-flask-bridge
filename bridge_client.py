@@ -288,11 +288,20 @@ class BridgeClient:
             print(f"[CLIENT][CHAT_API][ERROR] {url} -> {error}", file=sys.stderr)
             return False, f"无法访问聊天接口：{error}"
 
-        text_preview = (response.text or "")[:200]
+        text_preview = (response.text or "")[:500]
         try:
             body = response.json()
-        except ValueError:
+        except ValueError as error:
             body = None
+            print(
+                "[CLIENT][CHAT_API][JSON_PARSE_FAILED] "
+                f"url={url} "
+                f"status={response.status_code} "
+                f"error_type={type(error).__name__} "
+                f"error={error} "
+                f"body_preview={text_preview!r}",
+                file=sys.stderr,
+            )
 
         if response.status_code == 404:
             if isinstance(body, dict) and (
@@ -448,34 +457,55 @@ class BridgeClient:
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         timeout = self.http_timeout if timeout is None else timeout
+        method_upper = method.upper()
+        url = self._url(path)
         try:
             response = self._session.request(
-                method.upper(),
-                self._url(path),
+                method_upper,
+                url,
                 json=json_body,
                 headers=self._headers(),
                 timeout=timeout,
             )
         except requests.RequestException as error:
-            raise BridgeApiError(f"网络请求失败：{error}") from error
+            payload_keys = sorted((json_body or {}).keys()) if isinstance(json_body, dict) else []
+            raise BridgeApiError(
+                "[CLIENT][REQUEST_FAILED] "
+                f"method={method_upper} "
+                f"url={url} "
+                f"path={path} "
+                f"timeout={timeout} "
+                f"payload_keys={payload_keys} "
+                f"error_type={type(error).__name__} "
+                f"error={error}"
+            ) from error
 
         return self._decode_json_response(response, path=path)
 
     def _get_legacy_health(self) -> dict[str, Any]:
-        """GET /api/status — GUI 内置状态接口（无 /api/v1 的旧服务也可用）。"""
+        """@deprecated GET /api/status fallback for pre-/api/v1 bridge services."""
+        url = self._url("/api/status")
         try:
             response = self._session.get(
-                self._url("/api/status"),
+                url,
                 headers=self._headers(),
                 timeout=30,
             )
         except requests.RequestException as error:
-            raise BridgeApiError(f"网络请求失败：{error}") from error
+            raise BridgeApiError(
+                "[CLIENT][LEGACY_HEALTH_FAILED] "
+                f"method=GET "
+                f"url={url} "
+                f"timeout=30 "
+                f"error_type={type(error).__name__} "
+                f"error={error}"
+            ) from error
 
         return self._decode_json_response(response, allow_not_ok=True)
 
     @staticmethod
     def _normalize_legacy_status(data: dict[str, Any]) -> dict[str, Any]:
+        """@deprecated Convert legacy /api/status data into /api/v1/status shape."""
         tm_summary = data.get("tm_online_summary") or {}
         waiting_acks = data.get("waiting_acks") or []
         return {
@@ -500,7 +530,12 @@ class BridgeClient:
         }
 
     def check_connection(self) -> tuple[bool, str]:
-        """检查服务是否可达；返回 (可否继续, 说明文本)。"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：外部脚本可能直接调用 BridgeClient.check_connection()。
+        新代码请优先使用 diagnose_connection()。
+        """
         diag = self.diagnose_connection()
         if not diag.health_ok:
             return False, "\n".join(diag.summary_lines())
@@ -509,14 +544,8 @@ class BridgeClient:
         return True, "\n".join(diag.summary_lines())
 
     def status(self) -> dict[str, Any]:
-        """GET /api/v1/status；旧服务自动回退到 /api/status。"""
-        try:
-            return self._request("GET", "/api/v1/status", timeout=30)
-        except BridgeApiError as error:
-            if error.code != "API_V1_NOT_FOUND" and error.status_code != 404:
-                raise
-            legacy = self._get_legacy_health()
-            return self._normalize_legacy_status(legacy)
+        """GET /api/v1/status。"""
+        return self._request("GET", "/api/v1/status", timeout=30)
 
     def _chat_ask_payload(
         self,
@@ -753,7 +782,12 @@ class BridgeClient:
         return dict(session) if isinstance(session, dict) else {}
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        """GET /api/v1/sessions/<session_id>"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：BridgeClient 可能作为外部 SDK 使用。
+        新代码如无强需求，优先使用 list_sessions() 或服务端 /api/v1/sessions。
+        """
         data = self._request(
             "GET",
             f"/api/v1/sessions/{session_id}",
@@ -767,16 +801,23 @@ class BridgeClient:
         session_id: str,
         client_id: str,
         *,
+        url: str = "",
         page_url: str = "",
         conversation_id: str = "",
     ) -> dict[str, Any]:
-        """POST /api/v1/sessions/<session_id>/bind"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：外部脚本可能通过 SDK 绑定 session。
+        新代码请优先使用 /api/v1 接口；GUI 内部绑定应以 session.remote_chatgpt 为权威。
+        """
+        url = (url or page_url or "").strip()
         data = self._request(
             "POST",
             f"/api/v1/sessions/{session_id}/bind",
             json_body={
                 "client_id": client_id,
-                "page_url": page_url,
+                "url": url,
                 "conversation_id": conversation_id,
             },
             timeout=30,
@@ -785,7 +826,12 @@ class BridgeClient:
         return dict(session) if isinstance(session, dict) else {}
 
     def ping(self) -> bool:
-        """基础健康检查是否通过（不要求聊天 API）。"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：外部脚本可能直接调用 BridgeClient.ping()。
+        新代码请优先使用 diagnose_connection().health_ok 或 status()。
+        """
         return self.diagnose_connection().health_ok
 
 

@@ -4,6 +4,7 @@ import re
 import time
 
 from app.models import normalize_remote_chatgpt
+from app.utils.page_status import page_url_from
 from PyQt5.QtCore import Qt
 
 
@@ -11,12 +12,7 @@ class PageSelectorMixin:
     def _page_full_url(self, page):
         if not isinstance(page, dict):
             return ""
-        return (
-            (page.get("page_url") or "").strip()
-            or (page.get("url") or "").strip()
-            or (page.get("normalized_url") or "").strip()
-            or (page.get("conversation_url") or "").strip()
-        )
+        return page_url_from(page)
 
     def _extract_chatgpt_conversation_id_from_url(self, url):
         text = str(url or "").strip()
@@ -91,7 +87,23 @@ class PageSelectorMixin:
                     continue
                 try:
                     return float(value)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as error:
+                    if (
+                        hasattr(self, "_is_debug_mode_enabled")
+                        and self._is_debug_mode_enabled()
+                        and hasattr(self, "_append_log")
+                    ):
+                        self._append_log(
+                            "[TM_PAGE][FOCUS_SORT_FIELD_INVALID] "
+                            "function=_find_focused_tm_page.sort_key "
+                            f"field={field} "
+                            f"value={value!r} "
+                            f"client_id={page.get('client_id') or '-'} "
+                            f"page_instance_id={page.get('page_instance_id') or '-'} "
+                            f"error_type={type(error).__name__} "
+                            f"error={error}",
+                            echo=False,
+                        )
                     continue
             return 0.0
 
@@ -110,44 +122,6 @@ class PageSelectorMixin:
             if (item.get("client_id") or "").strip() == client_id:
                 return item
         return None
-
-    def _selected_tm_page_from_selector(self):
-        combo = getattr(self, "tm_page_combo", None) or getattr(
-            self, "tm_page_selector", None
-        )
-        if combo is None or combo.count() <= 0 or combo.currentIndex() < 0:
-            return None
-        if hasattr(self, "_tm_page_combo_page_from_index"):
-            page = self._tm_page_combo_page_from_index(combo.currentIndex())
-            if isinstance(page, dict):
-                return page
-        data = combo.itemData(combo.currentIndex(), Qt.UserRole)
-        if isinstance(data, dict):
-            return data
-        page = self._find_tm_client_by_client_id(data)
-        if not isinstance(page, dict):
-            page = self._find_tm_page_by_selector_data(data)
-        if isinstance(page, dict):
-            return page
-        text = combo.currentText().strip()
-        if not text:
-            return None
-        url = text
-        client_id = ""
-        if "  | client=" in text:
-            url, _, client_tail = text.partition("  | client=")
-            url = url.strip()
-            client_id = client_tail.strip()
-        if client_id:
-            page = self._find_tm_page_by_selector_data(client_id)
-            if isinstance(page, dict):
-                return page
-        return {
-            "url": url,
-            "page_url": url,
-            "client_id": client_id,
-            "conversation_id": "",
-        }
 
     def _on_tm_page_selector_changed(self, index):
         if getattr(self, "_tm_page_selector_refreshing", False):
@@ -204,18 +178,17 @@ class PageSelectorMixin:
         if page_type == "conversation" or normalized.get("conversation_id"):
             if online:
                 return (
-                    "已选中对话页，可点击「绑定当前页面」建立绑定，或直接同步/发送。"
+                    "已选中对话页；同步/发送仍发往本会话已绑定窗口。"
+                    "若要改用此页，请点击「绑定当前页面」。"
                 )
-            return (
-                "已选中离线对话页；可以绑定，但同步/发送需要页面在线。"
-            )
+            return "已选中离线对话页；绑定、同步和发送都需要页面在线。"
         if page_type == "home" or self._is_prebound_home_page(page):
             return (
                 "已选中首页页，可预绑定；进入具体对话页后才可同步对话内容。"
             )
         if online:
             return "已选中页面，可点击「绑定当前页面」建立绑定。"
-        return "已选中离线页；可以绑定，但同步/发送需要页面在线。"
+        return "已选中离线页；绑定、同步和发送都需要页面在线。"
 
     def _on_set_manual_current_page_clicked(self):
         self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)
@@ -279,7 +252,7 @@ class PageSelectorMixin:
         client_id = (normalized.get("client_id") or "").strip()
         page_instance_id = (normalized.get("page_instance_id") or "").strip()
         conversation_id = (normalized.get("conversation_id") or "").strip()
-        page_url = (normalized.get("page_url") or "").strip()
+        page_url = (normalized.get("url") or "").strip()
         page_type = (normalized.get("page_type") or "").strip()
 
         if not client_id and not page_url:
@@ -328,10 +301,17 @@ class PageSelectorMixin:
                 live = self._client_info_by_id(client_id, status=status)
                 if isinstance(live, dict):
                     merged.update(live)
+                    merged["realtime"] = True
+                else:
+                    merged["realtime"] = False
+                    merged["source"] = merged.get("source") or "cache"
+            else:
+                merged["realtime"] = False
+                merged["source"] = merged.get("source") or "cache"
             normalized = self._normalize_tm_page_for_binding(merged)
             merged.update(normalized)
-            if normalized.get("page_url"):
-                merged["url"] = normalized["page_url"]
+            if normalized.get("url"):
+                merged["url"] = normalized["url"]
             return merged
 
         client_id = (self._manual_current_tm_client_id or "").strip()
@@ -342,10 +322,11 @@ class PageSelectorMixin:
             live = self._client_info_by_id(client_id, status=status)
             if isinstance(live, dict):
                 merged = dict(live)
+                merged["realtime"] = True
                 normalized = self._normalize_tm_page_for_binding(merged)
                 merged.update(normalized)
-                if normalized.get("page_url"):
-                    merged["url"] = normalized["page_url"]
+                if normalized.get("url"):
+                    merged["url"] = normalized["url"]
                 return merged
         if not self._manual_current_tm_url and not self._manual_current_tm_conversation_id:
             return None
@@ -355,11 +336,13 @@ class PageSelectorMixin:
             "conversation_id": self._manual_current_tm_conversation_id,
             "page_url": self._manual_current_tm_url,
             "url": self._manual_current_tm_url,
+            "source": "cache",
+            "realtime": False,
         }
         normalized = self._normalize_tm_page_for_binding(fallback)
         fallback.update(normalized)
-        if normalized.get("page_url"):
-            fallback["url"] = normalized["page_url"]
+        if normalized.get("url"):
+            fallback["url"] = normalized["url"]
         return fallback
 
     def _find_tm_client_by_client_id(self, client_id, status=None):
@@ -386,8 +369,13 @@ class PageSelectorMixin:
         if not remote.get("enabled"):
             return None
         client_id = (remote.get("client_id") or "").strip()
+        page_instance_id = (remote.get("page_instance_id") or "").strip()
         if client_id:
-            live = self._client_info_by_id(client_id, status=status)
+            live = self._client_info_by_id(
+                client_id,
+                status=status,
+                page_instance_id=page_instance_id,
+            )
             if isinstance(live, dict):
                 return live
         conversation_id = self._remote_conversation_id(remote)
@@ -410,6 +398,20 @@ class PageSelectorMixin:
             "page_type": (remote.get("page_type") or "conversation").strip(),
         }
 
+    def _safe_status_float(self, status, field, default=0.0):
+        raw = status.get(field) if isinstance(status, dict) else None
+        try:
+            return float(raw if raw not in (None, "") else default)
+        except (TypeError, ValueError) as error:
+            if hasattr(self, "_append_log"):
+                self._append_log(
+                    "[TM_PAGE][STATUS_FLOAT_FALLBACK] "
+                    f"field={field} value={raw!r} default={default!r} "
+                    f"error_type={type(error).__name__} error={error}",
+                    echo=False,
+                )
+            return float(default)
+
     def _find_last_focused_tm_page(self, max_age_sec=None, status=None):
         max_age_sec = (
             self.LAST_FOCUSED_TM_PAGE_MAX_AGE_SEC
@@ -418,7 +420,7 @@ class PageSelectorMixin:
         )
         status = status or getattr(self, "_last_bridge_status", None) or {}
         page = status.get("last_focused_tm_page")
-        at = float(status.get("last_focused_tm_page_at") or 0.0)
+        at = self._safe_status_float(status, "last_focused_tm_page_at", 0.0)
         if not isinstance(page, dict) or at <= 0:
             return None, 0.0
         age = time.time() - at
@@ -428,8 +430,13 @@ class PageSelectorMixin:
         if client_id:
             live = self._client_info_by_id(client_id, status=status)
             if isinstance(live, dict):
+                live = dict(live)
+                live["realtime"] = True
                 return live, age
-        return page, age
+        cached = dict(page)
+        cached["source"] = cached.get("source") or "cache"
+        cached["realtime"] = False
+        return cached, age
 
 
 

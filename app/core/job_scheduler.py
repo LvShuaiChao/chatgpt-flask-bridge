@@ -357,6 +357,44 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
     return True, task_id
 
 
+def set_job_chatgpt_reply(
+    job_id,
+    reply_text,
+    *,
+    status="chatgpt_reply_ready",
+    source_payload=None,
+):
+    job_id = (job_id or "").strip()
+    reply = str(reply_text or "")
+    if not job_id:
+        return False, "job_id is empty"
+    if not reply.strip():
+        return False, "reply_text is empty"
+    if status and status not in JOB_STATUSES:
+        return False, f"invalid status: {status}"
+
+    with job_lock:
+        job = job_map.get(job_id)
+        if not job:
+            return False, "job not found"
+        if job.get("status") == "cancelled":
+            return False, "job cancelled"
+        job["chatgpt_reply"] = reply
+        if isinstance(source_payload, dict):
+            job["source_payload"] = dict(source_payload)
+        job["updated_at"] = _now_text()
+
+    append_job_log(
+        job_id,
+        "CHATGPT_REPLY_READY",
+        f"reply_len={len(reply)} source=manual_seed",
+    )
+    if status:
+        update_job_status(job_id, status, "已准备好发送到 Cursor")
+    _notify_job_change()
+    return True, "ok"
+
+
 def handle_cursor_task_report(report):
     if not isinstance(report, dict):
         return False, "report must be dict"
@@ -471,7 +509,13 @@ def _notify_job_change():
         try:
             cb(get_job_scheduler_snapshot())
         except Exception as exc:
-            _log_line(f"[JOB][STATUS_CALLBACK_FAILED] error={exc}")
+            _log_line(
+                "[JOB][STATUS_CALLBACK_FAILED] "
+                "function=_notify_job_change "
+                f"callback={repr(cb)} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}\n{traceback.format_exc()}"
+            )
 
 
 def _log_line(line):
@@ -480,6 +524,16 @@ def _log_line(line):
         try:
             cb(line)
         except Exception as exc:
-            print(f"[JOB][LOG_CALLBACK_FAILED] {line} callback_error={exc}")
+            line_preview = str(line or "")
+            if len(line_preview) > 500:
+                line_preview = line_preview[:500] + "...<truncated>"
+            print(
+                "[JOB][LOG_CALLBACK_FAILED] "
+                "function=_log_line "
+                f"callback={repr(cb)} "
+                f"line_preview={line_preview!r} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}\n{traceback.format_exc()}"
+            )
     else:
         print(line)

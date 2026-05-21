@@ -108,13 +108,13 @@ print(reply)
 
 ### 图形界面
 
-在保留命令行/库调用的前提下，可使用**独立的 Bridge API 调试客户端**（不参与主 `GUI.py` 桌面联动）：
+在保留命令行/库调用的前提下，可使用**独立的 Bridge API 调试客户端**（不参与主 `GUI.py` 桌面联动，归类为 legacy examples）：
 
 ```bash
 python examples/bridge_client_gui.py
 ```
 
-根目录 `bridge_client_gui.py` 仅为兼容入口，启动时会打印 `[DEPRECATED]` 并转发到上述路径；主程序请勿导入该文件。
+根目录 `bridge_client_gui.py` 仅为兼容入口，启动时会打印 `[DEPRECATED]` 并转发到上述路径；主程序请勿导入该文件，生产发布包应排除它。
 
 界面中可配置服务地址与 Token、查看连接诊断、选择或新建 GUI 会话，并通过聊天区发送消息。
 
@@ -133,14 +133,14 @@ python bridge_client.py "你好"
 python bridge_client.py --status
 ```
 
-也可使用 `examples/chat_cli.py`（与上面参数相同）。
+也可使用 `examples/chat_cli.py`（与上面参数相同，legacy examples）。
 
 环境变量（可选）：
 
 - `CHATGPT_PAGE_BRIDGE_URL` — 服务地址，默认 `http://127.0.0.1:5000`
 - `CHATGPT_PAGE_BRIDGE_TOKEN` — 与 GUI 服务端一致的 API token
 
-示例脚本：`examples/external_client.py`（最小示例）、`examples/chat_cli.py`（完整 CLI）。
+示例脚本：`examples/external_client.py`（最小示例）、`examples/chat_cli.py`（完整 CLI），均作为 legacy examples 保留，不参与主程序导入链。
 
 ## 页面绑定规则（重要）
 
@@ -162,10 +162,10 @@ python bridge_client.py --status
 ```
 油猴脚本与Python联动/
 ├── gui.py                 # 主 GUI 入口（含桥接服务）
-├── bridge_client_gui.py   # Bridge API 客户端 GUI 入口
+├── bridge_client_gui.py   # legacy wrapper，仅兼容旧命令；生产发布包排除
 ├── bridge_client.py       # 外部 API Python 客户端库（含 CLI）
 ├── server.py              # Flask 桥接服务（也可单独 python server.py 调试）
-├── examples/
+├── examples/              # legacy examples，仅开发/调试；生产发布包排除
 │   ├── external_client.py # 最小调用示例
 │   └── chat_cli.py        # 命令行客户端
 ├── client.user.js         # Tampermonkey 用户脚本
@@ -258,6 +258,24 @@ python server.py
 ```bash
 python export_for_chatgpt.py
 ```
+
+### 生产发布包排除项
+
+主 GUI 运行链路只依赖 `gui.py` / `app/`、`server.py`、`bridge_client.py`、`client.user.js` 和运行时配置。制作精简生产包时排除以下 legacy 调试入口：
+
+- `examples/`
+- `bridge_client_gui.py`
+
+如果后续新增 PyInstaller、setuptools、压缩发布脚本或 CI 打包配置，也需要同步把这两个路径加入排除列表。
+
+### Legacy 接口观察
+
+`/api/status` 与 `/process` 暂时保留为兼容接口。运行日志中出现以下标记说明仍有旧客户端访问：
+
+- `[API][DEPRECATED] endpoint=/api/status`
+- `[API][DEPRECATED] endpoint=/process`
+
+`/process` 默认仍返回 `LEGACY_PROCESS_DISABLED`；只有设置 `CHATGPT_ENABLE_LEGACY_PROCESS=1`（或 `true` / `yes`）才会启用旧处理逻辑。连续一个版本没有上述访问记录后，再同步删除 `/process`、`ENABLE_LEGACY_PROCESS_ENDPOINT`、`/api/status` 以及 `bridge_client.py` 中对应的 legacy status fallback。
 
 ## 免责声明
 

@@ -120,80 +120,9 @@ APP_STYLESHEET = """
                 color: #ffffff;
                 border: 1px solid #2563eb;
             }
-            QPushButton[btnRole="blueSolid"],
-            QPushButton[btnRole="blueGraySolid"],
-            QPushButton[btnRole="primary"],
-            QPushButton[btnRole="action"],
-            QPushButton[btnRole="bluePrimary"],
-            QPushButton[btnRole="secondary"] {
-                background: #2563eb;
-                color: #ffffff;
-                border: 1px solid #1d4ed8;
-                font-weight: 600;
-            }
-            QPushButton[btnRole="blueSolid"]:hover,
-            QPushButton[btnRole="blueGraySolid"]:hover,
-            QPushButton[btnRole="primary"]:hover,
-            QPushButton[btnRole="action"]:hover,
-            QPushButton[btnRole="bluePrimary"]:hover,
-            QPushButton[btnRole="secondary"]:hover {
-                background: #1d4ed8;
-                color: #ffffff;
-                border-color: #1e40af;
-            }
-            QPushButton[btnRole="blueSolid"]:pressed,
-            QPushButton[btnRole="blueGraySolid"]:pressed,
-            QPushButton[btnRole="primary"]:pressed,
-            QPushButton[btnRole="action"]:pressed,
-            QPushButton[btnRole="bluePrimary"]:pressed,
-            QPushButton[btnRole="secondary"]:pressed {
-                background: #1e40af;
-                color: #ffffff;
-                border-color: #1e3a8a;
-            }
-            QPushButton[btnRole="blueSolid"]:disabled,
-            QPushButton[btnRole="blueGraySolid"]:disabled,
-            QPushButton[btnRole="primary"]:disabled,
-            QPushButton[btnRole="action"]:disabled,
-            QPushButton[btnRole="bluePrimary"]:disabled,
-            QPushButton[btnRole="secondary"]:disabled {
-                background: #3b82f6;
-                color: #ffffff;
-                border: 1px solid #2563eb;
-            }
-            QPushButton[btnRole="redSolid"],
-            QPushButton[btnRole="danger"],
-            QPushButton[btnRole="dangerPrimary"] {
-                background: #dc2626;
-                color: #ffffff;
-                border: 1px solid #b91c1c;
-                font-weight: 600;
-            }
-            QPushButton[btnRole="redSolid"]:hover,
-            QPushButton[btnRole="danger"]:hover,
-            QPushButton[btnRole="dangerPrimary"]:hover {
-                background: #b91c1c;
-                color: #ffffff;
-            }
-            QPushButton[btnRole="redSolid"]:pressed,
-            QPushButton[btnRole="danger"]:pressed,
-            QPushButton[btnRole="dangerPrimary"]:pressed {
-                background: #991b1b;
-                color: #ffffff;
-            }
-            QPushButton[btnRole="redSolid"]:disabled,
-            QPushButton[btnRole="danger"]:disabled,
-            QPushButton[btnRole="dangerPrimary"]:disabled {
-                background: #ef4444;
-                color: #ffffff;
-                border: 1px solid #dc2626;
-            }
             QPushButton#PrimaryButton,
-            QPushButton#GhostButton,
-            QPushButton#CompactButton,
-            QPushButton#PrimaryButtonCompact,
+            QPushButton[class="PrimaryButton"],
             QPushButton#NewSessionButton,
-            QPushButton#OpenSessionUrlButton,
             QPushButton#CopyCurrentLogButton {
                 background: #2563eb;
                 color: #ffffff;
@@ -203,48 +132,26 @@ APP_STYLESHEET = """
                 font-weight: 600;
             }
             QPushButton#PrimaryButton:hover,
-            QPushButton#GhostButton:hover,
-            QPushButton#CompactButton:hover,
-            QPushButton#PrimaryButtonCompact:hover,
+            QPushButton[class="PrimaryButton"]:hover,
             QPushButton#NewSessionButton:hover,
-            QPushButton#OpenSessionUrlButton:hover,
             QPushButton#CopyCurrentLogButton:hover {
                 background: #1d4ed8;
                 color: #ffffff;
             }
             QPushButton#PrimaryButton:pressed,
-            QPushButton#GhostButton:pressed,
-            QPushButton#CompactButton:pressed,
-            QPushButton#PrimaryButtonCompact:pressed,
+            QPushButton[class="PrimaryButton"]:pressed,
             QPushButton#NewSessionButton:pressed,
-            QPushButton#OpenSessionUrlButton:pressed,
             QPushButton#CopyCurrentLogButton:pressed {
                 background: #1e40af;
                 color: #ffffff;
             }
             QPushButton#PrimaryButton:disabled,
-            QPushButton#GhostButton:disabled,
-            QPushButton#CompactButton:disabled,
-            QPushButton#PrimaryButtonCompact:disabled,
+            QPushButton[class="PrimaryButton"]:disabled,
             QPushButton#NewSessionButton:disabled,
-            QPushButton#OpenSessionUrlButton:disabled,
             QPushButton#CopyCurrentLogButton:disabled {
                 background: #3b82f6;
                 color: #ffffff;
                 border: 1px solid #2563eb;
-            }
-            QPushButton#PrimaryButtonCompact {
-                font-size: 12px;
-                padding: 0px 10px;
-                min-height: 42px;
-            }
-            QPushButton#GhostButton {
-                padding: 4px 10px;
-            }
-            QPushButton#CompactButton {
-                padding: 3px 10px;
-                min-height: 20px;
-                font-size: 12px;
             }
             QPushButton#NewSessionButton {
                 padding: 8px 12px;
@@ -254,12 +161,7 @@ APP_STYLESHEET = """
                 min-height: 28px;
                 padding: 4px 12px;
             }
-            QPushButton#OpenSessionUrlButton {
-                min-height: 26px;
-                padding: 3px 10px;
-            }
-            QPushButton#DangerButton,
-            QPushButton#DangerGhostButton {
+            QPushButton#DangerButton {
                 background: #dc2626;
                 color: #ffffff;
                 border: 1px solid #b91c1c;
@@ -267,24 +169,18 @@ APP_STYLESHEET = """
                 padding: 5px 12px;
                 font-weight: 600;
             }
-            QPushButton#DangerButton:hover,
-            QPushButton#DangerGhostButton:hover {
+            QPushButton#DangerButton:hover {
                 background: #b91c1c;
                 color: #ffffff;
             }
-            QPushButton#DangerButton:pressed,
-            QPushButton#DangerGhostButton:pressed {
+            QPushButton#DangerButton:pressed {
                 background: #991b1b;
                 color: #ffffff;
             }
-            QPushButton#DangerButton:disabled,
-            QPushButton#DangerGhostButton:disabled {
+            QPushButton#DangerButton:disabled {
                 background: #ef4444;
                 color: #ffffff;
                 border: 1px solid #dc2626;
-            }
-            QPushButton#DangerGhostButton {
-                padding: 4px 10px;
             }
             QPushButton#WarningButton {
                 background: #f97316;
@@ -384,19 +280,19 @@ APP_STYLESHEET = """
                 border-radius: 6px;
                 padding: 4px 10px;
             }
-            QLabel#TmBindMismatchHint {
-                color: #8d6e00;
+            QLabel#focus_sync_hint_label {
+                color: #8a6d00;
+                background: transparent;
                 font-size: 12px;
-                padding: 0px 4px;
+                padding-left: 6px;
+                padding-right: 6px;
             }
-            QLabel#TmBindMismatchHint[state="info"] {
-                color: #1d4ed8;
-            }
-            QLabel#TmBindMismatchHint[state="warn"] {
-                color: #8d6e00;
-            }
-            QLabel#TmBindMismatchHint[state="error"] {
-                color: #b71c1c;
+            QLabel#TmBindMismatchHint {
+                color: #8a6d00;
+                background: transparent;
+                font-size: 12px;
+                padding-left: 6px;
+                padding-right: 6px;
             }
             QLabel#StatusRelationLine {
                 color: #5b6472;
@@ -410,6 +306,25 @@ APP_STYLESHEET = """
                 background: #ffffff;
                 border: 1px solid #e5e7eb;
                 border-radius: 8px;
+            }
+            QFrame#SyncProgressPanel {
+                background: #eff6ff;
+                border: 1px solid #bfdbfe;
+                border-radius: 6px;
+            }
+            QLabel#SyncProgressLabel {
+                color: #1d4ed8;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QProgressBar#SyncProgressBar {
+                border: 1px solid #bfdbfe;
+                border-radius: 5px;
+                background: #ffffff;
+            }
+            QProgressBar#SyncProgressBar::chunk {
+                border-radius: 5px;
+                background: #2563eb;
             }
             QWidget#ChatPanel {
                 background: #ffffff;
@@ -501,6 +416,15 @@ APP_STYLESHEET = """
                 border: 1px solid #e5e7eb;
                 border-radius: 10px;
             }
+            QSplitter#ChatMainSplitter::handle {
+                background: #d1d5db;
+            }
+            QSplitter#ChatMainSplitter::handle:horizontal {
+                width: 6px;
+            }
+            QSplitter#ChatMainSplitter::handle:hover {
+                background: #2563eb;
+            }
             QWidget#CurrentSessionHeader {
                 background: transparent;
             }
@@ -509,6 +433,7 @@ APP_STYLESHEET = """
                 font-size: 15px;
                 font-weight: 600;
                 padding: 0px 4px;
+                min-height: 28px;
             }
             QLabel#CurrentSessionUrlLabel {
                 font-size: 12px;
@@ -517,6 +442,7 @@ APP_STYLESHEET = """
                 border: 1px solid #e5e7eb;
                 border-radius: 6px;
                 padding: 4px 8px;
+                min-height: 28px;
             }
             QListWidget#SessionList {
                 background: #f3f4f6;
@@ -550,16 +476,19 @@ APP_STYLESHEET = """
                 font-size: 14px;
                 font-weight: 600;
                 background: transparent;
+                min-height: 22px;
             }
             QLabel#SessionItemSubtitle {
                 color: #6b7280;
                 font-size: 12px;
                 background: transparent;
+                min-height: 18px;
             }
             QLabel#SessionBindStatusLabel {
                 font-size: 11px;
-                padding: 1px 6px;
+                padding: 2px 6px;
                 border-radius: 6px;
+                min-height: 18px;
             }
             QLabel#SessionPendingDot {
                 color: #2563eb;
@@ -577,49 +506,6 @@ APP_STYLESHEET = """
                 background: #ffffff;
                 border: none;
             }
-            QScrollArea#ChatScrollArea {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-                min-height: 80px;
-            }
-            QWidget#ChatEmptyState {
-                min-height: 80px;
-                max-height: 120px;
-            }
-            QScrollArea#ChatScrollArea[bindState="bound_online"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="bound_offline"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="bind_mismatch"] {
-                background: #fef2f2;
-                border: 1px solid #fca5a5;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_optional"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="unbound_required"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="pending_bind"],
-            QScrollArea#ChatScrollArea[bindState="waiting_bound_reopen"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QScrollArea#ChatScrollArea[bindState="prebound_home"] {
-                background: #f7f8fa;
-                border: 1px solid #e5e7eb;
-            }
-            QWidget#ChatViewport,
-            QWidget#ChatMessagesContainer {
-                background: #f7f8fa;
-            }
             QTextBrowser#ChatTranscript {
                 background: #f7f8fa;
                 border: 1px solid #e5e7eb;
@@ -628,95 +514,19 @@ APP_STYLESHEET = """
                 color: #111827;
                 font-size: 13px;
             }
-            QWidget#ChatViewport[bindState="bound_online"],
-            QWidget#ChatViewport[bindState="bound_offline"],
-            QWidget#ChatViewport[bindState="bind_mismatch"],
-            QWidget#ChatViewport[bindState="unbound_optional"],
-            QWidget#ChatViewport[bindState="unbound_required"],
-            QWidget#ChatViewport[bindState="pending_bind"],
-            QWidget#ChatViewport[bindState="waiting_bound_reopen"],
-            QWidget#ChatViewport[bindState="prebound_home"],
-            QWidget#ChatMessagesContainer[bindState="bound_online"],
-            QWidget#ChatMessagesContainer[bindState="bound_offline"],
-            QWidget#ChatMessagesContainer[bindState="bind_mismatch"],
-            QWidget#ChatMessagesContainer[bindState="unbound_optional"],
-            QWidget#ChatMessagesContainer[bindState="unbound_required"],
-            QWidget#ChatMessagesContainer[bindState="pending_bind"],
-            QWidget#ChatMessagesContainer[bindState="waiting_bound_reopen"],
-            QWidget#ChatMessagesContainer[bindState="prebound_home"] {
+            QTextBrowser#ChatTranscript[bindState="bound_online"],
+            QTextBrowser#ChatTranscript[bindState="bound_offline"],
+            QTextBrowser#ChatTranscript[bindState="unbound_optional"],
+            QTextBrowser#ChatTranscript[bindState="unbound_required"],
+            QTextBrowser#ChatTranscript[bindState="pending_bind"],
+            QTextBrowser#ChatTranscript[bindState="waiting_bound_reopen"],
+            QTextBrowser#ChatTranscript[bindState="prebound_home"] {
                 background: #f7f8fa;
-            }
-            QLabel#EmptyTitle {
-                color: #6b7280;
-                font-size: 16px;
-                font-weight: 600;
-            }
-            QLabel#EmptySubtitle {
-                color: #9ca3af;
-                font-size: 13px;
-            }
-            QFrame#SystemBubble {
-                background: #eef0f3;
-                border: none;
-                border-radius: 8px;
-            }
-            QLabel#SystemBubbleBody {
-                color: #666;
-                font-size: 12px;
-                background: transparent;
-            }
-            QWidget#ChatBubbleRow {
-                background: transparent;
-            }
-            QFrame#ChatBubble,
-            QFrame#ChatMessageBubble {
-                border: 1px solid #d1d5db;
-                border-radius: 8px;
-                background: #ffffff;
-            }
-            QFrame#ChatBubble[bubbleRole="user"],
-            QFrame#ChatMessageBubble[bubbleRole="user"] {
-                background: #dcf8c6;
-                border: 1px solid #c5e8b0;
-                border-radius: 12px;
-            }
-            QFrame#ChatBubble[bubbleRole="assistant"],
-            QFrame#ChatMessageBubble[bubbleRole="assistant"] {
-                background: #ffffff;
                 border: 1px solid #e5e7eb;
-                border-radius: 12px;
             }
-            QFrame#ChatBubble[bubbleRole="error"],
-            QFrame#ChatMessageBubble[bubbleRole="error"] {
+            QTextBrowser#ChatTranscript[bindState="bind_mismatch"] {
                 background: #fef2f2;
-                border: 1px solid #fecaca;
-                border-radius: 10px;
-            }
-            QLabel#BubbleHeader {
-                color: #555;
-            }
-            QFrame#ChatBubble[bubbleRole="user"] QLabel#BubbleHeader,
-            QFrame#ChatMessageBubble[bubbleRole="user"] QLabel#BubbleHeader {
-                color: #3b6b35;
-            }
-            QFrame#ChatBubble[bubbleRole="error"] QLabel#BubbleBody,
-            QFrame#ChatMessageBubble[bubbleRole="error"] QLabel#BubbleBody,
-            QFrame#ChatMessageBubble[bubbleRole="error"] QLabel#ChatMessageText {
-                color: #7f1d1d;
-            }
-            QLabel#BubbleBody,
-            QLabel#ChatMessageText {
-                color: #111827;
-                font-size: 13px;
-                background: transparent;
-            }
-            QFrame#ChatBubble[bubbleRole="assistant"] QLabel#BubbleBody,
-            QFrame#ChatBubble[bubbleRole="assistant"] QLabel#ChatMessageText {
-                color: #111827;
-            }
-            QFrame#ChatBubble[bubbleRole="user"] QLabel#BubbleBody,
-            QFrame#ChatBubble[bubbleRole="user"] QLabel#ChatMessageText {
-                color: #1f2937;
+                border: 1px solid #fca5a5;
             }
             QWidget#ChatInputBlock {
                 background: transparent;

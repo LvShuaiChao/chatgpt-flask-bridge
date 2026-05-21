@@ -68,7 +68,6 @@ OPEN_CLOSE_METHODS = frozenset({
     "_on_open_chatgpt_home",
     "_on_open_new_chatgpt_tab",
     "_on_open_bound_chatgpt_page",
-    "_flash_bound_chatgpt_page",
     "_render_tampermonkey_clients",
     "_on_refresh_tm_pages",
     "_on_reload_bound_tm_page",

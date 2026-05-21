@@ -100,7 +100,6 @@ CHAT_RENDER_METHODS = {
     "_add_system_message",
     "_scroll_to_bottom",
     "_do_scroll_to_bottom",
-    "_last_assistant_text",
     "_update_session_assistant",
     "_apply_session_change",
     "_set_reply_text",

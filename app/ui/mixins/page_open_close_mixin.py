@@ -189,7 +189,6 @@ class PageOpenCloseMixin:
                 "enabled": True,
                 "bind_state": BIND_STATE_BOUND_CONVERSATION,
                 "conversation_id": conversation_id,
-                "conversation_url": page_url,
                 "url": page_url,
                 "client_id": client_id,
                 "page_instance_id": (client_info.get("page_instance_id") or "").strip(),
@@ -221,7 +220,6 @@ class PageOpenCloseMixin:
                     **remote,
                     "enabled": True,
                     "conversation_id": conversation_id,
-                    "conversation_url": url,
                     "url": url,
                     "page_type": "conversation",
                 }
@@ -374,140 +372,7 @@ class PageOpenCloseMixin:
                 f"url={bound_url}",
                 echo=True,
             )
-    def _flash_bound_chatgpt_page(self):
-        session = self._current_session()
-        if not session:
-            self._set_tm_action_hint("当前没有选中的本地对话。")
-            self._append_log("[BIND][FLASH][FAILED] reason=no_current_session", echo=True)
-            return
 
-        if not server.is_server_running():
-            self._set_tm_action_hint("服务未启动，无法定位绑定页。")
-            self._append_log("[BIND][FLASH][FAILED] reason=server_not_running", echo=True)
-            return
-
-        status = server.get_bridge_status()
-        self._last_bridge_status = status
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        remote_client_id = (remote.get("client_id") or "").strip()
-        remote_conversation_id = (remote.get("conversation_id") or "").strip()
-        if not remote_conversation_id:
-            remote_conversation_id = self._client_conversation_id(remote)
-        self._append_log(
-            "[BIND][FLASH][START] "
-            f"session_id={session.session_id} "
-            f"remote_client={remote_client_id or '-'} "
-            f"remote_conv={remote_conversation_id or '-'}",
-            echo=True,
-        )
-        bound_info, bound_state, bound_reason = self._resolve_bound_page_info(status=status)
-        self._append_log(
-            "[BIND][FLASH][RESOLVE] "
-            f"state={bound_state} "
-            f"reason={bound_reason} "
-            f"target_client={((bound_info or {}).get('client_id') or '-').strip() or '-'} "
-            f"target_conv={self._client_conversation_id(bound_info) or '-'} "
-            f"target_url={((bound_info or {}).get('page_url') or (bound_info or {}).get('url') or '-').strip() or '-'}",
-            echo=True,
-        )
-
-        if bound_state != "online" or not isinstance(bound_info, dict):
-            self._append_log(
-                "[BIND][FLASH][FAILED] "
-                f"reason=bound_page_offline "
-                f"session_id={session.session_id} "
-                f"remote_client={remote_client_id or '-'} "
-                f"remote_conv={remote_conversation_id or '-'} "
-                f"bound_state={bound_state} "
-                f"bound_reason={bound_reason}",
-                echo=True,
-            )
-            self._set_tm_action_hint("绑定页当前不可用，无法定位。")
-            return
-
-        target_client_id = (bound_info.get("client_id") or "").strip()
-        target_page_instance_id = (bound_info.get("page_instance_id") or "").strip()
-        target_conversation_id = self._client_conversation_id(bound_info)
-        target_url = (bound_info.get("page_url") or bound_info.get("url") or "").strip()
-        target_page_type = (bound_info.get("page_type") or "").strip()
-
-        if not target_client_id:
-            self._set_tm_action_hint("绑定页缺少 client_id，无法定位。")
-            self._append_log(
-                "[BIND][FLASH][FAILED] reason=missing_target_client_id",
-                echo=True,
-            )
-            return
-
-        if bound_reason == "matched_by_conversation":
-            old_client_id = remote_client_id
-            remote["enabled"] = True
-            remote["client_id"] = target_client_id
-            remote["bound_client_id"] = target_client_id
-            remote["page_instance_id"] = target_page_instance_id
-            remote["conversation_id"] = target_conversation_id
-            remote["conversation_url"] = target_url
-            remote["url"] = target_url
-            remote["page_url"] = target_url
-            remote["page_type"] = target_page_type
-            remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
-            session.remote_chatgpt = remote
-            session.updated_at = time.time()
-            self._append_log(
-                "[BIND][FLASH][REBIND_BY_CONVERSATION] "
-                f"session_id={session.session_id} "
-                f"old_client_id={old_client_id or '-'} "
-                f"new_client_id={target_client_id} "
-                f"conversation_id={target_conversation_id or '-'} "
-                f"url={target_url or '-'}",
-                echo=True,
-            )
-            self._save_sessions_to_disk()
-
-        ok = server.enqueue_control_command(
-            command="flash_page",
-            target_client_id=target_client_id,
-            target_page_instance_id=target_page_instance_id,
-            target_conversation_id=target_conversation_id,
-            payload={
-                "title": "GUI 已定位此页面",
-                "message": "当前 ChatGPT 页面已绑定到当前 GUI 对话。",
-                "duration_ms": 5000,
-                "blink_count": 8,
-                "page_type": target_page_type,
-                "url": target_url,
-                "client_id": target_client_id,
-                "conversation_id": target_conversation_id,
-                "page_instance_id": target_page_instance_id,
-                "flash_title": True,
-                "flash_favicon": True,
-            },
-        )
-
-        if ok:
-            self._set_tm_action_hint("已定位绑定页。")
-            self._append_log(
-                "[BIND][FLASH][DONE] "
-                f"session_id={session.session_id} "
-                f"client_id={target_client_id} "
-                f"page_instance_id={target_page_instance_id or '-'} "
-                f"conversation_id={target_conversation_id or '-'} "
-                f"url={target_url or '-'} "
-                f"reason={bound_reason}",
-                echo=True,
-            )
-            self._update_bound_page_display()
-            self._refresh_session_list(select_session_id=session.session_id)
-            self._apply_chat_bind_visual_state()
-        else:
-            self._set_tm_action_hint("定位绑定页命令发送失败，请查看日志。")
-            self._append_log(
-                "[BIND][FLASH][FAILED] "
-                f"reason=enqueue_failed "
-                f"client_id={target_client_id} "
-                f"conversation_id={target_conversation_id or '-'}",
-                echo=True,
-            )
     def _tm_table_signature(self, status=None):
         clients = list(self._iter_tm_clients(status or {}))
         rows = []

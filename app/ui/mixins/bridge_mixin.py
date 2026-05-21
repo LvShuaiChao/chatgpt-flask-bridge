@@ -126,15 +126,65 @@ class BridgeMixin:
         pending = getattr(self, "_pending_upload_sends", {}).pop(key, None)
         return pending
 
-    def _execute_queued_chat_send(self, session, pending):
-        """上传成功后：将暂存的聊天 payload 入队并更新会话 UI。"""
+    def _read_bridge_queue_length(
+        self,
+        *,
+        trace_id="",
+        session_id="",
+        message_id="",
+        target_client="",
+        target_conv="",
+        warn_tag="",
+        reason="",
+    ):
+        if not server.is_server_running():
+            return 0
         try:
-            return self._execute_queued_chat_send_impl(session, pending)
-        finally:
-            if hasattr(self, "dump_top_level_windows"):
-                self.dump_top_level_windows("after_queue_process")
+            return int((server.get_bridge_status() or {}).get("queue_length") or 0)
+        except Exception as exc:
+            self._append_log(
+                f"{warn_tag} "
+                + kv_line(
+                    trace_id=trace_id or "-",
+                    session_id=session_id or "-",
+                    message_id=message_id or "-",
+                    target_client=target_client,
+                    target_conv=target_conv,
+                    reason=reason,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                + f"\n{traceback.format_exc()}",
+                echo=True,
+            )
+            return -1
 
-    def _execute_queued_chat_send_impl(self, session, pending):
+    def _register_pending_send_request(
+        self,
+        bridge_message_id,
+        *,
+        session_id,
+        turn_id,
+        user_message_id,
+        assistant_message_id,
+    ):
+        server.attach_external_request_bridge(session_id, bridge_message_id, turn_id)
+        self._message_to_session[bridge_message_id] = session_id
+        self._message_to_turn[bridge_message_id] = turn_id
+        pending_sends = getattr(self, "_pending_send_requests", None)
+        if pending_sends is None:
+            pending_sends = {}
+            self._pending_send_requests = pending_sends
+        pending_sends[bridge_message_id] = {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "created_at": time.time(),
+        }
+
+    def _prepare_chat_send_from_pending(self, session, pending):
+        """从 pending 解析发送上下文（不改 payload 入队顺序）。"""
         payload = dict(pending.get("payload") or {})
         raw_user_text = (pending.get("raw_user_text") or "").strip()
         turn_id = (pending.get("turn_id") or "").strip()
@@ -144,14 +194,11 @@ class BridgeMixin:
         from_pending_bootstrap = bool(pending.get("from_pending_bootstrap"))
         source = (pending.get("source") or "direct").strip()
         suppress_system_message = bool(pending.get("suppress_system_message"))
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
         is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
         existing_user_message = self._find_session_message_by_id(
             session, reuse_user_message_id
         )
-
         trace_id = (
             payload.get("trace_id")
             or (
@@ -161,30 +208,89 @@ class BridgeMixin:
             )
             or ""
         ).strip()
+        return {
+            "payload": payload,
+            "raw_user_text": raw_user_text,
+            "turn_id": turn_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "reuse_user_message_id": reuse_user_message_id,
+            "from_pending_bootstrap": from_pending_bootstrap,
+            "source": source,
+            "suppress_system_message": suppress_system_message,
+            "is_bootstrap": is_bootstrap,
+            "existing_user_message": existing_user_message,
+            "trace_id": trace_id,
+        }
+
+    def _patch_chat_send_target_payload(self, session, payload):
+        """入队前补全 target_client_id / url（与原先内联逻辑一致）。"""
+        if (payload.get("target_client_id") or "").strip():
+            return
+        remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+        bound_client = (remote_now.get("client_id") or "").strip()
+        if bound_client:
+            payload["target_client_id"] = bound_client
+            bound_url = (
+                remote_now.get("conversation_url") or remote_now.get("url") or ""
+            ).strip()
+            if bound_url:
+                payload["target_page_url"] = bound_url
+            return
+        if not self._session_is_local_new_chat_flow(session):
+            live_client = (
+                self._last_bridge_status.get("tampermonkey_client_id") or ""
+            ).strip()
+            if live_client:
+                self._remember_session_page_from_client(session, live_client)
+
+    def _log_chat_queue_event(self, tag, *, trace_id="-", **fields):
+        self._append_log(
+            tag + " " + kv_line(trace_id=trace_id or "-", **fields),
+            echo=True,
+        )
+
+    def _execute_queued_chat_send(self, session, pending):
+        """上传成功后：将暂存的聊天 payload 入队并更新会话 UI。"""
+        try:
+            return self._execute_queued_chat_send_impl(session, pending)
+        finally:
+            if hasattr(self, "dump_top_level_windows"):
+                self.dump_top_level_windows("after_queue_process")
+
+    def _execute_queued_chat_send_impl(self, session, pending):
+        ctx = self._prepare_chat_send_from_pending(session, pending)
+        payload = ctx["payload"]
+        raw_user_text = ctx["raw_user_text"]
+        turn_id = ctx["turn_id"]
+        user_message_id = ctx["user_message_id"]
+        assistant_message_id = ctx["assistant_message_id"]
+        reuse_user_message_id = ctx["reuse_user_message_id"]
+        from_pending_bootstrap = ctx["from_pending_bootstrap"]
+        source = ctx["source"]
+        suppress_system_message = ctx["suppress_system_message"]
+        is_bootstrap = ctx["is_bootstrap"]
+        existing_user_message = ctx["existing_user_message"]
+        trace_id = ctx["trace_id"]
+
         target_client = (payload.get("target_client_id") or "").strip() or "-"
         target_conv = (payload.get("conversation_id") or "").strip() or "-"
-        queue_before = 0
-        if server.is_server_running():
-            try:
-                queue_before = int(
-                    (server.get_bridge_status() or {}).get("queue_length") or 0
-                )
-            except Exception as exc:
-                self._append_log(
-                    "[CHAT_QUEUE][BEFORE_PUT][WARN] "
-                    + kv_line(trace_id=trace_id or "-", reason="queue_before_read_failed", error=repr(exc)),
-                    echo=True,
-                )
-        self._append_log(
-            "[CHAT_QUEUE][BEFORE_PUT] "
-            + kv_line(
-                trace_id=trace_id or "-",
-                target_client=target_client,
-                target_conv=target_conv,
-                text_len=len(raw_user_text),
-                queue_before=queue_before,
-            ),
-            echo=True,
+        queue_before = self._read_bridge_queue_length(
+            trace_id=trace_id,
+            session_id=session.session_id,
+            message_id=user_message_id,
+            target_client=target_client,
+            target_conv=target_conv,
+            warn_tag="[CHAT_QUEUE][BEFORE_PUT][WARN]",
+            reason="queue_before_read_failed",
+        )
+        self._log_chat_queue_event(
+            "[CHAT_QUEUE][BEFORE_PUT]",
+            trace_id=trace_id,
+            target_client=target_client,
+            target_conv=target_conv,
+            text_len=len(raw_user_text),
+            queue_before=queue_before,
         )
         self._append_log(
             "[SEND_EXEC] "
@@ -218,40 +324,22 @@ class BridgeMixin:
                 self._add_system_message(f"消息入队失败：{error}")
             return {"ok": False, "reason": str(error), "retryable": False}
 
-        if not (payload.get("target_client_id") or "").strip():
-            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-            bound_client = (remote_now.get("client_id") or "").strip()
-            if bound_client:
-                payload["target_client_id"] = bound_client
-                bound_url = (
-                    remote_now.get("conversation_url") or remote_now.get("url") or ""
-                ).strip()
-                if bound_url:
-                    payload["target_page_url"] = bound_url
-            elif not self._session_is_local_new_chat_flow(session):
-                live_client = (
-                    self._last_bridge_status.get("tampermonkey_client_id") or ""
-                ).strip()
-                if live_client:
-                    self._remember_session_page_from_client(session, live_client)
+        self._patch_chat_send_target_payload(session, payload)
 
         bridge_message_id = (
             (msg.get("message_id") or msg.get("id") or "").strip()
             if isinstance(msg, dict)
             else None
         )
-        queue_after = 0
-        if server.is_server_running():
-            try:
-                queue_after = int(
-                    (server.get_bridge_status() or {}).get("queue_length") or 0
-                )
-            except Exception as exc:
-                self._append_log(
-                    "[CHAT_QUEUE][PUT_OK][WARN] "
-                    + kv_line(trace_id=trace_id or "-", reason="queue_after_read_failed", error=repr(exc)),
-                    echo=True,
-                )
+        queue_after = self._read_bridge_queue_length(
+            trace_id=trace_id,
+            session_id=session.session_id,
+            message_id=user_message_id,
+            target_client=target_client,
+            target_conv=target_conv,
+            warn_tag="[CHAT_QUEUE][PUT_OK][WARN]",
+            reason="queue_after_read_failed",
+        )
         if not bridge_message_id:
             self._append_log(
                 "[CHAT_QUEUE][PUT_FAIL] "
@@ -270,34 +358,22 @@ class BridgeMixin:
                 "reason": "missing_bridge_message_id",
                 "retryable": False,
             }
-        self._append_log(
-            "[CHAT_QUEUE][PUT_OK] "
-            + kv_line(
-                trace_id=trace_id or "-",
-                message_id=bridge_message_id,
-                target_client=target_client,
-                target_conv=target_conv,
-                queue_after=queue_after,
-            ),
-            echo=True,
+        self._log_chat_queue_event(
+            "[CHAT_QUEUE][PUT_OK]",
+            trace_id=trace_id,
+            message_id=bridge_message_id,
+            target_client=target_client,
+            target_conv=target_conv,
+            queue_after=queue_after,
         )
 
-        server.attach_external_request_bridge(
-            session.session_id, bridge_message_id, turn_id
+        self._register_pending_send_request(
+            bridge_message_id,
+            session_id=session.session_id,
+            turn_id=turn_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
         )
-        self._message_to_session[bridge_message_id] = session.session_id
-        self._message_to_turn[bridge_message_id] = turn_id
-        pending_sends = getattr(self, "_pending_send_requests", None)
-        if pending_sends is None:
-            pending_sends = {}
-            self._pending_send_requests = pending_sends
-        pending_sends[bridge_message_id] = {
-            "session_id": session.session_id,
-            "turn_id": turn_id,
-            "user_message_id": user_message_id,
-            "assistant_message_id": assistant_message_id,
-            "created_at": time.time(),
-        }
 
         if is_bootstrap:
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -1742,6 +1818,501 @@ class BridgeMixin:
                 f"total_ms={total_ms}",
                 echo=False,
             )
+    def _handle_report_unknown_event(self, item, payload):
+        bridge_id = item.get("message_id") or "-"
+        waiting_ids = payload.get("waiting_message_ids") or []
+        self._append_log(
+            f"[回传未知] message_id={bridge_id} event={payload.get('event') or '-'} "
+            f"client_id={item.get('client_id') or '-'} "
+            f"waiting_message_ids={waiting_ids}"
+        )
+
+    def _handle_report_mismatch_event(self, item, payload):
+        bridge_id = item.get("message_id") or "-"
+        self._append_log(
+            f"[回传不匹配] message_id={bridge_id} "
+            f"session_id={item.get('session_id') or '-'} "
+            f"turn_id={item.get('turn_id') or '-'} "
+            f"event={payload.get('event') or '-'} "
+            f"owner_client_id={payload.get('owner_client_id') or '-'} "
+            f"report_client_id={payload.get('report_client_id') or item.get('client_id') or '-'}"
+        )
+
+    def _handle_ack_mismatch_or_ignored_event(self, item, payload, kind):
+        if kind == "ack_mismatch":
+            bridge_id = item.get("message_id") or "-"
+            self._append_log(
+                f"[ACK不匹配] message_id={bridge_id} "
+                f"session_id={item.get('session_id') or '-'} "
+                f"turn_id={item.get('turn_id') or '-'} "
+                f"detail={payload.get('detail') or '-'} "
+                f"owner_client_id={payload.get('owner_client_id') or '-'} "
+                f"report_client_id={payload.get('report_client_id') or item.get('client_id') or '-'}"
+            )
+
+    def _handle_open_url_result_event(self, item, payload, kind):
+        url = payload.get("url") or ""
+        detail = payload.get("detail") or ""
+        if kind == "open_url_success":
+            self._append_log(f"[打开网页] 成功：{url} {detail}".strip())
+        else:
+            self._append_log(f"[打开网页] 失败：{url} {detail}".strip())
+
+    def _handle_command_result_event(self, item, payload, kind):
+        page_url = payload.get("page_url") or ""
+        detail = (
+            payload.get("detail")
+            or payload.get("reason")
+            or payload.get("error")
+            or ""
+        )
+        command = (payload.get("command") or "").strip()
+        client_id = item.get("client_id") or "-"
+        if kind == "close_page_success":
+            self._append_log(
+                f"[关闭页面] 成功 client_id={client_id} {page_url} {detail}".strip()
+            )
+            return
+        if kind == "close_page_failed":
+            self._append_log(
+                f"[关闭页面] 失败 client_id={client_id} {page_url} {detail}".strip()
+            )
+            return
+        if command == "start_upload":
+            if not detail:
+                result_obj = payload.get("result")
+                if isinstance(result_obj, dict):
+                    detail = (
+                        (result_obj.get("reason") or "")
+                        or (result_obj.get("detail") or "")
+                    ).strip() or detail
+            control_message_id = (item.get("message_id") or "").strip()
+            pending_key = str(control_message_id)
+            if pending_key and pending_key in getattr(
+                self, "_pending_upload_sends", {}
+            ):
+                self._on_upload_before_send_control_failed(
+                    control_message_id, detail
+                )
+            else:
+                self._append_log(
+                    f"[上传] 失败 client_id={client_id} reason={detail or '-'}",
+                    echo=True,
+                )
+                self._add_system_message(
+                    f"上传失败：{detail or '未返回具体原因，请查看油猴日志'}"
+                )
+            return
+        self._append_log(
+            f"[命令] 失败 command={command or '-'} client_id={client_id} {detail}".strip(),
+            echo=True,
+        )
+
+    def _handle_conversation_created_event(self, item, payload):
+        conv_session = self._resolve_session_for_conversation_created(item)
+        if conv_session is not None:
+            report_client = (item.get("client_id") or "").strip()
+            self._apply_conversation_created_binding(
+                conv_session, payload, client_id=report_client
+            )
+            if hasattr(self, "_try_send_next_queued_message"):
+                self._try_send_next_queued_message(conv_session)
+            return
+        mismatch_payload = item.get("payload") or {}
+        self._append_log(
+            f"[BIND][MISMATCH] reason=conversation_created_no_session "
+            f"message_id={(item.get('message_id') or '-')[:8]} "
+            f"bind_request_id="
+            f"{mismatch_payload.get('bind_request_id') or mismatch_payload.get('launch_token') or '-'} "
+            f"client_id={item.get('client_id') or '-'} "
+            f"page_instance_id={mismatch_payload.get('page_instance_id') or '-'}"
+        )
+
+    def _resolve_inbound_session_binding(self, item, payload, kind):
+        session, turn_id, bridge_id = self._resolve_inbound_binding(item)
+        if session is not None and turn_id:
+            return session, turn_id, bridge_id
+        if kind not in ("send_success", "send_message_result", "assistant_message"):
+            return session, turn_id, bridge_id
+        session_id = (
+            item.get("session_id") or payload.get("session_id") or ""
+        ).strip()
+        session = self._sessions.get(session_id) if session_id else None
+        turn_id = (item.get("turn_id") or payload.get("turn_id") or "").strip()
+        bridge_id = (item.get("message_id") or "").strip()
+        return session, turn_id, bridge_id
+
+    def _handle_send_result_event(self, item, payload, session, turn_id, bridge_id, kind):
+        ok = bool(payload.get("ok", payload.get("success", True)))
+        self._append_log(
+            "[CHAT_SEND][ACK] "
+            f"request_id={bridge_id or '-'} "
+            f"session_id={session.session_id} "
+            f"ok={'true' if ok else 'false'} "
+            f"status={(payload.get('status') or payload.get('reason') or '-')}",
+            echo=True,
+        )
+        status_text = "sent" if ok else "发送失败"
+        if hasattr(self, "_update_message_status_by_request_id"):
+            updated = self._update_message_status_by_request_id(
+                session.session_id,
+                bridge_id,
+                status_text,
+                turn_id=turn_id,
+            )
+        else:
+            updated = False
+            for message in reversed(session.messages):
+                if message.role != "user":
+                    continue
+                if (message.turn_id or "").strip() != (turn_id or "").strip():
+                    if bridge_id and (message.bridge_message_id or "").strip() != bridge_id:
+                        continue
+                message.status = "已发送" if ok else "发送失败"
+                updated = True
+                break
+        if not updated:
+            self._append_log(
+                "[CHAT_MESSAGE][APPEND_FAILED] "
+                f"reason=ack_no_user_message session_id={session.session_id} "
+                f"request_id={bridge_id or '-'}",
+                echo=True,
+            )
+        if session.session_id == self._current_session_id and hasattr(
+            self, "_render_current_chat_messages"
+        ):
+            self._render_current_chat_messages(
+                force_bottom=True,
+                reason="send_success",
+            )
+
+    def _handle_assistant_message_event(
+        self, item, payload, session, turn_id, bridge_id
+    ):
+        text = (payload.get("content") or payload.get("text") or "").strip()
+        if self._upsert_assistant_reply_from_bridge(
+            session,
+            turn_id,
+            bridge_id,
+            text,
+            render_reason="assistant_message",
+        ):
+            if bridge_id:
+                self._finalize_bridge(bridge_id)
+
+    def _handle_ack_event(self, item, payload, session, turn_id, bridge_id):
+        success = bool(payload.get("success"))
+        detail = (
+            payload.get("detail")
+            or payload.get("reason")
+            or ""
+        )
+        detail_text = str(detail).strip().replace("\n", " ")
+        self._append_log(
+            "[CHAT_SEND][ACK] "
+            f"request_id={bridge_id or '-'} "
+            f"session_id={session.session_id} "
+            f"ok={'true' if success else 'false'} "
+            f"detail={detail_text or '-'}",
+            echo=True,
+        )
+        if success:
+            self._append_log(
+                "[CHAT_SEND][BROWSER_SENT] "
+                f"request_id={bridge_id or '-'} "
+                f"session_id={session.session_id}",
+                echo=True,
+            )
+        ack_status = (
+            "sent"
+            if success
+            else f"发送失败({detail_text or 'unknown'})"
+        )
+        if hasattr(self, "_update_message_status_by_request_id"):
+            self._update_message_status_by_request_id(
+                session.session_id,
+                bridge_id,
+                ack_status,
+                turn_id=turn_id,
+            )
+        else:
+            target_user = None
+            for message in reversed(session.messages):
+                if message.role != "user":
+                    continue
+                if (message.turn_id or "").strip() == (turn_id or "").strip():
+                    target_user = message
+                    break
+                if bridge_id and (message.bridge_message_id or "").strip() == bridge_id:
+                    target_user = message
+                    break
+            if target_user is not None:
+                target_user.status = (
+                    "已发送"
+                    if success
+                    else f"发送失败({detail_text or 'unknown'})"
+                )
+        if self._is_finalized(bridge_id):
+            if session.session_id == self._current_session_id and hasattr(
+                self, "_render_current_chat_messages"
+            ):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="ack_finalized",
+                )
+            return
+        if success:
+            if self._has_assistant_for_turn(session, turn_id):
+                self._ack_success_message_ids.add(bridge_id)
+                self._set_reply_waiting(session, turn_id)
+            report_client = (item.get("client_id") or "").strip()
+            if report_client:
+                remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+                if not remote_now.get("bootstrap_in_progress"):
+                    self._remember_session_page_from_client(
+                        session, report_client
+                    )
+                self._update_bound_page_display()
+        else:
+            self._ack_success_message_ids.discard(bridge_id)
+            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+            if remote_now.get("bootstrap_in_progress"):
+                session.remote_chatgpt = {
+                    **remote_now,
+                    "bootstrap_in_progress": False,
+                }
+                self._save_sessions_to_disk()
+            if self._has_assistant_for_turn(session, turn_id):
+                self._set_reply_error(
+                    session,
+                    turn_id,
+                    f"发送失败：{detail_text or '油猴返回失败'}",
+                    "发送失败",
+                )
+            self._finalize_bridge(bridge_id)
+        if session.session_id == self._current_session_id and hasattr(
+            self, "_render_current_chat_messages"
+        ):
+            self._render_current_chat_messages(
+                force_bottom=True,
+                reason="ack",
+            )
+
+    def _handle_send_failed_event(self, item, payload, session, turn_id, bridge_id):
+        if not self._has_assistant_for_turn(
+            session, turn_id
+        ) or self._is_finalized(bridge_id):
+            return
+        self._ack_success_message_ids.discard(bridge_id)
+        remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state_now = self._remote_bind_state(remote_now)
+        if (
+            remote_now.get("bootstrap_in_progress")
+            or bind_state_now == BIND_STATE_WAITING_CONVERSATION_CREATED
+            or (
+                bind_state_now == BIND_STATE_PREBOUND_HOME
+                and not (remote_now.get("conversation_id") or "").strip()
+            )
+        ):
+            session.remote_chatgpt = {
+                **default_remote_chatgpt(),
+                "bind_state": BIND_STATE_UNBOUND,
+            }
+            session.updated_at = time.time()
+            self._save_sessions_to_disk()
+            self._append_log(
+                "[BIND][BOOTSTRAP_FAILED_RESET] "
+                f"session_id={session.session_id} "
+                f"message_id={bridge_id[:8] if bridge_id else '-'} "
+                f"reason={payload.get('reason') or payload.get('detail') or '-'}"
+            )
+        detail = (
+            payload.get("detail")
+            or payload.get("reason")
+            or str(payload)
+        )
+        reason_labels = {
+            "target_client_id_mismatch": "目标 client_id 与当前页面不一致",
+            "conversation_id_mismatch": "目标会话与当前页面不一致",
+            "target_page_url_mismatch": "目标页面 URL 与当前页面不一致",
+            "not_conversation_page": "当前页面不是 ChatGPT 对话页",
+            "not_home_page": "bootstrap 要求 ChatGPT 首页",
+            "bootstrap_target_not_home": "bootstrap 只能发送到 ChatGPT 首页",
+            "home_already_has_conversation": "首页不应已有 conversation_id",
+            "bootstrap_target_has_conversation": "首页不应已有 conversation_id",
+            "target_page_instance_id_mismatch": "预绑定首页 page_instance_id 不一致",
+            "bind_request_id_mismatch": "绑定令牌与当前页面不一致",
+            "conversation_created_timeout": "首条消息已发送，但未检测到新对话页",
+        }
+        if payload.get("reason") in reason_labels:
+            detail = reason_labels[payload["reason"]]
+        self._set_reply_error(
+            session, turn_id, f"发送失败：{detail}", "发送失败"
+        )
+        target_user = None
+        for message in reversed(session.messages):
+            if (
+                message.role == "user"
+                and (message.turn_id or "").strip() == (turn_id or "").strip()
+            ):
+                target_user = message
+                break
+        if target_user is not None:
+            target_user.status = "发送失败"
+            session.updated_at = time.time()
+            failed_text = (target_user.content or "").strip()
+            if failed_text and hasattr(self, "message_input"):
+                self.message_input.setPlainText(failed_text)
+            elif failed_text and hasattr(self, "message_edit"):
+                self.message_edit.setPlainText(failed_text)
+        self._add_system_message_once(
+            "消息发送失败，请检查绑定页面后重试。已将失败消息恢复到输入框。",
+            dedupe_seconds=10,
+        )
+        self._finalize_bridge(bridge_id)
+        self._try_send_next_queued_message(session)
+
+    def _handle_assistant_reply_event(
+        self, item, payload, session, turn_id, bridge_id
+    ):
+        if self._is_finalized(bridge_id):
+            return
+        text = (payload.get("text") or payload.get("content") or "").strip()
+        if self._upsert_assistant_reply_from_bridge(
+            session,
+            turn_id,
+            bridge_id,
+            text,
+            render_reason="assistant_reply",
+        ):
+            self._finalize_bridge(bridge_id)
+            self._ack_success_message_ids.discard(bridge_id)
+            report_client = (item.get("client_id") or "").strip()
+            if report_client:
+                self._remember_session_page_from_client(
+                    session, report_client
+                )
+                self._update_bound_page_display()
+            if getattr(self, "_auto_sync_conversation_after_reply", False):
+                self._schedule_auto_sync_conversation(
+                    session, request_reason="auto_after_reply"
+                )
+            self._try_send_next_queued_message(session)
+        else:
+            self._set_reply_error(
+                session, turn_id, "ChatGPT 返回了空回复。", "空回复"
+            )
+            self._finalize_bridge(bridge_id)
+            self._try_send_next_queued_message(session)
+
+    def _handle_assistant_reply_failed_event(
+        self, item, payload, session, turn_id, bridge_id, kind
+    ):
+        if not self._has_assistant_for_turn(
+            session, turn_id
+        ) or self._is_finalized(bridge_id):
+            return
+        self._ack_success_message_ids.discard(bridge_id)
+        detail = (
+            payload.get("reason")
+            or payload.get("detail")
+            or payload.get("error_message")
+            or ""
+        )
+        if not detail:
+            if kind == "assistant_reply_empty":
+                detail = "ChatGPT 已发送，但未读取到回复内容。"
+            else:
+                detail = "读取 ChatGPT 回复失败。"
+        busy = payload.get("busy")
+        busy_reason = payload.get("busy_reason") or ""
+        if busy:
+            detail = f"{detail}（busy={busy_reason or 'yes'}）"
+        elapsed = payload.get("elapsed_ms")
+        if elapsed is not None:
+            detail = f"{detail}（等待 {elapsed}ms）"
+        prefix = "读取回复失败："
+        if not str(detail).startswith(prefix) and kind == "assistant_reply_failed":
+            detail = f"{prefix}{detail}"
+        status_text = "读取失败" if kind == "assistant_reply_failed" else "空回复"
+        self._set_reply_error(session, turn_id, detail, status_text)
+        self._finalize_bridge(bridge_id)
+        self._try_send_next_queued_message(session)
+
+    def _handle_bound_message_event(self, item, payload, kind):
+        session, turn_id, bridge_id = self._resolve_inbound_session_binding(
+            item, payload, kind
+        )
+        if session is None:
+            return
+        if kind in ("send_success", "send_message_result"):
+            self._handle_send_result_event(
+                item, payload, session, turn_id, bridge_id, kind
+            )
+            return
+        if kind == "assistant_message":
+            self._handle_assistant_message_event(
+                item, payload, session, turn_id, bridge_id
+            )
+            return
+        if kind == "ack":
+            self._handle_ack_event(item, payload, session, turn_id, bridge_id)
+            return
+        if kind == "send_failed":
+            self._handle_send_failed_event(
+                item, payload, session, turn_id, bridge_id
+            )
+            return
+        if kind == "assistant_reply":
+            self._handle_assistant_reply_event(
+                item, payload, session, turn_id, bridge_id
+            )
+            return
+        if kind in ("assistant_reply_empty", "assistant_reply_failed"):
+            self._handle_assistant_reply_failed_event(
+                item, payload, session, turn_id, bridge_id, kind
+            )
+
+    def _handle_control_done_event(self, item, payload):
+        client_id = item.get("client_id") or "-"
+        command = (payload.get("command") or "").strip()
+        if command == "start_upload":
+            control_message_id = (item.get("message_id") or "").strip()
+            pending = (
+                getattr(self, "_pending_upload_sends", {}).get(str(control_message_id))
+                if control_message_id
+                else None
+            )
+            if pending:
+                self._on_upload_before_send_control_done(control_message_id)
+            else:
+                result = payload.get("result") or {}
+                if not isinstance(result, dict):
+                    result = {}
+                upload_status = result.get("upload_status") or {}
+                if not isinstance(upload_status, dict):
+                    upload_status = {}
+                success = int(result.get("success", 0) or 0)
+                failed = int(result.get("failed", 0) or 0)
+                attached = int(upload_status.get("attached", 0) or 0)
+                total = int(upload_status.get("total", 0) or 0)
+                self._append_log(
+                    "[上传] 完成 "
+                    f"client_id={client_id} "
+                    f"success={success} failed={failed} "
+                    f"attached={attached} total={total}",
+                    echo=True,
+                )
+                self._add_system_message(
+                    f"上传完成：成功 {success} 个，失败 {failed} 个，"
+                    f"已挂载 {attached} 个，总数 {total}。"
+                )
+            return
+        self._append_log(
+            f"[控制完成] command={command or '-'} client_id={client_id}",
+            echo=True,
+        )
+
     def _handle_inbound_events(self, items):
         for item in items:
             event_key = (
@@ -1750,464 +2321,52 @@ class BridgeMixin:
             if event_key in self._processed_inbound_ids:
                 continue
             self._processed_inbound_ids.add(event_key)
-            kind = item.get("kind", "?")
-            payload = item.get("payload") or {}
-            if kind == "report_unknown":
-                bridge_id = item.get("message_id") or "-"
-                payload = item.get("payload") or {}
-                waiting_ids = payload.get("waiting_message_ids") or []
-                self._append_log(
-                    f"[回传未知] message_id={bridge_id} event={payload.get('event') or '-'} "
-                    f"client_id={item.get('client_id') or '-'} "
-                    f"waiting_message_ids={waiting_ids}"
-                )
-                continue
-            if kind == "report_mismatch":
-                bridge_id = item.get("message_id") or "-"
-                payload = item.get("payload") or {}
-                self._append_log(
-                    f"[回传不匹配] message_id={bridge_id} "
-                    f"session_id={item.get('session_id') or '-'} "
-                    f"turn_id={item.get('turn_id') or '-'} "
-                    f"event={payload.get('event') or '-'} "
-                    f"owner_client_id={payload.get('owner_client_id') or '-'} "
-                    f"report_client_id={payload.get('report_client_id') or item.get('client_id') or '-'}"
-                )
-                continue
-            if kind in ("ack_mismatch", "report_ignored"):
-                if kind == "ack_mismatch":
-                    bridge_id = item.get("message_id") or "-"
-                    payload = item.get("payload") or {}
-                    self._append_log(
-                        f"[ACK不匹配] message_id={bridge_id} "
-                        f"session_id={item.get('session_id') or '-'} "
-                        f"turn_id={item.get('turn_id') or '-'} "
-                        f"detail={payload.get('detail') or '-'} "
-                        f"owner_client_id={payload.get('owner_client_id') or '-'} "
-                        f"report_client_id={payload.get('report_client_id') or item.get('client_id') or '-'}"
-                    )
-                continue
-            if kind in ("open_url_success", "open_url_failed"):
-                url = payload.get("url") or ""
-                detail = payload.get("detail") or ""
-                if kind == "open_url_success":
-                    self._append_log(f"[打开网页] 成功：{url} {detail}".strip())
-                else:
-                    self._append_log(f"[打开网页] 失败：{url} {detail}".strip())
-                continue
-            if kind == "close_page_requested":
-                client_id = item.get("client_id") or "-"
-                self._append_log(f"[关闭页面] 已向页面发送关闭请求 client_id={client_id}")
-                continue
-            if kind == "close_page_still_open":
-                page_url = payload.get("page_url") or ""
-                detail = payload.get("detail") or ""
-                client_id = item.get("client_id") or "-"
-                self._append_log(
-                    f"[关闭页面] 页面仍在运行 client_id={client_id} {page_url} {detail}".strip()
-                )
-                self._set_settings_hint(
-                    "页面仍在运行，浏览器可能拦截了 window.close()"
-                )
-                continue
-            if kind == "control_done":
-                client_id = item.get("client_id") or "-"
-                command = (payload.get("command") or "").strip()
-                if command == "start_upload":
-                    control_message_id = (item.get("message_id") or "").strip()
-                    pending = (
-                        getattr(self, "_pending_upload_sends", {}).get(
-                            str(control_message_id)
-                        )
-                        if control_message_id
-                        else None
-                    )
-                    if pending:
-                        self._on_upload_before_send_control_done(control_message_id)
-                    else:
-                        result = payload.get("result") or {}
-                        if not isinstance(result, dict):
-                            result = {}
-                        upload_status = result.get("upload_status") or {}
-                        if not isinstance(upload_status, dict):
-                            upload_status = {}
-                        success = int(result.get("success", 0) or 0)
-                        failed = int(result.get("failed", 0) or 0)
-                        attached = int(upload_status.get("attached", 0) or 0)
-                        total = int(upload_status.get("total", 0) or 0)
-                        self._append_log(
-                            "[上传] 完成 "
-                            f"client_id={client_id} "
-                            f"success={success} failed={failed} "
-                            f"attached={attached} total={total}",
-                            echo=True,
-                        )
-                        self._add_system_message(
-                            f"上传完成：成功 {success} 个，失败 {failed} 个，"
-                            f"已挂载 {attached} 个，总数 {total}。"
-                        )
-                    continue
-                self._append_log(
-                    f"[控制完成] command={command or '-'} client_id={client_id}",
-                    echo=True,
-                )
-                continue
-            if kind in ("close_page_success", "close_page_failed", "command_failed"):
-                page_url = payload.get("page_url") or ""
-                detail = (
-                    payload.get("detail")
-                    or payload.get("reason")
-                    or payload.get("error")
-                    or ""
-                )
-                command = (payload.get("command") or "").strip()
-                client_id = item.get("client_id") or "-"
-                if kind == "close_page_success":
-                    self._append_log(
-                        f"[关闭页面] 成功 client_id={client_id} {page_url} {detail}".strip()
-                    )
-                elif kind == "close_page_failed":
-                    self._append_log(
-                        f"[关闭页面] 失败 client_id={client_id} {page_url} {detail}".strip()
-                    )
-                elif command == "start_upload":
-                    if not detail:
-                        result_obj = payload.get("result")
-                        if isinstance(result_obj, dict):
-                            detail = (
-                                (result_obj.get("reason") or "")
-                                or (result_obj.get("detail") or "")
-                            ).strip() or detail
-                    control_message_id = (item.get("message_id") or "").strip()
-                    pending_key = str(control_message_id)
-                    if pending_key and pending_key in getattr(
-                        self, "_pending_upload_sends", {}
-                    ):
-                        self._on_upload_before_send_control_failed(
-                            control_message_id, detail
-                        )
-                    else:
-                        self._append_log(
-                            f"[上传] 失败 client_id={client_id} reason={detail or '-'}",
-                            echo=True,
-                        )
-                        self._add_system_message(
-                            f"上传失败：{detail or '未返回具体原因，请查看油猴日志'}"
-                        )
-                else:
-                    self._append_log(
-                        f"[命令] 失败 command={command or '-'} client_id={client_id} {detail}".strip(),
-                        echo=True,
-                    )
-                continue
-            if kind == "conversation_snapshot":
-                self._handle_conversation_snapshot_inbound(item)
-                continue
-            if kind == "conversation_created":
-                conv_session = self._resolve_session_for_conversation_created(item)
-                if conv_session is not None:
-                    report_client = (item.get("client_id") or "").strip()
-                    self._apply_conversation_created_binding(
-                        conv_session, payload, client_id=report_client
-                    )
-                    if hasattr(self, "_try_send_next_queued_message"):
-                        self._try_send_next_queued_message(conv_session)
-                else:
-                    payload = item.get("payload") or {}
-                    self._append_log(
-                        f"[BIND][MISMATCH] reason=conversation_created_no_session "
-                        f"message_id={(item.get('message_id') or '-')[:8]} "
-                        f"bind_request_id="
-                        f"{payload.get('bind_request_id') or payload.get('launch_token') or '-'} "
-                        f"client_id={item.get('client_id') or '-'} "
-                        f"page_instance_id={payload.get('page_instance_id') or '-'}"
-                    )
-                continue
-            session, turn_id, bridge_id = self._resolve_inbound_binding(item)
-            if session is None or not turn_id:
-                if kind in ("send_success", "send_message_result", "assistant_message"):
-                    session_id = (
-                        item.get("session_id") or payload.get("session_id") or ""
-                    ).strip()
-                    session = self._sessions.get(session_id) if session_id else None
-                    turn_id = (
-                        item.get("turn_id") or payload.get("turn_id") or ""
-                    ).strip()
-                    bridge_id = (item.get("message_id") or "").strip()
-                if session is None:
-                    continue
-            if kind in ("send_success", "send_message_result"):
-                ok = bool(payload.get("ok", payload.get("success", True)))
-                self._append_log(
-                    "[CHAT_SEND][ACK] "
-                    f"request_id={bridge_id or '-'} "
-                    f"session_id={session.session_id} "
-                    f"ok={'true' if ok else 'false'} "
-                    f"status={(payload.get('status') or payload.get('reason') or '-')}",
-                    echo=True,
-                )
-                status_text = "sent" if ok else "发送失败"
-                if hasattr(self, "_update_message_status_by_request_id"):
-                    updated = self._update_message_status_by_request_id(
-                        session.session_id,
-                        bridge_id,
-                        status_text,
-                        turn_id=turn_id,
-                    )
-                else:
-                    updated = False
-                    for message in reversed(session.messages):
-                        if message.role != "user":
-                            continue
-                        if (message.turn_id or "").strip() != (turn_id or "").strip():
-                            if bridge_id and (message.bridge_message_id or "").strip() != bridge_id:
-                                continue
-                        message.status = "已发送" if ok else "发送失败"
-                        updated = True
-                        break
-                if not updated:
-                    self._append_log(
-                        "[CHAT_MESSAGE][APPEND_FAILED] "
-                        f"reason=ack_no_user_message session_id={session.session_id} "
-                        f"request_id={bridge_id or '-'}",
-                        echo=True,
-                    )
-                if session.session_id == self._current_session_id and hasattr(
-                    self, "_render_current_chat_messages"
-                ):
-                    self._render_current_chat_messages(
-                        force_bottom=True,
-                        reason="send_success",
-                    )
-                continue
-            if kind == "assistant_message":
-                text = (payload.get("content") or payload.get("text") or "").strip()
-                if self._upsert_assistant_reply_from_bridge(
-                    session,
-                    turn_id,
-                    bridge_id,
-                    text,
-                    render_reason="assistant_message",
-                ):
-                    if bridge_id:
-                        self._finalize_bridge(bridge_id)
-                continue
-            if kind == "ack":
-                success = bool(payload.get("success"))
-                detail = payload.get("detail") or ""
-                self._append_log(
-                    "[CHAT_SEND][ACK] "
-                    f"request_id={bridge_id or '-'} "
-                    f"session_id={session.session_id} "
-                    f"ok={'true' if success else 'false'} "
-                    f"detail={detail or '-'}",
-                    echo=True,
-                )
-                ack_status = "sent" if success else "发送失败"
-                if hasattr(self, "_update_message_status_by_request_id"):
-                    self._update_message_status_by_request_id(
-                        session.session_id,
-                        bridge_id,
-                        ack_status,
-                        turn_id=turn_id,
-                    )
-                else:
-                    target_user = None
-                    for message in reversed(session.messages):
-                        if message.role != "user":
-                            continue
-                        if (message.turn_id or "").strip() == (turn_id or "").strip():
-                            target_user = message
-                            break
-                        if bridge_id and (message.bridge_message_id or "").strip() == bridge_id:
-                            target_user = message
-                            break
-                    if target_user is not None:
-                        target_user.status = "已发送" if success else "发送失败"
-                if self._is_finalized(bridge_id):
-                    if session.session_id == self._current_session_id and hasattr(
-                        self, "_render_current_chat_messages"
-                    ):
-                        self._render_current_chat_messages(
-                            force_bottom=True,
-                            reason="ack_finalized",
-                        )
-                    continue
-                if success:
-                    if self._has_assistant_for_turn(session, turn_id):
-                        self._ack_success_message_ids.add(bridge_id)
-                        self._set_reply_waiting(session, turn_id)
-                    report_client = (item.get("client_id") or "").strip()
-                    if report_client:
-                        remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                        if not remote_now.get("bootstrap_in_progress"):
-                            self._remember_session_page_from_client(
-                                session, report_client
-                            )
-                        self._update_bound_page_display()
-                else:
-                    self._ack_success_message_ids.discard(bridge_id)
-                    remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                    if remote_now.get("bootstrap_in_progress"):
-                        session.remote_chatgpt = {
-                            **remote_now,
-                            "bootstrap_in_progress": False,
-                        }
-                        self._save_sessions_to_disk()
-                    if self._has_assistant_for_turn(session, turn_id):
-                        self._set_reply_error(
-                            session,
-                            turn_id,
-                            f"发送失败：{detail or '油猴返回失败'}",
-                            "发送失败",
-                        )
-                    self._finalize_bridge(bridge_id)
-                if session.session_id == self._current_session_id and hasattr(
-                    self, "_render_current_chat_messages"
-                ):
-                    self._render_current_chat_messages(
-                        force_bottom=True,
-                        reason="ack",
-                    )
-                continue
-            if kind == "send_failed":
-                if not self._has_assistant_for_turn(
-                    session, turn_id
-                ) or self._is_finalized(bridge_id):
-                    continue
-                self._ack_success_message_ids.discard(bridge_id)
-                remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                bind_state_now = self._remote_bind_state(remote_now)
-                if (
-                    remote_now.get("bootstrap_in_progress")
-                    or bind_state_now == BIND_STATE_WAITING_CONVERSATION_CREATED
-                    or (
-                        bind_state_now == BIND_STATE_PREBOUND_HOME
-                        and not (remote_now.get("conversation_id") or "").strip()
-                    )
-                ):
-                    session.remote_chatgpt = {
-                        **default_remote_chatgpt(),
-                        "bind_state": BIND_STATE_UNBOUND,
-                    }
-                    session.updated_at = time.time()
-                    self._save_sessions_to_disk()
-                    self._append_log(
-                        "[BIND][BOOTSTRAP_FAILED_RESET] "
-                        f"session_id={session.session_id} "
-                        f"message_id={bridge_id[:8] if bridge_id else '-'} "
-                        f"reason={payload.get('reason') or payload.get('detail') or '-'}"
-                    )
-                detail = (
-                    payload.get("detail")
-                    or payload.get("reason")
-                    or str(payload)
-                )
-                reason_labels = {
-                    "target_client_id_mismatch": "目标 client_id 与当前页面不一致",
-                    "conversation_id_mismatch": "目标会话与当前页面不一致",
-                    "target_page_url_mismatch": "目标页面 URL 与当前页面不一致",
-                    "not_conversation_page": "当前页面不是 ChatGPT 对话页",
-                    "not_home_page": "bootstrap 要求 ChatGPT 首页",
-                    "bootstrap_target_not_home": "bootstrap 只能发送到 ChatGPT 首页",
-                    "home_already_has_conversation": "首页不应已有 conversation_id",
-                    "bootstrap_target_has_conversation": "首页不应已有 conversation_id",
-                    "target_page_instance_id_mismatch": "预绑定首页 page_instance_id 不一致",
-                    "bind_request_id_mismatch": "绑定令牌与当前页面不一致",
-                    "conversation_created_timeout": "首条消息已发送，但未检测到新对话页",
-                }
-                if payload.get("reason") in reason_labels:
-                    detail = reason_labels[payload["reason"]]
-                self._set_reply_error(
-                    session, turn_id, f"发送失败：{detail}", "发送失败"
-                )
-                target_user = None
-                for message in reversed(session.messages):
-                    if (
-                        message.role == "user"
-                        and (message.turn_id or "").strip() == (turn_id or "").strip()
-                    ):
-                        target_user = message
-                        break
-                if target_user is not None:
-                    target_user.status = "发送失败"
-                    session.updated_at = time.time()
-                    failed_text = (target_user.content or "").strip()
-                    if failed_text and hasattr(self, "message_input"):
-                        self.message_input.setPlainText(failed_text)
-                    elif failed_text and hasattr(self, "message_edit"):
-                        self.message_edit.setPlainText(failed_text)
-                self._add_system_message_once(
-                    "消息发送失败，请检查绑定页面后重试。已将失败消息恢复到输入框。",
-                    dedupe_seconds=10,
-                )
-                self._finalize_bridge(bridge_id)
-                self._try_send_next_queued_message(session)
-                continue
-            if kind == "assistant_reply":
-                if self._is_finalized(bridge_id):
-                    continue
-                text = (payload.get("text") or payload.get("content") or "").strip()
-                if self._upsert_assistant_reply_from_bridge(
-                    session,
-                    turn_id,
-                    bridge_id,
-                    text,
-                    render_reason="assistant_reply",
-                ):
-                    self._finalize_bridge(bridge_id)
-                    self._ack_success_message_ids.discard(bridge_id)
-                    report_client = (item.get("client_id") or "").strip()
-                    if report_client:
-                        self._remember_session_page_from_client(
-                            session, report_client
-                        )
-                        self._update_bound_page_display()
-                    if getattr(self, "_auto_sync_conversation_after_reply", False):
-                        self._schedule_auto_sync_conversation(
-                            session, request_reason="auto_after_reply"
-                        )
-                    self._try_send_next_queued_message(session)
-                else:
-                    self._set_reply_error(
-                        session, turn_id, "ChatGPT 返回了空回复。", "空回复"
-                    )
-                    self._finalize_bridge(bridge_id)
-                    self._try_send_next_queued_message(session)
-                continue
-            if kind in ("assistant_reply_empty", "assistant_reply_failed"):
-                if not self._has_assistant_for_turn(
-                    session, turn_id
-                ) or self._is_finalized(bridge_id):
-                    continue
-                self._ack_success_message_ids.discard(bridge_id)
-                detail = (
-                    payload.get("reason")
-                    or payload.get("detail")
-                    or payload.get("error_message")
-                    or ""
-                )
-                if not detail:
-                    if kind == "assistant_reply_empty":
-                        detail = "ChatGPT 已发送，但未读取到回复内容。"
-                    else:
-                        detail = "读取 ChatGPT 回复失败。"
-                busy = payload.get("busy")
-                busy_reason = payload.get("busy_reason") or ""
-                if busy:
-                    detail = f"{detail}（busy={busy_reason or 'yes'}）"
-                elapsed = payload.get("elapsed_ms")
-                if elapsed is not None:
-                    detail = f"{detail}（等待 {elapsed}ms）"
-                prefix = "读取回复失败："
-                if not str(detail).startswith(prefix) and kind == "assistant_reply_failed":
-                    detail = f"{prefix}{detail}"
-                status_text = "读取失败" if kind == "assistant_reply_failed" else "空回复"
-                self._set_reply_error(session, turn_id, detail, status_text)
-                self._finalize_bridge(bridge_id)
-                self._try_send_next_queued_message(session)
-                continue
-            continue
+            self._handle_inbound_event(item)
+
+    def _handle_inbound_event(self, item):
+        kind = item.get("kind", "?")
+        payload = item.get("payload") or {}
+        if kind == "report_unknown":
+            self._handle_report_unknown_event(item, payload)
+            return
+        if kind == "report_mismatch":
+            self._handle_report_mismatch_event(item, payload)
+            return
+        if kind in ("ack_mismatch", "report_ignored"):
+            self._handle_ack_mismatch_or_ignored_event(item, payload, kind)
+            return
+        if kind in ("open_url_success", "open_url_failed"):
+            self._handle_open_url_result_event(item, payload, kind)
+            return
+        if kind == "close_page_requested":
+            client_id = item.get("client_id") or "-"
+            self._append_log(f"[关闭页面] 已向页面发送关闭请求 client_id={client_id}")
+            return
+        if kind == "close_page_still_open":
+            page_url = payload.get("page_url") or ""
+            detail = payload.get("detail") or ""
+            client_id = item.get("client_id") or "-"
+            self._append_log(
+                f"[关闭页面] 页面仍在运行 client_id={client_id} {page_url} {detail}".strip()
+            )
+            self._set_settings_hint(
+                "页面仍在运行，浏览器可能拦截了 window.close()"
+            )
+            return
+        if kind == "control_done":
+            self._handle_control_done_event(item, payload)
+            return
+        if kind in ("close_page_success", "close_page_failed", "command_failed"):
+            self._handle_command_result_event(item, payload, kind)
+            return
+        if kind == "conversation_snapshot":
+            self._handle_conversation_snapshot_inbound(item)
+            return
+        if kind == "conversation_created":
+            self._handle_conversation_created_event(item, payload)
+            return
+        self._handle_bound_message_event(item, payload, kind)
+
     def _render_inbound_log(self, items):
         if not items:
             self.event_log_edit.setPlainText("（暂无回传）")

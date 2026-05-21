@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import socket
@@ -6,28 +7,30 @@ import time
 import traceback
 import uuid
 from collections import deque
-from pathlib import Path
 from flask import Flask, jsonify, request
 from log_utils import append_log, clear_log_file
 from app.core import job_scheduler as _job_scheduler
-from app.constants import TM_HEARTBEAT_ONLINE_SECONDS
 from app.url_utils import parse_conversation_id
 from app.utils.bridge_payload import (
     normalize_inbound_push_payload,
     normalize_outbound_bridge_message,
 )
-from app.utils.page_status import explain_page_decision, page_url_from
+from app.utils.page_status import (
+    explain_page_decision,
+    get_page_liveness,
+    is_page_online,
+    normalize_page_url_fields,
+    page_url_from,
+)
 from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
 from flask_cors import CORS
+from werkzeug.exceptions import BadRequest, HTTPException
 from werkzeug.serving import WSGIRequestHandler, make_server
 
 from app.server import state as st
 from app.server.state import (
-    LAST_FOCUSED_TM_PAGE_MAX_AGE_SEC,
     LEASE_SEC,
     MAX_CONTROL_QUEUE_SIZE,
-    MAX_INBOUND_HISTORY_SIZE,
-    MAX_OUTBOUND_HISTORY_SIZE,
     MAX_OUTBOUND_QUEUE_SIZE,
     ONLINE_TIMEOUT_SEC,
     POLL_SUMMARY_INTERVAL_SEC,
@@ -55,16 +58,10 @@ from app.server.state import (
     _tampermonkey_clients,
     _tampermonkey_pages,
     _tm_prev_snapshot,
-    bound_client_id,
-    bound_session_id,
-    tampermonkey_client_id,
-    tampermonkey_last_seen,
-    tampermonkey_page_url,
 )
 from app.server.session_bindings import (
     clear_session_binding,
     gc_orphan_session_bindings,
-    set_bound_client_id,
 )
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -98,6 +95,10 @@ _server_bind_host = None
 _server_port = None
 _server_public_host = None
 _debug_mode = False
+# @deprecated — 旧版 /process 开关（CHATGPT_ENABLE_LEGACY_PROCESS=1|true|yes 时启用）。
+# 当前 client.user.js 已使用 /api/bridge；/process 仅供历史客户端兼容。
+# 删除条件：连续一个版本日志中未出现 [API][DEPRECATED] endpoint=/process，
+# 且确认无外部脚本依赖 CHATGPT_ENABLE_LEGACY_PROCESS。
 ENABLE_LEGACY_PROCESS_ENDPOINT = (
     os.environ.get("CHATGPT_ENABLE_LEGACY_PROCESS", "").strip().lower()
     in ("1", "true", "yes")
@@ -135,6 +136,164 @@ def _format_log_fields(fields):
             continue
         parts.append(f"{key}={value}")
     return " ".join(parts)
+
+
+BRIDGE_JSON_LOG_TEXT_LIMIT = 1200
+BRIDGE_JSON_LOG_MAX_CHARS = 9000
+BRIDGE_JSON_LOG_LIST_LIMIT = 5
+BRIDGE_JSON_SECRET_KEYS = {
+    "authorization",
+    "x-api-key",
+    "api_key",
+    "api_token",
+    "token",
+    "bridgeapitoken",
+    "bridge_api_token",
+    "password",
+    "cookie",
+    "set-cookie",
+}
+BRIDGE_JSON_LONG_TEXT_KEYS = {
+    "content",
+    "raw_content",
+    "text",
+    "assistant_text",
+    "processed_data",
+    "prompt",
+    "message",
+    "final_prompt",
+    "reply",
+}
+
+
+def _bridge_clip_text(value, limit=BRIDGE_JSON_LOG_TEXT_LIMIT):
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...<truncated len={len(text)}>"
+
+
+def _bridge_json_safe_value(value, depth=0):
+    if depth >= 6:
+        return f"<max_depth type={type(value).__name__}>"
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if key_lower in BRIDGE_JSON_SECRET_KEYS:
+                out[key_text] = "***"
+                continue
+            if key_lower in BRIDGE_JSON_LONG_TEXT_KEYS:
+                raw_text = str(item or "")
+                out[key_text] = _bridge_clip_text(raw_text)
+                out[f"{key_text}_len"] = len(raw_text)
+                out[f"{key_text}_truncated"] = len(raw_text) > BRIDGE_JSON_LOG_TEXT_LIMIT
+                continue
+            if key_lower == "messages" and isinstance(item, list):
+                out["messages_count"] = len(item)
+                out["messages"] = [
+                    _bridge_json_safe_value(row, depth + 1)
+                    for row in item[:BRIDGE_JSON_LOG_LIST_LIMIT]
+                ]
+                if len(item) > BRIDGE_JSON_LOG_LIST_LIMIT:
+                    out["messages_truncated_count"] = len(item) - BRIDGE_JSON_LOG_LIST_LIMIT
+                continue
+            out[key_text] = _bridge_json_safe_value(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        rows = [
+            _bridge_json_safe_value(item, depth + 1)
+            for item in value[:BRIDGE_JSON_LOG_LIST_LIMIT]
+        ]
+        if len(value) > BRIDGE_JSON_LOG_LIST_LIMIT:
+            rows.append(f"<list_truncated count={len(value) - BRIDGE_JSON_LOG_LIST_LIMIT}>")
+        return rows
+    if isinstance(value, tuple):
+        return _bridge_json_safe_value(list(value), depth + 1)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str):
+            return _bridge_clip_text(value)
+        return value
+    return str(value)
+
+
+def _bridge_json_dumps_for_log(payload):
+    safe_payload = _bridge_json_safe_value(payload)
+    text = json.dumps(
+        safe_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    if len(text) > BRIDGE_JSON_LOG_MAX_CHARS:
+        return text[:BRIDGE_JSON_LOG_MAX_CHARS] + f"...<json_truncated len={len(text)}>"
+    return text
+
+
+def _bridge_json_should_log(action, response_payload=None):
+    action = (action or "").strip()
+    if _is_bridge_debug_enabled():
+        return True
+    if action == "poll":
+        return bool(response_payload and response_payload.get("has_message"))
+    if action in ("ack", "report"):
+        return True
+    return True
+
+
+def _log_bridge_json_line(line):
+    """油猴桥接 JSON 日志；GUI 模式下额外 print 到命令行。"""
+    _log(line, tag="bridge_json")
+    if _log_callback:
+        now_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        print(f"[{now_text}][SERVER] {line}")
+
+
+def _log_bridge_json_payload(direction, payload, *, action="", event="", message_id="", client_id=""):
+    action = (action or "").strip() or "-"
+    event = (event or "").strip() or "-"
+    message_id = (message_id or "").strip() or "-"
+    client_id = (client_id or "").strip() or "-"
+    json_text = _bridge_json_dumps_for_log(payload)
+    _log_bridge_json_line(
+        f"[BRIDGE][JSON][{direction}] "
+        f"action={action} event={event} "
+        f"client_id={client_id} message_id={message_id} "
+        f"json={json_text}"
+    )
+
+
+def _log_bridge_exchange(action, request_payload, response_payload):
+    if not _bridge_json_should_log(action, response_payload):
+        return
+    event = ""
+    message_id = ""
+    client_id = ""
+    if isinstance(request_payload, dict):
+        event = str(request_payload.get("event") or "")
+        message_id = str(request_payload.get("message_id") or "")
+        client_id = str(request_payload.get("client_id") or "")
+    if not message_id and isinstance(response_payload, dict):
+        message_id = str(response_payload.get("message_id") or response_payload.get("id") or "")
+    _log_bridge_json_payload(
+        "TM_TO_SERVER",
+        request_payload,
+        action=action,
+        event=event,
+        message_id=message_id,
+        client_id=client_id,
+    )
+    _log_bridge_json_payload(
+        "SERVER_TO_TM",
+        response_payload,
+        action=action,
+        event=event,
+        message_id=message_id,
+        client_id=client_id,
+    )
+
+
 # Cursor Bridge：GUI / 插件 任务队列与回报
 cursor_task_queue = deque()
 cursor_task_reports = deque(maxlen=200)
@@ -277,9 +436,18 @@ def _log(message, tag=""):
     if not _should_emit_bridge_log(tag, text):
         return
     if _log_callback:
-        _log_callback(f"[SERVER] {text}")
-    else:
-        append_log(text, source="SERVER", echo=True)
+        try:
+            _log_callback(f"[SERVER] {text}")
+        except Exception as error:
+            append_log(
+                "[SERVER][LOG_CALLBACK_FAILED] "
+                f"error_type={type(error).__name__} "
+                f"error={error}\n{traceback.format_exc()}",
+                source="SERVER",
+                echo=True,
+            )
+        return
+    append_log(text, source="SERVER", echo=True)
 
 
 def _init_job_scheduler_hooks():
@@ -291,8 +459,25 @@ _init_job_scheduler_hooks()
 
 
 def _notify_status():
-    if _status_callback:
-        _status_callback(get_bridge_status())
+    if not _status_callback:
+        return
+    try:
+        status = get_bridge_status()
+    except Exception as error:
+        _log(
+            "[SERVER][STATUS_BUILD_FAILED] "
+            f"error_type={type(error).__name__} "
+            f"error={error}\n{traceback.format_exc()}"
+        )
+        return
+    try:
+        _status_callback(status)
+    except Exception as error:
+        _log(
+            "[SERVER][STATUS_CALLBACK_FAILED] "
+            f"error_type={type(error).__name__} "
+            f"error={error}\n{traceback.format_exc()}"
+        )
 
 def _now():
     return time.time()
@@ -302,21 +487,87 @@ def _format_time(ts):
 
     return format_ts(ts)
 
+
+def _safe_int_field(value, default=0, *, context="", field=""):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[SERVER][INT_FIELD_FALLBACK] "
+            f"context={context or '-'} "
+            f"field={field or '-'} "
+            f"value={value!r} "
+            f"default={default!r} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return int(default)
+
+
+def _tm_seen_float(info, *, field="last_seen", default=0.0, context=""):
+    info_dict = info if isinstance(info, dict) else {}
+    raw = info_dict.get(field) if info_dict else None
+    try:
+        return float(raw if raw not in (None, "") else default)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[TM][TIME_FIELD_FALLBACK] "
+            f"context={context or '-'} "
+            f"field={field} "
+            f"value={raw!r} "
+            f"client_id={info_dict.get('client_id') or '-'} "
+            f"page_instance_id={info_dict.get('page_instance_id') or '-'} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return float(default)
+
+
 def is_tampermonkey_online():
-    if tampermonkey_last_seen is None:
+    with _state_lock:
+        last_seen = st.tampermonkey_last_seen
+    if not last_seen:
         return False
-    return (_now() - tampermonkey_last_seen) <= ONLINE_TIMEOUT_SEC
+    return (_now() - float(last_seen)) <= ONLINE_TIMEOUT_SEC
 
 def _client_online(last_seen):
-    if last_seen is None:
+    """@deprecated 仅兼容旧调用；业务判断请用 is_page_online(page)。"""
+    if last_seen is None or last_seen == "":
         return False
-    return (_now() - last_seen) <= ONLINE_TIMEOUT_SEC
+    return is_page_online({"last_seen": last_seen})
+
+
+def get_bridge_message_id(msg):
+    if not isinstance(msg, dict):
+        return ""
+    return (msg.get("message_id") or msg.get("id") or "").strip()
+
+
+def _bridge_message_id_matches(msg, message_id):
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return False
+    return get_bridge_message_id(msg) == message_id
+
+
+def _sync_message_status_fields(msg, status):
+    if not isinstance(msg, dict):
+        return
+    msg["message_status"] = status
+    msg["status"] = status
+
+
+def _set_message_status(msg, status, *, error_detail=None):
+    if not isinstance(msg, dict):
+        return
+    _sync_message_status_fields(msg, status)
+    msg["finalized_at"] = _now()
+    if error_detail is not None:
+        msg["error_detail"] = error_detail
 
 def _is_ignored_page(meta):
     page_type = (meta.get("page_type") or "").strip()
     page_url = page_url_from(meta) if isinstance(meta, dict) else ""
-    if not page_url:
-        page_url = (meta.get("page_url") or "").strip()
     if page_type == "ignored":
         return True
     if "/backend-api/" in page_url or "/sentinel/" in page_url or "frame.html" in page_url:
@@ -360,7 +611,11 @@ def _registry_entry_for_client(client_id, page_instance_id=""):
             for info in _tampermonkey_pages.values():
                 if (info.get("client_id") or "").strip() != client_id:
                     continue
-                seen = float(info.get("last_seen") or 0)
+                seen = _tm_seen_float(
+                    info,
+                    field="last_seen",
+                    context="_registry_entry_for_client",
+                )
                 if seen >= best_seen:
                     best_seen = seen
                     best = info
@@ -370,23 +625,8 @@ def _registry_entry_for_client(client_id, page_instance_id=""):
         return dict(entry) if entry else {}
 
 
-def _set_bound_session_on_registry(client_id, page_instance_id, session_id):
-    session_id = (session_id or "").strip()
-    client_id = (client_id or "").strip()
-    page_instance_id = (page_instance_id or "").strip()
-    with _state_lock:
-        if _tampermonkey_pages:
-            if page_instance_id:
-                key = _page_registry_key(client_id, page_instance_id)
-                page = _tampermonkey_pages.get(key)
-                if page is not None:
-                    page["bound_session_id"] = session_id
-            else:
-                for info in _tampermonkey_pages.values():
-                    if (info.get("client_id") or "").strip() == client_id:
-                        info["bound_session_id"] = session_id
-        if client_id in _tampermonkey_clients:
-            _tampermonkey_clients[client_id]["bound_session_id"] = session_id
+# Registry 级 bound_session_id 写入（_set_bound_session_on_registry）已移除；
+# 主绑定在 GUI session.remote_chatgpt。本函数仅清理残留。
 
 
 def _clear_bound_session_on_registry(session_id, client_id=""):
@@ -415,16 +655,9 @@ def _clear_bound_session_on_registry(session_id, client_id=""):
 
 def _overwrite_page_identity_fields(entry, meta):
     """同一 page_instance 的 URL/对话字段允许被后续 poll/report 覆盖。"""
-    page_url_val = (
-        (meta.get("url") or meta.get("page_url") or meta.get("conversation_url") or "")
-        .strip()
-    )
+    page_url_val = page_url_from(meta) if isinstance(meta, dict) else ""
     if page_url_val:
-        entry["page_url"] = page_url_val
         entry["url"] = page_url_val
-    elif "page_url" in meta:
-        entry["page_url"] = (meta.get("page_url") or "").strip()
-        entry["url"] = entry["page_url"]
     if "page_title" in meta:
         entry["page_title"] = (meta.get("page_title") or "").strip()
     if "pathname" in meta:
@@ -449,22 +682,34 @@ def _sync_tampermonkey_page_registry(entry):
     page_entry["client_id"] = client_id
     page_entry["page_instance_id"] = page_instance_id
 
-def get_tm_online_summary(bound_client_id=None, bound_conversation_id=None):
+def get_tm_online_summary(
+    bound_client_id=None,
+    bound_conversation_id=None,
+    *,
+    snapshot_clients=None,
+):
     """统计油猴页面在线数量（以 _tampermonkey_pages 为主，client 表仅兼容）。"""
     bound_client_id = (bound_client_id or "").strip() or None
     bound_conversation_id = (bound_conversation_id or "").strip() or None
     if bound_conversation_id in ("", "-"):
         bound_conversation_id = None
 
-    with _state_lock:
-        if _tampermonkey_pages:
-            all_entries = [
-                ((info.get("client_id") or "").strip(), info)
-                for info in _tampermonkey_pages.values()
-                if (info.get("client_id") or "").strip()
-            ]
-        else:
-            all_entries = list(_tampermonkey_clients.items())
+    if snapshot_clients is not None:
+        all_entries = [
+            ((item.get("client_id") or "").strip(), item)
+            for item in snapshot_clients
+            if (item.get("client_id") or "").strip()
+        ]
+    else:
+        with _state_lock:
+            if _tampermonkey_pages:
+                all_entries = [
+                    ((info.get("client_id") or "").strip(), info)
+                    for info in _tampermonkey_pages.values()
+                    if (info.get("client_id") or "").strip()
+                ]
+            else:
+                all_entries = list(_tampermonkey_clients.items())
 
     total_clients = len(all_entries)
     online_clients = 0
@@ -475,25 +720,49 @@ def get_tm_online_summary(bound_client_id=None, bound_conversation_id=None):
     active_conversation_id = None
     active_last_seen = 0.0
     active_conv_last_seen = 0.0
-    bound_online = False
-    bound_page_type = ""
+    exact_bound_info = None
+    conversation_fallback_info = None
     bound_registry_conv_id = None
 
     for client_id, info in all_entries:
-        last_seen = info.get("last_seen")
-        online = _client_online(last_seen)
+        online = is_page_online(info)
         if online:
             online_clients += 1
         else:
             offline_clients += 1
 
         page_type = (info.get("page_type") or "").strip()
+        conversation_id = (info.get("conversation_id") or "").strip()
+        if conversation_id == "-":
+            conversation_id = ""
+
         if bound_client_id and client_id == bound_client_id:
-            bound_online = online
-            bound_page_type = page_type
-            registry_conv = (info.get("conversation_id") or "").strip()
-            if registry_conv and registry_conv != "-":
-                bound_registry_conv_id = registry_conv
+            exact_bound_info = info
+            if conversation_id:
+                bound_registry_conv_id = conversation_id
+
+        if (
+            bound_conversation_id
+            and conversation_id == bound_conversation_id
+            and page_type == "conversation"
+            and online
+        ):
+            current_seen = _tm_seen_float(
+                info,
+                field="last_seen",
+                context="get_tm_online_summary.conversation_fallback",
+            )
+            old_seen = (
+                _tm_seen_float(
+                    conversation_fallback_info,
+                    field="last_seen",
+                    context="get_tm_online_summary.conversation_fallback_old",
+                )
+                if conversation_fallback_info
+                else 0.0
+            )
+            if conversation_fallback_info is None or current_seen >= old_seen:
+                conversation_fallback_info = info
 
         if _is_ignored_page(info):
             continue
@@ -503,18 +772,46 @@ def get_tm_online_summary(bound_client_id=None, bound_conversation_id=None):
                 online_conversation_clients += 1
             elif page_type == "home":
                 online_home_clients += 1
-            seen_ts = float(last_seen or 0)
+            seen_ts = _tm_seen_float(
+                info,
+                field="last_seen",
+                context="get_tm_online_summary",
+            )
             if seen_ts >= active_last_seen:
                 active_last_seen = seen_ts
                 active_client_id = client_id
-            conversation_id = (info.get("conversation_id") or "").strip()
-            if page_type == "conversation" and conversation_id and conversation_id != "-":
+            if page_type == "conversation" and conversation_id:
                 if seen_ts >= active_conv_last_seen:
                     active_conv_last_seen = seen_ts
                     active_conversation_id = conversation_id
 
     if bound_conversation_id is None and bound_registry_conv_id:
         bound_conversation_id = bound_registry_conv_id
+
+    bound_online = False
+    bound_page_type = ""
+    bound_match_mode = "offline"
+    resolved_bound_client_id = bound_client_id
+
+    if isinstance(exact_bound_info, dict):
+        exact_online = is_page_online(exact_bound_info)
+        if exact_online:
+            bound_online = True
+            bound_page_type = (exact_bound_info.get("page_type") or "").strip()
+            resolved_bound_client_id = (
+                (exact_bound_info.get("client_id") or bound_client_id or "").strip()
+                or bound_client_id
+            )
+            bound_match_mode = "client"
+
+    if not bound_online and isinstance(conversation_fallback_info, dict):
+        bound_online = True
+        bound_page_type = (conversation_fallback_info.get("page_type") or "").strip()
+        resolved_bound_client_id = (
+            (conversation_fallback_info.get("client_id") or "").strip()
+            or bound_client_id
+        )
+        bound_match_mode = "conversation_fallback"
 
     bound_dialog_ready = bool(
         bound_online
@@ -530,11 +827,13 @@ def get_tm_online_summary(bound_client_id=None, bound_conversation_id=None):
         "online_home_clients": online_home_clients,
         "active_client_id": active_client_id,
         "active_conversation_id": active_conversation_id,
-        "bound_client_id": bound_client_id,
+        "bound_client_id": resolved_bound_client_id,
+        "stored_bound_client_id": bound_client_id,
         "bound_conversation_id": bound_conversation_id,
         "bound_online": bound_online,
         "bound_page_type": bound_page_type,
         "bound_dialog_ready": bound_dialog_ready,
+        "bound_match_mode": bound_match_mode,
         "online_timeout_sec": ONLINE_TIMEOUT_SEC,
     }
 
@@ -551,7 +850,6 @@ def _snapshot_clients():
         if not client_id:
             continue
         last_seen = info.get("last_seen")
-        visibility = (info.get("visibility_state") or "").strip()
         activity_state = classify_tm_client_activity(info, now=now)
         _, seen_age, poll_age, _ = compute_tm_activity_metrics(info, now=now)
         decision = explain_page_decision(info, action="sync")
@@ -560,18 +858,16 @@ def _snapshot_clients():
                 "client_id": client_id or (info.get("client_id") or ""),
                 "page_instance_id": info.get("page_instance_id") or "",
                 "script_version": info.get("script_version") or "",
-                "page_url": decision.get("url") or info.get("page_url") or info.get("url") or "",
-                "url": decision.get("url") or info.get("url") or info.get("page_url") or "",
+                "url": decision.get("url") or page_url_from(info) or "",
                 "page_title": info.get("page_title") or "",
                 "page_type": info.get("page_type") or "",
                 "conversation_id": info.get("conversation_id") or "",
                 "is_top_frame": bool(info.get("is_top_frame", True)),
                 "visibility_state": info.get("visibility_state") or "",
-                "visible": visibility,
                 "has_focus": bool(info.get("has_focus")),
                 "last_focus_at": info.get("last_focus_at"),
                 "pathname": info.get("pathname") or "",
-                "last_seen": last_seen,
+                "last_seen": info.get("last_seen"),
                 "last_heartbeat_at": info.get("last_heartbeat_at"),
                 "last_poll_at": info.get("last_poll_at"),
                 "last_claim_at": info.get("last_claim_at"),
@@ -579,9 +875,10 @@ def _snapshot_clients():
                 "activity_state": activity_state,
                 "seen_age_seconds": round(seen_age, 3),
                 "poll_age_seconds": round(poll_age, 3),
-                "online": _client_online(last_seen),
+                "page_liveness": decision.get("page_liveness") or "offline",
+                "online": bool(decision.get("online")),
                 "bound_session_id": info.get("bound_session_id") or "",
-                "is_bound": client_id == bound_client_id,
+                "bind_state_source": "session.remote_chatgpt",
                 "bind_request_id": info.get("bind_request_id") or "",
                 "launch_token": info.get("launch_token") or "",
                 "is_responding": bool(info.get("is_responding", False)),
@@ -590,24 +887,36 @@ def _snapshot_clients():
                 "response_state_at": info.get("response_state_at"),
                 "can_accept_input": bool(info.get("can_accept_input", True)),
                 "can_send_now": bool(info.get("can_send_now")) if "can_send_now" in info else None,
+                "url_syncable": bool(decision.get("url_syncable")),
                 "syncable": bool(decision.get("syncable")),
                 "conversation_syncable": bool(decision.get("conversation_syncable")),
                 "dialog_ready": bool(decision.get("dialog_ready")),
                 "sendable": bool(decision.get("sendable")),
+                "queueable": bool(decision.get("queueable")),
+                "send_decision": decision.get("send_decision") or "",
                 "last_response_state_seen_at": info.get("last_response_state_seen_at"),
                 "response_started_at": info.get("response_started_at"),
                 "response_last_text_changed_at": info.get("response_last_text_changed_at"),
                 "upload_bridge_supported": bool(info.get("upload_bridge_supported")),
-                "upload_bridge_version": int(info.get("upload_bridge_version") or 0),
+                "upload_bridge_version": _safe_int_field(
+                    info.get("upload_bridge_version"),
+                    0,
+                    context="_snapshot_clients",
+                    field="upload_bridge_version",
+                ),
             }
         )
     return items
 
 def get_bridge_status():
     with _state_lock:
+        tm_last_seen = st.tampermonkey_last_seen
+        tm_client_id = st.tampermonkey_client_id
+        tm_page_url = st.tampermonkey_page_url
         waiting_acks = [dict(msg) for msg in _outbound_waiting.values()]
         waiting = waiting_acks[0] if waiting_acks else None
         server_url = get_server_url() if is_server_running() else ""
+        snapshot_clients = _snapshot_clients()
         return {
             "server_running": is_server_running(),
             "server_url": server_url,
@@ -615,13 +924,13 @@ def get_bridge_status():
             "server_port": get_server_port() if is_server_running() else None,
             "server_bind_host": get_server_bind_host() if is_server_running() else "",
             "tampermonkey_online": is_tampermonkey_online(),
-            "tampermonkey_last_seen": tampermonkey_last_seen,
-            "tampermonkey_client_id": tampermonkey_client_id,
-            "tampermonkey_page_url": tampermonkey_page_url,
-            "bound_client_id": bound_client_id,
-            "bound_session_id": bound_session_id,
-            "tampermonkey_clients": _snapshot_clients(),
-            "tm_online_summary": get_tm_online_summary(),
+            "tampermonkey_last_seen": tm_last_seen,
+            "tampermonkey_client_id": tm_client_id,
+            "tampermonkey_page_url": tm_page_url,
+            "tampermonkey_clients": snapshot_clients,
+            "tm_online_summary": get_tm_online_summary(
+                snapshot_clients=snapshot_clients
+            ),
             "queue_length": len(_outbound_queue),
             "control_queue_length": len(_control_queue),
             "control_waiting_count": len(_control_waiting),
@@ -643,20 +952,18 @@ def push_message(data):
     payload = normalize_inbound_push_payload(data)
     session_id = (payload.get("session_id") or "").strip()
     turn_id = (payload.get("turn_id") or "").strip()
-    raw_content = (payload.get("raw_content") or "").strip()
-    content = (payload.get("content") or "").strip()
-    if not content:
-        raise ValueError("content/raw_content 不能为空")
+    content = str(payload.get("content") or "")
+    raw_content = str(payload.get("raw_content") or "")
     if not raw_content:
         raw_content = content
+    if not content.strip():
+        raise ValueError("content/raw_content 不能为空")
     target_client_id = (payload.get("target_client_id") or "").strip() or None
     target_url = page_url_from(payload) or None
-    target_page_url = target_url
     target_page_instance_id = (
         (payload.get("target_page_instance_id") or "").strip() or None
     )
     conversation_id = (payload.get("conversation_id") or "").strip() or None
-    conversation_url = (payload.get("conversation_url") or target_url or "").strip() or None
     bootstrap_conversation = bool(payload.get("bootstrap_conversation"))
     bind_request_id = (
         (payload.get("bind_request_id") or payload.get("launch_token") or "").strip()
@@ -666,6 +973,7 @@ def push_message(data):
     trace_id = (payload.get("trace_id") or "").strip() or None
     message_id = str(uuid.uuid4())
     msg = {
+        # @deprecated Compatibility for older clients; internal code should use message_id.
         "id": message_id,
         "message_id": message_id,
         "type": "chat",
@@ -677,10 +985,8 @@ def push_message(data):
         "url": target_url or "",
         "target_url": target_url or "",
         "target_client_id": target_client_id,
-        "target_page_url": target_page_url,
         "target_page_instance_id": target_page_instance_id,
         "conversation_id": conversation_id,
-        "conversation_url": conversation_url,
         "bootstrap_conversation": bootstrap_conversation,
         "bind_request_id": bind_request_id,
         "launch_token": launch_token,
@@ -715,10 +1021,18 @@ def push_message(data):
     _log(
         f"[CHAT_QUEUE][PUT_OK] trace_id={trace_id or '-'} "
         f"message_id={message_id} target_client={target_hint} "
-        f"target_conv={conversation_id or '-'} url={page_hint} text_len={len(content)} "
+        f"target_conv={conversation_id or '-'} url={page_hint} content_len={len(content)} "
         f"queue_before={queue_before} queue_after={queue_after} "
         f"session_id={session_id or '-'} turn_id={turn_id or '-'} "
         f"page={page_hint} preview={preview}"
+    )
+    _log_bridge_json_payload(
+        "SERVER_TO_TM_QUEUE",
+        msg,
+        action="queue_chat",
+        event="chat",
+        message_id=message_id,
+        client_id=target_client_id or "",
     )
     _notify_status()
     return msg
@@ -730,7 +1044,7 @@ def get_message_state(message_id):
         return None
     with _state_lock:
         for msg in _outbound_queue:
-            if msg.get("id") == message_id:
+            if _bridge_message_id_matches(msg, message_id):
                 return dict(msg)
         msg = _outbound_waiting.get(message_id)
         if msg:
@@ -739,7 +1053,7 @@ def get_message_state(message_id):
         if msg:
             return dict(msg)
         for msg in _outbound_history:
-            if msg.get("id") == message_id:
+            if _bridge_message_id_matches(msg, message_id):
                 return dict(msg)
     return None
 
@@ -753,10 +1067,8 @@ def cancel_message(message_id, reason="cancelled"):
         kept = deque()
         while _outbound_queue:
             msg = _outbound_queue.popleft()
-            if msg.get("id") == message_id:
-                msg["status"] = "cancelled"
-                msg["finalized_at"] = _now()
-                msg["error_detail"] = reason
+            if _bridge_message_id_matches(msg, message_id):
+                _set_message_status(msg, "cancelled", error_detail=reason)
                 _outbound_history.append(dict(msg))
                 cancelled = True
             else:
@@ -765,9 +1077,7 @@ def cancel_message(message_id, reason="cancelled"):
 
         msg = _outbound_waiting.pop(message_id, None)
         if msg:
-            msg["status"] = "cancelled"
-            msg["finalized_at"] = _now()
-            msg["error_detail"] = reason
+            _set_message_status(msg, "cancelled", error_detail=reason)
             _outbound_history.append(dict(msg))
             cancelled = True
 
@@ -791,7 +1101,7 @@ def _queue_control_message(command, *, log_label="", **extra):
 
     label = log_label or command
     target_client_id = msg.get("target_client_id") or "-"
-    target_page_url = page_url_from(msg) or msg.get("target_page_url") or "-"
+    target_url = page_url_from(msg) or "-"
     page_instance = msg.get("target_page_instance_id") or "-"
     conversation = msg.get("target_conversation_id") or "-"
     request_id = ""
@@ -802,7 +1112,7 @@ def _queue_control_message(command, *, log_label="", **extra):
         f"[BRIDGE][CONTROL][QUEUE] command={command} "
         f"message_id={msg['id'][:8]}… "
         f"target_client_id={target_client_id} "
-        f"target_page_url={target_page_url} "
+        f"target_url={target_url} "
         f"page_instance={page_instance} "
         f"conversation={conversation} "
         f"label={label}"
@@ -810,6 +1120,14 @@ def _queue_control_message(command, *, log_label="", **extra):
     _log(
         f"[TM_CONTROL][ENQUEUE] type={command} request_id={request_id or '-'} "
         f"target_client_id={target_client_id} message_id={msg['id'][:8]}…"
+    )
+    _log_bridge_json_payload(
+        "SERVER_TO_TM_QUEUE",
+        msg,
+        action="queue_command",
+        event=command,
+        message_id=msg.get("message_id") or msg.get("id") or "",
+        client_id=target_client_id if target_client_id != "-" else "",
     )
     _notify_status()
     return msg
@@ -859,6 +1177,7 @@ def _make_command_message(command, **extra):
     )
     target_url = (target_url or "").strip() or None
     msg = {
+        # @deprecated Compatibility for older clients; internal code should use message_id.
         "id": message_id,
         "message_id": message_id,
         "type": "command",
@@ -875,13 +1194,11 @@ def _make_command_message(command, **extra):
         "target_client_id": extra.pop("target_client_id", None),
         "url": target_url,
         "target_url": target_url,
-        "target_page_url": target_url,
     }
     msg.update(extra)
     if target_url and not (msg.get("url") or "").strip():
         msg["url"] = target_url
         msg["target_url"] = target_url
-        msg["target_page_url"] = target_url
     return msg
 
 def _copy_existing_fields(dst, src, fields):
@@ -1142,7 +1459,12 @@ def print_registered_routes():
         else:
             _log(f"[SERVER][READY] routes_count={len(rules)}")
     except Exception as exc:
-        _log(f"[SERVER][ROUTES][FAILED] error={exc}")
+        _log(
+            "[SERVER][ROUTES][FAILED] "
+            "function=print_registered_routes "
+            f"error_type={type(exc).__name__} "
+            f"error={exc}\n{traceback.format_exc()}"
+        )
 
 
 def enqueue_control_command(
@@ -1152,7 +1474,7 @@ def enqueue_control_command(
     target_conversation_id="",
     payload=None,
 ):
-    """GUI：向指定油猴页面下发控制命令（如 flash_page）。"""
+    """GUI：向指定油猴页面下发控制命令。"""
     command = (command or "").strip()
     target_client_id = (target_client_id or "").strip()
     target_page_instance_id = (target_page_instance_id or "").strip()
@@ -1288,7 +1610,7 @@ def _normalized_last_focused_page(entry):
     client_id = (entry.get("client_id") or "").strip()
     if not client_id:
         return None
-    page_url = (entry.get("page_url") or "").strip()
+    page_url = page_url_from(entry)
     if "chatgpt.com" not in page_url:
         return None
     page_type = (entry.get("page_type") or "").strip()
@@ -1297,7 +1619,7 @@ def _normalized_last_focused_page(entry):
     return {
         "client_id": client_id,
         "page_instance_id": (entry.get("page_instance_id") or "").strip(),
-        "page_url": page_url,
+        "url": page_url,
         "page_title": (entry.get("page_title") or "").strip(),
         "page_type": page_type,
         "conversation_id": (entry.get("conversation_id") or "").strip(),
@@ -1323,7 +1645,7 @@ def _update_last_focused_tm_page(entry):
     log_key = "|".join([
         page.get("client_id") or "-",
         page.get("conversation_id") or "-",
-        page.get("page_url") or "-",
+        page.get("url") or "-",
     ])
     if log_key == _last_focused_update_log_key:
         return
@@ -1332,18 +1654,17 @@ def _update_last_focused_tm_page(entry):
         "[TM][LAST_FOCUSED_UPDATE] "
         f"client_id={page.get('client_id') or '-'} "
         f"conversation_id={page.get('conversation_id') or '-'} "
-        f"url={page.get('page_url') or '-'}"
+        f"url={page.get('url') or '-'}"
     )
 
 
 def _touch_tampermonkey(meta, action="poll"):
-    global tampermonkey_last_seen, tampermonkey_client_id, tampermonkey_page_url
     now = _now()
     client_id = (meta.get("client_id") or "").strip()
     if not client_id:
         return
     page_instance_id = (meta.get("page_instance_id") or "").strip()
-    page_url = (meta.get("page_url") or "").strip()
+    page_url = page_url_from(meta)
     page_type = (meta.get("page_type") or "").strip()
     conversation_id = (meta.get("conversation_id") or "").strip()
     ignored = _is_ignored_page(meta)
@@ -1368,7 +1689,7 @@ def _touch_tampermonkey(meta, action="poll"):
             "client_id": client_id,
             "page_instance_id": "",
             "script_version": "",
-            "page_url": "",
+            "url": "",
             "page_title": "",
             "page_type": "",
             "conversation_id": "",
@@ -1413,10 +1734,32 @@ def _touch_tampermonkey(meta, action="poll"):
     if "upload_bridge_supported" in meta:
         entry["upload_bridge_supported"] = bool(meta.get("upload_bridge_supported"))
     if "upload_bridge_version" in meta:
+        raw_upload_bridge_version = meta.get("upload_bridge_version")
         try:
-            entry["upload_bridge_version"] = int(meta.get("upload_bridge_version") or 0)
-        except (TypeError, ValueError):
-            entry["upload_bridge_version"] = int(entry.get("upload_bridge_version") or 0)
+            entry["upload_bridge_version"] = int(raw_upload_bridge_version or 0)
+        except (TypeError, ValueError) as error:
+            old_value = entry.get("upload_bridge_version")
+            _log(
+                "[TM][UPLOAD_BRIDGE_VERSION_INVALID] "
+                f"client_id={client_id or '-'} "
+                f"page_instance_id={page_instance_id or '-'} "
+                f"raw={raw_upload_bridge_version!r} "
+                f"old={old_value!r} "
+                f"error_type={type(error).__name__} "
+                f"error={error}"
+            )
+            try:
+                entry["upload_bridge_version"] = int(old_value or 0)
+            except (TypeError, ValueError) as old_error:
+                _log(
+                    "[TM][UPLOAD_BRIDGE_VERSION_OLD_INVALID] "
+                    f"client_id={client_id or '-'} "
+                    f"page_instance_id={page_instance_id or '-'} "
+                    f"old={old_value!r} "
+                    f"error_type={type(old_error).__name__} "
+                    f"error={old_error}"
+                )
+                entry["upload_bridge_version"] = 0
     entry["page_title"] = (meta.get("page_title") or entry.get("page_title") or "").strip()
     _overwrite_page_identity_fields(entry, meta)
     if "page_type" not in meta:
@@ -1463,9 +1806,11 @@ def _touch_tampermonkey(meta, action="poll"):
         entry["last_heartbeat_at"] = now
     _sync_tampermonkey_page_registry(entry)
     if not ignored:
-        tampermonkey_last_seen = now
-        tampermonkey_client_id = client_id
-        tampermonkey_page_url = page_url or entry.get("page_url") or tampermonkey_page_url
+        st.tampermonkey_last_seen = now
+        st.tampermonkey_client_id = client_id
+        st.tampermonkey_page_url = (
+            page_url or entry.get("url") or st.tampermonkey_page_url
+        )
     if action == "poll":
         visible = entry.get("visibility_state") or "-"
         focus = "yes" if entry.get("has_focus") else "no"
@@ -1473,7 +1818,7 @@ def _touch_tampermonkey(meta, action="poll"):
         response_state_txt = entry.get("response_state") or "unknown"
         input_txt = "yes" if entry.get("can_accept_input", True) else "no"
         norm_url = _normalize_chatgpt_url_for_compare(
-            page_url or entry.get("page_url") or ""
+            page_url or entry.get("url") or ""
         )
         if _debug_mode:
             _log(
@@ -1601,7 +1946,7 @@ def _find_outbound_message(message_id):
     if control:
         return control
     for msg in reversed(_outbound_history):
-        if msg.get("id") == message_id:
+        if _bridge_message_id_matches(msg, message_id):
             return msg
     return None
 
@@ -1620,11 +1965,12 @@ def _is_finalized(msg):
         return False
     if msg.get("finalized_at"):
         return True
-    return msg.get("status") in ("replied", "failed")
+    message_status = (msg.get("message_status") or msg.get("status") or "").strip()
+    return message_status in ("replied", "failed", "cancelled")
 
-def _finalize_message(msg, status):
-    msg["status"] = status
-    msg["finalized_at"] = _now()
+
+def _finalize_message(msg, status, *, error_detail=None):
+    _set_message_status(msg, status, error_detail=error_detail)
 
 def _normalize_page_url(url):
     return (url or "").strip().split("#")[0]
@@ -1672,14 +2018,13 @@ def _message_matches_client(msg, client_id):
 
 
 STRICT_TARGET_CONTROL_COMMANDS = frozenset({
-    "flash_page",
     "sync_conversation",
     "start_upload",
 })
 
 
 def _targeted_control_matches(msg, body):
-    """定向控制命令：sync_conversation 按 client_id 或 conversation_id 匹配，忽略 page_instance 过期。"""
+    """定向控制命令：优先 client_id+page_instance_id，再 client_id+conversation_id，再 conversation_id。"""
     client_id = (body.get("client_id") or "").strip()
     command = (msg.get("command") or "").strip()
     if command not in STRICT_TARGET_CONTROL_COMMANDS:
@@ -1703,9 +2048,25 @@ def _targeted_control_matches(msg, body):
             return False
         if not body_conversation_id or body_conversation_id == "-":
             return False
-        if target_client_id and target_client_id == client_id:
+        if (
+            target_client_id
+            and target_client_id == client_id
+            and target_page_instance_id
+            and target_page_instance_id == body_page_instance_id
+        ):
             return True
-
+        if (
+            target_client_id
+            and target_client_id == client_id
+            and target_conversation_id
+            and target_conversation_id == body_conversation_id
+        ):
+            _log(
+                "[BRIDGE][CONTROL][MATCH_BY_CLIENT_CONV] "
+                f"command=sync_conversation client_id={client_id or '-'} "
+                f"conversation_id={body_conversation_id or '-'}"
+            )
+            return True
         if target_conversation_id and target_conversation_id == body_conversation_id:
             _log(
                 "[BRIDGE][CONTROL][MATCH_BY_CONVERSATION] "
@@ -1715,10 +2076,8 @@ def _targeted_control_matches(msg, body):
                 f"conversation_id={body_conversation_id or '-'}"
             )
             return True
-
-        if not target_client_id and not target_conversation_id:
+        if not target_client_id and not target_conversation_id and not target_page_instance_id:
             return True
-
         return False
 
     if not _message_matches_client(msg, client_id):
@@ -1771,31 +2130,84 @@ def _message_matches_page(msg, body):
     if page_type != "conversation":
         return False
 
+    target_client = (msg.get("target_client_id") or "").strip()
+    target_instance = (msg.get("target_page_instance_id") or "").strip()
+    body_client = (body.get("client_id") or "").strip()
+    body_instance = (body.get("page_instance_id") or "").strip()
+    if target_client and target_instance:
+        if target_client != body_client or target_instance != body_instance:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=page_instance_mismatch "
+                f"message_id={((msg.get('id') or '-')[:8])} "
+                f"target_client={target_client or '-'} "
+                f"body_client={body_client or '-'} "
+                f"target_instance={target_instance or '-'} "
+                f"body_instance={body_instance or '-'}"
+            )
+            return False
+        target_conv = (
+            (msg.get("conversation_id") or msg.get("target_conversation_id") or "")
+            .strip()
+        )
+        body_conv = (body.get("conversation_id") or "").strip()
+        if target_conv and body_conv and target_conv != body_conv:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=conversation_mismatch "
+                f"message_id={((msg.get('id') or '-')[:8])} "
+                f"target_conv={target_conv or '-'} "
+                f"body_conv={body_conv or '-'}"
+            )
+            return False
+        return True
+
     target_conv = (
         (msg.get("conversation_id") or msg.get("target_conversation_id") or "")
         .strip()
     )
     if not target_conv:
         return False
-    target_page = _normalize_page_url(
-        page_url_from(msg) or msg.get("target_page_url") or ""
-    )
     body_conv = (body.get("conversation_id") or "").strip()
-    body_page = _normalize_page_url(body.get("page_url") or "")
     if target_conv != body_conv:
+        _log(
+            "[BRIDGE][MATCH_SKIP] reason=conversation_mismatch "
+            f"message_id={((msg.get('id') or '-')[:8])} "
+            f"client_id={client_id or '-'} "
+            f"target_conv={target_conv or '-'} "
+            f"body_conv={body_conv or '-'} "
+            f"target_page={_normalize_page_url(page_url_from(msg)) or '-'} "
+            f"body_page={_normalize_page_url(page_url_from(body)) or '-'}"
+        )
         return False
-    if target_page and target_page != body_page:
-        return False
-    if target_conv or target_page:
-        conv_ok = bool(target_conv and target_conv == body_conv)
-        page_ok = bool(target_page and target_page == body_page)
-        if not conv_ok and not page_ok:
+
+    target_page = _normalize_page_url(page_url_from(msg))
+    body_page = _normalize_page_url(page_url_from(body))
+    if target_page and body_page and target_page != body_page:
+        if not msg.get("strict_url_match"):
+            _log(
+                "[BRIDGE][MATCH_URL_DIFF] "
+                f"message_id={((msg.get('id') or '-')[:8])} "
+                f"client_id={client_id or '-'} "
+                f"target_conv={target_conv or '-'} "
+                f"body_conv={body_conv or '-'} "
+                f"target_page={target_page or '-'} "
+                f"body_page={body_page or '-'} "
+                f"strict_url_match=false"
+            )
+        else:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=page_url_mismatch "
+                f"message_id={((msg.get('id') or '-')[:8])} "
+                f"client_id={client_id or '-'} "
+                f"target_conv={target_conv or '-'} "
+                f"body_conv={body_conv or '-'} "
+                f"target_page={target_page or '-'} "
+                f"body_page={body_page or '-'}"
+            )
             return False
     return True
 
 
 def _pop_message_for_client(body):
-    client_id = (body.get("client_id") or "").strip()
     if not _outbound_queue:
         return None
     attempts = len(_outbound_queue)
@@ -1827,7 +2239,7 @@ def _pop_control_command_for_client(body):
             _control_queue.append(msg)
         return None
 
-    # 1) 严格定向控制命令（flash_page / sync_conversation / start_upload 等）
+    # 1) 严格定向控制命令（sync_conversation / start_upload 等）
     msg = _rotate(lambda m: _targeted_control_matches(m, body))
     if msg:
         _log(
@@ -1866,16 +2278,16 @@ def _pop_control_command_for_client(body):
 
 def _claim_message(msg, client_id):
     now = _now()
-    msg["status"] = "delivered"
+    _sync_message_status_fields(msg, "delivered")
     msg["delivered_to"] = client_id
     msg["delivered_at"] = now
     msg["lease_until"] = now + LEASE_SEC
-    _update_external_status_for_bridge(msg.get("id"), "sent")
+    _update_external_status_for_bridge(get_bridge_message_id(msg), "sent")
     entry = _tampermonkey_clients.get(client_id)
     if entry is not None:
         entry["last_claim_at"] = now
     _log(
-        f"[BRIDGE][CLAIM] client_id={client_id} message_id={msg['id'][:8]}… "
+        f"[BRIDGE][CLAIM] client_id={client_id} message_id={get_bridge_message_id(msg)[:8]}… "
         f"lease_until={_format_time(msg['lease_until'])}"
     )
 
@@ -1983,6 +2395,7 @@ def _poll_response(msg, retry):
         "ok": True,
         "has_message": True,
         "message_id": message_id,
+        # @deprecated Compatibility for older clients; internal code should use message_id.
         "id": message_id,
         "type": msg.get("type", "chat"),
         "retry": retry,
@@ -2015,7 +2428,6 @@ def _poll_response(msg, retry):
                 "session_id",
                 "turn_id",
                 *common_target_fields,
-                "conversation_url",
                 "conversation_id",
                 "bind_request_id",
                 "launch_token",
@@ -2066,7 +2478,7 @@ def _poll_no_message_reason(body, waiting=None):
         return "home_bootstrap_only"
     if page_type != "conversation":
         return "not_target_client"
-    pending_total, pending_for_client, pending_for_conversation = _outbound_queue_stats(
+    pending_total, pending_for_client, _ = _outbound_queue_stats(
         client_id, conversation_id
     )
     if pending_total <= 0:
@@ -2101,11 +2513,15 @@ def _log_poll_request(body):
     responding = "yes" if body.get("is_responding") else "no"
     input_txt = "yes" if body.get("can_accept_input", True) else "no"
     state = (body.get("response_state") or "-").strip() or "-"
+    poll_url = page_url_from(body) or "-"
+    url_fields = normalize_page_url_fields(body)
+    url_source = url_fields.get("url_source") or ""
+    url_source_txt = f" url_source={url_source}" if url_source and url_source != "url" else ""
     _poll_log_immediate(
         f"[BRIDGE][POLL][REQUEST] client_id={client_id} "
         f"page_instance_id={(body.get('page_instance_id') or '-')} "
         f"page_type={page_type or '-'} conversation_id={conversation_id or '-'} "
-        f"url={(body.get('page_url') or '-')} visible={visible} focus={focus} "
+        f"url={poll_url}{url_source_txt} visible={visible} focus={focus} "
         f"responding={responding} input={input_txt} state={state}"
     )
 
@@ -2149,7 +2565,7 @@ def _log_poll_message_found(body, msg, *, delivered=False):
     _poll_log_immediate(
         f"[BRIDGE][POLL][MESSAGE_FOUND] client_id={client_id} "
         f"conversation_id={conversation_id or '-'} "
-        f"message_id={msg.get('id') or '-'} "
+        f"message_id={get_bridge_message_id(msg) or '-'} "
         f"trace_id={(msg.get('trace_id') or '-')} text_len={len(text)} "
         f"target_client={(msg.get('target_client_id') or '-')} "
         f"target_conv={(msg.get('conversation_id') or msg.get('target_conversation_id') or '-')}"
@@ -2157,7 +2573,7 @@ def _log_poll_message_found(body, msg, *, delivered=False):
     if delivered:
         _poll_log_immediate(
             f"[BRIDGE][POLL][MESSAGE_DELIVERED] client_id={client_id} "
-            f"message_id={msg.get('id') or '-'} "
+            f"message_id={get_bridge_message_id(msg) or '-'} "
             f"trace_id={(msg.get('trace_id') or '-')}"
         )
 
@@ -2169,7 +2585,7 @@ def _handle_poll(body):
         return {"ok": False, "error": "缺少 client_id"}, False
     page_type = (body.get("page_type") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
-    page_url = (body.get("page_url") or "").strip()
+    page_url = page_url_from(body)
     identity_changed = _poll_identity_changed(
         client_id, page_type, conversation_id, page_url
     )
@@ -2405,11 +2821,9 @@ def _handle_ack(body):
         ack_turn_id = waiting.get("turn_id")
         if success:
             waiting["status"] = "acked"
-            status_text = "成功"
             _update_external_status_for_bridge(message_id, "waiting")
         else:
             _finalize_message(waiting, "failed")
-            status_text = "失败"
             _archive_waiting(message_id)
             _notify_external_request_from_bridge(
                 message_id,
@@ -2489,13 +2903,13 @@ def _handle_report(body):
                 or _tampermonkey_clients.get(client_id)
                 or {}
             )
-        old_url = (old_entry.get("page_url") or "").strip()
+        old_url = page_url_from(old_entry)
         old_conv = (old_entry.get("conversation_id") or "").strip()
         merge_meta = dict(body)
         if isinstance(payload, dict):
             merge_meta.update(payload)
         _touch_tampermonkey(merge_meta, action="report")
-        new_url = (merge_meta.get("page_url") or "").strip()
+        new_url = page_url_from(merge_meta)
         new_conv = (merge_meta.get("conversation_id") or "").strip()
         reason = (payload.get("reason") or merge_meta.get("reason") or "-").strip()
         _log(
@@ -2522,7 +2936,7 @@ def _handle_report(body):
         has_focus = "yes" if entry.get("has_focus") else "no"
         visible = (entry.get("visibility_state") or "-").strip() or "-"
         conversation_id = (entry.get("conversation_id") or "-").strip() or "-"
-        page_url = (entry.get("page_url") or body.get("page_url") or "-").strip() or "-"
+        page_url = page_url_from(entry) or page_url_from(body) or "-"
         _log(
             "[TM][FOCUS_STATE] "
             f"client_id={client_id or '-'} "
@@ -2541,7 +2955,7 @@ def _handle_report(body):
         level = payload.get("level") or "info"
         message = (payload.get("message") or "").strip()
         extra = payload.get("extra") or {}
-        page_url = payload.get("page_url") or body.get("page_url") or ""
+        page_url = page_url_from(payload) or page_url_from(body) or ""
         log_client_id = body.get("client_id") or payload.get("client_id") or client_id
         if message.startswith("[TM]"):
             extra_text = _format_log_fields(extra)
@@ -2736,7 +3150,7 @@ def _handle_report(body):
                 _notify_status()
                 return {"ok": True}
             if event == "close_page_requested":
-                msg["status"] = "requested"
+                _sync_message_status_fields(msg, "requested")
                 _add_inbound(event, payload, **inbound_kw)
             elif event in control_events_finalize:
                 if (
@@ -2838,10 +3252,7 @@ def _handle_report(body):
                 )
         elif event == "conversation_created":
             conv_id = (payload.get("conversation_id") or body.get("conversation_id") or "").strip()
-            page_url = (
-                (payload.get("page_url") or payload.get("url") or body.get("page_url") or "")
-                .strip()
-            )
+            page_url = page_url_from(payload) or page_url_from(body)
             report_bind = (
                 payload.get("bind_request_id")
                 or payload.get("launch_token")
@@ -2863,7 +3274,8 @@ def _handle_report(body):
             )
             msg["conversation_id"] = conv_id or msg.get("conversation_id")
             if page_url:
-                msg["conversation_url"] = page_url
+                msg["url"] = page_url
+                msg["target_url"] = page_url
             _add_inbound(event, payload, **inbound_kw)
         elif event in (
             "open_url_success",
@@ -3042,9 +3454,26 @@ def _notify_external_request_from_bridge(message_id, event, payload, msg=None):
             )
 
 
+def _external_req_float(req, field, default):
+    raw = req.get(field) if isinstance(req, dict) else None
+    try:
+        return float(raw if raw not in (None, "") else default)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[EXTERNAL_API][REQUEST_FLOAT_FALLBACK] "
+            f"field={field} "
+            f"value={raw!r} "
+            f"default={default!r} "
+            f"request_id={(req or {}).get('request_id') or '-'} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return float(default)
+
+
 def _check_external_request_timeout(req):
-    timeout = float(req.get("timeout") or 120)
-    created = float(req.get("created_at") or 0)
+    timeout = _external_req_float(req, "timeout", 120)
+    created = _external_req_float(req, "created_at", 0)
     if created and (_now() - created) > timeout:
         req["status"] = "timeout"
         req["error"] = f"等待回复超时（{int(timeout)}s）"
@@ -3101,24 +3530,91 @@ def count_user_turns(session):
     return count
 
 
+def _parse_external_timeout(body, *, default=120, min_value=1, max_value=120):
+    raw_timeout = body.get("timeout", default) if isinstance(body, dict) else default
+    try:
+        timeout = float(raw_timeout or default)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[EXTERNAL_API][INVALID_TIMEOUT] "
+            f"raw_timeout={raw_timeout!r} "
+            f"default={default} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return None, _external_json_error(
+            f"invalid timeout: {raw_timeout}",
+            "INVALID_TIMEOUT",
+            400,
+        )
+
+    if timeout <= 0:
+        timeout = default
+
+    timeout = max(float(min_value), min(float(timeout), float(max_value)))
+    return timeout, None
+
+
 def _parse_force_new_session_after_turns(body):
     if not isinstance(body, dict):
-        return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS
-    if "force_new_session_after_turns" in body:
-        return int(body.get("force_new_session_after_turns") or 0)
-    return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS
+        return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS, None
+    if "force_new_session_after_turns" not in body:
+        return DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS, None
+
+    raw_value = body.get("force_new_session_after_turns")
+    try:
+        value = int(raw_value or 0)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[EXTERNAL_API][INVALID_FORCE_NEW_SESSION_AFTER_TURNS] "
+            f"raw_value={raw_value!r} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return None, _external_json_error(
+            f"invalid force_new_session_after_turns: {raw_value}",
+            "INVALID_FORCE_NEW_SESSION_AFTER_TURNS",
+            400,
+        )
+
+    return max(0, value), None
+
+
+def _safe_meta_int(value, default=0, *, field=""):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[EXTERNAL_API][SESSION_META_INT_FALLBACK] "
+            f"field={field or '-'} "
+            f"value={value!r} "
+            f"default={default!r} "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
+        return int(default)
 
 
 def _external_session_meta_from_gui(gui_result):
     if not isinstance(gui_result, dict):
+        _log(
+            "[EXTERNAL_API][SESSION_META_INVALID] "
+            f"type={type(gui_result).__name__} fallback=empty"
+        )
         gui_result = {}
     return {
         "new_session_created": bool(gui_result.get("new_session_created")),
         "new_session_reason": (gui_result.get("new_session_reason") or "").strip(),
         "previous_session_id": (gui_result.get("previous_session_id") or "").strip(),
-        "previous_turn_count": int(gui_result.get("previous_turn_count") or 0),
-        "force_new_session_after_turns": int(
-            gui_result.get("force_new_session_after_turns") or 0
+        "previous_turn_count": _safe_meta_int(
+            gui_result.get("previous_turn_count"),
+            0,
+            field="previous_turn_count",
+        ),
+        "force_new_session_after_turns": _safe_meta_int(
+            gui_result.get("force_new_session_after_turns"),
+            0,
+            field="force_new_session_after_turns",
         ),
     }
 
@@ -3140,13 +3636,24 @@ def _log_force_new_session_if_needed(body, gui_result):
 
 def _external_sessions_summary_from_gui():
     result = _dispatch_to_gui("sessions_summary", {}, timeout_sec=5)
+    if not isinstance(result, dict):
+        result = {"ok": False, "error": f"invalid gui result: {type(result).__name__}"}
     if result.get("ok") and isinstance(result.get("summary"), dict):
         return result["summary"]
+    _log(
+        "[EXTERNAL_API][SESSIONS_SUMMARY_FAILED] "
+        "function=_external_sessions_summary_from_gui "
+        f"code={result.get('code') or '-'} "
+        f"error={result.get('error') or '-'} "
+        f"result_keys={sorted(result.keys()) if isinstance(result, dict) else '-'}"
+    )
     return {
         "total": 0,
         "bound_online": 0,
         "bound_offline": 0,
         "unbound": 0,
+        "summary_error": result.get("error") or "sessions_summary failed",
+        "summary_error_code": result.get("code") or "INTERNAL_ERROR",
     }
 
 
@@ -3156,7 +3663,13 @@ def _external_client_key(body):
         return client_name
     try:
         addr = (request.remote_addr or "").strip()
-    except RuntimeError:
+    except RuntimeError as error:
+        _log(
+            "[EXTERNAL_API][CLIENT_KEY_FAILED] "
+            "reason=no_request_context "
+            f"error_type={type(error).__name__} "
+            f"error={error}\n{traceback.format_exc()}"
+        )
         addr = ""
     return addr or "unknown"
 
@@ -3209,10 +3722,17 @@ def _external_create_chat_send(body):
     auto_open_home = bool(body.get("auto_open_home", True))
     new_session = bool(body.get("new_session", False))
     reuse_last_session = body.get("reuse_last_session", True) is not False
-    force_new_session_after_turns = _parse_force_new_session_after_turns(body)
-    timeout = float(body.get("timeout") or 120)
-    if timeout <= 0:
-        timeout = 120
+    force_new_session_after_turns, force_error = _parse_force_new_session_after_turns(body)
+    if force_error:
+        return None, force_error
+    timeout, timeout_error = _parse_external_timeout(
+        body,
+        default=120,
+        min_value=1,
+        max_value=120,
+    )
+    if timeout_error:
+        return None, timeout_error
 
     session_id, force_new_session_flag, resolve_reason = _resolve_external_session_for_send(
         body
@@ -3304,19 +3824,91 @@ def _external_auth_denied():
     return _require_external_auth()
 
 
-def _external_request_body():
-    return request.get_json(silent=True) or {}
-
-
-def _json_body_or_error(log_tag):
+def _request_body_preview(max_len=500):
     try:
-        return request.get_json(silent=True) or {}, None
+        raw = request.get_data(cache=True, as_text=True) or ""
+    except Exception as error:
+        return f"<read_body_failed {type(error).__name__}: {error}>"
+    raw = raw.replace("\r", "\\r").replace("\n", "\\n")
+    if len(raw) > max_len:
+        return raw[:max_len] + "...<truncated>"
+    return raw
+
+
+def _json_body_or_error(log_tag, *, allow_empty=True):
+    preview = _request_body_preview()
+    if not preview.strip() and allow_empty:
+        return {}, None
+    try:
+        body = request.get_json(silent=False)
+    except BadRequest as exc:
+        _log(
+            f"{log_tag} reason=json_decode_failed "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"error_type={type(exc).__name__} error={exc} "
+            f"body_preview={preview!r}\n{traceback.format_exc()}"
+        )
+        return None, (
+            jsonify({
+                "ok": False,
+                "error": f"invalid json: {exc}",
+                "code": "INVALID_JSON",
+            }),
+            400,
+        )
     except Exception as exc:
-        _log(f"{log_tag} reason=json_error error={exc}")
-        return None, jsonify({
-            "ok": False,
-            "error": f"invalid json: {exc}",
-        }), 400
+        _log(
+            f"{log_tag} reason=json_parse_exception "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"error_type={type(exc).__name__} error={exc} "
+            f"body_preview={preview!r}\n{traceback.format_exc()}"
+        )
+        return None, (
+            jsonify({
+                "ok": False,
+                "error": f"invalid json: {exc}",
+                "code": "INVALID_JSON",
+            }),
+            400,
+        )
+    if body is None:
+        if allow_empty:
+            return {}, None
+        _log(
+            f"{log_tag} reason=json_body_empty "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r}"
+        )
+        return None, (
+            jsonify({
+                "ok": False,
+                "error": "request body must be JSON",
+                "code": "EMPTY_JSON_BODY",
+            }),
+            400,
+        )
+    if not isinstance(body, dict):
+        _log(
+            f"{log_tag} reason=json_body_not_object "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"body_type={type(body).__name__} body_preview={preview!r}"
+        )
+        return None, (
+            jsonify({
+                "ok": False,
+                "error": "json body must be an object",
+                "code": "INVALID_JSON",
+            }),
+            400,
+        )
+    return body, None
 
 
 @app.route("/api/v1/status", methods=["GET"])
@@ -3359,7 +3951,9 @@ def api_v1_chat_send():
     denied = _external_auth_denied()
     if denied:
         return denied
-    body = _external_request_body()
+    body, error_response = _json_body_or_error("[EXTERNAL_API][SEND_JSON]")
+    if error_response:
+        return error_response
     try:
         result, err_resp = _external_create_chat_send(body)
         if err_resp:
@@ -3424,7 +4018,9 @@ def api_v1_chat_ask():
     denied = _external_auth_denied()
     if denied:
         return denied
-    body = _external_request_body()
+    body, error_response = _json_body_or_error("[EXTERNAL_API][ASK_JSON]")
+    if error_response:
+        return error_response
     text = (body.get("text") or "").strip()
     text_len = len(text)
     try:
@@ -3437,15 +4033,25 @@ def api_v1_chat_ask():
             "new_session_created": bool(result.get("new_session_created")),
             "new_session_reason": result.get("new_session_reason") or "",
             "previous_session_id": result.get("previous_session_id") or "",
-            "previous_turn_count": int(result.get("previous_turn_count") or 0),
-            "force_new_session_after_turns": int(
-                result.get("force_new_session_after_turns") or 0
+            "previous_turn_count": _safe_meta_int(
+                result.get("previous_turn_count"),
+                0,
+                field="previous_turn_count",
+            ),
+            "force_new_session_after_turns": _safe_meta_int(
+                result.get("force_new_session_after_turns"),
+                0,
+                field="force_new_session_after_turns",
             ),
         }
-        timeout = float(body.get("timeout") or 30)
-        if timeout <= 0:
-            timeout = 30
-        timeout = max(1, min(timeout, 30))
+        timeout, timeout_error = _parse_external_timeout(
+            body,
+            default=30,
+            min_value=1,
+            max_value=30,
+        )
+        if timeout_error:
+            return timeout_error
         _log(
             f"[EXTERNAL_API][ASK] request_id={request_id} session_id={session_id} "
             f"text_len={text_len} timeout={timeout}"
@@ -3517,9 +4123,12 @@ def api_v1_sessions():
                 500,
             )
         return _external_json_ok(sessions=gui_result.get("sessions") or [])
+    body, error_response = _json_body_or_error("[EXTERNAL_API][SESSIONS_CREATE_JSON]")
+    if error_response:
+        return error_response
     gui_result = _dispatch_to_gui(
         "sessions_create",
-        {"title": _external_request_body().get("title") or "新对话"},
+        {"title": body.get("title") or "新对话"},
         timeout_sec=10,
     )
     if not gui_result.get("ok"):
@@ -3557,7 +4166,9 @@ def api_v1_session_bind(session_id):
     denied = _external_auth_denied()
     if denied:
         return denied
-    body = _external_request_body()
+    body, error_response = _json_body_or_error("[EXTERNAL_API][SESSION_BIND_JSON]")
+    if error_response:
+        return error_response
     if request.method == "DELETE" or body.get("clear"):
         gui_result = _dispatch_to_gui(
             "sessions_bind_clear",
@@ -3583,7 +4194,7 @@ def api_v1_session_bind(session_id):
         )
 
     client_id = (body.get("client_id") or "").strip()
-    page_url = (body.get("page_url") or "").strip()
+    page_url = page_url_from(body)
     conversation_id = (body.get("conversation_id") or "").strip()
     page_instance_id = (body.get("page_instance_id") or "").strip()
     if not conversation_id and page_url:
@@ -3649,7 +4260,9 @@ def api_bridge():
     source = request.headers.get("X-Request-Source")
     if source != "tampermonkey":
         return jsonify({"ok": False, "error": "需要 X-Request-Source: tampermonkey"}), 403
-    body = _external_request_body()
+    body, error_response = _json_body_or_error("[BRIDGE][JSON_BODY]")
+    if error_response:
+        return error_response
     remote_addr = (request.remote_addr or "").strip() or "-"
     if body.get("test_connection"):
         _log(
@@ -3676,6 +4289,7 @@ def api_bridge():
         _notify_status()
     result["server_time"] = _now()
     result["tampermonkey_online"] = True
+    _log_bridge_exchange(action, body, result)
     return jsonify(result)
 
 @app.route("/api/cursor/tasks/create", methods=["POST"])
@@ -3800,11 +4414,18 @@ def api_jobs_create():
 
 @app.route("/api/jobs/list", methods=["GET"])
 def api_jobs_list():
-    limit = request.args.get("limit", 50)
+    raw_limit = request.args.get("limit", 50)
     try:
-        limit = int(limit)
-    except (TypeError, ValueError):
+        limit = int(raw_limit)
+    except (TypeError, ValueError) as error:
+        _log(
+            "[API][JOBS_LIST][INVALID_LIMIT_FALLBACK] "
+            f"limit={raw_limit!r} fallback=50 "
+            f"error_type={type(error).__name__} "
+            f"error={error}"
+        )
         limit = 50
+    limit = max(1, min(limit, 500))
     return jsonify({
         "ok": True,
         "jobs": _job_scheduler.list_jobs(limit=limit),
@@ -3865,6 +4486,9 @@ def health():
     return jsonify({"ok": True, "server": "running"})
 
 
+# @deprecated — 旧版状态接口；新接口为 /api/v1/status（api_v1_status）。
+# bridge_client.py 的 status() 在 /api/v1 不可用时仍会 fallback 到本路由。
+# 删除前须先移除 bridge_client._get_legacy_health 与 _normalize_legacy_status。
 @app.route("/api/status", methods=["GET"])
 def api_status():
     _log(
@@ -3873,11 +4497,18 @@ def api_status():
     )
     return jsonify(get_bridge_status())
 
-@app.route("/process", methods=["POST"])
 
+# @deprecated — 旧版 /process 接口；当前 client.user.js 已使用 /api/bridge。
+# 默认关闭（ENABLE_LEGACY_PROCESS_ENDPOINT=False 时返回 410 LEGACY_PROCESS_DISABLED）。
+# 删除条件：连续一个版本日志中未出现 [API][DEPRECATED] endpoint=/process。
+@app.route("/process", methods=["POST"])
 def process_legacy():
     """@deprecated 旧版接口。当前油猴应使用 /api/bridge。"""
     if not ENABLE_LEGACY_PROCESS_ENDPOINT:
+        _log(
+            "[API][DEPRECATED] endpoint=/process status=disabled "
+            "code=LEGACY_PROCESS_DISABLED replacement=/api/bridge"
+        )
         return jsonify(
             {
                 "ok": False,
@@ -3891,10 +4522,20 @@ def process_legacy():
     )
     source = request.headers.get("X-Request-Source")
     if source == "tampermonkey":
-        body = request.get_json(silent=True) or {}
+        body, error_response = _json_body_or_error("[API][LEGACY_PROCESS_JSON_FAILED]")
+        if error_response:
+            return error_response
         if not body.get("action"):
+            _log(
+                "[API][LEGACY_PROCESS_DEFAULT_ACTION] "
+                "reason=missing_action fallback=poll"
+            )
             body["action"] = "poll"
         if not body.get("client_id"):
+            _log(
+                "[API][LEGACY_PROCESS_DEFAULT_CLIENT] "
+                "reason=missing_client_id fallback=legacy-client"
+            )
             body["client_id"] = "legacy-client"
         need_notify = False
         with _state_lock:
@@ -3911,18 +4552,49 @@ def process_legacy():
     if source == "client":
         data_from_client = None
         if request.is_json:
-            data_from_client = request.json.get("data")
+            body, error_response = _json_body_or_error("[API][LEGACY_CLIENT_JSON_FAILED]")
+            if error_response:
+                return error_response
+            data_from_client = body.get("data")
         else:
-            data_from_client = request.data.decode("utf-8")
+            try:
+                data_from_client = request.data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                _log(
+                    "[API][LEGACY_CLIENT_DECODE_FAILED] "
+                    f"remote={request.remote_addr or '-'} "
+                    f"error_type={type(error).__name__} error={error}"
+                )
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": f"invalid request body encoding: {error}",
+                        "code": "INVALID_BODY_ENCODING",
+                    }
+                ), 400
         try:
             push_message(data_from_client)
         except ValueError as error:
+            _log(
+                "[API][LEGACY_CLIENT_PUSH_FAILED] "
+                "reason=empty_message "
+                f"remote={request.remote_addr or '-'} "
+                f"data_len={len(str(data_from_client or ''))} "
+                f"error_type={type(error).__name__} error={error}"
+            )
             return jsonify({
                 "ok": False,
                 "error": str(error),
                 "code": "EMPTY_MESSAGE",
             }), 400
         except RuntimeError as error:
+            _log(
+                "[API][LEGACY_CLIENT_PUSH_FAILED] "
+                "reason=queue_full "
+                f"remote={request.remote_addr or '-'} "
+                f"data_len={len(str(data_from_client or ''))} "
+                f"error_type={type(error).__name__} error={error}"
+            )
             return jsonify({
                 "ok": False,
                 "error": str(error),
@@ -4068,13 +4740,57 @@ def _clear_server_url_file():
         )
 
 
+def _parse_server_port(value, default=5000, *, field="port"):
+    try:
+        parsed_port = int(value)
+    except (TypeError, ValueError) as error:
+        detail = (
+            "[SERVER][INVALID_PORT] "
+            f"field={field} value={value!r} default={default!r} "
+            f"error_type={type(error).__name__} error={error}"
+        )
+        _log(detail)
+        return None, detail
+    if parsed_port <= 0 or parsed_port > 65535:
+        detail = (
+            "[SERVER][INVALID_PORT_RANGE] "
+            f"field={field} value={value!r} parsed={parsed_port}"
+        )
+        _log(detail)
+        return None, detail
+    return parsed_port, ""
+
+
 def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
     global _http_server, _server_thread
     global _server_bind_host, _server_port, _server_public_host
 
     bind_host = (host or "").strip() or "127.0.0.1"
-    configured_port = int(port)
+    configured_port, port_error = _parse_server_port(port, 5000, field="port")
+    extra_ports = list(fallback_ports if fallback_ports is not None else FALLBACK_PORTS)
+    _log(
+        "[SERVER][START_REQUEST] "
+        f"host={bind_host} port={port} fallback_ports={extra_ports} "
+        f"debug={is_debug_mode()}"
+    )
+    if port_error:
+        return {
+            "ok": False,
+            "message": f"服务端口无效：{port}",
+            "detail": port_error,
+            "host": bind_host,
+            "bind_host": bind_host,
+            "port": port,
+            "url": "",
+        }
     if _http_server is not None:
+        _log(
+            "[SERVER][START_SKIPPED] "
+            "reason=already_running "
+            f"bind_host={get_server_bind_host()} "
+            f"public_host={get_server_public_host()} "
+            f"port={get_server_port()} url={get_server_url()}"
+        )
         result = {
             "ok": False,
             "already_running": True,
@@ -4086,11 +4802,17 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
         }
         return result
 
-    extra_ports = list(fallback_ports if fallback_ports is not None else FALLBACK_PORTS)
     candidates = []
-    for candidate in [configured_port, *extra_ports]:
-        if candidate not in candidates:
-            candidates.append(int(candidate))
+    for raw_candidate in [configured_port, *extra_ports]:
+        candidate_port, candidate_error = _parse_server_port(
+            raw_candidate,
+            configured_port,
+            field="fallback_port",
+        )
+        if candidate_error:
+            continue
+        if candidate_port not in candidates:
+            candidates.append(candidate_port)
 
     failures = []
     for candidate_port in candidates:
@@ -4138,14 +4860,21 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
                 f"[SERVER][FALLBACK_PORT] old_port={configured_port} "
                 f"new_port={candidate_port}"
             )
-        _log(f"[SERVER][STARTED] url={server_url}")
+        _write_server_url_file(server_url)
+        _log(
+            "[SERVER][STARTED] "
+            f"bind_host={bind_host} public_host={_server_public_host} "
+            f"configured_port={configured_port} actual_port={candidate_port} "
+            f"fallback_used={candidate_port != configured_port} "
+            f"server_url={server_url} bridge_url={bridge_url} "
+            f"url_file={SERVER_URL_FILE}"
+        )
         _log(f"服务已启动：{server_url}")
         _log(f"  油猴接口 POST {bridge_url}")
         _log(f"  外部 API GET/POST /api/v1/*")
         print_registered_routes()
         if (API_TOKEN or "").strip():
             _log(f"  外部 API 鉴权：已启用（CHATGPT_PAGE_BRIDGE_TOKEN）")
-        _write_server_url_file(server_url)
 
         result = {
             "ok": True,
@@ -4193,24 +4922,95 @@ def start_server(host="127.0.0.1", port=5000, fallback_ports=None):
 def stop_server():
     global _http_server, _server_thread
     global _server_bind_host, _server_port, _server_public_host
+    _log(
+        "[SERVER][STOP_REQUEST] "
+        f"running={_http_server is not None} bind_host={_server_bind_host or '-'} "
+        f"port={_server_port or '-'}"
+    )
     if _http_server is None:
+        _log("[SERVER][STOP_SKIPPED] reason=not_running")
         return False
-    _http_server.shutdown()
+    try:
+        _http_server.shutdown()
+    except Exception as error:
+        _log(
+            "[SERVER][STOP_FAILED] "
+            f"error_type={type(error).__name__} error={error}\n{traceback.format_exc()}"
+        )
+        return False
     _http_server = None
     _server_thread = None
     _server_bind_host = None
     _server_port = None
     _server_public_host = None
     _clear_server_url_file()
+    _log("[SERVER][STOPPED] success=True")
     _log("服务已停止")
     _notify_status()
     return True
 
-@app.after_request
 
+@app.before_request
+def before_request():
+    request._log_started_at = time.perf_counter()
+    if not is_debug_mode():
+        return
+    json_keys = []
+    if request.is_json:
+        try:
+            body = request.get_json(silent=True) or {}
+            if isinstance(body, dict):
+                json_keys = sorted(body.keys())
+        except Exception as error:
+            _log(
+                "[HTTP][REQUEST_BODY_PARSE_FAILED] "
+                f"path={request.path} error_type={type(error).__name__} error={error}"
+            )
+    _log(
+        "[HTTP][REQUEST] "
+        f"method={request.method} path={request.path} "
+        f"remote={request.remote_addr or '-'} "
+        f"content_length={request.content_length or 0} "
+        f"json_keys={json_keys}"
+    )
+
+
+@app.after_request
 def after_request(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
+    started_at = getattr(request, "_log_started_at", None)
+    cost_ms = 0
+    if started_at is not None:
+        cost_ms = int((time.perf_counter() - started_at) * 1000)
+    status_code = int(response.status_code or 0)
+    should_log = is_debug_mode() or status_code >= 400
+    if should_log:
+        _log(
+            "[HTTP][RESPONSE] "
+            f"method={request.method} path={request.path} "
+            f"status={response.status_code} cost_ms={cost_ms} "
+            f"content_length={response.calculate_content_length() or 0}"
+        )
     return response
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_route_error(error):
+    if isinstance(error, HTTPException):
+        return error
+    _log(
+        "[HTTP][UNHANDLED_EXCEPTION] "
+        f"method={request.method} path={request.path} "
+        f"remote={request.remote_addr or '-'} "
+        f"error_type={type(error).__name__} error={error}\n{traceback.format_exc()}"
+    )
+    return jsonify(
+        {
+            "ok": False,
+            "error": str(error),
+            "code": "INTERNAL_ERROR",
+        }
+    ), 500
 _configure_werkzeug_access_log()
 if __name__ == "__main__":
     clear_log_file()

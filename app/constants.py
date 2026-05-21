@@ -97,6 +97,36 @@ SESSION_BIND_LIST_STYLES = {
     },
 }
 
+# 顶部状态栏三种页面角色（仅 UI 文案，不改变业务逻辑）
+STATUS_CHIP_AUTO_FOCUS_PREFIX = "自动焦点页"
+STATUS_CHIP_MANUAL_SELECT_PREFIX = "手动选中页"
+STATUS_CHIP_SESSION_BIND_PREFIX = "会话绑定页"
+
+STATUS_CHIP_AUTO_FOCUS_TOOLTIP = (
+    "表示油猴脚本自动检测到的当前浏览器焦点页面。\n"
+    "如果显示“浏览器页面未获得焦点”，不代表页面不存在，"
+    "只表示 ChatGPT 网页当前没有获得浏览器焦点。"
+)
+STATUS_CHIP_MANUAL_SELECT_TOOLTIP = (
+    "表示用户在「可用页面列表」里手动选中的页面。\n"
+    "它只是临时选择，不等于当前会话已经绑定。"
+)
+STATUS_CHIP_SESSION_BIND_TOOLTIP = (
+    "表示当前本地对话真正绑定的远端 ChatGPT 页面。\n"
+    "发送消息、同步网页对话、复制最后回复时，应优先使用这个绑定页面。"
+)
+
+STATUS_PAGE_ROLES_HINT = (
+    "自动焦点页用于自动检测；手动选中页用于临时选择；"
+    "会话绑定页才是当前对话实际发送和同步使用的目标页面。"
+)
+
+
+def status_chip_text(prefix, state):
+    """顶部状态芯片：「前缀：状态」。"""
+    return f"{prefix}：{state}"
+
+
 DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",
     "port": "5000",
@@ -112,7 +142,6 @@ DEFAULT_APP_SETTINGS = {
     # 输入框为空时预填的默认内容（新建对话、切换对话、发送清空后回填）
     "default_compose_message": "",
     "auto_clear_input_after_send": True,
-    "auto_scroll_to_bottom": True,
     "auto_name_new_chat": True,
     "show_timestamp": True,
     "show_assistant_placeholder": True,
@@ -120,6 +149,8 @@ DEFAULT_APP_SETTINGS = {
     "save_chat_history": True,
     "debug_mode": False,
     "show_raw_payload": True,
+    "mirror_log_to_console": True,
+    "include_log_callsite": True,
     "log_ack_events": True,
     "log_assistant_reply_events": True,
     "log_send_failed_events": True,

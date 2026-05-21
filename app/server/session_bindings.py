@@ -1,4 +1,15 @@
-"""服务端会话绑定（legacy 全局 bound_client_id；主绑定在 GUI session.remote_chatgpt）。"""
+"""legacy 服务端绑定清理模块（仅用于旧数据清理，禁止新功能依赖）。
+
+当前主绑定来源：
+- GUI 本地会话的 session.remote_chatgpt
+
+本模块只负责：
+- 清理 registry 中的 bound_session_id 残留
+
+注意：
+- 本模块不再作为绑定写入入口。
+- 删除条件：旧 sessions / registry 迁移完成，且连续一个版本无 legacy 绑定清理日志。
+"""
 from app.server import state as st
 from app.utils.page_status import page_url_from
 
@@ -8,32 +19,12 @@ def _server():
     return srv
 
 
-def set_bound_client_id(client_id, session_id=None):
-    """@deprecated 当前推荐使用 GUI 的 session.remote_chatgpt 保存每个对话绑定。"""
-    srv = _server()
-    srv._log(
-        "[DEPRECATED] set_bound_client_id called; prefer session.remote_chatgpt binding"
-    )
-    client_id = (client_id or "").strip()
-    session_id = (session_id or "").strip() if session_id is not None else None
-    with st._state_lock:
-        st.bound_client_id = client_id or None
-        if session_id is not None:
-            st.bound_session_id = session_id or None
-        if client_id:
-            srv._set_bound_session_on_registry(client_id, "", session_id or "")
-    srv._notify_status()
-
-
 def clear_session_binding(session_id, client_id=None):
-    """清空服务端全局/客户端上的会话绑定记录，不关闭 ChatGPT 网页。"""
+    """清空客户端 registry 中的会话绑定记录，不关闭 ChatGPT 网页。"""
     srv = _server()
     session_id = (session_id or "").strip()
     client_id = (client_id or "").strip()
     with st._state_lock:
-        if session_id and st.bound_session_id == session_id:
-            st.bound_client_id = None
-            st.bound_session_id = None
         srv._clear_bound_session_on_registry(session_id, client_id)
     srv._notify_status()
 
@@ -48,17 +39,6 @@ def gc_orphan_session_bindings(valid_session_ids):
     }
     removed = []
     with st._state_lock:
-        if st.bound_session_id and st.bound_session_id not in valid:
-            removed.append(
-                {
-                    "session_id": st.bound_session_id,
-                    "client_id": st.bound_client_id or "",
-                    "conversation_id": "",
-                    "url": st.tampermonkey_page_url or "",
-                }
-            )
-            st.bound_client_id = None
-            st.bound_session_id = None
         seen_sessions = set()
         for entry in list(st._tampermonkey_pages.values()) + list(
             st._tampermonkey_clients.values()

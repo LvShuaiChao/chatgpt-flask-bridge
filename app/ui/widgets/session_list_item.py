@@ -4,11 +4,11 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayou
 from app.constants import SESSION_BIND_LIST_STYLES
 from app.ui.widgets.elided_label import ElidedLabel
 
-SESSION_LIST_ITEM_HEIGHT = 80
-SESSION_LIST_ITEM_MIN_HEIGHT = 74
-SESSION_LIST_ITEM_MAX_HEIGHT = 92
+SESSION_LIST_ITEM_HEIGHT = 94
+SESSION_LIST_ITEM_MIN_HEIGHT = 88
+SESSION_LIST_ITEM_MAX_HEIGHT = 110
 SESSION_LIST_ITEM_RADIUS = 8
-SESSION_CARD_MAX_WIDTH = 240
+SESSION_CARD_MAX_WIDTH = 460
 
 
 def _hex_to_rgb_triplet(hex_color: str) -> tuple[int, int, int]:
@@ -23,14 +23,13 @@ class SessionListItemWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("SessionListItem")
         self.setMinimumWidth(0)
-        self.setMaximumWidth(SESSION_CARD_MAX_WIDTH + 12)
+        self.setMaximumWidth(16777215)
         self.setMinimumHeight(SESSION_LIST_ITEM_MIN_HEIGHT)
         self.setMaximumHeight(SESSION_LIST_ITEM_MAX_HEIGHT)
-        self.setFixedHeight(SESSION_LIST_ITEM_HEIGHT)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(2, 2, 2, 2)
+        root.setContentsMargins(0, 4, 0, 4)
         root.setSpacing(0)
 
         self.left_bar = QFrame()
@@ -41,15 +40,15 @@ class SessionListItemWidget(QWidget):
         self.card = QFrame()
         self.card.setObjectName("SessionCard")
         self.card.setMinimumWidth(0)
-        self.card.setMaximumWidth(SESSION_CARD_MAX_WIDTH)
+        self.card.setMaximumWidth(16777215)
         self.card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root.addWidget(self.left_bar)
         root.addWidget(self.card, stretch=1)
 
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(8, 6, 8, 6)
-        card_layout.setSpacing(2)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(4)
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -57,7 +56,7 @@ class SessionListItemWidget(QWidget):
 
         self.title_label = ElidedLabel()
         self.title_label.setObjectName("SessionItemTitle")
-        self.title_label.setFixedHeight(20)
+        self.title_label.setMinimumHeight(22)
         title_row.addWidget(self.title_label, stretch=1)
 
         self.pending_dot = QLabel()
@@ -69,18 +68,18 @@ class SessionListItemWidget(QWidget):
         self.current_badge = QLabel("当前")
         self.current_badge.setObjectName("SessionCurrentBadge")
         self.current_badge.setAlignment(Qt.AlignCenter)
-        self.current_badge.setFixedHeight(20)
+        self.current_badge.setMinimumHeight(22)
         self.current_badge.setMinimumWidth(34)
         self.current_badge.setVisible(False)
         title_row.addWidget(self.current_badge, 0, Qt.AlignVCenter)
 
         self.subtitle_label = ElidedLabel()
         self.subtitle_label.setObjectName("SessionItemSubtitle")
-        self.subtitle_label.setFixedHeight(18)
+        self.subtitle_label.setMinimumHeight(18)
 
         self.status_label = ElidedLabel()
         self.status_label.setObjectName("SessionBindStatusLabel")
-        self.status_label.setFixedHeight(18)
+        self.status_label.setMinimumHeight(18)
 
         card_layout.addLayout(title_row)
         card_layout.addWidget(self.subtitle_label)
@@ -286,7 +285,7 @@ class SessionListItemWidget(QWidget):
                 font-size: 11px;
                 background: rgba(255, 255, 255, 0.45);
                 border-radius: 6px;
-                padding: 1px 6px;
+                padding: 2px 6px;
                 border: none;
             }}
             """

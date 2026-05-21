@@ -5,7 +5,7 @@
 - **输出路径**：固定为仓库根目录 ``0_merged_for_chatgpt.txt``（超出 ``MAX_TOKENS_PER_OUTPUT_FILE`` 则按 token 拆分为 ``*_partNN.txt``）；默认同轮次为**每个**写出的 txt 各打一个同名 ``.zip``（单文件则仅 ``0_merged_for_chatgpt.zip``，多分片则 ``*_partNN.zip`` 各一个，DEFLATE）；``--no-export-zip`` 可关闭。
 - **循环**：默认每隔 ``LOOP_EXPORT_INTERVAL_SEC`` 秒检查一次；进程启动后**会先做一次全量合并写盘**，之后**仅当**候选文件相对上次导出的 mtime 清单有变化时才再次合并（Ctrl+C 结束）。``--loop-always-export`` 恢复「每轮必导出」。``--once`` 只跑一轮。
 - 常用开关：``--incremental``（本会话**首轮仍全量合并**，之后才按 mtime 仅合并变更文件）、``--include-runtime-state``、``--include-logs``、``--include-claude``。
-- 日志（``logs/*.log`` 等）默认**不**混入源码合并包，单独写入 ``0_export_logs_for_chatgpt.txt``（过大时仅导出末尾一段）。
+- 日志（仓库根 ``log.txt``、``logs/*.log`` 等）默认**不**混入源码合并包，单独写入 ``0_export_logs_for_chatgpt.txt``（过大时仅导出末尾一段）。
 - 默认缩小合并包（省略 ``runtime/`` 会话状态、``.claude/``、本脚本等）：``--include-runtime-state``、``--include-claude``、``--include-export-script`` 可逐项恢复。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
@@ -349,7 +349,7 @@ def _is_windows_reserved_output_basename(path: Path) -> bool:
 # =========================
 ADDITIONAL_INCLUDES: list[str] = []
 # 单独导出日志时，对下列相对路径的大文件仅导出末尾字节。
-EXPORT_LOG_RELATIVE_CANDIDATES: tuple[str, ...] = ()
+EXPORT_LOG_RELATIVE_CANDIDATES: tuple[str, ...] = ("log.txt",)
 EXPORT_LOG_GLOB_UNDER_LOGS: tuple[str, ...] = ("*.log",)
 EXPORT_LOG_TAIL_MAX_BYTES = 800_000
 
@@ -494,7 +494,9 @@ def read_export_text(file_path: Path, project_root: Path) -> str:
     except (OSError, ValueError):
         rel = file_path.name
     rel_norm = rel.replace("\\", "/")
-    if _is_separate_log_export_path(rel_norm) and file_path.suffix.lower() == ".log":
+    if _is_separate_log_export_path(rel_norm) and (
+        file_path.suffix.lower() == ".log" or rel_norm.replace("\\", "/") in EXPORT_LOG_RELATIVE_CANDIDATES
+    ):
         return _read_log_tail_utf8(file_path, EXPORT_LOG_TAIL_MAX_BYTES)
     return read_text_auto(file_path)
 

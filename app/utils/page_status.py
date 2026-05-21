@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Literal, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.constants import (
@@ -19,10 +20,12 @@ PageLiveness = Literal["online", "recently_seen", "stale", "offline"]
 
 __all__ = [
     "normalize_page",
+    "normalize_page_url_fields",
     "page_url_from",
     "page_registry_key",
     "get_page_liveness",
     "is_page_online",
+    "can_sync_conversation",
     "is_page_url_syncable",
     "is_conversation_syncable",
     "is_dialog_ready_page",
@@ -31,7 +34,9 @@ __all__ = [
     "is_page_syncable",
     "evaluate_send_page",
     "explain_page_decision",
+    "evaluate_page_capability",
     "log_page_decision_fields",
+    "PageCapability",
 ]
 
 _CHATGPT_HOSTS = frozenset(
@@ -66,6 +71,19 @@ def page_url_from(raw: Any) -> str:
     return ""
 
 
+def normalize_page_url_fields(raw: Any) -> Dict[str, str]:
+    """Migrate legacy URL aliases into the canonical url field without writing aliases."""
+    if not isinstance(raw, dict):
+        return {"url": "", "url_source": ""}
+    for key in _URL_READ_KEYS:
+        val = (raw.get(key) or "").strip()
+        if val and val != "-":
+            if key != "url":
+                _maybe_log_deprecated_url_field(raw, key)
+            return {"url": val, "url_source": key}
+    return {"url": "", "url_source": ""}
+
+
 def _maybe_log_deprecated_url_field(raw: dict, used_key: str) -> None:
     if used_key == "url" or used_key in _DEPRECATED_URL_LOGGED:
         return
@@ -73,7 +91,7 @@ def _maybe_log_deprecated_url_field(raw: dict, used_key: str) -> None:
     client_id = (raw.get("client_id") or "-").strip()
     page_instance_id = (raw.get("page_instance_id") or "-").strip()
     print(
-        f"[FIELD][DEPRECATED] field={used_key} replacement=url "
+        f"[FIELD][MIGRATE] field={used_key} replacement=url "
         f"client_id={client_id} page_instance_id={page_instance_id}"
     )
 
@@ -85,16 +103,8 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
     if now is None:
         now = time.time()
 
-    url = ""
-    url_source = ""
-    for key in _URL_READ_KEYS:
-        val = (raw.get(key) or "").strip()
-        if val and val != "-":
-            url = val
-            url_source = key
-            break
-    if url_source and url_source != "url":
-        _maybe_log_deprecated_url_field(raw, url_source)
+    url_info = normalize_page_url_fields(raw)
+    url = url_info["url"]
 
     conversation_id = (
         (raw.get("conversation_id") or raw.get("chatgpt_conversation_id") or "")
@@ -125,21 +135,31 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
                     f"[PAGE_STATUS][URL_PARSE_FAILED] url={url!r} error={exc!r}"
                 )
 
-    last_seen = _float_ts(raw.get("last_seen"))
-    online = is_page_online(raw, now=now) if last_seen else bool(raw.get("online"))
+    last_seen = _float_ts(
+        raw.get("last_seen"),
+        context="page_status.normalize_page.last_seen",
+        log_on_error=True,
+    )
+    page_liveness = get_page_liveness(raw, now=now) if last_seen else "offline"
+    online = page_liveness == "online"
+    legacy_online = bool(raw.get("online")) if not last_seen else None
 
     out: Dict[str, Any] = dict(raw)
+    for legacy_url_key in _URL_READ_KEYS:
+        if legacy_url_key != "url":
+            out.pop(legacy_url_key, None)
     out.update(
         {
             "client_id": client_id,
             "page_instance_id": page_instance_id,
             "conversation_id": conversation_id,
             "url": url,
-            "page_url": url,
             "page_type": page_type,
             "page_title": (raw.get("page_title") or raw.get("title") or "").strip(),
             "last_seen": last_seen,
             "online": online,
+            "page_liveness": page_liveness,
+            "legacy_online": legacy_online,
             "visibility_state": (
                 raw.get("visibility_state")
                 or raw.get("visible")
@@ -177,7 +197,9 @@ def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
     last_seen = _float_ts(
         page.get("last_seen")
         or page.get("last_heartbeat_at")
-        or page.get("last_poll_at")
+        or page.get("last_poll_at"),
+        context="page_status.get_page_liveness.last_seen",
+        log_on_error=True,
     )
     if not last_seen:
         return "offline"
@@ -212,28 +234,32 @@ def is_page_url_syncable(page: Any, *, now: float | None = None) -> bool:
     return is_page_online(norm, now=now) and bool((norm.get("url") or "").strip())
 
 
-def is_conversation_syncable(page: Any, *, now: float | None = None) -> bool:
-    """当前对话可同步：在线且 conversation_id 非空（与 dialog_ready 一致，含 /c/ URL）。"""
-    return is_dialog_ready_page(page, now=now)
-
-
-def is_dialog_ready_page(page: Any, *, now: float | None = None) -> bool:
-    """可同步/可对话页：在线 + conversation 类型 + conversation_id + url 含 /c/。"""
+def can_sync_conversation(page: Any, *, now: float | None = None) -> bool:
+    """可同步完整对话：在线 + conversation_id + url 含 /c/。"""
     if not isinstance(page, dict):
         return False
     norm = normalize_page(page, now=now)
     if not is_page_online(norm, now=now):
         return False
+    conversation_id = (norm.get("conversation_id") or "").strip()
+    url = (norm.get("url") or "").strip()
+    return bool(conversation_id and "/c/" in url)
+
+
+def is_conversation_syncable(page: Any, *, now: float | None = None) -> bool:
+    """兼容旧名：等同 can_sync_conversation。"""
+    return can_sync_conversation(page, now=now)
+
+
+def is_dialog_ready_page(page: Any, *, now: float | None = None) -> bool:
+    """UI 文案兼容：与 can_sync_conversation 一致。"""
+    if not isinstance(page, dict):
+        return False
+    norm = normalize_page(page, now=now)
     page_type = (norm.get("page_type") or "").strip()
     if page_type and page_type not in ("conversation", "-"):
         return False
-    conversation_id = (norm.get("conversation_id") or "").strip()
-    if not conversation_id:
-        return False
-    url = (norm.get("url") or "").strip()
-    if not url or "/c/" not in url:
-        return False
-    return True
+    return can_sync_conversation(page, now=now)
 
 
 def is_prebound_home_page(page: Any, *, now: float | None = None) -> bool:
@@ -265,10 +291,11 @@ def is_prebound_home_page(page: Any, *, now: float | None = None) -> bool:
 
 
 def classify_page_state(page: Any, *, now: float | None = None) -> Dict[str, Any]:
-    """返回 online/dialog_ready/prebound_home 与单一 state（offline|online|dialog_ready|prebound_home）。"""
+    """返回统一状态字段；state 仅保留为 legacy_state 兼容。"""
     online = is_page_online(page, now=now) if isinstance(page, dict) else False
     dialog_ready = is_dialog_ready_page(page, now=now) if isinstance(page, dict) else False
     prebound_home = is_prebound_home_page(page, now=now) if isinstance(page, dict) else False
+    page_liveness = get_page_liveness(page, now=now) if isinstance(page, dict) else "offline"
     if not online:
         state: PageStateKind = "offline"
     elif dialog_ready:
@@ -282,7 +309,9 @@ def classify_page_state(page: Any, *, now: float | None = None) -> Dict[str, Any
         "online": online,
         "dialog_ready": dialog_ready,
         "prebound_home": prebound_home,
+        "legacy_state": state,
         "state": state,
+        "page_liveness": page_liveness,
         "client_id": norm.get("client_id") or "",
         "page_instance_id": norm.get("page_instance_id") or "",
         "conversation_id": norm.get("conversation_id") or "",
@@ -340,48 +369,173 @@ def evaluate_send_page(
     return "allowed", "ready"
 
 
-def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
-    norm = normalize_page(page) if isinstance(page, dict) else {}
-    classified = classify_page_state(norm) if norm else {}
+@dataclass
+class PageCapability:
+    """统一页面能力判定结果（UI、server、执行入口共用）。"""
+
+    online: bool = False
+    bound: bool = False
+    syncable: bool = False
+    conversation_syncable: bool = False
+    sendable: bool = False
+    queueable: bool = False
+    reason: str = ""
+    block_reason: str = ""
+    client_id: str = ""
+    page_instance_id: str = ""
+    conversation_id: str = ""
+    url: str = ""
+    page_liveness: str = "offline"
+    dialog_ready: bool = False
+    prebound_home: bool = False
+    send_decision: str = "blocked"
+    url_syncable: bool = False
+    client_id_mismatch: bool = False
+    page_instance_id_mismatch: bool = False
+    conversation_mismatch: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "client_id": self.client_id,
+            "page_instance_id": self.page_instance_id,
+            "conversation_id": self.conversation_id,
+            "url": self.url,
+            "online": self.online,
+            "bound": self.bound,
+            "client_id_mismatch": self.client_id_mismatch,
+            "page_instance_id_mismatch": self.page_instance_id_mismatch,
+            "conversation_mismatch": self.conversation_mismatch,
+            "page_liveness": self.page_liveness,
+            "dialog_ready": self.dialog_ready,
+            "prebound_home": self.prebound_home,
+            "page_state": "offline" if not self.online else "online",
+            "legacy_state": "",
+            "can_sync_conversation": self.conversation_syncable,
+            "url_syncable": self.url_syncable,
+            "syncable": self.syncable,
+            "conversation_syncable": self.conversation_syncable,
+            "sendable": self.sendable,
+            "queueable": self.queueable,
+            "send_queued": self.queueable,
+            "send_decision": self.send_decision,
+            "blocked_reason": self.block_reason,
+            "reason": self.reason,
+            "response_state": "unknown",
+        }
+
+
+def _page_block_reason_for_sync(
+    norm: Dict[str, Any],
+    classified: Dict[str, Any],
+    online: bool,
+) -> str:
+    if not online:
+        return "offline"
+    if classified.get("prebound_home"):
+        return "prebound_home_wait_conversation"
+    if not (norm.get("url") or ""):
+        return "missing_url"
+    if not (norm.get("conversation_id") or ""):
+        return "missing_conversation_id"
+    return "not_conversation_page"
+
+
+def evaluate_page_capability(
+    page: Any,
+    *,
+    action: Optional[str] = None,
+    bound: bool = False,
+    expected_conversation_id: str = "",
+    expected_client_id: str = "",
+    expected_page_instance_id: str = "",
+    now: float | None = None,
+) -> PageCapability:
+    """统一能力判定：online/url_syncable/conversation_syncable/sendable/queueable。"""
+    norm = normalize_page(page, now=now) if isinstance(page, dict) else {}
+    if not norm:
+        return PageCapability(reason="no_page", block_reason="no_page")
+    classified = classify_page_state(norm, now=now)
     online = bool(classified.get("online"))
-    url_syncable = is_page_url_syncable(norm) if norm else False
-    conversation_syncable = is_conversation_syncable(norm) if norm else False
-    dialog_ready = bool(classified.get("dialog_ready"))
-    syncable = url_syncable
-    send_decision, send_reason = (
-        evaluate_send_page(norm) if norm else ("blocked", "no_page")
+    url_syncable = is_page_url_syncable(norm, now=now)
+    conversation_syncable = can_sync_conversation(norm, now=now)
+    dialog_ready = conversation_syncable
+    # 保持当前外部行为：syncable 仍按完整对话可同步处理，避免改变按钮/同步流程。
+    syncable = conversation_syncable
+    send_decision, send_reason = evaluate_send_page(
+        norm,
+        expected_conversation_id,
     )
     sendable = send_decision == "allowed"
-    send_queued = send_decision == "queued"
-    blocked_reason = ""
+    queueable = send_decision == "queued"
+    block_reason = ""
+    reason = ""
     if action == "sync" and not conversation_syncable:
-        if not online:
-            blocked_reason = "offline"
-        elif classified.get("prebound_home"):
-            blocked_reason = "prebound_home_wait_conversation"
-        elif not (norm.get("url") or ""):
-            blocked_reason = "missing_url"
+        block_reason = _page_block_reason_for_sync(norm, classified, online)
+        reason = block_reason
+    elif action == "send":
+        if send_decision == "blocked":
+            block_reason = send_reason
+        elif send_decision == "queued":
+            reason = send_reason
         else:
-            blocked_reason = "missing_conversation_id"
-    elif action == "send" and send_decision == "blocked":
-        blocked_reason = send_reason
+            reason = send_reason
 
-    return {
-        "client_id": norm.get("client_id") or "",
-        "page_instance_id": norm.get("page_instance_id") or "",
-        "conversation_id": norm.get("conversation_id") or "",
-        "url": norm.get("url") or "",
-        "online": online,
-        "dialog_ready": dialog_ready,
-        "prebound_home": bool(classified.get("prebound_home")),
-        "page_state": classified.get("state") or ("offline" if not online else "online"),
-        "syncable": syncable,
-        "conversation_syncable": conversation_syncable,
-        "sendable": sendable,
-        "send_queued": send_queued,
-        "send_decision": send_decision,
-        "blocked_reason": blocked_reason or send_reason,
-    }
+    exp_cid = (expected_conversation_id or "").strip()
+    exp_client = (expected_client_id or "").strip()
+    exp_instance = (expected_page_instance_id or "").strip()
+    client_id_mismatch = bool(
+        norm and exp_client and (norm.get("client_id") or "").strip() != exp_client
+    )
+    page_instance_id_mismatch = bool(
+        norm
+        and exp_instance
+        and (norm.get("page_instance_id") or "").strip() != exp_instance
+    )
+    page_conv = (norm.get("conversation_id") or "").strip() if norm else ""
+    conversation_mismatch = bool(
+        norm and exp_cid and page_conv and page_conv != exp_cid
+    )
+    if client_id_mismatch:
+        block_reason = block_reason or "client_id_mismatch"
+    if page_instance_id_mismatch:
+        block_reason = block_reason or "page_instance_id_mismatch"
+    if conversation_mismatch:
+        block_reason = block_reason or "conversation_mismatch"
+
+    return PageCapability(
+        online=online,
+        bound=bound,
+        syncable=syncable,
+        conversation_syncable=conversation_syncable,
+        sendable=sendable,
+        queueable=queueable,
+        reason=reason,
+        block_reason=block_reason,
+        client_id=norm.get("client_id") or "",
+        page_instance_id=norm.get("page_instance_id") or "",
+        conversation_id=norm.get("conversation_id") or "",
+        url=norm.get("url") or "",
+        page_liveness=str(classified.get("page_liveness") or "offline"),
+        dialog_ready=dialog_ready,
+        prebound_home=bool(classified.get("prebound_home")),
+        send_decision=send_decision,
+        url_syncable=url_syncable,
+        client_id_mismatch=client_id_mismatch,
+        page_instance_id_mismatch=page_instance_id_mismatch,
+        conversation_mismatch=conversation_mismatch,
+    )
+
+
+def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
+    cap = evaluate_page_capability(page, action=action)
+    out = cap.to_dict()
+    if isinstance(page, dict):
+        norm = normalize_page(page)
+        classified = classify_page_state(norm)
+        out["legacy_state"] = classified.get("legacy_state") or ""
+        out["page_state"] = out["legacy_state"] or out["page_state"]
+        out["response_state"] = norm.get("response_state") or "unknown"
+    return out
 
 
 def log_page_decision_fields(decision: Dict[str, Any]) -> str:
@@ -390,11 +544,21 @@ def log_page_decision_fields(decision: Dict[str, Any]) -> str:
         f"page_instance_id={decision.get('page_instance_id') or '-'} "
         f"conversation_id={decision.get('conversation_id') or '-'} "
         f"url={decision.get('url') or '-'} "
+        f"page_liveness={decision.get('page_liveness') or '-'} "
         f"online={'true' if decision.get('online') else 'false'} "
         f"dialog_ready={'true' if decision.get('dialog_ready') else 'false'} "
         f"prebound_home={'true' if decision.get('prebound_home') else 'false'} "
+        f"can_sync_conversation={'true' if (decision.get('conversation_syncable') or decision.get('syncable')) else 'false'} "
         f"syncable={'true' if decision.get('syncable') else 'false'} "
         f"conversation_syncable={'true' if decision.get('conversation_syncable') else 'false'} "
         f"sendable={'true' if decision.get('sendable') else 'false'} "
-        f"blocked_reason={decision.get('blocked_reason') or '-'}"
+        f"queueable={'true' if decision.get('queueable') else 'false'} "
+        f"send_decision={decision.get('send_decision') or '-'} "
+        f"response_state={decision.get('response_state') or '-'} "
+        f"bound={'true' if decision.get('bound') else 'false'} "
+        f"client_id_mismatch={'true' if decision.get('client_id_mismatch') else 'false'} "
+        f"page_instance_id_mismatch={'true' if decision.get('page_instance_id_mismatch') else 'false'} "
+        f"conversation_mismatch={'true' if decision.get('conversation_mismatch') else 'false'} "
+        f"blocked_reason={decision.get('blocked_reason') or '-'} "
+        f"reason={decision.get('reason') or '-'}"
     )

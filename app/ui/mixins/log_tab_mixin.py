@@ -21,14 +21,21 @@ class LogLoadWorker(QThread):
             lines = read_last_lines(self.log_path, self.max_lines)
             self.loaded.emit(lines)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            detail = (
+                "[LOG_TAB][WORKER_FAILED] "
+                "function=LogLoadWorker.run "
+                f"path={self.log_path} "
+                f"max_lines={self.max_lines} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}\n{traceback.format_exc()}"
+            )
+            print(detail)
+            self.failed.emit(detail)
 
 
 class LogTabMixin:
-    LOG_TAB_MAX_DISPLAY_LINES = 1000
-    LOG_TAB_MAX_BLOCK_COUNT = 3000
-    LOG_TAB_LOAD_DEBOUNCE_MS = 500
-    LOG_FILE_TAIL_MAX_BYTES = 512 * 1024
+    LOG_TAB_MAX_DISPLAY_LINES = 3000
+    LOG_TAB_MAX_BLOCK_COUNT = 8000
 
     def _init_log_tab_state(self):
         self._log_tab_loaded = False
@@ -66,6 +73,10 @@ class LogTabMixin:
         if index < 0:
             return
         tab_text = self.main_tabs.tabText(index)
+        if hasattr(self, "_flush_pending_chat_render") and (
+            "聊天" in tab_text or "鑱婂ぉ" in tab_text
+        ):
+            QTimer.singleShot(30, self._flush_pending_chat_render)
         if tab_text != "日志":
             return
         if getattr(self, "_pending_log_subtabs_refresh", False):
@@ -78,6 +89,11 @@ class LogTabMixin:
             return
         self._runtime_log_loaded_once = True
         self._reload_runtime_log_view()
+
+    def _load_runtime_log_if_visible(self):
+        if not self._is_log_tab_visible():
+            return
+        self._load_runtime_log_once()
 
     def _reload_runtime_log_view(self, max_lines=None):
         if max_lines is None:

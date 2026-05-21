@@ -20,20 +20,6 @@ class ChatSessionMixin:
             if getattr(message, "visible_in_chat", True)
         )
 
-    def _resolve_session_id_for_request(self, request_id, payload=None):
-        request_id = (request_id or "").strip()
-        session_id = ""
-        if isinstance(payload, dict):
-            session_id = (payload.get("session_id") or "").strip()
-        if not session_id and request_id:
-            pending = getattr(self, "_pending_send_requests", {}).get(request_id) or {}
-            session_id = (pending.get("session_id") or "").strip()
-        if not session_id and request_id:
-            session_id = (self._message_to_session.get(request_id) or "").strip()
-        if not session_id:
-            session_id = (self._current_session_id() or "").strip()
-        return session_id
-
     def _update_message_status_by_request_id(
         self, session_id, request_id, status, *, turn_id=""
     ):
@@ -141,6 +127,7 @@ class ChatSessionMixin:
                 .strip()
             ),
             parent_message_id=(message.get("parent_message_id") or "").strip(),
+            source=(message.get("source") or "").strip(),
             visible_in_chat=bool(message.get("visible_in_chat", True)),
         )
         count_after = self._session_visible_message_count(session)
@@ -219,24 +206,6 @@ class ChatSessionMixin:
         )
         return False
 
-    def _count_visible_chat_bubble_widgets(self):
-        layout = None
-        if hasattr(self, "_chat_messages_layout"):
-            layout = self._chat_messages_layout()
-        if layout is None:
-            layout = getattr(self, "chat_list_layout", None)
-        if layout is None:
-            return 0
-        count = 0
-        for index in range(layout.count()):
-            item = layout.itemAt(index)
-            if item is None or item.spacerItem() is not None:
-                continue
-            widget = item.widget()
-            if widget is not None and widget.objectName() == "ChatBubbleRow":
-                count += 1
-        return count
-
     def _ensure_current_session_binding_consistent(self):
         session = self._current_session()
         if session is None:
@@ -263,19 +232,7 @@ class ChatSessionMixin:
 
         visible_messages, _skipped = self._visible_messages_for_render(session)
         if not visible_messages:
-            if hasattr(self, "_show_empty_chat_state"):
-                self._show_empty_chat_state()
-            elif hasattr(self, "_clear_chat_widgets"):
-                self._clear_chat_widgets()
-            if hasattr(self, "_finish_chat_render_layout"):
-                if hasattr(self, "_render_chat_transcript"):
-                    self._render_chat_transcript(
-                        session,
-                        force_bottom=force_bottom,
-                    )
-                self._finish_chat_render_layout(force_bottom=force_bottom)
-            elif hasattr(self, "_adjust_chat_history_height_to_content"):
-                self._adjust_chat_history_height_to_content()
+            self._render_session_chat(session, force_bottom=force_bottom)
             self._append_log(
                 "[CHAT_RENDER][EMPTY] "
                 f"session_id={session.session_id} "
@@ -284,57 +241,9 @@ class ChatSessionMixin:
             )
             return False
 
-        bubble_before = self._count_visible_chat_bubble_widgets()
-        stale_signature = (
-            bubble_before <= 0
-            and len(visible_messages) > 0
-        )
-        if stale_signature:
-            self._last_rendered_chat_signature = None
-            self._last_rendered_session_id = ""
-            force_bottom = True
-            self._append_log(
-                "[CHAT_RENDER][FORCE] "
-                f"session_id={session.session_id} "
-                f"reason=stale_signature_or_empty_widgets "
-                f"message_count={len(visible_messages)} "
-                f"trigger_reason={reason or '-'}",
-                echo=True,
-            )
-
         self._render_session_chat(session, force_bottom=force_bottom)
-        bubble_after = self._count_visible_chat_bubble_widgets()
-        self._append_log(
-            "[CHAT_RENDER][CURRENT_DONE] "
-            f"session_id={session.session_id} "
-            f"count={len(visible_messages)} "
-            f"total_messages={len(session.messages)} "
-            f"bubbles={bubble_after} "
-            f"trigger_reason={reason or '-'}",
-            echo=True,
-        )
-        if bubble_after > 0 and hasattr(self, "_log_chat_render_ui_state"):
-            self._log_chat_render_ui_state(
-                session, visible_messages, bubble_after
-            )
-            scroll = None
-            if hasattr(self, "_chat_primary_scroll_area"):
-                scroll = self._chat_primary_scroll_area()
-            else:
-                scroll = getattr(self, "chat_scroll", None)
-            container = None
-            if hasattr(self, "_chat_messages_container"):
-                container = self._chat_messages_container()
-            else:
-                container = getattr(self, "chat_container", None)
-            suspicious = False
-            if container is not None and container.size().height() <= 0:
-                suspicious = True
-            if scroll is not None and scroll.viewport() is not None:
-                if scroll.viewport().size().height() <= 0:
-                    suspicious = True
-            if scroll is not None and not scroll.isVisible():
-                suspicious = True
-            if suspicious and hasattr(self, "_log_chat_render_bubble_geometry"):
-                self._log_chat_render_bubble_geometry(bubble_after)
-        return bubble_after > 0
+        if getattr(self, "_pending_chat_render", None):
+            return False
+        if hasattr(self, "_log_chat_render_ui_state"):
+            self._log_chat_render_ui_state(session, visible_messages)
+        return True

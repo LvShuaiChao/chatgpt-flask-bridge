@@ -163,7 +163,6 @@ class PageBindingStateMixin:
         if "xz_bind_token=" not in url:
             return False
         new_url = f"https://chatgpt.com/c/{conversation_id}"
-        remote["conversation_url"] = new_url
         remote["url"] = new_url
         remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
         remote["page_type"] = "conversation"
@@ -190,7 +189,9 @@ class PageBindingStateMixin:
             )
             return False
         normalized = self._normalize_tm_page_for_binding(normalized)
-        if not normalized.get("client_id") and not normalized.get("page_url"):
+        if not normalized.get("client_id") and not (
+            normalized.get("url") or normalized.get("page_url")
+        ):
             self._append_log(
                 "[BIND][WRITE][SKIP] reason=invalid_normalized_page",
                 echo=True,
@@ -212,7 +213,7 @@ class PageBindingStateMixin:
         )
 
         new_conversation_id = (normalized.get("conversation_id") or "").strip()
-        new_url = (normalized.get("page_url") or "").strip()
+        new_url = (normalized.get("url") or normalized.get("page_url") or "").strip()
         if (
             new_conversation_id
             and old_url
@@ -282,8 +283,6 @@ class PageBindingStateMixin:
         url = (norm.get("url") or norm.get("page_url") or page_url_from(page) or "").strip()
         if url:
             bind_item["url"] = url
-            bind_item["conversation_url"] = url
-            bind_item["page_url"] = url
         self._append_log(
             "[BIND][SET_BOUND_PAGE] "
             f"session_id={session.session_id} "
@@ -311,14 +310,14 @@ class PageBindingStateMixin:
         if not isinstance(client_info, dict):
             client_info = {
                 "client_id": str(client_info or "").strip(),
-                "page_url": "",
+                "url": "",
             }
         norm = self._normalize_tm_page_for_binding(client_info)
         if norm:
             client_info = dict(client_info)
             client_info.update(norm)
-            if norm.get("page_url"):
-                client_info["url"] = norm["page_url"]
+            if norm.get("url") or norm.get("page_url"):
+                client_info["url"] = norm.get("url") or norm.get("page_url")
         if not allow_existing_conversation_for_new_session:
             rejected, reject_msg = self._reject_bind_existing_conversation_for_new_session(
                 session, client_info
@@ -328,8 +327,8 @@ class PageBindingStateMixin:
                     self._add_system_message(reject_msg)
                 return False
         page_url = (
-            client_info.get("page_url")
-            or client_info.get("url")
+            client_info.get("url")
+            or client_info.get("page_url")
             or client_info.get("conversation_url")
             or ""
         ).strip()

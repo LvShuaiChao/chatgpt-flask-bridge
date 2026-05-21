@@ -532,7 +532,7 @@ class JobSchedulerMixin:
         if target_client_id:
             payload["target_client_id"] = target_client_id
         if target_page_url:
-            payload["target_page_url"] = target_page_url
+            payload["target_url"] = target_page_url
         return payload, None
 
     def _job_status_label(self, status):
@@ -768,8 +768,19 @@ class JobSchedulerMixin:
         job = None
         try:
             job = job_scheduler.get_job(job_id)
-        except Exception:
-            job = None
+        except Exception as error:
+            detail = (
+                "[JOB][GET_FOR_CURSOR_FAILED] "
+                "function=_on_job_send_reply_to_cursor "
+                f"job_id={job_id or '-'} "
+                f"error_type={type(error).__name__} "
+                f"error={error}\n{traceback.format_exc()}"
+            )
+            self._append_log(detail, echo=True)
+            self._set_job_hint(f"读取任务失败，无法发送到 Cursor：{error}")
+            if hasattr(self, "_add_system_message"):
+                self._add_system_message(f"读取任务失败，无法发送到 Cursor：{error}")
+            return
         reply = ((job or {}).get("chatgpt_reply") or "").strip()
         if not reply:
             self._set_job_hint("当前还没有可发送到 Cursor 的 ChatGPT 回复。")
