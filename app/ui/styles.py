@@ -398,11 +398,38 @@ APP_STYLESHEET = """
             QSplitter#ChatMainSplitter::handle:hover {
                 background: #60a5fa;
             }
-            QFrame#SessionCard[isCurrentSession="true"] {
-                background: #eff6ff;
-                border: 1px solid #93c5fd;
-                border-left: 4px solid #2563eb;
-                border-radius: 6px;
+            QFrame#SessionCard[sessionState="bound_online"] {
+                background: #ecfdf5;
+                border: 1px solid #86efac;
+            }
+            QFrame#SessionCard[sessionState="bound_offline"] {
+                background: #fffbeb;
+                border: 1px solid #fbbf24;
+            }
+            QFrame#SessionCard[sessionState="unbound"] {
+                background: #f9fafb;
+                border: 1px solid #d1d5db;
+            }
+            QFrame#SessionCard[sessionState="bound_online"][isCurrentSession="true"] {
+                background: #ecfdf5;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
+            }
+            QFrame#SessionCard[sessionState="bound_offline"][isCurrentSession="true"] {
+                background: #fffbeb;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
+            }
+            QFrame#SessionCard[sessionState="unbound"][isCurrentSession="true"] {
+                background: #f8fafc;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
             }
             QLabel#CurrentSessionBadge {
                 color: #ffffff;

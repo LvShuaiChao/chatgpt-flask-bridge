@@ -8,4 +8,4 @@ class NoWheelComboBox(QComboBox):
     """
 
     def wheelEvent(self, event):
-        event.accept()
+        event.ignore()

@@ -1,12 +1,12 @@
 ====================================================================================================
 PROJECT EXPORT FOR CHATGPT / CURSOR
-Export time: 2026-05-22 02:15:15
+Export time: 2026-05-22 02:27:58
 Project name: chatgpt-flask-bridge
 Project root: E:\Documents\Desktop\chatgpt-flask-bridge
 Export mode: full project scan
-循环次数: 第 140 次
-本次合并耗时: 0.41s（读取各文件并组装正文）
-当前代码总行数: 63747
+循环次数: 第 151 次
+本次合并耗时: 0.32s（读取各文件并组装正文）
+当前代码总行数: 63744
 当前收录源码文件合计 tokens（cl100k_base）: 50.19万
 当前合并导出全文 tokens（cl100k_base）: 50.52万
 ChatGPT 文档 token 参考上限（文本类）: 200万
@@ -57,31 +57,32 @@ ChatGPT 文档 token 参考上限（文本类）: 200万
   35. app/ui/widgets/chat_input.py
   36. app/ui/widgets/elided_label.py
   37. app/ui/widgets/no_wheel_combo_box.py
-  38. app/ui/widgets/no_wheel_tab_widget.py
-  39. app/ui/widgets/session_list.py
-  40. app/ui/widgets/session_list_item.py
-  41. app/url_utils.py
-  42. app/utils/__init__.py
-  43. app/utils/bridge_payload.py
-  44. app/utils/page_status.py
-  45. app/utils/text_utils.py
-  46. app/utils/time_utils.py
-  47. app/utils/tm_activity.py
-  48. app/utils/trace_log.py
-  49. bridge_client.py
-  50. bridge_client_gui.py
-  51. client.user.js
-  52. examples/__init__.py
-  53. examples/bridge_client_gui.py
-  54. examples/chat_cli.py
-  55. examples/client_ui/__init__.py
-  56. examples/client_ui/main_window.py
-  57. examples/external_client.py
-  58. GUI.py
-  59. log_utils.py
-  60. README.md
-  61. requirements.txt
-  62. server.py
+  38. app/ui/widgets/no_wheel_spin_box.py
+  39. app/ui/widgets/no_wheel_tab_widget.py
+  40. app/ui/widgets/session_list.py
+  41. app/ui/widgets/session_list_item.py
+  42. app/url_utils.py
+  43. app/utils/__init__.py
+  44. app/utils/bridge_payload.py
+  45. app/utils/page_status.py
+  46. app/utils/text_utils.py
+  47. app/utils/time_utils.py
+  48. app/utils/tm_activity.py
+  49. app/utils/trace_log.py
+  50. bridge_client.py
+  51. bridge_client_gui.py
+  52. client.user.js
+  53. examples/__init__.py
+  54. examples/bridge_client_gui.py
+  55. examples/chat_cli.py
+  56. examples/client_ui/__init__.py
+  57. examples/client_ui/main_window.py
+  58. examples/external_client.py
+  59. GUI.py
+  60. log_utils.py
+  61. README.md
+  62. requirements.txt
+  63. server.py
 
 ----------------------------------------------------------------------------------------------------
 
@@ -1555,7 +1556,7 @@ TOKENS（cl100k_base）: 0万（0）
 
 ====================================================================================================
 FILE: app/ui/mixins/bridge_mixin.py
-TOKENS（cl100k_base）: 3.63万（36,307）
+TOKENS（cl100k_base）: 3.63万（36,343）
 ====================================================================================================
 
 import time
@@ -4031,8 +4032,9 @@ class BridgeMixin:
         return line
     def _update_running_ui(self, running):
         if hasattr(self, "enable_lan_access_cb"):
-            self.enable_lan_access_cb.setEnabled(not running)
-        self.port_edit.setEnabled(not running)
+            self.enable_lan_access_cb.setEnabled(True)
+        if hasattr(self, "port_edit"):
+            self.port_edit.setEnabled(True)
         # 服务按钮不要再禁用成灰色。
         # 重复点击由 _start_server / _stop_server 内部提示“已运行”或“未运行”。
         self.settings_start_btn.setEnabled(True)
@@ -4092,6 +4094,9 @@ class BridgeMixin:
             )
             self._update_service_settings_status()
             self._save_app_settings()
+            self._service_settings_pending_restart = False
+            if hasattr(self, "_set_service_settings_hint"):
+                self._set_service_settings_hint("")
             message = result.get("message") or server.get_server_url()
             self._append_log(message, echo=True)
             if result.get("fallback_used"):
@@ -6583,7 +6588,7 @@ class ChatSessionMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/cursor_bridge_mixin.py
-TOKENS（cl100k_base）: 0.57万（5,674）
+TOKENS（cl100k_base）: 0.57万（5,692）
 ====================================================================================================
 
 import json
@@ -7385,7 +7390,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 未找到")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 未找到")
 
             self._set_cursor_status_hint(msg)
 
@@ -7405,7 +7410,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 超时")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 超时")
 
             self._set_cursor_status_hint(msg)
 
@@ -7427,7 +7432,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 异常")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 异常")
 
             self._set_cursor_status_hint(msg)
 
@@ -7457,7 +7462,9 @@ class CursorBridgeMixin:
 
             self._add_system_message(ok_msg)
 
-            self.cursor_status_label.setText(f"Cursor 状态：CLI 可用 {version}")
+            self._set_cursor_feedback(
+                status_text=f"Cursor 状态：CLI 可用 {version}"
+            )
 
             self._set_cursor_status_hint(ok_msg)
 
@@ -7483,7 +7490,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 测试失败")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 测试失败")
 
             self._set_cursor_status_hint(fail_msg)
 
@@ -7588,7 +7595,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：接口缺失")
+            self._set_cursor_feedback(status_text="Cursor 状态：接口缺失")
 
             self._set_cursor_status_hint(fail_msg)
 
@@ -7610,7 +7617,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：任务发送失败")
+            self._set_cursor_feedback(status_text="Cursor 状态：任务发送失败")
 
             self._set_cursor_status_hint(fail_msg)
 
@@ -22031,7 +22038,7 @@ class SessionMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/settings_mixin.py
-TOKENS（cl100k_base）: 0.56万（5,554）
+TOKENS（cl100k_base）: 0.59万（5,886）
 ====================================================================================================
 
 import time
@@ -22039,6 +22046,7 @@ import traceback
 
 import server
 from log_utils import append_log, set_log_runtime_options
+from PyQt5.QtCore import QTimer
 
 from app.constants import (
     DEFAULT_APP_SETTINGS,
@@ -22370,19 +22378,58 @@ class SettingsMixin:
             self._default_compose_message = (
                 self.default_compose_message_edit.toPlainText()
             )
-        if hasattr(self, "debug_mode_cb"):
-            self._debug_mode = self.debug_mode_cb.isChecked()
-        if hasattr(self, "show_raw_payload_cb"):
-            self._show_raw_payload = self.show_raw_payload_cb.isChecked()
-        if hasattr(self, "mirror_log_to_console_cb"):
-            self._mirror_log_to_console = self.mirror_log_to_console_cb.isChecked()
-        if hasattr(self, "include_log_callsite_cb"):
-            self._include_log_callsite = self.include_log_callsite_cb.isChecked()
         set_log_runtime_options(
             verbose=self._debug_mode,
             mirror_to_console=self._mirror_log_to_console,
             include_callsite=self._include_log_callsite,
         )
+    def _init_service_settings_autosave_timer(self):
+        self._service_default_message_save_timer = QTimer(self)
+        self._service_default_message_save_timer.setSingleShot(True)
+        self._service_default_message_save_timer.timeout.connect(
+            self._on_service_default_message_autosave_timeout
+        )
+        self._service_settings_pending_restart = False
+
+    def _schedule_service_default_message_autosave(self):
+        if getattr(self, "_service_settings_syncing", False):
+            return
+        timer = getattr(self, "_service_default_message_save_timer", None)
+        if timer is None:
+            return
+        timer.start(500)
+
+    def _on_service_default_message_autosave_timeout(self):
+        self._auto_save_service_settings(network_config_changed=False)
+
+    def _auto_save_service_settings(self, *, network_config_changed=False):
+        if getattr(self, "_service_settings_syncing", False):
+            return
+        if network_config_changed and hasattr(self, "port_edit"):
+            if self._parse_port() is None:
+                return
+        try:
+            self._save_app_settings()
+            self._apply_default_compose_message_if_empty()
+            if network_config_changed and hasattr(self, "tm_bridge_url_label"):
+                self._update_tampermonkey_settings_labels(self._last_bridge_status)
+            if network_config_changed:
+                if server.is_server_running():
+                    self._service_settings_pending_restart = True
+                    self._set_service_settings_hint(
+                        "配置已保存，重启服务后生效"
+                    )
+                else:
+                    self._service_settings_pending_restart = False
+                    self._set_service_settings_hint("")
+            self._update_service_settings_status()
+        except Exception as error:
+            detail = (
+                f"自动保存服务设置失败：{error}\n{traceback.format_exc()}"
+            )
+            append_log(detail, source="GUI", echo=True)
+            self._set_service_settings_hint(f"保存失败：{error}")
+
     def _save_app_settings(self):
         self._read_settings_from_widgets()
         self._settings.setValue("host", self._host)
@@ -22435,6 +22482,7 @@ class SettingsMixin:
         else:
             self._set_settings_hint("设置已应用。")
     def _reset_settings_to_default(self):
+        # TODO: 迁移到更多菜单，并增加二次确认对话框。
         ui_setting_keys = {
             "font_size",
             "remember_window_geometry",
@@ -22456,6 +22504,13 @@ class SettingsMixin:
         self._save_app_settings()
         self._set_settings_hint("已恢复默认设置。")
     def _sync_settings_widgets_from_values(self):
+        self._service_settings_syncing = True
+        try:
+            self._sync_settings_widgets_from_values_impl()
+        finally:
+            self._service_settings_syncing = False
+
+    def _sync_settings_widgets_from_values_impl(self):
         if hasattr(self, "enable_lan_access_cb"):
             self.enable_lan_access_cb.setChecked(self._enable_lan_access)
         self._update_listen_host_label()
@@ -22497,14 +22552,6 @@ class SettingsMixin:
             self.default_compose_message_edit.setPlainText(
                 getattr(self, "_default_compose_message", "") or ""
             )
-        if hasattr(self, "debug_mode_cb"):
-            self.debug_mode_cb.setChecked(self._debug_mode)
-        if hasattr(self, "show_raw_payload_cb"):
-            self.show_raw_payload_cb.setChecked(self._show_raw_payload)
-        if hasattr(self, "mirror_log_to_console_cb"):
-            self.mirror_log_to_console_cb.setChecked(self._mirror_log_to_console)
-        if hasattr(self, "include_log_callsite_cb"):
-            self.include_log_callsite_cb.setChecked(self._include_log_callsite)
     def _default_compose_message_text(self):
         return (getattr(self, "_default_compose_message", "") or "").strip()
 
@@ -22519,7 +22566,14 @@ class SettingsMixin:
             return
         edit.setPlainText(text)
     def _set_settings_hint(self, text):
-        self.settings_hint_label.setText(text or "")
+        text = text or ""
+        if text:
+            self.statusBar().showMessage(text, 8000)
+
+    def _set_service_settings_hint(self, text):
+        if hasattr(self, "settings_service_hint_label"):
+            self.settings_service_hint_label.setText(text or "")
+
     def _set_tm_action_hint(self, text):
         text = (text or "").strip()
         if text == getattr(self, "_last_tm_action_hint_text", None):
@@ -22541,6 +22595,8 @@ class SettingsMixin:
         self._update_listen_host_label()
         if hasattr(self, "tm_bridge_url_label"):
             self._update_tampermonkey_settings_labels(self._last_bridge_status)
+        if not getattr(self, "_service_settings_syncing", False):
+            self._auto_save_service_settings(network_config_changed=True)
 
     def _update_service_settings_status(self):
         if server.is_server_running():
@@ -22577,6 +22633,9 @@ class SettingsMixin:
         if server.is_server_running():
             self._stop_server()
         self._start_server()
+        if server.is_server_running():
+            self._service_settings_pending_restart = False
+            self._set_service_settings_hint("")
     def _clear_log_widget(self, widget, name):
         if widget is None:
             msg = f"清空{name}失败：未找到日志控件。"
@@ -22641,16 +22700,12 @@ class SettingsMixin:
             self._runtime_log_loaded_once = False
         self._append_log("已清空运行日志。", echo=True)
         self._set_tm_action_hint("已清空运行日志")
-    def _on_save_settings_clicked(self):
-        self._save_app_settings()
-        self._apply_settings(immediate_only=False)
-        self._set_settings_hint("设置已保存。")
 
 
 
 ====================================================================================================
 FILE: app/ui/mixins/ui_builder_mixin.py
-TOKENS（cl100k_base）: 2.42万（24,190）
+TOKENS（cl100k_base）: 2.33万（23,277）
 ====================================================================================================
 
 import os
@@ -22659,8 +22714,6 @@ import traceback
 
 import server
 from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
-from log_utils import get_log_file_path
-
 from app.constants import (
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
@@ -22670,6 +22723,7 @@ from app.models import normalize_remote_chatgpt
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.elided_label import ElidedLabel
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
+from app.ui.widgets.no_wheel_spin_box import NoWheelSpinBox
 from app.ui.widgets.no_wheel_tab_widget import NoWheelTabWidget
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
@@ -22689,7 +22743,6 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -23197,42 +23250,16 @@ class UiBuilderMixin:
             layout.addWidget(self.view_logs_btn)
 
     def _build_tm_debug_action_buttons(self, layout):
-        specs = self._tm_action_button_specs()
-        debug_specs = [
-            ("open_chatgpt", specs["open_chatgpt"]),
-            ("open_bound", specs["open_bound"]),
-            ("sync_web", specs["sync_web"]),
-            ("bind_current", specs["bind_current"]),
-            (
-                "close_selected",
-                {
-                    "text": "关闭选中页面",
-                    "handler": self._on_close_selected_tm_page,
-                    "danger": True,
-                    "tooltip": "",
-                },
-            ),
-            ("close_other", specs["close_other"]),
-            (
-                "close_bound_debug",
-                {
-                    "text": "关闭当前绑定页面",
-                    "handler": self._on_close_bound_tm_page,
-                    "danger": True,
-                    "tooltip": specs["close_bound"]["tooltip"],
-                },
-            ),
-        ]
+        """设置页专属调试操作（主聊天页已有按钮不在此重复创建）。"""
         layout.setSpacing(6)
-        for _key, spec in debug_specs:
-            layout.addWidget(
-                self._create_tm_ghost_button(
-                    spec["text"],
-                    spec["handler"],
-                    danger=spec["danger"],
-                    tooltip=spec["tooltip"],
-                )
+        layout.addWidget(
+            self._create_tm_ghost_button(
+                "关闭选中页面",
+                self._on_close_selected_tm_page,
+                danger=True,
+                tooltip="关闭下方页面表格中当前选中的 ChatGPT 页面",
             )
+        )
     def _format_tm_page_option_label(
         self,
         page,
@@ -24510,11 +24537,19 @@ class UiBuilderMixin:
         self._update_listen_host_label()
         self.port_edit = QLineEdit(self._port_text)
         self.port_edit.setFixedWidth(80)
+        self.port_edit.editingFinished.connect(
+            lambda: self._auto_save_service_settings(network_config_changed=True)
+        )
         service_form.addRow("局域网访问", self.enable_lan_access_cb)
         service_form.addRow("监听地址", self.listen_host_label)
         service_form.addRow("端口 port", self.port_edit)
         self.auto_start_server_cb = QCheckBox("启动 GUI 时自动启动服务")
         self.auto_start_server_cb.setChecked(self._auto_start_server)
+        self.auto_start_server_cb.stateChanged.connect(
+            lambda _state: self._auto_save_service_settings(
+                network_config_changed=False
+            )
+        )
         service_form.addRow("", self.auto_start_server_cb)
         chat_input_group, chat_input_layout = self._make_group_vbox("聊天输入")
         chat_input_hint = self._make_hint_label(
@@ -24531,6 +24566,9 @@ class UiBuilderMixin:
         self.default_compose_message_edit.setFixedHeight(72)
         chat_input_layout.addWidget(chat_input_hint)
         chat_input_layout.addWidget(self.default_compose_message_edit)
+        self.default_compose_message_edit.textChanged.connect(
+            self._schedule_service_default_message_autosave
+        )
         service_form.addRow("", chat_input_group)
         service_btn_row = QHBoxLayout()
         self.settings_start_btn = QPushButton("启动服务")
@@ -24556,8 +24594,12 @@ class UiBuilderMixin:
         self.settings_service_status_label = QLabel("当前状态：未启动")
         self.settings_service_status_label.setWordWrap(True)
         service_form.addRow("状态", self.settings_service_status_label)
+        self.settings_service_hint_label = QLabel("")
+        self.settings_service_hint_label.setWordWrap(True)
+        self.settings_service_hint_label.setStyleSheet("color: #555;")
+        service_form.addRow("", self.settings_service_hint_label)
         self.service_layout.addWidget(service_form_host)
-        self.service_layout.addStretch(1)
+        self._init_service_settings_autosave_timer()
         self.settings_tabs.addTab(self.service_scroll, "服务设置")
         # --- 油猴设置
         (
@@ -24644,7 +24686,7 @@ class UiBuilderMixin:
         )
         sync_mode_row = QHBoxLayout()
         sync_mode_row.addWidget(QLabel("同步模式"))
-        self.sync_conversation_mode_combo = QComboBox()
+        self.sync_conversation_mode_combo = NoWheelComboBox()
         self.sync_conversation_mode_combo.addItem("安全合并（只补缺失）", "merge")
         self.sync_conversation_mode_combo.addItem("以网页为准（完全覆盖本地聊天）", "replace")
         self.sync_conversation_mode_combo.setSizePolicy(
@@ -24653,7 +24695,7 @@ class UiBuilderMixin:
         sync_mode_row.addWidget(self.sync_conversation_mode_combo, stretch=1)
         sync_max_row = QHBoxLayout()
         sync_max_row.addWidget(QLabel("最多同步条数"))
-        self.sync_conversation_max_messages_spin = QSpinBox()
+        self.sync_conversation_max_messages_spin = NoWheelSpinBox()
         self.sync_conversation_max_messages_spin.setRange(10, 2000)
         self.sync_conversation_max_messages_spin.setSingleStep(10)
         sync_max_row.addWidget(self.sync_conversation_max_messages_spin)
@@ -24719,94 +24761,7 @@ class UiBuilderMixin:
         self.tampermonkey_layout.addWidget(tm_form_host)
         self.tampermonkey_layout.addStretch(1)
         self.settings_tabs.addTab(self.tampermonkey_scroll, "油猴设置")
-        # --- 调试设置（日志清理；聊天/调试行为固定为 DEFAULT_APP_SETTINGS）
-        (
-            self.debug_scroll,
-            self.debug_tab,
-            self.debug_layout,
-        ) = self._create_scroll_tab()
-        debug_form_host = QWidget()
-        debug_form_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        debug_form = QFormLayout(debug_form_host)
-        debug_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        log_group = QGroupBox("运行日志")
-        log_layout = QVBoxLayout(log_group)
-        self.debug_mode_cb = QCheckBox("详细调试日志")
-        self.show_raw_payload_cb = QCheckBox("显示原始 payload")
-        self.mirror_log_to_console_cb = QCheckBox("同步输出到运行窗口")
-        self.include_log_callsite_cb = QCheckBox("日志包含调用位置")
-        for widget in (
-            self.debug_mode_cb,
-            self.show_raw_payload_cb,
-            self.mirror_log_to_console_cb,
-            self.include_log_callsite_cb,
-        ):
-            log_layout.addWidget(widget)
-        debug_form.addRow("", log_group)
-        cursor_group = QGroupBox("Cursor 联动测试")
-        cursor_layout = QVBoxLayout(cursor_group)
-        cursor_btn_row = QHBoxLayout()
-        self.cursor_cli_test_btn = QPushButton("测试 Cursor CLI")
-        self.cursor_cli_test_btn.setObjectName("PrimaryButton")
-        self.cursor_cli_test_btn.setToolTip(
-            "调用 cursor-agent --version，检测 Python 是否可以找到 Cursor CLI"
-        )
-        self.cursor_send_test_task_btn = QPushButton("发送 Cursor 测试任务")
-        self.cursor_send_test_task_btn.setObjectName("PrimaryButton")
-        self.cursor_send_test_task_btn.setToolTip(
-            "向本地 server.py 的 Cursor 任务队列发送一条只读测试任务"
-        )
-        self.cursor_open_task_dir_btn = QPushButton("打开任务目录")
-        self.cursor_open_task_dir_btn.setObjectName("PrimaryButton")
-        self.cursor_open_task_dir_btn.setToolTip(
-            "打开当前项目下的 .cursor_tasks/inbox 目录"
-        )
-        cursor_btn_row.addWidget(self.cursor_cli_test_btn)
-        cursor_btn_row.addWidget(self.cursor_send_test_task_btn)
-        cursor_btn_row.addWidget(self.cursor_open_task_dir_btn)
-        cursor_btn_row.addStretch()
-        cursor_layout.addLayout(cursor_btn_row)
-        self.cursor_status_label = QLabel("Cursor 状态：未测试")
-        self.cursor_status_label.setWordWrap(True)
-        self.cursor_status_label.setStyleSheet("color: #555;")
-        cursor_layout.addWidget(self.cursor_status_label)
-        self.cursor_cli_test_btn.clicked.connect(self._on_test_cursor_cli_clicked)
-        self.cursor_send_test_task_btn.clicked.connect(
-            self._on_send_cursor_test_task_clicked
-        )
-        self.cursor_open_task_dir_btn.clicked.connect(
-            self._on_open_cursor_task_dir_clicked
-        )
-        debug_form.addRow("", cursor_group)
-        self.log_file_path_label = QLabel(f"日志文件：{get_log_file_path()}")
-        self.log_file_path_label.setWordWrap(True)
-        self.log_file_path_label.setStyleSheet("color: #555;")
-        debug_form.addRow("", self.log_file_path_label)
-        self.debug_layout.addWidget(debug_form_host)
-        self.debug_layout.addStretch(1)
-        self.settings_tabs.addTab(self.debug_scroll, "调试设置")
         self._sync_settings_widgets_from_values()
-        bottom_row = QHBoxLayout()
-        self.apply_settings_btn = QPushButton("应用设置")
-        self.apply_settings_btn.setObjectName("PrimaryButton")
-        self.save_settings_btn = QPushButton("保存设置")
-        self.save_settings_btn.setObjectName("PrimaryButton")
-        self.reset_settings_btn = QPushButton("恢复默认设置")
-        self.reset_settings_btn.setObjectName("WarningButton")
-        self.apply_settings_btn.clicked.connect(
-            lambda: self._apply_settings(immediate_only=True)
-        )
-        self.save_settings_btn.clicked.connect(self._on_save_settings_clicked)
-        self.reset_settings_btn.clicked.connect(self._reset_settings_to_default)
-        bottom_row.addWidget(self.apply_settings_btn)
-        bottom_row.addWidget(self.save_settings_btn)
-        bottom_row.addWidget(self.reset_settings_btn)
-        bottom_row.addStretch()
-        layout.addLayout(bottom_row)
-        self.settings_hint_label = QLabel("")
-        self.settings_hint_label.setWordWrap(True)
-        self.settings_hint_label.setStyleSheet("color: #555;")
-        layout.addWidget(self.settings_hint_label)
         return page
     def _build_chat_status_bar(self):
         bar = QWidget()
@@ -25317,7 +25272,7 @@ class UiBuilderMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/waiting_timer_mixin.py
-TOKENS（cl100k_base）: 0.21万（2,147）
+TOKENS（cl100k_base）: 0.21万（2,128）
 ====================================================================================================
 
 import re
@@ -25531,8 +25486,6 @@ class WaitingTimerMixin:
         if text == getattr(self, "_last_tm_action_hint_text", None):
             return
         self._last_tm_action_hint_text = text
-        if hasattr(self, "settings_hint_label"):
-            self.settings_hint_label.setText(text or "")
         if text:
             self.statusBar().showMessage(text, 8000)
 
@@ -25580,7 +25533,7 @@ class WaitingTimerMixin:
 
 ====================================================================================================
 FILE: app/ui/styles.py
-TOKENS（cl100k_base）: 0.45万（4,534）
+TOKENS（cl100k_base）: 0.48万（4,814）
 ====================================================================================================
 
 """主窗口 QSS 样式（从 ui_builder_mixin 抽出，避免业务逻辑文件过长）。"""
@@ -25983,11 +25936,38 @@ APP_STYLESHEET = """
             QSplitter#ChatMainSplitter::handle:hover {
                 background: #60a5fa;
             }
-            QFrame#SessionCard[isCurrentSession="true"] {
-                background: #eff6ff;
-                border: 1px solid #93c5fd;
-                border-left: 4px solid #2563eb;
-                border-radius: 6px;
+            QFrame#SessionCard[sessionState="bound_online"] {
+                background: #ecfdf5;
+                border: 1px solid #86efac;
+            }
+            QFrame#SessionCard[sessionState="bound_offline"] {
+                background: #fffbeb;
+                border: 1px solid #fbbf24;
+            }
+            QFrame#SessionCard[sessionState="unbound"] {
+                background: #f9fafb;
+                border: 1px solid #d1d5db;
+            }
+            QFrame#SessionCard[sessionState="bound_online"][isCurrentSession="true"] {
+                background: #ecfdf5;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
+            }
+            QFrame#SessionCard[sessionState="bound_offline"][isCurrentSession="true"] {
+                background: #fffbeb;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
+            }
+            QFrame#SessionCard[sessionState="unbound"][isCurrentSession="true"] {
+                background: #f8fafc;
+                border-top: 2px solid #2563eb;
+                border-right: 2px solid #2563eb;
+                border-bottom: 2px solid #2563eb;
+                border-left: none;
             }
             QLabel#CurrentSessionBadge {
                 color: #ffffff;
@@ -26372,7 +26352,30 @@ class NoWheelComboBox(QComboBox):
     """
 
     def wheelEvent(self, event):
-        event.accept()
+        event.ignore()
+
+
+
+====================================================================================================
+FILE: app/ui/widgets/no_wheel_spin_box.py
+TOKENS（cl100k_base）: 0.01万（125）
+====================================================================================================
+
+from PyQt5.QtWidgets import QDoubleSpinBox, QSpinBox
+
+
+class NoWheelSpinBox(QSpinBox):
+    """禁止鼠标滚轮直接改数值，避免在可滚动设置页上误触。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """禁止鼠标滚轮直接改数值，避免在可滚动设置页上误触。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 
@@ -26433,7 +26436,7 @@ class SessionListWidget(QListWidget):
 
 ====================================================================================================
 FILE: app/ui/widgets/session_list_item.py
-TOKENS（cl100k_base）: 0.25万（2,527）
+TOKENS（cl100k_base）: 0.26万（2,586）
 ====================================================================================================
 
 from PyQt5.QtCore import Qt
@@ -26460,8 +26463,7 @@ QLabel#CurrentSessionBadge {
 }
 """
 
-_CURRENT_CARD_BG = "#eff6ff"
-_CURRENT_LEFT_BAR = "#2563eb"
+_CURRENT_BORDER = "#2563eb"
 
 
 class SessionListItemWidget(QWidget):
@@ -26552,6 +26554,14 @@ class SessionListItemWidget(QWidget):
             style.unpolish(self.card)
             style.polish(self.card)
 
+    def _sync_session_state_property(self, bind_state):
+        bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+        self.card.setProperty("sessionState", bind_state)
+        style = self.card.style()
+        if style is not None:
+            style.unpolish(self.card)
+            style.polish(self.card)
+
     def _reapply_visual_from_state(self):
         state = getattr(self, "_last_apply_state", None)
         if not isinstance(state, dict):
@@ -26563,6 +26573,7 @@ class SessionListItemWidget(QWidget):
         self._apply_selection_visual_style(
             selected=bool(state.get("selected")),
             is_current=bool(state.get("is_current")),
+            bind_state=bind_state,
             left_color=style.get("left") or "#9ca3af",
             border_color=style.get("border") or "#d1d5db",
             background_color=style.get("bg") or "#f9fafb",
@@ -26575,6 +26586,7 @@ class SessionListItemWidget(QWidget):
         *,
         selected,
         is_current,
+        bind_state="unbound",
         left_color,
         border_color,
         background_color,
@@ -26582,40 +26594,46 @@ class SessionListItemWidget(QWidget):
     ):
         is_current = bool(is_current)
         selected = bool(selected)
+        bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+
         self._sync_current_badge(is_current)
         self._sync_current_card_property(is_current)
+        self._sync_session_state_property(bind_state)
+
+        bar_color = left_color
+        card_bg = background_color
+        card_border = selected_border if selected else border_color
+        border_width = 1
+        bar_width = 5 if selected else 4
+
+        self.left_bar.show()
+        self.left_bar.setFixedWidth(bar_width)
+        self.left_bar.setStyleSheet(
+            f"""
+            QFrame#SessionListLeftBar {{
+                background: {bar_color};
+                border: none;
+                border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+            }}
+            """
+        )
 
         if is_current:
-            self.left_bar.hide()
-            self.left_bar.setFixedWidth(0)
             self.card.setStyleSheet(
                 f"""
                 QFrame#SessionCard {{
-                    background: {_CURRENT_CARD_BG};
-                    border: 1px solid #93c5fd;
-                    border-left: 4px solid {_CURRENT_LEFT_BAR};
+                    background: {card_bg};
+                    border-top: 2px solid {_CURRENT_BORDER};
+                    border-right: 2px solid {_CURRENT_BORDER};
+                    border-bottom: 2px solid {_CURRENT_BORDER};
+                    border-left: none;
                     border-radius: {SESSION_LIST_ITEM_RADIUS}px;
                 }}
                 """
             )
+            title_weight = 700
         else:
-            self.left_bar.show()
-            bar_color = left_color
-            card_border = selected_border if selected else border_color
-            card_bg = background_color
-            border_width = 1
-            bar_width = 5 if selected else 4
-            self.left_bar.setFixedWidth(bar_width)
-            self.left_bar.setStyleSheet(
-                f"""
-                QFrame#SessionListLeftBar {{
-                    background: {bar_color};
-                    border: none;
-                    border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                    border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                }}
-                """
-            )
             self.card.setStyleSheet(
                 f"""
                 QFrame#SessionCard {{
@@ -26626,19 +26644,6 @@ class SessionListItemWidget(QWidget):
                 """
             )
             title_weight = 700 if selected else 600
-            self.title_label.setStyleSheet(
-                f"""
-                QLabel#SessionItemTitle {{
-                    font-weight: {title_weight};
-                    color: #111827;
-                    font-size: 14px;
-                    background: transparent;
-                }}
-                """
-            )
-            return
-
-        title_weight = 700
 
         self.title_label.setStyleSheet(
             f"""
@@ -26766,6 +26771,7 @@ class SessionListItemWidget(QWidget):
         self._apply_selection_visual_style(
             selected=selected,
             is_current=is_current,
+            bind_state=bind_state,
             left_color=style["left"],
             border_color=style["border"],
             background_color=style["bg"],

@@ -79,8 +79,6 @@ class BridgeMixin:
                 "source": "gui-send-before-message",
                 "session_id": session.session_id if session else "",
                 "turn_id": payload.get("turn_id") or "",
-                "reset_before_start": True,
-                "force_restart": True,
                 "require_all_success": True,
                 "block_next_chat_on_failed": True,
             },
@@ -102,9 +100,10 @@ class BridgeMixin:
             message_id = (queued.get("id") or "").strip()
 
         self._append_log(
-            "[UPLOAD_BEFORE_SEND][QUEUED] "
+            "[TM_CONTROL][START_UPLOAD][QUEUE] "
+            f"target_client_id={target_client_id or '-'} "
+            "command=start_upload "
             f"session_id={(session.session_id if session else '-')} "
-            f"client_id={target_client_id or '-'} "
             f"page_instance_id={target_page_instance_id or '-'} "
             f"conversation_id={target_conversation_id or '-'} "
             f"command_message_id={message_id or '-'}",
@@ -522,6 +521,8 @@ class BridgeMixin:
         )
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
+        if hasattr(self, "_update_upload_current_file_btn_state"):
+            self._update_upload_current_file_btn_state()
         return {
             "ok": True,
             "bridge_message_id": bridge_message_id,
@@ -670,10 +671,8 @@ class BridgeMixin:
                 echo=True,
             )
         payload = {
-            "source": "gui-manual-upload",
+            "source": "python_gui",
             "session_id": session.session_id if session else "",
-            "reset_before_start": True,
-            "force_restart": True,
             "require_all_success": True,
             "block_next_chat_on_failed": block_next_chat_on_failed,
         }
@@ -702,9 +701,10 @@ class BridgeMixin:
         if isinstance(queued, dict):
             message_id = (queued.get("id") or "").strip()
         self._append_log(
-            "[UPLOAD_TRIGGER][QUEUED] "
+            "[TM_CONTROL][START_UPLOAD][QUEUE] "
+            f"target_client_id={cid} "
+            "command=start_upload "
             f"session_id={(session.session_id if session else '-')} "
-            f"client_id={cid} "
             f"page_instance_id={pins} "
             f"conversation_id={conv} "
             f"command_message_id={message_id or '-'} "
@@ -886,6 +886,8 @@ class BridgeMixin:
 
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
+        if hasattr(self, "_update_upload_current_file_btn_state"):
+            self._update_upload_current_file_btn_state()
 
         return True
 
@@ -1809,6 +1811,8 @@ class BridgeMixin:
             )
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
+        if hasattr(self, "_update_upload_current_file_btn_state"):
+            self._update_upload_current_file_btn_state()
         self._debug_status_step("[STATUS_APPLY][STEP] done")
         total_ms = int((time.perf_counter() - apply_t0) * 1000)
         if self._is_debug_mode_enabled():
@@ -1909,6 +1913,10 @@ class BridgeMixin:
                 self._add_system_message(
                     f"上传失败：{detail or '未返回具体原因，请查看油猴日志'}"
                 )
+            return
+        if command == "upload_current_file":
+            if hasattr(self, "_on_upload_current_file_command_failed"):
+                self._on_upload_current_file_command_failed(item, payload)
             return
         self._append_log(
             f"[命令] 失败 command={command or '-'} client_id={client_id} {detail}".strip(),
@@ -2283,6 +2291,10 @@ class BridgeMixin:
     def _handle_control_done_event(self, item, payload):
         client_id = item.get("client_id") or "-"
         command = (payload.get("command") or "").strip()
+        if command == "upload_current_file":
+            if hasattr(self, "_on_upload_current_file_control_done"):
+                self._on_upload_current_file_control_done(item, payload)
+            return
         if command == "start_upload":
             control_message_id = (item.get("message_id") or "").strip()
             pending = (
@@ -2471,8 +2483,9 @@ class BridgeMixin:
         return line
     def _update_running_ui(self, running):
         if hasattr(self, "enable_lan_access_cb"):
-            self.enable_lan_access_cb.setEnabled(not running)
-        self.port_edit.setEnabled(not running)
+            self.enable_lan_access_cb.setEnabled(True)
+        if hasattr(self, "port_edit"):
+            self.port_edit.setEnabled(True)
         # 服务按钮不要再禁用成灰色。
         # 重复点击由 _start_server / _stop_server 内部提示“已运行”或“未运行”。
         self.settings_start_btn.setEnabled(True)
@@ -2532,6 +2545,9 @@ class BridgeMixin:
             )
             self._update_service_settings_status()
             self._save_app_settings()
+            self._service_settings_pending_restart = False
+            if hasattr(self, "_set_service_settings_hint"):
+                self._set_service_settings_hint("")
             message = result.get("message") or server.get_server_url()
             self._append_log(message, echo=True)
             if result.get("fallback_used"):

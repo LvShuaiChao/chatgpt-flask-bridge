@@ -3,6 +3,7 @@ import traceback
 
 import server
 from log_utils import append_log, set_log_runtime_options
+from PyQt5.QtCore import QTimer
 
 from app.constants import (
     DEFAULT_APP_SETTINGS,
@@ -334,19 +335,58 @@ class SettingsMixin:
             self._default_compose_message = (
                 self.default_compose_message_edit.toPlainText()
             )
-        if hasattr(self, "debug_mode_cb"):
-            self._debug_mode = self.debug_mode_cb.isChecked()
-        if hasattr(self, "show_raw_payload_cb"):
-            self._show_raw_payload = self.show_raw_payload_cb.isChecked()
-        if hasattr(self, "mirror_log_to_console_cb"):
-            self._mirror_log_to_console = self.mirror_log_to_console_cb.isChecked()
-        if hasattr(self, "include_log_callsite_cb"):
-            self._include_log_callsite = self.include_log_callsite_cb.isChecked()
         set_log_runtime_options(
             verbose=self._debug_mode,
             mirror_to_console=self._mirror_log_to_console,
             include_callsite=self._include_log_callsite,
         )
+    def _init_service_settings_autosave_timer(self):
+        self._service_default_message_save_timer = QTimer(self)
+        self._service_default_message_save_timer.setSingleShot(True)
+        self._service_default_message_save_timer.timeout.connect(
+            self._on_service_default_message_autosave_timeout
+        )
+        self._service_settings_pending_restart = False
+
+    def _schedule_service_default_message_autosave(self):
+        if getattr(self, "_service_settings_syncing", False):
+            return
+        timer = getattr(self, "_service_default_message_save_timer", None)
+        if timer is None:
+            return
+        timer.start(500)
+
+    def _on_service_default_message_autosave_timeout(self):
+        self._auto_save_service_settings(network_config_changed=False)
+
+    def _auto_save_service_settings(self, *, network_config_changed=False):
+        if getattr(self, "_service_settings_syncing", False):
+            return
+        if network_config_changed and hasattr(self, "port_edit"):
+            if self._parse_port() is None:
+                return
+        try:
+            self._save_app_settings()
+            self._apply_default_compose_message_if_empty()
+            if network_config_changed and hasattr(self, "tm_bridge_url_label"):
+                self._update_tampermonkey_settings_labels(self._last_bridge_status)
+            if network_config_changed:
+                if server.is_server_running():
+                    self._service_settings_pending_restart = True
+                    self._set_service_settings_hint(
+                        "配置已保存，重启服务后生效"
+                    )
+                else:
+                    self._service_settings_pending_restart = False
+                    self._set_service_settings_hint("")
+            self._update_service_settings_status()
+        except Exception as error:
+            detail = (
+                f"自动保存服务设置失败：{error}\n{traceback.format_exc()}"
+            )
+            append_log(detail, source="GUI", echo=True)
+            self._set_service_settings_hint(f"保存失败：{error}")
+
     def _save_app_settings(self):
         self._read_settings_from_widgets()
         self._settings.setValue("host", self._host)
@@ -399,6 +439,7 @@ class SettingsMixin:
         else:
             self._set_settings_hint("设置已应用。")
     def _reset_settings_to_default(self):
+        # TODO: 迁移到更多菜单，并增加二次确认对话框。
         ui_setting_keys = {
             "font_size",
             "remember_window_geometry",
@@ -420,6 +461,13 @@ class SettingsMixin:
         self._save_app_settings()
         self._set_settings_hint("已恢复默认设置。")
     def _sync_settings_widgets_from_values(self):
+        self._service_settings_syncing = True
+        try:
+            self._sync_settings_widgets_from_values_impl()
+        finally:
+            self._service_settings_syncing = False
+
+    def _sync_settings_widgets_from_values_impl(self):
         if hasattr(self, "enable_lan_access_cb"):
             self.enable_lan_access_cb.setChecked(self._enable_lan_access)
         self._update_listen_host_label()
@@ -461,14 +509,6 @@ class SettingsMixin:
             self.default_compose_message_edit.setPlainText(
                 getattr(self, "_default_compose_message", "") or ""
             )
-        if hasattr(self, "debug_mode_cb"):
-            self.debug_mode_cb.setChecked(self._debug_mode)
-        if hasattr(self, "show_raw_payload_cb"):
-            self.show_raw_payload_cb.setChecked(self._show_raw_payload)
-        if hasattr(self, "mirror_log_to_console_cb"):
-            self.mirror_log_to_console_cb.setChecked(self._mirror_log_to_console)
-        if hasattr(self, "include_log_callsite_cb"):
-            self.include_log_callsite_cb.setChecked(self._include_log_callsite)
     def _default_compose_message_text(self):
         return (getattr(self, "_default_compose_message", "") or "").strip()
 
@@ -483,7 +523,14 @@ class SettingsMixin:
             return
         edit.setPlainText(text)
     def _set_settings_hint(self, text):
-        self.settings_hint_label.setText(text or "")
+        text = text or ""
+        if text:
+            self.statusBar().showMessage(text, 8000)
+
+    def _set_service_settings_hint(self, text):
+        if hasattr(self, "settings_service_hint_label"):
+            self.settings_service_hint_label.setText(text or "")
+
     def _set_tm_action_hint(self, text):
         text = (text or "").strip()
         if text == getattr(self, "_last_tm_action_hint_text", None):
@@ -505,6 +552,8 @@ class SettingsMixin:
         self._update_listen_host_label()
         if hasattr(self, "tm_bridge_url_label"):
             self._update_tampermonkey_settings_labels(self._last_bridge_status)
+        if not getattr(self, "_service_settings_syncing", False):
+            self._auto_save_service_settings(network_config_changed=True)
 
     def _update_service_settings_status(self):
         if server.is_server_running():
@@ -541,6 +590,9 @@ class SettingsMixin:
         if server.is_server_running():
             self._stop_server()
         self._start_server()
+        if server.is_server_running():
+            self._service_settings_pending_restart = False
+            self._set_service_settings_hint("")
     def _clear_log_widget(self, widget, name):
         if widget is None:
             msg = f"清空{name}失败：未找到日志控件。"
@@ -605,7 +657,3 @@ class SettingsMixin:
             self._runtime_log_loaded_once = False
         self._append_log("已清空运行日志。", echo=True)
         self._set_tm_action_hint("已清空运行日志")
-    def _on_save_settings_clicked(self):
-        self._save_app_settings()
-        self._apply_settings(immediate_only=False)
-        self._set_settings_hint("设置已保存。")

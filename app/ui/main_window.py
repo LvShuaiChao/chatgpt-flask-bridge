@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.ui.mixins.bridge_mixin import BridgeMixin
+from app.ui.mixins.chat_file_upload_mixin import ChatFileUploadMixin
 from app.ui.mixins.chat_session_mixin import ChatSessionMixin
 from app.ui.mixins.chat_render_mixin import ChatRenderMixin
 from app.ui.mixins.cursor_bridge_mixin import CursorBridgeMixin
@@ -38,6 +39,7 @@ class MainWindow(
     ChatRenderMixin,
     PageBindMixin,
     BridgeMixin,
+    ChatFileUploadMixin,
     CursorBridgeMixin,
     JobSchedulerMixin,
     LogTabMixin,
@@ -57,6 +59,7 @@ class MainWindow(
         self._external_client_last_session = {}
         self._processed_inbound_ids = set()
         self._pending_upload_sends = {}
+        self._init_chat_file_upload_state()
         self._pending_web_sync_requests = {}
         self._web_sync_hard_timed_out_request_ids = set()
         self._pending_sync_requests = {}

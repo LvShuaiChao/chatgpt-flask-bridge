@@ -22,8 +22,7 @@ QLabel#CurrentSessionBadge {
 }
 """
 
-_CURRENT_CARD_BG = "#eff6ff"
-_CURRENT_LEFT_BAR = "#2563eb"
+_CURRENT_BORDER = "#2563eb"
 
 
 class SessionListItemWidget(QWidget):
@@ -114,6 +113,14 @@ class SessionListItemWidget(QWidget):
             style.unpolish(self.card)
             style.polish(self.card)
 
+    def _sync_session_state_property(self, bind_state):
+        bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+        self.card.setProperty("sessionState", bind_state)
+        style = self.card.style()
+        if style is not None:
+            style.unpolish(self.card)
+            style.polish(self.card)
+
     def _reapply_visual_from_state(self):
         state = getattr(self, "_last_apply_state", None)
         if not isinstance(state, dict):
@@ -125,6 +132,7 @@ class SessionListItemWidget(QWidget):
         self._apply_selection_visual_style(
             selected=bool(state.get("selected")),
             is_current=bool(state.get("is_current")),
+            bind_state=bind_state,
             left_color=style.get("left") or "#9ca3af",
             border_color=style.get("border") or "#d1d5db",
             background_color=style.get("bg") or "#f9fafb",
@@ -137,6 +145,7 @@ class SessionListItemWidget(QWidget):
         *,
         selected,
         is_current,
+        bind_state="unbound",
         left_color,
         border_color,
         background_color,
@@ -144,40 +153,46 @@ class SessionListItemWidget(QWidget):
     ):
         is_current = bool(is_current)
         selected = bool(selected)
+        bind_state = bind_state if bind_state in SESSION_BIND_LIST_STYLES else "unbound"
+
         self._sync_current_badge(is_current)
         self._sync_current_card_property(is_current)
+        self._sync_session_state_property(bind_state)
+
+        bar_color = left_color
+        card_bg = background_color
+        card_border = selected_border if selected else border_color
+        border_width = 1
+        bar_width = 5 if selected else 4
+
+        self.left_bar.show()
+        self.left_bar.setFixedWidth(bar_width)
+        self.left_bar.setStyleSheet(
+            f"""
+            QFrame#SessionListLeftBar {{
+                background: {bar_color};
+                border: none;
+                border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+                border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
+            }}
+            """
+        )
 
         if is_current:
-            self.left_bar.hide()
-            self.left_bar.setFixedWidth(0)
             self.card.setStyleSheet(
                 f"""
                 QFrame#SessionCard {{
-                    background: {_CURRENT_CARD_BG};
-                    border: 1px solid #93c5fd;
-                    border-left: 4px solid {_CURRENT_LEFT_BAR};
+                    background: {card_bg};
+                    border-top: 2px solid {_CURRENT_BORDER};
+                    border-right: 2px solid {_CURRENT_BORDER};
+                    border-bottom: 2px solid {_CURRENT_BORDER};
+                    border-left: none;
                     border-radius: {SESSION_LIST_ITEM_RADIUS}px;
                 }}
                 """
             )
+            title_weight = 700
         else:
-            self.left_bar.show()
-            bar_color = left_color
-            card_border = selected_border if selected else border_color
-            card_bg = background_color
-            border_width = 1
-            bar_width = 5 if selected else 4
-            self.left_bar.setFixedWidth(bar_width)
-            self.left_bar.setStyleSheet(
-                f"""
-                QFrame#SessionListLeftBar {{
-                    background: {bar_color};
-                    border: none;
-                    border-top-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                    border-bottom-left-radius: {SESSION_LIST_ITEM_RADIUS}px;
-                }}
-                """
-            )
             self.card.setStyleSheet(
                 f"""
                 QFrame#SessionCard {{
@@ -188,19 +203,6 @@ class SessionListItemWidget(QWidget):
                 """
             )
             title_weight = 700 if selected else 600
-            self.title_label.setStyleSheet(
-                f"""
-                QLabel#SessionItemTitle {{
-                    font-weight: {title_weight};
-                    color: #111827;
-                    font-size: 14px;
-                    background: transparent;
-                }}
-                """
-            )
-            return
-
-        title_weight = 700
 
         self.title_label.setStyleSheet(
             f"""
@@ -328,6 +330,7 @@ class SessionListItemWidget(QWidget):
         self._apply_selection_visual_style(
             selected=selected,
             is_current=is_current,
+            bind_state=bind_state,
             left_color=style["left"],
             border_color=style["border"],
             background_color=style["bg"],

@@ -14612,6 +14612,7 @@
     const state = {
       groups: [],
       activeGroupId: '',
+      selectedFileIdByGroup: {},
       queue: [],
       groupCounts: null,
       running: false,
@@ -14674,6 +14675,81 @@
     let uploadUiActionLastKey = '';
     let uploadUiActionLastAt = 0;
     let quickPromptActiveCategory = '全部';
+
+    function getActiveGroupId() {
+      return String(state.activeGroupId || '').trim();
+    }
+
+    function getActiveGroupFiles() {
+      const groupId = getActiveGroupId();
+      if (!groupId) {
+        return [];
+      }
+      return (state.queue || []).filter(
+        (file) => file && String(file.groupId || '').trim() === groupId,
+      );
+    }
+
+    function getSelectedFileIdForActiveGroup() {
+      const groupId = getActiveGroupId();
+      if (!groupId) {
+        return '';
+      }
+      return String(
+        state.selectedFileIdByGroup[groupId] || state.activeId || '',
+      ).trim();
+    }
+
+    function setSelectedFileIdForActiveGroup(fileId, meta = {}) {
+      const groupId = getActiveGroupId();
+      const id = String(fileId || '').trim();
+      if (!groupId) {
+        return;
+      }
+      state.selectedFileIdByGroup[groupId] = id;
+      state.activeId = id;
+      const file = getActiveGroupFiles().find((item) => item.id === id) || null;
+      console.log('[UPLOAD][FILE_SELECT]', {
+        projectKey: groupId,
+        fileId: id,
+        fileName: file && file.name ? file.name : '',
+        reason: meta.reason || '',
+      });
+    }
+
+    function resolveSelectedFileIdForGroup(groupId, files) {
+      const gid = String(groupId || '').trim();
+      const oldSelectedId = String(state.selectedFileIdByGroup[gid] || '').trim();
+      if (oldSelectedId && files.some((file) => file && file.id === oldSelectedId)) {
+        return oldSelectedId;
+      }
+      if (files.length > 0) {
+        return files[0].id;
+      }
+      return '';
+    }
+
+    function syncActiveGroupSelectionAfterQueueLoad(groupId) {
+      const gid = String(groupId || getActiveGroupId() || '').trim();
+      const files = getActiveGroupFiles();
+      const selectedId = resolveSelectedFileIdForGroup(gid, files);
+      state.selectedFileIdByGroup[gid] = selectedId;
+      state.activeId = selectedId;
+      console.log('[UPLOAD][PROJECT_SWITCH]', {
+        activeProjectKey: gid,
+        fileCount: files.length,
+        selectedFileId: selectedId,
+      });
+    }
+
+    function getSelectedUploadFile() {
+      const groupId = getActiveGroupId();
+      const fileId = getSelectedFileIdForActiveGroup();
+      if (!groupId || !fileId) {
+        return null;
+      }
+      return getActiveGroupFiles().find((file) => file.id === fileId) || null;
+    }
 
     function shouldSkipUploadUiAction(actionKey, source, intervalMs) {
       const now = Date.now();
@@ -15586,7 +15662,7 @@
         return;
       }
 
-      const queueSnapshot = (state.queue || []).map((item) => ({
+      const queueSnapshot = getActiveGroupFiles().map((item) => ({
         ...item,
         groupId: groupIdSnapshot,
       }));
@@ -15779,7 +15855,7 @@
       });
 
       if (state.activeGroupId) {
-        state.groupCounts.set(state.activeGroupId, state.queue.length);
+        state.groupCounts.set(state.activeGroupId, getActiveGroupFiles().length);
       }
     }
 
@@ -15789,7 +15865,7 @@
       }
 
       if (groupId === state.activeGroupId) {
-        return state.queue.length;
+        return getActiveGroupFiles().length;
       }
 
       return 0;
@@ -15807,8 +15883,6 @@
         return true;
       }
 
-      const fallbackGroupId = state.groups[0].id;
-
       try {
         const db = await openDb();
 
@@ -15822,10 +15896,13 @@
         });
 
         rows.forEach((row) => {
-          const groupId = row.groupId || fallbackGroupId;
-
-          if (!groupId) return;
-
+          const groupId = String(row.groupId || '').trim();
+          if (!groupId) {
+            return;
+          }
+          if (!counts.has(groupId)) {
+            return;
+          }
           counts.set(groupId, (counts.get(groupId) || 0) + 1);
         });
 
@@ -16211,10 +16288,11 @@
         });
 
         state.queue = rows
-          .filter((r) => r.groupId === state.activeGroupId)
+          .filter((r) => String(r.groupId || '').trim() === state.activeGroupId)
           .map((r) => restoreUploadItemFromPersistRow(r, state.activeGroupId));
 
         refreshQueueReadableState();
+        syncActiveGroupSelectionAfterQueueLoad(state.activeGroupId);
         await refreshUploadGroupCounts();
         render();
         logUploadQueueSnapshot('loadQueue:after-load');
@@ -16433,7 +16511,6 @@
         await schedulePersistQueue();
 
         state.activeGroupId = groupId;
-        state.activeId = '';
 
         await loadQueueForActiveGroup();
 
@@ -16453,7 +16530,7 @@
         setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
 
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][switch:ok] from=${prevActiveGroupId || '-'} to=${groupId || '-'} count=${state.queue.length}`,
+          `[UPLOAD_GROUP][switch:ok] from=${prevActiveGroupId || '-'} to=${groupId || '-'} count=${getActiveGroupFiles().length} selected=${getSelectedFileIdForActiveGroup() || '-'}`,
         );
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
@@ -16523,6 +16600,7 @@
         state.groups.push(group);
         state.activeGroupId = group.id;
         state.activeId = '';
+        state.selectedFileIdByGroup[group.id] = '';
         state.queue = [];
 
         await persistGroups();
@@ -16974,7 +17052,7 @@
         return;
       }
 
-      const q = state.queue.find((item) => item.id === id);
+      const q = getActiveGroupFiles().find((item) => item.id === id);
 
       if (!q) {
         setStatus('未找到要删除的文件');
@@ -16986,6 +17064,7 @@
 
       try {
         state.queue = state.queue.filter((item) => item.id !== id);
+        syncActiveGroupSelectionAfterQueueLoad(getActiveGroupId());
 
         await schedulePersistQueue();
 
@@ -17811,18 +17890,22 @@
     }
 
     function buildUploadListHtml() {
-      if (!state.queue.length) {
+      const files = getActiveGroupFiles();
+      const selectedFileId = getSelectedFileIdForActiveGroup();
+      const activeGroupId = getActiveGroupId();
+
+      if (!files.length) {
         return `
           <div class="cgpt-upload-item empty">
             <div>
-              <div class="cgpt-upload-meta">当前组暂无文件</div>
+              <div class="cgpt-upload-meta">当前项目没有文件</div>
             </div>
           </div>
         `;
       }
 
-      return state.queue.map((q) => {
-        const activeClass = state.activeId === q.id ? 'active' : '';
+      return files.map((q) => {
+        const activeClass = selectedFileId === q.id ? 'active' : '';
         const cachedClass = isCachedUploadSnapshot(q) ? 'cached-snapshot' : '';
         const sourceText = getUploadInlineStatusText(q);
         const itemTitle = escapeHtml(buildUploadItemTitle(q));
@@ -17839,7 +17922,7 @@
           : '';
 
         return `
-            <div class="cgpt-upload-item ${activeClass} ${cachedClass}" data-id="${q.id}" title="${itemTitle}">
+            <div class="cgpt-upload-item ${activeClass} ${cachedClass}" data-id="${q.id}" data-group-id="${escapeHtml(activeGroupId)}" data-file-id="${escapeHtml(q.id)}" title="${itemTitle}">
               <div class="cgpt-upload-file-main">
                 <div class="cgpt-upload-name">${escapeHtml(q.name || 'unknown')}</div>
                 <div class="cgpt-upload-meta">
@@ -17932,9 +18015,11 @@
 
       const uiRunning = isUploadRunActuallyActive();
 
+      const activeFiles = getActiveGroupFiles();
+
       setButtonState(currentStartBtn, {
         text: uiRunning ? '正在上传' : '开始上传',
-        disabled: uiRunning || state.queue.length <= 0,
+        disabled: uiRunning || activeFiles.length <= 0,
         removeClasses: ['primary', 'danger'],
         addClasses: ['success'],
       });
@@ -18700,10 +18785,17 @@
       await schedulePersistQueue();
       await refreshUploadGroupCounts();
 
+      if (addedCount > 0) {
+        const lastAdded = getActiveGroupFiles()[getActiveGroupFiles().length - 1];
+        if (lastAdded && lastAdded.id) {
+          setSelectedFileIdForActiveGroup(lastAdded.id, { reason: 'add-files' });
+        }
+      }
+
       render();
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][addFiles:done] count=${addedCount} queue=${state.queue.length} group=${state.activeGroupId || '-'}`,
+        `[UPLOAD_DIAG][addFiles:done] count=${addedCount} queue=${getActiveGroupFiles().length} group=${state.activeGroupId || '-'}`,
       );
     }
 
@@ -18891,7 +18983,7 @@
         return;
       }
 
-      const q = state.queue.find((item) => item && item.id === id);
+      const q = getActiveGroupFiles().find((item) => item && item.id === id);
 
       if (!q) {
         setStatus('重新绑定失败：未找到队列文件');
@@ -19412,11 +19504,11 @@
       refreshQueueReadableState();
       await reconcileFailedItems();
 
-      const q = state.queue.find((item) => item && item.id === id);
+      const q = getActiveGroupFiles().find((item) => item && item.id === id);
 
       if (!q) {
         setStatus('未找到要上传的文件');
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][single-upload:not-found] id=${id}`);
+        ToolboxShell.appendLog(`[UPLOAD_DIAG][single-upload:not-found] id=${id} group=${getActiveGroupId() || '-'}`);
         render();
         return;
       }
@@ -19540,7 +19632,7 @@
     }
 
     async function uploadSingleFromListClick(id) {
-      const q = state.queue.find((item) => item && item.id === id);
+      const q = getActiveGroupFiles().find((item) => item && item.id === id);
 
       if (!q) {
         setStatus('未找到对应文件');
@@ -20086,8 +20178,10 @@
         return buildUploadSkipResult('no-active-group');
       }
 
-      if (!state.queue.length) {
-        setStatus('当前分组没有文件');
+      const activeFiles = getActiveGroupFiles();
+
+      if (!activeFiles.length) {
+        setStatus('当前项目没有文件');
         ToolboxShell.appendLog('[UPLOAD_DIAG][startUpload:skip-empty-queue]');
         return buildUploadSkipResult('empty-queue');
       }
@@ -20099,19 +20193,19 @@
 
       logUploadQueueSnapshot('startUpload:after-refresh');
 
-      const attachedCount = state.queue.filter((q) => q && q.state === UploadState.ATTACHED).length;
-      const uploadablePlan = state.queue.filter((q) => {
+      const attachedCount = activeFiles.filter((q) => q && q.state === UploadState.ATTACHED).length;
+      const uploadablePlan = activeFiles.filter((q) => {
         return q &&
           q.state !== UploadState.ATTACHED &&
           q.state !== UploadState.CANCELLED;
       });
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][startUpload:plan] total=${state.queue.length} attached=${attachedCount} uploadable=${uploadablePlan.length}`
+        `[UPLOAD_DIAG][startUpload:plan] group=${getActiveGroupId() || '-'} total=${activeFiles.length} attached=${attachedCount} uploadable=${uploadablePlan.length}`
       );
 
-      const uploadableTargets = state.queue.filter(isUploadItemUploadable);
-      const missingTargets = state.queue.filter(isUploadItemMissingSource);
+      const uploadableTargets = activeFiles.filter(isUploadItemUploadable);
+      const missingTargets = activeFiles.filter(isUploadItemMissingSource);
 
       uploadableTargets.forEach((q) => {
         logUploadItemSource('startUpload:uploadable', q);
@@ -20124,7 +20218,7 @@
       });
 
       if (!uploadableTargets.length) {
-        const totalCount = state.queue.filter(Boolean).length;
+        const totalCount = activeFiles.filter(Boolean).length;
 
         if (totalCount > 0 && attachedCount === totalCount) {
           setStatus(`当前分组文件已全部绑定：${attachedCount}/${totalCount}；再次点击“开始上传”将再次绑定`, 'success');
@@ -20318,6 +20412,76 @@
       }
 
       return finalResult || buildUploadSkipResult('upload-not-finalized');
+    }
+
+    async function triggerStartUpload(source = 'button') {
+      const uploadSource = String(source || 'button').trim() || 'button';
+
+      if (state.running) {
+        setStatus('正在上传中，请稍后', 'running');
+        ToolboxShell.appendLog(
+          `[UPLOAD][START][SKIP] source=${uploadSource} reason=already-running`
+        );
+        return buildUploadSkipResult('already-running');
+      }
+
+      const activeFiles = getActiveGroupFiles();
+      const selectedFile = getSelectedUploadFile();
+      const fileCount = activeFiles.filter(Boolean).length;
+      const queueCount = activeFiles.length;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][START][TRIGGERED] source=${uploadSource} group=${getActiveGroupId() || '-'} file_count=${fileCount} queue_count=${queueCount} selected=${selectedFile ? selectedFile.id : '-'}`
+      );
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][upload-button:click] source=${uploadSource} group=${getActiveGroupId() || '-'} total=${queueCount}`
+      );
+
+      if (selectedFile) {
+        console.log('[UPLOAD][SELECTED_FILE_UPLOAD]', {
+          projectKey: getActiveGroupId(),
+          fileId: selectedFile.id,
+          fileName: selectedFile.name,
+        });
+        return await uploadSingleFromListClick(selectedFile.id);
+      }
+
+      const allItems = activeFiles.filter(Boolean);
+      const attachedItems = allItems.filter((q) => q.state === UploadState.ATTACHED);
+      const allAttached = allItems.length > 0 && attachedItems.length === allItems.length;
+
+      let changed = false;
+
+      if (allAttached) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][manual-repeat-upload-detected] total=${allItems.length} attached=${attachedItems.length}`,
+        );
+
+        changed = resetQueueItemsForUpload({
+          preserveAttached: false,
+          forceResetAttached: true,
+          forceAll: true,
+          reason: 'manual-repeat-upload',
+        });
+
+        setStatus('准备再次上传，不清空输入框已有附件', 'info');
+      } else {
+        changed = resetQueueItemsForUpload({
+          preserveAttached: true,
+          reason: 'manual-start-upload',
+        });
+      }
+
+      if (changed) {
+        ToolboxShell.appendLog('[UPLOAD_DIAG][upload:reset-before-start]');
+        scheduleRenderUpload('upload:reset-before-start');
+        persistQueueThrottled('upload:reset-before-start');
+      }
+
+      return await startUpload({
+        reason: uploadSource,
+      });
     }
 
     function startCopyLastMessageHardResetTimer(source) {
@@ -21378,51 +21542,7 @@
       }
 
       if (action === 'start-upload') {
-        if (state.running) {
-          setStatus('正在上传中，请稍后', 'running');
-          ToolboxShell.appendLog('[UPLOAD_UI_ACTION][start-upload:ignored] reason=running');
-          return true;
-        }
-
-        void (async () => {
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][upload-button:click] source=${src} total=${state.queue.length}`,
-          );
-
-          const allItems = state.queue.filter(Boolean);
-          const attachedItems = allItems.filter((q) => q.state === UploadState.ATTACHED);
-          const allAttached = allItems.length > 0 && attachedItems.length === allItems.length;
-
-          let changed = false;
-
-          if (allAttached) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][manual-repeat-upload-detected] total=${allItems.length} attached=${attachedItems.length}`,
-            );
-
-            changed = resetQueueItemsForUpload({
-              preserveAttached: false,
-              forceResetAttached: true,
-              forceAll: true,
-              reason: 'manual-repeat-upload',
-            });
-
-            setStatus('准备再次上传，不清空输入框已有附件', 'info');
-          } else {
-            changed = resetQueueItemsForUpload({
-              preserveAttached: true,
-              reason: 'manual-start-upload',
-            });
-          }
-
-          if (changed) {
-            ToolboxShell.appendLog('[UPLOAD_DIAG][upload:reset-before-start]');
-            scheduleRenderUpload('upload:reset-before-start');
-            persistQueueThrottled('upload:reset-before-start');
-          }
-
-          await startUpload();
-        })().catch((err) => {
+        void triggerStartUpload(src || 'button').catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] start upload UI action failed', err);
           setStatus(`上传失败：${errText}`, 'error');
@@ -21803,29 +21923,20 @@
         const id = itemEl.getAttribute('data-id');
         if (!id) return;
 
-        const q = state.queue.find((item) => item && item.id === id);
+        const q = getActiveGroupFiles().find((item) => item && item.id === id);
         if (!q) {
           setStatus('未找到对应文件');
-          ToolboxShell.appendLog(`[UPLOAD_DIAG][upload-list-click:missing-item] id=${id || '-'}`);
+          ToolboxShell.appendLog(`[UPLOAD_DIAG][upload-list-click:missing-item] id=${id || '-'} group=${getActiveGroupId() || '-'}`);
           return;
         }
 
-        state.activeId = id;
+        setSelectedFileIdForActiveGroup(id, { reason: 'upload-list-click' });
+        renderUploadListOnly();
+        renderUploadButtonsOnly();
 
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][upload-list-click:upload] id=${id || '-'} name=${q.name || '-'} state=${q.state || '-'} running=${state.running}`,
+          `[UPLOAD_DIAG][upload-list-click:select] id=${id || '-'} name=${q.name || '-'} group=${getActiveGroupId() || '-'}`,
         );
-
-        try {
-          await uploadSingleFromListClick(id);
-        } catch (err) {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] upload list item click failed', err);
-          setStatus(`点击文件上传失败：${errText}`);
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][upload-list-click:failed] id=${id || '-'} error=${errText}`,
-          );
-        }
       });
 
       const quickPromptBox = qs('#cgpt-upload-quick-prompts', rootEl);
@@ -22195,14 +22306,16 @@
     }
 
     function getUploadStatus() {
+      const activeFiles = getActiveGroupFiles();
       return {
         groupCount: state.groups.length,
         activeGroupId: state.activeGroupId,
         activeGroupName: getActiveGroupName(),
-        total: state.queue.length,
-        attached: state.queue.filter((q) => q && q.state === UploadState.ATTACHED).length,
-        failed: state.queue.filter(isUploadFailedState).length,
-        missing: state.queue.filter((q) => q && q.state === UploadState.MISSING_FILE).length,
+        selectedFileId: getSelectedFileIdForActiveGroup(),
+        total: activeFiles.length,
+        attached: activeFiles.filter((q) => q && q.state === UploadState.ATTACHED).length,
+        failed: activeFiles.filter(isUploadFailedState).length,
+        missing: activeFiles.filter((q) => q && q.state === UploadState.MISSING_FILE).length,
         running: state.running,
       };
     }
@@ -22212,38 +22325,9 @@
     }
 
     async function startUploadFromBridge(payload = {}) {
-      const source = String(payload.source || 'bridge-start-upload').trim() || 'bridge-start-upload';
-      const resetBeforeStart = payload.reset_before_start === true;
-      const forceRestart = payload.force_restart !== false;
-
-      ToolboxShell.appendLog(
-        `[BRIDGE][UPLOAD][START] source=${source} total=${state.queue.length} running=${state.running}`
-      );
-
-      if (resetBeforeStart) {
-        const changed = resetQueueItemsForUpload({
-          forceAll: true,
-          preserveAttached: true,
-          reason: source,
-        });
-
-        ToolboxShell.appendLog(
-          `[BRIDGE][UPLOAD][RESET] source=${source} changed=${changed} total=${state.queue.length}`
-        );
-
-        if (changed) {
-          scheduleRenderUpload('bridge-start-upload:reset');
-          persistQueueThrottled('bridge-start-upload:reset');
-        }
-      }
-
-      const result = await startUpload({
-        forceRestart,
-        reason: source,
-      });
-
+      const source = String(payload.source || 'bridge_command').trim() || 'bridge_command';
+      const result = await triggerStartUpload(source);
       const status = getUploadStatus();
-
       const finalResult = {
         ...(result || {}),
         upload_status: status,
@@ -22269,6 +22353,7 @@
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,
       startUploadFromBridge,
+      triggerStartUpload,
     };
   })();
 
@@ -26847,10 +26932,138 @@
       state.uploadBlockNextChatSourceMessageId = String(sourceMessageId || '');
     }
 
+    function base64ToUint8Array(base64) {
+      const binary = atob(String(base64 || ''));
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    async function uploadCurrentFileCommand(result) {
+      const normalized = normalizeBridgePollMessage(result);
+      const messageId = normalized.message_id || normalized.id;
+      const payload = normalized.payload && typeof normalized.payload === 'object'
+        ? normalized.payload
+        : {};
+      const fileInfo = payload.file && typeof payload.file === 'object' ? payload.file : {};
+      const requestId = String(payload.request_id || '').trim();
+
+      await report('command_received', {
+        command: 'upload_current_file',
+        request_id: requestId,
+      }, messageId);
+
+      if (!fileInfo.content_base64) {
+        const reason = '上传命令缺少文件内容';
+        await report('command_failed', {
+          command: 'upload_current_file',
+          request_id: requestId,
+          reason,
+        }, messageId);
+        await ack(messageId, false, reason);
+        return false;
+      }
+
+      try {
+        const bytes = base64ToUint8Array(fileInfo.content_base64);
+        const mime = fileInfo.mime || 'application/octet-stream';
+        const name = fileInfo.name || 'upload.bin';
+        const blob = new Blob([bytes], { type: mime });
+        const file = new File([blob], name, {
+          type: mime,
+          lastModified: Date.now(),
+        });
+
+        if (!ComposerApi || typeof ComposerApi.attachFilesByFileInput !== 'function') {
+          throw new Error('ComposerApi.attachFilesByFileInput 不可用');
+        }
+
+        ToolboxShell.appendLog(
+          `[BRIDGE][UPLOAD_CURRENT_FILE][START] request_id=${requestId || '-'} `
+          + `name=${name} size=${file.size}`,
+        );
+
+        const uploadResult = await ComposerApi.attachFilesByFileInput([file], 12000, {});
+
+        if (!uploadResult || !uploadResult.ok) {
+          const reason = (uploadResult && uploadResult.reason)
+            ? uploadResult.reason
+            : '未找到 ChatGPT 文件上传 input 或设置 input.files 失败';
+
+          await report('control_done', {
+            command: 'upload_current_file',
+            request_id: requestId,
+            ok: false,
+            message: reason,
+            detail: { file_name: name },
+            result: uploadResult || {},
+          }, messageId);
+
+          await report('command_failed', {
+            command: 'upload_current_file',
+            request_id: requestId,
+            reason,
+          }, messageId);
+
+          await ack(messageId, false, reason);
+          return false;
+        }
+
+        const detail = {
+          file_name: name,
+          size: file.size,
+        };
+
+        await report('control_done', {
+          command: 'upload_current_file',
+          request_id: requestId,
+          ok: true,
+          message: '文件已提交到上传控件',
+          detail,
+          result: uploadResult,
+        }, messageId);
+
+        await ack(messageId, true, `文件已提交：${name}`);
+        ToolboxShell.appendLog(
+          `[BRIDGE][UPLOAD_CURRENT_FILE][OK] request_id=${requestId || '-'} name=${name}`,
+        );
+        return true;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        const reason = `上传当前文件失败：${errText}`;
+
+        console.error('[ChatGPT toolbox] upload_current_file command failed', error);
+        ToolboxShell.appendLog(`[BRIDGE][UPLOAD_CURRENT_FILE][FAILED] ${reason}`);
+
+        await report('control_done', {
+          command: 'upload_current_file',
+          request_id: requestId,
+          ok: false,
+          message: reason,
+          result: { reason: errText },
+        }, messageId);
+
+        await report('command_failed', {
+          command: 'upload_current_file',
+          request_id: requestId,
+          reason: errText,
+        }, messageId);
+
+        await ack(messageId, false, reason);
+        return false;
+      }
+    }
+
     async function startUploadCommand(result) {
       const normalized = normalizeBridgePollMessage(result);
       const messageId = normalized.message_id || normalized.id;
-      const payload = normalized.payload || {};
+      const payload = normalized.payload && typeof normalized.payload === 'object'
+        ? normalized.payload
+        : {};
+      const bridgeSource = 'bridge_command';
 
       const setUploadBlockOnFailed = (reason) => {
         if (payload.block_next_chat_on_failed !== false) {
@@ -26858,8 +27071,8 @@
         }
       };
 
-      if (!UploadModule || typeof UploadModule.startUploadFromBridge !== 'function') {
-        const reason = 'UploadModule.startUploadFromBridge 不存在，无法执行油猴上传';
+      if (!UploadModule || typeof UploadModule.triggerStartUpload !== 'function') {
+        const reason = 'UploadModule.triggerStartUpload 不存在，无法执行油猴上传';
         setUploadBlockOnFailed(reason);
 
         await ack(messageId, false, reason);
@@ -26874,14 +27087,25 @@
       let uploadResult = null;
 
       try {
+        ToolboxShell.appendLog(
+          `[TM_CONTROL][START_UPLOAD][RECEIVED] source=${bridgeSource}`
+        );
+        console.log(
+          `[TM_CONTROL][START_UPLOAD][RECEIVED] source=${bridgeSource}`
+        );
+
         await report('command_received', {
           command: 'start_upload',
         }, messageId);
 
-        uploadResult = await UploadModule.startUploadFromBridge({
-          ...payload,
-          source: payload.source || 'gui-send-before-message',
-        });
+        uploadResult = await UploadModule.triggerStartUpload(bridgeSource);
+        const uploadStatus = UploadModule.getStatus
+          ? UploadModule.getStatus()
+          : {};
+        uploadResult = {
+          ...(uploadResult || {}),
+          upload_status: uploadStatus,
+        };
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
         const reason = `发送前上传失败：${errText}`;
@@ -26971,7 +27195,15 @@
 
     async function handleCommandMessage(result) {
       const normalized = normalizeBridgePollMessage(result);
-      const command = normalized.command || '';
+      const cmdPayload = normalized.payload && typeof normalized.payload === 'object'
+        ? normalized.payload
+        : {};
+      const command = String(
+        normalized.command
+        || cmdPayload.command
+        || normalized.action
+        || ''
+      ).trim();
       const messageId = normalized.message_id || normalized.id;
       if (command === 'close_self') {
         return await closeCurrentPageCommand(messageId);
@@ -27052,6 +27284,9 @@
       }
       if (command === 'start_upload') {
         return await startUploadCommand(normalized);
+      }
+      if (command === 'upload_current_file') {
+        return await uploadCurrentFileCommand(normalized);
       }
       await ack(messageId, false, `未知命令: ${command || '-'}`);
       return false;

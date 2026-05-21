@@ -4,8 +4,6 @@ import traceback
 
 import server
 from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
-from log_utils import get_log_file_path
-
 from app.constants import (
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
@@ -15,6 +13,7 @@ from app.models import normalize_remote_chatgpt
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.elided_label import ElidedLabel
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
+from app.ui.widgets.no_wheel_spin_box import NoWheelSpinBox
 from app.ui.widgets.no_wheel_tab_widget import NoWheelTabWidget
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
@@ -34,7 +33,6 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -138,6 +136,13 @@ class UiBuilderMixin:
                 "CursorBridgeMixin._bind_send_last_to_cursor_button missing",
                 echo=True,
             )
+        self._reconnect_button(
+            self.upload_current_file_btn,
+            self._trigger_tm_start_upload,
+            tag="upload_current_file_btn",
+        )
+        if hasattr(self, "_update_upload_current_file_btn_state"):
+            self._update_upload_current_file_btn_state()
         self._chat_panel_signals_bound = True
 
     def _init_splitter_save_timer(self):
@@ -414,7 +419,6 @@ class UiBuilderMixin:
         row.setSpacing(6)
         for btn in (
             self.open_chatgpt_btn,
-            self.bind_current_page_btn,
             self.sync_web_conversation_btn,
             self.close_bound_page_btn,
             self.close_other_pages_btn,
@@ -474,6 +478,7 @@ class UiBuilderMixin:
         self._ensure_tm_action_buttons()
         self._ensure_bind_selected_page_button()
         for page_row_btn in (
+            self.bind_current_page_btn,
             self.chat_open_bound_btn,
             self.bind_selected_page_btn,
         ):
@@ -483,7 +488,7 @@ class UiBuilderMixin:
             page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def _build_tm_page_selector_row(self, parent_layout):
-        """页面 [下拉列表] [打开绑定页面] [设为当前页]"""
+        """页面 [下拉列表] [绑定当前页面] [打开绑定页面] [设为当前页]"""
         self._ensure_tm_action_buttons()
         self._ensure_tm_page_combo()
         self._ensure_bind_selected_page_button()
@@ -509,6 +514,7 @@ class UiBuilderMixin:
         self.tm_page_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row.addWidget(self.tm_page_empty_label, 1)
         row.addWidget(self.tm_page_combo, 1)
+        row.addWidget(self.bind_current_page_btn, 0, Qt.AlignVCenter)
         row.addWidget(self.chat_open_bound_btn, 0, Qt.AlignVCenter)
         row.addWidget(self.bind_selected_page_btn, 0, Qt.AlignVCenter)
         parent_layout.addLayout(row)
@@ -521,7 +527,6 @@ class UiBuilderMixin:
         layout.setSpacing(6)
         for btn in (
             self.open_chatgpt_btn,
-            self.bind_current_page_btn,
             self.sync_web_conversation_btn,
         ):
             layout.addWidget(btn)
@@ -542,42 +547,16 @@ class UiBuilderMixin:
             layout.addWidget(self.view_logs_btn)
 
     def _build_tm_debug_action_buttons(self, layout):
-        specs = self._tm_action_button_specs()
-        debug_specs = [
-            ("open_chatgpt", specs["open_chatgpt"]),
-            ("open_bound", specs["open_bound"]),
-            ("sync_web", specs["sync_web"]),
-            ("bind_current", specs["bind_current"]),
-            (
-                "close_selected",
-                {
-                    "text": "关闭选中页面",
-                    "handler": self._on_close_selected_tm_page,
-                    "danger": True,
-                    "tooltip": "",
-                },
-            ),
-            ("close_other", specs["close_other"]),
-            (
-                "close_bound_debug",
-                {
-                    "text": "关闭当前绑定页面",
-                    "handler": self._on_close_bound_tm_page,
-                    "danger": True,
-                    "tooltip": specs["close_bound"]["tooltip"],
-                },
-            ),
-        ]
+        """设置页专属调试操作（主聊天页已有按钮不在此重复创建）。"""
         layout.setSpacing(6)
-        for _key, spec in debug_specs:
-            layout.addWidget(
-                self._create_tm_ghost_button(
-                    spec["text"],
-                    spec["handler"],
-                    danger=spec["danger"],
-                    tooltip=spec["tooltip"],
-                )
+        layout.addWidget(
+            self._create_tm_ghost_button(
+                "关闭选中页面",
+                self._on_close_selected_tm_page,
+                danger=True,
+                tooltip="关闭下方页面表格中当前选中的 ChatGPT 页面",
             )
+        )
     def _format_tm_page_option_label(
         self,
         page,
@@ -1843,11 +1822,25 @@ class UiBuilderMixin:
             self.service_tab,
             self.service_layout,
         ) = self._create_scroll_tab()
-        service_form_host = QWidget()
-        service_form_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        service_form = QFormLayout(service_form_host)
-        service_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        self.enable_lan_access_cb = QCheckBox("允许局域网访问（监听 0.0.0.0）")
+        self.service_layout.setContentsMargins(12, 10, 12, 10)
+        self.service_layout.setSpacing(10)
+        service_root = QWidget()
+        service_root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        service_root_layout = QVBoxLayout(service_root)
+        service_root_layout.setContentsMargins(0, 0, 0, 0)
+        service_root_layout.setSpacing(10)
+
+        basic_group, basic_layout = self._make_group_vbox("服务基础设置")
+        basic_layout.setContentsMargins(10, 8, 10, 8)
+        basic_layout.setSpacing(6)
+        basic_form_host = QWidget()
+        basic_form = QFormLayout(basic_form_host)
+        basic_form.setContentsMargins(0, 0, 0, 0)
+        basic_form.setSpacing(6)
+        basic_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        basic_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.enable_lan_access_cb = QCheckBox()
+        self.enable_lan_access_cb.setToolTip("允许局域网访问（监听 0.0.0.0）")
         self.enable_lan_access_cb.setChecked(self._enable_lan_access)
         self.enable_lan_access_cb.toggled.connect(self._on_enable_lan_access_changed)
         self.listen_host_label = QLabel()
@@ -1855,17 +1848,26 @@ class UiBuilderMixin:
         self._update_listen_host_label()
         self.port_edit = QLineEdit(self._port_text)
         self.port_edit.setFixedWidth(80)
-        service_form.addRow("局域网访问", self.enable_lan_access_cb)
-        service_form.addRow("监听地址", self.listen_host_label)
-        service_form.addRow("端口 port", self.port_edit)
-        self.auto_start_server_cb = QCheckBox("启动 GUI 时自动启动服务")
-        self.auto_start_server_cb.setChecked(self._auto_start_server)
-        service_form.addRow("", self.auto_start_server_cb)
-        chat_input_group, chat_input_layout = self._make_group_vbox("聊天输入")
-        chat_input_hint = self._make_hint_label(
-            "当底部输入框为空时自动填入（新建对话、切换对话、发送后清空时）。"
-            "留空表示不预填。"
+        self.port_edit.editingFinished.connect(
+            lambda: self._auto_save_service_settings(network_config_changed=True)
         )
+        basic_form.addRow("局域网访问", self.enable_lan_access_cb)
+        basic_form.addRow("监听地址", self.listen_host_label)
+        basic_form.addRow("端口", self.port_edit)
+        self.auto_start_server_cb = QCheckBox()
+        self.auto_start_server_cb.setToolTip("启动 GUI 时自动启动服务")
+        self.auto_start_server_cb.setChecked(self._auto_start_server)
+        self.auto_start_server_cb.stateChanged.connect(
+            lambda _state: self._auto_save_service_settings(
+                network_config_changed=False
+            )
+        )
+        basic_form.addRow("自动启动", self.auto_start_server_cb)
+        basic_layout.addWidget(basic_form_host)
+
+        chat_input_group, chat_input_layout = self._make_group_vbox("聊天输入")
+        chat_input_layout.setContentsMargins(10, 8, 10, 8)
+        chat_input_layout.setSpacing(4)
         self.default_compose_message_edit = QPlainTextEdit()
         self.default_compose_message_edit.setPlaceholderText(
             "例如：请用中文简要回答…"
@@ -1873,11 +1875,28 @@ class UiBuilderMixin:
         self.default_compose_message_edit.setPlainText(
             getattr(self, "_default_compose_message", "") or ""
         )
-        self.default_compose_message_edit.setFixedHeight(72)
-        chat_input_layout.addWidget(chat_input_hint)
+        self.default_compose_message_edit.setMinimumHeight(120)
+        self.default_compose_message_edit.setMaximumHeight(160)
+        self.default_compose_message_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        chat_input_hint = self._make_hint_label(
+            "当底部输入框为空时自动填入（新建对话、切换对话、发送后清空时）；留空表示不填充。"
+        )
+        hint_font = chat_input_hint.font()
+        hint_font.setPointSize(max(hint_font.pointSize() - 1, 8))
+        chat_input_hint.setFont(hint_font)
         chat_input_layout.addWidget(self.default_compose_message_edit)
-        service_form.addRow("", chat_input_group)
+        chat_input_layout.addWidget(chat_input_hint)
+        self.default_compose_message_edit.textChanged.connect(
+            self._schedule_service_default_message_autosave
+        )
+
+        ops_group, ops_layout = self._make_group_vbox("服务操作与状态")
+        ops_layout.setContentsMargins(10, 8, 10, 8)
+        ops_layout.setSpacing(8)
         service_btn_row = QHBoxLayout()
+        service_btn_row.setSpacing(8)
         self.settings_start_btn = QPushButton("启动服务")
         self.settings_stop_btn = QPushButton("停止服务")
         self.settings_restart_btn = QPushButton("重启服务并应用")
@@ -1897,12 +1916,21 @@ class UiBuilderMixin:
         service_btn_row.addWidget(self.settings_stop_btn)
         service_btn_row.addWidget(self.settings_restart_btn)
         service_btn_row.addStretch()
-        service_form.addRow("操作", service_btn_row)
+        ops_layout.addLayout(service_btn_row)
         self.settings_service_status_label = QLabel("当前状态：未启动")
         self.settings_service_status_label.setWordWrap(True)
-        service_form.addRow("状态", self.settings_service_status_label)
-        self.service_layout.addWidget(service_form_host)
-        self.service_layout.addStretch(1)
+        self.settings_service_status_label.setStyleSheet("color: #333;")
+        ops_layout.addWidget(self.settings_service_status_label)
+        self.settings_service_hint_label = QLabel("")
+        self.settings_service_hint_label.setWordWrap(True)
+        self.settings_service_hint_label.setStyleSheet("color: #555;")
+        ops_layout.addWidget(self.settings_service_hint_label)
+
+        service_root_layout.addWidget(basic_group)
+        service_root_layout.addWidget(chat_input_group)
+        service_root_layout.addWidget(ops_group)
+        self.service_layout.addWidget(service_root)
+        self._init_service_settings_autosave_timer()
         self.settings_tabs.addTab(self.service_scroll, "服务设置")
         # --- 油猴设置
         (
@@ -1989,7 +2017,7 @@ class UiBuilderMixin:
         )
         sync_mode_row = QHBoxLayout()
         sync_mode_row.addWidget(QLabel("同步模式"))
-        self.sync_conversation_mode_combo = QComboBox()
+        self.sync_conversation_mode_combo = NoWheelComboBox()
         self.sync_conversation_mode_combo.addItem("安全合并（只补缺失）", "merge")
         self.sync_conversation_mode_combo.addItem("以网页为准（完全覆盖本地聊天）", "replace")
         self.sync_conversation_mode_combo.setSizePolicy(
@@ -1998,7 +2026,7 @@ class UiBuilderMixin:
         sync_mode_row.addWidget(self.sync_conversation_mode_combo, stretch=1)
         sync_max_row = QHBoxLayout()
         sync_max_row.addWidget(QLabel("最多同步条数"))
-        self.sync_conversation_max_messages_spin = QSpinBox()
+        self.sync_conversation_max_messages_spin = NoWheelSpinBox()
         self.sync_conversation_max_messages_spin.setRange(10, 2000)
         self.sync_conversation_max_messages_spin.setSingleStep(10)
         sync_max_row.addWidget(self.sync_conversation_max_messages_spin)
@@ -2064,94 +2092,7 @@ class UiBuilderMixin:
         self.tampermonkey_layout.addWidget(tm_form_host)
         self.tampermonkey_layout.addStretch(1)
         self.settings_tabs.addTab(self.tampermonkey_scroll, "油猴设置")
-        # --- 调试设置（日志清理；聊天/调试行为固定为 DEFAULT_APP_SETTINGS）
-        (
-            self.debug_scroll,
-            self.debug_tab,
-            self.debug_layout,
-        ) = self._create_scroll_tab()
-        debug_form_host = QWidget()
-        debug_form_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        debug_form = QFormLayout(debug_form_host)
-        debug_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        log_group = QGroupBox("运行日志")
-        log_layout = QVBoxLayout(log_group)
-        self.debug_mode_cb = QCheckBox("详细调试日志")
-        self.show_raw_payload_cb = QCheckBox("显示原始 payload")
-        self.mirror_log_to_console_cb = QCheckBox("同步输出到运行窗口")
-        self.include_log_callsite_cb = QCheckBox("日志包含调用位置")
-        for widget in (
-            self.debug_mode_cb,
-            self.show_raw_payload_cb,
-            self.mirror_log_to_console_cb,
-            self.include_log_callsite_cb,
-        ):
-            log_layout.addWidget(widget)
-        debug_form.addRow("", log_group)
-        cursor_group = QGroupBox("Cursor 联动测试")
-        cursor_layout = QVBoxLayout(cursor_group)
-        cursor_btn_row = QHBoxLayout()
-        self.cursor_cli_test_btn = QPushButton("测试 Cursor CLI")
-        self.cursor_cli_test_btn.setObjectName("PrimaryButton")
-        self.cursor_cli_test_btn.setToolTip(
-            "调用 cursor-agent --version，检测 Python 是否可以找到 Cursor CLI"
-        )
-        self.cursor_send_test_task_btn = QPushButton("发送 Cursor 测试任务")
-        self.cursor_send_test_task_btn.setObjectName("PrimaryButton")
-        self.cursor_send_test_task_btn.setToolTip(
-            "向本地 server.py 的 Cursor 任务队列发送一条只读测试任务"
-        )
-        self.cursor_open_task_dir_btn = QPushButton("打开任务目录")
-        self.cursor_open_task_dir_btn.setObjectName("PrimaryButton")
-        self.cursor_open_task_dir_btn.setToolTip(
-            "打开当前项目下的 .cursor_tasks/inbox 目录"
-        )
-        cursor_btn_row.addWidget(self.cursor_cli_test_btn)
-        cursor_btn_row.addWidget(self.cursor_send_test_task_btn)
-        cursor_btn_row.addWidget(self.cursor_open_task_dir_btn)
-        cursor_btn_row.addStretch()
-        cursor_layout.addLayout(cursor_btn_row)
-        self.cursor_status_label = QLabel("Cursor 状态：未测试")
-        self.cursor_status_label.setWordWrap(True)
-        self.cursor_status_label.setStyleSheet("color: #555;")
-        cursor_layout.addWidget(self.cursor_status_label)
-        self.cursor_cli_test_btn.clicked.connect(self._on_test_cursor_cli_clicked)
-        self.cursor_send_test_task_btn.clicked.connect(
-            self._on_send_cursor_test_task_clicked
-        )
-        self.cursor_open_task_dir_btn.clicked.connect(
-            self._on_open_cursor_task_dir_clicked
-        )
-        debug_form.addRow("", cursor_group)
-        self.log_file_path_label = QLabel(f"日志文件：{get_log_file_path()}")
-        self.log_file_path_label.setWordWrap(True)
-        self.log_file_path_label.setStyleSheet("color: #555;")
-        debug_form.addRow("", self.log_file_path_label)
-        self.debug_layout.addWidget(debug_form_host)
-        self.debug_layout.addStretch(1)
-        self.settings_tabs.addTab(self.debug_scroll, "调试设置")
         self._sync_settings_widgets_from_values()
-        bottom_row = QHBoxLayout()
-        self.apply_settings_btn = QPushButton("应用设置")
-        self.apply_settings_btn.setObjectName("PrimaryButton")
-        self.save_settings_btn = QPushButton("保存设置")
-        self.save_settings_btn.setObjectName("PrimaryButton")
-        self.reset_settings_btn = QPushButton("恢复默认设置")
-        self.reset_settings_btn.setObjectName("WarningButton")
-        self.apply_settings_btn.clicked.connect(
-            lambda: self._apply_settings(immediate_only=True)
-        )
-        self.save_settings_btn.clicked.connect(self._on_save_settings_clicked)
-        self.reset_settings_btn.clicked.connect(self._reset_settings_to_default)
-        bottom_row.addWidget(self.apply_settings_btn)
-        bottom_row.addWidget(self.save_settings_btn)
-        bottom_row.addWidget(self.reset_settings_btn)
-        bottom_row.addStretch()
-        layout.addLayout(bottom_row)
-        self.settings_hint_label = QLabel("")
-        self.settings_hint_label.setWordWrap(True)
-        self.settings_hint_label.setStyleSheet("color: #555;")
-        layout.addWidget(self.settings_hint_label)
         return page
     def _build_chat_status_bar(self):
         bar = QWidget()
@@ -2631,6 +2572,9 @@ class UiBuilderMixin:
         self.copy_last_btn = QPushButton("复制最后回复")
         self.copy_last_btn.setObjectName("PrimaryButton")
         bottom_action_row.addWidget(self.copy_last_btn)
+        self.upload_current_file_btn = QPushButton("开始上传")
+        self.upload_current_file_btn.setObjectName("PrimaryButton")
+        bottom_action_row.addWidget(self.upload_current_file_btn)
         input_layout.addLayout(bottom_action_row)
         chat_tab_layout.addWidget(input_block, 0)
         self._bind_chat_panel_signals()

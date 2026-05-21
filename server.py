@@ -1121,6 +1121,11 @@ def _queue_control_message(command, *, log_label="", **extra):
         f"[TM_CONTROL][ENQUEUE] type={command} request_id={request_id or '-'} "
         f"target_client_id={target_client_id} message_id={msg['id'][:8]}…"
     )
+    if command == "start_upload":
+        _log(
+            f"[TM_CONTROL][START_UPLOAD][QUEUE] "
+            f"target_client_id={target_client_id} command=start_upload"
+        )
     _log_bridge_json_payload(
         "SERVER_TO_TM_QUEUE",
         msg,
@@ -2020,6 +2025,7 @@ def _message_matches_client(msg, client_id):
 STRICT_TARGET_CONTROL_COMMANDS = frozenset({
     "sync_conversation",
     "start_upload",
+    "upload_current_file",
 })
 
 

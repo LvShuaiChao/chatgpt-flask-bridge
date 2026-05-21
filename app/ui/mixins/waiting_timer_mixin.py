@@ -209,8 +209,6 @@ class WaitingTimerMixin:
         if text == getattr(self, "_last_tm_action_hint_text", None):
             return
         self._last_tm_action_hint_text = text
-        if hasattr(self, "settings_hint_label"):
-            self.settings_hint_label.setText(text or "")
         if text:
             self.statusBar().showMessage(text, 8000)
 

@@ -797,7 +797,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 未找到")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 未找到")
 
             self._set_cursor_status_hint(msg)
 
@@ -817,7 +817,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 超时")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 超时")
 
             self._set_cursor_status_hint(msg)
 
@@ -839,7 +839,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 异常")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 异常")
 
             self._set_cursor_status_hint(msg)
 
@@ -869,7 +869,9 @@ class CursorBridgeMixin:
 
             self._add_system_message(ok_msg)
 
-            self.cursor_status_label.setText(f"Cursor 状态：CLI 可用 {version}")
+            self._set_cursor_feedback(
+                status_text=f"Cursor 状态：CLI 可用 {version}"
+            )
 
             self._set_cursor_status_hint(ok_msg)
 
@@ -895,7 +897,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：CLI 测试失败")
+            self._set_cursor_feedback(status_text="Cursor 状态：CLI 测试失败")
 
             self._set_cursor_status_hint(fail_msg)
 
@@ -1000,7 +1002,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：接口缺失")
+            self._set_cursor_feedback(status_text="Cursor 状态：接口缺失")
 
             self._set_cursor_status_hint(fail_msg)
 
@@ -1022,7 +1024,7 @@ class CursorBridgeMixin:
 
             self._add_system_message(fail_msg)
 
-            self.cursor_status_label.setText("Cursor 状态：任务发送失败")
+            self._set_cursor_feedback(status_text="Cursor 状态：任务发送失败")
 
             self._set_cursor_status_hint(fail_msg)
 
