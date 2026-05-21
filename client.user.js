@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 工具箱：多文件上传 + 自动指令队列 + Prompt 管理
 // @namespace    https://github.com/xiaozhang/chatgpt-toolbox
-// @version      3.6.3
+// @version      3.6.4
 // @description  一个统一工具箱面板：多文件队列上传、自动指令队列、Prompt 管理、标题前缀、对话导出与 issues 统计。每个功能独立模块，放到不同选项卡。?
 // @author       小张
 // @match        https://chatgpt.com/*
@@ -1536,6 +1536,52 @@
       subscribe,
     };
   })();
+
+  let toolboxRoutePipelineRunning = false;
+
+  async function runToolboxRouteChangePipeline(reason = '') {
+    if (toolboxRoutePipelineRunning) {
+      return;
+    }
+
+    toolboxRoutePipelineRunning = true;
+
+    try {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.handleRouteChange === 'function') {
+        await ToolboxShell.handleRouteChange(reason);
+      }
+
+      if (typeof BridgeModule !== 'undefined' && typeof BridgeModule.handleRouteChange === 'function') {
+        await BridgeModule.handleRouteChange(reason);
+      }
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[ChatGPT toolbox][ROUTE_PIPELINE] failed', error);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[ROUTE_PIPELINE][failed] reason=${reason || '-'} error=${errText}`);
+      }
+    } finally {
+      toolboxRoutePipelineRunning = false;
+    }
+  }
+
+  function installUnifiedRouteChangePipeline() {
+    if (window.__cgptUnifiedRoutePipelineBound) {
+      return;
+    }
+
+    window.__cgptUnifiedRoutePipelineBound = true;
+
+    RouteChangeBus.subscribe((routeReason) => {
+      window.setTimeout(() => {
+        void runToolboxRouteChangePipeline(routeReason);
+      }, 0);
+    });
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog('[ROUTE_PIPELINE][bind] unified page-state + bridge identity');
+    }
+  }
 
   const MemoryManager = (() => {
     const KEYS = Object.freeze({
@@ -3146,6 +3192,32 @@
       rootEl.classList.remove(...LEGACY_EDGE_CLASSES);
     }
 
+    const TOOLBOX_FLOATING_HIDDEN_CLASS = 'cgpt-toolbox-floating-hidden';
+
+    function isFloatingEdgeHidden() {
+      return !!(root && (
+        root.classList.contains('cgpt-edge-hidden')
+        || root.classList.contains(TOOLBOX_FLOATING_HIDDEN_CLASS)
+      ));
+    }
+
+    function setFloatingEdgeHidden(active, reason = '') {
+      if (!root) {
+        return;
+      }
+
+      const on = Boolean(active);
+      root.classList.toggle('cgpt-edge-hidden', on);
+      root.classList.toggle(TOOLBOX_FLOATING_HIDDEN_CLASS, on);
+
+      if (on) {
+        removeLegacyMultisideEdgeClasses(root, reason || 'set-floating-hidden');
+        root.classList.add('cgpt-edge-right');
+      } else {
+        root.classList.remove('cgpt-edge-right');
+      }
+    }
+
     let edgeRestoreClickGuardUntil = 0;
     let edgeRevealTimer = 0;
     let edgeRehideGuardUntil = 0;
@@ -3453,17 +3525,20 @@
           border-top: 2px solid #f8fafc;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden {
+        #${APP.rootId}.cgpt-edge-hidden,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden {
           transition: transform 160ms ease, opacity 160ms ease;
           opacity: 0.72;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden:hover {
+        #${APP.rootId}.cgpt-edge-hidden:hover,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden:hover {
           transform: none !important;
           opacity: 1;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden.cgpt-edge-right {
+        #${APP.rootId}.cgpt-edge-hidden.cgpt-edge-right,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden.cgpt-edge-right {
           transform: translateX(calc(100% - ${EDGE_HIDE_VISIBLE_SIZE}px));
         }
 
@@ -3489,7 +3564,8 @@
 
         #${APP.rootId}.cgpt-toolbox-panel-hidden #${APP.panelId},
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.panelId},
-        #${APP.rootId}.cgpt-edge-hidden #${APP.panelId} {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.panelId},
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.panelId} {
           display: none !important;
           pointer-events: none !important;
         }
@@ -3500,7 +3576,8 @@
         }
 
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.toggleId},
-        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId} {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId},
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.toggleId} {
           width: 38px;
           min-width: 38px;
           height: 34px;
@@ -3518,7 +3595,8 @@
         }
 
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.toggleId}:hover,
-        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId}:hover {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId}:hover,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.toggleId}:hover {
           opacity: 1;
         }
 
@@ -7835,7 +7913,7 @@
       const edgeHiddenDocked =
         root.classList.contains('cgpt-toolbox-edge-hidden') &&
         !root.classList.contains('cgpt-toolbox-edge-revealed');
-      const floatHidden = root.classList.contains('cgpt-edge-hidden');
+      const floatHidden = isFloatingEdgeHidden();
       const visuallyHidden =
         !panelHidden &&
         !edgeHiddenDocked &&
@@ -8640,11 +8718,41 @@
       });
     }
 
+    function readToolboxLayoutFlagsFromDom() {
+      if (!root) {
+        return {
+          panel_hidden: false,
+          edge_docked: false,
+          edge_revealed: false,
+          floating_hidden: false,
+          hidden: false,
+        };
+      }
+
+      const panel_hidden = isPanelHiddenNow();
+      const edge_docked = isEdgeHidden() && !root.classList.contains('cgpt-toolbox-edge-revealed');
+      const edge_revealed = isEdgeHidden() && root.classList.contains('cgpt-toolbox-edge-revealed');
+      const floating_hidden = isFloatingEdgeHidden();
+
+      return {
+        panel_hidden,
+        edge_docked,
+        edge_revealed,
+        floating_hidden,
+        hidden: panel_hidden || edge_docked || floating_hidden,
+      };
+    }
+
     function collectToolboxLayoutState() {
+      const flags = readToolboxLayoutFlagsFromDom();
       const layout = {
         mode: compactMode ? 'compact' : 'full',
-        hidden: isPanelHiddenNow(),
-        edge_hidden: isEdgeHidden(),
+        hidden: flags.hidden,
+        panel_hidden: flags.panel_hidden,
+        edge_docked: flags.edge_docked,
+        edge_revealed: flags.edge_revealed,
+        floating_hidden: flags.floating_hidden,
+        edge_hidden: flags.edge_docked,
         anchor: (root && root.dataset && root.dataset.snapEdge) || '',
         updatedAt: Date.now(),
       };
@@ -8665,7 +8773,11 @@
         reason || 'save-toolbox-layout',
       );
       appendLog(
-        `[TOOLBOX][LAYOUT][save] reason=${reason || '-'} hidden=${layout.hidden ? 1 : 0} mode=${layout.mode}`,
+        `[TOOLBOX][LAYOUT][save] reason=${reason || '-'} `
+          + `panel_hidden=${layout.panel_hidden ? 1 : 0} `
+          + `edge_docked=${layout.edge_docked ? 1 : 0} `
+          + `edge_revealed=${layout.edge_revealed ? 1 : 0} `
+          + `floating_hidden=${layout.floating_hidden ? 1 : 0} mode=${layout.mode}`,
       );
     }
 
@@ -8734,12 +8846,42 @@
       const layoutUpdatedAt = Number(layout.updatedAt || 0);
       const globalUpdatedAt = Number(savedGlobal && savedGlobal.updatedAt || 0);
 
-      if (typeof layout.hidden === 'boolean' && layout.hidden !== isToolboxInAnyHiddenState()) {
-        if (layout.hidden) {
-          hidePanel({ save: false, reason: reason || 'restore-layout-hidden' });
-        } else {
+      const wantPanelHidden = layout.panel_hidden === true
+        || (layout.hidden === true && layout.edge_docked !== true && layout.floating_hidden !== true);
+      const wantEdgeDocked = layout.edge_docked === true || layout.edge_hidden === true;
+      const wantFloatingHidden = layout.floating_hidden === true;
+      const wantAnyHidden = wantPanelHidden || wantEdgeDocked || wantFloatingHidden || layout.hidden === true;
+      const currentlyHidden = isToolboxInAnyHiddenState();
+
+      if (wantAnyHidden !== currentlyHidden || wantEdgeDocked !== isEdgeHidden()) {
+        if (!wantAnyHidden) {
           showPanel({ save: false, reason: reason || 'restore-layout-visible' });
+          setFloatingEdgeHidden(false, reason || 'restore-layout-visible');
+          clearFloatEdgeHiddenClasses();
+          root.classList.remove('cgpt-toolbox-edge-hidden', 'cgpt-toolbox-edge-revealed');
+          updateEdgeAutoHide();
+        } else if (wantEdgeDocked) {
+          hidePanel({ save: false, reason: reason || 'restore-layout-edge-docked' });
+          setFloatingEdgeHidden(false, reason || 'restore-layout-edge-docked');
+          root.classList.add('cgpt-toolbox-edge-hidden');
+          if (layout.edge_revealed === true) {
+            root.classList.add('cgpt-toolbox-edge-revealed');
+          } else {
+            root.classList.remove('cgpt-toolbox-edge-revealed');
+          }
+          clearFloatEdgeHiddenClasses();
+          normalizeEdgeVisualState(reason || 'restore-layout-edge-docked');
+        } else {
+          hidePanel({ save: false, reason: reason || 'restore-layout-hidden' });
+          if (wantFloatingHidden) {
+            setFloatingEdgeHidden(true, reason || 'restore-layout-floating-hidden');
+          } else if (isEdgeAutoHideEnabled()) {
+            updateEdgeAutoHide();
+          }
         }
+      } else if (wantEdgeDocked && layout.edge_revealed === true && !root.classList.contains('cgpt-toolbox-edge-revealed')) {
+        root.classList.add('cgpt-toolbox-edge-revealed');
+        normalizeEdgeVisualState(reason || 'restore-layout-edge-revealed');
       }
 
       if (
@@ -9412,6 +9554,7 @@
 
       root.classList.remove(
         'cgpt-edge-hidden',
+        TOOLBOX_FLOATING_HIDDEN_CLASS,
         ...LEGACY_EDGE_CLASSES,
         'cgpt-edge-right',
       );
@@ -9422,6 +9565,7 @@
       'cgpt-toolbox-edge-revealed',
       'cgpt-toolbox-panel-hidden',
       'cgpt-edge-hidden',
+      TOOLBOX_FLOATING_HIDDEN_CLASS,
       ...LEGACY_EDGE_CLASSES,
       'cgpt-edge-left',
       'cgpt-edge-right',
@@ -9652,9 +9796,7 @@
       const panelHidden = isPanelHiddenNow();
       const shouldHide = enabled && edge === EDGE_AUTO_HIDE_SIDE && panelHidden && !isEdgeHidden();
 
-      root.classList.toggle('cgpt-edge-hidden', shouldHide);
-      removeLegacyMultisideEdgeClasses(root, 'updateEdgeAutoHide');
-      root.classList.toggle('cgpt-edge-right', shouldHide);
+      setFloatingEdgeHidden(shouldHide, 'updateEdgeAutoHide');
 
       appendLog(
         `[TOOLBOX_EDGE][float-auto-hide-check] enabled=${enabled} panelHidden=${panelHidden} edge=${edge || '-'} shouldHide=${shouldHide} horizontal=true`,
@@ -10148,8 +10290,8 @@
 
         revealFloatBallTemporarily('hover');
 
-        if (root) {
-          root.classList.remove('cgpt-edge-hidden');
+        if (isFloatingEdgeHidden()) {
+          setFloatingEdgeHidden(false, 'toggle-hover-reveal');
         }
       });
 
@@ -10466,10 +10608,13 @@
       }
 
       if (statusType === 'online') {
+        if (/可发送/.test(value)) return '可发送';
+        if (/已连接/.test(value)) return '已连接';
         return '在线';
       }
 
       if (statusType === 'running') {
+        if (/生成中/.test(value)) return '生成中';
         if (/等待回答/.test(value)) return '等回答';
         if (/等待发送/.test(value)) return '等发送';
         if (/上传/.test(value)) return '上传中';
@@ -11018,7 +11163,7 @@
       }
     }
 
-    function checkToolboxPageKeyChanged(reason = '') {
+    async function handleRouteChange(reason = '') {
       const nextKey = getToolboxPageKey();
 
       if (!lastToolboxPageKey) {
@@ -11047,9 +11192,13 @@
         `[TOOLBOX_PAGE_STATE][page-change] reason=${reason || '-'} old=${oldKey} next=${nextKey}`,
       );
 
-      void applyToolboxPageState('page-key-changed').catch((error) => {
+      await applyToolboxPageState('page-key-changed');
+    }
+
+    function checkToolboxPageKeyChanged(reason = '') {
+      void handleRouteChange(reason).catch((error) => {
         appendLog(
-          `[TOOLBOX_PAGE_STATE][apply-page-key-changed-error] error=${error && error.stack ? error.stack : String(error)}`,
+          `[TOOLBOX_PAGE_STATE][route-change-error] reason=${reason || '-'} error=${error && error.stack ? error.stack : String(error)}`,
         );
       });
     }
@@ -11062,11 +11211,7 @@
       window.__cgptToolboxPageStateWatcherBound = true;
       lastToolboxPageKey = getToolboxPageKey();
 
-      RouteChangeBus.subscribe((reason) => {
-        window.setTimeout(() => {
-          checkToolboxPageKeyChanged(reason);
-        }, 100);
-      });
+      installUnifiedRouteChangePipeline();
 
       window.setInterval(() => {
         checkToolboxPageKeyChanged('interval');
@@ -11087,6 +11232,7 @@
       getActiveTab,
       applyToolboxUiState,
       applyToolboxPageState,
+      handleRouteChange,
       setEdgeAutoHideEnabled,
       suspendEdgeAutoHide,
       resetToolboxPosition,
@@ -12278,18 +12424,44 @@
     };
   }
 
+  function bridgeSafeConversationRecord(record) {
+    if (!record || typeof record !== 'object') {
+      return null;
+    }
+    const safe = {};
+    Object.keys(record).forEach((key) => {
+      if (key === 'element') {
+        return;
+      }
+      const value = record[key];
+      if (value instanceof Node) {
+        return;
+      }
+      if (typeof value === 'function') {
+        return;
+      }
+      safe[key] = value;
+    });
+    return safe;
+  }
+
   function buildConversationSnapshotForBridge(resolvePageIdentity) {
     try {
-      const messages = buildConversationMessageRecords({
+      const rawMessages = buildConversationMessageRecords({
         includeEmpty: false,
       });
+      const messages = rawMessages
+        .map((record) => bridgeSafeConversationRecord(record))
+        .filter(Boolean);
 
       const latestAny = messages.length ? messages[messages.length - 1] : null;
-      const latestAssistant = getLatestConversationMessageRecord({
-        role: 'assistant',
-        preferAssistant: true,
-        allowPreviousAssistantFallback: true,
-      });
+      let latestAssistant = null;
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === 'assistant') {
+          latestAssistant = messages[i];
+          break;
+        }
+      }
 
       const page = typeof resolvePageIdentity === 'function' ? resolvePageIdentity() : {};
 
@@ -16360,10 +16532,6 @@
         console.error('[ChatGPT toolbox] quick prompt send failed', err);
         setStatus(`快捷 Prompt 发送失败：${errText}`, 'error');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:send-failed] title=${title} error=${errText}`);
-      } finally {
-        if (state.autoSendRunId === runId) {
-          resetUploadSendShortcutState('quick-prompt-finally', runId);
-        }
       }
     }
 
@@ -23051,51 +23219,41 @@
         }
       }
 
-      if (autoSend && ComposerApi.isAssistantLikelyBusy()) {
-        setStatus('ChatGPT 正在回复，暂不能发送 Prompt', 'warn');
-        ToolboxShell.appendLog('[Prompt 管理] 发送阻断：assistant_busy');
-        return;
-      }
-
-      const okSet = ComposerApi.setComposerValue(text);
-
-      if (!okSet) {
-        console.error('[ChatGPT toolbox] Prompt fill failed: composer not found');
-        ToolboxShell.appendLog('[Prompt 管理] 填入失败：未找到输入框');
-        alert('没有找到 ChatGPT 输入框。请确认当前页面是 ChatGPT 对话页面');
-        return;
-      }
-
       if (!autoSend) {
+        const okSet = ComposerApi.setComposerValue(text);
+
+        if (!okSet) {
+          console.error('[ChatGPT toolbox] Prompt fill failed: composer not found');
+          ToolboxShell.appendLog('[Prompt 管理] 填入失败：未找到输入框');
+          alert('没有找到 ChatGPT 输入框。请确认当前页面是 ChatGPT 对话页面');
+          return;
+        }
+
         setStatus('已填入输入框，未自动发送');
         return;
       }
 
       sendLock = true;
-      setStatus('已填入，正在发送…');
+      setStatus('正在发送 Prompt…');
 
       try {
-        await sleep(260);
+        const sendResult = await sendContentViaComposer({
+          source: 'prompt-manager',
+          content: text,
+          allowReplaceDraft: true,
+          waitUntilSendable: true,
+          timeoutMs: 60000,
+          blockWhenResponding: true,
+        });
 
-        const okSend = ComposerApi.clickSend();
-
-        if (!okSend) {
-          setStatus('已填入，但没有找到可用发送按钮', 'warn');
-          console.error('[ChatGPT toolbox] Prompt send failed: no send button');
-          ToolboxShell.appendLog('[Prompt 管理] 发送失败：发送按钮不可用');
+        if (!sendResult.ok) {
+          setStatus(`Prompt 发送失败：${sendResult.reason || 'unknown'}`, 'warn');
+          ToolboxShell.appendLog(`[Prompt 管理] 发送失败：${sendResult.reason || 'unknown'}`);
           return;
         }
 
-        const confirmed = await waitPromptSendConfirmed(text, 5000);
-
-        if (!confirmed.ok) {
-          setStatus(`点击发送后未确认成功：${confirmed.reason}`, 'warn');
-          ToolboxShell.appendLog(`[Prompt 管理] 发送未确认：${confirmed.reason}`);
-          return;
-        }
-
-        setStatus(`已发送 Prompt：${confirmed.reason}`, 'success');
-        ToolboxShell.appendLog(`[Prompt 管理] 已发送 Prompt reason=${confirmed.reason}`);
+        setStatus(`已发送 Prompt：${sendResult.reason}`, 'success');
+        ToolboxShell.appendLog(`[Prompt 管理] 已发送 Prompt reason=${sendResult.reason}`);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] Prompt send failed', err);
@@ -24497,14 +24655,16 @@
       }
     })();
 
+    function getBridgePageKey() {
+      return `${CLIENT_ID}::${PAGE_INSTANCE_ID}`;
+    }
+
     function buildVisibilityPayload() {
       const visibilityState = document.visibilityState || 'unknown';
-      const isVisible = visibilityState === 'visible';
       const hasFocus = document.hasFocus();
 
       return {
         visibility_state: visibilityState,
-        is_visible: isVisible,
         has_focus: hasFocus,
       };
     }
@@ -24845,7 +25005,7 @@
         const identity = {
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
-          page_key: PAGE_KEY,
+          page_key: getBridgePageKey(),
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
@@ -24869,6 +25029,7 @@
           can_send_now: Boolean(responseState.can_send_now),
         };
         logIdentityThrottled(identity);
+        logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
 
         return identity;
       } catch (error) {
@@ -24891,7 +25052,7 @@
         return {
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
-          page_key: PAGE_KEY,
+          page_key: getBridgePageKey(),
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
@@ -25716,6 +25877,52 @@
       }
     }
 
+    function getBridgePollStatusPresentation() {
+      const capability = getPageCapability('bridge-poll');
+      logPageCapability(capability, '[BRIDGE][POLL]');
+
+      if (capability.is_responding) {
+        return {
+          text: 'Bridge 已连接 · 生成中',
+          type: 'running',
+          shortText: '生成中',
+        };
+      }
+
+      if (capability.sendable) {
+        return {
+          text: 'Bridge 已连接 · 可发送',
+          type: 'online',
+          shortText: '可发送',
+        };
+      }
+
+      if (capability.inputable) {
+        const reason = capability.response_state_reason || 'send_button_unavailable';
+        return {
+          text: `Bridge 已连接 · 可输入 (${reason})`,
+          type: 'warn',
+          shortText: '可输入',
+        };
+      }
+
+      const reason = capability.response_state_reason || capability.response_state || 'not_ready';
+      let text = `Bridge 已连接 · 不可发送 (${reason})`;
+      let type = 'warn';
+
+      if (!capability.conversation_syncable) {
+        text = capability.syncable
+          ? 'Bridge 已连接 · 对话未就绪'
+          : 'Bridge 已连接 · 无可用 URL';
+      }
+
+      return {
+        text,
+        type,
+        shortText: '已连接',
+      };
+    }
+
     /* ===== bridge core: heartbeat / poll / report / control claim ===== */
     async function pollBridge() {
       const cfg = getConfig();
@@ -25761,8 +25968,13 @@
 
         if (runId === state.bridgeRunId && state.timerId) {
           if (!handled || handled.handled !== true || handled.ok !== false) {
-            updateStatus('在线');
-            ToolboxShell.setStatus('在线', 'online', { persist: true });
+            const pres = getBridgePollStatusPresentation();
+            updateStatus(pres.text);
+            ToolboxShell.setStatus(pres.text, pres.type, {
+              persist: true,
+              shortText: pres.shortText,
+            });
+            renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
           } else {
             const failReason = handled.reason || '-';
             updateStatus(`消息处理失败：${failReason}`);
@@ -25776,6 +25988,7 @@
 
         updateStatus(`离线：${errText}`);
         ToolboxShell.setStatus(`离线：${errText}`, 'offline', { persist: true });
+        renderBridgeCapabilityPanel(getPageCapability('bridge-poll-offline'));
 
         logBridgeError(
           `[pollBridge][failed] action=poll url=${bridgeUrl} type=${errName} error=${errText}`,
@@ -25889,12 +26102,21 @@
       }, 200);
     }
 
-    let unsubscribePageIdentityRoute = null;
+    async function handleRouteChange(reason = '') {
+      const identity = getPageIdentity();
+      const key = identityKey(identity);
 
-    function onBridgeRouteChange(reason) {
-      window.setTimeout(() => {
-        checkPageIdentityChange(reason);
-      }, 0);
+      if (key === state.lastIdentityKey) {
+        return;
+      }
+
+      const oldKey = state.lastIdentityKey || '';
+      state.pendingIdentityOldKey = oldKey;
+      state.pendingIdentityReason = reason || 'route_change';
+      state.lastIdentityKey = key;
+      bridgeTimers.clearTimeout('identity-report-debounce');
+      debugLog(`route identity changed: ${oldKey || '-'} -> ${key}`);
+      flushIdentityChangeReport();
     }
 
     function installPageIdentityListeners() {
@@ -25903,20 +26125,10 @@
       }
 
       state.pageIdentityListenersInstalled = true;
-      unsubscribePageIdentityRoute = RouteChangeBus.subscribe(onBridgeRouteChange);
     }
 
     function removePageIdentityListeners() {
-      if (!state.pageIdentityListenersInstalled) {
-        return;
-      }
-
       state.pageIdentityListenersInstalled = false;
-
-      if (typeof unsubscribePageIdentityRoute === 'function') {
-        unsubscribePageIdentityRoute();
-        unsubscribePageIdentityRoute = null;
-      }
     }
 
     function start() {
@@ -25964,7 +26176,13 @@
           source: SOURCE,
           test_connection: true,
         });
-        updateStatus('连接测试成功');
+        const pres = getBridgePollStatusPresentation();
+        updateStatus(`连接测试成功 · ${pres.shortText}`);
+        ToolboxShell.setStatus(`连接测试成功 · ${pres.text}`, pres.type, {
+          persist: true,
+          shortText: pres.shortText,
+        });
+        renderBridgeCapabilityPanel(getPageCapability('bridge-test'));
         ToolboxShell.appendLog(`[BRIDGE][TEST][OK] ${JSON.stringify(result).slice(0, 300)}`);
       } catch (error) {
         const text = error && error.message ? error.message : String(error);
@@ -26025,6 +26243,47 @@
       },
     ]);
 
+    function formatBridgeCapabilityText(capability) {
+      const cap = capability && typeof capability === 'object'
+        ? capability
+        : getPageCapability('bridge-panel');
+
+      const identity = getPageIdentity();
+      const yesNo = (value) => (value ? 'yes' : 'no');
+
+      return [
+        `client_id: ${cap.client_id || identity.client_id || '-'}`,
+        `page_instance_id: ${cap.page_instance_id || identity.page_instance_id || '-'}`,
+        `conversation_id: ${cap.conversation_id || identity.conversation_id || '-'}`,
+        `url: ${cap.url || identity.url || '-'}`,
+        `page_type: ${identity.page_type || '-'}`,
+        `online: ${yesNo(cap.online)}`,
+        `syncable: ${yesNo(cap.syncable)}`,
+        `conversation_syncable: ${yesNo(cap.conversation_syncable)}`,
+        `inputable: ${yesNo(cap.inputable)}`,
+        `sendable: ${yesNo(cap.sendable)}`,
+        `is_responding: ${yesNo(cap.is_responding)}`,
+        `response_state: ${cap.response_state || '-'}`,
+        `response_state_reason: ${cap.response_state_reason || '-'}`,
+        `visibility_state: ${cap.visibility_state || document.visibilityState || '-'}`,
+        `has_focus: ${yesNo(cap.has_focus)} (display only)`,
+      ].join('\n');
+    }
+
+    function renderBridgeCapabilityPanel(capability) {
+      if (!state.root) {
+        return;
+      }
+
+      const textEl = qs('#cgpt-bridge-capability-text', state.root);
+
+      if (!textEl) {
+        return;
+      }
+
+      textEl.textContent = formatBridgeCapabilityText(capability);
+    }
+
     function renderBridgeConfigToUi() {
       if (!state.root) return;
 
@@ -26040,6 +26299,7 @@
       });
 
       DomUtil.setText(state.root, '#cgpt-bridge-url', getBridgeUrl(), 'BRIDGE');
+      renderBridgeCapabilityPanel();
     }
 
     function readBridgeConfigFromUi() {
@@ -26144,6 +26404,11 @@
           <div class="cgpt-hint" style="margin-top:6px;">
             状态：<span id="cgpt-bridge-status">未启动</span>
           </div>
+
+          <div class="cgpt-hint" style="margin-top:10px; font-weight:600;">
+            页面能力（当前标签页，仅展示不拦截同步）
+          </div>
+          <pre id="cgpt-bridge-capability-text" class="cgpt-hint" style="margin:4px 0 0; padding:8px; background:rgba(0,0,0,0.04); border-radius:6px; white-space:pre-wrap; font-family:ui-monospace,monospace; font-size:11px; line-height:1.45;">-</pre>
         </div>
       `;
 
@@ -26180,6 +26445,7 @@
 
     return {
       mount,
+      handleRouteChange,
     };
   })();
 

@@ -127,9 +127,14 @@ class SessionMixin:
 
     def _is_chat_view_visible(self):
         chat_scroll = getattr(self, "chat_scroll", None)
-        if chat_scroll is None:
+        transcript = getattr(self, "chat_transcript", None)
+        if chat_scroll is None and transcript is None:
             return False
-        if not chat_scroll.isVisible():
+        scroll_visible = chat_scroll.isVisible() if chat_scroll is not None else False
+        transcript_visible = (
+            transcript.isVisible() if transcript is not None else False
+        )
+        if not scroll_visible and not transcript_visible:
             return False
         for attr_name in (
             "chat_mode_tabs",
@@ -141,9 +146,13 @@ class SessionMixin:
             if tabs is None:
                 continue
             current_text = tabs.tabText(tabs.currentIndex()).strip()
-            if current_text and "聊天" not in current_text:
+            if current_text and not self._is_chat_tab_title(current_text):
                 return False
         return True
+
+    def _is_chat_tab_title(self, text):
+        text = (text or "").strip()
+        return "聊天" in text or "鑱婂ぉ" in text
 
     def _render_pending_chat_if_needed(self):
         session_id = getattr(self, "_pending_chat_render_session_id", "")
@@ -181,6 +190,17 @@ class SessionMixin:
             return
         old_session_id = getattr(self, "_current_session_id", "")
         if old_session_id == session_id:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                if hasattr(self, "_render_chat_transcript"):
+                    self._render_chat_transcript(session, force_bottom=True)
+                QTimer.singleShot(
+                    0,
+                    lambda: self._render_current_chat_messages(
+                        force_bottom=True,
+                        reason="select_same_session",
+                    ),
+                )
             return
 
         switch_token = uuid.uuid4().hex

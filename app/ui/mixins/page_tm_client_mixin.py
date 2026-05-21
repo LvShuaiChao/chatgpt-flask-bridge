@@ -20,10 +20,13 @@ from app.utils.text_utils import short_id, short_page_display
 from app.utils.page_status import (
     classify_page_state,
     evaluate_send_page,
+    explain_page_decision,
     get_page_liveness,
+    is_conversation_syncable,
     is_dialog_ready_page,
     is_page_online,
     is_page_syncable,
+    is_page_url_syncable,
     is_prebound_home_page,
     page_registry_key,
     page_url_from,
@@ -256,7 +259,10 @@ class PageTmClientMixin:
         page_state = self._classify_page_state(item, log=False)
         dialog_ready = bool(page_state.get("dialog_ready"))
         prebound_home = bool(page_state.get("prebound_home"))
+        url_syncable = is_page_url_syncable(item)
+        conversation_syncable = is_conversation_syncable(item)
         syncable = sync_readable
+        decision = explain_page_decision(item, action="sync")
 
         stale = bool(online and activity in ("stale_hidden",))
 
@@ -297,8 +303,11 @@ class PageTmClientMixin:
             "sendable": sendable,
             "sync_readable": sync_readable,
             "syncable": syncable,
+            "url_syncable": url_syncable,
+            "conversation_syncable": conversation_syncable,
             "dialog_ready": dialog_ready,
             "prebound_home": prebound_home,
+            "blocked_reason": (decision.get("blocked_reason") or reason or "").strip(),
             "stale": stale,
             "state": state,
             "reason": reason,

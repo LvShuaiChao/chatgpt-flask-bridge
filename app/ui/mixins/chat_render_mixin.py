@@ -1,3 +1,4 @@
+import html
 import time
 import traceback
 
@@ -24,6 +25,283 @@ MAX_RENDER_MESSAGES_ON_SWITCH = 120
 
 
 class ChatRenderMixin:
+    def _chat_transcript_widget(self):
+        return getattr(self, "chat_transcript", None)
+
+    def _set_transcript_visible(self, visible):
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        transcript.setVisible(bool(visible))
+        scroll = self._chat_primary_scroll_area()
+        if scroll is not None:
+            scroll.setVisible(not bool(visible))
+
+    def _message_role_label(self, role):
+        role = (role or "").strip().lower()
+        if role == "user":
+            return "你"
+        if role == "assistant":
+            return "ChatGPT"
+        if role == "error":
+            return "错误"
+        return "系统"
+
+    def _message_role_color(self, role):
+        role = (role or "").strip().lower()
+        if role == "user":
+            return "#111827", "#95ec69", "#95ec69"
+        if role == "assistant":
+            return "#111827", "#ffffff", "#ffffff"
+        if role == "error":
+            return "#b91c1c", "#fff1f2", "#fecaca"
+        return "#6b7280", "#eef2f7", "#dbe3ef"
+
+    def _render_wechat_transcript(self, session=None, *, force_bottom=False):
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        if session is None:
+            session = self._current_session()
+
+        messages = []
+        if session is not None:
+            messages, skipped = self._visible_messages_for_render(session)
+        else:
+            skipped = 0
+
+        blocks = []
+        if skipped > 0:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding:8px 0;'>"
+                "<span style='color:#8a8f98;font-size:12px;'>"
+                f"已折叠较早的 {int(skipped)} 条消息"
+                "</span></td></tr></table>"
+            )
+
+        last_time_label = ""
+        for message in messages:
+            role = getattr(message, "role", "")
+            normalized_role = (role or "").strip().lower()
+            text = html.escape(getattr(message, "text", "") or "").replace(
+                "\n", "<br>"
+            )
+            status = html.escape(getattr(message, "status", "") or "")
+            detail = html.escape(getattr(message, "detail", "") or "")
+            ts = html.escape(self._format_message_ts(message.created_at) or "")
+            fg, bg, border = self._message_role_color(role)
+
+            if ts and ts != last_time_label:
+                last_time_label = ts
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:8px 0 4px 0;'>"
+                    f"<span style='color:#9ca3af;font-size:12px;'>{ts}</span>"
+                    "</td></tr></table>"
+                )
+
+            if normalized_role in ("system", "error"):
+                meta = html.escape(self._message_role_label(role))
+                if status or detail:
+                    meta = " · ".join(part for part in (meta, status, detail) if part)
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:5px 0;'>"
+                    "<table width='58%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:6px 10px;'>"
+                    f"<div style='color:{fg};font-size:12px;line-height:1.45;'>"
+                    f"{meta}<br>{text}</div>"
+                    "</td></tr></table></td></tr></table>"
+                )
+                continue
+
+            is_user = normalized_role == "user"
+            avatar_text = "我" if is_user else "AI"
+            avatar_bg = "#95ec69" if is_user else "#d8dde6"
+            avatar_fg = "#245c1a" if is_user else "#374151"
+            bubble_width = "48%"
+            footer = " · ".join(part for part in (status, detail) if part)
+
+            if is_user:
+                row = (
+                    "<tr>"
+                    "<td width='100%' align='right' style='padding:0 12px 6px 56px;'>"
+                    f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:9px 11px;'>"
+                    f"<div style='font-size:14px;line-height:1.55;color:{fg};'>"
+                    f"{text}</div>"
+                    "</td></tr></table>"
+                    "</td>"
+                    "<td width='34' valign='top' align='center' style='padding:0 10px 0 0;'>"
+                    f"<table width='30' height='30' bgcolor='{avatar_bg}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='center' valign='middle' style='color:{avatar_fg};"
+                    "font-size:12px;font-weight:600;'>"
+                    f"{avatar_text}</td></tr></table></td>"
+                    "</tr>"
+                )
+            else:
+                row = (
+                    "<tr>"
+                    "<td width='34' valign='top' align='center' style='padding:0 0 0 10px;'>"
+                    f"<table width='30' height='30' bgcolor='{avatar_bg}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='center' valign='middle' style='color:{avatar_fg};"
+                    "font-size:12px;font-weight:600;'>"
+                    f"{avatar_text}</td></tr></table></td>"
+                    "<td width='100%' align='left' style='padding:0 56px 6px 12px;'>"
+                    f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:9px 11px;'>"
+                    f"<div style='font-size:14px;line-height:1.55;color:{fg};'>"
+                    f"{text}</div>"
+                    "</td></tr></table>"
+                    "</td>"
+                    "</tr>"
+                )
+
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                + row
+                + "</table>"
+            )
+            if footer:
+                align = "right" if is_user else "left"
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='{align}' style='padding:0 58px 4px 58px;'>"
+                    f"<span style='color:#9ca3af;font-size:11px;'>{footer}</span>"
+                    "</td></tr></table>"
+                )
+
+        if not blocks:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding-top:32px;'>"
+                "<span style='color:#9ca3af;'>暂无消息</span>"
+                "</td></tr></table>"
+            )
+
+        transcript.setHtml(
+            "<html><body style='font-family:Microsoft YaHei UI, Segoe UI, "
+            "Arial, sans-serif; margin:0; padding:8px 0 10px 0; "
+            "background:#f5f6f8;'>"
+            + "".join(blocks)
+            + "</body></html>"
+        )
+        self._set_transcript_visible(True)
+        transcript.updateGeometry()
+        transcript.update()
+        if force_bottom:
+            QTimer.singleShot(
+                0,
+                lambda: transcript.verticalScrollBar().setValue(
+                    transcript.verticalScrollBar().maximum()
+                ),
+            )
+
+    def _render_chat_transcript(self, session=None, *, force_bottom=False):
+        return self._render_wechat_transcript(session, force_bottom=force_bottom)
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        if session is None:
+            session = self._current_session()
+
+        messages = []
+        if session is not None:
+            messages, skipped = self._visible_messages_for_render(session)
+        else:
+            skipped = 0
+
+        blocks = []
+        if skipped > 0:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding:6px 0;'>"
+                "<span style='color:#6b7280;font-size:12px;'>"
+                f"已折叠较早的 {int(skipped)} 条消息"
+                "</span></td></tr></table>"
+            )
+
+        for message in messages:
+            role = getattr(message, "role", "")
+            normalized_role = (role or "").strip().lower()
+            text = html.escape(getattr(message, "text", "") or "").replace(
+                "\n", "<br>"
+            )
+            status = html.escape(getattr(message, "status", "") or "")
+            detail = html.escape(getattr(message, "detail", "") or "")
+            ts = html.escape(self._format_message_ts(message.created_at) or "")
+            fg, bg, border = self._message_role_color(role)
+            align = "right" if role == "user" else "left"
+            meta = " · ".join(
+                part
+                for part in (
+                    html.escape(self._message_role_label(role)),
+                    ts,
+                    status,
+                    detail,
+                )
+                if part
+            )
+
+            if normalized_role in ("system", "error"):
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:5px 0;'>"
+                    "<table width='72%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:6px 10px;'>"
+                    f"<span style='color:{fg};font-size:12px;font-weight:600;'>"
+                    f"{meta}</span><br>"
+                    f"<span style='color:{fg};font-size:12px;'>{text}</span>"
+                    "</td></tr></table></td></tr></table>"
+                )
+                continue
+
+            bubble_width = "64%"
+            outer_align = "right" if normalized_role == "user" else "left"
+            meta_align = "right" if normalized_role == "user" else "left"
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                f"<tr><td align='{outer_align}' style='padding:6px 4px;'>"
+                f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                "padding:8px 10px;'>"
+                f"<div align='{meta_align}' style='font-size:12px;"
+                f"font-weight:600;color:{fg};margin-bottom:4px;'>{meta}</div>"
+                f"<div style='font-size:13px;line-height:1.5;color:{fg};'>"
+                f"{text}</div>"
+                "</td></tr></table></td></tr></table>"
+            )
+
+        if not blocks:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding-top:32px;'>"
+                "<span style='color:#9ca3af;'>暂无消息</span>"
+                "</td></tr></table>"
+            )
+
+        transcript.setHtml(
+            "<html><body style='font-family:Microsoft YaHei UI, Segoe UI, "
+            "Arial, sans-serif; margin:0; padding:0;'>"
+            + "".join(blocks)
+            + "</body></html>"
+        )
+        self._set_transcript_visible(True)
+        transcript.updateGeometry()
+        transcript.update()
+        if force_bottom:
+            QTimer.singleShot(
+                0,
+                lambda: transcript.verticalScrollBar().setValue(
+                    transcript.verticalScrollBar().maximum()
+                ),
+            )
+
     def _chat_primary_scroll_area(self):
         scroll = getattr(self, "chat_messages_scroll", None)
         if scroll is not None:
@@ -424,28 +702,16 @@ class ChatRenderMixin:
         if content_hint <= 0:
             content_hint = container.sizeHint().height()
 
-        min_height = 90
-        empty_height = 120
-        max_height = 360
-
-        if message_count <= 0:
-            target_height = empty_height
-        else:
-            target_height = content_hint + 16
-            if target_height < min_height:
-                target_height = min_height
-            if target_height > max_height:
-                target_height = max_height
-
-        scroll.setMinimumHeight(target_height)
-        scroll.setMaximumHeight(target_height)
+        scroll.setMinimumHeight(180)
+        scroll.setMaximumHeight(16777215)
         scroll.updateGeometry()
 
         self._append_log(
             "[CHAT_HEIGHT][ADJUST] "
             f"message_count={message_count} "
             f"content_hint={content_hint} "
-            f"target_height={target_height}",
+            f"scroll_min={scroll.minimumHeight()} "
+            f"scroll_max={scroll.maximumHeight()}",
             echo=False,
         )
 
@@ -499,6 +765,7 @@ class ChatRenderMixin:
         if not visible_messages:
             self._show_empty_chat_state()
             self._update_chat_empty_placeholder(0)
+            self._render_chat_transcript(session, force_bottom=force_bottom)
             self._finish_chat_render_layout(force_bottom=force_bottom)
             self._append_log(
                 f"[CHAT_RENDER][EMPTY] session_id={session.session_id}",
@@ -521,6 +788,7 @@ class ChatRenderMixin:
         ):
             self._hide_empty_chat_state()
             self._adjust_chat_history_height_to_content()
+            self._render_chat_transcript(session, force_bottom=force_bottom)
             self._append_log(
                 "[CHAT_RENDER][SKIP] "
                 f"session_id={session.session_id} "
@@ -605,6 +873,7 @@ class ChatRenderMixin:
                 widget.update()
 
         self._update_chat_empty_placeholder(len(visible_messages))
+        self._render_chat_transcript(session, force_bottom=force_bottom)
         self._scroll_to_bottom_if_user_was_near_bottom(
             scroll_state,
             force_bottom=force_bottom,
@@ -656,6 +925,7 @@ class ChatRenderMixin:
             bubble.set_error(message.text, message.status)
         else:
             bubble.set_text(message.text, message.status)
+        self._render_chat_transcript(self._current_session(), force_bottom=True)
         return True
     def _scroll_to_last_chat_message(self):
         scroll = self._chat_primary_scroll_area()

@@ -16,7 +16,7 @@ from app.utils.bridge_payload import (
     normalize_inbound_push_payload,
     normalize_outbound_bridge_message,
 )
-from app.utils.page_status import page_url_from
+from app.utils.page_status import explain_page_decision, page_url_from
 from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
 from flask_cors import CORS
 from werkzeug.serving import WSGIRequestHandler, make_server
@@ -554,13 +554,14 @@ def _snapshot_clients():
         visibility = (info.get("visibility_state") or "").strip()
         activity_state = classify_tm_client_activity(info, now=now)
         _, seen_age, poll_age, _ = compute_tm_activity_metrics(info, now=now)
+        decision = explain_page_decision(info, action="sync")
         items.append(
             {
                 "client_id": client_id or (info.get("client_id") or ""),
                 "page_instance_id": info.get("page_instance_id") or "",
                 "script_version": info.get("script_version") or "",
-                "page_url": info.get("page_url") or info.get("url") or "",
-                "url": info.get("url") or info.get("page_url") or "",
+                "page_url": decision.get("url") or info.get("page_url") or info.get("url") or "",
+                "url": decision.get("url") or info.get("url") or info.get("page_url") or "",
                 "page_title": info.get("page_title") or "",
                 "page_type": info.get("page_type") or "",
                 "conversation_id": info.get("conversation_id") or "",
@@ -588,6 +589,11 @@ def _snapshot_clients():
                 "response_state_reason": info.get("response_state_reason") or "",
                 "response_state_at": info.get("response_state_at"),
                 "can_accept_input": bool(info.get("can_accept_input", True)),
+                "can_send_now": bool(info.get("can_send_now")) if "can_send_now" in info else None,
+                "syncable": bool(decision.get("syncable")),
+                "conversation_syncable": bool(decision.get("conversation_syncable")),
+                "dialog_ready": bool(decision.get("dialog_ready")),
+                "sendable": bool(decision.get("sendable")),
                 "last_response_state_seen_at": info.get("last_response_state_seen_at"),
                 "response_started_at": info.get("response_started_at"),
                 "response_last_text_changed_at": info.get("response_last_text_changed_at"),
@@ -1429,6 +1435,8 @@ def _touch_tampermonkey(meta, action="poll"):
     response_state_reason = (meta.get("response_state_reason") or "").strip()
     response_state_at = meta.get("response_state_at") or entry.get("response_state_at")
     can_accept_input = bool(meta.get("can_accept_input", True))
+    if "can_send_now" in meta:
+        entry["can_send_now"] = bool(meta.get("can_send_now"))
     response_started_at = meta.get("response_started_at") or entry.get("response_started_at")
     response_last_text_changed_at = (
         meta.get("response_last_text_changed_at")

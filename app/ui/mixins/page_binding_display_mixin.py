@@ -156,17 +156,31 @@ class PageBindingDisplayMixin:
         state = str(page.get("response_state") or page.get("state") or "").lower()
         return "是" if bool(responding) or state == "generating" else "否"
 
-    def _page_syncable_text(self, page):
+    def _page_conversation_syncable_text(self, page):
         if not isinstance(page, dict):
             return "否"
         profile = self._tm_client_sync_profile(page)
-        if profile.get("sync_readable") or profile.get("syncable"):
+        if profile.get("conversation_syncable") or profile.get("dialog_ready"):
             return "是"
-        page_type = str(page.get("page_type") or "").strip()
-        conversation_id = self._page_chatgpt_conversation_id(page)
-        url = self._page_full_url(page)
-        syncable = page_type == "conversation" and bool(conversation_id) and "/c/" in url
-        return "是" if syncable else "否"
+        if page.get("conversation_syncable") is True:
+            return "是"
+        return "否"
+
+    def _page_sendable_text(self, page):
+        if not isinstance(page, dict):
+            return "否"
+        profile = self._tm_client_sync_profile(page)
+        if profile.get("sendable"):
+            return "是"
+        if page.get("sendable") is True:
+            return "是"
+        if profile.get("send_reason") in ("queued", "waiting_for_input"):
+            return "等待"
+        return "否"
+
+    def _page_syncable_text(self, page):
+        """对话可同步（/c/ 对话页），不等同于 URL 级 syncable。"""
+        return self._page_conversation_syncable_text(page)
 
     def _page_identity_text(self, page, *, instance_unknown=False):
         if not isinstance(page, dict):
@@ -217,11 +231,12 @@ class PageBindingDisplayMixin:
         )
         return (
             f"油猴插件：{self._page_plugin_status_text(page)} | "
-            f"窗口：{self._page_visible_text(page)} | "
-            f"焦点：{self._page_focus_text(page)} | "
+            f"对话可同步：{sync_part} | "
+            f"可发送：{self._page_sendable_text(page)} | "
             f"可输入：{self._page_input_text(page)} | "
             f"正在生成：{self._page_responding_text(page)} | "
-            f"可同步：{sync_part}"
+            f"窗口：{self._page_visible_text(page)}（仅展示） | "
+            f"焦点：{self._page_focus_text(page)}（仅展示）"
         )
 
     def _format_page_status_with_source(self, source, page, *, sync_text=None):
@@ -733,6 +748,8 @@ class PageBindingDisplayMixin:
             widgets.append(self._chat_panel)
         if hasattr(self, "chat_scroll"):
             widgets.append(self.chat_scroll)
+        if hasattr(self, "chat_transcript"):
+            widgets.append(self.chat_transcript)
         if hasattr(self, "chat_container"):
             widgets.append(self.chat_container)
         for widget in widgets:

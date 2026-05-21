@@ -620,6 +620,14 @@ APP_STYLESHEET = """
             QWidget#ChatMessagesContainer {
                 background: #f7f8fa;
             }
+            QTextBrowser#ChatTranscript {
+                background: #f7f8fa;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                padding: 10px 12px;
+                color: #111827;
+                font-size: 13px;
+            }
             QWidget#ChatViewport[bindState="bound_online"],
             QWidget#ChatViewport[bindState="bound_offline"],
             QWidget#ChatViewport[bindState="bind_mismatch"],

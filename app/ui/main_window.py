@@ -144,6 +144,20 @@ class MainWindow(
         self._status_timer.start(1000)
         QTimer.singleShot(0, self._refresh_cursor_bridge_status)
         QTimer.singleShot(0, self._load_runtime_log_once)
+        QTimer.singleShot(
+            0,
+            lambda: self._render_current_chat_messages(
+                force_bottom=True,
+                reason="startup_initial",
+            ),
+        )
+        QTimer.singleShot(
+            120,
+            lambda: self._render_current_chat_messages(
+                force_bottom=True,
+                reason="startup_after_show",
+            ),
+        )
         if self._auto_start_server and not server.is_server_running():
             QTimer.singleShot(300, self._start_server)
 

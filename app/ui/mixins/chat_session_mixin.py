@@ -268,6 +268,11 @@ class ChatSessionMixin:
             elif hasattr(self, "_clear_chat_widgets"):
                 self._clear_chat_widgets()
             if hasattr(self, "_finish_chat_render_layout"):
+                if hasattr(self, "_render_chat_transcript"):
+                    self._render_chat_transcript(
+                        session,
+                        force_bottom=force_bottom,
+                    )
                 self._finish_chat_render_layout(force_bottom=force_bottom)
             elif hasattr(self, "_adjust_chat_history_height_to_content"):
                 self._adjust_chat_history_height_to_content()

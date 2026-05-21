@@ -2,7 +2,6 @@
 
 import traceback
 import time
-import uuid
 import webbrowser
 
 import server
@@ -17,7 +16,7 @@ from app.models import (
 )
 from app.url_utils import parse_conversation_id
 from PyQt5.QtCore import QUrl, Qt
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import QTableWidgetItem
 
 
@@ -251,6 +250,7 @@ class PageOpenCloseMixin:
             )
             return False
 
+        url = url.split("#", 1)[0]
         self._append_log(
             "[OLD_SESSION][OPEN] "
             f"session_id={session.session_id} "
@@ -346,6 +346,7 @@ class PageOpenCloseMixin:
             )
             return
 
+        bound_url = bound_url.split("#", 1)[0]
         self._append_log(
             "[OPEN_BOUND_PAGE][START] "
             f"session_id={session.session_id} "
@@ -354,10 +355,7 @@ class PageOpenCloseMixin:
             echo=True,
         )
 
-        ok = self._open_bound_conversation_url(
-            bound_url,
-            reopen_request_id=(remote.get("reopen_request_id") or uuid.uuid4().hex),
-        )
+        ok = self._open_bound_conversation_url(bound_url)
 
         if ok:
             self._add_system_message(f"已打开绑定页面：{bound_url}")
@@ -526,6 +524,10 @@ class PageOpenCloseMixin:
                     str(c.get("last_seen", "")),
                     str(bool(self._page_is_online(c))),
                     str(c.get("page_url", "")),
+                    str(c.get("conversation_syncable")),
+                    str(c.get("sendable")),
+                    str(c.get("can_send_now")),
+                    str(c.get("response_state", "")),
                 ])
             )
         return tuple(sorted(rows))
@@ -565,6 +567,8 @@ class PageOpenCloseMixin:
                 conversation_id = item.get("conversation_id") or "-"
                 if len(conversation_id) > 16:
                     conversation_id = conversation_id[:16] + "…"
+                conv_sync_text = self._page_conversation_syncable_text(item)
+                sendable_text = self._page_sendable_text(item)
                 visibility = item.get("visibility_state") or "-"
                 has_focus = "是" if self._page_has_focus(item) else "否"
                 last_focus = self._format_last_seen_ago(item.get("last_focus_at"))
@@ -573,6 +577,12 @@ class PageOpenCloseMixin:
                 online_text = "在线" if page_online else "离线"
                 is_bound = (
                     "是" if session_bound_id and client_id == session_bound_id else "否"
+                )
+                profile = self._tm_client_sync_profile(item)
+                cap_tip = (
+                    f"conversation_syncable={conv_sync_text} "
+                    f"sendable={sendable_text} "
+                    f"blocked_reason={profile.get('blocked_reason') or profile.get('reason') or '-'}"
                 )
                 online_item = QTableWidgetItem(online_text)
                 if page_online:
@@ -584,17 +594,33 @@ class PageOpenCloseMixin:
                 table.setItem(row, 2, QTableWidgetItem(page_instance_id))
                 table.setItem(row, 3, QTableWidgetItem(page_type))
                 table.setItem(row, 4, QTableWidgetItem(conversation_id))
-                table.setItem(row, 5, QTableWidgetItem(visibility))
+                conv_sync_item = QTableWidgetItem(conv_sync_text)
+                if conv_sync_text == "是":
+                    conv_sync_item.setForeground(Qt.darkGreen)
+                else:
+                    conv_sync_item.setForeground(Qt.gray)
+                conv_sync_item.setToolTip(cap_tip)
+                table.setItem(row, 5, conv_sync_item)
+                send_item = QTableWidgetItem(sendable_text)
+                if sendable_text == "是":
+                    send_item.setForeground(Qt.darkGreen)
+                elif sendable_text == "等待":
+                    send_item.setForeground(QColor("#ca8a04"))
+                else:
+                    send_item.setForeground(Qt.gray)
+                send_item.setToolTip(cap_tip)
+                table.setItem(row, 6, send_item)
+                table.setItem(row, 7, QTableWidgetItem(visibility))
                 focus_text = f"{has_focus}/{last_focus}"
-                table.setItem(row, 6, QTableWidgetItem(focus_text))
-                table.setItem(row, 7, QTableWidgetItem(last_seen))
+                table.setItem(row, 8, QTableWidgetItem(focus_text))
+                table.setItem(row, 9, QTableWidgetItem(last_seen))
                 url_item = QTableWidgetItem(display_url)
-                url_item.setToolTip(full_url)
-                table.setItem(row, 8, url_item)
+                url_item.setToolTip(full_url or cap_tip)
+                table.setItem(row, 10, url_item)
                 bound_item = QTableWidgetItem(is_bound)
                 if is_bound == "是":
                     bound_item.setForeground(Qt.darkGreen)
-                table.setItem(row, 9, bound_item)
+                table.setItem(row, 11, bound_item)
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
@@ -717,4 +743,3 @@ class PageOpenCloseMixin:
             return
         self._enqueue_close_page(client_id, label=f"绑定页面 {client_id}")
         self._set_tm_action_hint(f"已向绑定页面 {client_id} 下发关闭命令。")
-

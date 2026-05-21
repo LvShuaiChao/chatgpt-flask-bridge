@@ -178,7 +178,7 @@ class PageSyncMixin:
                 ),
                 "active_matches_bound": active_matches_bound,
             }
-        return {
+        failed = {
             "syncable": False,
             "source": "none",
             "source_label": "不可用",
@@ -190,6 +190,15 @@ class PageSyncMixin:
             "reason": "no_syncable_target",
             "active_matches_bound": active_matches_bound,
         }
+        probe = current_info if isinstance(current_info, dict) else bound_info
+        if isinstance(probe, dict) and hasattr(self, "_append_log"):
+            decision = explain_page_decision(probe, action="sync")
+            self._append_log(
+                "[SYNC][SELECT_PAGE][FAILED] "
+                + log_page_decision_fields(decision),
+                echo=False,
+            )
+        return failed
 
     def _format_sync_target_status_text(self, target, profile=None):
         online = bool(
@@ -1635,6 +1644,206 @@ class PageSyncMixin:
             parts.append(role + ":" + str(len(text)) + ":" + text[:64])
         return "\n".join(parts)
 
+    def _simple_sync_find_target(self, session, status=None):
+        status = status or server.get_bridge_status()
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        expected_conv = self._remote_conversation_id(remote)
+
+        current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+        current_info = self._client_info_by_id(current_client_id, status=status)
+        if isinstance(current_info, dict) and self._tm_page_is_online_simple(current_info):
+            current_conv = self._client_conversation_id(current_info)
+            if current_conv and (not expected_conv or current_conv == expected_conv):
+                return dict(current_info), "current_page"
+
+        if expected_conv:
+            for item in self._iter_tm_clients(status, online_only=True):
+                if self._client_conversation_id(item) == expected_conv:
+                    return dict(item), "same_conversation"
+
+        bound_client_id = (remote.get("client_id") or "").strip()
+        if bound_client_id:
+            bound_info = self._client_info_by_id(bound_client_id, status=status)
+            if isinstance(bound_info, dict) and self._tm_page_is_online_simple(bound_info):
+                return dict(bound_info), "bound_client"
+
+        return None, "not_online"
+
+    def _simple_sync_open_url(self, session):
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        url = self._remote_conversation_url(remote)
+        if not url and session is not None:
+            url = self._session_openable_chatgpt_url(session)
+        if not url:
+            conv = self._remote_conversation_id(remote)
+            if conv:
+                url = f"https://chatgpt.com/c/{conv}"
+        if not url:
+            return False
+        if hasattr(self, "_open_bound_page_for_session"):
+            return self._open_bound_page_for_session(
+                session,
+                label="同步网页对话",
+                fallback_live=True,
+            )
+        return self._open_or_queue_url(url, "同步网页对话")
+
+    def _simple_sync_retry_after_open(self, session_id, attempts_left=20):
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        target_item, source = self._simple_sync_find_target(session)
+        if isinstance(target_item, dict):
+            self._clear_session_sync_running(session_id, reason="page_detected")
+            ok, reason = self._enqueue_simple_sync_command(
+                session,
+                target_item,
+                request_reason="manual_button_opened",
+                source=source,
+            )
+            if ok:
+                return
+            if reason:
+                self._set_tm_action_hint(f"同步失败：{reason}")
+            return
+        if attempts_left <= 0:
+            self._clear_session_sync_running(session_id, reason="wait_page_timeout")
+            btn = getattr(self, "sync_web_conversation_btn", None)
+            if btn is not None and session_id == (self._current_session_id or ""):
+                btn.setEnabled(True)
+            self._set_tm_action_hint("已打开网页，但还没检测到可同步的对话页。")
+            return
+        QTimer.singleShot(
+            1500,
+            lambda sid=session_id, left=attempts_left - 1: self._simple_sync_retry_after_open(
+                sid,
+                left,
+            ),
+        )
+
+    def _enqueue_simple_sync_command(
+        self,
+        session,
+        target_item,
+        *,
+        request_reason="manual_button",
+        source="simple",
+    ):
+        if session is None:
+            return False, "当前没有选中的对话"
+        if not server.is_server_running():
+            return False, "请先启动服务"
+
+        session_id = session.session_id
+        if self._is_session_sync_running(session_id):
+            return False, "同步正在进行中，请稍等"
+
+        client_id = (target_item.get("client_id") or "").strip()
+        page_instance_id = (target_item.get("page_instance_id") or "").strip()
+        conversation_id = self._client_conversation_id(target_item)
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        expected_conv = self._remote_conversation_id(remote)
+        if not conversation_id:
+            conversation_id = expected_conv
+        if not conversation_id:
+            return False, "目标页缺少 conversation_id"
+
+        if expected_conv and conversation_id == expected_conv and hasattr(
+            self, "_relink_session_binding_from_tm_page"
+        ):
+            self._relink_session_binding_from_tm_page(
+                session,
+                target_item,
+                reason="simple_sync_same_conversation",
+            )
+
+        trace_id = make_sync_trace_id(session.session_id)
+        request_id = f"sync-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        mode = (self._sync_conversation_mode or "merge").strip().lower()
+        if mode not in ("merge", "replace"):
+            mode = "merge"
+        max_messages = int(self._sync_conversation_max_messages or 200)
+        if max_messages < 1:
+            max_messages = 200
+
+        self._mark_session_sync_running(session_id, request_id)
+        if not hasattr(self, "_pending_web_sync_requests"):
+            self._pending_web_sync_requests = {}
+        self._pending_web_sync_requests[request_id] = {
+            "session_id": session.session_id,
+            "client_id": client_id,
+            "conversation_id": conversation_id,
+            "created_at": time.time(),
+            "request_reason": request_reason,
+            "trace_id": trace_id,
+        }
+
+        payload = {
+            "mode": mode,
+            "max_messages": max_messages,
+            "session_id": session.session_id,
+            "conversation_id": conversation_id,
+            "target_client_id": client_id,
+            "request_id": request_id,
+            "source": request_reason or "manual",
+            "request_reason": request_reason or "manual",
+            "command_type": "read_snapshot",
+            "require_input": False,
+            "allow_hidden": True,
+            "allow_generating": True,
+            "allow_while_generating": True,
+            "allow_not_focused": True,
+            "simple_online_policy": True,
+        }
+
+        self._append_log(
+            "[SYNC_SIMPLE][REQUEST] "
+            f"session_id={session.session_id} "
+            f"source={source or '-'} "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"request_id={request_id}",
+            echo=True,
+        )
+        queued = server.enqueue_control_command(
+            command="sync_conversation",
+            target_client_id=client_id,
+            target_page_instance_id=page_instance_id,
+            target_conversation_id=conversation_id,
+            payload=payload,
+        )
+        if not queued:
+            self._clear_session_sync_running(
+                session_id,
+                request_id,
+                reason="enqueue_failed",
+            )
+            return False, "命令入队失败"
+
+        message_id = ""
+        if isinstance(queued, dict):
+            message_id = (queued.get("message_id") or queued.get("id") or "").strip()
+        if message_id:
+            if not hasattr(self, "_pending_sync_requests"):
+                self._pending_sync_requests = {}
+            self._pending_sync_requests[message_id] = {
+                "session_id": session.session_id,
+                "conversation_id": conversation_id,
+                "target_client_id": client_id,
+                "request_id": request_id,
+            }
+            web_pending = self._pending_web_sync_requests.get(request_id)
+            if isinstance(web_pending, dict):
+                web_pending["message_id"] = message_id
+            QTimer.singleShot(
+                20000,
+                lambda rid=request_id: self._check_web_sync_timeout(rid),
+            )
+
+        self._set_tm_action_hint("已请求同步网页对话，等待网页返回内容。")
+        return True, ""
+
     def _sync_bound_web_conversation(self, _checked=False):
         session = self._current_session()
         if session is None:
@@ -1666,6 +1875,46 @@ class PageSyncMixin:
                 echo=True,
             )
             return
+
+        btn = getattr(self, "sync_web_conversation_btn", None)
+        if btn is not None:
+            btn.setEnabled(False)
+
+        status = server.get_bridge_status()
+        target_item, source = self._simple_sync_find_target(session, status=status)
+        if isinstance(target_item, dict):
+            ok, reason = self._enqueue_simple_sync_command(
+                session,
+                target_item,
+                request_reason="manual_button",
+                source=source,
+            )
+        else:
+            opened = self._simple_sync_open_url(session)
+            if opened:
+                self._mark_session_sync_running(session_id, "waiting_open_page")
+                self._set_tm_action_hint("已打开绑定网页，检测到页面后会自动同步。")
+                QTimer.singleShot(
+                    1500,
+                    lambda sid=session_id: self._simple_sync_retry_after_open(sid),
+                )
+                return
+            ok, reason = False, "没有可同步页面，也没有可打开的绑定 URL"
+
+        if not ok:
+            self._clear_session_sync_running(
+                session_id,
+                reason="sync_enqueue_failed",
+            )
+            if btn is not None:
+                btn.setEnabled(True)
+            self._set_tm_action_hint(f"同步失败：{reason}")
+            self._append_log(
+                "[SYNC_SIMPLE][FAILED] "
+                + kv_line(session_id=session_id, reason=reason or "sync_enqueue_failed"),
+                echo=True,
+            )
+        return
 
         trace_id = make_sync_trace_id(session.session_id)
         self._set_active_sync_trace_id(trace_id)

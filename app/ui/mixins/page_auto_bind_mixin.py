@@ -897,10 +897,7 @@ class PageAutoBindMixin:
         url = (target_url or "").strip()
         if not url:
             return False
-        request_id = (reopen_request_id or "").strip()
-        if request_id:
-            clean_url = url.split("#")[0]
-            url = f"{clean_url}#xz_reopen_token={request_id}"
+        url = url.split("#", 1)[0]
         return self._open_page_once(url, "打开绑定的 ChatGPT 对话页")
     def _prepare_bound_conversation_reopen_if_needed(
         self, session, text, user_message_id=""
@@ -2023,4 +2020,3 @@ class PageAutoBindMixin:
             self._save_sessions_to_disk()
             if self._current_session():
                 self._update_bound_page_display()
-

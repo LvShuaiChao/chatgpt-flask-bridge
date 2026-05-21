@@ -176,6 +176,7 @@ python bridge_client.py --status
 ├── app/
 │   ├── models.py          # 会话 / 绑定状态模型
 │   ├── constants.py       # 常量与默认设置
+│   ├── utils/page_status.py  # 页面在线/同步/发送统一判定
 │   └── ui/                # PyQt 界面与 mixin
 │       ├── main_window.py
 │       └── mixins/        # 桥接、绑定、会话、设置等
@@ -201,6 +202,34 @@ python bridge_client.py --status
 - **普通聊天消息**：仅能被匹配的 `conversation` 页面领取  
 
 详细逻辑见 `server.py` 的 `_message_matches_page()` 与 `client.user.js` 中的发送前校验。
+
+## Bridge 页面字段规范（统一命名）
+
+油猴 `client.user.js`、Flask `server.py`、GUI `app/utils/page_status.py` 共用一套能力判定，避免「在线但不能同步/发送」类误判。
+
+| 字段 | 含义 | 判定要点 |
+|------|------|----------|
+| `client_id` | 油猴客户端 ID | `sessionStorage` 持久化，勿与消息 `id` 混淆 |
+| `page_instance_id` | 页面实例 ID | 与 `getToolboxPageInstanceId()` 一致，每标签页稳定 |
+| `page_key` | `client_id::page_instance_id` | 后端注册与绑定匹配 |
+| `conversation_id` | ChatGPT 对话 ID | 从 `/c/xxx` URL 解析 |
+| `url` | 当前完整页面地址 | **唯一写入字段**；兼容读 `page_url` / `target_url` 等 |
+| `message_id` | Bridge 消息 ID | 兼容读 `id`，不再写回 `id` |
+| `content` | 待发送文本 | 兼容读 `text` / `message` / `prompt` |
+| `assistant_text` | 助手回复 | 不再与 `content` 混写 |
+| `online` | 页面在线 | **仅**看最近心跳 `last_seen` |
+| `syncable` | URL 级可同步 | `online` + `url` 非空 |
+| `conversation_syncable` | 对话可同步 | `online` + `conversation_id` + `/c/` 对话页 |
+| `sendable` | 可发送 | `online` + 输入框可用 + 发送按钮可用（生成中会排队） |
+| `can_accept_input` / `can_send_now` | 油猴上报的输入/发送能力 | 供 GUI 展示，**不**作为同步硬条件 |
+| `visibility_state` / `has_focus` | 可见性/焦点 | 仅日志与展示，不拦截同步 |
+| `active_tab` | 工具箱当前 tab | 页面级 `pageState`，新页默认 `upload` |
+| `upload_active_group_id` | 上传分组 | 页面级持久化 |
+| `quick_prompt_category` | 快捷 Prompt 分类 | 页面级，勿与全局设置混读 |
+
+发送统一入口：油猴 `sendContentViaComposer()`。路由变化统一走 `runToolboxRouteChangePipeline()`（先恢复 pageState，再 `identity_change`）。
+
+油猴 Bridge 状态栏不再仅用「在线」，而区分 **已连接 / 可发送 / 生成中 / 不可发送**（`getBridgePollStatusPresentation()`）。Bridge 设置页展示当前页 **能力明细**（`#cgpt-bridge-capability-text`）。工具箱隐藏状态保存为 `panel_hidden`、`edge_docked`、`edge_revealed`、`floating_hidden`（DOM 类 `cgpt-toolbox-floating-hidden` 与旧 `cgpt-edge-hidden` 双写兼容）。
 
 ## 常见问题
 

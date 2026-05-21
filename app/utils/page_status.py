@@ -23,6 +23,8 @@ __all__ = [
     "page_registry_key",
     "get_page_liveness",
     "is_page_online",
+    "is_page_url_syncable",
+    "is_conversation_syncable",
     "is_dialog_ready_page",
     "is_prebound_home_page",
     "classify_page_state",
@@ -145,6 +147,7 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
             ),
             "has_focus": bool(raw.get("has_focus") or raw.get("is_focused")),
             "can_accept_input": bool(raw.get("can_accept_input", True)),
+            "can_send_now": raw.get("can_send_now"),
             "is_responding": bool(raw.get("is_responding")),
             "response_state": (raw.get("response_state") or "unknown").strip()
             or "unknown",
@@ -199,6 +202,19 @@ def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
 def is_page_online(page: Any, now: float | None = None) -> bool:
     """仅根据最近心跳 last_seen 判断在线，不依赖焦点/可见性/输入框/生成状态。"""
     return get_page_liveness(page, now=now) == "online"
+
+
+def is_page_url_syncable(page: Any, *, now: float | None = None) -> bool:
+    """页面可同步（宽松）：在线且 url 非空；不依赖焦点/可见性/发送按钮。"""
+    if not isinstance(page, dict):
+        return False
+    norm = normalize_page(page, now=now)
+    return is_page_online(norm, now=now) and bool((norm.get("url") or "").strip())
+
+
+def is_conversation_syncable(page: Any, *, now: float | None = None) -> bool:
+    """当前对话可同步：在线且 conversation_id 非空（与 dialog_ready 一致，含 /c/ URL）。"""
+    return is_dialog_ready_page(page, now=now)
 
 
 def is_dialog_ready_page(page: Any, *, now: float | None = None) -> bool:
@@ -317,6 +333,8 @@ def evaluate_send_page(
     if not ("/c/" in url or conversation_id):
         return "blocked", "not_conversation_url"
 
+    if norm.get("can_send_now") is False:
+        return "queued", "send_button_unavailable"
     if norm.get("is_responding") or not norm.get("can_accept_input", True):
         return "queued", "waiting_for_input"
     return "allowed", "ready"
@@ -326,14 +344,17 @@ def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
     norm = normalize_page(page) if isinstance(page, dict) else {}
     classified = classify_page_state(norm) if norm else {}
     online = bool(classified.get("online"))
-    syncable = bool(classified.get("dialog_ready"))
+    url_syncable = is_page_url_syncable(norm) if norm else False
+    conversation_syncable = is_conversation_syncable(norm) if norm else False
+    dialog_ready = bool(classified.get("dialog_ready"))
+    syncable = url_syncable
     send_decision, send_reason = (
         evaluate_send_page(norm) if norm else ("blocked", "no_page")
     )
     sendable = send_decision == "allowed"
     send_queued = send_decision == "queued"
     blocked_reason = ""
-    if action == "sync" and not syncable:
+    if action == "sync" and not conversation_syncable:
         if not online:
             blocked_reason = "offline"
         elif classified.get("prebound_home"):
@@ -351,10 +372,11 @@ def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
         "conversation_id": norm.get("conversation_id") or "",
         "url": norm.get("url") or "",
         "online": online,
-        "dialog_ready": bool(classified.get("dialog_ready")),
+        "dialog_ready": dialog_ready,
         "prebound_home": bool(classified.get("prebound_home")),
         "page_state": classified.get("state") or ("offline" if not online else "online"),
         "syncable": syncable,
+        "conversation_syncable": conversation_syncable,
         "sendable": sendable,
         "send_queued": send_queued,
         "send_decision": send_decision,
@@ -372,6 +394,7 @@ def log_page_decision_fields(decision: Dict[str, Any]) -> str:
         f"dialog_ready={'true' if decision.get('dialog_ready') else 'false'} "
         f"prebound_home={'true' if decision.get('prebound_home') else 'false'} "
         f"syncable={'true' if decision.get('syncable') else 'false'} "
+        f"conversation_syncable={'true' if decision.get('conversation_syncable') else 'false'} "
         f"sendable={'true' if decision.get('sendable') else 'false'} "
         f"blocked_reason={decision.get('blocked_reason') or '-'}"
     )

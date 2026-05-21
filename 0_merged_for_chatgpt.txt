@@ -1,16 +1,16 @@
 ====================================================================================================
 PROJECT EXPORT FOR CHATGPT / CURSOR
-Export time: 2026-05-21 17:39:03
+Export time: 2026-05-21 18:26:16
 Project name: chatgpt-flask-bridge
 Project root: E:\Documents\Desktop\chatgpt-flask-bridge
 Export mode: full project scan
-循环次数: 第 750 次
-本次合并耗时: 0.47s（读取各文件并组装正文）
-当前代码总行数: 59747
-当前收录源码文件合计 tokens（cl100k_base）: 46.76万
-当前合并导出全文 tokens（cl100k_base）: 47.09万
+循环次数: 第 798 次
+本次合并耗时: 0.44s（读取各文件并组装正文）
+当前代码总行数: 60710
+当前收录源码文件合计 tokens（cl100k_base）: 47.70万
+当前合并导出全文 tokens（cl100k_base）: 48.03万
 ChatGPT 文档 token 参考上限（文本类）: 200万
-合并导出全文相对上述上限尚余约 152.91万。
+合并导出全文相对上述上限尚余约 151.97万。
 ====================================================================================================
 
 说明：
@@ -1367,7 +1367,7 @@ def schedule_scroll_to_bottom_if_needed(
 
 ====================================================================================================
 FILE: app/ui/main_window.py
-TOKENS（cl100k_base）: 0.16万（1,637）
+TOKENS（cl100k_base）: 0.17万（1,706）
 ====================================================================================================
 
 
@@ -1516,6 +1516,20 @@ class MainWindow(
         self._status_timer.start(1000)
         QTimer.singleShot(0, self._refresh_cursor_bridge_status)
         QTimer.singleShot(0, self._load_runtime_log_once)
+        QTimer.singleShot(
+            0,
+            lambda: self._render_current_chat_messages(
+                force_bottom=True,
+                reason="startup_initial",
+            ),
+        )
+        QTimer.singleShot(
+            120,
+            lambda: self._render_current_chat_messages(
+                force_bottom=True,
+                reason="startup_after_show",
+            ),
+        )
         if self._auto_start_server and not server.is_server_running():
             QTimer.singleShot(300, self._start_server)
 
@@ -5717,9 +5731,10 @@ class BridgeMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/chat_render_mixin.py
-TOKENS（cl100k_base）: 0.92万（9,168）
+TOKENS（cl100k_base）: 1.19万（11,854）
 ====================================================================================================
 
+import html
 import time
 import traceback
 
@@ -5746,6 +5761,283 @@ MAX_RENDER_MESSAGES_ON_SWITCH = 120
 
 
 class ChatRenderMixin:
+    def _chat_transcript_widget(self):
+        return getattr(self, "chat_transcript", None)
+
+    def _set_transcript_visible(self, visible):
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        transcript.setVisible(bool(visible))
+        scroll = self._chat_primary_scroll_area()
+        if scroll is not None:
+            scroll.setVisible(not bool(visible))
+
+    def _message_role_label(self, role):
+        role = (role or "").strip().lower()
+        if role == "user":
+            return "你"
+        if role == "assistant":
+            return "ChatGPT"
+        if role == "error":
+            return "错误"
+        return "系统"
+
+    def _message_role_color(self, role):
+        role = (role or "").strip().lower()
+        if role == "user":
+            return "#111827", "#95ec69", "#95ec69"
+        if role == "assistant":
+            return "#111827", "#ffffff", "#ffffff"
+        if role == "error":
+            return "#b91c1c", "#fff1f2", "#fecaca"
+        return "#6b7280", "#eef2f7", "#dbe3ef"
+
+    def _render_wechat_transcript(self, session=None, *, force_bottom=False):
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        if session is None:
+            session = self._current_session()
+
+        messages = []
+        if session is not None:
+            messages, skipped = self._visible_messages_for_render(session)
+        else:
+            skipped = 0
+
+        blocks = []
+        if skipped > 0:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding:8px 0;'>"
+                "<span style='color:#8a8f98;font-size:12px;'>"
+                f"已折叠较早的 {int(skipped)} 条消息"
+                "</span></td></tr></table>"
+            )
+
+        last_time_label = ""
+        for message in messages:
+            role = getattr(message, "role", "")
+            normalized_role = (role or "").strip().lower()
+            text = html.escape(getattr(message, "text", "") or "").replace(
+                "\n", "<br>"
+            )
+            status = html.escape(getattr(message, "status", "") or "")
+            detail = html.escape(getattr(message, "detail", "") or "")
+            ts = html.escape(self._format_message_ts(message.created_at) or "")
+            fg, bg, border = self._message_role_color(role)
+
+            if ts and ts != last_time_label:
+                last_time_label = ts
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:8px 0 4px 0;'>"
+                    f"<span style='color:#9ca3af;font-size:12px;'>{ts}</span>"
+                    "</td></tr></table>"
+                )
+
+            if normalized_role in ("system", "error"):
+                meta = html.escape(self._message_role_label(role))
+                if status or detail:
+                    meta = " · ".join(part for part in (meta, status, detail) if part)
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:5px 0;'>"
+                    "<table width='58%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:6px 10px;'>"
+                    f"<div style='color:{fg};font-size:12px;line-height:1.45;'>"
+                    f"{meta}<br>{text}</div>"
+                    "</td></tr></table></td></tr></table>"
+                )
+                continue
+
+            is_user = normalized_role == "user"
+            avatar_text = "我" if is_user else "AI"
+            avatar_bg = "#95ec69" if is_user else "#d8dde6"
+            avatar_fg = "#245c1a" if is_user else "#374151"
+            bubble_width = "48%"
+            footer = " · ".join(part for part in (status, detail) if part)
+
+            if is_user:
+                row = (
+                    "<tr>"
+                    "<td width='100%' align='right' style='padding:0 12px 6px 56px;'>"
+                    f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:9px 11px;'>"
+                    f"<div style='font-size:14px;line-height:1.55;color:{fg};'>"
+                    f"{text}</div>"
+                    "</td></tr></table>"
+                    "</td>"
+                    "<td width='34' valign='top' align='center' style='padding:0 10px 0 0;'>"
+                    f"<table width='30' height='30' bgcolor='{avatar_bg}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='center' valign='middle' style='color:{avatar_fg};"
+                    "font-size:12px;font-weight:600;'>"
+                    f"{avatar_text}</td></tr></table></td>"
+                    "</tr>"
+                )
+            else:
+                row = (
+                    "<tr>"
+                    "<td width='34' valign='top' align='center' style='padding:0 0 0 10px;'>"
+                    f"<table width='30' height='30' bgcolor='{avatar_bg}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='center' valign='middle' style='color:{avatar_fg};"
+                    "font-size:12px;font-weight:600;'>"
+                    f"{avatar_text}</td></tr></table></td>"
+                    "<td width='100%' align='left' style='padding:0 56px 6px 12px;'>"
+                    f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:9px 11px;'>"
+                    f"<div style='font-size:14px;line-height:1.55;color:{fg};'>"
+                    f"{text}</div>"
+                    "</td></tr></table>"
+                    "</td>"
+                    "</tr>"
+                )
+
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                + row
+                + "</table>"
+            )
+            if footer:
+                align = "right" if is_user else "left"
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td align='{align}' style='padding:0 58px 4px 58px;'>"
+                    f"<span style='color:#9ca3af;font-size:11px;'>{footer}</span>"
+                    "</td></tr></table>"
+                )
+
+        if not blocks:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding-top:32px;'>"
+                "<span style='color:#9ca3af;'>暂无消息</span>"
+                "</td></tr></table>"
+            )
+
+        transcript.setHtml(
+            "<html><body style='font-family:Microsoft YaHei UI, Segoe UI, "
+            "Arial, sans-serif; margin:0; padding:8px 0 10px 0; "
+            "background:#f5f6f8;'>"
+            + "".join(blocks)
+            + "</body></html>"
+        )
+        self._set_transcript_visible(True)
+        transcript.updateGeometry()
+        transcript.update()
+        if force_bottom:
+            QTimer.singleShot(
+                0,
+                lambda: transcript.verticalScrollBar().setValue(
+                    transcript.verticalScrollBar().maximum()
+                ),
+            )
+
+    def _render_chat_transcript(self, session=None, *, force_bottom=False):
+        return self._render_wechat_transcript(session, force_bottom=force_bottom)
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return
+        if session is None:
+            session = self._current_session()
+
+        messages = []
+        if session is not None:
+            messages, skipped = self._visible_messages_for_render(session)
+        else:
+            skipped = 0
+
+        blocks = []
+        if skipped > 0:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding:6px 0;'>"
+                "<span style='color:#6b7280;font-size:12px;'>"
+                f"已折叠较早的 {int(skipped)} 条消息"
+                "</span></td></tr></table>"
+            )
+
+        for message in messages:
+            role = getattr(message, "role", "")
+            normalized_role = (role or "").strip().lower()
+            text = html.escape(getattr(message, "text", "") or "").replace(
+                "\n", "<br>"
+            )
+            status = html.escape(getattr(message, "status", "") or "")
+            detail = html.escape(getattr(message, "detail", "") or "")
+            ts = html.escape(self._format_message_ts(message.created_at) or "")
+            fg, bg, border = self._message_role_color(role)
+            align = "right" if role == "user" else "left"
+            meta = " · ".join(
+                part
+                for part in (
+                    html.escape(self._message_role_label(role)),
+                    ts,
+                    status,
+                    detail,
+                )
+                if part
+            )
+
+            if normalized_role in ("system", "error"):
+                blocks.append(
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr><td align='center' style='padding:5px 0;'>"
+                    "<table width='72%' cellspacing='0' cellpadding='0'>"
+                    f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                    "padding:6px 10px;'>"
+                    f"<span style='color:{fg};font-size:12px;font-weight:600;'>"
+                    f"{meta}</span><br>"
+                    f"<span style='color:{fg};font-size:12px;'>{text}</span>"
+                    "</td></tr></table></td></tr></table>"
+                )
+                continue
+
+            bubble_width = "64%"
+            outer_align = "right" if normalized_role == "user" else "left"
+            meta_align = "right" if normalized_role == "user" else "left"
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                f"<tr><td align='{outer_align}' style='padding:6px 4px;'>"
+                f"<table width='{bubble_width}' cellspacing='0' cellpadding='0'>"
+                f"<tr><td bgcolor='{bg}' style='border:1px solid {border};"
+                "padding:8px 10px;'>"
+                f"<div align='{meta_align}' style='font-size:12px;"
+                f"font-weight:600;color:{fg};margin-bottom:4px;'>{meta}</div>"
+                f"<div style='font-size:13px;line-height:1.5;color:{fg};'>"
+                f"{text}</div>"
+                "</td></tr></table></td></tr></table>"
+            )
+
+        if not blocks:
+            blocks.append(
+                "<table width='100%' cellspacing='0' cellpadding='0'>"
+                "<tr><td align='center' style='padding-top:32px;'>"
+                "<span style='color:#9ca3af;'>暂无消息</span>"
+                "</td></tr></table>"
+            )
+
+        transcript.setHtml(
+            "<html><body style='font-family:Microsoft YaHei UI, Segoe UI, "
+            "Arial, sans-serif; margin:0; padding:0;'>"
+            + "".join(blocks)
+            + "</body></html>"
+        )
+        self._set_transcript_visible(True)
+        transcript.updateGeometry()
+        transcript.update()
+        if force_bottom:
+            QTimer.singleShot(
+                0,
+                lambda: transcript.verticalScrollBar().setValue(
+                    transcript.verticalScrollBar().maximum()
+                ),
+            )
+
     def _chat_primary_scroll_area(self):
         scroll = getattr(self, "chat_messages_scroll", None)
         if scroll is not None:
@@ -6146,28 +6438,16 @@ class ChatRenderMixin:
         if content_hint <= 0:
             content_hint = container.sizeHint().height()
 
-        min_height = 90
-        empty_height = 120
-        max_height = 360
-
-        if message_count <= 0:
-            target_height = empty_height
-        else:
-            target_height = content_hint + 16
-            if target_height < min_height:
-                target_height = min_height
-            if target_height > max_height:
-                target_height = max_height
-
-        scroll.setMinimumHeight(target_height)
-        scroll.setMaximumHeight(target_height)
+        scroll.setMinimumHeight(180)
+        scroll.setMaximumHeight(16777215)
         scroll.updateGeometry()
 
         self._append_log(
             "[CHAT_HEIGHT][ADJUST] "
             f"message_count={message_count} "
             f"content_hint={content_hint} "
-            f"target_height={target_height}",
+            f"scroll_min={scroll.minimumHeight()} "
+            f"scroll_max={scroll.maximumHeight()}",
             echo=False,
         )
 
@@ -6221,6 +6501,7 @@ class ChatRenderMixin:
         if not visible_messages:
             self._show_empty_chat_state()
             self._update_chat_empty_placeholder(0)
+            self._render_chat_transcript(session, force_bottom=force_bottom)
             self._finish_chat_render_layout(force_bottom=force_bottom)
             self._append_log(
                 f"[CHAT_RENDER][EMPTY] session_id={session.session_id}",
@@ -6243,6 +6524,7 @@ class ChatRenderMixin:
         ):
             self._hide_empty_chat_state()
             self._adjust_chat_history_height_to_content()
+            self._render_chat_transcript(session, force_bottom=force_bottom)
             self._append_log(
                 "[CHAT_RENDER][SKIP] "
                 f"session_id={session.session_id} "
@@ -6327,6 +6609,7 @@ class ChatRenderMixin:
                 widget.update()
 
         self._update_chat_empty_placeholder(len(visible_messages))
+        self._render_chat_transcript(session, force_bottom=force_bottom)
         self._scroll_to_bottom_if_user_was_near_bottom(
             scroll_state,
             force_bottom=force_bottom,
@@ -6378,6 +6661,7 @@ class ChatRenderMixin:
             bubble.set_error(message.text, message.status)
         else:
             bubble.set_text(message.text, message.status)
+        self._render_chat_transcript(self._current_session(), force_bottom=True)
         return True
     def _scroll_to_last_chat_message(self):
         scroll = self._chat_primary_scroll_area()
@@ -6917,7 +7201,7 @@ class ChatRenderMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/chat_session_mixin.py
-TOKENS（cl100k_base）: 0.26万（2,609）
+TOKENS（cl100k_base）: 0.26万（2,640）
 ====================================================================================================
 
 """会话消息写入与聊天区刷新。"""
@@ -7190,6 +7474,11 @@ class ChatSessionMixin:
             elif hasattr(self, "_clear_chat_widgets"):
                 self._clear_chat_widgets()
             if hasattr(self, "_finish_chat_render_layout"):
+                if hasattr(self, "_render_chat_transcript"):
+                    self._render_chat_transcript(
+                        session,
+                        force_bottom=force_bottom,
+                    )
                 self._finish_chat_render_layout(force_bottom=force_bottom)
             elif hasattr(self, "_adjust_chat_history_height_to_content"):
                 self._adjust_chat_history_height_to_content()
@@ -9600,7 +9889,7 @@ class LogTabMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_auto_bind_mixin.py
-TOKENS（cl100k_base）: 1.80万（18,024）
+TOKENS（cl100k_base）: 1.80万（17,992）
 ====================================================================================================
 
 """自动绑定、首页预绑定、bootstrap 与对话创建绑定。"""
@@ -10502,10 +10791,7 @@ class PageAutoBindMixin:
         url = (target_url or "").strip()
         if not url:
             return False
-        request_id = (reopen_request_id or "").strip()
-        if request_id:
-            clean_url = url.split("#")[0]
-            url = f"{clean_url}#xz_reopen_token={request_id}"
+        url = url.split("#", 1)[0]
         return self._open_page_once(url, "打开绑定的 ChatGPT 对话页")
     def _prepare_bound_conversation_reopen_if_needed(
         self, session, text, user_message_id=""
@@ -12998,7 +13284,7 @@ class PageBindingDiagnosticsMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_binding_display_mixin.py
-TOKENS（cl100k_base）: 0.91万（9,076）
+TOKENS（cl100k_base）: 0.92万（9,218）
 ====================================================================================================
 
 """绑定/页面关系 UI 显示。"""
@@ -13159,17 +13445,31 @@ class PageBindingDisplayMixin:
         state = str(page.get("response_state") or page.get("state") or "").lower()
         return "是" if bool(responding) or state == "generating" else "否"
 
-    def _page_syncable_text(self, page):
+    def _page_conversation_syncable_text(self, page):
         if not isinstance(page, dict):
             return "否"
         profile = self._tm_client_sync_profile(page)
-        if profile.get("sync_readable") or profile.get("syncable"):
+        if profile.get("conversation_syncable") or profile.get("dialog_ready"):
             return "是"
-        page_type = str(page.get("page_type") or "").strip()
-        conversation_id = self._page_chatgpt_conversation_id(page)
-        url = self._page_full_url(page)
-        syncable = page_type == "conversation" and bool(conversation_id) and "/c/" in url
-        return "是" if syncable else "否"
+        if page.get("conversation_syncable") is True:
+            return "是"
+        return "否"
+
+    def _page_sendable_text(self, page):
+        if not isinstance(page, dict):
+            return "否"
+        profile = self._tm_client_sync_profile(page)
+        if profile.get("sendable"):
+            return "是"
+        if page.get("sendable") is True:
+            return "是"
+        if profile.get("send_reason") in ("queued", "waiting_for_input"):
+            return "等待"
+        return "否"
+
+    def _page_syncable_text(self, page):
+        """对话可同步（/c/ 对话页），不等同于 URL 级 syncable。"""
+        return self._page_conversation_syncable_text(page)
 
     def _page_identity_text(self, page, *, instance_unknown=False):
         if not isinstance(page, dict):
@@ -13220,11 +13520,12 @@ class PageBindingDisplayMixin:
         )
         return (
             f"油猴插件：{self._page_plugin_status_text(page)} | "
-            f"窗口：{self._page_visible_text(page)} | "
-            f"焦点：{self._page_focus_text(page)} | "
+            f"对话可同步：{sync_part} | "
+            f"可发送：{self._page_sendable_text(page)} | "
             f"可输入：{self._page_input_text(page)} | "
             f"正在生成：{self._page_responding_text(page)} | "
-            f"可同步：{sync_part}"
+            f"窗口：{self._page_visible_text(page)}（仅展示） | "
+            f"焦点：{self._page_focus_text(page)}（仅展示）"
         )
 
     def _format_page_status_with_source(self, source, page, *, sync_text=None):
@@ -13736,6 +14037,8 @@ class PageBindingDisplayMixin:
             widgets.append(self._chat_panel)
         if hasattr(self, "chat_scroll"):
             widgets.append(self.chat_scroll)
+        if hasattr(self, "chat_transcript"):
+            widgets.append(self.chat_transcript)
         if hasattr(self, "chat_container"):
             widgets.append(self.chat_container)
         for widget in widgets:
@@ -14379,14 +14682,13 @@ class PageBindingStateMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_open_close_mixin.py
-TOKENS（cl100k_base）: 0.68万（6,758）
+TOKENS（cl100k_base）: 0.70万（7,026）
 ====================================================================================================
 
 """打开 / 关闭 / 刷新 ChatGPT 页面与油猴页面表格。"""
 
 import traceback
 import time
-import uuid
 import webbrowser
 
 import server
@@ -14401,7 +14703,7 @@ from app.models import (
 )
 from app.url_utils import parse_conversation_id
 from PyQt5.QtCore import QUrl, Qt
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import QTableWidgetItem
 
 
@@ -14635,6 +14937,7 @@ class PageOpenCloseMixin:
             )
             return False
 
+        url = url.split("#", 1)[0]
         self._append_log(
             "[OLD_SESSION][OPEN] "
             f"session_id={session.session_id} "
@@ -14730,6 +15033,7 @@ class PageOpenCloseMixin:
             )
             return
 
+        bound_url = bound_url.split("#", 1)[0]
         self._append_log(
             "[OPEN_BOUND_PAGE][START] "
             f"session_id={session.session_id} "
@@ -14738,10 +15042,7 @@ class PageOpenCloseMixin:
             echo=True,
         )
 
-        ok = self._open_bound_conversation_url(
-            bound_url,
-            reopen_request_id=(remote.get("reopen_request_id") or uuid.uuid4().hex),
-        )
+        ok = self._open_bound_conversation_url(bound_url)
 
         if ok:
             self._add_system_message(f"已打开绑定页面：{bound_url}")
@@ -14910,6 +15211,10 @@ class PageOpenCloseMixin:
                     str(c.get("last_seen", "")),
                     str(bool(self._page_is_online(c))),
                     str(c.get("page_url", "")),
+                    str(c.get("conversation_syncable")),
+                    str(c.get("sendable")),
+                    str(c.get("can_send_now")),
+                    str(c.get("response_state", "")),
                 ])
             )
         return tuple(sorted(rows))
@@ -14949,6 +15254,8 @@ class PageOpenCloseMixin:
                 conversation_id = item.get("conversation_id") or "-"
                 if len(conversation_id) > 16:
                     conversation_id = conversation_id[:16] + "…"
+                conv_sync_text = self._page_conversation_syncable_text(item)
+                sendable_text = self._page_sendable_text(item)
                 visibility = item.get("visibility_state") or "-"
                 has_focus = "是" if self._page_has_focus(item) else "否"
                 last_focus = self._format_last_seen_ago(item.get("last_focus_at"))
@@ -14957,6 +15264,12 @@ class PageOpenCloseMixin:
                 online_text = "在线" if page_online else "离线"
                 is_bound = (
                     "是" if session_bound_id and client_id == session_bound_id else "否"
+                )
+                profile = self._tm_client_sync_profile(item)
+                cap_tip = (
+                    f"conversation_syncable={conv_sync_text} "
+                    f"sendable={sendable_text} "
+                    f"blocked_reason={profile.get('blocked_reason') or profile.get('reason') or '-'}"
                 )
                 online_item = QTableWidgetItem(online_text)
                 if page_online:
@@ -14968,17 +15281,33 @@ class PageOpenCloseMixin:
                 table.setItem(row, 2, QTableWidgetItem(page_instance_id))
                 table.setItem(row, 3, QTableWidgetItem(page_type))
                 table.setItem(row, 4, QTableWidgetItem(conversation_id))
-                table.setItem(row, 5, QTableWidgetItem(visibility))
+                conv_sync_item = QTableWidgetItem(conv_sync_text)
+                if conv_sync_text == "是":
+                    conv_sync_item.setForeground(Qt.darkGreen)
+                else:
+                    conv_sync_item.setForeground(Qt.gray)
+                conv_sync_item.setToolTip(cap_tip)
+                table.setItem(row, 5, conv_sync_item)
+                send_item = QTableWidgetItem(sendable_text)
+                if sendable_text == "是":
+                    send_item.setForeground(Qt.darkGreen)
+                elif sendable_text == "等待":
+                    send_item.setForeground(QColor("#ca8a04"))
+                else:
+                    send_item.setForeground(Qt.gray)
+                send_item.setToolTip(cap_tip)
+                table.setItem(row, 6, send_item)
+                table.setItem(row, 7, QTableWidgetItem(visibility))
                 focus_text = f"{has_focus}/{last_focus}"
-                table.setItem(row, 6, QTableWidgetItem(focus_text))
-                table.setItem(row, 7, QTableWidgetItem(last_seen))
+                table.setItem(row, 8, QTableWidgetItem(focus_text))
+                table.setItem(row, 9, QTableWidgetItem(last_seen))
                 url_item = QTableWidgetItem(display_url)
-                url_item.setToolTip(full_url)
-                table.setItem(row, 8, url_item)
+                url_item.setToolTip(full_url or cap_tip)
+                table.setItem(row, 10, url_item)
                 bound_item = QTableWidgetItem(is_bound)
                 if is_bound == "是":
                     bound_item.setForeground(Qt.darkGreen)
-                table.setItem(row, 9, bound_item)
+                table.setItem(row, 11, bound_item)
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
@@ -16788,7 +17117,7 @@ class PageSendTargetMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_sync_mixin.py
-TOKENS（cl100k_base）: 1.94万（19,365）
+TOKENS（cl100k_base）: 2.14万（21,443）
 ====================================================================================================
 
 """同步网页对话、快照回收与 sync 决策。"""
@@ -16971,7 +17300,7 @@ class PageSyncMixin:
                 ),
                 "active_matches_bound": active_matches_bound,
             }
-        return {
+        failed = {
             "syncable": False,
             "source": "none",
             "source_label": "不可用",
@@ -16983,6 +17312,15 @@ class PageSyncMixin:
             "reason": "no_syncable_target",
             "active_matches_bound": active_matches_bound,
         }
+        probe = current_info if isinstance(current_info, dict) else bound_info
+        if isinstance(probe, dict) and hasattr(self, "_append_log"):
+            decision = explain_page_decision(probe, action="sync")
+            self._append_log(
+                "[SYNC][SELECT_PAGE][FAILED] "
+                + log_page_decision_fields(decision),
+                echo=False,
+            )
+        return failed
 
     def _format_sync_target_status_text(self, target, profile=None):
         online = bool(
@@ -18428,6 +18766,206 @@ class PageSyncMixin:
             parts.append(role + ":" + str(len(text)) + ":" + text[:64])
         return "\n".join(parts)
 
+    def _simple_sync_find_target(self, session, status=None):
+        status = status or server.get_bridge_status()
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        expected_conv = self._remote_conversation_id(remote)
+
+        current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+        current_info = self._client_info_by_id(current_client_id, status=status)
+        if isinstance(current_info, dict) and self._tm_page_is_online_simple(current_info):
+            current_conv = self._client_conversation_id(current_info)
+            if current_conv and (not expected_conv or current_conv == expected_conv):
+                return dict(current_info), "current_page"
+
+        if expected_conv:
+            for item in self._iter_tm_clients(status, online_only=True):
+                if self._client_conversation_id(item) == expected_conv:
+                    return dict(item), "same_conversation"
+
+        bound_client_id = (remote.get("client_id") or "").strip()
+        if bound_client_id:
+            bound_info = self._client_info_by_id(bound_client_id, status=status)
+            if isinstance(bound_info, dict) and self._tm_page_is_online_simple(bound_info):
+                return dict(bound_info), "bound_client"
+
+        return None, "not_online"
+
+    def _simple_sync_open_url(self, session):
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        url = self._remote_conversation_url(remote)
+        if not url and session is not None:
+            url = self._session_openable_chatgpt_url(session)
+        if not url:
+            conv = self._remote_conversation_id(remote)
+            if conv:
+                url = f"https://chatgpt.com/c/{conv}"
+        if not url:
+            return False
+        if hasattr(self, "_open_bound_page_for_session"):
+            return self._open_bound_page_for_session(
+                session,
+                label="同步网页对话",
+                fallback_live=True,
+            )
+        return self._open_or_queue_url(url, "同步网页对话")
+
+    def _simple_sync_retry_after_open(self, session_id, attempts_left=20):
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        target_item, source = self._simple_sync_find_target(session)
+        if isinstance(target_item, dict):
+            self._clear_session_sync_running(session_id, reason="page_detected")
+            ok, reason = self._enqueue_simple_sync_command(
+                session,
+                target_item,
+                request_reason="manual_button_opened",
+                source=source,
+            )
+            if ok:
+                return
+            if reason:
+                self._set_tm_action_hint(f"同步失败：{reason}")
+            return
+        if attempts_left <= 0:
+            self._clear_session_sync_running(session_id, reason="wait_page_timeout")
+            btn = getattr(self, "sync_web_conversation_btn", None)
+            if btn is not None and session_id == (self._current_session_id or ""):
+                btn.setEnabled(True)
+            self._set_tm_action_hint("已打开网页，但还没检测到可同步的对话页。")
+            return
+        QTimer.singleShot(
+            1500,
+            lambda sid=session_id, left=attempts_left - 1: self._simple_sync_retry_after_open(
+                sid,
+                left,
+            ),
+        )
+
+    def _enqueue_simple_sync_command(
+        self,
+        session,
+        target_item,
+        *,
+        request_reason="manual_button",
+        source="simple",
+    ):
+        if session is None:
+            return False, "当前没有选中的对话"
+        if not server.is_server_running():
+            return False, "请先启动服务"
+
+        session_id = session.session_id
+        if self._is_session_sync_running(session_id):
+            return False, "同步正在进行中，请稍等"
+
+        client_id = (target_item.get("client_id") or "").strip()
+        page_instance_id = (target_item.get("page_instance_id") or "").strip()
+        conversation_id = self._client_conversation_id(target_item)
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        expected_conv = self._remote_conversation_id(remote)
+        if not conversation_id:
+            conversation_id = expected_conv
+        if not conversation_id:
+            return False, "目标页缺少 conversation_id"
+
+        if expected_conv and conversation_id == expected_conv and hasattr(
+            self, "_relink_session_binding_from_tm_page"
+        ):
+            self._relink_session_binding_from_tm_page(
+                session,
+                target_item,
+                reason="simple_sync_same_conversation",
+            )
+
+        trace_id = make_sync_trace_id(session.session_id)
+        request_id = f"sync-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        mode = (self._sync_conversation_mode or "merge").strip().lower()
+        if mode not in ("merge", "replace"):
+            mode = "merge"
+        max_messages = int(self._sync_conversation_max_messages or 200)
+        if max_messages < 1:
+            max_messages = 200
+
+        self._mark_session_sync_running(session_id, request_id)
+        if not hasattr(self, "_pending_web_sync_requests"):
+            self._pending_web_sync_requests = {}
+        self._pending_web_sync_requests[request_id] = {
+            "session_id": session.session_id,
+            "client_id": client_id,
+            "conversation_id": conversation_id,
+            "created_at": time.time(),
+            "request_reason": request_reason,
+            "trace_id": trace_id,
+        }
+
+        payload = {
+            "mode": mode,
+            "max_messages": max_messages,
+            "session_id": session.session_id,
+            "conversation_id": conversation_id,
+            "target_client_id": client_id,
+            "request_id": request_id,
+            "source": request_reason or "manual",
+            "request_reason": request_reason or "manual",
+            "command_type": "read_snapshot",
+            "require_input": False,
+            "allow_hidden": True,
+            "allow_generating": True,
+            "allow_while_generating": True,
+            "allow_not_focused": True,
+            "simple_online_policy": True,
+        }
+
+        self._append_log(
+            "[SYNC_SIMPLE][REQUEST] "
+            f"session_id={session.session_id} "
+            f"source={source or '-'} "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"request_id={request_id}",
+            echo=True,
+        )
+        queued = server.enqueue_control_command(
+            command="sync_conversation",
+            target_client_id=client_id,
+            target_page_instance_id=page_instance_id,
+            target_conversation_id=conversation_id,
+            payload=payload,
+        )
+        if not queued:
+            self._clear_session_sync_running(
+                session_id,
+                request_id,
+                reason="enqueue_failed",
+            )
+            return False, "命令入队失败"
+
+        message_id = ""
+        if isinstance(queued, dict):
+            message_id = (queued.get("message_id") or queued.get("id") or "").strip()
+        if message_id:
+            if not hasattr(self, "_pending_sync_requests"):
+                self._pending_sync_requests = {}
+            self._pending_sync_requests[message_id] = {
+                "session_id": session.session_id,
+                "conversation_id": conversation_id,
+                "target_client_id": client_id,
+                "request_id": request_id,
+            }
+            web_pending = self._pending_web_sync_requests.get(request_id)
+            if isinstance(web_pending, dict):
+                web_pending["message_id"] = message_id
+            QTimer.singleShot(
+                20000,
+                lambda rid=request_id: self._check_web_sync_timeout(rid),
+            )
+
+        self._set_tm_action_hint("已请求同步网页对话，等待网页返回内容。")
+        return True, ""
+
     def _sync_bound_web_conversation(self, _checked=False):
         session = self._current_session()
         if session is None:
@@ -18459,6 +18997,46 @@ class PageSyncMixin:
                 echo=True,
             )
             return
+
+        btn = getattr(self, "sync_web_conversation_btn", None)
+        if btn is not None:
+            btn.setEnabled(False)
+
+        status = server.get_bridge_status()
+        target_item, source = self._simple_sync_find_target(session, status=status)
+        if isinstance(target_item, dict):
+            ok, reason = self._enqueue_simple_sync_command(
+                session,
+                target_item,
+                request_reason="manual_button",
+                source=source,
+            )
+        else:
+            opened = self._simple_sync_open_url(session)
+            if opened:
+                self._mark_session_sync_running(session_id, "waiting_open_page")
+                self._set_tm_action_hint("已打开绑定网页，检测到页面后会自动同步。")
+                QTimer.singleShot(
+                    1500,
+                    lambda sid=session_id: self._simple_sync_retry_after_open(sid),
+                )
+                return
+            ok, reason = False, "没有可同步页面，也没有可打开的绑定 URL"
+
+        if not ok:
+            self._clear_session_sync_running(
+                session_id,
+                reason="sync_enqueue_failed",
+            )
+            if btn is not None:
+                btn.setEnabled(True)
+            self._set_tm_action_hint(f"同步失败：{reason}")
+            self._append_log(
+                "[SYNC_SIMPLE][FAILED] "
+                + kv_line(session_id=session_id, reason=reason or "sync_enqueue_failed"),
+                echo=True,
+            )
+        return
 
         trace_id = make_sync_trace_id(session.session_id)
         self._set_active_sync_trace_id(trace_id)
@@ -18980,7 +19558,7 @@ class PageSyncMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/page_tm_client_mixin.py
-TOKENS（cl100k_base）: 0.91万（9,109）
+TOKENS（cl100k_base）: 0.92万（9,202）
 ====================================================================================================
 
 """油猴客户端遍历、URL 摘要与绑定状态基础判断。"""
@@ -19005,10 +19583,13 @@ from app.utils.text_utils import short_id, short_page_display
 from app.utils.page_status import (
     classify_page_state,
     evaluate_send_page,
+    explain_page_decision,
     get_page_liveness,
+    is_conversation_syncable,
     is_dialog_ready_page,
     is_page_online,
     is_page_syncable,
+    is_page_url_syncable,
     is_prebound_home_page,
     page_registry_key,
     page_url_from,
@@ -19241,7 +19822,10 @@ class PageTmClientMixin:
         page_state = self._classify_page_state(item, log=False)
         dialog_ready = bool(page_state.get("dialog_ready"))
         prebound_home = bool(page_state.get("prebound_home"))
+        url_syncable = is_page_url_syncable(item)
+        conversation_syncable = is_conversation_syncable(item)
         syncable = sync_readable
+        decision = explain_page_decision(item, action="sync")
 
         stale = bool(online and activity in ("stale_hidden",))
 
@@ -19282,8 +19866,11 @@ class PageTmClientMixin:
             "sendable": sendable,
             "sync_readable": sync_readable,
             "syncable": syncable,
+            "url_syncable": url_syncable,
+            "conversation_syncable": conversation_syncable,
             "dialog_ready": dialog_ready,
             "prebound_home": prebound_home,
+            "blocked_reason": (decision.get("blocked_reason") or reason or "").strip(),
             "stale": stale,
             "state": state,
             "reason": reason,
@@ -20136,7 +20723,7 @@ class PageTmClientMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/session_mixin.py
-TOKENS（cl100k_base）: 1.11万（11,066）
+TOKENS（cl100k_base）: 1.12万（11,241）
 ====================================================================================================
 
 import json
@@ -20268,9 +20855,14 @@ class SessionMixin:
 
     def _is_chat_view_visible(self):
         chat_scroll = getattr(self, "chat_scroll", None)
-        if chat_scroll is None:
+        transcript = getattr(self, "chat_transcript", None)
+        if chat_scroll is None and transcript is None:
             return False
-        if not chat_scroll.isVisible():
+        scroll_visible = chat_scroll.isVisible() if chat_scroll is not None else False
+        transcript_visible = (
+            transcript.isVisible() if transcript is not None else False
+        )
+        if not scroll_visible and not transcript_visible:
             return False
         for attr_name in (
             "chat_mode_tabs",
@@ -20282,9 +20874,13 @@ class SessionMixin:
             if tabs is None:
                 continue
             current_text = tabs.tabText(tabs.currentIndex()).strip()
-            if current_text and "聊天" not in current_text:
+            if current_text and not self._is_chat_tab_title(current_text):
                 return False
         return True
+
+    def _is_chat_tab_title(self, text):
+        text = (text or "").strip()
+        return "聊天" in text or "鑱婂ぉ" in text
 
     def _render_pending_chat_if_needed(self):
         session_id = getattr(self, "_pending_chat_render_session_id", "")
@@ -20322,6 +20918,17 @@ class SessionMixin:
             return
         old_session_id = getattr(self, "_current_session_id", "")
         if old_session_id == session_id:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                if hasattr(self, "_render_chat_transcript"):
+                    self._render_chat_transcript(session, force_bottom=True)
+                QTimer.singleShot(
+                    0,
+                    lambda: self._render_current_chat_messages(
+                        force_bottom=True,
+                        reason="select_same_session",
+                    ),
+                )
             return
 
         switch_token = uuid.uuid4().hex
@@ -22008,7 +22615,7 @@ class SettingsMixin:
 
 ====================================================================================================
 FILE: app/ui/mixins/ui_builder_mixin.py
-TOKENS（cl100k_base）: 2.19万（21,896）
+TOKENS（cl100k_base）: 2.22万（22,153）
 ====================================================================================================
 
 import os
@@ -22046,6 +22653,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTableWidget,
+    QTextBrowser,
     QPlainTextEdit,
     QTextEdit,
     QVBoxLayout,
@@ -22698,6 +23306,9 @@ class UiBuilderMixin:
         input_text = self._page_input_text(item)
         responding_text = self._page_responding_text(item)
         syncable_text = self._page_syncable_text(item)
+        sendable_text = self._page_sendable_text(item)
+        profile = self._tm_client_sync_profile(item)
+        blocked = (profile.get("blocked_reason") or profile.get("reason") or "").strip()
 
         last_seen_text = self._format_last_seen_ago(item.get("last_seen"))
 
@@ -22708,11 +23319,13 @@ class UiBuilderMixin:
             f"page_instance_id：{page_instance_id}\n"
             f"last_seen：{last_seen_text}\n"
             f"页面类型：{type_text}\n"
-            f"窗口：{visible_text}\n"
-            f"焦点：{focus_text}（仅辅助状态，不影响列表显示）\n"
+            f"对话可同步：{syncable_text}\n"
+            f"可发送：{sendable_text}\n"
             f"可输入：{input_text}\n"
             f"正在生成：{responding_text}\n"
-            f"可同步：{syncable_text}"
+            f"窗口：{visible_text}（仅展示，不拦截同步）\n"
+            f"焦点：{focus_text}（仅展示，不拦截同步）\n"
+            f"blocked_reason：{blocked or '-'}"
         )
 
     def _tm_page_combo_sort_key(self, item):
@@ -23582,7 +24195,7 @@ class UiBuilderMixin:
         sync_layout.addLayout(sync_max_row)
         bind_layout.addWidget(sync_group)
         tm_form.addRow("", bind_group)
-        self.tm_pages_table = QTableWidget(0, 10)
+        self.tm_pages_table = QTableWidget(0, 12)
         self.tm_pages_table.setHorizontalHeaderLabels(
             [
                 "状态",
@@ -23590,6 +24203,8 @@ class UiBuilderMixin:
                 "page_instance_id",
                 "页面类型",
                 "会话ID",
+                "对话同步",
+                "可发送",
                 "可见",
                 "焦点/最近焦点",
                 "最后心跳",
@@ -23599,15 +24214,17 @@ class UiBuilderMixin:
         )
         self.tm_pages_table.horizontalHeader().setStretchLastSection(True)
         self.tm_pages_table.setColumnWidth(0, 40)
-        self.tm_pages_table.setColumnWidth(1, 100)
-        self.tm_pages_table.setColumnWidth(2, 120)
-        self.tm_pages_table.setColumnWidth(3, 72)
-        self.tm_pages_table.setColumnWidth(4, 100)
-        self.tm_pages_table.setColumnWidth(5, 40)
-        self.tm_pages_table.setColumnWidth(6, 40)
-        self.tm_pages_table.setColumnWidth(7, 72)
-        self.tm_pages_table.setColumnWidth(8, 200)
+        self.tm_pages_table.setColumnWidth(1, 88)
+        self.tm_pages_table.setColumnWidth(2, 100)
+        self.tm_pages_table.setColumnWidth(3, 64)
+        self.tm_pages_table.setColumnWidth(4, 88)
+        self.tm_pages_table.setColumnWidth(5, 52)
+        self.tm_pages_table.setColumnWidth(6, 44)
+        self.tm_pages_table.setColumnWidth(7, 40)
+        self.tm_pages_table.setColumnWidth(8, 72)
         self.tm_pages_table.setColumnWidth(9, 72)
+        self.tm_pages_table.setColumnWidth(10, 160)
+        self.tm_pages_table.setColumnWidth(11, 64)
         self.tm_pages_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tm_pages_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.tm_pages_table.verticalHeader().setVisible(False)
@@ -24293,15 +24910,15 @@ class UiBuilderMixin:
         self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.chat_scroll.setSizePolicy(
             QSizePolicy.Expanding,
-            QSizePolicy.Preferred,
+            QSizePolicy.Expanding,
         )
-        self.chat_scroll.setMinimumHeight(80)
-        self.chat_scroll.setMaximumHeight(260)
+        self.chat_scroll.setMinimumHeight(180)
+        self.chat_scroll.setMaximumHeight(16777215)
         self.chat_container = QWidget()
         self.chat_container.setObjectName("ChatMessagesContainer")
         self.chat_container.setSizePolicy(
             QSizePolicy.Expanding,
-            QSizePolicy.Minimum,
+            QSizePolicy.MinimumExpanding,
         )
         self.chat_list_layout = QVBoxLayout(self.chat_container)
         self.chat_list_layout.setContentsMargins(12, 12, 12, 12)
@@ -24325,8 +24942,22 @@ class UiBuilderMixin:
         self.chat_bottom_spacer = None
         self.chat_bottom_spacer_widget = None
         self.chat_scroll.setWidget(self.chat_container)
-        chat_tab_layout.addWidget(self.chat_scroll, 0)
-        chat_tab_layout.addStretch(1)
+        chat_tab_layout.addWidget(self.chat_scroll, 1)
+
+        self.chat_transcript = QTextBrowser()
+        self.chat_transcript.setObjectName("ChatTranscript")
+        self.chat_transcript.setOpenExternalLinks(False)
+        self.chat_transcript.setReadOnly(True)
+        self.chat_transcript.setFrameShape(QFrame.NoFrame)
+        self.chat_transcript.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chat_transcript.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.chat_transcript.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding,
+        )
+        self.chat_transcript.setMinimumHeight(180)
+        self.chat_transcript.setVisible(False)
+        chat_tab_layout.addWidget(self.chat_transcript, 1)
 
         input_block = QWidget()
         input_block.setObjectName("ChatInputBlock")
@@ -24335,7 +24966,7 @@ class UiBuilderMixin:
         input_block.setMaximumHeight(158)
         self.chat_input_panel = input_block
         input_layout = QVBoxLayout(input_block)
-        input_layout.setContentsMargins(0, 4, 0, 0)
+        input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(6)
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
@@ -24391,7 +25022,7 @@ class UiBuilderMixin:
 
 ====================================================================================================
 FILE: app/ui/styles.py
-TOKENS（cl100k_base）: 0.63万（6,253）
+TOKENS（cl100k_base）: 0.63万（6,320）
 ====================================================================================================
 
 """主窗口 QSS 样式（从 ui_builder_mixin 抽出，避免业务逻辑文件过长）。"""
@@ -25015,6 +25646,14 @@ APP_STYLESHEET = """
             QWidget#ChatViewport,
             QWidget#ChatMessagesContainer {
                 background: #f7f8fa;
+            }
+            QTextBrowser#ChatTranscript {
+                background: #f7f8fa;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                padding: 10px 12px;
+                color: #111827;
+                font-size: 13px;
             }
             QWidget#ChatViewport[bindState="bound_online"],
             QWidget#ChatViewport[bindState="bound_offline"],
@@ -25986,7 +26625,7 @@ def normalize_outbound_bridge_message(msg: Dict[str, Any]) -> Dict[str, Any]:
 
 ====================================================================================================
 FILE: app/utils/page_status.py
-TOKENS（cl100k_base）: 0.33万（3,316）
+TOKENS（cl100k_base）: 0.36万（3,613）
 ====================================================================================================
 
 """统一页面身份、在线/可同步/可发送判定（各层共用，避免多套逻辑打架）。"""
@@ -26014,6 +26653,8 @@ __all__ = [
     "page_registry_key",
     "get_page_liveness",
     "is_page_online",
+    "is_page_url_syncable",
+    "is_conversation_syncable",
     "is_dialog_ready_page",
     "is_prebound_home_page",
     "classify_page_state",
@@ -26136,6 +26777,7 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
             ),
             "has_focus": bool(raw.get("has_focus") or raw.get("is_focused")),
             "can_accept_input": bool(raw.get("can_accept_input", True)),
+            "can_send_now": raw.get("can_send_now"),
             "is_responding": bool(raw.get("is_responding")),
             "response_state": (raw.get("response_state") or "unknown").strip()
             or "unknown",
@@ -26190,6 +26832,19 @@ def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
 def is_page_online(page: Any, now: float | None = None) -> bool:
     """仅根据最近心跳 last_seen 判断在线，不依赖焦点/可见性/输入框/生成状态。"""
     return get_page_liveness(page, now=now) == "online"
+
+
+def is_page_url_syncable(page: Any, *, now: float | None = None) -> bool:
+    """页面可同步（宽松）：在线且 url 非空；不依赖焦点/可见性/发送按钮。"""
+    if not isinstance(page, dict):
+        return False
+    norm = normalize_page(page, now=now)
+    return is_page_online(norm, now=now) and bool((norm.get("url") or "").strip())
+
+
+def is_conversation_syncable(page: Any, *, now: float | None = None) -> bool:
+    """当前对话可同步：在线且 conversation_id 非空（与 dialog_ready 一致，含 /c/ URL）。"""
+    return is_dialog_ready_page(page, now=now)
 
 
 def is_dialog_ready_page(page: Any, *, now: float | None = None) -> bool:
@@ -26308,6 +26963,8 @@ def evaluate_send_page(
     if not ("/c/" in url or conversation_id):
         return "blocked", "not_conversation_url"
 
+    if norm.get("can_send_now") is False:
+        return "queued", "send_button_unavailable"
     if norm.get("is_responding") or not norm.get("can_accept_input", True):
         return "queued", "waiting_for_input"
     return "allowed", "ready"
@@ -26317,14 +26974,17 @@ def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
     norm = normalize_page(page) if isinstance(page, dict) else {}
     classified = classify_page_state(norm) if norm else {}
     online = bool(classified.get("online"))
-    syncable = bool(classified.get("dialog_ready"))
+    url_syncable = is_page_url_syncable(norm) if norm else False
+    conversation_syncable = is_conversation_syncable(norm) if norm else False
+    dialog_ready = bool(classified.get("dialog_ready"))
+    syncable = url_syncable
     send_decision, send_reason = (
         evaluate_send_page(norm) if norm else ("blocked", "no_page")
     )
     sendable = send_decision == "allowed"
     send_queued = send_decision == "queued"
     blocked_reason = ""
-    if action == "sync" and not syncable:
+    if action == "sync" and not conversation_syncable:
         if not online:
             blocked_reason = "offline"
         elif classified.get("prebound_home"):
@@ -26342,10 +27002,11 @@ def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
         "conversation_id": norm.get("conversation_id") or "",
         "url": norm.get("url") or "",
         "online": online,
-        "dialog_ready": bool(classified.get("dialog_ready")),
+        "dialog_ready": dialog_ready,
         "prebound_home": bool(classified.get("prebound_home")),
         "page_state": classified.get("state") or ("offline" if not online else "online"),
         "syncable": syncable,
+        "conversation_syncable": conversation_syncable,
         "sendable": sendable,
         "send_queued": send_queued,
         "send_decision": send_decision,
@@ -26363,6 +27024,7 @@ def log_page_decision_fields(decision: Dict[str, Any]) -> str:
         f"dialog_ready={'true' if decision.get('dialog_ready') else 'false'} "
         f"prebound_home={'true' if decision.get('prebound_home') else 'false'} "
         f"syncable={'true' if decision.get('syncable') else 'false'} "
+        f"conversation_syncable={'true' if decision.get('conversation_syncable') else 'false'} "
         f"sendable={'true' if decision.get('sendable') else 'false'} "
         f"blocked_reason={decision.get('blocked_reason') or '-'}"
     )
@@ -27755,13 +28417,13 @@ if __name__ == "__main__":
 
 ====================================================================================================
 FILE: client.user.js
-TOKENS（cl100k_base）: 19.47万（194,654）
+TOKENS（cl100k_base）: 19.69万（196,934）
 ====================================================================================================
 
 // ==UserScript==
 // @name         ChatGPT 工具箱：多文件上传 + 自动指令队列 + Prompt 管理
 // @namespace    https://github.com/xiaozhang/chatgpt-toolbox
-// @version      3.6.3
+// @version      3.6.4
 // @description  一个统一工具箱面板：多文件队列上传、自动指令队列、Prompt 管理、标题前缀、对话导出与 issues 统计。每个功能独立模块，放到不同选项卡。?
 // @author       小张
 // @match        https://chatgpt.com/*
@@ -29296,6 +29958,52 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       subscribe,
     };
   })();
+
+  let toolboxRoutePipelineRunning = false;
+
+  async function runToolboxRouteChangePipeline(reason = '') {
+    if (toolboxRoutePipelineRunning) {
+      return;
+    }
+
+    toolboxRoutePipelineRunning = true;
+
+    try {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.handleRouteChange === 'function') {
+        await ToolboxShell.handleRouteChange(reason);
+      }
+
+      if (typeof BridgeModule !== 'undefined' && typeof BridgeModule.handleRouteChange === 'function') {
+        await BridgeModule.handleRouteChange(reason);
+      }
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[ChatGPT toolbox][ROUTE_PIPELINE] failed', error);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[ROUTE_PIPELINE][failed] reason=${reason || '-'} error=${errText}`);
+      }
+    } finally {
+      toolboxRoutePipelineRunning = false;
+    }
+  }
+
+  function installUnifiedRouteChangePipeline() {
+    if (window.__cgptUnifiedRoutePipelineBound) {
+      return;
+    }
+
+    window.__cgptUnifiedRoutePipelineBound = true;
+
+    RouteChangeBus.subscribe((routeReason) => {
+      window.setTimeout(() => {
+        void runToolboxRouteChangePipeline(routeReason);
+      }, 0);
+    });
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog('[ROUTE_PIPELINE][bind] unified page-state + bridge identity');
+    }
+  }
 
   const MemoryManager = (() => {
     const KEYS = Object.freeze({
@@ -30906,6 +31614,32 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       rootEl.classList.remove(...LEGACY_EDGE_CLASSES);
     }
 
+    const TOOLBOX_FLOATING_HIDDEN_CLASS = 'cgpt-toolbox-floating-hidden';
+
+    function isFloatingEdgeHidden() {
+      return !!(root && (
+        root.classList.contains('cgpt-edge-hidden')
+        || root.classList.contains(TOOLBOX_FLOATING_HIDDEN_CLASS)
+      ));
+    }
+
+    function setFloatingEdgeHidden(active, reason = '') {
+      if (!root) {
+        return;
+      }
+
+      const on = Boolean(active);
+      root.classList.toggle('cgpt-edge-hidden', on);
+      root.classList.toggle(TOOLBOX_FLOATING_HIDDEN_CLASS, on);
+
+      if (on) {
+        removeLegacyMultisideEdgeClasses(root, reason || 'set-floating-hidden');
+        root.classList.add('cgpt-edge-right');
+      } else {
+        root.classList.remove('cgpt-edge-right');
+      }
+    }
+
     let edgeRestoreClickGuardUntil = 0;
     let edgeRevealTimer = 0;
     let edgeRehideGuardUntil = 0;
@@ -31213,17 +31947,20 @@ TOKENS（cl100k_base）: 19.47万（194,654）
           border-top: 2px solid #f8fafc;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden {
+        #${APP.rootId}.cgpt-edge-hidden,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden {
           transition: transform 160ms ease, opacity 160ms ease;
           opacity: 0.72;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden:hover {
+        #${APP.rootId}.cgpt-edge-hidden:hover,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden:hover {
           transform: none !important;
           opacity: 1;
         }
 
-        #${APP.rootId}.cgpt-edge-hidden.cgpt-edge-right {
+        #${APP.rootId}.cgpt-edge-hidden.cgpt-edge-right,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden.cgpt-edge-right {
           transform: translateX(calc(100% - ${EDGE_HIDE_VISIBLE_SIZE}px));
         }
 
@@ -31249,7 +31986,8 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
         #${APP.rootId}.cgpt-toolbox-panel-hidden #${APP.panelId},
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.panelId},
-        #${APP.rootId}.cgpt-edge-hidden #${APP.panelId} {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.panelId},
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.panelId} {
           display: none !important;
           pointer-events: none !important;
         }
@@ -31260,7 +31998,8 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         }
 
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.toggleId},
-        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId} {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId},
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.toggleId} {
           width: 38px;
           min-width: 38px;
           height: 34px;
@@ -31278,7 +32017,8 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         }
 
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #${APP.toggleId}:hover,
-        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId}:hover {
+        #${APP.rootId}.cgpt-edge-hidden #${APP.toggleId}:hover,
+        #${APP.rootId}.cgpt-toolbox-floating-hidden #${APP.toggleId}:hover {
           opacity: 1;
         }
 
@@ -35595,7 +36335,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       const edgeHiddenDocked =
         root.classList.contains('cgpt-toolbox-edge-hidden') &&
         !root.classList.contains('cgpt-toolbox-edge-revealed');
-      const floatHidden = root.classList.contains('cgpt-edge-hidden');
+      const floatHidden = isFloatingEdgeHidden();
       const visuallyHidden =
         !panelHidden &&
         !edgeHiddenDocked &&
@@ -36400,11 +37140,41 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       });
     }
 
+    function readToolboxLayoutFlagsFromDom() {
+      if (!root) {
+        return {
+          panel_hidden: false,
+          edge_docked: false,
+          edge_revealed: false,
+          floating_hidden: false,
+          hidden: false,
+        };
+      }
+
+      const panel_hidden = isPanelHiddenNow();
+      const edge_docked = isEdgeHidden() && !root.classList.contains('cgpt-toolbox-edge-revealed');
+      const edge_revealed = isEdgeHidden() && root.classList.contains('cgpt-toolbox-edge-revealed');
+      const floating_hidden = isFloatingEdgeHidden();
+
+      return {
+        panel_hidden,
+        edge_docked,
+        edge_revealed,
+        floating_hidden,
+        hidden: panel_hidden || edge_docked || floating_hidden,
+      };
+    }
+
     function collectToolboxLayoutState() {
+      const flags = readToolboxLayoutFlagsFromDom();
       const layout = {
         mode: compactMode ? 'compact' : 'full',
-        hidden: isPanelHiddenNow(),
-        edge_hidden: isEdgeHidden(),
+        hidden: flags.hidden,
+        panel_hidden: flags.panel_hidden,
+        edge_docked: flags.edge_docked,
+        edge_revealed: flags.edge_revealed,
+        floating_hidden: flags.floating_hidden,
+        edge_hidden: flags.edge_docked,
         anchor: (root && root.dataset && root.dataset.snapEdge) || '',
         updatedAt: Date.now(),
       };
@@ -36425,7 +37195,11 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         reason || 'save-toolbox-layout',
       );
       appendLog(
-        `[TOOLBOX][LAYOUT][save] reason=${reason || '-'} hidden=${layout.hidden ? 1 : 0} mode=${layout.mode}`,
+        `[TOOLBOX][LAYOUT][save] reason=${reason || '-'} `
+          + `panel_hidden=${layout.panel_hidden ? 1 : 0} `
+          + `edge_docked=${layout.edge_docked ? 1 : 0} `
+          + `edge_revealed=${layout.edge_revealed ? 1 : 0} `
+          + `floating_hidden=${layout.floating_hidden ? 1 : 0} mode=${layout.mode}`,
       );
     }
 
@@ -36494,12 +37268,42 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       const layoutUpdatedAt = Number(layout.updatedAt || 0);
       const globalUpdatedAt = Number(savedGlobal && savedGlobal.updatedAt || 0);
 
-      if (typeof layout.hidden === 'boolean' && layout.hidden !== isToolboxInAnyHiddenState()) {
-        if (layout.hidden) {
-          hidePanel({ save: false, reason: reason || 'restore-layout-hidden' });
-        } else {
+      const wantPanelHidden = layout.panel_hidden === true
+        || (layout.hidden === true && layout.edge_docked !== true && layout.floating_hidden !== true);
+      const wantEdgeDocked = layout.edge_docked === true || layout.edge_hidden === true;
+      const wantFloatingHidden = layout.floating_hidden === true;
+      const wantAnyHidden = wantPanelHidden || wantEdgeDocked || wantFloatingHidden || layout.hidden === true;
+      const currentlyHidden = isToolboxInAnyHiddenState();
+
+      if (wantAnyHidden !== currentlyHidden || wantEdgeDocked !== isEdgeHidden()) {
+        if (!wantAnyHidden) {
           showPanel({ save: false, reason: reason || 'restore-layout-visible' });
+          setFloatingEdgeHidden(false, reason || 'restore-layout-visible');
+          clearFloatEdgeHiddenClasses();
+          root.classList.remove('cgpt-toolbox-edge-hidden', 'cgpt-toolbox-edge-revealed');
+          updateEdgeAutoHide();
+        } else if (wantEdgeDocked) {
+          hidePanel({ save: false, reason: reason || 'restore-layout-edge-docked' });
+          setFloatingEdgeHidden(false, reason || 'restore-layout-edge-docked');
+          root.classList.add('cgpt-toolbox-edge-hidden');
+          if (layout.edge_revealed === true) {
+            root.classList.add('cgpt-toolbox-edge-revealed');
+          } else {
+            root.classList.remove('cgpt-toolbox-edge-revealed');
+          }
+          clearFloatEdgeHiddenClasses();
+          normalizeEdgeVisualState(reason || 'restore-layout-edge-docked');
+        } else {
+          hidePanel({ save: false, reason: reason || 'restore-layout-hidden' });
+          if (wantFloatingHidden) {
+            setFloatingEdgeHidden(true, reason || 'restore-layout-floating-hidden');
+          } else if (isEdgeAutoHideEnabled()) {
+            updateEdgeAutoHide();
+          }
         }
+      } else if (wantEdgeDocked && layout.edge_revealed === true && !root.classList.contains('cgpt-toolbox-edge-revealed')) {
+        root.classList.add('cgpt-toolbox-edge-revealed');
+        normalizeEdgeVisualState(reason || 'restore-layout-edge-revealed');
       }
 
       if (
@@ -37172,6 +37976,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
       root.classList.remove(
         'cgpt-edge-hidden',
+        TOOLBOX_FLOATING_HIDDEN_CLASS,
         ...LEGACY_EDGE_CLASSES,
         'cgpt-edge-right',
       );
@@ -37182,6 +37987,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       'cgpt-toolbox-edge-revealed',
       'cgpt-toolbox-panel-hidden',
       'cgpt-edge-hidden',
+      TOOLBOX_FLOATING_HIDDEN_CLASS,
       ...LEGACY_EDGE_CLASSES,
       'cgpt-edge-left',
       'cgpt-edge-right',
@@ -37412,9 +38218,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       const panelHidden = isPanelHiddenNow();
       const shouldHide = enabled && edge === EDGE_AUTO_HIDE_SIDE && panelHidden && !isEdgeHidden();
 
-      root.classList.toggle('cgpt-edge-hidden', shouldHide);
-      removeLegacyMultisideEdgeClasses(root, 'updateEdgeAutoHide');
-      root.classList.toggle('cgpt-edge-right', shouldHide);
+      setFloatingEdgeHidden(shouldHide, 'updateEdgeAutoHide');
 
       appendLog(
         `[TOOLBOX_EDGE][float-auto-hide-check] enabled=${enabled} panelHidden=${panelHidden} edge=${edge || '-'} shouldHide=${shouldHide} horizontal=true`,
@@ -37908,8 +38712,8 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
         revealFloatBallTemporarily('hover');
 
-        if (root) {
-          root.classList.remove('cgpt-edge-hidden');
+        if (isFloatingEdgeHidden()) {
+          setFloatingEdgeHidden(false, 'toggle-hover-reveal');
         }
       });
 
@@ -38226,10 +39030,13 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }
 
       if (statusType === 'online') {
+        if (/可发送/.test(value)) return '可发送';
+        if (/已连接/.test(value)) return '已连接';
         return '在线';
       }
 
       if (statusType === 'running') {
+        if (/生成中/.test(value)) return '生成中';
         if (/等待回答/.test(value)) return '等回答';
         if (/等待发送/.test(value)) return '等发送';
         if (/上传/.test(value)) return '上传中';
@@ -38778,7 +39585,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }
     }
 
-    function checkToolboxPageKeyChanged(reason = '') {
+    async function handleRouteChange(reason = '') {
       const nextKey = getToolboxPageKey();
 
       if (!lastToolboxPageKey) {
@@ -38807,9 +39614,13 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         `[TOOLBOX_PAGE_STATE][page-change] reason=${reason || '-'} old=${oldKey} next=${nextKey}`,
       );
 
-      void applyToolboxPageState('page-key-changed').catch((error) => {
+      await applyToolboxPageState('page-key-changed');
+    }
+
+    function checkToolboxPageKeyChanged(reason = '') {
+      void handleRouteChange(reason).catch((error) => {
         appendLog(
-          `[TOOLBOX_PAGE_STATE][apply-page-key-changed-error] error=${error && error.stack ? error.stack : String(error)}`,
+          `[TOOLBOX_PAGE_STATE][route-change-error] reason=${reason || '-'} error=${error && error.stack ? error.stack : String(error)}`,
         );
       });
     }
@@ -38822,11 +39633,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       window.__cgptToolboxPageStateWatcherBound = true;
       lastToolboxPageKey = getToolboxPageKey();
 
-      RouteChangeBus.subscribe((reason) => {
-        window.setTimeout(() => {
-          checkToolboxPageKeyChanged(reason);
-        }, 100);
-      });
+      installUnifiedRouteChangePipeline();
 
       window.setInterval(() => {
         checkToolboxPageKeyChanged('interval');
@@ -38847,6 +39654,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       getActiveTab,
       applyToolboxUiState,
       applyToolboxPageState,
+      handleRouteChange,
       setEdgeAutoHideEnabled,
       suspendEdgeAutoHide,
       resetToolboxPosition,
@@ -40038,18 +40846,44 @@ TOKENS（cl100k_base）: 19.47万（194,654）
     };
   }
 
+  function bridgeSafeConversationRecord(record) {
+    if (!record || typeof record !== 'object') {
+      return null;
+    }
+    const safe = {};
+    Object.keys(record).forEach((key) => {
+      if (key === 'element') {
+        return;
+      }
+      const value = record[key];
+      if (value instanceof Node) {
+        return;
+      }
+      if (typeof value === 'function') {
+        return;
+      }
+      safe[key] = value;
+    });
+    return safe;
+  }
+
   function buildConversationSnapshotForBridge(resolvePageIdentity) {
     try {
-      const messages = buildConversationMessageRecords({
+      const rawMessages = buildConversationMessageRecords({
         includeEmpty: false,
       });
+      const messages = rawMessages
+        .map((record) => bridgeSafeConversationRecord(record))
+        .filter(Boolean);
 
       const latestAny = messages.length ? messages[messages.length - 1] : null;
-      const latestAssistant = getLatestConversationMessageRecord({
-        role: 'assistant',
-        preferAssistant: true,
-        allowPreviousAssistantFallback: true,
-      });
+      let latestAssistant = null;
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === 'assistant') {
+          latestAssistant = messages[i];
+          break;
+        }
+      }
 
       const page = typeof resolvePageIdentity === 'function' ? resolvePageIdentity() : {};
 
@@ -44120,10 +44954,6 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         console.error('[ChatGPT toolbox] quick prompt send failed', err);
         setStatus(`快捷 Prompt 发送失败：${errText}`, 'error');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:send-failed] title=${title} error=${errText}`);
-      } finally {
-        if (state.autoSendRunId === runId) {
-          resetUploadSendShortcutState('quick-prompt-finally', runId);
-        }
       }
     }
 
@@ -50811,51 +51641,41 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         }
       }
 
-      if (autoSend && ComposerApi.isAssistantLikelyBusy()) {
-        setStatus('ChatGPT 正在回复，暂不能发送 Prompt', 'warn');
-        ToolboxShell.appendLog('[Prompt 管理] 发送阻断：assistant_busy');
-        return;
-      }
-
-      const okSet = ComposerApi.setComposerValue(text);
-
-      if (!okSet) {
-        console.error('[ChatGPT toolbox] Prompt fill failed: composer not found');
-        ToolboxShell.appendLog('[Prompt 管理] 填入失败：未找到输入框');
-        alert('没有找到 ChatGPT 输入框。请确认当前页面是 ChatGPT 对话页面');
-        return;
-      }
-
       if (!autoSend) {
+        const okSet = ComposerApi.setComposerValue(text);
+
+        if (!okSet) {
+          console.error('[ChatGPT toolbox] Prompt fill failed: composer not found');
+          ToolboxShell.appendLog('[Prompt 管理] 填入失败：未找到输入框');
+          alert('没有找到 ChatGPT 输入框。请确认当前页面是 ChatGPT 对话页面');
+          return;
+        }
+
         setStatus('已填入输入框，未自动发送');
         return;
       }
 
       sendLock = true;
-      setStatus('已填入，正在发送…');
+      setStatus('正在发送 Prompt…');
 
       try {
-        await sleep(260);
+        const sendResult = await sendContentViaComposer({
+          source: 'prompt-manager',
+          content: text,
+          allowReplaceDraft: true,
+          waitUntilSendable: true,
+          timeoutMs: 60000,
+          blockWhenResponding: true,
+        });
 
-        const okSend = ComposerApi.clickSend();
-
-        if (!okSend) {
-          setStatus('已填入，但没有找到可用发送按钮', 'warn');
-          console.error('[ChatGPT toolbox] Prompt send failed: no send button');
-          ToolboxShell.appendLog('[Prompt 管理] 发送失败：发送按钮不可用');
+        if (!sendResult.ok) {
+          setStatus(`Prompt 发送失败：${sendResult.reason || 'unknown'}`, 'warn');
+          ToolboxShell.appendLog(`[Prompt 管理] 发送失败：${sendResult.reason || 'unknown'}`);
           return;
         }
 
-        const confirmed = await waitPromptSendConfirmed(text, 5000);
-
-        if (!confirmed.ok) {
-          setStatus(`点击发送后未确认成功：${confirmed.reason}`, 'warn');
-          ToolboxShell.appendLog(`[Prompt 管理] 发送未确认：${confirmed.reason}`);
-          return;
-        }
-
-        setStatus(`已发送 Prompt：${confirmed.reason}`, 'success');
-        ToolboxShell.appendLog(`[Prompt 管理] 已发送 Prompt reason=${confirmed.reason}`);
+        setStatus(`已发送 Prompt：${sendResult.reason}`, 'success');
+        ToolboxShell.appendLog(`[Prompt 管理] 已发送 Prompt reason=${sendResult.reason}`);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] Prompt send failed', err);
@@ -52257,14 +53077,16 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }
     })();
 
+    function getBridgePageKey() {
+      return `${CLIENT_ID}::${PAGE_INSTANCE_ID}`;
+    }
+
     function buildVisibilityPayload() {
       const visibilityState = document.visibilityState || 'unknown';
-      const isVisible = visibilityState === 'visible';
       const hasFocus = document.hasFocus();
 
       return {
         visibility_state: visibilityState,
-        is_visible: isVisible,
         has_focus: hasFocus,
       };
     }
@@ -52605,7 +53427,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         const identity = {
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
-          page_key: PAGE_KEY,
+          page_key: getBridgePageKey(),
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
@@ -52629,6 +53451,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
           can_send_now: Boolean(responseState.can_send_now),
         };
         logIdentityThrottled(identity);
+        logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
 
         return identity;
       } catch (error) {
@@ -52651,7 +53474,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
         return {
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
-          page_key: PAGE_KEY,
+          page_key: getBridgePageKey(),
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
@@ -53476,6 +54299,52 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }
     }
 
+    function getBridgePollStatusPresentation() {
+      const capability = getPageCapability('bridge-poll');
+      logPageCapability(capability, '[BRIDGE][POLL]');
+
+      if (capability.is_responding) {
+        return {
+          text: 'Bridge 已连接 · 生成中',
+          type: 'running',
+          shortText: '生成中',
+        };
+      }
+
+      if (capability.sendable) {
+        return {
+          text: 'Bridge 已连接 · 可发送',
+          type: 'online',
+          shortText: '可发送',
+        };
+      }
+
+      if (capability.inputable) {
+        const reason = capability.response_state_reason || 'send_button_unavailable';
+        return {
+          text: `Bridge 已连接 · 可输入 (${reason})`,
+          type: 'warn',
+          shortText: '可输入',
+        };
+      }
+
+      const reason = capability.response_state_reason || capability.response_state || 'not_ready';
+      let text = `Bridge 已连接 · 不可发送 (${reason})`;
+      let type = 'warn';
+
+      if (!capability.conversation_syncable) {
+        text = capability.syncable
+          ? 'Bridge 已连接 · 对话未就绪'
+          : 'Bridge 已连接 · 无可用 URL';
+      }
+
+      return {
+        text,
+        type,
+        shortText: '已连接',
+      };
+    }
+
     /* ===== bridge core: heartbeat / poll / report / control claim ===== */
     async function pollBridge() {
       const cfg = getConfig();
@@ -53521,8 +54390,13 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
         if (runId === state.bridgeRunId && state.timerId) {
           if (!handled || handled.handled !== true || handled.ok !== false) {
-            updateStatus('在线');
-            ToolboxShell.setStatus('在线', 'online', { persist: true });
+            const pres = getBridgePollStatusPresentation();
+            updateStatus(pres.text);
+            ToolboxShell.setStatus(pres.text, pres.type, {
+              persist: true,
+              shortText: pres.shortText,
+            });
+            renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
           } else {
             const failReason = handled.reason || '-';
             updateStatus(`消息处理失败：${failReason}`);
@@ -53536,6 +54410,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
         updateStatus(`离线：${errText}`);
         ToolboxShell.setStatus(`离线：${errText}`, 'offline', { persist: true });
+        renderBridgeCapabilityPanel(getPageCapability('bridge-poll-offline'));
 
         logBridgeError(
           `[pollBridge][failed] action=poll url=${bridgeUrl} type=${errName} error=${errText}`,
@@ -53649,12 +54524,21 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }, 200);
     }
 
-    let unsubscribePageIdentityRoute = null;
+    async function handleRouteChange(reason = '') {
+      const identity = getPageIdentity();
+      const key = identityKey(identity);
 
-    function onBridgeRouteChange(reason) {
-      window.setTimeout(() => {
-        checkPageIdentityChange(reason);
-      }, 0);
+      if (key === state.lastIdentityKey) {
+        return;
+      }
+
+      const oldKey = state.lastIdentityKey || '';
+      state.pendingIdentityOldKey = oldKey;
+      state.pendingIdentityReason = reason || 'route_change';
+      state.lastIdentityKey = key;
+      bridgeTimers.clearTimeout('identity-report-debounce');
+      debugLog(`route identity changed: ${oldKey || '-'} -> ${key}`);
+      flushIdentityChangeReport();
     }
 
     function installPageIdentityListeners() {
@@ -53663,20 +54547,10 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       }
 
       state.pageIdentityListenersInstalled = true;
-      unsubscribePageIdentityRoute = RouteChangeBus.subscribe(onBridgeRouteChange);
     }
 
     function removePageIdentityListeners() {
-      if (!state.pageIdentityListenersInstalled) {
-        return;
-      }
-
       state.pageIdentityListenersInstalled = false;
-
-      if (typeof unsubscribePageIdentityRoute === 'function') {
-        unsubscribePageIdentityRoute();
-        unsubscribePageIdentityRoute = null;
-      }
     }
 
     function start() {
@@ -53724,7 +54598,13 @@ TOKENS（cl100k_base）: 19.47万（194,654）
           source: SOURCE,
           test_connection: true,
         });
-        updateStatus('连接测试成功');
+        const pres = getBridgePollStatusPresentation();
+        updateStatus(`连接测试成功 · ${pres.shortText}`);
+        ToolboxShell.setStatus(`连接测试成功 · ${pres.text}`, pres.type, {
+          persist: true,
+          shortText: pres.shortText,
+        });
+        renderBridgeCapabilityPanel(getPageCapability('bridge-test'));
         ToolboxShell.appendLog(`[BRIDGE][TEST][OK] ${JSON.stringify(result).slice(0, 300)}`);
       } catch (error) {
         const text = error && error.message ? error.message : String(error);
@@ -53785,6 +54665,47 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       },
     ]);
 
+    function formatBridgeCapabilityText(capability) {
+      const cap = capability && typeof capability === 'object'
+        ? capability
+        : getPageCapability('bridge-panel');
+
+      const identity = getPageIdentity();
+      const yesNo = (value) => (value ? 'yes' : 'no');
+
+      return [
+        `client_id: ${cap.client_id || identity.client_id || '-'}`,
+        `page_instance_id: ${cap.page_instance_id || identity.page_instance_id || '-'}`,
+        `conversation_id: ${cap.conversation_id || identity.conversation_id || '-'}`,
+        `url: ${cap.url || identity.url || '-'}`,
+        `page_type: ${identity.page_type || '-'}`,
+        `online: ${yesNo(cap.online)}`,
+        `syncable: ${yesNo(cap.syncable)}`,
+        `conversation_syncable: ${yesNo(cap.conversation_syncable)}`,
+        `inputable: ${yesNo(cap.inputable)}`,
+        `sendable: ${yesNo(cap.sendable)}`,
+        `is_responding: ${yesNo(cap.is_responding)}`,
+        `response_state: ${cap.response_state || '-'}`,
+        `response_state_reason: ${cap.response_state_reason || '-'}`,
+        `visibility_state: ${cap.visibility_state || document.visibilityState || '-'}`,
+        `has_focus: ${yesNo(cap.has_focus)} (display only)`,
+      ].join('\n');
+    }
+
+    function renderBridgeCapabilityPanel(capability) {
+      if (!state.root) {
+        return;
+      }
+
+      const textEl = qs('#cgpt-bridge-capability-text', state.root);
+
+      if (!textEl) {
+        return;
+      }
+
+      textEl.textContent = formatBridgeCapabilityText(capability);
+    }
+
     function renderBridgeConfigToUi() {
       if (!state.root) return;
 
@@ -53800,6 +54721,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
       });
 
       DomUtil.setText(state.root, '#cgpt-bridge-url', getBridgeUrl(), 'BRIDGE');
+      renderBridgeCapabilityPanel();
     }
 
     function readBridgeConfigFromUi() {
@@ -53904,6 +54826,11 @@ TOKENS（cl100k_base）: 19.47万（194,654）
           <div class="cgpt-hint" style="margin-top:6px;">
             状态：<span id="cgpt-bridge-status">未启动</span>
           </div>
+
+          <div class="cgpt-hint" style="margin-top:10px; font-weight:600;">
+            页面能力（当前标签页，仅展示不拦截同步）
+          </div>
+          <pre id="cgpt-bridge-capability-text" class="cgpt-hint" style="margin:4px 0 0; padding:8px; background:rgba(0,0,0,0.04); border-radius:6px; white-space:pre-wrap; font-family:ui-monospace,monospace; font-size:11px; line-height:1.45;">-</pre>
         </div>
       `;
 
@@ -53940,6 +54867,7 @@ TOKENS（cl100k_base）: 19.47万（194,654）
 
     return {
       mount,
+      handleRouteChange,
     };
   })();
 
@@ -55842,7 +56770,7 @@ def read_last_lines(path, max_lines=1000, encoding="utf-8", max_read_bytes=2 * 1
 
 ====================================================================================================
 FILE: README.md
-TOKENS（cl100k_base）: 0.32万（3,152）
+TOKENS（cl100k_base）: 0.40万（3,956）
 ====================================================================================================
 
 # 油猴脚本与 Python 联动
@@ -56023,6 +56951,7 @@ python bridge_client.py --status
 ├── app/
 │   ├── models.py          # 会话 / 绑定状态模型
 │   ├── constants.py       # 常量与默认设置
+│   ├── utils/page_status.py  # 页面在线/同步/发送统一判定
 │   └── ui/                # PyQt 界面与 mixin
 │       ├── main_window.py
 │       └── mixins/        # 桥接、绑定、会话、设置等
@@ -56048,6 +56977,34 @@ python bridge_client.py --status
 - **普通聊天消息**：仅能被匹配的 `conversation` 页面领取  
 
 详细逻辑见 `server.py` 的 `_message_matches_page()` 与 `client.user.js` 中的发送前校验。
+
+## Bridge 页面字段规范（统一命名）
+
+油猴 `client.user.js`、Flask `server.py`、GUI `app/utils/page_status.py` 共用一套能力判定，避免「在线但不能同步/发送」类误判。
+
+| 字段 | 含义 | 判定要点 |
+|------|------|----------|
+| `client_id` | 油猴客户端 ID | `sessionStorage` 持久化，勿与消息 `id` 混淆 |
+| `page_instance_id` | 页面实例 ID | 与 `getToolboxPageInstanceId()` 一致，每标签页稳定 |
+| `page_key` | `client_id::page_instance_id` | 后端注册与绑定匹配 |
+| `conversation_id` | ChatGPT 对话 ID | 从 `/c/xxx` URL 解析 |
+| `url` | 当前完整页面地址 | **唯一写入字段**；兼容读 `page_url` / `target_url` 等 |
+| `message_id` | Bridge 消息 ID | 兼容读 `id`，不再写回 `id` |
+| `content` | 待发送文本 | 兼容读 `text` / `message` / `prompt` |
+| `assistant_text` | 助手回复 | 不再与 `content` 混写 |
+| `online` | 页面在线 | **仅**看最近心跳 `last_seen` |
+| `syncable` | URL 级可同步 | `online` + `url` 非空 |
+| `conversation_syncable` | 对话可同步 | `online` + `conversation_id` + `/c/` 对话页 |
+| `sendable` | 可发送 | `online` + 输入框可用 + 发送按钮可用（生成中会排队） |
+| `can_accept_input` / `can_send_now` | 油猴上报的输入/发送能力 | 供 GUI 展示，**不**作为同步硬条件 |
+| `visibility_state` / `has_focus` | 可见性/焦点 | 仅日志与展示，不拦截同步 |
+| `active_tab` | 工具箱当前 tab | 页面级 `pageState`，新页默认 `upload` |
+| `upload_active_group_id` | 上传分组 | 页面级持久化 |
+| `quick_prompt_category` | 快捷 Prompt 分类 | 页面级，勿与全局设置混读 |
+
+发送统一入口：油猴 `sendContentViaComposer()`。路由变化统一走 `runToolboxRouteChangePipeline()`（先恢复 pageState，再 `identity_change`）。
+
+油猴 Bridge 状态栏不再仅用「在线」，而区分 **已连接 / 可发送 / 生成中 / 不可发送**（`getBridgePollStatusPresentation()`）。Bridge 设置页展示当前页 **能力明细**（`#cgpt-bridge-capability-text`）。工具箱隐藏状态保存为 `panel_hidden`、`edge_docked`、`edge_revealed`、`floating_hidden`（DOM 类 `cgpt-toolbox-floating-hidden` 与旧 `cgpt-edge-hidden` 双写兼容）。
 
 ## 常见问题
 
@@ -56097,7 +57054,7 @@ requests>=2.28.0
 
 ====================================================================================================
 FILE: server.py
-TOKENS（cl100k_base）: 3.59万（35,894）
+TOKENS（cl100k_base）: 3.60万（36,027）
 ====================================================================================================
 
 import logging
@@ -56118,7 +57075,7 @@ from app.utils.bridge_payload import (
     normalize_inbound_push_payload,
     normalize_outbound_bridge_message,
 )
-from app.utils.page_status import page_url_from
+from app.utils.page_status import explain_page_decision, page_url_from
 from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
 from flask_cors import CORS
 from werkzeug.serving import WSGIRequestHandler, make_server
@@ -56656,13 +57613,14 @@ def _snapshot_clients():
         visibility = (info.get("visibility_state") or "").strip()
         activity_state = classify_tm_client_activity(info, now=now)
         _, seen_age, poll_age, _ = compute_tm_activity_metrics(info, now=now)
+        decision = explain_page_decision(info, action="sync")
         items.append(
             {
                 "client_id": client_id or (info.get("client_id") or ""),
                 "page_instance_id": info.get("page_instance_id") or "",
                 "script_version": info.get("script_version") or "",
-                "page_url": info.get("page_url") or info.get("url") or "",
-                "url": info.get("url") or info.get("page_url") or "",
+                "page_url": decision.get("url") or info.get("page_url") or info.get("url") or "",
+                "url": decision.get("url") or info.get("url") or info.get("page_url") or "",
                 "page_title": info.get("page_title") or "",
                 "page_type": info.get("page_type") or "",
                 "conversation_id": info.get("conversation_id") or "",
@@ -56690,6 +57648,11 @@ def _snapshot_clients():
                 "response_state_reason": info.get("response_state_reason") or "",
                 "response_state_at": info.get("response_state_at"),
                 "can_accept_input": bool(info.get("can_accept_input", True)),
+                "can_send_now": bool(info.get("can_send_now")) if "can_send_now" in info else None,
+                "syncable": bool(decision.get("syncable")),
+                "conversation_syncable": bool(decision.get("conversation_syncable")),
+                "dialog_ready": bool(decision.get("dialog_ready")),
+                "sendable": bool(decision.get("sendable")),
                 "last_response_state_seen_at": info.get("last_response_state_seen_at"),
                 "response_started_at": info.get("response_started_at"),
                 "response_last_text_changed_at": info.get("response_last_text_changed_at"),
@@ -57531,6 +58494,8 @@ def _touch_tampermonkey(meta, action="poll"):
     response_state_reason = (meta.get("response_state_reason") or "").strip()
     response_state_at = meta.get("response_state_at") or entry.get("response_state_at")
     can_accept_input = bool(meta.get("can_accept_input", True))
+    if "can_send_now" in meta:
+        entry["can_send_now"] = bool(meta.get("can_send_now"))
     response_started_at = meta.get("response_started_at") or entry.get("response_started_at")
     response_last_text_changed_at = (
         meta.get("response_last_text_changed_at")

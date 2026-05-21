@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTableWidget,
+    QTextBrowser,
     QPlainTextEdit,
     QTextEdit,
     QVBoxLayout,
@@ -685,6 +686,9 @@ class UiBuilderMixin:
         input_text = self._page_input_text(item)
         responding_text = self._page_responding_text(item)
         syncable_text = self._page_syncable_text(item)
+        sendable_text = self._page_sendable_text(item)
+        profile = self._tm_client_sync_profile(item)
+        blocked = (profile.get("blocked_reason") or profile.get("reason") or "").strip()
 
         last_seen_text = self._format_last_seen_ago(item.get("last_seen"))
 
@@ -695,11 +699,13 @@ class UiBuilderMixin:
             f"page_instance_id：{page_instance_id}\n"
             f"last_seen：{last_seen_text}\n"
             f"页面类型：{type_text}\n"
-            f"窗口：{visible_text}\n"
-            f"焦点：{focus_text}（仅辅助状态，不影响列表显示）\n"
+            f"对话可同步：{syncable_text}\n"
+            f"可发送：{sendable_text}\n"
             f"可输入：{input_text}\n"
             f"正在生成：{responding_text}\n"
-            f"可同步：{syncable_text}"
+            f"窗口：{visible_text}（仅展示，不拦截同步）\n"
+            f"焦点：{focus_text}（仅展示，不拦截同步）\n"
+            f"blocked_reason：{blocked or '-'}"
         )
 
     def _tm_page_combo_sort_key(self, item):
@@ -1569,7 +1575,7 @@ class UiBuilderMixin:
         sync_layout.addLayout(sync_max_row)
         bind_layout.addWidget(sync_group)
         tm_form.addRow("", bind_group)
-        self.tm_pages_table = QTableWidget(0, 10)
+        self.tm_pages_table = QTableWidget(0, 12)
         self.tm_pages_table.setHorizontalHeaderLabels(
             [
                 "状态",
@@ -1577,6 +1583,8 @@ class UiBuilderMixin:
                 "page_instance_id",
                 "页面类型",
                 "会话ID",
+                "对话同步",
+                "可发送",
                 "可见",
                 "焦点/最近焦点",
                 "最后心跳",
@@ -1586,15 +1594,17 @@ class UiBuilderMixin:
         )
         self.tm_pages_table.horizontalHeader().setStretchLastSection(True)
         self.tm_pages_table.setColumnWidth(0, 40)
-        self.tm_pages_table.setColumnWidth(1, 100)
-        self.tm_pages_table.setColumnWidth(2, 120)
-        self.tm_pages_table.setColumnWidth(3, 72)
-        self.tm_pages_table.setColumnWidth(4, 100)
-        self.tm_pages_table.setColumnWidth(5, 40)
-        self.tm_pages_table.setColumnWidth(6, 40)
-        self.tm_pages_table.setColumnWidth(7, 72)
-        self.tm_pages_table.setColumnWidth(8, 200)
+        self.tm_pages_table.setColumnWidth(1, 88)
+        self.tm_pages_table.setColumnWidth(2, 100)
+        self.tm_pages_table.setColumnWidth(3, 64)
+        self.tm_pages_table.setColumnWidth(4, 88)
+        self.tm_pages_table.setColumnWidth(5, 52)
+        self.tm_pages_table.setColumnWidth(6, 44)
+        self.tm_pages_table.setColumnWidth(7, 40)
+        self.tm_pages_table.setColumnWidth(8, 72)
         self.tm_pages_table.setColumnWidth(9, 72)
+        self.tm_pages_table.setColumnWidth(10, 160)
+        self.tm_pages_table.setColumnWidth(11, 64)
         self.tm_pages_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tm_pages_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.tm_pages_table.verticalHeader().setVisible(False)
@@ -2280,15 +2290,15 @@ class UiBuilderMixin:
         self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.chat_scroll.setSizePolicy(
             QSizePolicy.Expanding,
-            QSizePolicy.Preferred,
+            QSizePolicy.Expanding,
         )
-        self.chat_scroll.setMinimumHeight(80)
-        self.chat_scroll.setMaximumHeight(260)
+        self.chat_scroll.setMinimumHeight(180)
+        self.chat_scroll.setMaximumHeight(16777215)
         self.chat_container = QWidget()
         self.chat_container.setObjectName("ChatMessagesContainer")
         self.chat_container.setSizePolicy(
             QSizePolicy.Expanding,
-            QSizePolicy.Minimum,
+            QSizePolicy.MinimumExpanding,
         )
         self.chat_list_layout = QVBoxLayout(self.chat_container)
         self.chat_list_layout.setContentsMargins(12, 12, 12, 12)
@@ -2312,8 +2322,22 @@ class UiBuilderMixin:
         self.chat_bottom_spacer = None
         self.chat_bottom_spacer_widget = None
         self.chat_scroll.setWidget(self.chat_container)
-        chat_tab_layout.addWidget(self.chat_scroll, 0)
-        chat_tab_layout.addStretch(1)
+        chat_tab_layout.addWidget(self.chat_scroll, 1)
+
+        self.chat_transcript = QTextBrowser()
+        self.chat_transcript.setObjectName("ChatTranscript")
+        self.chat_transcript.setOpenExternalLinks(False)
+        self.chat_transcript.setReadOnly(True)
+        self.chat_transcript.setFrameShape(QFrame.NoFrame)
+        self.chat_transcript.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chat_transcript.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.chat_transcript.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding,
+        )
+        self.chat_transcript.setMinimumHeight(180)
+        self.chat_transcript.setVisible(False)
+        chat_tab_layout.addWidget(self.chat_transcript, 1)
 
         input_block = QWidget()
         input_block.setObjectName("ChatInputBlock")
@@ -2322,7 +2346,7 @@ class UiBuilderMixin:
         input_block.setMaximumHeight(158)
         self.chat_input_panel = input_block
         input_layout = QVBoxLayout(input_block)
-        input_layout.setContentsMargins(0, 4, 0, 0)
+        input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(6)
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
