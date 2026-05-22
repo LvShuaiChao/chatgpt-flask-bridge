@@ -93,6 +93,29 @@ def test_get_bridge_status_slim_pages_and_summary(server_module):
     assert "tampermonkey_client_id" not in status
 
 
+def test_get_bridge_status_includes_recent_inbound_for_gui(server_module):
+    with server_module._state_lock:
+        server_module._inbound_messages.clear()
+        server_module._outbound_queue.clear()
+        server_module._control_queue.clear()
+    server_module._add_inbound(
+        "assistant_reply",
+        {"content": "hello"},
+        message_id="mid-1",
+        session_id="sid-1",
+        turn_id="tid-1",
+        client_id="tm-1",
+    )
+
+    status = server_module.get_bridge_status()
+
+    assert status["inbound_count"] == 1
+    assert status["recent_inbound"][0]["kind"] == "assistant_reply"
+    assert status["recent_inbound"][0]["message_id"] == "mid-1"
+    assert status["queue_length"] == 0
+    assert status["control_queue_length"] == 0
+
+
 def test_chatgpt_home_and_conversation_url_capabilities():
     from app.utils.page_status import evaluate_page_capability, explain_page_decision
 

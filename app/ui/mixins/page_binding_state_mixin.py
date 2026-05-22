@@ -493,7 +493,9 @@ class PageBindingStateMixin:
             and not self._is_manual_set_bound_page_reason(bind_reason)
             and hasattr(self, "_should_block_automatic_bind_actions")
         ):
-            blocked, mismatch_type = self._should_block_automatic_bind_actions(session)
+            blocked, mismatch_type = self._should_block_automatic_bind_actions(
+                session, bind_reason=bind_reason
+            )
             if blocked:
                 if hasattr(self, "_log_sync_target_blocked"):
                     self._log_sync_target_blocked(session, mismatch_type)

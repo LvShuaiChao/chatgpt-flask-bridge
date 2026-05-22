@@ -1,5 +1,7 @@
 import html
+import re
 import time
+import traceback
 
 from PyQt5.QtCore import QTimer
 
@@ -8,11 +10,158 @@ from app.utils.text_utils import format_ts
 
 
 MAX_RENDER_MESSAGES_ON_SWITCH = 120
+CHAT_SCROLL_NEAR_BOTTOM_THRESHOLD = 32
+
+_WAITING_ELAPSED_IN_HTML_RE = re.compile(
+    r"((?:等待回复(?:\.\.\.|…)|等待 ChatGPT 回复(?:\.\.\.|…)))\s+\d{2}:\d{2}"
+)
 
 
 class ChatRenderMixin:
     def _chat_transcript_widget(self):
         return getattr(self, "chat_transcript", None)
+
+    def _chat_scrollbar(self):
+        transcript = self._chat_transcript_widget()
+        if transcript is None:
+            return None
+        return transcript.verticalScrollBar()
+
+    def _is_chat_near_bottom(self, threshold=CHAT_SCROLL_NEAR_BOTTOM_THRESHOLD):
+        bar = self._chat_scrollbar()
+        if bar is None:
+            return True
+        return bar.maximum() - bar.value() <= max(0, int(threshold))
+
+    def _scroll_chat_to_bottom_once(self):
+        bar = self._chat_scrollbar()
+        if bar is None:
+            return
+        bar.setValue(bar.maximum())
+
+    def _schedule_scroll_chat_to_bottom(self):
+        if getattr(self, "_chat_scroll_to_bottom_pending", False):
+            return
+        self._chat_scroll_to_bottom_pending = True
+
+        def run():
+            self._chat_scroll_to_bottom_pending = False
+            self._scroll_chat_to_bottom_once()
+
+        QTimer.singleShot(0, run)
+
+    def _capture_chat_scroll_ratio(self):
+        bar = self._chat_scrollbar()
+        if bar is None:
+            return None
+        max_val = bar.maximum()
+        if max_val <= 0:
+            return 0.0
+        return bar.value() / float(max_val)
+
+    def _restore_chat_scroll_ratio(self, ratio):
+        if ratio is None:
+            return
+        bar = self._chat_scrollbar()
+        if bar is None:
+            return
+        max_val = bar.maximum()
+        bar.setValue(int(max(0.0, min(1.0, float(ratio))) * max_val))
+
+    def _resolve_chat_scroll_policy(self, *, scroll_policy=None, force_bottom=None):
+        if scroll_policy is not None:
+            return scroll_policy
+        if force_bottom is None:
+            return "auto_if_near_bottom"
+        return "force_bottom" if force_bottom else "auto_if_near_bottom"
+
+    def _apply_chat_scroll_policy(
+        self,
+        scroll_policy,
+        *,
+        was_near_bottom=None,
+        scroll_ratio=None,
+    ):
+        policy = (scroll_policy or "auto_if_near_bottom").strip()
+        if policy == "force_bottom":
+            self._schedule_scroll_chat_to_bottom()
+            return
+        if policy == "auto_if_near_bottom":
+            near = (
+                was_near_bottom
+                if was_near_bottom is not None
+                else self._is_chat_near_bottom()
+            )
+            if near:
+                self._schedule_scroll_chat_to_bottom()
+            return
+        if policy == "preserve":
+            if scroll_ratio is not None:
+                ratio = scroll_ratio
+
+                def restore():
+                    self._restore_chat_scroll_ratio(ratio)
+
+                QTimer.singleShot(0, restore)
+            return
+        self._append_log(
+            "[CHAT_SCROLL][UNKNOWN_POLICY] "
+            f"policy={policy!r}",
+            echo=False,
+        )
+
+    def _patch_waiting_elapsed_in_transcript(self, session):
+        transcript = self._chat_transcript_widget()
+        if transcript is None or session is None:
+            return False
+        if not hasattr(self, "_session_is_waiting_reply"):
+            return False
+        if not self._session_is_waiting_reply(session):
+            return False
+        current_id = (getattr(self, "_current_session_id", "") or "").strip()
+        if (getattr(session, "session_id", "") or "").strip() != current_id:
+            return False
+        try:
+            elapsed = self._format_elapsed_mmss(
+                self._session_pending_elapsed_sec(session)
+            )
+            cached_session_id = (
+                getattr(self, "_last_chat_render_session_id", "") or ""
+            ).strip()
+            html = ""
+            if cached_session_id == current_id:
+                html = getattr(self, "_last_chat_render_html", "") or ""
+            if not html:
+                html = transcript.toHtml()
+            if not html or not _WAITING_ELAPSED_IN_HTML_RE.search(html):
+                return False
+
+            was_near_bottom = self._is_chat_near_bottom()
+            scroll_ratio = None if was_near_bottom else self._capture_chat_scroll_ratio()
+            new_html = _WAITING_ELAPSED_IN_HTML_RE.sub(rf"\1 {elapsed}", html)
+            if new_html == html:
+                return False
+
+            self._last_chat_render_html = new_html
+            self._last_chat_render_session_id = current_id
+            transcript.setHtml(new_html)
+            transcript.setVisible(True)
+            if was_near_bottom:
+                self._schedule_scroll_chat_to_bottom()
+            elif scroll_ratio is not None:
+                ratio = scroll_ratio
+                QTimer.singleShot(0, lambda r=ratio: self._restore_chat_scroll_ratio(r))
+            return True
+        except Exception as exc:
+            self._append_log(
+                "[CHAT_SCROLL][PATCH_WAITING_FAILED] "
+                f"session_id={getattr(session, 'session_id', '-') } "
+                f"error_type={type(exc).__name__} "
+                f"error={exc} "
+                f"traceback={traceback.format_exc()}",
+                echo=False,
+            )
+            return False
 
     @staticmethod
     def _format_ts(ts):
@@ -132,13 +281,28 @@ class ChatRenderMixin:
             "</table>"
         )
 
-    def _render_chat_transcript(self, session=None, *, force_bottom=False):
+    def _render_chat_transcript(
+        self,
+        session=None,
+        *,
+        scroll_policy=None,
+        force_bottom=None,
+    ):
         transcript = self._chat_transcript_widget()
         if transcript is None:
             return
 
         if session is None:
             session = self._current_session()
+
+        policy = self._resolve_chat_scroll_policy(
+            scroll_policy=scroll_policy,
+            force_bottom=force_bottom,
+        )
+        was_near_bottom = self._is_chat_near_bottom()
+        scroll_ratio = (
+            self._capture_chat_scroll_ratio() if policy == "preserve" else None
+        )
 
         messages, skipped = self._visible_messages_for_render(session) if session else ([], 0)
         if not messages:
@@ -265,17 +429,29 @@ class ChatRenderMixin:
             "</html>"
         )
 
+        self._last_chat_render_html = doc
+        self._last_chat_render_session_id = (
+            session.session_id if session is not None else ""
+        )
         transcript.setHtml(doc)
         transcript.setVisible(True)
         transcript.updateGeometry()
         transcript.viewport().update()
         transcript.update()
 
-        if force_bottom:
-            QTimer.singleShot(0, self._scroll_to_bottom)
-            QTimer.singleShot(80, self._scroll_to_bottom)
+        self._apply_chat_scroll_policy(
+            policy,
+            was_near_bottom=was_near_bottom,
+            scroll_ratio=scroll_ratio,
+        )
 
-    def _render_session_chat(self, session, *, force_bottom=False):
+    def _render_session_chat(
+        self,
+        session,
+        *,
+        scroll_policy=None,
+        force_bottom=None,
+    ):
         if session is None:
             return
 
@@ -283,7 +459,11 @@ class ChatRenderMixin:
         if session.session_id != current_id:
             return
 
-        self._render_chat_transcript(session, force_bottom=force_bottom)
+        self._render_chat_transcript(
+            session,
+            scroll_policy=scroll_policy,
+            force_bottom=force_bottom,
+        )
         self._append_log(
             "[CHAT_RENDER][DONE] "
             f"session_id={session.session_id} "
@@ -298,18 +478,20 @@ class ChatRenderMixin:
         self._bridge_msg.pending_chat_render = None
         self._bridge_msg.pending_chat_render_session_id = ""
         if session_id and session_id in self._sessions:
+            pending_policy = pending.get("scroll_policy")
+            if pending_policy:
+                scroll_policy = pending_policy
+            elif pending.get("force_bottom", True):
+                scroll_policy = "force_bottom"
+            else:
+                scroll_policy = "auto_if_near_bottom"
             self._render_session_chat(
                 self._sessions[session_id],
-                force_bottom=bool(pending.get("force_bottom", True)),
+                scroll_policy=scroll_policy,
             )
 
     def _scroll_to_bottom(self):
-        transcript = self._chat_transcript_widget()
-        if transcript is None:
-            return
-        bar = transcript.verticalScrollBar()
-        if bar is not None:
-            bar.setValue(bar.maximum())
+        self._schedule_scroll_chat_to_bottom()
 
     def _log_chat_render_ui_state(self, session, messages):
         transcript = self._chat_transcript_widget()
@@ -345,7 +527,7 @@ class ChatRenderMixin:
         session = self._ensure_current_session()
         self._append_session_message(session, "system", text)
         if session.session_id == self._current_session_id:
-            self._render_session_chat(session, force_bottom=True)
+            self._render_session_chat(session, scroll_policy="force_bottom")
         self._refresh_session_list(select_session_id=session.session_id)
         self._save_sessions_to_disk()
 
@@ -393,7 +575,7 @@ class ChatRenderMixin:
         if hasattr(self, "_sync_session_waiting_timer"):
             self._sync_session_waiting_timer(session, reason="reply_ui_change")
         if session.session_id == self._current_session_id:
-            self._render_session_chat(session, force_bottom=True)
+            self._render_session_chat(session, scroll_policy="auto_if_near_bottom")
         else:
             self._mark_session_pending(session.session_id)
         self._refresh_session_list(select_session_id=self._current_session_id)
@@ -432,7 +614,7 @@ class ChatRenderMixin:
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="set_reply_waiting")
         if session.session_id == self._current_session_id:
-            self._render_session_chat(session, force_bottom=True)
+            self._render_session_chat(session, scroll_policy="force_bottom")
         self._refresh_session_list(select_session_id=session.session_id)
         self._save_sessions_to_disk()
         return True

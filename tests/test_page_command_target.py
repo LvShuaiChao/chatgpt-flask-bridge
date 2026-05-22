@@ -49,6 +49,7 @@ class PageCommandTargetTests(unittest.TestCase):
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -65,6 +66,7 @@ class PageCommandTargetTests(unittest.TestCase):
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -79,10 +81,11 @@ class PageCommandTargetTests(unittest.TestCase):
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "gone",
                 "page_instance_id": "gone",
-                "conversation_id": "conv99",
-                "url": "https://chatgpt.com/c/conv99",
+                "conversation_id": "conv-missing",
+                "url": "https://chatgpt.com/c/conv-missing",
             }
         )
         reg = self._registry_with_bound()
@@ -98,10 +101,24 @@ class PageCommandTargetTests(unittest.TestCase):
 
     def test_sync_bound_page_not_polling(self):
         now = time.time()
-        reg = self._registry_with_bound()
+        status = {
+            "pages": [
+                {
+                    "client_id": "tm-bind",
+                    "page_instance_id": "inst-bind",
+                    "url": "https://chatgpt.com/c/conv99",
+                    "conversation_id": "conv99",
+                    "page_type": "conversation",
+                    "last_seen": now,
+                    "page_display_id": "3",
+                },
+            ]
+        }
+        reg = PageRegistry.from_bridge_status(status, now=now)
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -110,7 +127,7 @@ class PageCommandTargetTests(unittest.TestCase):
         )
         page = reg.get_bound_page(
             {
-                "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -142,6 +159,7 @@ class PageCommandTargetTests(unittest.TestCase):
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -172,6 +190,7 @@ class PageCommandTargetTests(unittest.TestCase):
         session = _FakeSession(
             {
                 "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",
@@ -180,7 +199,7 @@ class PageCommandTargetTests(unittest.TestCase):
         )
         page = reg.get_bound_page(
             {
-                "enabled": True,
+                "bind_state": "BOUND_CONVERSATION",
                 "client_id": "tm-bind",
                 "page_instance_id": "inst-bind",
                 "conversation_id": "conv99",

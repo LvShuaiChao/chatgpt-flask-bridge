@@ -408,16 +408,22 @@ class PageRegistryRefreshMixin:
             reg = getattr(self, "page_registry", None)
         if not isinstance(reg, PageRegistry):
             reg = PageRegistry.empty()
-        snap = reg.get_bound_page(binding)
+        from app.utils.page_command import resolve_bound_page_in_registry
+
+        resolved = resolve_bound_page_in_registry(reg, binding, allow_same_conversation=True)
+        snap = resolved.get("page")
         url = binding.get("url") or ""
         if snap is None:
+            reason_code = (resolved.get("reason_code") or "bound_page_offline").strip()
             return {
-                "found": False,
+                "found": remote_binding_enabled(
+                    getattr(session, "remote_chatgpt", None) or {}
+                ),
                 "online": False,
                 "conversation_syncable": False,
                 "send_decision": "blocked",
                 "page": None,
-                "reason_code": "bound_page_offline",
+                "reason_code": reason_code,
                 "client_id": binding.get("client_id") or "",
                 "page_instance_id": binding.get("page_instance_id") or "",
                 "conversation_id": binding.get("conversation_id") or "",
@@ -428,9 +434,14 @@ class PageRegistryRefreshMixin:
         )
         send_target = resolve_page_command_target(session, "send_message", reg)
         page_dict = snap.to_dict()
+        raw = snap._raw if isinstance(snap._raw, dict) else {}
+        online = is_page_online(raw) if raw else snap.online
         return {
             "found": True,
-            "online": snap.online,
+            "online": online,
+            "conversation_syncable": bool(
+                snap.conversation_syncable
+            ),
             "sync_ok": bool(sync_target.get("ok")),
             "send_decision": "allowed" if send_target.get("ok") else "blocked",
             "page": page_dict,
@@ -461,11 +472,17 @@ class PageRegistryRefreshMixin:
         if snap.get("sync_ok"):
             sync_text, chip = "同步：可同步", "ok"
         elif snap.get("found") and not snap.get("online"):
-            sync_text, chip = "同步：不可同步", "warn"
+            sync_text, chip = "同步：页面离线", "warn"
         elif snap.get("found"):
             sync_text, chip = "同步：不可同步", "error"
         else:
-            sync_text, chip = "同步：未绑定", "warn"
+            remote = normalize_remote_chatgpt(
+                session.remote_chatgpt if session else None
+            )
+            if remote_binding_enabled(remote):
+                sync_text, chip = "同步：页面离线", "warn"
+            else:
+                sync_text, chip = "同步：未绑定", "warn"
         self.tm_sync_target_label.setText(sync_text)
         if hasattr(self, "_refresh_status_chip"):
             self._refresh_status_chip(self.tm_sync_target_label, chip)

@@ -48,6 +48,7 @@ from app.utils.page_status import (
     explain_page_decision,
     log_page_decision_fields,
     page_url_from,
+    read_snapshot_identity,
 )
 from app.utils.trace_log import kv_line, make_sync_trace_id
 from PyQt5.QtCore import QTimer
@@ -103,7 +104,7 @@ class PageSyncMixin:
         *,
         session,
         remote,
-        target_item,
+        page,
         source,
         block_reason,
         detail,
@@ -114,20 +115,21 @@ class PageSyncMixin:
         bound_page_instance_id = (remote.get("page_instance_id") or "").strip()
         bound_conversation_id = self._remote_conversation_id(remote)
         bound_url = (remote.get("url") or "").strip()
-        active_client_id = (status.get("active_client_id") or "").strip()
-        active_conversation_id = (status.get("active_conversation_id") or "").strip()
+        active = read_snapshot_identity(status, "active")
+        active_client_id = active["client_id"]
+        active_conversation_id = active["conversation_id"]
         active_matches_bound = bool(
             active_client_id and bound_client_id and active_client_id == bound_client_id
         )
         profile = {}
-        if isinstance(target_item, dict):
+        if isinstance(page, dict):
             profile = self._tm_client_sync_profile(
-                target_item,
+                page,
                 expected_conversation_id=detail.get("conversation_id") or "",
             )
         conv_sync = bool(detail.get("conversation_syncable"))
         if allowed is None:
-            allowed_flag = not bool(block_reason) and isinstance(target_item, dict)
+            allowed_flag = not bool(block_reason) and isinstance(page, dict)
         else:
             allowed_flag = bool(allowed)
         sync_readable = conv_sync or bool(
@@ -136,7 +138,7 @@ class PageSyncMixin:
         if allowed_flag and (
             bool(detail.get("online"))
             or bool(profile.get("online"))
-            or (isinstance(target_item, dict) and self._tm_page_is_online_simple(target_item))
+            or (isinstance(page, dict) and self._tm_page_is_online_simple(page))
         ):
             sync_readable = True
             conv_sync = True
@@ -174,8 +176,8 @@ class PageSyncMixin:
             "source_label": source_label,
             "target_matches_bound": bool(detail.get("bound")),
             "short_label": (
-                self._short_page_label(target_item)
-                if isinstance(target_item, dict)
+                self._short_page_label(page)
+                if isinstance(page, dict)
                 else "不可用"
             ),
             "client_id": detail.get("client_id") or "",
@@ -193,14 +195,13 @@ class PageSyncMixin:
                 "conversation_id": active_conversation_id,
             },
             "page_type": (
-                (target_item.get("page_type") or "").strip()
-                if isinstance(target_item, dict)
+                (page.get("page_type") or "").strip()
+                if isinstance(page, dict)
                 else ""
             ),
             "reason_code": (
                 block_reason
                 or detail.get("reason_code")
-                or detail.get("blocked_reason")
                 or ""
             ),
             "active_matches_bound": active_matches_bound,
@@ -436,7 +437,7 @@ class PageSyncMixin:
         target_info = target_page
         target_url = self._page_full_url(target_info) if any(
             (target_info.get(k) or "").strip()
-            for k in ("client_id", "conversation_id", "page_url")
+            for k in ("client_id", "conversation_id", "url")
         ) else ""
         if verbose_status:
             self.tm_sync_target_label.setToolTip(target_url or "不可用")
@@ -478,9 +479,7 @@ class PageSyncMixin:
         target_client = (target.get("client_id") or "-").strip() or "-"
         if isinstance(focused_info, dict):
             focused_visible = str(
-                focused_info.get("visible")
-                or focused_info.get("visibility_state")
-                or "unknown"
+                focused_info.get("visibility_state") or "unknown"
             ).lower()
             if focused_visible in ("true", "1", "visible"):
                 focused_visible_log = "visible"
@@ -693,7 +692,7 @@ class PageSyncMixin:
             "request_id",
             "client_id",
             "page_instance_id",
-            "page_url",
+            "url",
         ):
             if not (payload.get(key) or "").strip():
                 alt = (
@@ -712,11 +711,9 @@ class PageSyncMixin:
             )
             if conv:
                 payload["conversation_id"] = conv
-        snapshot_url = page_url_from(payload)
+        snapshot_url = (payload.get("url") or "").strip()
         if snapshot_url:
             payload["url"] = snapshot_url
-        for legacy_key in ("page_url", "conversation_url", "target_page_url"):
-            payload.pop(legacy_key, None)
         return payload
 
     def _handle_conversation_snapshot_inbound(self, item):
@@ -1245,7 +1242,7 @@ class PageSyncMixin:
         if isinstance(plan.target, dict):
             reason_code = (
                 plan.target.get("reason_code")
-                or plan.target.get("blocked_reason")
+                or plan.target.get("reason_code")
                 or ""
             ).strip()
         block_reason = (plan.block_reason or "").strip()
@@ -1267,10 +1264,13 @@ class PageSyncMixin:
         return ""
 
     def _sync_timeout_finish_text(self, message_id: str, pending: dict) -> str:
-        base = (
-            "同步请求已发送，但网页没有返回结果，请刷新页面列表或重新绑定页面。"
-        )
         message_id = (message_id or "").strip()
+        pending = pending if isinstance(pending, dict) else {}
+        if pending.get("ack_mismatch"):
+            return (
+                "网页回传了同步确认，但 message_id 不匹配，快照未被服务端接受。"
+                "请刷新页面列表或重新绑定页面后重试。"
+            )
         msg = get_message_state(message_id) if message_id else None
 
         in_control_queue = False
@@ -1294,24 +1294,48 @@ class PageSyncMixin:
             acked = bool(msg.get("acked_at")) or status in ("acked", "replied", "failed")
             if not delivered:
                 return (
-                    f"{base} 同步命令已入队，但绑定网页没有领取命令，"
+                    "同步命令已入队，但网页没有领取命令。"
                     "可能是页面轮询停止、page_instance_id 过期或绑定到了旧页面。"
+                )
+            if acked and status not in ("replied",):
+                return (
+                    "网页已领取同步命令，但未回传 conversation_snapshot。"
+                    "请检查油猴脚本日志是否有 report 报错。"
                 )
             if not acked:
                 return (
-                    f"{base} 网页已领取同步命令，但没有回传结果，"
-                    "请检查油猴脚本执行报错。"
+                    "网页已领取同步命令，但未回传 conversation_snapshot。"
+                    "请检查油猴脚本是否执行 sync_conversation 报错。"
                 )
             return (
-                f"{base} 网页确认收到命令，但没有回传对话快照。"
+                "网页已领取同步命令，但未回传 conversation_snapshot。"
             )
 
         if in_control_queue or not message_id:
-            return (
-                f"{base} 同步命令已入队，但绑定网页没有领取命令，"
-                "可能是页面轮询停止、page_instance_id 过期或绑定到了旧页面。"
-            )
-        return base
+            return "同步命令已入队，但网页没有领取命令。"
+        return (
+            "同步请求已发送，但网页没有返回结果，"
+            "请刷新页面列表或重新绑定页面。"
+        )
+
+    def _note_sync_ack_mismatch(self, message_id: str) -> None:
+        message_id = (message_id or "").strip()
+        if not message_id:
+            return
+        pending_map = getattr(self._web_sync, "pending_requests", None)
+        if not isinstance(pending_map, dict):
+            return
+        for pending in pending_map.values():
+            if not isinstance(pending, dict):
+                continue
+            if (pending.get("message_id") or "").strip() == message_id:
+                pending["ack_mismatch"] = True
+                break
+        sync_req = getattr(self._page_cmd, "pending_sync_requests", None)
+        if isinstance(sync_req, dict) and message_id in sync_req:
+            entry = sync_req.get(message_id)
+            if isinstance(entry, dict):
+                entry["ack_mismatch"] = True
 
     def _build_sync_plan(
         self,
@@ -1340,15 +1364,15 @@ class PageSyncMixin:
         mode = "merge"
         max_messages = 10
 
-        allowed, target_item, source, block_reason, detail = (
+        allowed, target_page, source, block_reason, detail = (
             self.resolve_sync_decision(session, status=status)
         )
         if not isinstance(detail, dict):
             detail = {}
 
         target: Dict[str, Any] = {}
-        if isinstance(target_item, dict):
-            target.update(target_item)
+        if isinstance(target_page, dict):
+            target.update(target_page)
         if isinstance(detail, dict):
             for key, value in detail.items():
                 if key not in target or not str(target.get(key) or "").strip():
@@ -1356,12 +1380,12 @@ class PageSyncMixin:
         client_id = (target.get("client_id") or "").strip()
         page_instance_id = (target.get("page_instance_id") or "").strip()
         conversation_id = (target.get("conversation_id") or "").strip()
-        if not conversation_id and isinstance(target_item, dict):
-            conversation_id = (self._client_conversation_id(target_item) or "").strip()
+        if not conversation_id and isinstance(target_page, dict):
+            conversation_id = (self._client_conversation_id(target_page) or "").strip()
             target["conversation_id"] = conversation_id
         target_url = (target.get("url") or "").strip()
-        if not target_url and isinstance(target_item, dict):
-            target_url = page_url_from(target_item) or ""
+        if not target_url and isinstance(target_page, dict):
+            target_url = page_url_from(target_page) or ""
         if not target_url and client_id:
             info = self._client_info_by_id(
                 client_id, status=status, page_instance_id=page_instance_id
@@ -1456,6 +1480,8 @@ class PageSyncMixin:
         ok, msg = self._sync_prechecks(session, session.session_id if session else "")
         if not ok:
             return False, msg
+        if hasattr(self, "_clear_stale_pending_reply_before_sync"):
+            self._clear_stale_pending_reply_before_sync(session)
         sync_status = None
         if (reason or "").strip() in ("manual_button", "manual"):
             sync_status = self._refresh_sync_bridge_status_and_relink(session)
@@ -1544,8 +1570,7 @@ class PageSyncMixin:
         block_reason = (
             plan.block_reason
             or (
-                plan.target.get("blocked_reason")
-                or plan.target.get("reason_code")
+                plan.target.get("reason_code")
                 or ""
             ).strip()
             if isinstance(plan.target, dict)
@@ -1836,19 +1861,20 @@ class PageSyncMixin:
             return
         pending["soft_notified"] = True
         session_id = (pending.get("session_id") or "").strip()
+        finish_text = self._sync_timeout_finish_text(
+            (pending.get("message_id") or "").strip(), pending
+        )
         self._append_log(
             "[WEB_SYNC][SOFT_TIMEOUT] "
             f"request_id={request_id} "
-            f"reason=no_snapshot_or_report_within_20s",
+            f"reason=no_snapshot_or_report_within_20s "
+            f"hint={finish_text}",
             echo=True,
         )
         self._update_sync_progress(
             session_id=session_id,
             request_id=request_id,
-            text=(
-                "同步请求已发送，但网页没有返回结果，"
-                "请刷新页面列表或重新绑定页面。"
-            ),
+            text=finish_text,
         )
     def _begin_wait_conversation_page_for_sync(self, session, item, *, request_reason="manual_button"):
         if session is None or not isinstance(item, dict):
@@ -1955,7 +1981,7 @@ class PageSyncMixin:
                 )
 
     def resolve_sync_decision(self, session, status=None):
-        """薄适配：委托 resolve_page_action，返回 (allowed, target_item, source, block_reason, detail)。"""
+        """薄适配：委托 resolve_page_action，返回 (allowed, page, source, block_reason, detail)。"""
         plan = self.resolve_page_action(
             session, action="sync_conversation", status=status, user_initiated=True
         )
@@ -2202,21 +2228,21 @@ class PageSyncMixin:
         self,
         *,
         expected_ctx=None,
-        target_item=None,
+        page=None,
         status=None,
         session=None,
     ):
         """轻量校验：online / client_id / page_instance_id / conversation_id。"""
         del status
-        if not isinstance(expected_ctx, dict) or not isinstance(target_item, dict):
+        if not isinstance(expected_ctx, dict) or not isinstance(page, dict):
             return False, "invalid_context"
         exp_client = (expected_ctx.get("client_id") or "").strip()
         exp_instance = (expected_ctx.get("page_instance_id") or "").strip()
         exp_conv = (expected_ctx.get("conversation_id") or "").strip()
-        got_client = (target_item.get("client_id") or "").strip()
-        got_instance = (target_item.get("page_instance_id") or "").strip()
-        got_conv = (target_item.get("conversation_id") or "").strip()
-        if not is_page_online(target_item):
+        got_client = (page.get("client_id") or "").strip()
+        got_instance = (page.get("page_instance_id") or "").strip()
+        got_conv = (page.get("conversation_id") or "").strip()
+        if not is_page_online(page):
             return False, "target_offline"
         if exp_conv and got_conv and exp_conv != got_conv:
             return False, "conversation_mismatch"
@@ -2240,13 +2266,13 @@ class PageSyncMixin:
         if session is None:
             return
         status = get_bridge_status()
-        allowed, target_item, source, _block_reason, _sync_detail = (
+        allowed, target_page, source, _block_reason, _sync_detail = (
             self.resolve_sync_decision(session, status=status)
         )
-        if allowed and isinstance(target_item, dict) and expected_ctx:
+        if allowed and isinstance(target_page, dict) and expected_ctx:
             still_ok, stale_reason = self._sync_dispatch_target_still_valid(
                 expected_ctx=expected_ctx,
-                target_item=target_item,
+                page=target_page,
                 status=status,
                 session=session,
             )
@@ -2255,12 +2281,12 @@ class PageSyncMixin:
                     "[SYNC][RETRY_STALE_TARGET] "
                     f"session_id={session_id} reason={stale_reason or 'expected_ctx_mismatch'} "
                     f"expected_client={(expected_ctx.get('client_id') or '-')} "
-                    f"got_client={(target_item.get('client_id') or '-')} "
+                    f"got_client={(target_page.get('client_id') or '-')} "
                     f"expected_instance={(expected_ctx.get('page_instance_id') or '-')} "
-                    f"got_instance={(target_item.get('page_instance_id') or '-')}",
+                    f"got_instance={(target_page.get('page_instance_id') or '-')}",
                     echo=True,
                 )
-        if allowed and isinstance(target_item, dict):
+        if allowed and isinstance(target_page, dict):
             self._clear_session_sync_running(session_id, reason="page_detected")
             ok, reason = self.request_sync_conversation(
                 session,

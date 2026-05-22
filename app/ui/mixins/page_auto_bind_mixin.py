@@ -304,7 +304,7 @@ class PageAutoBindMixin:
         )
     def _idle_home_selection_reason(self, item):
         visible = (
-            item.get("visibility_state") or item.get("visible") or ""
+            item.get("visibility_state") or ""
         ).strip()
         activity = classify_tm_client_activity(item)
         if activity == "active_focused" or item.get("has_focus"):
@@ -398,7 +398,7 @@ class PageAutoBindMixin:
             return False
         if item.get("has_focus"):
             return True
-        vis = (item.get("visibility_state") or item.get("visible") or "").strip()
+        vis = (item.get("visibility_state") or "").strip()
         return vis == "visible"
 
     def _idle_home_skip_reason(
@@ -671,7 +671,7 @@ class PageAutoBindMixin:
         client_id = (selected.get("client_id") or "").strip()
         page_instance_id = (selected.get("page_instance_id") or "").strip()
         visible = (
-            selected.get("visibility_state") or selected.get("visible") or ""
+            selected.get("visibility_state") or ""
         ).strip()
         reason = self._idle_home_selection_reason(selected)
         self._append_log(
@@ -847,7 +847,7 @@ class PageAutoBindMixin:
             client_id = (idle_home.get("client_id") or "").strip()
             page_instance_id = (idle_home.get("page_instance_id") or "").strip()
             visible = (
-                idle_home.get("visibility_state") or idle_home.get("visible") or ""
+                idle_home.get("visibility_state") or ""
             ).strip()
             reason = self._idle_home_selection_reason(idle_home)
             if not self._prebound_home_bind_to_session(

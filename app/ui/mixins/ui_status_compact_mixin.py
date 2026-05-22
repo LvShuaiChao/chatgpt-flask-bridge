@@ -374,25 +374,37 @@ class UiStatusCompactMixin:
         page_type = (data.get("page_type") or "").strip()
         liveness = (data.get("page_liveness") or "").strip()
         online = bool(data.get("online")) or liveness == "online"
+        sync_readable = bool(
+            data.get("conversation_syncable")
+            or data.get("sync_readable")
+            or (profile or {}).get("sync_ok")
+            or (profile or {}).get("conversation_syncable")
+        )
+        if sync_readable and online:
+            return "同步：可同步", "ok"
         if conversation_id and online and page_type == "conversation":
             return "同步：可同步", "ok"
         if data.get("prebound_home"):
             return "同步：不可同步", "warn"
+        if conversation_id and not online:
+            return "同步：页面离线", "warn"
+        if not conversation_id and not online:
+            return "同步：未绑定", "warn"
         return "同步：不可同步", "error"
 
     def _format_compact_send_chip(self, target, profile=None):
         data = self._merge_status_target_profile(target, profile)
         send_decision = (data.get("send_decision") or "").strip()
         response_state = (data.get("response_state") or "unknown").strip().lower()
-        blocked_reason = (data.get("blocked_reason") or "").strip()
+        reason_code = (data.get("reason_code") or "").strip()
         if send_decision == "allowed":
             return "发送：可发送", "ok"
         if send_decision == "queued":
             return "发送：可排队", "warn"
         if response_state in BUSY_RESPONSE_STATES or bool(data.get("is_responding")):
             return "发送：等待回复", "warn"
-        if blocked_reason:
-            return f"发送：不可发送（{blocked_reason}）", "error"
+        if reason_code:
+            return f"发送：不可发送（{reason_code}）", "error"
         return "发送：不可发送", "error"
 
     def _format_compact_sync_target_tooltip(self, target, profile=None, *, status=None):
@@ -403,7 +415,7 @@ class UiStatusCompactMixin:
         lines = [
             f"conversation_id：{data.get('conversation_id') or '-'}",
             f"send_decision：{data.get('send_decision') or '-'}",
-            f"blocked_reason：{data.get('blocked_reason') or '-'}",
+            f"reason_code：{data.get('reason_code') or '-'}",
             STATUS_DETAIL_TECH_HINT,
         ]
         return "\n".join(lines)
@@ -526,7 +538,7 @@ class UiStatusCompactMixin:
         data = self._merge_status_target_profile(item, profile)
         conversation_id = (data.get("conversation_id") or "").strip()
         send_decision = (data.get("send_decision") or "-").strip() or "-"
-        blocked_reason = (data.get("blocked_reason") or "-").strip() or "-"
+        reason_code = (data.get("reason_code") or "-").strip() or "-"
 
         lines = [
             f"页面 ID：{page_id}",
@@ -535,7 +547,7 @@ class UiStatusCompactMixin:
             f"URL：{full_url or '-'}",
             f"conversation_id：{conversation_id or '-'}",
             f"send_decision：{send_decision}",
-            f"blocked_reason：{blocked_reason}",
+            f"reason_code：{reason_code}",
             STATUS_DETAIL_TECH_HINT,
         ]
         return "\n".join(lines)

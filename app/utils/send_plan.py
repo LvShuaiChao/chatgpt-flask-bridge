@@ -25,7 +25,6 @@ class SendPlan:
 
     turn: LocalTurn
     page_action: PageActionPlan | None = None
-    target_page_snapshot: Optional[Dict[str, Any]] = field(default=None)
     decision: str = "blocked"  # allowed | queued | blocked
     reason: str = ""
     is_bootstrap: bool = False
@@ -95,12 +94,6 @@ class SendPlan:
         return self.page_action.target_source
 
     @property
-    def target_item(self) -> Any:
-        if self.page_action is None:
-            return None
-        return self.page_action.page
-
-    @property
     def page(self) -> PageActionPlan | None:
         """发送目标解析结果；与历史 plan.page.client_id 访问兼容。"""
         return self.page_action
@@ -114,15 +107,9 @@ class SendPlan:
     def apply_page_action(self, page_action: PageActionPlan | None) -> None:
         self.page_action = page_action
         if page_action is None:
-            self.target_page_snapshot = None
             return
         self.decision = (page_action.decision or "blocked").strip()
         self.reason = (page_action.reason_code or "").strip()
-        snap: Dict[str, Any] = {}
-        if isinstance(page_action.page, dict):
-            snap.update(page_action.page)
-        snap.update(page_action.capability.to_dict())
-        self.target_page_snapshot = snap
 
     def allows_dispatch(self) -> bool:
         return self.decision in ("allowed", "queued") and bool(self.client_id)

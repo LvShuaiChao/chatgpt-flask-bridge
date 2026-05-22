@@ -365,3 +365,55 @@ class ChatSession:
                 object.__setattr__(self, "pending_reply_since", float(value or 0))
             return
         super().__setattr__(name, value)
+
+
+def _message_field(message, key, default=""):
+    if isinstance(message, dict):
+        value = message.get(key)
+    else:
+        value = getattr(message, key, default)
+    if value is None:
+        return default
+    return value
+
+
+def is_waiting_placeholder_message(message) -> bool:
+    """assistant 本地占位 / 等待回复类消息（运行态，不应跨 GUI 重启保留）。"""
+    role = (_message_field(message, "role") or "").strip()
+    if role != "assistant":
+        return False
+    source = (
+        _message_field(message, "message_source")
+        or _message_field(message, "source")
+    ).strip()
+    status = (
+        _message_field(message, "ui_status")
+        or _message_field(message, "status")
+    ).strip()
+    content = (_message_field(message, "content") or "").strip()
+    from app.constants import (
+        ASSISTANT_WAIT_TEXTS,
+        WAITING_PLACEHOLDER_SOURCES,
+        WAITING_PLACEHOLDER_STATUSES,
+    )
+
+    if source in WAITING_PLACEHOLDER_SOURCES:
+        return True
+    if status in WAITING_PLACEHOLDER_STATUSES:
+        return True
+    if content in ASSISTANT_WAIT_TEXTS:
+        return True
+    return content.startswith("等待回复")
+
+
+def mark_waiting_placeholder_failed(message, *, content: str) -> bool:
+    if not is_waiting_placeholder_message(message):
+        return False
+    if isinstance(message, dict):
+        message["ui_status"] = "failed"
+        message["status"] = "failed"
+        message["content"] = content
+    else:
+        message.ui_status = "failed"
+        message.content = content
+    return True

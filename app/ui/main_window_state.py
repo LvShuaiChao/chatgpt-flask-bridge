@@ -97,7 +97,6 @@ class SessionUiState:
 class ServerUiState:
     start_failed: bool = False
     start_error: str = ""
-    tampermonkey_page_url: str | None = None
 
 
 def init_main_window_states(host) -> None:

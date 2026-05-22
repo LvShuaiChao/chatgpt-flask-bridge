@@ -171,7 +171,7 @@ class ExternalApiGuiMixin:
         if not any([client_id, page_url, conversation_id, page_instance_id]):
             return {
                 "ok": False,
-                "error": "缺少页面身份信息（client_id / page_url / conversation_id / page_instance_id）",
+                "error": "缺少页面身份信息（client_id / url / conversation_id / page_instance_id）",
                 "code": "EMPTY_TEXT",
             }
         client_info = None
@@ -206,11 +206,12 @@ class ExternalApiGuiMixin:
         return {
             "ok": True,
             "session_id": session.session_id,
-            "bound_client_id": (remote.get("client_id") or "").strip(),
-            "bound_page_instance_id": (remote.get("page_instance_id") or "").strip(),
-            "bound_conversation_id": self._remote_conversation_id(remote),
-            "url": (page_url_from(remote) or page_url or "").strip(),
-            "bind_state": self._remote_bind_state(remote) or "bound",
+            "bound": {
+                "client_id": (remote.get("client_id") or "").strip(),
+                "page_instance_id": (remote.get("page_instance_id") or "").strip(),
+                "conversation_id": self._remote_conversation_id(remote),
+                "url": (page_url_from(remote) or page_url or "").strip(),
+            },
             "session": self._external_session_payload(session),
         }
 
@@ -350,6 +351,14 @@ class ExternalApiGuiMixin:
         render_reason,
     ):
         text = (text or "").strip()
+        if text in ("正在思考", "正在生成", "思考中", "回复完成"):
+            session_id = session.session_id if session else ""
+            self._append_log(
+                f"[REPLY][SKIP_INVALID_TEXT] session_id={session_id or '-'} "
+                f"turn_id={turn_id or '-'} text={text!r}",
+                echo=True,
+            )
+            return False
         session_id = session.session_id if session else ""
         count_before = self._session_visible_message_count(session)
         self._append_log(
@@ -606,8 +615,8 @@ class ExternalApiGuiMixin:
         }
 
     def _external_push_message_text(self, session, content):
-        raw_user_text = content.strip()
-        if not raw_user_text:
+        content_text = content.strip()
+        if not content_text:
             return {"ok": False, "error": "text 为空", "code": "EMPTY_TEXT"}
 
         turn_id = str(uuid.uuid4())
@@ -651,7 +660,7 @@ class ExternalApiGuiMixin:
         payload = self._build_bridge_send_payload(
             session=session,
             turn_id=turn_id,
-            content=raw_user_text,
+            content=content_text,
             target_client_id=target_client_id,
             url=target_page_url,
             page_instance_id=(remote.get("page_instance_id") or "").strip(),
@@ -704,7 +713,7 @@ class ExternalApiGuiMixin:
         self._append_session_message(
             session,
             "user",
-            raw_user_text,
+            content_text,
             message_id=user_message_id,
             turn_id=turn_id,
             bridge_message_id=bridge_message_id,

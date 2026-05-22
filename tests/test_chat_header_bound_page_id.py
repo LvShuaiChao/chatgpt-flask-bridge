@@ -1,4 +1,4 @@
-﻿"""聊天区当前会话 / 绑定页面行展示 page_display_id。"""
+"""聊天区当前会话 / 绑定页面行展示 page_display_id。"""
 
 import pytest
 from PyQt5.QtWidgets import QApplication
@@ -62,7 +62,7 @@ class _Host(UiStatusCompactMixin, PageBindingDisplayMixin):
         return (remote.get("conversation_id") or "").strip()
 
     def _remote_conversation_url(self, remote):
-        return (remote.get("conversation_url") or remote.get("url") or "").strip()
+        return (remote.get("url") or "").strip()
 
     def _remote_bind_state(self, remote):
         return "bound_conversation" if remote_binding_enabled(remote) else "unbound"

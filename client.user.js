@@ -472,7 +472,18 @@
 
     function bindClick(root, selector, handler, moduleName) {
       const el = byId(root, selector, moduleName);
-      return bindOnce(el, 'click', handler, `click:${selector}`);
+      return bindOnce(el, 'click', async (event) => {
+        if (event && typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
+          event.currentTarget.blur();
+        }
+        await handler(event);
+      }, `click:${selector}`);
     }
 
     function bindChange(root, selector, handler, moduleName) {
@@ -847,6 +858,107 @@
     return false;
   }
 
+  function isToolboxCopyActionButton(button) {
+    if (!button) {
+      return false;
+    }
+    const id = String(button.id || '');
+    return id === 'cgpt-upload-continue-once' || id === 'cgpt-copy-last-message-scroll-bottom';
+  }
+
+  function setButtonTemporaryError(button, text, delayMs = 1200) {
+    if (!button) {
+      return;
+    }
+
+    const oldText = button.textContent;
+    button.classList.remove('cgpt-btn-ok', 'danger', 'failed', 'error');
+    button.classList.add('cgpt-btn-error');
+
+    if (text) {
+      button.textContent = text;
+    }
+
+    window.setTimeout(() => {
+      button.classList.remove('cgpt-btn-error');
+      if (text) {
+        button.textContent = oldText;
+      }
+      if (typeof button.blur === 'function') {
+        button.blur();
+      }
+    }, delayMs);
+  }
+
+  function setButtonTemporaryOk(button, delayMs = 800) {
+    if (!button) {
+      return;
+    }
+
+    button.classList.remove('cgpt-btn-error', 'danger', 'failed', 'error');
+    button.classList.add('cgpt-btn-ok');
+
+    window.setTimeout(() => {
+      button.classList.remove('cgpt-btn-ok');
+      if (typeof button.blur === 'function') {
+        button.blur();
+      }
+    }, delayMs);
+  }
+
+  function shouldSkipGlobalShortcutForToolboxTarget(target) {
+    const toolbox = document.querySelector(`#${APP.panelId}`);
+    if (!toolbox || !(target instanceof Element) || !toolbox.contains(target)) {
+      return false;
+    }
+
+    const tagName = String(target.tagName || '').toLowerCase();
+    const isEditable =
+      tagName === 'input' ||
+      tagName === 'textarea' ||
+      target.isContentEditable === true;
+
+    return !isEditable;
+  }
+
+  function installToolboxKeyboardGuard(rootEl) {
+    if (!rootEl) {
+      return;
+    }
+
+    if (rootEl.dataset.toolboxKeyboardGuardBound === '1') {
+      return;
+    }
+
+    rootEl.dataset.toolboxKeyboardGuardBound = '1';
+
+    rootEl.addEventListener('keydown', (event) => {
+      const target = event.target;
+      if (!target) {
+        return;
+      }
+
+      const tagName = String(target.tagName || '').toLowerCase();
+      const isEditable =
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        target.isContentEditable === true;
+
+      if (isEditable) {
+        return;
+      }
+
+      if (tagName === 'button' && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (typeof target.blur === 'function') {
+          target.blur();
+        }
+      }
+    }, true);
+  }
+
   function applyWaitingAnswerButtonStyle(button, waiting, options = {}) {
     if (!button) {
       return;
@@ -871,10 +983,13 @@
       });
     }
 
-    button.classList.remove(...styleClasses);
+    button.classList.remove(...styleClasses, 'cgpt-btn-error', 'cgpt-btn-ok');
 
     if (waiting) {
-      button.classList.add('danger', 'cgpt-waiting-answer');
+      button.classList.add('cgpt-waiting-answer');
+      if (!isToolboxCopyActionButton(button)) {
+        button.classList.add('danger');
+      }
       return;
     }
 
@@ -1038,11 +1153,33 @@
       }
 
       set.add(bindKey);
-      el.addEventListener(eventName, (event) => {
+      el.addEventListener(eventName, async (event) => {
+        if (eventName === 'click') {
+          if (event && typeof event.preventDefault === 'function') {
+            event.preventDefault();
+          }
+          if (event && typeof event.stopPropagation === 'function') {
+            event.stopPropagation();
+          }
+          const clickTarget = (event && event.currentTarget) || el;
+          if (clickTarget && typeof clickTarget.blur === 'function') {
+            clickTarget.blur();
+          }
+        }
+
         try {
-          handler(event, el);
+          const result = handler(event, el);
+          if (result && typeof result.then === 'function') {
+            await result;
+          }
         } catch (error) {
           const moduleName = options.moduleName || 'EventBinder';
+          const errText = error && error.message ? error.message : String(error);
+          console.error(`[${moduleName}][${eventName}-failed]`, {
+            error_type: error && error.name,
+            error: errText,
+            stack: error && error.stack,
+          });
           logError(`[${moduleName}][${eventName}-failed]`, error, options.key || '');
         }
       }, options.listenerOptions);
@@ -1751,39 +1888,24 @@
 
   const TOOLBOX_PAGE_STATE_ROOT_KEY = 'cgpt_toolbox_page_state_v1';
 
-  const TOOLBOX_STATE_FIELD_ALIASES = Object.freeze({
-    activeTab: ['activeTab', 'active_tab'],
-    uploadActiveGroupId: ['uploadActiveGroupId', 'upload_active_group_id'],
-    quickPromptCategory: ['quickPromptCategory', 'quick_prompt_category', 'selectedQuickCategory'],
-  });
-
   function readToolboxStateField(state, fieldName, fallback = '') {
     const src = state && typeof state === 'object' ? state : {};
-    const keys = TOOLBOX_STATE_FIELD_ALIASES[fieldName] || [fieldName];
-
-    for (let i = 0; i < keys.length; i += 1) {
-      const key = keys[i];
-      if (!Object.prototype.hasOwnProperty.call(src, key)) {
-        continue;
-      }
-
-      const value = src[key];
-      if (value == null) {
-        continue;
-      }
-
-      if (typeof value === 'string') {
-        const text = value.trim();
-        if (text) {
-          return text;
-        }
-        continue;
-      }
-
-      return value;
+    const key = String(fieldName || '').trim();
+    if (!key || !Object.prototype.hasOwnProperty.call(src, key)) {
+      return fallback;
     }
 
-    return fallback;
+    const value = src[key];
+    if (value == null) {
+      return fallback;
+    }
+
+    if (typeof value === 'string') {
+      const text = value.trim();
+      return text || fallback;
+    }
+
+    return value;
   }
 
   function normalizeToolboxStatePatchForWrite(patch) {
@@ -1794,21 +1916,16 @@
     if (activeTab) {
       out.activeTab = activeTab;
     }
-    delete out.active_tab;
 
     const uploadActiveGroupId = readToolboxStateField(input, 'uploadActiveGroupId', '');
     if (uploadActiveGroupId) {
       out.uploadActiveGroupId = uploadActiveGroupId;
     }
-    delete out.upload_active_group_id;
-    delete out.uploadLastActiveGroupId;
 
     const quickPromptCategory = readToolboxStateField(input, 'quickPromptCategory', '');
     if (quickPromptCategory) {
       out.quickPromptCategory = quickPromptCategory;
     }
-    delete out.quick_prompt_category;
-    delete out.selectedQuickCategory;
 
     return out;
   }
@@ -1834,7 +1951,7 @@
     }
   }
 
-  function getToolboxPageKey() {
+  function getToolboxRouteKey() {
     return `page:${getToolboxPageInstanceId()}`;
   }
 
@@ -1894,9 +2011,9 @@
   }
 
   function getToolboxPageState() {
-    const pageKey = getToolboxPageKey();
+    const toolboxRouteKey = getToolboxRouteKey();
     const states = readAllToolboxPageStates();
-    const state = states[pageKey];
+    const state = states[toolboxRouteKey];
     if (!state || typeof state !== 'object') {
       return {};
     }
@@ -1904,20 +2021,20 @@
   }
 
   function saveToolboxPageStatePatch(patch, reason = '') {
-    const pageKey = getToolboxPageKey();
+    const toolboxRouteKey = getToolboxRouteKey();
     const states = readAllToolboxPageStates();
-    const oldState = states[pageKey] && typeof states[pageKey] === 'object'
-      ? states[pageKey]
+    const oldState = states[toolboxRouteKey] && typeof states[toolboxRouteKey] === 'object'
+      ? states[toolboxRouteKey]
       : {};
     const bindingPatch = getToolboxPageBindingPatch();
 
     const normalizedPatch = normalizeToolboxStatePatchForWrite(patch || {});
 
-    states[pageKey] = {
+    states[toolboxRouteKey] = {
       ...oldState,
       ...normalizedPatch,
       ...bindingPatch,
-      pageKey,
+      toolboxRouteKey,
       page_instance_id: getToolboxPageInstanceId(),
       url: window.location.href,
       pathname: window.location.pathname,
@@ -1925,11 +2042,11 @@
     };
 
     writeAllToolboxPageStates(states);
-    const activeTab = readToolboxStateField(states[pageKey], 'activeTab', '');
+    const activeTab = readToolboxStateField(states[toolboxRouteKey], 'activeTab', '');
     const uploadActiveGroupId = readToolboxStateField(
-      states[pageKey],
+      states[toolboxRouteKey],
       'uploadActiveGroupId',
-      readToolboxStateField(states[pageKey], 'upload_active_group_id', ''),
+      '',
     );
     let compactModeFlag = false;
     try {
@@ -1942,13 +2059,13 @@
       );
     }
     toolboxPageStateAppendLog(
-      `[TOOLBOX_TAB][SAVE] reason=${reason || '-'} pageKey=${pageKey} activeTab=${activeTab || '-'} `
+      `[TOOLBOX_TAB][SAVE] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKey} activeTab=${activeTab || '-'} `
       + `uploadActiveGroupId=${uploadActiveGroupId || '-'} compactMode=${compactModeFlag ? 'true' : 'false'} `
       + `isApplyingToolboxPageState=${isApplyingToolboxPageState ? 'true' : 'false'} `
       + `fields=${Object.keys(patch || {}).join(',')}`,
     );
     toolboxPageStateAppendLog(
-      `[TOOLBOX_PAGE_STATE][save] reason=${reason || '-'} pageKey=${pageKey} fields=${Object.keys(patch || {}).join(',')}`,
+      `[TOOLBOX_PAGE_STATE][save] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKey} fields=${Object.keys(patch || {}).join(',')}`,
     );
   }
 
@@ -1974,7 +2091,7 @@
       state.quickPromptCategory = UploadModule.getQuickPromptActiveCategory();
     }
 
-    state.pageKey = getToolboxPageKey();
+    state.toolboxRouteKey = getToolboxRouteKey();
     state.page_instance_id = getToolboxPageInstanceId();
     state.url = window.location.href;
     state.pathname = window.location.pathname;
@@ -2005,19 +2122,19 @@
     );
   }
 
-  function saveToolboxBaseStateForPageKey(pageKey, reason = '', meta = {}) {
-    const key = String(pageKey || '').trim();
+  function saveToolboxBaseStateForRouteKey(toolboxRouteKey, reason = '', meta = {}) {
+    const key = String(toolboxRouteKey || '').trim();
 
     if (!key) {
       toolboxPageStateAppendLog(
-        `[TOOLBOX_PAGE_STATE][save-for-key-skip] reason=${reason || '-'} pageKey=empty`,
+        `[TOOLBOX_PAGE_STATE][save-for-key-skip] reason=${reason || '-'} toolboxRouteKey=empty`,
       );
       return;
     }
 
     if (isApplyingToolboxPageState) {
       toolboxPageStateAppendLog(
-        `[TOOLBOX_PAGE_STATE][save-for-key-skip] reason=${reason || '-'} pageKey=${key} applying=true`,
+        `[TOOLBOX_PAGE_STATE][save-for-key-skip] reason=${reason || '-'} toolboxRouteKey=${key} applying=true`,
       );
       return;
     }
@@ -2032,11 +2149,11 @@
     const nextState = {
       ...oldState,
       ...patch,
-      pageKey: key,
+      toolboxRouteKey: key,
       updatedAt: Date.now(),
     };
 
-    if (reason === 'before-page-key-change') {
+    if (reason === 'before-route-key-change') {
       nextState.url = metaObj.url || oldState.url || '';
       nextState.pathname = metaObj.pathname || oldState.pathname || '';
     } else {
@@ -2048,11 +2165,11 @@
 
     writeAllToolboxPageStates(states);
     toolboxPageStateAppendLog(
-      `[TOOLBOX_PAGE_STATE][save-for-key] reason=${reason || '-'} pageKey=${key} fields=${Object.keys(patch || {}).join(',')}`,
+      `[TOOLBOX_PAGE_STATE][save-for-key] reason=${reason || '-'} toolboxRouteKey=${key} fields=${Object.keys(patch || {}).join(',')}`,
     );
   }
 
-  let lastToolboxPageKey = '';
+  let lastToolboxRouteKey = '';
   let lastToolboxConversationKey = '';
 
 
@@ -4341,6 +4458,61 @@
           box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
         }
 
+        .cgpt-status-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 46px;
+          height: 24px;
+          padding: 0 8px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1;
+          border: 1px solid rgba(148, 163, 184, 0.55);
+          color: #e5e7eb;
+          background: rgba(15, 23, 42, 0.88);
+          white-space: nowrap;
+        }
+
+        .cgpt-state-ready {
+          color: #dcfce7;
+          background: rgba(22, 163, 74, 0.9);
+          border-color: rgba(74, 222, 128, 0.9);
+        }
+
+        .cgpt-state-waiting {
+          color: #dbeafe;
+          background: rgba(37, 99, 235, 0.88);
+          border-color: rgba(96, 165, 250, 0.9);
+        }
+
+        .cgpt-state-generating {
+          color: #ffedd5;
+          background: rgba(217, 119, 6, 0.92);
+          border-color: rgba(251, 191, 36, 0.9);
+        }
+
+        .cgpt-state-blocked {
+          color: #fee2e2;
+          background: rgba(220, 38, 38, 0.9);
+          border-color: rgba(248, 113, 113, 0.9);
+        }
+
+        .cgpt-state-offline,
+        .cgpt-state-unknown {
+          color: #e5e7eb;
+          background: rgba(71, 85, 105, 0.86);
+          border-color: rgba(148, 163, 184, 0.65);
+        }
+
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-status-pill {
+          min-width: 40px;
+          height: 22px;
+          padding: 0 7px;
+          font-size: 11px;
+        }
+
         .cgpt-toolbox-header-actions {
           flex: 0 0 auto;
           display: flex;
@@ -4922,6 +5094,21 @@
           background: #273449;
         }
 
+        .cgpt-btn:focus {
+          outline: 2px solid rgba(96, 165, 250, 0.75);
+          outline-offset: 2px;
+        }
+
+        .cgpt-btn:active {
+          transform: translateY(1px);
+        }
+
+        .cgpt-btn.cgpt-btn-ok {
+          background: #166534 !important;
+          border-color: #22c55e !important;
+          color: #ffffff !important;
+        }
+
         .cgpt-btn.primary {
           background: #1d4ed8;
           border-color: #3b82f6;
@@ -4931,15 +5118,13 @@
           background: #2563eb;
         }
 
-        .cgpt-btn.danger,
-        .cgpt-waiting-answer {
+        .cgpt-btn.danger {
           background: #dc2626;
           border-color: #ef4444;
           color: #ffffff;
         }
 
-        .cgpt-btn.danger:hover,
-        .cgpt-waiting-answer:hover {
+        .cgpt-btn.danger:hover {
           background: #b91c1c;
           border-color: #f87171;
           color: #ffffff;
@@ -5020,33 +5205,37 @@
           cursor: not-allowed;
         }
 
+        .cgpt-btn-copy-continue,
         #cgpt-upload-continue-once,
         #cgpt-upload-continue-once.copy-continue,
-        #cgpt-upload-continue-once.cgpt-btn-busy {
+        #cgpt-upload-continue-once.cgpt-btn-busy,
+        #cgpt-upload-continue-once.cgpt-waiting-answer {
           background: #7c3aed !important;
-          border-color: #a78bfa !important;
+          border-color: #8b5cf6 !important;
           color: #ffffff !important;
           opacity: 1 !important;
         }
 
-        #cgpt-upload-continue-once:hover {
+        #cgpt-upload-continue-once:hover,
+        #cgpt-upload-continue-once.cgpt-waiting-answer:hover {
           background: #8b5cf6 !important;
         }
 
         #cgpt-upload-continue-once[aria-disabled="true"] {
           background: #7c3aed !important;
-          border-color: #a78bfa !important;
+          border-color: #8b5cf6 !important;
           color: #ffffff !important;
           opacity: 1 !important;
           cursor: default;
         }
 
-        #cgpt-upload-continue-once.cgpt-btn-busy {
+        #cgpt-upload-continue-once.cgpt-btn-busy,
+        #cgpt-upload-continue-once.cgpt-waiting-answer.cgpt-btn-busy {
           box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.45);
         }
 
         #cgpt-copy-last-message-scroll-bottom {
-          background: #1d4ed8 !important;
+          background: #2563eb !important;
           border-color: #3b82f6 !important;
           color: #ffffff !important;
           pointer-events: auto !important;
@@ -5058,36 +5247,22 @@
           pointer-events: auto !important;
         }
 
-        #cgpt-copy-last-message-scroll-bottom:hover:not(:disabled) {
+        #cgpt-copy-last-message-scroll-bottom:hover:not(:disabled),
+        #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer:hover:not(:disabled) {
+          background: #3b82f6 !important;
+        }
+
+        #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer {
           background: #2563eb !important;
-        }
-
-        #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer,
-        #cgpt-copy-last-message-scroll-bottom.danger {
-          background: #dc2626 !important;
-          border-color: #ef4444 !important;
+          border-color: #3b82f6 !important;
           color: #ffffff !important;
         }
 
-        #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer:hover:not(:disabled),
-        #cgpt-copy-last-message-scroll-bottom.danger:hover:not(:disabled) {
-          background: #b91c1c !important;
-          border-color: #f87171 !important;
-        }
-
-        #cgpt-upload-continue-once.cgpt-waiting-answer,
-        #cgpt-upload-continue-once.cgpt-waiting-answer.copy-continue,
-        #cgpt-upload-continue-once.cgpt-waiting-answer.cgpt-btn-busy {
+        .cgpt-btn-copy-continue.cgpt-btn-error,
+        #cgpt-copy-last-message-scroll-bottom.cgpt-btn-error {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
-          box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.45);
-        }
-
-        #cgpt-upload-continue-once.cgpt-waiting-answer:hover,
-        #cgpt-upload-continue-once.cgpt-waiting-answer.copy-continue:hover {
-          background: #b91c1c !important;
-          border-color: #f87171 !important;
         }
 
         #cgpt-copy-last-message-scroll-bottom:disabled {
@@ -7370,6 +7545,7 @@
 
       ensureToolboxResizeHandle(panel);
       bindToolboxResize(panel);
+      installToolboxKeyboardGuard(root);
 
       if (root.dataset.shellEventsVersion === SHELL_EVENTS_VERSION) {
         return;
@@ -7484,9 +7660,9 @@
       }
 
       if (options.save !== false) {
-        const pageKey = typeof getToolboxPageKey === 'function' ? getToolboxPageKey() : '-';
+        const toolboxRouteKey = typeof getToolboxRouteKey === 'function' ? getToolboxRouteKey() : '-';
         appendLog(
-          `[TOOLBOX_TAB][SAVE] source=switchTab pageKey=${pageKey} activeTab=${nextTab} `
+          `[TOOLBOX_TAB][SAVE] source=switchTab toolboxRouteKey=${toolboxRouteKey} activeTab=${nextTab} `
           + `reason=${options.reason || `switch-tab:${nextTab}`} compactMode=${compactMode ? 'true' : 'false'} `
           + `isApplyingToolboxPageState=${isApplyingToolboxPageState ? 'true' : 'false'}`,
         );
@@ -11885,7 +12061,7 @@
       create();
 
       const applySeq = ++toolboxPageStateApplySeq;
-      const pageKeyAtStart = getToolboxPageKey();
+      const toolboxRouteKeyAtStart = getToolboxRouteKey();
       const state = getToolboxPageState();
 
       const abortIfStaleApply = () => {
@@ -11896,9 +12072,9 @@
           return true;
         }
 
-        if (getToolboxPageKey() !== pageKeyAtStart) {
+        if (getToolboxRouteKey() !== toolboxRouteKeyAtStart) {
           appendLog(
-            `[TOOLBOX_PAGE_STATE][apply-abort] reason=page-key-changed old=${pageKeyAtStart} current=${getToolboxPageKey()}`,
+            `[TOOLBOX_PAGE_STATE][apply-abort] reason=route-key-changed old=${toolboxRouteKeyAtStart} current=${getToolboxRouteKey()}`,
           );
           return true;
         }
@@ -11913,16 +12089,16 @@
         const uploadGroupField = readToolboxStateField(
           state,
           'uploadActiveGroupId',
-          readToolboxStateField(state, 'upload_active_group_id', ''),
+          '',
         );
         appendLog(
-          `[TOOLBOX_PAGE_STATE][APPLY] reason=${reason || '-'} pageKey=${pageKeyAtStart} seq=${applySeq} `
+          `[TOOLBOX_PAGE_STATE][APPLY] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKeyAtStart} seq=${applySeq} `
           + `activeTab=${activeTabField || '-'} uploadActiveGroupId=${uploadGroupField || '-'} `
           + `compactMode=${compactMode ? 'true' : 'false'} isApplyingToolboxPageState=true `
           + `keys=${Object.keys(state).join(',')}`,
         );
         appendLog(
-          `[TOOLBOX_PAGE_STATE][apply] reason=${reason || '-'} pageKey=${pageKeyAtStart} seq=${applySeq} keys=${Object.keys(state).join(',')}`,
+          `[TOOLBOX_PAGE_STATE][apply] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKeyAtStart} seq=${applySeq} keys=${Object.keys(state).join(',')}`,
         );
 
         if (abortIfStaleApply()) {
@@ -11963,41 +12139,41 @@
     }
 
     async function handleRouteChange(reason = '') {
-      const nextPageKey = getToolboxPageKey();
+      const nextPageKey = getToolboxRouteKey();
       const nextConvKey = getToolboxConversationStateKey();
 
-      if (!lastToolboxPageKey) {
-        lastToolboxPageKey = nextPageKey;
+      if (!lastToolboxRouteKey) {
+        lastToolboxRouteKey = nextPageKey;
         lastToolboxConversationKey = nextConvKey;
         return;
       }
 
-      const pageKeyChanged = nextPageKey !== lastToolboxPageKey;
+      const toolboxRouteKeyChanged = nextPageKey !== lastToolboxRouteKey;
       const convKeyChanged = nextConvKey !== lastToolboxConversationKey;
 
-      if (!pageKeyChanged && !convKeyChanged) {
+      if (!toolboxRouteKeyChanged && !convKeyChanged) {
         return;
       }
 
-      if (pageKeyChanged) {
-        const oldKey = lastToolboxPageKey;
+      if (toolboxRouteKeyChanged) {
+        const oldKey = lastToolboxRouteKey;
         const oldStates = readAllToolboxPageStates();
         const oldPageState = oldStates[oldKey] && typeof oldStates[oldKey] === 'object'
           ? oldStates[oldKey]
           : {};
 
-        saveToolboxBaseStateForPageKey(oldKey, 'before-page-key-change', {
+        saveToolboxBaseStateForRouteKey(oldKey, 'before-route-key-change', {
           url: oldPageState.url || window.location.href,
           pathname: oldPageState.pathname || window.location.pathname,
         });
 
-        lastToolboxPageKey = nextPageKey;
+        lastToolboxRouteKey = nextPageKey;
 
         appendLog(
           `[TOOLBOX_PAGE_STATE][page-change] reason=${reason || '-'} old=${oldKey} next=${nextPageKey}`,
         );
 
-        await applyToolboxPageState('page-key-changed');
+        await applyToolboxPageState('route-key-changed');
       }
 
       if (convKeyChanged) {
@@ -12008,7 +12184,7 @@
       }
     }
 
-    function checkToolboxPageKeyChanged(reason = '') {
+    function checkToolboxRouteKeyChanged(reason = '') {
       void handleRouteChange(reason).catch((error) => {
         appendLog(
           `[TOOLBOX_PAGE_STATE][route-change-error] reason=${reason || '-'} error=${error && error.stack ? error.stack : String(error)}`,
@@ -12022,16 +12198,16 @@
       }
 
       window.__cgptToolboxPageStateWatcherBound = true;
-      lastToolboxPageKey = getToolboxPageKey();
+      lastToolboxRouteKey = getToolboxRouteKey();
       lastToolboxConversationKey = getToolboxConversationStateKey();
 
       installUnifiedRouteChangePipeline();
 
       window.setInterval(() => {
-        checkToolboxPageKeyChanged('interval');
+        checkToolboxRouteKeyChanged('interval');
       }, 1500);
 
-      appendLog(`[TOOLBOX_PAGE_STATE][route-watch-bind] pageKey=${lastToolboxPageKey}`);
+      appendLog(`[TOOLBOX_PAGE_STATE][route-watch-bind] toolboxRouteKey=${lastToolboxRouteKey}`);
     }
 
     return {
@@ -13194,6 +13370,102 @@
       latestUser: picked.latestUser || null,
       reason: picked.reason || '',
     };
+  }
+
+  function getValidAssistantTextsFromDom() {
+    const main = document.querySelector('main') || document.body;
+    if (!(main instanceof HTMLElement)) {
+      return [];
+    }
+
+    return Array.from(main.querySelectorAll('[data-message-author-role="assistant"]'))
+      .filter((node) => node instanceof HTMLElement)
+      .filter((node) => !isInToolbox(node) && !isInComposerArea(node) && !isChatSidebarElement(node))
+      .map((node) => String(node.innerText || node.textContent || '').trim())
+      .filter(Boolean);
+  }
+
+  function getBridgeReplyBaseline() {
+    const validAssistantTexts = getValidAssistantTextsFromDom();
+
+    return {
+      assistant_count: validAssistantTexts.length,
+      last_assistant_text: validAssistantTexts[validAssistantTexts.length - 1] || '',
+      started_at: Date.now(),
+    };
+  }
+
+  function getLatestAssistantTextFromDomDirect() {
+    const main = document.querySelector('main') || document.body;
+    if (!(main instanceof HTMLElement)) {
+      return '';
+    }
+
+    const nodes = Array.from(
+      main.querySelectorAll('[data-message-author-role="assistant"]'),
+    );
+
+    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+      const node = nodes[i];
+
+      if (!(node instanceof HTMLElement)) {
+        continue;
+      }
+
+      if (isInToolbox(node) || isInComposerArea(node) || isChatSidebarElement(node)) {
+        continue;
+      }
+
+      const text = String(node.innerText || node.textContent || '').trim();
+
+      if (text) {
+        return text;
+      }
+    }
+
+    return '';
+  }
+
+  function extractBridgeAssistantReplyText(replyBaseline) {
+    const domTexts = getValidAssistantTextsFromDom();
+
+    if (replyBaseline && typeof replyBaseline.assistant_count === 'number') {
+      const baselineCount = replyBaseline.assistant_count;
+      if (domTexts.length > baselineCount) {
+        const newTexts = domTexts.slice(baselineCount);
+        const candidate = newTexts[newTexts.length - 1] || '';
+        if (candidate) {
+          return candidate;
+        }
+      }
+
+      const latestDom = domTexts[domTexts.length - 1] || '';
+      const baselineText = String(replyBaseline.last_assistant_text || '').trim();
+      if (latestDom && latestDom !== baselineText) {
+        return latestDom;
+      }
+    }
+
+    const latestAssistant = getLatestAssistantAfterLatestUserRecord({
+      includeHidden: true,
+    });
+
+    let text = latestAssistant && latestAssistant.text
+      ? String(latestAssistant.text).trim()
+      : '';
+
+    if (!text) {
+      text = getLatestAssistantTextFromDomDirect();
+    }
+
+    if (replyBaseline) {
+      const baselineText = String(replyBaseline.last_assistant_text || '').trim();
+      if (text && text === baselineText) {
+        return '';
+      }
+    }
+
+    return text;
   }
 
   function getLatestAssistantMessageForCopy() {
@@ -14614,15 +14886,21 @@
         if (!wasBusy && typeof TitlePrefixModule.stopReplyDoneFlash === 'function') {
           TitlePrefixModule.stopReplyDoneFlash(`assistant-start:${reason || '-'}`);
         }
+        if (!wasBusy) {
+          ChatInputStateRuntime.waitingForReply = false;
+        }
         wasBusy = true;
+        updateChatInputStateBadge();
         return;
       }
 
       if (wasBusy) {
         wasBusy = false;
+        ChatInputStateRuntime.waitingForReply = false;
 
         const now = Date.now();
         if (now - lastFlashAt < 1500) {
+          updateChatInputStateBadge();
           return;
         }
 
@@ -14630,6 +14908,8 @@
         TitlePrefixModule.startReplyDoneFlash(`assistant-finished:${reason || '-'}`);
         refreshToolboxPageStatusDisplay(`assistant-finished:${reason || '-'}`);
       }
+
+      updateChatInputStateBadge();
     }
 
     function start() {
@@ -14686,6 +14966,10 @@
     last_poll_ok: null,
     last_poll_error: '',
     last_poll_at: 0,
+  };
+
+  const ChatInputStateRuntime = {
+    waitingForReply: false,
   };
 
   function hasValidPageDisplayId(value) {
@@ -14772,6 +15056,8 @@
     ) {
       UploadModule.refreshToolboxTopStatus(reason);
     }
+
+    updateChatInputStateBadge();
   }
 
   function getBridgePageDisplayIdText() {
@@ -15046,6 +15332,7 @@
       last_poll_error: '',
       last_poll_at: Date.now(),
     });
+    updateChatInputStateBadge();
   }
 
   function markBridgePollFailure(errorText) {
@@ -15055,6 +15342,7 @@
       last_poll_error: String(errorText || '').trim() || 'bridge_poll_failed',
       last_poll_at: Date.now(),
     });
+    updateChatInputStateBadge();
   }
 
   function resolvePageCapabilityReason(responseState, conversationId, url) {
@@ -15110,6 +15398,9 @@
       response_state: responseState.response_state || 'unknown',
       response_state_reason: resolvePageCapabilityReason(responseState, conversationId, url),
       bridge_connected: Boolean(BridgePollRuntime.bridge_connected),
+      can_send_now: Boolean(responseState.can_send_now),
+      can_accept_input: Boolean(responseState.can_accept_input),
+      assistant_busy: responding,
       last_poll_ok: BridgePollRuntime.last_poll_ok,
       last_poll_error: String(BridgePollRuntime.last_poll_error || '').trim(),
       last_poll_at: Number(BridgePollRuntime.last_poll_at || 0),
@@ -15117,6 +15408,208 @@
       has_focus: document.hasFocus(),
       reason: String(reason || '').trim(),
     };
+  }
+
+  function isDomElementVisible(el) {
+    if (!(el instanceof Element)) {
+      return false;
+    }
+
+    if (el.disabled) {
+      return false;
+    }
+
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function detectChatInputStateFromDom() {
+    const stopSelectors = [
+      'button[data-testid="stop-button"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="停止"]',
+      'button[data-testid*="stop"]',
+    ];
+
+    for (const selector of stopSelectors) {
+      const stopBtn = document.querySelector(selector);
+      if (isDomElementVisible(stopBtn)) {
+        return {
+          text: '生成中',
+          cls: 'cgpt-state-generating',
+          title: 'ChatGPT 正在回答，暂时不建议发送新消息',
+        };
+      }
+    }
+
+    const composer = document.querySelector('#prompt-textarea')
+      || document.querySelector('textarea')
+      || document.querySelector('[contenteditable="true"]');
+    const sendSelectors = [
+      'button[data-testid="send-button"]',
+      'button[aria-label*="Send"]',
+      'button[aria-label*="发送"]',
+    ];
+
+    let sendBtn = null;
+    for (const selector of sendSelectors) {
+      const candidate = document.querySelector(selector);
+      if (candidate) {
+        sendBtn = candidate;
+        break;
+      }
+    }
+
+    if (composer && sendBtn) {
+      const sendReady = !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true';
+      if (sendReady) {
+        return {
+          text: '可输入',
+          cls: 'cgpt-state-ready',
+          title: '当前页面可以输入并发送消息',
+        };
+      }
+
+      return {
+        text: '不可发',
+        cls: 'cgpt-state-blocked',
+        title: '当前输入框或发送按钮不可用',
+      };
+    }
+
+    if (composer) {
+      return {
+        text: '不可发',
+        cls: 'cgpt-state-blocked',
+        title: '当前输入框或发送按钮不可用',
+      };
+    }
+
+    return {
+      text: '未知',
+      cls: 'cgpt-state-unknown',
+      title: '无法判断当前页面输入状态',
+    };
+  }
+
+  function resolveWaitingForReply() {
+    if (ChatInputStateRuntime.waitingForReply) {
+      return true;
+    }
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && typeof UploadModule.isWaitingForReply === 'function'
+      && UploadModule.isWaitingForReply()
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function getChatInputState() {
+    const capability = typeof getPageCapability === 'function'
+      ? getPageCapability('input-state')
+      : null;
+    const domState = detectChatInputStateFromDom();
+
+    const bridgeConnected = !!(capability && capability.bridge_connected);
+    let isResponding = !!(
+      capability
+      && (
+        capability.is_responding
+        || capability.assistant_busy
+        || capability.response_state === 'responding'
+        || capability.response_state === 'generating'
+      )
+    );
+    let canSendNow = !!(
+      capability
+      && (
+        capability.can_send_now
+        || capability.sendable
+        || capability.can_accept_input
+        || capability.inputable
+      )
+    );
+
+    if (!bridgeConnected) {
+      return {
+        text: '未连接',
+        cls: 'cgpt-state-offline',
+        title: '油猴桥接未连接或页面未注册到 Flask',
+      };
+    }
+
+    if (domState && domState.cls === 'cgpt-state-generating') {
+      isResponding = true;
+    }
+
+    if (isResponding) {
+      return {
+        text: '生成中',
+        cls: 'cgpt-state-generating',
+        title: 'ChatGPT 正在回答，暂时不建议发送新消息',
+      };
+    }
+
+    if (resolveWaitingForReply()) {
+      return {
+        text: '等待中',
+        cls: 'cgpt-state-waiting',
+        title: '消息已发送，正在等待回复',
+      };
+    }
+
+    if (canSendNow || (domState && domState.cls === 'cgpt-state-ready')) {
+      return {
+        text: '可输入',
+        cls: 'cgpt-state-ready',
+        title: '当前页面可以输入并发送消息',
+      };
+    }
+
+    if (domState && domState.cls === 'cgpt-state-blocked') {
+      return domState;
+    }
+
+    if (capability) {
+      return {
+        text: '不可发',
+        cls: 'cgpt-state-blocked',
+        title: '当前输入框或发送按钮不可用',
+      };
+    }
+
+    return domState || {
+      text: '未知',
+      cls: 'cgpt-state-unknown',
+      title: '无法判断当前页面输入状态',
+    };
+  }
+
+  function updateChatInputStateBadge() {
+    const badge = document.querySelector('#cgpt-page-input-state');
+    if (!badge) {
+      return;
+    }
+
+    const info = getChatInputState();
+
+    badge.textContent = info.text;
+    badge.title = info.title || info.text;
+
+    badge.classList.remove(
+      'cgpt-state-ready',
+      'cgpt-state-waiting',
+      'cgpt-state-generating',
+      'cgpt-state-blocked',
+      'cgpt-state-offline',
+      'cgpt-state-unknown',
+    );
+
+    badge.classList.add(info.cls || 'cgpt-state-unknown');
   }
 
   function logPageCapability(capability, tag = '[CAPABILITY]') {
@@ -15148,6 +15641,13 @@
 
     while (Date.now() - startedAt < timeoutMs) {
       if (ComposerApi.isAssistantLikelyBusy()) {
+        const latestBusy = getLatestConversationMessageRecord({ preferAssistant: false });
+        if (latestBusy && latestBusy.role === 'user') {
+          const latestBusyText = String(latestBusy.text || '').trim();
+          if (!contentText || (contentProbe && latestBusyText.includes(contentProbe))) {
+            return { ok: true, reason: 'assistant_busy_user_visible' };
+          }
+        }
         return { ok: false, reason: 'assistant_busy' };
       }
 
@@ -15180,14 +15680,17 @@
     const timeoutMs = Number(options.timeoutMs || 60000);
 
     logPageCapability(getPageCapability(`send:${source}`), '[SEND][CAPABILITY]');
+    updateChatInputStateBadge();
 
     if (!sendExistingComposer && !content) {
+      updateChatInputStateBadge();
       return { ok: false, reason: 'empty_content', source };
     }
 
     const responseState = detectComposerResponseState();
 
     if (blockWhenResponding && responseState.is_responding) {
+      updateChatInputStateBadge();
       return {
         ok: false,
         reason: 'assistant_busy',
@@ -15197,6 +15700,7 @@
     }
 
     if (!sendExistingComposer && !responseState.can_accept_input) {
+      updateChatInputStateBadge();
       return {
         ok: false,
         reason: responseState.response_state_reason || 'cannot_accept_input',
@@ -15249,6 +15753,7 @@
     );
 
     if (!confirmed.ok) {
+      updateChatInputStateBadge();
       return {
         ok: false,
         reason: `send_not_confirmed:${confirmed.reason}`,
@@ -15256,6 +15761,8 @@
       };
     }
 
+    ChatInputStateRuntime.waitingForReply = true;
+    updateChatInputStateBadge();
     return { ok: true, reason: confirmed.reason, source };
   }
 
@@ -18018,14 +18525,17 @@
       const turnText = `轮:${turnCount}`;
 
       pageStatusRowEl.innerHTML = `
+        <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge" title="${escapeHtml(turnText)}">${escapeHtml(turnText)}</span>
       `;
+      updateChatInputStateBadge();
     }
 
     function renderToolboxTopStatus() {
       renderToolboxPageStatusRow();
       renderProjectCategoryChips();
+      updateChatInputStateBadge();
     }
 
     function setStatus(text, type) {
@@ -18593,6 +19103,7 @@
         copyTaskStatus = 'done';
         setStatus('已复制最后回复，并发送：继续', 'success');
         ToolboxShell.appendLog('[UPLOAD_COPY_CONTINUE][done] copied=1 sent=1');
+        setButtonTemporaryOk(btn);
 
         return true;
       } catch (error) {
@@ -18601,6 +19112,7 @@
         console.error('[ChatGPT toolbox] copyLastMessageAndContinue failed', error);
         ToolboxShell.appendLog(`[UPLOAD_COPY_CONTINUE][failed] error=${errText}`);
         setStatus(`复制并继续失败：${errText}`, 'error');
+        setButtonTemporaryError(btn, '复制失败', 1200);
         return false;
       } finally {
         copyContinueTaskRunning = false;
@@ -18836,10 +19348,14 @@
             'orange',
             'amber',
             'cgpt-waiting-answer',
+            'cgpt-btn-error',
+            'cgpt-btn-ok',
+            'failed',
+            'error',
           ],
           addClasses: waitingAnswer
-            ? ['danger', 'cgpt-waiting-answer', 'copy-continue']
-            : ['primary', 'copy-continue'],
+            ? ['cgpt-waiting-answer', 'copy-continue', 'cgpt-btn-copy-continue']
+            : ['copy-continue', 'cgpt-btn-copy-continue'],
         });
         copyContinueBtn.dataset.assistantBusy = busy ? '1' : '0';
       }
@@ -18870,10 +19386,14 @@
             'orange',
             'amber',
             'cgpt-waiting-answer',
+            'cgpt-btn-error',
+            'cgpt-btn-ok',
+            'failed',
+            'error',
           ],
           addClasses: waitingAnswer
-            ? ['danger', 'cgpt-waiting-answer']
-            : ['primary'],
+            ? ['cgpt-waiting-answer']
+            : [],
         });
       }
 
@@ -20667,6 +21187,7 @@
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][send-message-button:sent] runId=${runId} reason=${sendResult.reason || '-'}`,
           );
+          updateChatInputStateBadge();
           return true;
         }
 
@@ -20793,6 +21314,10 @@
         logUploadShortcutDebug(e, 'send-ignore', 'target-in-toolbox-editable');
         return false;
       }
+      if (shouldSkipGlobalShortcutForToolboxTarget(e.target)) {
+        logUploadShortcutDebug(e, 'send-ignore', 'target-in-toolbox-non-editable');
+        return false;
+      }
       const now = Date.now();
       if (now - uploadSendShortcutLastAt < 800) {
         e.preventDefault();
@@ -20908,6 +21433,10 @@
         }
 
         if (isEditableTarget(e.target)) {
+          return;
+        }
+
+        if (shouldSkipGlobalShortcutForToolboxTarget(e.target)) {
           return;
         }
 
@@ -21634,8 +22163,12 @@
             'orange',
             'amber',
             'cgpt-waiting-answer',
+            'cgpt-btn-error',
+            'cgpt-btn-ok',
+            'failed',
+            'error',
           ],
-          addClasses: ['primary'],
+          addClasses: [],
         });
         applyUploadShortcutButtonTitles(rootElRef);
       }
@@ -22028,6 +22561,7 @@
             if (typeof ToolboxShell.showToast === 'function') {
               ToolboxShell.showToast(`已复制 ${stats.charCount} 字符`, 'success', 900);
             }
+            setButtonTemporaryOk(copyLastMessageBtn);
             return true;
           }
 
@@ -22127,6 +22661,7 @@
             ToolboxShell.appendLog(
               `[CHAT_PAGE][copy-last-message:ok] source=${source} role=${result.role || '-'} chars=${stats.charCount} han=${stats.hanCount} no_space=${stats.noSpaceCharCount} lines=${stats.lineCount} reason=${result.reason || '-'}`
             );
+            setButtonTemporaryOk(copyLastMessageBtn);
           } catch (uiErr) {
             const uiErrText = uiErr && uiErr.message ? uiErr.message : String(uiErr);
             console.error('[ChatGPT toolbox] copy success UI update failed', uiErr);
@@ -22169,6 +22704,7 @@
 
         ToolboxShell.appendLog(`[CHAT_PAGE][copy-last-message:failed] source=${source} error=${errText}`);
         ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:beep-skip] reason=copy-failed');
+        setButtonTemporaryError(copyLastMessageBtn, '复制失败', 1200);
 
         if (!shouldRestoreScroll) {
           void forceChatPageToAbsoluteEnd('copy-last-message-error').catch((scrollErr) => {
@@ -22332,8 +22868,13 @@
               'warning',
               'orange',
               'amber',
+              'danger',
+              'cgpt-btn-error',
+              'cgpt-btn-ok',
+              'failed',
+              'error',
             ],
-            addClasses: ['danger', 'cgpt-waiting-answer'],
+            addClasses: ['cgpt-waiting-answer'],
           });
         }
 
@@ -22449,6 +22990,10 @@
           logShortcutDebug(e, 'copy-ignore', 'target-in-toolbox-editable');
           return;
         }
+        if (shouldSkipGlobalShortcutForToolboxTarget(e.target)) {
+          logShortcutDebug(e, 'copy-ignore', 'target-in-toolbox-non-editable');
+          return;
+        }
         const now = Date.now();
         if (now - copyLastMessageShortcutLastAt < 800) {
           logShortcutDebug(e, 'copy-ignore', 'too-fast');
@@ -22532,6 +23077,10 @@
         }
       }
 
+      if (typeof button.blur === 'function') {
+        button.blur();
+      }
+
       ToolboxShell.appendLog(
         `[UPLOAD_UI_ACTION][hit] action=${action} source=${src} disabled=${button.disabled ? '1' : '0'}`,
       );
@@ -22582,6 +23131,7 @@
             },
           );
           ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-last-message:failed] error=${errText}`);
+          setButtonTemporaryError(button, '复制失败', 1200);
           resetCopyLastMessageTaskState('ui-action-catch');
         });
 
@@ -22661,6 +23211,9 @@
         if (copyContinueBtn) {
           e.preventDefault();
           e.stopPropagation();
+          if (typeof copyContinueBtn.blur === 'function') {
+            copyContinueBtn.blur();
+          }
 
           const busyState = clearStaleUploadButtonBusy(copyContinueBtn, {
             action: 'copy-continue',
@@ -22680,6 +23233,9 @@
 
         const copyBtn = target.closest('#cgpt-copy-last-message-scroll-bottom');
         if (copyBtn) {
+          if (typeof copyBtn.blur === 'function') {
+            copyBtn.blur();
+          }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-last-message');
           runUploadUiAction('copy-last-message', copyBtn, 'delegated-click', e);
           return;
@@ -22687,6 +23243,9 @@
 
         const sendBtn = target.closest('#cgpt-upload-start-send');
         if (sendBtn) {
+          if (typeof sendBtn.blur === 'function') {
+            sendBtn.blur();
+          }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=send-message');
           runUploadUiAction('send-message', sendBtn, 'delegated-click', e);
           return;
@@ -22694,6 +23253,9 @@
 
         const uploadBtn = target.closest('#cgpt-upload-start');
         if (uploadBtn) {
+          if (typeof uploadBtn.blur === 'function') {
+            uploadBtn.blur();
+          }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=start-upload');
           runUploadUiAction('start-upload', uploadBtn, 'delegated-click', e);
           return;
@@ -22703,6 +23265,9 @@
         if (sendHotkeyBtn) {
           e.preventDefault();
           e.stopPropagation();
+          if (typeof sendHotkeyBtn.blur === 'function') {
+            sendHotkeyBtn.blur();
+          }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=send-hotkey');
           runUploadActionPromise(triggerSendHotkeyOnce(), '发送快捷键');
           return;
@@ -22712,6 +23277,9 @@
         if (autoContinueBtn) {
           e.preventDefault();
           e.stopPropagation();
+          if (typeof autoContinueBtn.blur === 'function') {
+            autoContinueBtn.blur();
+          }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=auto-continue');
           runUploadActionPromise((async () => {
             if (!AutoQueueModule || typeof AutoQueueModule.triggerContinueOnce !== 'function') {
@@ -23313,10 +23881,10 @@
         return;
       }
 
-      const shouldApplyDefaults = reason === 'init' || reason === 'page-key-changed';
+      const shouldApplyDefaults = reason === 'init' || reason === 'route-key-changed';
       const shouldRestoreUploadGroup =
         shouldApplyDefaults || reason === 'upload-groups-ready';
-      const pageKey = getToolboxPageKey();
+      const toolboxRouteKey = getToolboxRouteKey();
       const reasonText = reason || '-';
 
       let targetGroupId = '';
@@ -23331,7 +23899,7 @@
 
         if (pageGroupId && !preferred.groupId) {
           ToolboxShell.appendLog(
-            `[UPLOAD_PAGE_STATE][restore-group-missing] reason=${reasonText} pageKey=${pageKey} groupId=${pageGroupId}`,
+            `[UPLOAD_PAGE_STATE][restore-group-missing] reason=${reasonText} toolboxRouteKey=${toolboxRouteKey} groupId=${pageGroupId}`,
           );
         }
       } else {
@@ -23347,7 +23915,7 @@
 
       if (!targetGroupId) {
         ToolboxShell.appendLog(
-          `[UPLOAD_PAGE_STATE][restore-group-skip] reason=${reasonText} pageKey=${pageKey} noTarget=1`,
+          `[UPLOAD_PAGE_STATE][restore-group-skip] reason=${reasonText} toolboxRouteKey=${toolboxRouteKey} noTarget=1`,
         );
       } else {
         if (targetGroupId !== state.activeGroupId) {
@@ -23360,7 +23928,7 @@
         }
 
         ToolboxShell.appendLog(
-          `[UPLOAD_PAGE_STATE][restore-group] reason=${reasonText} pageKey=${pageKey} groupId=${targetGroupId || '-'} source=${source}`,
+          `[UPLOAD_PAGE_STATE][restore-group] reason=${reasonText} toolboxRouteKey=${toolboxRouteKey} groupId=${targetGroupId || '-'} source=${source}`,
         );
 
         if (source === 'last-manual' || source === 'first') {
@@ -23579,6 +24147,11 @@
         render();
         syncGlobalDocumentDropBinding();
       },
+      isWaitingForReply: () => !!(
+        state.waitingReply
+        || state.waitingSend
+        || state.autoSendWaiting
+      ),
       refreshToolboxTopStatus: (reason = '') => {
         renderToolboxTopStatus();
         if (reason && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
@@ -24324,7 +24897,9 @@
       if (busy) {
         state.replyBecameBusy = true;
         state.idleSince = 0;
+        ChatInputStateRuntime.waitingForReply = false;
         updateStatus();
+        updateChatInputStateBadge();
         return;
       }
 
@@ -24337,6 +24912,7 @@
           state.waitingStartedAt = 0;
           advanceAfterSend();
           updateStatus();
+          updateChatInputStateBadge();
         }
         return;
       }
@@ -24353,6 +24929,7 @@
 
         advanceAfterSend();
         updateStatus();
+        updateChatInputStateBadge();
       }
     }
 
@@ -24396,6 +24973,7 @@
         state.waitingStartedAt = Date.now();
         log(`已发送：${prompt.slice(0, 80)} reason=${sendResult.reason || '-'}`);
         updateStatus();
+        updateChatInputStateBadge();
       }).catch((err) => {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] auto queue send failed', err);
@@ -27222,6 +27800,8 @@
       uploadBlockNextChatReason: '',
       uploadBlockNextChatAt: 0,
       uploadBlockNextChatSourceMessageId: '',
+      pendingReplyContext: null,
+      lastReplyWatchResponding: false,
     };
 
     const bridgeTimers = createTimerRegistry('BRIDGE');
@@ -27256,10 +27836,6 @@
       }
     })();
 
-    function getBridgePageKey() {
-      return `${CLIENT_ID}::${PAGE_INSTANCE_ID}`;
-    }
-
     function buildVisibilityPayload() {
       const visibilityState = document.visibilityState || 'unknown';
       const hasFocus = document.hasFocus();
@@ -27272,7 +27848,7 @@
 
     function getConfig() {
       return {
-        bridgeEnabled: !!MemoryManager.get('bridgeEnabled', true),
+        bridgeEnabled: true,
         bridgeBaseUrl: normalizeBridgeBaseUrl(MemoryManager.get('bridgeBaseUrl', DEFAULT_BRIDGE_BASE_URL)),
         bridgePath: normalizeBridgePath(MemoryManager.get('bridgePath', DEFAULT_BRIDGE_PATH)),
         bridgeApiToken: String(MemoryManager.get('bridgeApiToken', '') || '').trim(),
@@ -27284,8 +27860,12 @@
 
     function saveConfig(patch) {
       Object.keys(patch || {}).forEach((key) => {
+        if (key === 'bridgeEnabled') {
+          return;
+        }
         MemoryManager.set(key, patch[key]);
       });
+      MemoryManager.set('bridgeEnabled', true);
     }
 
     function normalizeBridgeBaseUrl(value) {
@@ -27347,55 +27927,25 @@
       return detectComposerResponseState();
     }
 
-    const BRIDGE_DEPRECATED_FIELDS_LOGGED = new Set();
-
     function bridgeUrlFrom(obj) {
       if (!obj || typeof obj !== 'object') {
         return '';
       }
-      return String(
-        obj.url
-        || obj.page_url
-        || obj.target_url
-        || obj.target_page_url
-        || obj.conversation_url
-        || '',
-      ).trim();
+      return String(obj.url || '').trim();
     }
 
     function bridgeContentFrom(obj) {
       if (!obj || typeof obj !== 'object') {
         return '';
       }
-      const readOrder = [
-        ['content', 'content'],
-        ['final_prompt', 'content'],
-        ['text', 'content'],
-        ['message', 'content'],
-        ['raw_content', 'content'],
-        ['raw_user_text', 'content'],
-      ];
-      for (const [field, replacement] of readOrder) {
-        const value = String(obj[field] || '').trim();
-        if (!value) {
-          continue;
-        }
-        if (field !== 'content' && !BRIDGE_DEPRECATED_FIELDS_LOGGED.has(`poll:${field}`)) {
-          BRIDGE_DEPRECATED_FIELDS_LOGGED.add(`poll:${field}`);
-          ToolboxShell.appendLog(
-            `[FIELD][DEPRECATED] bridge_poll field=${field} replacement=${replacement}`,
-          );
-        }
-        return value;
-      }
-      return '';
+      return String(obj.content || '').trim();
     }
 
     function normalizeBridgePollMessage(raw) {
       if (!raw || typeof raw !== 'object') {
         return raw;
       }
-      const messageId = String(raw.message_id || raw.id || '').trim();
+      const messageId = String(raw.message_id || '').trim();
       const content = bridgeContentFrom(raw);
       const url = bridgeUrlFrom(raw);
       const normalized = {
@@ -27403,23 +27953,9 @@
         message_id: messageId,
         content,
       };
-
-      if (messageId && normalized.id) {
-        ToolboxShell.appendLog('[FIELD][DEPRECATED] poll message field=id write=message_id');
-        delete normalized.id;
-      }
-
       if (url) {
-        if (normalized.page_url || normalized.target_url || normalized.target_page_url || normalized.conversation_url) {
-          ToolboxShell.appendLog('[FIELD][DEPRECATED] poll message url alias fields collapsed to url');
-        }
         normalized.url = url;
-        delete normalized.page_url;
-        delete normalized.target_url;
-        delete normalized.target_page_url;
-        delete normalized.conversation_url;
       }
-
       return normalized;
     }
 
@@ -27519,8 +28055,6 @@
         const savedAt = Number(meta && meta.savedAt ? meta.savedAt : 0);
         const metaClientId = String(meta && meta.client_id ? meta.client_id : '').trim();
         const metaPageInstanceId = String(meta && meta.page_instance_id ? meta.page_instance_id : '').trim();
-        const legacyPageKey = String(meta && meta.pageKey ? meta.pageKey : '').trim();
-
         if (!token) {
           clearStoredBindRequestToken('empty-token');
           return '';
@@ -27531,7 +28065,12 @@
           return '';
         }
 
-        if (metaPageInstanceId && metaPageInstanceId !== PAGE_INSTANCE_ID) {
+        if (!metaPageInstanceId) {
+          clearStoredBindRequestToken('missing-page-instance-id');
+          return '';
+        }
+
+        if (metaPageInstanceId !== PAGE_INSTANCE_ID) {
           clearStoredBindRequestToken('page-instance-mismatch');
           return '';
         }
@@ -27539,14 +28078,6 @@
         if (metaClientId && metaClientId !== CLIENT_ID) {
           clearStoredBindRequestToken('client-id-mismatch');
           return '';
-        }
-
-        if (!metaPageInstanceId && legacyPageKey) {
-          ToolboxShell.appendLog(
-            `[FIELD][DEPRECATED] bind_token_meta field=pageKey replacement=page_instance_id legacy=${legacyPageKey}`,
-          );
-          saveStoredBindRequestToken(token);
-          return token;
         }
 
         return token;
@@ -27723,6 +28254,124 @@
       }
     }
 
+    const DEBUG_FULL_BRIDGE_JSON = true;
+
+    const BRIDGE_JSON_QUIET_REPORT_EVENTS = new Set([
+      'focus_state',
+      'page_heartbeat',
+      'heartbeat',
+      'heartbeat_busy',
+      'status_timer',
+    ]);
+
+    function buildBridgeRequestPayload(body) {
+      return {
+        ...getPageIdentity(),
+        ...(body || {}),
+      };
+    }
+
+    function stringifyFullBridgeJsonForLog(obj) {
+      try {
+        return JSON.stringify(obj, null, 0);
+      } catch (error) {
+        console.error('[BRIDGE][JSON][STRINGIFY_FAILED]', {
+          error_type: error && error.name ? error.name : 'Error',
+          error: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? error.stack : '',
+        });
+        return String(obj);
+      }
+    }
+
+    function shouldLogFullBridgeJson(payload) {
+      if (!DEBUG_FULL_BRIDGE_JSON || !payload) {
+        return false;
+      }
+      const action = String(payload.action || '').trim();
+      const event = String(payload.event || '').trim();
+      if (
+        action === 'poll'
+        || action === 'ack'
+        || action === 'hello'
+        || action === 'register'
+        || action === 'assistant_reply'
+      ) {
+        return true;
+      }
+      if (action === 'report') {
+        if (BRIDGE_JSON_QUIET_REPORT_EVENTS.has(event)) {
+          return false;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    function appendBridgeJsonToolboxLog(line) {
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(line);
+      }
+    }
+
+    function logTmToServerFull(payload) {
+      const jsonText = stringifyFullBridgeJsonForLog(payload);
+      console.log('[BRIDGE][JSON][TM_TO_SERVER_FULL]', {
+        action: payload && payload.action,
+        event: payload && payload.event,
+        client_id: payload && payload.client_id,
+        page_instance_id: payload && payload.page_instance_id,
+        conversation_id: payload && payload.conversation_id,
+        message_id: payload && payload.message_id,
+        json: jsonText,
+      });
+      appendBridgeJsonToolboxLog(
+        `[BRIDGE][JSON][TM_TO_SERVER_FULL] action=${payload.action || '-'} event=${payload.event || '-'} `
+        + `client_id=${payload.client_id || '-'} page_instance_id=${payload.page_instance_id || '-'} `
+        + `conversation_id=${payload.conversation_id || '-'} message_id=${payload.message_id || '-'} `
+        + `json=${jsonText}`,
+      );
+    }
+
+    function logServerToTmFull(requestPayload, responseJson) {
+      const jsonText = stringifyFullBridgeJsonForLog(responseJson);
+      console.log('[BRIDGE][JSON][SERVER_TO_TM_FULL]', {
+        action: requestPayload && requestPayload.action,
+        event: requestPayload && requestPayload.event,
+        request_message_id: requestPayload && requestPayload.message_id,
+        response_message_id: responseJson && responseJson.message_id,
+        ok: responseJson && responseJson.ok,
+        has_message: responseJson && responseJson.has_message,
+        type: responseJson && responseJson.type,
+        json: jsonText,
+      });
+      appendBridgeJsonToolboxLog(
+        `[BRIDGE][JSON][SERVER_TO_TM_FULL] action=${requestPayload.action || '-'} event=${requestPayload.event || '-'} `
+        + `ok=${responseJson && responseJson.ok} has_message=${responseJson && responseJson.has_message} `
+        + `type=${responseJson && responseJson.type || '-'} json=${jsonText}`,
+      );
+    }
+
+    function logAssistantReplyReportFull(reportPayload, messageId) {
+      const payload = reportPayload || {};
+      const jsonText = stringifyFullBridgeJsonForLog(payload);
+      console.log('[BRIDGE][JSON][ASSISTANT_REPLY_REPORT_FULL]', {
+        message_id: messageId || payload.message_id,
+        session_id: payload.session_id,
+        turn_id: payload.turn_id,
+        client_id: payload.client_id,
+        page_instance_id: payload.page_instance_id,
+        conversation_id: payload.conversation_id,
+        response_state: payload.response_state,
+        json: jsonText,
+      });
+      appendBridgeJsonToolboxLog(
+        `[BRIDGE][JSON][ASSISTANT_REPLY_REPORT_FULL] message_id=${messageId || payload.message_id || '-'} `
+        + `session_id=${payload.session_id || '-'} turn_id=${payload.turn_id || '-'} `
+        + `client_id=${payload.client_id || '-'} json=${jsonText}`,
+      );
+    }
+
     function apiRequest(body) {
       return new Promise((resolve, reject) => {
         if (typeof GM_xmlhttpRequest !== 'function') {
@@ -27734,14 +28383,15 @@
 
         const cfg = getConfig();
         const reqUrl = getBridgeUrl();
+        const payload = buildBridgeRequestPayload(body);
+        if (shouldLogFullBridgeJson(payload)) {
+          logTmToServerFull(payload);
+        }
         GM_xmlhttpRequest({
           method: 'POST',
           url: reqUrl,
           headers: buildBridgeHeaders(),
-          data: JSON.stringify({
-            ...getPageIdentity(),
-            ...body,
-          }),
+          data: JSON.stringify(payload),
           timeout: cfg.bridgeRequestTimeoutMs,
           onload(response) {
             const action = body && body.action ? body.action : '-';
@@ -27762,7 +28412,11 @@
               return;
             }
             try {
-              resolve(JSON.parse(response.responseText));
+              const responseJson = JSON.parse(response.responseText);
+              if (shouldLogFullBridgeJson(payload)) {
+                logServerToTmFull(payload, responseJson);
+              }
+              resolve(responseJson);
             } catch (error) {
               const parseError = new Error(
                 `响应解析失败 action=${action} url=${reqUrl} response=${responsePreview}`,
@@ -27790,12 +28444,14 @@
     }
 
     async function ack(messageId, success, detail) {
-      return apiRequest({
+      const result = await apiRequest({
         action: 'ack',
         message_id: messageId,
         success,
         detail: detail || '',
       });
+      updateChatInputStateBadge();
+      return result;
     }
 
     async function report(event, payload, messageId, options = {}) {
@@ -27870,84 +28526,473 @@
       state.focusStateListenersInstalled = false;
     }
 
-    async function waitForBridgeAssistantReply(messageId, result) {
+    function isAssistantBusySendReason(reason) {
+      const normalized = String(reason || '').trim().toLowerCase();
+      return normalized === 'assistant_busy'
+        || normalized.includes('assistant_busy');
+    }
+
+    function shouldBridgeWaitReplyAfterBusyFailure(reason) {
+      const normalized = String(reason || '').trim().toLowerCase();
+      if (!normalized.includes('assistant_busy')) {
+        return false;
+      }
+      return normalized.includes('send_not_confirmed')
+        || normalized === 'assistant_busy';
+    }
+
+    const PENDING_REPLY_CONTEXT_KEY = 'cgpt_pending_reply_context';
+
+    function savePendingReplyContext(message) {
+      if (!message || !message.message_id) {
+        return;
+      }
+
+      const identity = getPageIdentity();
+      const replyBaseline = typeof getBridgeReplyBaseline === 'function'
+        ? getBridgeReplyBaseline()
+        : null;
+      const ctx = {
+        message_id: String(message.message_id || '').trim(),
+        session_id: String(message.session_id || '').trim(),
+        turn_id: String(message.turn_id || '').trim(),
+        client_id: String(message.client_id || identity.client_id || CLIENT_ID || '').trim(),
+        page_instance_id: String(
+          message.page_instance_id || identity.page_instance_id || PAGE_INSTANCE_ID || '',
+        ).trim(),
+        conversation_id: String(
+          message.conversation_id || identity.conversation_id || '',
+        ).trim(),
+        url: String(message.url || location.href || '').trim(),
+        sent_content: String(message.content || '').trim(),
+        sent_at: Date.now(),
+        reply_reported: false,
+        reply_baseline: replyBaseline,
+      };
+
+      state.pendingReplyContext = ctx;
+
+      try {
+        localStorage.setItem(PENDING_REPLY_CONTEXT_KEY, JSON.stringify(ctx));
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][SAVE_FAILED]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+      }
+
+      console.log('[REPLY_CONTEXT][SAVE]', ctx);
+    }
+
+    function loadPendingReplyContext() {
+      if (state.pendingReplyContext && !state.pendingReplyContext.reply_reported) {
+        return state.pendingReplyContext;
+      }
+
+      try {
+        const raw = localStorage.getItem(PENDING_REPLY_CONTEXT_KEY) || '';
+        if (!raw) {
+          return null;
+        }
+
+        const ctx = JSON.parse(raw);
+        if (!ctx || !ctx.message_id || ctx.reply_reported) {
+          return null;
+        }
+
+        state.pendingReplyContext = ctx;
+        return ctx;
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][LOAD_FAILED]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+        return null;
+      }
+    }
+
+    function getConversationIdFromLocation() {
+      return parseConversationIdFromPath(location.pathname || '') || '';
+    }
+
+    function extractLatestAssistantMessageText() {
+      let text = '';
+      const ctx = loadPendingReplyContext();
+      if (ctx && typeof extractBridgeAssistantReplyText === 'function') {
+        try {
+          text = extractBridgeAssistantReplyText(ctx.reply_baseline || null);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          logBridgeError(`[REPLY_REPORT][EXTRACT_BASELINE_FAILED] error=${errText}`, error);
+        }
+      }
+
+      if (!text && typeof getLatestAssistantTextFromDomDirect === 'function') {
+        text = getLatestAssistantTextFromDomDirect();
+      }
+
+      if (!text) {
+        const nodes = [];
+
+        document
+          .querySelectorAll('[data-message-author-role="assistant"]')
+          .forEach((node) => nodes.push(node));
+
+        if (!nodes.length) {
+          document.querySelectorAll('article').forEach((node) => {
+            const articleText = (node.innerText || node.textContent || '').trim();
+            if (!articleText) {
+              return;
+            }
+            if (articleText.includes('你说：') || articleText.includes('You said:')) {
+              return;
+            }
+            nodes.push(node);
+          });
+        }
+
+        if (nodes.length) {
+          text = (nodes[nodes.length - 1].innerText || nodes[nodes.length - 1].textContent || '').trim();
+        }
+      }
+
+      text = String(text || '')
+        .replace(/ChatGPT 也可能会犯错。请核查重要信息。/g, '')
+        .replace(/已思考\s*\d+\s*秒\s*›?/g, '')
+        .replace(/已思考若干秒\s*›?/g, '')
+        .trim();
+
+      const pageTitle = String(document.title || '').trim();
+      if (!text || text === pageTitle || text === '回复完成') {
+        return '';
+      }
+
+      const sentContent = ctx ? String(ctx.sent_content || '').trim() : '';
+      if (sentContent && text === sentContent) {
+        return '';
+      }
+
+      return text;
+    }
+
+    function isInvalidAssistantReplyText(text) {
+      const value = String(text || '').trim();
+      if (!value) {
+        return true;
+      }
+
+      const invalidTexts = new Set([
+        '正在思考',
+        '正在生成',
+        '思考中',
+        '回复完成',
+      ]);
+
+      if (invalidTexts.has(value)) {
+        return true;
+      }
+
+      if (/^已思考\s*\d+\s*秒\s*›?$/.test(value)) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function isPageStillGeneratingForReplyReport() {
+      const cap = getPageCapability ? getPageCapability('assistant-reply-report') : null;
+      const responseState = String((cap && cap.response_state) || '').toLowerCase();
+      const reason = String((cap && cap.response_state_reason) || '').toLowerCase();
+
+      return !!(
+        cap
+        && (
+          cap.is_responding
+          || responseState === 'generating'
+          || responseState === 'responding'
+          || reason === 'assistant_busy'
+        )
+      );
+    }
+
+    function watchReplyCompletionAndReport() {
+      const ctx = loadPendingReplyContext();
+      if (!ctx || ctx.reply_reported) {
+        return;
+      }
+
+      const cap = getPageCapability ? getPageCapability('reply-complete-watch') : null;
+      const responseState = String((cap && cap.response_state) || '').toLowerCase();
+      const isResponding = !!(
+        cap
+        && (
+          cap.is_responding
+          || responseState === 'generating'
+          || responseState === 'responding'
+        )
+      );
+
+      const wasResponding = state.lastReplyWatchResponding === true;
+      state.lastReplyWatchResponding = isResponding;
+
+      if (isResponding) {
+        return;
+      }
+
+      const ageMs = Date.now() - Number(ctx.sent_at || 0);
+      if (ageMs < 1000) {
+        return;
+      }
+
+      if (wasResponding || responseState === 'idle') {
+        window.setTimeout(() => {
+          void tryReportAssistantReplyFromCurrentPage('response_idle_after_generation');
+        }, 600);
+      }
+    }
+
+    async function reportAssistantReply(ctx, content, reason) {
+      if (isPageStillGeneratingForReplyReport()) {
+        console.warn('[REPLY_REPORT][SKIP_GENERATING]', {
+          reason,
+          content_preview: String(content || '').slice(0, 80),
+        });
+        return false;
+      }
+
+      if (isInvalidAssistantReplyText(content)) {
+        console.warn('[REPLY_REPORT][SKIP_INVALID_TEXT]', {
+          reason,
+          content_preview: String(content || '').slice(0, 80),
+        });
+        return false;
+      }
+
+      const payload = withBridgeUrlFields({
+        action: 'assistant_reply',
+        event: 'assistant_reply',
+        client_id: ctx.client_id,
+        page_instance_id: ctx.page_instance_id,
+        conversation_id: ctx.conversation_id,
+        url: ctx.url || location.href,
+        message_id: ctx.message_id,
+        session_id: ctx.session_id,
+        turn_id: ctx.turn_id,
+        role: 'assistant',
+        content,
+        content_len: content.length,
+        reason: reason || '',
+        page_title: document.title || '',
+        response_state: 'idle',
+        created_at: Date.now() / 1000,
+      });
+
+      try {
+        const result = await apiRequest(payload);
+        logAssistantReplyReportFull(payload, ctx.message_id);
+
+        ctx.reply_reported = true;
+        state.pendingReplyContext = ctx;
+
+        try {
+          localStorage.setItem(PENDING_REPLY_CONTEXT_KEY, JSON.stringify(ctx));
+        } catch (storageError) {
+          console.error('[REPLY_CONTEXT][MARK_REPORTED_FAILED]', {
+            error_type: storageError && storageError.name,
+            error: storageError && storageError.message,
+            stack: storageError && storageError.stack,
+          });
+        }
+
+        console.log('[REPLY_REPORT][DONE]', {
+          message_id: ctx.message_id,
+          session_id: ctx.session_id,
+          turn_id: ctx.turn_id,
+          content_len: content.length,
+          reason,
+          result,
+        });
+
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
+          ToolboxShell.setStatus('回复已回传 GUI', 'ok');
+        }
+
+        return true;
+      } catch (error) {
+        console.error('[REPLY_REPORT][FAILED]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+          payload,
+        });
+        return false;
+      }
+    }
+
+    async function tryReportAssistantReplyFromCurrentPage(reason) {
+      const ctx = loadPendingReplyContext();
+      if (!ctx || ctx.reply_reported) {
+        return false;
+      }
+
+      if (ctx.conversation_id) {
+        const currentConversationId = getConversationIdFromLocation();
+        if (currentConversationId && currentConversationId !== ctx.conversation_id) {
+          return false;
+        }
+      }
+
+      const cap = getPageCapability ? getPageCapability('reply-report') : null;
+      const responseState = String((cap && cap.response_state) || '').toLowerCase();
+      const isResponding = !!(
+        cap
+        && (
+          cap.is_responding
+          || responseState === 'generating'
+          || responseState === 'responding'
+        )
+      );
+
+      if (isResponding) {
+        return false;
+      }
+
+      const ageMs = Date.now() - Number(ctx.sent_at || 0);
+      if (ageMs < 800) {
+        return false;
+      }
+
+      const content = extractLatestAssistantMessageText();
+
+      if (isInvalidAssistantReplyText(content)) {
+        console.warn('[REPLY_REPORT][SKIP_INVALID_TEXT]', {
+          reason,
+          content_preview: String(content || '').slice(0, 80),
+        });
+        return false;
+      }
+
+      if (!content) {
+        console.warn('[REPLY_REPORT][SKIP_EMPTY]', {
+          reason,
+          age_ms: ageMs,
+          response_state: responseState,
+          title: document.title,
+          article_count: document.querySelectorAll('article').length,
+          assistant_count: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+        });
+        return false;
+      }
+
+      await reportAssistantReply(ctx, content, reason);
+      return true;
+    }
+
+    async function waitForBridgeAssistantReply(messageId, result, replyBaseline = null) {
       const sessionId = String(result.session_id || '').trim();
       const turnId = String(result.turn_id || '').trim();
       const identity = getPageIdentity();
       const timeoutMs = 10 * 60 * 1000;
       const noBusyGraceMs = 15000;
-      const stableIdleMs = 1600;
+      const stableTextMs = 1500;
       const pollMs = 800;
+      const checkLogIntervalMs = 3000;
       const startedAt = Date.now();
       let idleSince = 0;
       let sawBusy = false;
       let lastAssistantText = '';
+      let lastCheckLogAt = 0;
 
-      ToolboxShell.appendLog(
-        `[BRIDGE][REPLY_WAIT] messageId=${String(messageId || '').slice(0, 8)} `
-        + `session_id=${sessionId || '-'} turn_id=${turnId || '-'}`
-      );
-
-      while (Date.now() - startedAt < timeoutMs) {
-        let busy = false;
+      const safeCheckAssistantBusy = () => {
         try {
-          busy = typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          return typeof ComposerApi.isAssistantLikelyBusy === 'function'
             ? ComposerApi.isAssistantLikelyBusy()
             : false;
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
           logBridgeError(`[BRIDGE][REPLY_WAIT] busy-check-failed error=${errText}`, error);
+          return false;
         }
+      };
+
+      ToolboxShell.appendLog(
+        `[BRIDGE][REPLY_WAIT][START] messageId=${String(messageId || '').slice(0, 8)} `
+        + `session_id=${sessionId || '-'} turn_id=${turnId || '-'}`
+      );
+
+      ChatInputStateRuntime.waitingForReply = true;
+      updateChatInputStateBadge();
+
+      while (Date.now() - startedAt < timeoutMs) {
+        const busy = safeCheckAssistantBusy();
 
         if (busy) {
           sawBusy = true;
           idleSince = 0;
-          await sleep(pollMs);
-          continue;
         }
+        ChatInputStateRuntime.waitingForReply = true;
+        updateChatInputStateBadge();
 
+        let text = '';
         try {
-          const latestAssistant = getLatestAssistantAfterLatestUserRecord({
-            includeHidden: true,
-          });
-          const text = latestAssistant && latestAssistant.text
-            ? String(latestAssistant.text).trim()
-            : '';
-
-          if (text) {
-            if (text === lastAssistantText) {
-              if (!idleSince) {
-                idleSince = Date.now();
-              }
-              if (Date.now() - idleSince >= stableIdleMs) {
-                await report(
-                  'assistant_reply',
-                  withBridgeUrlFields({
-                    session_id: sessionId,
-                    turn_id: turnId,
-                    client_id: identity.client_id || CLIENT_ID,
-                    page_instance_id: identity.page_instance_id || PAGE_INSTANCE_ID,
-                    conversation_id: identity.conversation_id || '',
-                    text,
-                    content: text,
-                    assistant_text: text,
-                    ok: true,
-                  }),
-                  messageId,
-                );
-                return true;
-              }
-            } else {
-              lastAssistantText = text;
-              idleSince = Date.now();
-            }
-          }
+          text = extractBridgeAssistantReplyText(replyBaseline);
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
-          logBridgeError(`[BRIDGE][REPLY_WAIT] snapshot-check-failed error=${errText}`, error);
+          logBridgeError(`[BRIDGE][REPLY_WAIT] extract-failed error=${errText}`, error);
         }
 
-        if (!sawBusy && Date.now() - startedAt >= noBusyGraceMs) {
+        const now = Date.now();
+        if (now - lastCheckLogAt >= checkLogIntervalMs) {
+          lastCheckLogAt = now;
+          const idleMs = idleSince ? now - idleSince : 0;
+          ToolboxShell.appendLog(
+            `[BRIDGE][REPLY_WAIT][CHECK] busy=${busy ? 'true' : 'false'} `
+            + `text_len=${text.length} same_as_last=${text && text === lastAssistantText ? 'true' : 'false'} `
+            + `idle_ms=${idleMs} saw_busy=${sawBusy ? 'true' : 'false'}`
+          );
+        }
+
+        if (text && !busy && !isInvalidAssistantReplyText(text)) {
+          if (text === lastAssistantText) {
+            if (!idleSince) {
+              idleSince = Date.now();
+            }
+
+            const stableMs = Date.now() - idleSince;
+            const stableEnough = stableMs >= stableTextMs;
+
+            if (stableEnough) {
+              const ctx = loadPendingReplyContext();
+              if (ctx && ctx.message_id === messageId) {
+                const reported = await reportAssistantReply(
+                  ctx,
+                  text,
+                  'reply_wait_idle_stable',
+                );
+                if (reported) {
+                  ToolboxShell.appendLog(
+                    `[BRIDGE][REPLY_WAIT][REPORT] messageId=${String(messageId || '').slice(0, 8)} `
+                    + `text_len=${text.length}`
+                  );
+                  ChatInputStateRuntime.waitingForReply = false;
+                  updateChatInputStateBadge();
+                  return true;
+                }
+              }
+            }
+          } else {
+            lastAssistantText = text;
+            idleSince = Date.now();
+          }
+        }
+
+        if (!sawBusy && Date.now() - startedAt >= noBusyGraceMs && !lastAssistantText) {
+          const emptyReason = 'no-busy-observed-and-no-assistant-after-latest-user';
+          ToolboxShell.appendLog(
+            `[BRIDGE][REPLY_WAIT][EMPTY] reason=${emptyReason} messageId=${String(messageId || '').slice(0, 8)}`
+          );
           await report(
             'assistant_reply_empty',
             withBridgeUrlFields({
@@ -27956,16 +29001,23 @@
               client_id: identity.client_id || CLIENT_ID,
               page_instance_id: identity.page_instance_id || PAGE_INSTANCE_ID,
               conversation_id: identity.conversation_id || '',
-              reason: 'no-busy-observed-and-no-assistant-after-latest-user',
+              reason: emptyReason,
             }),
             messageId,
           );
+          ChatInputStateRuntime.waitingForReply = false;
+          updateChatInputStateBadge();
           return false;
         }
 
+        updateChatInputStateBadge();
         await sleep(pollMs);
       }
 
+      const timeoutReason = 'reply-wait-timeout';
+      ToolboxShell.appendLog(
+        `[BRIDGE][REPLY_WAIT][EMPTY] reason=${timeoutReason} messageId=${String(messageId || '').slice(0, 8)}`
+      );
       await report(
         'assistant_reply_empty',
         withBridgeUrlFields({
@@ -27974,10 +29026,12 @@
           client_id: identity.client_id || CLIENT_ID,
           page_instance_id: identity.page_instance_id || PAGE_INSTANCE_ID,
           conversation_id: identity.conversation_id || '',
-          reason: 'reply-wait-timeout',
+          reason: timeoutReason,
         }),
         messageId,
       );
+      ChatInputStateRuntime.waitingForReply = false;
+      updateChatInputStateBadge();
       return false;
     }
 
@@ -27987,6 +29041,7 @@
       const content = bridgeContentFrom(normalized);
       const sessionId = String(normalized.session_id || '').trim();
       const turnId = String(normalized.turn_id || '').trim();
+      savePendingReplyContext(normalized);
       const identity = getPageIdentity();
       const targetUrl = bridgeUrlFrom(normalized);
       const allowReplaceDraft = normalized.allow_replace_draft === true
@@ -28039,17 +29094,50 @@
         return false;
       }
 
+      const replyBaseline = getBridgeReplyBaseline();
+
       const sendResult = await sendContentViaComposer({
         source: 'bridge',
         content,
         allowReplaceDraft,
         waitUntilSendable: true,
         timeoutMs: 60000,
-        blockWhenResponding: true,
+        blockWhenResponding: false,
       });
 
       if (!sendResult.ok) {
         const reason = sendResult.reason || 'send_failed';
+        if (shouldBridgeWaitReplyAfterBusyFailure(reason)) {
+          await ack(
+            messageId,
+            true,
+            `已发送到 ChatGPT：assistant_busy（等待回复） detail=${reason}`,
+          );
+          ToolboxShell.appendLog(
+            `[BRIDGE][SEND][BUSY_WAIT] messageId=${String(messageId || '').slice(0, 8)} `
+            + `reason=${reason}`,
+          );
+          try {
+            await waitForBridgeAssistantReply(messageId, normalized, replyBaseline);
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            logBridgeError(`[BRIDGE][REPLY_WAIT] failed error=${errText}`, error);
+            await report(
+              'assistant_reply_failed',
+              withBridgeUrlFields({
+                session_id: sessionId,
+                turn_id: turnId,
+                client_id: identity.client_id || CLIENT_ID,
+                page_instance_id: identity.page_instance_id || PAGE_INSTANCE_ID,
+                conversation_id: identity.conversation_id || '',
+                reason: errText,
+              }),
+              messageId,
+            );
+          }
+          return true;
+        }
+
         const ackMessages = {
           assistant_busy: 'ChatGPT 正在生成回复，暂不能发送',
           composer_has_existing_text: 'ChatGPT 输入框已有内容，已拒绝覆盖草稿',
@@ -28491,6 +29579,10 @@
         return await openUrlCommand(normalized);
       }
       if (command === 'sync_conversation') {
+        if (!messageId) {
+          ToolboxShell.appendLog('[BRIDGE][SYNC_CONVERSATION][FAILED] reason=missing_message_id');
+          return false;
+        }
         try {
           const responseState = detectResponseState();
           const capability = getPageCapability('sync_conversation');
@@ -28498,59 +29590,58 @@
           const cmdPayload = normalized.payload && typeof normalized.payload === 'object'
             ? normalized.payload
             : {};
-
-          snapshot.command_type = cmdPayload.command_type || 'read_snapshot';
-          snapshot.require_input = false;
-          snapshot.allow_while_generating = true;
-          snapshot.allow_generating = true;
-          snapshot.allow_hidden = true;
-          snapshot.allow_not_focused = true;
-          snapshot.simple_online_policy = true;
-          snapshot.capability = capability;
-          snapshot.syncable = capability.syncable;
-          snapshot.conversation_syncable = capability.conversation_syncable;
-          snapshot.sendable = capability.sendable;
-          snapshot.can_accept_input = Boolean(responseState.can_accept_input);
-          snapshot.can_send_now = Boolean(responseState.can_send_now);
-          snapshot.is_responding = Boolean(responseState.is_responding);
-          const visibilityPayload = buildVisibilityPayload();
-          snapshot.visibility_state = visibilityPayload.visibility_state;
-          snapshot.has_focus = visibilityPayload.has_focus;
-          snapshot.response_state = responseState.response_state || 'unknown';
-          snapshot.response_state_reason = responseState.response_state_reason || '';
-
           const identity = getPageIdentity();
-          logPageCapability(capability, '[SYNC][BRIDGE]');
-
-          ToolboxShell.appendLog(
-            `[BRIDGE][SYNC_CONVERSATION][messages=${snapshot.message_count}] `
-            + `syncable=${capability.syncable ? 'yes' : 'no'} `
-            + `conversation_syncable=${capability.conversation_syncable ? 'yes' : 'no'} `
-            + `input=${snapshot.can_accept_input ? 'yes' : 'no'} `
-            + `is_responding=${snapshot.is_responding ? 'yes' : 'no'} `
-            + `response_state=${snapshot.response_state || '-'} `
-            + `command_type=${snapshot.command_type}`
-          );
-
-          snapshot.session_id = cmdPayload.session_id || snapshot.session_id || '';
-          snapshot.request_id = cmdPayload.request_id || snapshot.request_id || '';
-          snapshot.turn_id = cmdPayload.turn_id || snapshot.turn_id || '';
-          snapshot.client_id = cmdPayload.client_id || snapshot.client_id || CLIENT_ID;
-          snapshot.page_instance_id = cmdPayload.page_instance_id || snapshot.page_instance_id || PAGE_INSTANCE_ID;
-          snapshot.conversation_id = cmdPayload.conversation_id || snapshot.conversation_id || identity.conversation_id || '';
           const snapshotUrl = bridgeUrlFrom(cmdPayload)
             || bridgeUrlFrom(snapshot.page)
             || bridgeUrlFrom(identity)
             || location.href;
-          snapshot.url = snapshotUrl;
-          snapshot.mode = cmdPayload.mode || snapshot.mode || 'merge';
+          const reportPayload = {
+            request_id: cmdPayload.request_id || snapshot.request_id || '',
+            session_id: cmdPayload.session_id || snapshot.session_id || '',
+            conversation_id: cmdPayload.conversation_id || snapshot.conversation_id || identity.conversation_id || '',
+            client_id: cmdPayload.client_id || snapshot.client_id || identity.client_id || CLIENT_ID,
+            page_instance_id: cmdPayload.page_instance_id || snapshot.page_instance_id || identity.page_instance_id || PAGE_INSTANCE_ID,
+            url: snapshotUrl,
+            messages: snapshot.messages || [],
+            message_count: Array.isArray(snapshot.messages) ? snapshot.messages.length : 0,
+            mode: cmdPayload.mode || snapshot.mode || 'merge',
+            ok: true,
+            command_type: cmdPayload.command_type || 'read_snapshot',
+            capability,
+            syncable: capability.syncable,
+            conversation_syncable: capability.conversation_syncable,
+            can_accept_input: Boolean(responseState.can_accept_input),
+            can_send_now: Boolean(responseState.can_send_now),
+            is_responding: Boolean(responseState.is_responding),
+            response_state: responseState.response_state || 'unknown',
+            response_state_reason: responseState.response_state_reason || '',
+          };
 
-          await reportStrict(
+          logPageCapability(capability, '[SYNC][BRIDGE]');
+          ToolboxShell.appendLog(
+            `[BRIDGE][SYNC_CONVERSATION][report] message_id=${String(messageId).slice(0, 8)} `
+            + `messages=${reportPayload.message_count} `
+            + `session_id=${reportPayload.session_id || '-'} `
+            + `request_id=${reportPayload.request_id || '-'}`,
+          );
+
+          const reportResult = await reportStrict(
             'conversation_snapshot',
-            snapshot,
+            reportPayload,
             messageId,
           );
-          await ack(messageId, true, '已回传当前页面快照');
+          if (!reportResult || reportResult.ok === false) {
+            const reportErr = (reportResult && reportResult.error) ? reportResult.error : 'report_failed';
+            throw new Error(`conversation_snapshot report failed: ${reportErr}`);
+          }
+
+          const ackResult = await ack(messageId, true, '已回传当前页面快照');
+          if (ackResult && ackResult.ok === false) {
+            ToolboxShell.appendLog(
+              `[BRIDGE][SYNC_CONVERSATION][ack-rejected] message_id=${String(messageId).slice(0, 8)} `
+              + `error=${ackResult.error || 'unknown'}`,
+            );
+          }
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
           const errStack = error && error.stack ? error.stack : errText;
@@ -28754,6 +29845,8 @@
 
         applyBridgeStateFromPollResult(result, 'poll');
 
+        watchReplyCompletionAndReport();
+
         if (
           typeof UploadModule !== 'undefined'
           && typeof UploadModule.applyBridgeUploadFiles === 'function'
@@ -28774,10 +29867,12 @@
               shortText: pres.shortText,
             });
             renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
+            updateChatInputStateBadge();
           } else {
             const failReason = handled.reason || '-';
             updateStatus(`消息处理失败：${failReason}`);
             ToolboxShell.setStatus(`消息处理失败：${failReason}`, 'error', { persist: true });
+            updateChatInputStateBadge();
           }
         }
       } catch (error) {
@@ -28793,6 +29888,7 @@
           shortText: pres.shortText,
         });
         renderBridgeCapabilityPanel(getPageCapability('bridge-poll-offline'));
+        updateChatInputStateBadge();
 
         logBridgeError(
           `[pollBridge][failed] action=poll url=${bridgeUrl} type=${errName} error=${errText}`,
@@ -29107,6 +30203,7 @@
       }
 
       textEl.textContent = formatBridgeCapabilityText(capability);
+      updateChatInputStateBadge();
     }
 
     function renderBridgeConfigToUi() {
@@ -29169,8 +30266,6 @@
         testConnection();
       }, 'BRIDGE');
       DomUtil.bindClick(mountRoot, '#cgpt-bridge-stop', () => {
-        saveConfig({ bridgeEnabled: false });
-        renderConfigToUi();
         stop();
       }, 'BRIDGE');
       DomUtil.bindClick(mountRoot, '#cgpt-bridge-copy-url', () => {

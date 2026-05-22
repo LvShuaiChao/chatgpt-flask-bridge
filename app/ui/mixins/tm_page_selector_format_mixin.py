@@ -651,22 +651,6 @@ class TmPageSelectorFormatMixin:
 
             )
 
-        if not bound_url:
-
-            bound_url = (
-
-                self._normalize_chatgpt_page_url(
-
-                    getattr(self, "bound_page_url", "")
-
-                )
-
-                if hasattr(self, "_normalize_chatgpt_page_url")
-
-                else str(getattr(self, "bound_page_url", "") or "").strip()
-
-            )
-
         if bound_url:
 
             combo_idx = self._tm_page_combo_find_index_by_normalized_url(bound_url)

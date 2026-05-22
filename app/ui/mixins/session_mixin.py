@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
     PENDING_ASSISTANT_STATUSES,
+    PENDING_REPLY_HARD_TIMEOUT_SECONDS,
+    PENDING_REPLY_STALE_TIMEOUT_SEC,
+    PENDING_REPLY_SYNC_AFTER_SECONDS,
     RUNTIME_DIR,
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
@@ -583,6 +586,363 @@ class SessionMixin:
                 return True
 
         return False
+
+    def _session_pending_messages_index(self, session):
+        return {
+            (getattr(message, "message_id", "") or "").strip(): message
+            for message in session.messages
+            if (getattr(message, "message_id", "") or "").strip()
+        }
+
+    def _iter_pending_assistant_messages(self, session):
+        if not session:
+            return
+        messages_by_id = self._session_pending_messages_index(session)
+        for message in reversed(session.messages):
+            if not getattr(message, "visible_in_chat", True):
+                continue
+            if message.role != "assistant":
+                continue
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(
+                bridge_id
+            ):
+                continue
+            if not bridge_id:
+                parent_id = (getattr(message, "parent_message_id", "") or "").strip()
+                parent = messages_by_id.get(parent_id)
+                parent_bridge_id = (
+                    (getattr(parent, "bridge_message_id", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                parent_source = (
+                    (parent.message_source or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                if (
+                    parent is not None
+                    and not parent_bridge_id
+                    and parent_source in ("local_send", "local_queue")
+                ):
+                    continue
+            status = (message.ui_status or "").strip()
+            text = (message.content or "").strip()
+            if status in PENDING_ASSISTANT_STATUSES or text in ASSISTANT_WAIT_TEXTS:
+                yield message
+
+    def _get_pending_reply_state(self, session):
+        """返回当前 pending assistant 占位快照；无则 None。"""
+        for message in self._iter_pending_assistant_messages(session):
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            since = float(getattr(message, "created_at", 0) or 0)
+            if since <= 0:
+                since = float(getattr(session, "pending_reply_since", 0) or 0)
+            return {
+                "bridge_message_id": bridge_id,
+                "turn_id": (getattr(message, "turn_id", "") or "").strip(),
+                "assistant_message_id": (
+                    getattr(message, "message_id", "") or ""
+                ).strip(),
+                "parent_message_id": (
+                    getattr(message, "parent_message_id", "") or ""
+                ).strip(),
+                "since": since,
+                "message": message,
+                "message_source": (message.message_source or "").strip(),
+            }
+        return None
+
+    def _pending_reply_age_seconds(self, session, pending=None):
+        pending = pending or self._get_pending_reply_state(session)
+        if pending:
+            since = float(pending.get("since") or 0)
+            if since > 0:
+                return max(0.0, time.time() - since)
+        if session is None:
+            return 0.0
+        since = float(getattr(session, "pending_reply_since", 0) or 0)
+        if since <= 0:
+            return 0.0
+        return max(0.0, time.time() - since)
+
+    def _pending_reply_is_actionable(self, session, pending=None):
+        """仅当存在有效 bridge_message_id 且未 finalize 时，pending 才可拦截发送。"""
+        pending = pending or self._get_pending_reply_state(session)
+        if not pending:
+            return False
+        bridge_id = (pending.get("bridge_message_id") or "").strip()
+        if not bridge_id:
+            return False
+        if hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
+            return False
+        return True
+
+    def _bound_page_indicates_idle(self, session):
+        state = self._session_bound_response_state(session)
+        response_state = (state.get("response_state") or "").strip().lower()
+        return (
+            bool(state.get("can_accept_input", True))
+            and not bool(state.get("is_responding"))
+            and response_state == "idle"
+        )
+
+    def _bound_page_indicates_busy(self, session):
+        """绑定页正在生成/忙碌时不应清理 pending。"""
+        state = self._session_bound_response_state(session)
+        response_state = (state.get("response_state") or "").strip().lower()
+        if bool(state.get("is_responding")):
+            return True
+        if response_state in ("generating", "assistant_busy"):
+            return True
+        remote = normalize_remote_chatgpt(
+            getattr(session, "remote_chatgpt", None) or default_remote_chatgpt()
+        )
+        detail = str(remote.get("response_state_reason") or "").strip().lower()
+        return "assistant_busy" in detail
+
+    def _maybe_recover_pending_reply(self, session):
+        """等待较久时触发 sync_conversation，避免 60s 直接清掉 waiting。"""
+        if session is None:
+            return False
+        if not self._session_has_pending_assistant_reply(session):
+            return False
+        age = self._pending_reply_age_seconds(session)
+        since_session = float(getattr(session, "pending_reply_since", 0) or 0)
+        if since_session > 0:
+            age = max(age, max(0.0, time.time() - since_session))
+        if age < PENDING_REPLY_SYNC_AFTER_SECONDS:
+            return False
+        if getattr(session, "pending_sync_requested", False):
+            return False
+        if hasattr(self, "request_sync_conversation"):
+            ok, detail = self.request_sync_conversation(
+                session,
+                reason="pending_reply_recovery",
+            )
+            self._append_log(
+                "[CHAT][PENDING_SYNC_REQUESTED] "
+                f"session_id={session.session_id} "
+                f"pending_age={age:.1f} "
+                f"ok={'true' if ok else 'false'} "
+                f"detail={detail or '-'}",
+                echo=True,
+            )
+        else:
+            self._append_log(
+                "[CHAT][PENDING_SYNC_REQUESTED] "
+                f"session_id={session.session_id} "
+                f"pending_age={age:.1f} "
+                f"detail=request_sync_conversation_unavailable",
+                echo=True,
+            )
+        session.pending_sync_requested = True
+        if hasattr(self, "_save_sessions_to_disk"):
+            self._save_sessions_to_disk()
+        return True
+
+    def _stale_pending_clear_reason(self, session, pending=None):
+        pending = pending or self._get_pending_reply_state(session)
+        if pending and self._bound_page_indicates_busy(session):
+            return ""
+        age = self._pending_reply_age_seconds(session, pending)
+        since_session = float(getattr(session, "pending_reply_since", 0) or 0)
+        if since_session > 0:
+            age = max(age, max(0.0, time.time() - since_session))
+        if age < PENDING_REPLY_HARD_TIMEOUT_SECONDS:
+            return ""
+        if not pending:
+            since = float(getattr(session, "pending_reply_since", 0) or 0)
+            if since > 0 and age >= PENDING_REPLY_HARD_TIMEOUT_SECONDS:
+                return "timeout"
+            return ""
+        bridge_id = (pending.get("bridge_message_id") or "").strip()
+        assistant_id = (pending.get("assistant_message_id") or "").strip()
+        if age < PENDING_REPLY_HARD_TIMEOUT_SECONDS:
+            if bridge_id and assistant_id:
+                return ""
+            if not self._pending_reply_is_actionable(session, pending):
+                return ""
+            return ""
+        if not bridge_id:
+            return "missing_bridge_message_id"
+        if not assistant_id:
+            return "missing_assistant_message_id"
+        if age >= PENDING_REPLY_HARD_TIMEOUT_SECONDS:
+            return "timeout"
+        if self._bound_page_indicates_idle(session) and bridge_id:
+            if hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
+                return "page_idle_finalized"
+            if (
+                hasattr(self, "_bridge_msg")
+                and bridge_id in getattr(
+                    self._bridge_msg, "finalized_bridge_message_ids", set()
+                )
+            ):
+                return "page_idle_finalized"
+        return ""
+
+    def _is_stale_pending_reply(self, session, pending=None):
+        pending = pending or self._get_pending_reply_state(session)
+        if not pending:
+            return False
+        return bool(self._stale_pending_clear_reason(session, pending))
+
+    def _clear_stale_pending_reply(self, session, *, reason="", force=False):
+        if session is None:
+            return False
+        pending = self._get_pending_reply_state(session)
+        has_waiting_flag = float(getattr(session, "pending_reply_since", 0) or 0) > 0
+        has_pending_messages = self._session_has_pending_assistant_reply(session)
+        if not pending and not has_waiting_flag and not has_pending_messages:
+            return False
+
+        clear_reason = (reason or "").strip()
+        if not force:
+            if pending:
+                clear_reason = clear_reason or self._stale_pending_clear_reason(
+                    session, pending
+                )
+            elif has_pending_messages or has_waiting_flag:
+                clear_reason = clear_reason or "missing_bridge_message_id"
+            if not clear_reason:
+                return False
+        elif not clear_reason:
+            clear_reason = "forced"
+
+        age = self._pending_reply_age_seconds(session, pending)
+        old_turn_id = (pending or {}).get("turn_id") or "-"
+        old_assistant_id = (pending or {}).get("assistant_message_id") or "-"
+        cleared = 0
+        messages_to_clear = []
+        if pending and pending.get("message") is not None:
+            messages_to_clear.append(pending["message"])
+        elif has_pending_messages:
+            for message in reversed(list(session.messages)):
+                if not getattr(message, "visible_in_chat", True):
+                    continue
+                if message.role != "assistant":
+                    continue
+                status = (message.ui_status or "").strip()
+                text = (message.content or "").strip()
+                if status in PENDING_ASSISTANT_STATUSES or text in ASSISTANT_WAIT_TEXTS:
+                    messages_to_clear.append(message)
+                    break
+
+        for message in messages_to_clear:
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            message.role = "error"
+            message.ui_status = "已重置"
+            message.content = (
+                "上一条回复的本地等待状态已重置。"
+                "如果网页中已有回复，请点击「同步网页对话」刷新完整内容。"
+            )
+            if bridge_id and hasattr(self, "_finalize_bridge"):
+                self._finalize_bridge(bridge_id)
+                if hasattr(self, "_bridge_msg"):
+                    self._bridge_msg.ack_success_message_ids.discard(bridge_id)
+            cleared += 1
+            if not old_turn_id or old_turn_id == "-":
+                old_turn_id = (getattr(message, "turn_id", "") or "").strip() or "-"
+            if not old_assistant_id or old_assistant_id == "-":
+                old_assistant_id = (
+                    getattr(message, "message_id", "") or ""
+                ).strip() or "-"
+
+        if float(getattr(session, "pending_reply_since", 0) or 0) > 0:
+            session.pending_reply_since = 0
+            cleared += 1
+
+        if cleared <= 0:
+            return False
+
+        if hasattr(self, "_mark_session_waiting_finished"):
+            self._mark_session_waiting_finished(
+                session, reason=f"clear_stale_pending:{clear_reason}"
+            )
+
+        session.updated_at = time.time()
+        self._append_log(
+            "[CHAT][STALE_PENDING_CLEAR] "
+            f"session_id={session.session_id} "
+            f"reason={clear_reason} "
+            f"pending_age={age:.1f} "
+            f"old_turn_id={old_turn_id} "
+            f"old_assistant_message_id={old_assistant_id}",
+            echo=True,
+        )
+
+        if session.session_id == getattr(self, "_current_session_id", None):
+            if hasattr(self, "_render_session_chat"):
+                self._render_session_chat(session, force_bottom=True)
+            elif hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="stale_pending_clear",
+                )
+
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list(
+                select_session_id=getattr(self, "_current_session_id", None)
+            )
+        if hasattr(self, "_save_sessions_to_disk"):
+            self._save_sessions_to_disk()
+        if hasattr(self, "_update_upload_action_buttons_state"):
+            self._update_upload_action_buttons_state()
+        return True
+
+    def _clear_stale_pending_reply_before_send(self, session):
+        if session is None:
+            return False
+        pending = self._get_pending_reply_state(session)
+        if pending and self._is_stale_pending_reply(session, pending):
+            return self._clear_stale_pending_reply(session, reason="before_send")
+        if not pending and self._session_has_pending_assistant_reply(session):
+            if not self._pending_reply_is_actionable(session, pending):
+                return self._clear_stale_pending_reply(
+                    session, reason="before_send", force=True
+                )
+        if not pending and float(getattr(session, "pending_reply_since", 0) or 0) > 0:
+            since = float(session.pending_reply_since or 0)
+            age = max(0.0, time.time() - since) if since > 0 else 0.0
+            if age >= PENDING_REPLY_STALE_TIMEOUT_SEC:
+                return self._clear_stale_pending_reply(
+                    session, reason="timeout", force=True
+                )
+        return False
+
+    def _clear_stale_pending_reply_before_sync(self, session):
+        if session is None:
+            return False
+        pending = self._get_pending_reply_state(session)
+        if not pending:
+            return False
+        if self._is_stale_pending_reply(session, pending):
+            return self._clear_stale_pending_reply(session, reason="before_sync")
+        return False
+
+    def _cleanup_stale_pending_on_load(self, session):
+        if session is None:
+            return False
+        pending = self._get_pending_reply_state(session)
+        if not pending:
+            return False
+        if not self._is_stale_pending_reply(session, pending):
+            return False
+        age = self._pending_reply_age_seconds(session, pending)
+        reason = self._stale_pending_clear_reason(session, pending) or "stale_waiting"
+        self._append_log(
+            "[CHAT][LOAD_CLEAN_STALE_PENDING] "
+            f"session_id={session.session_id} "
+            f"reason=stale_waiting_on_startup "
+            f"pending_age={age:.1f} "
+            f"detail={reason}",
+            echo=True,
+        )
+        return self._clear_stale_pending_reply(
+            session, reason="stale_waiting_on_startup", force=True
+        )
 
     def _session_bound_response_state(self, session):
         if not session:
@@ -1424,17 +1784,129 @@ class SessionMixin:
                 return message
         return None
     def _resolve_inbound_binding(self, item):
-        bridge_id = item.get("message_id") or ""
+        bridge_id = (item.get("message_id") or "").strip()
         session_id = (
             self._message_to_session.get(bridge_id) or item.get("session_id") or ""
-        )
-        turn_id = self._message_to_turn.get(bridge_id) or item.get("turn_id") or ""
-        if not bridge_id or not session_id or not turn_id:
-            return None, "", bridge_id
+        ).strip()
+        turn_id = (
+            self._message_to_turn.get(bridge_id) or item.get("turn_id") or ""
+        ).strip()
+        if not session_id or not turn_id:
+            return None, turn_id, bridge_id
         session = self._sessions.get(session_id)
         if session is None:
-            return None, "", bridge_id
+            return None, turn_id, bridge_id
         return session, turn_id, bridge_id
+
+    def _on_tm_assistant_reply(self, payload):
+        session_id = str(payload.get("session_id") or "").strip()
+        turn_id = str(payload.get("turn_id") or "").strip()
+        content = str(
+            payload.get("content") or payload.get("text") or payload.get("assistant_text") or ""
+        ).strip()
+        bridge_id = str(payload.get("message_id") or "").strip()
+
+        if not content:
+            self._append_log("[REPLY][SKIP] reason=empty_content", echo=True)
+            return False
+
+        if content in ("正在思考", "正在生成", "思考中", "回复完成"):
+            self._append_log(
+                f"[REPLY][SKIP_INVALID_TEXT] session_id={session_id or '-'} "
+                f"turn_id={turn_id or '-'} text={content!r}",
+                echo=True,
+            )
+            return False
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            self._append_log(
+                f"[REPLY][SKIP] reason=session_not_found session_id={session_id or '-'}",
+                echo=True,
+            )
+            return False
+
+        if self._upsert_assistant_reply_from_bridge(
+            session,
+            turn_id,
+            bridge_id,
+            content,
+            render_reason="tm_assistant_reply",
+        ):
+            if hasattr(self, "_mark_session_waiting_finished"):
+                self._mark_session_waiting_finished(session, reason="tm_assistant_reply")
+            session.has_pending_reply = False
+            session.pending_reply_since = 0
+            session.pending_sync_requested = False
+            session.updated_at = time.time()
+            if bridge_id:
+                if hasattr(self, "_finalize_bridge"):
+                    self._finalize_bridge(bridge_id)
+                if hasattr(self, "_bridge_msg"):
+                    self._bridge_msg.ack_success_message_ids.discard(bridge_id)
+            self._save_sessions_to_disk()
+            if session.session_id == getattr(self, "_current_session_id", ""):
+                if hasattr(self, "_render_current_chat_messages"):
+                    self._render_current_chat_messages(
+                        force_bottom=True,
+                        reason="tm_assistant_reply",
+                    )
+                elif hasattr(self, "_render_session_chat"):
+                    self._render_session_chat(session, force_bottom=True)
+            if hasattr(self, "_refresh_session_list"):
+                self._refresh_session_list()
+            self._append_log(
+                f"[REPLY][APPLIED] session_id={session_id} turn_id={turn_id or '-'} "
+                f"content_len={len(content)} updated=true",
+                echo=True,
+            )
+            return True
+
+        updated = False
+        for message in session.messages:
+            if (
+                getattr(message, "role", "") == "assistant"
+                and str(getattr(message, "turn_id", "") or "").strip() == turn_id
+                and str(getattr(message, "ui_status", "") or "").strip()
+                in ("waiting", "sending", "等待回复", "准备发送")
+            ):
+                message.content = content
+                message.ui_status = "done"
+                updated = True
+                break
+
+        if not updated:
+            self._append_message_to_session(
+                session.session_id,
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "turn_id": turn_id,
+                    "message_source": "tm_assistant_reply",
+                    "ui_status": "done",
+                    "created_at": time.time(),
+                },
+            )
+
+        session.has_pending_reply = False
+        session.pending_reply_since = 0
+        session.pending_sync_requested = False
+        session.updated_at = time.time()
+        self._save_sessions_to_disk()
+        if session.session_id == getattr(self, "_current_session_id", ""):
+            if hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="tm_assistant_reply",
+                )
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list()
+        self._append_log(
+            f"[REPLY][APPLIED] session_id={session_id} turn_id={turn_id or '-'} "
+            f"content_len={len(content)} updated={updated}",
+            echo=True,
+        )
+        return True
     def _has_assistant_for_turn(self, session, turn_id):
         return self._find_assistant_by_turn(session, turn_id) is not None
     def _migrate_loaded_session_messages(self):
@@ -1556,6 +2028,8 @@ class SessionMixin:
             visible_in_chat=bool(item.get("visible_in_chat", True)),
         )
     def _session_to_dict(self, session):
+        if hasattr(self, "_normalize_session_for_persistence"):
+            return self._normalize_session_for_persistence(session)
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         assert_no_legacy_fields(remote, owner="GUI save session.remote_chatgpt")
         return {
@@ -1568,7 +2042,7 @@ class SessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
-            "pending_reply_since": float(session.pending_reply_since or 0),
+            "pending_reply_since": 0,
             "messages": [self._message_to_dict(item) for item in session.messages],
         }
     def _session_from_dict(self, data):
@@ -1587,9 +2061,6 @@ class SessionMixin:
                 continue
             messages.append(self._message_from_dict(item))
         remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
-        pending_reply_since = self._session_float_field(data, "pending_reply_since")
-        if pending_reply_since <= 0 and bool(data.get("has_pending_reply")):
-            pending_reply_since = self._session_float_field(data, "updated_at") or time.time()
         return ChatSession(
             session_id=data.get("session_id") or str(uuid.uuid4()),
             title=data.get("title") or "新对话",
@@ -1601,7 +2072,7 @@ class SessionMixin:
             pinned_context=data.get("pinned_context", ""),
             remote_chatgpt=remote,
             messages=messages,
-            pending_reply_since=pending_reply_since,
+            pending_reply_since=0,
         )
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:
@@ -1724,8 +2195,15 @@ class SessionMixin:
         self._bridge_msg.finalized_bridge_message_ids = set(finalized)
         self._migrate_loaded_session_messages()
         self._migrate_loaded_remote_bindings()
-        if hasattr(self, "_restore_waiting_timers_after_load"):
-            self._restore_waiting_timers_after_load()
+        startup_cleared = False
+        for session in self._sessions.values():
+            if hasattr(self, "_clear_runtime_waiting_state_on_startup"):
+                if self._clear_runtime_waiting_state_on_startup(session):
+                    startup_cleared = True
+            else:
+                self._cleanup_stale_pending_on_load(session)
+        if startup_cleared:
+            self._save_sessions_to_disk()
 
     def _migrate_loaded_remote_bindings(self):
         from app.utils.bind_runtime import migrate_transient_from_remote

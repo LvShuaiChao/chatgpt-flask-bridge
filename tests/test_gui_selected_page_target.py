@@ -165,7 +165,7 @@ def test_send_prefers_bound_page_over_gui_selection():
     assert isinstance(target, dict)
     assert (target.get("client_id") or "").strip() == "bound-c"
     assert (target.get("page_instance_id") or "").strip() == "bound-p"
-    assert target.get("source") == "bound_page"
+    assert target.get("target_source") == "bound_page"
 
 
 def test_gui_selection_differs_blocks_resolve_page_action():
@@ -185,6 +185,6 @@ def test_gui_selection_differs_blocks_resolve_page_action():
     )
     result = host.resolve_page_action(session, action="send")
     assert result.decision == "blocked"
-    assert result.blocked_reason == "selected_page_mismatch_bound_session"
+    assert result.reason_code == "selected_page_mismatch_bound_session"
     assert not result.allowed
     assert any("SELECTED_PAGE_MISMATCH" in line for line in host._logs)

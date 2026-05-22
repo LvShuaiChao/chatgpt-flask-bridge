@@ -1,361 +1,368 @@
 """页面命令目标解析（无 Qt 依赖）。"""
 
-
-
 from __future__ import annotations
 
-
-
 import time
-
-from typing import Any, Dict, Optional, Tuple
-
-
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from app.constants import SYNC_COMMAND_POLL_MAX_AGE_SECONDS
-
 from app.utils.page_snapshot import PageRegistry, PageSnapshot, binding_from_session
-
-from app.utils.page_status import can_sync_conversation, evaluate_page_capability
-
+from app.utils.page_status import (
+    can_sync_conversation,
+    evaluate_page_capability,
+    is_page_online,
+)
 from app.utils.time_utils import float_ts
 
-
-
 __all__ = [
-
     "resolve_page_command_target",
-
+    "resolve_bound_page_in_registry",
     "command_target_result",
-
     "evaluate_sync_poll_freshness",
-
 ]
 
-
-
 _COMMAND_ALIASES = {
-
     "sync": "sync_conversation",
-
     "send": "send_message",
-
     "upload": "start_upload",
-
     "copy_last": "copy_last_message",
-
 }
 
 
-
-
-
 def command_target_result(
-
     *,
-
     ok: bool,
-
     reason: str = "",
-
     reason_code: str = "",
-
     page: Optional[PageSnapshot] = None,
-
+    matched_by: str = "",
 ) -> Dict[str, Any]:
-
     page_obj = page
-
     return {
-
         "ok": bool(ok),
-
         "reason": (reason or "").strip(),
-
         "reason_code": (reason_code or "").strip(),
-
         "page": page_obj,
-
         "client_id": (page_obj.client_id if page_obj else "") or "",
-
         "page_instance_id": (page_obj.page_instance_id if page_obj else "") or "",
-
         "conversation_id": (page_obj.conversation_id if page_obj else "") or "",
-
         "url": (page_obj.url if page_obj else "") or "",
-
+        "matched_by": (matched_by or "").strip(),
     }
 
 
-
-
-
 def evaluate_sync_poll_freshness(
-
     page: PageSnapshot,
-
     *,
-
     now: float | None = None,
-
     max_age_seconds: float = SYNC_COMMAND_POLL_MAX_AGE_SECONDS,
-
 ) -> Tuple[bool, str, str]:
-
     """检查绑定页 poll 是否足够新鲜以领取 sync_conversation。"""
-
     if now is None:
-
         now = time.time()
-
     raw = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
-
     last_poll_at = float_ts(
-
         raw.get("last_poll_at"),
-
         default=0.0,
-
         context="page_command.sync.last_poll_at",
-
         log_on_error=True,
-
     )
-
     if last_poll_at <= 0:
-
         return (
-
             False,
-
             "bound_page_not_polling",
-
             "绑定页面没有 poll 记录，无法领取同步命令",
-
         )
-
     poll_age = now - last_poll_at
-
     if poll_age > float(max_age_seconds):
-
         return (
-
             False,
-
             "bound_page_poll_stale",
-
             f"绑定页面轮询已过期（{poll_age:.1f}s），无法领取同步命令",
-
         )
-
     return True, "", ""
 
 
+def _page_poll_recency_key(page: PageSnapshot) -> float:
+    raw = page._raw if isinstance(page._raw, dict) else {}
+    for key in ("last_poll_at", "last_seen", "last_heartbeat_at"):
+        ts = float_ts(raw.get(key), default=0.0, context=f"page_command.pick.{key}")
+        if ts > 0:
+            return ts
+    return 0.0
 
+
+def _pick_fresh_conversation_page(
+    registry: PageRegistry,
+    conversation_id: str,
+    *,
+    now: float | None = None,
+    for_sync: bool = False,
+) -> Optional[PageSnapshot]:
+    """同 conversation 选最新在线页；sync 要求 poll 新鲜且可同步。"""
+    conversation_id = (conversation_id or "").strip()
+    if not conversation_id or not isinstance(registry, PageRegistry):
+        return None
+    if now is None:
+        now = time.time()
+    candidates: list[tuple[float, PageSnapshot]] = []
+    for page in registry.get_by_conversation_id(conversation_id):
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        if not is_page_online(raw, now=now):
+            continue
+        if not can_sync_conversation(raw, now=now):
+            continue
+        if for_sync:
+            poll_ok, _, _ = evaluate_sync_poll_freshness(page, now=now)
+            if not poll_ok:
+                continue
+        candidates.append((_page_poll_recency_key(page), page))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    return candidates[0][1]
+
+
+def resolve_bound_page_in_registry(
+    registry: PageRegistry,
+    binding: Mapping[str, Any] | None,
+    *,
+    now: float | None = None,
+    allow_same_conversation: bool = True,
+) -> Dict[str, Any]:
+    """
+    在 PageRegistry 中解析会话绑定页：精确匹配优先，同 conversation 在线页兜底。
+    返回 page / matched_by / online / last_poll_at / reason_code。
+    """
+    from app.models import BIND_STATE_UNBOUND
+
+    if now is None:
+        now = time.time()
+    empty = {
+        "page": None,
+        "matched_by": "none",
+        "online": False,
+        "last_poll_at": 0.0,
+        "reason_code": "not_bound",
+        "relink_needed": False,
+    }
+    if not binding or (binding.get("bind_state") or BIND_STATE_UNBOUND) == BIND_STATE_UNBOUND:
+        empty["reason_code"] = "not_bound"
+        return empty
+
+    reg = registry if isinstance(registry, PageRegistry) else PageRegistry.empty()
+    bound_client = (binding.get("client_id") or "").strip()
+    bound_instance = (binding.get("page_instance_id") or "").strip()
+    bound_conv = (binding.get("conversation_id") or "").strip()
+
+    page = reg.get_bound_page(binding, strict_identity=True)
+    matched_by = "exact" if page is not None else "none"
+    reason_code = ""
+
+    if page is not None:
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        online = is_page_online(raw, now=now)
+        last_poll_at = float_ts(
+            raw.get("last_poll_at"),
+            default=0.0,
+            context="page_command.resolve.last_poll_at",
+        )
+        if online:
+            return {
+                "page": page,
+                "matched_by": "exact",
+                "online": True,
+                "last_poll_at": last_poll_at,
+                "reason_code": "",
+                "relink_needed": False,
+            }
+        reason_code = "bound_page_offline"
+    else:
+        reason_code = "bound_page_offline"
+
+    if not allow_same_conversation or not bound_conv:
+        return {
+            "page": page,
+            "matched_by": matched_by,
+            "online": False,
+            "last_poll_at": 0.0,
+            "reason_code": reason_code,
+            "relink_needed": False,
+        }
+
+    fallback = _pick_fresh_conversation_page(
+        reg, bound_conv, now=now, for_sync=False
+    )
+    if fallback is None:
+        return {
+            "page": None,
+            "matched_by": "none",
+            "online": False,
+            "last_poll_at": 0.0,
+            "reason_code": reason_code,
+            "relink_needed": False,
+        }
+
+    raw = fallback._raw if isinstance(fallback._raw, dict) else {}
+    last_poll_at = float_ts(
+        raw.get("last_poll_at"),
+        default=0.0,
+        context="page_command.resolve.fallback_poll",
+    )
+    relink_needed = (
+        fallback.client_id != bound_client
+        or fallback.page_instance_id != bound_instance
+    )
+    return {
+        "page": fallback,
+        "matched_by": "same_conversation",
+        "online": True,
+        "last_poll_at": last_poll_at,
+        "reason_code": "",
+        "relink_needed": relink_needed,
+    }
 
 
 def resolve_page_command_target(
-
     session: Any,
-
     command: str,
-
     registry: Optional[PageRegistry] = None,
-
     *,
-
     now: float | None = None,
-
+    allow_same_conversation: bool = True,
 ) -> Dict[str, Any]:
-
     """
-
     统一解析 sync/send/upload/copy 目标页。
-
-    sync_conversation 仅使用 session 绑定页；不因 GUI 选中页或 active_matches_bound 覆盖。
-
+    使用 resolve_bound_page_in_registry；同会话新鲜在线页可作为绑定目标。
     """
-
     if now is None:
-
         now = time.time()
-
     cmd = _COMMAND_ALIASES.get((command or "").strip(), (command or "").strip())
-
     if not cmd:
-
         return command_target_result(ok=False, reason="未知命令", reason_code="invalid_command")
 
-
-
     if session is None:
-
-        return command_target_result(ok=False, reason="当前没有选中的对话", reason_code="no_session")
-
-
+        return command_target_result(
+            ok=False, reason="当前没有选中的对话", reason_code="no_session"
+        )
 
     binding = binding_from_session(session)
-
     from app.models import BIND_STATE_UNBOUND
 
     if (binding.get("bind_state") or BIND_STATE_UNBOUND) == BIND_STATE_UNBOUND:
-
         return command_target_result(
-
             ok=False,
-
             reason="当前对话未绑定页面",
-
             reason_code="not_bound",
-
         )
-
-
 
     reg = registry if isinstance(registry, PageRegistry) else PageRegistry.empty()
-
-    page = reg.get_bound_page(binding)
+    resolved = resolve_bound_page_in_registry(
+        reg,
+        binding,
+        now=now,
+        allow_same_conversation=allow_same_conversation,
+    )
+    page = resolved.get("page")
+    matched_by = (resolved.get("matched_by") or "none").strip()
 
     if page is None:
-
+        code = (resolved.get("reason_code") or "bound_page_offline").strip()
         return command_target_result(
-
             ok=False,
-
             reason="绑定页面不在线或未上报",
-
-            reason_code="bound_page_offline",
-
+            reason_code=code,
+            matched_by=matched_by,
         )
-
-
 
     if cmd == "sync_conversation":
-
         if not page.online:
-
             return command_target_result(
-
                 ok=False,
-
                 reason="绑定页面离线",
-
                 reason_code="bound_page_offline",
-
                 page=page,
-
+                matched_by=matched_by,
             )
-
         if not can_sync_conversation(page._raw, now=now):
-
             return command_target_result(
-
                 ok=False,
-
                 reason="绑定页面暂不可同步对话",
-
                 reason_code="not_conversation_syncable",
-
                 page=page,
-
+                matched_by=matched_by,
             )
-
         poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
-
         if not poll_ok:
-
-            return command_target_result(
-
-                ok=False,
-
-                reason=poll_reason,
-
-                reason_code=poll_code,
-
-                page=page,
-
-            )
-
-        return command_target_result(ok=True, reason="", reason_code="", page=page)
-
-
+            if matched_by == "same_conversation":
+                fresh = _pick_fresh_conversation_page(
+                    reg,
+                    binding.get("conversation_id") or "",
+                    now=now,
+                    for_sync=True,
+                )
+                if fresh is not None:
+                    page = fresh
+                    matched_by = "same_conversation"
+                    poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(
+                        page, now=now
+                    )
+            if not poll_ok:
+                return command_target_result(
+                    ok=False,
+                    reason=poll_reason,
+                    reason_code=poll_code,
+                    page=page,
+                    matched_by=matched_by,
+                )
+        return command_target_result(
+            ok=True, reason="", reason_code="", page=page, matched_by=matched_by
+        )
 
     action = cmd
-
     if cmd == "send_message":
-
         action = "send"
-
     elif cmd == "start_upload":
-
         action = "upload"
-
     elif cmd == "copy_last_message":
-
         action = "copy_last"
 
-
-
     cap = evaluate_page_capability(
-
         page._raw,
-
         action=action,
-
         bound=True,
-
         expected_conversation_id=binding.get("conversation_id") or "",
-
         expected_client_id=binding.get("client_id") or "",
-
+        expected_page_instance_id=binding.get("page_instance_id") or "",
         now=now,
-
     )
-
-    if not page.online:
-
+    raw = page._raw if isinstance(page._raw, dict) else {}
+    online = is_page_online(raw, now=now)
+    if not online:
         return command_target_result(
-
             ok=False,
-
             reason="绑定页面离线",
-
             reason_code="bound_page_offline",
-
             page=page,
-
+            matched_by=matched_by,
         )
-
     if cmd in ("send_message", "start_upload") and cap.send_decision == "blocked":
-
-        blocked = cap.reason or "blocked"
-
+        blocked = cap.reason_code or "blocked"
         return command_target_result(
-
             ok=False,
-
             reason=f"绑定页面暂不可{cmd}: {blocked}",
-
             reason_code=blocked,
-
             page=page,
-
+            matched_by=matched_by,
         )
-
     if cmd == "copy_last_message" and not can_sync_conversation(page._raw, now=now):
-
         return command_target_result(
-
             ok=False,
-
             reason="绑定页面暂不可复制",
-
             reason_code="not_conversation_syncable",
-
             page=page,
-
+            matched_by=matched_by,
         )
-
-    return command_target_result(ok=True, reason="", reason_code="", page=page)
-
-
+    return command_target_result(
+        ok=True, reason="", reason_code="", page=page, matched_by=matched_by
+    )

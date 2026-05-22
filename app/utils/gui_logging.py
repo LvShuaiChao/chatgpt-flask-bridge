@@ -50,6 +50,13 @@ GUI_NOISY_TAGS = (
     "[BRIDGE][POLL][NO_MESSAGE]",
     "[BRIDGE][JSON][TM_TO_SERVER]",
     "[BRIDGE][JSON][SERVER_TO_TM]",
+    "[BRIDGE][JSON][TM_TO_SERVER_FULL]",
+    "[BRIDGE][JSON][SERVER_TO_TM_FULL]",
+    "[BRIDGE][JSON][SERVER_TO_TM_QUEUE_FULL]",
+    "[GUI][JSON][SEND_PAYLOAD_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_REPORT_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_RECV_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_UNKNOWN_FULL]",
     "[BRIDGE][REPORT_UNKNOWN]",
     "[BRIDGE_RUNTIME_PATCH]",
     "[BRIDGE_CLIENT_REPORT]",
@@ -201,7 +208,7 @@ _LEVEL_IN_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _BLOCKED_REASON_RE = re.compile(
-    r"blocked_reason=([^ \t]+)",
+    r"reason_code=([^ \t]+)",
     re.IGNORECASE,
 )
 _KV_FIELD_RE = re.compile(
@@ -295,7 +302,7 @@ def _decision_identity_mismatch_warning(text: str) -> bool:
         if left and right and left != "-" and right != "-" and left != right:
             return True
 
-    bound_conv = fields.get("bound_conversation_id") or fields.get("conversation_id", "")
+    bound_conv = fields.get("conversation_id", "")
     target_conv = fields.get("target_conversation_id", "")
     if (
         bound_conv
@@ -319,9 +326,9 @@ def _decision_message_is_warning(text: str) -> bool:
         reason = (match.group(1) or "").strip().lower()
         if reason and reason not in ("-", "none", "null", ""):
             return True
-    if "blocked_reason=" in lower and "blocked_reason=-" not in lower:
+    if "reason_code=" in lower and "reason_code=-" not in lower:
         for part in text.split():
-            if part.lower().startswith("blocked_reason="):
+            if part.lower().startswith("reason_code="):
                 val = part.split("=", 1)[-1].strip()
                 if val and val != "-":
                     return True

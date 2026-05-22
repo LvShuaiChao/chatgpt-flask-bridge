@@ -523,8 +523,10 @@ def get_tm_online_summary(
         "offline_clients": offline_clients,
         "online_conversation_clients": online_conversation_clients,
         "online_home_clients": online_home_clients,
-        "active_client_id": active_client_id,
-        "active_conversation_id": active_conversation_id,
+        "active": {
+            "client_id": (active_client_id or "").strip(),
+            "conversation_id": (active_conversation_id or "").strip(),
+        },
         "exact_bound_online": exact_bound_online,
         "bound_online": bound_online,
         "bound_effective_online": bound_effective_online,
@@ -678,7 +680,7 @@ def _normalized_last_focused_page(entry):
         "page_title": (entry.get("page_title") or "").strip(),
         "page_type": page_type,
         "conversation_id": (entry.get("conversation_id") or "").strip(),
-        "visibility_state": (entry.get("visibility_state") or entry.get("visible") or "").strip(),
+        "visibility_state": (entry.get("visibility_state") or "").strip(),
         "has_focus": bool(entry.get("has_focus")),
         "last_focus_at": entry.get("last_focus_at"),
         "online": _client_online(entry.get("last_seen")),
@@ -885,7 +887,6 @@ def _touch_tampermonkey(meta, action="poll"):
         new_snap = {
             "client_id": client_id,
             "page_instance_id": page_instance_id or "-",
-            "page_key": snap_key,
             "page_type": page_type or "-",
             "conversation_id": conversation_id or "-",
             "normalized_url": norm_url,
@@ -921,9 +922,9 @@ def _touch_tampermonkey(meta, action="poll"):
                 f"new_conv={new_snap.get('conversation_id') or '-'} "
                 f"old_url={prev_snap.get('normalized_url') or '-'} "
                 f"new_url={new_snap.get('normalized_url') or '-'} "
-                f"old_is_responding={prev_snap.get('is_responding') or prev_snap.get('responding') or '-'} "
+                f"old_is_responding={prev_snap.get('is_responding') or '-'} "
                 f"new_is_responding={new_snap.get('is_responding') or '-'} "
-                f"old_can_accept_input={prev_snap.get('can_accept_input') or prev_snap.get('input') or '-'} "
+                f"old_can_accept_input={prev_snap.get('can_accept_input') or '-'} "
                 f"new_can_accept_input={new_snap.get('can_accept_input') or '-'} "
                 f"reason=heartbeat_diff"
             )

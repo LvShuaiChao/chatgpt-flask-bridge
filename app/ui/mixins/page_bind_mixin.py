@@ -46,6 +46,7 @@ from app.utils.page_status import (
     is_page_online,
     log_page_decision_fields,
     page_url_from,
+    read_snapshot_identity,
 )
 from app.ui.mixins.ui_status_compact_mixin import UiStatusCompactMixin
 from app.ui.mixins.page_auto_bind_mixin import PageAutoBindMixin
@@ -96,10 +97,11 @@ class PageBindMixin(
                     "conversation_id": bound_conversation_id or "",
                     "url": (remote.get("url") or "").strip(),
                 }
-        summary["active"] = {
-            "client_id": (summary.get("active_client_id") or "").strip(),
-            "conversation_id": (summary.get("active_conversation_id") or "").strip(),
-        }
+        if "active" not in summary:
+            summary["active"] = {
+                "client_id": "",
+                "conversation_id": "",
+            }
         reg = getattr(self, "page_registry", None)
         if isinstance(reg, PageRegistry):
             reg_summary = reg.summary()
@@ -239,8 +241,12 @@ class PageBindMixin(
 
     def _pick_current_page_client_info(self, status=None):
         status = status or self._bridge_ui.last_bridge_status or {}
-        for key in ("tampermonkey_client_id", "active_client_id"):
-            cid = (status.get(key) or "").strip()
+        active_client_id = read_snapshot_identity(status, "active")["client_id"]
+        for cid in (
+            (status.get("tampermonkey_client_id") or "").strip(),
+            active_client_id,
+        ):
+            cid = (cid or "").strip()
             info = self._client_info_by_id(cid, status=status)
             if isinstance(info, dict) and is_page_online(info):
                 return info
@@ -756,8 +762,8 @@ class PageBindMixin(
 
     def request_send_message(self, session, content="", source="gui", status=None):
         """统一发送入口：返回 ok/decision/target 等，供 GUI / 外部 API / 队列恢复共用。"""
-        raw_user_text = (content or "").strip()
-        if not raw_user_text:
+        content_text = (content or "").strip()
+        if not content_text:
             return {
                 "ok": False,
                 "reason": "empty_text",
@@ -803,7 +809,7 @@ class PageBindMixin(
                     "ok": False,
                     "reason": busy_reason,
                     "decision": "queued",
-                    "detail": {"blocked_reason": busy_reason, "send_decision": "queued"},
+                    "detail": {"reason_code": busy_reason, "send_decision": "queued"},
                     "code": "SEND_BUSY",
                     "enqueue": True,
                 }
@@ -824,7 +830,7 @@ class PageBindMixin(
                     "ok": False,
                     "reason": reason,
                     "decision": "queued",
-                    "detail": {"blocked_reason": reason, "send_decision": "queued"},
+                    "detail": {"reason_code": reason, "send_decision": "queued"},
                     "code": "BIND_PAGE_NOT_READY",
                     "enqueue": True,
                 }
@@ -836,7 +842,7 @@ class PageBindMixin(
             and self._session_needs_first_message_bind(session)
         ):
             ready, bind_reason = self._prepare_first_message_binding(
-                session, raw_user_text
+                session, content_text
             )
             if not ready:
                 if bind_reason == "__WAITING_HOME_PENDING__":
@@ -845,7 +851,7 @@ class PageBindMixin(
                         "reason": bind_reason,
                         "decision": "queued",
                         "detail": {
-                            "blocked_reason": bind_reason,
+                            "reason_code": bind_reason,
                             "send_decision": "queued",
                         },
                         "code": "WAITING_HOME",
@@ -856,17 +862,17 @@ class PageBindMixin(
                     "reason": bind_reason or "first_message_bind_not_ready",
                     "decision": "blocked",
                     "detail": {
-                        "blocked_reason": bind_reason or "first_message_bind_not_ready",
+                        "reason_code": bind_reason or "first_message_bind_not_ready",
                         "send_decision": "blocked",
                     },
                     "code": "NO_AVAILABLE_CHATGPT_PAGE",
                 }
 
-        decision, send_reason, target_item, detail = self.resolve_send_decision(
-            session, content=raw_user_text, status=status
+        decision, send_reason, target_page, detail = self.resolve_send_decision(
+            session, content=content_text, status=status
         )
         if decision == "blocked":
-            reason = send_reason or detail.get("blocked_reason") or "send_blocked"
+            reason = send_reason or detail.get("reason_code") or "send_blocked"
             code = "BIND_PAGE_OFFLINE"
             if "未找到" in reason or "没有" in reason:
                 code = "NO_AVAILABLE_CHATGPT_PAGE"
@@ -887,17 +893,17 @@ class PageBindMixin(
             }
 
         target_client_id = (detail.get("client_id") or "").strip()
-        if not target_client_id and isinstance(target_item, dict):
-            target_client_id = (target_item.get("client_id") or "").strip()
+        if not target_client_id and isinstance(target_page, dict):
+            target_client_id = (target_page.get("client_id") or "").strip()
         target_page_instance_id = (detail.get("page_instance_id") or "").strip()
-        if not target_page_instance_id and isinstance(target_item, dict):
-            target_page_instance_id = (target_item.get("page_instance_id") or "").strip()
+        if not target_page_instance_id and isinstance(target_page, dict):
+            target_page_instance_id = (target_page.get("page_instance_id") or "").strip()
         target_conversation_id = (detail.get("conversation_id") or "").strip()
-        if not target_conversation_id and isinstance(target_item, dict):
-            target_conversation_id = self._client_conversation_id(target_item)
+        if not target_conversation_id and isinstance(target_page, dict):
+            target_conversation_id = self._client_conversation_id(target_page)
         target_page_url = ((detail.get("url") or "") or "").strip()
-        if not target_page_url and isinstance(target_item, dict):
-            target_page_url = page_url_from(target_item)
+        if not target_page_url and isinstance(target_page, dict):
+            target_page_url = page_url_from(target_page)
 
         if hasattr(self, "_verify_send_target_binding") and hasattr(
             self, "_debug_logging_enabled"
@@ -928,10 +934,10 @@ class PageBindMixin(
             "page_instance_id": target_page_instance_id,
             "conversation_id": target_conversation_id,
             "url": target_page_url,
-            "target_item": target_item,
+            "page": target_page,
             "detail": detail,
-            "content": raw_user_text,
-            "source": source,
+            "content": content_text,
+            "message_source": source,
         }
 
     def _compose_send_payload(
@@ -950,11 +956,10 @@ class PageBindMixin(
         bootstrap_conversation=False,
         trace_id="",
         allow_same_conversation_fallback=False,
-        target_page_snapshot=None,
+        cap_page=None,
     ):
         """入队 payload：只使用已 resolve 的 target，不从 remote_chatgpt 静默补全。"""
         from app.utils.bridge_payload import build_gui_push_payload
-        from app.utils.page_status import explain_page_decision
 
         client_id = (client_id or "").strip()
         page_instance_id = (page_instance_id or "").strip()
@@ -965,8 +970,12 @@ class PageBindMixin(
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             bind_request_id = self._session_bind_request_id(remote)
 
-        if isinstance(target_page_snapshot, dict) and target_page_snapshot:
-            cap_dict = explain_page_decision(target_page_snapshot, action="send")
+        if isinstance(cap_page, dict) and cap_page:
+            cap_page = dict(cap_page)
+            cap_page.setdefault("client_id", client_id)
+            cap_page.setdefault("page_instance_id", page_instance_id)
+            cap_page.setdefault("conversation_id", conversation_id)
+            cap_page.setdefault("url", url)
         else:
             cap_page = {
                 "client_id": client_id,
@@ -974,8 +983,11 @@ class PageBindMixin(
                 "conversation_id": conversation_id,
                 "url": url,
             }
-            cap = evaluate_page_capability(cap_page, action="send")
-            cap_dict = cap.to_dict()
+        cap = evaluate_page_capability(cap_page, action="send")
+        cap_dict = cap.to_dict()
+        decision_dict = explain_page_decision(cap_page, action="send")
+        if isinstance(decision_dict, dict):
+            cap_dict.update(decision_dict)
 
         del allow_same_conversation_fallback
         payload = build_gui_push_payload(

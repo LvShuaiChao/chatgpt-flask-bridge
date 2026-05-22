@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 
 from app.server import state as st
-from app.server.bridge_logging import _log_bridge_json_payload
+from app.server.bridge_logging import log_server_to_tm_queue_full
 from app.utils.bridge_payload import get_bridge_message_id
 from app.server.tm_page_registry import (
     _is_ignored_page,
@@ -62,13 +62,10 @@ def _queue_control_message(command, *, log_label="", **extra):
             f"[TM_CONTROL][START_UPLOAD][QUEUE] "
             f"client_id={client_id} command=start_upload"
         )
-    _log_bridge_json_payload(
-        "SERVER_TO_TM_QUEUE",
+    log_server_to_tm_queue_full(
         msg,
         action="queue_command",
         event=command,
-        message_id=get_bridge_message_id(msg),
-        client_id=client_id if client_id != "-" else "",
     )
     _notify_status()
     return msg

@@ -19,6 +19,7 @@ from app.utils.page_status import (
     normalize_page,
     page_registry_key,
     page_url_from,
+    read_snapshot_identity,
 )
 
 __all__ = [
@@ -77,7 +78,7 @@ def status_pages_token(status: Any) -> str:
                     parts.append(f"summary.{key}:{_page_source_len(value)}")
     parts.extend([
         f"running={int(bool(status.get('server_running')))}",
-        f"bound={status.get('bound_client_id') or ''}",
+        f"bound={read_snapshot_identity(status, 'bound')['client_id']}",
         f"q={status.get('queue_length', 0)}",
         f"cq={status.get('control_queue_length', 0)}",
     ])
@@ -196,7 +197,7 @@ class PageSnapshot:
     online: bool = False
     can_accept_input: bool = True
     send_decision: str = "blocked"
-    blocked_reason: str = ""
+    reason_code: str = ""
     response_state: str = "unknown"
     page_liveness: str = "offline"
     activity_state: str = ""
@@ -228,7 +229,7 @@ class PageSnapshot:
             "online": self.online,
             "can_accept_input": self.can_accept_input,
             "send_decision": self.send_decision,
-            "blocked_reason": self.blocked_reason,
+            "reason_code": self.reason_code,
             "response_state": self.response_state,
             "page_liveness": self.page_liveness,
             "activity_state": self.activity_state,
@@ -261,7 +262,7 @@ class PageSnapshot:
             online=online,
             can_accept_input=bool(norm.get("can_accept_input", True)),
             send_decision=send_cap.send_decision,
-            blocked_reason=send_cap.blocked_reason,
+            reason_code=send_cap.reason_code,
             response_state=(norm.get("response_state") or "unknown").strip() or "unknown",
             page_liveness=liveness,
             activity_state=(norm.get("activity_state") or "").strip(),

@@ -1,4 +1,4 @@
-﻿"""GUI 同步卡住修复：_append_log(level=) 与 sync_target_state 一致性。"""
+"""GUI 同步卡住修复：_append_log(level=) 与 sync_target_state 一致性。"""
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -48,11 +48,11 @@ class TestSyncTargetSnapshotAllowed(unittest.TestCase):
         snap = host._build_sync_target_snapshot_from_decision(
             session=MagicMock(),
             remote={"enabled": True, "client_id": "c1"},
-            target_item={"client_id": "c1", "online": True},
+            page={"client_id": "c1", "online": True},
             source="bound_page",
             block_reason="",
             detail={"conversation_syncable": True, "online": True},
-            status={"active_client_id": "other"},
+            status={"active": {"client_id": "other", "conversation_id": ""}},
             allowed=True,
         )
         self.assertTrue(snap.get("allowed"))

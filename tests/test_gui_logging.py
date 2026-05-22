@@ -63,8 +63,8 @@ def test_should_show_gui_log_target_mismatch_warning_visible():
 
 
 def test_level_for_decision_message():
-    assert level_for_decision_message("[ACTION_DECISION] allowed=true blocked_reason=-") == "DEBUG"
-    assert level_for_decision_message("[SYNC][DECISION] allowed=false blocked_reason=offline") == "WARNING"
+    assert level_for_decision_message("[ACTION_DECISION] allowed=true reason_code=-") == "DEBUG"
+    assert level_for_decision_message("[SYNC][DECISION] allowed=false reason_code=offline") == "WARNING"
     assert level_for_decision_message("[ACTION_DECISION] allowed=true reason=no_online_page") == "WARNING"
 
 

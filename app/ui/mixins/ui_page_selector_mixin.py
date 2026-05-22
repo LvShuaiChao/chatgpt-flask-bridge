@@ -285,7 +285,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
         syncable_text = self._page_syncable_text(item)
         sendable_text = self._page_sendable_text(item)
         profile = self._tm_client_sync_profile(item)
-        blocked = (profile.get("blocked_reason") or profile.get("reason") or "").strip()
+        blocked = (profile.get("reason_code") or "").strip()
 
         last_seen_text = self._format_last_seen_ago(item.get("last_seen"))
 
@@ -302,18 +302,25 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
             f"正在生成：{responding_text}\n"
             f"窗口：{visible_text}（仅展示，不拦截同步）\n"
             f"焦点：{focus_text}（仅展示，不拦截同步）\n"
-            f"blocked_reason：{blocked or '-'}"
+            f"reason_code：{blocked or '-'}"
         )
+
+    def _tm_page_combo_sort_rank(self, profile):
+        if not isinstance(profile, dict):
+            return 0
+        if profile.get("send_now_available") and profile.get("conversation_syncable"):
+            return 4
+        if profile.get("conversation_syncable"):
+            return 3
+        if profile.get("online"):
+            return 2
+        if profile.get("stale"):
+            return 1
+        return 0
 
     def _tm_page_combo_sort_key(self, item):
         profile = self._tm_client_sync_profile(item)
-        state_rank = {
-            "sendable": 4,
-            "syncable": 3,
-            "online": 2,
-            "stale": 1,
-            "offline": 0,
-        }.get(profile.get("state"), 0)
+        state_rank = self._tm_page_combo_sort_rank(profile)
         page_type = (item.get("page_type") or "").strip()
         conv_rank = 1 if page_type == "conversation" else 0
         last_seen = float(item.get("last_seen") or 0)
@@ -555,10 +562,10 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                     f"client_id={(item.get('client_id') or '-').strip() or '-'} "
                     f"page_type={(item.get('page_type') or '-').strip() or '-'} "
                     f"conversation_id={(item.get('conversation_id') or '-').strip() or '-'} "
-                    f"visible={(item.get('visible') or '-').strip() or '-'} "
+                    f"visibility_state={(item.get('visibility_state') or '-').strip() or '-'} "
                     f"focus={(item.get('focus') or '-').strip() or '-'} "
-                    f"responding={(item.get('responding') or '-').strip() or '-'} "
-                    f"state={(item.get('state') or '-').strip() or '-'} "
+                    f"response_state={(item.get('response_state') or '-').strip() or '-'} "
+                    f"activity_state={(item.get('activity_state') or '-').strip() or '-'} "
                     f"input={(item.get('input') or '-').strip() or '-'} "
                     f"url={(page_url_from(item) or '-').strip() or '-'}",
                     echo=False,

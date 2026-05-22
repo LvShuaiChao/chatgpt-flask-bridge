@@ -148,7 +148,6 @@ class PageSendTargetMixin:
             "page_instance_id": page_instance_id,
             "conversation_id": conversation_id,
             "url": url,
-            "source": source,
             "target_source": source,
             "online": online,
             "page_liveness": page_liveness,
@@ -226,6 +225,15 @@ class PageSendTargetMixin:
         }
     )
 
+    AUTO_RELINK_FRESH_PAGE_REASONS = frozenset(
+        {
+            "sync_relink_to_fresh_poll_page",
+            "auto_relink_fresh_page",
+            "before_send_relink",
+            "before_sync_relink",
+        }
+    )
+
     AUTO_BIND_MISMATCH_BLOCK_TYPES = frozenset(
         {
             "different_conversation",
@@ -293,7 +301,9 @@ class PageSendTargetMixin:
                 return "same_conversation_different_page"
         return ""
 
-    def _should_block_automatic_bind_actions(self, session, *, status=None):
+    def _should_block_automatic_bind_actions(self, session, *, status=None, bind_reason=""):
+        if (bind_reason or "").strip() in self.AUTO_RELINK_FRESH_PAGE_REASONS:
+            return False, ""
         if not getattr(self, "_bind_each_chat_to_page", True):
             return False, ""
         mismatch = self._bound_vs_current_mismatch_type(session, status=status)
@@ -364,10 +374,25 @@ class PageSendTargetMixin:
             echo=True,
         )
 
-    def _log_action_target_selected(self, session, target, *, action="sync"):
+    def _log_action_target_selected(self, session, target, *, action="sync", force=False):
         if not isinstance(target, dict):
             return
         session_id = session.session_id if session else "-"
+        client_id = (target.get("client_id") or "").strip()
+        page_instance_id = (target.get("page_instance_id") or "").strip()
+        conversation_id = (target.get("conversation_id") or "").strip()
+        throttle_key = (
+            f"{session_id}|{action}|{client_id}|{page_instance_id}|{conversation_id}"
+        )
+        now = time.time()
+        log_at = getattr(self, "_action_target_selected_log_at", None)
+        if not isinstance(log_at, dict):
+            log_at = {}
+            self._action_target_selected_log_at = log_at
+        last_at = float(log_at.get(throttle_key) or 0)
+        if not force and last_at > 0 and (now - last_at) < 5.0:
+            return
+        log_at[throttle_key] = now
         self._append_log(
             "[SYNC][TARGET_SELECTED] "
             f"action={action} "
@@ -499,25 +524,24 @@ class PageSendTargetMixin:
         session,
         *,
         action,
-        blocked_reason,
+        reason_code,
         status=None,
         capability_detail=None,
     ):
+        del status
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         identity = self._session_bound_identity(remote)
         detail = dict(capability_detail or {})
-        detail.setdefault("blocked_reason", blocked_reason)
+        detail.setdefault("reason_code", reason_code)
         detail.setdefault("client_id", identity["client_id"])
         detail.setdefault("page_instance_id", identity["page_instance_id"])
         detail.setdefault("conversation_id", identity["conversation_id"])
         detail.setdefault("url", identity["url"])
         return {
             "decision": "blocked",
-            "target": {},
-            "target_item": None,
+            "page": None,
             "target_source": "",
-            "blocked_reason": blocked_reason,
-            "reason": blocked_reason,
+            "reason_code": reason_code,
             "client_id": identity["client_id"],
             "page_instance_id": identity["page_instance_id"],
             "conversation_id": identity["conversation_id"],
@@ -526,6 +550,7 @@ class PageSendTargetMixin:
             "send_decision": "blocked",
             "action": action,
             "page_liveness": "offline",
+            "capability_detail": detail,
         }
 
     def _page_action_from_resolved_target(
@@ -547,7 +572,7 @@ class PageSendTargetMixin:
             return self._page_action_blocked_result(
                 session,
                 action=action,
-                blocked_reason=self._blocked_reason_for_unresolved_target(session),
+                reason_code=self._blocked_reason_for_unresolved_target(session),
                 status=status,
             )
         target_source = canonical_target_source(
@@ -567,9 +592,6 @@ class PageSendTargetMixin:
             (resolved.get("conversation_id") or self._client_conversation_id(item) or "").strip()
         )
         url = (resolved.get("url") or page_url_from(item) or "").strip()
-        page_key = build_page_key(
-            {"client_id": client_id, "page_instance_id": page_instance_id}
-        )
         bound = self._page_matches_bound_identity(item, remote) if identity["client_id"] else False
         cap = evaluate_page_capability(
             item,
@@ -581,10 +603,10 @@ class PageSendTargetMixin:
         )
         send_decision = cap.send_decision
         online = bool(cap.online or is_page_online(item))
-        blocked_reason = cap.blocked_reason
+        reason_code = cap.reason_code
         page_liveness = cap.page_liveness
 
-        if blocked_reason == "prebound_home_wait_conversation":
+        if reason_code == "prebound_home_wait_conversation":
             decision = "blocked"
             allowed = False
         elif action == "send":
@@ -597,7 +619,7 @@ class PageSendTargetMixin:
             else:
                 decision = "blocked"
                 allowed = False
-                blocked_reason = blocked_reason or send_decision or "send_blocked"
+                reason_code = reason_code or send_decision or "send_blocked"
         elif action in ("sync_conversation", "copy_last"):
             if can_sync_conversation(item):
                 decision = "allowed"
@@ -605,7 +627,7 @@ class PageSendTargetMixin:
             else:
                 decision = "blocked"
                 allowed = False
-                blocked_reason = blocked_reason or "not_syncable"
+                reason_code = reason_code or "not_syncable"
         elif action == "upload":
             if send_decision == "allowed":
                 decision = "allowed"
@@ -613,27 +635,17 @@ class PageSendTargetMixin:
             else:
                 decision = "blocked"
                 allowed = False
-                blocked_reason = blocked_reason or "upload_not_allowed"
+                reason_code = reason_code or "upload_not_allowed"
         else:
             decision = "blocked"
             allowed = False
-            blocked_reason = blocked_reason or f"unsupported_action:{action}"
+            reason_code = reason_code or f"unsupported_action:{action}"
 
-        target = {
-            "client_id": client_id,
-            "page_instance_id": page_instance_id,
-            "conversation_id": conversation_id,
-            "url": url,
-            "target_source": target_source,
-            "page_key": page_key,
-        }
         result = {
             "decision": decision,
-            "target": target,
-            "target_item": item,
+            "page": item,
             "target_source": target_source,
-            "blocked_reason": blocked_reason if not allowed else "",
-            "reason": blocked_reason if not allowed else (send_decision if action == "send" else ""),
+            "reason_code": reason_code if not allowed else "",
             "client_id": client_id,
             "page_instance_id": page_instance_id,
             "conversation_id": conversation_id,
@@ -642,6 +654,7 @@ class PageSendTargetMixin:
             "send_decision": send_decision,
             "action": action,
             "page_liveness": page_liveness or get_page_liveness(item),
+            "capability_detail": cap.to_dict(),
         }
         return result
 
@@ -658,7 +671,7 @@ class PageSendTargetMixin:
         统一页面动作判定入口（send / sync_conversation / copy_last）。
         UI 按钮态、执行路径、日志均应以本函数返回的 decision 为准。
         """
-        del selected_page, user_initiated
+        del selected_page
         action = (action or "").strip() or "send"
         if action == "sync":
             action = "sync_conversation"
@@ -671,13 +684,16 @@ class PageSendTargetMixin:
             blocked = self._page_action_blocked_result(
                 session,
                 action=action,
-                blocked_reason=mismatch_reason,
+                reason_code=mismatch_reason,
                 status=status,
             )
             return self._finalize_page_action_result(session, action, blocked)
 
         resolved = self._resolve_conversation_action_target(
-            session, action=action, status=status
+            session,
+            action=action,
+            status=status,
+            log_target_selected=bool(user_initiated),
         )
         if not isinstance(resolved, dict):
             from app.utils.page_command import resolve_page_command_target
@@ -692,7 +708,7 @@ class PageSendTargetMixin:
             cmd = cmd_map.get(action, action)
             reg = PageRegistry.from_bridge_status(status)
             target_fail = resolve_page_command_target(session, cmd, reg)
-            blocked_reason = (
+            fail_reason_code = (
                 (target_fail.get("reason_code") or "").strip()
                 or (target_fail.get("reason") or "").strip()
                 or self._blocked_reason_for_unresolved_target(session)
@@ -700,12 +716,10 @@ class PageSendTargetMixin:
             cap_detail = {}
             if (target_fail.get("reason_code") or "").strip():
                 cap_detail["reason_code"] = target_fail.get("reason_code")
-            if (target_fail.get("reason") or "").strip():
-                cap_detail["reason"] = target_fail.get("reason")
             blocked = self._page_action_blocked_result(
                 session,
                 action=action,
-                blocked_reason=blocked_reason,
+                reason_code=fail_reason_code,
                 status=status,
                 capability_detail=cap_detail,
             )
@@ -728,7 +742,7 @@ class PageSendTargetMixin:
                 f"decision={plan.decision or '-'} "
                 f"allowed={'yes' if plan.allowed else 'no'} "
                 f"target_source={plan.target_source or '-'} "
-                f"blocked_reason={plan.blocked_reason or '-'} "
+                f"reason_code={plan.reason_code or '-'} "
                 + log_page_decision_fields(
                     plan.capability.to_dict(),
                     compact=not debug_on,
@@ -737,33 +751,170 @@ class PageSendTargetMixin:
             )
         return plan
 
-    def _resolve_conversation_action_target(self, session, *, action="send", status=None):
-        """仅使用 session.remote_chatgpt 绑定页；无 active/focused/同会话/任意在线兜底。"""
-        from app.utils.page_command import resolve_page_command_target
-        from app.utils.page_snapshot import PageRegistry
+    def resolve_bound_page_target(
+        self,
+        session,
+        action,
+        *,
+        status=None,
+        user_initiated=False,
+        relink=True,
+    ):
+        """
+        发送/同步共用的绑定页解析：基于最新 PageRegistry，支持同会话新鲜页兜底与自动换绑。
+        """
+        from app.utils.page_command import resolve_bound_page_in_registry
+        from app.utils.page_snapshot import PageRegistry, binding_from_session
 
         action = (action or "").strip() or "send"
         if action == "sync":
             action = "sync_conversation"
         status = status or self._bridge_ui.last_bridge_status or {}
-        cmd_map = {
-            "send": "send_message",
-            "upload": "start_upload",
-            "copy_last": "copy_last_message",
-            "sync_conversation": "sync_conversation",
-        }
-        cmd = cmd_map.get(action, action)
-        reg = PageRegistry.from_bridge_status(status)
-        result = resolve_page_command_target(session, cmd, reg)
-        page = result.get("page")
-        if not result.get("ok") or page is None:
-            return None
-        item = getattr(page, "_raw", None) or {}
+        if user_initiated and hasattr(self, "refresh_page_registry"):
+            try:
+                self.refresh_page_registry(reason=f"before_{action}", status=status)
+                status = self._bridge_ui.last_bridge_status or status
+            except Exception as exc:
+                if hasattr(self, "_append_log"):
+                    self._append_log(
+                        "[BOUND_PAGE][REFRESH][FAILED] "
+                        f"action={action} "
+                        f"error_type={type(exc).__name__} error={exc}",
+                        echo=True,
+                        level="ERROR",
+                    )
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+            self.page_registry = reg
+
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        binding = binding_from_session(session)
+        resolved = resolve_bound_page_in_registry(reg, binding, allow_same_conversation=True)
+        page = resolved.get("page")
+        matched_by = (resolved.get("matched_by") or "none").strip()
+        online = bool(resolved.get("online"))
+        last_poll_at = float(resolved.get("last_poll_at") or 0.0)
+        reason_code = (resolved.get("reason_code") or "").strip()
+
+        session_id = session.session_id if session else "-"
+        if hasattr(self, "_append_log"):
+            self._append_log(
+                "[BOUND_PAGE][RESOLVE] "
+                f"session_id={session_id} "
+                f"action={action} "
+                f"remote_client_id={(remote.get('client_id') or '-')} "
+                f"remote_page_instance_id={(remote.get('page_instance_id') or '-')} "
+                f"remote_conversation_id={(self._remote_conversation_id(remote) or '-')} "
+                f"matched_by={matched_by or 'none'} "
+                f"online={'true' if online else 'false'} "
+                f"last_poll_at={last_poll_at:.3f} "
+                f"reason_code={reason_code or '-'}",
+                echo=user_initiated,
+            )
+
+        if (
+            relink
+            and page is not None
+            and bool(resolved.get("relink_needed"))
+            and matched_by == "same_conversation"
+        ):
+            item = page._raw if isinstance(page._raw, dict) else {}
+            if isinstance(item, dict):
+                old_client = (remote.get("client_id") or "").strip()
+                old_instance = (remote.get("page_instance_id") or "").strip()
+                relink_reason = (
+                    "before_send_relink"
+                    if action == "send"
+                    else "before_sync_relink"
+                )
+                if hasattr(self, "_relink_session_binding_from_tm_page"):
+                    self._relink_session_binding_from_tm_page(
+                        session, item, reason=relink_reason
+                    )
+                elif hasattr(self, "set_bound_page"):
+                    self.set_bound_page(
+                        session,
+                        item,
+                        reason="auto_relink_fresh_page",
+                        silent=True,
+                    )
+                if hasattr(self, "_append_log"):
+                    display_id = str(item.get("page_display_id") or "-")
+                    self._append_log(
+                        "[BOUND_PAGE][RELINK_TO_FRESH_PAGE] "
+                        f"old_client_id={old_client or '-'} "
+                        f"old_page_instance_id={old_instance or '-'} "
+                        f"new_client_id={(item.get('client_id') or '-')} "
+                        f"new_page_instance_id={(item.get('page_instance_id') or '-')} "
+                        f"page_display_id={display_id} "
+                        f"conversation_id={(item.get('conversation_id') or '-')}",
+                        echo=True,
+                    )
+                binding = binding_from_session(session)
+                resolved = resolve_bound_page_in_registry(
+                    reg, binding, allow_same_conversation=True
+                )
+                page = resolved.get("page")
+                matched_by = (resolved.get("matched_by") or "exact").strip()
+                online = bool(resolved.get("online"))
+                reason_code = (resolved.get("reason_code") or "").strip()
+
+        if page is None or not online:
+            return {
+                "ok": False,
+                "page": None,
+                "item": None,
+                "matched_by": matched_by,
+                "online": False,
+                "reason_code": reason_code or "bound_page_offline",
+            }
+
+        item = page._raw if isinstance(page._raw, dict) else {}
         if not isinstance(item, dict):
+            return {
+                "ok": False,
+                "page": page,
+                "item": None,
+                "matched_by": matched_by,
+                "online": False,
+                "reason_code": "bound_page_offline",
+            }
+        source = "bound_page" if matched_by == "exact" else "same_conversation"
+        target = self._conversation_action_target_payload(item, source=source)
+        self._log_action_target_selected(
+            session, target, action=action, force=user_initiated
+        )
+        return {
+            "ok": True,
+            "page": page,
+            "item": item,
+            "target": target,
+            "matched_by": matched_by,
+            "online": online,
+            "reason_code": reason_code,
+        }
+
+    def _resolve_conversation_action_target(
+        self,
+        session,
+        *,
+        action="send",
+        status=None,
+        log_target_selected=False,
+        user_initiated=False,
+    ):
+        """委托 resolve_bound_page_target（与 sync/send 共用）。"""
+        resolved = self.resolve_bound_page_target(
+            session,
+            action,
+            status=status,
+            user_initiated=bool(log_target_selected or user_initiated),
+            relink=True,
+        )
+        if not isinstance(resolved, dict) or not resolved.get("ok"):
             return None
-        target = self._conversation_action_target_payload(item, source="bound_page")
-        self._log_action_target_selected(session, target, action=action)
-        return target
+        return resolved.get("target")
 
     def _send_target_result(self, client_id="", page_url="", ok=False, reason=""):
         return (
@@ -1193,9 +1344,9 @@ class PageSendTargetMixin:
                 return self._send_target_ok(
                     page_action.client_id,
                     page_action.url,
-                    page_action.reason or "",
+                    page_action.reason_code or "",
                 )
-            blocked = page_action.blocked_reason or page_action.reason or "send_blocked"
+            blocked = page_action.reason_code or "send_blocked"
             return self._send_target_blocked(
                 self._send_target_blocked_user_message(blocked) or blocked
             )
@@ -1460,33 +1611,36 @@ class PageSendTargetMixin:
             return page_action
         if (page_action.get("decision") or "").strip() not in ("allowed", "queued"):
             return page_action
-        target = page_action.get("target") if isinstance(page_action.get("target"), dict) else {}
+        page = page_action.get("page") if isinstance(page_action.get("page"), dict) else {}
         target_src = canonical_target_source(
             target_source_from(page_action) or (page_action.get("target_source") or "")
         )
         if target_src not in (TARGET_SOURCE_BOUND_PAGE, ""):
             out = dict(page_action)
             out["decision"] = "blocked"
-            out["reason"] = "non_bound_target_source"
+            out["reason_code"] = "non_bound_target_source"
             detail = dict(out.get("capability_detail") or {})
-            detail["blocked_reason"] = "non_bound_target_source"
+            detail["reason_code"] = "non_bound_target_source"
             out["capability_detail"] = detail
-            out["blocked_reason"] = "non_bound_target_source"
             return out
         reason = self._send_binding_verify_blocked_reason(
             session,
-            target_client_id=(target.get("client_id") or "").strip(),
-            url=(target.get("url") or "").strip(),
-            target_page_instance_id=(target.get("page_instance_id") or "").strip(),
-            target_conversation_id=(target.get("conversation_id") or "").strip(),
+            target_client_id=(page.get("client_id") or page_action.get("client_id") or "").strip(),
+            url=(page.get("url") or page_action.get("url") or "").strip(),
+            target_page_instance_id=(
+                (page.get("page_instance_id") or page_action.get("page_instance_id") or "").strip()
+            ),
+            target_conversation_id=(
+                (page.get("conversation_id") or page_action.get("conversation_id") or "").strip()
+            ),
         )
         if not reason:
             return page_action
         out = dict(page_action)
         out["decision"] = "blocked"
-        out["reason"] = reason
+        out["reason_code"] = reason
         detail = dict(out.get("capability_detail") or {})
-        detail["blocked_reason"] = reason
+        detail["reason_code"] = reason
         out["capability_detail"] = detail
         return out
 

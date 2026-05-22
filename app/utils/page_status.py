@@ -56,7 +56,7 @@ __all__ = [
 
 
 def read_snapshot_identity(snapshot: Any, role: str) -> Dict[str, str]:
-    """从快照/摘要读取 bound 或 active 身份（优先嵌套 dict，兼容旧平铺字段）。"""
+    """从快照/摘要读取 bound 或 active 身份（仅嵌套 snapshot[role]）。"""
     empty = {
         "client_id": "",
         "page_instance_id": "",
@@ -73,20 +73,6 @@ def read_snapshot_identity(snapshot: Any, role: str) -> Dict[str, str]:
             "page_instance_id": (nested.get("page_instance_id") or "").strip(),
             "conversation_id": (nested.get("conversation_id") or "").strip(),
             "url": (nested.get("url") or "").strip(),
-        }
-    if role_key == "bound":
-        return {
-            "client_id": (snapshot.get("bound_client_id") or "").strip(),
-            "page_instance_id": (snapshot.get("bound_page_instance_id") or "").strip(),
-            "conversation_id": (snapshot.get("bound_conversation_id") or "").strip(),
-            "url": (snapshot.get("bound_url") or "").strip(),
-        }
-    if role_key == "active":
-        return {
-            "client_id": (snapshot.get("active_client_id") or "").strip(),
-            "page_instance_id": (snapshot.get("active_page_instance_id") or "").strip(),
-            "conversation_id": (snapshot.get("active_conversation_id") or "").strip(),
-            "url": (snapshot.get("active_url") or "").strip(),
         }
     return dict(empty)
 
@@ -490,20 +476,12 @@ class PageCapability:
     response_state: str = "unknown"
     can_accept_input: bool = True
     send_decision: str = "blocked"
-    blocked_reason: str = ""
+    reason_code: str = ""
     prebound_home: bool = False
 
     @property
     def allowed(self) -> bool:
         return self.send_decision in ("allowed", "queued")
-
-    @property
-    def reason(self) -> str:
-        return self.blocked_reason
-
-    @property
-    def reason_code(self) -> str:
-        return self.blocked_reason
 
     @property
     def send_requestable(self) -> bool:
@@ -551,12 +529,7 @@ class PageCapability:
         send_decision = (
             data.get("send_decision") or data.get("decision") or "blocked"
         )
-        blocked_reason = (
-            data.get("blocked_reason")
-            or data.get("reason_code")
-            or data.get("reason")
-            or ""
-        ).strip()
+        reason_code = (data.get("reason_code") or "").strip()
         page_liveness = (data.get("page_liveness") or "offline").strip()
         online = bool(data.get("online"))
         if not online and page_liveness == "online":
@@ -568,7 +541,7 @@ class PageCapability:
             conversation_syncable=bool(data.get("conversation_syncable")),
             page_liveness=page_liveness,
             send_decision=str(send_decision).strip() or "blocked",
-            blocked_reason=blocked_reason,
+            reason_code=reason_code,
             response_state=(data.get("response_state") or "unknown").strip(),
             client_id=(data.get("client_id") or "").strip(),
             page_instance_id=(data.get("page_instance_id") or "").strip(),
@@ -596,14 +569,6 @@ class PageActionPlan:
         return self.decision in ("allowed", "queued")
 
     @property
-    def reason(self) -> str:
-        return self.reason_code
-
-    @property
-    def blocked_reason(self) -> str:
-        return self.reason_code
-
-    @property
     def conversation_syncable(self) -> bool:
         return bool(self.capability.conversation_syncable)
 
@@ -628,37 +593,13 @@ class PageActionPlan:
         return (self.capability.url or "").strip()
 
     @property
-    def target_item(self) -> Any:
-        return self.page
-
-    @property
-    def target(self) -> Any:
-        """兼容旧字段名；同步/日志路径曾使用 plan.target。"""
-        if isinstance(self.page, dict):
-            return self.page
-        if self.page is not None:
-            return self.page
-        return {
-            "client_id": self.client_id,
-            "page_instance_id": self.page_instance_id,
-            "conversation_id": self.conversation_id,
-            "url": self.url,
-            "page_type": (self.capability.page_type or "").strip(),
-            "reason_code": self.reason_code,
-        }
-
-    @property
-    def source(self) -> str:
-        return self.target_source
-
-    @property
     def online(self) -> bool:
         return bool(self.capability.online)
 
     @classmethod
     def from_resolve_result(cls, data: Dict[str, Any]) -> PageActionPlan:
         if not isinstance(data, dict):
-            cap = PageCapability(blocked_reason="invalid_page_action_result")
+            cap = PageCapability(reason_code="invalid_page_action_result")
             return cls(
                 action="",
                 decision="blocked",
@@ -704,19 +645,16 @@ class PageActionPlan:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "action": self.action,
             "decision": self.decision,
             "reason_code": self.reason_code,
             "target_source": self.target_source,
-            "target": {
-                "client_id": self.client_id,
-                "page_instance_id": self.page_instance_id,
-                "conversation_id": self.conversation_id,
-                "url": self.url,
-            },
             "capability": self.capability.to_dict(),
         }
+        if isinstance(self.page, dict):
+            out["page"] = self.page
+        return out
 
     def as_send_decision_tuple(self) -> Tuple[str, str, Any, Dict[str, Any]]:
         return (
@@ -750,8 +688,9 @@ class PageActionPlan:
         remote_page_instance_id = (remote.get("page_instance_id") or "").strip()
         remote_conversation_id = (remote.get("conversation_id") or "").strip()
         remote_url = (remote.get("url") or "").strip()
-        active_client_id = (status.get("active_client_id") or "").strip()
-        active_conversation_id = (status.get("active_conversation_id") or "").strip()
+        active = read_snapshot_identity(status, "active")
+        active_client_id = active["client_id"]
+        active_conversation_id = active["conversation_id"]
         active_matches_bound = bool(
             active_client_id and remote_client_id and active_client_id == remote_client_id
         )
@@ -837,11 +776,11 @@ def evaluate_page_capability(
     expected_page_instance_id: str = "",
     now: float | None = None,
 ) -> PageCapability:
-    """统一能力判定：online / send_decision / blocked_reason（细分能力仅内部计算）。"""
+    """统一能力判定：online / send_decision / reason_code（细分能力仅内部计算）。"""
     del bound  # 保留参数以兼容旧调用方
     norm = normalize_page(page, now=now) if isinstance(page, dict) else {}
     if not norm:
-        return PageCapability(send_decision="blocked", blocked_reason="no_page")
+        return PageCapability(send_decision="blocked", reason_code="no_page")
     classified = classify_page_state(norm, now=now)
     online = bool(classified.get("online"))
     conversation_syncable = can_sync_conversation(norm, now=now)
@@ -900,7 +839,7 @@ def evaluate_page_capability(
         conversation_syncable=conversation_syncable,
         page_liveness=str(classified.get("page_liveness") or get_page_liveness(norm, now=now)),
         send_decision=send_decision,
-        blocked_reason=reason,
+        reason_code=reason,
         response_state=response_state,
         client_id=norm.get("client_id") or "",
         page_instance_id=norm.get("page_instance_id") or "",

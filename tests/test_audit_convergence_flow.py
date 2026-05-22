@@ -42,7 +42,7 @@ class _DryRunHost:
 
     def request_send_message(self, session, content="", dry_run=False, **kwargs):
         if dry_run:
-            decision, reason, target_item, detail = self.resolve_send_decision(
+            decision, reason, target_page, detail = self.resolve_send_decision(
                 session, content=content
             )
             detail = detail if isinstance(detail, dict) else {}
@@ -87,7 +87,7 @@ def test_send_busy_page_is_queueable_not_send_now():
     assert "queueable" not in cap.to_dict()
 
 
-def test_sync_pending_shape_uses_page_key_only():
+def test_sync_pending_shape_uses_canonical_ids_only():
     from app.utils.page_status import build_page_key
 
     page_key = build_page_key({"client_id": "c1", "page_instance_id": "p1"})
@@ -96,10 +96,10 @@ def test_sync_pending_shape_uses_page_key_only():
         "client_id": "c1",
         "page_instance_id": "p1",
         "conversation_id": "conv-1",
-        "page_key": page_key,
         "url": "https://chatgpt.com/c/conv-1",
     }
     assert page_key == "c1|p1"
+    assert "page_key" not in pending
     assert "target_page_key" not in pending
     assert_no_legacy_fields(pending, owner="test_sync_pending")
 

@@ -1,10 +1,111 @@
 """会话消息写入与聊天区刷新。"""
 
+import copy
 import time
 import uuid
 
+from app.constants import (
+    PENDING_USER_SEND_STATUSES,
+    PERSIST_PENDING_RESET_MESSAGE,
+    STARTUP_PENDING_RESET_MESSAGE,
+)
+from app.models import (
+    mark_waiting_placeholder_failed,
+    normalize_remote_chatgpt,
+)
+from app.utils.legacy_cleanup import assert_no_legacy_fields
+
 
 class ChatSessionMixin:
+    def _clear_runtime_waiting_state_on_startup(self, session):
+        if session is None:
+            return False
+
+        changed = False
+
+        if float(getattr(session, "pending_reply_since", 0) or 0) > 0:
+            session.pending_reply_since = 0
+            changed = True
+
+        messages = getattr(session, "messages", None)
+        if not isinstance(messages, list):
+            return changed
+
+        for msg in messages:
+            if mark_waiting_placeholder_failed(
+                msg, content=STARTUP_PENDING_RESET_MESSAGE
+            ):
+                changed = True
+
+        if changed:
+            session.updated_at = time.time()
+            self._append_log(
+                "[CHAT][STARTUP_CLEAR_WAITING_STATE] "
+                f"session_id={getattr(session, 'session_id', '-')}",
+                echo=True,
+            )
+
+        return changed
+
+    def _sanitize_message_dict_for_persistence(self, msg_dict):
+        if not isinstance(msg_dict, dict):
+            return msg_dict
+        item = dict(msg_dict)
+        role = (item.get("role") or "").strip()
+        ui_status = (item.get("ui_status") or "").strip()
+        if role == "user" and ui_status in PENDING_USER_SEND_STATUSES:
+            item["ui_status"] = ""
+        if mark_waiting_placeholder_failed(
+            item, content=PERSIST_PENDING_RESET_MESSAGE
+        ):
+            pass
+        return item
+
+    def _normalize_session_for_persistence(self, session):
+        if session is None:
+            return {}
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        assert_no_legacy_fields(remote, owner="GUI save session.remote_chatgpt")
+        message_to_dict = getattr(self, "_message_to_dict", None)
+        messages_out = []
+        for item in session.messages:
+            if callable(message_to_dict):
+                msg_dict = message_to_dict(item)
+            elif isinstance(item, dict):
+                msg_dict = copy.deepcopy(item)
+            else:
+                msg_dict = {
+                    "message_id": getattr(item, "message_id", ""),
+                    "turn_id": getattr(item, "turn_id", ""),
+                    "role": getattr(item, "role", ""),
+                    "content": getattr(item, "content", ""),
+                    "created_at": getattr(item, "created_at", 0),
+                    "ui_status": getattr(item, "ui_status", "") or "",
+                    "detail": getattr(item, "detail", "") or "",
+                    "message_source": getattr(item, "message_source", "") or "",
+                    "bridge_message_id": getattr(item, "bridge_message_id", ""),
+                    "parent_message_id": getattr(item, "parent_message_id", ""),
+                    "visible_in_chat": bool(
+                        getattr(item, "visible_in_chat", True)
+                    ),
+                }
+            messages_out.append(
+                self._sanitize_message_dict_for_persistence(msg_dict)
+            )
+        return {
+            "session_id": session.session_id,
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "task_type": session.task_type,
+            "context_mode": session.context_mode,
+            "summary": session.summary,
+            "pinned_context": session.pinned_context,
+            "remote_chatgpt": dict(remote),
+            "pending_reply_since": 0,
+            "messages": messages_out,
+        }
+
     def _get_session_by_id(self, session_id):
         session_id = (session_id or "").strip()
         if not session_id:
@@ -217,7 +318,13 @@ class ChatSessionMixin:
         if hasattr(self, "_refresh_current_session_binding_display"):
             self._refresh_current_session_binding_display()
 
-    def _render_current_chat_messages(self, *, force_bottom=True, reason=""):
+    def _render_current_chat_messages(
+        self,
+        *,
+        scroll_policy=None,
+        force_bottom=None,
+        reason="",
+    ):
         self._ensure_current_session_binding_consistent()
         session = self._current_session()
         if session is None:
@@ -230,9 +337,14 @@ class ChatSessionMixin:
                 self._clear_chat_widgets()
             return False
 
+        if scroll_policy is None and force_bottom is None:
+            scroll_policy = "auto_if_near_bottom"
+        elif scroll_policy is None:
+            scroll_policy = "force_bottom" if force_bottom else "auto_if_near_bottom"
+
         visible_messages, _skipped = self._visible_messages_for_render(session)
         if not visible_messages:
-            self._render_session_chat(session, force_bottom=force_bottom)
+            self._render_session_chat(session, scroll_policy=scroll_policy)
             self._append_log(
                 "[CHAT_RENDER][EMPTY] "
                 f"session_id={session.session_id} "
@@ -241,7 +353,7 @@ class ChatSessionMixin:
             )
             return False
 
-        self._render_session_chat(session, force_bottom=force_bottom)
+        self._render_session_chat(session, scroll_policy=scroll_policy)
         if getattr(self, "_pending_chat_render", None):
             return False
         if hasattr(self, "_log_chat_render_ui_state"):

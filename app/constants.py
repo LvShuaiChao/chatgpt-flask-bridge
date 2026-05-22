@@ -15,6 +15,7 @@ ASSISTANT_WAIT_TEXTS = frozenset(
 )
 PENDING_ASSISTANT_STATUSES = frozenset(
     {
+        "waiting",
         "等待中",
         "已加入队列",
         "等待回复",
@@ -22,8 +23,32 @@ PENDING_ASSISTANT_STATUSES = frozenset(
         "读取中",
     }
 )
+PENDING_REPLY_SYNC_AFTER_SECONDS = 45
+PENDING_REPLY_HARD_TIMEOUT_SECONDS = 180
+PENDING_REPLY_STALE_TIMEOUT_SEC = PENDING_REPLY_HARD_TIMEOUT_SECONDS
+
+# 桥接完整 JSON 日志（GUI / Flask / 油猴）；稳定后可改为 False
+DEBUG_FULL_BRIDGE_JSON = True
 
 PENDING_USER_SEND_STATUSES = frozenset({"sending", "queued", "waiting_send"})
+
+# GUI 重启 / 写盘时不应保留的运行态等待文案
+STARTUP_PENDING_RESET_MESSAGE = (
+    "错误：上一次回复未完成，已在重新打开 GUI 时重置。"
+    "若网页中已有回复，请点击【同步网页对话】刷新完整内容。"
+)
+PERSIST_PENDING_RESET_MESSAGE = (
+    "错误：GUI 已关闭，上一条回复未完成。请重新同步网页对话。"
+)
+WAITING_PLACEHOLDER_SOURCES = frozenset({"local_placeholder"})
+WAITING_PLACEHOLDER_STATUSES = frozenset(
+    {
+        "waiting",
+        "读取中",
+        "等待回复",
+        "assistant_pending",
+    }
+) | PENDING_ASSISTANT_STATUSES
 UI_STATUS_DISPLAY_TEXT = {
     "sending": "发送中",
     "queued": "已加入队列",

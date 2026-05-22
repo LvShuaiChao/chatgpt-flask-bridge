@@ -136,20 +136,38 @@ def _update_external_status_for_bridge(bridge_message_id, status):
 def _notify_external_request_from_bridge(message_id, event, payload, msg=None):
     message_id = (message_id or "").strip()
     if not message_id:
-        return
-    payload = payload or {}
+        return False
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        return _notify_external_request_from_bridge_locked(
+            message_id, event, payload, msg
+        )
+    except Exception as exc:
+        _log(
+            "[BRIDGE][EXTERNAL_NOTIFY][FAILED] "
+            f"message_id={message_id[:8]}… "
+            f"event={event or '-'} "
+            f"error_type={type(exc).__name__} "
+            f"error={exc}\n{traceback.format_exc()}"
+        )
+        return False
+
+
+def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=None):
     with st._state_lock:
         request_id = st._bridge_message_to_external.get(message_id)
         if not request_id:
-            return
+            return False
         req = st._external_requests.get(request_id)
         if not req:
-            return
+            return False
         if _external_request_status(req) in ("done", "failed", "timeout"):
-            return
+            return False
         session_id = req.get("session_id") or ""
         if event == "assistant_reply":
-            text = (payload.get("content") or "").strip()
+            text = (
+                payload.get("text") or payload.get("content") or ""
+            ).strip()
             if not text:
                 _log(
                     f"[FIELD][MISSING_CONTENT] request_id={request_id} "
@@ -179,6 +197,7 @@ def _notify_external_request_from_bridge(message_id, event, payload, msg=None):
                 f"[EXTERNAL_API][REQUEST_FAILED] request_id={request_id} "
                 f"reason={reason}"
             )
+    return True
 
 
 def _external_req_float(req, field, default):

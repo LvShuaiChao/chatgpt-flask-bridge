@@ -154,7 +154,6 @@ class PageTmClientMixin:
             page_type = (item.get("page_type") or "-").strip() or "-"
             conversation_id = (
                 item.get("conversation_id")
-                or item.get("chatgpt_conversation_id")
                 or self._client_conversation_id(item)
                 or "-"
             )
@@ -276,7 +275,7 @@ class PageTmClientMixin:
 
     @staticmethod
     def _normalize_visibility_state(item):
-        raw = (item.get("visibility_state") or item.get("visible") or "").strip().lower()
+        raw = (item.get("visibility_state") or "").strip().lower()
         if raw in ("true", "1"):
             return "visible"
         if raw in ("false", "0"):
@@ -340,7 +339,7 @@ class PageTmClientMixin:
                 "conversation_syncable": False,
                 "url_syncable": False,
                 "stale": False,
-                "state": "offline",
+                "page_liveness": "offline",
                 "reason": "invalid_client",
                 "is_responding": False,
                 "can_accept_input": False,
@@ -374,7 +373,7 @@ class PageTmClientMixin:
             expected_client_id=expected_client_id,
         )
         send_decision = (send_cap.send_decision or "blocked").strip()
-        send_block_reason = send_cap.reason or ""
+        send_block_reason = send_cap.reason_code or ""
 
         client_match = not expected_client_id or client_id == expected_client_id
         conv_match = not expected_conversation_id or conversation_id == expected_conversation_id
@@ -389,7 +388,7 @@ class PageTmClientMixin:
         can_accept = can_accept_input(item)
         response_state = str(item.get("response_state") or "unknown")
 
-        reason = (decision.get("blocked_reason") or "").strip()
+        reason = (decision.get("reason_code") or "").strip()
         if not reason:
             if not online:
                 reason = "offline"
@@ -401,19 +400,6 @@ class PageTmClientMixin:
                 reason = "not_conversation_syncable"
 
         stale = bool(online and activity in ("stale_hidden",))
-        state = "offline"
-        if online:
-            state = "online"
-        if prebound_home:
-            state = "prebound_home"
-        if stale:
-            state = "stale"
-        if conversation_syncable:
-            state = "syncable"
-        if send_now_available and conversation_syncable:
-            state = "sendable"
-        if send_queueable:
-            state = "queueable"
 
         return {
             "client_id": client_id,
@@ -428,9 +414,8 @@ class PageTmClientMixin:
             "url_syncable": bool(decision.get("url_syncable")),
             "conversation_syncable": conversation_syncable,
             "prebound_home": prebound_home,
-            "blocked_reason": reason,
+            "reason_code": reason,
             "stale": stale,
-            "state": state,
             "reason": reason,
             "send_reason": send_block_reason or "",
             "send_decision": send_decision,
@@ -473,11 +458,7 @@ class PageTmClientMixin:
         client_id = (item.get("client_id") or "").strip()
         page_instance_id = (item.get("page_instance_id") or "").strip()
         page_url = page_url_from(item)
-        conversation_id = (
-            item.get("conversation_id")
-            or item.get("chatgpt_conversation_id")
-            or ""
-        ).strip()
+        conversation_id = (item.get("conversation_id") or "").strip()
         if not conversation_id:
             conversation_id = parse_conversation_id(page_url)
         if conversation_id:
@@ -988,9 +969,6 @@ class PageTmClientMixin:
         conversation_id = (item.get("conversation_id") or "").strip()
         if conversation_id:
             return conversation_id
-        chatgpt_id = (item.get("chatgpt_conversation_id") or "").strip()
-        if chatgpt_id:
-            return chatgpt_id
         for field in ("url",):
             conv = parse_conversation_id((item.get(field) or "").strip())
             if conv:

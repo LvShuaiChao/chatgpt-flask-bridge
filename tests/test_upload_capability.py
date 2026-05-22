@@ -27,7 +27,7 @@ def test_evaluate_page_capability_upload_requires_bridge_and_online():
     }
     cap = evaluate_page_capability(page, action="upload", now=now)
     assert cap.allowed is False
-    assert cap.blocked_reason == "upload_bridge_not_supported"
+    assert cap.reason_code == "upload_bridge_not_supported"
 
     page["upload_bridge_supported"] = True
     cap_ok = evaluate_page_capability(page, action="upload", now=now)

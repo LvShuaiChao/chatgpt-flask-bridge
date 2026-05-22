@@ -33,11 +33,25 @@ _LOG_MIN_LEVEL = os.environ.get("CHATGPT_BRIDGE_LOG_MIN_LEVEL", "INFO").strip().
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_MAX_BACKUPS = 3
 _LOG_LEVEL_RANK = {"TRACE": 0, "DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+_BRIDGE_JSON_FULL_TAGS = (
+    "[GUI][JSON][SEND_PAYLOAD_FULL]",
+    "[BRIDGE][JSON][SERVER_TO_TM_QUEUE_FULL]",
+    "[BRIDGE][JSON][TM_TO_SERVER_FULL]",
+    "[BRIDGE][JSON][SERVER_TO_TM_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_REPORT_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_RECV_FULL]",
+    "[BRIDGE][JSON][ASSISTANT_REPLY_UNKNOWN_FULL]",
+)
+
 _NOISY_FILE_TAGS = (
     "[ACTION_CAPABILITY]",
     "[ACTION_DECISION]",
     "[BRIDGE][JSON][SERVER_TO_TM]",
     "[BRIDGE][JSON][TM_TO_SERVER]",
+    "[BRIDGE][JSON][SERVER_TO_TM_FULL]",
+    "[BRIDGE][JSON][TM_TO_SERVER_FULL]",
+    "[BRIDGE][JSON][SERVER_TO_TM_QUEUE_FULL]",
+    "[GUI][JSON][SEND_PAYLOAD_FULL]",
     "[BRIDGE][POLL_SUMMARY]",
     "[TM][HEARTBEAT]",
     "[TM][POLL]",
@@ -133,6 +147,8 @@ def _effective_log_level(text, level):
 
 def _should_write_file(text, level, *, force=False):
     if force:
+        return True
+    if any(tag in text for tag in _BRIDGE_JSON_FULL_TAGS):
         return True
     level_text = _normalize_log_level(level)
     if _LOG_LEVEL_RANK.get(level_text, 20) < _LOG_LEVEL_RANK.get(_LOG_MIN_LEVEL, 20):

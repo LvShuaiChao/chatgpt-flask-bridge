@@ -38,7 +38,7 @@ class _Host(UiStatusCompactMixin, UiBuilderMixin):
         return {
             "conversation_syncable": page.get("conversation_syncable"),
             "send_decision": page.get("send_decision"),
-            "blocked_reason": page.get("blocked_reason"),
+            "reason_code": page.get("reason_code"),
             "response_state": page.get("response_state"),
         }
 

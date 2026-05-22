@@ -18,7 +18,7 @@ from app.models import (
     BIND_STATE_WAITING_HOME,
     normalize_remote_chatgpt,
 )
-from app.utils.page_status import page_url_from
+from app.utils.page_status import page_url_from, read_snapshot_identity
 
 
 class PageBindingDisplayMixin:
@@ -443,7 +443,7 @@ class PageBindingDisplayMixin:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             bound_conv = self._remote_conversation_id(remote) or "-"
             active_info = self._client_info_by_id(
-                (self._tm_summary_for_session(session).get("active_client_id") or "").strip()
+                read_snapshot_identity(self._tm_summary_for_session(session), "active")["client_id"]
             )
             current_conv = "-"
             current_instance = "-"
@@ -471,7 +471,9 @@ class PageBindingDisplayMixin:
             status=status
         )
         bound_client_id = ((bound_info or {}).get("client_id") or "").strip()
-        active_client_id = (self._tm_summary_for_session(session).get("active_client_id") or "").strip()
+        active_client_id = read_snapshot_identity(
+            self._tm_summary_for_session(session), "active"
+        )["client_id"]
         active_info = self._client_info_by_id(active_client_id, status=status)
         active_profile = self._tm_client_sync_profile(active_info) if active_info else {}
         active_page_syncable = bool(active_profile.get("sync_ok"))

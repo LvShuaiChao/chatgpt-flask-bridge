@@ -3,6 +3,7 @@
 import time
 import unittest
 
+from app.models import BIND_STATE_BOUND_CONVERSATION
 from app.utils.page_snapshot import (
     PageRegistry,
     PageSnapshot,
@@ -69,7 +70,7 @@ class PageRegistryTests(unittest.TestCase):
         }
         reg = PageRegistry.from_bridge_status(status, now=now)
         binding = {
-            "enabled": True,
+            "bind_state": BIND_STATE_BOUND_CONVERSATION,
             "client_id": "tm-abc",
             "page_instance_id": "inst-1",
             "conversation_id": "conv1",
@@ -102,7 +103,7 @@ class PageRegistryTests(unittest.TestCase):
             }
         )
         b = binding_from_session(session)
-        self.assertTrue(b["enabled"])
+        self.assertEqual(b["client_id"], "c1")
         self.assertEqual(b["url"], "https://chatgpt.com/c/x")
 
     def test_snapshot_canonical_url_only(self):

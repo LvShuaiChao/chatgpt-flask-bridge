@@ -373,14 +373,16 @@ def _api_v1_session_bind(ext):
                 code,
                 status,
             )
+        bound = gui_result.get("bound") or {}
         return ext._external_json_ok(
             session=gui_result.get("session") or {},
             session_id=gui_result.get("session_id") or session_id,
-            bound_client_id=gui_result.get("bound_client_id") or client_id,
-            bound_page_instance_id=gui_result.get("bound_page_instance_id") or page_instance_id,
-            bound_conversation_id=gui_result.get("bound_conversation_id") or conversation_id,
-            url=gui_result.get("url") or page_url,
-            bind_state=gui_result.get("bind_state") or "bound",
+            bound={
+                "client_id": bound.get("client_id") or client_id,
+                "page_instance_id": bound.get("page_instance_id") or page_instance_id,
+                "conversation_id": bound.get("conversation_id") or conversation_id,
+                "url": bound.get("url") or page_url,
+            },
         )
 
     return view

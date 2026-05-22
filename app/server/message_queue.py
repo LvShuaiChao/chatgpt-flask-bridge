@@ -6,7 +6,11 @@ import uuid
 
 from app.core import job_scheduler as _job_scheduler
 from app.server import state as st
-from app.server.bridge_logging import _log_bridge_json_payload
+from app.server.bridge_logging import (
+    log_assistant_reply_recv_full,
+    log_assistant_reply_unknown_full,
+    log_server_to_tm_queue_full,
+)
 from app.server.state import BridgeQueueFullError, LEASE_SEC, MAX_OUTBOUND_QUEUE_SIZE
 from app.utils.bridge_payload import (
     get_bridge_message_id,
@@ -42,6 +46,9 @@ from app.server.tm_page_registry import (
 )
 from app.server import control_commands as cc
 from app.server import external_api as ext
+from app.server.external_api import (
+    _notify_external_request_from_bridge as _notify_external_request_impl,
+)
 from app.server.state import (
     POLL_SUMMARY_INTERVAL_SEC,
     _last_focused_tm_page,
@@ -59,36 +66,21 @@ STRICT_TARGET_CONTROL_COMMANDS = frozenset({
     "start_upload",
 })
 
+_INVALID_ASSISTANT_REPLY_TEXTS = frozenset({
+    "正在思考",
+    "正在生成",
+    "思考中",
+    "回复完成",
+})
 
-def _safe_log_bridge_json_payload(
-    direction,
-    payload,
-    *,
-    action="",
-    event="",
-    message_id="",
-    client_id="",
-):
-    try:
-        _log_bridge_json_payload(
-            direction,
-            payload,
-            action=action,
-            event=event,
-            message_id=message_id,
-            client_id=client_id,
-        )
-    except Exception as exc:
-        _log(
-            "[BRIDGE][JSON_LOG_FAILED] "
-            f"direction={direction or '-'} "
-            f"action={action or '-'} "
-            f"event={event or '-'} "
-            f"message_id={message_id or '-'} "
-            f"client_id={client_id or '-'} "
-            f"error_type={type(exc).__name__} "
-            f"error={exc}\n{traceback.format_exc()}"
-        )
+
+def _is_invalid_assistant_reply_text(text):
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value in _INVALID_ASSISTANT_REPLY_TEXTS:
+        return True
+    return False
 
 
 def _bridge_message_id_matches(msg, message_id):
@@ -159,12 +151,17 @@ def get_bridge_status():
         server_url = get_server_url() if is_server_running() else ""
         bridge_url = get_server_bridge_url() if is_server_running() else ""
         summary = _build_bridge_status_summary(pages)
+        recent_inbound = [dict(item) for item in st._inbound_messages]
         return {
             "server_running": is_server_running(),
             "server_url": server_url,
             "bridge_url": bridge_url,
             "pages": pages,
             "summary": summary,
+            "queue_length": len(st._outbound_queue),
+            "control_queue_length": len(st._control_queue),
+            "inbound_count": len(st._inbound_messages),
+            "recent_inbound": recent_inbound,
         }
 
 
@@ -235,14 +232,7 @@ def push_message(data):
         f"session_id={session_id or '-'} turn_id={turn_id or '-'} "
         f"page={page_hint} preview={preview}"
     )
-    _safe_log_bridge_json_payload(
-        "SERVER_TO_TM_QUEUE",
-        msg,
-        action="queue_chat",
-        event="chat",
-        message_id=message_id,
-        client_id=client_id or "",
-    )
+    log_server_to_tm_queue_full(msg, action="queue_chat", event="chat")
     _notify_status()
     return msg
 
@@ -343,6 +333,97 @@ def _find_outbound_message(message_id):
         if _bridge_message_id_matches(msg, message_id):
             return msg
     return None
+
+
+def _lookup_outbound_for_ack(message_id):
+    """ack 查找：waiting -> outbound_queue -> history（未 finalize 的 chat）。"""
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return None, None
+    waiting = st._outbound_waiting.get(message_id)
+    if waiting:
+        return waiting, "waiting"
+    for pending in st._outbound_queue:
+        if _bridge_message_id_matches(pending, message_id):
+            return pending, "queue"
+    for hist in reversed(st._outbound_history):
+        if _bridge_message_id_matches(hist, message_id) and hist.get("type") != "command":
+            return hist, "history"
+    return None, None
+
+
+def _short_id_list(ids, limit=8):
+    rows = []
+    for mid in list(ids or [])[:limit]:
+        mid = (mid or "").strip()
+        if not mid:
+            continue
+        rows.append(f"{mid[:8]}…" if len(mid) > 8 else mid)
+    return rows
+
+
+def _log_ack_unknown(
+    message_id,
+    client_id,
+    body,
+    *,
+    reason,
+):
+    page_instance_id = (body.get("page_instance_id") or "").strip()
+    with st._state_lock:
+        known_outbound_ids = sorted(st._outbound_waiting.keys())
+        known_leased_ids = [
+            get_bridge_message_id(msg)
+            for msg in st._outbound_waiting.values()
+            if msg.get("delivered_at") and not msg.get("acked_at")
+        ]
+        known_control_ids = sorted(st._control_waiting.keys())
+        recent_finalized = [
+            get_bridge_message_id(item)
+            for item in reversed(st._outbound_history)
+            if item.get("finalized_at") or (item.get("message_status") or "") in (
+                "replied",
+                "failed",
+                "cancelled",
+            )
+        ][:8]
+    _log(
+        "[BRIDGE][ACK_UNKNOWN] "
+        f"message_id={message_id or '-'} "
+        f"client_id={client_id or '-'} "
+        f"page_instance_id={page_instance_id or '-'} "
+        f"reason={reason or '-'} "
+        f"known_outbound_ids={_short_id_list(known_outbound_ids)} "
+        f"known_leased_ids={_short_id_list(known_leased_ids)} "
+        f"known_control_ids={_short_id_list(known_control_ids)} "
+        f"recent_finalized_ids={_short_id_list(recent_finalized)}"
+    )
+
+
+def _safe_notify_external_request_from_bridge(
+    message_id,
+    event,
+    payload=None,
+    msg=None,
+):
+    """通知 external API；失败不得影响 ack/report 主流程。"""
+    try:
+        _notify_external_request_impl(
+            message_id,
+            event,
+            payload if isinstance(payload, dict) else {},
+            msg,
+        )
+        return True
+    except Exception as exc:
+        _log(
+            "[BRIDGE][EXTERNAL_NOTIFY][FAILED] "
+            f"message_id={(message_id or '-')[:8]}… "
+            f"event={event or '-'} "
+            f"error_type={type(exc).__name__} "
+            f"error={exc}\n{traceback.format_exc()}"
+        )
+        return False
 
 
 def _finalize_control_message(message_id, status, error_detail=None):
@@ -1008,7 +1089,7 @@ def _log_poll_request(body):
     client_id = (body.get("client_id") or "").strip()
     page_type = (body.get("page_type") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
-    visible = (body.get("visibility_state") or body.get("visible") or "-")
+    visible = (body.get("visibility_state") or "-")
     focus = "yes" if body.get("has_focus") else "no"
     input_txt = "yes" if body.get("can_accept_input", True) else "no"
     state = (body.get("response_state") or "-").strip() or "-"
@@ -1254,15 +1335,204 @@ def _handle_poll(body):
     )
 
 
+def _lookup_control_command(message_id):
+    """查找 sync/控制命令：waiting -> control_queue -> history。"""
+    message_id = (message_id or "").strip()
+    if not message_id:
+        return None, None
+    with st._state_lock:
+        msg = st._control_waiting.get(message_id)
+        if msg:
+            return msg, "waiting"
+        for pending in st._control_queue:
+            if get_bridge_message_id(pending) == message_id:
+                return pending, "queue"
+        for hist in reversed(st._outbound_history):
+            if get_bridge_message_id(hist) == message_id and hist.get("type") == "command":
+                return hist, "history"
+    return None, None
+
+
+def _handle_conversation_snapshot_report(body, client_id, message_id, payload):
+    message_id = (message_id or "").strip()
+    client_id = (client_id or "").strip()
+    msg, location = _lookup_control_command(message_id)
+    if not msg:
+        with st._state_lock:
+            waiting_ids = sorted(st._control_waiting.keys())
+            queue_ids = [
+                get_bridge_message_id(item)
+                for item in st._control_queue
+                if get_bridge_message_id(item)
+            ]
+            recent_finalized = [
+                get_bridge_message_id(item)
+                for item in reversed(st._outbound_history)
+                if item.get("type") == "command"
+            ][:8]
+        waiting_short = [
+            (mid[:8] + "…") if mid and len(mid) > 8 else (mid or "-")
+            for mid in waiting_ids
+        ]
+        queue_short = [
+            (mid[:8] + "…") if mid and len(mid) > 8 else (mid or "-")
+            for mid in queue_ids
+        ]
+        finalized_short = [
+            (mid[:8] + "…") if mid and len(mid) > 8 else (mid or "-")
+            for mid in recent_finalized
+        ]
+        _log(
+            "[BRIDGE][CONVERSATION_SNAPSHOT][UNKNOWN] "
+            f"message_id={message_id or '-'} "
+            f"waiting_message_ids={waiting_short} "
+            f"control_queue_ids={queue_short} "
+            f"recent_finalized_ids={finalized_short}"
+        )
+        _add_inbound(
+            "report_unknown",
+            {
+                "event": "conversation_snapshot",
+                "payload": payload,
+                "report_client_id": client_id,
+                "waiting_message_ids": waiting_ids,
+                "control_queue_ids": queue_ids,
+            },
+            message_id=message_id,
+            client_id=client_id,
+        )
+        _notify_status()
+        return {"ok": True}
+
+    command = (msg.get("command") or "").strip()
+    if command != "sync_conversation":
+        _log(
+            "[BRIDGE][CONVERSATION_SNAPSHOT][IGNORED] "
+            f"message_id={message_id[:8]}… command={command or '-'}"
+        )
+        return {"ok": True}
+
+    owner = (msg.get("delivered_to") or "").strip()
+    if owner and owner != client_id:
+        _add_inbound(
+            "report_mismatch",
+            {
+                "event": "conversation_snapshot",
+                "payload": payload,
+                "owner_client_id": owner,
+                "report_client_id": client_id,
+            },
+            message_id=message_id,
+            session_id=msg.get("session_id"),
+            client_id=client_id,
+        )
+        _log(
+            "[BRIDGE][CONVERSATION_SNAPSHOT][MISMATCH] "
+            f"message_id={message_id[:8]}… owner={owner} reporter={client_id}"
+        )
+        _notify_status()
+        return {"ok": True}
+
+    if _is_finalized(msg):
+        session_id = (payload.get("session_id") or msg.get("session_id") or "").strip()
+        _add_inbound(
+            "conversation_snapshot",
+            dict(payload) if isinstance(payload, dict) else {},
+            message_id=message_id,
+            session_id=session_id,
+            client_id=client_id,
+        )
+        _log(
+            "[BRIDGE][CONVERSATION_SNAPSHOT][LATE] "
+            f"message_id={message_id[:8]}… location={location or '-'}"
+        )
+        _notify_status()
+        return {"ok": True}
+
+    cmd_payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+    page_meta = payload.get("page") if isinstance(payload.get("page"), dict) else {}
+    enriched = dict(payload) if isinstance(payload, dict) else {}
+    for key, value in cmd_payload.items():
+        if value not in (None, "") and not enriched.get(key):
+            enriched[key] = value
+    for key in (
+        "session_id",
+        "conversation_id",
+        "request_id",
+        "client_id",
+        "page_instance_id",
+        "url",
+    ):
+        if (enriched.get(key) or "").strip():
+            continue
+        alt = cmd_payload.get(key) or page_meta.get(key) or body.get(key)
+        if alt not in (None, ""):
+            enriched[key] = alt
+    if not (enriched.get("client_id") or "").strip():
+        enriched["client_id"] = client_id
+    session_id = (enriched.get("session_id") or msg.get("session_id") or "").strip()
+    request_id = (enriched.get("request_id") or "-").strip() or "-"
+    conversation_id = (enriched.get("conversation_id") or "-").strip() or "-"
+    message_count = len(enriched.get("messages") or [])
+    _log(
+        "[BRIDGE][CONVERSATION_SNAPSHOT][RECV] "
+        f"message_id={message_id} "
+        f"session_id={session_id or '-'} "
+        f"request_id={request_id} "
+        f"client_id={client_id or '-'} "
+        f"conversation_id={conversation_id} "
+        f"message_count={message_count}"
+    )
+    _log(
+        f"[SYNC_CONVERSATION][RECV] session_id={session_id or '-'} "
+        f"message_id={message_id[:8]}… "
+        f"conversation_id={conversation_id} "
+        f"count={message_count}"
+    )
+    _log(
+        f"[WEB_SYNC][SNAPSHOT_RECEIVED] request_id={request_id} "
+        f"client_id={client_id} conversation_id={conversation_id} "
+        f"message_count={message_count}"
+    )
+    _add_inbound(
+        "conversation_snapshot",
+        enriched,
+        message_id=message_id,
+        session_id=session_id,
+        client_id=client_id,
+    )
+    with st._state_lock:
+        if message_id in st._control_waiting:
+            _finalize_control_message(message_id, "replied", None)
+    _log(
+        "[BRIDGE][CONVERSATION_SNAPSHOT][FINALIZED] "
+        f"message_id={message_id} status=snapshot_received"
+    )
+    _notify_status()
+    return {"ok": True}
+
+
+def _ack_detail_indicates_busy_wait(detail):
+    detail_text = str(detail or "").lower()
+    return (
+        "assistant_busy" in detail_text
+        or "generating" in detail_text
+        or (
+            "send_not_confirmed" in detail_text
+            and "assistant_busy" in detail_text
+        )
+    )
+
+
 def _handle_ack(body):
     client_id = (body.get("client_id") or "").strip()
-    message_id = body.get("message_id")
+    message_id = (body.get("message_id") or "").strip()
     success = bool(body.get("success", False))
     detail = body.get("detail") or ""
     detail_text = str(detail or "").lower()
-    if "assistant_busy" in detail_text:
-        success = False
-        detail = "assistant_busy"
+    busy_wait = _ack_detail_indicates_busy_wait(detail)
+    if busy_wait and "assistant_busy" in detail_text:
+        detail = detail if str(detail).strip() else "assistant_busy"
     _touch_tampermonkey(body, action="ack")
     if not client_id:
         _log("[BRIDGE][ACK] 拒绝：缺少 client_id")
@@ -1323,8 +1593,46 @@ def _handle_ack(body):
             )
             _notify_status()
             return {"ok": True}
-        waiting = st._outbound_waiting.get(message_id)
+        waiting, ack_location = _lookup_outbound_for_ack(message_id)
         if not waiting:
+            hist_control, hist_loc = _lookup_control_command(message_id)
+            if hist_control and hist_control.get("type") == "command":
+                hist_owner = (hist_control.get("delivered_to") or "").strip()
+                hist_cmd = (hist_control.get("command") or "").strip()
+                if hist_owner and hist_owner != client_id:
+                    _log(
+                        "[BRIDGE][ACK][CONTROL_MISMATCH] "
+                        f"message_id={message_id[:8]}… command={hist_cmd} "
+                        f"owner={hist_owner} reporter={client_id}"
+                    )
+                    _notify_status()
+                    return {"ok": False, "error": "client_id 不匹配"}
+                _log(
+                    "[BRIDGE][ACK][CONTROL_LATE] "
+                    f"message_id={message_id} command={hist_cmd} "
+                    f"location={hist_loc or '-'} finalized="
+                    f"{'yes' if _is_finalized(hist_control) else 'no'} "
+                    f"detail={detail or '-'}"
+                )
+                _add_inbound(
+                    "ack",
+                    {
+                        "success": success,
+                        "detail": detail,
+                        "control": True,
+                        "late": True,
+                    },
+                    message_id=message_id,
+                    client_id=client_id,
+                )
+                _notify_status()
+                return {"ok": True}
+            _log_ack_unknown(
+                message_id,
+                client_id,
+                body,
+                reason="not_in_outbound_waiting_queue_or_history",
+            )
             _add_inbound(
                 "ack_mismatch",
                 {
@@ -1341,8 +1649,52 @@ def _handle_ack(body):
             )
             _notify_status()
             return {"ok": False, "error": "message_id 不匹配或已过期"}
-        owner = waiting.get("delivered_to")
-        if owner != client_id:
+        if ack_location == "queue":
+            _log(
+                "[BRIDGE][ACK][QUEUE_LATE] "
+                f"message_id={message_id} client_id={client_id} "
+                f"success={success} detail={detail or '-'}"
+            )
+            _add_inbound(
+                "ack",
+                {"success": success, "detail": detail, "late": True, "location": "queue"},
+                message_id=message_id,
+                session_id=waiting.get("session_id"),
+                turn_id=waiting.get("turn_id"),
+                client_id=client_id,
+            )
+            _notify_status()
+            return {"ok": True}
+        if ack_location == "history" and _is_finalized(waiting):
+            _log(
+                "[BRIDGE][ACK][HISTORY_FINALIZED] "
+                f"message_id={message_id} client_id={client_id} "
+                f"message_status={waiting.get('message_status') or '-'}"
+            )
+            _add_inbound(
+                "ack",
+                {
+                    "success": success,
+                    "detail": detail,
+                    "late": True,
+                    "location": "history",
+                    "ignored": True,
+                },
+                message_id=message_id,
+                session_id=waiting.get("session_id"),
+                turn_id=waiting.get("turn_id"),
+                client_id=client_id,
+            )
+            _notify_status()
+            return {"ok": True}
+        if ack_location == "history":
+            _log(
+                "[BRIDGE][ACK][HISTORY_LATE] "
+                f"message_id={message_id} client_id={client_id} "
+                f"success={success} detail={detail or '-'}"
+            )
+        owner = (waiting.get("delivered_to") or "").strip()
+        if owner and owner != client_id:
             _add_inbound(
                 "ack_mismatch",
                 {
@@ -1378,23 +1730,45 @@ def _handle_ack(body):
             )
             _notify_status()
             return {"ok": False, "error": "消息已结束"}
-        waiting["acked_at"] = _now()
+        now = _now()
+        if not waiting.get("delivered_at"):
+            waiting["delivered_at"] = now
+        waiting["acked_at"] = now
         if not success:
             waiting["error_detail"] = detail
         ack_session_id = waiting.get("session_id")
         ack_turn_id = waiting.get("turn_id")
         if success:
+            waiting.pop("finalized_at", None)
             _sync_message_status_fields(waiting, "acked")
             ext._update_external_status_for_bridge(message_id, "waiting")
+        elif busy_wait:
+            waiting.pop("finalized_at", None)
+            _sync_message_status_fields(waiting, "waiting_reply")
+            ext._update_external_status_for_bridge(message_id, "waiting")
+            _log(
+                "[BRIDGE][ACK][BUSY_WAIT] "
+                f"client_id={client_id} message_id={message_id} "
+                f"detail={detail or '-'}"
+            )
         else:
             _finalize_message(waiting, "failed")
-            _archive_waiting(message_id)
-            _notify_external_request_from_bridge(
+            if ack_location == "waiting":
+                _archive_waiting(message_id)
+            _safe_notify_external_request_from_bridge(
                 message_id,
                 "send_failed",
                 {"detail": detail, "reason": detail},
                 waiting,
             )
+    if success:
+        _log(
+            "[BRIDGE][ACK][OK] "
+            f"client_id={client_id} message_id={message_id} "
+            f"session_id={(ack_session_id or '-')[:8] if ack_session_id else '-'} "
+            f"turn_id={(ack_turn_id or '-')[:8] if ack_turn_id else '-'} "
+            f"detail={detail or '-'}"
+        )
     _log(
         f"[BRIDGE][ACK] client_id={client_id} message_id={message_id[:8]}… "
         f"success={success} detail={detail or '-'}"
@@ -1456,7 +1830,7 @@ def _handle_report(body):
     client_id = (body.get("client_id") or "").strip()
     event = body.get("event") or "info"
     payload = body.get("payload") or {}
-    message_id = body.get("message_id")
+    message_id = (body.get("message_id") or "").strip()
     if event == "identity_change":
         page_instance_id = (
             (body.get("page_instance_id") or payload.get("page_instance_id") or "").strip()
@@ -1519,6 +1893,10 @@ def _handle_report(body):
     if not client_id:
         _log(f"[BRIDGE][REPORT] 拒绝：缺少 client_id event={event}")
         return {"ok": False, "error": "缺少 client_id"}
+    if event == "conversation_snapshot":
+        return _handle_conversation_snapshot_report(
+            body, client_id, message_id, payload
+        )
     if event == "client_log":
         level = payload.get("level") or "info"
         message = (payload.get("message") or "").strip()
@@ -1569,6 +1947,18 @@ def _handle_report(body):
                 return {"ok": True}
         if not msg:
             waiting_ids = sorted(st._outbound_waiting.keys())
+            control_ids = sorted(st._control_waiting.keys())
+            outbound_ids = [
+                str(m.get("message_id") or "")
+                for m in st._outbound_queue
+                if isinstance(m, dict) and m.get("message_id")
+            ]
+            leased_ids = list(waiting_ids)
+            recent_finalized = [
+                str(m.get("message_id") or "")
+                for m in list(st._outbound_history)[-20:]
+                if isinstance(m, dict) and m.get("message_id")
+            ]
             _add_inbound(
                 "report_unknown",
                 {
@@ -1580,11 +1970,24 @@ def _handle_report(body):
                 message_id=message_id,
                 client_id=client_id,
             )
+            waiting_short = [
+                (mid[:8] + "…") if mid and len(mid) > 8 else (mid or "-")
+                for mid in waiting_ids
+            ]
             _log(
-                f"[BRIDGE][REPORT_UNKNOWN] message_id={message_id} "
-                f"client_id={client_id} event={event} "
-                f"waiting_message_ids={[mid[:8] + '…' for mid in waiting_ids]}"
+                f"[BRIDGE][REPORT_UNKNOWN] event={event} "
+                f"message_id={message_id or '-'} "
+                f"client_id={client_id or '-'} "
+                f"waiting_message_ids={waiting_short}"
             )
+            if event == "assistant_reply":
+                log_assistant_reply_unknown_full(
+                    body,
+                    known_outbound_ids=outbound_ids,
+                    known_leased_ids=leased_ids,
+                    known_control_ids=control_ids,
+                    recent_finalized_ids=recent_finalized,
+                )
             _notify_status()
             return {"ok": True}
         owner = msg.get("delivered_to")
@@ -1655,60 +2058,9 @@ def _handle_report(body):
                 "command_failed",
             )
             if event == "conversation_snapshot":
-                cmd_payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
-                page_meta = payload.get("page") if isinstance(payload.get("page"), dict) else {}
-                enriched = dict(payload)
-                for key, value in cmd_payload.items():
-                    if value not in (None, "") and not enriched.get(key):
-                        enriched[key] = value
-                for key in (
-                    "session_id",
-                    "conversation_id",
-                    "request_id",
-                    "client_id",
-                    "page_instance_id",
-                    "url",
-                ):
-                    if (enriched.get(key) or "").strip():
-                        continue
-                    alt = cmd_payload.get(key) or page_meta.get(key)
-                    if alt not in (None, ""):
-                        enriched[key] = alt
-                if not (enriched.get("client_id") or "").strip():
-                    enriched["client_id"] = client_id
-                session_id = (enriched.get("session_id") or msg.get("session_id") or "").strip()
-                message_count = len(enriched.get("messages") or [])
-                total_text_len = 0
-                for web_msg in enriched.get("messages") or []:
-                    if isinstance(web_msg, dict):
-                        total_text_len += len(
-                            str(
-                                web_msg.get("text") or web_msg.get("content") or ""
-                            ).strip()
-                        )
-                _log(
-                    f"[SYNC_CONVERSATION][RECV] session_id={session_id or '-'} "
-                    f"message_id={message_id[:8] if message_id else '?'}… "
-                    f"conversation_id={(enriched.get('conversation_id') or '-')} "
-                    f"count={message_count} total_text_len={total_text_len}"
+                return _handle_conversation_snapshot_report(
+                    body, client_id, message_id, payload
                 )
-                _log(
-                    f"[WEB_SYNC][SNAPSHOT_RECEIVED] request_id="
-                    f"{(enriched.get('request_id') or '-')} "
-                    f"client_id={client_id} "
-                    f"conversation_id={(enriched.get('conversation_id') or '-')} "
-                    f"message_count={message_count}"
-                )
-                _add_inbound(
-                    event,
-                    enriched,
-                    message_id=message_id,
-                    session_id=session_id,
-                    client_id=client_id,
-                )
-                _finalize_control_message(message_id, "replied", None)
-                _notify_status()
-                return {"ok": True}
             if event == "close_page_requested":
                 _sync_message_status_fields(msg, "requested")
                 _add_inbound(event, payload, **inbound_kw)
@@ -1736,7 +2088,29 @@ def _handle_report(body):
             return {"ok": True}
         if event == "assistant_reply":
             text = (payload.get("text") or payload.get("content") or "").strip()
+            if _is_invalid_assistant_reply_text(text):
+                _log(
+                    "[BRIDGE][ASSISTANT_REPLY][SKIP_INVALID_TEXT] "
+                    f"message_id={message_id or '-'} "
+                    f"content={text!r}"
+                )
+                _notify_status()
+                return {"ok": False, "error": "invalid_assistant_reply_text"}
             msg["reply_text"] = text
+            session_id_log = (msg.get("session_id") or "").strip()
+            turn_id_log = (msg.get("turn_id") or "").strip()
+            mid_log = message_id or "-"
+            if isinstance(mid_log, str) and len(mid_log) > 8:
+                mid_log = f"{mid_log[:8]}…"
+            _log(
+                "[BRIDGE][ASSISTANT_REPLY][RECV] "
+                f"message_id={mid_log} "
+                f"session_id={session_id_log or '-'} "
+                f"turn_id={turn_id_log or '-'} "
+                f"client_id={client_id or '-'} "
+                f"text_len={len(text)}"
+            )
+            log_assistant_reply_recv_full(body, msg)
             try:
                 _job_scheduler.on_assistant_reply(
                     text,
@@ -1763,10 +2137,14 @@ def _handle_report(body):
                 client_entry["response_state_at"] = int(now * 1000)
                 client_entry["can_accept_input"] = True
                 client_entry["last_response_state_seen_at"] = now
+            _log(
+                "[BRIDGE][ASSISTANT_REPLY][FINALIZED] "
+                f"message_id={mid_log} status=replied reply_len={len(text)}"
+            )
             _log_finalized(msg, message_id, event)
             _add_inbound(event, payload, **inbound_kw)
             _archive_waiting(message_id)
-            _notify_external_request_from_bridge(message_id, event, payload, msg)
+            _safe_notify_external_request_from_bridge(message_id, event, payload, msg)
         elif event == "send_failed":
             if not _is_finalized(msg):
                 _finalize_message(msg, "failed")
@@ -1775,7 +2153,7 @@ def _handle_report(body):
                 _add_inbound(event, payload, **inbound_kw)
                 if message_id in st._outbound_waiting:
                     _archive_waiting(message_id)
-                _notify_external_request_from_bridge(message_id, event, payload, msg)
+                _safe_notify_external_request_from_bridge(message_id, event, payload, msg)
             else:
                 _add_inbound(
                     "report_ignored",
@@ -1806,7 +2184,7 @@ def _handle_report(body):
                 _add_inbound(event, payload, **inbound_kw)
                 if message_id in st._outbound_waiting:
                     _archive_waiting(message_id)
-                _notify_external_request_from_bridge(message_id, event, payload, msg)
+                _safe_notify_external_request_from_bridge(message_id, event, payload, msg)
             else:
                 _add_inbound(
                     "report_ignored",
@@ -1863,3 +2241,143 @@ def _handle_report(body):
             _add_inbound(event, payload, **inbound_kw)
     _notify_status()
     return {"ok": True}
+
+
+def _handle_assistant_reply(body):
+    """油猴 action=assistant_reply：直接上报 assistant 正文到 GUI。"""
+    client_id = read_bridge_client_id(body)
+    page_instance_id = read_bridge_page_instance_id(body)
+    message_id = str(body.get("message_id") or "").strip()
+    content = str(
+        body.get("content")
+        or body.get("text")
+        or body.get("assistant_text")
+        or ""
+    ).strip()
+    if not content:
+        return {"ok": False, "error": "empty_assistant_reply"}
+    if _is_invalid_assistant_reply_text(content):
+        _log(
+            "[BRIDGE][ASSISTANT_REPLY][SKIP_INVALID_TEXT] "
+            f"message_id={message_id or '-'} "
+            f"content={content!r}"
+        )
+        return {"ok": False, "error": "invalid_assistant_reply_text"}
+    if not client_id:
+        _log("[BRIDGE][ASSISTANT_REPLY] 拒绝：缺少 client_id")
+        return {"ok": False, "error": "缺少 client_id"}
+
+    _touch_tampermonkey(body, action="assistant_reply")
+
+    session_id = str(body.get("session_id") or "").strip()
+    turn_id = str(body.get("turn_id") or "").strip()
+    payload = {
+        "text": content,
+        "content": content,
+        "assistant_text": content,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "client_id": client_id,
+        "page_instance_id": page_instance_id,
+        "conversation_id": str(body.get("conversation_id") or "").strip(),
+        "url": page_url_from(body),
+        "reason": str(body.get("reason") or "").strip(),
+        "response_state": str(body.get("response_state") or "").strip(),
+        "ok": True,
+    }
+    inbound_kw = {
+        "message_id": message_id,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "client_id": client_id,
+    }
+
+    with st._state_lock:
+        msg = _find_outbound_message(message_id) if message_id else None
+
+    mid_log = message_id or "-"
+    if isinstance(mid_log, str) and len(mid_log) > 8:
+        mid_log = f"{mid_log[:8]}…"
+    session_id_log = session_id or (msg.get("session_id") if msg else "") or ""
+    turn_id_log = turn_id or (msg.get("turn_id") if msg else "") or ""
+    _log(
+        "[BRIDGE][ASSISTANT_REPLY][RECV] "
+        f"message_id={mid_log} "
+        f"session_id={session_id_log or '-'} "
+        f"turn_id={turn_id_log or '-'} "
+        f"client_id={client_id or '-'} "
+        f"content_len={len(content)}"
+    )
+
+    if msg:
+        msg["reply_text"] = content
+        if not session_id:
+            session_id = str(msg.get("session_id") or "").strip()
+            inbound_kw["session_id"] = session_id
+            payload["session_id"] = session_id
+        if not turn_id:
+            turn_id = str(msg.get("turn_id") or "").strip()
+            inbound_kw["turn_id"] = turn_id
+            payload["turn_id"] = turn_id
+        log_assistant_reply_recv_full(body, msg)
+        try:
+            _job_scheduler.on_assistant_reply(
+                content,
+                outbound_message_id=message_id,
+                auto_send_hook=lambda jid: _job_scheduler.send_job_to_cursor(
+                    jid, enqueue_cursor_task
+                ),
+            )
+        except Exception as exc:
+            _log(
+                "[JOB][ASSISTANT_REPLY_HOOK_FAILED] "
+                f"message_id={message_id or '-'} error={exc}\n{traceback.format_exc()}"
+            )
+        _finalize_message(msg, "replied")
+        page_key = _page_registry_key(client_id, page_instance_id) or client_id
+        with st._state_lock:
+            client_entry = st._tampermonkey_pages.get(page_key)
+        if isinstance(client_entry, dict):
+            now = _now()
+            client_entry["is_responding"] = False
+            client_entry["response_state"] = "idle"
+            client_entry["response_state_reason"] = "assistant_reply_received"
+            client_entry["response_state_at"] = int(now * 1000)
+            client_entry["can_accept_input"] = True
+            client_entry["last_response_state_seen_at"] = now
+        _log(
+            "[BRIDGE][ASSISTANT_REPLY][FINALIZED] "
+            f"message_id={mid_log} status=replied reply_len={len(content)}"
+        )
+        _log_finalized(msg, message_id, "assistant_reply")
+        _add_inbound("assistant_reply", payload, **inbound_kw)
+        _archive_waiting(message_id)
+        _safe_notify_external_request_from_bridge(
+            message_id, "assistant_reply", payload, msg
+        )
+    else:
+        if message_id:
+            waiting_ids = sorted(st._outbound_waiting.keys())
+            control_ids = sorted(st._control_waiting.keys())
+            outbound_ids = [
+                str(m.get("message_id") or "")
+                for m in st._outbound_queue
+                if isinstance(m, dict) and m.get("message_id")
+            ]
+            leased_ids = list(waiting_ids)
+            recent_finalized = [
+                str(m.get("message_id") or "")
+                for m in list(st._outbound_history)[-20:]
+                if isinstance(m, dict) and m.get("message_id")
+            ]
+            log_assistant_reply_unknown_full(
+                body,
+                known_outbound_ids=outbound_ids,
+                known_leased_ids=leased_ids,
+                known_control_ids=control_ids,
+                recent_finalized_ids=recent_finalized,
+            )
+        _add_inbound("assistant_reply", payload, **inbound_kw)
+
+    _notify_status()
+    return {"ok": True, "handled": True}

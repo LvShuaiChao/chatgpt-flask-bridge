@@ -49,7 +49,7 @@ def classify_tm_client_activity(
     now_v, seen_age, poll_age, _ = compute_tm_activity_metrics(item, now=now)
     _ = now_v
 
-    visible = (item.get("visibility_state") or item.get("visible") or "").strip()
+    visible = (item.get("visibility_state") or "").strip()
     has_focus = bool(item.get("has_focus"))
 
     if seen_age > TM_HEARTBEAT_ONLINE_SECONDS:

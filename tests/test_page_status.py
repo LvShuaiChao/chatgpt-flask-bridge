@@ -127,7 +127,7 @@ class PageStatusTests(unittest.TestCase):
         }
         cap_conv = evaluate_page_capability(conv, action="sync", now=now)
         self.assertTrue(can_sync_conversation(conv, now=now))
-        self.assertEqual(cap_conv.blocked_reason, "")
+        self.assertEqual(cap_conv.reason_code, "")
 
     def test_send_now_vs_send_queueable(self):
         now = time.time()
@@ -183,7 +183,7 @@ class PageStatusTests(unittest.TestCase):
             expected_conversation_id="xyz",
             now=now,
         )
-        self.assertEqual(cap.reason, "client_id_mismatch")
+        self.assertEqual(cap.reason_code, "client_id_mismatch")
         self.assertEqual(cap.send_decision, "blocked")
 
     def test_url_syncable_without_conversation_id(self):

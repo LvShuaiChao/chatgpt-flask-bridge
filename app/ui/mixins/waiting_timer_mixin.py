@@ -86,8 +86,8 @@ class WaitingTimerMixin:
                 )
 
     def _restore_waiting_timers_after_load(self):
-        for session in self._iter_all_chat_sessions():
-            self._sync_session_waiting_timer(session, reason="load_sessions")
+        # 等待回复计时为运行态；会话从磁盘加载后已在 startup clear 中清零，不再恢复。
+        return
 
     def _strip_waiting_elapsed_suffix(self, text):
         return _WAITING_ELAPSED_SUFFIX_RE.sub("", (text or "").strip()).strip()
@@ -167,11 +167,14 @@ class WaitingTimerMixin:
             return
         if session.session_id != getattr(self, "_current_session_id", None):
             return
+        if hasattr(self, "_patch_waiting_elapsed_in_transcript"):
+            if self._patch_waiting_elapsed_in_transcript(session):
+                return
         if hasattr(self, "_render_session_chat"):
-            self._render_session_chat(session, force_bottom=False)
+            self._render_session_chat(session, scroll_policy="preserve")
         elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
-                force_bottom=False,
+                scroll_policy="preserve",
                 reason="waiting_elapsed_tick",
             )
 
@@ -206,6 +209,8 @@ class WaitingTimerMixin:
 
             any_waiting = True
             elapsed = max(0, int(now_ts - since_ts))
+            if hasattr(self, "_maybe_recover_pending_reply"):
+                self._maybe_recover_pending_reply(session)
             self._maybe_log_waiting_tick(session, elapsed)
 
             if session.session_id == current_session_id:

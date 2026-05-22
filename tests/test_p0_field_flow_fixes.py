@@ -62,7 +62,7 @@ def test_send_binding_verify_merged_into_page_action_blocks_mismatch_without_fal
             "conversation_id": "conv-1",
             "url": "https://chatgpt.com/c/conv-1",
         },
-        "target_item": {
+        "page": {
             "client_id": "other-c",
             "page_instance_id": "other-p",
             "conversation_id": "conv-1",
@@ -73,7 +73,7 @@ def test_send_binding_verify_merged_into_page_action_blocks_mismatch_without_fal
     }
     merged = host._apply_send_binding_verify_to_page_action(session, page_action)
     assert merged["decision"] == "blocked"
-    assert merged["reason"] == "client_id_mismatch"
+    assert merged["reason_code"] == "client_id_mismatch"
 
 
 def test_send_binding_verify_blocks_client_mismatch_even_with_legacy_fallback_flag():
@@ -96,7 +96,7 @@ def test_send_binding_verify_blocks_client_mismatch_even_with_legacy_fallback_fl
             "conversation_id": "conv-1",
             "url": "https://chatgpt.com/c/conv-1",
         },
-        "target_item": {
+        "page": {
             "client_id": "other-c",
             "page_instance_id": "other-p",
             "conversation_id": "conv-1",
@@ -107,7 +107,7 @@ def test_send_binding_verify_blocks_client_mismatch_even_with_legacy_fallback_fl
     }
     merged = host._apply_send_binding_verify_to_page_action(session, page_action)
     assert merged["decision"] == "blocked"
-    assert merged["reason"] == "client_id_mismatch"
+    assert merged["reason_code"] == "client_id_mismatch"
 
 
 def test_send_binding_verify_blocks_conversation_id_mismatch_even_with_fallback():
@@ -234,7 +234,6 @@ def test_poll_wait_conversation_matches_page_instance_not_other_tab(sync_poll_ho
     host._wait_conversation_sync_by_session["s1"] = {
         "client_id": "c1",
         "page_instance_id": "home-p",
-        "page_key": "c1|home-p",
         "bind_token": "tok-abc",
         "started_at": time.time(),
         "url": "https://chatgpt.com/?xz_bind_token=tok-abc",

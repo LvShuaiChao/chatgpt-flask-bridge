@@ -40,7 +40,7 @@ from app.url_utils import parse_conversation_id
 from app.utils.page_status import conversation_syncable_from
 from app.utils.page_status import is_page_url_syncable
 from app.utils.page_snapshot import bridge_status_online
-from app.utils.page_status import page_url_from
+from app.utils.page_status import page_url_from, read_snapshot_identity
 from PyQt5.QtCore import QTimer, QUrl, Qt
 from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import QTableWidgetItem
@@ -416,12 +416,12 @@ class PageOpenCloseMixin:
                     str(c.get("page_instance_id", "")),
                     str(c.get("page_type", "")),
                     str(c.get("conversation_id", "")),
-                    str(c.get("visibility_state", c.get("visible", ""))),
+                    str(c.get("visibility_state", "")),
                     str(bool(c.get("has_focus"))),
                     str(c.get("last_focus_at", "")),
                     str(c.get("last_seen", "")),
                     str(bool(self._page_is_online(c))),
-                    str(c.get("page_url", "")),
+                    str(c.get("url", "")),
                     str(c.get("conversation_syncable")),
                     str(c.get("send_now_available")),
                     str(c.get("can_send_now")),
@@ -464,8 +464,7 @@ class PageOpenCloseMixin:
         if hasattr(self, "_tm_summary_for_session"):
             summary = self._tm_summary_for_session() or {}
         bound_page_id = (
-            (summary.get("stored_bound_client_id") or summary.get("bound_client_id") or "")
-            .strip()
+            read_snapshot_identity(summary, "bound")["client_id"]
             or (self._session_bound_client_id() if hasattr(self, "_session_bound_client_id") else "")
         )
         bound_page_online = bool(summary.get("bound_online"))
