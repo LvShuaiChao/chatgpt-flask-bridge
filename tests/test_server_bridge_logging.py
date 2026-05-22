@@ -42,6 +42,26 @@ def test_bridge_json_should_log_page_heartbeat_report(server_module):
     assert server_module._bridge_json_should_log("report", body, {"ok": True}) is False
 
 
+def test_bridge_json_line_does_not_print_when_gui_callback_is_set(monkeypatch, capsys):
+    from app.server import bridge_logging
+    from app.server import state as server_state
+
+    callbacks = []
+    monkeypatch.setattr(bridge_logging, "append_bridge_json_log", lambda line: None)
+    monkeypatch.setattr(server_state, "_log_callback", callbacks.append)
+
+    bridge_logging._log_bridge_json_line(
+        '[BRIDGE][JSON][TM_TO_SERVER_FULL]\naction=poll\njson={"action":"poll"}'
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert callbacks == [
+        '[SERVER] [BRIDGE][JSON][TM_TO_SERVER_FULL]\naction=poll\njson={"action":"poll"}'
+    ]
+
+
 def test_dumps_full_json_no_truncation(server_module):
     from app.utils.json_log import dumps_full_json_for_log
 

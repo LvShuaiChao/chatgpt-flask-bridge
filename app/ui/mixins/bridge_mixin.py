@@ -681,8 +681,6 @@ class BridgeMixin:
 
         if self._auto_clear_input_after_send and not from_pending_bootstrap:
             self.message_edit.clear()
-            if hasattr(self, "_ensure_default_chat_input_text"):
-                self._ensure_default_chat_input_text()
             if hasattr(self, "_stash_session_compose_draft"):
                 self._stash_session_compose_draft(session.session_id)
         self._focus_message_input_later()

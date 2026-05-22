@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from app.ui.mixins.bridge_mixin import BridgeMixin
 from app.ui.mixins.page_binding_diagnostics_mixin import PageBindingDiagnosticsMixin
 from app.ui.mixins.page_sync_mixin import PageSyncMixin
+from app.models import ChatSession
 
 
 class _AppendLogHost(BridgeMixin):
@@ -19,6 +20,14 @@ class _AppendLogHost(BridgeMixin):
 
 
 class _SnapshotHost(PageSyncMixin):
+    def __init__(self):
+        self.logs = []
+        self.hints = []
+        self.refreshed = []
+        self.saved = False
+        self._current_session_id = ""
+        self._sessions = {}
+
     def _tm_page_is_online_simple(self, page):
         return bool(page.get("online"))
 
@@ -30,6 +39,22 @@ class _SnapshotHost(PageSyncMixin):
 
     def _remote_conversation_id(self, remote):
         return (remote or {}).get("conversation_id") or ""
+
+    def _append_log(self, message, **kwargs):
+        self.logs.append(message)
+
+    def _save_sessions_to_disk(self):
+        self.saved = True
+
+    def _refresh_local_conversation_after_sync(self, session_id, **kwargs):
+        self.refreshed.append((session_id, kwargs))
+        return True
+
+    def _auto_rename_session_from_messages(self, session):
+        return None
+
+    def _set_tm_action_hint(self, text):
+        self.hints.append(text)
 
 
 class TestAppendLogLevelCompat(unittest.TestCase):
@@ -58,6 +83,39 @@ class TestSyncTargetSnapshotAllowed(unittest.TestCase):
         self.assertTrue(snap.get("allowed"))
         self.assertTrue(snap.get("sync_readable"))
         self.assertTrue(snap.get("conversation_syncable"))
+
+    def test_snapshot_sync_preserves_repeated_identical_messages(self):
+        host = _SnapshotHost()
+        session = ChatSession(
+            session_id="s1",
+            title="t",
+            created_at=0,
+            updated_at=0,
+        )
+        host._sessions = {"s1": session}
+        host._current_session_id = "s1"
+
+        ok, _ = host._sync_session_messages_from_web_snapshot(
+            "s1",
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "reply one"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "reply two"},
+            ],
+            source="test",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [(message.role, message.content) for message in session.messages],
+            [
+                ("user", "hello"),
+                ("assistant", "reply one"),
+                ("user", "hello"),
+                ("assistant", "reply two"),
+            ],
+        )
 
 
 class TestStatusSummarySyncTargetState(unittest.TestCase):

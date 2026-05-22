@@ -1,11 +1,9 @@
 """Bridge JSON request/response logging (full payload, no truncation)."""
 from __future__ import annotations
 
-import time
 import traceback
 
 from app.constants import DEBUG_FULL_BRIDGE_JSON
-from app.server import state as st
 from app.server.runtime_state import _is_bridge_debug_enabled, _log
 from app.utils.bridge_json_file_log import append_bridge_json_log
 from app.utils.json_log import dumps_full_json_for_log
@@ -55,12 +53,9 @@ def _bridge_json_should_log(action, request_payload=None, response_payload=None)
 
 
 def _log_bridge_json_line(line):
-    """油猴桥接 JSON 日志；GUI 模式下额外 print 到命令行。"""
+    """Write full bridge JSON through normal logging and the dedicated file."""
     _log(line, tag="bridge_json")
     append_bridge_json_log(line)
-    if st._log_callback:
-        now_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        print(f"[{now_text}][SERVER] {line}")
 
 
 def _log_bridge_json_block(tag, fields, payload):

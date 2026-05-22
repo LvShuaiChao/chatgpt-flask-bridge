@@ -1362,7 +1362,11 @@ class PageSyncMixin:
             self._set_active_sync_trace_id(trace_id)
         request_id = f"sync-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         mode = "merge"
-        max_messages = 10
+        try:
+            max_messages = int(getattr(self, "_sync_conversation_max_messages", 10) or 10)
+        except (TypeError, ValueError):
+            max_messages = 10
+        max_messages = max(1, max_messages)
 
         allowed, target_page, source, block_reason, detail = (
             self.resolve_sync_decision(session, status=status)
@@ -2614,15 +2618,9 @@ class PageSyncMixin:
 
         old_count = len(session.messages)
         new_messages = []
-        fingerprints = set()
         for item in normalized_web:
             role = item["role"]
             text = item["text"]
-            fp = self._message_fingerprint(role, text)
-            if fp in fingerprints:
-                skipped += 1
-                continue
-            fingerprints.add(fp)
             new_messages.append(
                 ChatMessage(
                     role=role,
