@@ -24,6 +24,22 @@ JOB_STATUSES = frozenset({
     "cancelled",
 })
 
+
+def job_status_from(job):
+    if not isinstance(job, dict):
+        return ""
+    return (job.get("job_status") or job.get("status") or "").strip()
+
+
+def _migrate_job_status_inplace(job):
+    if not isinstance(job, dict):
+        return job
+    status = job_status_from(job)
+    if status:
+        job["job_status"] = status
+    job.pop("status", None)
+    return job
+
 CHATGPT_CURSOR_PROMPT_TEMPLATE = """请根据下面需求，整理成适合直接发给 Cursor Agent 的修改指令。
 
 要求：
@@ -74,7 +90,7 @@ def create_job(
         "chatgpt_reply": "",
         "cursor_task_id": "",
         "outbound_message_id": "",
-        "status": "created",
+        "job_status": "created",
         "cursor_status": "",
         "error": "",
         "auto_send_to_cursor": bool(auto_send_to_cursor),
@@ -104,7 +120,8 @@ def update_job_status(job_id, status, message=""):
         if not job:
             return False, "job not found"
         if status:
-            job["status"] = status
+            job["job_status"] = status
+            job.pop("status", None)
         if message:
             job["error"] = message if status in ("cursor_failed", "cancelled") else ""
         job["updated_at"] = _now_text()
@@ -143,7 +160,10 @@ def get_job(job_id):
     job_id = (job_id or "").strip()
     with job_lock:
         job = job_map.get(job_id)
-        return dict(job) if job else None
+        if not job:
+            return None
+        _migrate_job_status_inplace(job)
+        return dict(job)
 
 
 def list_jobs(limit=50):
@@ -154,7 +174,7 @@ def list_jobs(limit=50):
         for job_id in reversed(ids):
             job = job_map.get(job_id)
             if job:
-                jobs.append(dict(job))
+                jobs.append(dict(_migrate_job_status_inplace(job)))
             if len(jobs) >= limit:
                 break
         return jobs
@@ -169,13 +189,13 @@ def _find_waiting_chatgpt_job(*, outbound_message_id=""):
                 if not job:
                     continue
                 if job.get("outbound_message_id") == outbound_message_id:
-                    if job.get("status") == "waiting_chatgpt_reply":
+                    if job_status_from(job) == "waiting_chatgpt_reply":
                         return job_id, job
         for job_id in reversed(job_queue):
             job = job_map.get(job_id)
             if not job:
                 continue
-            if job.get("status") == "waiting_chatgpt_reply":
+            if job_status_from(job) == "waiting_chatgpt_reply":
                 return job_id, job
     return None, None
 
@@ -195,7 +215,7 @@ def on_assistant_reply(text, *, outbound_message_id="", auto_send_hook=None):
 
     with job_lock:
         stored = job_map.get(job_id)
-        if not stored or stored.get("status") != "waiting_chatgpt_reply":
+        if not stored or job_status_from(stored) != "waiting_chatgpt_reply":
             return None
         stored["chatgpt_reply"] = reply_text
         stored["updated_at"] = _now_text()
@@ -254,7 +274,7 @@ def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
     if not job:
         return False, "job not found"
 
-    if job.get("status") == "cancelled":
+    if job_status_from(job) == "cancelled":
         return False, "job cancelled"
 
     prompt = (job.get("chatgpt_prompt") or "").strip()
@@ -262,8 +282,8 @@ def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
         return False, "chatgpt_prompt is empty"
 
     payload = {
-        "final_prompt": prompt,
-        "raw_user_text": job.get("user_requirement") or prompt,
+        "content": prompt,
+        "raw_content": job.get("user_requirement") or prompt,
         "job_id": job_id,
     }
     if isinstance(payload_extra, dict):
@@ -284,7 +304,7 @@ def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
         update_job_status(job_id, "cursor_failed", "push_message returned invalid result")
         return False, "push_message returned invalid result"
 
-    message_id = (msg.get("id") or "").strip()
+    message_id = (msg.get("message_id") or "").strip()
     with job_lock:
         stored = job_map.get(job_id)
         if stored:
@@ -357,44 +377,6 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
     return True, task_id
 
 
-def set_job_chatgpt_reply(
-    job_id,
-    reply_text,
-    *,
-    status="chatgpt_reply_ready",
-    source_payload=None,
-):
-    job_id = (job_id or "").strip()
-    reply = str(reply_text or "")
-    if not job_id:
-        return False, "job_id is empty"
-    if not reply.strip():
-        return False, "reply_text is empty"
-    if status and status not in JOB_STATUSES:
-        return False, f"invalid status: {status}"
-
-    with job_lock:
-        job = job_map.get(job_id)
-        if not job:
-            return False, "job not found"
-        if job.get("status") == "cancelled":
-            return False, "job cancelled"
-        job["chatgpt_reply"] = reply
-        if isinstance(source_payload, dict):
-            job["source_payload"] = dict(source_payload)
-        job["updated_at"] = _now_text()
-
-    append_job_log(
-        job_id,
-        "CHATGPT_REPLY_READY",
-        f"reply_len={len(reply)} source=manual_seed",
-    )
-    if status:
-        update_job_status(job_id, status, "已准备好发送到 Cursor")
-    _notify_job_change()
-    return True, "ok"
-
-
 def handle_cursor_task_report(report):
     if not isinstance(report, dict):
         return False, "report must be dict"
@@ -461,8 +443,9 @@ def cancel_job(job_id, reason=""):
         job = job_map.get(job_id)
         if not job:
             return False, "job not found"
-        if job.get("status") in ("cursor_done", "cancelled"):
-            return False, f"cannot cancel status={job.get('status')}"
+        current_status = job_status_from(job)
+        if current_status in ("cursor_done", "cancelled"):
+            return False, f"cannot cancel status={current_status}"
 
     detail = (reason or "").strip() or "用户取消"
     append_job_log(job_id, "CANCELLED", detail)
@@ -474,7 +457,7 @@ def get_job_scheduler_snapshot(limit=20):
     jobs = list_jobs(limit=limit)
     active = None
     for job in jobs:
-        st = job.get("status") or ""
+        st = job_status_from(job)
         if st not in ("cursor_done", "cancelled", "cursor_failed"):
             active = job
             break

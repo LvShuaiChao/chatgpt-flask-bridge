@@ -18,6 +18,7 @@ from app.constants import (
     UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
+    remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
@@ -29,6 +30,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.utils.legacy_cleanup import assert_no_legacy_fields
 from app.ui.widgets.session_list_item import (
     SESSION_LIST_ITEM_HEIGHT,
     SessionListItemWidget,
@@ -131,13 +133,15 @@ class SessionMixin:
             f"title={session.title!r} auto_open_chatgpt=false"
         )
         self._render_session_chat(session, force_bottom=True)
-        if hasattr(self, "_update_bound_page_display"):
-            self._update_bound_page_display()
+        if hasattr(self, "schedule_page_registry_refresh"):
+            self.schedule_page_registry_refresh(reason="session_created")
         if hasattr(self, "_apply_chat_bind_visual_state"):
             self._apply_chat_bind_visual_state()
+        if hasattr(self, "_restore_session_compose_input"):
+            self._restore_session_compose_input(session.session_id)
+        elif hasattr(self, "_ensure_default_chat_input_text"):
+            self._ensure_default_chat_input_text()
         self._focus_message_input_later()
-        if hasattr(self, "_apply_default_compose_message_if_empty"):
-            self._apply_default_compose_message_if_empty()
         self._save_sessions_to_disk()
         if self._auto_open_chatgpt_on_new_session_enabled():
             if hasattr(self, "_ensure_visible_chatgpt_home_for_new_session"):
@@ -152,12 +156,6 @@ class SessionMixin:
         if session:
             return session
         return self._create_session(select=True)
-    def _is_tm_pages_table_visible(self):
-        table = getattr(self, "tm_pages_table", None)
-        if table is None:
-            return False
-        return table.isVisible()
-
     def _is_chat_view_visible(self):
         transcript = getattr(self, "chat_transcript", None)
         if transcript is None:
@@ -184,15 +182,15 @@ class SessionMixin:
         if not session_id:
             return
         if session_id != getattr(self, "_current_session_id", ""):
-            self._pending_chat_render_session_id = ""
+            self._bridge_msg.pending_chat_render_session_id = ""
             return
         if not self._is_chat_view_visible():
             return
         session = self._sessions.get(session_id)
         if session is None:
-            self._pending_chat_render_session_id = ""
+            self._bridge_msg.pending_chat_render_session_id = ""
             return
-        self._pending_chat_render_session_id = ""
+        self._bridge_msg.pending_chat_render_session_id = ""
         self._render_session_chat(session, force_bottom=True)
 
     def _log_select_session_deferred_skip(self, phase, reason, session_id, switch_token):
@@ -215,6 +213,8 @@ class SessionMixin:
             return
         old_session_id = getattr(self, "_current_session_id", "")
         if old_session_id == session_id:
+            if hasattr(self, "_ensure_default_chat_input_text"):
+                self._ensure_default_chat_input_text()
             session = self._sessions.get(session_id)
             if session is not None:
                 if hasattr(self, "_render_chat_transcript"):
@@ -235,9 +235,12 @@ class SessionMixin:
                 )
             return
 
+        if old_session_id and hasattr(self, "_stash_session_compose_draft"):
+            self._stash_session_compose_draft(old_session_id)
+
         switch_token = uuid.uuid4().hex
         self._deferred_session_switch_token = switch_token
-        self._session_switching = True
+        self._session_ui.switching = True
 
         self._current_session_id = session_id
         self._suspend_status_ui_until = time.time() + 0.8
@@ -311,7 +314,7 @@ class SessionMixin:
                 session_id,
                 switch_token,
             )
-            self._session_switching = False
+            self._session_ui.switching = False
             return
 
         session.has_pending_reply = self._session_has_pending_assistant_reply(session)
@@ -321,13 +324,13 @@ class SessionMixin:
             self._render_session_chat(session, force_bottom=True)
             chat_rendered = True
         else:
-            self._pending_chat_render = {
+            self._bridge_msg.pending_chat_render = {
                 "session_id": session_id,
                 "force_bottom": True,
                 "reason": "select_session_deferred",
                 "created_at": time.time(),
             }
-            self._pending_chat_render_session_id = session_id
+            self._bridge_msg.pending_chat_render_session_id = session_id
             chat_rendered = False
         render_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -374,7 +377,7 @@ class SessionMixin:
                 session_id,
                 switch_token,
             )
-            self._session_switching = False
+            self._session_ui.switching = False
             return
 
         if save and hasattr(self, "_settings"):
@@ -389,22 +392,14 @@ class SessionMixin:
         else:
             self._refresh_session_list_current_badges([session_id])
         self._update_current_session_title(session)
-        if hasattr(self, "_update_bound_page_display"):
-            self._update_bound_page_display()
-        if hasattr(self, "_refresh_tm_page_selector"):
-            self._refresh_tm_page_selector()
-        if self._is_tm_pages_table_visible() and hasattr(
-            self, "_render_tampermonkey_clients"
-        ):
-            self._render_tampermonkey_clients(self._last_bridge_status)
         if hasattr(self, "_try_send_next_queued_message"):
             self._try_send_next_queued_message(session)
+        if hasattr(self, "_restore_session_compose_input"):
+            self._restore_session_compose_input(session_id)
         self._focus_message_input_later()
-        if hasattr(self, "_apply_default_compose_message_if_empty"):
-            self._apply_default_compose_message_if_empty()
         light_ms = int((time.perf_counter() - t0) * 1000)
 
-        self._session_switching = False
+        self._session_ui.switching = False
         if not chat_rendered and hasattr(self, "_flush_pending_chat_render"):
             QTimer.singleShot(0, self._flush_pending_chat_render)
         if self._is_debug_mode_enabled():
@@ -419,6 +414,20 @@ class SessionMixin:
             )
         if hasattr(self, "_schedule_status_apply_after_session_switch"):
             self._schedule_status_apply_after_session_switch()
+        if hasattr(self, "schedule_page_registry_refresh"):
+            QTimer.singleShot(
+                300,
+                lambda: self.schedule_page_registry_refresh(
+                    reason="session_switch_finished"
+                ),
+            )
+        elif hasattr(self, "_auto_refresh_tm_pages_if_needed"):
+            QTimer.singleShot(
+                300,
+                lambda: self._auto_refresh_tm_pages_if_needed(
+                    "session_switch_finished"
+                ),
+            )
     def _session_display_title(self, session):
         title = session.title or "新对话"
         if session.has_pending_reply:
@@ -484,7 +493,7 @@ class SessionMixin:
                 continue
             if message.role != "assistant":
                 continue
-            status = (message.status or "").strip()
+            status = (message.ui_status or "").strip()
             if status in PENDING_ASSISTANT_STATUSES:
                 continue
             text = str(message.content or "")
@@ -554,7 +563,7 @@ class SessionMixin:
                     else ""
                 )
                 parent_source = (
-                    (getattr(parent, "source", "") or "").strip()
+                    (parent.message_source or "").strip()
                     if parent is not None
                     else ""
                 )
@@ -565,7 +574,7 @@ class SessionMixin:
                 ):
                     continue
 
-            status = (message.status or "").strip()
+            status = (message.ui_status or "").strip()
             if status in PENDING_ASSISTANT_STATUSES:
                 return True
 
@@ -595,7 +604,7 @@ class SessionMixin:
                 "can_accept_input": True,
             }
         client_info = self._client_info_by_id(
-            client_id, getattr(self, "_last_bridge_status", None)
+            client_id, getattr(self._bridge_ui, 'last_bridge_status', None)
         )
         if not isinstance(client_info, dict):
             return {
@@ -619,13 +628,13 @@ class SessionMixin:
 
         bind_list_state = self._session_bind_list_state(
             session,
-            getattr(self, "_last_bridge_status", None),
+            getattr(self._bridge_ui, 'last_bridge_status', None),
         )
 
         if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
             return f"{ts} · 等待首页上线..."
 
-        if self._pending_auto_bind_session_id == session.session_id:
+        if self._auto_bind.pending_session_id == session.session_id:
             return f"{ts} · 等待绑定..."
 
         if has_pending:
@@ -664,7 +673,7 @@ class SessionMixin:
         if bind_list_state == "bound_online":
             return f"{ts} · 已绑定在线"
 
-        if remote.get("enabled") and (remote.get("client_id") or "").strip():
+        if remote_binding_enabled(remote) and (remote.get("client_id") or "").strip():
             return f"{ts} · 已绑定离线"
 
         return ts
@@ -676,7 +685,7 @@ class SessionMixin:
             session = self._sessions.get(sid)
             if not session:
                 continue
-            bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+            bind_state = self._session_bind_list_state(session, self._bridge_ui.last_bridge_status)
             preview = self._session_preview_text(session)
             pending = self._session_has_pending_assistant_reply(session)
             rows.append((
@@ -693,6 +702,8 @@ class SessionMixin:
         return bool(session_id) and session_id == current_id
 
     def _format_current_session_header_text(self, session=None):
+        if hasattr(self, "_format_current_session_header_with_page_id"):
+            return self._format_current_session_header_with_page_id(session)
         if session is None:
             return "当前会话：新对话"
         title = self._session_display_title(session) if hasattr(self, "_session_display_title") else ""
@@ -789,7 +800,7 @@ class SessionMixin:
     ):
         if not hasattr(self, "session_list"):
             return
-        self._list_refreshing = True
+        self._page_cmd.list_refreshing = True
         self.session_list.blockSignals(True)
         try:
             current_index = self._list_index_for_session(current_session_id)
@@ -811,7 +822,7 @@ class SessionMixin:
                 )
         finally:
             self.session_list.blockSignals(False)
-            self._list_refreshing = False
+            self._page_cmd.list_refreshing = False
 
     def _force_session_list_repaint_now(self):
         session_list = getattr(self, "session_list", None)
@@ -837,7 +848,7 @@ class SessionMixin:
             f"标题：{title}",
             f"绑定状态：{style['label']}",
         ]
-        bridge_status = getattr(self, "_last_bridge_status", None)
+        bridge_status = getattr(self._bridge_ui, 'last_bridge_status', None)
         client_id = (
             remote.get("client_id")
             or remote.get("prebound_home_client_id")
@@ -851,25 +862,37 @@ class SessionMixin:
         conversation_id = (remote.get("conversation_id") or "").strip()
         if not conversation_id:
             conversation_id = parse_conversation_id(
-                remote.get("conversation_url") or remote.get("url") or ""
+                (remote.get("url") or "").strip()
             )
-        page_url = (
-            remote.get("conversation_url")
-            or remote.get("url")
-            or ""
-        ).strip()
+        page_url = (remote.get("url") or "").strip()
         if bind_state == "bind_mismatch":
             reason = self._session_bind_mismatch_tooltip_reason(session, bridge_status)
             if reason:
                 lines.append(reason)
-        if bind_state == "unbound" and not remote.get("enabled"):
+        if bind_state == "unbound" and not remote_binding_enabled(remote):
             lines.append(UNBOUND_SESSION_SEND_HINT)
-        else:
+        elif remote_binding_enabled(remote):
+            from app.constants import STATUS_DETAIL_TECH_HINT
+
+            page_display_id = "-"
+            if hasattr(self, "_session_bound_page_display_id_text"):
+                page_display_id = self._session_bound_page_display_id_text(
+                    session, status=bridge_status
+                )
+            if page_url:
+                lines.append(f"绑定页 URL：{page_url}")
+            if page_display_id and page_display_id != "-":
+                lines.append(f"页面 ID：{page_display_id}")
+            lines.append(STATUS_DETAIL_TECH_HINT)
+        verbose = (
+            hasattr(self, "_is_ui_verbose_status_enabled")
+            and self._is_ui_verbose_status_enabled()
+        )
+        if verbose and remote_binding_enabled(remote):
             lines.extend([
                 f"client_id：{client_id or '-'}",
                 f"page_instance_id：{page_instance_id or '-'}",
                 f"conversation_id：{conversation_id or '-'}",
-                f"url：{page_url or '-'}",
             ])
             client_info = (
                 self._client_info_by_id(client_id, bridge_status)
@@ -879,37 +902,8 @@ class SessionMixin:
             if client_info:
                 focus_txt = "是" if client_info.get("has_focus") else "否"
                 lines.append(f"focus：{focus_txt}")
-                visibility_raw = (
-                    client_info.get("visibility_state")
-                    or client_info.get("visibility")
-                    or ""
-                ).strip()
-                if not visibility_raw:
-                    visible_flag = client_info.get("visible")
-                    if visible_flag is True:
-                        visibility_raw = "visible"
-                    elif visible_flag is False:
-                        visibility_raw = "hidden"
-                    else:
-                        visibility_raw = "-"
-                lines.append(f"visible：{visibility_raw}")
                 lines.append(
                     f"last_seen：{self._format_last_seen_ago(client_info.get('last_seen'))}"
-                )
-                lines.append(
-                    f"last_poll：{self._format_last_seen_ago(client_info.get('last_poll_at'))}"
-                )
-            elif client_id:
-                lines.extend([
-                    "focus：-",
-                    "visible：-",
-                    "last_seen：-",
-                    "last_poll：-",
-                ])
-            elif remote.get("last_seen"):
-                lines.append(
-                    "last_seen："
-                    + self._format_last_seen_ago(remote.get("last_seen"))
                 )
         if self._session_has_pending_assistant_reply(session):
             elapsed = ""
@@ -928,12 +922,15 @@ class SessionMixin:
         return "\n".join(lines)
 
     def _apply_session_list_item_widget(self, item, session, *, selected=False):
-        bind_state = self._session_bind_list_state(session, self._last_bridge_status)
+        bind_state = self._session_bind_list_state(session, self._bridge_ui.last_bridge_status)
         is_current = self._session_item_is_current(session.session_id)
         widget = self.session_list.itemWidget(item)
         if widget is None:
             widget = SessionListItemWidget()
             self.session_list.setItemWidget(item, widget)
+        status_text = None
+        if hasattr(self, "_session_list_bind_status_text"):
+            status_text = self._session_list_bind_status_text(session, bind_state)
         widget.apply_state(
             title=self._session_list_title_text(session),
             subtitle=self._session_preview_text(session),
@@ -942,6 +939,7 @@ class SessionMixin:
             selected=selected,
             is_current=is_current,
             tooltip=self._session_list_item_tooltip(session, bind_state),
+            status_text=status_text,
         )
         viewport_w = max(0, self.session_list.viewport().width())
         item_w = viewport_w if viewport_w > 0 else 220
@@ -999,11 +997,11 @@ class SessionMixin:
             if target_id:
                 list_index = self._list_index_for_session(target_id)
                 if list_index >= 0 and self.session_list.currentRow() != list_index:
-                    self._list_refreshing = True
+                    self._page_cmd.list_refreshing = True
                     self.session_list.blockSignals(True)
                     self.session_list.setCurrentRow(list_index)
                     self.session_list.blockSignals(False)
-                    self._list_refreshing = False
+                    self._page_cmd.list_refreshing = False
             self._refresh_session_list_current_badges(
                 [target_id] if target_id else None
             )
@@ -1015,7 +1013,7 @@ class SessionMixin:
             and all(old_row[0] == new_row[0] for old_row, new_row in zip(old_sig, new_sig))
         )
 
-        self._list_refreshing = True
+        self._page_cmd.list_refreshing = True
         self.session_list.blockSignals(True)
 
         if structure_same:
@@ -1061,12 +1059,12 @@ class SessionMixin:
             if list_index >= 0:
                 self.session_list.setCurrentRow(list_index)
         self.session_list.blockSignals(False)
-        self._list_refreshing = False
+        self._page_cmd.list_refreshing = False
         self._last_session_list_visual_signature = new_sig
         self._refresh_session_list_current_badges()
 
     def _on_session_list_pressed_fast(self, item):
-        if self._list_refreshing or item is None:
+        if self._page_cmd.list_refreshing or item is None:
             return
         session_id = item.data(Qt.UserRole)
         if not session_id:
@@ -1082,7 +1080,7 @@ class SessionMixin:
         self._select_session(session_id)
 
     def _on_session_list_changed(self, current, previous):
-        if self._list_refreshing or current is None:
+        if self._page_cmd.list_refreshing or current is None:
             return
         session_id = current.data(Qt.UserRole)
         if not session_id:
@@ -1129,7 +1127,7 @@ class SessionMixin:
             open_page_action.setToolTip(open_url)
         else:
             open_page_action.setToolTip(
-                "发送消息后会自动记录页面；也可先点击「绑定当前」"
+                "发送消息后会自动记录页面；也可先在列表选中页面后点击「绑定所选页面」"
             )
         menu.addSeparator()
         rename_action = menu.addAction("重命名")
@@ -1262,15 +1260,33 @@ class SessionMixin:
         if session.session_id != (self._current_session_id or ""):
             return 0
 
+        reason_text = (reason or "").strip()
         old_message_count = len(session.messages or [])
+        auto_bind_reasons = (
+            "auto_bind_conversation",
+            "auto_bind_before_sync",
+            "auto_rebind",
+        )
+        if old_message_count <= 0 or any(
+            token in reason_text for token in auto_bind_reasons
+        ):
+            if hasattr(self, "_append_log"):
+                self._append_log(
+                    "[CHAT][CLEAR_SKIP] "
+                    "reason=auto_bind_or_empty "
+                    f"detail={reason_text or '-'} "
+                    f"old_message_count={old_message_count}",
+                    echo=False,
+                )
+            return old_message_count
         if isinstance(getattr(self, "_session_send_queues", None), dict):
             self._session_send_queues.pop(session.session_id, None)
         for bridge_id, sid in list(self._message_to_session.items()):
             if sid == session.session_id:
                 del self._message_to_session[bridge_id]
                 self._message_to_turn.pop(bridge_id, None)
-                self._finalized_bridge_message_ids.discard(bridge_id)
-                self._ack_success_message_ids.discard(bridge_id)
+                self._bridge_msg.finalized_bridge_message_ids.discard(bridge_id)
+                self._bridge_msg.ack_success_message_ids.discard(bridge_id)
 
         session.messages.clear()
         session.updated_at = time.time()
@@ -1305,8 +1321,8 @@ class SessionMixin:
         self._refresh_session_list(select_session_id=session.session_id)
         self._update_current_session_title(session)
         self._save_sessions_to_disk()
-        if hasattr(self, "_update_bound_page_display"):
-            self._update_bound_page_display()
+        if hasattr(self, "schedule_page_registry_refresh"):
+            self.schedule_page_registry_refresh(reason="clear_before_bind_or_sync")
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
         return old_message_count
@@ -1351,8 +1367,8 @@ class SessionMixin:
             if sid == session.session_id:
                 del self._message_to_session[bridge_id]
                 self._message_to_turn.pop(bridge_id, None)
-                self._finalized_bridge_message_ids.discard(bridge_id)
-                self._ack_success_message_ids.discard(bridge_id)
+                self._bridge_msg.finalized_bridge_message_ids.discard(bridge_id)
+                self._bridge_msg.ack_success_message_ids.discard(bridge_id)
         session.messages.clear()
         session.updated_at = time.time()
         session.has_pending_reply = False
@@ -1377,9 +1393,9 @@ class SessionMixin:
         content,
         message_id="",
         turn_id="",
-        status="",
+        ui_status="",
         created_at=None,
-        source="",
+        message_source="",
         bridge_message_id="",
         parent_message_id="",
         visible_in_chat=True,
@@ -1390,9 +1406,9 @@ class SessionMixin:
             created_at=created_at or time.time(),
             message_id=message_id or str(uuid.uuid4()),
             turn_id=turn_id or "",
-            status=status or "",
+            ui_status=(ui_status or "").strip(),
             detail="",
-            source=source or "",
+            message_source=(message_source or "").strip(),
             bridge_message_id=bridge_message_id or "",
             parent_message_id=parent_message_id or "",
             visible_in_chat=bool(visible_in_chat),
@@ -1428,7 +1444,7 @@ class SessionMixin:
                 role = message.role
                 bridge = message.bridge_message_id
                 mid = message.message_id
-                source = (getattr(message, "source", "") or "").strip()
+                source = (message.message_source or "").strip()
                 if role in ("user", "assistant") and mid and not bridge:
                     if source in ("local_send", "local_queue", "local_placeholder"):
                         continue
@@ -1481,9 +1497,9 @@ class SessionMixin:
             "role": message.role,
             "content": message.content,
             "created_at": message.created_at,
-            "status": message.status,
-            "detail": getattr(message, "detail", "") or "",
-            "source": getattr(message, "source", "") or "",
+            "ui_status": message.ui_status or "",
+            "detail": message.detail or "",
+            "message_source": message.message_source or "",
             "bridge_message_id": message.bridge_message_id,
             "parent_message_id": message.parent_message_id,
             "visible_in_chat": message.visible_in_chat,
@@ -1504,32 +1520,44 @@ class SessionMixin:
                 )
             try:
                 return float(fallback)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as nested_error:
+                if hasattr(self, "_append_log"):
+                    self._append_log(
+                        "[SESSION][FLOAT_DEFAULT_INVALID] "
+                        f"scope={scope} field={field} fallback={fallback!r} "
+                        f"error_type={type(nested_error).__name__} error={nested_error}",
+                        echo=True,
+                    )
                 return time.time()
 
     def _message_from_dict(self, data):
-        content = data.get("content")
+        from app.utils.legacy_cleanup import assert_no_legacy_fields
+
+        item = dict(data) if isinstance(data, dict) else {}
+        assert_no_legacy_fields(item, owner="session_message_load")
+        content = item.get("content")
         if content is None:
-            content = data.get("text", "")
+            content = ""
         return ChatMessage(
-            role=data.get("role", "system"),
+            role=item.get("role", "system"),
             content=content,
             created_at=self._session_float_field(
-                data,
+                item,
                 "created_at",
                 scope="message",
             ),
-            message_id=data.get("message_id", ""),
-            turn_id=data.get("turn_id", ""),
-            status=data.get("status", ""),
-            detail=data.get("detail", ""),
-            source=data.get("source", ""),
-            bridge_message_id=data.get("bridge_message_id", ""),
-            parent_message_id=data.get("parent_message_id", ""),
-            visible_in_chat=bool(data.get("visible_in_chat", True)),
+            message_id=item.get("message_id", ""),
+            turn_id=item.get("turn_id", ""),
+            ui_status=(item.get("ui_status") or "").strip(),
+            detail=item.get("detail", ""),
+            message_source=(item.get("message_source") or "").strip(),
+            bridge_message_id=item.get("bridge_message_id", ""),
+            parent_message_id=item.get("parent_message_id", ""),
+            visible_in_chat=bool(item.get("visible_in_chat", True)),
         )
     def _session_to_dict(self, session):
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        assert_no_legacy_fields(remote, owner="GUI save session.remote_chatgpt")
         return {
             "session_id": session.session_id,
             "title": session.title,
@@ -1540,7 +1568,7 @@ class SessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
-            "has_pending_reply": session.has_pending_reply,
+            "pending_reply_since": float(session.pending_reply_since or 0),
             "messages": [self._message_to_dict(item) for item in session.messages],
         }
     def _session_from_dict(self, data):
@@ -1559,6 +1587,9 @@ class SessionMixin:
                 continue
             messages.append(self._message_from_dict(item))
         remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
+        pending_reply_since = self._session_float_field(data, "pending_reply_since")
+        if pending_reply_since <= 0 and bool(data.get("has_pending_reply")):
+            pending_reply_since = self._session_float_field(data, "updated_at") or time.time()
         return ChatSession(
             session_id=data.get("session_id") or str(uuid.uuid4()),
             title=data.get("title") or "新对话",
@@ -1570,7 +1601,7 @@ class SessionMixin:
             pinned_context=data.get("pinned_context", ""),
             remote_chatgpt=remote,
             messages=messages,
-            has_pending_reply=bool(data.get("has_pending_reply")),
+            pending_reply_since=pending_reply_since,
         )
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:
@@ -1592,7 +1623,7 @@ class SessionMixin:
                 "message_to_session": self._message_to_session,
                 "message_to_turn": self._message_to_turn,
                 "finalized_bridge_message_ids": list(
-                    self._finalized_bridge_message_ids
+                    self._bridge_msg.finalized_bridge_message_ids
                 ),
             }
             text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1690,24 +1721,25 @@ class SessionMixin:
         finalized = payload.get("finalized_bridge_message_ids") or payload.get(
             "finalized_message_ids"
         ) or []
-        self._finalized_bridge_message_ids = set(finalized)
+        self._bridge_msg.finalized_bridge_message_ids = set(finalized)
         self._migrate_loaded_session_messages()
         self._migrate_loaded_remote_bindings()
-        if hasattr(self, "_gc_orphan_bindings"):
-            self._gc_orphan_bindings()
         if hasattr(self, "_restore_waiting_timers_after_load"):
             self._restore_waiting_timers_after_load()
 
     def _migrate_loaded_remote_bindings(self):
+        from app.utils.bind_runtime import migrate_transient_from_remote
+
         changed = False
         for session in self._sessions.values():
             old_remote = dict(session.remote_chatgpt or {})
             old_bind_state = (old_remote.get("bind_state") or "").strip()
-            remote = normalize_remote_chatgpt(old_remote)
+            cleaned = migrate_transient_from_remote(self, session, old_remote)
+            remote = normalize_remote_chatgpt(cleaned)
 
             conversation_id = (remote.get("conversation_id") or "").strip()
             conversation_url = (
-                remote.get("conversation_url") or remote.get("url") or ""
+                (remote.get("url") or "").strip()
             ).strip()
 
             if not conversation_id and conversation_url:
@@ -1717,10 +1749,8 @@ class SessionMixin:
                 if not conversation_url:
                     conversation_url = f"https://chatgpt.com/c/{conversation_id}"
 
-                remote["enabled"] = True
                 remote["conversation_id"] = conversation_id
                 remote["url"] = conversation_url
-                remote["page_type"] = "conversation"
 
                 new_bind_state = remote.get("bind_state")
                 if remote.get("bind_state") in (
@@ -1733,9 +1763,6 @@ class SessionMixin:
                 ):
                     remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
                     new_bind_state = BIND_STATE_BOUND_CONVERSATION
-
-                remote["pending_bootstrap_text"] = ""
-                remote["bootstrap_in_progress"] = False
 
                 if remote != old_remote or old_bind_state != new_bind_state:
                     self._append_log(
@@ -1774,8 +1801,6 @@ class SessionMixin:
                 self.main_tabs.setCurrentIndex(main_tab_index)
         if hasattr(self, "_restore_chat_sub_tab_index"):
             self._restore_chat_sub_tab_index()
-        self._update_service_settings_status()
-        self._update_tampermonkey_settings_labels()
     def _save_ui_settings(self):
         if self._remember_window_geometry:
             self._settings.setValue("geometry", self.saveGeometry())
@@ -1785,14 +1810,9 @@ class SessionMixin:
             self._save_splitter_sizes_now()
         if hasattr(self, "_save_chat_sub_tab_index"):
             self._save_chat_sub_tab_index()
-        if hasattr(self, "tm_status_detail_panel"):
-            self._settings.setValue(
-                "ui/status_detail_expanded",
-                bool(self.tm_status_detail_panel.isVisible()),
-            )
         self._settings.setValue("main_tab_index", self.main_tabs.currentIndex())
         self._settings.setValue("tab_session_ids", self._tab_session_ids)
         if self._current_session_id:
             self._settings.setValue("current_session_id", self._current_session_id)
-        if self._saved_page_url:
-            self._settings.setValue("last_page_url", self._saved_page_url)
+        if self._saved_page_url and hasattr(self, "_persist_page_url"):
+            self._persist_page_url(self._saved_page_url)

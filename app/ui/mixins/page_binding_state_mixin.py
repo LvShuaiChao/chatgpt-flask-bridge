@@ -1,11 +1,34 @@
 """绑定字段清理、归一化与统一写入入口。"""
 
+from app.server import (
+    cancel_message,
+    complete_gui_dispatch,
+    enqueue_control_command,
+    get_bridge_status,
+    get_message_state,
+    get_server_port,
+    get_server_public_host,
+    get_server_url,
+    get_tm_online_summary,
+    is_server_running,
+    push_close_other_pages,
+    push_close_page,
+    push_message,
+    push_open_url,
+    set_debug_mode,
+    set_external_gui_dispatch,
+    set_log_callback,
+    set_status_callback,
+    start_server,
+    stop_server,
+)
+
 import time
+import traceback
 from urllib.parse import urlparse
 
-import server
-
 from app.models import (
+    remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_UNBOUND,
     normalize_remote_chatgpt,
@@ -15,6 +38,11 @@ from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
 
 
+def _binding_log_text(value, default="-"):
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
 
 
 class PageBindingStateMixin:
@@ -38,12 +66,11 @@ class PageBindingStateMixin:
         old_page_instance_id = (remote.get("page_instance_id") or "").strip()
         old_conversation_id = (remote.get("conversation_id") or "").strip()
         old_url = (
-            (remote.get("conversation_url") or remote.get("url") or "").strip()
+            ((remote.get("url") or "").strip()).strip()
         )
 
         write_session_remote_chatgpt(
             session,
-            enabled=False,
             bind_state=BIND_STATE_UNBOUND,
             url="",
             conversation_id="",
@@ -53,12 +80,9 @@ class PageBindingStateMixin:
             last_seen=0,
         )
         self._purge_session_binding_caches(session_id)
-        if getattr(self, "_pending_auto_bind_session_id", "") == session_id:
+        if getattr(self._auto_bind, 'pending_session_id', '') == session_id:
             if hasattr(self, "_clear_pending_auto_bind"):
                 self._clear_pending_auto_bind()
-
-        if server.is_server_running():
-            server.clear_session_binding(session_id, client_id=old_client_id)
 
         self._append_log(
             "[BIND][CLEAR][SESSION] "
@@ -93,14 +117,14 @@ class PageBindingStateMixin:
         if not session_id:
             return 0
         removed = 0
-        pending_map = getattr(self, "_pending_web_sync_requests", None)
+        pending_map = getattr(self._web_sync, 'pending_requests', None)
         if isinstance(pending_map, dict):
             for request_id in list(pending_map.keys()):
                 item = pending_map.get(request_id) or {}
                 if item.get("session_id") == session_id:
                     pending_map.pop(request_id, None)
                     removed += 1
-        sync_map = getattr(self, "_pending_sync_requests", None)
+        sync_map = getattr(self._page_cmd, 'pending_sync_requests', None)
         if isinstance(sync_map, dict):
             for message_id in list(sync_map.keys()):
                 item = sync_map.get(message_id) or {}
@@ -114,20 +138,9 @@ class PageBindingStateMixin:
         return removed
 
     def _gc_orphan_bindings(self):
+        """清理已无对应本地会话的桥接消息映射（不再写服务端 registry）。"""
         session_ids = set(self._sessions.keys())
         removed = 0
-        if server.is_server_running():
-            orphans = server.gc_orphan_session_bindings(session_ids)
-            for item in orphans:
-                removed += 1
-                self._append_log(
-                    "[BIND][GC][ORPHAN_REMOVED] "
-                    f"session_id={item.get('session_id') or '-'} "
-                    f"client_id={item.get('client_id') or '-'} "
-                    f"conversation_id={item.get('conversation_id') or '-'} "
-                    f"url={item.get('url') or '-'}",
-                    echo=True,
-                )
         for bridge_id, sid in list(self._message_to_session.items()):
             if sid and sid not in session_ids:
                 self._message_to_session.pop(bridge_id, None)
@@ -140,26 +153,214 @@ class PageBindingStateMixin:
         if session is not None:
             self._fix_session_remote_url_from_conversation(session)
         self._update_current_session_url_display()
-        self._update_bound_page_display()
+        if hasattr(self, "schedule_page_registry_refresh"):
+            self.schedule_page_registry_refresh(reason="binding_display")
         self._update_sync_target_display()
         self._apply_chat_bind_visual_state()
+
+    def _bind_selected_page_to_current_session(self, selected_page=None, *, log_click=False):
+        """将所选页面写入当前会话 remote_chatgpt 并刷新 UI。"""
+        if log_click:
+            combo = getattr(self, "tm_page_combo", None)
+            combo_index = combo.currentIndex() if combo is not None else -1
+            combo_text = combo.currentText() if combo is not None else ""
+            combo_count = combo.count() if combo is not None else 0
+            self._append_log(
+                "[BIND][CLICK] "
+                f"combo_index={combo_index} "
+                f"combo_text={combo_text!r} "
+                f"combo_count={combo_count}",
+                echo=True,
+            )
+
+        if not is_server_running():
+            self._add_system_message("请先启动服务。")
+            self._append_log(
+                "[BIND][FAILED] reason_code=server_not_running "
+                "error_type=RuntimeError error=server_not_running "
+                "traceback=-",
+                echo=True,
+            )
+            return False
+
+        if selected_page is None:
+            selected_page = (
+                self._get_selected_tm_page_from_combo()
+                if hasattr(self, "_get_selected_tm_page_from_combo")
+                else None
+            )
+        if not isinstance(selected_page, dict):
+            combo = getattr(self, "tm_page_combo", None)
+            combo_index = combo.currentIndex() if combo is not None else -1
+            combo_text = combo.currentText() if combo is not None else ""
+            combo_count = combo.count() if combo is not None else 0
+            self._append_log(
+                "[BIND][SELECTED_PAGE_MISSING] "
+                f"combo_index={combo_index} "
+                f"combo_text={combo_text!r} "
+                f"combo_count={combo_count}",
+                echo=True,
+            )
+            self._set_tm_action_hint(
+                "页面下拉框有显示内容，但未携带页面数据，请刷新页面列表后重试。"
+            )
+            self._add_system_message(
+                "页面下拉框有显示内容，但未携带页面数据，请刷新页面列表后重试。"
+            )
+            return False
+
+        online = (
+            self._page_is_online_for_ui(selected_page)
+            if hasattr(self, "_page_is_online_for_ui")
+            else False
+        )
+        self._append_log(
+            "[BIND][SELECTED_PAGE] "
+            f"page_display_id={_binding_log_text(selected_page.get('page_display_id'))} "
+            f"client_id={_binding_log_text(selected_page.get('client_id'))} "
+            f"page_instance_id={_binding_log_text(selected_page.get('page_instance_id'))} "
+            f"conversation_id={_binding_log_text(selected_page.get('conversation_id'))} "
+            f"url={_binding_log_text(page_url_from(selected_page))} "
+            f"online={str(online).lower()} "
+            f"last_poll_at={_binding_log_text(selected_page.get('last_poll_at'))}",
+            echo=True,
+        )
+
+        if not online:
+            self._set_tm_action_hint("所选页面当前离线，请打开页面或刷新列表后重试。")
+            self._append_log(
+                "[BIND][FAILED] reason_code=page_offline "
+                "error_type=BindError error=selected_page_not_online_for_ui "
+                "traceback=-",
+                echo=True,
+            )
+            return False
+
+        session = self._ensure_current_session()
+        try:
+            normalized = self._normalize_tm_page_for_binding(selected_page)
+            client_id = (normalized.get("client_id") or "").strip()
+            page_instance_id = (normalized.get("page_instance_id") or "").strip()
+            conversation_id = (normalized.get("conversation_id") or "").strip()
+            page_url = (normalized.get("url") or page_url_from(selected_page) or "").strip()
+            if not conversation_id and page_url:
+                conversation_id = parse_conversation_id(page_url) or ""
+            if not client_id and not page_url:
+                self._append_log(
+                    "[BIND][FAILED] reason_code=missing_page_identity "
+                    "error_type=BindError error=missing_client_id_and_url "
+                    "traceback=-",
+                    echo=True,
+                )
+                return False
+            if not conversation_id:
+                self._append_log(
+                    "[BIND][FAILED] reason_code=missing_conversation_id "
+                    "error_type=BindError error=missing_conversation_id "
+                    "traceback=-",
+                    echo=True,
+                )
+                self._set_tm_action_hint("所选页面缺少 conversation_id，无法绑定对话页。")
+                return False
+
+            page_display_id = _binding_log_text(
+                selected_page.get("page_display_id")
+                or normalized.get("page_display_id"),
+                default="",
+            )
+            if hasattr(self, "_tm_page_display_id_text") and not page_display_id:
+                display_text = self._tm_page_display_id_text(selected_page)
+                if display_text and display_text != "-":
+                    page_display_id = str(display_text).strip()
+
+            page_type = (
+                (normalized.get("page_type") or selected_page.get("page_type") or "")
+                .strip()
+                or "conversation"
+            )
+            last_seen = selected_page.get("last_seen")
+            if last_seen in (None, ""):
+                last_seen = selected_page.get("last_poll_at") or time.time()
+            try:
+                last_seen_val = float(last_seen)
+            except (TypeError, ValueError):
+                last_seen_val = time.time()
+
+            bind_url = (
+                (selected_page.get("url") or page_url_from(selected_page) or page_url or "")
+                .strip()
+            )
+            if not bind_url and conversation_id:
+                bind_url = f"https://chatgpt.com/c/{conversation_id}"
+
+            last_poll_at = str(selected_page.get("last_poll_at") or "").strip()
+
+            write_session_remote_chatgpt(
+                session,
+                bind_state=BIND_STATE_BOUND_CONVERSATION,
+                conversation_id=conversation_id,
+                url=bind_url,
+                client_id=client_id,
+                page_instance_id=page_instance_id,
+                page_display_id=page_display_id,
+                page_type=page_type,
+                page_title=(selected_page.get("page_title") or "").strip(),
+                last_seen=last_seen_val,
+                last_poll_at=last_poll_at,
+            )
+            from app.utils.bind_runtime import update_bind_runtime
+
+            update_bind_runtime(self, session, bootstrap_in_progress=False)
+            session.updated_at = time.time()
+
+            remote_after = normalize_remote_chatgpt(session.remote_chatgpt)
+            conversation_title = ""
+            if hasattr(self, "_session_display_title"):
+                conversation_title = self._session_display_title(session)
+            self._append_log(
+                "[BIND][SESSION_UPDATED] "
+                f"session_id={session.session_id} "
+                f"conversation_title={_binding_log_text(conversation_title)} "
+                f"page_display_id={_binding_log_text(remote_after.get('page_display_id') or page_display_id)} "
+                f"client_id={_binding_log_text(remote_after.get('client_id'))} "
+                f"page_instance_id={_binding_log_text(remote_after.get('page_instance_id'))} "
+                f"conversation_id={_binding_log_text(remote_after.get('conversation_id'))} "
+                f"url={_binding_log_text(remote_after.get('url'))}",
+                echo=True,
+            )
+
+            self._refresh_current_session_binding_display()
+            self._refresh_session_list(select_session_id=session.session_id)
+            self._save_sessions_to_disk()
+            if hasattr(self, "_update_current_session_title"):
+                self._update_current_session_title(session)
+            if hasattr(self, "_update_bound_page_display_light"):
+                self._update_bound_page_display_light()
+            self._apply_chat_bind_visual_state()
+            return True
+        except Exception as exc:
+            self._append_log(
+                "[BIND][FAILED] "
+                f"reason_code=exception "
+                f"error_type={type(exc).__name__} "
+                f"error={exc} "
+                f"traceback={traceback.format_exc()}",
+                echo=True,
+            )
+            self._set_tm_action_hint(f"绑定失败：{exc}")
+            return False
 
     def _fix_session_remote_url_from_conversation(self, session, *, echo=True):
         """conversation_id 已存在但 URL 仍为 xz_bind_token 时自动修复。"""
         if session is None:
             return False
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if not remote.get("enabled"):
+        if not remote_binding_enabled(remote):
             return False
         conversation_id = self._remote_conversation_id(remote)
         if not conversation_id:
             return False
-        url = (
-            remote.get("conversation_url")
-            or remote.get("url")
-            or remote.get("page_url")
-            or ""
-        ).strip()
+        url = (remote.get("url") or "").strip()
         if "xz_bind_token=" not in url:
             return False
         new_url = f"https://chatgpt.com/c/{conversation_id}"
@@ -190,7 +391,7 @@ class PageBindingStateMixin:
             return False
         normalized = self._normalize_tm_page_for_binding(normalized)
         if not normalized.get("client_id") and not (
-            normalized.get("url") or normalized.get("page_url")
+            normalized.get("url")
         ):
             self._append_log(
                 "[BIND][WRITE][SKIP] reason=invalid_normalized_page",
@@ -199,7 +400,7 @@ class PageBindingStateMixin:
             return False
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        old_url = self._remote_conversation_url(remote) if remote.get("enabled") else ""
+        old_url = self._remote_conversation_url(remote) if remote_binding_enabled(remote) else ""
         old_conversation_id = self._remote_conversation_id(remote) or ""
         old_client_id = (remote.get("client_id") or "").strip()
         self._append_log(
@@ -213,7 +414,7 @@ class PageBindingStateMixin:
         )
 
         new_conversation_id = (normalized.get("conversation_id") or "").strip()
-        new_url = (normalized.get("url") or normalized.get("page_url") or "").strip()
+        new_url = (normalized.get("url") or "").strip()
         if (
             new_conversation_id
             and old_url
@@ -238,7 +439,7 @@ class PageBindingStateMixin:
         )
 
         remote_after = normalize_remote_chatgpt(session.remote_chatgpt)
-        new_url_after = self._remote_conversation_url(remote_after) if remote_after.get("enabled") else ""
+        new_url_after = self._remote_conversation_url(remote_after) if remote_binding_active(remote_after) else ""
         self._append_log(
             "[BIND][WRITE][AFTER] "
             f"session_id={session.session_id} "
@@ -268,6 +469,15 @@ class PageBindingStateMixin:
         allow_existing_conversation_for_new_session=False,
     ):
         """统一绑定写入入口：client_id + page_instance_id + conversation_id + url。"""
+        if getattr(self, "_set_bound_page_running", False):
+            if hasattr(self, "_log_reentry_skip"):
+                self._log_reentry_skip("set_bound_page")
+            elif hasattr(self, "_append_log"):
+                self._append_log(
+                    "[REENTRY][SKIP] name=set_bound_page reason=already_running",
+                    echo=False,
+                )
+            return False
         if session is None:
             self._append_log("[BIND][SET_BOUND_PAGE][SKIP] reason=session_is_none", echo=True)
             return False
@@ -277,10 +487,49 @@ class PageBindingStateMixin:
                 echo=True,
             )
             return False
+        bind_reason = (reason or "").strip()
+        if (
+            hasattr(self, "_is_manual_set_bound_page_reason")
+            and not self._is_manual_set_bound_page_reason(bind_reason)
+            and hasattr(self, "_should_block_automatic_bind_actions")
+        ):
+            blocked, mismatch_type = self._should_block_automatic_bind_actions(session)
+            if blocked:
+                if hasattr(self, "_log_sync_target_blocked"):
+                    self._log_sync_target_blocked(session, mismatch_type)
+                else:
+                    self._append_log(
+                        "[BIND][SET_BOUND_PAGE][SKIP] "
+                        f"reason=bound_current_mismatch mismatch_type={mismatch_type or '-'} "
+                        f"bind_reason={bind_reason or '-'}",
+                        echo=not silent,
+                    )
+                return False
+        self._page_cmd.set_bound_page_running = True
+        try:
+            return self._set_bound_page_impl(
+                session,
+                page,
+                reason=bind_reason,
+                silent=silent,
+                allow_existing_conversation_for_new_session=allow_existing_conversation_for_new_session,
+            )
+        finally:
+            self._page_cmd.set_bound_page_running = False
+
+    def _set_bound_page_impl(
+        self,
+        session,
+        page,
+        *,
+        reason="",
+        silent=False,
+        allow_existing_conversation_for_new_session=False,
+    ):
         norm = self._normalize_tm_page_for_binding(page)
         bind_item = dict(page)
         bind_item.update(norm)
-        url = (norm.get("url") or norm.get("page_url") or page_url_from(page) or "").strip()
+        url = (norm.get("url") or page_url_from(page) or "").strip()
         if url:
             bind_item["url"] = url
         self._append_log(
@@ -316,8 +565,8 @@ class PageBindingStateMixin:
         if norm:
             client_info = dict(client_info)
             client_info.update(norm)
-            if norm.get("url") or norm.get("page_url"):
-                client_info["url"] = norm.get("url") or norm.get("page_url")
+            if norm.get("url"):
+                client_info["url"] = norm.get("url")
         if not allow_existing_conversation_for_new_session:
             rejected, reject_msg = self._reject_bind_existing_conversation_for_new_session(
                 session, client_info
@@ -328,8 +577,8 @@ class PageBindingStateMixin:
                 return False
         page_url = (
             client_info.get("url")
-            or client_info.get("page_url")
-            or client_info.get("conversation_url")
+            or client_info.get("url")
+            or (client_info.get("url") or "")
             or ""
         ).strip()
         conversation_id = (

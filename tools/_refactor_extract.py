@@ -30,7 +30,6 @@ SYNC_METHODS = {
     "_sync_bound_web_conversation",
     "_make_web_snapshot_signature",
     "resolve_sync_decision",
-    "_resolve_sync_target_simple",
     "_begin_wait_conversation_page_for_sync",
     "_poll_wait_conversation_sync_requests",
     "_build_bound_sync_target_payload",

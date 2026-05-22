@@ -15,101 +15,151 @@ from app.constants import (
 from app.url_utils import parse_conversation_id
 from app.utils.time_utils import float_ts as _float_ts
 
-PageStateKind = Literal["offline", "online", "dialog_ready", "prebound_home"]
+
+def _canonical_url_from(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("url") or "").strip()
+
+PageStateKind = Literal["offline", "online", "conversation_ready", "prebound_home"]
 PageLiveness = Literal["online", "recently_seen", "stale", "offline"]
 
 __all__ = [
+    "BUSY_RESPONSE_STATES",
     "normalize_page",
-    "normalize_page_url_fields",
     "page_url_from",
+    "conversation_syncable_from",
+    "build_page_key",
     "page_registry_key",
+    "latest_page_seen_ts",
     "get_page_liveness",
+    "is_strict_page_online",
+    "is_display_page_online",
     "is_page_online",
+    "read_response_state",
+    "is_page_busy",
+    "can_accept_input",
     "can_sync_conversation",
     "is_page_url_syncable",
-    "is_conversation_syncable",
-    "is_dialog_ready_page",
     "is_prebound_home_page",
     "classify_page_state",
-    "is_page_syncable",
     "evaluate_send_page",
     "explain_page_decision",
     "evaluate_page_capability",
+    "compact_page_decision_fields",
+    "compact_page_public_fields",
     "log_page_decision_fields",
     "PageCapability",
+    "PageActionPlan",
+    "read_snapshot_identity",
 ]
+
+
+def read_snapshot_identity(snapshot: Any, role: str) -> Dict[str, str]:
+    """从快照/摘要读取 bound 或 active 身份（优先嵌套 dict，兼容旧平铺字段）。"""
+    empty = {
+        "client_id": "",
+        "page_instance_id": "",
+        "conversation_id": "",
+        "url": "",
+    }
+    if not isinstance(snapshot, dict):
+        return dict(empty)
+    role_key = (role or "").strip().lower()
+    nested = snapshot.get(role_key)
+    if isinstance(nested, dict):
+        return {
+            "client_id": (nested.get("client_id") or "").strip(),
+            "page_instance_id": (nested.get("page_instance_id") or "").strip(),
+            "conversation_id": (nested.get("conversation_id") or "").strip(),
+            "url": (nested.get("url") or "").strip(),
+        }
+    if role_key == "bound":
+        return {
+            "client_id": (snapshot.get("bound_client_id") or "").strip(),
+            "page_instance_id": (snapshot.get("bound_page_instance_id") or "").strip(),
+            "conversation_id": (snapshot.get("bound_conversation_id") or "").strip(),
+            "url": (snapshot.get("bound_url") or "").strip(),
+        }
+    if role_key == "active":
+        return {
+            "client_id": (snapshot.get("active_client_id") or "").strip(),
+            "page_instance_id": (snapshot.get("active_page_instance_id") or "").strip(),
+            "conversation_id": (snapshot.get("active_conversation_id") or "").strip(),
+            "url": (snapshot.get("active_url") or "").strip(),
+        }
+    return dict(empty)
+
+BUSY_RESPONSE_STATES = frozenset(
+    {
+        "responding",
+        "generating",
+        "streaming",
+        "waiting",
+        "pending",
+        "queued",
+    }
+)
 
 _CHATGPT_HOSTS = frozenset(
     {"chatgpt.com", "chat.openai.com", "www.chatgpt.com"}
 )
 
-_URL_READ_KEYS = (
-    "url",
+# normalize_page 出站清理：仅删除非 canonical 的 URL 别名（不读取）
+_PAGE_URL_STRIP_KEYS = (
     "page_url",
-    "conversation_url",
-    "target_page_url",
     "target_url",
-    "normalized_url",
+    "target_page_url",
+    "conversation_url",
+    "tampermonkey_page_url",
     "bound_url",
     "bound_page_url",
+    "normalized_url",
     "chatgpt_url",
     "last_page_url",
     "current_url",
     "reopen_target_url",
 )
 
-_DEPRECATED_URL_LOGGED: set[str] = set()
+
+def conversation_syncable_from(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    val = data.get("conversation_syncable")
+    if val is True:
+        return True
+    if val is False:
+        return False
+    if isinstance(val, str) and val.strip().lower() in ("true", "yes", "1"):
+        return True
+    return False
 
 
 def page_url_from(raw: Any) -> str:
-    if not isinstance(raw, dict):
-        return ""
-    for key in _URL_READ_KEYS:
-        val = (raw.get(key) or "").strip()
-        if val and val != "-":
-            return val
-    return ""
+    """运行时只读 canonical url；入站迁移请用 normalize_page。"""
+    return _canonical_url_from(raw)
 
 
 def normalize_page_url_fields(raw: Any) -> Dict[str, str]:
-    """Migrate legacy URL aliases into the canonical url field without writing aliases."""
+    """只读 canonical url；旧 URL 字段须在入站边界由 reject/migrate 处理。"""
     if not isinstance(raw, dict):
         return {"url": "", "url_source": ""}
-    for key in _URL_READ_KEYS:
-        val = (raw.get(key) or "").strip()
-        if val and val != "-":
-            if key != "url":
-                _maybe_log_deprecated_url_field(raw, key)
-            return {"url": val, "url_source": key}
+    val = page_url_from(raw)
+    if val:
+        return {"url": val, "url_source": "url"}
     return {"url": "", "url_source": ""}
 
 
-def _maybe_log_deprecated_url_field(raw: dict, used_key: str) -> None:
-    if used_key == "url" or used_key in _DEPRECATED_URL_LOGGED:
-        return
-    _DEPRECATED_URL_LOGGED.add(used_key)
-    client_id = (raw.get("client_id") or "-").strip()
-    page_instance_id = (raw.get("page_instance_id") or "-").strip()
-    print(
-        f"[FIELD][MIGRATE] field={used_key} replacement=url "
-        f"client_id={client_id} page_instance_id={page_instance_id}"
-    )
-
-
 def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
-    """规范化页面对象；写入统一 url，读取兼容旧 URL 字段。"""
+    """规范化页面对象；只读规范字段（旧字段须在入站/加载边界先 migrate）。"""
     if not isinstance(raw, dict):
         return {}
     if now is None:
         now = time.time()
 
-    url_info = normalize_page_url_fields(raw)
-    url = url_info["url"]
+    url = normalize_page_url_fields(raw)["url"]
 
-    conversation_id = (
-        (raw.get("conversation_id") or raw.get("chatgpt_conversation_id") or "")
-        .strip()
-    )
+    conversation_id = (raw.get("conversation_id") or "").strip()
     if conversation_id in ("", "-"):
         conversation_id = ""
     if not conversation_id and url:
@@ -135,19 +185,38 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
                     f"[PAGE_STATUS][URL_PARSE_FAILED] url={url!r} error={exc!r}"
                 )
 
-    last_seen = _float_ts(
-        raw.get("last_seen"),
-        context="page_status.normalize_page.last_seen",
-        log_on_error=True,
-    )
-    page_liveness = get_page_liveness(raw, now=now) if last_seen else "offline"
+    seen_values = []
+    for seen_key in (
+        "last_seen",
+        "last_seen_at",
+        "last_heartbeat_at",
+        "last_poll_at",
+        "last_report_at",
+    ):
+        seen_ts = _float_ts(
+            raw.get(seen_key),
+            context=f"page_status.normalize_page.{seen_key}",
+            log_on_error=True,
+        )
+        if seen_ts:
+            seen_values.append(seen_ts)
+
+    last_seen = max(seen_values) if seen_values else 0.0
+
+    if last_seen:
+        page_liveness = get_page_liveness(raw, now=now)
+    else:
+        incoming_liveness = str(raw.get("page_liveness") or "").strip().lower()
+        if incoming_liveness in ("online", "recently_seen", "stale", "offline"):
+            page_liveness = incoming_liveness
+        elif raw.get("online") is True:
+            page_liveness = "online"
+        else:
+            page_liveness = "offline"
+
     online = page_liveness == "online"
-    legacy_online = bool(raw.get("online")) if not last_seen else None
 
     out: Dict[str, Any] = dict(raw)
-    for legacy_url_key in _URL_READ_KEYS:
-        if legacy_url_key != "url":
-            out.pop(legacy_url_key, None)
     out.update(
         {
             "client_id": client_id,
@@ -155,37 +224,52 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
             "conversation_id": conversation_id,
             "url": url,
             "page_type": page_type,
-            "page_title": (raw.get("page_title") or raw.get("title") or "").strip(),
+            "page_title": (raw.get("page_title") or "").strip(),
             "last_seen": last_seen,
             "online": online,
             "page_liveness": page_liveness,
-            "legacy_online": legacy_online,
-            "visibility_state": (
-                raw.get("visibility_state")
-                or raw.get("visible")
-                or ""
-            ),
-            "has_focus": bool(raw.get("has_focus") or raw.get("is_focused")),
+            "visibility_state": (raw.get("visibility_state") or "").strip(),
+            "has_focus": bool(raw.get("has_focus")),
             "can_accept_input": bool(raw.get("can_accept_input", True)),
-            "can_send_now": raw.get("can_send_now"),
-            "is_responding": bool(raw.get("is_responding")),
             "response_state": (raw.get("response_state") or "unknown").strip()
             or "unknown",
-            "activity_state": (raw.get("activity_state") or raw.get("activity") or "").strip(),
+            "activity_state": (raw.get("activity_state") or "").strip(),
         }
     )
+    for key in _PAGE_URL_STRIP_KEYS:
+        out.pop(key, None)
     return out
 
 
-def page_registry_key(raw: Any) -> str:
-    page = normalize_page(raw) if isinstance(raw, dict) else {}
-    client_id = page.get("client_id") or ""
-    page_instance_id = page.get("page_instance_id") or ""
-    if not client_id:
+def build_page_key(page: Any = None, page_instance_id: str | None = None) -> str:
+    """组合页面键：client_id|page_instance_id；缺任一则为无效。"""
+    if page_instance_id is not None:
+        client_id = str(page or "").strip()
+        instance_id = str(page_instance_id).strip()
+    elif isinstance(page, dict):
+        client_id = str(page.get("client_id") or "").strip()
+        instance_id = str(page.get("page_instance_id") or "").strip()
+    else:
         return ""
-    if page_instance_id:
-        return f"{client_id}|{page_instance_id}"
-    return client_id
+    if not client_id or not instance_id:
+        return ""
+    return f"{client_id}|{instance_id}"
+
+
+def page_registry_key(raw: Any) -> str:
+    return build_page_key(raw)
+
+
+def latest_page_seen_ts(page: dict) -> float:
+    """最近活跃时间（心跳/轮询/上报，不含 focus）。"""
+    if not isinstance(page, dict):
+        return 0.0
+    values = []
+    for key in ("last_seen", "last_seen_at", "last_heartbeat_at", "last_poll_at", "last_report_at"):
+        ts = _float_ts(page.get(key), context=f"page_status.latest_page_seen_ts.{key}")
+        if ts:
+            values.append(ts)
+    return max(values) if values else 0.0
 
 
 def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
@@ -194,13 +278,7 @@ def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
         return "offline"
     if now is None:
         now = time.time()
-    last_seen = _float_ts(
-        page.get("last_seen")
-        or page.get("last_heartbeat_at")
-        or page.get("last_poll_at"),
-        context="page_status.get_page_liveness.last_seen",
-        log_on_error=True,
-    )
+    last_seen = latest_page_seen_ts(page)
     if not last_seen:
         return "offline"
     try:
@@ -221,9 +299,43 @@ def get_page_liveness(page: Any, now: float | None = None) -> PageLiveness:
     return state
 
 
-def is_page_online(page: Any, now: float | None = None) -> bool:
-    """仅根据最近心跳 last_seen 判断在线，不依赖焦点/可见性/输入框/生成状态。"""
+def is_strict_page_online(page: Any, now: float | None = None) -> bool:
+    """严格在线：仅 liveness == online（发送/同步/命令判定用）。"""
     return get_page_liveness(page, now=now) == "online"
+
+
+def is_display_page_online(page: Any, now: float | None = None) -> bool:
+    """UI 展示：online 或 recently_seen；不得用于动作强拦截。"""
+    return get_page_liveness(page, now=now) in ("online", "recently_seen")
+
+
+def is_page_online(page: Any, now: float | None = None) -> bool:
+    """严格在线（等同 is_strict_page_online）。"""
+    return is_strict_page_online(page, now=now)
+
+
+def read_response_state(page: Any) -> str:
+    if not isinstance(page, dict):
+        return "unknown"
+    norm = normalize_page(page)
+    state = str(norm.get("response_state") or "").strip().lower()
+    return state or "unknown"
+
+
+def is_page_busy(page: Any) -> bool:
+    if not isinstance(page, dict):
+        return False
+    norm = normalize_page(page)
+    if bool(norm.get("is_responding")):
+        return True
+    return read_response_state(norm) in BUSY_RESPONSE_STATES
+
+
+def can_accept_input(page: Any) -> bool:
+    if not isinstance(page, dict):
+        return True
+    norm = normalize_page(page)
+    return bool(norm.get("can_accept_input", True))
 
 
 def is_page_url_syncable(page: Any, *, now: float | None = None) -> bool:
@@ -246,13 +358,7 @@ def can_sync_conversation(page: Any, *, now: float | None = None) -> bool:
     return bool(conversation_id and "/c/" in url)
 
 
-def is_conversation_syncable(page: Any, *, now: float | None = None) -> bool:
-    """兼容旧名：等同 can_sync_conversation。"""
-    return can_sync_conversation(page, now=now)
-
-
-def is_dialog_ready_page(page: Any, *, now: float | None = None) -> bool:
-    """UI 文案兼容：与 can_sync_conversation 一致。"""
+def _page_dialog_ready(page: Any, *, now: float | None = None) -> bool:
     if not isinstance(page, dict):
         return False
     norm = normalize_page(page, now=now)
@@ -291,15 +397,15 @@ def is_prebound_home_page(page: Any, *, now: float | None = None) -> bool:
 
 
 def classify_page_state(page: Any, *, now: float | None = None) -> Dict[str, Any]:
-    """返回统一状态字段；state 仅保留为 legacy_state 兼容。"""
+    """返回统一状态字段。"""
     online = is_page_online(page, now=now) if isinstance(page, dict) else False
-    dialog_ready = is_dialog_ready_page(page, now=now) if isinstance(page, dict) else False
+    dialog_ready = _page_dialog_ready(page, now=now) if isinstance(page, dict) else False
     prebound_home = is_prebound_home_page(page, now=now) if isinstance(page, dict) else False
     page_liveness = get_page_liveness(page, now=now) if isinstance(page, dict) else "offline"
     if not online:
         state: PageStateKind = "offline"
     elif dialog_ready:
-        state = "dialog_ready"
+        state = "conversation_ready"
     elif prebound_home:
         state = "prebound_home"
     else:
@@ -309,22 +415,14 @@ def classify_page_state(page: Any, *, now: float | None = None) -> Dict[str, Any
         "online": online,
         "dialog_ready": dialog_ready,
         "prebound_home": prebound_home,
-        "legacy_state": state,
-        "state": state,
+        "page_state": state,
         "page_liveness": page_liveness,
+        "page_type": norm.get("page_type") or "",
         "client_id": norm.get("client_id") or "",
         "page_instance_id": norm.get("page_instance_id") or "",
         "conversation_id": norm.get("conversation_id") or "",
         "url": norm.get("url") or "",
-        "page_type": norm.get("page_type") or "",
     }
-
-
-def is_page_syncable(page: Any, *, require_conversation: bool = True) -> bool:
-    """兼容旧名：默认等同 is_dialog_ready_page（同步硬拦截）。"""
-    if not require_conversation:
-        return is_page_online(page)
-    return is_dialog_ready_page(page)
 
 
 def evaluate_send_page(
@@ -362,10 +460,18 @@ def evaluate_send_page(
     if not ("/c/" in url or conversation_id):
         return "blocked", "not_conversation_url"
 
-    if norm.get("can_send_now") is False:
-        return "queued", "send_button_unavailable"
-    if norm.get("is_responding") or not norm.get("can_accept_input", True):
+    response_state = read_response_state(norm)
+    if is_page_busy(norm):
+        return "queued", "waiting_for_response"
+    if response_state in BUSY_RESPONSE_STATES:
+        return "queued", "waiting_for_response"
+    if not can_accept_input(norm):
         return "queued", "waiting_for_input"
+    # can_send_now reflects the current ChatGPT composer before we inject text.
+    # An empty composer reports a disabled send button, but it is still ready for
+    # bridge-driven sends because the client fills the composer first.
+    if response_state == "unknown":
+        return "allowed", "unknown_state_defer_to_tm"
     return "allowed", "ready"
 
 
@@ -374,25 +480,52 @@ class PageCapability:
     """统一页面能力判定结果（UI、server、执行入口共用）。"""
 
     online: bool = False
-    bound: bool = False
-    syncable: bool = False
     conversation_syncable: bool = False
-    sendable: bool = False
-    queueable: bool = False
-    reason: str = ""
-    block_reason: str = ""
+    page_liveness: str = "offline"
     client_id: str = ""
     page_instance_id: str = ""
     conversation_id: str = ""
     url: str = ""
-    page_liveness: str = "offline"
-    dialog_ready: bool = False
-    prebound_home: bool = False
+    page_type: str = ""
+    response_state: str = "unknown"
+    can_accept_input: bool = True
     send_decision: str = "blocked"
-    url_syncable: bool = False
-    client_id_mismatch: bool = False
-    page_instance_id_mismatch: bool = False
-    conversation_mismatch: bool = False
+    blocked_reason: str = ""
+    prebound_home: bool = False
+
+    @property
+    def allowed(self) -> bool:
+        return self.send_decision in ("allowed", "queued")
+
+    @property
+    def reason(self) -> str:
+        return self.blocked_reason
+
+    @property
+    def reason_code(self) -> str:
+        return self.blocked_reason
+
+    @property
+    def send_requestable(self) -> bool:
+        return self.send_decision in ("allowed", "queued") or (
+            self.prebound_home and self.online
+        )
+
+    @property
+    def send_now_available(self) -> bool:
+        return self.send_decision == "allowed"
+
+    @property
+    def send_queueable(self) -> bool:
+        return self.send_decision == "queued"
+
+    @property
+    def bootstrap_sendable(self) -> bool:
+        return self.prebound_home and self.online
+
+    @property
+    def url_syncable(self) -> bool:
+        return self.online and bool(self.url)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -400,27 +533,281 @@ class PageCapability:
             "page_instance_id": self.page_instance_id,
             "conversation_id": self.conversation_id,
             "url": self.url,
+            "page_type": self.page_type,
             "online": self.online,
-            "bound": self.bound,
-            "client_id_mismatch": self.client_id_mismatch,
-            "page_instance_id_mismatch": self.page_instance_id_mismatch,
-            "conversation_mismatch": self.conversation_mismatch,
-            "page_liveness": self.page_liveness,
-            "dialog_ready": self.dialog_ready,
-            "prebound_home": self.prebound_home,
-            "page_state": "offline" if not self.online else "online",
-            "legacy_state": "",
-            "can_sync_conversation": self.conversation_syncable,
-            "url_syncable": self.url_syncable,
-            "syncable": self.syncable,
             "conversation_syncable": self.conversation_syncable,
-            "sendable": self.sendable,
-            "queueable": self.queueable,
-            "send_queued": self.queueable,
+            "page_liveness": self.page_liveness,
+            "prebound_home": self.prebound_home,
+            "response_state": self.response_state or "unknown",
+            "can_accept_input": self.can_accept_input,
             "send_decision": self.send_decision,
-            "blocked_reason": self.block_reason,
-            "reason": self.reason,
-            "response_state": "unknown",
+            "reason_code": self.reason_code,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PageCapability:
+        if not isinstance(data, dict):
+            return PageCapability()
+        send_decision = (
+            data.get("send_decision") or data.get("decision") or "blocked"
+        )
+        blocked_reason = (
+            data.get("blocked_reason")
+            or data.get("reason_code")
+            or data.get("reason")
+            or ""
+        ).strip()
+        page_liveness = (data.get("page_liveness") or "offline").strip()
+        online = bool(data.get("online"))
+        if not online and page_liveness == "online":
+            online = True
+        if online and page_liveness == "offline":
+            page_liveness = "online"
+        return cls(
+            online=online,
+            conversation_syncable=bool(data.get("conversation_syncable")),
+            page_liveness=page_liveness,
+            send_decision=str(send_decision).strip() or "blocked",
+            blocked_reason=blocked_reason,
+            response_state=(data.get("response_state") or "unknown").strip(),
+            client_id=(data.get("client_id") or "").strip(),
+            page_instance_id=(data.get("page_instance_id") or "").strip(),
+            conversation_id=(data.get("conversation_id") or "").strip(),
+            url=(data.get("url") or "").strip(),
+            page_type=(data.get("page_type") or "").strip(),
+            prebound_home=bool(data.get("prebound_home")),
+            can_accept_input=bool(data.get("can_accept_input", True)),
+        )
+
+
+@dataclass
+class PageActionPlan:
+    """统一页面动作判定（send / sync_conversation / copy_last / upload）。"""
+
+    action: str
+    decision: str
+    target_source: str
+    reason_code: str
+    capability: PageCapability
+    page: Any = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision in ("allowed", "queued")
+
+    @property
+    def reason(self) -> str:
+        return self.reason_code
+
+    @property
+    def blocked_reason(self) -> str:
+        return self.reason_code
+
+    @property
+    def conversation_syncable(self) -> bool:
+        return bool(self.capability.conversation_syncable)
+
+    @property
+    def send_decision(self) -> str:
+        return (self.capability.send_decision or "blocked").strip()
+
+    @property
+    def client_id(self) -> str:
+        return (self.capability.client_id or "").strip()
+
+    @property
+    def page_instance_id(self) -> str:
+        return (self.capability.page_instance_id or "").strip()
+
+    @property
+    def conversation_id(self) -> str:
+        return (self.capability.conversation_id or "").strip()
+
+    @property
+    def url(self) -> str:
+        return (self.capability.url or "").strip()
+
+    @property
+    def target_item(self) -> Any:
+        return self.page
+
+    @property
+    def target(self) -> Any:
+        """兼容旧字段名；同步/日志路径曾使用 plan.target。"""
+        if isinstance(self.page, dict):
+            return self.page
+        if self.page is not None:
+            return self.page
+        return {
+            "client_id": self.client_id,
+            "page_instance_id": self.page_instance_id,
+            "conversation_id": self.conversation_id,
+            "url": self.url,
+            "page_type": (self.capability.page_type or "").strip(),
+            "reason_code": self.reason_code,
+        }
+
+    @property
+    def source(self) -> str:
+        return self.target_source
+
+    @property
+    def online(self) -> bool:
+        return bool(self.capability.online)
+
+    @classmethod
+    def from_resolve_result(cls, data: Dict[str, Any]) -> PageActionPlan:
+        if not isinstance(data, dict):
+            cap = PageCapability(blocked_reason="invalid_page_action_result")
+            return cls(
+                action="",
+                decision="blocked",
+                target_source="",
+                reason_code="invalid_page_action_result",
+                capability=cap,
+            )
+        cap_raw = data.get("capability_detail")
+        if isinstance(cap_raw, PageCapability):
+            cap = cap_raw
+        elif isinstance(cap_raw, dict):
+            cap = PageCapability.from_dict(cap_raw)
+        else:
+            cap = PageCapability.from_dict(data)
+        if not cap.client_id:
+            cap = PageCapability.from_dict(
+                {
+                    **cap.to_dict(),
+                    "client_id": (data.get("client_id") or "").strip(),
+                    "page_instance_id": (data.get("page_instance_id") or "").strip(),
+                    "conversation_id": (data.get("conversation_id") or "").strip(),
+                    "url": (data.get("url") or "").strip(),
+                }
+            )
+        reason_code = (
+            data.get("reason_code")
+            or data.get("reason")
+            or data.get("blocked_reason")
+            or ""
+        ).strip()
+        page = data.get("page")
+        if page is None:
+            page = data.get("target_item")
+        if page is None:
+            page = data.get("target")
+        return cls(
+            action=(data.get("action") or "").strip(),
+            decision=(data.get("decision") or "blocked").strip(),
+            target_source=(data.get("target_source") or "").strip(),
+            reason_code=reason_code,
+            capability=cap,
+            page=page,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "decision": self.decision,
+            "reason_code": self.reason_code,
+            "target_source": self.target_source,
+            "target": {
+                "client_id": self.client_id,
+                "page_instance_id": self.page_instance_id,
+                "conversation_id": self.conversation_id,
+                "url": self.url,
+            },
+            "capability": self.capability.to_dict(),
+        }
+
+    def as_send_decision_tuple(self) -> Tuple[str, str, Any, Dict[str, Any]]:
+        return (
+            self.decision,
+            self.reason_code,
+            self.page,
+            self.capability.to_dict(),
+        )
+
+    def as_sync_decision_tuple(self) -> Tuple[bool, Any, str, str, Dict[str, Any]]:
+        allowed = self.decision == "allowed"
+        block = "" if allowed else (self.reason_code or "blocked")
+        return (
+            allowed,
+            self.page,
+            self.target_source,
+            block,
+            self.capability.to_dict(),
+        )
+
+    def to_sync_target_snapshot(
+        self,
+        *,
+        remote: Optional[Dict[str, Any]] = None,
+        status: Optional[Dict[str, Any]] = None,
+        short_label: str = "",
+    ) -> Dict[str, Any]:
+        remote = remote if isinstance(remote, dict) else {}
+        status = status if isinstance(status, dict) else {}
+        remote_client_id = (remote.get("client_id") or "").strip()
+        remote_page_instance_id = (remote.get("page_instance_id") or "").strip()
+        remote_conversation_id = (remote.get("conversation_id") or "").strip()
+        remote_url = (remote.get("url") or "").strip()
+        active_client_id = (status.get("active_client_id") or "").strip()
+        active_conversation_id = (status.get("active_conversation_id") or "").strip()
+        active_matches_bound = bool(
+            active_client_id and remote_client_id and active_client_id == remote_client_id
+        )
+        cap = self.capability
+        conv_sync = bool(cap.conversation_syncable) or self.decision == "allowed"
+        sync_readable = conv_sync
+        from app.models import remote_binding_enabled
+
+        from app.utils.target_sources import (
+            TARGET_SOURCE_BOUND_PAGE,
+            TARGET_SOURCE_NO_SESSION,
+            canonical_target_source,
+        )
+
+        resolved_source = canonical_target_source(self.target_source) or (
+            TARGET_SOURCE_BOUND_PAGE
+            if remote_binding_enabled(remote)
+            else TARGET_SOURCE_NO_SESSION
+        )
+        if resolved_source == TARGET_SOURCE_BOUND_PAGE:
+            source_label = "已绑定页"
+        elif resolved_source == TARGET_SOURCE_NO_SESSION:
+            source_label = "无会话目标"
+        else:
+            source_label = resolved_source or "未知来源"
+        return {
+            "conversation_syncable": conv_sync,
+            "sync_readable": sync_readable,
+            "send_decision": self.send_decision,
+            "reason_code": self.reason_code or "",
+            "response_state": cap.response_state or "unknown",
+            "online": cap.online,
+            "source": resolved_source,
+            "source_label": source_label,
+            "target_matches_bound": bool(self.client_id),
+            "short_label": short_label or (self.client_id or "不可用"),
+            "client_id": self.client_id,
+            "page_instance_id": self.page_instance_id,
+            "conversation_id": self.conversation_id,
+            "url": self.url,
+            "page_type": (
+                (self.page.get("page_type") or "").strip()
+                if isinstance(self.page, dict)
+                else ""
+            ),
+            "bound": {
+                "client_id": remote_client_id,
+                "page_instance_id": remote_page_instance_id,
+                "conversation_id": remote_conversation_id,
+                "url": remote_url,
+            },
+            "active": {
+                "client_id": active_client_id,
+                "conversation_id": active_conversation_id,
+            },
+            "active_matches_bound": active_matches_bound,
         }
 
 
@@ -450,79 +837,78 @@ def evaluate_page_capability(
     expected_page_instance_id: str = "",
     now: float | None = None,
 ) -> PageCapability:
-    """统一能力判定：online/url_syncable/conversation_syncable/sendable/queueable。"""
+    """统一能力判定：online / send_decision / blocked_reason（细分能力仅内部计算）。"""
+    del bound  # 保留参数以兼容旧调用方
     norm = normalize_page(page, now=now) if isinstance(page, dict) else {}
     if not norm:
-        return PageCapability(reason="no_page", block_reason="no_page")
+        return PageCapability(send_decision="blocked", blocked_reason="no_page")
     classified = classify_page_state(norm, now=now)
     online = bool(classified.get("online"))
-    url_syncable = is_page_url_syncable(norm, now=now)
     conversation_syncable = can_sync_conversation(norm, now=now)
-    dialog_ready = conversation_syncable
-    # 保持当前外部行为：syncable 仍按完整对话可同步处理，避免改变按钮/同步流程。
-    syncable = conversation_syncable
     send_decision, send_reason = evaluate_send_page(
         norm,
         expected_conversation_id,
     )
-    sendable = send_decision == "allowed"
-    queueable = send_decision == "queued"
-    block_reason = ""
+    prebound_home = bool(classified.get("prebound_home"))
     reason = ""
-    if action == "sync" and not conversation_syncable:
-        block_reason = _page_block_reason_for_sync(norm, classified, online)
-        reason = block_reason
-    elif action == "send":
-        if send_decision == "blocked":
-            block_reason = send_reason
-        elif send_decision == "queued":
-            reason = send_reason
+    act = (action or "").strip()
+    if act in ("sync", "sync_conversation"):
+        if not can_sync_conversation(norm, now=now):
+            reason = _page_block_reason_for_sync(norm, classified, online)
+    elif act == "send":
+        reason = send_reason
+    elif act == "sync_url":
+        if not is_page_url_syncable(norm, now=now):
+            reason = _page_block_reason_for_sync(norm, classified, online)
+            send_decision = "blocked"
         else:
-            reason = send_reason
+            send_decision = "allowed"
+            reason = "ready"
+    elif act == "upload":
+        if not online:
+            reason = "offline"
+            send_decision = "blocked"
+        elif not bool(norm.get("upload_bridge_supported")):
+            reason = "upload_bridge_not_supported"
+            send_decision = "blocked"
+        else:
+            send_decision = "allowed"
 
     exp_cid = (expected_conversation_id or "").strip()
     exp_client = (expected_client_id or "").strip()
     exp_instance = (expected_page_instance_id or "").strip()
-    client_id_mismatch = bool(
-        norm and exp_client and (norm.get("client_id") or "").strip() != exp_client
-    )
-    page_instance_id_mismatch = bool(
+    page_conv = (norm.get("conversation_id") or "").strip()
+    if norm and exp_client and (norm.get("client_id") or "").strip() != exp_client:
+        reason = "client_id_mismatch"
+        send_decision = "blocked"
+    elif (
         norm
         and exp_instance
         and (norm.get("page_instance_id") or "").strip() != exp_instance
-    )
-    page_conv = (norm.get("conversation_id") or "").strip() if norm else ""
-    conversation_mismatch = bool(
-        norm and exp_cid and page_conv and page_conv != exp_cid
-    )
-    if client_id_mismatch:
-        block_reason = block_reason or "client_id_mismatch"
-    if page_instance_id_mismatch:
-        block_reason = block_reason or "page_instance_id_mismatch"
-    if conversation_mismatch:
-        block_reason = block_reason or "conversation_mismatch"
+    ):
+        reason = "page_instance_id_mismatch"
+        send_decision = "blocked"
+    elif norm and exp_cid and page_conv and page_conv != exp_cid:
+        reason = "conversation_mismatch"
+        send_decision = "blocked"
+
+    response_state = read_response_state(norm)
+    can_accept_input_val = can_accept_input(norm)
 
     return PageCapability(
         online=online,
-        bound=bound,
-        syncable=syncable,
         conversation_syncable=conversation_syncable,
-        sendable=sendable,
-        queueable=queueable,
-        reason=reason,
-        block_reason=block_reason,
+        page_liveness=str(classified.get("page_liveness") or get_page_liveness(norm, now=now)),
+        send_decision=send_decision,
+        blocked_reason=reason,
+        response_state=response_state,
         client_id=norm.get("client_id") or "",
         page_instance_id=norm.get("page_instance_id") or "",
         conversation_id=norm.get("conversation_id") or "",
         url=norm.get("url") or "",
-        page_liveness=str(classified.get("page_liveness") or "offline"),
-        dialog_ready=dialog_ready,
-        prebound_home=bool(classified.get("prebound_home")),
-        send_decision=send_decision,
-        url_syncable=url_syncable,
-        client_id_mismatch=client_id_mismatch,
-        page_instance_id_mismatch=page_instance_id_mismatch,
-        conversation_mismatch=conversation_mismatch,
+        page_type=(norm.get("page_type") or "").strip(),
+        prebound_home=prebound_home,
+        can_accept_input=can_accept_input_val,
     )
 
 
@@ -531,34 +917,47 @@ def explain_page_decision(page: Any, action: str = "sync") -> Dict[str, Any]:
     out = cap.to_dict()
     if isinstance(page, dict):
         norm = normalize_page(page)
-        classified = classify_page_state(norm)
-        out["legacy_state"] = classified.get("legacy_state") or ""
-        out["page_state"] = out["legacy_state"] or out["page_state"]
         out["response_state"] = norm.get("response_state") or "unknown"
     return out
 
 
-def log_page_decision_fields(decision: Dict[str, Any]) -> str:
+def compact_page_public_fields(page: dict) -> dict:
+    """UI 页面列表对外字段（不含重复能力/发送细分）。"""
+    if not isinstance(page, dict):
+        return {}
+    cap = evaluate_page_capability(page, action="send")
+    return {
+        "page_display_id": str(page.get("page_display_id") or "").strip(),
+        "client_id": (page.get("client_id") or "").strip(),
+        "page_instance_id": (page.get("page_instance_id") or "").strip(),
+        "url": cap.url or page_url_from(page) or "",
+        "page_title": (page.get("page_title") or "").strip(),
+        "page_type": cap.page_type or (page.get("page_type") or "").strip(),
+        "conversation_id": (page.get("conversation_id") or "").strip(),
+        "online": cap.online,
+        "page_liveness": cap.page_liveness,
+        "last_seen": page.get("last_seen"),
+        "response_state": cap.response_state or "unknown",
+        "can_accept_input": cap.can_accept_input,
+        "send_decision": cap.send_decision,
+        "reason_code": cap.reason_code,
+    }
+
+
+def compact_page_decision_fields(decision: Dict[str, Any]) -> str:
     return (
+        f"page_display_id={decision.get('page_display_id') or '-'} "
         f"client_id={decision.get('client_id') or '-'} "
         f"page_instance_id={decision.get('page_instance_id') or '-'} "
         f"conversation_id={decision.get('conversation_id') or '-'} "
         f"url={decision.get('url') or '-'} "
-        f"page_liveness={decision.get('page_liveness') or '-'} "
         f"online={'true' if decision.get('online') else 'false'} "
-        f"dialog_ready={'true' if decision.get('dialog_ready') else 'false'} "
-        f"prebound_home={'true' if decision.get('prebound_home') else 'false'} "
-        f"can_sync_conversation={'true' if (decision.get('conversation_syncable') or decision.get('syncable')) else 'false'} "
-        f"syncable={'true' if decision.get('syncable') else 'false'} "
-        f"conversation_syncable={'true' if decision.get('conversation_syncable') else 'false'} "
-        f"sendable={'true' if decision.get('sendable') else 'false'} "
-        f"queueable={'true' if decision.get('queueable') else 'false'} "
-        f"send_decision={decision.get('send_decision') or '-'} "
         f"response_state={decision.get('response_state') or '-'} "
-        f"bound={'true' if decision.get('bound') else 'false'} "
-        f"client_id_mismatch={'true' if decision.get('client_id_mismatch') else 'false'} "
-        f"page_instance_id_mismatch={'true' if decision.get('page_instance_id_mismatch') else 'false'} "
-        f"conversation_mismatch={'true' if decision.get('conversation_mismatch') else 'false'} "
-        f"blocked_reason={decision.get('blocked_reason') or '-'} "
-        f"reason={decision.get('reason') or '-'}"
+        f"page_liveness={decision.get('page_liveness') or '-'} "
+        f"send_decision={decision.get('send_decision') or '-'} "
+        f"reason_code={decision.get('reason_code') or decision.get('reason') or decision.get('blocked_reason') or '-'}"
     )
+
+
+def log_page_decision_fields(decision: Dict[str, Any], *, compact: bool = True) -> str:
+    return compact_page_decision_fields(decision)

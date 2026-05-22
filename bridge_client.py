@@ -33,7 +33,6 @@ RUNTIME_SERVER_URL_FILE = (
 
 HEALTH_ENDPOINTS = (
     "/api/v1/status",
-    "/api/status",
     "/health",
 )
 
@@ -67,7 +66,7 @@ def format_connection_help(base_url: str) -> str:
         )
     return (
         f"无法访问 {status_url}\n"
-        "请确认 GUI 已启动，并在「设置 → 服务设置」中查看实际服务端口。\n"
+        "请确认 GUI 已启动；默认桥接地址为 http://127.0.0.1:5000/api/bridge（可在 GUI「详情」查看）。\n"
         "若 GUI 自动切换到了备用端口（如 8765），请把客户端地址改为该端口，例如：\n"
         "  python bridge_client.py --url http://127.0.0.1:8765\n"
         "或设置环境变量 CHATGPT_PAGE_BRIDGE_URL。"
@@ -384,7 +383,7 @@ class BridgeClient:
             else:
                 diag.chat_api_ok = False
                 diag.messages.append(
-                    "服务已连接（旧版 /api/status 或 /health），但外部 API /api/v1 不可用。"
+                    "服务已连接（/health），但外部 API /api/v1 不可用。"
                 )
                 diag.messages.append(
                     "请完全退出 GUI 后重新运行 python gui.py，以加载含 /api/v1/* 的最新 server.py。"
@@ -481,53 +480,6 @@ class BridgeClient:
             ) from error
 
         return self._decode_json_response(response, path=path)
-
-    def _get_legacy_health(self) -> dict[str, Any]:
-        """@deprecated GET /api/status fallback for pre-/api/v1 bridge services."""
-        url = self._url("/api/status")
-        try:
-            response = self._session.get(
-                url,
-                headers=self._headers(),
-                timeout=30,
-            )
-        except requests.RequestException as error:
-            raise BridgeApiError(
-                "[CLIENT][LEGACY_HEALTH_FAILED] "
-                f"method=GET "
-                f"url={url} "
-                f"timeout=30 "
-                f"error_type={type(error).__name__} "
-                f"error={error}"
-            ) from error
-
-        return self._decode_json_response(response, allow_not_ok=True)
-
-    @staticmethod
-    def _normalize_legacy_status(data: dict[str, Any]) -> dict[str, Any]:
-        """@deprecated Convert legacy /api/status data into /api/v1/status shape."""
-        tm_summary = data.get("tm_online_summary") or {}
-        waiting_acks = data.get("waiting_acks") or []
-        return {
-            "ok": True,
-            "server": "running" if data.get("server_running") else "stopped",
-            "tm": {
-                "online_clients": tm_summary.get("online_clients", 0),
-                "online_home_clients": tm_summary.get("online_home_clients", 0),
-                "online_conversation_clients": tm_summary.get(
-                    "online_conversation_clients", 0
-                ),
-            },
-            "queues": {
-                "chat_queue": data.get("queue_length", 0),
-                "control_queue": data.get("control_queue_length", 0),
-                "waiting": len(waiting_acks),
-            },
-            "sessions": {},
-            "tampermonkey_online": data.get("tampermonkey_online"),
-            "tampermonkey_client_id": data.get("tampermonkey_client_id"),
-            "_legacy_status": True,
-        }
 
     def check_connection(self) -> tuple[bool, str]:
         """
@@ -902,8 +854,6 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 def _print_bridge_status(client: BridgeClient) -> None:
     data = client.status()
-    if data.get("_legacy_status"):
-        print("（通过旧版 /api/status 读取，会话统计不可用）")
     tm = data.get("tm") or {}
     queues = data.get("queues") or {}
     sessions = data.get("sessions") or {}

@@ -1,0 +1,197 @@
+"""resolve_page_command_target 单元测试。"""
+
+import time
+import unittest
+
+from app.constants import SYNC_COMMAND_POLL_MAX_AGE_SECONDS
+from app.utils.page_command import (
+    evaluate_sync_poll_freshness,
+    resolve_page_command_target,
+)
+from app.utils.page_snapshot import PageRegistry
+
+
+class _FakeSession:
+    def __init__(self, remote):
+        self.remote_chatgpt = remote
+
+
+class PageCommandTargetTests(unittest.TestCase):
+    def _registry_with_bound(self):
+        now = time.time()
+        status = {
+            "pages": [
+                {
+                    "client_id": "tm-bind",
+                    "page_instance_id": "inst-bind",
+                    "url": "https://chatgpt.com/c/conv99",
+                    "conversation_id": "conv99",
+                    "page_type": "conversation",
+                    "last_seen": now,
+                    "last_poll_at": now,
+                    "page_display_id": "3",
+                },
+                {
+                    "client_id": "tm-other",
+                    "page_instance_id": "inst-other",
+                    "url": "https://chatgpt.com/c/other",
+                    "conversation_id": "other",
+                    "page_type": "conversation",
+                    "last_seen": now,
+                    "last_poll_at": now,
+                },
+            ]
+        }
+        return PageRegistry.from_bridge_status(status, now=now)
+
+    def test_sync_uses_bound_page_only(self):
+        reg = self._registry_with_bound()
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        result = resolve_page_command_target(session, "sync_conversation", reg)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["client_id"], "tm-bind")
+        self.assertEqual(result["page_instance_id"], "inst-bind")
+
+    def test_sync_not_blocked_by_other_online_page(self):
+        reg = self._registry_with_bound()
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        result = resolve_page_command_target(session, "sync_conversation", reg)
+        self.assertTrue(result["ok"])
+        self.assertNotEqual(result["client_id"], "tm-other")
+
+    def test_sync_bound_offline(self):
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "gone",
+                "page_instance_id": "gone",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        reg = self._registry_with_bound()
+        result = resolve_page_command_target(session, "sync_conversation", reg)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "bound_page_offline")
+
+    def test_sync_not_bound(self):
+        session = _FakeSession({"enabled": False})
+        result = resolve_page_command_target(session, "sync_conversation", PageRegistry.empty())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "not_bound")
+
+    def test_sync_bound_page_not_polling(self):
+        now = time.time()
+        reg = self._registry_with_bound()
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        page = reg.get_bound_page(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+            }
+        )
+        self.assertIsNotNone(page)
+        result = resolve_page_command_target(session, "sync_conversation", reg, now=now)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "bound_page_not_polling")
+
+    def test_sync_bound_page_poll_stale(self):
+        now = time.time()
+        stale_poll = now - SYNC_COMMAND_POLL_MAX_AGE_SECONDS - 5
+        status = {
+            "pages": [
+                {
+                    "client_id": "tm-bind",
+                    "page_instance_id": "inst-bind",
+                    "url": "https://chatgpt.com/c/conv99",
+                    "conversation_id": "conv99",
+                    "page_type": "conversation",
+                    "last_seen": now,
+                    "last_poll_at": stale_poll,
+                    "page_display_id": "3",
+                },
+            ]
+        }
+        reg = PageRegistry.from_bridge_status(status, now=now)
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        result = resolve_page_command_target(session, "sync_conversation", reg, now=now)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "bound_page_poll_stale")
+
+    def test_sync_bound_page_poll_fresh(self):
+        now = time.time()
+        status = {
+            "pages": [
+                {
+                    "client_id": "tm-bind",
+                    "page_instance_id": "inst-bind",
+                    "url": "https://chatgpt.com/c/conv99",
+                    "conversation_id": "conv99",
+                    "page_type": "conversation",
+                    "last_seen": now,
+                    "last_poll_at": now,
+                    "page_display_id": "3",
+                },
+            ]
+        }
+        reg = PageRegistry.from_bridge_status(status, now=now)
+        session = _FakeSession(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+                "url": "https://chatgpt.com/c/conv99",
+            }
+        )
+        page = reg.get_bound_page(
+            {
+                "enabled": True,
+                "client_id": "tm-bind",
+                "page_instance_id": "inst-bind",
+                "conversation_id": "conv99",
+            }
+        )
+        poll_ok, code, _reason = evaluate_sync_poll_freshness(page, now=now)
+        self.assertTrue(poll_ok)
+        self.assertEqual(code, "")
+        result = resolve_page_command_target(session, "sync_conversation", reg, now=now)
+        self.assertTrue(result["ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()

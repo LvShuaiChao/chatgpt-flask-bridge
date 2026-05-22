@@ -27,6 +27,15 @@ class WaitingTimerMixin:
         seconds = total_seconds % 60
         return f"{minutes:02d}:{seconds:02d}"
 
+    def _session_pending_elapsed_sec(self, session) -> int:
+        since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
+        if since_ts <= 0:
+            return 0
+        return max(0, int(time.time() - since_ts))
+
+    def _session_is_waiting_reply(self, session) -> bool:
+        return float(getattr(session, "pending_reply_since", 0) or 0) > 0
+
     def _iter_all_chat_sessions(self):
         sessions = getattr(self, "_sessions", None)
         if not isinstance(sessions, dict):
@@ -36,42 +45,24 @@ class WaitingTimerMixin:
     def _mark_session_waiting_started(self, session, reason=""):
         if session is None:
             return
-        if getattr(session, "waiting_for_reply", False):
-            since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
-            if since_ts > 0:
-                return
-        since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
-        if since_ts <= 0:
-            since_ts = time.time()
-        session.waiting_for_reply = True
-        session.waiting_since_ts = since_ts
-        session.waiting_elapsed_sec = max(0, int(time.time() - since_ts))
-        if not getattr(session, "pending_reply_since", 0):
-            session.pending_reply_since = since_ts
+        if self._session_is_waiting_reply(session):
+            return
+        session.pending_reply_since = time.time()
         self._append_log(
             "[CHAT][WAITING_START] "
             f"session_id={session.session_id} "
             f"reason={reason or '-'} "
-            f"waiting_since_ts={session.waiting_since_ts}",
+            f"pending_reply_since={session.pending_reply_since}",
             echo=True,
         )
 
     def _mark_session_waiting_finished(self, session, reason=""):
         if session is None:
             return
-        was_waiting = bool(getattr(session, "waiting_for_reply", False))
-        old_elapsed = 0
-        since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
-        if since_ts > 0:
-            old_elapsed = max(0, int(time.time() - since_ts))
-        elif was_waiting:
-            old_elapsed = int(getattr(session, "waiting_elapsed_sec", 0) or 0)
-
-        session.waiting_for_reply = False
-        session.waiting_since_ts = 0
-        session.waiting_elapsed_sec = 0
-
-        if was_waiting or since_ts > 0:
+        was_waiting = self._session_is_waiting_reply(session)
+        old_elapsed = self._session_pending_elapsed_sec(session) if was_waiting else 0
+        session.pending_reply_since = 0
+        if was_waiting:
             self._append_log(
                 "[CHAT][WAITING_END] "
                 f"session_id={session.session_id} "
@@ -89,7 +80,7 @@ class WaitingTimerMixin:
         if has_pending:
             self._mark_session_waiting_started(session, reason=reason or "sync_pending")
         else:
-            if getattr(session, "waiting_for_reply", False):
+            if self._session_is_waiting_reply(session):
                 self._mark_session_waiting_finished(
                     session, reason=reason or "sync_idle"
                 )
@@ -112,7 +103,7 @@ class WaitingTimerMixin:
     def _is_pending_wait_display_message(self, message):
         if message is None:
             return False
-        status = (getattr(message, "status", "") or "").strip()
+        status = (message.ui_status or "").strip()
         text = (getattr(message, "content", "") or "").strip()
         if status in PENDING_ASSISTANT_STATUSES:
             return True
@@ -122,23 +113,19 @@ class WaitingTimerMixin:
 
     def _display_text_for_message(self, message, session):
         plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
-        if not session or not getattr(session, "waiting_for_reply", False):
+        if not session or not self._session_is_waiting_reply(session):
             return plain
         if not self._is_pending_wait_display_message(message):
             return plain
         base = self._waiting_reply_display_base(plain)
-        elapsed = self._format_elapsed_mmss(
-            getattr(session, "waiting_elapsed_sec", 0) or 0
-        )
+        elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
         return f"{base} {elapsed}"
 
     def _format_waiting_status_text(self, base_text, session):
         base_text = (base_text or "").strip()
-        if not session or not getattr(session, "waiting_for_reply", False):
+        if not session or not self._session_is_waiting_reply(session):
             return base_text
-        elapsed = self._format_elapsed_mmss(
-            getattr(session, "waiting_elapsed_sec", 0) or 0
-        )
+        elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
         if not base_text:
             return f"已等待 {elapsed}"
         if "已等待" in base_text:
@@ -150,11 +137,9 @@ class WaitingTimerMixin:
         return f"{base_text}。已等待 {elapsed}"
 
     def _session_waiting_preview_suffix(self, session):
-        if not session or not getattr(session, "waiting_for_reply", False):
+        if not session or not self._session_is_waiting_reply(session):
             return ""
-        return self._format_elapsed_mmss(
-            getattr(session, "waiting_elapsed_sec", 0) or 0
-        )
+        return self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
 
     def _maybe_log_waiting_tick(self, session, elapsed):
         if not getattr(self, "_debug_mode", False):
@@ -195,16 +180,12 @@ class WaitingTimerMixin:
             return
         self._apply_tm_action_hint_with_waiting()
 
-    def _set_tm_action_hint(self, text):
-        self._tm_action_hint_base = (text or "").strip()
-        self._apply_tm_action_hint_with_waiting()
-
     def _apply_tm_action_hint_with_waiting(self):
         text = (getattr(self, "_tm_action_hint_base", "") or "").strip()
         session = None
         if hasattr(self, "_current_session"):
             session = self._current_session()
-        if session and getattr(session, "waiting_for_reply", False):
+        if session and self._session_is_waiting_reply(session):
             text = self._format_waiting_status_text(text, session)
         if text == getattr(self, "_last_tm_action_hint_text", None):
             return
@@ -215,28 +196,17 @@ class WaitingTimerMixin:
     def _refresh_waiting_elapsed_ui(self):
         current_session_id = getattr(self, "_current_session_id", None)
         now_ts = time.time()
-        changed = False
         any_waiting = False
         current_session = None
 
         for session in self._iter_all_chat_sessions():
-            if not getattr(session, "waiting_for_reply", False):
+            since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
+            if since_ts <= 0:
                 continue
 
             any_waiting = True
-            since_ts = float(getattr(session, "waiting_since_ts", 0) or 0)
-            if since_ts <= 0:
-                if hasattr(self, "_sync_session_waiting_timer"):
-                    self._sync_session_waiting_timer(
-                        session, reason="waiting_tick_resync"
-                    )
-                continue
-
             elapsed = max(0, int(now_ts - since_ts))
-            if getattr(session, "waiting_elapsed_sec", -1) != elapsed:
-                session.waiting_elapsed_sec = elapsed
-                changed = True
-                self._maybe_log_waiting_tick(session, elapsed)
+            self._maybe_log_waiting_tick(session, elapsed)
 
             if session.session_id == current_session_id:
                 current_session = session
@@ -245,9 +215,8 @@ class WaitingTimerMixin:
             self._waiting_tick_log_at.clear()
             return
 
-        if changed:
-            if hasattr(self, "_refresh_session_list"):
-                self._refresh_session_list(select_session_id=current_session_id)
-            if current_session is not None:
-                self._refresh_current_chat_waiting_text(current_session)
-            self._refresh_status_bar_waiting_text()
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list(select_session_id=current_session_id)
+        if current_session is not None:
+            self._refresh_current_chat_waiting_text(current_session)
+        self._refresh_status_bar_waiting_text()

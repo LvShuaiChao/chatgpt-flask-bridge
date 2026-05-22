@@ -1,6 +1,29 @@
+from app.server import (
+    cancel_message,
+    complete_gui_dispatch,
+    enqueue_control_command,
+    get_bridge_status,
+    get_message_state,
+    get_server_port,
+    get_server_public_host,
+    get_server_url,
+    get_tm_online_summary,
+    is_server_running,
+    push_close_other_pages,
+    push_close_page,
+    push_message,
+    push_open_url,
+    set_debug_mode,
+    set_external_gui_dispatch,
+    set_log_callback,
+    set_status_callback,
+    start_server,
+    stop_server,
+)
+
 import traceback
 
-import server
+from app.server.route_flags import enable_external_api
 
 from app.constants import (
     SETTINGS_APP,
@@ -16,34 +39,49 @@ from PyQt5.QtWidgets import (
 )
 
 from app.ui.mixins.bridge_mixin import BridgeMixin
-from app.ui.mixins.chat_file_upload_mixin import ChatFileUploadMixin
+from app.ui.mixins.external_api_gui_mixin import ExternalApiGuiMixin
+from app.ui.mixins.send_flow_mixin import SendFlowMixin
 from app.ui.mixins.chat_session_mixin import ChatSessionMixin
 from app.ui.mixins.chat_render_mixin import ChatRenderMixin
 from app.ui.mixins.cursor_bridge_mixin import CursorBridgeMixin
-from app.ui.mixins.job_scheduler_mixin import JobSchedulerMixin
-from app.ui.mixins.log_tab_mixin import LogTabMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
 from app.ui.mixins.settings_mixin import SettingsMixin
 from app.ui.mixins.waiting_timer_mixin import WaitingTimerMixin
 from app.ui.mixins.ui_builder_mixin import UiBuilderMixin
+from app.ui.main_window_state import (
+    AutoBindState,
+    BindDisplayState,
+    BridgeMessageState,
+    BridgeUiState,
+    LogUiState,
+    PageCommandUiState,
+    PageSelectorState,
+    ServerUiState,
+    SessionUiState,
+    WebSyncState,
+)
 
 
-class MainWindow(
-    QMainWindow,
-    SettingsMixin,
-    WaitingTimerMixin,
-    UiBuilderMixin,
-    SessionMixin,
-    ChatSessionMixin,
-    ChatRenderMixin,
-    PageBindMixin,
-    BridgeMixin,
-    ChatFileUploadMixin,
-    CursorBridgeMixin,
-    JobSchedulerMixin,
-    LogTabMixin,
-):
+def _main_window_bases():
+    bases = [
+        SettingsMixin,
+        WaitingTimerMixin,
+        UiBuilderMixin,
+        SessionMixin,
+        ChatSessionMixin,
+        ChatRenderMixin,
+        PageBindMixin,
+        SendFlowMixin,
+        BridgeMixin,
+        CursorBridgeMixin,
+    ]
+    if enable_external_api():
+        bases.append(ExternalApiGuiMixin)
+    return tuple(bases)
+
+
+class MainWindow(QMainWindow, *_main_window_bases()):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChatGPT 油猴联动聊天窗口")
@@ -53,76 +91,33 @@ class MainWindow(
         self._sessions = {}
         self._tab_session_ids = []
         self._current_session_id = None
+        self._session_compose_drafts = {}
         self._message_to_session = {}
         self._message_to_turn = {}
         self._session_send_queues = {}
         self._external_client_last_session = {}
         self._processed_inbound_ids = set()
-        self._pending_upload_sends = {}
-        self._init_chat_file_upload_state()
-        self._pending_web_sync_requests = {}
-        self._web_sync_hard_timed_out_request_ids = set()
-        self._pending_sync_requests = {}
-        self._pending_chat_render = None
-        self._pending_send_requests = {}
-        self._web_sync_timeout_retry_done = set()
-        self._finalized_bridge_message_ids = set()
-        self._ack_success_message_ids = set()
-        self._tampermonkey_page_url = None
+        self._bridge_ui = BridgeUiState()
+        self._page_selector = PageSelectorState()
+        self._web_sync = WebSyncState()
+        self._auto_bind = AutoBindState()
+        self._bind_display = BindDisplayState()
+        self._page_cmd = PageCommandUiState()
+        self._bridge_msg = BridgeMessageState()
+        self._log_ui = LogUiState()
+        self._session_ui = SessionUiState()
+        self._server_ui = ServerUiState()
         self._saved_page_url = self._load_saved_page_url()
-        self._last_bridge_status = {}
-        self._server_start_failed = False
-        self._server_start_error = ""
-        self._auto_bind_known_clients = set()
-        self._auto_bind_wait_until = 0
-        self._pending_auto_bind_session_id = ""
-        self._pending_auto_bind_until = 0
-        self._pending_auto_bind_known_clients = set()
-        self._pending_auto_bind_known_page_instances = set()
-        self._last_bound_page_seen_by_session = {}
-        self._last_session_bind_display_state = {}
-        self._last_session_bind_logged_pair = {}
-        self._last_session_bind_state_log_at = {}
-        self._last_auto_open_url_at = {}
-        self._list_refreshing = False
-        self._applying_bridge_status = False
-        self._pending_bridge_status = None
-        self._status_apply_pending = False
-        self._pending_status_payload = None
-        self._pending_status_apply_reason = ""
-        self._last_status_apply_at = 0.0
-        self._last_status_snapshot_key = ""
-        self._last_light_status_signature = ""
-        self._last_status_apply_schedule_at = 0.0
-        self._last_tm_clients_signature = ""
-        self._last_page_selector_key = ""
-        self._manual_current_tm_page = None
-        self._manual_current_tm_client_id = ""
-        self._manual_current_tm_page_instance_id = ""
-        self._manual_current_tm_conversation_id = ""
-        self._manual_current_tm_url = ""
-        self._tm_page_selector_refreshing = False
-        self._last_chat_area_style_key = ""
-        self._last_page_relation_key = ""
-        self._last_bind_mismatch_key = ""
-        self._last_bind_mismatch_at = 0.0
-        self._last_bind_mismatch_ui_key = ""
-        self._pending_log_lines = []
-        self._log_flush_scheduled = False
-        self._log_tab_load_pending = False
-        self._session_switching = False
-        self._pending_after_switch_status_apply = False
-        self._last_session_switch_status_apply_at = 0.0
-        self._current_status_apply_reason = ""
+        self._init_page_registry_refresh_state()
         self._load_app_settings_values()
-        server.set_debug_mode(self._debug_mode)
+        set_debug_mode(self._debug_mode)
         self._notifier = BridgeNotifier()
         self._notifier.log_signal.connect(self._append_log)
-        self._init_bridge_status_aggregation()
+        self._init_status_scheduler()
         self._notifier.status_signal.connect(self._on_bridge_status_signal)
-        server.set_log_callback(self._notifier.log_signal.emit)
-        server.set_status_callback(self._notifier.status_signal.emit)
-        server.set_external_gui_dispatch(self._notifier.external_dispatch_signal.emit)
+        set_log_callback(self._notifier.log_signal.emit)
+        set_status_callback(self._notifier.status_signal.emit)
+        set_external_gui_dispatch(self._notifier.external_dispatch_signal.emit)
         self._notifier.external_dispatch_signal.connect(self._handle_external_gui_dispatch)
         self._build_ui()
         self._setup_window_shortcuts()
@@ -132,7 +127,8 @@ class MainWindow(
             if saved_session_id and saved_session_id in self._sessions:
                 self._current_session_id = saved_session_id
         self._restore_ui_settings()
-        self._update_bound_page_display()
+        if hasattr(self, "schedule_page_registry_refresh"):
+            self.schedule_page_registry_refresh(reason="startup")
         self._ensure_session_order()
         self._refresh_session_list()
         if not self._sessions:
@@ -149,7 +145,6 @@ class MainWindow(
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
         QTimer.singleShot(0, self._refresh_cursor_bridge_status)
-        QTimer.singleShot(400, self._load_runtime_log_if_visible)
         QTimer.singleShot(
             0,
             lambda: self._render_current_chat_messages(
@@ -164,7 +159,7 @@ class MainWindow(
                 reason="startup_after_show",
             ),
         )
-        if self._auto_start_server and not server.is_server_running():
+        if self._auto_start_server and not is_server_running():
             QTimer.singleShot(300, self._start_server)
 
     def showEvent(self, event):
@@ -185,9 +180,9 @@ class MainWindow(
             self._save_splitter_sizes_now()
         self._save_sessions_to_disk()
         self._save_app_settings()
-        if server.is_server_running():
+        if is_server_running():
             try:
-                server.stop_server()
+                stop_server()
             except Exception as error:
                 detail = f"关闭窗口时停止服务失败：{error}\n{traceback.format_exc()}"
                 self._append_log(detail, echo=True)

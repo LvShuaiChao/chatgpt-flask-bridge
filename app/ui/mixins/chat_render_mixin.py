@@ -69,7 +69,7 @@ class ChatRenderMixin:
 
     def _message_status_html(self, message, *, align="left"):
         ts = self._html_escape(self._format_message_ts(getattr(message, "created_at", 0)))
-        status = self._html_escape(getattr(message, "status", "") or "")
+        status = self._html_escape(message.ui_status or "")
         detail = self._html_escape(getattr(message, "detail", "") or "")
 
         parts = []
@@ -295,8 +295,8 @@ class ChatRenderMixin:
     def _flush_pending_chat_render(self):
         pending = getattr(self, "_pending_chat_render", None) or {}
         session_id = (pending.get("session_id") or "").strip()
-        self._pending_chat_render = None
-        self._pending_chat_render_session_id = ""
+        self._bridge_msg.pending_chat_render = None
+        self._bridge_msg.pending_chat_render_session_id = ""
         if session_id and session_id in self._sessions:
             self._render_session_chat(
                 self._sessions[session_id],
@@ -381,7 +381,7 @@ class ChatRenderMixin:
         if text is not None:
             target.content = text
         if status is not None:
-            target.status = status
+            target.ui_status = status
         if role is not None:
             target.role = role
         if error:
@@ -427,7 +427,7 @@ class ChatRenderMixin:
             return False
         target.role = "assistant"
         target.content = ASSISTANT_WAIT_TEXT
-        target.status = "等待中"
+        target.ui_status = "等待中"
         session.updated_at = time.time()
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="set_reply_waiting")

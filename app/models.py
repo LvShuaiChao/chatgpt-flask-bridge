@@ -6,7 +6,6 @@ from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
 
 logger = logging.getLogger(__name__)
-_MIGRATED_REMOTE_URL_FIELDS_LOGGED: set[str] = set()
 
 BIND_STATE_UNBOUND = "UNBOUND"
 BIND_STATE_WAITING_HOME = "WAITING_HOME"
@@ -28,73 +27,127 @@ VALID_BIND_STATES = frozenset(
     }
 )
 
+REMOTE_CHATGPT_PERSISTENT_KEYS = (
+    "bind_state",
+    "conversation_id",
+    "url",
+    "client_id",
+    "page_instance_id",
+    "page_display_id",
+    "page_type",
+    "page_title",
+    "last_seen",
+    "bind_request_id",
+    "bind_started_at",
+    "pending_bootstrap_content",
+    "pending_send_content",
+    "pending_send_message_id",
+    "reopen_started_at",
+)
+
+_REMOTE_NORMALIZE_KEYS = (
+    "bind_state",
+    "url",
+    "conversation_id",
+    "client_id",
+    "page_instance_id",
+    "page_display_id",
+    "page_type",
+    "page_title",
+    "last_seen",
+    "last_poll_at",
+)
+
 
 def default_remote_chatgpt():
+    """长期绑定字段；临时运行态见 app.utils.bind_runtime.BindSessionRuntime。"""
     return {
-        "enabled": False,
         "bind_state": BIND_STATE_UNBOUND,
-        "conversation_id": "",
         "url": "",
+        "conversation_id": "",
         "client_id": "",
         "page_instance_id": "",
+        "page_display_id": "",
         "page_type": "",
         "page_title": "",
         "last_seen": 0,
-        "prebound_home_client_id": "",
-        "prebound_home_page_instance_id": "",
-        "created_from_home": False,
-        "bootstrap_in_progress": False,
-        "bootstrap_message_id": "",
-        "bootstrap_started_at": 0,
-        "pending_bootstrap_text": "",
-        "pending_bootstrap_created_at": 0,
-        "opened_home_at": 0,
-        "bind_request_id": "",
-        "launch_token": "",
-        "bind_started_at": 0,
-        "bound_at": 0,
-        "reserved_client_id": "",
-        "reserved_page_instance_id": "",
-        "reserved_at": 0,
-        "pending_send_text": "",
-        "pending_send_message_id": "",
-        "pending_send_created_at": 0,
-        "reopen_request_id": "",
-        "reopen_started_at": 0,
-        "reopen_target_url": "",
+        "last_poll_at": "",
     }
+
+
+def remote_binding_active(remote) -> bool:
+    """bind_state != UNBOUND 即视为已启用绑定（不再持久化 enabled）。"""
+    remote = normalize_remote_chatgpt(remote)
+    return (remote.get("bind_state") or "").strip() != BIND_STATE_UNBOUND
+
+
+def remote_binding_enabled(remote) -> bool:
+    """由 bind_state 推导是否已绑定/预绑定（替代 remote.get('enabled')）。"""
+    return remote_binding_active(remote)
+
+
+def derive_remote_page_type(url: str = "", conversation_id: str = "") -> str:
+    """由 url / conversation_id 派生 page_type（不写入 session.remote_chatgpt）。"""
+    conversation_id = (conversation_id or "").strip()
+    if conversation_id:
+        return "conversation"
+    url = (url or "").strip()
+    if not url:
+        return ""
+    low = url.lower()
+    if "xz_bind_token" in low:
+        return "home"
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(low)
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "/").rstrip("/") or "/"
+        if host in ("chatgpt.com", "www.chatgpt.com") and path == "/":
+            return "home"
+    except Exception as error:
+        logger.warning(
+            "[REMOTE][DERIVE_PAGE_TYPE] url=%r error=%s",
+            url,
+            error,
+        )
+    return ""
 
 
 def _infer_bind_state(remote, base):
     explicit = (remote.get("bind_state") or "").strip()
     if explicit in VALID_BIND_STATES:
         return explicit
-    if not remote.get("enabled", base.get("enabled")):
-        return BIND_STATE_UNBOUND
-    page_type = (remote.get("page_type") or base.get("page_type") or "").strip()
     conversation_id = (remote.get("conversation_id") or base.get("conversation_id") or "").strip()
     if conversation_id:
         return BIND_STATE_BOUND_CONVERSATION
+    page_type = derive_remote_page_type(
+        remote.get("url") or base.get("url") or "",
+        conversation_id,
+    )
     if page_type == "home":
         return BIND_STATE_PREBOUND_HOME
-    if page_type == "conversation":
-        return BIND_STATE_BOUND_CONVERSATION
     return BIND_STATE_UNBOUND
 
 
-def _remote_float(remote, key, default=0.0):
-    raw = remote.get(key, default) if isinstance(remote, dict) else default
+def _core_remote_dict(remote: dict) -> dict:
+    last_seen = remote.get("last_seen")
     try:
-        return float(raw or default)
-    except (TypeError, ValueError) as error:
-        logger.warning(
-            "[REMOTE][FLOAT_FIELD_FALLBACK] field=%s value=%r default=%r error=%s",
-            key,
-            raw,
-            default,
-            error,
-        )
-        return float(default)
+        last_seen_val = float(last_seen if last_seen not in (None, "") else 0)
+    except (TypeError, ValueError):
+        last_seen_val = 0.0
+    return {
+        "bind_state": (remote.get("bind_state") or BIND_STATE_UNBOUND),
+        "url": (remote.get("url") or "").strip(),
+        "conversation_id": (remote.get("conversation_id") or "").strip(),
+        "client_id": (remote.get("client_id") or "").strip(),
+        "page_instance_id": (remote.get("page_instance_id") or "").strip(),
+        "page_display_id": str(remote.get("page_display_id") or "").strip(),
+        "page_type": (remote.get("page_type") or "").strip(),
+        "page_title": (remote.get("page_title") or "").strip(),
+        "last_seen": last_seen_val,
+        "last_poll_at": str(remote.get("last_poll_at") or "").strip(),
+    }
 
 
 def normalize_remote_chatgpt(remote):
@@ -107,62 +160,54 @@ def normalize_remote_chatgpt(remote):
             type(remote).__name__,
         )
         return base
-    for key in base:
-        if key in remote:
-            base[key] = remote[key]
-    base["enabled"] = bool(remote.get("enabled", False))
-    base["last_seen"] = _remote_float(remote, "last_seen", 0)
-    base["created_from_home"] = bool(remote.get("created_from_home", False))
-    base["bootstrap_in_progress"] = bool(remote.get("bootstrap_in_progress", False))
-    base["bootstrap_started_at"] = _remote_float(remote, "bootstrap_started_at", 0)
-    base["bind_started_at"] = _remote_float(remote, "bind_started_at", 0)
-    base["reserved_at"] = _remote_float(remote, "reserved_at", 0)
-    legacy_url = (base.get("url") or "").strip() or (remote.get("url") or "").strip()
-    legacy_url_source = "url" if legacy_url else ""
-    if not legacy_url:
-        for key in (
-            "conversation_url",
-            "page_url",
-            "bound_url",
-            "bound_page_url",
-            "chatgpt_url",
-            "last_page_url",
-        ):
-            val = (remote.get(key) or "").strip()
-            if not val:
-                continue
-            legacy_url = val
-            legacy_url_source = key
-            if key != "url" and key not in _MIGRATED_REMOTE_URL_FIELDS_LOGGED:
-                _MIGRATED_REMOTE_URL_FIELDS_LOGGED.add(key)
-                logger.info(
-                    "[FIELD][MIGRATE] field=%s replacement=url",
-                    key,
-                )
-            break
-    if legacy_url:
-        if not (base.get("url") or "").strip():
-            base["url"] = legacy_url
+    from app.utils.legacy_cleanup import assert_no_legacy_fields
 
-    legacy_conversation_id = (
-        (base.get("conversation_id") or "").strip()
-        or (remote.get("conversation_id") or "").strip()
-        or (remote.get("bound_conversation_id") or "").strip()
-        or (remote.get("target_conversation_id") or "").strip()
-    )
+    remote_work = dict(remote)
+    remote_work.pop("binding", None)
+    for drop_key in (
+        "enabled",
+        "canonical_url",
+        "last_reported_url",
+        "prebound_home_client_id",
+        "prebound_home_page_instance_id",
+        "reserved_client_id",
+        "reserved_page_instance_id",
+        "reserved_at",
+        "created_from_home",
+        "opened_home_at",
+        "bound_at",
+        "reopen_request_id",
+        "reopen_target_url",
+        "pending_bootstrap_created_at",
+        "pending_send_created_at",
+        "bootstrap_message_id",
+        "bootstrap_started_at",
+        "bootstrap_in_progress",
+    ):
+        remote_work.pop(drop_key, None)
+    assert_no_legacy_fields(remote_work, owner="normalize_remote_chatgpt")
+    for key in _REMOTE_NORMALIZE_KEYS:
+        if key in remote_work:
+            base[key] = remote_work[key]
+    for extra_key in ("page_display_id", "page_type", "page_title", "last_seen", "last_poll_at"):
+        if extra_key in remote_work and extra_key not in base:
+            base[extra_key] = remote_work[extra_key]
+
+    url = (base.get("url") or "").strip() or (remote_work.get("url") or "").strip()
+    if url and not (base.get("url") or "").strip():
+        base["url"] = url
+
+    legacy_conversation_id = (base.get("conversation_id") or "").strip() or (
+        remote_work.get("conversation_id") or ""
+    ).strip()
     if not legacy_conversation_id:
-        legacy_conversation_id = parse_conversation_id(legacy_url)
+        legacy_conversation_id = parse_conversation_id(url)
     if legacy_conversation_id:
-        base["enabled"] = True
         base["conversation_id"] = legacy_conversation_id
-        base["page_type"] = "conversation"
         if not (base.get("url") or "").strip():
             base["url"] = f"https://chatgpt.com/c/{legacy_conversation_id}"
 
-    if legacy_url and legacy_url_source in ("page_url", "bound_page_url", "chatgpt_url", "last_page_url"):
-        base["url"] = legacy_url
-
-    base["bind_state"] = _infer_bind_state(remote, base)
+    base["bind_state"] = _infer_bind_state(remote_work, base)
     conversation_id = (base.get("conversation_id") or "").strip()
     if conversation_id and base["bind_state"] in (
         BIND_STATE_UNBOUND,
@@ -171,52 +216,41 @@ def normalize_remote_chatgpt(remote):
         BIND_STATE_WAITING_CONVERSATION_CREATED,
     ):
         base["bind_state"] = BIND_STATE_BOUND_CONVERSATION
-    if base["bind_state"] == BIND_STATE_PREBOUND_HOME:
-        if not (base.get("prebound_home_client_id") or "").strip():
-            base["prebound_home_client_id"] = (base.get("client_id") or "").strip()
-        if not (base.get("prebound_home_page_instance_id") or "").strip():
-            base["prebound_home_page_instance_id"] = (
-                base.get("page_instance_id") or ""
-            ).strip()
-    for legacy_key in (
-        "conversation_url",
-        "page_url",
-        "bound_url",
-        "bound_page_url",
-        "chatgpt_url",
-        "last_page_url",
-        "target_page_url",
-        "target_url",
-    ):
-        base.pop(legacy_key, None)
-    return base
+    if base["bind_state"] == BIND_STATE_BOUND_OFFLINE:
+        if conversation_id:
+            base["bind_state"] = BIND_STATE_BOUND_CONVERSATION
+        else:
+            base["bind_state"] = BIND_STATE_UNBOUND
+    return _core_remote_dict(base)
 
 
 def write_session_remote_chatgpt(session, **fields):
     """
     唯一推荐写入入口：更新 session.remote_chatgpt 并规范化 url / bind_state。
-    仅接受核心字段；其余 bootstrap 字段可通过关键字传入。
+    仅接受 REMOTE_CHATGPT_PERSISTENT_KEYS 与核心绑定字段；其余写入 bind_runtime。
     """
     if session is None:
         return default_remote_chatgpt()
     remote = normalize_remote_chatgpt(session.remote_chatgpt)
-    core_keys = (
-        "enabled",
-        "bind_state",
-        "url",
-        "conversation_id",
-        "client_id",
-        "page_instance_id",
-        "page_type",
-        "page_title",
-        "last_seen",
-    )
-    for key in core_keys:
+    from app.utils.bind_runtime import TRANSIENT_REMOTE_CHATGPT_KEYS
+
+    for key in _REMOTE_NORMALIZE_KEYS:
         if key in fields and fields[key] is not None:
             remote[key] = fields[key]
     for key, value in fields.items():
-        if key not in core_keys and key in remote:
-            remote[key] = value
+        if key in TRANSIENT_REMOTE_CHATGPT_KEYS:
+            logger.debug(
+                "[SESSION_REMOTE][SKIP_TRANSIENT] session_id=%s field=%s",
+                getattr(session, "session_id", "-"),
+                key,
+            )
+            continue
+        if key not in _REMOTE_NORMALIZE_KEYS:
+            logger.debug(
+                "[SESSION_REMOTE][SKIP_UNKNOWN] session_id=%s field=%s",
+                getattr(session, "session_id", "-"),
+                key,
+            )
     url = page_url_from(remote)
     conversation_id = (remote.get("conversation_id") or "").strip()
     if not conversation_id and url:
@@ -227,8 +261,6 @@ def write_session_remote_chatgpt(session, **fields):
     if conversation_id:
         canonical = f"https://chatgpt.com/c/{conversation_id}"
         remote["url"] = canonical
-        remote["page_type"] = "conversation"
-        remote["enabled"] = True
         if (remote.get("bind_state") or "").strip() in (
             BIND_STATE_UNBOUND,
             BIND_STATE_PREBOUND_HOME,
@@ -238,7 +270,7 @@ def write_session_remote_chatgpt(session, **fields):
         ):
             remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
     elif (remote.get("bind_state") or "").strip() == BIND_STATE_PREBOUND_HOME:
-        remote["enabled"] = True
+        pass
     logger.info(
         "[SESSION_REMOTE][NORMALIZE] session_id=%s bind_state=%s conversation_id=%s url=%s",
         getattr(session, "session_id", "-"),
@@ -247,15 +279,9 @@ def write_session_remote_chatgpt(session, **fields):
         remote.get("url"),
     )
     remote = normalize_remote_chatgpt(remote)
-    for legacy_key in (
-        "conversation_url",
-        "page_url",
-        "bound_url",
-        "bound_page_url",
-        "chatgpt_url",
-        "last_page_url",
-    ):
-        remote.pop(legacy_key, None)
+    from app.utils.legacy_cleanup import assert_no_legacy_fields
+
+    assert_no_legacy_fields(remote, owner="GUI session.remote_chatgpt")
     session.remote_chatgpt = remote
     return remote
 
@@ -267,20 +293,12 @@ class ChatMessage:
     created_at: float = field(default_factory=time.time)
     message_id: str = ""
     turn_id: str = ""
-    status: str = ""
+    ui_status: str = ""
     detail: str = ""
-    source: str = ""
+    message_source: str = ""
     bridge_message_id: str = ""
     parent_message_id: str = ""
     visible_in_chat: bool = True
-
-    @property
-    def text(self):
-        return self.content
-
-    @text.setter
-    def text(self, value):
-        self.content = value
 
 
 @dataclass
@@ -295,11 +313,26 @@ class ChatSession:
     pinned_context: str = ""
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
-    has_pending_reply: bool = False
     pending_reply_since: float = 0
-    waiting_for_reply: bool = False
-    waiting_since_ts: float = 0
-    waiting_elapsed_sec: int = 0
+
+    @property
+    def has_pending_reply(self) -> bool:
+        return float(self.pending_reply_since or 0) > 0
+
+    @property
+    def waiting_for_reply(self) -> bool:
+        return self.has_pending_reply
+
+    @property
+    def waiting_since_ts(self) -> float:
+        return float(self.pending_reply_since or 0)
+
+    @property
+    def waiting_elapsed_sec(self) -> int:
+        since = float(self.pending_reply_since or 0)
+        if since <= 0:
+            return 0
+        return max(0, int(time.time() - since))
 
     @property
     def conversation_id(self):
@@ -311,3 +344,24 @@ class ChatSession:
         remote = normalize_remote_chatgpt(self.remote_chatgpt)
         remote["conversation_id"] = (value or "").strip()
         self.remote_chatgpt = remote
+
+    def __setattr__(self, name, value):
+        if name == "remote_chatgpt":
+            value = normalize_remote_chatgpt(value)
+        elif name == "has_pending_reply":
+            if value:
+                if float(getattr(self, "pending_reply_since", 0) or 0) <= 0:
+                    object.__setattr__(self, "pending_reply_since", time.time())
+            else:
+                object.__setattr__(self, "pending_reply_since", 0)
+            return
+        elif name in ("waiting_for_reply", "waiting_since_ts", "waiting_elapsed_sec"):
+            if name == "waiting_for_reply":
+                if value and float(getattr(self, "pending_reply_since", 0) or 0) <= 0:
+                    object.__setattr__(self, "pending_reply_since", time.time())
+                elif not value:
+                    object.__setattr__(self, "pending_reply_since", 0)
+            elif name == "waiting_since_ts" and value:
+                object.__setattr__(self, "pending_reply_since", float(value or 0))
+            return
+        super().__setattr__(name, value)

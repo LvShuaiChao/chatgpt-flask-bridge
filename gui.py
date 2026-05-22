@@ -12,7 +12,6 @@ from log_utils import (
     append_startup_environment,
     clear_log_file,
     get_log_file_path,
-    set_log_runtime_options,
 )
 
 
@@ -30,7 +29,6 @@ def main():
     sys.excepthook = handle_exception
 
     clear_log_file()
-    set_log_runtime_options(verbose=True, mirror_to_console=True, include_callsite=True)
     append_startup_environment(source="GUI")
     append_log(
         "[APP][BOOT] GUI main started",

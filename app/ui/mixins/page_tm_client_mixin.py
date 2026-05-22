@@ -1,11 +1,38 @@
 """油猴客户端遍历、URL 摘要与绑定状态基础判断。"""
 
+from app.server.tm_page_registry import _is_ignored_page
+from app.server import (
+    cancel_message,
+    complete_gui_dispatch,
+    enqueue_control_command,
+    get_bridge_status,
+    get_message_state,
+    get_server_port,
+    get_server_public_host,
+    get_server_url,
+    get_tm_online_summary,
+    is_server_running,
+    push_close_other_pages,
+    push_close_page,
+    push_message,
+    push_open_url,
+    set_debug_mode,
+    set_external_gui_dispatch,
+    set_log_callback,
+    set_status_callback,
+    start_server,
+    stop_server,
+)
+
 import time
 import traceback
 from urllib.parse import urlsplit, urlunsplit, urlparse
 
+from PyQt5.QtCore import Qt
+
 from app.constants import TM_HEARTBEAT_ONLINE_SECONDS
 from app.models import (
+    remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
@@ -18,17 +45,20 @@ from app.models import (
 from app.url_utils import parse_conversation_id
 from app.utils.text_utils import short_id, short_page_display
 from app.utils.page_status import (
+    conversation_syncable_from,
+    can_accept_input,
     classify_page_state,
+    evaluate_page_capability,
     evaluate_send_page,
     explain_page_decision,
     get_page_liveness,
     can_sync_conversation,
-    is_conversation_syncable,
-    is_dialog_ready_page,
+    is_page_busy,
     is_page_online,
-    is_page_syncable,
     is_page_url_syncable,
     is_prebound_home_page,
+    latest_page_seen_ts,
+    normalize_page,
     page_registry_key,
     page_url_from,
 )
@@ -37,9 +67,14 @@ from app.utils.tm_activity import (
     compute_tm_activity_metrics,
     tm_send_allowed,
 )
+from app.utils.page_snapshot import PageRegistry
 
 
 class PageTmClientMixin:
+    def _page_is_online(self, page):
+        """页面列表统计用在线判断（与下拉框展示口径一致，含 recently_seen）。"""
+        return self._page_is_online_for_ui(page)
+
     def _page_is_online_for_ui(self, page):
         """UI 展示用在线判断：与下拉框 [在线] 文案、绿色样式共用，含 recently_seen。"""
         if not isinstance(page, dict):
@@ -95,8 +130,13 @@ class PageTmClientMixin:
         return page_url_from(item)
 
     def _is_dialog_ready_page(self, item):
-        """可同步对话页（统一 app.utils.page_status.is_dialog_ready_page）。"""
-        return is_dialog_ready_page(item)
+        """可同步对话页（在线 + conversation 类型 + 可同步）。"""
+        if not isinstance(item, dict):
+            return False
+        page_type = (item.get("page_type") or "").strip()
+        if page_type and page_type not in ("conversation", "-"):
+            return False
+        return can_sync_conversation(item)
 
     def _is_prebound_home_page(self, item):
         """首页预绑定（统一 app.utils.page_status.is_prebound_home_page）。"""
@@ -148,28 +188,48 @@ class PageTmClientMixin:
             "prebound_home": prebound_home,
         }
 
-    def _find_online_page_by_conversation_id(self, conversation_id, status=None):
+    def _find_online_page_by_conversation_id(
+        self, conversation_id, status=None, snapshot=None
+    ):
         return self._find_online_tm_client_by_conversation_id(
-            conversation_id, status=status, sync_only=False
+            conversation_id, status=status, sync_only=False, snapshot=snapshot
         )
 
     def _get_selected_tm_page_from_combo(self, status=None):
-        status = status or self._last_bridge_status or {}
-        if hasattr(self, "tm_page_combo") and self.tm_page_combo.count() > 0:
-            idx = self.tm_page_combo.currentIndex()
-            if idx >= 0 and hasattr(self, "_tm_page_combo_page_from_index"):
-                page = self._tm_page_combo_page_from_index(idx)
-                if isinstance(page, dict):
-                    return page
-        client_id = ""
-        if hasattr(self, "_selected_tm_page_client_id"):
-            client_id = (self._selected_tm_page_client_id() or "").strip()
-        if client_id:
-            return self._find_tm_client_by_client_id(client_id, status=status)
+        """统一从页面下拉框读取当前选中页（UserRole 完整 dict，不解析 currentText）。"""
+        del status
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None or combo.count() <= 0:
+            return None
+
+        index = combo.currentIndex()
+
+        if index < 0 and combo.count() == 1:
+            index = 0
+            combo.setCurrentIndex(0)
+
+        if index < 0:
+            return None
+
+        data = combo.itemData(index, Qt.UserRole)
+        if isinstance(data, dict):
+            return data
+
+        role = getattr(self, "TM_PAGE_ITEM_DICT_ROLE", None)
+        if role is not None:
+            data = combo.itemData(index, role)
+            if isinstance(data, dict):
+                return data
+
+        if hasattr(self, "_tm_page_combo_page_from_index"):
+            page = self._tm_page_combo_page_from_index(index)
+            if isinstance(page, dict):
+                return page
+
         return None
 
     def _get_current_or_recent_online_tm_page(self, status=None):
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         for getter in (
             lambda: self._pick_current_page_client_info(status),
             lambda: self._find_focused_tm_page(status),
@@ -274,14 +334,17 @@ class PageTmClientMixin:
         if not isinstance(item, dict):
             return {
                 "online": False,
-                "sendable": False,
-                "sync_readable": False,
-                "syncable": False,
+                "send_now_available": False,
+                "send_decision": "blocked",
+                "send_queueable": False,
+                "conversation_syncable": False,
+                "url_syncable": False,
                 "stale": False,
                 "state": "offline",
                 "reason": "invalid_client",
-                "responding": False,
-                "input_ok": False,
+                "is_responding": False,
+                "can_accept_input": False,
+                "response_state": "unknown",
             }
 
         client_id = (item.get("client_id") or "").strip()
@@ -304,44 +367,27 @@ class PageTmClientMixin:
         last_seen_age = self._age_from_ts(item.get("last_seen"), context="last_seen")
 
         decision = explain_page_decision(item, action="sync")
-        send_decision, send_block_reason = evaluate_send_page(
+        send_cap = evaluate_page_capability(
             item,
+            action="send",
             expected_conversation_id=expected_conversation_id,
+            expected_client_id=expected_client_id,
         )
+        send_decision = (send_cap.send_decision or "blocked").strip()
+        send_block_reason = send_cap.reason or ""
 
         client_match = not expected_client_id or client_id == expected_client_id
         conv_match = not expected_conversation_id or conversation_id == expected_conversation_id
         online = bool(decision.get("online"))
-        dialog_ready = bool(decision.get("dialog_ready"))
         prebound_home = bool(decision.get("prebound_home"))
         conversation_syncable = bool(decision.get("conversation_syncable"))
-        syncable = bool(decision.get("syncable"))
-        sendable = bool(
-            online
-            and client_match
-            and conv_match
-            and send_decision == "allowed"
-        )
-        queueable = bool(
-            online
-            and client_match
-            and conv_match
-            and send_decision == "queued"
-        )
+        send_requestable = bool(send_cap.send_requestable)
+        send_now_available = bool(send_cap.send_now_available)
+        send_queueable = bool(send_cap.send_queueable)
 
-        responding = bool(item.get("is_responding") or item.get("responding"))
-        if isinstance(item.get("responding"), str):
-            responding = item.get("responding").lower() in (
-                "yes",
-                "true",
-                "1",
-                "generating",
-            )
-        response_state = str(item.get("response_state") or "").lower()
-        if response_state == "generating":
-            responding = True
-
-        input_ok = bool(item.get("can_accept_input", True))
+        responding = is_page_busy(item)
+        can_accept = can_accept_input(item)
+        response_state = str(item.get("response_state") or "unknown")
 
         reason = (decision.get("blocked_reason") or "").strip()
         if not reason:
@@ -351,8 +397,8 @@ class PageTmClientMixin:
                 reason = "client_mismatch"
             elif not conv_match:
                 reason = "conversation_mismatch"
-            elif not dialog_ready:
-                reason = "not_dialog_ready"
+            elif not conversation_syncable:
+                reason = "not_conversation_syncable"
 
         stale = bool(online and activity in ("stale_hidden",))
         state = "offline"
@@ -362,27 +408,25 @@ class PageTmClientMixin:
             state = "prebound_home"
         if stale:
             state = "stale"
-        if conversation_syncable and dialog_ready:
+        if conversation_syncable:
             state = "syncable"
-        if sendable and dialog_ready:
+        if send_now_available and conversation_syncable:
             state = "sendable"
-        if queueable:
+        if send_queueable:
             state = "queueable"
 
         return {
             "client_id": client_id,
             "conversation_id": conversation_id,
             "visibility": visibility or "-",
-            "activity": activity or "-",
+            "activity_state": activity or "-",
             "online": online,
-            "sendable": sendable,
-            "queueable": queueable,
-            "sync_readable": conversation_syncable,
-            "syncable": syncable,
+            "send_requestable": send_requestable,
+            "send_now_available": send_now_available,
+            "send_queueable": send_queueable,
             "can_sync_conversation": conversation_syncable,
             "url_syncable": bool(decision.get("url_syncable")),
             "conversation_syncable": conversation_syncable,
-            "dialog_ready": dialog_ready,
             "prebound_home": prebound_home,
             "blocked_reason": reason,
             "stale": stale,
@@ -392,8 +436,9 @@ class PageTmClientMixin:
             "send_decision": send_decision,
             "client_match": client_match,
             "conversation_match": conv_match,
-            "input_ok": input_ok,
-            "responding": responding,
+            "can_accept_input": can_accept,
+            "is_responding": responding,
+            "response_state": response_state,
             "page_type": (item.get("page_type") or "").strip(),
             "heartbeat_age": round(heartbeat_age, 3) if heartbeat_age >= 0 else -1.0,
             "last_seen_age": round(last_seen_age, 3) if last_seen_age >= 0 else -1.0,
@@ -467,13 +512,18 @@ class PageTmClientMixin:
             "url": norm.get("url") or "",
         }
 
-    def _tm_client_bindable(self, item):
-        """手动绑定必须使用实时在线页面，避免绑定到历史快照或离线页。"""
+    def _tm_client_bindable(self, item, *, for_manual_ui=False):
+        """手动绑定候选校验；for_manual_ui 与下拉框 [在线] 展示口径一致。"""
         if not isinstance(item, dict):
             return False, "invalid_page"
-        if item.get("realtime") is False:
+        if not for_manual_ui and item.get("realtime") is False:
             return False, "not_realtime_page"
-        if not self._tm_page_is_online_simple(item):
+        online = (
+            self._page_is_online_for_ui(item)
+            if for_manual_ui
+            else self._tm_page_is_online_simple(item)
+        )
+        if not online:
             return False, "offline"
         identity = self._tm_page_identity_fields(item)
         if any(
@@ -484,7 +534,7 @@ class PageTmClientMixin:
         return False, "missing_page_identity"
 
     def _find_online_tm_client_by_conversation_id(
-        self, conversation_id, status=None, *, sync_only=False
+        self, conversation_id, status=None, *, sync_only=False, snapshot=None
     ):
         """按 conversation_id 查找在线页面（与 sync/send 共用 _pick_best_conversation_page）。"""
         conversation_id = (conversation_id or "").strip()
@@ -498,12 +548,18 @@ class PageTmClientMixin:
                 profile = self._tm_client_sync_profile(
                     item, expected_conversation_id=conversation_id
                 )
-                if not (profile.get("sync_readable") or profile.get("syncable")):
+                if not profile.get("sync_ok"):
                     return None
             return item
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
+        snapshot = snapshot or self._get_tm_page_snapshot(status, log_stages=False)
+        conv_pages = snapshot.by_conversation_id_dict.get(conversation_id) or []
         candidates = []
-        for item in self._iter_tm_clients(status, online_only=False):
+        for item in conv_pages or self._iter_tm_clients(
+            status, online_only=False, snapshot=snapshot
+        ):
+            if conv_pages and self._client_conversation_id(item) != conversation_id:
+                continue
             item_conv = self._client_conversation_id(item)
             if item_conv != conversation_id:
                 continue
@@ -513,7 +569,7 @@ class PageTmClientMixin:
                 profile = self._tm_client_sync_profile(
                     item, expected_conversation_id=conversation_id
                 )
-                if not (profile.get("sync_readable") or profile.get("syncable")):
+                if not profile.get("sync_ok"):
                     continue
             poll_age = self._age_from_ts(
                 item.get("last_poll_at"),
@@ -552,7 +608,7 @@ class PageTmClientMixin:
         conversation_id = (conversation_id or "").strip()
         if not conversation_id:
             return 0
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         count = 0
         for item in self._iter_tm_clients(status, online_only=False):
             if self._client_conversation_id(item) != conversation_id:
@@ -588,14 +644,9 @@ class PageTmClientMixin:
                 value += 40
             if page.get("is_online") or page.get("online"):
                 value += 20
-            title = str(page.get("title") or "").strip()
-            page_url = str(
-                page.get("url")
-                or page.get("href")
-                or page.get("page_url")
-                or ""
-            ).strip()
-            if title:
+            page_title = str(page.get("page_title") or "").strip()
+            page_url = page_url_from(page)
+            if page_title:
                 value += 5
             if page_url:
                 value += 5
@@ -622,7 +673,7 @@ class PageTmClientMixin:
                 str(
                     merged.get("url")
                     or merged.get("href")
-                    or merged.get("page_url")
+                    or merged.get("url")
                     or ""
                 )
             )
@@ -631,7 +682,7 @@ class PageTmClientMixin:
     def _annotate_pages_for_url_dedup(self, pages, status=None):
         if not pages:
             return
-        status = status or getattr(self, "_last_bridge_status", None) or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         current_client_id = str(status.get("tampermonkey_client_id") or "").strip()
         bound_page_instance_id = ""
         resolved_bound_client_id = ""
@@ -642,7 +693,7 @@ class PageTmClientMixin:
         session = self._current_session() if hasattr(self, "_current_session") else None
         if session is not None:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            if remote.get("enabled"):
+            if remote_binding_enabled(remote):
                 resolved_bound_client_id = (remote.get("client_id") or "").strip()
                 bound_page_instance_id = (remote.get("page_instance_id") or "").strip()
                 if hasattr(self, "_remote_conversation_id"):
@@ -684,84 +735,58 @@ class PageTmClientMixin:
         if not pages:
             return []
         deduped = {}
-        duplicate_urls = []
+        merged_keys = []
         for page in pages:
             if not isinstance(page, dict):
                 continue
-            raw_url = str(
-                page.get("url")
-                or page.get("href")
-                or page.get("page_url")
-                or ""
-            ).strip()
-            norm_url = self._normalize_chatgpt_page_url(raw_url)
-            page_id = str(
-                page.get("page_id")
-                or page.get("id")
-                or page.get("window_id")
-                or ""
-            ).strip()
-            key = norm_url or f"page_id:{page_id}"
-            if not key:
-                continue
-            old = deduped.get(key)
+            norm_page = normalize_page(page)
+            identity_key = page_registry_key(norm_page)
+            if not identity_key:
+                raw_url = page_url_from(norm_page)
+                norm_url = self._normalize_chatgpt_page_url(raw_url)
+                if not norm_url:
+                    continue
+                identity_key = f"url_fallback:{norm_url}"
+            old = deduped.get(identity_key)
             if old is None:
-                new_page = dict(page)
-                new_page["_normalized_url"] = norm_url
-                deduped[key] = new_page
+                deduped[identity_key] = norm_page
                 continue
-            duplicate_urls.append(norm_url or key)
-            deduped[key] = self._choose_better_page_record(old, page)
+            merged_keys.append(identity_key)
+            deduped[identity_key] = self._choose_better_page_record(old, norm_page)
 
         unique_pages = list(deduped.values())
         raw_count = len([p for p in pages if isinstance(p, dict)])
         duplicate_count = max(0, raw_count - len(unique_pages))
-        if hasattr(self, "_append_log"):
-            self._append_log(
-                "[PAGE_LIST][DEDUP] "
-                f"raw={raw_count} unique={len(unique_pages)} duplicate={duplicate_count}",
-                echo=False,
-            )
-            if duplicate_count and (
-                not hasattr(self, "_is_debug_mode_enabled")
-                or self._is_debug_mode_enabled()
-            ):
-                seen_urls = set()
-                for norm in duplicate_urls:
-                    if not norm or norm in seen_urls:
-                        continue
-                    seen_urls.add(norm)
-                    kept = deduped.get(norm) or deduped.get(f"page_id:{norm}")
-                    if not isinstance(kept, dict):
-                        kept = next(
-                            (
-                                item
-                                for item in unique_pages
-                                if item.get("_normalized_url") == norm
-                            ),
-                            None,
-                        )
-                    keep_title = (
-                        str(kept.get("title") or "").strip() if isinstance(kept, dict) else ""
-                    )
-                    self._append_log(
-                        "[PAGE_LIST][DEDUP_DUPLICATE] "
-                        f"url={norm} keep_title={keep_title!r}",
-                        echo=False,
-                    )
+        self._log_tm_page_list_stage(
+            "dedupe",
+            f"[TM_PAGE_LIST][DEDUPE] "
+            f"total={raw_count} kept={len(unique_pages)} merged={duplicate_count}",
+        )
         return unique_pages
 
-    def _extract_tm_pages_from_status(self, status=None):
-        status = status or getattr(self, "_last_bridge_status", None) or {}
+    def _ensure_tm_page_list_log_aggregator(self):
+        agg = getattr(self, "_tm_page_list_log_aggregator", None)
+        if agg is None:
+            from app.utils.gui_logging import TmPageListLogAggregator
+
+            agg = TmPageListLogAggregator(interval_sec=1.0)
+            self._tm_page_list_log_aggregator = agg
+        return agg
+
+    def _log_tm_page_list_stage(self, stage, message):
+        """文件日志始终写入；GUI 侧聚合 FETCH/NORMALIZE/DEDUPE。"""
+        text = str(message or "")
+        if hasattr(self, "_append_log"):
+            self._append_log(text, echo=False)
+        agg = self._ensure_tm_page_list_log_aggregator()
+        summary = agg.record(stage, count=1)
+        if summary and hasattr(self, "_append_log"):
+            self._append_log(summary, echo=False)
+
+    def _fetch_raw_tm_pages_from_status(self, status=None):
+        """从 status 拉取原始页面列表（未 normalize / dedupe）。"""
+        status = status or self._bridge_ui.last_bridge_status or {}
         pages = []
-        candidate_keys = (
-            "clients",
-            "tm_clients",
-            "tampermonkey_clients",
-            "pages",
-            "tm_pages",
-            "browser_pages",
-        )
 
         def extend_from(value):
             if isinstance(value, dict):
@@ -769,72 +794,84 @@ class PageTmClientMixin:
             elif isinstance(value, list):
                 pages.extend(value)
 
-        for key in candidate_keys:
-            extend_from(status.get(key))
-
+        extend_from(status.get("pages"))
         nested = status.get("summary")
-        if isinstance(nested, dict):
-            for key in candidate_keys:
-                extend_from(nested.get(key))
+        if isinstance(nested, dict) and not pages:
+            extend_from(nested.get("pages"))
+        return pages
 
-        def as_timestamp(value):
-            if isinstance(value, (int, float)):
-                return float(value)
-
-            text = str(value or "").strip()
-            if not text:
-                return 0.0
-
-            normalized = text.replace(".", "", 1)
-            if normalized.isdigit():
-                return float(text)
-
-            return 0.0
-
-        def latest_seen_timestamp(item):
-            values = [
-                as_timestamp(item.get("last_heartbeat_at")),
-                as_timestamp(item.get("last_poll_at")),
-                as_timestamp(item.get("last_report_at")),
-                as_timestamp(item.get("last_seen")),
-                as_timestamp(item.get("last_focus_at")),
-            ]
-            return max(values) if values else 0.0
+    def build_tm_page_snapshot(self, status=None, *, log_stages=True):
+        """单次解析 bridge status 页面列表，构建索引与计数。"""
+        status = status or self._bridge_ui.last_bridge_status or {}
+        pages_raw = self._fetch_raw_tm_pages_from_status(status)
+        if log_stages:
+            self._log_tm_page_list_stage(
+                "fetch",
+                f"[TM_PAGE_LIST][FETCH] raw_count={len(pages_raw)}",
+            )
 
         prepared = []
-        for page in pages:
+        for page in pages_raw:
             if not isinstance(page, dict):
                 continue
-
-            client_id = str(page.get("client_id") or "").strip()
-            page_instance_id = str(page.get("page_instance_id") or "").strip()
-            conversation_id = str(page.get("conversation_id") or "").strip()
-            url = (
-                page.get("url")
-                or page.get("page_url")
-                or page.get("normalized_url")
-                or page.get("href")
-                or ""
-            )
-            url = str(url).strip()
-
+            item = normalize_page(page)
+            client_id = str(item.get("client_id") or "").strip()
+            page_instance_id = str(item.get("page_instance_id") or "").strip()
+            url = page_url_from(item)
             if not client_id and not page_instance_id and not url:
                 continue
-
-            item = dict(page)
-            item["client_id"] = client_id
-            item["page_instance_id"] = page_instance_id
-            item["conversation_id"] = conversation_id
-            item["url"] = url
             prepared.append(item)
 
-        self.raw_available_pages = list(prepared)
+        if log_stages:
+            self._log_tm_page_list_stage(
+                "normalize",
+                f"[TM_PAGE_LIST][NORMALIZE] count={len(prepared)}",
+            )
+
         self._annotate_pages_for_url_dedup(prepared, status=status)
         normalized = self._dedupe_chatgpt_pages(prepared)
-        normalized.sort(key=latest_seen_timestamp, reverse=True)
-        self.available_pages = list(normalized)
+        normalized.sort(
+            key=lambda item: latest_page_seen_ts(item) if isinstance(item, dict) else 0.0,
+            reverse=True,
+        )
+        online_fn = (
+            self._tm_page_is_online_simple
+            if hasattr(self, "_tm_page_is_online_simple")
+            else is_page_online
+        )
+        registry = PageRegistry.from_normalized_dicts(
+            normalized,
+            status,
+            conversation_id_of=self._client_conversation_id,
+            is_online=online_fn,
+        )
+        self.page_registry = registry
+        return registry
 
-        return normalized
+    def _get_tm_page_snapshot(self, status=None, *, log_stages=False):
+        """返回与 status 匹配的缓存 PageRegistry，必要时单次构建。"""
+        status = status or self._bridge_ui.last_bridge_status or {}
+        cached = getattr(self, "page_registry", None)
+        if isinstance(cached, PageRegistry) and cached.matches_status(status):
+            return cached
+        return self.build_tm_page_snapshot(status, log_stages=log_stages)
+
+    def _status_summary_page_count(self, status=None):
+        """状态摘要用的页面总数（复用 snapshot，不重复解析）。"""
+        return self._get_tm_page_snapshot(status, log_stages=False).total_count
+
+    def _extract_tm_pages_from_status(
+        self, status=None, *, log_stages=True, snapshot=None
+    ):
+        if snapshot is not None:
+            return list(snapshot.page_dicts)
+        status = status or self._bridge_ui.last_bridge_status or {}
+        cached = getattr(self, "page_registry", None)
+        if isinstance(cached, PageRegistry) and cached.matches_status(status):
+            return list(cached.page_dicts)
+        return list(
+            self.build_tm_page_snapshot(status, log_stages=log_stages).page_dicts
+        )
 
     def _page_is_stale(self, page, max_age_sec=None):
         if max_age_sec is None:
@@ -860,13 +897,28 @@ class PageTmClientMixin:
                 )
             return False
 
-    def _tm_display_counts_from_status(self, status=None, summary=None):
-        status = status or getattr(self, "_last_bridge_status", None) or {}
-        pages = self._extract_tm_pages_from_status(status)
+    def _tm_display_counts_from_status(self, status=None, summary=None, snapshot=None):
+        status = status or self._bridge_ui.last_bridge_status or {}
+        snapshot = snapshot or self._get_tm_page_snapshot(status, log_stages=False)
+        pages = list(snapshot.page_dicts)
         extracted_total = len(pages)
-        extracted_online = sum(
-            1 for page in pages if not self._page_is_stale(page)
+        extracted_strict_online = sum(
+            1 for page in pages if is_page_online(page)
         )
+        extracted_recently_seen = sum(
+            1 for page in pages
+            if get_page_liveness(page) == "recently_seen"
+        )
+        extracted_syncable = sum(
+            1 for page in pages if conversation_syncable_from(page)
+        )
+        self._tm_liveness_counts = {
+            "strict_online": extracted_strict_online,
+            "recently_seen": extracted_recently_seen,
+            "conversation_syncable": extracted_syncable,
+            "total": extracted_total,
+        }
+        extracted_online = extracted_strict_online
         if summary is None:
             summary = {}
         summary_total = int(summary.get("total_clients") or 0)
@@ -884,9 +936,19 @@ class PageTmClientMixin:
             return extracted_online, extracted_total
         return summary_online, summary_total
 
-    def _iter_tm_clients(self, status=None, *, online_only=False, bindable_only=False, page_type=""):
-        status = status or self._last_bridge_status or {}
-        for item in self._extract_tm_pages_from_status(status):
+    def _iter_tm_clients(
+        self,
+        status=None,
+        *,
+        online_only=False,
+        bindable_only=False,
+        page_type="",
+        snapshot=None,
+    ):
+        status = status or self._bridge_ui.last_bridge_status or {}
+        for item in self._extract_tm_pages_from_status(
+            status, log_stages=False, snapshot=snapshot
+        ):
             client_id = (item.get("client_id") or "").strip()
             if not client_id:
                 continue
@@ -913,7 +975,7 @@ class PageTmClientMixin:
                             f"client_id={(item.get('client_id') or '-')} "
                             f"page_instance_id={(item.get('page_instance_id') or '-')} "
                             f"conversation_id={(item.get('conversation_id') or '-')} "
-                            f"url={(item.get('page_url') or item.get('url') or '-')}",
+                            f"url={page_url_from(item) or '-'}",
                             echo=False,
                         )
                     continue
@@ -929,7 +991,7 @@ class PageTmClientMixin:
         chatgpt_id = (item.get("chatgpt_conversation_id") or "").strip()
         if chatgpt_id:
             return chatgpt_id
-        for field in ("page_url", "url", "normalized_url", "conversation_url"):
+        for field in ("url",):
             conv = parse_conversation_id((item.get(field) or "").strip())
             if conv:
                 return conv
@@ -959,22 +1021,12 @@ class PageTmClientMixin:
         conversation_id = (remote.get("conversation_id") or "").strip()
         if conversation_id:
             return conversation_id
-        return parse_conversation_id(
-            remote.get("conversation_url")
-            or remote.get("url")
-            or remote.get("page_url")
-            or ""
-        ) or ""
+        return parse_conversation_id((remote.get("url") or "").strip()) or ""
 
     def _remote_conversation_url(self, remote):
         remote = normalize_remote_chatgpt(remote)
         conversation_id = self._remote_conversation_id(remote)
-        url = (
-            remote.get("conversation_url")
-            or remote.get("url")
-            or remote.get("page_url")
-            or ""
-        ).strip()
+        url = (remote.get("url") or "").strip()
         if conversation_id and (not url or "xz_bind_token=" in url):
             return f"https://chatgpt.com/c/{conversation_id}"
         if not url and conversation_id:
@@ -986,7 +1038,7 @@ class PageTmClientMixin:
             session.remote_chatgpt if session else None
         )
         state = self._remote_bind_state(remote)
-        if not remote.get("enabled"):
+        if not remote_binding_enabled(remote):
             return BIND_STATE_UNBOUND
         if state == BIND_STATE_WAITING_BOUND_CONVERSATION:
             return BIND_STATE_WAITING_BOUND_CONVERSATION
@@ -1099,21 +1151,19 @@ class PageTmClientMixin:
         return False
 
     def _client_info_by_page_identity(
-        self, client_id, page_instance_id="", status=None
+        self, client_id, page_instance_id="", status=None, snapshot=None
     ):
         client_id = (client_id or "").strip()
         page_instance_id = (page_instance_id or "").strip()
         if not client_id:
             return None
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
+        snapshot = snapshot or self._get_tm_page_snapshot(status, log_stages=False)
         if page_instance_id:
-            for item in self._iter_tm_clients(status):
-                if (
-                    self._tm_client_id(item) == client_id
-                    and self._tm_page_instance_id(item) == page_instance_id
-                ):
-                    return item
-        for item in self._iter_tm_clients(status):
+            hit = snapshot.by_page_instance_id.get(page_instance_id)
+            if isinstance(hit, dict) and self._tm_client_id(hit) == client_id:
+                return hit
+        for item in self._iter_tm_clients(status, snapshot=snapshot):
             if self._tm_client_id(item) == client_id:
                 if page_instance_id:
                     self._append_log(
@@ -1127,10 +1177,14 @@ class PageTmClientMixin:
                 return item
         return None
 
-    def _client_info_by_id(self, client_id, status=None, page_instance_id=None):
+    def _client_info_by_id(
+        self, client_id, status=None, page_instance_id=None, snapshot=None
+    ):
         client_id = (client_id or "").strip()
         if not client_id:
             return None
+        status = status or self._bridge_ui.last_bridge_status or {}
+        snapshot = snapshot or self._get_tm_page_snapshot(status, log_stages=False)
         instance = page_instance_id
         if instance is None:
             session = self._current_session() if hasattr(self, "_current_session") else None
@@ -1140,14 +1194,13 @@ class PageTmClientMixin:
                     instance = (remote.get("page_instance_id") or "").strip()
         if instance:
             found = self._client_info_by_page_identity(
-                client_id, instance, status=status
+                client_id, instance, status=status, snapshot=snapshot
             )
             if found is not None:
                 return found
-        status = status or self._last_bridge_status or {}
-        for item in self._iter_tm_clients(status):
-            if self._tm_client_id(item) == client_id:
-                return item
+        hit = snapshot.by_client_id.get(client_id)
+        if isinstance(hit, dict):
+            return hit
         return None
 
     def _client_info_from_status(self, client_id):
@@ -1163,7 +1216,7 @@ class PageTmClientMixin:
         client_id = (client_id or "").strip()
         if not client_id:
             return False
-        for item in self._iter_tm_clients(self._last_bridge_status, online_only=True):
+        for item in self._iter_tm_clients(self._bridge_ui.last_bridge_status, online_only=True):
             if self._tm_client_id(item) == client_id:
                 return True
         return False
@@ -1185,7 +1238,7 @@ class PageTmClientMixin:
         page_type = (item.get("page_type") or "").strip()
         if page_type == "home":
             return True
-        page_url = (item.get("page_url") or "").strip()
+        page_url = (item.get("url") or "").strip()
         if page_url:
             try:
                 parsed = urlparse(page_url)
@@ -1264,7 +1317,7 @@ class PageTmClientMixin:
 
         for session in self._sessions.values():
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            if not remote.get("enabled"):
+            if not remote_binding_enabled(remote):
                 continue
             bind_state = self._remote_bind_state(remote)
             bound_client = (remote.get("client_id") or "").strip()
@@ -1272,7 +1325,7 @@ class PageTmClientMixin:
             bound_conv = (remote.get("conversation_id") or "").strip()
             if not bound_conv:
                 bound_conv = parse_conversation_id(
-                    remote.get("conversation_url") or remote.get("url") or ""
+                    (remote.get("url") or "").strip()
                 )
             prebound_client = (remote.get("prebound_home_client_id") or "").strip()
             prebound_instance = (
@@ -1330,12 +1383,12 @@ class PageTmClientMixin:
         return None
 
     def _collect_monkey_window_binding_stats(self, status=None):
-        import server as bridge_server
+        from app.server.tm_page_registry import _is_ignored_page
 
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         filtered = []
         for item in self._iter_tm_clients(status):
-            if bridge_server._is_ignored_page(item):
+            if _is_ignored_page(item):
                 continue
             filtered.append(item)
 
@@ -1393,8 +1446,13 @@ class PageTmClientMixin:
                     seen_unbound.add(label)
                     unbound_labels.append(label)
 
-        raw_pages = getattr(self, "raw_available_pages", None) or []
-        raw_count = len(raw_pages)
+        registry = getattr(self, "page_registry", None)
+        page_dicts = (
+            list(registry.page_dicts)
+            if isinstance(registry, PageRegistry)
+            else list(self._extract_tm_pages_from_status(status, log_stages=False))
+        )
+        raw_count = len(page_dicts)
         unique_count = total
         duplicate_count = max(0, raw_count - unique_count)
 
@@ -1441,39 +1499,3 @@ class PageTmClientMixin:
         unbound_text = self._format_monkey_label_list(stats.get("unbound_labels") or [])
         detail_line = f"绑定明细：已绑定：{bound_text}｜未绑定：{unbound_text}"
         return window_line, detail_line
-
-    def _update_tm_blank_home_label(self, status=None, monkey_stats=None):
-        if not hasattr(self, "tm_blank_home_label"):
-            return
-        monkey_stats = monkey_stats or self._collect_monkey_window_binding_stats(status)
-        blank_total = int(monkey_stats.get("blank_home_total") or 0)
-        blank_online = int(monkey_stats.get("blank_home_online") or 0)
-        blank_available = int(monkey_stats.get("blank_home_available") or 0)
-        blank_bound = int(monkey_stats.get("blank_home_bound") or 0)
-        self.tm_blank_home_label.setText(
-            f"空白页：{blank_online}/{blank_total}｜可用{blank_available}｜已绑{blank_bound}"
-        )
-        if blank_available > 0:
-            self._refresh_status_chip(self.tm_blank_home_label, "ok")
-        elif blank_online > 0:
-            self._refresh_status_chip(self.tm_blank_home_label, "warn")
-        else:
-            self._refresh_status_chip(self.tm_blank_home_label, "")
-        available_text = self._format_monkey_label_list(
-            monkey_stats.get("blank_home_available_labels") or []
-        )
-        bound_text = self._format_monkey_label_list(
-            monkey_stats.get("blank_home_bound_labels") or []
-        )
-        self.tm_blank_home_label.setToolTip(
-            "空白 ChatGPT 首页统计\n"
-            f"在线/总数：{blank_online}/{blank_total}\n"
-            f"可用空白页：{blank_available}\n"
-            f"已绑定/预绑定空白页：{blank_bound}\n"
-            f"可用列表：{available_text}\n"
-            f"已绑列表：{bound_text}"
-        )
-
-    def update_monkey_binding_summary(self, status=None, monkey_stats=None):
-        """页面概览 UI 已移除；统计仍由 _collect_monkey_window_binding_stats 供日志使用。"""
-        return

@@ -1,43 +1,37 @@
+from app.server import (
+    cancel_message,
+    complete_gui_dispatch,
+    enqueue_control_command,
+    get_bridge_status,
+    get_message_state,
+    get_server_port,
+    get_server_public_host,
+    get_server_url,
+    get_tm_online_summary,
+    is_server_running,
+    push_close_other_pages,
+    push_close_page,
+    push_message,
+    push_open_url,
+    set_debug_mode,
+    set_external_gui_dispatch,
+    set_log_callback,
+    set_status_callback,
+    start_server,
+    stop_server,
+)
+
 import time
 import traceback
 
-import server
 from log_utils import append_log, set_log_runtime_options
-from PyQt5.QtCore import QTimer
 
 from app.constants import (
     DEFAULT_APP_SETTINGS,
     RUNTIME_DIR,
 )
-
-BOOL_SETTING_BINDINGS = {
-    "remember_window_geometry": "_remember_window_geometry",
-    "remember_window_position": "_remember_window_position",
-    "restore_main_tab": "_restore_main_tab",
-    "restore_chat_tab": "_restore_chat_tab",
-    "show_top_status_bar": "_show_top_status_bar",
-    "debug_mode": "_debug_mode",
-    "show_raw_payload": "_show_raw_payload",
-    "mirror_log_to_console": "_mirror_log_to_console",
-    "include_log_callsite": "_include_log_callsite",
-    "log_ack_events": "_log_ack_events",
-    "log_assistant_reply_events": "_log_assistant_reply_events",
-    "log_send_failed_events": "_log_send_failed_events",
-    "auto_clear_input_after_send": "_auto_clear_input_after_send",
-    "auto_name_new_chat": "_auto_name_new_chat",
-    "show_timestamp": "_show_timestamp",
-    "show_assistant_placeholder": "_show_assistant_placeholder",
-    "bind_each_chat_to_page": "_bind_each_chat_to_page",
-    "auto_open_bound_page_when_missing": "_auto_open_bound_page_when_missing",
-    "allow_fallback_to_any_page": "_allow_fallback_to_any_page",
-    "auto_bind_unbound_page": "_auto_bind_unbound_page",
-    "upload_before_send_enabled": "_upload_before_send_enabled",
-    "sync_full_conversation_enabled": "_sync_full_conversation_enabled",
-    "auto_sync_conversation_on_bind": "_auto_sync_conversation_on_bind",
-    "auto_sync_conversation_after_reply": "_auto_sync_conversation_after_reply",
-}
-
-BOOL_SETTING_SAVE_KEYS = frozenset({
+# 无设置页 UI 的布尔项：仅用 DEFAULT_APP_SETTINGS 固定值，不写入 QSettings。
+_FIXED_BOOL_SETTING_ATTRS = (
     "remember_window_geometry",
     "remember_window_position",
     "restore_main_tab",
@@ -54,15 +48,18 @@ BOOL_SETTING_SAVE_KEYS = frozenset({
     "auto_name_new_chat",
     "show_timestamp",
     "show_assistant_placeholder",
-    "bind_each_chat_to_page",
-    "auto_open_bound_page_when_missing",
-    "allow_fallback_to_any_page",
-    "auto_bind_unbound_page",
-    "upload_before_send_enabled",
-    "sync_full_conversation_enabled",
-    "auto_sync_conversation_on_bind",
-    "auto_sync_conversation_after_reply",
-})
+)
+
+FIXED_BRIDGE_BEHAVIOR_SETTINGS = {
+    "bind_each_chat_to_page": True,
+    "auto_open_bound_page_when_missing": True,
+    "auto_bind_unbound_page": True,
+    "sync_full_conversation_enabled": True,
+    "auto_sync_conversation_on_bind": False,
+    "auto_sync_conversation_after_reply": False,
+    "sync_conversation_mode": "replace",
+    "sync_conversation_max_messages": 200,
+}
 
 
 class SettingsMixin:
@@ -108,22 +105,61 @@ class SettingsMixin:
         if value is None:
             return bool(default)
         return str(value).lower() in ("1", "true", "yes", "on")
-    def _load_bool_settings(self):
+    def _apply_fixed_bool_settings_from_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
-        for key, attr in BOOL_SETTING_BINDINGS.items():
-            setattr(
-                self,
-                attr,
-                self._qsettings_bool(
-                    self._settings.value(key),
-                    defaults[key],
-                ),
-            )
+        for key in _FIXED_BOOL_SETTING_ATTRS:
+            setattr(self, f"_{key}", bool(defaults.get(key, False)))
 
-    def _save_bool_settings(self):
-        for key in BOOL_SETTING_SAVE_KEYS:
-            attr = BOOL_SETTING_BINDINGS[key]
-            self._settings.setValue(key, bool(getattr(self, attr)))
+    def _remove_legacy_bool_qsettings(self):
+        if not hasattr(self, "_settings"):
+            return
+        for key in _FIXED_BOOL_SETTING_ATTRS:
+            self._settings.remove(key)
+
+    def _apply_fixed_bridge_behavior_settings(self):
+        fixed = FIXED_BRIDGE_BEHAVIOR_SETTINGS
+        self._bind_each_chat_to_page = bool(fixed["bind_each_chat_to_page"])
+        self._auto_open_bound_page_when_missing = bool(
+            fixed["auto_open_bound_page_when_missing"]
+        )
+        self._auto_bind_unbound_page = bool(fixed["auto_bind_unbound_page"])
+        self._sync_full_conversation_enabled = bool(
+            fixed["sync_full_conversation_enabled"]
+        )
+        self._auto_sync_conversation_on_bind = bool(
+            fixed["auto_sync_conversation_on_bind"]
+        )
+        self._auto_sync_conversation_after_reply = bool(
+            fixed["auto_sync_conversation_after_reply"]
+        )
+        self._sync_conversation_mode = str(fixed["sync_conversation_mode"])
+        self._sync_conversation_max_messages = int(
+            fixed["sync_conversation_max_messages"]
+        )
+
+    def _remove_fixed_bridge_behavior_qsettings(self):
+        if not hasattr(self, "_settings"):
+            return
+        for key in FIXED_BRIDGE_BEHAVIOR_SETTINGS:
+            self._settings.remove(key)
+
+    def _apply_fixed_service_settings(self):
+        self._enable_lan_access = False
+        self._host = "127.0.0.1"
+        self._port_text = "5000"
+        self._auto_start_server = True
+
+    def _remove_fixed_service_qsettings(self):
+        if not hasattr(self, "_settings"):
+            return
+        for key in (
+            "host",
+            "enable_lan_access",
+            "port",
+            "auto_start_server",
+            "default_compose_message",
+        ):
+            self._settings.remove(key)
 
     def _load_ui_and_bind_settings_from_qsettings(self):
         defaults = DEFAULT_APP_SETTINGS
@@ -134,7 +170,7 @@ class SettingsMixin:
             max_value=48,
             name="font_size",
         )
-        self._load_bool_settings()
+        self._apply_fixed_bool_settings_from_defaults()
         self._enter_send_mode = str(
             self._settings.value("enter_send_mode", defaults["enter_send_mode"])
         )
@@ -148,67 +184,24 @@ class SettingsMixin:
             max_value=999,
             name="force_new_session_after_turns",
         )
-        self._sync_conversation_max_messages = self._safe_int(
-            self._settings.value(
-                "sync_conversation_max_messages",
-                defaults["sync_conversation_max_messages"],
-            ),
-            defaults["sync_conversation_max_messages"],
-            min_value=1,
-            max_value=999,
-            name="sync_conversation_max_messages",
-        )
-        mode = str(
-            self._settings.value(
-                "sync_conversation_mode", defaults["sync_conversation_mode"]
-            )
-            or defaults["sync_conversation_mode"]
-        ).strip().lower()
-        default_mode = defaults["sync_conversation_mode"]
-        self._sync_conversation_mode = (
-            mode if mode in ("merge", "replace") else default_mode
-        )
-        self._default_compose_message = str(
-            self._settings.value(
-                "default_compose_message",
-                defaults["default_compose_message"],
-            )
-            or defaults["default_compose_message"]
-        )
+        self._apply_fixed_bridge_behavior_settings()
+
     def _force_ui_settings_to_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
         self._enable_lan_access = bool(defaults.get("enable_lan_access", False))
         self._host = str(defaults.get("host", "127.0.0.1"))
-        self._port_text = str(defaults.get("port", 16666))
-        self._auto_start_server = bool(defaults.get("auto_start_server", False))
+        self._port_text = str(defaults.get("port", "5000"))
+        self._auto_start_server = bool(defaults.get("auto_start_server", True))
         self._debug_mode = bool(defaults.get("debug_mode", False))
         self._show_raw_payload = bool(defaults.get("show_raw_payload", False))
-        self._mirror_log_to_console = bool(defaults.get("mirror_log_to_console", True))
-        self._include_log_callsite = bool(defaults.get("include_log_callsite", True))
-        self._bind_each_chat_to_page = bool(
-            defaults.get("bind_each_chat_to_page", True)
-        )
+        self._mirror_log_to_console = bool(defaults.get("mirror_log_to_console", False))
+        self._include_log_callsite = bool(defaults.get("include_log_callsite", False))
         self._chat_font_pt = int(defaults.get("font_size", 11))
         self._enter_send_mode = str(
             defaults.get("enter_send_mode", "enter_send")
         )
         self._force_new_session_after_turns = int(
             defaults.get("force_new_session_after_turns", 0)
-        )
-        self._sync_full_conversation_enabled = bool(
-            defaults.get("sync_full_conversation_enabled", True)
-        )
-        self._auto_sync_conversation_on_bind = bool(
-            defaults.get("auto_sync_conversation_on_bind", False)
-        )
-        self._auto_sync_conversation_after_reply = bool(
-            defaults.get("auto_sync_conversation_after_reply", False)
-        )
-        self._sync_conversation_max_messages = int(
-            defaults.get("sync_conversation_max_messages", 30)
-        )
-        self._sync_conversation_mode = str(
-            defaults.get("sync_conversation_mode", "replace")
         )
         self._remember_window_geometry = bool(
             defaults.get("remember_window_geometry", True)
@@ -234,42 +227,26 @@ class SettingsMixin:
         self._show_assistant_placeholder = bool(
             defaults.get("show_assistant_placeholder", True)
         )
-        self._auto_open_bound_page_when_missing = bool(
-            defaults.get("auto_open_bound_page_when_missing", True)
-        )
-        self._allow_fallback_to_any_page = bool(
-            defaults.get("allow_fallback_to_any_page", False)
-        )
-        self._auto_bind_unbound_page = bool(
-            defaults.get("auto_bind_unbound_page", True)
-        )
-        self._upload_before_send_enabled = bool(
-            defaults.get("upload_before_send_enabled", False)
-        )
-        self._default_compose_message = str(
-            defaults.get("default_compose_message", "")
-        )
+        self._apply_fixed_bridge_behavior_settings()
     def _resolve_listen_host(self):
-        if getattr(self, "_enable_lan_access", False):
-            return "0.0.0.0"
         return "127.0.0.1"
+
+    def _service_host_port_for_display(self, status=None):
+        status = status or {}
+        if status.get("server_running") and status.get("server_port"):
+            return (
+                status.get("server_host") or get_server_public_host(),
+                str(status.get("server_port")),
+            )
+        if is_server_running():
+            return get_server_public_host(), str(get_server_port() or "")
+        port = getattr(self, "_port_text", None) or "5000"
+        return "127.0.0.1", str(port)
 
     def _load_app_settings_values(self):
         defaults = DEFAULT_APP_SETTINGS
         try:
-            saved_host = str(self._settings.value("host", defaults["host"])).strip()
-            self._enable_lan_access = self._qsettings_bool(
-                self._settings.value("enable_lan_access"),
-                defaults["enable_lan_access"],
-            )
-            if saved_host in ("0.0.0.0", "::"):
-                self._enable_lan_access = True
-            self._host = self._resolve_listen_host()
-            self._port_text = str(self._settings.value("port", defaults["port"]))
-            self._auto_start_server = self._qsettings_bool(
-                self._settings.value("auto_start_server"),
-                defaults["auto_start_server"],
-            )
+            self._apply_fixed_service_settings()
             self._chat_sessions_path = str(RUNTIME_DIR)
             self._save_chat_history = True
             self._load_ui_and_bind_settings_from_qsettings()
@@ -277,383 +254,64 @@ class SettingsMixin:
             detail = f"加载设置失败，已使用默认值：{error}\n{traceback.format_exc()}"
             append_log(detail, source="GUI", echo=True)
             defaults = DEFAULT_APP_SETTINGS
-            self._enable_lan_access = defaults["enable_lan_access"]
-            self._host = self._resolve_listen_host()
-            self._port_text = str(defaults["port"])
-            self._auto_start_server = defaults["auto_start_server"]
+            self._apply_fixed_service_settings()
             self._force_ui_settings_to_defaults()
             self._chat_sessions_path = defaults["chat_sessions_path"]
             self._save_chat_history = defaults["save_chat_history"]
-        server.set_debug_mode(self._debug_mode)
+        set_debug_mode(self._debug_mode)
         set_log_runtime_options(
             verbose=self._debug_mode,
             mirror_to_console=self._mirror_log_to_console,
             include_callsite=self._include_log_callsite,
         )
     def _read_settings_from_widgets(self):
-        if hasattr(self, "enable_lan_access_cb"):
-            self._enable_lan_access = self.enable_lan_access_cb.isChecked()
-        self._host = self._resolve_listen_host()
-        self._port_text = self.port_edit.text().strip() or "5000"
-        self._auto_start_server = self.auto_start_server_cb.isChecked()
-        if hasattr(self, "bind_each_chat_to_page_cb"):
-            self._bind_each_chat_to_page = (
-                self.bind_each_chat_to_page_cb.isChecked()
-            )
-            self._auto_open_bound_page_when_missing = (
-                self.auto_open_bound_page_when_missing_cb.isChecked()
-            )
-            self._allow_fallback_to_any_page = (
-                self.allow_fallback_to_any_page_cb.isChecked()
-            )
-            self._auto_bind_unbound_page = self.auto_bind_unbound_page_cb.isChecked()
-        if hasattr(self, "upload_before_send_enabled_cb"):
-            self._upload_before_send_enabled = (
-                self.upload_before_send_enabled_cb.isChecked()
-            )
-        if hasattr(self, "sync_full_conversation_enabled_cb"):
-            self._sync_full_conversation_enabled = (
-                self.sync_full_conversation_enabled_cb.isChecked()
-            )
-            self._auto_sync_conversation_on_bind = (
-                self.auto_sync_conversation_on_bind_cb.isChecked()
-            )
-            self._auto_sync_conversation_after_reply = (
-                self.auto_sync_conversation_after_reply_cb.isChecked()
-            )
-            self._sync_conversation_max_messages = int(
-                self.sync_conversation_max_messages_spin.value()
-            )
-            mode = self.sync_conversation_mode_combo.currentData()
-            default_mode = DEFAULT_APP_SETTINGS["sync_conversation_mode"]
-            self._sync_conversation_mode = (
-                mode if mode in ("merge", "replace") else default_mode
-            )
+        self._apply_fixed_service_settings()
         self._chat_sessions_path = str(RUNTIME_DIR)
         self._save_chat_history = True
-        if hasattr(self, "default_compose_message_edit"):
-            self._default_compose_message = (
-                self.default_compose_message_edit.toPlainText()
-            )
         set_log_runtime_options(
             verbose=self._debug_mode,
             mirror_to_console=self._mirror_log_to_console,
             include_callsite=self._include_log_callsite,
         )
-    def _init_service_settings_autosave_timer(self):
-        self._service_default_message_save_timer = QTimer(self)
-        self._service_default_message_save_timer.setSingleShot(True)
-        self._service_default_message_save_timer.timeout.connect(
-            self._on_service_default_message_autosave_timeout
-        )
-        self._service_settings_pending_restart = False
-
-    def _schedule_service_default_message_autosave(self):
-        if getattr(self, "_service_settings_syncing", False):
-            return
-        timer = getattr(self, "_service_default_message_save_timer", None)
-        if timer is None:
-            return
-        timer.start(500)
-
-    def _on_service_default_message_autosave_timeout(self):
-        self._auto_save_service_settings(network_config_changed=False)
-
-    def _auto_save_service_settings(self, *, network_config_changed=False):
-        if getattr(self, "_service_settings_syncing", False):
-            return
-        if network_config_changed and hasattr(self, "port_edit"):
-            if self._parse_port() is None:
-                return
-        try:
-            self._save_app_settings()
-            self._apply_default_compose_message_if_empty()
-            if network_config_changed and hasattr(self, "tm_bridge_url_label"):
-                self._update_tampermonkey_settings_labels(self._last_bridge_status)
-            if network_config_changed:
-                if server.is_server_running():
-                    self._service_settings_pending_restart = True
-                    self._set_service_settings_hint(
-                        "配置已保存，重启服务后生效"
-                    )
-                else:
-                    self._service_settings_pending_restart = False
-                    self._set_service_settings_hint("")
-            self._update_service_settings_status()
-        except Exception as error:
-            detail = (
-                f"自动保存服务设置失败：{error}\n{traceback.format_exc()}"
-            )
-            append_log(detail, source="GUI", echo=True)
-            self._set_service_settings_hint(f"保存失败：{error}")
+        self._apply_fixed_bridge_behavior_settings()
 
     def _save_app_settings(self):
         self._read_settings_from_widgets()
-        self._settings.setValue("host", self._host)
-        self._settings.setValue("enable_lan_access", self._enable_lan_access)
-        self._settings.setValue("port", self._port_text)
-        self._settings.setValue("auto_start_server", self._auto_start_server)
+        self._apply_fixed_bridge_behavior_settings()
+        self._remove_fixed_bridge_behavior_qsettings()
+        self._apply_fixed_service_settings()
+        self._remove_fixed_service_qsettings()
         self._settings.setValue("font_size", self._chat_font_pt)
-        self._save_bool_settings()
+        self._remove_legacy_bool_qsettings()
         self._settings.setValue(
             "force_new_session_after_turns",
             int(self._force_new_session_after_turns or 0),
         )
-        self._settings.setValue(
-            "sync_conversation_max_messages", int(self._sync_conversation_max_messages)
-        )
-        self._settings.setValue("sync_conversation_mode", self._sync_conversation_mode)
-        self._settings.setValue(
-            "default_compose_message",
-            getattr(self, "_default_compose_message", "") or "",
-        )
-        server.set_debug_mode(self._debug_mode)
+        set_debug_mode(self._debug_mode)
         self._save_ui_settings()
-    def _sync_page_url_detail_widgets(self):
-        if not hasattr(self, "tm_bound_page_label"):
-            return
-        self._update_live_page_display()
-        self._update_bound_page_display()
-    def _apply_settings(self, immediate_only=False):
-        self._read_settings_from_widgets()
-        server.set_debug_mode(self._debug_mode)
-        if getattr(self, "bridge_status_panel", None) is not None:
-            self.bridge_status_panel.setVisible(self._show_top_status_bar)
-        session = self._current_session()
-        if session:
-            self._render_session_chat(session)
-        self._sync_page_url_detail_widgets()
-        if hasattr(self, "_sync_bridge_status_panel_height"):
-            self._sync_bridge_status_panel_height()
-        self._apply_chat_bind_visual_state()
-        if self.message_edit.placeholderText():
-            self._update_input_placeholder()
-        self._apply_default_compose_message_if_empty()
-        if immediate_only:
-            self._set_settings_hint("已应用当前可立即生效的设置。")
-            return
-        if server.is_server_running():
-            self._set_settings_hint(
-                "部分设置已应用。host/port 变更需停止服务后重新启动才能生效。"
-            )
-        else:
-            self._set_settings_hint("设置已应用。")
-    def _reset_settings_to_default(self):
-        # TODO: 迁移到更多菜单，并增加二次确认对话框。
-        ui_setting_keys = {
-            "font_size",
-            "remember_window_geometry",
-            "remember_window_position",
-            "restore_main_tab",
-            "restore_chat_tab",
-            "show_top_status_bar",
-        }
-        for key, value in DEFAULT_APP_SETTINGS.items():
-            if key in ui_setting_keys:
-                continue
-            if key == "port":
-                self._port_text = str(value)
-            else:
-                setattr(self, f"_{key}", value)
-        self._force_ui_settings_to_defaults()
-        self._sync_settings_widgets_from_values()
-        self._apply_settings(immediate_only=True)
-        self._save_app_settings()
-        self._set_settings_hint("已恢复默认设置。")
-    def _sync_settings_widgets_from_values(self):
-        self._service_settings_syncing = True
-        try:
-            self._sync_settings_widgets_from_values_impl()
-        finally:
-            self._service_settings_syncing = False
-
-    def _sync_settings_widgets_from_values_impl(self):
-        if hasattr(self, "enable_lan_access_cb"):
-            self.enable_lan_access_cb.setChecked(self._enable_lan_access)
-        self._update_listen_host_label()
-        self.port_edit.setText(self._port_text)
-        self.auto_start_server_cb.setChecked(self._auto_start_server)
-        if hasattr(self, "bind_each_chat_to_page_cb"):
-            self.bind_each_chat_to_page_cb.setChecked(self._bind_each_chat_to_page)
-            self.auto_open_bound_page_when_missing_cb.setChecked(
-                self._auto_open_bound_page_when_missing
-            )
-            self.allow_fallback_to_any_page_cb.setChecked(
-                self._allow_fallback_to_any_page
-            )
-            self.auto_bind_unbound_page_cb.setChecked(self._auto_bind_unbound_page)
-        if hasattr(self, "upload_before_send_enabled_cb"):
-            self.upload_before_send_enabled_cb.setChecked(
-                self._upload_before_send_enabled
-            )
-        if hasattr(self, "sync_full_conversation_enabled_cb"):
-            self.sync_full_conversation_enabled_cb.setChecked(
-                self._sync_full_conversation_enabled
-            )
-            self.auto_sync_conversation_on_bind_cb.setChecked(
-                self._auto_sync_conversation_on_bind
-            )
-            self.auto_sync_conversation_after_reply_cb.setChecked(
-                self._auto_sync_conversation_after_reply
-            )
-            self.sync_conversation_max_messages_spin.setValue(
-                int(self._sync_conversation_max_messages or 200)
-            )
-            idx = self.sync_conversation_mode_combo.findData(
-                self._sync_conversation_mode
-            )
-            if idx >= 0:
-                self.sync_conversation_mode_combo.setCurrentIndex(idx)
-        self._update_input_placeholder()
-        if hasattr(self, "default_compose_message_edit"):
-            self.default_compose_message_edit.setPlainText(
-                getattr(self, "_default_compose_message", "") or ""
-            )
-    def _default_compose_message_text(self):
-        return (getattr(self, "_default_compose_message", "") or "").strip()
-
-    def _apply_default_compose_message_if_empty(self):
-        text = self._default_compose_message_text()
-        if not text:
-            return
+    def _update_input_placeholder(self):
         edit = getattr(self, "message_edit", None)
         if edit is None:
             return
-        if (edit.toPlainText() or "").strip():
-            return
-        edit.setPlainText(text)
+        if getattr(self, "_enter_send_mode", "enter_send") == "ctrl_enter_send":
+            edit.setPlaceholderText("输入消息，Ctrl+Enter 发送，Enter 换行")
+        else:
+            edit.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
+
     def _set_settings_hint(self, text):
         text = text or ""
         if text:
             self.statusBar().showMessage(text, 8000)
 
-    def _set_service_settings_hint(self, text):
-        if hasattr(self, "settings_service_hint_label"):
-            self.settings_service_hint_label.setText(text or "")
-
     def _set_tm_action_hint(self, text):
-        text = (text or "").strip()
+        self._tm_action_hint_base = (text or "").strip()
+        if hasattr(self, "_apply_tm_action_hint_with_waiting"):
+            self._apply_tm_action_hint_with_waiting()
+            return
+        text = self._tm_action_hint_base
         if text == getattr(self, "_last_tm_action_hint_text", None):
             return
         self._last_tm_action_hint_text = text
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
-    def _update_listen_host_label(self):
-        if not hasattr(self, "listen_host_label"):
-            return
-        if self._enable_lan_access:
-            self.listen_host_label.setText("0.0.0.0（全部网卡，局域网可访问）")
-        else:
-            self.listen_host_label.setText("127.0.0.1（仅本机）")
-
-    def _on_enable_lan_access_changed(self, _checked=False):
-        self._read_settings_from_widgets()
-        self._update_listen_host_label()
-        if hasattr(self, "tm_bridge_url_label"):
-            self._update_tampermonkey_settings_labels(self._last_bridge_status)
-        if not getattr(self, "_service_settings_syncing", False):
-            self._auto_save_service_settings(network_config_changed=True)
-
-    def _update_service_settings_status(self):
-        if server.is_server_running():
-            service_url = server.get_server_url() or "-"
-            bridge_url = server.get_server_bridge_url() or "-"
-            self.settings_service_status_label.setText(
-                f"当前状态：运行中\n"
-                f"服务地址：{service_url}\n"
-                f"油猴填写：{bridge_url}"
-            )
-        elif getattr(self, "_server_start_failed", False):
-            message = getattr(self, "_server_start_error", "") or "未知错误"
-            self.settings_service_status_label.setText(
-                f"当前状态：启动失败\n{message}"
-            )
-        else:
-            self.settings_service_status_label.setText("当前状态：未启动")
-    def _on_check_tampermonkey(self):
-        if not server.is_server_running():
-            self._set_settings_hint("请先启动服务，再检查油猴连接。")
-            return
-        status = server.get_bridge_status()
-        self._schedule_status_apply(status, reason="settings_refresh", force=True)
-        if status.get("tampermonkey_online"):
-            self._set_settings_hint("油猴在线。")
-        elif status.get("tampermonkey_last_seen"):
-            self._set_settings_hint("油猴离线（曾连接过）。")
-        else:
-            self._set_settings_hint("油猴未连接。")
-        session = self._current_session() if hasattr(self, "_current_session") else None
-        if session is not None and hasattr(self, "_try_send_next_queued_message"):
-            self._try_send_next_queued_message(session)
-    def _restart_server_with_settings(self):
-        if server.is_server_running():
-            self._stop_server()
-        self._start_server()
-        if server.is_server_running():
-            self._service_settings_pending_restart = False
-            self._set_service_settings_hint("")
-    def _clear_log_widget(self, widget, name):
-        if widget is None:
-            msg = f"清空{name}失败：未找到日志控件。"
-            self._append_log(f"[LOG_CLEAR][FAILED] name={name} reason=no_widget", echo=True)
-            self._set_tm_action_hint(msg)
-            return
-        try:
-            widget.clear()
-        except Exception as exc:
-            import traceback
-
-            detail = f"{exc}\n{traceback.format_exc()}"
-            msg = f"清空{name}失败：{exc}"
-            self._append_log(
-                f"[LOG_CLEAR][FAILED] name={name} error={detail}",
-                echo=True,
-            )
-            print(f"[LOG_CLEAR][FAILED] name={name} error={detail}")
-            self._set_tm_action_hint(msg)
-            return
-        self._append_log(f"已清空{name}。", echo=True)
-        self._set_tm_action_hint(f"已清空{name}")
-
-    def _on_clear_runtime_log_clicked(self):
-        now = time.time()
-        last_at = float(getattr(self, "_last_clear_log_at", 0.0) or 0.0)
-        if now - last_at < 1.0:
-            return
-        self._last_clear_log_at = now
-        self._clear_runtime_log()
-
-    def _clear_runtime_log(self):
-        import traceback
-        from pathlib import Path
-
-        from log_utils import LOG_FILE, _LOG_LOCK, get_log_file_path
-
-        log_path = get_log_file_path()
-        try:
-            with _LOG_LOCK:
-                path = Path(log_path) if log_path else LOG_FILE
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("", encoding="utf-8")
-        except Exception as exc:
-            detail = f"{exc}\n{traceback.format_exc()}"
-            msg = f"清空运行日志失败：{exc}"
-            self._append_log(
-                f"[LOG_CLEAR][FAILED] path={log_path} error={detail}",
-                echo=True,
-            )
-            print(f"[LOG_CLEAR][FAILED] path={log_path} error={detail}")
-            self._set_tm_action_hint(msg)
-            return
-
-        if hasattr(self, "log_edit") and self.log_edit is not None:
-            self.log_edit.clear()
-        if hasattr(self, "_loaded_log_lines"):
-            self._loaded_log_lines = []
-        if hasattr(self, "_log_tab_loaded"):
-            self._log_tab_loaded = False
-        if hasattr(self, "_runtime_log_loaded_once"):
-            self._runtime_log_loaded_once = False
-        self._append_log("已清空运行日志。", echo=True)
-        self._set_tm_action_hint("已清空运行日志")

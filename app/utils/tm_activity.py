@@ -85,7 +85,7 @@ def tm_send_allowed(
     state = classify_tm_client_activity(item, now=now_v)
 
     detail = {
-        "activity": state,
+        "activity_state": state,
         "seen_age": round(seen_age, 3),
         "poll_age": round(poll_age, 3),
     }

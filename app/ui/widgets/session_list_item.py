@@ -272,6 +272,7 @@ class SessionListItemWidget(QWidget):
         selected=False,
         is_current=None,
         tooltip="",
+        status_text=None,
     ):
         style = SESSION_BIND_LIST_STYLES.get(
             bind_state, SESSION_BIND_LIST_STYLES["unbound"]
@@ -292,7 +293,9 @@ class SessionListItemWidget(QWidget):
 
         subtitle = (subtitle or "").replace("\n", " ")
         title_text = title or "新对话"
-        status_text = style["label"]
+        display_status_text = (
+            status_text if status_text is not None else style["label"]
+        )
         tooltip_text = tooltip or ""
 
         self._sync_current_badge(is_current)
@@ -305,7 +308,7 @@ class SessionListItemWidget(QWidget):
             bool(is_current),
             bool(selected),
             tooltip_text,
-            status_text,
+            display_status_text,
         )
         if getattr(self, "_last_apply_state_key", None) == state_key:
             return
@@ -313,7 +316,7 @@ class SessionListItemWidget(QWidget):
 
         self.title_label.setText(title_text)
         self.subtitle_label.setText(subtitle)
-        self.status_label.setText(status_text)
+        self.status_label.setText(display_status_text)
 
         self.pending_dot.setText("●" if pending_reply else "")
         self.pending_dot.setVisible(bool(pending_reply))

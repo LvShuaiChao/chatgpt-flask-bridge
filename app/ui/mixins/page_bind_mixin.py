@@ -1,10 +1,32 @@
 """页面绑定主 mixin：组合继承与跨 mixin 调度入口。"""
 
+from app.server import (
+    cancel_message,
+    complete_gui_dispatch,
+    enqueue_control_command,
+    get_bridge_status,
+    get_message_state,
+    get_server_port,
+    get_server_public_host,
+    get_server_url,
+    get_tm_online_summary,
+    is_server_running,
+    push_close_other_pages,
+    push_close_page,
+    push_message,
+    push_open_url,
+    set_debug_mode,
+    set_external_gui_dispatch,
+    set_log_callback,
+    set_status_callback,
+    start_server,
+    stop_server,
+)
+
 import time
 
-import server
-
 from app.models import (
+    remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
@@ -16,18 +38,22 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.utils.page_snapshot import PageRegistry
 from app.utils.page_status import (
+    evaluate_page_capability,
     evaluate_send_page,
     explain_page_decision,
     is_page_online,
     log_page_decision_fields,
     page_url_from,
 )
+from app.ui.mixins.ui_status_compact_mixin import UiStatusCompactMixin
 from app.ui.mixins.page_auto_bind_mixin import PageAutoBindMixin
 from app.ui.mixins.page_binding_diagnostics_mixin import PageBindingDiagnosticsMixin
 from app.ui.mixins.page_binding_display_mixin import PageBindingDisplayMixin
 from app.ui.mixins.page_binding_state_mixin import PageBindingStateMixin
 from app.ui.mixins.page_open_close_mixin import PageOpenCloseMixin
+from app.ui.mixins.page_registry_refresh_mixin import PageRegistryRefreshMixin
 from app.ui.mixins.page_selector_mixin import PageSelectorMixin
 from app.ui.mixins.page_send_target_mixin import PageSendTargetMixin
 from app.ui.mixins.page_sync_mixin import PageSyncMixin
@@ -36,6 +62,8 @@ from PyQt5.QtCore import Qt, QTimer
 
 
 class PageBindMixin(
+    PageRegistryRefreshMixin,
+    UiStatusCompactMixin,
     PageBindingDiagnosticsMixin,
     PageBindingDisplayMixin,
     PageSyncMixin,
@@ -52,28 +80,37 @@ class PageBindMixin(
         bound_conversation_id = ""
         if session is not None:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            if remote.get("enabled"):
+            if remote_binding_enabled(remote):
                 bound_client_id = (remote.get("client_id") or "").strip()
                 bound_conversation_id = self._remote_conversation_id(remote)
-        summary = server.get_tm_online_summary(
+        summary = get_tm_online_summary(
             bound_client_id=bound_client_id or None,
             bound_conversation_id=bound_conversation_id or None,
         )
         if session is not None:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            if remote.get("enabled") and not summary.get("bound_page_type"):
+            if remote_binding_enabled(remote):
+                summary["bound"] = {
+                    "client_id": bound_client_id,
+                    "page_instance_id": (remote.get("page_instance_id") or "").strip(),
+                    "conversation_id": bound_conversation_id or "",
+                    "url": (remote.get("url") or "").strip(),
+                }
+        summary["active"] = {
+            "client_id": (summary.get("active_client_id") or "").strip(),
+            "conversation_id": (summary.get("active_conversation_id") or "").strip(),
+        }
+        reg = getattr(self, "page_registry", None)
+        if isinstance(reg, PageRegistry):
+            reg_summary = reg.summary()
+            summary["online_clients"] = reg_summary.get("online_count", 0)
+            summary["total_clients"] = reg_summary.get("total_count", 0)
+        if session is not None:
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            if remote_binding_enabled(remote) and not summary.get("bound_page_type"):
                 summary["bound_page_type"] = (remote.get("page_type") or "").strip()
-            if (
-                remote.get("enabled")
-                and not summary.get("bound_conversation_id")
-                and bound_conversation_id
-            ):
-                summary["bound_conversation_id"] = bound_conversation_id
             if self._remote_bind_state(remote) == BIND_STATE_PREBOUND_HOME:
                 summary["bound_page_type"] = "home"
-                summary["bound_online"] = self._session_has_prebound_home_online(
-                    remote
-                )
         return summary
 
 
@@ -148,47 +185,18 @@ class PageBindMixin(
 
     def _resolve_manual_bind_candidate(self, status=None):
         """
-        解析手动绑定候选页。
-        绑定要求候选页来自实时在线页面；缓存页只用于展示。
+        解析手动绑定候选页：仅使用可用页面列表当前选中项（UserRole dict）。
+        在线判断与下拉框 [在线] 展示一致。
         """
-        status = status or self._last_bridge_status or {}
+        del status
         item = None
         source = ""
-
-        item = self._get_manual_current_tm_page(status=status)
+        if hasattr(self, "_get_selected_tm_page_from_combo"):
+            item = self._get_selected_tm_page_from_combo()
+        elif hasattr(self, "_get_tm_page_combo_selection"):
+            item = self._get_tm_page_combo_selection()
         if item:
-            source = "manual_current_page"
-
-        if not item:
-            selector = getattr(self, "tm_page_combo", None)
-            if selector is not None and selector.count() > 0:
-                idx = selector.currentIndex()
-                if idx >= 0:
-                    if hasattr(self, "_tm_page_combo_page_from_index"):
-                        item = self._tm_page_combo_page_from_index(idx)
-                    if not isinstance(item, dict):
-                        data = selector.itemData(idx, Qt.UserRole)
-                        if isinstance(data, dict):
-                            item = data
-                        else:
-                            item = self._find_tm_client_by_client_id(data, status=status)
-                    if item:
-                        source = "page_combo"
-
-        if not item:
-            item = self._current_focused_tm_page(status)
-            if item:
-                source = "focused_page"
-
-        if not item:
-            item = self._last_focused_tm_page(status)
-            if item:
-                source = "last_focused_page"
-
-        if not item:
-            item = self._current_bound_tm_page(status)
-            if item:
-                source = "bound_page"
+            source = "page_combo"
 
         if not isinstance(item, dict):
             return None, source, "no_page_selected"
@@ -196,7 +204,9 @@ class PageBindMixin(
         normalized = self._normalize_tm_page_for_binding(item)
         bind_candidate = dict(item)
         bind_candidate.update(normalized)
-        bindable, reason = self._tm_client_bindable(bind_candidate)
+        bindable, reason = self._tm_client_bindable(
+            bind_candidate, for_manual_ui=True
+        )
         if not bindable:
             return None, source, reason or "missing_page_identity"
 
@@ -228,7 +238,7 @@ class PageBindMixin(
             return float(default)
 
     def _pick_current_page_client_info(self, status=None):
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         for key in ("tampermonkey_client_id", "active_client_id"):
             cid = (status.get(key) or "").strip()
             info = self._client_info_by_id(cid, status=status)
@@ -262,46 +272,54 @@ class PageBindMixin(
             return focus_candidates[0][2]
         return None
 
-    def _resolve_bound_page_info(self, status=None):
+    def _resolve_bound_page_info(self, status=None, snapshot=None):
         if getattr(self, "_in_resolve_bound_page_info", False):
             return self._resolve_bound_page_info_session_only(status=status)
         self._in_resolve_bound_page_info = True
         try:
-            return self._resolve_bound_page_info_impl(status=status)
+            return self._resolve_bound_page_info_impl(
+                status=status, snapshot=snapshot
+            )
         finally:
             self._in_resolve_bound_page_info = False
 
     def _resolve_bound_page_info_session_only(self, status=None):
         """重入保护：页面列表提取过程中勿再查在线页。"""
-        status = status or self._last_bridge_status or {}
+        status = status or self._bridge_ui.last_bridge_status or {}
         session = self._current_session()
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        if not remote.get("enabled"):
+        if not remote_binding_enabled(remote):
             return None, "unbound", "session_unbound"
         client_id = (remote.get("client_id") or "").strip()
         return {
             "client_id": client_id,
             "page_instance_id": (remote.get("page_instance_id") or "").strip(),
             "conversation_id": (remote.get("conversation_id") or "").strip(),
-            "page_url": (remote.get("conversation_url") or remote.get("url") or "").strip(),
+            "url": ((remote.get("url") or "").strip()).strip(),
             "page_type": (remote.get("page_type") or "").strip(),
         }, "offline", "reentrant_session_only"
 
-    def _resolve_bound_page_info_impl(self, status=None):
-        status = status or self._last_bridge_status or {}
+    def _resolve_bound_page_info_impl(self, status=None, snapshot=None):
+        status = status or self._bridge_ui.last_bridge_status or {}
+        if snapshot is None and hasattr(self, "_get_tm_page_snapshot"):
+            snapshot = self._get_tm_page_snapshot(status, log_stages=False)
         session = self._current_session()
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        if not remote.get("enabled"):
+        if not remote_binding_enabled(remote):
             return None, "unbound", "session_unbound"
         bound_conversation_id = self._remote_conversation_id(remote)
         if bound_conversation_id:
             matched = self._find_online_page_by_conversation_id(
-                bound_conversation_id, status=status
+                bound_conversation_id, status=status, snapshot=snapshot
             )
             if isinstance(matched, dict) and self._tm_page_is_online_simple(matched):
                 return matched, "online", "matched_by_conversation"
         client_id = (remote.get("client_id") or "").strip()
-        bound_info = self._client_info_by_id(client_id, status=status) if client_id else None
+        bound_info = (
+            self._client_info_by_id(client_id, status=status, snapshot=snapshot)
+            if client_id
+            else None
+        )
         if isinstance(bound_info, dict):
             if self._tm_page_is_online_simple(bound_info):
                 return bound_info, "online", "bound_client_online"
@@ -309,7 +327,7 @@ class PageBindMixin(
         return {
             "client_id": client_id,
             "conversation_id": (remote.get("conversation_id") or "").strip(),
-            "page_url": (remote.get("conversation_url") or remote.get("url") or "").strip(),
+            "url": ((remote.get("url") or "").strip()).strip(),
             "page_type": (remote.get("page_type") or "").strip(),
         }, "offline", "bound_info_missing"
 
@@ -342,10 +360,10 @@ class PageBindMixin(
         if self._session_has_wrong_existing_conversation_bind(session):
             return (
                 False,
-                "当前对话错误绑定到已有 ChatGPT 对话页。请点击“绑定当前页面”覆盖后重新发送，"
+                "当前对话错误绑定到已有 ChatGPT 对话页。请点击“绑定所选页面”覆盖后重新发送，"
                 "以通过空白首页创建新对话。",
             )
-        if not remote.get("enabled"):
+        if not remote_binding_enabled(remote):
             return False, "请先发送消息以连接 ChatGPT 页面。"
         bind_state = self._effective_bind_state(session)
         if bind_state == BIND_STATE_UNBOUND:
@@ -397,11 +415,11 @@ class PageBindMixin(
     def _is_finalized(self, bridge_message_id):
         return bool(
             bridge_message_id
-            and bridge_message_id in self._finalized_bridge_message_ids
+            and bridge_message_id in self._bridge_msg.finalized_bridge_message_ids
         )
     def _finalize_bridge(self, bridge_message_id):
         if bridge_message_id:
-            self._finalized_bridge_message_ids.add(bridge_message_id)
+            self._bridge_msg.finalized_bridge_message_ids.add(bridge_message_id)
     def _bootstrap_state_created_at(self, state, bridge_id=""):
         raw = state.get("created_at") if isinstance(state, dict) else None
         try:
@@ -425,7 +443,7 @@ class PageBindMixin(
             bridge_id = (message.bridge_message_id or "").strip()
             if not bridge_id:
                 continue
-            state = server.get_message_state(bridge_id)
+            state = get_message_state(bridge_id)
             if not state:
                 continue
             if not state.get("bootstrap_conversation"):
@@ -446,7 +464,7 @@ class PageBindMixin(
             bridge_id = (message.bridge_message_id or "").strip()
             if not bridge_id:
                 continue
-            state = server.get_message_state(bridge_id)
+            state = get_message_state(bridge_id)
             if not state or not state.get("bootstrap_conversation"):
                 continue
             if (state.get("status") or "").strip() != "queued":
@@ -467,7 +485,7 @@ class PageBindMixin(
             bridge_id = (message.bridge_message_id or "").strip()
             if not bridge_id:
                 continue
-            state = server.get_message_state(bridge_id)
+            state = get_message_state(bridge_id)
             if not state:
                 continue
             if not state.get("bootstrap_conversation"):
@@ -478,10 +496,10 @@ class PageBindMixin(
             if now - created_at < self.BOOTSTRAP_CLAIM_TIMEOUT_SECONDS:
                 continue
             turn_id = (message.turn_id or "").strip()
-            server.cancel_message(bridge_id, "bootstrap_not_claimed_timeout")
+            cancel_message(bridge_id, "bootstrap_not_claimed_timeout")
             self._finalize_bridge(bridge_id)
             if message.role == "user":
-                message.status = "发送超时"
+                message.ui_status = "发送超时"
             if message.role == "assistant" and turn_id:
                 self._set_reply_error(
                     session,
@@ -507,7 +525,8 @@ class PageBindMixin(
             session.updated_at = time.time()
             self._save_sessions_to_disk()
             self._apply_chat_bind_visual_state()
-            self._update_bound_page_display()
+            if hasattr(self, "schedule_page_registry_refresh"):
+                self.schedule_page_registry_refresh(reason="bootstrap_cancel")
 
         return cancelled
     def _retry_bootstrap_after_claim_timeout(self, session):
@@ -534,15 +553,20 @@ class PageBindMixin(
                 continue
             self._retry_bootstrap_after_claim_timeout(session)
     def _load_saved_page_url(self):
-        raw = self._settings.value("last_page_url", "")
+        from app.utils.bridge_payload import load_qsettings_last_url
+
+        raw = load_qsettings_last_url(self._settings)
         if isinstance(raw, str) and self._is_persistable_page_url(raw):
             return raw.strip()
         return None
+
     def _persist_page_url(self, url):
+        from app.utils.bridge_payload import persist_qsettings_last_url
+
         if not self._is_persistable_page_url(url):
             return
         self._saved_page_url = url.strip()
-        self._settings.setValue("last_page_url", self._saved_page_url)
+        persist_qsettings_last_url(self._settings, self._saved_page_url)
 
 
 
@@ -562,198 +586,98 @@ class PageBindMixin(
 
     def _hint_after_manual_bind(self, client_info):
         profile = self._tm_client_sync_profile(client_info)
-        if profile.get("sync_readable") or profile.get("syncable"):
-            if profile.get("sendable"):
-                return "当前对话已绑定当前页面"
+        if profile.get("sync_ok") or profile.get("sync_readable"):
+            if profile.get("send_now_available") or profile.get("send_requestable"):
+                return "当前对话已绑定所选页面"
             return "已绑定；可同步读取网页对话，发送需等待生成结束。"
         if not profile.get("online"):
             return (
-                "已绑定当前页面；绑定页当前离线，打开该页面后可恢复同步。"
+                "已绑定所选页面；绑定页当前离线，打开该页面后可恢复同步。"
             )
         return (
             "已绑定但绑定页当前无法读取快照；请打开绑定对话页后再同步。"
         )
 
     def _on_bind_current_page(self):
-        if not server.is_server_running():
-            self._add_system_message("请先启动服务。")
-            return
+        """绑定所选页面：只读取一次 selected_page，后续绑定流程不再重读 combo。"""
         session = self._ensure_current_session()
-        status = server.get_bridge_status()
-        selector = getattr(self, "tm_page_combo", None)
-        selected_index = selector.currentIndex() if selector is not None else -1
-        selected_client_id = ""
-        if selector is not None and selected_index >= 0:
-            data = selector.itemData(selected_index, Qt.UserRole)
-            if isinstance(data, dict):
-                selected_client_id = (data.get("client_id") or "").strip()
-            else:
-                selected_client_id = str(data or "").strip()
-        combo_client_id = ""
-        if selector is not None and selected_index >= 0:
-            combo_client_id = selected_client_id
+        combo = getattr(self, "tm_page_combo", None)
+        combo_index = combo.currentIndex() if combo is not None else -1
+        combo_text = combo.currentText() if combo is not None else ""
+        combo_count = combo.count() if combo is not None else 0
         self._append_log(
-            "[BIND][MANUAL][CLICK] "
-            f"session_id={session.session_id} "
-            f"combo_index={selected_index} "
-            f"combo_client_id={combo_client_id or '-'}",
+            "[BIND][CLICK] "
+            f"combo_index={combo_index} "
+            f"combo_text={combo_text!r} "
+            f"combo_count={combo_count}",
             echo=True,
         )
-        client_info, source, fail_reason = self._resolve_manual_bind_candidate(status)
-        if not client_info:
+
+        selected_page = (
+            self._get_selected_tm_page_from_combo()
+            if hasattr(self, "_get_selected_tm_page_from_combo")
+            else None
+        )
+        if not isinstance(selected_page, dict):
+            combo = getattr(self, "tm_page_combo", None)
+            combo_index = combo.currentIndex() if combo is not None else -1
+            combo_text = combo.currentText() if combo is not None else ""
+            self._append_log(
+                "[BIND][FAILED] reason_code=no_selected_page "
+                f"combo_index={combo_index} "
+                f"combo_text={combo_text!r}",
+                echo=True,
+            )
             self._set_tm_action_hint(
-                "未选择可绑定页面，请先在「可用页面列表」中选择一个 ChatGPT 页面。"
+                "未选择可绑定页面，请先在页面列表中选择一个 ChatGPT 页面。"
             )
             self._add_system_message(
-                "未选择可绑定页面，请先在「可用页面列表」中选择一个 ChatGPT 页面。"
+                "未选择可绑定页面，请先在页面列表中选择一个 ChatGPT 页面。"
             )
+            return
+
+        if not hasattr(self, "_bind_selected_page_to_current_session"):
             self._append_log(
-                "[BIND][MANUAL][FAILED] "
-                f"reason={fail_reason or 'no_page_selected'} "
-                f"session_id={session.session_id} "
-                f"source={source or '-'}",
+                "[BIND][FAILED] reason_code=missing_bind_handler "
+                "error_type=RuntimeError error=missing_bind_handler "
+                "traceback=-",
                 echo=True,
             )
             return
-        normalized = self._normalize_tm_page_for_binding(client_info)
-        if not normalized.get("client_id") and not normalized.get("url"):
-            self._append_log(
-                "[BIND][MANUAL][FAILED] reason=invalid_candidate "
-                f"session_id={session.session_id}",
-                echo=True,
-            )
-            self._set_tm_action_hint("未选择可绑定页面。")
-            return
-        self._append_log(
-            "[BIND][MANUAL][CANDIDATE] "
-            f"source={source or '-'} "
-            f"client_id={normalized.get('client_id') or '-'} "
-            f"page_instance_id={normalized.get('page_instance_id') or '-'} "
-            f"conversation_id={normalized.get('conversation_id') or '-'} "
-            f"url={normalized.get('url') or '-'} "
-            f"page_type={normalized.get('page_type') or '-'}",
-            echo=True,
+
+        ok = self._bind_selected_page_to_current_session(
+            selected_page=selected_page
         )
-        capability = explain_page_decision(client_info, action="bind")
+        if not ok:
+            return
+
+        self._set_tm_action_hint(self._hint_after_manual_bind(selected_page))
         self._append_log(
-            "[ACTION_CAPABILITY] action=bind "
+            "[BIND][MANUAL][SUCCESS] "
             f"session_id={session.session_id} "
-            + log_page_decision_fields(capability),
+            f"page_display_id={selected_page.get('page_display_id') or '-'} "
+            f"client_id={selected_page.get('client_id') or '-'} "
+            f"page_instance_id={selected_page.get('page_instance_id') or '-'} "
+            f"conversation_id={selected_page.get('conversation_id') or '-'} "
+            f"url={selected_page.get('url') or '-'}",
             echo=True,
         )
-        active_client_id = (normalized.get("client_id") or "").strip()
-        active_conversation_id = (normalized.get("conversation_id") or "").strip() or "-"
-        active_page_instance_id = (normalized.get("page_instance_id") or "").strip()
-        bind_key = (
-            f"{session.session_id}|{active_client_id}|"
-            f"{active_conversation_id}|{active_page_instance_id}"
-        )
-        now = time.time()
-        last_key = getattr(self, "_last_bind_current_page_key", "")
-        last_at = getattr(self, "_last_bind_current_page_at", 0.0)
-        if bind_key == last_key and now - last_at < 2.0:
-            self._append_log(
-                "[BIND][MANUAL][SKIP_DUPLICATE] "
-                f"session_id={session.session_id} client_id={active_client_id or '-'} "
-                f"conversation_id={active_conversation_id}",
-                echo=True,
+
+        normalized = self._normalize_tm_page_for_binding(selected_page)
+        conversation_id_after_bind = (
+            normalized.get("conversation_id")
+            or self._remote_conversation_id(
+                normalize_remote_chatgpt(session.remote_chatgpt)
             )
-            return
-        self._last_bind_current_page_key = bind_key
-        self._last_bind_current_page_at = now
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        old_client_id = (remote.get("client_id") or "").strip() or "-"
-        old_conversation_id = self._remote_conversation_id(remote) or "-"
-        old_bound_url = self._remote_conversation_url(remote) if remote.get("enabled") else ""
-        client_id = active_client_id or "-"
-        conversation_id = active_conversation_id
-        page_url = (normalized.get("url") or "").strip() or "-"
-        same_binding = (
-            remote.get("enabled")
-            and old_client_id == active_client_id
-            and old_conversation_id == active_conversation_id
-            and active_conversation_id not in ("", "-")
         )
-        url_needs_fix = (
-            active_conversation_id not in ("", "-")
-            and old_bound_url
-            and "xz_bind_token=" in old_bound_url
-            and "/c/" not in old_bound_url
-        )
-        if same_binding and not url_needs_fix:
-            self._append_log(
-                "[BIND][MANUAL][SKIP_ALREADY_BOUND] "
-                f"session_id={session.session_id} client_id={active_client_id or '-'} "
-                f"conversation_id={active_conversation_id}",
-                echo=True,
+        profile = self._tm_client_sync_profile(selected_page)
+        if conversation_id_after_bind and profile.get("sync_ok"):
+            self._set_tm_action_hint("同步中...")
+            self._sync_after_manual_bind_existing_conversation(
+                session, selected_page
             )
-            self._set_tm_action_hint(self._hint_after_manual_bind(client_info))
-            if hasattr(self, "_schedule_status_apply"):
-                self._schedule_status_apply(
-                    reason="bind_already_bound", delay_ms=200
-                )
-            return
-        self._clear_current_session_messages_before_rebind_or_sync(
-            reason="bind_current_page"
-        )
-        if self._update_session_binding_from_normalized_page(
-            session,
-            normalized,
-            reason="manual_bind",
-        ):
-            hint = self._hint_after_manual_bind(client_info)
-            self._set_tm_action_hint(hint)
-            if old_client_id != "-" and old_client_id != client_id:
-                self._append_log(
-                    "[BIND][MANUAL][REPLACE] "
-                    f"session_id={session.session_id} "
-                    f"old_client_id={old_client_id} "
-                    f"new_client_id={client_id}",
-                    echo=True,
-                )
-            self._append_log(
-                "[BIND][MANUAL][SUCCESS] "
-                f"session_id={session.session_id} "
-                f"client_id={client_id} "
-                f"page_instance_id={active_page_instance_id or '-'} "
-                f"conversation_id={conversation_id} "
-                f"url={page_url} "
-                f"bind_source={source or 'manual'}",
-                echo=True,
-            )
-            conversation_id_after_bind = (
-                normalized.get("conversation_id")
-                or self._remote_conversation_id(
-                    normalize_remote_chatgpt(session.remote_chatgpt)
-                )
-            )
-            profile = self._tm_client_sync_profile(client_info)
-            if conversation_id_after_bind and profile.get("syncable"):
-                self._set_tm_action_hint("同步中...")
-                self._sync_after_manual_bind_existing_conversation(session, client_info)
-            elif conversation_id_after_bind:
-                self._update_bound_page_display()
-                self._apply_chat_bind_visual_state()
-                self._refresh_session_list(select_session_id=session.session_id)
-            else:
-                self._append_log(
-                    "[BIND][MANUAL][PREBOUND_HOME_DONE] "
-                    f"session_id={session.session_id} "
-                    f"client_id={client_id} "
-                    f"page_url={page_url}",
-                    echo=True,
-                )
-                self._update_bound_page_display()
-                self._apply_chat_bind_visual_state()
-                self._refresh_session_list(select_session_id=session.session_id)
-            return
-        self._append_log(
-            "[BIND][MANUAL][FAILED] "
-            f"reason=bind_page_to_session_returned_false "
-            f"session_id={session.session_id} "
-            f"source={source or '-'}",
-            echo=True,
-        )
+        elif conversation_id_after_bind:
+            self._apply_chat_bind_visual_state()
 
     def _sync_after_manual_bind_existing_conversation(self, session, client_info):
         if session is None:
@@ -804,14 +728,13 @@ class PageBindMixin(
             f"conversation_id={conversation_id}"
         )
 
-        if getattr(self, "_sync_full_conversation_enabled", True):
-            QTimer.singleShot(
-                300,
-                lambda: self.request_sync_conversation(
-                    session,
-                    reason="manual_bind_existing",
-                ),
-            )
+        QTimer.singleShot(
+            300,
+            lambda: self.request_sync_conversation(
+                session,
+                reason="manual_bind_existing",
+            ),
+        )
 
     def _get_wait_conversation_sync_requests(self):
         pending = getattr(self, "_wait_conversation_sync_by_session", None)
@@ -824,118 +747,12 @@ class PageBindMixin(
 
 
     def resolve_send_decision(self, session, content="", status=None):
-        """统一发送决策：返回 (decision, reason, target_page, detail)。decision: allowed|queued|blocked。"""
-        status = status or self._last_bridge_status or {}
-        prereq_ok, prereq_reason = self._check_tm_send_prerequisites(session)
-        if not prereq_ok:
-            detail = {"blocked_reason": prereq_reason, "send_decision": "blocked"}
-            self._append_log(
-                f"[SEND][DECISION] allowed=false reason={prereq_reason}",
-                echo=True,
-            )
-            return "blocked", prereq_reason, None, detail
-
-        target_client_id, target_page_url, allowed, reason = (
-            self._resolve_target_page_for_session(session)
+        """薄适配：委托 resolve_page_action，返回 (decision, reason, target_page, detail)。"""
+        del content
+        plan = self.resolve_page_action(
+            session, action="send", status=status, user_initiated=True
         )
-        target_item = None
-        action_target = self._resolve_conversation_action_target(
-            session, action="send", status=status
-        )
-        if isinstance(action_target, dict) and isinstance(
-            action_target.get("item"), dict
-        ):
-            target_item = action_target["item"]
-            target_client_id = (action_target.get("client_id") or target_client_id).strip()
-            target_page_url = (action_target.get("url") or target_page_url).strip()
-            reason = reason or (action_target.get("source") or "")
-        elif target_client_id:
-            target_item = self._find_tm_client_by_client_id(
-                target_client_id, status=status
-            )
-        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        expected_conv = self._remote_conversation_id(remote)
-        if not target_item and expected_conv:
-            target_item = self._find_online_page_by_conversation_id(
-                expected_conv, status=status
-            )
-        if not isinstance(target_item, dict):
-            detail = explain_page_decision({}, action="send")
-            detail["blocked_reason"] = reason or "no_target_page"
-            self._append_log(
-                "[SEND][DECISION] " + log_page_decision_fields(detail),
-                echo=True,
-            )
-            return "blocked", reason or "no_target_page", None, detail
-
-        decision, send_reason = evaluate_send_page(
-            target_item, expected_conversation_id=expected_conv
-        )
-        detail = self._explain_page_decision_for_session(
-            session, target_item, action="send"
-        )
-        detail["target_client_id"] = target_client_id
-        detail["target_page_url"] = target_page_url
-        detail["reason"] = send_reason or reason
-        detail["send_decision"] = decision
-        bind_state = self._remote_bind_state(remote)
-        bootstrap_allow_reasons = {
-            "prebound_home_wait_conversation",
-            "missing_conversation_id",
-            "not_conversation_page",
-            "not_conversation_url",
-        }
-        bootstrap_bind_states = {
-            BIND_STATE_PREBOUND_HOME,
-            BIND_STATE_WAITING_HOME,
-            BIND_STATE_WAITING_CONVERSATION_CREATED,
-        }
-        if not allowed:
-            decision = "blocked"
-            send_reason = reason or send_reason or "target_not_allowed"
-            detail["reason"] = send_reason
-            detail["send_decision"] = decision
-        elif decision == "blocked" and allowed:
-            if (
-                send_reason in bootstrap_allow_reasons
-                and bind_state in bootstrap_bind_states
-            ):
-                self._append_log(
-                    "[SEND_DECISION][BOOTSTRAP_ALLOW] "
-                    f"session_id={(session.session_id if session else '-')} "
-                    f"bind_state={bind_state} "
-                    f"send_reason={send_reason} "
-                    f"target_reason={reason or '-'}",
-                    echo=True,
-                )
-                decision = "allowed"
-                send_reason = reason or send_reason or "target_resolved"
-                detail["reason"] = send_reason
-                detail["send_decision"] = decision
-            else:
-                self._append_log(
-                    "[SEND_DECISION][BLOCKED_KEEP] "
-                    f"session_id={(session.session_id if session else '-')} "
-                    f"bind_state={bind_state} "
-                    f"send_reason={send_reason} "
-                    f"target_allowed=true target_reason={reason or '-'}",
-                    echo=True,
-                )
-        elif decision == "blocked":
-            send_reason = reason or send_reason
-            detail["reason"] = send_reason
-        self._append_log(
-            "[ACTION_CAPABILITY] action=chat "
-            f"session_id={(session.session_id if session else '-')} "
-            + log_page_decision_fields(detail),
-            echo=True,
-        )
-        self._append_log(
-            f"[SEND_DECISION][FINAL] decision={decision} allowed={allowed} "
-            + log_page_decision_fields(detail),
-            echo=True,
-        )
-        return decision, send_reason, target_item, detail
+        return plan.as_send_decision_tuple()
 
     def request_send_message(self, session, content="", source="gui", status=None):
         """统一发送入口：返回 ok/decision/target 等，供 GUI / 外部 API / 队列恢复共用。"""
@@ -947,7 +764,7 @@ class PageBindMixin(
                 "decision": "blocked",
                 "code": "EMPTY_TEXT",
             }
-        if not server.is_server_running():
+        if not is_server_running():
             return {
                 "ok": False,
                 "reason": "请先启动服务",
@@ -1010,29 +827,6 @@ class PageBindMixin(
                     "detail": {"blocked_reason": reason, "send_decision": "queued"},
                     "code": "BIND_PAGE_NOT_READY",
                     "enqueue": True,
-                }
-
-        if self._bind_each_chat_to_page and hasattr(
-            self, "_prepare_bound_conversation_reopen_if_needed"
-        ):
-            reopen_result = self._prepare_bound_conversation_reopen_if_needed(
-                session, raw_user_text
-            )
-            if reopen_result is False:
-                self._append_log(
-                    "[SEND][REQUEST][REOPEN_FAILED] "
-                    f"session_id={(session.session_id if session else '-')}",
-                    echo=True,
-                )
-                return {
-                    "ok": False,
-                    "reason": "reopen_bind_page_failed",
-                    "decision": "blocked",
-                    "detail": {
-                        "blocked_reason": "reopen_bind_page_failed",
-                        "send_decision": "blocked",
-                    },
-                    "code": "BIND_PAGE_OFFLINE",
                 }
 
         if (
@@ -1101,24 +895,22 @@ class PageBindMixin(
         target_conversation_id = (detail.get("conversation_id") or "").strip()
         if not target_conversation_id and isinstance(target_item, dict):
             target_conversation_id = self._client_conversation_id(target_item)
-        target_page_url = (detail.get("url") or detail.get("target_page_url") or "").strip()
+        target_page_url = ((detail.get("url") or "") or "").strip()
         if not target_page_url and isinstance(target_item, dict):
             target_page_url = page_url_from(target_item)
 
-        if hasattr(self, "_verify_send_target_binding"):
-            target_client_id, target_page_url, verify_ok, verify_reason = (
-                self._verify_send_target_binding(
-                    session, target_client_id, target_page_url
-                )
+        if hasattr(self, "_verify_send_target_binding") and hasattr(
+            self, "_debug_logging_enabled"
+        ) and self._debug_logging_enabled():
+            _v_client, _v_url, _verify_ok, verify_reason = self._verify_send_target_binding(
+                session, target_client_id, target_page_url
             )
-            if not verify_ok:
-                return {
-                    "ok": False,
-                    "reason": verify_reason or "send_verify_failed",
-                    "decision": "blocked",
-                    "detail": detail,
-                    "code": "BIND_PAGE_OFFLINE",
-                }
+            if verify_reason:
+                self._append_log(
+                    f"[SEND][VERIFY][DEBUG] session_id={(session.session_id if session else '-')} "
+                    f"reason={verify_reason} note=resolve_page_action_is_authoritative",
+                    echo=False,
+                )
 
         self._append_log(
             "[SEND][REQUEST] "
@@ -1132,14 +924,91 @@ class PageBindMixin(
             "ok": True,
             "decision": decision,
             "reason": send_reason,
-            "target_client_id": target_client_id,
-            "target_page_instance_id": target_page_instance_id,
-            "target_conversation_id": target_conversation_id,
-            "target_page_url": target_page_url,
+            "client_id": target_client_id,
+            "page_instance_id": target_page_instance_id,
+            "conversation_id": target_conversation_id,
+            "url": target_page_url,
             "target_item": target_item,
             "detail": detail,
-            "raw_user_text": raw_user_text,
+            "content": raw_user_text,
             "source": source,
         }
+
+    def _compose_send_payload(
+        self,
+        session,
+        *,
+        turn_id,
+        content,
+        raw_content="",
+        client_id="",
+        url="",
+        page_instance_id="",
+        conversation_id="",
+        target_source="",
+        bind_request_id="",
+        bootstrap_conversation=False,
+        trace_id="",
+        allow_same_conversation_fallback=False,
+        target_page_snapshot=None,
+    ):
+        """入队 payload：只使用已 resolve 的 target，不从 remote_chatgpt 静默补全。"""
+        from app.utils.bridge_payload import build_gui_push_payload
+        from app.utils.page_status import explain_page_decision
+
+        client_id = (client_id or "").strip()
+        page_instance_id = (page_instance_id or "").strip()
+        conversation_id = (conversation_id or "").strip()
+        url = (url or "").strip()
+        bind_request_id = (bind_request_id or "").strip()
+        if not bind_request_id and hasattr(self, "_session_bind_request_id"):
+            remote = normalize_remote_chatgpt(session.remote_chatgpt)
+            bind_request_id = self._session_bind_request_id(remote)
+
+        if isinstance(target_page_snapshot, dict) and target_page_snapshot:
+            cap_dict = explain_page_decision(target_page_snapshot, action="send")
+        else:
+            cap_page = {
+                "client_id": client_id,
+                "page_instance_id": page_instance_id,
+                "conversation_id": conversation_id,
+                "url": url,
+            }
+            cap = evaluate_page_capability(cap_page, action="send")
+            cap_dict = cap.to_dict()
+
+        del allow_same_conversation_fallback
+        payload = build_gui_push_payload(
+            session_id=session.session_id,
+            turn_id=turn_id,
+            content=content or raw_content,
+            trace_id=trace_id,
+            client_id=client_id,
+            url=url,
+            conversation_id=conversation_id,
+            page_instance_id=page_instance_id,
+            bootstrap_conversation=bootstrap_conversation,
+            bind_request_id=bind_request_id,
+        )
+        from app.utils.target_sources import canonical_target_source
+
+        ts = canonical_target_source(target_source)
+        if ts:
+            payload["target_source"] = ts
+
+        self._append_log(
+            "[SEND][PAYLOAD_TARGET] "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"url={url or '-'} "
+            f"target_source={target_source or '-'} "
+            f"send_requestable={'yes' if cap.send_requestable else 'no'} "
+            f"send_now_available={'yes' if cap.send_now_available else 'no'} "
+            f"send_queueable={'yes' if cap.send_queueable else 'no'} "
+            + log_page_decision_fields(cap_dict),
+            echo=True,
+        )
+        return payload
 
 

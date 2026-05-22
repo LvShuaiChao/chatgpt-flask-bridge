@@ -55,7 +55,7 @@ class ChatSessionMixin:
                 matched = (message.turn_id or "").strip() == turn_id
             if not matched:
                 continue
-            message.status = status
+            message.ui_status = status
             session.updated_at = time.time()
             self._save_sessions_to_disk()
             self._append_log(
@@ -101,7 +101,7 @@ class ChatSessionMixin:
             return False
 
         role = (message.get("role") or "").strip()
-        content = (message.get("content") or message.get("text") or "").strip()
+        content = (message.get("content") or "").strip()
 
         if not role or not content:
             self._append_log(
@@ -120,19 +120,19 @@ class ChatSessionMixin:
             content,
             message_id=(message.get("message_id") or "").strip() or str(uuid.uuid4()),
             turn_id=(message.get("turn_id") or "").strip(),
-            status=(message.get("status") or "").strip(),
+            ui_status=(message.get("ui_status") or "").strip(),
             created_at=message.get("created_at"),
             bridge_message_id=(
                 (message.get("bridge_message_id") or message.get("request_id") or "")
                 .strip()
             ),
             parent_message_id=(message.get("parent_message_id") or "").strip(),
-            source=(message.get("source") or "").strip(),
+            message_source=(message.get("message_source") or "").strip(),
             visible_in_chat=bool(message.get("visible_in_chat", True)),
         )
         count_after = self._session_visible_message_count(session)
 
-        source = (message.get("source") or "-").strip()
+        source = (message.get("message_source") or "-").strip()
         self._append_log(
             "[CHAT_MESSAGE][APPEND] "
             f"session_id={session_id} "
@@ -180,7 +180,7 @@ class ChatSessionMixin:
             if message.role != "user":
                 continue
 
-            message.status = status or ""
+            message.ui_status = status or ""
             if detail:
                 message.detail = detail
             session.updated_at = time.time()

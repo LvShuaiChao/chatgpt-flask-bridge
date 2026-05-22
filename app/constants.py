@@ -4,6 +4,7 @@ RUNTIME_DIR = Path(__file__).resolve().parent.parent / "runtime"
 SESSIONS_FILE = RUNTIME_DIR / "chat_sessions.json"
 SESSIONS_JSON_VERSION = 2
 ASSISTANT_WAIT_TEXT = "等待回复…"
+DEFAULT_CHAT_INPUT_TEXT = "你好"
 ASSISTANT_WAIT_TEXTS = frozenset(
     {
         ASSISTANT_WAIT_TEXT,
@@ -21,10 +22,21 @@ PENDING_ASSISTANT_STATUSES = frozenset(
         "读取中",
     }
 )
+
+PENDING_USER_SEND_STATUSES = frozenset({"sending", "queued", "waiting_send"})
+UI_STATUS_DISPLAY_TEXT = {
+    "sending": "发送中",
+    "queued": "已加入队列",
+    "waiting": ASSISTANT_WAIT_TEXT,
+    "assistant_pending": ASSISTANT_WAIT_TEXT,
+}
+
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 # 油猴页面在线/活跃度（server.ONLINE_TIMEOUT_SEC 与此同源）
 TM_POLL_FRESH_SECONDS = 5.0
 TM_HEARTBEAT_ONLINE_SECONDS = 10.0
+# sync_conversation 入队前要求绑定页 last_poll_at 不超过此秒数
+SYNC_COMMAND_POLL_MAX_AGE_SECONDS = 10.0
 BOUND_PAGE_ONLINE_SECONDS = 30.0
 BOUND_PAGE_STALE_SECONDS = 60.0
 BOUND_PAGE_OFFLINE_GRACE_SECONDS = 10.0
@@ -99,7 +111,7 @@ SESSION_BIND_LIST_STYLES = {
 
 # 顶部状态栏三种页面角色（仅 UI 文案，不改变业务逻辑）
 STATUS_CHIP_AUTO_FOCUS_PREFIX = "自动焦点页"
-STATUS_CHIP_MANUAL_SELECT_PREFIX = "手动选中页"
+STATUS_CHIP_MANUAL_SELECT_PREFIX = "所选页面"
 STATUS_CHIP_SESSION_BIND_PREFIX = "会话绑定页"
 
 STATUS_CHIP_AUTO_FOCUS_TOOLTIP = (
@@ -108,8 +120,8 @@ STATUS_CHIP_AUTO_FOCUS_TOOLTIP = (
     "只表示 ChatGPT 网页当前没有获得浏览器焦点。"
 )
 STATUS_CHIP_MANUAL_SELECT_TOOLTIP = (
-    "表示用户在「可用页面列表」里手动选中的页面。\n"
-    "它只是临时选择，不等于当前会话已经绑定。"
+    "表示「可用页面列表」中当前选中的页面。\n"
+    "点击「绑定所选页面」后才会成为本会话的绑定目标。"
 )
 STATUS_CHIP_SESSION_BIND_TOOLTIP = (
     "表示当前本地对话真正绑定的远端 ChatGPT 页面。\n"
@@ -118,11 +130,16 @@ STATUS_CHIP_SESSION_BIND_TOOLTIP = (
 
 STATUS_PAGE_ROLES_HINT = (
     "会话绑定页是当前对话实际发送和同步使用的目标页面；"
-    "可用页面列表中的手动选中页仅用于绑定等操作前的临时选择。"
+    "先在可用页面列表选中页面，再点击「绑定所选页面」。"
 )
 
 UNBOUND_SESSION_SEND_HINT = (
-    "当前会话未绑定 ChatGPT 页面，请先点击【打开 ChatGPT】或【绑定当前页面】。"
+    "当前会话未绑定 ChatGPT 页面，请先点击【打开 ChatGPT】或在列表选中页面后点击【绑定所选页面】。"
+)
+
+STATUS_DETAIL_TECH_HINT = (
+    "client_id、page_instance_id、conversation_id、message_id 与原始状态"
+    "请点击聊天页顶部「详情」查看。"
 )
 
 
@@ -135,7 +152,7 @@ DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",
     "port": "5000",
     "enable_lan_access": False,
-    "auto_start_server": False,
+    "auto_start_server": True,
     "font_size": 14,
     "remember_window_geometry": True,
     "remember_window_position": True,
@@ -143,8 +160,6 @@ DEFAULT_APP_SETTINGS = {
     "restore_chat_tab": True,
     "show_top_status_bar": True,
     "enter_send_mode": "enter_send",
-    # 输入框为空时预填的默认内容（新建对话、切换对话、发送清空后回填）
-    "default_compose_message": "",
     "auto_clear_input_after_send": True,
     "auto_name_new_chat": True,
     "show_timestamp": True,
@@ -153,23 +168,13 @@ DEFAULT_APP_SETTINGS = {
     "save_chat_history": True,
     "debug_mode": False,
     "show_raw_payload": True,
-    "mirror_log_to_console": True,
-    "include_log_callsite": True,
+    "mirror_log_to_console": False,
+    "include_log_callsite": False,
     "log_ack_events": True,
     "log_assistant_reply_events": True,
     "log_send_failed_events": True,
-    "bind_each_chat_to_page": True,
     # 新建本地对话时是否自动打开/绑定 ChatGPT 首页（默认仅创建本地会话）
     "auto_open_chatgpt_on_new_session": False,
-    "auto_open_bound_page_when_missing": True,
-    "allow_fallback_to_any_page": False,
-    "auto_bind_unbound_page": True,
-    "sync_full_conversation_enabled": True,
-    "auto_sync_conversation_on_bind": False,
-    "auto_sync_conversation_after_reply": False,
-    "sync_conversation_max_messages": 200,
-    "sync_conversation_mode": "replace",
-    "upload_before_send_enabled": False,
     # 0=不强制；N>0 时同一 GUI 会话连续 N 条用户消息后，外部 API 下一条自动新建会话
     "force_new_session_after_turns": 0,
 }

@@ -24,7 +24,7 @@ flowchart LR
 
 默认服务地址：`http://127.0.0.1:5000`  
 油猴专用接口：`POST /api/bridge`（需请求头 `X-Request-Source: tampermonkey`）  
-外部程序接口：`GET/POST /api/v1/*`（见下方「外部 API 客户端」）
+外部程序接口：`GET/POST /api/v1/*`（默认**不**注册；设 `CHATGPT_BRIDGE_ENABLE_EXTERNAL_API=1` 后启用，见「外部 API 客户端」）
 
 ## 环境要求
 
@@ -61,13 +61,12 @@ pip install -r requirements.txt
    python gui.py
    ```
 
-2. **在 GUI 中启动服务**  
-   点击「启动服务」（或按界面提示操作），确认状态栏显示油猴可连接。
+2. **启动 GUI**  
+   程序会自动在 `127.0.0.1:5000` 启动桥接服务；确认顶部状态栏显示油猴可连接。
 
 3. **安装油猴脚本**  
-   - 在 Tampermonkey 中新建脚本  
-   - 将 `client.user.js` 全文粘贴保存  
-   - 若修改了服务端口或需局域网连接，在油猴菜单 **「浏览器桥接 · 设置」** 中填写地址（无需改脚本源码）
+   - 将 `client.user.js` 粘贴到 Tampermonkey 并保存（仓库内仅此一份维护脚本）  
+   - 桥接服务固定监听 `127.0.0.1:5000`；若曾改过端口，在油猴菜单 **「浏览器桥接 · 设置」** 中填写地址（无需改脚本源码）
 
 4. **打开 ChatGPT**  
    在浏览器中打开 [ChatGPT 首页](https://chatgpt.com/) 或任意对话页，刷新页面，确认脚本已运行（浏览器控制台可见 `[联动]` 日志）。
@@ -106,18 +105,6 @@ print(reply)
 | `client.list_sessions()` | 列出 GUI 会话 |
 | `client.create_session(title)` | 新建会话 |
 
-### 图形界面
-
-在保留命令行/库调用的前提下，可使用**独立的 Bridge API 调试客户端**（不参与主 `GUI.py` 桌面联动，归类为 legacy examples）：
-
-```bash
-python examples/bridge_client_gui.py
-```
-
-根目录 `bridge_client_gui.py` 仅为兼容入口，启动时会打印 `[DEPRECATED]` 并转发到上述路径；主程序请勿导入该文件，生产发布包应排除它。
-
-界面中可配置服务地址与 Token、查看连接诊断、选择或新建 GUI 会话，并通过聊天区发送消息。
-
 ### 命令行
 
 可直接运行 `bridge_client.py`（Windows 下双击会进入交互模式，退出前会等待按键，避免窗口闪退）：
@@ -133,14 +120,12 @@ python bridge_client.py "你好"
 python bridge_client.py --status
 ```
 
-也可使用 `examples/chat_cli.py`（与上面参数相同，legacy examples）。
-
 环境变量（可选）：
 
 - `CHATGPT_PAGE_BRIDGE_URL` — 服务地址，默认 `http://127.0.0.1:5000`
 - `CHATGPT_PAGE_BRIDGE_TOKEN` — 与 GUI 服务端一致的 API token
 
-示例脚本：`examples/external_client.py`（最小示例）、`examples/chat_cli.py`（完整 CLI），均作为 legacy examples 保留，不参与主程序导入链。
+库调用示例见 `bridge_client.py` 模块文档字符串。
 
 ## 页面绑定规则（重要）
 
@@ -155,20 +140,16 @@ python bridge_client.py --status
 
 左侧会话列表会用颜色区分状态：未绑定、预绑定首页、已绑定在线、绑定离线、绑定异常等。
 
-手动「绑定当前页面」**不会**把新建空白对话绑到旧网页对话；若需接管已有网页上下文，需后续单独实现「接管已有对话」功能。
+手动「绑定所选页面」**不会**把新建空白对话绑到旧网页对话；若需接管已有网页上下文，需后续单独实现「接管已有对话」功能。
 
 ## 项目结构
 
 ```
 油猴脚本与Python联动/
 ├── gui.py                 # 主 GUI 入口（含桥接服务）
-├── bridge_client_gui.py   # legacy wrapper，仅兼容旧命令；生产发布包排除
 ├── bridge_client.py       # 外部 API Python 客户端库（含 CLI）
 ├── server.py              # Flask 桥接服务（也可单独 python server.py 调试）
-├── examples/              # legacy examples，仅开发/调试；生产发布包排除
-│   ├── external_client.py # 最小调用示例
-│   └── chat_cli.py        # 命令行客户端
-├── client.user.js         # Tampermonkey 用户脚本
+├── client.user.js         # Tampermonkey 用户脚本（唯一维护版本）
 ├── log_utils.py           # 统一日志
 ├── requirements.txt
 ├── runtime/               # 运行时数据（会话、可 gitignore）
@@ -186,13 +167,13 @@ python bridge_client.py --status
 
 ## 配置说明
 
-- **服务地址 / 端口**：GUI「设置」中修改，默认 `127.0.0.1:5000`
+- **服务地址 / 端口**：固定 `127.0.0.1:5000`（本机）
 - **会话保存路径**：默认 `runtime/chat_sessions.json`
 - **油猴连接地址**：油猴菜单「浏览器桥接 · 设置」，需与 GUI 端口一致（默认 `http://127.0.0.1:5000/api/bridge`）
 - **API Token**：环境变量 `CHATGPT_PAGE_BRIDGE_TOKEN`；启用后油猴设置中需填写相同 Token
 - **调试日志**：项目根目录 `log.txt`，GUI 内也可查看
 
-常用设置项（可在 GUI 设置页调整）包括：是否启用页面绑定、是否自动打开绑定页、发送后是否清空输入框、调试模式等。默认值见 `app/constants.py` 中的 `DEFAULT_APP_SETTINGS`。
+桥接行为（页面绑定、同步策略等）已内置为固定默认值，见 `app/constants.py` 中的 `DEFAULT_APP_SETTINGS` 与 `FIXED_BRIDGE_BEHAVIOR_SETTINGS`。
 
 ## 油猴 ↔ 服务端协议（简述）
 
@@ -213,9 +194,9 @@ python bridge_client.py --status
 | `page_instance_id` | 页面实例 ID | 与 `getToolboxPageInstanceId()` 一致，每标签页稳定 |
 | `page_key` | `client_id::page_instance_id` | 后端注册与绑定匹配 |
 | `conversation_id` | ChatGPT 对话 ID | 从 `/c/xxx` URL 解析 |
-| `url` | 当前完整页面地址 | **唯一写入字段**；兼容读 `page_url` / `target_url` 等 |
-| `message_id` | Bridge 消息 ID | 兼容读 `id`，不再写回 `id` |
-| `content` | 待发送文本 | 兼容读 `text` / `message` / `prompt` |
+| `url` | 当前完整页面地址 | **唯一字段**；入站若带 `page_url` / `target_url` 等旧名会被拒绝 |
+| `message_id` | Bridge 消息 ID | **唯一字段**；入站 `id` 等旧名会被拒绝 |
+| `content` | 待发送文本 | **唯一字段**；入站 `text` / `message` / `prompt` 等旧名会被拒绝 |
 | `assistant_text` | 助手回复 | 不再与 `content` 混写 |
 | `online` | 页面在线 | **仅**看最近心跳 `last_seen` |
 | `syncable` | URL 级可同步 | `online` + `url` 非空 |
@@ -259,23 +240,9 @@ python server.py
 python export_for_chatgpt.py
 ```
 
-### 生产发布包排除项
+### 生产发布包
 
-主 GUI 运行链路只依赖 `gui.py` / `app/`、`server.py`、`bridge_client.py`、`client.user.js` 和运行时配置。制作精简生产包时排除以下 legacy 调试入口：
-
-- `examples/`
-- `bridge_client_gui.py`
-
-如果后续新增 PyInstaller、setuptools、压缩发布脚本或 CI 打包配置，也需要同步把这两个路径加入排除列表。
-
-### Legacy 接口观察
-
-`/api/status` 与 `/process` 暂时保留为兼容接口。运行日志中出现以下标记说明仍有旧客户端访问：
-
-- `[API][DEPRECATED] endpoint=/api/status`
-- `[API][DEPRECATED] endpoint=/process`
-
-`/process` 默认仍返回 `LEGACY_PROCESS_DISABLED`；只有设置 `CHATGPT_ENABLE_LEGACY_PROCESS=1`（或 `true` / `yes`）才会启用旧处理逻辑。连续一个版本没有上述访问记录后，再同步删除 `/process`、`ENABLE_LEGACY_PROCESS_ENDPOINT`、`/api/status` 以及 `bridge_client.py` 中对应的 legacy status fallback。
+主 GUI 运行链路只依赖 `gui.py` / `app/`、`server.py`、`bridge_client.py`、`client.user.js` 和运行时配置。制作精简发布包时可排除 `tests/`、`tools/`、`export_for_chatgpt.py` 等开发辅助内容。
 
 ## 免责声明
 
