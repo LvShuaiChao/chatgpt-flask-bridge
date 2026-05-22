@@ -22,7 +22,7 @@ from app.server.tm_page_registry import (
     _poll_response_needs_runtime_patch,
     _tm_registry_counts,
 )
-from app.server.runtime_state import _log, _now, _notify_status, is_debug_mode
+from app.server.runtime_state import _dispatch_to_gui, _log, _now, _notify_status, is_debug_mode
 
 
 def _is_local_remote_addr(remote_addr):
@@ -41,6 +41,20 @@ def _json_response_with_log(result, body, status_code=200):
     log_server_to_tm_full(result, body, status_code=status_code)
     return jsonify(result), status_code
 
+
+
+def _handle_system_hotkey_action(body):
+    combo = str((body or {}).get("combo") or "").strip().lower()
+    client_id = str((body or {}).get("client_id") or "-")
+    _log(f"[SYSTEM_HOTKEY][REQUEST] combo={combo} client_id={client_id}")
+
+    payload = {"combo": combo, "source": "bridge_api"}
+    result = _dispatch_to_gui("system_hotkey", payload, timeout_sec=5)
+
+    ok = bool(result.get("ok"))
+    _log(f"[SYSTEM_HOTKEY][RESULT] ok={ok} combo={combo}")
+    result["server_time"] = _now()
+    return jsonify(result), 200 if ok else 400
 
 def api_bridge():
     """油猴专用交互接口：poll / ack / report"""
@@ -72,6 +86,9 @@ def api_bridge():
     action = body.get("action", "poll")
     need_notify = False
     identity_changed = False
+    if action == "system_hotkey":
+        return _handle_system_hotkey_action(body)
+
     with st._state_lock:
         if action == "poll":
             result, need_notify, identity_changed = _handle_poll(body)

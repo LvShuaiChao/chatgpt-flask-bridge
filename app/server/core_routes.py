@@ -78,6 +78,7 @@ def handle_unexpected_route_error(error):
 
 def register_core_routes(app) -> None:
     from app.server import upload_files as uf
+    from app.server import system_hotkey as sh
 
     app.add_url_rule("/api/bridge", view_func=bridge_api.api_bridge, methods=["POST"])
     app.add_url_rule("/health", view_func=health, methods=["GET"])
@@ -91,6 +92,7 @@ def register_core_routes(app) -> None:
         view_func=uf.api_download_upload_file,
         methods=["GET"],
     )
+    sh.register_system_hotkey_routes(app)
     app.before_request(before_request)
     app.after_request(after_request)
     app.errorhandler(Exception)(handle_unexpected_route_error)

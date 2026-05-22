@@ -2992,6 +2992,37 @@ class BridgeMixin:
 
     def _handle_external_gui_dispatch(self, action_id, action, payload):
         from app.server.runtime_state import complete_gui_dispatch
+        if action == "system_hotkey":
+            combo = str((payload or {}).get("combo") or "").strip().lower()
+            if combo != "ctrl+alt+i":
+                result = {
+                    "ok": False,
+                    "error": f"不允许的快捷键: {combo}",
+                    "code": "INVALID_HOTKEY",
+                }
+            else:
+                try:
+                    import pyautogui
+                    self._append_log("[SYSTEM_HOTKEY][EXEC] combo=ctrl+alt+i", echo=True)
+                    pyautogui.hotkey("ctrl", "alt", "i", interval=0.04)
+                    self._append_log("[SYSTEM_HOTKEY][DONE] combo=ctrl+alt+i", echo=True)
+                    result = {
+                        "ok": True,
+                        "combo": "ctrl+alt+i",
+                        "keys": ["ctrl", "alt", "i"],
+                    }
+                except Exception as error:
+                    import traceback
+                    detail = f"{error}
+{traceback.format_exc()}"
+                    self._append_log(f"[SYSTEM_HOTKEY][ERROR] {detail}", echo=True)
+                    result = {
+                        "ok": False,
+                        "error": str(error),
+                        "code": "INTERNAL_ERROR",
+                    }
+            complete_gui_dispatch(action_id, result)
+            return
         complete_gui_dispatch(
             action_id,
             {

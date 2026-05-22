@@ -1,4 +1,4 @@
-// ==UserScript==
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿// ==UserScript==
 // @name         ChatGPT 工具箱：多文件上传 + 自动指令队列 + Prompt 管理
 // @namespace    https://github.com/xiaozhang/chatgpt-toolbox
 // @version      3.6.6
@@ -2486,7 +2486,7 @@
 
     const sendHotkeyBtn = qs(UploadSelectors.sendHotkeyBtn, scope);
     if (sendHotkeyBtn) {
-      sendHotkeyBtn.title = `发送快捷键：${shortcutCfg.sendMessage.label || '未设置'}`;
+      sendHotkeyBtn.title = `发送 Ctrl+Alt+I：${shortcutCfg.sendMessage.label || '未设置'}`;
     }
 
     const autoContinueBtn = qs(UploadSelectors.autoContinueBtn, scope);
@@ -6163,7 +6163,7 @@
         #cgpt-toolbox-floating-title {
           position: fixed;
           z-index: 2147483647;
-          display: none;
+          display: inline-flex;
           align-items: center;
           justify-content: center;
           height: 28px;
@@ -6189,11 +6189,6 @@
 
         #${APP.rootId}.cgpt-toolbox-dragging #cgpt-toolbox-floating-title {
           cursor: grabbing !important;
-        }
-
-        #${APP.rootId}:not(.cgpt-toolbox-panel-hidden):not(.cgpt-toolbox-edge-hidden):not(.cgpt-edge-hidden) #cgpt-toolbox-floating-title,
-        #${APP.rootId}.cgpt-toolbox-edge-revealed:not(.cgpt-toolbox-panel-hidden):not(.cgpt-edge-hidden) #cgpt-toolbox-floating-title {
-          display: none !important;
         }
 
         #${APP.rootId}.cgpt-toolbox-panel-hidden #cgpt-toolbox-floating-title,
@@ -21356,38 +21351,23 @@
     }
 
     async function triggerSendHotkeyOnce() {
-      const shortcutCfg = getShortcutConfig();
-      const cfg = shortcutCfg.sendMessage || {};
-
-      if (!cfg || (!cfg.key && !cfg.code)) {
-        setStatus('未设置发送快捷键', 'warn');
-        return false;
-      }
-
-      if (isWaitingSendActive()) {
-        const runningMs = uploadSendTaskStartedAt ? Date.now() - uploadSendTaskStartedAt : 0;
-        if (runningMs > 30000 && !ComposerApi.isAssistantLikelyBusy()) {
-          resetUploadSendShortcutState('stale-hotkey-button-reset', state.autoSendRunId);
-        } else {
-          cancelWaitingSend('hotkey-button-click');
-          return true;
-        }
-      }
-
-      const runId = claimWaitingSendRun('hotkey-button', Date.now());
-      setStatus('快捷键触发：正在等待发送按钮', 'running');
+      setStatus('正在请求 GUI 发送 Ctrl+Alt+I', 'running');
+      ToolboxShell.appendLog('[SYSTEM_HOTKEY][REQUEST] combo=ctrl+alt+i');
 
       try {
-        return await sendCurrentMessageFromUploadPanel('hotkey-button', runId);
+        const result = await BridgeModule.sendSystemHotkey('ctrl+alt+i');
+        setStatus('已请求 GUI 发送 Ctrl+Alt+I', 'success');
+        ToolboxShell.appendLog('[SYSTEM_HOTKEY][DONE] combo=ctrl+alt+i result=' + JSON.stringify(result).slice(0, 200));
+        return true;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.error('[SEND_HOTKEY][FAILED]', {
+        console.error('[SYSTEM_HOTKEY][FAILED]', {
           error_type: err && err.name,
           error: errText,
           stack: err && err.stack,
         });
-        setStatus(`发送快捷键失败：${errText}`, 'error');
-        resetUploadSendShortcutState('hotkey-button-catch', runId);
+        setStatus(`GUI 快捷键失败：${errText}`, 'error');
+        ToolboxShell.appendLog('[SYSTEM_HOTKEY][FAILED] error=' + errText);
         return false;
       }
     }
@@ -22012,6 +21992,9 @@
         );
         return buildUploadSkipResult('already-running');
       }
+
+      // 重置已绑定的文件，允许再次上传
+      resetQueueItemsForUpload({ forceResetAttached: true });
 
       const pendingItems = getPendingUploadItems();
 
@@ -23269,7 +23252,7 @@
             sendHotkeyBtn.blur();
           }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=send-hotkey');
-          runUploadActionPromise(triggerSendHotkeyOnce(), '发送快捷键');
+          runUploadActionPromise(triggerSendHotkeyOnce(), '发送 Ctrl+Alt+I');
           return;
         }
 
@@ -23713,7 +23696,7 @@
         sendHotkeyBtn.type = 'button';
         sendHotkeyBtn.className = 'cgpt-btn warning';
         sendHotkeyBtn.id = 'cgpt-send-hotkey-once';
-        sendHotkeyBtn.textContent = '发送快捷键';
+        sendHotkeyBtn.textContent = '发送 Ctrl+Alt+I';
         actionRow.insertBefore(sendHotkeyBtn, copyLastBtn);
       }
 
@@ -23741,7 +23724,7 @@
             error: error && error.message,
             stack: error && error.stack,
           });
-          setStatus(`发送快捷键失败：${error && error.message ? error.message : error}`, 'error');
+          setStatus(`发送 Ctrl+Alt+I 失败：${error && error.message ? error.message : error}`, 'error');
         }
       }, 'UPLOAD');
 
@@ -23857,13 +23840,13 @@
           type: 'order',
           before: '#cgpt-upload-continue-once',
           after: '#cgpt-send-hotkey-once',
-          message: '发送快捷键按钮应位于复制并继续按钮之后',
+          message: '发送 Ctrl+Alt+I按钮应位于复制并继续按钮之后',
         },
         {
           type: 'order',
           before: '#cgpt-send-hotkey-once',
           after: '#cgpt-auto-continue-once',
-          message: '自动继续按钮应位于发送快捷键按钮之后',
+          message: '自动继续按钮应位于发送 Ctrl+Alt+I按钮之后',
         },
         {
           type: 'order',
@@ -24069,7 +24052,7 @@
             <button type="button" class="cgpt-btn success" id="cgpt-upload-start">开始上传</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-upload-start-send">发送信息</button>
             <button type="button" class="cgpt-btn cgpt-btn-copy-continue" id="cgpt-upload-continue-once" title="先复制最后回复，再发送“继续”">复制并继续</button>
-            <button type="button" class="cgpt-btn warning" id="cgpt-send-hotkey-once">发送快捷键</button>
+            <button type="button" class="cgpt-btn warning" id="cgpt-send-hotkey-once">发送 Ctrl+Alt+I</button>
             <button type="button" class="cgpt-btn teal" id="cgpt-auto-continue-once">自动继续</button>
             <button type="button" class="cgpt-btn" id="cgpt-copy-last-message-scroll-bottom">复制最后回复</button>
           </div>
@@ -30363,9 +30346,24 @@
       }
     }
 
+    async function sendSystemHotkey(combo = 'ctrl+alt+i') {
+      const normalizedCombo = String(combo || '').trim().toLowerCase() || 'ctrl+alt+i';
+      const result = await apiRequest({
+        action: 'system_hotkey',
+        combo: normalizedCombo,
+      });
+
+      if (!result || result.ok !== true) {
+        throw new Error((result && result.error) || 'GUI 执行快捷键失败');
+      }
+
+      return result;
+    }
+
     return {
       mount,
       handleRouteChange,
+      sendSystemHotkey,
     };
   })();
 

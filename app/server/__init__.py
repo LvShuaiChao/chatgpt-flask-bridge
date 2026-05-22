@@ -33,6 +33,10 @@ from app.server.control_commands import (
     push_close_page,
     push_open_url,
 )
+from app.server.system_hotkey import (
+    _parse_hotkey_for_pyautogui,
+    execute_system_hotkey,
+)
 
 ONLINE_TIMEOUT_SEC = st.ONLINE_TIMEOUT_SEC
 
@@ -64,4 +68,6 @@ __all__ = [
     "push_close_other_pages",
     "push_close_page",
     "push_open_url",
+    "_parse_hotkey_for_pyautogui",
+    "execute_system_hotkey",
 ]

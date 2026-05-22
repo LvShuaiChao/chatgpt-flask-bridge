@@ -12,6 +12,10 @@ from app.server.runtime_state import (
     start_server,
     stop_server,
 )
+from app.server.system_hotkey import (
+    _parse_hotkey_for_pyautogui,
+    execute_system_hotkey as _execute_system_hotkey_impl,
+)
 
 __all__ = [
     "create_app",
@@ -23,7 +27,22 @@ __all__ = [
     "set_status_callback",
     "start_server",
     "stop_server",
+    "_parse_hotkey_for_pyautogui",
+    "execute_system_hotkey",
 ]
+
+_LAST_SYSTEM_HOTKEY_AT = 0.0
+
+
+def execute_system_hotkey(hotkey: str, *, source: str = ""):
+    """Compatibility wrapper for old `import server` callers/tests."""
+    global _LAST_SYSTEM_HOTKEY_AT
+    from app.server import system_hotkey as _sh
+
+    _sh._LAST_SYSTEM_HOTKEY_AT = float(_LAST_SYSTEM_HOTKEY_AT or 0.0)
+    result = _execute_system_hotkey_impl(hotkey, source=source)
+    _LAST_SYSTEM_HOTKEY_AT = float(_sh._LAST_SYSTEM_HOTKEY_AT or 0.0)
+    return result
 
 _FALLBACK_MODULES = (
     "app.server",
@@ -33,6 +52,7 @@ _FALLBACK_MODULES = (
     "app.server.message_queue",
     "app.server.tm_page_registry",
     "app.server.control_commands",
+    "app.server.system_hotkey",
     "app.server.cursor_api",
     "app.server.external_api",
 )

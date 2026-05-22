@@ -6,7 +6,12 @@ import traceback
 import uuid
 
 from app.server.external_api import attach_external_request_bridge, count_user_turns
-from app.server import complete_gui_dispatch, is_server_running, push_message
+from app.server import (
+    complete_gui_dispatch,
+    execute_system_hotkey,
+    is_server_running,
+    push_message,
+)
 from app.constants import ASSISTANT_WAIT_TEXT
 from app.models import (
     remote_binding_enabled,
@@ -39,6 +44,8 @@ class ExternalApiGuiMixin:
                 result = self._external_api_sessions_bind_clear(payload or {})
             elif action == "sessions_summary":
                 result = self._external_api_sessions_summary()
+            elif action == "system_hotkey":
+                result = self._external_api_system_hotkey(payload or {})
             else:
                 result = {
                     "ok": False,
@@ -56,6 +63,26 @@ class ExternalApiGuiMixin:
                 "code": "INTERNAL_ERROR",
             }
         complete_gui_dispatch(action_id, result)
+
+    def _external_api_system_hotkey(self, payload):
+        combo = str((payload or {}).get("combo") or "").strip().lower()
+        if combo != "ctrl+alt+i":
+            return {
+                "ok": False,
+                "error": f"不允许的快捷键: {combo}",
+                "code": "INVALID_HOTKEY",
+            }
+
+        import pyautogui
+        self._append_log("[SYSTEM_HOTKEY][EXEC] combo=ctrl+alt+i", echo=True)
+        pyautogui.hotkey("ctrl", "alt", "i", interval=0.04)
+        self._append_log("[SYSTEM_HOTKEY][DONE] combo=ctrl+alt+i", echo=True)
+
+        return {
+            "ok": True,
+            "combo": "ctrl+alt+i",
+            "keys": ["ctrl", "alt", "i"],
+        }
 
     def _external_api_sessions_summary(self):
         total = 0
