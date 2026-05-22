@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Application runtime logs (including rotation: log.txt.1, log.txt.2, ...)
+log.txt
+log.txt.*
+*.log
+
+# ChatGPT export artifacts
+/0_merged_for_chatgpt*.zip
+/0_merged_for_chatgpt*.txt
+/0_merged_for_chatgpt*_metadata.txt
+/0_export_logs_for_chatgpt*.txt
+/.export_for_chatgpt_mtimes.json
+
+# Temporary export archives / reports
+/*_merged_for_chatgpt*.zip
+/*_merged_for_chatgpt*.txt
+/*_export_logs_for_chatgpt*.txt
