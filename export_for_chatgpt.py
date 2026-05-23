@@ -802,7 +802,7 @@ def find_file_by_name(project_root: Path, relative_or_name: str) -> Path | None:
         for d in list(dirs):
             dp = root_path / d
             if should_exclude_path(dp, project_root):
-            continue
+                continue
             kept_dirs.append(d)
         dirs[:] = kept_dirs
         if target_name in files:
@@ -962,14 +962,14 @@ def _prepare_export_file(
 
     tok_line = _tokens_header_line_for_exported_body(content, token_count=source_tokens)
 
-        block = "\n".join(
-            [
+    block = "\n".join(
+        [
             "\n" + "=" * 100,
             f"FILE: {rel_path.as_posix()}",
             tok_line,
             "=" * 100,
-                "",
-                content.rstrip(),
+            "",
+            content.rstrip(),
             "\n",
         ]
     )

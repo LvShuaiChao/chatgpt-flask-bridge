@@ -1,13 +1,17 @@
   /********************************************************************
-   * 3. UploadModule：多文件上传模块
+   * 3. UploadModule锛氬鏂囦欢涓婁紶妯″潡
    ********************************************************************/
 
   const UploadModule = (() => {
-    const DEFAULT_UPLOAD_GROUP_NAME = '默认组';
+    const DEFAULT_UPLOAD_GROUP_NAME = '???';
     const SEND_WAIT_TIMEOUT_MS = 60 * 1000;
     const COPY_CONTINUE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
     const COPY_CONTINUE_STABLE_ROUNDS = 2;
     const COPY_CONTINUE_STABLE_INTERVAL_MS = 350;
+
+    const UPLOAD_DROP_HANDLED_PROP = '__cgptToolboxUploadDropHandledV1';
+    let lastDropSignature = '';
+    let lastDropSignatureAt = 0;
 
     const state = {
       groups: [],
@@ -32,6 +36,10 @@
       waitingSendTimer: null,
       waitingSendInterval: null,
       waitingSendAbortController: null,
+      waitingReply: false,
+      waitingReplyRunId: null,
+      waitingReplyCheckedAt: 0,
+      waitingReplyTimer: null,
     };
 
     let host = null;
@@ -84,9 +92,85 @@
     let copyHotkeyContinueLoopStopRequested = false;
     let copyHotkeyContinueLoopCount = 0;
     let copyHotkeyContinueLoopStartedAt = 0;
+    const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '__CHATGPT_TOOLBOX_DONE__';
     let uploadUiActionLastKey = '';
     let uploadUiActionLastAt = 0;
-    let quickPromptActiveCategory = '全部';
+    let quickPromptActiveCategory = '鍏ㄩ儴';
+
+    function getDefaultCopyHotkeyContinuePromptText() {
+      return [
+        '请继续完成上一个任务。',
+        '',
+        '如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充，请只回复下面这一行终止信号：',
+        '',
+        DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+        '',
+        '除此之外不要输出任何多余文字。',
+        '',
+        '如果还需要继续，请直接继续输出后续内容，不要解释。',
+      ].join('\n');
+    }
+
+    function getCopyHotkeyContinueStopSignal() {
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+
+      const signal = String(
+        cfg.copyHotkeyContinueStopSignal || DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+      ).trim();
+
+      return signal || DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL;
+    }
+
+    function getCopyHotkeyContinuePromptText() {
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+
+      const signal = getCopyHotkeyContinueStopSignal();
+
+      let text = String(cfg.copyHotkeyContinuePromptText || '').trim();
+
+      if (!text) {
+        text = getDefaultCopyHotkeyContinuePromptText();
+      }
+
+      if (!text.includes(signal)) {
+        text = [
+          text,
+          '',
+          '如果没有必要继续，请只回复下面这一行终止信号，不要输出任何多余文字：',
+          '',
+          signal,
+        ].join('\n');
+      }
+
+      return text;
+    }
+
+    function isCopyHotkeyContinueStopSignalText(text) {
+      const raw = String(text || '').trim();
+      if (!raw) {
+        return false;
+      }
+
+      const signal = getCopyHotkeyContinueStopSignal();
+      if (!signal) {
+        return false;
+      }
+
+      if (raw === signal) {
+        return true;
+      }
+
+      const lines = raw
+        .split(/\r?\n/)
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+
+      return lines.length === 1 && lines[0] === signal;
+    }
 
     function getActiveGroupId() {
       return String(state.activeGroupId || '').trim();
@@ -313,7 +397,7 @@
         btn.dataset.busyAt = '0';
         btn.dataset.waitingReply = '0';
         btn.classList.remove('cgpt-btn-busy');
-        btn.textContent = String(options.idleText || '复制并继续');
+        btn.textContent = String(options.idleText || '?????');
         applyWaitingAnswerButtonStyle(btn, false, {
           extraIdleClasses: ['copy-continue'],
         });
@@ -331,7 +415,7 @@
       btn.dataset.waitingReply = assistantBusy ? '1' : '0';
       btn.classList.add('cgpt-btn-busy');
       const busyText = String(
-        options.text || (assistantBusy ? '等待回复...' : '继续中...'),
+        options.text || (assistantBusy ? '绛夊緟鍥炲...' : '缁х画涓?..'),
       );
       btn.textContent = busyText;
       applyWaitingAnswerButtonStyle(btn, isWaitingAnswerVisualState({
@@ -372,7 +456,7 @@
     }
 
     function isUploadBlobPersistEnabled() {
-      return !!MemoryManager.get(MemoryManager.KEYS.uploadBlobPersistEnabled, true);
+      return false;
     }
 
     function isUploadUseUniqueFileNameEnabled() {
@@ -451,10 +535,10 @@
     function isHandleReadFailureMessage(message) {
       const text = String(message || '');
 
-      return text.includes('本地文件读取失败') ||
-        text.includes('缺少文件，请重新拖入') ||
-        text.includes('没有本地文件读取权限') ||
-        text.includes('本地文件为空或读取失败');
+      return text.includes('鏈湴鏂囦欢璇诲彇澶辫触') ||
+        text.includes('缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆') ||
+        text.includes('娌℃湁鏈湴鏂囦欢璇诲彇鏉冮檺') ||
+        text.includes('鏈湴鏂囦欢涓虹┖鎴栬鍙栧け璐?');
     }
 
     function shouldPreserveMissingOrFailedState(q) {
@@ -528,6 +612,32 @@
           changed = true;
         }
       });
+
+      return changed;
+    }
+
+    function resetFlaskFilesForUpload(reason = '') {
+      let changed = false;
+
+      state.flaskFiles = (state.flaskFiles || []).map((row) => {
+        if (!row) return row;
+
+        if (row.status === 'uploaded') {
+          changed = true;
+          return {
+            ...row,
+            status: 'pending',
+          };
+        }
+
+        return row;
+      });
+
+      if (changed) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FLASK_RESET_FOR_REUPLOAD] reason=${String(reason || '-')}`
+        );
+      }
 
       return changed;
     }
@@ -643,9 +753,9 @@
       }
     }
 
-    // 注意：displayPath 只是展示信息，不能作为本地读取依据
-    // 浏览器通常不会暴露真实绝对路径
-    // 是否能重新读取本地文件，只能fileHandle 是否存在且可 getFile
+    // 娉ㄦ剰锛歞isplayPath 鍙槸灞曠ず淇℃伅锛屼笉鑳戒綔涓烘湰鍦拌鍙栦緷鎹?
+    // 娴忚鍣ㄩ€氬父涓嶄細鏆撮湶鐪熷疄缁濆璺緞
+    // 鏄惁鑳介噸鏂拌鍙栨湰鍦版枃浠讹紝鍙兘fileHandle 鏄惁瀛樺湪涓斿彲 getFile
 
     function hasLocalReadableHandle(q) {
       return !!(
@@ -655,30 +765,9 @@
       );
     }
 
-    function isCachedUploadSnapshot(q) {
-      if (!q) return false;
-
-      if (
-        q.state === UploadState.MISSING_FILE ||
-        q.sourceKind === 'missing-file' ||
-        q.sourceKind === 'missing-local'
-      ) {
-        return false;
-      }
-
-      if (hasLocalReadableHandle(q)) {
-        return false;
-      }
-
-      if (q.sourceKind === 'session-file') {
-        return false;
-      }
-
-      return (
-        q.sourceKind === 'cached-blob' ||
-        q.sourceKind === 'cached-only' ||
-        q.readMode === 'snapshot'
-      ) && Boolean(q.file || q.blob);
+        function isCachedUploadSnapshot(q) {
+      // Blob persistence disabled - no cached snapshots
+      return false;
     }
 
     function getUploadInlineStatusText(q) {
@@ -688,9 +777,9 @@
         q.state === UploadState.MISSING_FILE ||
         q.sourceKind === 'missing-file' ||
         q.sourceKind === 'missing-local' ||
-        (!q.file && !q.blob && !hasLocalReadableHandle(q))
+        (!q.file && !q.fileHandle && !hasLocalReadableHandle(q))
       ) {
-        return '缺少文件：请重新绑定';
+        return '需重新拖入';
       }
 
       if (q.state === UploadState.ATTACHED) {
@@ -705,22 +794,15 @@
         return '本地直读';
       }
 
-      if (hasLocalReadableHandle(q)) {
-        return '本地直读';
+      if (hasLocalReadableHandle(q) || q.fileHandle) {
+        return '实时读取';
       }
 
-      if (isCachedUploadSnapshot(q)) {
-        if (q.sourceKind === 'cached-only') {
-          return '缺少原文件：使用缓存';
-        }
-        return '可上传：缓存文件';
-      }
-
-      if (q.file || q.blob) {
+      if (q.file) {
         return '本次选择';
       }
 
-      return '未知来源';
+      return '需重新拖入';
     }
 
     function buildUploadItemTitle(q) {
@@ -728,30 +810,30 @@
 
       const lines = [];
 
-      lines.push(`文件名：${q.name || '-'}`);
-      lines.push(`大小：${formatBytes(q.size)}`);
+      lines.push(`鏂囦欢鍚嶏細${q.name || '-'}`);
+      lines.push(`澶у皬锛?{formatBytes(q.size)}`);
 
       if (q.lastModified) {
         const d = new Date(Number(q.lastModified));
         if (!Number.isNaN(d.getTime())) {
-          lines.push(`修改时间：${d.toLocaleString()}`);
+          lines.push(`淇敼鏃堕棿锛?{d.toLocaleString()}`);
         }
       }
 
-      lines.push(`来源：${getUploadInlineStatusText(q)}`);
+      lines.push(`鏉ユ簮锛?{getUploadInlineStatusText(q)}`);
 
       if (hasLocalReadableHandle(q)) {
-        lines.push('说明：已保存本地文件句柄，刷新后可重新读取原文件');
+        lines.push('说明：已保存本地文件句柄，刷新后可实时读取最新文件');
       } else if (isCachedUploadSnapshot(q)) {
-        lines.push('说明：这是浏览器 IndexedDB 中保存的文件快照，不是本地文件句柄；原文件变化后不会自动同步');
+              // lines.push('说明：这是浏览器 IndexedDB 中保存的文件快照，不是本地文件句柄；原文件变化后不会自动同步');
       } else if (q.sourceKind === 'session-file' && (q.file || q.blob)) {
-        lines.push('说明：仅当前页面内存可用，刷新后会尝试转为缓存快照');
+              // lines.push('说明：仅当前页面内存可用，刷新后会变为需重新拖入');
       } else if (
         q.sourceKind === 'missing-file' ||
         q.sourceKind === 'missing-local' ||
         q.state === UploadState.MISSING_FILE
       ) {
-        lines.push('说明：缺少可读文件，请点击“重新绑定”或重新拖入');
+        lines.push('璇存槑锛氱己灏戝彲璇绘枃浠讹紝璇风偣鍑烩€滈噸鏂扮粦瀹氣€濇垨閲嶆柊鎷栧叆');
       }
 
       return lines.join('\n');
@@ -775,12 +857,12 @@
           }
 
           const msg = q.sourceKind === 'cached-only'
-            ? '缺少文件，请重新拖入'
+            ? '缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆'
             : (q.sourceKind === 'missing-local'
-              ? '缺少文件，请重新拖入'
+              ? '缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆'
               : (q.sourceKind === 'session-file'
-                ? '缺少文件，请重新拖入'
-                : '缺少文件，请重新拖入'));
+                ? '缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆'
+                : '缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆'));
 
           if (q.message !== msg) {
             q.message = msg;
@@ -844,14 +926,14 @@
           }
 
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][refreshQueue:attached-reset-after-reload] ${q.name} 页面附件区未检测到，已改为待上传`
+            `[UPLOAD_DIAG][refreshQueue:attached-reset-after-reload] ${q.name} 椤甸潰闄勪欢鍖烘湭妫€娴嬪埌锛屽凡鏀逛负寰呬笂浼燻`
           );
           q.state = UploadState.IDLE;
           q.uploadName = '';
           if (!q.message) {
             q.message = q.persistedAttached
-              ? '上次已上传，刷新后请点击上传'
-              : '页面附件区未检测到，请再次点击上传';
+              ? '涓婃宸蹭笂浼狅紝鍒锋柊鍚庤鐐瑰嚮涓婁紶'
+              : '椤甸潰闄勪欢鍖烘湭妫€娴嬪埌锛岃鍐嶆鐐瑰嚮涓婁紶';
           }
           changed = true;
         }
@@ -956,84 +1038,65 @@
         debugSavedFrom: '',
       };
 
-      const logPersistRow = (blobSaved) => {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persist-row] name=${q.name || '-'} blob=${blobSaved ? 1 : 0} handle=${hasHandle ? 1 : 0} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`,
-        );
-      };
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][persist-row:no-blob] name=${q.name || '-'} handle=${hasHandle ? 1 : 0} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`
+      );
 
-      if (hasHandle) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persist:handle] name=${q.name || '-'} handle=1 sourceKind=${q.sourceKind || '-'}`,
-        );
-      }
-
-      if (!isUploadBlobPersistEnabled()) {
-        console.debug('[ChatGPT toolbox] buildPersistRow: Blob 持久化未开启', sourceInfo);
-        logPersistRow(false);
-        return row;
-      }
-
-      if (isFileLike(q.file)) {
-        if (q.file.size > APP.uploadBlobMaxBytes) {
-          console.warn('[ChatGPT toolbox] buildPersistRow: 文件超过限制，跳Blob 保存', {
-            sourceInfo,
-            limit: APP.uploadBlobMaxBytes,
-          });
-          logPersistRow(false);
-          return row;
-        }
-
-        row.blob = q.file;
-        row.blobSaved = true;
-        row.blobSavedAt = Date.now();
-        row.debugSavedFrom = 'file';
-
-        console.debug('[ChatGPT toolbox] buildPersistRow: Blob q.file 保存', {
-          sourceInfo,
-          blobSaved: true,
-        });
-
-        logPersistRow(true);
-        return row;
-      }
-
-      if (isBlobLike(q.blob)) {
-        if (q.blob.size > APP.uploadBlobMaxBytes) {
-          console.warn('[ChatGPT toolbox] buildPersistRow: q.blob 超过限制，跳Blob 保存', {
-            sourceInfo,
-            limit: APP.uploadBlobMaxBytes,
-          });
-          logPersistRow(false);
-          return row;
-        }
-
-        row.blob = q.blob;
-        row.blobSaved = true;
-        row.blobSavedAt = Date.now();
-        row.debugSavedFrom = 'blob';
-
-        console.debug('[ChatGPT toolbox] buildPersistRow: Blob q.blob 保存', {
-          sourceInfo,
-          blobSaved: true,
-        });
-
-        logPersistRow(true);
-        return row;
-      }
-
-      console.warn('[ChatGPT toolbox] buildPersistRow: 没有可保存的 File/Blob', sourceInfo);
-
-      logPersistRow(false);
       return row;
     }
 
-    function openDb() {
+    async function clearPersistedUploadBlobs(reason) {
+      if (!APP || !APP.uploadStore) {
+        console.warn('[ChatGPT toolbox] clearPersistedUploadBlobs: APP.uploadStore not available');
+        return;
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][clear-persisted-blob:start] reason=${reason || '-'}`
+      );
+
+      let changed = 0;
+
+      try {
+        const all = await APP.uploadStore.getAll();
+
+        for (const record of all) {
+          if (!record) continue;
+
+          const hasBlob = record.blob !== null && record.blob !== undefined;
+
+          if (hasBlob || record.blobSaved || record.blobSavedAt || record.debugSavedFrom) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_DIAG][clear-persisted-blob:item] name=${record.name || '-'} id=${record.id || '-'} oldBlob=${hasBlob ? 1 : 0}`
+            );
+
+            record.blob = null;
+            record.blobSaved = false;
+            record.blobSavedAt = 0;
+            record.debugSavedFrom = '';
+
+            await APP.uploadStore.put(record);
+            changed++;
+          }
+        }
+      } catch (e) {
+        console.error('[ChatGPT toolbox] clearPersistedUploadBlobs failed', e);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][clear-persisted-blob:error] reason=${reason || '-'} error=${e && e.message ? e.message : String(e)}`
+        );
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][clear-persisted-blob:done] changed=${changed}`
+      );
+    }
+
+    function openDb() {    function openDb() {    function openDb() {
       if (dbPromise) return dbPromise;
 
       dbPromise = new Promise((resolve, reject) => {
         if (!window.indexedDB) {
-          reject(new Error('当前浏览器不支持 IndexedDB'));
+          reject(new Error('褰撳墠娴忚鍣ㄤ笉鏀寔 IndexedDB'));
           return;
         }
 
@@ -1106,7 +1169,7 @@
           console.warn('[ChatGPT toolbox] IndexedDB open blocked');
 
           if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog('[UPLOAD_DB][open:blocked] IndexedDB 被其他页面或旧连接阻塞');
+            ToolboxShell.appendLog('[UPLOAD_DB][open:blocked] IndexedDB 琚叾浠栭〉闈㈡垨鏃ц繛鎺ラ樆濉?');
           }
 
           reject(err);
@@ -1148,7 +1211,7 @@
           message: r.message || '',
         }));
 
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB回读 ${summary.length} 条：${summary.map((x) => `${x.name}:blob=${x.hasBlob ? 1 : 0},handle=${x.hasHandle ? 1 : 0},state=${x.state}`).join('|')}`);
+        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB鍥炶 ${summary.length} 鏉★細${summary.map((x) => `${x.name}:blob=${x.hasBlob ? 1 : 0},handle=${x.hasHandle ? 1 : 0},state=${x.state}`).join('|')}`);
 
         console.debug('[ChatGPT toolbox] persisted queue readback', {
           stage,
@@ -1157,14 +1220,14 @@
         });
       } catch (e) {
         console.error('[ChatGPT toolbox] debugReadBackPersistedQueue failed', stage, e);
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB回读失败${e && e.message ? e.message : String(e)}`);
+        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB鍥炶澶辫触${e && e.message ? e.message : String(e)}`);
       }
     }
 
     async function persistQueue() {
       const groupIdSnapshot = String(state.activeGroupId || '').trim();
       if (!groupIdSnapshot) {
-        console.warn('[ChatGPT toolbox] persistQueue: activeGroupId 为空');
+        console.warn('[ChatGPT toolbox] persistQueue: activeGroupId 涓虹┖');
         return;
       }
 
@@ -1309,7 +1372,7 @@
             `[UPLOAD_DIAG][persistQueue:failed-or-timeout] type=${errName} timeoutMs=${UPLOAD_PERSIST_TIMEOUT_MS} note=timeout-does-not-cancel-indexeddb-write error=${errText}`,
           );
 
-          setStatus(`上传队列保存失败或超时：${errText}`, 'error');
+          setStatus(`涓婁紶闃熷垪淇濆瓨澶辫触鎴栬秴鏃讹細${errText}`, 'error');
 
           throw e;
         });
@@ -1422,7 +1485,7 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][refresh-counts:failed] activeGroupId=${state.activeGroupId || '-'} groups=${state.groups.length} type=${errName} error=${errText}`,
         );
-        setStatus(`上传分组数量刷新失败：${errText}`, 'error');
+        setStatus(`涓婁紶鍒嗙粍鏁伴噺鍒锋柊澶辫触锛?{errText}`, 'error');
         return false;
       }
     }
@@ -1431,7 +1494,7 @@
       const active = group.id === activeGroupId ? ' active' : '';
       const count = getUploadGroupFileCount(group.id);
       const cleanName = stripTrailingCountFromGroupName(group.name);
-      const title = `${cleanName}：${count} 个文件`;
+      const title = `${cleanName}锛?{count} 涓枃浠禶`;
 
       return `
           <button type="button"
@@ -1476,7 +1539,7 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][persist-failed] groups=${state.groups.length} activeGroupId=${state.activeGroupId || '-'} type=${errName} error=${errText}`,
         );
-        setStatus(`上传分组保存失败：${errText}`, 'error');
+        setStatus(`涓婁紶鍒嗙粍淇濆瓨澶辫触锛?{errText}`, 'error');
         throw e;
       }
     }
@@ -1539,7 +1602,7 @@
           `[UPLOAD_GROUP][load-failed] store=${APP.uploadGroupStore} type=${errName} error=${errStack}`,
         );
         setStatus(
-          '读取文件组失败，当前为临时默认分组，请勿立即导入/删除分组；请刷新或检查 IndexedDB',
+          '璇诲彇鏂囦欢缁勫け璐ワ紝褰撳墠涓轰复鏃堕粯璁ゅ垎缁勶紝璇峰嬁绔嬪嵆瀵煎叆/鍒犻櫎鍒嗙粍锛涜鍒锋柊鎴栨鏌?IndexedDB',
           'error',
         );
 
@@ -1627,7 +1690,7 @@
           `[UPLOAD_GROUP][migrate-missing-group-error] target=${targetId || '-'} type=${errName} error=${errText}`,
         );
 
-        setStatus(`上传队列兼容迁移失败：${errText}`, 'error');
+        setStatus(`涓婁紶闃熷垪鍏煎杩佺Щ澶辫触锛?{errText}`, 'error');
 
         return false;
       }
@@ -1647,7 +1710,7 @@
         } else {
           item.persistedAttached = true;
           item.state = UploadState.IDLE;
-          item.message = '上次已上传，刷新后请点击上传';
+          item.message = '涓婃宸蹭笂浼狅紝鍒锋柊鍚庤鐐瑰嚮涓婁紶';
           item.uploadName = '';
         }
       } else {
@@ -1657,42 +1720,20 @@
       return false;
     }
 
+        // [DEPRECATED] Blob persistence is disabled
     function restoreBlobBackedUploadItem(item, row, restoredState) {
-      const restoredFile = normalizeToNativeFile(row.blob, item.name || 'upload.bin');
-
-      item.file = restoredFile;
-      item.blob = restoredFile || row.blob;
-      item.sourceKind = 'cached-blob';
-      item.readMode = 'snapshot';
-      item.uploadName = '';
-
-      if (restoredState === UploadState.ATTACHED && hasAttachmentEvidenceForItem(item)) {
-        item.state = UploadState.ATTACHED;
-        item.attachedInSession = true;
-        item.message = '';
-      } else {
-        item.state = UploadState.IDLE;
-        item.message = restoredState === UploadState.ATTACHED
-          ? '上次已上传，当前可重新上传'
-          : '';
-      }
-
-      if (restoredState === UploadState.ATTACHED) {
-        item.persistedAttached = true;
-      }
-
+      console.warn('[ChatGPT toolbox] restoreBlobBackedUploadItem called but blob persistence is disabled');
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][loadQueue:cached-blob-restored] name=${item.name || '-'} groupId=${item.groupId || '-'} size=${item.size}`,
+        `[UPLOAD_DIAG][restore-blob:deprecated] name=${item.name || '-'} id=${item.id || '-'}`
       );
-
-      return false;
+      return restoreMissingUploadItem(item, restoredState);
     }
 
     function restoreMissingUploadItem(item, restoredState) {
       item.sourceKind = 'missing-file';
       item.readMode = '';
       item.state = UploadState.MISSING_FILE;
-      item.message = '缺少文件，请重新拖入';
+      item.message = '缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆';
       item.uploadName = '';
 
       if (restoredState === UploadState.ATTACHED) {
@@ -1702,9 +1743,9 @@
       return true;
     }
 
-    function restoreUploadItemFromPersistRow(row, activeGroupId) {
+        function restoreUploadItemFromPersistRow(row, activeGroupId) {
       const restoredState = row.state || UploadState.IDLE;
-      const hasBlob = isBlobLike(row.blob);
+      const hasBlob = false;
       const handle = row.handle || null;
 
       const item = {
@@ -1716,7 +1757,7 @@
         lastModified: Number(row.lastModified) || 0,
         type: row.type || 'application/octet-stream',
         file: null,
-        blob: hasBlob ? row.blob : null,
+        blob: null,
         fileHandle: handle && isFileHandleLike(handle) ? handle : null,
         state: UploadState.IDLE,
         message: '',
@@ -1731,9 +1772,7 @@
       let needsReDrag = false;
 
       if (item.fileHandle) {
-        needsReDrag = restoreHandleBackedUploadItem(item, restoredState, hasBlob);
-      } else if (hasBlob) {
-        needsReDrag = restoreBlobBackedUploadItem(item, row, restoredState);
+        needsReDrag = restoreHandleBackedUploadItem(item, restoredState, false);
       } else {
         needsReDrag = restoreMissingUploadItem(item, restoredState);
       }
@@ -1743,20 +1782,14 @@
           id: row.id,
           name: row.name,
           state: row.state,
-          blobSaved: !!row.blobSaved,
-          hasBlob: isBlobLike(row.blob),
-          blobTag: row.blob ? getObjectTag(row.blob) : '',
-          blobSize: row.blob && typeof row.blob.size === 'number' ? row.blob.size : null,
           hasHandle: !!row.handle,
-          handleName: row.handle && row.handle.name ? row.handle.name : '',
-          debugSavedFrom: row.debugSavedFrom || '',
         },
         item: describeUploadSource(item),
         needsReDrag,
       });
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][restore-row] name=${item.name || '-'} blob=${hasBlob ? 1 : 0} handle=${item.fileHandle ? 1 : 0} sourceKind=${item.sourceKind || '-'} readMode=${item.readMode || '-'}`,
+        `[UPLOAD_DIAG][restore-row] name=${item.name || '-'} blob=0 handle=${item.fileHandle ? 1 : 0} sourceKind=${item.sourceKind || '-'} readMode=${item.readMode || '-'}`,
       );
 
       logUploadItemSource('loadQueue:item-restored', item, {
@@ -1768,7 +1801,7 @@
 
     async function loadQueueForActiveGroup() {
       if (!state.activeGroupId) {
-        console.warn('[ChatGPT toolbox] loadQueueForActiveGroup: activeGroupId 为空');
+        console.warn('[ChatGPT toolbox] loadQueueForActiveGroup: activeGroupId 涓虹┖');
         state.queue = [];
         render();
         return;
@@ -1811,27 +1844,29 @@
         refreshQueueReadableState();
         syncActiveGroupSelectionAfterQueueLoad(state.activeGroupId);
         await refreshUploadGroupCounts();
+        dedupeActiveGroupQueue('load-queue');
         render();
         logUploadQueueSnapshot('loadQueue:after-load');
       } catch (e) {
         console.warn('[ChatGPT toolbox] load upload queue for group failed', e);
         state.queue = [];
+        dedupeActiveGroupQueue('load-queue');
         syncActiveGroupCountInCache();
         render();
-        setStatus(`上传队列恢复失败：${e && e.message ? e.message : String(e)}`);
+        setStatus(`涓婁紶闃熷垪鎭㈠澶辫触锛?{e && e.message ? e.message : String(e)}`);
       }
     }
 
     function isHardFileReadFailure(reason) {
       const text = String(reason || '');
 
-      return text.includes('缺少文件，请重新拖入') ||
-        text.includes('没有本地文件读取权限') ||
-        text.includes('本地文件读取失败') ||
-        text.includes('本地文件为空或读取失败') ||
-        text.includes('缺少可读取的文件对象') ||
-        text.includes('请重新拖入') ||
-        text.includes('没有可上传的 File 对象');
+      return text.includes('缂哄皯鏂囦欢锛岃閲嶆柊鎷栧叆') ||
+        text.includes('娌℃湁鏈湴鏂囦欢璇诲彇鏉冮檺') ||
+        text.includes('鏈湴鏂囦欢璇诲彇澶辫触') ||
+        text.includes('鏈湴鏂囦欢涓虹┖鎴栬鍙栧け璐?') ||
+        text.includes('缂哄皯鍙鍙栫殑鏂囦欢瀵硅薄') ||
+        text.includes('璇烽噸鏂版嫋鍏?') ||
+        text.includes('娌℃湁鍙笂浼犵殑 File 瀵硅薄');
     }
 
     function hasAttachmentEvidenceForItem(q) {
@@ -1860,7 +1895,7 @@
             message: '',
           });
 
-          ToolboxShell.appendLog(`失败条目已复核为成功：${q.name}`);
+          ToolboxShell.appendLog(`澶辫触鏉＄洰宸插鏍镐负鎴愬姛锛?{q.name}`);
         }
       }
     }
@@ -1871,7 +1906,7 @@
 
     function getActiveGroupName() {
       const g = getActiveGroup();
-      return g ? g.name : '未命名组';
+      return g ? g.name : '鏈懡鍚嶇粍';
     }
 
     function resolvePageUploadGroupId(pageState) {
@@ -2014,15 +2049,15 @@
       healStaleUploadRunningLockIfNeeded('switchGroup');
 
       if (state.running) {
-        setStatus('正在上传中，不能切换分组');
+        setStatus('姝ｅ湪涓婁紶涓紝涓嶈兘鍒囨崲鍒嗙粍');
         return;
       }
 
       const exists = state.groups.some((g) => g.id === groupId);
       if (!exists) {
-        console.warn('[ChatGPT toolbox] switchGroup: 分组不存在', groupId);
+        console.warn('[ChatGPT toolbox] switchGroup: 鍒嗙粍涓嶅瓨鍦?', groupId);
         ToolboxShell.appendLog(`[UPLOAD_GROUP][switch:missing] groupId=${groupId || '-'}`);
-        setStatus('切换失败：分组不存在', 'error');
+        setStatus('鍒囨崲澶辫触锛氬垎缁勪笉瀛樺湪', 'error');
         return;
       }
 
@@ -2050,7 +2085,7 @@
         }
 
         render();
-        setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
+        setStatus(`宸插垏鎹㈠埌 ${getActiveGroupName()}`, 'success');
 
         syncUploadGroupAppState();
         appendUploadGroupLog('SWITCH', {
@@ -2076,7 +2111,7 @@
 
         console.error('[ChatGPT toolbox] switchGroup failed', e);
 
-        setStatus(`切换分组失败，已恢复原分组：${errText}`, 'error');
+        setStatus(`鍒囨崲鍒嗙粍澶辫触锛屽凡鎭㈠鍘熷垎缁勶細${errText}`, 'error');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][switch:failed-rollback] from=${prevActiveGroupId || '-'} to=${groupId || '-'} type=${errName} error=${errText}`,
@@ -2088,7 +2123,7 @@
 
     function buildRandomGroupName() {
       const tag = buildUploadTimestamp().slice(0, 20);
-      const baseName = `项目_${tag}`;
+      const baseName = `椤圭洰_${tag}`;
 
       const existingNames = new Set(
         state.groups.map((g) => String(g.name || '').trim())
@@ -2105,7 +2140,7 @@
       healStaleUploadRunningLockIfNeeded('createGroupInline');
 
       if (state.running) {
-        setStatus('正在上传中，不能新建分组');
+        setStatus('姝ｅ湪涓婁紶涓紝涓嶈兘鏂板缓鍒嗙粍');
         return;
       }
 
@@ -2158,7 +2193,7 @@
           groupNameInputEl.select();
         }
 
-        setStatus(`已新建分组：${group.name}`, 'success');
+        setStatus(`宸叉柊寤哄垎缁勶細${group.name}`, 'success');
         ToolboxShell.appendLog(`[UPLOAD_GROUP][create-inline:ok] groupId=${group.id} name=${group.name}`);
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
@@ -2176,7 +2211,7 @@
 
         console.error('[ChatGPT toolbox] createGroupInline failed', e);
 
-        setStatus(`新建分组失败，已恢复原状态：${errText}`, 'error');
+        setStatus(`鏂板缓鍒嗙粍澶辫触锛屽凡鎭㈠鍘熺姸鎬侊細${errText}`, 'error');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][create-inline:failed-rollback] type=${errName} error=${errText}`,
@@ -2205,7 +2240,7 @@
 
       if (!state.groups.length) {
         manageGroupListEl.innerHTML = renderEmptyState(
-          '暂无分组',
+          '鏆傛棤鍒嗙粍',
           'cgpt-upload-manage-empty cgpt-empty-state',
         );
         return;
@@ -2220,9 +2255,9 @@
           <button type="button"
             class="cgpt-upload-manage-group-item${active}"
             data-group-id="${escapeHtml(g.id)}"
-            title="${escapeHtml(`${cleanName} · ${count} 个文件`)}">
+            title="${escapeHtml(`${cleanName} 路 ${count} 涓枃浠禶`)}">
             <span class="cgpt-upload-manage-group-name">${escapeHtml(cleanName)}</span>
-            <span class="cgpt-upload-manage-group-count">${count} 个</span>
+            <span class="cgpt-upload-manage-group-count">${count} 涓?/span>
           </button>
         `;
       }).join('');
@@ -2242,11 +2277,7 @@
         lastGroupNameInputValue = nextName;
       }
 
-      const blobPersistEl = qs('#cgpt-upload-blob-persist-inline', host || document);
-
-      if (blobPersistEl) {
-        blobPersistEl.checked = isUploadBlobPersistEnabled();
-      }
+      // Blob persistence disabled - sync removed
 
       const uniqueNameEl = qs('#cgpt-upload-use-unique-name-inline', host || document);
 
@@ -2256,12 +2287,12 @@
 
       const clearBtn = qs('#cgpt-upload-group-clear-inline', host || document);
       if (clearBtn) {
-        clearBtn.textContent = '清空当前组';
+        clearBtn.textContent = '娓呯┖褰撳墠缁?';
       }
 
       const deleteBtn = qs('#cgpt-upload-group-delete-inline', host || document);
       if (deleteBtn) {
-        deleteBtn.textContent = '删除当前组';
+        deleteBtn.textContent = '鍒犻櫎褰撳墠缁?';
       }
 
       clearConfirmUntil = 0;
@@ -2272,25 +2303,25 @@
       const group = getActiveGroup();
 
       if (!group) {
-        setStatus('当前没有可重命名的分组');
+        setStatus('褰撳墠娌℃湁鍙噸鍛藉悕鐨勫垎缁?');
         return false;
       }
 
       const text = String(groupNameInputEl ? groupNameInputEl.value : '').trim();
 
       if (!text) {
-        setStatus('请输入分组名称');
-        console.warn('[ChatGPT toolbox] renameActiveGroupInline: 分组名称为空');
+        setStatus('璇疯緭鍏ュ垎缁勫悕绉?');
+        console.warn('[ChatGPT toolbox] renameActiveGroupInline: 鍒嗙粍鍚嶇О涓虹┖');
         return false;
       }
 
       if (text === group.name) {
-        setStatus(`分组名称未变化：${group.name}`);
+        setStatus(`鍒嗙粍鍚嶇О鏈彉鍖栵細${group.name}`);
         return true;
       }
 
       if (state.groups.some((g) => g.id !== group.id && g.name === text)) {
-        setStatus('分组名称已存在');
+        setStatus('鍒嗙粍鍚嶇О宸插瓨鍦?');
         return false;
       }
 
@@ -2311,7 +2342,7 @@
         render();
         syncGroupManagePanel();
 
-        setStatus(`已保存分组名称：${group.name}`, 'success');
+        setStatus(`宸蹭繚瀛樺垎缁勫悕绉帮細${group.name}`, 'success');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][rename-inline:ok] groupId=${group.id || '-'} oldName=${prevName || '-'} newName=${group.name || '-'}`,
@@ -2338,7 +2369,7 @@
 
         console.error('[ChatGPT toolbox] renameActiveGroupInline failed', e);
 
-        setStatus(`保存分组名称失败，已恢复原名称：${errText}`, 'error');
+        setStatus(`淇濆瓨鍒嗙粍鍚嶇О澶辫触锛屽凡鎭㈠鍘熷悕绉帮細${errText}`, 'error');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][rename-inline:failed-rollback] groupId=${group.id || '-'} oldName=${prevName || '-'} nextName=${nextName || '-'} type=${errName} error=${errText}`,
@@ -2354,7 +2385,7 @@
       if (!targetGroupId) {
         const msg = 'deleteGroupQueue skipped: empty groupId';
         console.warn(`[ChatGPT toolbox] ${msg}`);
-        ToolboxShell.appendLog('[UPLOAD_GROUP][delete-queue:skip] groupId为空');
+        ToolboxShell.appendLog('[UPLOAD_GROUP][delete-queue:skip] groupId涓虹┖');
         return;
       }
 
@@ -2411,7 +2442,7 @@
       const group = getActiveGroup();
 
       if (!group) {
-        setStatus('当前没有可清空的分组');
+        setStatus('褰撳墠娌℃湁鍙竻绌虹殑鍒嗙粍');
         return;
       }
 
@@ -2421,10 +2452,10 @@
         clearConfirmUntil = now + 3000;
 
         if (button) {
-          button.textContent = '再次点击清空';
+          button.textContent = '鍐嶆鐐瑰嚮娓呯┖';
         }
 
-        setStatus('再次点击确认清空当前组文件');
+        setStatus('鍐嶆鐐瑰嚮纭娓呯┖褰撳墠缁勬枃浠?');
         return;
       }
 
@@ -2440,7 +2471,7 @@
         render();
         syncGroupManagePanel();
 
-        setStatus(`已清空分组：${group.name}`, 'success');
+        setStatus(`宸叉竻绌哄垎缁勶細${group.name}`, 'success');
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][clear-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'} removed=${prevQueue.length}`,
         );
@@ -2455,7 +2486,7 @@
 
         console.error('[ChatGPT toolbox] clearActiveGroupQueueInline failed', e);
 
-        setStatus(`清空分组失败，已恢复原队列：${errText}`, 'error');
+        setStatus(`娓呯┖鍒嗙粍澶辫触锛屽凡鎭㈠鍘熼槦鍒楋細${errText}`, 'error');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][clear-inline:failed-rollback] groupId=${group.id || '-'} name=${group.name || '-'} type=${errName} error=${errText}`,
@@ -2469,12 +2500,12 @@
       const group = getActiveGroup();
 
       if (!group) {
-        setStatus('当前没有可删除的分组');
+        setStatus('褰撳墠娌℃湁鍙垹闄ょ殑鍒嗙粍');
         return;
       }
 
       if (state.groups.length <= 1) {
-        setStatus('至少保留一个分组');
+        setStatus('鑷冲皯淇濈暀涓€涓垎缁?');
         return;
       }
 
@@ -2484,10 +2515,10 @@
         deleteConfirmUntil = now + 3000;
 
         if (button) {
-          button.textContent = '再次点击删除';
+          button.textContent = '鍐嶆鐐瑰嚮鍒犻櫎';
         }
 
-        setStatus('再次点击确认删除当前组');
+        setStatus('鍐嶆鐐瑰嚮纭鍒犻櫎褰撳墠缁?');
         return;
       }
 
@@ -2502,7 +2533,7 @@
       const nextActiveGroupId = preferred.groupId || (nextGroups[0] && nextGroups[0].id) || '';
 
       if (!nextActiveGroupId) {
-        setStatus('删除失败：没有可切换的目标分组', 'error');
+        setStatus('鍒犻櫎澶辫触锛氭病鏈夊彲鍒囨崲鐨勭洰鏍囧垎缁?', 'error');
         return;
       }
 
@@ -2534,7 +2565,7 @@
             `[UPLOAD_GROUP][delete-inline:queue-cleanup-failed] groupId=${group.id || '-'} name=${group.name || '-'} error=${cleanupText}`,
           );
 
-          setStatus(`分组已删除，但旧队列清理失败：${cleanupText}`, 'error');
+          setStatus(`鍒嗙粍宸插垹闄わ紝浣嗘棫闃熷垪娓呯悊澶辫触锛?{cleanupText}`, 'error');
         }
 
         await refreshUploadGroupCounts();
@@ -2544,7 +2575,7 @@
           force: true,
         });
 
-        setStatus(`已删除分组：${group.name}`, 'success');
+        setStatus(`宸插垹闄ゅ垎缁勶細${group.name}`, 'success');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][delete-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'}`,
@@ -2569,7 +2600,7 @@
           `[UPLOAD_GROUP][delete-inline:failed-rollback] groupId=${group.id || '-'} name=${group.name || '-'} type=${errName} error=${errText}`,
         );
 
-        setStatus(`删除分组失败，已恢复原状态：${errText}`, 'error');
+        setStatus(`鍒犻櫎鍒嗙粍澶辫触锛屽凡鎭㈠鍘熺姸鎬侊細${errText}`, 'error');
 
         throw e;
       }
@@ -2577,15 +2608,15 @@
 
     async function removeFileFromCurrentGroup(id) {
       if (state.running) {
-        setStatus('正在上传中，不能删除文件');
+        setStatus('姝ｅ湪涓婁紶涓紝涓嶈兘鍒犻櫎鏂囦欢');
         return;
       }
 
       const q = getActiveGroupFiles().find((item) => item.id === id);
 
       if (!q) {
-        setStatus('未找到要删除的文件');
-        console.warn('[ChatGPT toolbox] removeFileFromCurrentGroup: 文件不存在', id);
+        setStatus('鏈壘鍒拌鍒犻櫎鐨勬枃浠?');
+        console.warn('[ChatGPT toolbox] removeFileFromCurrentGroup: 鏂囦欢涓嶅瓨鍦?', id);
         return;
       }
 
@@ -2599,7 +2630,7 @@
 
         render();
 
-        setStatus(`已从工具箱移除：${q.name}`, 'success');
+        setStatus(`宸蹭粠宸ュ叿绠辩Щ闄わ細${q.name}`, 'success');
 
         ToolboxShell.appendLog(
           `[UPLOAD_DIAG][remove-file:ok] id=${id || '-'} name=${q.name || '-'}`,
@@ -2614,7 +2645,7 @@
 
         console.error('[ChatGPT toolbox] removeFileFromCurrentGroup failed', e);
 
-        setStatus(`移除文件失败，已恢复原队列：${errText}`, 'error');
+        setStatus(`绉婚櫎鏂囦欢澶辫触锛屽凡鎭㈠鍘熼槦鍒楋細${errText}`, 'error');
 
         ToolboxShell.appendLog(
           `[UPLOAD_DIAG][remove-file:failed-rollback] id=${id || '-'} name=${q.name || '-'} type=${errName} error=${errText}`,
@@ -2676,7 +2707,7 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][export-meta:failed] activeGroupId=${state.activeGroupId || '-'} type=${errName} error=${errText}`,
         );
-        throw new Error(`上传分组与队列导出失败：${errText}`);
+        throw new Error(`涓婁紶鍒嗙粍涓庨槦鍒楀鍑哄け璐ワ細${errText}`);
       }
     }
 
@@ -2814,7 +2845,7 @@
           `[UPLOAD_GROUP][import:failed-rollback] type=${errName} error=${errText}`,
         );
 
-        setStatus(`导入上传分组失败，已恢复原状态：${errText}`, 'error');
+        setStatus(`瀵煎叆涓婁紶鍒嗙粍澶辫触锛屽凡鎭㈠鍘熺姸鎬侊細${errText}`, 'error');
 
         throw e;
       }
@@ -2824,14 +2855,14 @@
       return renderUploadGroupChipHtml(group, activeGroupId);
     }
 
-    /** 项目分类统计（上传分组 chip），与页面连接状态无关。 */
+    /** 椤圭洰鍒嗙被缁熻锛堜笂浼犲垎缁?chip锛夛紝涓庨〉闈㈣繛鎺ョ姸鎬佹棤鍏炽€?*/
     function renderUploadGroupFallbackChipHtml() {
       return `
           <button type="button"
             class="cgpt-chip-btn cgpt-upload-group-chip active"
             data-group-id=""
-            title="默认：0 个文件">
-            <span class="cgpt-chip-name">默认</span>
+            title="榛樿锛? 涓枃浠?>
+            <span class="cgpt-chip-name">榛樿</span>
             <span class="cgpt-chip-count">0</span>
           </button>
         `;
@@ -2852,9 +2883,9 @@
               class="cgpt-chip-btn cgpt-upload-group-chip active"
               data-group-id=""
               disabled
-              title="正在加载上传分组">
-              <span class="cgpt-chip-name">加载中</span>
-              <span class="cgpt-chip-count">…</span>
+              title="姝ｅ湪鍔犺浇涓婁紶鍒嗙粍">
+              <span class="cgpt-chip-name">鍔犺浇涓?/span>
+              <span class="cgpt-chip-count">鈥?/span>
             </button>
           `;
           appendUploadGroupLog('RENDER', { phase: 'waiting-init' });
@@ -2912,11 +2943,11 @@
       const pageDisplayId = getBridgePageDisplayIdText();
       const turnCount = getConversationTurnCount();
       logConversationTurnCountIfChanged(turnCount, 'renderToolboxPageStatusRow');
-      const pageIdText = `页面ID:${pageDisplayId}`;
-      const turnText = `轮:${turnCount}`;
+      const pageIdText = `椤甸潰ID:${pageDisplayId}`;
+      const turnText = `杞?${turnCount}`;
 
       pageStatusRowEl.innerHTML = `
-        <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
+        <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">鏈煡</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge" title="${escapeHtml(turnText)}">${escapeHtml(turnText)}</span>
       `;
@@ -3011,7 +3042,7 @@
         await sleep(500);
       }
 
-      ToolboxShell.appendLog('[UPLOAD_DIAG][wait-upload-idle-timeout] 附件空闲检测超时，但文件状态已写入，继续结束上传流程');
+      ToolboxShell.appendLog('[UPLOAD_DIAG][wait-upload-idle-timeout] 闄勪欢绌洪棽妫€娴嬭秴鏃讹紝浣嗘枃浠剁姸鎬佸凡鍐欏叆锛岀户缁粨鏉熶笂浼犳祦绋?');
       return false;
     }
 
@@ -3048,11 +3079,11 @@
     }
 
     function getQuickPromptActiveCategory() {
-      return String(quickPromptActiveCategory || '全部').trim() || '全部';
+      return String(quickPromptActiveCategory || '鍏ㄩ儴').trim() || '鍏ㄩ儴';
     }
 
     function saveQuickPromptActiveCategory(category, options = {}) {
-      const nextCategory = String(category || '全部').trim() || '全部';
+      const nextCategory = String(category || '鍏ㄩ儴').trim() || '鍏ㄩ儴';
       quickPromptActiveCategory = nextCategory;
 
       const cfg = getCompactUiConfig();
@@ -3081,7 +3112,7 @@
       }
 
       const text = String(prompt && prompt.category ? prompt.category : '').trim();
-      return text || '默认';
+      return text || '榛樿';
     }
 
     function getQuickPromptGroups(promptList) {
@@ -3099,7 +3130,7 @@
         }
       });
 
-      return ['全部', ...names];
+      return ['鍏ㄩ儴', ...names];
     }
 
     function applyCompactUiVisibility() {
@@ -3108,7 +3139,7 @@
       const cfg = getCompactUiConfig();
       const isCompact = isCompactUploadView();
 
-      // 项目文件夹/分组切换栏是核心功能，精简模式也必须显示。
+      // 椤圭洰鏂囦欢澶?鍒嗙粍鍒囨崲鏍忔槸鏍稿績鍔熻兘锛岀簿绠€妯″紡涔熷繀椤绘樉绀恒€?
       rootElRef.classList.remove('compact-hide-upload-groups');
 
       rootElRef.classList.toggle('compact-hide-upload-start', isCompact && !cfg.showUploadStartButton);
@@ -3123,7 +3154,7 @@
     async function sendOrFillQuickPrompt(prompt) {
       const cfg = getCompactUiConfig();
       const text = String(prompt && prompt.content ? prompt.content : '').trim();
-      const title = String(prompt && prompt.title ? prompt.title : '未命名').trim() || '未命名';
+      const title = String(prompt && prompt.title ? prompt.title : '鏈懡鍚?').trim() || '鏈懡鍚?';
       const action = cfg.quickPromptClickAction === 'fill' ? 'fill' : 'send';
 
       ToolboxShell.appendLog(
@@ -3131,7 +3162,7 @@
       );
 
       if (!text) {
-        setStatus(`Prompt 内容为空：${title}`, 'warn');
+        setStatus(`Prompt 鍐呭涓虹┖锛?{title}`, 'warn');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:empty] title=${title}`);
         return;
       }
@@ -3142,11 +3173,11 @@
 
       if (existingText && existingText !== text && cfg.confirmPromptDraftOverwrite === true) {
         const okReplace = window.confirm(
-          `ChatGPT 输入框已有 ${existingText.length} 个字符，是否覆盖为快捷 Prompt：${title}？`,
+          `ChatGPT 杈撳叆妗嗗凡鏈?${existingText.length} 涓瓧绗︼紝鏄惁瑕嗙洊涓哄揩鎹?Prompt锛?{title}锛焋,`
         );
 
         if (!okReplace) {
-          setStatus('已取消：未覆盖输入框草稿', 'warn');
+          setStatus('宸插彇娑堬細鏈鐩栬緭鍏ユ鑽夌', 'warn');
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][quick-prompt:block-draft-overwrite] title=${title} existingChars=${existingText.length} newChars=${text.length}`,
           );
@@ -3162,7 +3193,7 @@
 
       if (!ok) {
         console.warn('[ChatGPT toolbox] quick prompt: composer not found', prompt);
-        setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
+        setStatus('鏈壘鍒?ChatGPT 杈撳叆妗嗭紝鏃犳硶濉叆 Prompt', 'error');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:composer-not-found] title=${title}`);
         return;
       }
@@ -3176,7 +3207,7 @@
       );
 
       if (action === 'fill') {
-        setStatus(`已填入 Prompt：${title}`, 'success');
+        setStatus(`宸插～鍏?Prompt锛?{title}`, 'success');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:fill] ${title}`);
         return;
       }
@@ -3192,21 +3223,21 @@
         });
 
         if (sendResult.ok) {
-          setStatus(`已发送 Prompt：${title}`, 'success');
+          setStatus(`宸插彂閫?Prompt锛?{title}`, 'success');
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][quick-prompt:send-confirmed] title=${title} reason=${sendResult.reason || '-'}`,
           );
           return;
         }
 
-        setStatus(`快捷 Prompt 发送失败：${sendResult.reason || 'unknown'}`, 'warn');
+        setStatus(`蹇嵎 Prompt 鍙戦€佸け璐ワ細${sendResult.reason || 'unknown'}`, 'warn');
         ToolboxShell.appendLog(
           `[UPLOAD_DIAG][quick-prompt:send-failed] title=${title} reason=${sendResult.reason || '-'}`,
         );
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] quick prompt send failed', err);
-        setStatus(`快捷 Prompt 发送失败：${errText}`, 'error');
+        setStatus(`蹇嵎 Prompt 鍙戦€佸け璐ワ細${errText}`, 'error');
         ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:send-failed] title=${title} error=${errText}`);
       }
     }
@@ -3216,9 +3247,9 @@
         `[UPLOAD_COPY_CONTINUE][wait-start] source=${String(source || '-')}`,
       );
 
-      setStatus('正在等待当前回复完成...', 'danger', {
+      setStatus('姝ｅ湪绛夊緟褰撳墠鍥炲瀹屾垚...', 'danger', {
         persist: true,
-        shortText: '等回复',
+        shortText: '绛夊洖澶?',
       });
 
       if (
@@ -3252,7 +3283,7 @@
           `[UPLOAD_COPY_CONTINUE][wait-failed] reason=${reason}`,
         );
 
-        setStatus(`等待回复完成失败：${reason}`, 'warn');
+        setStatus(`绛夊緟鍥炲瀹屾垚澶辫触锛?{reason}`, 'warn');
 
         return {
           ok: false,
@@ -3266,7 +3297,7 @@
           `[UPLOAD_COPY_CONTINUE][wait-failed] reason=invalid-assistant-text preview=${trimmedText.slice(0, 40)}`,
         );
 
-        setStatus('等待回复完成失败：回复尚未就绪', 'warn');
+        setStatus('绛夊緟鍥炲瀹屾垚澶辫触锛氬洖澶嶅皻鏈氨缁?', 'warn');
 
         return {
           ok: false,
@@ -3324,7 +3355,7 @@
         ToolboxShell.appendLog(
           `[COPY_LAST_REPLY][start] source=${String(source || '-')}`,
         );
-        setStatus('正在等待最后回复稳定...', 'running');
+        setStatus('姝ｅ湪绛夊緟鏈€鍚庡洖澶嶇ǔ瀹?..', 'running');
 
         let text = '';
         if (typeof waitAssistantStableForCopyContinue === 'function') {
@@ -3334,13 +3365,13 @@
             ToolboxShell.appendLog(
               `[COPY_LAST_REPLY][abort] reason=${reason}`,
             );
-            setStatus(`复制最后回复失败：${reason}`, 'warn');
+            setStatus(`澶嶅埗鏈€鍚庡洖澶嶅け璐ワ細${reason}`, 'warn');
             copyLastReplyTaskStatus = 'failed';
             copyLastMessageTaskStatus = 'failed';
             copyLastMessageWaiting = false;
             renderUploadButtonsOnly();
             if (btn && typeof setButtonTemporaryError === 'function') {
-              setButtonTemporaryError(btn, '复制失败', 1200);
+              setButtonTemporaryError(btn, '澶嶅埗澶辫触', 1200);
             }
             return false;
           }
@@ -3358,13 +3389,13 @@
           ToolboxShell.appendLog(
             `[COPY_LAST_REPLY][abort] reason=${text ? 'invalid-assistant-text' : 'empty-text'}`,
           );
-          setStatus('复制最后回复失败：没有找到可复制的回复', 'warn');
+          setStatus('澶嶅埗鏈€鍚庡洖澶嶅け璐ワ細娌℃湁鎵惧埌鍙鍒剁殑鍥炲', 'warn');
           copyLastReplyTaskStatus = 'failed';
           copyLastMessageTaskStatus = 'failed';
           copyLastMessageWaiting = false;
           renderUploadButtonsOnly();
           if (btn && typeof setButtonTemporaryError === 'function') {
-            setButtonTemporaryError(btn, '复制失败', 1200);
+            setButtonTemporaryError(btn, '澶嶅埗澶辫触', 1200);
           }
           return false;
         }
@@ -3376,12 +3407,12 @@
 
         if (typeof copyTextToClipboard !== 'function') {
           ToolboxShell.appendLog('[COPY_LAST_REPLY][abort] reason=copyTextToClipboard-missing');
-          setStatus('复制失败：剪贴板函数不可用', 'error');
+          setStatus('澶嶅埗澶辫触锛氬壀璐存澘鍑芥暟涓嶅彲鐢?', 'error');
           copyLastReplyTaskStatus = 'failed';
           copyLastMessageTaskStatus = 'failed';
           renderUploadButtonsOnly();
           if (btn && typeof setButtonTemporaryError === 'function') {
-            setButtonTemporaryError(btn, '复制失败', 1200);
+            setButtonTemporaryError(btn, '澶嶅埗澶辫触', 1200);
           }
           return false;
         }
@@ -3394,12 +3425,12 @@
         ToolboxShell.appendLog(
           `[COPY_LAST_REPLY][done] chars=${text.length}`,
         );
-        setStatus('已复制最后回复', 'success');
+        setStatus('宸插鍒舵渶鍚庡洖澶?', 'success');
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(source || '-', 'copyLastReply');
         }
         if (btn && typeof setButtonTemporaryOk === 'function') {
-          setButtonTemporaryOk(btn, '已复制', 900);
+          setButtonTemporaryOk(btn, '宸插鍒?', 900);
         }
         return true;
       } catch (error) {
@@ -3412,13 +3443,13 @@
           stack: error && error.stack,
         });
         ToolboxShell.appendLog(`[COPY_LAST_REPLY][failed] error=${errText}`);
-        setStatus(`复制最后回复失败：${errText}`, 'error');
+        setStatus(`澶嶅埗鏈€鍚庡洖澶嶅け璐ワ細${errText}`, 'error');
         copyLastReplyTaskStatus = 'failed';
         copyLastMessageTaskStatus = 'failed';
         copyLastMessageWaiting = false;
         renderUploadButtonsOnly();
         if (btn && typeof setButtonTemporaryError === 'function') {
-          setButtonTemporaryError(btn, '复制失败', 1200);
+          setButtonTemporaryError(btn, '澶嶅埗澶辫触', 1200);
         }
         return false;
       } finally {
@@ -3538,8 +3569,9 @@
     }
 
     async function sendContinueMessageOnceOnly(source) {
-      const text = '\u7ee7\u7eed';
-      const sourceText = String(source || '-');
+      const sourceText = String(source || '');
+      const text = getCopyHotkeyContinuePromptText();
+      const stopSignal = getCopyHotkeyContinueStopSignal();
 
       if (typeof sendContentViaComposer === 'function') {
         try {
@@ -3559,9 +3591,10 @@
             safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${reason}`);
             return { ok: false, reason };
           }
-          setStatus('\u5df2\u53d1\u9001\uff1a\u7ee7\u7eed', 'success');
+
+          setStatus('已发送继续指令', 'success');
           console.warn('[UPLOAD_CONTINUE][SEND_OK]', { source, reason: result && result.reason });
-          safeAppendLog(`[UPLOAD_CONTINUE][sent] text=\u7ee7\u7eed reason=${result.reason || '-'}`);
+          safeAppendLog(`[UPLOAD_CONTINUE][sent] chars=${text.length} stopSignal=${stopSignal}`);
           safeAppendLog(`[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=${result && result.reason ? result.reason : '-'}`);
           return { ok: true, reason: result.reason || 'composer-send' };
         } catch (err) {
@@ -3630,9 +3663,9 @@
           safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=click-send-failed`);
           return { ok: false, reason: 'click-send-failed' };
         }
-        setStatus('\u5df2\u53d1\u9001\uff1a\u7ee7\u7eed', 'success');
+        setStatus('已发送继续指令', 'success');
         console.warn('[UPLOAD_CONTINUE][SEND_OK]', { source, reason: 'composer-click-send' });
-        safeAppendLog('[UPLOAD_CONTINUE][sent] text=\u7ee7\u7eed');
+        safeAppendLog(`[UPLOAD_CONTINUE][sent] chars=${text.length} stopSignal=${stopSignal}`);
         safeAppendLog(`[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=composer-click-send`);
         return { ok: true, reason: 'composer-click-send' };
       } catch (err) {
@@ -3643,6 +3676,110 @@
         safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${errText}`);
         return { ok: false, reason: errText };
       }
+    }
+
+    function getCopyHotkeyLoopContinuePrompt() {
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+
+      const fallback = `请继续完成上一个任务。
+如果你判断任务已经完成、没有必要继续、没有剩余内容需要输出，请只回复：
+<<<TASK_DONE>>>
+不要输出任何其他文字。
+否则请继续输出剩余内容，不要重复已经输出过的内容。`;
+
+      const prompt = String(cfg.copyHotkeyLoopContinuePrompt || '').trim();
+      return prompt || fallback;
+    }
+
+    function getCopyHotkeyLoopStopSignalConfig() {
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+
+      const signal = String(cfg.copyHotkeyLoopStopSignal || '<<<TASK_DONE>>>').trim();
+
+      return {
+        enabled: cfg.copyHotkeyLoopStopSignalEnabled !== false,
+        signal: signal || '<<<TASK_DONE>>>',
+      };
+    }
+
+    function getLastAssistantMessageTextForStopSignal() {
+      const assistantNodes = Array.from(
+        document.querySelectorAll('[data-message-author-role="assistant"]')
+      );
+
+      const lastNode = assistantNodes.length > 0
+        ? assistantNodes[assistantNodes.length - 1]
+        : null;
+
+      if (!lastNode) {
+        return '';
+      }
+
+      return String(lastNode.innerText || lastNode.textContent || '').trim();
+    }
+
+    function isCopyHotkeyLoopStopSignalMatched(text, signal) {
+      const normalizedText = String(text || '').trim();
+      const normalizedSignal = String(signal || '').trim();
+
+      if (!normalizedText || !normalizedSignal) {
+        return false;
+      }
+
+      if (normalizedText === normalizedSignal) {
+        return true;
+      }
+
+      const textLines = normalizedText
+        .split(/\r?\n/g)
+        .map(function(line) { return String(line || '').trim(); })
+        .filter(Boolean);
+
+      return textLines.some(function(line) { return line === normalizedSignal; });
+    }
+
+    function detectCopyHotkeyLoopStopSignal(cycleIndex) {
+      const cfg = getCopyHotkeyLoopStopSignalConfig();
+
+      if (!cfg.enabled) {
+        return {
+          matched: false,
+          reason: 'disabled',
+        };
+      }
+
+      const assistantText = getLastAssistantMessageTextForStopSignal();
+      const matched = isCopyHotkeyLoopStopSignalMatched(assistantText, cfg.signal);
+
+      if (!matched) {
+        return {
+          matched: false,
+          reason: 'not-matched',
+        };
+      }
+
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][stop-signal-matched] index=${cycleIndex} signal=${cfg.signal}`
+        );
+      }
+
+      if (typeof setStatus === 'function') {
+        setStatus(
+          `连续复制+快捷键+继续：检测到终止信号，任务已完成`,
+          'success'
+        );
+      }
+
+      return {
+        matched: true,
+        reason: 'stop-signal',
+        signal: cfg.signal,
+      };
     }
 
     function isAssistantBusyReason(reason) {
@@ -3769,12 +3906,12 @@
         copyTaskStatus = 'copying';
         if (btn) {
           btn.dataset.waitingReply = '0';
-          btn.textContent = '复制中...';
+          btn.textContent = '澶嶅埗涓?..';
           btn.disabled = true;
         }
 
         if (typeof copyTextToClipboard !== 'function') {
-          setStatus('复制最后回复失败：剪贴板 API 不可用', 'error');
+          setStatus('澶嶅埗鏈€鍚庡洖澶嶅け璐ワ細鍓创鏉?API 涓嶅彲鐢?', 'error');
           ToolboxShell.appendLog('[UPLOAD_COPY_CONTINUE][abort] reason=copyTextToClipboard-missing');
           return false;
         }
@@ -3790,7 +3927,7 @@
 
         copyTaskStatus = 'sending_continue';
         if (btn) {
-          btn.textContent = '发送继续...';
+          btn.textContent = '鍙戦€佺户缁?..';
           btn.disabled = true;
         }
 
@@ -3802,7 +3939,7 @@
         }
 
         copyTaskStatus = 'done';
-        setStatus('已复制最后回复，并发送：继续', 'success');
+        setStatus('宸插鍒舵渶鍚庡洖澶嶏紝骞跺彂閫侊細缁х画', 'success');
         ToolboxShell.appendLog('[UPLOAD_COPY_CONTINUE][done] copied=1 sent=1');
         setButtonTemporaryOk(btn);
 
@@ -3812,8 +3949,8 @@
         const errText = formatToolboxError(error);
         console.error('[ChatGPT toolbox] copyLastMessageAndContinue failed', error);
         ToolboxShell.appendLog(`[UPLOAD_COPY_CONTINUE][failed] error=${errText}`);
-        setStatus(`复制并继续失败：${errText}`, 'error');
-        setButtonTemporaryError(btn, '复制失败', 1200);
+        setStatus(`澶嶅埗骞剁户缁け璐ワ細${errText}`, 'error');
+        setButtonTemporaryError(btn, '澶嶅埗澶辫触', 1200);
         return false;
       } finally {
         copyContinueTaskRunning = false;
@@ -3885,3 +4022,608 @@
       });
     }
 
+    async function copyHotkeyAndContinueOnce(source = 'button') {
+      const sourceText = String(source || '');
+      const isLoopMode = sourceText.startsWith('loop-') || copyHotkeyContinueLoopRunning === true;
+      const btn = rootElRef ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef) : null;
+      if (copyHotkeyContinueTaskRunning) {
+        const runningMs = Date.now() - Number(copyHotkeyContinueTaskStartedAt || 0);
+        if (runningMs <= 90000) {
+          if (isLoopMode) {
+            ToolboxShell.appendLog(
+              `[COPY_HOTKEY_CONTINUE][loop-force-release] runningMs=${runningMs} source=${sourceText}`,
+            );
+            copyHotkeyContinueTaskRunning = false;
+            copyHotkeyContinueTaskStartedAt = 0;
+          } else {
+            ToolboxShell.appendLog(
+              `[COPY_HOTKEY_CONTINUE][skip] reason=task-running runningMs=${runningMs}`,
+            );
+            return {
+              ok: false,
+              reason: 'task-running',
+              source: sourceText,
+              loopMode: isLoopMode,
+            };
+          }
+        } else {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE][stale-release] runningMs=${runningMs}`,
+          );
+          copyHotkeyContinueTaskRunning = false;
+          copyHotkeyContinueTaskStartedAt = 0;
+        }
+      }
+      copyHotkeyContinueTaskRunning = true;
+      copyHotkeyContinueTaskStartedAt = Date.now();
+      try {
+        if (btn && !isLoopMode) {
+          btn.dataset.busy = '1';
+          btn.disabled = true;
+          btn.textContent = '绛夊緟鍥炲...';
+        }
+        if (!isLoopMode) {
+          setStatus('姝ｅ湪绛夊緟鍥炵瓟瀹屾垚锛岀劧鍚庡鍒跺苟鍙戦€佸揩鎹烽敭', 'running');
+        }
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE][start] source=${sourceText || '-'}`,
+        );
+
+        logCopyHotkeyContinueStep(sourceText, 'wait-reply');
+        const waitResult = await waitAssistantStableForCopyContinue(source);
+        if (!waitResult || !waitResult.ok) {
+          const reason = waitResult && waitResult.reason ? waitResult.reason : 'wait-assistant-failed';
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE][abort] reason=${reason}`,
+          );
+          if (!isLoopMode) {
+            setStatus(`澶嶅埗+蹇嵎閿?缁х画澶辫触锛?{reason}`, 'warn');
+          }
+          return {
+            ok: false,
+            reason: reason || 'wait-assistant-failed',
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+        if (!waitResult.text || !String(waitResult.text).trim()) {
+          ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][abort] reason=empty-assistant-text');
+          if (!isLoopMode) {
+            setStatus('澶嶅埗+蹇嵎閿?缁х画澶辫触锛氭渶鍚庡洖澶嶄负绌?', 'warn');
+          }
+          return {
+            ok: false,
+            reason: 'empty-assistant-text',
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+
+        if (isCopyHotkeyContinueStopSignalText(waitResult.text)) {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE][stop-signal] source=${sourceText || '-'} signal=${getCopyHotkeyContinueStopSignal()}`,
+          );
+
+          if (!isLoopMode) {
+            setStatus('收到终止信号，任务已完成，不再继续', 'success');
+          }
+
+          return {
+            ok: true,
+            reason: 'stop-signal',
+            shouldStopLoop: true,
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+
+        const assistantMessageKey = buildAssistantMessageKeyFromRecord(
+          waitResult.record,
+          waitResult.text,
+        ) || getLastAssistantMessageKeySafe();
+
+        logCopyHotkeyContinueStep(sourceText, 'copy-last-reply');
+        if (btn && !isLoopMode) {
+          btn.textContent = '澶嶅埗涓?..';
+        }
+        if (typeof copyTextToClipboard !== 'function') {
+          if (!isLoopMode) {
+            setStatus('澶嶅埗澶辫触锛氬壀璐存澘 API 涓嶅彲鐢?', 'error');
+          }
+          ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][abort] reason=copyTextToClipboard-missing');
+          return {
+            ok: false,
+            reason: 'copyTextToClipboard-missing',
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+        try {
+          await copyTextToClipboard(waitResult.text);
+        } catch (copyError) {
+          const errText = formatToolboxError(copyError);
+          console.error('[COPY_HOTKEY_CONTINUE][COPY_FAILED]', {
+            source: sourceText,
+            loopMode: isLoopMode,
+            error_type: copyError && copyError.name,
+            error: errText,
+            stack: copyError && copyError.stack,
+          });
+          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=copy-failed detail=${errText}`);
+          if (!isLoopMode) {
+            setStatus(`澶嶅埗+蹇嵎閿?缁х画澶辫触锛?{errText}`, 'error');
+          }
+          return {
+            ok: false,
+            reason: 'copy-failed',
+            detail: errText,
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE][copied] chars=${String(waitResult.text || '').length}`,
+        );
+        if (typeof playCopySuccessBeepSafe === 'function') {
+          void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyContinue');
+        }
+
+        logCopyHotkeyContinueStep(sourceText, 'send-hotkey');
+        if (btn && !isLoopMode) {
+          btn.textContent = '鍙戦€佸揩鎹烽敭...';
+        }
+        const hotkeyOk = await triggerSendHotkeyOnce();
+        if (!hotkeyOk) {
+          ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][failed] reason=hotkey-failed');
+          if (!isLoopMode) {
+            setStatus('澶嶅埗鎴愬姛锛屼絾 Ctrl+Alt+I 鎵ц澶辫触', 'error');
+          }
+          return {
+            ok: false,
+            reason: 'hotkey-failed',
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+        await sleep(300);
+
+        logCopyHotkeyContinueStep(sourceText, 'send-continue');
+        if (btn && !isLoopMode) {
+          btn.textContent = '鍙戦€佺户缁?..';
+        }
+        const continueSource = isLoopMode ? sourceText : 'copy-hotkey-continue-once';
+        const loopContinuePromptTxt = getCopyHotkeyContinuePromptText();
+        safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
+        const continueResult = await sendContinueMessageOnly(continueSource);
+        if (!continueResult || !continueResult.ok) {
+          const detail = continueResult && continueResult.reason ? continueResult.reason : '';
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE][failed] reason=continue-send-failed detail=${detail || '-'}`,
+          );
+          if (!isLoopMode) {
+            setStatus('澶嶅埗鍜屽揩鎹烽敭宸插畬鎴愶紝浣嗗彂閫?缁х画"澶辫触', 'error');
+          }
+          return {
+            ok: false,
+            reason: 'continue-send-failed',
+            detail,
+            source: sourceText,
+            loopMode: isLoopMode,
+          };
+        }
+        ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][done] copied=1 hotkey=1 continue=1');
+        if (!isLoopMode) {
+          setStatus('宸插鍒舵渶鍚庡洖澶嶏紝宸插彂閫?Ctrl+Alt+I锛屽苟鍙戦€佺户缁?', 'success');
+          if (btn) {
+            setButtonTemporaryOk(btn);
+          }
+        }
+        return {
+          ok: true,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied_text: String(waitResult.text || ''),
+          assistantMessageKey,
+          continueSent: true,
+          continueReason: continueResult && continueResult.reason ? continueResult.reason : '',
+          hotkeySent: true,
+          copied: true,
+        };
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[COPY_HOTKEY_CONTINUE][ERROR]', {
+          source: sourceText,
+          loopMode: isLoopMode,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] source=${sourceText} error=${errText}`);
+        if (!isLoopMode) {
+          setStatus(`澶嶅埗+蹇嵎閿?缁х画澶辫触锛?{errText}`, 'error');
+          if (btn) {
+            setButtonTemporaryError(btn, '鎵ц澶辫触', 1200);
+          }
+        }
+        return {
+          ok: false,
+          reason: 'exception',
+          detail: errText,
+          source: sourceText,
+          loopMode: isLoopMode,
+        };
+      } finally {
+        copyHotkeyContinueTaskRunning = false;
+        copyHotkeyContinueTaskStartedAt = 0;
+
+        if (!isLoopMode) {
+          if (btn) {
+            btn.dataset.busy = '0';
+            btn.disabled = false;
+            btn.textContent = '澶嶅埗+蹇嵎閿?缁х画';
+          }
+          renderUploadButtonsOnly();
+        } else {
+          safeAppendLog(`[COPY_HOTKEY_CONTINUE][KEEP_LOOP_STATE] source=${sourceText}`);
+          console.warn('[COPY_HOTKEY_CONTINUE][KEEP_LOOP_STATE]', {
+            source: sourceText,
+            running: copyHotkeyContinueLoopRunning,
+          });
+        }
+      }
+    }
+
+    async function waitAssistantCycleAfterContinue(source, previousKey) {
+      const sourceText = String(source || '');
+      const prevKey = String(previousKey || '');
+      const startedAt = Date.now();
+      const maxWaitMs = 180000;
+      let sawBusy = false;
+
+      safeAppendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-start] source=${sourceText} previousKey=${prevKey || '-'}`,
+      );
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        if (copyHotkeyContinueLoopStopRequested) {
+          safeAppendLog('[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-stop-requested]');
+          return false;
+        }
+
+        let busy = false;
+
+        try {
+          busy = (
+            typeof ComposerApi !== 'undefined'
+            && ComposerApi
+            && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+            && ComposerApi.isAssistantLikelyBusy()
+          );
+        } catch (error) {
+          console.error('[COPY_HOTKEY_CONTINUE_LOOP][busy-check-failed]', {
+            source: sourceText,
+            error_type: error && error.name,
+            error: error && error.message,
+            stack: error && error.stack,
+          });
+          busy = false;
+        }
+
+        if (busy) {
+          sawBusy = true;
+        }
+
+        const nextKey = getLastAssistantMessageKeySafe();
+
+        safeAppendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-poll] previousKey=${prevKey || '-'} nextKey=${nextKey || '-'} same=${nextKey && nextKey === prevKey ? '1' : '0'} busy=${busy ? '1' : '0'} sawBusy=${sawBusy ? '1' : '0'}`,
+        );
+
+        if (nextKey && prevKey && nextKey !== prevKey && !busy) {
+          await sleep(600);
+          safeAppendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done-by-poll] previousKey=${prevKey} nextKey=${nextKey}`,
+          );
+          return true;
+        }
+
+        if (sawBusy && !busy) {
+          await sleep(800);
+          const keyAfterIdle = getLastAssistantMessageKeySafe();
+          if (!prevKey || keyAfterIdle !== prevKey) {
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done] previousKey=${prevKey || '-'} nextKey=${keyAfterIdle || '-'}`,
+            );
+            return true;
+          }
+        }
+
+        await sleep(1500);
+      }
+
+      safeAppendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-timeout] source=${sourceText} previousKey=${prevKey || '-'} maxWaitMs=${maxWaitMs}`,
+      );
+      setStatus('杩炵画澶嶅埗+蹇嵎閿?缁х画锛氱瓑寰呬笅涓€杞洖绛旇秴鏃?', 'warn');
+      return false;
+    }
+
+    
+    function getCopyHotkeyLoopAutomationConfig() {
+      const cfg = getCompactUiConfig();
+
+      const autoUploadInterval = Number(cfg.copyHotkeyLoopAutoUploadInterval || 5);
+      const homeNavInterval = Number(cfg.copyHotkeyLoopHomeNavInterval || 20);
+
+      return {
+        autoUploadEnabled: cfg.copyHotkeyLoopAutoUploadEnabled !== false,
+        autoUploadInterval: Number.isFinite(autoUploadInterval) && autoUploadInterval > 0
+          ? Math.floor(autoUploadInterval)
+          : 5,
+        homeNavEnabled: cfg.copyHotkeyLoopHomeNavEnabled !== false,
+        homeNavInterval: Number.isFinite(homeNavInterval) && homeNavInterval > 0
+          ? Math.floor(homeNavInterval)
+          : 20,
+        homeNavUrl: String(cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/').trim() || 'https://chatgpt.com/',
+      };
+    }
+
+    function isCopyHotkeyLoopIntervalHit(cycleIndex, enabled, interval) {
+      const index = Number(cycleIndex) || 0;
+      const step = Number(interval) || 0;
+
+      return enabled === true && index > 0 && step > 0 && index % step === 0;
+    }
+
+    function requestCopyHotkeyLoopHomeNavigation(cycleIndex, cfg) {
+      const targetUrl = String(
+        cfg && cfg.homeNavUrl ? cfg.homeNavUrl : 'https://chatgpt.com/'
+      ).trim() || 'https://chatgpt.com/';
+
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][home-nav-request] index=${cycleIndex} url=${targetUrl}`
+      );
+
+      setStatus(
+        `????+???+???? ${cycleIndex} ???????????? ChatGPT ??`,
+        'running'
+      );
+
+      window.setTimeout(() => {
+        try {
+          window.location.assign(targetUrl);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[COPY_HOTKEY_CONTINUE_LOOP][home-nav-failed]', {
+            cycleIndex,
+            targetUrl,
+            error_type: error && error.name,
+            error: errText,
+            stack: error && error.stack,
+          });
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][home-nav-failed] index=${cycleIndex} error=${errText}`
+          );
+          setStatus(`???????${errText}`, 'error');
+        }
+      }, 600);
+    }
+
+    async function runCopyHotkeyLoopPostCycleActions(cycleIndex) {
+      const cfg = getCopyHotkeyLoopAutomationConfig();
+
+      const shouldHomeNav = isCopyHotkeyLoopIntervalHit(
+        cycleIndex,
+        cfg.homeNavEnabled,
+        cfg.homeNavInterval,
+      );
+
+      if (shouldHomeNav) {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][post-cycle] action=home-nav index=${cycleIndex} uploadSkipped=1`
+        );
+
+        requestCopyHotkeyLoopHomeNavigation(cycleIndex, cfg);
+
+        return {
+          stop: true,
+          reason: 'home-nav',
+        };
+      }
+
+      const shouldAutoUpload = isCopyHotkeyLoopIntervalHit(
+        cycleIndex,
+        cfg.autoUploadEnabled,
+        cfg.autoUploadInterval,
+      );
+
+      if (!shouldAutoUpload) {
+        return {
+          stop: false,
+          reason: 'no-action',
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][post-cycle] action=auto-upload index=${cycleIndex} interval=${cfg.autoUploadInterval}`
+      );
+
+      setStatus(
+        `????+???+???? ${cycleIndex} ??????????????????`,
+        'running'
+      );
+
+      try {
+        const uploadResult = await handleStartUploadClick(`copy-hotkey-loop-auto-upload-${cycleIndex}`);
+
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][auto-upload-done] index=${cycleIndex} success=${uploadResult && uploadResult.success != null ? uploadResult.success : '-'} failed=${uploadResult && uploadResult.failed != null ? uploadResult.failed : '-'} skipped=${uploadResult && uploadResult.skipped ? '1' : '0'} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'}`
+        );
+
+        return {
+          stop: false,
+          reason: 'auto-upload-done',
+          uploadResult,
+        };
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+
+        console.error('[COPY_HOTKEY_CONTINUE_LOOP][auto-upload-failed]', {
+          cycleIndex,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][auto-upload-failed] index=${cycleIndex} error=${errText}`
+        );
+
+        setStatus(`? ${cycleIndex} ????????${errText}`, 'error');
+
+        return {
+          stop: false,
+          reason: 'auto-upload-failed',
+          error: errText,
+        };
+      }
+    }
+
+
+async function toggleCopyHotkeyContinueLoop(source = 'button') {
+      const btn = rootElRef ? qs(UploadSelectors.copyHotkeyContinueLoopBtn, rootElRef) : null;
+      if (copyHotkeyContinueLoopRunning) {
+        copyHotkeyContinueLoopStopRequested = true;
+        setStatus('姝ｅ湪鍋滄杩炵画澶嶅埗+蹇嵎閿?缁х画...', 'warn');
+        ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE_LOOP][stop-requested]');
+        if (btn) {
+          btn.textContent = '鍋滄涓?..';
+          btn.disabled = true;
+        }
+        return true;
+      }
+      copyHotkeyContinueLoopRunning = true;
+      copyHotkeyContinueLoopStopRequested = false;
+      copyHotkeyContinueLoopCount = 0;
+      copyHotkeyContinueLoopStartedAt = Date.now();
+      if (btn) {
+        btn.dataset.running = '1';
+        btn.textContent = '鍋滄杩炵画';
+      }
+      setStatus('杩炵画澶嶅埗+蹇嵎閿?缁х画宸插惎鍔?', 'running');
+      renderUploadButtonsOnly();
+      safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][start] source=${String(source || '-')}`);
+      let loopStopReason = 'natural-end';
+      try {
+        while (!copyHotkeyContinueLoopStopRequested) {
+          copyHotkeyContinueLoopCount += 1;
+          safeAppendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][cycle-start] index=${copyHotkeyContinueLoopCount}`,
+          );
+          const result = await copyHotkeyAndContinueOnce(`loop-${copyHotkeyContinueLoopCount}`);
+
+          if (result && result.shouldStopLoop) {
+            loopStopReason = 'stop-signal';
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][natural-stop] reason=stop-signal index=${copyHotkeyContinueLoopCount}`,
+            );
+            setStatus(
+              `连续复制+快捷键+继续已完成，共执行 ${copyHotkeyContinueLoopCount} 轮`,
+              'success',
+            );
+            break;
+          }
+
+          if (!result || result.ok === false) {
+            const reason = result && result.reason ? result.reason : 'once-failed';
+            const detail = result && result.detail ? result.detail : '';
+
+            loopStopReason = `cycle-stop:${reason}`;
+
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][cycle-stop] reason=${reason} detail=${detail || '-'} index=${copyHotkeyContinueLoopCount}`,
+            );
+
+            console.warn('[COPY_HOTKEY_CONTINUE_LOOP][CYCLE_STOP]', {
+              reason,
+              detail,
+              index: copyHotkeyContinueLoopCount,
+              result,
+            });
+
+            break;
+          }
+
+          if (copyHotkeyContinueLoopStopRequested) {
+            loopStopReason = 'user-stop';
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][cycle-stop] reason=user-stop index=${copyHotkeyContinueLoopCount}`,
+            );
+            break;
+          }
+
+          safeAppendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][before-wait-next] index=${copyHotkeyContinueLoopCount} key=${result.assistantMessageKey || '-'} reason=${result.continueReason || '-'}`,
+          );
+
+          const waited = await waitAssistantCycleAfterContinue(
+            `loop-${copyHotkeyContinueLoopCount}`,
+            result.assistantMessageKey || '',
+          );
+          if (!waited) {
+            loopStopReason = copyHotkeyContinueLoopStopRequested
+              ? 'user-stop'
+              : 'wait-next-reply-failed';
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=${loopStopReason} index=${copyHotkeyContinueLoopCount}`,
+            );
+            if (loopStopReason === 'wait-next-reply-failed') {
+              console.warn('[COPY_HOTKEY_CONTINUE_LOOP][WAIT_NEXT_FAILED]', {
+                index: copyHotkeyContinueLoopCount,
+                previousKey: result.assistantMessageKey || '',
+              });
+            }
+            break;
+          }
+
+          const stopSignalResult = detectCopyHotkeyLoopStopSignal(copyHotkeyContinueLoopCount);
+
+          if (stopSignalResult && stopSignalResult.matched) {
+            loopStopReason = stopSignalResult.reason || 'stop-signal';
+
+            if (typeof safeAppendLog === 'function') {
+              safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=${loopStopReason} index=${copyHotkeyContinueLoopCount}`);
+            }
+
+            break;
+          }
+
+          const postCycleAction = await runCopyHotkeyLoopPostCycleActions(copyHotkeyContinueLoopCount);
+
+          if (postCycleAction && postCycleAction.stop) {
+            loopStopReason = postCycleAction.reason || 'post-cycle-stop';
+
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=${loopStopReason} index=${copyHotkeyContinueLoopCount}`
+            );
+
+            break;
+          }
+        }
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        loopStopReason = `exception:${errText}`;
+        console.error('[COPY_HOTKEY_CONTINUE_LOOP][FAILED]', {
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][failed] error=${errText}`);
+        setStatus(`杩炵画澶嶅埗+蹇嵎閿?缁х画澶辫触锛?{errText}`, 'error');
+      } finally {
+        const stoppedByUser = copyHotkeyContinueLoopStopRequested;
+        copyHotkeyContinueLoopRunning = false;
+        copyHotkeyContinueLoopStopRequested = false;
+        if (btn) {
+// placeholder
+true;

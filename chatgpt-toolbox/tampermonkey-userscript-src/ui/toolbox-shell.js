@@ -750,10 +750,6 @@
           display: none !important;
         }
 
-        #${APP.panelId}.cgpt-toolbox-compact #cgpt-upload-module.compact-hide-upload-groups .cgpt-upload-groups-head {
-          display: none !important;
-        }
-
         #${APP.panelId}.cgpt-toolbox-compact #cgpt-upload-module .cgpt-upload-groups-head {
           display: block !important;
         }
@@ -8396,7 +8392,6 @@ bindToggleDrag();
 
       if (statusType === 'online') {
         if (/可发送/.test(value)) return '可发送';
-        if (/待输入/.test(value)) return '待输入';
         if (/已连接/.test(value)) return '已连接';
         return '在线';
       }

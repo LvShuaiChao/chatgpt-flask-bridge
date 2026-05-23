@@ -1754,6 +1754,13 @@
     confirmPromptDraftOverwrite: false,
     globalDropCaptureEnabled: false,
     restoreScrollAfterCopyLastMessage: false,
+    copyHotkeyLoopAutoUploadEnabled: true,
+    copyHotkeyLoopAutoUploadInterval: 5,
+    copyHotkeyLoopHomeNavEnabled: true,
+    copyHotkeyLoopHomeNavInterval: 20,
+    copyHotkeyLoopHomeNavUrl: 'https://chatgpt.com/',
+    copyHotkeyContinuePromptText: '',
+    copyHotkeyContinueStopSignal: '__CHATGPT_TOOLBOX_DONE__',
   });
 
   function normalizeCompactUiConfig(input) {
@@ -1792,6 +1799,37 @@
 
     // 项目文件夹栏为核心功能，忽略历史配置中的隐藏项。
     cfg.showUploadGroups = true;
+
+    function normalizePositiveInt(value, fallback, min, max) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return fallback;
+      const intValue = Math.floor(n);
+      if (intValue < min) return fallback;
+      if (intValue > max) return max;
+      return intValue;
+    }
+
+    cfg.copyHotkeyLoopAutoUploadEnabled = cfg.copyHotkeyLoopAutoUploadEnabled !== false;
+    cfg.copyHotkeyLoopAutoUploadInterval = normalizePositiveInt(cfg.copyHotkeyLoopAutoUploadInterval, 5, 1, 999);
+    cfg.copyHotkeyLoopHomeNavEnabled = cfg.copyHotkeyLoopHomeNavEnabled !== false;
+    cfg.copyHotkeyLoopHomeNavInterval = normalizePositiveInt(cfg.copyHotkeyLoopHomeNavInterval, 20, 1, 999);
+    cfg.copyHotkeyLoopHomeNavUrl = (typeof cfg.copyHotkeyLoopHomeNavUrl === 'string' && cfg.copyHotkeyLoopHomeNavUrl.trim().length > 0) ? cfg.copyHotkeyLoopHomeNavUrl.trim() : 'https://chatgpt.com/';
+
+    // 继续指令 & 终止信号（兼容旧版 copyHotkeyLoop* 字段）
+    const legacyLoopPrompt = typeof cfg.copyHotkeyLoopContinuePrompt === 'string'
+      ? cfg.copyHotkeyLoopContinuePrompt.trim()
+      : '';
+    cfg.copyHotkeyContinuePromptText = String(cfg.copyHotkeyContinuePromptText || legacyLoopPrompt || '').trim();
+
+    const legacyLoopStop = typeof cfg.copyHotkeyLoopStopSignal === 'string'
+      ? cfg.copyHotkeyLoopStopSignal.trim()
+      : '';
+    const nextStopSignal = String(cfg.copyHotkeyContinueStopSignal || legacyLoopStop || '__CHATGPT_TOOLBOX_DONE__').trim();
+    cfg.copyHotkeyContinueStopSignal = nextStopSignal || '__CHATGPT_TOOLBOX_DONE__';
+
+    delete cfg.copyHotkeyLoopContinuePrompt;
+    delete cfg.copyHotkeyLoopStopSignalEnabled;
+    delete cfg.copyHotkeyLoopStopSignal;
 
     return cfg;
   }

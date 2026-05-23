@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Slice repo-root client.user.js into chatgpt-toolbox/tampermonkey-userscript-src/*.js."""
+﻿#!/usr/bin/env python3
+"""Slice repo-root client.user.js into chatgpt-toolbox/tampermonkey-userscript-src/ organized by feature."""
 
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ def find_slices(lines: list[str]) -> dict[str, tuple[int, int]]:
     outer_close = find_line(lines, r"^\}\)\(\);\s*$", start=auto_queue)
 
     return {
-        "state.js": (strict_end, dom_util - 1),
-        "logger.js": (dom_util, toolbox - 1),
-        "toolbox-ui.js": (toolbox, chat_extractor - 1),
+        "core/state.js": (strict_end, dom_util - 1),
+        "core/logger.js": (dom_util, toolbox - 1),
+        "ui/toolbox-shell.js": (toolbox, chat_extractor - 1),
         "main-middle.js": (chat_extractor, upload_banner - 1),
         "upload-head.js": (upload_banner, copy_once - 1),
         "continue.js": (copy_once, toggle_loop - 1),
@@ -88,59 +88,73 @@ def main() -> None:
     middle = slice_lines(lines, *slices["main-middle.js"])
     boot = slice_lines(lines, *slices["main-boot.js"])
 
-    (OUT_DIR / "main.js").write_text(
+    # core/main.js = header + ChatMessageExtractor + upload marker (ends with marker)
+    core_main = (OUT_DIR / "core" / "main.js")
+    core_main.parent.mkdir(parents=True, exist_ok=True)
+    core_main.write_text(
         header
         + middle.rstrip("\n")
-        + f"\n{UPLOAD_INSERT_MARKER}\n"
-        + boot.lstrip("\n"),
+        + f"\n{UPLOAD_INSERT_MARKER}\n",
         encoding="utf-8",
     )
 
-    for name in (
-        "state.js",
-        "logger.js",
-        "toolbox-ui.js",
-        "continue.js",
-        "loop.js",
-        "shortcut.js",
-    ):
-        (OUT_DIR / name).write_text(slice_lines(lines, *slices[name]), encoding="utf-8")
+    # autoqueue/auto-queue.js = AutoQueueModule (starts after the marker)
+    autoqueue_file = (OUT_DIR / "autoqueue" / "auto-queue.js")
+    autoqueue_file.parent.mkdir(parents=True, exist_ok=True)
+    autoqueue_file.write_text(boot.lstrip("\n"), encoding="utf-8")
 
-    for part in ("upload-head.js", "upload-mid.js", "upload-tail.js"):
-        (OUT_DIR / part).write_text(slice_lines(lines, *slices[part]), encoding="utf-8")
+    # Move simple files to new subdirectories
+    path_map = {
+        "core/state.js": "core/state.js",
+        "core/logger.js": "core/logger.js",
+        "ui/toolbox-shell.js": "ui/toolbox-shell.js",
+    }
+    for src_key, dst_rel in path_map.items():
+        dst = OUT_DIR / dst_rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(slice_lines(lines, *slices[src_key]), encoding="utf-8")
 
-    (OUT_DIR / "upload.js").write_text(
+    # upload/upload-module.js = upload-head + continue + loop + upload-mid + shortcut + upload-tail
+    upload_module = (OUT_DIR / "upload" / "upload-module.js")
+    upload_module.parent.mkdir(parents=True, exist_ok=True)
+    upload_module.write_text(
         slice_lines(lines, *slices["upload-head.js"])
+        + slice_lines(lines, *slices["continue.js"])
+        + slice_lines(lines, *slices["loop.js"])
         + slice_lines(lines, *slices["upload-mid.js"])
+        + slice_lines(lines, *slices["shortcut.js"])
         + slice_lines(lines, *slices["upload-tail.js"]),
         encoding="utf-8",
     )
 
+    # .build-order.json metadata
     (OUT_DIR / ".build-order.json").write_text(
         json.dumps(
             {
                 "parts": [
-                    "state.js",
-                    "logger.js",
-                    "toolbox-ui.js",
-                    "main.js",
-                    "upload.js",
-                    "continue.js",
-                    "loop.js",
-                    "shortcut.js",
+                    "core/state.js",
+                    "core/logger.js",
+                    "ui/toolbox-shell.js",
+                    "core/main.js",
+                    "upload/upload-module.js",
+                    "autoqueue/auto-queue.js",
                 ],
                 "uploadInsertMarker": UPLOAD_INSERT_MARKER,
                 "slices": {k: list(v) for k, v in slices.items()},
             },
             indent=2,
+            ensure_ascii=False,
         )
         + "\n",
         encoding="utf-8",
     )
 
     print(f"Wrote modules under {OUT_DIR}")
-    for name, bounds in slices.items():
+    for name, bounds in sorted(slices.items()):
         print(f"  {name}: {bounds[0]}-{bounds[1]}")
+    print(f"  upload/upload-module.js: merged from upload-head + continue + loop + upload-mid + shortcut + upload-tail")
+    print(f"  core/main.js: header + main-middle + marker")
+    print(f"  autoqueue/auto-queue.js: main-boot (AutoQueueModule)")
 
 
 if __name__ == "__main__":
