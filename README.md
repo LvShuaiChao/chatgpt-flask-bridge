@@ -19,7 +19,7 @@ flowchart LR
 |------|------|------|
 | 桌面客户端 | `gui.py` / `app/ui/` | 对话列表、消息编辑、页面绑定、设置、日志 |
 | 桥接服务 | `app/server/` | 消息队列、油猴在线状态、页面匹配与下发 |
-| 浏览器油猴脚本 | `client.user.js` | 浏览器端：轮询服务端、在 ChatGPT 页面发送并抓取回复 |
+| 浏览器油猴脚本 | `chatgpt-toolbox/dist/client.user.js` | 浏览器端：轮询服务端、在 ChatGPT 页面发送并抓取回复（由 `tampermonkey-userscript-src/` 构建） |
 | 运行时数据 | `runtime/` | 本地会话 JSON、持久化配置 |
 
 默认服务地址：`http://127.0.0.1:5000`  
@@ -65,7 +65,9 @@ pip install -r requirements.txt
    程序会自动在 `127.0.0.1:5000` 启动桥接服务；确认顶部状态栏显示油猴可连接。
 
 3. **安装油猴脚本**  
-   - 将 `client.user.js` 粘贴到 Tampermonkey 并保存（仓库内仅此一份维护脚本）  
+   - 在 Tampermonkey 中安装 **`chatgpt-toolbox/dist/client.user.js`**（构建产物；不要直接改 `dist/`）  
+   - 开发时改 `chatgpt-toolbox/tampermonkey-userscript-src/`，在 `chatgpt-toolbox/` 下执行 `npm run build` 后重新安装/更新脚本  
+   - 根目录 `client.user.js` 会在构建时自动同步，便于测试与旧文档引用  
    - 桥接服务固定监听 `127.0.0.1:5000`；若曾改过端口，在油猴菜单 **「浏览器桥接 · 设置」** 中填写地址（无需改脚本源码）
 
 4. **打开 ChatGPT**  
@@ -145,7 +147,12 @@ python -m app.client.bridge_client --status
 ```
 油猴脚本与Python联动/
 ├── gui.py                 # 主 GUI 入口（含桥接服务）
-├── client.user.js         # Tampermonkey 用户脚本（唯一维护版本）
+├── client.user.js         # 油猴脚本构建同步副本（勿手改；以 dist 为准）
+├── chatgpt-toolbox/      # 油猴脚本模块化工程
+│   ├── tampermonkey-userscript-src/  # 开发源码（勿使用 src/ 目录名）
+│   ├── build.userjs.mjs
+│   ├── package.json
+│   └── dist/client.user.js           # Tampermonkey 安装用单文件
 ├── requirements.txt
 ├── runtime/               # 运行时数据（会话、可 gitignore）
 │   └── chat_sessions.json
@@ -159,8 +166,10 @@ python -m app.client.bridge_client --status
 │       ├── main_window.py
 │       └── mixins/        # 桥接、绑定、会话、设置等
 ├── export_for_chatgpt.py  # 导出代码供 ChatGPT 阅读（开发辅助）
-└── tools/                 # 重构脚本等开发工具
+└── tools/                 # 重构脚本等开发工具（含 generate_userscript_modules.py）
 ```
+
+油猴脚本模块说明见 [chatgpt-toolbox/README.md](chatgpt-toolbox/README.md)。
 
 ## 配置说明
 
@@ -224,11 +233,23 @@ python -m app.client.bridge_client --status
 
 桥接服务由 `gui.py` 启动时内嵌运行；调试可直接 `from app.server import create_app, start_server`。
 
-导出项目源码合并包（便于发给 ChatGPT 分析）：
+导出**整个仓库**源码合并包（Python `app/`、`gui.py`、油猴 `chatgpt-toolbox/tampermonkey-userscript-src/` 等），便于发给 ChatGPT 分析。含行数/Token 统计、增量合并、循环检测、日志单独导出等。若存在 `chatgpt-toolbox/`，每轮导出前会尝试 `npm run build`。
 
 ```bash
+# 默认：循环运行，有文件变更才重新合并写盘（Ctrl+C 结束）
 python export_for_chatgpt.py
+
+# 只导出一次
+python export_for_chatgpt.py --once
+
+# 增量：首轮全量，之后仅合并 mtime 变化的文件
+python export_for_chatgpt.py --incremental
+
+# 包含 tests/、tools/ 等（默认省略以缩小包体）
+python export_for_chatgpt.py --include-tests --include-tools
 ```
+
+主输出：仓库根目录 `0_merged_for_chatgpt.txt` / `.zip`（过大自动分片）。辅助输出在 `exports/for_chatgpt/`（统计、日志副本、mtime 清单）。
 
 ### 生产发布包
 

@@ -1,0 +1,59 @@
+{
+  "parts": [
+    "state.js",
+    "logger.js",
+    "toolbox-ui.js",
+    "main.js",
+    "upload.js",
+    "continue.js",
+    "loop.js",
+    "shortcut.js"
+  ],
+  "uploadInsertMarker": "/*__UPLOAD_MODULES__*/",
+  "slices": {
+    "state.js": [
+      29,
+      447
+    ],
+    "logger.js": [
+      448,
+      3493
+    ],
+    "toolbox-ui.js": [
+      3494,
+      13094
+    ],
+    "main-middle.js": [
+      13095,
+      15981
+    ],
+    "upload-head.js": [
+      15982,
+      19724
+    ],
+    "continue.js": [
+      19725,
+      20029
+    ],
+    "loop.js": [
+      20030,
+      20148
+    ],
+    "upload-mid.js": [
+      20149,
+      22490
+    ],
+    "shortcut.js": [
+      22491,
+      24035
+    ],
+    "upload-tail.js": [
+      24036,
+      25178
+    ],
+    "main-boot.js": [
+      25180,
+      32324
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+---
+description: Tampermonkey userscript source-of-truth rule
+alwaysApply: true
+---
+
+# Tampermonkey Userscript 修改规则
+
+本项目的油猴脚本采用「源码拆分 + 构建生成单文件」的结构。
+
+## 只能修改源码目录
+
+允许修改：
+
+- `chatgpt-toolbox/tampermonkey-userscript-src/**/*.js`
+- `chatgpt-toolbox/build.userjs.mjs`
+- `chatgpt-toolbox/package.json`
+- `chatgpt-toolbox/README.md`
+
+## 禁止直接修改生成文件
+
+禁止直接修改：
+
+- `chatgpt-toolbox/dist/client.user.js`
+- `client.user.js`（仓库根目录）
+
+这两个文件是构建产物，不是源码。任何功能修改都必须先改：
+
+`chatgpt-toolbox/tampermonkey-userscript-src/`
+
+然后运行：
+
+```bash
+cd chatgpt-toolbox
+npm run build
+```
+
+## 修改流程
+
+每次修改油猴功能时，必须遵守：
+
+1. 先定位源码文件。
+2. 修改 `tampermonkey-userscript-src/` 下的源码。
+3. 不要手动编辑 `dist/client.user.js`。
+4. 不要手动编辑根目录 `client.user.js`。
+5. 修改完成后运行 `npm run build`。
+6. 检查 `dist/client.user.js` 是否重新生成（顶部应有 `GENERATED FILE - DO NOT EDIT DIRECTLY`）。
+7. 根目录 `client.user.js` 只能由 `build.userjs.mjs` 自动同步，不得手改。
+
+## 重要原则
+
+- `dist/client.user.js` 只能由 `build.userjs.mjs` 生成。
+- 根目录 `client.user.js` 只能由 `build.userjs.mjs` 同步生成。
+- 不要在生成文件里做功能修复；看到 dist 里的问题时，必须回到源码目录修改对应模块。
+- 不要使用 `try/pass`。
+- 如果必须捕获异常，必须 `console.error` 输出完整错误对象。

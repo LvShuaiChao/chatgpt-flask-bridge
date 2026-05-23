@@ -1,0 +1,9 @@
+{
+  "name": "chatgpt-toolbox",
+  "private": true,
+  "description": "Tampermonkey userscript build for ChatGPT toolbox",
+  "scripts": {
+    "build": "node build.userjs.mjs",
+    "watch": "node build.userjs.mjs --watch"
+  }
+}

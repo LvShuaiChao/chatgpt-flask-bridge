@@ -10,6 +10,7 @@
 - 默认缩小合并包（省略 ``runtime/`` 会话状态、``.claude/``、本脚本等）：``--include-runtime-state``、``--include-claude``、``--include-export-script`` 可逐项恢复。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
+- **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前尝试 ``npm run build``，合并包收录 ``tampermonkey-userscript-src/`` 与 ``chatgpt-toolbox/dist/client.user.js``；根目录 ``client.user.js`` 与 dist 重复时只保留 dist 版本。
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -102,6 +105,11 @@ def _detect_project_root(script_home: Path) -> Path:
 
 
 PROJECT_ROOT = _detect_project_root(_SCRIPT_HOME)
+CHATGPT_TOOLBOX_DIR = PROJECT_ROOT / "chatgpt-toolbox"
+USERSCRIPT_DIST_REL = "chatgpt-toolbox/dist/client.user.js"
+
+# 导出前构建油猴 dist（需 chatgpt-toolbox/package.json）
+RUN_BUILD_BEFORE_EXPORT = True
 
 # =========================
 # 主合并包：仓库根目录；其余中间文件：exports/for_chatgpt/
@@ -194,8 +202,38 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
         return True
     if SLIM_SKIP_EXPORT_SCRIPT and rel == "export_for_chatgpt.py":
         return True
+    # 模块化工程存在时，根目录 monolith 与 dist 重复，只导出 dist
+    if rel == "client.user.js" and (CHATGPT_TOOLBOX_DIR / "dist" / "client.user.js").is_file():
+        return True
 
     return False
+
+
+def _run_userscript_build(project_root: Path) -> None:
+    toolbox = project_root / "chatgpt-toolbox"
+    if not RUN_BUILD_BEFORE_EXPORT:
+        return
+    if not (toolbox / "package.json").is_file():
+        return
+    npm = shutil.which("npm")
+    if not npm:
+        print("[警告] 未找到 npm，跳过 chatgpt-toolbox build；dist 可能不是最新")
+        return
+    print(f"[构建] chatgpt-toolbox: npm run build …", flush=True)
+    proc = subprocess.run(
+        [npm, "run", "build"],
+        cwd=toolbox,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.stdout.strip():
+        print(proc.stdout.rstrip())
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise RuntimeError(f"chatgpt-toolbox npm run build 失败: {err}")
+    print("[构建] 完成", flush=True)
 
 
 def export_log_basename_should_skip_in_source_scan(basename: str) -> bool:
@@ -401,6 +439,7 @@ ALLOWED_SUFFIXES = {
     ".ts",
     ".tsx",
     ".jsx",
+    ".mjs",
 }
 
 _STDLIB_TOP: frozenset[str] | None = None
@@ -763,7 +802,7 @@ def find_file_by_name(project_root: Path, relative_or_name: str) -> Path | None:
         for d in list(dirs):
             dp = root_path / d
             if should_exclude_path(dp, project_root):
-                continue
+            continue
             kept_dirs.append(d)
         dirs[:] = kept_dirs
         if target_name in files:
@@ -923,14 +962,14 @@ def _prepare_export_file(
 
     tok_line = _tokens_header_line_for_exported_body(content, token_count=source_tokens)
 
-    block = "\n".join(
-        [
+        block = "\n".join(
+            [
             "\n" + "=" * 100,
             f"FILE: {rel_path.as_posix()}",
             tok_line,
             "=" * 100,
-            "",
-            content.rstrip(),
+                "",
+                content.rstrip(),
             "\n",
         ]
     )
@@ -954,9 +993,9 @@ def _error_file_block(file_path: Path, err: BaseException) -> str:
             "=" * 100,
             "",
             err_body,
-            "",
-        ]
-    )
+                "",
+            ]
+        )
 
 
 def _build_blocks_for_paths(
@@ -1246,7 +1285,7 @@ def _filter_incremental_changed(
             rel = p.relative_to(root).as_posix()
             mtime = p.stat().st_mtime
         except (OSError, ValueError):
-            continue
+                continue
         old = manifest_prev.get(rel)
         if old is None or mtime > old + 1e-6:
             changed.append(p)
@@ -1891,6 +1930,7 @@ def export_bundle(
 ) -> float:
     """执行一轮导出；返回本轮总耗时（秒，含扫描/合并/写盘/压缩/日志等）。"""
     project_root = project_root.resolve()
+    _run_userscript_build(project_root)
     t_export0 = time.perf_counter()
     global _RUN_STATS  # noqa: PLW0603
     _RUN_STATS = {
@@ -1984,7 +2024,7 @@ def export_bundle(
         src_tokens: int | None = None,
     ) -> str:
         return build_header(
-            project_root=project_root,
+        project_root=project_root,
             discovered=ordered_py,
             extras=extras,
             loop_iteration=loop_iteration,
