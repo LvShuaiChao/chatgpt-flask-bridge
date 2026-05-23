@@ -272,6 +272,14 @@
       logPinned: true,
       autoScrollPanel: true,
     }),
+    task: Object.freeze({
+      loopMode: false,
+      randomMinSec: 3,
+      randomMaxSec: 20,
+      maxLoopCount: 0,
+      logPinned: true,
+      autoScrollPanel: true,
+    }),
   });
 
   function cloneModeSettingItem(item) {
@@ -289,6 +297,34 @@
     return {
       continue: cloneModeSettingItem(DEFAULT_MODE_SETTINGS.continue),
       list: cloneModeSettingItem(DEFAULT_MODE_SETTINGS.list),
+      task: cloneModeSettingItem(DEFAULT_MODE_SETTINGS.task),
+    };
+  }
+
+  const DEFAULT_TASK_DONE_SIGNAL = '__CHATGPT_TOOLBOX_DONE__';
+
+  function getDefaultTaskContinuePromptText() {
+    return [
+      '请继续完成上一个任务。',
+      '',
+      '你必须先判断“最开始的任务目标”是否已经完整完成，而不是机械地继续输出。',
+      '',
+      '判断规则：',
+      '1. 如果最开始的任务目标已经完整完成，并且没有遗漏内容、没有未输出完的代码、没有未覆盖的文件、没有剩余检查项，请只回复下面这一行终止信号：',
+      DEFAULT_TASK_DONE_SIGNAL,
+      '',
+      '2. 如果还没有完成，请继续输出剩余内容。',
+      '3. 不要重复已经输出过的内容。',
+      '4. 不要重新开始整个任务。',
+      '5. 不要扩展到新任务。',
+      '6. 只补充当前任务中尚未完成、尚未输出、尚未覆盖的部分。',
+      '7. 如果上一轮回答因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止，请从中断位置继续。',
+    ].join('\n');
+  }
+
+  function createDefaultTaskQueueSettings() {
+    return {
+      stopOnMaxContinueRounds: true,
     };
   }
 
@@ -395,6 +431,9 @@
       promptMode: 'continue',
       listProfiles: [],
       activeListProfileId: '',
+      taskProfiles: [],
+      activeTaskProfileId: '',
+      taskQueueSettings: createDefaultTaskQueueSettings(),
       modeSettings: createDefaultModeSettings(),
     };
   }

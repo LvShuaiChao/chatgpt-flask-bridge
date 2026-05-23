@@ -848,7 +848,12 @@
         #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] #cgpt-autoq-list-save-name,
         #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] #cgpt-autoq-list-new,
         #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-list-name-row,
-        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] #cgpt-autoq-send-once {
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] #cgpt-autoq-send-once,
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-mode-tabs,
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-list-panel,
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-task-panel,
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-editor-block,
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="autoq"] .cgpt-autoq-status-section {
           display: none !important;
         }
 
@@ -2462,6 +2467,155 @@
 
         #cgpt-autoq-list-name {
           min-width: 0;
+        }
+
+        .cgpt-autoq-main-lite {
+          margin: 8px 0 10px;
+          padding: 10px 12px;
+          border: 1px solid #2f3542;
+          border-radius: 10px;
+          background: #111827;
+        }
+
+        .cgpt-autoq-main-lite-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .cgpt-autoq-task-panel {
+          margin-top: 8px;
+        }
+
+        .cgpt-autoq-task-list-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin: 8px 0;
+        }
+
+        .cgpt-autoq-task-list {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          max-height: 220px;
+          overflow-y: auto;
+          border: 1px solid #2f3542;
+          border-radius: 10px;
+          padding: 6px;
+          background: #0f1115;
+        }
+
+        .cgpt-autoq-task-item {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 8px;
+          padding: 8px;
+          border: 1px solid #243041;
+          border-radius: 8px;
+          background: #171b22;
+          cursor: pointer;
+        }
+
+        .cgpt-autoq-task-item.active {
+          border-color: #3b82f6;
+          box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
+        }
+
+        .cgpt-autoq-task-item-main {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .cgpt-autoq-task-item-title {
+          display: block;
+          font-weight: 650;
+          color: #f8fafc;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .cgpt-autoq-task-item-meta {
+          display: block;
+          margin-top: 3px;
+          font-size: 11px;
+          color: #94a3b8;
+        }
+
+        .cgpt-autoq-task-item-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+          justify-content: flex-end;
+        }
+
+        .cgpt-autoq-task-editor {
+          margin-top: 8px;
+        }
+
+        .cgpt-autoq-task-editor-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .cgpt-autoq-task-editor-full {
+          grid-column: 1 / -1;
+        }
+
+        .cgpt-autoq-task-profile-chips {
+          flex: 1;
+        }
+
+        .cgpt-autoq-task-chip.active {
+          background: #1d4ed8;
+          border-color: #3b82f6;
+          color: #ffffff;
+          font-weight: 650;
+        }
+
+        .cgpt-autoq-task-profile-defaults-title {
+          margin-top: 10px;
+          margin-bottom: 6px;
+        }
+
+        .cgpt-autoq-task-profile-defaults {
+          border: 1px solid #2f3542;
+          border-radius: 10px;
+          padding: 8px;
+          background: #111827;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .cgpt-autoq-task-advanced {
+          border: 1px solid #2f3542;
+          border-radius: 10px;
+          padding: 8px 10px;
+          background: #111827;
+        }
+
+        .cgpt-autoq-task-advanced-summary {
+          cursor: pointer;
+          font-weight: 650;
+          color: #e2e8f0;
+          user-select: none;
+        }
+
+        .cgpt-autoq-task-advanced-body {
+          margin-top: 8px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .cgpt-autoq-task-editor-actions {
+          margin-top: 8px;
         }
 
         .cgpt-prompt-list {
