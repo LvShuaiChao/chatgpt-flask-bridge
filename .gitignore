@@ -2,19 +2,19 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Application runtime logs (including rotation: log.txt.1, log.txt.2, ...)
+# Application runtime logs (active log at repo root; rotations under runtime/logs/)
 log.txt
 log.txt.*
+runtime/logs/
 *.log
 
-# ChatGPT export artifacts
+# ChatGPT export artifacts (current: exports/for_chatgpt/; legacy root names below)
+/exports/for_chatgpt/
 /0_merged_for_chatgpt*.zip
 /0_merged_for_chatgpt*.txt
 /0_merged_for_chatgpt*_metadata.txt
 /0_export_logs_for_chatgpt*.txt
 /.export_for_chatgpt_mtimes.json
-
-# Temporary export archives / reports
 /*_merged_for_chatgpt*.zip
 /*_merged_for_chatgpt*.txt
 /*_export_logs_for_chatgpt*.txt

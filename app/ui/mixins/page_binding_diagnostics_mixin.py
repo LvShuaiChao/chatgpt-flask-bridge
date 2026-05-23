@@ -445,7 +445,7 @@ class PageBindingDiagnosticsMixin:
             return
 
         url = self._page_full_url(page)
-        url_id = self._extract_chatgpt_conversation_id_from_url(url)
+        url_id = parse_conversation_id(url) or ''
         field_id = str(page.get("conversation_id") or "").strip()
         if not (url_id and field_id and url_id != field_id):
             return

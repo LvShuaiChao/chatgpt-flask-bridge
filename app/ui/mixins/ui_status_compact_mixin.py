@@ -31,10 +31,12 @@ class UiStatusCompactMixin:
             return text
         return text[:57] + "..."
 
-    def _tm_page_display_id_text(self, page):
+    def _tm_page_no_text(self, page):
         if not isinstance(page, dict):
             return "-"
-        text = str(page.get("page_display_id") or "").strip()
+        text = str(
+            page.get("page_no") or page.get("page_display_id") or ""
+        ).strip()
         return text or "-"
 
     def _bound_tm_page_for_session(self, session, status=None):
@@ -44,7 +46,7 @@ class UiStatusCompactMixin:
             return self._current_bound_tm_page(status=status, session=session)
         return None
 
-    def _page_display_id_from_registry(
+    def _page_no_from_registry(
         self, client_id, page_instance_id, status=None
     ):
         client_id = (client_id or "").strip()
@@ -62,27 +64,27 @@ class UiStatusCompactMixin:
                 client_id, status=status, page_instance_id=page_instance_id
             )
         if isinstance(page, dict):
-            text = self._tm_page_display_id_text(page)
+            text = self._tm_page_no_text(page)
             return text if text != "-" else ""
         return ""
 
-    def _session_bound_page_display_id_text(self, session, status=None):
-        """解析指定会话绑定页的 page_display_id（不含下拉框选中项）。"""
+    def _session_bound_page_no_text(self, session, status=None):
+        """解析指定会话绑定页的 page_no（不含下拉框选中项）。"""
         status = status or (getattr(self._bridge_ui, 'last_bridge_status', None) or {})
         bound_page = self._bound_tm_page_for_session(session, status=status)
         if isinstance(bound_page, dict):
-            page_display_id = self._tm_page_display_id_text(bound_page)
-            if page_display_id != "-":
-                return page_display_id
+            page_no = self._tm_page_no_text(bound_page)
+            if page_no != "-":
+                return page_no
 
         remote = normalize_remote_chatgpt(
             getattr(session, "remote_chatgpt", {}) or {}
         ) if session else {}
         if remote_binding_enabled(remote):
-            saved_page_display_id = str(remote.get("page_display_id") or "").strip()
-            if saved_page_display_id and saved_page_display_id != "-":
-                return saved_page_display_id
-            registry_id = self._page_display_id_from_registry(
+            saved_page_no = str(remote.get("page_no") or "").strip()
+            if saved_page_no and saved_page_no != "-":
+                return saved_page_no
+            registry_id = self._page_no_from_registry(
                 remote.get("client_id"),
                 remote.get("page_instance_id"),
                 status=status,
@@ -91,8 +93,8 @@ class UiStatusCompactMixin:
                 return registry_id
         return "-"
 
-    def _current_bound_page_display_id_text(self, session=None, status=None):
-        """当前会话区展示的 page_display_id；优先绑定页，其次下拉选中，再查 registry。"""
+    def _current_bound_page_no_text(self, session=None, status=None):
+        """当前会话区展示的 page_no；优先绑定页，其次下拉选中，再查 registry。"""
         status = status or (getattr(self._bridge_ui, 'last_bridge_status', None) or {})
         session = session if session is not None else (
             self._current_session() if hasattr(self, "_current_session") else None
@@ -100,9 +102,9 @@ class UiStatusCompactMixin:
 
         bound_page = self._bound_tm_page_for_session(session, status=status)
         if isinstance(bound_page, dict):
-            page_display_id = self._tm_page_display_id_text(bound_page)
-            if page_display_id != "-":
-                return page_display_id
+            page_no = self._tm_page_no_text(bound_page)
+            if page_no != "-":
+                return page_no
 
         current = (
             self._current_session() if hasattr(self, "_current_session") else None
@@ -122,18 +124,18 @@ class UiStatusCompactMixin:
             ):
                 selected_page = self._get_manual_current_tm_page(status=status)
             if isinstance(selected_page, dict):
-                page_display_id = self._tm_page_display_id_text(selected_page)
-                if page_display_id != "-":
-                    return page_display_id
+                page_no = self._tm_page_no_text(selected_page)
+                if page_no != "-":
+                    return page_no
 
         remote = normalize_remote_chatgpt(
             getattr(session, "remote_chatgpt", {}) or {}
         ) if session else {}
         if remote_binding_enabled(remote):
-            saved_page_display_id = str(remote.get("page_display_id") or "").strip()
-            if saved_page_display_id and saved_page_display_id != "-":
-                return saved_page_display_id
-            registry_id = self._page_display_id_from_registry(
+            saved_page_no = str(remote.get("page_no") or "").strip()
+            if saved_page_no and saved_page_no != "-":
+                return saved_page_no
+            registry_id = self._page_no_from_registry(
                 remote.get("client_id"),
                 remote.get("page_instance_id"),
                 status=status,
@@ -142,13 +144,51 @@ class UiStatusCompactMixin:
                 return registry_id
         return "-"
 
-    def _format_bound_page_line_text(self, page_display_id, url="", state_text=""):
-        page_display_id = str(page_display_id or "").strip() or "-"
+    def _format_bound_page_line_text(self, page_no, url="", state_text=""):
+        page_no = str(page_no or "").strip() or "-"
         url = str(url or "").strip()
+        state_text = str(state_text or "").strip()
+        if state_text in ("等待创建对话", "等待首页上线"):
+            return f"绑定页面：页面ID:{page_no} ｜ 临时首页绑定"
         if url:
-            return f"绑定页面：页面ID:{page_display_id} ｜ {url}"
-        fallback = str(state_text or "").strip() or "未绑定 ChatGPT 页面"
-        return f"绑定页面：页面ID:{page_display_id} ｜ {fallback}"
+            return f"绑定页面：页面ID:{page_no} ｜ {url}"
+        fallback = state_text or "未绑定 ChatGPT 页面"
+        return f"绑定页面：页面ID:{page_no} ｜ {fallback}"
+
+    def _format_bound_page_line_segments(self, page_no, url="", state_text=""):
+        page_no = str(page_no or "").strip() or "-"
+        url = str(url or "").strip()
+        state_text = str(state_text or "").strip()
+        if state_text in ("等待创建对话", "等待首页上线"):
+            tail = "临时首页绑定"
+        else:
+            tail = url or state_text or "未绑定 ChatGPT 页面"
+        return [
+            {"role": "prefix", "text": "绑定页面："},
+            {"role": "page_id", "text": f"页面ID:{page_no}"},
+            {"role": "separator", "text": " ｜ "},
+            {"role": "url", "text": tail, "elide": True},
+        ]
+
+    def _format_current_session_header_segments(self, session=None):
+        if session is None:
+            return [
+                {"role": "prefix", "text": "当前会话：新对话 ｜ "},
+                {"role": "page_id", "text": "页面ID：-"},
+            ]
+        title = ""
+        if hasattr(self, "_session_display_title"):
+            title = self._session_display_title(session)
+        if not title or title == "新对话":
+            return [
+                {"role": "prefix", "text": "当前会话：新对话 ｜ "},
+                {"role": "page_id", "text": "页面ID：-"},
+            ]
+        page_no = self._current_bound_page_no_text(session=session)
+        return [
+            {"role": "prefix", "text": f"当前会话：{title} ｜ "},
+            {"role": "page_id", "text": f"页面ID：{page_no}"},
+        ]
 
     def _format_current_session_header_with_page_id(self, session=None):
         if session is None:
@@ -158,14 +198,14 @@ class UiStatusCompactMixin:
             title = self._session_display_title(session)
         if not title or title == "新对话":
             return "当前会话：新对话 ｜ 页面ID：-"
-        page_display_id = self._current_bound_page_display_id_text(session=session)
-        return f"当前会话：{title} ｜ 页面ID：{page_display_id}"
+        page_no = self._current_bound_page_no_text(session=session)
+        return f"当前会话：{title} ｜ 页面ID：{page_no}"
 
     def _log_chat_header_bound_page_id(
         self,
         *,
         session=None,
-        page_display_id="-",
+        page_no="-",
         bound_url="",
         reason="",
     ):
@@ -188,7 +228,7 @@ class UiStatusCompactMixin:
         else:
             bound_conversation_id = (remote.get("conversation_id") or "").strip()
 
-        if str(page_display_id or "").strip() in ("", "-"):
+        if str(page_no or "").strip() in ("", "-"):
             from app.utils.gui_logging import LogThrottle
 
             throttle = getattr(self, "_chat_header_log_throttle", None)
@@ -198,7 +238,7 @@ class UiStatusCompactMixin:
             log_key = f"bound_page_id_missing|{bound_client_id}|{bound_page_instance_id}"
             msg = (
                 "[CHAT_HEADER][BOUND_PAGE_ID_MISSING] "
-                f"reason={reason or 'page_display_id_empty'} "
+                f"reason={reason or 'page_no_empty'} "
                 f"conversation_title={conversation_title or '-'} "
                 f"bound_client_id={bound_client_id or '-'} "
                 f"bound_page_instance_id={bound_page_instance_id or '-'} "
@@ -214,7 +254,7 @@ class UiStatusCompactMixin:
         self._append_log(
             "[CHAT_HEADER][BOUND_PAGE_ID] "
             f"conversation_title={conversation_title or '-'} "
-            f"page_display_id={page_display_id} "
+            f"page_no={page_no} "
             f"bound_client_id={bound_client_id or '-'} "
             f"bound_page_instance_id={bound_page_instance_id or '-'} "
             f"bound_conversation_id={bound_conversation_id or '-'} "
@@ -229,10 +269,26 @@ class UiStatusCompactMixin:
             bind_state, SESSION_BIND_LIST_STYLES["unbound"]
         )
         base_label = style.get("label") or "未绑定"
-        page_display_id = self._session_bound_page_display_id_text(session)
-        if page_display_id != "-":
-            return f"页面ID:{page_display_id} ｜ {base_label}"
+        page_no = self._session_bound_page_no_text(session)
+        if page_no != "-":
+            return f"页面ID:{page_no} ｜ {base_label}"
         return base_label
+
+    def _session_list_bind_status_segments(self, session, bind_state):
+        from app.constants import SESSION_BIND_LIST_STYLES
+
+        style = SESSION_BIND_LIST_STYLES.get(
+            bind_state, SESSION_BIND_LIST_STYLES["unbound"]
+        )
+        base_label = style.get("label") or "未绑定"
+        page_no = self._session_bound_page_no_text(session)
+        if page_no != "-":
+            return [
+                {"role": "page_id", "text": f"页面ID:{page_no}"},
+                {"role": "separator", "text": " ｜ "},
+                {"role": "bind", "tag": base_label, "text": base_label},
+            ]
+        return [{"role": "bind", "tag": base_label, "text": base_label}]
 
     def _tm_page_bind_state_text(self, page, *, session=None, status=None):
         if not isinstance(page, dict):
@@ -338,11 +394,11 @@ class UiStatusCompactMixin:
             session=session,
             status=status,
         )
-        page_display_id = "-"
-        if isinstance(page, dict) and hasattr(self, "_tm_page_display_id_text"):
-            page_display_id = self._tm_page_display_id_text(page)
-        if page_display_id == "-" and hasattr(self, "_current_bound_page_display_id_text"):
-            page_display_id = self._current_bound_page_display_id_text(
+        page_no = "-"
+        if isinstance(page, dict) and hasattr(self, "_tm_page_no_text"):
+            page_no = self._tm_page_no_text(page)
+        if page_no == "-" and hasattr(self, "_current_bound_page_no_text"):
+            page_no = self._current_bound_page_no_text(
                 session=session,
                 status=status,
             )
@@ -353,9 +409,9 @@ class UiStatusCompactMixin:
             state_text = "离线"
         elif chip == "error":
             state_text = "不一致"
-        if page_display_id and page_display_id != "-":
-            text = f"绑定：页面ID:{page_display_id} / {state_text}"
-            tip = f"页面 ID：{page_display_id}\n{tip or text}"
+        if page_no and page_no != "-":
+            text = f"绑定：页面ID:{page_no} / {state_text}"
+            tip = f"页面 ID：{page_no}\n{tip or text}"
         else:
             text = f"绑定：{state_text}"
             tip = STATUS_CHIP_SESSION_BIND_TOOLTIP
@@ -439,12 +495,12 @@ class UiStatusCompactMixin:
             if hasattr(self, "_resolve_bound_page_info")
             else (None, "missing", "")
         )
-        bound_id = self._tm_page_display_id_text(bound_info) if isinstance(bound_info, dict) else "-"
+        bound_id = self._tm_page_no_text(bound_info) if isinstance(bound_info, dict) else "-"
 
         selected_page = None
         if hasattr(self, "_get_manual_current_tm_page"):
             selected_page = self._get_manual_current_tm_page(status=status)
-        selected_id = self._tm_page_display_id_text(selected_page) if isinstance(
+        selected_id = self._tm_page_no_text(selected_page) if isinstance(
             selected_page, dict
         ) else "-"
 
@@ -518,7 +574,7 @@ class UiStatusCompactMixin:
         if hasattr(self, "_maybe_log_conversation_id_mismatch"):
             self._maybe_log_conversation_id_mismatch(item)
 
-        page_id = self._tm_page_display_id_text(item)
+        page_id = self._tm_page_no_text(item)
         online_text = "在线" if (
             self._page_is_online_for_ui(item)
             if hasattr(self, "_page_is_online_for_ui")

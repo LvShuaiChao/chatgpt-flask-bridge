@@ -3,29 +3,37 @@ import time
 from dataclasses import dataclass, field
 
 from app.url_utils import parse_conversation_id
-from app.utils.page_status import page_url_from
 
 logger = logging.getLogger(__name__)
 
 BIND_STATE_UNBOUND = "UNBOUND"
-BIND_STATE_WAITING_HOME = "WAITING_HOME"
-BIND_STATE_PREBOUND_HOME = "PREBOUND_HOME"
-BIND_STATE_WAITING_CONVERSATION_CREATED = "WAITING_CONVERSATION_CREATED"
+BIND_STATE_TEMP_HOME_BOUND = "TEMP_HOME_BOUND"
 BIND_STATE_BOUND_CONVERSATION = "BOUND_CONVERSATION"
+
+# legacy 别名（代码中仍可能引用）
+BIND_STATE_BOUND = BIND_STATE_BOUND_CONVERSATION
+BIND_STATE_PREBOUND_HOME = BIND_STATE_TEMP_HOME_BOUND
+BIND_STATE_WAITING_HOME = BIND_STATE_UNBOUND
+BIND_STATE_WAITING_CONVERSATION_CREATED = BIND_STATE_UNBOUND
 BIND_STATE_BOUND_OFFLINE = "BOUND_OFFLINE"
-BIND_STATE_WAITING_BOUND_CONVERSATION = "WAITING_BOUND_CONVERSATION"
+BIND_STATE_WAITING_BOUND_CONVERSATION = BIND_STATE_UNBOUND
 
 VALID_BIND_STATES = frozenset(
     {
         BIND_STATE_UNBOUND,
-        BIND_STATE_WAITING_HOME,
-        BIND_STATE_PREBOUND_HOME,
-        BIND_STATE_WAITING_CONVERSATION_CREATED,
+        BIND_STATE_TEMP_HOME_BOUND,
         BIND_STATE_BOUND_CONVERSATION,
         BIND_STATE_BOUND_OFFLINE,
-        BIND_STATE_WAITING_BOUND_CONVERSATION,
     }
 )
+
+_LEGACY_BIND_STATE_ALIASES = {
+    "BOUND": BIND_STATE_BOUND_CONVERSATION,
+    "PREBOUND_HOME": BIND_STATE_TEMP_HOME_BOUND,
+    "WAITING_HOME": BIND_STATE_UNBOUND,
+    "WAITING_CONVERSATION_CREATED": BIND_STATE_UNBOUND,
+    "WAITING_BOUND_CONVERSATION": BIND_STATE_UNBOUND,
+}
 
 REMOTE_CHATGPT_PERSISTENT_KEYS = (
     "bind_state",
@@ -33,7 +41,9 @@ REMOTE_CHATGPT_PERSISTENT_KEYS = (
     "url",
     "client_id",
     "page_instance_id",
+    "page_no",
     "page_display_id",
+    "temp_page_id",
     "page_type",
     "page_title",
     "last_seen",
@@ -51,7 +61,9 @@ _REMOTE_NORMALIZE_KEYS = (
     "conversation_id",
     "client_id",
     "page_instance_id",
+    "page_no",
     "page_display_id",
+    "temp_page_id",
     "page_type",
     "page_title",
     "last_seen",
@@ -63,16 +75,32 @@ def default_remote_chatgpt():
     """长期绑定字段；临时运行态见 app.utils.bind_runtime.BindSessionRuntime。"""
     return {
         "bind_state": BIND_STATE_UNBOUND,
-        "url": "",
-        "conversation_id": "",
         "client_id": "",
         "page_instance_id": "",
+        "conversation_id": "",
+        "url": "",
         "page_display_id": "",
+        "temp_page_id": "",
+        "page_no": "",
         "page_type": "",
         "page_title": "",
         "last_seen": 0,
-        "last_poll_at": "",
     }
+
+
+def _canonical_bind_state(raw_state: str) -> str:
+    state = (raw_state or "").strip()
+    if state in VALID_BIND_STATES:
+        return state
+    return _LEGACY_BIND_STATE_ALIASES.get(state, state)
+
+
+def is_temp_home_bound_state(bind_state: str) -> bool:
+    """TEMP_HOME_BOUND / PREBOUND_HOME 视为同一种首页临时绑定。"""
+    state = (bind_state or "").strip().upper()
+    if state in ("TEMP_HOME_BOUND", "PREBOUND_HOME"):
+        return True
+    return _canonical_bind_state(bind_state) == BIND_STATE_TEMP_HOME_BOUND
 
 
 def remote_binding_active(remote) -> bool:
@@ -115,39 +143,47 @@ def derive_remote_page_type(url: str = "", conversation_id: str = "") -> str:
 
 
 def _infer_bind_state(remote, base):
-    explicit = (remote.get("bind_state") or "").strip()
-    if explicit in VALID_BIND_STATES:
+    explicit = _canonical_bind_state(remote.get("bind_state") or base.get("bind_state") or "")
+    if explicit in VALID_BIND_STATES and explicit != BIND_STATE_BOUND_OFFLINE:
         return explicit
     conversation_id = (remote.get("conversation_id") or base.get("conversation_id") or "").strip()
     if conversation_id:
         return BIND_STATE_BOUND_CONVERSATION
+    temp_page_id = (
+        (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
+        .strip()
+    )
     page_type = derive_remote_page_type(
         remote.get("url") or base.get("url") or "",
         conversation_id,
     )
-    if page_type == "home":
-        return BIND_STATE_PREBOUND_HOME
+    if page_type == "home" or temp_page_id:
+        return BIND_STATE_TEMP_HOME_BOUND
     return BIND_STATE_UNBOUND
 
 
 def _core_remote_dict(remote: dict) -> dict:
-    last_seen = remote.get("last_seen")
-    try:
-        last_seen_val = float(last_seen if last_seen not in (None, "") else 0)
-    except (TypeError, ValueError):
-        last_seen_val = 0.0
-    return {
-        "bind_state": (remote.get("bind_state") or BIND_STATE_UNBOUND),
-        "url": (remote.get("url") or "").strip(),
-        "conversation_id": (remote.get("conversation_id") or "").strip(),
+    out = {
+        "bind_state": _canonical_bind_state(remote.get("bind_state") or BIND_STATE_UNBOUND),
         "client_id": (remote.get("client_id") or "").strip(),
         "page_instance_id": (remote.get("page_instance_id") or "").strip(),
-        "page_display_id": str(remote.get("page_display_id") or "").strip(),
-        "page_type": (remote.get("page_type") or "").strip(),
-        "page_title": (remote.get("page_title") or "").strip(),
-        "last_seen": last_seen_val,
-        "last_poll_at": str(remote.get("last_poll_at") or "").strip(),
+        "conversation_id": (remote.get("conversation_id") or "").strip(),
+        "url": (remote.get("url") or "").strip(),
     }
+    for key in _REMOTE_NORMALIZE_KEYS:
+        if key in remote and key not in out:
+            out[key] = remote[key]
+    for key in ("page_no", "page_type", "page_title", "last_seen", "last_poll_at"):
+        if key in remote and key not in out:
+            out[key] = remote[key]
+    temp_page_id = (out.get("temp_page_id") or out.get("page_display_id") or out.get("page_no") or "").strip()
+    if temp_page_id:
+        out["temp_page_id"] = temp_page_id
+        if not (out.get("page_display_id") or "").strip():
+            out["page_display_id"] = temp_page_id
+        if not (out.get("page_no") or "").strip():
+            out["page_no"] = temp_page_id
+    return out
 
 
 def normalize_remote_chatgpt(remote):
@@ -189,29 +225,30 @@ def normalize_remote_chatgpt(remote):
     for key in _REMOTE_NORMALIZE_KEYS:
         if key in remote_work:
             base[key] = remote_work[key]
-    for extra_key in ("page_display_id", "page_type", "page_title", "last_seen", "last_poll_at"):
-        if extra_key in remote_work and extra_key not in base:
-            base[extra_key] = remote_work[extra_key]
 
     url = (base.get("url") or "").strip() or (remote_work.get("url") or "").strip()
     if url and not (base.get("url") or "").strip():
         base["url"] = url
 
+    bind_state_before_conv = _canonical_bind_state(
+        remote_work.get("bind_state") or base.get("bind_state") or ""
+    )
     legacy_conversation_id = (base.get("conversation_id") or "").strip() or (
         remote_work.get("conversation_id") or ""
     ).strip()
-    if not legacy_conversation_id:
-        legacy_conversation_id = parse_conversation_id(url)
-    if legacy_conversation_id:
-        base["conversation_id"] = legacy_conversation_id
-        if not (base.get("url") or "").strip():
-            base["url"] = f"https://chatgpt.com/c/{legacy_conversation_id}"
+    if bind_state_before_conv != BIND_STATE_TEMP_HOME_BOUND:
+        if not legacy_conversation_id:
+            legacy_conversation_id = parse_conversation_id(url)
+        if legacy_conversation_id:
+            base["conversation_id"] = legacy_conversation_id
+            if not (base.get("url") or "").strip():
+                base["url"] = f"https://chatgpt.com/c/{legacy_conversation_id}"
 
     base["bind_state"] = _infer_bind_state(remote_work, base)
     conversation_id = (base.get("conversation_id") or "").strip()
     if conversation_id and base["bind_state"] in (
         BIND_STATE_UNBOUND,
-        BIND_STATE_PREBOUND_HOME,
+        BIND_STATE_TEMP_HOME_BOUND,
         BIND_STATE_WAITING_HOME,
         BIND_STATE_WAITING_CONVERSATION_CREATED,
     ):
@@ -251,26 +288,26 @@ def write_session_remote_chatgpt(session, **fields):
                 getattr(session, "session_id", "-"),
                 key,
             )
-    url = page_url_from(remote)
+    bind_state = _canonical_bind_state(remote.get("bind_state") or "")
+    url = (remote.get("url") or "").strip() if isinstance(remote, dict) else ""
     conversation_id = (remote.get("conversation_id") or "").strip()
-    if not conversation_id and url:
-        parsed_conversation_id = parse_conversation_id(url)
-        if parsed_conversation_id:
-            conversation_id = parsed_conversation_id
-            remote["conversation_id"] = conversation_id
-    if conversation_id:
-        canonical = f"https://chatgpt.com/c/{conversation_id}"
-        remote["url"] = canonical
-        if (remote.get("bind_state") or "").strip() in (
-            BIND_STATE_UNBOUND,
-            BIND_STATE_PREBOUND_HOME,
-            BIND_STATE_WAITING_HOME,
-            BIND_STATE_WAITING_CONVERSATION_CREATED,
-            "",
-        ):
-            remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
-    elif (remote.get("bind_state") or "").strip() == BIND_STATE_PREBOUND_HOME:
-        pass
+    if bind_state != BIND_STATE_TEMP_HOME_BOUND:
+        if not conversation_id and url:
+            parsed_conversation_id = parse_conversation_id(url)
+            if parsed_conversation_id:
+                conversation_id = parsed_conversation_id
+                remote["conversation_id"] = conversation_id
+        if conversation_id:
+            canonical = f"https://chatgpt.com/c/{conversation_id}"
+            remote["url"] = canonical
+            if bind_state in (
+                BIND_STATE_UNBOUND,
+                BIND_STATE_TEMP_HOME_BOUND,
+                BIND_STATE_WAITING_HOME,
+                BIND_STATE_WAITING_CONVERSATION_CREATED,
+                "",
+            ):
+                remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
     logger.info(
         "[SESSION_REMOTE][NORMALIZE] session_id=%s bind_state=%s conversation_id=%s url=%s",
         getattr(session, "session_id", "-"),
@@ -313,26 +350,22 @@ class ChatSession:
     pinned_context: str = ""
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
-    pending_reply_since: float = 0
+    reply_waiting_since: float = 0
 
     @property
     def has_pending_reply(self) -> bool:
-        return float(self.pending_reply_since or 0) > 0
+        return float(self.reply_waiting_since or 0) > 0
 
     @property
     def waiting_for_reply(self) -> bool:
         return self.has_pending_reply
 
-    @property
-    def waiting_since_ts(self) -> float:
-        return float(self.pending_reply_since or 0)
+    def mark_reply_waiting_started(self) -> None:
+        import time
+        object.__setattr__(self, 'reply_waiting_since', time.time())
 
-    @property
-    def waiting_elapsed_sec(self) -> int:
-        since = float(self.pending_reply_since or 0)
-        if since <= 0:
-            return 0
-        return max(0, int(time.time() - since))
+    def mark_reply_waiting_finished(self) -> None:
+        object.__setattr__(self, 'reply_waiting_since', 0)
 
     @property
     def conversation_id(self):
@@ -350,19 +383,16 @@ class ChatSession:
             value = normalize_remote_chatgpt(value)
         elif name == "has_pending_reply":
             if value:
-                if float(getattr(self, "pending_reply_since", 0) or 0) <= 0:
-                    object.__setattr__(self, "pending_reply_since", time.time())
+                if float(getattr(self, "reply_waiting_since", 0) or 0) <= 0:
+                    object.__setattr__(self, "reply_waiting_since", time.time())
             else:
-                object.__setattr__(self, "pending_reply_since", 0)
+                object.__setattr__(self, "reply_waiting_since", 0)
             return
-        elif name in ("waiting_for_reply", "waiting_since_ts", "waiting_elapsed_sec"):
-            if name == "waiting_for_reply":
-                if value and float(getattr(self, "pending_reply_since", 0) or 0) <= 0:
-                    object.__setattr__(self, "pending_reply_since", time.time())
-                elif not value:
-                    object.__setattr__(self, "pending_reply_since", 0)
-            elif name == "waiting_since_ts" and value:
-                object.__setattr__(self, "pending_reply_since", float(value or 0))
+        elif name == "waiting_for_reply":
+            if value and float(getattr(self, "reply_waiting_since", 0) or 0) <= 0:
+                object.__setattr__(self, "reply_waiting_since", time.time())
+            elif not value:
+                object.__setattr__(self, "reply_waiting_since", 0)
             return
         super().__setattr__(name, value)
 

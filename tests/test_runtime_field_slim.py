@@ -8,7 +8,7 @@ from app.utils.legacy_cleanup import assert_no_legacy_fields, reject_legacy_fiel
 
 @pytest.fixture
 def server_module():
-    import server as srv
+    import app.server as srv
 
     return srv
 

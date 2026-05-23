@@ -6,11 +6,13 @@ import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from app.constants import SYNC_COMMAND_POLL_MAX_AGE_SECONDS
-from app.utils.page_snapshot import PageRegistry, PageSnapshot, binding_from_session
+from app.utils.page_status import PageRegistry, PageSnapshot, binding_from_session
 from app.utils.page_status import (
     can_sync_conversation,
     evaluate_page_capability,
     is_page_online,
+    is_prebound_home_page,
+    page_url_from,
 )
 from app.utils.time_utils import float_ts
 
@@ -19,6 +21,7 @@ __all__ = [
     "resolve_bound_page_in_registry",
     "command_target_result",
     "evaluate_sync_poll_freshness",
+    "is_page_polling_active",
 ]
 
 _COMMAND_ALIASES = {
@@ -51,8 +54,53 @@ def command_target_result(
     }
 
 
+def _resolve_page_raw(page):
+    """? PageSnapshot ? raw dict ???????"""
+    if isinstance(page, dict):
+        return page
+    if hasattr(page, '_raw') and isinstance(page._raw, dict):
+        return page._raw
+    return {}
+
+
+def is_page_polling_active(
+    page,
+    *,
+    now_ts=None,
+    max_age_sec=15.0,
+):
+    """???????????????
+    
+    ?? online=true ? last_poll_at ?????????????????????
+    ?????? polling / is_polling / poll_state ???
+    
+    ???? raw dict ? PageSnapshot ???
+    """
+    raw = _resolve_page_raw(page)
+    if not isinstance(raw, dict) or not raw.get("online"):
+        return False
+    
+    last_poll_at = raw.get("last_poll_at")
+    if last_poll_at is None:
+        return False
+    
+    try:
+        last_poll_at_value = float(last_poll_at)
+    except (TypeError, ValueError) as exc:
+        print(
+            "[PAGE_POLLING][INVALID_LAST_POLL_AT] "
+            f"value={last_poll_at!r} error_type={type(exc).__name__} error={exc}"
+        )
+        return False
+    
+    if now_ts is None:
+        now_ts = __import__('time').time()
+    
+    return (now_ts - last_poll_at_value) <= max_age_sec
+
+
 def evaluate_sync_poll_freshness(
-    page: PageSnapshot,
+    page,
     *,
     now: float | None = None,
     max_age_seconds: float = SYNC_COMMAND_POLL_MAX_AGE_SECONDS,
@@ -60,7 +108,7 @@ def evaluate_sync_poll_freshness(
     """检查绑定页 poll 是否足够新鲜以领取 sync_conversation。"""
     if now is None:
         now = time.time()
-    raw = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
+    raw = _resolve_page_raw(page)
     last_poll_at = float_ts(
         raw.get("last_poll_at"),
         default=0.0,
@@ -128,13 +176,13 @@ def resolve_bound_page_in_registry(
     binding: Mapping[str, Any] | None,
     *,
     now: float | None = None,
-    allow_same_conversation: bool = True,
+    allow_same_conversation: bool = False,
 ) -> Dict[str, Any]:
     """
-    在 PageRegistry 中解析会话绑定页：精确匹配优先，同 conversation 在线页兜底。
+    在 PageRegistry 中解析会话绑定页：仅精确匹配，不允许同 conversation 兜底。
     返回 page / matched_by / online / last_poll_at / reason_code。
     """
-    from app.models import BIND_STATE_UNBOUND
+    from app.models import BIND_STATE_UNBOUND, is_temp_home_bound_state
 
     if now is None:
         now = time.time()
@@ -151,6 +199,65 @@ def resolve_bound_page_in_registry(
         return empty
 
     reg = registry if isinstance(registry, PageRegistry) else PageRegistry.empty()
+    bind_state = (binding.get("bind_state") or "").strip()
+    if is_temp_home_bound_state(bind_state):
+        temp_page_id = (
+            (binding.get("temp_page_id") or binding.get("page_display_id") or "")
+            .strip()
+        )
+        if not temp_page_id:
+            return {
+                **empty,
+                "reason_code": "temp_home_page_not_found",
+            }
+        page = reg.get_by_page_display_id(temp_page_id)
+        if page is None:
+            return {
+                **empty,
+                "reason_code": "temp_home_page_not_found",
+            }
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        page_url = page_url_from(raw) or (page.url or "")
+        page_type = (raw.get("page_type") or page.page_type or "").strip()
+        is_home = is_prebound_home_page(raw, now=now) or page_type == "home"
+        if not is_home:
+            return {
+                "page": page,
+                "matched_by": "page_display_id",
+                "online": False,
+                "last_poll_at": float_ts(
+                    raw.get("last_poll_at"),
+                    default=0.0,
+                    context="page_command.temp_home.not_home_poll",
+                ),
+                "reason_code": "temp_home_page_not_home",
+                "relink_needed": False,
+            }
+        online = is_page_online(raw, now=now)
+        last_poll_at = float_ts(
+            raw.get("last_poll_at"),
+            default=0.0,
+            context="page_command.temp_home.last_poll_at",
+        )
+        if not online:
+            return {
+                "page": page,
+                "matched_by": "page_display_id",
+                "online": False,
+                "last_poll_at": last_poll_at,
+                "reason_code": "bound_page_offline",
+                "relink_needed": False,
+            }
+        return {
+            "page": page,
+            "matched_by": "page_display_id",
+            "online": True,
+            "last_poll_at": last_poll_at,
+            "reason_code": "",
+            "relink_needed": False,
+            "bootstrap_conversation": True,
+            "target_page_id": temp_page_id,
+        }
     bound_client = (binding.get("client_id") or "").strip()
     bound_instance = (binding.get("page_instance_id") or "").strip()
     bound_conv = (binding.get("conversation_id") or "").strip()
@@ -161,6 +268,20 @@ def resolve_bound_page_in_registry(
 
     if page is not None:
         raw = page._raw if isinstance(page._raw, dict) else {}
+        page_conv = (raw.get("conversation_id") or page.conversation_id or "").strip()
+        if bound_conv and page_conv and page_conv != bound_conv:
+            return {
+                "page": page,
+                "matched_by": "identity_conversation_mismatch",
+                "online": False,
+                "last_poll_at": float_ts(
+                    raw.get("last_poll_at"),
+                    default=0.0,
+                    context="page_command.resolve.mismatch_poll",
+                ),
+                "reason_code": "conversation_id_mismatch",
+                "relink_needed": False,
+            }
         online = is_page_online(raw, now=now)
         last_poll_at = float_ts(
             raw.get("last_poll_at"),
@@ -223,13 +344,14 @@ def resolve_bound_page_in_registry(
     }
 
 
+# Log labels: [SYNC][RESOLVE] / [SEND][RESOLVE] / [COMMAND][CLAIM]
 def resolve_page_command_target(
     session: Any,
     command: str,
     registry: Optional[PageRegistry] = None,
     *,
     now: float | None = None,
-    allow_same_conversation: bool = True,
+    allow_same_conversation: bool = False,
 ) -> Dict[str, Any]:
     """
     统一解析 sync/send/upload/copy 目标页。
@@ -284,6 +406,15 @@ def resolve_page_command_target(
                 page=page,
                 matched_by=matched_by,
             )
+        poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
+        if not poll_ok:
+            return command_target_result(
+                ok=False,
+                reason=poll_reason,
+                reason_code=poll_code,
+                page=page,
+                matched_by=matched_by,
+            )
         if not can_sync_conversation(page._raw, now=now):
             return command_target_result(
                 ok=False,
@@ -294,7 +425,7 @@ def resolve_page_command_target(
             )
         poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
         if not poll_ok:
-            if matched_by == "same_conversation":
+            if allow_same_conversation and cmd != "sync_conversation" and matched_by == "same_conversation":
                 fresh = _pick_fresh_conversation_page(
                     reg,
                     binding.get("conversation_id") or "",
@@ -327,11 +458,17 @@ def resolve_page_command_target(
     elif cmd == "copy_last_message":
         action = "copy_last"
 
+    bind_state = (binding.get("bind_state") or "").strip()
+    from app.models import is_temp_home_bound_state
+
+    expected_conversation_id = binding.get("conversation_id") or ""
+    if is_temp_home_bound_state(bind_state):
+        expected_conversation_id = ""
     cap = evaluate_page_capability(
         page._raw,
         action=action,
         bound=True,
-        expected_conversation_id=binding.get("conversation_id") or "",
+        expected_conversation_id=expected_conversation_id,
         expected_client_id=binding.get("client_id") or "",
         expected_page_instance_id=binding.get("page_instance_id") or "",
         now=now,

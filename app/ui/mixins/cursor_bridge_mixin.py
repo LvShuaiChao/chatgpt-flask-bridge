@@ -743,7 +743,7 @@ class CursorBridgeMixin:
         )
 
     def _bind_send_last_to_cursor_button(self):
-        """绑定聊天面板「发送最后给 Cursor」按钮（由 UiBuilderMixin 在创建按钮后调用）。"""
+        """绑定设置页「发送最后给 Cursor」按钮（由设置页构建后调用）。"""
         button = getattr(self, "send_last_to_cursor_btn", None)
         if button is None:
             return

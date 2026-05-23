@@ -19,6 +19,7 @@ class TmPageSelectorFormatMixin:
 
 
     TM_PAGE_ITEM_DICT_ROLE = Qt.UserRole + 1
+    TM_PAGE_DISPLAY_ROLE = Qt.UserRole + 2
 
 
 
@@ -36,7 +37,7 @@ class TmPageSelectorFormatMixin:
 
         if not conversation_id and hasattr(self, "_page_chatgpt_conversation_id"):
 
-            conversation_id = (self._page_chatgpt_conversation_id(page) or "").strip()
+            conversation_id = ((page.get("conversation_id") or "").strip() or "").strip()
 
         return conversation_id
 
@@ -67,6 +68,28 @@ class TmPageSelectorFormatMixin:
 
 
     def _tm_page_option_bind_tag(self, page, **bound_kwargs):
+
+        bound_page_instance_id = (bound_kwargs.get("bound_page_instance_id") or "").strip()
+        bound_conversation_id = (bound_kwargs.get("bound_conversation_id") or "").strip()
+        bound_client_id = (bound_kwargs.get("bound_client_id") or "").strip()
+        client_id = str(page.get("client_id") or "").strip()
+        item_instance = (page.get("page_instance_id") or "").strip()
+        item_conv = (
+            self._client_conversation_id(page)
+            if hasattr(self, "_client_conversation_id")
+            else (page.get("conversation_id") or "").strip()
+        )
+        if (
+            bound_client_id
+            and client_id
+            and bound_client_id == client_id
+            and bound_page_instance_id
+            and item_instance
+            and bound_page_instance_id == item_instance
+        ):
+            return "\u5df2\u7ed1\u5b9a"
+        if bound_conversation_id and item_conv and item_conv == bound_conversation_id:
+            return "\u540c\u4f1a\u8bdd"
 
         if hasattr(self, "_tm_page_bind_state_text") and hasattr(self, "_bridge_ui"):
 
@@ -176,7 +199,7 @@ class TmPageSelectorFormatMixin:
 
 
 
-        page_display_id = self._tm_page_display_id_text(page)
+        page_no = self._tm_page_no_text(page)
 
         url = self._tm_page_option_resolve_url(page) or "无URL"
 
@@ -198,9 +221,23 @@ class TmPageSelectorFormatMixin:
 
         liveness_tag = self._tm_page_option_liveness_tag(page)
 
-        return f"[{liveness_tag}][{bind_tag}] 页面ID:{page_display_id} | {url}"
+        return f"[{liveness_tag}][{bind_tag}] 页面ID:{page_no} | {url}"
 
+    def _tm_page_option_display_segments(self, page, **bound_kwargs):
+        if not isinstance(page, dict):
+            return [{"role": "plain", "text": "无效页面"}]
 
+        liveness_tag = self._tm_page_option_liveness_tag(page)
+        bind_tag = self._tm_page_option_bind_tag(page, **bound_kwargs)
+        page_no = self._tm_page_no_text(page)
+        url = self._tm_page_option_resolve_url(page) or "无URL"
+        return [
+            {"role": "liveness", "tag": liveness_tag, "text": f"[{liveness_tag}]"},
+            {"role": "bind", "tag": bind_tag, "text": f"[{bind_tag}]"},
+            {"role": "page_id", "text": f" 页面ID:{page_no}"},
+            {"role": "separator", "text": " | "},
+            {"role": "url", "text": url, "elide": True},
+        ]
 
     def _format_tm_page_option_tooltip(self, page):
 
@@ -208,7 +245,7 @@ class TmPageSelectorFormatMixin:
 
             return "无效页面"
 
-        page_display_id = self._tm_page_display_id_text(page)
+        page_no = self._tm_page_no_text(page)
 
         bind_text = self._tm_page_option_bind_tag(page)
 
@@ -218,7 +255,7 @@ class TmPageSelectorFormatMixin:
 
         lines = [
 
-            f"页面ID: {page_display_id}",
+            f"页面ID: {page_no}",
 
             f"状态: {liveness_tag}",
 
@@ -532,6 +569,11 @@ class TmPageSelectorFormatMixin:
         )
 
         bound_instance = (remote.get("page_instance_id") or "").strip()
+        bind_state = self._remote_bind_state(remote) if hasattr(self, "_remote_bind_state") else ""
+        temp_page_id = (
+            (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
+            .strip()
+        )
 
         bound_conv = (
 
@@ -617,7 +659,35 @@ class TmPageSelectorFormatMixin:
 
             return combo_index_for_list_index(list_index)
 
+        def is_plain_chatgpt_home_url(url):
+            text = str(url or "").strip()
+            if not text:
+                return False
+            normalized = (
+                self._normalize_chatgpt_page_url(text)
+                if hasattr(self, "_normalize_chatgpt_page_url")
+                else text.rstrip("/")
+            )
+            return normalized in (
+                "https://chatgpt.com",
+                "https://chatgpt.com/",
+                "https://chat.openai.com",
+                "https://chat.openai.com/",
+            )
 
+
+
+        if bound_instance and bound_client:
+            list_idx = page_index_in_list(
+                lambda p: (
+                    (p.get("client_id") or "").strip() == bound_client
+                    and (p.get("page_instance_id") or "").strip() == bound_instance
+                ),
+                online_only=True,
+            )
+            combo_idx = try_restore(list_idx)
+            if combo_idx >= 0:
+                return combo_idx
 
         bound_url = ""
 
@@ -651,15 +721,16 @@ class TmPageSelectorFormatMixin:
 
             )
 
-        if bound_url:
-
-            combo_idx = self._tm_page_combo_find_index_by_normalized_url(bound_url)
-
+        if temp_page_id and bind_state == "TEMP_HOME_BOUND":
+            list_idx = page_index_in_list(
+                lambda p, pid=temp_page_id: (
+                    str(p.get("page_display_id") or p.get("page_no") or "").strip() == pid
+                ),
+                online_only=False,
+            )
+            combo_idx = try_restore(list_idx)
             if combo_idx >= 0:
-
                 return combo_idx
-
-
 
         if bound_conv:
 
@@ -672,24 +743,6 @@ class TmPageSelectorFormatMixin:
                     and (p.get("page_type") or "").strip() == "conversation"
 
                 ),
-
-                online_only=True,
-
-            )
-
-            combo_idx = try_restore(list_idx)
-
-            if combo_idx >= 0:
-
-                return combo_idx
-
-
-
-        if bound_instance:
-
-            list_idx = page_index_in_list(
-
-                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance,
 
                 online_only=True,
 
@@ -725,6 +778,16 @@ class TmPageSelectorFormatMixin:
 
 
 
+        if bound_url and not is_plain_chatgpt_home_url(bound_url):
+
+            combo_idx = self._tm_page_combo_find_index_by_normalized_url(bound_url)
+
+            if combo_idx >= 0:
+
+                return combo_idx
+
+
+
         if manual_instance:
 
             list_idx = page_index_in_list(
@@ -747,7 +810,10 @@ class TmPageSelectorFormatMixin:
 
             list_idx = page_index_in_list(
 
-                lambda p: page_conv_id(p) == manual_conv,
+                lambda p: (
+                    page_conv_id(p) == manual_conv
+                    and (p.get("page_type") or "").strip() == "conversation"
+                ),
 
                 online_only=True,
 
@@ -779,51 +845,14 @@ class TmPageSelectorFormatMixin:
 
 
 
-        if bound_instance:
-
-            list_idx = page_index_in_list(
-
-                lambda p: (p.get("page_instance_id") or "").strip() == bound_instance,
-
-            )
-
-            combo_idx = try_restore(list_idx)
-
-            if combo_idx >= 0:
-
-                return combo_idx
-
-
-
-        if bound_conv:
-
-            list_idx = page_index_in_list(
-
-                lambda p: page_conv_id(p) == bound_conv,
-
-            )
-
-            combo_idx = try_restore(list_idx)
-
-            if combo_idx >= 0:
-
-                return combo_idx
-
-
-
-        for candidate_client in (manual_client, bound_client):
-
-            if not candidate_client:
-
-                continue
-
-            combo_idx = self._tm_page_combo_find_index_by_client_id(candidate_client)
-
-            if combo_idx >= 0:
-
-                return combo_idx
-
-
+        list_idx = page_index_in_list(
+            lambda p: str(p.get("focus") or p.get("has_focus") or "").lower()
+            in ("1", "true", "yes"),
+            online_only=True,
+        )
+        combo_idx = try_restore(list_idx)
+        if combo_idx >= 0:
+            return combo_idx
 
         return -1
 

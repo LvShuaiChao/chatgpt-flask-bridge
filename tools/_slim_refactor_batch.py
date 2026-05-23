@@ -152,7 +152,7 @@ REPLACEMENTS = [
     ("from app.server.page_registry import", "from app.server.tm_page_registry import"),
     ("from app.server import page_registry", "from app.server import tm_page_registry"),
     ("app.server.page_registry", "app.server.tm_page_registry"),
-    ("from app.utils.page_registry import", "from app.utils.page_snapshot import"),
+    ("from app.utils.page_registry import", "from app.utils.page_status import"),
     ("app.utils.page_registry", "app.utils.page_snapshot"),
 ]
 

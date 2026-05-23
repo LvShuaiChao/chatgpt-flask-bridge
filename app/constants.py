@@ -89,7 +89,7 @@ SESSION_BIND_LIST_STYLES = {
         "border": "#bfdbfe",
         "left": "#3b82f6",
         "text": "#1e3a8a",
-        "label": "预绑定首页",
+        "label": "等待创建对话",
         "selected_border": "#2563eb",
     },
     "waiting_home": {

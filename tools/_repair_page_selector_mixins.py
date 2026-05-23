@@ -90,7 +90,7 @@ def build_ui_page_selector_refresh() -> str:
     return '''
     def _pages_for_page_combo(self, status=None):
         """优先使用 PageRegistry.snapshot.pages，否则从 bridge status 提取。"""
-        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import PageRegistry
 
         reg = getattr(self, "page_registry", None)
         if isinstance(reg, PageRegistry) and reg.pages:
@@ -295,7 +295,7 @@ def main():
     header = '''"""油猴页面下拉框 UI 构建、列表刷新与空状态展示。"""
 import traceback
 
-import server
+import app.server
 from app.ui.mixins.tm_page_selector_format_mixin import TmPageSelectorFormatMixin
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
 from app.ui.widgets.rich_text_combo_delegate import RichTextComboDelegate

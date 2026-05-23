@@ -4,7 +4,7 @@ import time
 import unittest
 
 from app.models import BIND_STATE_BOUND_CONVERSATION
-from app.utils.page_snapshot import (
+from app.utils.page_status import (
     PageRegistry,
     PageSnapshot,
     binding_from_session,

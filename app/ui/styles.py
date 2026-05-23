@@ -224,6 +224,50 @@ APP_STYLESHEET = """
                 color: #ffffff;
                 border: 1px solid #16a34a;
             }
+            /* 页面行：刷新列表（查询/刷新，蓝色） */
+            QPushButton#refreshPageListButton {
+                background: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1d4ed8;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-weight: 600;
+            }
+            QPushButton#refreshPageListButton:hover {
+                background: #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#refreshPageListButton:pressed {
+                background: #1e40af;
+                color: #ffffff;
+            }
+            QPushButton#refreshPageListButton:disabled {
+                background: #3b82f6;
+                color: #ffffff;
+                border: 1px solid #2563eb;
+            }
+            /* 页面行：绑定所选页面（确认关联，绿色） */
+            QPushButton#bindSelectedPageButton {
+                background: #16a34a;
+                color: #ffffff;
+                border: 1px solid #15803d;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-weight: 600;
+            }
+            QPushButton#bindSelectedPageButton:hover {
+                background: #15803d;
+                color: #ffffff;
+            }
+            QPushButton#bindSelectedPageButton:pressed {
+                background: #166534;
+                color: #ffffff;
+            }
+            QPushButton#bindSelectedPageButton:disabled {
+                background: #22c55e;
+                color: #ffffff;
+                border: 1px solid #16a34a;
+            }
             QLabel#StatusChip {
                 background: #eef0f3;
                 border: 1px solid #e2e5ea;
@@ -454,9 +498,8 @@ APP_STYLESHEET = """
             QLabel#CurrentSessionUrlLabel {
                 font-size: 12px;
                 color: #475569;
-                background: #f8fafc;
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
+                background: transparent;
+                border: none;
                 padding: 4px 8px;
                 min-height: 28px;
             }
@@ -623,3 +666,20 @@ APP_STYLESHEET = """
                 outline: none;
             }
             """
+
+REFRESH_PAGE_LIST_BUTTON_OBJECT_NAME = "refreshPageListButton"
+BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME = "bindSelectedPageButton"
+
+
+def apply_refresh_button_style(button) -> None:
+    """页面行「刷新页面列表」：蓝色刷新/查询按钮（依赖全局 APP_STYLESHEET）。"""
+    if button is None:
+        return
+    button.setObjectName(REFRESH_PAGE_LIST_BUTTON_OBJECT_NAME)
+
+
+def apply_bind_button_style(button) -> None:
+    """页面行「绑定所选页面」：绿色确认绑定按钮（依赖全局 APP_STYLESHEET）。"""
+    if button is None:
+        return
+    button.setObjectName(BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME)

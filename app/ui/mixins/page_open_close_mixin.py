@@ -39,7 +39,7 @@ from app.models import (
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import conversation_syncable_from
 from app.utils.page_status import is_page_url_syncable
-from app.utils.page_snapshot import bridge_status_online
+from app.utils.page_status import bridge_status_online
 from app.utils.page_status import page_url_from, read_snapshot_identity
 from PyQt5.QtCore import QTimer, QUrl, Qt
 from PyQt5.QtGui import QColor, QDesktopServices
@@ -254,7 +254,7 @@ class PageOpenCloseMixin:
                 url = self._live_openable_chatgpt_url()
                 if url:
                     cid = (
-                        self._bridge_ui.last_bridge_status.get("tampermonkey_client_id") or ""
+                        read_snapshot_identity(self._bridge_ui.last_bridge_status, "active")["client_id"] or ""
                     ).strip()
                     if cid:
                         self._remember_session_page_from_client(session, cid)
@@ -529,7 +529,7 @@ class PageOpenCloseMixin:
             )
             return
         if not self._page_is_online(keep_info):
-            current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+            current_client_id = (read_snapshot_identity(status, "active")["client_id"] or "").strip()
             self._set_tm_action_hint(
                 "当前绑定页面已离线，为避免误关所有在线页面，已取消。请先点击「绑定所选页面」。"
             )
@@ -538,7 +538,7 @@ class PageOpenCloseMixin:
                 f" keep_client_id={except_id} current_client_id={current_client_id or '-'}"
             )
             return
-        current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+        current_client_id = (read_snapshot_identity(status, "active")["client_id"] or "").strip()
         if current_client_id and current_client_id != except_id:
             self._set_tm_action_hint(
                 "当前可见页面不是本对话绑定页，请先绑定所选页面后再关闭其他页面。"

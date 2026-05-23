@@ -5,7 +5,7 @@ import traceback
 
 from app.utils.bridge_json_file_log import append_bridge_json_log
 from app.utils.json_log import dumps_full_json_for_log
-from log_utils import append_log
+from app.utils.log_utils import append_log
 
 
 def format_gui_send_payload_full_log(
@@ -31,6 +31,8 @@ def format_gui_send_payload_full_log(
         f"page_instance_id={payload.get('page_instance_id') or '-'}",
         f"conversation_id={payload.get('conversation_id') or '-'}",
         f"url={payload.get('url') or '-'}",
+        f"bootstrap_conversation={'true' if payload.get('bootstrap_conversation') else 'false'}",
+        f"target_page_id={payload.get('target_page_id') or '-'}",
         f"json={dumps_full_json_for_log(payload)}",
     ]
     return "\n".join(lines)

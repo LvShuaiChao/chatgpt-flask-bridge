@@ -64,7 +64,7 @@ def _file_public_meta(entry: dict, base_url: str | None = None) -> dict:
         "source": "flask_local_direct",
         "mime_type": entry.get("mime_type") or "application/octet-stream",
         "download_url": f"{base}/api/upload_files/{file_id}/content",
-        "status": entry.get("status") or "pending",
+        "status": entry.get("upload_status") or "pending",
     }
 
 
@@ -91,7 +91,7 @@ def register_upload_file(
         "session_id": (session_id or "").strip(),
         "client_id": (client_id or "").strip(),
         "page_instance_id": (page_instance_id or "").strip(),
-        "status": "pending",
+        "upload_status": "pending",
         "created_at": now,
         "updated_at": now,
     }
@@ -132,7 +132,7 @@ def list_upload_files_for_client(
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        if (entry.get("status") or "") == "uploaded":
+        if (entry.get("upload_status") or "") == "uploaded":
             continue
         result.append(_file_public_meta(entry, base_url))
     return result
@@ -145,7 +145,7 @@ def mark_upload_files_uploaded(file_ids: list[str]) -> None:
             entry = st._upload_files_by_id.get((fid or "").strip())
             if not isinstance(entry, dict):
                 continue
-            entry["status"] = "uploaded"
+            entry["upload_status"] = "uploaded"
             entry["updated_at"] = now
 
 

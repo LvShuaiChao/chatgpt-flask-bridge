@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-    GUI["PyQt5 GUI\n(gui.py)"] -->|push_message / 状态轮询| Server["Flask 桥接\n(server.py)"]
+    GUI["PyQt5 GUI\n(gui.py)"] -->|push_message / 状态轮询| Server["Flask 桥接\n(app/server/)"]
     TM["Tampermonkey\n(client.user.js)"] -->|poll / ack / report| Server
     TM -->|自动输入并发送| Web["ChatGPT 网页"]
     Server -->|入站事件| GUI
@@ -18,7 +18,7 @@ flowchart LR
 | 组件 | 文件 | 作用 |
 |------|------|------|
 | 桌面客户端 | `gui.py` / `app/ui/` | 对话列表、消息编辑、页面绑定、设置、日志 |
-| 桥接服务 | `server.py` | 消息队列、油猴在线状态、页面匹配与下发 |
+| 桥接服务 | `app/server/` | 消息队列、油猴在线状态、页面匹配与下发 |
 | 浏览器油猴脚本 | `client.user.js` | 浏览器端：轮询服务端、在 ChatGPT 页面发送并抓取回复 |
 | 运行时数据 | `runtime/` | 本地会话 JSON、持久化配置 |
 
@@ -80,12 +80,12 @@ pip install -r requirements.txt
 
 ## 外部 API 客户端
 
-其他 Python 程序可通过 `bridge_client.py` 调用本地桥接服务（需 **GUI 已启动且服务已开启**）。
+其他 Python 程序可通过 `app/client/bridge_client.py` 调用本地桥接服务（需 **GUI 已启动且服务已开启**）。
 
 ### 库用法
 
 ```python
-from bridge_client import BridgeClient, BridgeApiError
+from app.client import BridgeClient, BridgeApiError
 
 client = BridgeClient(base_url="http://127.0.0.1:5000")
 # 若设置了环境变量 CHATGPT_PAGE_BRIDGE_TOKEN，会自动带鉴权头
@@ -107,17 +107,15 @@ print(reply)
 
 ### 命令行
 
-可直接运行 `bridge_client.py`（Windows 下双击会进入交互模式，退出前会等待按键，避免窗口闪退）：
-
 ```bash
-# 交互对话（双击 bridge_client.py 等同此模式）
-python bridge_client.py
+# 交互对话
+python -m app.client.bridge_client
 
 # 单次提问
-python bridge_client.py "你好"
+python -m app.client.bridge_client "你好"
 
 # 查看服务状态
-python bridge_client.py --status
+python -m app.client.bridge_client --status
 ```
 
 环境变量（可选）：
@@ -125,7 +123,7 @@ python bridge_client.py --status
 - `CHATGPT_PAGE_BRIDGE_URL` — 服务地址，默认 `http://127.0.0.1:5000`
 - `CHATGPT_PAGE_BRIDGE_TOKEN` — 与 GUI 服务端一致的 API token
 
-库调用示例见 `bridge_client.py` 模块文档字符串。
+库调用示例见 `app/client/bridge_client.py` 模块文档字符串。
 
 ## 页面绑定规则（重要）
 
@@ -147,17 +145,16 @@ python bridge_client.py --status
 ```
 油猴脚本与Python联动/
 ├── gui.py                 # 主 GUI 入口（含桥接服务）
-├── bridge_client.py       # 外部 API Python 客户端库（含 CLI）
-├── server.py              # Flask 桥接服务（也可单独 python server.py 调试）
 ├── client.user.js         # Tampermonkey 用户脚本（唯一维护版本）
-├── log_utils.py           # 统一日志
 ├── requirements.txt
 ├── runtime/               # 运行时数据（会话、可 gitignore）
 │   └── chat_sessions.json
 ├── app/
 │   ├── models.py          # 会话 / 绑定状态模型
 │   ├── constants.py       # 常量与默认设置
-│   ├── utils/page_status.py  # 页面在线/同步/发送统一判定
+│   ├── server/            # Flask 桥接服务
+│   ├── client/            # 外部 API Python 客户端（含 CLI）
+│   ├── utils/             # 工具（含 log_utils、page_status 等）
 │   └── ui/                # PyQt 界面与 mixin
 │       ├── main_window.py
 │       └── mixins/        # 桥接、绑定、会话、设置等
@@ -171,7 +168,7 @@ python bridge_client.py --status
 - **会话保存路径**：默认 `runtime/chat_sessions.json`
 - **油猴连接地址**：油猴菜单「浏览器桥接 · 设置」，需与 GUI 端口一致（默认 `http://127.0.0.1:5000/api/bridge`）
 - **API Token**：环境变量 `CHATGPT_PAGE_BRIDGE_TOKEN`；启用后油猴设置中需填写相同 Token
-- **调试日志**：项目根目录 `log.txt`，GUI 内也可查看
+- **调试日志**：项目根目录 `log.txt`（当前写入）；轮转备份在 `runtime/logs/`，GUI 内也可查看
 
 桥接行为（页面绑定、同步策略等）已内置为固定默认值，见 `app/constants.py` 中的 `DEFAULT_APP_SETTINGS` 与 `FIXED_BRIDGE_BEHAVIOR_SETTINGS`。
 
@@ -182,27 +179,24 @@ python bridge_client.py --status
 - **bootstrap 消息**：仅能被 `page_type=home` 且无 `conversation_id` 的页面领取  
 - **普通聊天消息**：仅能被匹配的 `conversation` 页面领取  
 
-详细逻辑见 `server.py` 的 `_message_matches_page()` 与 `client.user.js` 中的发送前校验。
+详细逻辑见 `app/server/message_queue.py` 的 `_message_matches_page()` 与 `client.user.js` 中的发送前校验。
 
 ## Bridge 页面字段规范（统一命名）
 
-油猴 `client.user.js`、Flask `server.py`、GUI `app/utils/page_status.py` 共用一套能力判定，避免「在线但不能同步/发送」类误判。
+油猴 `client.user.js`、Flask `app/server/`、GUI `app/utils/page_status.py` 共用一套能力判定，避免「在线但不能同步/发送」类误判。
 
 | 字段 | 含义 | 判定要点 |
 |------|------|----------|
 | `client_id` | 油猴客户端 ID | `sessionStorage` 持久化，勿与消息 `id` 混淆 |
 | `page_instance_id` | 页面实例 ID | 与 `getToolboxPageInstanceId()` 一致，每标签页稳定 |
-| `page_key` | `client_id::page_instance_id` | 后端注册与绑定匹配 |
 | `conversation_id` | ChatGPT 对话 ID | 从 `/c/xxx` URL 解析 |
 | `url` | 当前完整页面地址 | **唯一字段**；入站若带 `page_url` / `target_url` 等旧名会被拒绝 |
 | `message_id` | Bridge 消息 ID | **唯一字段**；入站 `id` 等旧名会被拒绝 |
 | `content` | 待发送文本 | **唯一字段**；入站 `text` / `message` / `prompt` 等旧名会被拒绝 |
 | `assistant_text` | 助手回复 | 不再与 `content` 混写 |
 | `online` | 页面在线 | **仅**看最近心跳 `last_seen` |
-| `syncable` | URL 级可同步 | `online` + `url` 非空 |
 | `conversation_syncable` | 对话可同步 | `online` + `conversation_id` + `/c/` 对话页 |
-| `sendable` | 可发送 | `online` + 输入框可用 + 发送按钮可用（生成中会排队） |
-| `can_accept_input` / `can_send_now` | 油猴上报的输入/发送能力 | 供 GUI 展示，**不**作为同步硬条件 |
+| `can_accept_input` / `can_send_now` / `send_decision` | 油猴上报的输入/发送/判定能力 | 供 GUI 展示，**不**作为同步硬条件；`syncable`/`sendable`/`inputable` 仅限 UI 展示局部变量 |
 | `visibility_state` / `has_focus` | 可见性/焦点 | 仅日志与展示，不拦截同步 |
 | `active_tab` | 工具箱当前 tab | 页面级 `pageState`，新页默认 `upload` |
 | `upload_active_group_id` | 上传分组 | 页面级持久化 |
@@ -228,11 +222,7 @@ python bridge_client.py --status
 
 ## 开发说明
 
-单独启动桥接服务（无 GUI）：
-
-```bash
-python server.py
-```
+桥接服务由 `gui.py` 启动时内嵌运行；调试可直接 `from app.server import create_app, start_server`。
 
 导出项目源码合并包（便于发给 ChatGPT 分析）：
 
@@ -242,7 +232,7 @@ python export_for_chatgpt.py
 
 ### 生产发布包
 
-主 GUI 运行链路只依赖 `gui.py` / `app/`、`server.py`、`bridge_client.py`、`client.user.js` 和运行时配置。制作精简发布包时可排除 `tests/`、`tools/`、`export_for_chatgpt.py` 等开发辅助内容。
+主 GUI 运行链路只依赖 `gui.py`、`app/`、`client.user.js` 和运行时配置。制作精简发布包时可排除 `tests/`、`tools/`、`export_for_chatgpt.py` 等开发辅助内容。
 
 ## 免责声明
 

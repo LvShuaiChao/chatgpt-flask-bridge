@@ -23,8 +23,8 @@ class ChatSessionMixin:
 
         changed = False
 
-        if float(getattr(session, "pending_reply_since", 0) or 0) > 0:
-            session.pending_reply_since = 0
+        if float(getattr(session, "reply_waiting_since", 0) or 0) > 0:
+            session.reply_waiting_since = 0
             changed = True
 
         messages = getattr(session, "messages", None)
@@ -52,9 +52,9 @@ class ChatSessionMixin:
             return msg_dict
         item = dict(msg_dict)
         role = (item.get("role") or "").strip()
-        ui_status = (item.get("ui_status") or "").strip()
+        ui_status = (item.get("status") or "").strip()
         if role == "user" and ui_status in PENDING_USER_SEND_STATUSES:
-            item["ui_status"] = ""
+            item["status"] = ""
         if mark_waiting_placeholder_failed(
             item, content=PERSIST_PENDING_RESET_MESSAGE
         ):
@@ -80,13 +80,13 @@ class ChatSessionMixin:
                     "role": getattr(item, "role", ""),
                     "content": getattr(item, "content", ""),
                     "created_at": getattr(item, "created_at", 0),
-                    "ui_status": getattr(item, "ui_status", "") or "",
+                    "status": getattr(item, "status", "") or "",
                     "detail": getattr(item, "detail", "") or "",
-                    "message_source": getattr(item, "message_source", "") or "",
-                    "bridge_message_id": getattr(item, "bridge_message_id", ""),
+                    "source": getattr(item, "source", "") or "",
+                    "message_id": getattr(item, "message_id", ""),
                     "parent_message_id": getattr(item, "parent_message_id", ""),
-                    "visible_in_chat": bool(
-                        getattr(item, "visible_in_chat", True)
+                    "visible": bool(
+                        getattr(item, "visible", True)
                     ),
                 }
             messages_out.append(
@@ -102,7 +102,7 @@ class ChatSessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
-            "pending_reply_since": 0,
+            "reply_waiting_since": 0,
             "messages": messages_out,
         }
 
@@ -118,7 +118,7 @@ class ChatSessionMixin:
         return sum(
             1
             for message in session.messages
-            if getattr(message, "visible_in_chat", True)
+            if getattr(message, "visible", True)
         )
 
     def _update_message_status_by_request_id(
@@ -221,19 +221,25 @@ class ChatSessionMixin:
             content,
             message_id=(message.get("message_id") or "").strip() or str(uuid.uuid4()),
             turn_id=(message.get("turn_id") or "").strip(),
-            ui_status=(message.get("ui_status") or "").strip(),
+            ui_status=(
+                (message.get("ui_status") or message.get("status") or "")
+                .strip()
+            ),
             created_at=message.get("created_at"),
             bridge_message_id=(
-                (message.get("bridge_message_id") or message.get("request_id") or "")
+                (message.get("message_id") or message.get("request_id") or "")
                 .strip()
             ),
             parent_message_id=(message.get("parent_message_id") or "").strip(),
-            message_source=(message.get("message_source") or "").strip(),
-            visible_in_chat=bool(message.get("visible_in_chat", True)),
+            message_source=(
+                (message.get("message_source") or message.get("source") or "")
+                .strip()
+            ),
+            visible_in_chat=bool(message.get("visible", True)),
         )
         count_after = self._session_visible_message_count(session)
 
-        source = (message.get("message_source") or "-").strip()
+        source = (message.get("source") or "-").strip()
         self._append_log(
             "[CHAT_MESSAGE][APPEND] "
             f"session_id={session_id} "

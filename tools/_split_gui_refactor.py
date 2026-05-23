@@ -374,8 +374,8 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
 
-import server
-from log_utils import append_log, clear_log_file, get_log_file_path
+import app.server
+from app.utils.log_utils import append_log, clear_log_file, get_log_file_path
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
@@ -484,7 +484,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
-from log_utils import clear_log_file
+from app.utils.log_utils import clear_log_file
 
 
 def main():

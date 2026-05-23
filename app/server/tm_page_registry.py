@@ -6,11 +6,12 @@ import traceback
 from urllib.parse import urlparse
 
 from app.utils.page_status import (
-    build_page_key,
+    page_registry_key as _psk,
     evaluate_page_capability,
     explain_page_decision,
     get_page_liveness,
     is_page_online,
+    is_page_url_syncable,
     page_url_from,
 )
 from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activity_metrics
@@ -45,37 +46,37 @@ def _page_registry_key(client_id, page_instance_id):
     page_instance_id = (page_instance_id or "").strip()
     if not client_id:
         return ""
-    if page_instance_id:
-        return f"{client_id}|{page_instance_id}"
-    return client_id
+    if not page_instance_id:
+        return ""
+    return f"{client_id}|{page_instance_id}"
 
 
 def _tm_page_display_key(client_id, page_instance_id):
-    key = build_page_key(client_id, page_instance_id)
+    key = _psk({'client_id': client_id, 'page_instance_id': page_instance_id})
     if key:
         return key
     return _page_registry_key(client_id, page_instance_id)
 
 
-def _allocate_tm_page_display_id(client_id, page_instance_id):
+def _allocate_tm_page_no(client_id, page_instance_id):
     key = _tm_page_display_key(client_id, page_instance_id)
     if not key:
         return 0
     now = _now()
     with st._state_lock:
-        display_ids = st._tm_page_display_id_by_key
+        display_ids = st._tm_page_no_by_key
         if key in display_ids:
             display_ids[key] = int(display_ids[key])
-            st._tm_page_display_id_updated_at[key] = now
+            st._tm_page_no_updated_at[key] = now
             return display_ids[key]
         next_id = 1
         if display_ids:
             next_id = max(int(v) for v in display_ids.values()) + 1
         display_ids[key] = next_id
-        st._tm_page_display_id_updated_at[key] = now
+        st._tm_page_no_updated_at[key] = now
     _log(
         "[TM_PAGE_DISPLAY_ID][ASSIGN] "
-        f"page_display_id={next_id} "
+        f"page_no={next_id} "
         f"client_id={client_id or '-'} "
         f"page_instance_id={page_instance_id or '-'} "
         f"key={key}"
@@ -83,8 +84,8 @@ def _allocate_tm_page_display_id(client_id, page_instance_id):
     return next_id
 
 
-def _ensure_tm_page_display_id(client_id, page_instance_id):
-    return _allocate_tm_page_display_id(client_id, page_instance_id)
+def _ensure_tm_page_no(client_id, page_instance_id):
+    return _allocate_tm_page_no(client_id, page_instance_id)
 
 
 def _bridge_runtime_patch_for_body(body):
@@ -92,14 +93,14 @@ def _bridge_runtime_patch_for_body(body):
         return {}
     client_id = (body.get("client_id") or "").strip()
     page_instance_id = (body.get("page_instance_id") or "").strip()
-    page_display_id = _ensure_tm_page_display_id(client_id, page_instance_id)
+    page_no = _ensure_tm_page_no(client_id, page_instance_id)
     patch = {
         "page_registered": bool(client_id),
         "client_id": client_id,
         "page_instance_id": page_instance_id,
     }
-    if page_display_id:
-        patch["page_display_id"] = page_display_id
+    if page_no:
+        patch["page_no"] = page_no
     try:
         from app.server import upload_files as uf
 
@@ -134,10 +135,10 @@ def _poll_response_needs_runtime_patch(result, body, *, identity_changed=False):
     return False
 
 
-def _extract_page_display_id_for_poll(result, body):
-    """从 poll 结果体或页面注册状态解析 page_display_id。"""
+def _extract_page_no_for_poll(result, body):
+    """从 poll 结果体或页面注册状态解析 page_no。"""
     if isinstance(result, dict):
-        raw = result.get("page_display_id")
+        raw = result.get("page_no")
         if raw not in (None, "", 0):
             try:
                 return int(raw)
@@ -153,7 +154,7 @@ def _extract_page_display_id_for_poll(result, body):
     if page_key:
         with st._state_lock:
             entry = st._tampermonkey_pages.get(page_key) or {}
-        raw = entry.get("page_display_id")
+        raw = entry.get("page_no")
         if raw not in (None, "", 0):
             try:
                 return int(raw)
@@ -162,16 +163,16 @@ def _extract_page_display_id_for_poll(result, body):
                 if text and text != "-":
                     return text
     patch = _bridge_runtime_patch_for_body(body)
-    return patch.get("page_display_id") or None
+    return patch.get("page_no") or None
 
 
-def _ensure_poll_top_level_page_display_id(result, body):
-    """保证油猴 poll 响应 JSON 顶层含有 page_display_id。"""
+def _ensure_poll_top_level_page_no(result, body):
+    """保证油猴 poll 响应 JSON 顶层含有 page_no。"""
     if not isinstance(result, dict):
         return result
-    page_display_id = _extract_page_display_id_for_poll(result, body)
-    if page_display_id:
-        result["page_display_id"] = page_display_id
+    page_no = _extract_page_no_for_poll(result, body)
+    if page_no:
+        result["page_no"] = page_no
     client_id = (body.get("client_id") or "").strip() if isinstance(body, dict) else "-"
     page_instance_id = (
         (body.get("page_instance_id") or "").strip() if isinstance(body, dict) else "-"
@@ -180,7 +181,7 @@ def _ensure_poll_top_level_page_display_id(result, body):
         "[TM_PAGE_DISPLAY_ID][POLL_RESPONSE] "
         f"client_id={client_id or '-'} "
         f"page_instance_id={page_instance_id or '-'} "
-        f"page_display_id={result.get('page_display_id') or '-'}"
+        f"page_no={result.get('page_no') or '-'}"
     )
     return result
 
@@ -189,9 +190,9 @@ def _apply_bridge_runtime_patch(result, body, *, action="poll", identity_changed
     if not isinstance(result, dict):
         return result
     if action in ("poll", "poll_idle", "hello", "register"):
-        page_display_id = _extract_page_display_id_for_poll(result, body)
-        if page_display_id:
-            result["page_display_id"] = page_display_id
+        page_no = _extract_page_no_for_poll(result, body)
+        if page_no:
+            result["page_no"] = page_no
     if action in ("poll", "poll_idle") and not result.get("has_message"):
         if not _poll_response_needs_runtime_patch(
             result, body, identity_changed=identity_changed
@@ -207,13 +208,13 @@ def _apply_bridge_runtime_patch(result, body, *, action="poll", identity_changed
             f"action={action} "
             f"client_id={runtime_patch.get('client_id') or '-'} "
             f"page_instance_id={runtime_patch.get('page_instance_id') or '-'} "
-            f"page_display_id={runtime_patch.get('page_display_id') or '-'} "
+            f"page_no={runtime_patch.get('page_no') or '-'} "
             f"page_registered={runtime_patch.get('page_registered')}"
         )
     return result
 
 
-def _cleanup_tm_page_display_ids():
+def _cleanup_tm_page_nos():
     with st._state_lock:
         active_keys = set()
         for info in st._tampermonkey_pages.values():
@@ -232,11 +233,11 @@ def _cleanup_tm_page_display_ids():
                 if key:
                     active_keys.add(key)
         removed = 0
-        for key in list(st._tm_page_display_id_by_key.keys()):
+        for key in list(st._tm_page_no_by_key.keys()):
             if key in active_keys:
                 continue
-            st._tm_page_display_id_by_key.pop(key, None)
-            st._tm_page_display_id_updated_at.pop(key, None)
+            st._tm_page_no_by_key.pop(key, None)
+            st._tm_page_no_updated_at.pop(key, None)
             removed += 1
             _log(
                 "[TM_PAGE_ID][RELEASE] "
@@ -263,20 +264,20 @@ def _tm_registry_counts():
         entries = [dict(info) for info in st._tampermonkey_pages.values()]
     raw_clients_count = len(entries)
     online_clients_count = 0
-    url_syncable_count = 0
+    syncable_count = 0
     conversation_syncable_count = 0
     for entry in entries:
         if is_page_online(entry, now=now):
             online_clients_count += 1
+        if is_page_url_syncable(entry, now=now):
+            syncable_count += 1
         decision = explain_page_decision(entry, action="sync")
-        if decision.get("url_syncable"):
-            url_syncable_count += 1
         if decision.get("conversation_syncable"):
             conversation_syncable_count += 1
     return {
         "raw_clients_count": raw_clients_count,
         "online_clients_count": online_clients_count,
-        "url_syncable_count": url_syncable_count,
+        "syncable_count": syncable_count,
         "conversation_syncable_count": conversation_syncable_count,
     }
 
@@ -555,15 +556,15 @@ def _snapshot_clients():
         activity_state = classify_tm_client_activity(info, now=now)
         _, seen_age, poll_age, _ = compute_tm_activity_metrics(info, now=now)
         cap_send = evaluate_page_capability(info, action="send", now=now)
-        page_display_id = info.get("page_display_id") or _ensure_tm_page_display_id(
+        page_no = info.get("page_no") or _ensure_tm_page_no(
             info.get("client_id") or "",
             info.get("page_instance_id") or "",
         )
-        page_display_id = str(page_display_id or "").strip()
+        page_no = str(page_no or "").strip()
         row = {
             "client_id": client_id or (info.get("client_id") or ""),
             "page_instance_id": info.get("page_instance_id") or "",
-            "page_display_id": page_display_id,
+            "page_no": page_no,
             "conversation_id": info.get("conversation_id") or "",
             "url": cap_send.url or page_url_from(info) or "",
             "page_type": info.get("page_type") or "",
@@ -648,7 +649,7 @@ def _maybe_log_tm_activity_classify(client_id, entry, meta):
 def _meta_has_focus(meta):
     if not isinstance(meta, dict):
         return False
-    for key in ("has_focus", "focus", "focused"):
+    for key in ("has_focus",):
         value = meta.get(key)
         if isinstance(value, bool):
             if value:
@@ -745,7 +746,7 @@ def _touch_tampermonkey(meta, action="poll"):
             f"page_instance_id={page_instance_id} page_type={page_type or '-'} "
             f"bind_request_id={hello_bind or '-'}"
         )
-    page_key = _page_registry_key(client_id, page_instance_id) or client_id
+    page_key = _page_registry_key(client_id, page_instance_id)
     entry = st._tampermonkey_pages.setdefault(
         page_key,
         {
@@ -827,7 +828,7 @@ def _touch_tampermonkey(meta, action="poll"):
         entry["is_top_frame"] = bool(meta.get("is_top_frame"))
     if "visibility_state" in meta:
         entry["visibility_state"] = (meta.get("visibility_state") or "").strip()
-    if "has_focus" in meta or any(meta.get(k) is not None for k in ("focus", "focused")):
+    if "has_focus" in meta:
         has_focus = _meta_has_focus(meta)
         entry["has_focus"] = has_focus
         if has_focus:
@@ -860,9 +861,9 @@ def _touch_tampermonkey(meta, action="poll"):
     elif action == "report":
         entry["last_report_at"] = now
         entry["last_heartbeat_at"] = now
-    page_display_id = _ensure_tm_page_display_id(client_id, page_instance_id)
-    if page_display_id:
-        entry["page_display_id"] = page_display_id
+    page_no = _ensure_tm_page_no(client_id, page_instance_id)
+    if page_no:
+        entry["page_no"] = page_no
     if action == "poll":
         visible = entry.get("visibility_state") or "-"
         focus = "yes" if entry.get("has_focus") else "no"
@@ -882,16 +883,16 @@ def _touch_tampermonkey(meta, action="poll"):
                 f"focus={focus} responding={responding} state={response_state_txt} "
                 f"input={input_txt} url={page_url or '-'}"
             )
-        snap_key = _page_registry_key(client_id, page_instance_id) or client_id
+        snap_key = _page_registry_key(client_id, page_instance_id)
         prev_snap = st._tm_prev_snapshot.get(snap_key) or {}
         new_snap = {
             "client_id": client_id,
             "page_instance_id": page_instance_id or "-",
             "page_type": page_type or "-",
             "conversation_id": conversation_id or "-",
-            "normalized_url": norm_url,
+            "url": norm_url,
             "visibility_state": visible,
-            "focus": focus,
+            "has_focus": focus,
             "is_responding": responding,
             "can_accept_input": input_txt,
             "response_state": response_state_txt,
@@ -899,9 +900,9 @@ def _touch_tampermonkey(meta, action="poll"):
         compare_keys = (
             "page_type",
             "conversation_id",
-            "normalized_url",
+            "url",
             "visibility_state",
-            "focus",
+            "has_focus",
             "is_responding",
             "can_accept_input",
             "response_state",
@@ -913,15 +914,15 @@ def _touch_tampermonkey(meta, action="poll"):
         ]
         if changed_fields:
             _log(
-                f"[TM][STATE_CHANGE] page_key={snap_key} client_id={client_id} "
+                f"[TM][STATE_CHANGE] registry_key={snap_key} client_id={client_id} "
                 f"page_instance_id={page_instance_id or '-'} "
                 f"changed_fields={','.join(changed_fields)} "
                 f"old_page_type={prev_snap.get('page_type') or '-'} "
                 f"new_page_type={new_snap.get('page_type') or '-'} "
                 f"old_conv={prev_snap.get('conversation_id') or '-'} "
                 f"new_conv={new_snap.get('conversation_id') or '-'} "
-                f"old_url={prev_snap.get('normalized_url') or '-'} "
-                f"new_url={new_snap.get('normalized_url') or '-'} "
+                f"old_url={prev_snap.get('url') or '-'} "
+                f"new_url={new_snap.get('url') or '-'} "
                 f"old_is_responding={prev_snap.get('is_responding') or '-'} "
                 f"new_is_responding={new_snap.get('is_responding') or '-'} "
                 f"old_can_accept_input={prev_snap.get('can_accept_input') or '-'} "
@@ -941,11 +942,11 @@ def _touch_tampermonkey(meta, action="poll"):
                 and new_conv != "-"
             ):
                 _log(
-                    f"[TM][HOME_TO_CONVERSATION] page_key={snap_key} client_id={client_id} "
+                    f"[TM][HOME_TO_CONVERSATION] registry_key={snap_key} client_id={client_id} "
                     f"page_instance_id={page_instance_id or '-'} "
                     f"old_conv=- new_conv={new_conv} "
-                    f"old_url={prev_snap.get('normalized_url') or 'https://chatgpt.com/'} "
-                    f"new_url={new_snap.get('normalized_url') or '-'}"
+                    f"old_url={prev_snap.get('url') or 'https://chatgpt.com/'} "
+                    f"new_url={new_snap.get('url') or '-'}"
                 )
         st._tm_prev_snapshot[snap_key] = new_snap
 
@@ -955,7 +956,7 @@ def _touch_tampermonkey(meta, action="poll"):
         entry.get("response_state_reason") or "",
         bool(entry.get("can_accept_input", True)),
     )
-    response_log_key = _page_registry_key(client_id, page_instance_id) or client_id
+    response_log_key = _page_registry_key(client_id, page_instance_id)
     prev_response_key = st._last_tm_response_state_log.get(response_log_key)
     if response_key != prev_response_key:
         if prev_response_key is not None:

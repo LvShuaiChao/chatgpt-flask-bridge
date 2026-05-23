@@ -7,7 +7,7 @@ from app.constants import DEBUG_FULL_BRIDGE_JSON
 
 @pytest.fixture
 def server_module():
-    import server as server_mod
+    import app.server as server_mod
     importlib.reload(server_mod)
     return server_mod
 

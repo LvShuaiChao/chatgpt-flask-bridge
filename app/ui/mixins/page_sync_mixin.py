@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
-from app.utils.page_command import evaluate_sync_poll_freshness, resolve_page_command_target
+from app.utils.page_command import evaluate_sync_poll_freshness, is_page_polling_active, resolve_page_command_target
 from app.utils.page_snapshot import PageRegistry, binding_from_session
 from app.models import (
     remote_binding_enabled,
@@ -45,6 +45,7 @@ from app.models import (
 )
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import (
+    conversation_syncable_from,
     explain_page_decision,
     log_page_decision_fields,
     page_url_from,
@@ -63,6 +64,7 @@ class SyncPlan:
     request_reason: str = "manual_button"
     delay_ms: int = 0
     allow_open_url: bool = False
+    strict_bound_identity: bool = True
     trace_id: str = ""
     request_id: str = ""
     allowed: bool = False
@@ -952,7 +954,7 @@ class PageSyncMixin:
                     )
             return
         status = self._bridge_ui.last_bridge_status or {}
-        current_client_id = (status.get("tampermonkey_client_id") or "").strip()
+        current_client_id = (read_snapshot_identity(status, "active")["client_id"] or "").strip()
         current_info = self._client_info_by_id(current_client_id, status=status)
         selected_client_id = self._selected_tm_page_client_id()
         selected_info = self._client_info_by_id(selected_client_id, status=status)
@@ -1192,49 +1194,42 @@ class PageSyncMixin:
         now = time.time()
         reg = PageRegistry.from_bridge_status(status, now=now)
         binding = binding_from_session(session)
-        result = resolve_page_command_target(session, "sync_conversation", reg, now=now)
+        result = resolve_page_command_target(
+            session,
+            "sync_conversation",
+            reg,
+            now=now,
+            allow_same_conversation=False,
+        )
         if result.get("ok"):
             return status
 
         conversation_id = (binding.get("conversation_id") or "").strip()
-        if not conversation_id:
-            return status
-
-        fresh_page = self._pick_fresh_sync_page_for_conversation(
-            reg, conversation_id, now=now
-        )
-        if fresh_page is None:
-            return status
-
         old_client_id = (binding.get("client_id") or "").strip()
         old_page_instance_id = (binding.get("page_instance_id") or "").strip()
-        fresh_raw = fresh_page._raw if isinstance(fresh_page._raw, dict) else fresh_page.to_dict()
-        if (
-            (fresh_page.client_id or "").strip() == old_client_id
-            and (fresh_page.page_instance_id or "").strip() == old_page_instance_id
-        ):
-            return status
-
-        if hasattr(self, "_relink_session_binding_from_tm_page"):
-            self._relink_session_binding_from_tm_page(
-                session,
-                fresh_raw,
-                reason="sync_relink_to_fresh_poll_page",
+        if conversation_id:
+            fresh_page = self._pick_fresh_sync_page_for_conversation(
+                reg, conversation_id, now=now
             )
+            if fresh_page is not None and (
+                (fresh_page.client_id or "").strip() != old_client_id
+                or (fresh_page.page_instance_id or "").strip() != old_page_instance_id
+            ):
+                self._append_log(
+                    "[SYNC][SAME_CONVERSATION_REJECTED] "
+                    f"bound_page_instance_id={old_page_instance_id or '-'} "
+                    f"candidate_page_instance_id={fresh_page.page_instance_id or '-'} "
+                    f"conversation_id={conversation_id or '-'}",
+                    echo=True,
+                )
         self._append_log(
-            "[SYNC][RELINK_TO_FRESH_PAGE] "
-            f"old_client_id={old_client_id or '-'} "
-            f"old_page_instance_id={old_page_instance_id or '-'} "
-            f"new_client_id={fresh_page.client_id or '-'} "
-            f"new_page_instance_id={fresh_page.page_instance_id or '-'} "
-            f"conversation_id={conversation_id or '-'}",
+            "[SYNC][STRICT_BOUND_TARGET] "
+            f"session_id={getattr(session, 'session_id', '-') or '-'} "
+            f"bound_client_id={old_client_id or '-'} "
+            f"bound_page_instance_id={old_page_instance_id or '-'} "
+            f"bound_conversation_id={conversation_id or '-'}",
             echo=True,
         )
-        status = get_bridge_status() if is_server_running() else status
-        if isinstance(status, dict) and hasattr(self, "_bridge_ui"):
-            self._bridge_ui.last_bridge_status = status
-        if hasattr(self, "refresh_page_registry_from_status"):
-            self.refresh_page_registry_from_status(status)
         return status if isinstance(status, dict) else {}
 
     def _sync_poll_block_user_hint(self, plan: SyncPlan) -> str:
@@ -1344,6 +1339,7 @@ class PageSyncMixin:
         request_reason="manual_button",
         delay_ms=0,
         allow_open_url=False,
+        strict_bound_identity=True,
         status=None,
     ) -> SyncPlan:
         """resolve_page_action(sync_conversation) -> SyncPlan。"""
@@ -1405,13 +1401,61 @@ class PageSyncMixin:
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         self._append_log(
-            "[SYNC][PLAN] "
+            "[SYNC][STRICT_BOUND_TARGET] "
             f"session_id={session_id} "
-            f"allowed={'true' if allowed else 'false'} "
-            f"source={source or '-'} "
-            f"client_id={client_id or '-'} "
-            f"conversation_id={conversation_id or '-'} "
-            f"bound_client={(remote.get('client_id') or '-')}",
+            f"bound_client_id={(remote.get('client_id') or '-')} "
+            f"bound_page_instance_id={(remote.get('page_instance_id') or '-')} "
+            f"bound_conversation_id={(self._remote_conversation_id(remote) or '-')}",
+            echo=True,
+        )
+        now_ts = time.time()
+        page_for_poll = target_page if isinstance(target_page, dict) else detail
+        page_online = bool(page_for_poll.get("online")) if isinstance(page_for_poll, dict) else False
+        page_conv_syncable = conversation_syncable_from(page_for_poll) if isinstance(page_for_poll, dict) else False
+        page_last_poll_raw = page_for_poll.get("last_poll_at") if isinstance(page_for_poll, dict) else None
+        page_last_poll = float(page_last_poll_raw) if page_last_poll_raw is not None else None
+        poll_age_sec = round(now_ts - page_last_poll, 1) if isinstance(page_last_poll, (int, float)) and page_last_poll > 0 else None
+        has_polling_field = bool(page_for_poll.get("polling") or page_for_poll.get("is_polling") or page_for_poll.get("poll_state")) if isinstance(page_for_poll, dict) else False
+        polling_value = page_for_poll.get("polling") if isinstance(page_for_poll, dict) else None
+        try:
+            polling_active = is_page_polling_active(page_for_poll, now_ts=now_ts, max_age_sec=15.0) if isinstance(page_for_poll, dict) else False
+        except Exception as exc:
+            print("[SYNC][POLLING_CHECK][ERROR] is_page_polling_active failed: error_type={} error={}".format(type(exc).__name__, exc))
+            polling_active = False
+
+        self._append_log(
+            "[SYNC][POLLING_CHECK] "
+            "session_id={} ".format(session_id)
+            + "page_no={} ".format(page_for_poll.get("page_no") or "-")
+            + "client_id={} ".format(page_for_poll.get("client_id") or "-")
+            + "page_instance_id={} ".format(page_for_poll.get("page_instance_id") or "-")
+            + "online={} ".format("true" if page_online else "false")
+            + "conversation_syncable={} ".format("true" if page_conv_syncable else "false")
+            + "last_poll_at={} ".format(page_last_poll or "-")
+            + "poll_age_sec={} ".format(poll_age_sec or "-")
+            + "has_polling_field={} ".format("true" if has_polling_field else "false")
+            + "polling_value={} ".format(polling_value or "-")
+            + "polling_active={} ".format("true" if polling_active else "false")
+            + "decision={} ".format("allow" if allowed else "block")
+            + "block_reason={}".format(block_reason or "-"),
+            echo=True,
+        )
+        self._append_log(
+            "[SYNC][PLAN] "
+            "session_id={} ".format(session_id)
+            + "allowed={} ".format("true" if allowed else "false")
+            + "source={} ".format(source or "-")
+            + "matched_by={} ".format(page_for_poll.get("matched_by") or "-")
+            + "online={} ".format("true" if page_online else "false")
+            + "conversation_syncable={} ".format("true" if page_conv_syncable else "false")
+            + "last_poll_at={} ".format(page_last_poll or "-")
+            + "poll_age_sec={} ".format(poll_age_sec or "-")
+            + "has_polling_field={} ".format("true" if has_polling_field else "false")
+            + "polling_value={} ".format(polling_value or "-")
+            + "polling_active={} ".format("true" if polling_active else "false")
+            + "client_id={} ".format(client_id or "-")
+            + "conversation_id={} ".format(conversation_id or "-")
+            + "block_reason={}".format(block_reason or "-"),
             echo=True,
         )
 
@@ -1433,6 +1477,7 @@ class PageSyncMixin:
             request_reason=request_reason or "manual_button",
             delay_ms=max(0, int(delay_ms or 0)),
             allow_open_url=bool(allow_open_url),
+            strict_bound_identity=bool(strict_bound_identity),
             trace_id=trace_id,
             request_id=request_id,
             allowed=bool(allowed),
@@ -1480,6 +1525,7 @@ class PageSyncMixin:
         reason="manual_button",
         delay_ms=0,
         allow_open_url=False,
+        strict_bound_identity=True,
     ):
         ok, msg = self._sync_prechecks(session, session.session_id if session else "")
         if not ok:
@@ -1494,6 +1540,7 @@ class PageSyncMixin:
             request_reason=reason,
             delay_ms=delay_ms,
             allow_open_url=allow_open_url,
+            strict_bound_identity=strict_bound_identity,
             status=sync_status,
         )
         return self._dispatch_sync_plan(plan)
@@ -1581,7 +1628,17 @@ class PageSyncMixin:
             else ""
         ) or "not_syncable"
 
-        if plan.allow_open_url and self._simple_sync_open_url(session):
+        strict_no_open_codes = {
+            "bound_page_offline",
+            "bound_page_poll_stale",
+            "bound_page_not_polling",
+            "not_conversation_syncable",
+        }
+        if (
+            plan.allow_open_url
+            and block_reason not in strict_no_open_codes
+            and self._simple_sync_open_url(session)
+        ):
             self._mark_session_sync_running(session_id, "waiting_open_page")
             self._start_sync_progress(
                 session_id,
@@ -1590,11 +1647,22 @@ class PageSyncMixin:
             )
             QTimer.singleShot(
                 1500,
-                lambda sid=session_id: self._simple_sync_retry_after_open(sid),
+                lambda sid=session_id, ctx=dict(plan.target or {}): self._simple_sync_retry_after_open(
+                    sid,
+                    expected_ctx=ctx,
+                ),
             )
             return False, block_reason or "waiting_open_page"
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        if block_reason in strict_no_open_codes:
+            self._append_log(
+                "[SYNC][BLOCK_STRICT_BOUND] "
+                f"reason_code={block_reason or '-'} "
+                f"bound_client_id={(remote.get('client_id') or '-')} "
+                f"bound_page_instance_id={(remote.get('page_instance_id') or '-')}",
+                echo=True,
+            )
         online_same_conv = self._count_online_sync_clients_by_conversation_id(
             self._remote_conversation_id(remote),
             status=status,
@@ -2250,17 +2318,17 @@ class PageSyncMixin:
             return False, "target_offline"
         if exp_conv and got_conv and exp_conv != got_conv:
             return False, "conversation_mismatch"
-        allow_fallback = False
-        if hasattr(self, "is_same_conversation_fallback_enabled"):
-            allow_fallback = self.is_same_conversation_fallback_enabled(
-                "sync_conversation", session=session
-            )
         if exp_client and got_client and exp_client != got_client:
-            if not (allow_fallback and exp_conv and got_conv == exp_conv):
-                return False, "client_id_mismatch"
+            return False, "client_id_mismatch"
         if exp_instance and got_instance and exp_instance != got_instance:
-            if not (allow_fallback and exp_conv and got_conv == exp_conv):
-                return False, "page_instance_mismatch"
+            self._append_log(
+                "[SYNC][RETRY_REJECT_NEW_PAGE_INSTANCE] "
+                f"expected_page_instance_id={exp_instance or '-'} "
+                f"candidate_page_instance_id={got_instance or '-'} "
+                f"conversation_id={got_conv or exp_conv or '-'}",
+                echo=True,
+            )
+            return False, "page_instance_mismatch"
         return True, ""
 
     def _simple_sync_retry_after_open(
@@ -2268,6 +2336,14 @@ class PageSyncMixin:
     ):
         session = self._sessions.get(session_id)
         if session is None:
+            return
+        if not isinstance(expected_ctx, dict) or not expected_ctx:
+            self._append_log(
+                "[SYNC][RETRY_REJECT_NEW_PAGE_INSTANCE] "
+                f"session_id={session_id} reason=missing_expected_ctx",
+                echo=True,
+            )
+            self._clear_session_sync_running(session_id, reason="missing_expected_ctx")
             return
         status = get_bridge_status()
         allowed, target_page, source, _block_reason, _sync_detail = (
@@ -2290,6 +2366,8 @@ class PageSyncMixin:
                     f"got_instance={(target_page.get('page_instance_id') or '-')}",
                     echo=True,
                 )
+                allowed = False
+                target_page = None
         if allowed and isinstance(target_page, dict):
             self._clear_session_sync_running(session_id, reason="page_detected")
             ok, reason = self.request_sync_conversation(
@@ -2321,9 +2399,10 @@ class PageSyncMixin:
             return
         QTimer.singleShot(
             1500,
-            lambda sid=session_id, left=attempts_left - 1: self._simple_sync_retry_after_open(
+            lambda sid=session_id, left=attempts_left - 1, ctx=expected_ctx: self._simple_sync_retry_after_open(
                 sid,
                 left,
+                expected_ctx=ctx,
             ),
         )
 
@@ -2386,7 +2465,7 @@ class PageSyncMixin:
         self.request_sync_conversation(
             session,
             reason="manual_button",
-            allow_open_url=True,
+            allow_open_url=False,
         )
 
     # --- round-2: snapshot merge helpers (moved from page_bind_mixin) ---

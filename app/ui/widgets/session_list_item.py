@@ -3,6 +3,7 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayou
 
 from app.constants import SESSION_BIND_LIST_STYLES
 from app.ui.widgets.elided_label import ElidedLabel
+from app.ui.widgets.segmented_elided_label import SegmentedElidedLabel
 
 SESSION_LIST_ITEM_HEIGHT = 94
 SESSION_LIST_ITEM_MIN_HEIGHT = 88
@@ -85,7 +86,7 @@ class SessionListItemWidget(QWidget):
         self.subtitle_label.setObjectName("SessionItemSubtitle")
         self.subtitle_label.setMinimumHeight(18)
 
-        self.status_label = ElidedLabel()
+        self.status_label = SegmentedElidedLabel()
         self.status_label.setObjectName("SessionBindStatusLabel")
         self.status_label.setMinimumHeight(18)
 
@@ -273,6 +274,7 @@ class SessionListItemWidget(QWidget):
         is_current=None,
         tooltip="",
         status_text=None,
+        status_segments=None,
     ):
         style = SESSION_BIND_LIST_STYLES.get(
             bind_state, SESSION_BIND_LIST_STYLES["unbound"]
@@ -293,9 +295,16 @@ class SessionListItemWidget(QWidget):
 
         subtitle = (subtitle or "").replace("\n", " ")
         title_text = title or "新对话"
-        display_status_text = (
-            status_text if status_text is not None else style["label"]
-        )
+        if status_segments is not None:
+            display_status_text = "".join(
+                str(seg.get("text") or "")
+                for seg in status_segments
+                if isinstance(seg, dict)
+            )
+        else:
+            display_status_text = (
+                status_text if status_text is not None else style["label"]
+            )
         tooltip_text = tooltip or ""
 
         self._sync_current_badge(is_current)
@@ -316,7 +325,10 @@ class SessionListItemWidget(QWidget):
 
         self.title_label.setText(title_text)
         self.subtitle_label.setText(subtitle)
-        self.status_label.setText(display_status_text)
+        if status_segments is not None and hasattr(self.status_label, "set_segments"):
+            self.status_label.set_segments(status_segments)
+        else:
+            self.status_label.setText(display_status_text)
 
         self.pending_dot.setText("●" if pending_reply else "")
         self.pending_dot.setVisible(bool(pending_reply))
@@ -341,15 +353,13 @@ class SessionListItemWidget(QWidget):
         )
 
         self.status_label.setStyleSheet(
-            f"""
-            QLabel#SessionBindStatusLabel {{
-                color: {style["text"]};
+            """
+            QLabel#SessionBindStatusLabel {
                 font-size: 11px;
-                background: rgba(255, 255, 255, 0.45);
-                border-radius: 6px;
-                padding: 2px 6px;
+                background: transparent;
                 border: none;
-            }}
+                padding: 2px 0px;
+            }
             """
         )
 

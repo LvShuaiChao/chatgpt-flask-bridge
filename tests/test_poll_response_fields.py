@@ -21,7 +21,7 @@ LEGACY_POLL_KEYS = frozenset(
 
 @pytest.fixture
 def server_module():
-    import server as srv
+    import app.server as srv
 
     return srv
 

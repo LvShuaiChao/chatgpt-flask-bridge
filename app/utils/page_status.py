@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -91,6 +91,7 @@ _CHATGPT_HOSTS = frozenset(
     {"chatgpt.com", "chat.openai.com", "www.chatgpt.com"}
 )
 
+
 # normalize_page 出站清理：仅删除非 canonical 的 URL 别名（不读取）
 _PAGE_URL_STRIP_KEYS = (
     "page_url",
@@ -106,6 +107,7 @@ _PAGE_URL_STRIP_KEYS = (
     "current_url",
     "reopen_target_url",
 )
+
 
 
 def conversation_syncable_from(data: Any) -> bool:
@@ -126,16 +128,6 @@ def page_url_from(raw: Any) -> str:
     return _canonical_url_from(raw)
 
 
-def normalize_page_url_fields(raw: Any) -> Dict[str, str]:
-    """只读 canonical url；旧 URL 字段须在入站边界由 reject/migrate 处理。"""
-    if not isinstance(raw, dict):
-        return {"url": "", "url_source": ""}
-    val = page_url_from(raw)
-    if val:
-        return {"url": val, "url_source": "url"}
-    return {"url": "", "url_source": ""}
-
-
 def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
     """规范化页面对象；只读规范字段（旧字段须在入站/加载边界先 migrate）。"""
     if not isinstance(raw, dict):
@@ -143,7 +135,7 @@ def normalize_page(raw: Any, *, now: float | None = None) -> Dict[str, Any]:
     if now is None:
         now = time.time()
 
-    url = normalize_page_url_fields(raw)["url"]
+    url = (raw.get("url") or "").strip()
 
     conversation_id = (raw.get("conversation_id") or "").strip()
     if conversation_id in ("", "-"):
@@ -437,6 +429,15 @@ def evaluate_send_page(
     if not conversation_id:
         conversation_id = parse_conversation_id(url) or ""
     if not conversation_id:
+        if is_prebound_home_page(norm) or (norm.get("page_type") or "").strip() == "home":
+            if is_page_busy(norm):
+                return "queued", "waiting_for_response"
+            response_state = read_response_state(norm)
+            if response_state in BUSY_RESPONSE_STATES:
+                return "queued", "waiting_for_response"
+            if not can_accept_input(norm):
+                return "queued", "waiting_for_input"
+            return "allowed", "home_bootstrap"
         return "blocked", "missing_conversation_id"
     expected = (expected_conversation_id or "").strip()
     if expected and conversation_id != expected:
@@ -627,7 +628,7 @@ class PageActionPlan:
         reason_code = (
             data.get("reason_code")
             or data.get("reason")
-            or data.get("blocked_reason")
+            or data.get("reason_code")
             or ""
         ).strip()
         page = data.get("page")
@@ -883,20 +884,35 @@ def compact_page_public_fields(page: dict) -> dict:
     }
 
 
-def compact_page_decision_fields(decision: Dict[str, Any]) -> str:
+def compact_page_decision_fields(decision: dict) -> str:
+    """Compact log line for page decision."""
     return (
-        f"page_display_id={decision.get('page_display_id') or '-'} "
-        f"client_id={decision.get('client_id') or '-'} "
-        f"page_instance_id={decision.get('page_instance_id') or '-'} "
-        f"conversation_id={decision.get('conversation_id') or '-'} "
-        f"url={decision.get('url') or '-'} "
-        f"online={'true' if decision.get('online') else 'false'} "
-        f"response_state={decision.get('response_state') or '-'} "
-        f"page_liveness={decision.get('page_liveness') or '-'} "
-        f"send_decision={decision.get('send_decision') or '-'} "
-        f"reason_code={decision.get('reason_code') or decision.get('reason') or decision.get('blocked_reason') or '-'}"
+        "[PAGE_CAPABILITY][EVAL] "
+        + "client_id=" + str(decision.get("client_id") or "-") + " "
+        + "page_instance_id=" + str(decision.get("page_instance_id") or "-") + " "
+        + "conversation_id=" + str(decision.get("conversation_id") or "-") + " "
+        + "url=" + str(decision.get("url") or "-") + " "
+        + "liveness=" + str(decision.get("liveness") or decision.get("page_liveness") or "-") + " "
+        + "can_sync=" + str(decision.get("can_sync") or "-") + " "
+        + "can_send=" + str(decision.get("can_send") or "-") + " "
+        + "busy=" + str(decision.get("busy") or "-") + " "
+        + "block_reason=" + str(decision.get("block_reason") or decision.get("reason_code") or decision.get("reason") or "-")
     )
 
 
 def log_page_decision_fields(decision: Dict[str, Any], *, compact: bool = True) -> str:
     return compact_page_decision_fields(decision)
+
+
+# Re-export snapshot/registry helpers (canonical implementation in page_snapshot.py).
+from app.utils.page_snapshot import (  # noqa: E402
+    PageRegistry,
+    PageSnapshot,
+    binding_from_session,
+    bridge_status_online,
+    page_display_id_sort_key,
+    page_display_ids_for_log,
+    pages_from_bridge_status,
+    sort_pages_by_display_id,
+    status_pages_token,
+)

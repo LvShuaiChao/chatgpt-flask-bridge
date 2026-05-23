@@ -68,8 +68,8 @@ _outbound_history = deque(maxlen=MAX_OUTBOUND_HISTORY_SIZE)
 ONLINE_TIMEOUT_SEC = TM_HEARTBEAT_ONLINE_SECONDS
 LEASE_SEC = 30
 # 油猴页面展示编号：key=client_id|page_instance_id，value=递增短编号
-_tm_page_display_id_by_key = {}
-_tm_page_display_id_updated_at = {}
+_tm_page_no_by_key = {}
+_tm_page_no_updated_at = {}
 
 import uuid
 import time

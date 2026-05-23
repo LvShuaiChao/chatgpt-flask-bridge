@@ -8,7 +8,7 @@ from app.utils.page_command import (
     evaluate_sync_poll_freshness,
     resolve_page_command_target,
 )
-from app.utils.page_snapshot import PageRegistry
+from app.utils.page_status import PageRegistry
 
 
 class _FakeSession:

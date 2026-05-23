@@ -132,7 +132,7 @@ class PageBindingDisplayMixin:
 
         self._maybe_log_conversation_id_mismatch(page)
 
-        chatgpt_id = self._page_chatgpt_conversation_id(page) or "-"
+        chatgpt_id = (page.get('conversation_id') or '').strip() or "-"
         client_id = str(page.get("client_id") or "-").strip() or "-"
         page_instance_id = str(page.get("page_instance_id") or "").strip()
         if not page_instance_id:
@@ -559,11 +559,14 @@ class PageBindingDisplayMixin:
         if bind_state == BIND_STATE_PREBOUND_HOME and not url:
             url = "https://chatgpt.com/"
 
+        if bind_state == BIND_STATE_PREBOUND_HOME and not conversation_id:
+            return url or "https://chatgpt.com/", "临时首页绑定"
+
         if url:
             if conversation_id:
-                state_text = "已记录对话页"
+                state_text = "已绑定对话"
             elif "xz_bind_token=" in url or bind_state == BIND_STATE_PREBOUND_HOME:
-                state_text = "已绑定首页，等待进入对话"
+                state_text = "等待创建对话"
             elif effective_state == BIND_STATE_BOUND_OFFLINE:
                 state_text = "离线"
             elif bind_state == BIND_STATE_BOUND_CONVERSATION:
@@ -581,25 +584,30 @@ class PageBindingDisplayMixin:
 
         url, state_text = self._current_session_bound_url()
         session = self._current_session() if hasattr(self, "_current_session") else None
-        page_display_id = "-"
-        if hasattr(self, "_current_bound_page_display_id_text"):
-            page_display_id = self._current_bound_page_display_id_text(session=session)
+        page_no = "-"
+        if hasattr(self, "_current_bound_page_no_text"):
+            page_no = self._current_bound_page_no_text(session=session)
+        segments = None
+        if hasattr(self, "_format_bound_page_line_segments"):
+            segments = self._format_bound_page_line_segments(
+                page_no, url=url, state_text=state_text
+            )
         if hasattr(self, "_format_bound_page_line_text"):
             text = self._format_bound_page_line_text(
-                page_display_id, url=url, state_text=state_text
+                page_no, url=url, state_text=state_text
             )
         elif url:
-            text = f"绑定页面：页面ID:{page_display_id} ｜ {url}"
+            text = f"绑定页面：页面ID:{page_no} ｜ {url}"
         else:
-            text = f"绑定页面：页面ID:{page_display_id} ｜ {state_text or '未绑定 ChatGPT 页面'}"
+            text = f"绑定页面：页面ID:{page_no} ｜ {state_text or '未绑定 ChatGPT 页面'}"
 
         if hasattr(self, "_log_chat_header_bound_page_id"):
             missing_reason = ""
-            if str(page_display_id or "").strip() in ("", "-"):
-                missing_reason = "page_display_id_empty"
+            if str(page_no or "").strip() in ("", "-"):
+                missing_reason = "page_no_empty"
             self._log_chat_header_bound_page_id(
                 session=session,
-                page_display_id=page_display_id,
+                page_no=page_no,
                 bound_url=url or state_text,
                 reason=missing_reason,
             )
@@ -615,15 +623,21 @@ class PageBindingDisplayMixin:
             tooltip = (
                 f"{text}\n"
                 f"state={state_text} | "
-                f"page_display_id={page_display_id} | "
+                f"page_no={page_no} | "
                 f"bound_client_id={bound_client} | "
                 f"bound_page_instance_id={bound_instance} | "
                 f"bound_conversation_id={bound_conv}"
             )
-            label.setText(text, tooltip=tooltip)
+            if segments is not None and hasattr(label, "set_segments"):
+                label.set_segments(segments, tooltip=tooltip)
+            else:
+                label.setText(text, tooltip=tooltip)
         else:
-            label.setText(text)
-            label.setToolTip(text)
+            if segments is not None and hasattr(label, "set_segments"):
+                label.set_segments(segments, tooltip=text)
+            else:
+                label.setText(text)
+                label.setToolTip(text)
 
     def _update_bound_page_display(self, summary=None):
         summary = summary or self._tm_summary_for_session()

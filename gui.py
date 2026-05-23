@@ -7,7 +7,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
-from log_utils import (
+from app.utils.log_utils import (
     append_log,
     append_startup_environment,
     clear_log_file,

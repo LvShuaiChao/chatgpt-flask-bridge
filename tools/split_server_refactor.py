@@ -42,7 +42,7 @@ from collections import deque
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from log_utils import append_log, clear_log_file
+from app.utils.log_utils import append_log, clear_log_file
 from werkzeug.exceptions import BadRequest, HTTPException
 from werkzeug.serving import WSGIRequestHandler, make_server
 

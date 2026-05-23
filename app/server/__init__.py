@@ -1,5 +1,7 @@
-"""Flask 桥接服务包（显式导出，无动态 __getattr__）。"""
+"""Flask 桥接服务包（显式导出 + 测试/旧代码用的动态属性回退）。"""
 from __future__ import annotations
+
+import importlib
 
 from app.server import state as st
 from app.server.runtime_state import (
@@ -35,10 +37,24 @@ from app.server.control_commands import (
 )
 from app.server.system_hotkey import (
     _parse_hotkey_for_pyautogui,
-    execute_system_hotkey,
+    execute_system_hotkey as _execute_system_hotkey_impl,
 )
 
 ONLINE_TIMEOUT_SEC = st.ONLINE_TIMEOUT_SEC
+
+_LAST_SYSTEM_HOTKEY_AT = 0.0
+
+_FALLBACK_MODULES = (
+    "app.server.state",
+    "app.server.runtime_state",
+    "app.server.bridge_logging",
+    "app.server.message_queue",
+    "app.server.tm_page_registry",
+    "app.server.control_commands",
+    "app.server.system_hotkey",
+    "app.server.cursor_api",
+    "app.server.external_api",
+)
 
 __all__ = [
     "st",
@@ -71,3 +87,30 @@ __all__ = [
     "_parse_hotkey_for_pyautogui",
     "execute_system_hotkey",
 ]
+
+
+def execute_system_hotkey(hotkey: str, *, source: str = ""):
+    """同步模块级 `_LAST_SYSTEM_HOTKEY_AT`（供测试与旧调用方）。"""
+    global _LAST_SYSTEM_HOTKEY_AT
+    from app.server import system_hotkey as _sh
+
+    _sh._LAST_SYSTEM_HOTKEY_AT = float(_LAST_SYSTEM_HOTKEY_AT or 0.0)
+    result = _execute_system_hotkey_impl(hotkey, source=source)
+    _LAST_SYSTEM_HOTKEY_AT = float(_sh._LAST_SYSTEM_HOTKEY_AT or 0.0)
+    return result
+
+
+def __getattr__(name: str):
+    for module_name in _FALLBACK_MODULES:
+        mod = importlib.import_module(module_name)
+        if hasattr(mod, name):
+            return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    names = set(globals())
+    for module_name in _FALLBACK_MODULES:
+        mod = importlib.import_module(module_name)
+        names.update(getattr(mod, "__all__", dir(mod)))
+    return sorted(names)

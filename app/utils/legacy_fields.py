@@ -1,0 +1,91 @@
+"""Central registry of legacy field names for reject/cleanup only.
+
+These fields MUST NOT be read as valid fallback sources.
+"""
+from __future__ import annotations
+
+LEGACY_FIELD_NAMES = frozenset({
+    "page_url",
+    "target_url",
+    "target_page_url",
+    "conversation_url",
+    "tampermonkey_page_url",
+    "bound_url",
+    "bound_page_url",
+    "normalized_url",
+    "chatgpt_url",
+    "last_page_url",
+    "current_url",
+    "reopen_target_url",
+    "chat_url",
+    "file_path",
+    "text",
+    "message",
+    "prompt",
+    "raw_content",
+    "raw_user_text",
+    "final_prompt",
+    "files",
+    "file_list",
+    "selected_files",
+    "toolboxTitle",
+    "upload_active_group_id",
+    "uploadLastActiveGroupId",
+    "has_pending_reply",
+    "pending_reply_since",
+    "waiting_for_reply",
+    "waiting_since_ts",
+    "waiting_elapsed_sec",
+    "turn_id",
+    "ui_status",
+    "message_source",
+    "bridge_message_id",
+    "parent_message_id",
+    "visible_in_chat",
+    "send_requestable",
+    "send_now_available",
+    "send_queueable",
+    "bootstrap_sendable",
+    "can_accept_input",
+    "send_decision",
+})
+
+LEGACY_URL_FIELD_NAMES = frozenset({
+    "page_url",
+    "target_url",
+    "target_page_url",
+    "conversation_url",
+    "tampermonkey_page_url",
+    "bound_url",
+    "bound_page_url",
+    "normalized_url",
+    "chatgpt_url",
+    "last_page_url",
+    "current_url",
+    "reopen_target_url",
+    "chat_url",
+})
+
+LEGACY_MESSAGE_FIELD_NAMES = frozenset({
+    "text",
+    "message",
+    "prompt",
+    "raw_content",
+    "raw_user_text",
+    "final_prompt",
+    "files",
+    "file_list",
+    "selected_files",
+    "bridge_message_id",
+    "parent_message_id",
+    "turn_id",
+    "ui_status",
+    "message_source",
+    "visible_in_chat",
+})
+
+__all__ = [
+    "LEGACY_FIELD_NAMES",
+    "LEGACY_URL_FIELD_NAMES",
+    "LEGACY_MESSAGE_FIELD_NAMES",
+]

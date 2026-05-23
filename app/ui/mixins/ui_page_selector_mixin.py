@@ -26,11 +26,20 @@ import time
 import traceback
 
 from app.models import normalize_remote_chatgpt
-from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
+from app.utils.page_status import (
+    get_page_liveness,
+    is_page_online,
+    page_display_ids_for_log,
+    page_url_from,
+    read_snapshot_identity,
+    sort_pages_by_display_id,
+)
 from app.ui.mixins.tm_page_selector_format_mixin import TmPageSelectorFormatMixin
+from app.ui.styles import apply_bind_button_style, apply_refresh_button_style
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
+from app.ui.widgets.tm_page_combo_delegate import TmPageComboDelegate
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QBrush
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -42,6 +51,88 @@ from PyQt5.QtWidgets import (
 
 
 class UiPageSelectorMixin(TmPageSelectorFormatMixin):
+    TM_PAGE_SELECTOR_COMBO_OBJECT_NAME = "TmPageSelectorCombo"
+
+    TM_PAGE_COMBO_ONLINE_COLOR = "#047857"
+    TM_PAGE_COMBO_OFFLINE_COLOR = "#374151"
+    TM_PAGE_COMBO_BOUND_COLOR = "#065f46"
+    TM_PAGE_COMBO_UNBOUND_COLOR = "#92400e"
+    TM_PAGE_COMBO_TEXT_COLOR = "#111827"
+    TM_PAGE_COMBO_URL_COLOR = "#1d4ed8"
+    TM_PAGE_COMBO_SELECTED_BG = "#bfdbfe"
+    TM_PAGE_COMBO_HOVER_BG = "#e0f2fe"
+
+    def _tm_page_combo_color_for_page(self, page):
+        if not isinstance(page, dict):
+            return self.TM_PAGE_COMBO_OFFLINE_COLOR
+        is_online = self._page_is_online_for_ui(page)
+        is_bound = bool(
+            page.get("bound")
+            or page.get("is_bound")
+            or page.get("bound_session_id")
+        )
+        if is_online and is_bound:
+            return self.TM_PAGE_COMBO_BOUND_COLOR
+        if is_online:
+            return self.TM_PAGE_COMBO_ONLINE_COLOR
+        return self.TM_PAGE_COMBO_OFFLINE_COLOR
+
+    @classmethod
+    def _tm_page_selector_combo_stylesheet(cls, *, line_color=None):
+        name = cls.TM_PAGE_SELECTOR_COMBO_OBJECT_NAME
+        color = line_color or cls.TM_PAGE_COMBO_TEXT_COLOR
+        return f"""
+QComboBox#{name} {{
+    color: {color};
+    background: #ffffff;
+    border: 1px solid #94a3b8;
+    border-radius: 4px;
+    padding: 3px 8px;
+}}
+
+QComboBox#{name}:hover {{
+    border-color: #2563eb;
+}}
+
+QComboBox#{name}:focus {{
+    border-color: #1d4ed8;
+}}
+
+QComboBox#{name} QAbstractItemView {{
+    color: {cls.TM_PAGE_COMBO_TEXT_COLOR};
+    background: #ffffff;
+    selection-background-color: {cls.TM_PAGE_COMBO_SELECTED_BG};
+    selection-color: {cls.TM_PAGE_COMBO_TEXT_COLOR};
+    border: 1px solid #64748b;
+    outline: 0;
+}}
+
+QComboBox#{name} QAbstractItemView::item {{
+    min-height: 24px;
+    padding: 4px 8px;
+}}
+
+QComboBox#{name} QAbstractItemView::item:hover {{
+    background: {cls.TM_PAGE_COMBO_HOVER_BG};
+    color: #0f172a;
+}}
+
+QComboBox#{name} QAbstractItemView::item:selected {{
+    background: {cls.TM_PAGE_COMBO_SELECTED_BG};
+    color: #0f172a;
+}}
+"""
+
+    def _apply_tm_page_selector_combo_stylesheet(self, *, line_color=None):
+        combo = getattr(self, "tm_page_combo", None)
+        if combo is None:
+            return
+        combo.setStyleSheet(
+            self._tm_page_selector_combo_stylesheet(line_color=line_color)
+        )
+        if hasattr(combo, "update"):
+            combo.update()
+
     def _bridge_status_has_page_sources(self, status):
         if not isinstance(status, dict):
             return False
@@ -65,7 +156,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
         if hasattr(self, "tm_page_combo"):
             return
         self.tm_page_combo = NoWheelComboBox()
-        self.tm_page_combo.setObjectName("TmPageCombo")
+        self.tm_page_combo.setObjectName(self.TM_PAGE_SELECTOR_COMBO_OBJECT_NAME)
         self.tm_page_combo.setMinimumWidth(0)
         self.tm_page_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
         self.tm_page_combo.setMinimumContentsLength(40)
@@ -73,19 +164,26 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
         self.tm_page_combo.setToolTip(
             "可用页面列表：选择 ChatGPT 页面作为手动选中页（用于绑定等操作）"
         )
+        self._apply_tm_page_selector_combo_stylesheet()
         self.tm_page_selector = self.tm_page_combo
         if not getattr(self, "_tm_page_selector_connected", False):
             self.tm_page_combo.currentIndexChanged.connect(
                 self._on_tm_page_selector_changed
             )
             self._tm_page_selector_connected = True
+        if getattr(self, "_tm_page_combo_delegate", None) is None:
+            self._tm_page_combo_delegate = TmPageComboDelegate(
+                self.tm_page_combo,
+                display_role=self.TM_PAGE_DISPLAY_ROLE,
+            )
+            self.tm_page_combo.setItemDelegate(self._tm_page_combo_delegate)
 
     def _ensure_refresh_page_list_button(self):
         if getattr(self, "_refresh_page_list_btn_ready", False):
             return
         self._refresh_page_list_btn_ready = True
         self.refresh_page_list_btn = QPushButton("刷新页面列表")
-        self.refresh_page_list_btn.setObjectName("PrimaryButton")
+        apply_refresh_button_style(self.refresh_page_list_btn)
         self.refresh_page_list_btn.setToolTip("重新扫描当前在线的 ChatGPT 页面")
         self.refresh_page_list_btn.setEnabled(True)
 
@@ -110,11 +208,12 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
     def _style_tm_page_selector_row_buttons(self):
         self._ensure_tm_action_buttons()
         self._ensure_refresh_page_list_button()
+        apply_refresh_button_style(self.refresh_page_list_btn)
+        apply_bind_button_style(self.bind_current_page_btn)
         for page_row_btn in (
             self.refresh_page_list_btn,
             self.bind_current_page_btn,
         ):
-            page_row_btn.setObjectName("PrimaryButton")
             page_row_btn.setFixedHeight(28)
             page_row_btn.setMinimumWidth(88)
             page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -165,7 +264,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
             layout.addWidget(btn)
         if include_page_selector:
             self._build_tm_page_selector_row(layout)
-        layout.addWidget(self.close_other_pages_btn)
+        # close_other_pages_btn 只允许放在“调试”选项卡，避免在聊天主页误操作。
         if include_view_logs:
             layout.addStretch()
             if not hasattr(self, "view_logs_btn"):
@@ -174,9 +273,6 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                 self.view_logs_btn.setToolTip("切换到日志页")
                 self.view_logs_btn.clicked.connect(self._show_log_tab)
             layout.addWidget(self.view_logs_btn)
-
-    TM_PAGE_COMBO_ONLINE_COLOR = "#16a34a"
-    TM_PAGE_COMBO_OFFLINE_COLOR = "#6b7280"
 
     def _tm_combo_page_item_dict(self, page):
         """下拉项 UserRole 载荷：完整页面 dict，供绑定/选中读取。"""
@@ -190,7 +286,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
             "client_id",
             "page_instance_id",
             "conversation_id",
-            "page_display_id",
+            "page_no",
             "page_type",
             "last_seen",
             "last_poll_at",
@@ -204,30 +300,32 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
         return payload
 
     def _tm_page_combo_apply_item_colors(self, index, page):
+        """为下拉项设置整行前景色（delegate 无分段数据时的回退）。"""
         if not hasattr(self, "tm_page_combo") or index < 0:
             return
-        if not isinstance(page, dict):
-            return
-
-        combo = self.tm_page_combo
-        is_online = self._page_is_online_for_ui(page)
-        color = (
-            self.TM_PAGE_COMBO_ONLINE_COLOR
-            if is_online
-            else self.TM_PAGE_COMBO_OFFLINE_COLOR
-        )
-        combo.setItemData(
+        color = self._tm_page_combo_color_for_page(page)
+        self.tm_page_combo.setItemData(
             index,
             QBrush(QColor(color)),
             Qt.ForegroundRole,
         )
+
+    def _tm_page_combo_apply_item_display(self, index, page, **bound_kwargs):
+        """为下拉项写入分段绘制数据（TmPageComboDelegate）。"""
+        if not hasattr(self, "tm_page_combo") or index < 0:
+            return
+        segments = self._tm_page_option_display_segments(page, **bound_kwargs)
+        self.tm_page_combo.setItemData(
+            index, segments, self.TM_PAGE_DISPLAY_ROLE
+        )
+        self._tm_page_combo_apply_item_colors(index, page)
         if hasattr(self, "_append_log") and (
             getattr(self, "_debug_mode", False)
             or (
                 hasattr(self, "_is_debug_mode_enabled")
                 and self._is_debug_mode_enabled()
             )
-        ):
+        ) and isinstance(page, dict):
             liveness = get_page_liveness(page)
             page_url = (page.get("url") or "-").strip() or "-"
             self._append_log(
@@ -236,8 +334,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                 f"client_id={(page.get('client_id') or '-').strip() or '-'} "
                 f"url={page_url} "
                 f"liveness={liveness} "
-                f"online_for_ui={str(is_online).lower()} "
-                f"color={color}",
+                f"segment_count={len(segments)}",
                 echo=False,
             )
 
@@ -246,35 +343,18 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
         if combo is None:
             return
         page = None
-        if hasattr(self, "_get_selected_tm_page_from_combo"):
-            page = self._get_selected_tm_page_from_combo()
-        is_online = (
-            self._page_is_online_for_ui(page) if isinstance(page, dict) else False
-        )
-        color = (
-            self.TM_PAGE_COMBO_ONLINE_COLOR
-            if is_online
-            else self.TM_PAGE_COMBO_OFFLINE_COLOR
-        )
-        combo.setStyleSheet(
-            f"""
-            QComboBox#TmPageCombo {{
-                color: {color};
-            }}
-            QComboBox#TmPageCombo QAbstractItemView {{
-                background: #ffffff;
-                selection-background-color: #2563eb;
-                selection-color: #ffffff;
-                outline: none;
-            }}
-            """
-        )
+        if combo.currentIndex() >= 0 and hasattr(
+            self, "_tm_page_combo_page_from_index"
+        ):
+            page = self._tm_page_combo_page_from_index(combo.currentIndex())
+        line_color = self._tm_page_combo_color_for_page(page)
+        self._apply_tm_page_selector_combo_stylesheet(line_color=line_color)
 
     def _tm_page_combo_tooltip(self, item):
         self._maybe_log_conversation_id_mismatch(item)
 
         full_url = self._page_full_url(item) or "-"
-        chatgpt_id = self._page_chatgpt_conversation_id(item) or "-"
+        chatgpt_id = (item.get("conversation_id") or "").strip() or "-"
         client_id = (item.get("client_id") or "-").strip() or "-"
         page_instance_id = (item.get("page_instance_id") or "-").strip() or "-"
         type_text = self._page_type_text(item)
@@ -305,26 +385,42 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
             f"reason_code：{blocked or '-'}"
         )
 
-    def _tm_page_combo_sort_rank(self, profile):
-        if not isinstance(profile, dict):
-            return 0
-        if profile.get("send_now_available") and profile.get("conversation_syncable"):
-            return 4
-        if profile.get("conversation_syncable"):
-            return 3
-        if profile.get("online"):
-            return 2
-        if profile.get("stale"):
-            return 1
-        return 0
+    def _log_tm_page_list_sort(
+        self,
+        pages_before,
+        pages_after,
+        *,
+        bound_page_id="-",
+        selected_page_id="-",
+        context="refresh",
+    ):
+        if not hasattr(self, "_append_log"):
+            return
+        self._append_log(
+            "[PAGE_SELECTOR][SORT] "
+            f"context={context} "
+            f"before_ids={page_display_ids_for_log(pages_before)} "
+            f"after_ids={page_display_ids_for_log(pages_after)} "
+            f"bound_page_id={bound_page_id or '-'} "
+            f"selected_page_id={selected_page_id or '-'}",
+            echo=False,
+        )
 
-    def _tm_page_combo_sort_key(self, item):
-        profile = self._tm_client_sync_profile(item)
-        state_rank = self._tm_page_combo_sort_rank(profile)
-        page_type = (item.get("page_type") or "").strip()
-        conv_rank = 1 if page_type == "conversation" else 0
-        last_seen = float(item.get("last_seen") or 0)
-        return (state_rank, conv_rank, last_seen)
+    def _resolve_page_list_sort_log_ids(self, session=None):
+        bound_page_id = "-"
+        selected_page_id = "-"
+        if hasattr(self, "_current_bound_page_no_text"):
+            bound_text = self._current_bound_page_no_text(session=session)
+            if bound_text and bound_text != "-":
+                bound_page_id = bound_text
+        selected_page = None
+        if hasattr(self, "_get_tm_page_combo_selection"):
+            selected_page = self._get_tm_page_combo_selection()
+        if isinstance(selected_page, dict) and hasattr(self, "_tm_page_no_text"):
+            selected_text = self._tm_page_no_text(selected_page)
+            if selected_text and selected_text != "-":
+                selected_page_id = selected_text
+        return bound_page_id, selected_page_id
 
     def _tm_page_list_empty_hint_text(self):
         status = getattr(self._bridge_ui, "last_bridge_status", None) or {}
@@ -483,10 +579,22 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                 echo=False,
             )
         current_client_id = str(
-            full_status.get("tampermonkey_client_id") or ""
+            read_snapshot_identity(full_status, "active")["client_id"] or ""
         ).strip()
 
-        pages.sort(key=self._tm_page_combo_sort_key, reverse=True)
+        session = self._current_session() if hasattr(self, "_current_session") else None
+        bound_page_id, selected_page_id = self._resolve_page_list_sort_log_ids(
+            session=session
+        )
+        pages_before_sort = list(pages)
+        pages = sort_pages_by_display_id(pages)
+        self._log_tm_page_list_sort(
+            pages_before_sort,
+            pages,
+            bound_page_id=bound_page_id,
+            selected_page_id=selected_page_id,
+            context="refresh_tm_page_selector",
+        )
         if hasattr(self, "tm_page_combo") and self.tm_page_combo.count() > 0:
             for item in pages:
                 client_id = (item.get("client_id") or "").strip()
@@ -553,7 +661,15 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                 else self._tm_page_combo_tooltip(item)
             )
             self.tm_page_combo.setItemData(idx, tooltip, Qt.ToolTipRole)
-            self._tm_page_combo_apply_item_colors(idx, item)
+            self._tm_page_combo_apply_item_display(
+                idx,
+                item,
+                bound_client_id=bound_client_id,
+                current_client_id=current_client_id,
+                bound_page_instance_id=bound_page_instance_id,
+                bound_conversation_id=bound_conversation_id,
+                resolved_bound_client_id=resolved_bound_client_id,
+            )
             if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
                 self._append_log(
                     "[TM_SELECTOR][ITEM] "
@@ -571,13 +687,10 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
                     echo=False,
                 )
 
-        session = self._current_session() if hasattr(self, "_current_session") else None
         restore_index = self._pick_tm_page_selector_restore_index(pages, session=session)
         try:
             if restore_index >= 0:
                 self.tm_page_combo.setCurrentIndex(restore_index)
-            elif self.tm_page_combo.count() > 0:
-                self.tm_page_combo.setCurrentIndex(0)
             else:
                 self.tm_page_combo.setCurrentIndex(-1)
         finally:
@@ -585,13 +698,24 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
             self.tm_page_combo.blockSignals(False)
             self.tm_page_combo.setUpdatesEnabled(True)
 
+        restored_page_id = "-"
+        if restore_index >= 0 and hasattr(self, "_tm_page_combo_page_from_index"):
+            restored_page = self._tm_page_combo_page_from_index(restore_index)
+            if isinstance(restored_page, dict) and hasattr(self, "_tm_page_no_text"):
+                restored_text = self._tm_page_no_text(restored_page)
+                if restored_text and restored_text != "-":
+                    restored_page_id = restored_text
         self._append_log(
             "[PAGE_SELECTOR][AUTO_REFRESH] "
             f"restore_index={restore_index} "
+            f"reason={'matched_current_page' if restore_index >= 0 else 'no_matching_current_page_no_auto_first'} "
+            f"restored_page_id={restored_page_id} "
             f"manual_client_id={manual_client_id or '-'} "
             f"session_bound={session_bound or '-'} "
             f"resolved_bound_client_id={resolved_bound_client_id or '-'} "
             f"bound_conversation_id={bound_conversation_id or '-'} "
+            f"bound_page_id={bound_page_id} "
+            f"selected_page_id={selected_page_id} "
             f"page_count={self.tm_page_combo.count()} "
             f"reason={'matched' if restore_index >= 0 else 'no_matching_current_page'}",
             echo=False,

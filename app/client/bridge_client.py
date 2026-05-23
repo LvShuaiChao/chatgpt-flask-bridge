@@ -3,7 +3,7 @@ ChatGPT Page Bridge 外部 API 客户端。
 
 用法::
 
-    from bridge_client import BridgeClient
+    from app.client.bridge_client import BridgeClient
 
     client = BridgeClient()  # 默认 http://127.0.0.1:5000
     reply = client.ask("你好，请介绍一下你自己")
@@ -27,9 +27,8 @@ import requests
 
 DEFAULT_CLIENT_NAME = "bridge_client"
 DEFAULT_BASE_URL = "http://127.0.0.1:5000"
-RUNTIME_SERVER_URL_FILE = (
-    Path(__file__).resolve().parent / "runtime" / "server_url.txt"
-)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_SERVER_URL_FILE = _PROJECT_ROOT / "runtime" / "server_url.txt"
 
 HEALTH_ENDPOINTS = (
     "/api/v1/status",
@@ -68,7 +67,7 @@ def format_connection_help(base_url: str) -> str:
         f"无法访问 {status_url}\n"
         "请确认 GUI 已启动；默认桥接地址为 http://127.0.0.1:5000/api/bridge（可在 GUI「详情」查看）。\n"
         "若 GUI 自动切换到了备用端口（如 8765），请把客户端地址改为该端口，例如：\n"
-        "  python bridge_client.py --url http://127.0.0.1:8765\n"
+        "  python -m app.client.bridge_client --url http://127.0.0.1:8765\n"
         "或设置环境变量 CHATGPT_PAGE_BRIDGE_URL。"
         f"{runtime_hint}"
     )
@@ -1058,7 +1057,7 @@ def _pause_before_exit(enabled: bool) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """命令行入口。也可直接运行本文件或 `python bridge_client.py`。"""
+    """命令行入口：`python -m app.client.bridge_client`。"""
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
     pause_on_exit = not args.no_pause

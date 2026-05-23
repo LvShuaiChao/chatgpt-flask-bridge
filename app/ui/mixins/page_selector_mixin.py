@@ -31,7 +31,7 @@ class PageSelectorMixin:
 
         url = (page.get("url") or "").strip()
 
-        url_conversation_id = self._extract_chatgpt_conversation_id_from_url(url)
+        url_conversation_id = parse_conversation_id(url) or ''
         field_conversation_id = str(page.get("conversation_id") or "").strip()
 
         if url_conversation_id:
@@ -220,21 +220,37 @@ class PageSelectorMixin:
         return self._find_tm_client_by_client_id(client_id, status=status)
 
     def _set_page_combo_selection(self, item, *, source=""):
-        """同步下拉框选中项（状态仅保存在 combo.currentData）。"""
+        """同步下拉框选中项，并记录用户最后手动选择的页面身份。"""
         if not isinstance(item, dict):
             return self._clear_page_combo_selection(source=source or "invalid_item")
         normalized = self._normalize_tm_page_for_binding(item)
-        client_id = (normalized.get("client_id") or "").strip()
-        page_instance_id = (normalized.get("page_instance_id") or "").strip()
+        client_id = (normalized.get("client_id") or item.get("client_id") or "").strip()
+        page_instance_id = (
+            normalized.get("page_instance_id")
+            or item.get("page_instance_id")
+            or ""
+        ).strip()
+        conversation_id = (
+            normalized.get("conversation_id")
+            or item.get("conversation_id")
+            or ""
+        ).strip()
+        if not conversation_id and hasattr(self, "_client_conversation_id"):
+            conversation_id = (self._client_conversation_id(item) or "").strip()
+        self._manual_current_tm_client_id = client_id
+        self._manual_current_tm_page_instance_id = page_instance_id
+        self._manual_current_tm_conversation_id = conversation_id
+        self._manual_current_tm_page = dict(item)
         if hasattr(self, "_append_log"):
             self._append_log(
                 "[PAGE_SELECTOR][SELECTION_SET] "
                 f"source={source or '-'} "
                 f"client_id={client_id or '-'} "
-                f"page_instance_id={page_instance_id or '-'}",
+                f"page_instance_id={page_instance_id or '-'} "
+                f"conversation_id={conversation_id or '-'}",
                 echo=False,
             )
-        return bool(client_id or page_instance_id)
+        return bool(client_id or page_instance_id or conversation_id)
 
     def _clear_page_combo_selection(self, *, source=""):
         combo = getattr(self, "tm_page_combo", None) or getattr(
@@ -244,6 +260,10 @@ class PageSelectorMixin:
             combo.blockSignals(True)
             combo.setCurrentIndex(-1)
             combo.blockSignals(False)
+        self._manual_current_tm_client_id = ""
+        self._manual_current_tm_page_instance_id = ""
+        self._manual_current_tm_conversation_id = ""
+        self._manual_current_tm_page = None
         if source and hasattr(self, "_append_log"):
             self._append_log(
                 f"[PAGE_SELECTOR][SELECTION_CLEAR] source={source}",

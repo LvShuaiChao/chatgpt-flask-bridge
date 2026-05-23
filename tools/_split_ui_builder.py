@@ -209,7 +209,7 @@ from PyQt5.QtCore import Qt"""
 IMPORTS_PAGE_SELECTOR = """import time
 import traceback
 
-import server
+import app.server
 from app.models import normalize_remote_chatgpt
 from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
 from app.ui.mixins.tm_page_selector_format_mixin import TmPageSelectorFormatMixin
@@ -267,7 +267,7 @@ from PyQt5.QtWidgets import (
 
 IMPORTS_SETTINGS = """import os
 
-import server
+import app.server
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,

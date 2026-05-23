@@ -234,7 +234,7 @@ import traceback
 import uuid
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from log_utils import append_log
+from app.utils.log_utils import append_log
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import WSGIRequestHandler, make_server
 

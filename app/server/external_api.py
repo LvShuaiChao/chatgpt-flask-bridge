@@ -46,7 +46,7 @@ def _new_external_request_id():
 def _external_request_status(req):
     if not isinstance(req, dict):
         return ""
-    return (req.get("request_status") or req.get("status") or "").strip()
+    return (req.get("request_status") or "").strip()
 
 
 def _set_external_request_status(req, status):
@@ -166,7 +166,7 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
         session_id = req.get("session_id") or ""
         if event == "assistant_reply":
             text = (
-                payload.get("text") or payload.get("content") or ""
+                payload.get("content") or ""
             ).strip()
             if not text:
                 _log(
@@ -265,7 +265,7 @@ def count_user_turns(session):
     for message in messages:
         if isinstance(message, dict):
             role = message.get("role", "")
-            text = message.get("text") or message.get("content") or ""
+            text = message.get("content") or ""
         else:
             role = getattr(message, "role", "")
             text = getattr(message, "text", None)
@@ -503,7 +503,7 @@ def _external_create_chat_send(body):
 
     gui_payload = {
         "session_id": session_id,
-        "text": text,
+        "content": text,
         "auto_create_session": auto_create_session,
         "auto_open_home": auto_open_home,
         "new_session": new_session,

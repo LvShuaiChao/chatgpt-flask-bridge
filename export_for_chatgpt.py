@@ -2,10 +2,11 @@
 将项目源码与配置打成文本文件，便于整段粘贴到 ChatGPT。
 
 - **全量扫描**（唯一模式）：遍历项目根下允许的扩展名，跳过无关目录；统一调用 ``export_should_skip_relative_path``。
-- **输出路径**：固定为仓库根目录 ``0_merged_for_chatgpt.txt``（超出 ``MAX_TOKENS_PER_OUTPUT_FILE`` 则按 token 拆分为 ``*_partNN.txt``）；默认同轮次为**每个**写出的 txt 各打一个同名 ``.zip``（单文件则仅 ``0_merged_for_chatgpt.zip``，多分片则 ``*_partNN.zip`` 各一个，DEFLATE）；``--no-export-zip`` 可关闭。
+- **主输出**：仓库根目录 ``0_merged_for_chatgpt.txt`` / ``0_merged_for_chatgpt.zip``（超出 ``MAX_TOKENS_PER_OUTPUT_FILE`` 则拆分为 ``*_partNN.txt`` 及同名 zip）；``--no-export-zip`` 可关闭 zip。
+- **辅助输出**（``exports/for_chatgpt/``）：统计说明、日志副本、增量清单 ``.export_for_chatgpt_mtimes.json``，不占用根目录。
 - **循环**：默认每隔 ``LOOP_EXPORT_INTERVAL_SEC`` 秒检查一次；进程启动后**会先做一次全量合并写盘**，之后**仅当**候选文件相对上次导出的 mtime 清单有变化时才再次合并（Ctrl+C 结束）。``--loop-always-export`` 恢复「每轮必导出」。``--once`` 只跑一轮。
 - 常用开关：``--incremental``（本会话**首轮仍全量合并**，之后才按 mtime 仅合并变更文件）、``--include-runtime-state``、``--include-logs``、``--include-claude``。
-- 日志（仓库根 ``log.txt``、``logs/*.log`` 等）默认**不**混入源码合并包，单独写入 ``0_export_logs_for_chatgpt.txt``（过大时仅导出末尾一段）。
+- 日志（仓库根 ``log.txt``、``runtime/logs/`` 等）默认**不**混入源码合并包，单独写入 ``exports/for_chatgpt/0_export_logs_for_chatgpt.txt``（过大时仅导出末尾一段）。
 - 默认缩小合并包（省略 ``runtime/`` 会话状态、``.claude/``、本脚本等）：``--include-runtime-state``、``--include-claude``、``--include-export-script`` 可逐项恢复。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
@@ -88,13 +89,13 @@ def _scan_suspicious_encoding(
             out.append({"path": rel_posix, "line": idx, "sample": line[:240]})
 
 # =========================
-# 项目根：本仓库为油猴脚本 + Python 联动（server.py / GUI.py 与脚本同目录）
+# 项目根：本仓库为油猴脚本 + Python 联动（gui.py / app/ 与脚本同目录）
 # =========================
 _SCRIPT_HOME = Path(__file__).resolve().parent
 
 
 def _detect_project_root(script_home: Path) -> Path:
-    markers = ("server.py", "gui.py", "GUI.py", "client.user.js")
+    markers = ("gui.py", "GUI.py", "client.user.js", "app/server/__init__.py")
     if any((script_home / name).is_file() for name in markers):
         return script_home
     return script_home.parent
@@ -103,14 +104,24 @@ def _detect_project_root(script_home: Path) -> Path:
 PROJECT_ROOT = _detect_project_root(_SCRIPT_HOME)
 
 # =========================
-# 默认输出：固定在项目根目录
-# 重要约束：未经用户明确确认，不允许修改导出路径相关逻辑（DEFAULT_OUTPUT / run_export 输出位置）。
+# 主合并包：仓库根目录；其余中间文件：exports/for_chatgpt/
 # =========================
-DEFAULT_OUTPUT = PROJECT_ROOT / "0_merged_for_chatgpt.txt"
-# 与 DEFAULT_OUTPUT 同 stem：单文件导出时对应 ``0_merged_for_chatgpt.zip``；分片时每个 part 另有同名 zip。
+EXPORT_REL_DIR = Path("exports") / "for_chatgpt"
+MERGED_BASENAME = "0_merged_for_chatgpt.txt"
+
+
+def export_dir_for_project(project_root: Path) -> Path:
+    return project_root.resolve() / EXPORT_REL_DIR
+
+
+def export_metadata_path_for_output(project_root: Path, output_path: Path) -> Path:
+    return export_dir_for_project(project_root) / f"{output_path.stem}_export_metadata.txt"
+
+
+EXPORT_DIR = export_dir_for_project(PROJECT_ROOT)
+DEFAULT_OUTPUT = PROJECT_ROOT / MERGED_BASENAME
 DEFAULT_ZIP_OUTPUT = DEFAULT_OUTPUT.with_suffix(".zip")
-# 日志单独导出，不混入源码合并包
-DEFAULT_LOG_OUTPUT = PROJECT_ROOT / "0_export_logs_for_chatgpt.txt"
+DEFAULT_LOG_OUTPUT = EXPORT_DIR / "0_export_logs_for_chatgpt.txt"
 
 # 循环导出：间隔秒数（写死，便于双击运行无需参数）
 LOOP_EXPORT_INTERVAL_SEC = 10.0
@@ -138,6 +149,7 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         ".venv",
         "venv",
         "runtime",
+        "exports",
     }
 )
 
@@ -396,7 +408,6 @@ _STDLIB_TOP: frozenset[str] | None = None
 # 本仓库主要源码（用于文档/说明；实际收录以排除规则 + 后缀为准）
 CORE_EXPORT_ROOT_FILES: frozenset[str] = frozenset(
     {
-        "server.py",
         "gui.py",
         "client.user.js",
         "requirements.txt",
@@ -1027,35 +1038,57 @@ def _unlink_export_artifact(path: Path) -> bool:
 
 
 def _iter_export_artifact_paths(project_root: Path, output_path: Path) -> list[Path]:
-    """枚举可能存在的合并导出 txt / zip（主文件、分片及历史目录）。"""
+    """枚举可能存在的合并导出 txt / zip（根目录主包 + exports/for_chatgpt 辅助文件）。"""
     project_root = project_root.resolve()
     output_path = output_path.resolve()
     stem = output_path.stem
     suffix = output_path.suffix
-    patterns = (
+    root_patterns = (
         f"{stem}{suffix}",
         f"{stem}_part*{suffix}",
-        f"{stem}_export_metadata.txt",
         f"{stem}.zip",
         f"{stem}_part*.zip",
-        "0_merged_for_chatgpt.txt",
-        "0_merged_for_chatgpt_part*.txt",
-        "0_merged_for_chatgpt.zip",
-        "0_merged_for_chatgpt_part*.zip",
     )
-    dirs: list[Path] = []
-    for d in (output_path.parent, project_root, project_root / "project_config" / "exports"):
+    aux_patterns = (
+        f"{stem}_export_metadata.txt",
+        "0_export_logs_for_chatgpt.txt",
+        ".export_for_chatgpt_mtimes.json",
+        # 旧版曾把主包也写在 exports/for_chatgpt/
+        f"{stem}{suffix}",
+        f"{stem}_part*{suffix}",
+        f"{stem}.zip",
+        f"{stem}_part*.zip",
+    )
+    root_dirs: list[Path] = []
+    for d in (
+        output_path.parent,
+        project_root,
+        project_root / "project_config" / "exports",
+        project_root / "docs" / "_exports",
+    ):
         try:
             dr = d.resolve()
         except OSError:
             continue
-        if dr not in dirs and dr.is_dir():
-            dirs.append(dr)
+        if dr not in root_dirs and dr.is_dir():
+            root_dirs.append(dr)
+    aux_dirs = [export_dir_for_project(project_root)]
 
     found: list[Path] = []
     seen: set[Path] = set()
-    for directory in dirs:
-        for pattern in patterns:
+    for directory in root_dirs:
+        for pattern in root_patterns:
+            for p in directory.glob(pattern):
+                try:
+                    key = p.resolve()
+                except OSError:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(p)
+    for directory in aux_dirs:
+        for pattern in aux_patterns:
             for p in directory.glob(pattern):
                 try:
                     key = p.resolve()
@@ -1107,15 +1140,17 @@ def export_paths_to_exclude_from_scan(
     project_root = project_root.resolve()
     out: set[Path] = {output_path.resolve()}
     try:
-        out.add(
-            output_path.with_name(f"{output_path.stem}_export_metadata.txt").resolve()
-        )
+        out.add(export_metadata_path_for_output(project_root, output_path).resolve())
     except OSError:
         logger.warning(
-            "[export] resolve export metadata sibling failed output_path=%s",
+            "[export] resolve export metadata path failed output_path=%s",
             output_path,
             exc_info=True,
         )
+    try:
+        out.add(DEFAULT_LOG_OUTPUT.resolve())
+    except OSError:
+        logger.warning("[export] resolve log export path failed", exc_info=True)
     for p in _split_export_part_paths(output_path):
         if p.is_file():
             out.add(p.resolve())
@@ -1161,7 +1196,7 @@ def export_paths_to_exclude_from_scan(
 
 
 def _export_manifest_path(project_root: Path) -> Path:
-    return project_root / ".export_for_chatgpt_mtimes.json"
+    return export_dir_for_project(project_root) / ".export_for_chatgpt_mtimes.json"
 
 
 def _load_export_manifest(project_root: Path) -> dict[str, float]:
@@ -1180,7 +1215,7 @@ def _load_export_manifest(project_root: Path) -> dict[str, float]:
 def _save_export_manifest(project_root: Path, mtime_by_rel: dict[str, float]) -> None:
     p = _export_manifest_path(project_root)
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
+        export_dir_for_project(project_root).mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(mtime_by_rel, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as e:
         print(f"[警告] 无法写入增量清单 {p}: {e}", file=sys.stderr)
@@ -2070,10 +2105,12 @@ def export_bundle(
     )
     export_metadata_path: Path | None = None
     if stats_tail.strip():
-        export_metadata_path = output_path.with_name(f"{output_path.stem}_export_metadata.txt")
+        export_metadata_path = export_metadata_path_for_output(project_root, output_path)
+        export_metadata_path.parent.mkdir(parents=True, exist_ok=True)
         export_metadata_path.write_text(stats_tail.strip() + "\n", encoding="utf-8")
         print(
-            f"[导出] 统计与说明已单独写入: {export_metadata_path.name}（未并入 FILE 源码块）",
+            f"[导出] 统计与说明已写入 {export_metadata_path.relative_to(project_root)}"
+            f"（未并入 FILE 源码块）",
             flush=True,
         )
     write_sec = time.perf_counter() - t_write0
@@ -2327,7 +2364,8 @@ def main() -> None:
         description=(
             "将项目源码与配置合并为文本：默认按固定间隔循环检查文件变更，"
             "有变更时才覆盖导出；"
-            f"输出固定为 {DEFAULT_OUTPUT.name}；"
+            f"主输出固定为仓库根 {DEFAULT_OUTPUT.name} / {DEFAULT_ZIP_OUTPUT.name}；"
+            f"辅助文件在 {EXPORT_REL_DIR.as_posix()}/；"
             f"超过 {MAX_TOKENS_PER_OUTPUT_FILE:,} tokens（{format_tokens_wan(MAX_TOKENS_PER_OUTPUT_FILE)}）自动按 token 拆片。"
         )
     )
@@ -2374,7 +2412,7 @@ def main() -> None:
         action="store_true",
         help=(
             "本会话首轮导出仍为全量合并；从第二轮起仅合并相对上次 mtime 有变化的文件 "
-            "（清单：.export_for_chatgpt_mtimes.json）"
+            f"（清单：{EXPORT_REL_DIR.as_posix()}/.export_for_chatgpt_mtimes.json）"
         ),
     )
     parser.add_argument(
@@ -2433,6 +2471,7 @@ def main() -> None:
     SLIM_SKIP_DATA_ACCOUNTS = not bool(args.include_data_accounts)
     SLIM_SKIP_EXPORT_SCRIPT = not bool(args.include_export_script)
 
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = DEFAULT_OUTPUT.resolve()
     if _is_windows_reserved_output_basename(output_path):
         print(

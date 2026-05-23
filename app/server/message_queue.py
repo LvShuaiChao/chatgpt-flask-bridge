@@ -38,8 +38,7 @@ from app.server.runtime_state import (
 )
 from app.server.tm_page_registry import (
     _bridge_runtime_patch_for_body,
-    _ensure_poll_top_level_page_display_id,
-    _page_registry_key,
+    _ensure_poll_top_level_page_no,
     _registry_entry_for_client,
     _snapshot_clients,
     _touch_tampermonkey,
@@ -94,7 +93,6 @@ def _sync_message_status_fields(msg, status):
     if not isinstance(msg, dict):
         return
     msg["message_status"] = status
-    msg.pop("status", None)
 
 
 def _set_message_status(msg, status, *, error_detail=None):
@@ -135,7 +133,7 @@ def _build_bridge_status_summary(pages):
                     "url",
                     "conversation_id",
                     "page_type",
-                    "page_display_id",
+                    "page_no",
                 )
             }
     return {
@@ -174,10 +172,11 @@ def push_message(data):
     if not content:
         raise ValueError("content 不能为空")
     client_id = read_bridge_client_id(payload) or None
-    page_url = page_url_from(payload) or None
+    url = page_url_from(payload) or None
     page_instance_id = read_bridge_page_instance_id(payload) or None
     conversation_id = (payload.get("conversation_id") or "").strip() or None
     bootstrap_conversation = bool(payload.get("bootstrap_conversation"))
+    target_page_id = (payload.get("target_page_id") or "").strip() or None
     bind_request_id = (payload.get("bind_request_id") or "").strip() or None
     target_source = (payload.get("target_source") or "").strip() or None
     trace_id = (payload.get("trace_id") or "").strip() or None
@@ -189,11 +188,12 @@ def push_message(data):
         "turn_id": turn_id,
         "trace_id": trace_id,
         "content": content,
-        "url": page_url or "",
+        "url": url or "",
         "client_id": client_id,
         "page_instance_id": page_instance_id,
         "conversation_id": conversation_id,
         "bootstrap_conversation": bootstrap_conversation,
+        "target_page_id": target_page_id,
         "bind_request_id": bind_request_id,
         "target_source": target_source,
         "message_status": "queued",
@@ -221,7 +221,7 @@ def push_message(data):
         queue_after = len(st._outbound_queue)
     preview = content if len(content) <= 80 else content[:80] + "..."
     client_hint = client_id or "-"
-    page_hint = page_url or "-"
+    page_hint = url or "-"
     if len(page_hint) > 60:
         page_hint = page_hint[:60] + "..."
     _log(
@@ -230,7 +230,7 @@ def push_message(data):
         f"conversation_id={conversation_id or '-'} url={page_hint} content_len={len(content)} "
         f"queue_before={queue_before} queue_after={queue_after} "
         f"session_id={session_id or '-'} turn_id={turn_id or '-'} "
-        f"page={page_hint} preview={preview}"
+        f"url={page_hint} preview={preview}"
     )
     log_server_to_tm_queue_full(msg, action="queue_chat", event="chat")
     _notify_status()
@@ -502,12 +502,12 @@ def _get_waiting_message_for_client(client_id):
     )
 
 
-def _message_target_client_id(msg):
+def _message_message_client_id(msg):
     return read_bridge_client_id(msg)
 
 
 def _message_matches_client(msg, client_id):
-    target = _message_target_client_id(msg)
+    target = _message_message_client_id(msg)
     if target and target != client_id:
         return False
     return True
@@ -516,9 +516,9 @@ def _message_matches_client(msg, client_id):
 def _sync_conversation_strict_match(msg, body):
     """sync_conversation 严格匹配；返回 (matched, mismatch_reason)。"""
     client_id = (body.get("client_id") or "").strip()
-    target_client_id = _message_target_client_id(msg)
-    target_page_instance_id = read_bridge_page_instance_id(msg)
-    target_conversation_id = (msg.get("conversation_id") or "").strip()
+    message_client_id = _message_message_client_id(msg)
+    message_page_instance_id = read_bridge_page_instance_id(msg)
+    message_conversation_id = (msg.get("conversation_id") or "").strip()
     body_page_instance_id = (body.get("page_instance_id") or "").strip()
     body_conversation_id = (body.get("conversation_id") or "").strip()
     body_page_type = (body.get("page_type") or "").strip()
@@ -529,13 +529,13 @@ def _sync_conversation_strict_match(msg, body):
         return False, "missing_body_conversation_id"
     if body_page_type and body_page_type != "conversation":
         return False, "page_type_not_conversation"
-    if not target_client_id or not target_page_instance_id or not target_conversation_id:
+    if not message_client_id or not message_page_instance_id or not message_conversation_id:
         return False, "missing_target_identity"
-    if target_client_id != client_id:
+    if message_client_id != client_id:
         return False, "client_id_mismatch"
-    if target_page_instance_id != body_page_instance_id:
+    if message_page_instance_id != body_page_instance_id:
         return False, "page_instance_id_mismatch"
-    if target_conversation_id != body_conversation_id:
+    if message_conversation_id != body_conversation_id:
         return False, "conversation_id_mismatch"
     return True, ""
 
@@ -556,17 +556,17 @@ def _sync_conversation_fallback_match(msg, body):
     body_conversation_id = (body.get("conversation_id") or "").strip()
     if not body_conversation_id or body_conversation_id == "-":
         return False
-    target_conversation_id = (msg.get("conversation_id") or "").strip()
-    if not target_conversation_id:
+    message_conversation_id = (msg.get("conversation_id") or "").strip()
+    if not message_conversation_id:
         return False
-    return target_conversation_id == body_conversation_id
+    return message_conversation_id == body_conversation_id
 
 
 def _log_sync_conversation_no_match(pending, body, *, mismatch_reason=""):
     client_id = (body.get("client_id") or "").strip()
-    target_client_id = _message_target_client_id(pending)
-    target_page_instance_id = read_bridge_page_instance_id(pending)
-    target_conversation_id = (pending.get("conversation_id") or "").strip()
+    message_client_id = _message_message_client_id(pending)
+    message_page_instance_id = read_bridge_page_instance_id(pending)
+    message_conversation_id = (pending.get("conversation_id") or "").strip()
     body_page_instance_id = (body.get("page_instance_id") or "").strip()
     body_conversation_id = (body.get("conversation_id") or "").strip()
     body_page_type = (body.get("page_type") or "").strip()
@@ -574,9 +574,9 @@ def _log_sync_conversation_no_match(pending, body, *, mismatch_reason=""):
         _, mismatch_reason = _sync_conversation_strict_match(pending, body)
     _poll_log_rate_limited(
         "[BRIDGE][CONTROL][NO_MATCH] command=sync_conversation "
-        f"target_client_id={target_client_id or '-'} "
-        f"target_page_instance_id={target_page_instance_id or '-'} "
-        f"target_conversation_id={target_conversation_id or '-'} "
+        f"message_client_id={message_client_id or '-'} "
+        f"message_page_instance_id={message_page_instance_id or '-'} "
+        f"message_conversation_id={message_conversation_id or '-'} "
         f"body_client_id={client_id or '-'} "
         f"body_page_instance_id={body_page_instance_id or '-'} "
         f"body_conversation_id={body_conversation_id or '-'} "
@@ -595,9 +595,9 @@ def _targeted_control_matches(msg, body):
     if command not in STRICT_TARGET_CONTROL_COMMANDS:
         return False
 
-    target_client_id = _message_target_client_id(msg)
-    target_page_instance_id = read_bridge_page_instance_id(msg)
-    target_conversation_id = (msg.get("conversation_id") or "").strip()
+    message_client_id = _message_message_client_id(msg)
+    message_page_instance_id = read_bridge_page_instance_id(msg)
+    message_conversation_id = (msg.get("conversation_id") or "").strip()
     body_page_instance_id = (body.get("page_instance_id") or "").strip()
     body_conversation_id = (body.get("conversation_id") or "").strip()
 
@@ -617,10 +617,10 @@ def _targeted_control_matches(msg, body):
     if not _message_matches_client(msg, client_id):
         return False
 
-    if target_page_instance_id and target_page_instance_id != body_page_instance_id:
+    if message_page_instance_id and message_page_instance_id != body_page_instance_id:
         return False
 
-    if target_conversation_id and target_conversation_id != body_conversation_id:
+    if message_conversation_id and message_conversation_id != body_conversation_id:
         return False
 
     return True
@@ -630,6 +630,14 @@ def _message_matches_page(msg, body):
     client_id = (body.get("client_id") or "").strip()
     if not _message_matches_client(msg, client_id):
         return False
+
+    target_page_id = (msg.get("target_page_id") or "").strip()
+    if target_page_id:
+        body_page_id = (
+            str(body.get("page_display_id") or body.get("page_no") or "").strip()
+        )
+        if not body_page_id or body_page_id != target_page_id:
+            return False
 
     if msg.get("bootstrap_conversation"):
         page_type = (body.get("page_type") or "").strip()
@@ -702,8 +710,8 @@ def _message_matches_page(msg, body):
             f"client_id={client_id or '-'} "
             f"target_conv={target_conv or '-'} "
             f"body_conv={body_conv or '-'} "
-            f"target_page={_normalize_page_url(page_url_from(msg)) or '-'} "
-            f"body_page={_normalize_page_url(page_url_from(body)) or '-'}"
+            f"target_url={_normalize_page_url(page_url_from(msg)) or '-'} "
+            f"body_url={_normalize_page_url(page_url_from(body)) or '-'}"
         )
         return False
 
@@ -717,8 +725,8 @@ def _message_matches_page(msg, body):
                 f"client_id={client_id or '-'} "
                 f"target_conv={target_conv or '-'} "
                 f"body_conv={body_conv or '-'} "
-                f"target_page={target_page or '-'} "
-                f"body_page={body_page or '-'} "
+                f"target_url={target_page or '-'} "
+                f"body_url={body_page or '-'} "
                 f"strict_url_match=false"
             )
         else:
@@ -728,8 +736,8 @@ def _message_matches_page(msg, body):
                 f"client_id={client_id or '-'} "
                 f"target_conv={target_conv or '-'} "
                 f"body_conv={body_conv or '-'} "
-                f"target_page={target_page or '-'} "
-                f"body_page={body_page or '-'}"
+                f"target_url={target_page or '-'} "
+                f"body_url={body_page or '-'}"
             )
             return False
     return True
@@ -787,14 +795,14 @@ def _pop_control_command_for_client(body):
     # 1b) sync_conversation：同 conversation_id 兜底（仅 simple_online_policy）
     msg = _rotate(lambda m: _sync_conversation_fallback_match(m, body))
     if msg:
-        target_client_id = _message_target_client_id(msg)
-        target_page_instance_id = read_bridge_page_instance_id(msg)
+        message_client_id = _message_message_client_id(msg)
+        message_page_instance_id = read_bridge_page_instance_id(msg)
         _log(
             "[BRIDGE][CONTROL][CLAIM_FALLBACK_SAME_CONVERSATION] "
             f"command=sync_conversation "
             f"message_id={get_bridge_message_id(msg)[:8]}… "
-            f"old_target_client_id={target_client_id or '-'} "
-            f"old_target_page_instance_id={target_page_instance_id or '-'} "
+            f"old_message_client_id={message_client_id or '-'} "
+            f"old_message_page_instance_id={message_page_instance_id or '-'} "
             f"body_client_id={client_id or '-'} "
             f"body_page_instance_id={(body.get('page_instance_id') or '-')} "
             f"conversation_id={(body.get('conversation_id') or '-')}"
@@ -811,10 +819,10 @@ def _pop_control_command_for_client(body):
             continue
         _log_sync_conversation_no_match(pending, body)
         break
-    # 2) 定向 close_self（匹配 target_client_id）
+    # 2) 定向 close_self（匹配 message_client_id）
     msg = _rotate(
         lambda m: m.get("command") == "close_self"
-        and _message_target_client_id(m)
+        and _message_message_client_id(m)
         and _message_matches_client(m, client_id)
     )
     if msg:
@@ -850,16 +858,17 @@ def _claim_message(msg, client_id_or_body):
     msg["delivered_at"] = now
     msg["lease_until"] = now + LEASE_SEC
     if page_instance_id:
+        msg["delivered_client_id"] = client_id
         msg["delivered_page_instance_id"] = page_instance_id
-        msg["delivered_page_key"] = _page_registry_key(client_id, page_instance_id)
+        msg["delivered_conversation_id"] = (body.get("conversation_id") or "").strip()
     if conversation_id:
         msg["delivered_conversation_id"] = conversation_id
     ext._update_external_status_for_bridge(get_bridge_message_id(msg), "sent")
     entry = _registry_entry_for_client(client_id, page_instance_id)
     if entry:
-        page_key = _page_registry_key(client_id, page_instance_id) or client_id
+        registry_key = f"{client_id}|{page_instance_id}" if client_id and page_instance_id else (client_id or '')
         with st._state_lock:
-            live = st._tampermonkey_pages.get(page_key)
+            live = st._tampermonkey_pages.get(registry_key)
             if isinstance(live, dict):
                 live["last_claim_at"] = now
     _log(
@@ -868,9 +877,9 @@ def _claim_message(msg, client_id_or_body):
     )
 
 
-def _poll_identity_changed(client_id, page_type, conversation_id, page_url=""):
+def _poll_identity_changed(client_id, page_type, conversation_id, url=""):
     prev = st._last_poll_identity.get(client_id)
-    norm_url = _normalize_chatgpt_url_for_compare(page_url or "")
+    norm_url = _normalize_chatgpt_url_for_compare(url or "")
     current = (page_type or "", conversation_id or "", norm_url)
     if prev is None:
         st._last_poll_identity[client_id] = current
@@ -1004,6 +1013,8 @@ def _poll_response(msg, retry):
         )
         if msg.get("bootstrap_conversation"):
             resp["bootstrap_conversation"] = True
+        if msg.get("target_page_id"):
+            resp["target_page_id"] = msg.get("target_page_id")
     assert_no_legacy_fields(resp, owner="server._poll_response")
     return resp
 
@@ -1033,8 +1044,8 @@ def _poll_minimal_idle_response(body=None):
 
 
 def _finalize_poll_response(result, body):
-    """保证 poll 响应顶层含 page_display_id 并写 [TM_PAGE_DISPLAY_ID][POLL_RESPONSE] 日志。"""
-    return _ensure_poll_top_level_page_display_id(result, body)
+    """保证 poll 响应顶层含 page_no 并写 [TM_PAGE_DISPLAY_ID][POLL_RESPONSE] 日志。"""
+    return _ensure_poll_top_level_page_no(result, body)
 
 
 def _poll_no_message_reason(body, waiting=None):
@@ -1126,7 +1137,7 @@ def _log_poll_no_message(body, waiting=None):
         f"[BRIDGE][POLL][NO_MESSAGE] client_id={client_id} "
         f"conversation_id={conversation_id or '-'} page_type={page_type or '-'} "
         f"reason={reason} pending_total={pending_total} "
-        f"pending_for_page={pending_for_page} "
+        f"pending_for_url={pending_for_page} "
         f"pending_for_conversation={pending_for_conversation}"
     )
     if st._debug_mode:
@@ -1169,21 +1180,60 @@ def _handle_hello(body):
     _log(
         f"[TM][HELLO][REGISTER] client_id={client_id} "
         f"page_instance_id={page_instance_id or '-'} "
-        f"page_display_id={result.get('page_display_id') or '-'}"
+        f"page_no={result.get('page_no') or '-'}"
     )
     return result, True
 
 
 def _handle_poll(body):
-    client_id = (body.get("client_id") or "").strip()
+    import traceback
+
+    body = body if isinstance(body, dict) else {}
+    client_id = str(body.get("client_id") or "").strip()
+    page_instance_id = str(body.get("page_instance_id") or "").strip()
+    page_type = str(body.get("page_type") or "").strip()
+    conversation_id = str(body.get("conversation_id") or "").strip()
+    url = str(body.get("url") or "").strip()
+    _log(
+        "[BRIDGE][POLL][ENTER] "
+        f"client_id={client_id or '-'} "
+        f"page_instance_id={page_instance_id or '-'} "
+        f"conversation_id={conversation_id or '-'} "
+        f"url={url or '-'}"
+    )
+    try:
+        return _handle_poll_impl(
+            body,
+            client_id=client_id,
+            page_instance_id=page_instance_id,
+            page_type=page_type,
+            conversation_id=conversation_id,
+            url=url,
+        )
+    except Exception as exc:
+        _log(
+            "[BRIDGE][POLL][ERROR] "
+            f"error_type={type(exc).__name__} "
+            f"error={exc} "
+            f"traceback={traceback.format_exc()}"
+        )
+        return {"ok": False, "error": str(exc)}, False, False
+
+
+def _handle_poll_impl(
+    body,
+    *,
+    client_id,
+    page_instance_id,
+    page_type,
+    conversation_id,
+    url,
+):
     if not client_id:
         _poll_log_immediate("[BRIDGE][POLL] 拒绝：缺少 client_id")
         return {"ok": False, "error": "缺少 client_id"}, False, False
-    page_type = (body.get("page_type") or "").strip()
-    conversation_id = (body.get("conversation_id") or "").strip()
-    page_url = page_url_from(body)
     identity_changed = _poll_identity_changed(
-        client_id, page_type, conversation_id, page_url
+        client_id, page_type, conversation_id, url
     )
     _touch_tampermonkey(body, action="poll")
     if st._debug_mode:
@@ -1835,9 +1885,9 @@ def _handle_report(body):
         page_instance_id = (
             (body.get("page_instance_id") or payload.get("page_instance_id") or "").strip()
         )
-        page_key = _page_registry_key(client_id, page_instance_id)
+        registry_key = f"{client_id}|{page_instance_id}" if client_id and page_instance_id else (client_id or '')
         with st._state_lock:
-            old_entry = dict(st._tampermonkey_pages.get(page_key) or {})
+            old_entry = dict(st._tampermonkey_pages.get(registry_key) or {})
         old_url = page_url_from(old_entry)
         old_conv = (old_entry.get("conversation_id") or "").strip()
         merge_meta = dict(body)
@@ -1877,14 +1927,14 @@ def _handle_report(body):
         has_focus = "yes" if entry.get("has_focus") else "no"
         visible = (entry.get("visibility_state") or "-").strip() or "-"
         conversation_id = (entry.get("conversation_id") or "-").strip() or "-"
-        page_url = page_url_from(entry) or page_url_from(body) or "-"
+        url = page_url_from(entry) or page_url_from(body) or "-"
         _log(
             "[TM][FOCUS_STATE] "
             f"client_id={client_id or '-'} "
             f"conversation_id={conversation_id} "
             f"has_focus={has_focus} "
             f"visible={visible} "
-            f"url={page_url} "
+            f"url={url} "
             f"reason={reason}"
         )
         _notify_status()
@@ -1901,7 +1951,7 @@ def _handle_report(body):
         level = payload.get("level") or "info"
         message = (payload.get("message") or "").strip()
         extra = payload.get("extra") or {}
-        page_url = page_url_from(payload) or page_url_from(body) or ""
+        url = page_url_from(payload) or page_url_from(body) or ""
         log_client_id = body.get("client_id") or payload.get("client_id") or client_id
         if message.startswith("[TM]"):
             extra_text = _format_log_fields(extra)
@@ -1912,7 +1962,7 @@ def _handle_report(body):
         else:
             _log(
                 f"[TM][CLIENT_LOG][{level}] "
-                f"client_id={log_client_id} page={page_url} message={message} "
+                f"client_id={log_client_id} url={url} message={message} "
                 f"extra={extra}"
             )
         return {"ok": True}
@@ -2128,7 +2178,7 @@ def _handle_report(body):
             page_inst = (body.get("page_instance_id") or "").strip()
             page_key = _page_registry_key(client_id, page_inst) or client_id
             with st._state_lock:
-                client_entry = st._tampermonkey_pages.get(page_key)
+                client_entry = st._tampermonkey_pages.get(registry_key)
             if isinstance(client_entry, dict):
                 now = _now()
                 client_entry["is_responding"] = False
@@ -2193,7 +2243,7 @@ def _handle_report(body):
                 )
         elif event == "conversation_created":
             conv_id = (payload.get("conversation_id") or body.get("conversation_id") or "").strip()
-            page_url = page_url_from(payload) or page_url_from(body)
+            url = page_url_from(payload) or page_url_from(body)
             report_bind = (
                 payload.get("bind_request_id") or body.get("bind_request_id") or ""
             ).strip()
@@ -2207,11 +2257,11 @@ def _handle_report(body):
                 f"bind_request_id={report_bind or '-'} "
                 f"client_id={client_id} "
                 f"page_instance_id={(body.get('page_instance_id') or '-')[:16]} "
-                f"conversation_id={conv_id or '-'} url={page_url or '-'}"
+                f"conversation_id={conv_id or '-'} url={url or '-'}"
             )
             msg["conversation_id"] = conv_id or msg.get("conversation_id")
-            if page_url:
-                msg["url"] = page_url
+            if url:
+                msg["url"] = url
             _add_inbound(event, payload, **inbound_kw)
         elif event in (
             "open_url_success",
@@ -2334,9 +2384,9 @@ def _handle_assistant_reply(body):
                 f"message_id={message_id or '-'} error={exc}\n{traceback.format_exc()}"
             )
         _finalize_message(msg, "replied")
-        page_key = _page_registry_key(client_id, page_instance_id) or client_id
+        registry_key = f"{client_id}|{page_instance_id}" if client_id and page_instance_id else (client_id or '')
         with st._state_lock:
-            client_entry = st._tampermonkey_pages.get(page_key)
+            client_entry = st._tampermonkey_pages.get(registry_key)
         if isinstance(client_entry, dict):
             now = _now()
             client_entry["is_responding"] = False

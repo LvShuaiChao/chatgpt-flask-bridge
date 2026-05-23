@@ -28,7 +28,7 @@ JOB_STATUSES = frozenset({
 def job_status_from(job):
     if not isinstance(job, dict):
         return ""
-    return (job.get("job_status") or job.get("status") or "").strip()
+    return (job.get("job_status") or "").strip()
 
 
 def _migrate_job_status_inplace(job):
@@ -283,7 +283,7 @@ def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
 
     payload = {
         "content": prompt,
-        "raw_content": job.get("user_requirement") or prompt,
+        "content": job.get("user_requirement") or prompt,
         "job_id": job_id,
     }
     if isinstance(payload_extra, dict):
@@ -326,7 +326,7 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
     if not job:
         return False, "job not found"
 
-    if job.get("status") == "cancelled":
+    if job_status_from(job) == "cancelled":
         return False, "job cancelled"
 
     content = job.get("chatgpt_reply") or ""
@@ -467,7 +467,7 @@ def get_job_scheduler_snapshot(limit=20):
         "active_job": active,
         "jobs": jobs,
         "pending_chatgpt": sum(
-            1 for j in jobs if j.get("status") == "waiting_chatgpt_reply"
+            1 for j in jobs if job_status_from(j) == "waiting_chatgpt_reply"
         ),
     }
 

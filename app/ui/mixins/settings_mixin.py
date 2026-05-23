@@ -4,6 +4,7 @@ from app.server import (
     enqueue_control_command,
     get_bridge_status,
     get_message_state,
+    get_server_bridge_url,
     get_server_port,
     get_server_public_host,
     get_server_url,
@@ -24,7 +25,7 @@ from app.server import (
 import time
 import traceback
 
-from log_utils import append_log, set_log_runtime_options
+from app.utils.log_utils import append_log, set_log_runtime_options
 
 from app.constants import (
     DEFAULT_APP_SETTINGS,
@@ -315,3 +316,43 @@ class SettingsMixin:
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
+
+    def _update_service_settings_status(self):
+        label = getattr(self, "settings_service_status_label", None)
+        if label is None:
+            return
+        if is_server_running():
+            service_url = get_server_url() or "-"
+            bridge_url = get_server_bridge_url() or "-"
+            label.setText(
+                f"当前状态：运行中\n"
+                f"服务地址：{service_url}\n"
+                f"油猴填写：{bridge_url}"
+            )
+            return
+        server_ui = getattr(self, "_server_ui", None)
+        if server_ui is not None and getattr(server_ui, "start_failed", False):
+            message = getattr(server_ui, "start_error", "") or "未知错误"
+            label.setText(f"当前状态：启动失败\n{message}")
+            return
+        label.setText("当前状态：未启动")
+
+    def _on_check_tampermonkey(self):
+        if not is_server_running():
+            self._set_settings_hint("请先启动服务，再检查油猴连接。")
+            return
+        status = get_bridge_status()
+        self._apply_bridge_status(status)
+        if status.get("tampermonkey_online"):
+            self._set_settings_hint("油猴在线。")
+        elif status.get("tampermonkey_last_seen"):
+            self._set_settings_hint("油猴离线（曾连接过）。")
+        else:
+            self._set_settings_hint("油猴未连接。")
+
+    def _show_log_tab(self):
+        if not hasattr(self, "main_tabs") or not hasattr(self, "log_page"):
+            return
+        index = self.main_tabs.indexOf(self.log_page)
+        if index >= 0:
+            self.main_tabs.setCurrentIndex(index)

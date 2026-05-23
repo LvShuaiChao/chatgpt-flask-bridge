@@ -6,7 +6,7 @@ import pytest
 
 from app.ui.main_window_state import BridgeUiState
 from app.ui.mixins.bridge_mixin import BridgeMixin
-from app.utils.page_snapshot import PageRegistry
+from app.utils.page_status import PageRegistry
 
 
 class _EnqueueHost(BridgeMixin):

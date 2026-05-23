@@ -12,6 +12,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.ui.styles import (
+    BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME,
+    apply_bind_button_style,
+)
+
 
 class UiBuilderCoreMixin:
     def _make_hint_label(self, text):
@@ -134,7 +139,9 @@ class UiBuilderCoreMixin:
             "open_chatgpt", specs
         )
         self.bind_current_page_btn = self._create_tm_action_button_from_spec(
-            "bind_current", specs
+            "bind_current",
+            specs,
+            object_name=BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME,
         )
         self.sync_web_conversation_btn = self._create_tm_action_button_from_spec(
             "sync_web", specs, object_name="sync_web_conversation_btn"
@@ -145,13 +152,15 @@ class UiBuilderCoreMixin:
         self._apply_tm_action_button_roles()
 
     def _apply_tm_action_button_roles(self):
-        for btn in (
-            self.open_chatgpt_btn,
-            self.bind_current_page_btn,
-            self.sync_web_conversation_btn,
-        ):
-            btn.setObjectName("PrimaryButton")
-            btn.setEnabled(True)
+        if self.open_chatgpt_btn is not None:
+            self.open_chatgpt_btn.setObjectName("PrimaryButton")
+            self.open_chatgpt_btn.setEnabled(True)
+        if self.sync_web_conversation_btn is not None:
+            self.sync_web_conversation_btn.setObjectName("SuccessButton")
+            self.sync_web_conversation_btn.setEnabled(True)
+        apply_bind_button_style(self.bind_current_page_btn)
+        if self.bind_current_page_btn is not None:
+            self.bind_current_page_btn.setEnabled(True)
         for btn in (self.close_other_pages_btn,):
             btn.setObjectName("DangerButton")
             btn.setEnabled(True)
@@ -165,7 +174,6 @@ class UiBuilderCoreMixin:
         for btn in (
             self.open_chatgpt_btn,
             self.sync_web_conversation_btn,
-            self.close_other_pages_btn,
         ):
             btn.setFixedHeight(30)
             btn.setMinimumHeight(30)
@@ -173,6 +181,46 @@ class UiBuilderCoreMixin:
             row.addWidget(btn)
         row.addStretch()
         return row
+
+    def _build_debug_page(self):
+        """调试页：集中放置危险操作、测试操作、诊断操作。"""
+        self._ensure_tm_action_buttons()
+
+        page = QWidget()
+        page.setObjectName("DebugPage")
+
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        title = QLabel("调试工具")
+        title.setObjectName("SectionTitle")
+        outer.addWidget(title)
+
+        page_group, page_layout = self._make_group_vbox("页面调试")
+        page_layout.setSpacing(8)
+
+        hint = self._make_hint_label(
+            "这里放置调试、诊断、危险操作按钮。普通聊天主页不显示这些按钮，避免误操作。"
+        )
+        page_layout.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self.close_other_pages_btn.setObjectName("DangerButton")
+        self.close_other_pages_btn.setFixedHeight(30)
+        self.close_other_pages_btn.setMinimumHeight(30)
+        self.close_other_pages_btn.setMaximumHeight(30)
+        row.addWidget(self.close_other_pages_btn)
+        row.addStretch()
+
+        page_layout.addLayout(row)
+        outer.addWidget(page_group)
+
+        outer.addStretch()
+        return page
 
     def _on_main_tab_changed(self, index):
         if index < 0:
@@ -202,9 +250,13 @@ class UiBuilderCoreMixin:
         self.main_tabs.setObjectName("MainTabs")
 
         self.chat_page = self._build_chat_page()
+        self.settings_page = self._build_settings_page()
+        self.debug_page = self._build_debug_page()
         self.log_page = None
 
         self.main_tabs.addTab(self.chat_page, "聊天")
+        self.main_tabs.addTab(self.settings_page, "设置")
+        self.main_tabs.addTab(self.debug_page, "调试")
 
         root.addWidget(self.main_tabs, stretch=1)
 

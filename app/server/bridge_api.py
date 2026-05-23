@@ -18,7 +18,7 @@ from app.server.message_queue import (
 from app.server.tm_page_registry import (
     _apply_bridge_runtime_patch,
     _bridge_runtime_patch_for_body,
-    _ensure_poll_top_level_page_display_id,
+    _ensure_poll_top_level_page_no,
     _poll_response_needs_runtime_patch,
     _tm_registry_counts,
 )
@@ -123,5 +123,5 @@ def api_bridge():
         result, body, action=action, identity_changed=identity_changed
     )
     if action == "poll":
-        result = _ensure_poll_top_level_page_display_id(result, body)
+        result = _ensure_poll_top_level_page_no(result, body)
     return _json_response_with_log(result, body)

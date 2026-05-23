@@ -11,7 +11,7 @@ import uuid
 
 from flask import Flask, jsonify
 from flask_cors import CORS
-from log_utils import append_log, clear_log_file
+from app.utils.log_utils import append_log, clear_log_file
 from werkzeug.serving import WSGIRequestHandler, make_server
 
 from app.server import state as st

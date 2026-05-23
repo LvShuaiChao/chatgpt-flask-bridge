@@ -9,8 +9,10 @@ import time
 import traceback
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LOG_LOCK = threading.RLock()
-LOG_FILE = Path(__file__).resolve().parent / "log.txt"
+LOG_FILE = _PROJECT_ROOT / "log.txt"
+LOG_ARCHIVE_DIR = _PROJECT_ROOT / "runtime" / "logs"
 _LOG_VERBOSE = os.environ.get("CHATGPT_BRIDGE_VERBOSE_LOG", "0").strip().lower() in (
     "1",
     "true",
@@ -141,7 +143,8 @@ def _effective_log_level(text, level):
         if level_text in ("TRACE", "DEBUG"):
             return level_text
         return _normalize_log_level(adjust_level_for_message(text, inferred or level_text))
-    except Exception:
+    except Exception as error:
+        print(f"[LOG_LEVEL][ERROR] {error}\n{traceback.format_exc()}")
         return level_text
 
 
@@ -158,20 +161,34 @@ def _should_write_file(text, level, *, force=False):
     return True
 
 
+def _log_archive_dir():
+    """轮转备份目录：与 ``LOG_FILE`` 同项目根下的 ``runtime/logs/``。"""
+    if LOG_FILE.parent == _PROJECT_ROOT:
+        return LOG_ARCHIVE_DIR
+    return LOG_FILE.parent / "runtime" / "logs"
+
+
+def _rotated_log_path(index: int) -> Path:
+    return _log_archive_dir() / f"{LOG_FILE.name}.{int(index)}"
+
+
 def _rotate_log_if_needed(next_line_bytes):
     try:
         if _LOG_MAX_BYTES <= 0 or not LOG_FILE.exists():
             return
         if LOG_FILE.stat().st_size + int(next_line_bytes or 0) <= _LOG_MAX_BYTES:
             return
-        for idx in range(int(_LOG_MAX_BACKUPS or 0), 0, -1):
-            src = LOG_FILE.with_name(f"{LOG_FILE.name}.{idx}")
-            dst = LOG_FILE.with_name(f"{LOG_FILE.name}.{idx + 1}")
-            if idx >= int(_LOG_MAX_BACKUPS or 0) and src.exists():
+        archive_dir = _log_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        max_backups = int(_LOG_MAX_BACKUPS or 0)
+        for idx in range(max_backups, 0, -1):
+            src = _rotated_log_path(idx)
+            dst = _rotated_log_path(idx + 1)
+            if idx >= max_backups and src.exists():
                 src.unlink()
             elif src.exists():
                 src.replace(dst)
-        LOG_FILE.replace(LOG_FILE.with_name(f"{LOG_FILE.name}.1"))
+        LOG_FILE.replace(_rotated_log_path(1))
     except Exception as error:
         print(f"[LOG_ROTATE_FAILED] {type(error).__name__}: {error}")
 

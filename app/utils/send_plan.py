@@ -28,6 +28,7 @@ class SendPlan:
     decision: str = "blocked"  # allowed | queued | blocked
     reason: str = ""
     is_bootstrap: bool = False
+    target_page_id: str = ""
     block_status: str = ""
     enqueue: bool = False
     system_msg: str = ""

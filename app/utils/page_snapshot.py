@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from app.models import BIND_STATE_UNBOUND, normalize_remote_chatgpt
+from app.models import BIND_STATE_TEMP_HOME_BOUND, BIND_STATE_UNBOUND, normalize_remote_chatgpt
 from app.utils.page_status import (
     build_page_key,
     can_sync_conversation,
@@ -33,6 +33,9 @@ __all__ = [
     "compute_page_counts",
     "bridge_status_online",
     "bridge_status_online_count",
+    "page_display_id_sort_key",
+    "page_display_ids_for_log",
+    "sort_pages_by_display_id",
 ]
 
 _PAGE_SOURCE_KEYS = ("pages",)
@@ -103,6 +106,44 @@ def compute_list_fingerprint(pages: List[dict]) -> str:
             )
         )
     return f"{len(rows)}#{'/'.join(sorted(rows))}"
+
+
+def page_display_id_sort_key(page: Any) -> Tuple[int, int]:
+    """页面展示编号排序键：(0, 数字) 升序在前；(1, …) 无有效 ID 排在最后。"""
+    if not isinstance(page, dict):
+        return (1, 999999999)
+    page_id = page.get("page_display_id")
+    if page_id in (None, ""):
+        page_id = page.get("page_no")
+    if page_id is None:
+        return (1, 999999999)
+    page_id_text = str(page_id).strip()
+    if not page_id_text or page_id_text == "-":
+        return (1, 999999999)
+    if page_id_text.isdigit():
+        return (0, int(page_id_text))
+    return (1, 999999999)
+
+
+def page_display_ids_for_log(pages: List[Any]) -> List[str]:
+    ids: List[str] = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            ids.append("-")
+            continue
+        rank, value = page_display_id_sort_key(page)
+        if rank == 0:
+            ids.append(str(value))
+        else:
+            ids.append("-")
+    return ids
+
+
+def sort_pages_by_display_id(pages: List[dict]) -> List[dict]:
+    """按 page_display_id / page_no 数字升序排列；无 ID 的页面排在最后。"""
+    if not pages:
+        return []
+    return sorted(pages, key=page_display_id_sort_key)
 
 
 def build_page_indexes(
@@ -181,6 +222,18 @@ def binding_from_session(session: Any) -> Dict[str, Any]:
         "page_instance_id": (remote.get("page_instance_id") or "").strip(),
         "conversation_id": (remote.get("conversation_id") or "").strip(),
         "url": (remote.get("url") or "").strip(),
+        "temp_page_id": (
+            remote.get("temp_page_id")
+            or remote.get("page_display_id")
+            or remote.get("page_no")
+            or ""
+        ).strip(),
+        "page_display_id": (
+            remote.get("page_display_id")
+            or remote.get("temp_page_id")
+            or remote.get("page_no")
+            or ""
+        ).strip(),
     }
 
 
@@ -250,7 +303,13 @@ class PageSnapshot:
         liveness = get_page_liveness(norm, now=now)
         online = is_strict_page_online(norm, now=now)
         send_cap = evaluate_page_capability(norm, action="send", now=now)
-        display_id = str(raw.get("page_display_id") or norm.get("page_display_id") or "").strip()
+        display_id = str(
+            raw.get("page_display_id")
+            or norm.get("page_display_id")
+            or raw.get("page_no")
+            or norm.get("page_no")
+            or ""
+        ).strip()
         last_seen = float(norm.get("last_seen") or 0.0)
         return cls(
             client_id=client_id,
@@ -319,9 +378,12 @@ class PageRegistry:
             if conv:
                 registry.by_conversation_id.setdefault(conv, []).append(snap)
         registry.status_token = status_pages_token(status)
-        registry.page_dicts = [
-            dict(snap._raw) if snap._raw else snap.to_dict() for snap in registry.pages
-        ]
+        registry.page_dicts = sort_pages_by_display_id(
+            [
+                dict(snap._raw) if snap._raw else snap.to_dict()
+                for snap in registry.pages
+            ]
+        )
         registry._rebuild_dict_indexes()
         return registry
 
@@ -340,7 +402,7 @@ class PageRegistry:
             now = time.time()
         registry = cls()
         registry.status_token = status_pages_token(status)
-        registry.page_dicts = list(page_dicts or [])
+        registry.page_dicts = sort_pages_by_display_id(list(page_dicts or []))
         online_fn = is_online or is_page_online
         (
             registry.online_count,
@@ -409,11 +471,36 @@ class PageRegistry:
             return []
         return list(self.by_conversation_id.get(cid) or [])
 
+    def get_by_page_display_id(self, page_display_id: str) -> Optional[PageSnapshot]:
+        target_id = str(page_display_id or "").strip()
+        if not target_id:
+            return None
+        for page in self.pages:
+            raw = page._raw if isinstance(page._raw, dict) else {}
+            candidates = (
+                str(raw.get("page_display_id") or "").strip(),
+                str(raw.get("page_no") or "").strip(),
+                str(page.page_display_id or "").strip(),
+            )
+            if target_id in candidates:
+                return page
+        return None
+
     def get_bound_page(
         self, binding: Mapping[str, Any] | None, *, strict_identity: bool = True
     ) -> Optional[PageSnapshot]:
         if not binding or (binding.get("bind_state") or BIND_STATE_UNBOUND) == BIND_STATE_UNBOUND:
             return None
+        bind_state = (binding.get("bind_state") or "").strip()
+        if bind_state == BIND_STATE_TEMP_HOME_BOUND:
+            temp_page_id = (
+                (binding.get("temp_page_id") or binding.get("page_display_id") or "")
+                .strip()
+            )
+            if temp_page_id:
+                page = self.get_by_page_display_id(temp_page_id)
+                if page is not None:
+                    return page
         client_id = (binding.get("client_id") or "").strip()
         page_instance_id = (binding.get("page_instance_id") or "").strip()
         if client_id and page_instance_id:

@@ -8,7 +8,7 @@ import traceback
 from app.models import normalize_remote_chatgpt, remote_binding_enabled
 from app.server import get_bridge_status, is_server_running
 from app.utils.page_command import resolve_page_command_target
-from app.utils.page_snapshot import (
+from app.utils.page_status import (
     PageRegistry,
     PageSnapshot,
     binding_from_session,
@@ -118,6 +118,8 @@ class PageRegistryRefreshMixin:
                     self._set_tm_action_hint("请先启动服务。")
             self._bridge_ui.last_bridge_status = status
             self.page_registry = PageRegistry.from_bridge_status(status)
+            if hasattr(self, "_upgrade_temp_home_sessions_from_registry"):
+                self._upgrade_temp_home_sessions_from_registry(self.page_registry)
             snapshot = None
             if hasattr(self, "_get_tm_page_snapshot"):
                 snapshot = self._get_tm_page_snapshot(status, log_stages=False)
@@ -391,7 +393,7 @@ class PageRegistryRefreshMixin:
                 "page": None,
                 "reason_code": "no_session",
             }
-        binding = binding_from_session(session)
+        binding = binding_from_session(session) or {}
         from app.models import BIND_STATE_UNBOUND
 
         if (binding.get("bind_state") or BIND_STATE_UNBOUND) == BIND_STATE_UNBOUND:
@@ -410,7 +412,7 @@ class PageRegistryRefreshMixin:
             reg = PageRegistry.empty()
         from app.utils.page_command import resolve_bound_page_in_registry
 
-        resolved = resolve_bound_page_in_registry(reg, binding, allow_same_conversation=True)
+        resolved = resolve_bound_page_in_registry(reg, binding, allow_same_conversation=False)
         snap = resolved.get("page")
         url = binding.get("url") or ""
         if snap is None:
@@ -436,6 +438,11 @@ class PageRegistryRefreshMixin:
         page_dict = snap.to_dict()
         raw = snap._raw if isinstance(snap._raw, dict) else {}
         online = is_page_online(raw) if raw else snap.online
+        page_display_id = (snap.page_display_id or "").strip()
+        if not page_display_id and raw:
+            page_display_id = str(
+                raw.get("page_display_id") or raw.get("page_no") or ""
+            ).strip()
         return {
             "found": True,
             "online": online,
@@ -451,7 +458,8 @@ class PageRegistryRefreshMixin:
             "page_instance_id": snap.page_instance_id,
             "conversation_id": snap.conversation_id,
             "url": snap.url or url,
-            "page_display_id": snap.page_display_id,
+            "page_no": page_display_id,
+            "page_display_id": page_display_id,
         }
 
     def _render_sync_target_display_light(self):
@@ -524,9 +532,9 @@ class PageRegistryRefreshMixin:
             from app.constants import STATUS_DETAIL_TECH_HINT
 
             tip_parts = [chip_tip or chip_text]
-            page_display_id = str(snap.get("page_display_id") or "").strip()
-            if page_display_id:
-                tip_parts.append(f"页面 ID：{page_display_id}")
+            page_no = str(snap.get("page_no") or "").strip()
+            if page_no:
+                tip_parts.append(f"页面 ID：{page_no}")
             self.tm_bound_page_label.setToolTip(
                 "\n".join(p for p in tip_parts if p) + "\n" + STATUS_DETAIL_TECH_HINT
             )

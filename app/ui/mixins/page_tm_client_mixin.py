@@ -57,17 +57,17 @@ from app.utils.page_status import (
     is_page_online,
     is_page_url_syncable,
     is_prebound_home_page,
-    latest_page_seen_ts,
     normalize_page,
     page_registry_key,
     page_url_from,
+    read_snapshot_identity,
 )
 from app.utils.tm_activity import (
     classify_tm_client_activity,
     compute_tm_activity_metrics,
     tm_send_allowed,
 )
-from app.utils.page_snapshot import PageRegistry
+from app.utils.page_status import PageRegistry, sort_pages_by_display_id
 
 
 class PageTmClientMixin:
@@ -82,7 +82,7 @@ class PageTmClientMixin:
         state = str(
             page.get("liveness")
             or page.get("page_liveness")
-            or page.get("state")
+            
             or ""
         ).strip().lower()
         if state in {
@@ -340,7 +340,7 @@ class PageTmClientMixin:
                 "url_syncable": False,
                 "stale": False,
                 "page_liveness": "offline",
-                "reason": "invalid_client",
+                "reason_code": "invalid_client",
                 "is_responding": False,
                 "can_accept_input": False,
                 "response_state": "unknown",
@@ -404,7 +404,7 @@ class PageTmClientMixin:
         return {
             "client_id": client_id,
             "conversation_id": conversation_id,
-            "visibility": visibility or "-",
+            "visibility_state": visibility or "-",
             "activity_state": activity or "-",
             "online": online,
             "send_requestable": send_requestable,
@@ -416,8 +416,7 @@ class PageTmClientMixin:
             "prebound_home": prebound_home,
             "reason_code": reason,
             "stale": stale,
-            "reason": reason,
-            "send_reason": send_block_reason or "",
+            "send_block_reason": send_block_reason or "",
             "send_decision": send_decision,
             "client_match": client_match,
             "conversation_match": conv_match,
@@ -664,7 +663,7 @@ class PageTmClientMixin:
         if not pages:
             return
         status = status or self._bridge_ui.last_bridge_status or {}
-        current_client_id = str(status.get("tampermonkey_client_id") or "").strip()
+        current_client_id = read_snapshot_identity(status, "active")["client_id"]
         bound_page_instance_id = ""
         resolved_bound_client_id = ""
         bound_conversation_id = ""
@@ -811,10 +810,7 @@ class PageTmClientMixin:
 
         self._annotate_pages_for_url_dedup(prepared, status=status)
         normalized = self._dedupe_chatgpt_pages(prepared)
-        normalized.sort(
-            key=lambda item: latest_page_seen_ts(item) if isinstance(item, dict) else 0.0,
-            reverse=True,
-        )
+        normalized = sort_pages_by_display_id(normalized)
         online_fn = (
             self._tm_page_is_online_simple
             if hasattr(self, "_tm_page_is_online_simple")
@@ -994,6 +990,37 @@ class PageTmClientMixin:
     def _remote_bind_state(remote):
         return normalize_remote_chatgpt(remote).get("bind_state") or BIND_STATE_UNBOUND
 
+    def _is_temp_home_bound_state(self, bind_state: str) -> bool:
+        from app.models import is_temp_home_bound_state
+
+        return is_temp_home_bound_state(bind_state)
+
+    def _find_page_by_display_id(self, page_display_id: str) -> dict | None:
+        """按 page_display_id 在最新 registry 中查找页面摘要（含 online）。"""
+        from app.utils.page_status import PageRegistry, is_page_online
+
+        pid = (page_display_id or "").strip()
+        if not pid:
+            return None
+        status = self._bridge_ui.last_bridge_status or {}
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+        page = reg.get_by_page_display_id(pid)
+        if page is None:
+            return None
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        return {
+            "online": is_page_online(raw),
+            "client_id": (raw.get("client_id") or page.client_id or "").strip(),
+            "page_instance_id": (
+                raw.get("page_instance_id") or page.page_instance_id or ""
+            ).strip(),
+            "url": page_url_from(raw) or (page.url or ""),
+            "page_display_id": pid,
+            "raw": raw,
+        }
+
     def _remote_conversation_id(self, remote):
         remote = normalize_remote_chatgpt(remote)
         conversation_id = (remote.get("conversation_id") or "").strip()
@@ -1025,6 +1052,12 @@ class PageTmClientMixin:
             BIND_STATE_WAITING_CONVERSATION_CREATED,
         ):
             if self._session_has_prebound_home_online(remote):
+                return state
+            temp_page_id = (
+                (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
+                .strip()
+            )
+            if temp_page_id:
                 return state
             return BIND_STATE_BOUND_OFFLINE
         if state == BIND_STATE_BOUND_CONVERSATION:

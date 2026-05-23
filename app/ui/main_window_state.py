@@ -57,6 +57,8 @@ class BindDisplayState:
     last_session_bind_logged_pair: dict = field(default_factory=dict)
     last_session_bind_state_log_at: dict = field(default_factory=dict)
     last_auto_open_url_at: dict = field(default_factory=dict)
+    auto_open_home_in_progress: bool = False
+    auto_open_home_session_id: str = ""
     last_chat_area_style_key: str = ""
     last_page_relation_key: str = ""
     last_bind_mismatch_key: str = ""

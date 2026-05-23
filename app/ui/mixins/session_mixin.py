@@ -460,7 +460,7 @@ class SessionMixin:
         roles = ("user", "assistant") if prefer_user else ("assistant", "user")
         for role in roles:
             for message in session.messages:
-                if not getattr(message, "visible_in_chat", True):
+                if not getattr(message, "visible", True):
                     continue
                 if message.role != role:
                     continue
@@ -476,7 +476,7 @@ class SessionMixin:
         if session is None:
             return ""
         for message in reversed(session.messages):
-            if not getattr(message, "visible_in_chat", True):
+            if not getattr(message, "visible", True):
                 continue
             if message.role not in ("user", "assistant"):
                 continue
@@ -492,7 +492,7 @@ class SessionMixin:
         if session is None:
             return ""
         for message in reversed(session.messages):
-            if not getattr(message, "visible_in_chat", True):
+            if not getattr(message, "visible", True):
                 continue
             if message.role != "assistant":
                 continue
@@ -548,7 +548,7 @@ class SessionMixin:
         }
 
         for message in reversed(session.messages):
-            if not getattr(message, "visible_in_chat", True):
+            if not getattr(message, "visible", True):
                 continue
 
             if message.role != "assistant":
@@ -599,7 +599,7 @@ class SessionMixin:
             return
         messages_by_id = self._session_pending_messages_index(session)
         for message in reversed(session.messages):
-            if not getattr(message, "visible_in_chat", True):
+            if not getattr(message, "visible", True):
                 continue
             if message.role != "assistant":
                 continue
@@ -638,7 +638,7 @@ class SessionMixin:
             bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
             since = float(getattr(message, "created_at", 0) or 0)
             if since <= 0:
-                since = float(getattr(session, "pending_reply_since", 0) or 0)
+                since = float(getattr(session, "reply_waiting_since", 0) or 0)
             return {
                 "bridge_message_id": bridge_id,
                 "turn_id": (getattr(message, "turn_id", "") or "").strip(),
@@ -650,7 +650,7 @@ class SessionMixin:
                 ).strip(),
                 "since": since,
                 "message": message,
-                "message_source": (message.message_source or "").strip(),
+                "source": (message.message_source or "").strip(),
             }
         return None
 
@@ -662,7 +662,7 @@ class SessionMixin:
                 return max(0.0, time.time() - since)
         if session is None:
             return 0.0
-        since = float(getattr(session, "pending_reply_since", 0) or 0)
+        since = float(getattr(session, "reply_waiting_since", 0) or 0)
         if since <= 0:
             return 0.0
         return max(0.0, time.time() - since)
@@ -709,7 +709,7 @@ class SessionMixin:
         if not self._session_has_pending_assistant_reply(session):
             return False
         age = self._pending_reply_age_seconds(session)
-        since_session = float(getattr(session, "pending_reply_since", 0) or 0)
+        since_session = float(getattr(session, "reply_waiting_since", 0) or 0)
         if since_session > 0:
             age = max(age, max(0.0, time.time() - since_session))
         if age < PENDING_REPLY_SYNC_AFTER_SECONDS:
@@ -747,13 +747,13 @@ class SessionMixin:
         if pending and self._bound_page_indicates_busy(session):
             return ""
         age = self._pending_reply_age_seconds(session, pending)
-        since_session = float(getattr(session, "pending_reply_since", 0) or 0)
+        since_session = float(getattr(session, "reply_waiting_since", 0) or 0)
         if since_session > 0:
             age = max(age, max(0.0, time.time() - since_session))
         if age < PENDING_REPLY_HARD_TIMEOUT_SECONDS:
             return ""
         if not pending:
-            since = float(getattr(session, "pending_reply_since", 0) or 0)
+            since = float(getattr(session, "reply_waiting_since", 0) or 0)
             if since > 0 and age >= PENDING_REPLY_HARD_TIMEOUT_SECONDS:
                 return "timeout"
             return ""
@@ -793,7 +793,7 @@ class SessionMixin:
         if session is None:
             return False
         pending = self._get_pending_reply_state(session)
-        has_waiting_flag = float(getattr(session, "pending_reply_since", 0) or 0) > 0
+        has_waiting_flag = float(getattr(session, "reply_waiting_since", 0) or 0) > 0
         has_pending_messages = self._session_has_pending_assistant_reply(session)
         if not pending and not has_waiting_flag and not has_pending_messages:
             return False
@@ -820,7 +820,7 @@ class SessionMixin:
             messages_to_clear.append(pending["message"])
         elif has_pending_messages:
             for message in reversed(list(session.messages)):
-                if not getattr(message, "visible_in_chat", True):
+                if not getattr(message, "visible", True):
                     continue
                 if message.role != "assistant":
                     continue
@@ -850,8 +850,8 @@ class SessionMixin:
                     getattr(message, "message_id", "") or ""
                 ).strip() or "-"
 
-        if float(getattr(session, "pending_reply_since", 0) or 0) > 0:
-            session.pending_reply_since = 0
+        if float(getattr(session, "reply_waiting_since", 0) or 0) > 0:
+            session.reply_waiting_since = 0
             cleared += 1
 
         if cleared <= 0:
@@ -903,8 +903,8 @@ class SessionMixin:
                 return self._clear_stale_pending_reply(
                     session, reason="before_send", force=True
                 )
-        if not pending and float(getattr(session, "pending_reply_since", 0) or 0) > 0:
-            since = float(session.pending_reply_since or 0)
+        if not pending and float(getattr(session, "reply_waiting_since", 0) or 0) > 0:
+            since = float(session.reply_waiting_since or 0)
             age = max(0.0, time.time() - since) if since > 0 else 0.0
             if age >= PENDING_REPLY_STALE_TIMEOUT_SEC:
                 return self._clear_stale_pending_reply(
@@ -1196,6 +1196,11 @@ class SessionMixin:
         label = getattr(self, "current_session_title", None)
         if label is None:
             return
+        if hasattr(self, "_format_current_session_header_segments") and hasattr(
+            label, "set_segments"
+        ):
+            label.set_segments(self._format_current_session_header_segments(session))
+            return
         label.setText(self._format_current_session_header_text(session))
 
     def _session_list_item_tooltip(self, session, bind_state):
@@ -1234,15 +1239,15 @@ class SessionMixin:
         elif remote_binding_enabled(remote):
             from app.constants import STATUS_DETAIL_TECH_HINT
 
-            page_display_id = "-"
-            if hasattr(self, "_session_bound_page_display_id_text"):
-                page_display_id = self._session_bound_page_display_id_text(
+            page_no = "-"
+            if hasattr(self, "_session_bound_page_no_text"):
+                page_no = self._session_bound_page_no_text(
                     session, status=bridge_status
                 )
             if page_url:
                 lines.append(f"绑定页 URL：{page_url}")
-            if page_display_id and page_display_id != "-":
-                lines.append(f"页面 ID：{page_display_id}")
+            if page_no and page_no != "-":
+                lines.append(f"页面 ID：{page_no}")
             lines.append(STATUS_DETAIL_TECH_HINT)
         verbose = (
             hasattr(self, "_is_ui_verbose_status_enabled")
@@ -1289,7 +1294,12 @@ class SessionMixin:
             widget = SessionListItemWidget()
             self.session_list.setItemWidget(item, widget)
         status_text = None
-        if hasattr(self, "_session_list_bind_status_text"):
+        status_segments = None
+        if hasattr(self, "_session_list_bind_status_segments"):
+            status_segments = self._session_list_bind_status_segments(
+                session, bind_state
+            )
+        elif hasattr(self, "_session_list_bind_status_text"):
             status_text = self._session_list_bind_status_text(session, bind_state)
         widget.apply_state(
             title=self._session_list_title_text(session),
@@ -1300,6 +1310,7 @@ class SessionMixin:
             is_current=is_current,
             tooltip=self._session_list_item_tooltip(session, bind_state),
             status_text=status_text,
+            status_segments=status_segments,
         )
         viewport_w = max(0, self.session_list.viewport().width())
         item_w = viewport_w if viewport_w > 0 else 220
@@ -1311,15 +1322,29 @@ class SessionMixin:
             return
         session = session or self._current_session()
         if not session:
-            self.current_session_title.setText("当前会话：新对话")
+            if hasattr(self.current_session_title, "set_segments") and hasattr(
+                self, "_format_current_session_header_segments"
+            ):
+                self.current_session_title.set_segments(
+                    self._format_current_session_header_segments(None)
+                )
+            else:
+                self.current_session_title.setText("当前会话：新对话")
             if hasattr(self, "_update_current_session_url_display"):
                 self._update_current_session_url_display()
             return
         if self._is_default_session_title(session.title):
             self._auto_rename_session_from_messages(session)
-        self.current_session_title.setText(
-            self._format_current_session_header_text(session)
-        )
+        if hasattr(self.current_session_title, "set_segments") and hasattr(
+            self, "_format_current_session_header_segments"
+        ):
+            self.current_session_title.set_segments(
+                self._format_current_session_header_segments(session)
+            )
+        else:
+            self.current_session_title.setText(
+                self._format_current_session_header_text(session)
+            )
         if hasattr(self, "_update_current_session_url_display"):
             self._update_current_session_url_display()
     def _list_index_for_session(self, session_id):
@@ -1651,7 +1676,7 @@ class SessionMixin:
         session.messages.clear()
         session.updated_at = time.time()
         session.has_pending_reply = False
-        session.pending_reply_since = 0
+        session.reply_waiting_since = 0
         if hasattr(self, "_mark_session_waiting_finished"):
             self._mark_session_waiting_finished(
                 session, reason="clear_before_rebind_or_sync"
@@ -1732,7 +1757,7 @@ class SessionMixin:
         session.messages.clear()
         session.updated_at = time.time()
         session.has_pending_reply = False
-        session.pending_reply_since = 0
+        session.reply_waiting_since = 0
         if hasattr(self, "_mark_session_waiting_finished"):
             self._mark_session_waiting_finished(session, reason="clear_session")
         if hasattr(self, "_set_tm_action_hint"):
@@ -1836,7 +1861,7 @@ class SessionMixin:
             if hasattr(self, "_mark_session_waiting_finished"):
                 self._mark_session_waiting_finished(session, reason="tm_assistant_reply")
             session.has_pending_reply = False
-            session.pending_reply_since = 0
+            session.reply_waiting_since = 0
             session.pending_sync_requested = False
             session.updated_at = time.time()
             if bridge_id:
@@ -1867,7 +1892,7 @@ class SessionMixin:
             if (
                 getattr(message, "role", "") == "assistant"
                 and str(getattr(message, "turn_id", "") or "").strip() == turn_id
-                and str(getattr(message, "ui_status", "") or "").strip()
+                and str(getattr(message, "status", "") or "").strip()
                 in ("waiting", "sending", "等待回复", "准备发送")
             ):
                 message.content = content
@@ -1882,14 +1907,14 @@ class SessionMixin:
                     "role": "assistant",
                     "content": content,
                     "turn_id": turn_id,
-                    "message_source": "tm_assistant_reply",
-                    "ui_status": "done",
+                    "source": "tm_assistant_reply",
+                    "status": "done",
                     "created_at": time.time(),
                 },
             )
 
         session.has_pending_reply = False
-        session.pending_reply_since = 0
+        session.reply_waiting_since = 0
         session.pending_sync_requested = False
         session.updated_at = time.time()
         self._save_sessions_to_disk()
@@ -1957,7 +1982,7 @@ class SessionMixin:
         if not session:
             return
         session.has_pending_reply = True
-        session.pending_reply_since = time.time()
+        session.reply_waiting_since = time.time()
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="mark_session_pending")
         self._refresh_session_list(select_session_id=self._current_session_id)
@@ -2002,6 +2027,26 @@ class SessionMixin:
                     )
                 return time.time()
 
+    @staticmethod
+    def _normalize_legacy_message_dict(data):
+        item = dict(data) if isinstance(data, dict) else {}
+        if "status" in item:
+            if not (item.get("ui_status") or "").strip():
+                item["ui_status"] = item.pop("status")
+            else:
+                item.pop("status", None)
+        if "source" in item:
+            if not (item.get("message_source") or "").strip():
+                item["message_source"] = item.pop("source")
+            else:
+                item.pop("source", None)
+        if "visible" in item:
+            if "visible_in_chat" not in item:
+                item["visible_in_chat"] = item.pop("visible")
+            else:
+                item.pop("visible", None)
+        return item
+
     def _message_from_dict(self, data):
         from app.utils.legacy_cleanup import assert_no_legacy_fields
 
@@ -2042,7 +2087,7 @@ class SessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
-            "pending_reply_since": 0,
+            "reply_waiting_since": 0,
             "messages": [self._message_to_dict(item) for item in session.messages],
         }
     def _session_from_dict(self, data):
@@ -2059,7 +2104,7 @@ class SessionMixin:
                     echo=True,
                 )
                 continue
-            messages.append(self._message_from_dict(item))
+            messages.append(self._message_from_dict(self._normalize_legacy_message_dict(item)))
         remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
         return ChatSession(
             session_id=data.get("session_id") or str(uuid.uuid4()),
@@ -2072,7 +2117,7 @@ class SessionMixin:
             pinned_context=data.get("pinned_context", ""),
             remote_chatgpt=remote,
             messages=messages,
-            pending_reply_since=0,
+            reply_waiting_since=0,
         )
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:

@@ -111,6 +111,37 @@ class UiSettingsPageMixin:
         tm_check_row.addStretch(1)
         tm_conn_layout.addLayout(tm_check_row)
         self.settings_layout.addWidget(tm_conn_group)
+
+        cursor_group, cursor_layout = self._make_group_vbox("Cursor 桥接")
+        cursor_layout.setContentsMargins(10, 8, 10, 8)
+        cursor_layout.setSpacing(8)
+        cursor_hint = QLabel(
+            "将当前会话中最后一条 ChatGPT 回复发送到 Cursor 任务队列。"
+        )
+        cursor_hint.setWordWrap(True)
+        cursor_hint.setStyleSheet("color: #555;")
+        cursor_layout.addWidget(cursor_hint)
+        cursor_btn_row = QHBoxLayout()
+        cursor_btn_row.setSpacing(8)
+        self.send_last_to_cursor_btn = QPushButton("发送最后给 Cursor")
+        self.send_last_to_cursor_btn.setObjectName("send_last_to_cursor_btn")
+        self.send_last_to_cursor_btn.setProperty("class", "PrimaryButton")
+        self.send_last_to_cursor_btn.setFixedHeight(32)
+        cursor_btn_row.addWidget(self.send_last_to_cursor_btn)
+        cursor_btn_row.addStretch(1)
+        cursor_layout.addLayout(cursor_btn_row)
+        self.settings_layout.addWidget(cursor_group)
+
+        bind_send_last = getattr(self, "_bind_send_last_to_cursor_button", None)
+        if callable(bind_send_last):
+            bind_send_last()
+        else:
+            self._append_log(
+                "[UI_BIND][SKIP] send_last_to_cursor_btn: "
+                "CursorBridgeMixin._bind_send_last_to_cursor_button missing",
+                echo=True,
+            )
+
         self.settings_layout.addStretch(1)
 
         layout.addWidget(self.settings_scroll, 1)

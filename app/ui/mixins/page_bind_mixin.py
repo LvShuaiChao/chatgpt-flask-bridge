@@ -38,7 +38,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.page_snapshot import PageRegistry
+from app.utils.page_status import PageRegistry
 from app.utils.page_status import (
     evaluate_page_capability,
     evaluate_send_page,
@@ -242,10 +242,7 @@ class PageBindMixin(
     def _pick_current_page_client_info(self, status=None):
         status = status or self._bridge_ui.last_bridge_status or {}
         active_client_id = read_snapshot_identity(status, "active")["client_id"]
-        for cid in (
-            (status.get("tampermonkey_client_id") or "").strip(),
-            active_client_id,
-        ):
+        for cid in (active_client_id,):
             cid = (cid or "").strip()
             info = self._client_info_by_id(cid, status=status)
             if isinstance(info, dict) and is_page_online(info):
@@ -313,25 +310,35 @@ class PageBindMixin(
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         if not remote_binding_enabled(remote):
             return None, "unbound", "session_unbound"
-        bound_conversation_id = self._remote_conversation_id(remote)
-        if bound_conversation_id:
-            matched = self._find_online_page_by_conversation_id(
-                bound_conversation_id, status=status, snapshot=snapshot
-            )
-            if isinstance(matched, dict) and self._tm_page_is_online_simple(matched):
-                return matched, "online", "matched_by_conversation"
         client_id = (remote.get("client_id") or "").strip()
+        page_instance_id = (remote.get("page_instance_id") or "").strip()
         bound_info = (
-            self._client_info_by_id(client_id, status=status, snapshot=snapshot)
+            self._client_info_by_id(
+                client_id,
+                status=status,
+                page_instance_id=page_instance_id,
+                snapshot=snapshot,
+            )
             if client_id
             else None
         )
         if isinstance(bound_info, dict):
+            if page_instance_id and (
+                bound_info.get("page_instance_id") or ""
+            ).strip() != page_instance_id:
+                return {
+                    "client_id": client_id,
+                    "page_instance_id": page_instance_id,
+                    "conversation_id": (remote.get("conversation_id") or "").strip(),
+                    "url": ((remote.get("url") or "").strip()).strip(),
+                    "page_type": (remote.get("page_type") or "").strip(),
+                }, "offline", "bound_identity_missing"
             if self._tm_page_is_online_simple(bound_info):
                 return bound_info, "online", "bound_client_online"
             return bound_info, "offline", "bound_client_offline"
         return {
             "client_id": client_id,
+            "page_instance_id": page_instance_id,
             "conversation_id": (remote.get("conversation_id") or "").strip(),
             "url": ((remote.get("url") or "").strip()).strip(),
             "page_type": (remote.get("page_type") or "").strip(),
@@ -661,7 +668,7 @@ class PageBindMixin(
         self._append_log(
             "[BIND][MANUAL][SUCCESS] "
             f"session_id={session.session_id} "
-            f"page_display_id={selected_page.get('page_display_id') or '-'} "
+            f"page_no={selected_page.get('page_no') or '-'} "
             f"client_id={selected_page.get('client_id') or '-'} "
             f"page_instance_id={selected_page.get('page_instance_id') or '-'} "
             f"conversation_id={selected_page.get('conversation_id') or '-'} "
@@ -670,12 +677,25 @@ class PageBindMixin(
         )
 
         normalized = self._normalize_tm_page_for_binding(selected_page)
+        page_type = (
+            normalized.get("page_type")
+            or selected_page.get("page_type")
+            or ""
+        ).strip()
         conversation_id_after_bind = (
             normalized.get("conversation_id")
             or self._remote_conversation_id(
                 normalize_remote_chatgpt(session.remote_chatgpt)
             )
         )
+        if page_type == "home" and not conversation_id_after_bind:
+            self._set_tm_action_hint(
+                "已预绑定 ChatGPT 首页。发送第一条消息后会自动创建并绑定新对话。"
+            )
+            self._apply_chat_bind_visual_state()
+            if hasattr(self, "schedule_page_registry_refresh"):
+                self.schedule_page_registry_refresh(reason="manual_bind_home")
+            return
         profile = self._tm_client_sync_profile(selected_page)
         if conversation_id_after_bind and profile.get("sync_ok"):
             self._set_tm_action_hint("同步中...")
@@ -954,6 +974,7 @@ class PageBindMixin(
         target_source="",
         bind_request_id="",
         bootstrap_conversation=False,
+        target_page_id="",
         trace_id="",
         allow_same_conversation_fallback=False,
         cap_page=None,
@@ -1001,6 +1022,7 @@ class PageBindMixin(
             page_instance_id=page_instance_id,
             bootstrap_conversation=bootstrap_conversation,
             bind_request_id=bind_request_id,
+            target_page_id=target_page_id,
         )
         from app.utils.target_sources import canonical_target_source
 

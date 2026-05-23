@@ -9,7 +9,7 @@ from app.utils.page_status import evaluate_page_capability
 
 @pytest.fixture
 def server_module():
-    import server as srv
+    import app.server as srv
 
     return srv
 

@@ -185,6 +185,8 @@ def normalize_inbound_push_payload(payload: Any) -> Dict[str, Any]:
 
         "bind_request_id",
 
+        "target_page_id",
+
     ):
 
         if key in data and data.get(key) not in (None, ""):
@@ -221,6 +223,8 @@ def build_gui_push_payload(
 
     bind_request_id: str = "",
 
+    target_page_id: str = "",
+
 ) -> Dict[str, Any]:
 
     """GUI 入队：只写 canonical 字段（client_id / page_instance_id / conversation_id / url）。"""
@@ -254,6 +258,8 @@ def build_gui_push_payload(
         "bootstrap_conversation": bool(bootstrap_conversation),
 
         "bind_request_id": (bind_request_id or "").strip() or None,
+
+        "target_page_id": (target_page_id or "").strip() or None,
 
     }
 

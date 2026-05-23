@@ -4,6 +4,7 @@ import traceback
 from app.constants import DEFAULT_CHAT_INPUT_TEXT, STATUS_CHIP_SESSION_BIND_TOOLTIP
 from app.ui.widgets.chat_input import ChatInput
 from app.ui.widgets.elided_label import ElidedLabel
+from app.ui.widgets.segmented_elided_label import SegmentedElidedLabel
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QTextCursor
@@ -122,15 +123,6 @@ class UiChatPanelMixin:
             self._clear_current_session,
             tag="clear_current_session_btn",
         )
-        bind_send_last = getattr(self, "_bind_send_last_to_cursor_button", None)
-        if callable(bind_send_last):
-            bind_send_last()
-        else:
-            self._append_log(
-                "[UI_BIND][SKIP] send_last_to_cursor_btn: "
-                "CursorBridgeMixin._bind_send_last_to_cursor_button missing",
-                echo=True,
-            )
         self._chat_panel_signals_bound = True
 
     def _init_splitter_save_timer(self):
@@ -406,7 +398,7 @@ class UiChatPanelMixin:
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
-        self.current_session_title = QLabel("当前会话：新对话")
+        self.current_session_title = SegmentedElidedLabel("当前会话：新对话")
         self.current_session_title.setObjectName("CurrentSessionTitle")
         self.current_session_title.setMinimumHeight(28)
         self.current_session_title.setSizePolicy(
@@ -420,7 +412,9 @@ class UiChatPanelMixin:
         url_row = QHBoxLayout(url_row_widget)
         url_row.setContentsMargins(8, 6, 8, 6)
         url_row.setSpacing(8)
-        self.current_session_url_label = ElidedLabel("绑定网址：未绑定 ChatGPT 页面")
+        self.current_session_url_label = SegmentedElidedLabel(
+            "绑定网址：未绑定 ChatGPT 页面"
+        )
         self.current_session_url_label.setObjectName("CurrentSessionUrlLabel")
         self.current_session_url_label.setWordWrap(False)
         self.current_session_url_label.setMinimumHeight(28)
@@ -486,10 +480,6 @@ class UiChatPanelMixin:
             "清空当前会话中的本地聊天记录，不删除会话，不解绑页面"
         )
         bottom_action_row.addWidget(self.clear_current_session_btn)
-        self.send_last_to_cursor_btn = QPushButton("发送最后给 Cursor")
-        self.send_last_to_cursor_btn.setObjectName("send_last_to_cursor_btn")
-        self.send_last_to_cursor_btn.setProperty("class", "PrimaryButton")
-        bottom_action_row.addWidget(self.send_last_to_cursor_btn)
         self.copy_last_btn = QPushButton("复制最后回复")
         self.copy_last_btn.setObjectName("PrimaryButton")
         bottom_action_row.addWidget(self.copy_last_btn)

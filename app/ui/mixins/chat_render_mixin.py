@@ -176,7 +176,7 @@ class ChatRenderMixin:
         visible = [
             message
             for message in getattr(session, "messages", [])
-            if getattr(message, "visible_in_chat", True)
+            if getattr(message, "visible", True)
         ]
         if len(visible) <= MAX_RENDER_MESSAGES_ON_SWITCH:
             return visible, 0

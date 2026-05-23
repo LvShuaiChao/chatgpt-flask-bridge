@@ -28,13 +28,13 @@ class WaitingTimerMixin:
         return f"{minutes:02d}:{seconds:02d}"
 
     def _session_pending_elapsed_sec(self, session) -> int:
-        since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
+        since_ts = float(getattr(session, "reply_waiting_since", 0) or 0)
         if since_ts <= 0:
             return 0
         return max(0, int(time.time() - since_ts))
 
     def _session_is_waiting_reply(self, session) -> bool:
-        return float(getattr(session, "pending_reply_since", 0) or 0) > 0
+        return float(getattr(session, "reply_waiting_since", 0) or 0) > 0
 
     def _iter_all_chat_sessions(self):
         sessions = getattr(self, "_sessions", None)
@@ -47,12 +47,12 @@ class WaitingTimerMixin:
             return
         if self._session_is_waiting_reply(session):
             return
-        session.pending_reply_since = time.time()
+        session.reply_waiting_since = time.time()
         self._append_log(
             "[CHAT][WAITING_START] "
             f"session_id={session.session_id} "
             f"reason={reason or '-'} "
-            f"pending_reply_since={session.pending_reply_since}",
+            f"reply_waiting_since={session.reply_waiting_since}",
             echo=True,
         )
 
@@ -61,7 +61,7 @@ class WaitingTimerMixin:
             return
         was_waiting = self._session_is_waiting_reply(session)
         old_elapsed = self._session_pending_elapsed_sec(session) if was_waiting else 0
-        session.pending_reply_since = 0
+        session.reply_waiting_since = 0
         if was_waiting:
             self._append_log(
                 "[CHAT][WAITING_END] "
@@ -203,7 +203,7 @@ class WaitingTimerMixin:
         current_session = None
 
         for session in self._iter_all_chat_sessions():
-            since_ts = float(getattr(session, "pending_reply_since", 0) or 0)
+            since_ts = float(getattr(session, "reply_waiting_since", 0) or 0)
             if since_ts <= 0:
                 continue
 

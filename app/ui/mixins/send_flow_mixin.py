@@ -14,12 +14,14 @@ from app.constants import (
 from app.models import (
     remote_binding_enabled,
     BIND_STATE_PREBOUND_HOME,
+    BIND_STATE_TEMP_HOME_BOUND,
+    BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_HOME,
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.page_status import PageActionPlan, page_url_from
+from app.utils.page_status import PageActionPlan, PageCapability, page_url_from
 from app.utils.send_plan import LocalTurn, SendPlan
 from app.utils.trace_log import kv_line, make_send_trace_id
 
@@ -31,6 +33,11 @@ def _turn_get(turn, key, default=None):
 
 
 class SendFlowMixin:
+    def _is_temp_home_bound_state(self, bind_state: str) -> bool:
+        from app.models import is_temp_home_bound_state
+
+        return is_temp_home_bound_state(bind_state)
+
     def _new_local_send_turn(
         self,
         content: str,
@@ -63,28 +70,10 @@ class SendFlowMixin:
     ) -> dict[str, str] | None:
         """plan 允许发送后追加 user 消息与 assistant 占位。"""
         session = turn.session
-        if session is None:
-            self._append_log(
-                "[SEND][LOCAL_APPEND][FAILED] reason=no_session",
-                echo=True,
-            )
-            return None
-
         content = turn.content
-        turn_id = str(turn.turn_id or "").strip()
-        user_message_id = str(turn.user_message_id or "").strip()
-        assistant_message_id = str(turn.assistant_message_id or "").strip()
-
-        if not turn_id or not user_message_id:
-            self._append_log(
-                "[SEND][LOCAL_APPEND][FAILED] "
-                f"reason=invalid_turn "
-                f"turn_id={turn_id or '-'} "
-                f"user_message_id={user_message_id or '-'} "
-                f"assistant_message_id={assistant_message_id or '-'}",
-                echo=True,
-            )
-            return None
+        turn_id = turn.turn_id
+        user_message_id = turn.user_message_id
+        assistant_message_id = turn.assistant_message_id
 
         setattr(self, "_pending_send_turn_id", turn_id)
         setattr(self, "_pending_send_user_message_id", user_message_id)
@@ -114,15 +103,13 @@ class SendFlowMixin:
                     "ui_status": "waiting",
                     "parent_message_id": user_message_id,
                     "message_source": "local_placeholder",
-                    "created_at": time.time(),
                 },
             )
             session.has_pending_reply = True
-            session.pending_reply_since = time.time()
+            session.reply_waiting_since = time.time()
             if hasattr(self, "_mark_session_waiting_started"):
                 self._mark_session_waiting_started(
-                    session,
-                    reason="send_click_local_placeholder",
+                    session, reason="send_click_local_placeholder"
                 )
 
         session.updated_at = time.time()
@@ -134,8 +121,10 @@ class SendFlowMixin:
                 reason="send_click_local_append",
             )
 
-        if clear_input and getattr(self, "_auto_clear_input_after_send", True):
+        if clear_input and self._auto_clear_input_after_send:
             self.message_edit.clear()
+            if hasattr(self, "_ensure_default_chat_input_text"):
+                self._ensure_default_chat_input_text()
             if hasattr(self, "_stash_session_compose_draft"):
                 self._stash_session_compose_draft(session.session_id)
 
@@ -228,12 +217,37 @@ class SendFlowMixin:
         )
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state = self._effective_bind_state(session)
-        plan.is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
+        plan.is_bootstrap = self._is_temp_home_bound_state(bind_state)
 
         if hasattr(self, "_clear_stale_pending_reply_before_send"):
             self._clear_stale_pending_reply_before_send(session)
 
         if not skip_prebind_checks:
+            if self._is_session_unbound(session) and hasattr(
+                self, "_ensure_temp_home_bound_for_send"
+            ):
+                ok = self._ensure_temp_home_bound_for_send(session)
+                if not ok:
+                    plan.decision = "blocked"
+                    plan.reason = "auto_open_chatgpt_failed"
+                    plan.block_status = "自动打开 ChatGPT 页面失败"
+                    plan.system_msg = (
+                        "自动打开 ChatGPT 页面失败，请手动打开页面后重试。"
+                    )
+                    plan.enqueue = False
+                    plan.render_reason = "send_auto_open_chatgpt_failed"
+                    self._log_send_plan(plan)
+                    return plan
+                remote = normalize_remote_chatgpt(session.remote_chatgpt)
+                bind_state = self._effective_bind_state(session)
+                plan.is_bootstrap = self._is_temp_home_bound_state(bind_state)
+
+            if self._is_temp_home_bound_state(bind_state):
+                temp_plan = self._apply_temp_home_send_plan(plan, session, remote)
+                if temp_plan is not None:
+                    self._log_send_plan(temp_plan)
+                    return temp_plan
+
             busy_reason = self._session_send_busy_reason(session)
             if busy_reason:
                 if busy_reason == "pending_reply":
@@ -261,10 +275,10 @@ class SendFlowMixin:
                         plan.conversation_id = (remote.get("conversation_id") or "").strip()
                     if not plan.url:
                         plan.url = (remote.get("url") or "").strip()
-                    page_display_id = "-"
-                    if hasattr(self, "_session_bound_page_display_id_text"):
-                        page_display_id = (
-                            self._session_bound_page_display_id_text(session) or "-"
+                    page_no = "-"
+                    if hasattr(self, "_session_bound_page_no_text"):
+                        page_no = (
+                            self._session_bound_page_no_text(session) or "-"
                         )
                     if not plan.client_id or not plan.conversation_id:
                         self._append_log(
@@ -273,7 +287,7 @@ class SendFlowMixin:
                                 reason="missing_target_for_pending_queue",
                                 session_id=session.session_id,
                                 bind_state=bind_state or "-",
-                                page_display_id=page_display_id,
+                                page_no=page_no,
                                 client_id=plan.client_id or "-",
                                 conversation_id=plan.conversation_id or "-",
                             ),
@@ -354,9 +368,8 @@ class SendFlowMixin:
         elif page_action is None and hasattr(self, "resolve_page_action"):
             page_action = self.resolve_page_action(session, action="send")
         elif page_action is None:
-            send_decision, send_reason, target_page, send_detail = (
-                self.resolve_send_decision(session, content=content)
-            )
+            # DEPRECATED: resolve_send_decision removed, use resolve_page_action(action="send")
+            send_decision, send_reason, target_page, send_detail = ("blocked", "deprecated_resolve_send_decision", None, {})
             page_action = PageActionPlan.from_resolve_result(
                 {
                     "action": "send",
@@ -392,6 +405,109 @@ class SendFlowMixin:
             return plan
 
         self._log_send_plan(plan)
+        return plan
+
+    def _resolve_temp_home_send_target(self, session, remote=None):
+        remote = normalize_remote_chatgpt(remote or session.remote_chatgpt)
+        bind_state = self._remote_bind_state(remote)
+        temp_page_id = (
+            (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
+            .strip()
+        )
+        result = {
+            "matched": False,
+            "temp_page_id": temp_page_id,
+            "url": "",
+            "client_id": "",
+            "page_instance_id": "",
+            "conversation_id": "",
+            "bind_state": bind_state,
+            "reason_code": "temp_home_page_not_found",
+        }
+        if not self._is_temp_home_bound_state(bind_state):
+            result["reason_code"] = "not_temp_home_bound"
+            return result
+        if not temp_page_id:
+            return result
+        from app.utils.page_command import resolve_bound_page_in_registry
+        from app.utils.page_status import PageRegistry, binding_from_session
+
+        status = self._bridge_ui.last_bridge_status or {}
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+        binding = binding_from_session(session)
+        resolved = resolve_bound_page_in_registry(reg, binding)
+        page = resolved.get("page")
+        if page is None or not resolved.get("online"):
+            result["reason_code"] = (resolved.get("reason_code") or "temp_home_page_not_found").strip()
+            return result
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        result.update(
+            {
+                "matched": True,
+                "url": page_url_from(raw) or (page.url or "") or "https://chatgpt.com/",
+                "client_id": (raw.get("client_id") or page.client_id or "").strip(),
+                "page_instance_id": (
+                    raw.get("page_instance_id") or page.page_instance_id or ""
+                ).strip(),
+                "conversation_id": "",
+                "reason_code": "",
+                "page_raw": raw,
+            }
+        )
+        return result
+
+    def _log_temp_home_send_target(self, session, temp_info):
+        self._append_log(
+            "[SEND][TEMP_HOME_TARGET] "
+            + kv_line(
+                session_id=session.session_id if session else "-",
+                temp_page_id=temp_info.get("temp_page_id") or "-",
+                matched="true" if temp_info.get("matched") else "false",
+                url=temp_info.get("url") or "-",
+                decision="allowed" if temp_info.get("matched") else "blocked",
+                reason=temp_info.get("reason_code") or "-",
+                client_id=temp_info.get("client_id") or "-",
+            ),
+            echo=True,
+        )
+
+    def _apply_temp_home_send_plan(self, plan: SendPlan, session, remote):
+        temp_info = self._resolve_temp_home_send_target(session, remote)
+        self._log_temp_home_send_target(session, temp_info)
+        if not temp_info.get("matched"):
+            plan.decision = "blocked"
+            plan.reason = temp_info.get("reason_code") or "temp_home_page_not_found"
+            plan.block_status = "临时绑定的首页页面未在线或未找到"
+            plan.system_msg = plan.block_status
+            plan.render_reason = "send_temp_home_target_missing"
+            return plan
+        raw = temp_info.get("page_raw") or {}
+        cap = PageCapability(
+            online=True,
+            send_decision="allowed",
+            reason_code="",
+            client_id=temp_info.get("client_id") or "",
+            page_instance_id=temp_info.get("page_instance_id") or "",
+            conversation_id="",
+            url=temp_info.get("url") or "",
+            page_type="home",
+            prebound_home=True,
+        )
+        page_action = PageActionPlan(
+            action="send",
+            decision="allowed",
+            target_source="temp_home_page_display_id",
+            reason_code="",
+            capability=cap,
+            page=raw,
+        )
+        plan.apply_page_action(page_action)
+        plan.is_bootstrap = True
+        plan.target_page_id = temp_info.get("temp_page_id") or ""
+        plan.decision = "allowed"
+        plan.reason = ""
         return plan
 
     def _apply_page_action_to_send_plan(self, plan: SendPlan, page_action) -> None:
@@ -631,7 +747,7 @@ class SendFlowMixin:
             self._set_tm_action_hint(plan.hint)
         if getattr(session, "has_pending_reply", False) and plan.decision == "blocked":
             session.has_pending_reply = False
-            session.pending_reply_since = 0
+            session.reply_waiting_since = 0
             assistant_id = (turn.assistant_message_id or "").strip()
             for message in reversed(session.messages):
                 if (message.message_id or "").strip() != assistant_id:
@@ -732,7 +848,7 @@ class SendFlowMixin:
                 )
         if getattr(session, "has_pending_reply", False):
             session.has_pending_reply = False
-            session.pending_reply_since = 0
+            session.reply_waiting_since = 0
         if hasattr(self, "_mark_session_waiting_finished"):
             self._mark_session_waiting_finished(
                 session, reason=f"send_failed:{err_type}"
@@ -752,8 +868,8 @@ class SendFlowMixin:
             "error": err,
         }
 
-    def _dispatch_send_plan(self, plan: SendPlan) -> dict:
-        """allowed/queued 且目标已 resolve：组 payload、上传、入 server 队列。"""
+    def _prepare_send_dispatch_payload(self, plan: SendPlan) -> tuple[bool, dict | None]:
+        """组装并校验发送 payload；失败时不应已追加本地消息。"""
         session = plan.session
         turn = plan.turn
         self._rebind_current_session_to_online_client_if_needed()
@@ -774,30 +890,74 @@ class SendFlowMixin:
                 conversation_id=plan.conversation_id,
                 target_source=plan.target_source,
                 bootstrap_conversation=plan.is_bootstrap,
+                target_page_id=plan.target_page_id,
                 trace_id=plan.trace_id,
                 allow_same_conversation_fallback=allow_fallback,
                 cap_page=self._send_plan_cap_page(plan),
             )
         except Exception as exc:
-            return self._fail_local_send_turn(
-                plan,
-                error=exc,
-                stage="compose_send_payload",
-            )
-        if not self._patch_chat_send_target_payload(session, payload):
             self._append_log(
-                "[SEND][BLOCK] "
+                "[SEND][PREPARE][FAIL] "
                 + kv_line(
                     trace_id=plan.trace_id or "-",
-                    reason="send_target_incomplete",
+                    stage="compose_send_payload",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 ),
                 echo=True,
+                level="ERROR",
             )
-            return {
-                "ok": False,
-                "reason": "send_target_incomplete",
-                "retryable": True,
-            }
+            return False, None
+        if not self._patch_chat_send_target_payload(session, payload):
+            return False, None
+        try:
+            from app.utils.gui_bridge_json_log import log_gui_send_payload_full
+
+            log_gui_send_payload_full(
+                trace_id=plan.trace_id,
+                session_id=session.session_id,
+                turn_id=turn.turn_id,
+                user_message_id=turn.user_message_id,
+                assistant_message_id=turn.assistant_message_id,
+                bridge_message_id="-",
+                payload=payload,
+            )
+        except Exception as exc:
+            import traceback
+
+            self._append_log(
+                "[GUI][JSON][SEND_PAYLOAD_FULL][LOG_FAILED] "
+                f"error_type={type(exc).__name__} error={exc}\n{traceback.format_exc()}",
+                echo=True,
+                level="ERROR",
+            )
+        return True, payload
+
+    def _dispatch_send_plan(
+        self, plan: SendPlan, *, prepared_payload: dict | None = None
+    ) -> dict:
+        """allowed/queued 且目标已 resolve：组 payload、上传、入 server 队列。"""
+        session = plan.session
+        turn = plan.turn
+
+        if prepared_payload is not None:
+            payload = prepared_payload
+        else:
+            ok, payload = self._prepare_send_dispatch_payload(plan)
+            if not ok or payload is None:
+                self._append_log(
+                    "[SEND][BLOCK] "
+                    + kv_line(
+                        trace_id=plan.trace_id or "-",
+                        reason="send_target_incomplete",
+                    ),
+                    echo=True,
+                )
+                return self._fail_local_send_turn(
+                    plan,
+                    error_message="send_target_incomplete",
+                    stage="patch_send_target",
+                )
 
         self._append_log(
             "[SEND][DISPATCH] "
@@ -807,6 +967,7 @@ class SendFlowMixin:
                 conversation_id=plan.conversation_id or "-",
                 source=plan.message_source or "-",
                 bootstrap="true" if plan.is_bootstrap else "false",
+                target_page_id=plan.target_page_id or "-",
             ),
             echo=True,
         )
@@ -819,7 +980,7 @@ class SendFlowMixin:
             "assistant_message_id": turn.assistant_message_id,
             "from_pending_bootstrap": plan.from_pending_bootstrap,
             "reuse_user_message_id": turn.user_message_id,
-            "message_source": plan.message_source,
+            "source": plan.message_source,
             "suppress_system_message": plan.suppress_system_message,
         }
 

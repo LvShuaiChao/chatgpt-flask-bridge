@@ -1,7 +1,7 @@
 import time
 from urllib.parse import urlparse
 
-from log_utils import append_log
+from app.utils.log_utils import append_log
 
 
 def short_id(value, length=8):

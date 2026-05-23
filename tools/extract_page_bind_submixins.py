@@ -100,8 +100,8 @@ HEADERS = {
         import traceback
         import uuid
 
-        import server
-        from log_utils import append_log
+        import app.server
+        from app.utils.log_utils import append_log
 
         from app.constants import (
             ASSISTANT_WAIT_TEXTS,
@@ -137,7 +137,7 @@ HEADERS = {
         import webbrowser
         from urllib.parse import urlparse
 
-        import server
+        import app.server
 
         from app.constants import CHATGPT_HOME_URL
         from app.models import (
@@ -187,8 +187,8 @@ REMAINING_HEADER = textwrap.dedent('''
     import webbrowser
     from urllib.parse import urlparse
 
-    import server
-    from log_utils import append_log
+    import app.server
+    from app.utils.log_utils import append_log
 
     from app.constants import (
         ASSISTANT_WAIT_TEXTS,

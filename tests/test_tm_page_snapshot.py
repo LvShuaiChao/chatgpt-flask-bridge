@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from app.ui.mixins.page_tm_client_mixin import PageTmClientMixin
-from app.utils.page_snapshot import PageRegistry, status_pages_token
+from app.utils.page_status import PageRegistry, status_pages_token
 
 
 class _SnapshotHost(PageTmClientMixin):

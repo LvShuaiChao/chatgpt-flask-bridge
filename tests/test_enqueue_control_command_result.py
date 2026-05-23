@@ -9,7 +9,7 @@ from app.ui.mixins.bridge_mixin import BridgeMixin
 
 @pytest.fixture
 def server_module():
-    import server as srv
+    import app.server as srv
 
     return importlib.reload(srv)
 

@@ -4,7 +4,7 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 from app.models import normalize_remote_chatgpt, remote_binding_enabled
-from app.ui.widgets.elided_label import ElidedLabel
+from app.ui.widgets.segmented_elided_label import SegmentedElidedLabel
 
 
 @pytest.fixture(scope="session")
@@ -77,7 +77,7 @@ class _Host(UiStatusCompactMixin, PageBindingDisplayMixin):
 @pytest.fixture
 def host(qapp):
     h = _Host()
-    h.current_session_url_label = ElidedLabel("")
+    h.current_session_url_label = SegmentedElidedLabel("")
     h._registry = {
         "tm-abc:page-inst-1": {
             "client_id": "tm-abc",

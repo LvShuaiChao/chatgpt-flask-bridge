@@ -103,7 +103,7 @@ def _now():
 
 
 def _srv():
-    import server as srv
+    import app.server as srv
     return srv
 
 

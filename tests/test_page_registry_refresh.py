@@ -213,7 +213,7 @@ def test_get_bound_page_snapshot_without_resolve():
 
     }
 
-    from app.utils.page_snapshot import PageRegistry
+    from app.utils.page_status import PageRegistry
 
     host.page_registry = PageRegistry.from_bridge_status(
         {
@@ -291,7 +291,7 @@ def test_poll_minimal_idle_response(server_module):
 @pytest.fixture
 
 def server_module():
-    import server as srv
+    import app.server as srv
 
     return srv
 

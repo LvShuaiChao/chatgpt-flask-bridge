@@ -4,7 +4,7 @@ import time
 import unittest
 
 from app.utils.page_command import resolve_bound_page_in_registry
-from app.utils.page_snapshot import PageRegistry
+from app.utils.page_status import PageRegistry
 
 
 class ResolveBoundPageRegistryTests(unittest.TestCase):

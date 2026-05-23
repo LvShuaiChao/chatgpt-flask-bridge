@@ -135,7 +135,7 @@ def _push_targeted_page_command(command, log_label, client_id, url=None):
     client_id = (client_id or "").strip()
     if not client_id:
         raise ValueError("client_id 不能为空")
-    page_url = (url or "").strip() or None
+    url = (url or "").strip() or None
 
     return _queue_control_message(
         command,

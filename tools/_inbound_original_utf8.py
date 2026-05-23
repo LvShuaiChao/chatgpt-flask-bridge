@@ -2,8 +2,8 @@ import time
 import traceback
 import uuid
 
-import server
-from log_utils import append_log
+import app.server
+from app.utils.log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,

@@ -26,7 +26,7 @@ import time
 import traceback
 import uuid
 
-from log_utils import append_log
+from app.utils.log_utils import append_log
 
 from PyQt5.QtWidgets import QFileDialog
 
@@ -52,7 +52,7 @@ from app.ui.status_scheduler import StatusScheduler
 from app.utils.bridge_payload import build_gui_push_payload
 from app.utils.page_status import page_url_from, read_snapshot_identity
 from app.utils.trace_log import kv_line, make_send_trace_id
-from app.utils.page_snapshot import bridge_status_online
+from app.utils.page_status import bridge_status_online
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
@@ -80,7 +80,7 @@ class BridgeMixin:
     def enqueue_page_command(self, session, command, payload=None):
         """统一页面命令入队：先 resolve_page_command_target，再 enqueue_control_command。"""
         from app.utils.page_command import resolve_page_command_target
-        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import PageRegistry
 
         command = (command or "").strip()
         registry = getattr(self, "page_registry", None)
@@ -318,7 +318,7 @@ class BridgeMixin:
             "assistant_message_id",
             "reuse_user_message_id",
             "from_pending_bootstrap",
-            "message_source",
+            "source",
             "suppress_system_message",
             "refresh_send_target",
         }
@@ -349,7 +349,7 @@ class BridgeMixin:
         assistant_message_id = (pending.get("assistant_message_id") or "").strip()
         reuse_user_message_id = (pending.get("reuse_user_message_id") or "").strip()
         from_pending_bootstrap = bool(pending.get("from_pending_bootstrap"))
-        message_source = (pending.get("message_source") or "direct").strip()
+        message_source = (pending.get("source") or "direct").strip()
         suppress_system_message = bool(pending.get("suppress_system_message"))
         bind_state = self._effective_bind_state(session)
         is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
@@ -374,7 +374,7 @@ class BridgeMixin:
             "assistant_message_id": assistant_message_id,
             "reuse_user_message_id": reuse_user_message_id,
             "from_pending_bootstrap": from_pending_bootstrap,
-            "message_source": message_source,
+            "source": message_source,
             "suppress_system_message": suppress_system_message,
             "is_bootstrap": is_bootstrap,
             "existing_user_message": existing_user_message,
@@ -382,28 +382,97 @@ class BridgeMixin:
         }
 
     def _patch_chat_send_target_payload(self, session, payload):
-        """入队前只校验 target 字段，不从 remote_chatgpt 重选。"""
-        del session
+        """入队前校验 target 字段。
+
+        正式对话页必须有 conversation_id。
+        临时首页绑定 / bootstrap 首条发送不要求 conversation_id。
+        """
+        from app.models import is_temp_home_bound_state
+
+        payload = payload if isinstance(payload, dict) else {}
+        remote = normalize_remote_chatgpt(
+            getattr(session, "remote_chatgpt", None) or {}
+        )
+        raw_bind_state = str(remote.get("bind_state") or "").strip()
+        effective_bind_state = ""
+        if hasattr(self, "_effective_bind_state"):
+            effective_bind_state = str(self._effective_bind_state(session) or "").strip()
+
+        bootstrap = bool(payload.get("bootstrap_conversation"))
+        is_temp_home = (
+            bootstrap
+            or is_temp_home_bound_state(raw_bind_state)
+            or is_temp_home_bound_state(effective_bind_state)
+        )
+
+        client_id = str(payload.get("client_id") or "").strip()
+        page_instance_id = str(payload.get("page_instance_id") or "").strip()
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        target_page_id = str(
+            payload.get("target_page_id")
+            or remote.get("target_page_id")
+            or remote.get("temp_page_id")
+            or remote.get("page_display_id")
+            or getattr(session, "bound_page_id", None)
+            or ""
+        ).strip()
+        url = page_url_from(payload) or str(
+            payload.get("url") or payload.get("conversation_url") or ""
+        ).strip()
+
         missing = []
-        if not (payload.get("client_id") or "").strip():
+
+        if not client_id:
             missing.append("client_id")
-        if not (payload.get("page_instance_id") or "").strip():
+        if not page_instance_id:
             missing.append("page_instance_id")
-        if not (payload.get("conversation_id") or "").strip():
-            missing.append("conversation_id")
-        if not page_url_from(payload):
+        if not url:
             missing.append("url")
+
+        if is_temp_home:
+            if not target_page_id:
+                missing.append("target_page_id")
+
+            payload["bootstrap_conversation"] = True
+            payload["target_page_id"] = target_page_id
+            payload["conversation_id"] = ""
+            payload["url"] = url or "https://chatgpt.com/"
+            mode = "temp_home"
+        else:
+            if not conversation_id:
+                missing.append("conversation_id")
+
+            payload["bootstrap_conversation"] = False
+            payload["conversation_id"] = conversation_id
+            mode = "conversation"
+
         if missing:
             self._append_log(
                 "[SEND][PATCH_TARGET][FAIL] "
+                f"mode={mode} "
                 f"missing_fields={','.join(missing)} "
-                f"client_id={(payload.get('client_id') or '-') or '-'} "
-                f"page_instance_id={(payload.get('page_instance_id') or '-') or '-'} "
-                f"conversation_id={(payload.get('conversation_id') or '-') or '-'} "
-                f"url={page_url_from(payload) or '-'}",
+                f"bind_state={raw_bind_state or '-'} "
+                f"effective_bind_state={effective_bind_state or '-'} "
+                f"client_id={client_id or '-'} "
+                f"page_instance_id={page_instance_id or '-'} "
+                f"target_page_id={target_page_id or '-'} "
+                f"conversation_id={conversation_id or '-'} "
+                f"url={url or '-'}",
                 echo=True,
             )
             return False
+
+        self._append_log(
+            "[SEND][PATCH_TARGET][OK] "
+            f"mode={mode} "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"target_page_id={target_page_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"url={payload.get('url') or '-'} "
+            f"bootstrap={'true' if payload.get('bootstrap_conversation') else 'false'}",
+            echo=True,
+        )
         return True
 
     def _log_chat_queue_event(self, tag, *, trace_id="-", **fields):
@@ -429,7 +498,7 @@ class BridgeMixin:
         assistant_message_id = ctx["assistant_message_id"]
         reuse_user_message_id = ctx["reuse_user_message_id"]
         from_pending_bootstrap = ctx["from_pending_bootstrap"]
-        message_source = ctx["message_source"]
+        message_source = ctx["source"]
         suppress_system_message = ctx["suppress_system_message"]
         is_bootstrap = ctx["is_bootstrap"]
         existing_user_message = ctx["existing_user_message"]
@@ -621,8 +690,8 @@ class BridgeMixin:
                     "turn_id": turn_id,
                     "bridge_message_id": bridge_message_id,
                     "request_id": bridge_message_id,
-                    "ui_status": "sending",
-                    "message_source": "local_send",
+                    "status": "sending",
+                    "source": "local_send",
                 },
             )
             count_after_enqueue = self._session_visible_message_count(session)
@@ -656,8 +725,8 @@ class BridgeMixin:
                         "turn_id": turn_id,
                         "bridge_message_id": bridge_message_id,
                         "parent_message_id": user_message_id,
-                        "ui_status": "waiting",
-                        "message_source": "local_placeholder",
+                        "status": "waiting",
+                        "source": "local_placeholder",
                     },
                 )
             else:
@@ -666,7 +735,7 @@ class BridgeMixin:
                 existing_assistant.content = ASSISTANT_WAIT_TEXT
 
         session.has_pending_reply = True
-        session.pending_reply_since = time.time()
+        session.reply_waiting_since = time.time()
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="send_queued")
         self._refresh_session_list(select_session_id=session.session_id)
@@ -1180,7 +1249,7 @@ class BridgeMixin:
                 echo=True,
             )
             return
-        turn = self._create_local_send_turn(
+        turn = self._new_local_send_turn(
             content, session=session, trace_id="", button="upload_and_send"
         )
         plan = self._build_send_plan(
@@ -1201,22 +1270,16 @@ class BridgeMixin:
                 echo=True,
             )
             return
-        payload = self._compose_send_payload(
-            session,
-            turn_id=turn.turn_id,
-            content=plan.content,
-            client_id=plan.client_id,
-            url=plan.url,
-            page_instance_id=plan.page_instance_id,
-            conversation_id=plan.conversation_id,
-            target_source=plan.target_source,
-            bootstrap_conversation=plan.is_bootstrap,
-            trace_id=turn.trace_id,
-            allow_same_conversation_fallback=False,
-        )
-        if not self._patch_chat_send_target_payload(session, payload):
+        prep_ok, payload = self._prepare_send_dispatch_payload(plan)
+        if not prep_ok or payload is None:
             self._append_log(
                 "[UPLOAD_AND_SEND][BLOCKED] reason=send_payload_incomplete",
+                echo=True,
+            )
+            return
+        if not self._append_local_send_turn(turn, clear_input=False):
+            self._append_log(
+                "[UPLOAD_AND_SEND][BLOCKED] reason=local_append_failed",
                 echo=True,
             )
             return
@@ -1240,7 +1303,7 @@ class BridgeMixin:
             "assistant_message_id": turn.assistant_message_id,
             "from_pending_bootstrap": plan.from_pending_bootstrap,
             "reuse_user_message_id": turn.user_message_id,
-            "message_source": plan.message_source,
+            "source": plan.message_source,
             "suppress_system_message": plan.suppress_system_message,
             "chain": "upload_and_send",
         }
@@ -1318,7 +1381,7 @@ class BridgeMixin:
                 ),
                 str(client.get("response_state") or client.get("is_responding") or ""),
                 str(client.get("can_accept_input") or ""),
-                str(client.get("state") or client.get("response_state") or ""),
+                str(client.get("response_state") or ""),
             ]))
         return "\n".join(sorted(parts))
 
@@ -1476,7 +1539,7 @@ class BridgeMixin:
             f"监听地址：{host}:{port}",
             f"油猴状态：{tm_text}",
             f"最后心跳：{self._format_ts(last_seen)}",
-            f"油猴 client_id：{status.get('tampermonkey_client_id') or '-'}",
+            f"油猴 client_id：{active_client_id or '-'}",
             f"全局绑定 client_id：{read_snapshot_identity(status, 'bound')['client_id'] or '-'}",
             f"本对话绑定 client_id：{self._session_bound_client_id() or '-'}",
             f"已知 ChatGPT 页面数：{self._status_summary_page_count(status)}",
@@ -2248,7 +2311,7 @@ class BridgeMixin:
                 self._try_send_next_queued_message(session)
                 return
         text = (
-            payload.get("text") or payload.get("content") or payload.get("assistant_text") or ""
+            payload.get("content") or payload.get("text") or payload.get("assistant_text") or ""
         ).strip()
         if text in ("正在思考", "正在生成", "思考中", "回复完成"):
             self._append_log(
@@ -2657,13 +2720,22 @@ class BridgeMixin:
             BIND_STATE_WAITING_BOUND_CONVERSATION,
         ):
             return bind_state.lower()
-        if bind_state == BIND_STATE_PREBOUND_HOME:
-            client_id = (
-                remote.get("prebound_home_client_id") or remote.get("client_id") or ""
+        if self._is_temp_home_bound_state(bind_state):
+            temp_page_id = (
+                remote.get("temp_page_id")
+                or remote.get("page_display_id")
+                or remote.get("page_no")
+                or ""
             ).strip()
-            item = self._client_info_by_id(client_id) if client_id else None
-            if isinstance(item, dict) and self._is_prebound_home_page(item):
-                return "prebound_home_wait_conversation"
+            if temp_page_id and hasattr(self, "_resolve_temp_home_send_target"):
+                temp_info = self._resolve_temp_home_send_target(session, remote)
+                if temp_info.get("matched"):
+                    return ""
+            elif temp_page_id and hasattr(self, "_find_page_by_display_id"):
+                page = self._find_page_by_display_id(temp_page_id)
+                if isinstance(page, dict) and page.get("online"):
+                    return ""
+            return "temp_home_page_not_found"
         return ""
 
     def _current_session_queue_size(self):
@@ -2895,6 +2967,14 @@ class BridgeMixin:
                         "retryable": True,
                     }
                 return self._handle_send_blocked(plan, messages_appended=True)
+            prep_ok, prepared_payload = self._prepare_send_dispatch_payload(plan)
+            if not prep_ok or prepared_payload is None:
+                return self._fail_local_send_turn(
+                    plan,
+                    error_message="send_target_incomplete",
+                    stage="patch_send_target",
+                    local_messages_appended=False,
+                )
             local_append_ids = self._append_local_send_turn(turn, clear_input=True)
             if not local_append_ids:
                 if not plan.suppress_system_message:
@@ -2906,7 +2986,9 @@ class BridgeMixin:
                     "reason": "local_append_failed",
                     "retryable": True,
                 }
-            return self._dispatch_send_plan(plan)
+            return self._dispatch_send_plan(
+                plan, prepared_payload=prepared_payload
+            )
         except Exception as exc:
             if plan is not None and hasattr(self, "_fail_local_send_turn"):
                 return self._fail_local_send_turn(
@@ -3013,8 +3095,7 @@ class BridgeMixin:
                     }
                 except Exception as error:
                     import traceback
-                    detail = f"{error}
-{traceback.format_exc()}"
+                    detail = f"{error}\n{traceback.format_exc()}"
                     self._append_log(f"[SYSTEM_HOTKEY][ERROR] {detail}", echo=True)
                     result = {
                         "ok": False,

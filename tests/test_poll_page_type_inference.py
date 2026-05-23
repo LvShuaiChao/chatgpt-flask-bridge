@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture
 def server_module():
     import importlib
-    import server as srv
+    import app.server as srv
 
     return importlib.reload(srv)
 

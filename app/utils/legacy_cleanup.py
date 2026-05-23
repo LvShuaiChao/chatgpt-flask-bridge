@@ -1,6 +1,7 @@
 """入站/保存边界：禁止携带旧字段（不再做 id/status 等入口迁移）。"""
 
 from __future__ import annotations
+from app.utils.legacy_fields import LEGACY_FIELD_NAMES, LEGACY_URL_FIELD_NAMES, LEGACY_MESSAGE_FIELD_NAMES
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,8 @@ LEGACY_FIELD_NAMES = frozenset(
         "toolbox_state_key",
         "toolbox_page_key",
         "launch_token",
+        "status",
+        "source",
     }
 )
 
