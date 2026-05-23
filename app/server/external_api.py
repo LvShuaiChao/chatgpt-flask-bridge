@@ -14,9 +14,6 @@ from app.server.runtime_state import (
     _notify_status,
     _now,
 )
-from app.server import message_queue as mq
-from app.server import tm_page_registry as pr
-
 def _external_auth_ok():
     token = (st.API_TOKEN or "").strip()
     if not token:

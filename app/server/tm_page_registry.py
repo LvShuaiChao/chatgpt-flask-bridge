@@ -214,50 +214,6 @@ def _apply_bridge_runtime_patch(result, body, *, action="poll", identity_changed
     return result
 
 
-def _cleanup_tm_page_nos():
-    with st._state_lock:
-        active_keys = set()
-        for info in st._tampermonkey_pages.values():
-            key = _tm_page_display_key(
-                info.get("client_id") or "",
-                info.get("page_instance_id") or "",
-            )
-            if key:
-                active_keys.add(key)
-        if not active_keys:
-            for info in st._tampermonkey_pages.values():
-                key = _tm_page_display_key(
-                    info.get("client_id") or "",
-                    info.get("page_instance_id") or "",
-                )
-                if key:
-                    active_keys.add(key)
-        removed = 0
-        for key in list(st._tm_page_no_by_key.keys()):
-            if key in active_keys:
-                continue
-            st._tm_page_no_by_key.pop(key, None)
-            st._tm_page_no_updated_at.pop(key, None)
-            removed += 1
-            _log(
-                "[TM_PAGE_ID][RELEASE] "
-                f"key={key} reason=no_active_page"
-            )
-    return removed
-
-
-def _register_bridge_client_report(body, action="poll"):
-    if not isinstance(body, dict):
-        return False
-    client_id = (body.get("client_id") or "").strip()
-    page_instance_id = (body.get("page_instance_id") or "").strip()
-    if not client_id or not page_instance_id:
-        _log("[BRIDGE_CLIENT_REPORT][DROP] reason=missing_client_identity")
-        return False
-    _touch_tampermonkey(body, action=action)
-    return True
-
-
 def _tm_registry_counts():
     now = _now()
     with st._state_lock:
@@ -346,21 +302,6 @@ def _overwrite_page_identity_fields(entry, meta):
         entry["conversation_id"] = (meta.get("conversation_id") or "").strip()
     if "page_type" in meta:
         entry["page_type"] = (meta.get("page_type") or "").strip()
-
-
-def _sync_tampermonkey_page_registry(entry):
-    client_id = (entry.get("client_id") or "").strip()
-    page_instance_id = (entry.get("page_instance_id") or "").strip()
-    page_key = _page_registry_key(client_id, page_instance_id)
-
-    if not page_key:
-        return
-
-    # 以 client_id|page_instance_id 为唯一键；同一 client_id 下允许多个 page_instance（多标签/多窗口）。
-    page_entry = st._tampermonkey_pages.setdefault(page_key, {})
-    page_entry.update(dict(entry))
-    page_entry["client_id"] = client_id
-    page_entry["page_instance_id"] = page_instance_id
 
 
 def get_tm_online_summary(

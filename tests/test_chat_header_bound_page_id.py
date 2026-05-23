@@ -15,7 +15,7 @@ def qapp():
     yield app
 from app.ui.mixins.page_binding_display_mixin import PageBindingDisplayMixin
 from app.ui.mixins.ui_status_compact_mixin import UiStatusCompactMixin
-from app.ui.main_window_state import init_main_window_states
+from tests.host_states import attach_main_window_states as init_main_window_states
 
 
 class _Session:

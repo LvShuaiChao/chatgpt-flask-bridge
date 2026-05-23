@@ -360,13 +360,6 @@ class ChatSession:
     def waiting_for_reply(self) -> bool:
         return self.has_pending_reply
 
-    def mark_reply_waiting_started(self) -> None:
-        import time
-        object.__setattr__(self, 'reply_waiting_since', time.time())
-
-    def mark_reply_waiting_finished(self) -> None:
-        object.__setattr__(self, 'reply_waiting_since', 0)
-
     @property
     def conversation_id(self):
         remote = normalize_remote_chatgpt(self.remote_chatgpt)

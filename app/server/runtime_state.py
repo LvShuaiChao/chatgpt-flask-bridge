@@ -244,18 +244,6 @@ def _tm_seen_float(info, *, field="last_seen", default=0.0, context=""):
         return float(default)
 
 
-def is_tampermonkey_online():
-    """任一页面在 ONLINE_TIMEOUT 内有心跳即视为在线。"""
-    from app.server.tm_page_registry import _iter_page_registry_entries
-    from app.utils.page_status import is_page_online
-
-    now = _now()
-    for info in _iter_page_registry_entries():
-        if is_page_online(info, now=now):
-            return True
-    return False
-
-
 def _client_online(last_seen):
     """@deprecated 仅兼容旧调用；业务判断请用 is_page_online(page)。"""
     from app.utils.page_status import is_page_online

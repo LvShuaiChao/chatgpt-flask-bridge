@@ -1,10 +1,9 @@
-﻿"""绑定 page_instance 失效但同 conversation 在线时的目标解析与阻断原因。"""
+"""绑定 page_instance 失效但同 conversation 在线时的目标解析与阻断原因。"""
 
 import time
 
 from app.models import default_remote_chatgpt
 from app.ui.mixins.page_send_target_mixin import PageSendTargetMixin
-from app.ui.main_window_state import init_main_window_states
 from app.utils.target_sources import TARGET_SOURCE_SAME_CONVERSATION_REBOUND_AFTER_LOST
 
 

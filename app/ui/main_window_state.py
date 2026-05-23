@@ -100,22 +100,3 @@ class ServerUiState:
     start_failed: bool = False
     start_error: str = ""
 
-
-def init_main_window_states(host) -> None:
-    """为测试桩或延迟初始化的 host 挂载领域状态对象（已存在则跳过）。"""
-    defaults = (
-        ("_bridge_ui", BridgeUiState),
-        ("_page_selector", PageSelectorState),
-        ("_web_sync", WebSyncState),
-        ("_auto_bind", AutoBindState),
-        ("_bind_display", BindDisplayState),
-        ("_page_cmd", PageCommandUiState),
-        ("_bridge_msg", BridgeMessageState),
-        ("_log_ui", LogUiState),
-        ("_session_ui", SessionUiState),
-        ("_server_ui", ServerUiState),
-    )
-    for attr, cls in defaults:
-        if not hasattr(host, attr):
-            setattr(host, attr, cls())
-

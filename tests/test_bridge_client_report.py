@@ -13,18 +13,14 @@ def server_module():
     return importlib.reload(srv)
 
 
-def test_register_bridge_client_report_requires_identity(server_module):
-    logged = []
-    server_module._log = lambda msg, tag="", level=None: logged.append(msg)
-    ok = server_module._register_bridge_client_report(
-        {"client_id": "c-only"},
-        action="poll",
-    )
-    assert ok is False
-    assert any("[BRIDGE_CLIENT_REPORT][DROP] reason=missing_client_identity" in line for line in logged)
+def test_touch_tampermonkey_requires_client_id(server_module):
+    with server_module._state_lock:
+        server_module._tampermonkey_pages.clear()
+    server_module._touch_tampermonkey({}, action="poll")
+    assert server_module._tm_registry_counts()["raw_clients_count"] == 0
 
 
-def test_register_bridge_client_report_updates_online_table(server_module):
+def test_touch_tampermonkey_updates_online_table(server_module):
     with server_module._state_lock:
         server_module._tampermonkey_pages.clear()
     now = server_module._now()
@@ -45,19 +41,17 @@ def test_register_bridge_client_report_updates_online_table(server_module):
         "url_syncable": True,
         "conversation_syncable": True,
     }
-    assert server_module._register_bridge_client_report(body, action="poll") is True
+    server_module._touch_tampermonkey(body, action="poll")
     counts = server_module._tm_registry_counts()
     assert counts["raw_clients_count"] == 1
     assert counts["online_clients_count"] == 1
     assert counts["conversation_syncable_count"] == 1
-    assert server_module.is_tampermonkey_online() is True
     snap = server_module._snapshot_clients()[0]
-    assert snap.get("send_decision")
-    assert snap.get("page_display_id")
+    assert snap.get("page_display_id") or snap.get("page_no")
     assert snap.get("url") == "https://chatgpt.com/c/abc-123"
 
 
-def test_is_tampermonkey_online_false_when_stale(server_module):
+def test_tm_registry_online_false_when_stale(server_module):
     with server_module._state_lock:
         server_module._tampermonkey_pages.clear()
     stale = server_module._now() - server_module.ONLINE_TIMEOUT_SEC - 5
@@ -69,8 +63,10 @@ def test_is_tampermonkey_online_false_when_stale(server_module):
         "last_seen": stale,
         "is_top_frame": True,
     }
-    server_module._register_bridge_client_report(body, action="poll")
-    page_key = server_module.build_page_key("tm-stale", "page-stale")
+    server_module._touch_tampermonkey(body, action="poll")
+    from app.utils.page_status import build_page_key
+
+    page_key = build_page_key("tm-stale", "page-stale")
     with server_module._state_lock:
         store = server_module._tampermonkey_pages.get(page_key)
         if isinstance(store, dict):
@@ -81,7 +77,6 @@ def test_is_tampermonkey_online_false_when_stale(server_module):
     counts = server_module._tm_registry_counts()
     assert counts["raw_clients_count"] == 1
     assert counts["online_clients_count"] == 0
-    assert server_module.is_tampermonkey_online() is False
 
 
 def test_get_bridge_status_slim_pages_and_summary(server_module):

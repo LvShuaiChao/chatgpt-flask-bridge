@@ -3,7 +3,7 @@
 import time
 
 from app.models import default_remote_chatgpt
-from app.ui.main_window_state import init_main_window_states
+from tests.host_states import attach_main_window_states as init_main_window_states
 from app.ui.mixins.page_send_target_mixin import PageSendTargetMixin
 
 

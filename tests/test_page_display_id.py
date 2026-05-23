@@ -32,7 +32,7 @@ def test_allocate_display_id_for_two_pages(server_module):
             "last_seen": now,
             "is_top_frame": True,
         }
-        assert server_module._register_bridge_client_report(body, action="poll") is True
+        server_module._touch_tampermonkey(body, action="poll")
 
     id_a = server_module._allocate_tm_page_display_id("tm-1", "page-a")
     id_b = server_module._allocate_tm_page_display_id("tm-2", "page-b")
@@ -52,7 +52,7 @@ def test_same_page_instance_keeps_display_id(server_module):
         "last_seen": now,
         "is_top_frame": True,
     }
-    server_module._register_bridge_client_report(body, action="poll")
+    server_module._touch_tampermonkey(body, action="poll")
     first = server_module._allocate_tm_page_display_id("tm-stable", "page-stable")
     second = server_module._allocate_tm_page_display_id("tm-stable", "page-stable")
     assert first == second == 1
@@ -61,7 +61,7 @@ def test_same_page_instance_keeps_display_id(server_module):
 def test_snapshot_clients_includes_page_display_id(server_module):
     _clear_tm_state(server_module)
     now = server_module._now()
-    server_module._register_bridge_client_report(
+    server_module._touch_tampermonkey(
         {
             "client_id": "tm-snap",
             "page_instance_id": "page-snap",
@@ -89,7 +89,7 @@ def test_poll_runtime_patch_includes_page_display_id(server_module):
         "last_seen": server_module._now(),
         "is_top_frame": True,
     }
-    server_module._register_bridge_client_report(body, action="poll")
+    server_module._touch_tampermonkey(body, action="poll")
     resp = server_module._finalize_poll_response(
         server_module._poll_minimal_idle_response(),
         body,
@@ -102,7 +102,7 @@ def test_cleanup_releases_display_id(server_module):
     logged = []
     server_module._log = lambda msg, tag="", level=None: logged.append(msg)
     now = server_module._now()
-    server_module._register_bridge_client_report(
+    server_module._touch_tampermonkey(
         {
             "client_id": "tm-gone",
             "page_instance_id": "page-gone",

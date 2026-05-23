@@ -43,7 +43,7 @@ def test_message_matches_page_blocks_missing_body_conversation_id(server_module)
     assert server_module._message_matches_page(msg, body) is False
 
 
-@pytest.mark.skip(reason="_register_bridge_client_report 尚未实现")
+@pytest.mark.skip(reason="legacy poll registration smoke test")
 def test_register_ignores_client_false_capability(server_module):
     with server_module._state_lock:
         server_module._tampermonkey_clients.clear()
@@ -60,7 +60,7 @@ def test_register_ignores_client_false_capability(server_module):
         "last_seen": now,
         "is_top_frame": True,
     }
-    assert server_module._register_bridge_client_report(body, action="poll") is True
+    server_module._touch_tampermonkey(body, action="poll")
     entry = server_module._registry_entry_for_client(
         "tm-cap",
         "page-cap",

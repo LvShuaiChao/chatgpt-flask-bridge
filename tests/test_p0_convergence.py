@@ -185,7 +185,14 @@ def test_waiting_messages_match_page_instance(server_module):
         server_module._outbound_waiting.clear()
         server_module._outbound_waiting["m1"] = msg_exact
         server_module._outbound_waiting["m2"] = msg_other
-    waiting = server_module._waiting_messages_for_page(body)
+    client_id = (body.get("client_id") or "").strip()
+    page_instance_id = (body.get("page_instance_id") or "").strip()
+    waiting_all = server_module._waiting_messages_for_client(client_id)
+    waiting = [
+        msg
+        for msg in waiting_all
+        if (msg.get("delivered_page_instance_id") or "").strip() == page_instance_id
+    ]
     assert len(waiting) == 1
     assert waiting[0]["message_id"] == "m1"
 

@@ -43,7 +43,6 @@ from app.server.tm_page_registry import (
     _snapshot_clients,
     _touch_tampermonkey,
 )
-from app.server import control_commands as cc
 from app.server import external_api as ext
 from app.server.external_api import (
     _notify_external_request_from_bridge as _notify_external_request_impl,
@@ -471,24 +470,6 @@ def _waiting_messages_for_client(client_id):
         msg
         for msg in st._outbound_waiting.values()
         if msg.get("delivered_to") == client_id and not _is_finalized(msg)
-    ]
-
-
-def _waiting_messages_for_page(body):
-    """按 client_id + page_instance_id 过滤等待中的出站消息。"""
-    if not isinstance(body, dict):
-        return []
-    client_id = (body.get("client_id") or "").strip()
-    page_instance_id = (body.get("page_instance_id") or "").strip()
-    if not client_id:
-        return []
-    waiting = _waiting_messages_for_client(client_id)
-    if not page_instance_id:
-        return waiting
-    return [
-        msg
-        for msg in waiting
-        if (msg.get("delivered_page_instance_id") or "").strip() == page_instance_id
     ]
 
 

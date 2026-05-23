@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from app.ui.mixins.page_tm_client_mixin import PageTmClientMixin
-from app.ui.main_window_state import init_main_window_states
+from tests.host_states import attach_main_window_states as init_main_window_states
 
 
 class _AnnotateHost(PageTmClientMixin):

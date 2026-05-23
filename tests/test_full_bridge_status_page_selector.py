@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.ui.mixins.ui_page_selector_mixin import UiPageSelectorMixin
-from app.ui.main_window_state import init_main_window_states
+from tests.host_states import attach_main_window_states as init_main_window_states
 
 
 class _PageSelectorHost(UiPageSelectorMixin):

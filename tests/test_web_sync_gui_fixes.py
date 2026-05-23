@@ -123,7 +123,7 @@ class TestStatusSummarySyncTargetState(unittest.TestCase):
         host = PageBindingDiagnosticsMixin()
         host._append_log = MagicMock()
         host._last_tm_summary_log_key = None
-        from app.ui.main_window_state import init_main_window_states
+        from tests.host_states import attach_main_window_states as init_main_window_states
 
         init_main_window_states(host)
         host._bridge_ui.last_bridge_status = {"server_running": True}

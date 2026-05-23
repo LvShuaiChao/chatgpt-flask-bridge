@@ -176,7 +176,7 @@ def test_verify_send_target_binding_blocks_client_mismatch():
 def sync_poll_host():
     from app.ui.mixins.page_sync_mixin import PageSyncMixin
 
-    from app.ui.main_window_state import init_main_window_states
+    from tests.host_states import attach_main_window_states as init_main_window_states
 
     class _Host(PageSyncMixin):
         def __init__(self):

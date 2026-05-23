@@ -2,7 +2,7 @@
 
 from app.models import BIND_STATE_TEMP_HOME_BOUND, write_session_remote_chatgpt
 from app.ui.mixins.bridge_mixin import BridgeMixin
-from app.ui.main_window_state import init_main_window_states
+from tests.host_states import attach_main_window_states as init_main_window_states
 
 
 
