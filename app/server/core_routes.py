@@ -23,13 +23,17 @@ def before_request():
     json_keys = []
     if request.is_json:
         try:
-            body = request.get_json(silent=True) or {}
+            body = request.get_json(silent=False)
             if isinstance(body, dict):
                 json_keys = sorted(body.keys())
         except Exception as error:
             _log(
                 "[HTTP][REQUEST_BODY_PARSE_FAILED] "
-                f"path={request.path} error_type={type(error).__name__} error={error}"
+                f"method={request.method} path={request.path} "
+                f"remote={request.remote_addr or '-'} "
+                f"content_type={request.content_type!r} "
+                f"error_type={type(error).__name__} error={error}\n"
+                f"{traceback.format_exc()}"
             )
     _log(
         "[HTTP][REQUEST] "

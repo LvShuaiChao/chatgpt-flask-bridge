@@ -142,9 +142,14 @@ def _extract_page_no_for_poll(result, body):
         if raw not in (None, "", 0):
             try:
                 return int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as error:
                 text = str(raw).strip()
                 if text and text != "-":
+                    _log(
+                        "[TM_PAGE][PAGE_NO_NON_NUMERIC] "
+                        f"source=result raw={raw!r} "
+                        f"error_type={type(error).__name__} error={error}"
+                    )
                     return text
     if not isinstance(body, dict):
         return None
@@ -158,9 +163,14 @@ def _extract_page_no_for_poll(result, body):
         if raw not in (None, "", 0):
             try:
                 return int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as error:
                 text = str(raw).strip()
                 if text and text != "-":
+                    _log(
+                        "[TM_PAGE][PAGE_NO_NON_NUMERIC] "
+                        f"source=body_registry raw={raw!r} "
+                        f"error_type={type(error).__name__} error={error}"
+                    )
                     return text
     patch = _bridge_runtime_patch_for_body(body)
     return patch.get("page_no") or None

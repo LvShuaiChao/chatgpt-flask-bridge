@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from flask import Response, jsonify, request
+from werkzeug.exceptions import BadRequest
 
 from app.server import state as st
 from app.server.runtime_state import _log, _now
@@ -138,6 +139,7 @@ def list_upload_files_for_client(
     return result
 
 
+# TODO(cleanup-observe): 当前无调用方；确认油猴上传完成后是否需要回写 uploaded 再决定删除。
 def mark_upload_files_uploaded(file_ids: list[str]) -> None:
     now = _now()
     with st._state_lock:
@@ -179,7 +181,32 @@ def upload_files_patch_for_poll(body: dict) -> dict:
 
 
 def api_register_upload_file():
-    body = request.get_json(silent=True) or {}
+    try:
+        body = request.get_json(silent=False)
+    except BadRequest as error:
+        _log(
+            "[UPLOAD_FILES][REGISTER][INVALID_JSON] "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"error_type={type(error).__name__} error={error}\n"
+            f"{traceback.format_exc()}"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"JSON 解析失败：{error}",
+            "code": "INVALID_JSON",
+        }), 400
+    if not isinstance(body, dict):
+        _log(
+            "[UPLOAD_FILES][REGISTER][INVALID_JSON_OBJECT] "
+            f"body_type={type(body).__name__}"
+        )
+        return jsonify({
+            "ok": False,
+            "error": "JSON body 必须是对象",
+            "code": "INVALID_JSON",
+        }), 400
     path_text = (body.get("path") or body.get("file_path") or "").strip()
     if not path_text:
         return jsonify({"ok": False, "error": "缺少 path"}), 400

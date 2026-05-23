@@ -55,7 +55,15 @@ class PageRegistryRefreshMixin:
     def _make_single_shot_timer(self):
         try:
             return QTimer(self)
-        except TypeError:
+        except TypeError as error:
+            self.safe_log(
+                "[PAGE_REGISTRY][TIMER][PARENT_FALLBACK] "
+                f"reason=qtimer_parent_rejected "
+                f"self_type={type(self).__name__} "
+                f"error_type={type(error).__name__} error={error}",
+                echo=True,
+                level="WARNING",
+            )
             return QTimer()
 
     def _ensure_page_registry_refresh_timer(self):

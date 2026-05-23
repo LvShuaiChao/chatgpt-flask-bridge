@@ -207,6 +207,8 @@
       'button[data-testid="send-button"]',
       'button[data-testid="composer-submit-button"]',
       'button#composer-submit-button',
+      '[data-testid="composer"] button[type="submit"]',
+      'form button[type="submit"]',
       'button[aria-label="发送"]',
       'button[aria-label="发送消息"]',
       'button[aria-label="发送提示"]',
@@ -294,10 +296,102 @@
     return cloneDefaultModeSettings();
   }
 
+  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = 'CHATGPT_TOOLBOX_DONE';
+
+  function getLegacyShortContinuePromptText() {
+    return [
+      '请继续完成上一个任务。',
+      '',
+      '如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充，请只回复下面这一行终止信号：',
+      '',
+      DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+      '',
+      '除此之外不要输出任何多余文字。',
+      '',
+      '如果还需要继续，请直接继续输出后续内容，不要解释。',
+    ].join('\n');
+  }
+
+  function getDefaultContinuePromptText() {
+    return [
+      '请继续完成上一个任务。',
+      '',
+      '你需要先判断上一个任务是否还有剩余内容，但默认不要轻易停止。',
+      '',
+      '判断原则：',
+      '1. 如果无法非常明确地确认“最开始的任务目标”已经完整完成，请继续输出。',
+      '2. 如果还有任何遗漏内容、未输出完的代码、未输出完的检查项、未输出完的整改指令、未覆盖的文件或未完成的步骤，请继续输出。',
+      '3. 如果只是阶段性完成、局部完成、当前小节完成，不代表整个任务完成，必须继续。',
+      '4. 如果上一次回答因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止，请从中断位置继续。',
+      '5. 只有在你非常确定最开始的任务已经完整完成，并且没有任何剩余内容需要输出时，才允许只回复下面这一行终止信号：',
+      '',
+      DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+      '',
+      '不要输出任何其他文字。',
+      '',
+      '继续输出时必须遵守：',
+      '1. 不要重新开始整个任务。',
+      '2. 不要重复已经输出过的内容。',
+      '3. 不要扩展到新任务、新需求、新建议。',
+      '4. 不要自由发挥，不要补充无关背景知识。',
+      '5. 只输出“原任务中尚未完成、尚未覆盖、尚未输出完”的部分。',
+      '6. 如果需要继续代码，从上一次中断的位置继续。',
+      '7. 如果需要继续分析，从上一次中断的小节继续。',
+      '8. 如果已经列过结论，不要重复结论，只补遗漏项。',
+      '9. 如果不确定是否已经完成，优先继续，而不是输出终止信号。',
+      '',
+      '请直接继续输出剩余内容。',
+    ].join('\n');
+  }
+
+  function isLegacyContinuePromptText(text) {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) {
+      return false;
+    }
+    if (trimmed === '继续') {
+      return true;
+    }
+    if (trimmed === getLegacyShortContinuePromptText()) {
+      return true;
+    }
+    if (trimmed.includes('<<<TASK_DONE>>>')) {
+      return true;
+    }
+    return false;
+  }
+
+  function migrateContinuePromptTextIfNeeded(storedText, logFn) {
+    const trimmed = String(storedText || '').trim();
+
+    if (!trimmed) {
+      return { value: '', migrated: false, reason: 'empty-use-runtime-default' };
+    }
+
+    if (trimmed === '继续') {
+      if (typeof logFn === 'function') {
+        logFn('[CONTINUE_PROMPT][MIGRATE_DEFAULT] old=continue new=explicit-task-done');
+      }
+      return { value: '', migrated: true, reason: 'old-continue' };
+    }
+
+    if (isLegacyContinuePromptText(trimmed)) {
+      if (typeof logFn === 'function') {
+        logFn('[CONTINUE_PROMPT][MIGRATE_DEFAULT] old=legacy-prompt new=explicit-task-done');
+      }
+      return { value: '', migrated: true, reason: 'legacy-prompt' };
+    }
+
+    if (typeof logFn === 'function') {
+      logFn('[CONTINUE_PROMPT][KEEP_USER_CUSTOM] reason=user-customized');
+    }
+    return { value: trimmed, migrated: false, reason: 'user-customized' };
+  }
+
   function createDefaultAutoConfig() {
     return {
       listPromptsText: '请先自我介绍一下\n请再用 3 点总结你能做什么',
-      continuePromptsText: '继续',
+      continuePromptsText: '',
       promptMode: 'continue',
       listProfiles: [],
       activeListProfileId: '',

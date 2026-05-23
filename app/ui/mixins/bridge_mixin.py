@@ -2559,7 +2559,13 @@ class BridgeMixin:
         raw = str(getattr(self, "_port_text", None) or "5000").strip()
         try:
             port = int(raw)
-        except ValueError:
+        except ValueError as error:
+            self._append_log(
+                "[SERVER][PORT_INVALID] "
+                f"raw={raw!r} error_type={type(error).__name__} error={error}",
+                echo=True,
+                level="ERROR",
+            )
             self._set_settings_hint(f"端口错误：{raw} 不是数字。")
             return None
         if not (1 <= port <= 65535):

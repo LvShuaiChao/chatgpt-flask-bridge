@@ -1541,6 +1541,7 @@
     );
   }
 
+  /** @deprecated TODO(cleanup-observe): 无引用，旧 page/conversation 合并逻辑残留。 */
   function getMergedToolboxApplyState() {
     return getToolboxPageState();
   }
@@ -1669,10 +1670,12 @@
     return state;
   }
 
+  /** @deprecated TODO(cleanup-observe): 无引用，固定返回空对象。 */
   function collectCurrentToolboxConversationState() {
     return {};
   }
 
+  /** @deprecated TODO(cleanup-observe): 无引用，仅转调 collectCurrentToolboxPageState。 */
   function collectCurrentToolboxBaseState() {
     return collectCurrentToolboxPageState();
   }
@@ -1760,7 +1763,7 @@
     copyHotkeyLoopHomeNavInterval: 20,
     copyHotkeyLoopHomeNavUrl: 'https://chatgpt.com/',
     copyHotkeyContinuePromptText: '',
-    copyHotkeyContinueStopSignal: '__CHATGPT_TOOLBOX_DONE__',
+    copyHotkeyContinueStopSignal: 'CHATGPT_TOOLBOX_DONE',
   });
 
   function normalizeCompactUiConfig(input) {
@@ -1824,8 +1827,20 @@
     const legacyLoopStop = typeof cfg.copyHotkeyLoopStopSignal === 'string'
       ? cfg.copyHotkeyLoopStopSignal.trim()
       : '';
-    const nextStopSignal = String(cfg.copyHotkeyContinueStopSignal || legacyLoopStop || '__CHATGPT_TOOLBOX_DONE__').trim();
-    cfg.copyHotkeyContinueStopSignal = nextStopSignal || '__CHATGPT_TOOLBOX_DONE__';
+    const LEGACY_COPY_HOTKEY_CONTINUE_STOP_SIGNALS = new Set([
+      '<<<CHATGPT_TOOLBOX_DONE>>>',
+      '__CHATGPT_TOOLBOX_DONE__',
+      '<<<TASK_DONE>>>',
+      'TASK_DONE',
+    ]);
+    const nextStopSignal = String(
+      cfg.copyHotkeyContinueStopSignal || legacyLoopStop || 'CHATGPT_TOOLBOX_DONE',
+    ).trim();
+    if (LEGACY_COPY_HOTKEY_CONTINUE_STOP_SIGNALS.has(nextStopSignal)) {
+      cfg.copyHotkeyContinueStopSignal = 'CHATGPT_TOOLBOX_DONE';
+    } else {
+      cfg.copyHotkeyContinueStopSignal = nextStopSignal || 'CHATGPT_TOOLBOX_DONE';
+    }
 
     delete cfg.copyHotkeyLoopContinuePrompt;
     delete cfg.copyHotkeyLoopStopSignalEnabled;

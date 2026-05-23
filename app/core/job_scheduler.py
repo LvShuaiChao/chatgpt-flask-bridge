@@ -265,6 +265,7 @@ def on_assistant_reply_failed(message, *, outbound_message_id=""):
     return job_id
 
 
+# TODO(cleanup-observe): 当前无路由/调用方引用；若 Job 仅保留手动发 Cursor 可删，否则补 /api/jobs/send_to_chatgpt。
 def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
     """
     将 job 的 chatgpt_prompt 通过 push_message_fn 发往 ChatGPT。
@@ -283,7 +284,6 @@ def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
 
     payload = {
         "content": prompt,
-        "content": job.get("user_requirement") or prompt,
         "job_id": job_id,
     }
     if isinstance(payload_extra, dict):

@@ -83,7 +83,6 @@ class ChatSessionMixin:
                     "status": getattr(item, "status", "") or "",
                     "detail": getattr(item, "detail", "") or "",
                     "source": getattr(item, "source", "") or "",
-                    "message_id": getattr(item, "message_id", ""),
                     "parent_message_id": getattr(item, "parent_message_id", ""),
                     "visible": bool(
                         getattr(item, "visible", True)

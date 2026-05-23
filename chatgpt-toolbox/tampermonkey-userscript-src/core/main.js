@@ -481,6 +481,20 @@
     return records[records.length - 1] || null;
   }
 
+  function buildMessageRecordKey(record) {
+    if (!record) {
+      return '';
+    }
+
+    return [
+      String(record.role || ''),
+      String(record.turn_id || ''),
+      String(record.index ?? ''),
+      String(record.char_count ?? ''),
+      String(record.text || '').slice(0, 120),
+    ].join('|');
+  }
+
   function getLatestAssistantAfterLatestUserRecord(options = {}) {
     const records = buildConversationMessageRecords({
       includeEmpty: false,
@@ -879,9 +893,45 @@
       ToolboxShell.appendLog(text);
     }
 
-    function isLikelyComposerSendButton(btn) {
+    const SEND_ARIA_POSITIVE = /(?:^|\b)(?:send(?:\s+(?:message|prompt))?|发送(?:消息|提示)?)(?:\b|$)/i;
+
+    let lastSendButtonScanMeta = {
+      total: 0,
+      matched: 0,
+      reason: '',
+      selector: '',
+      at: 0,
+    };
+
+    function describeSendButton(btn) {
       if (!(btn instanceof HTMLButtonElement)) {
-        return false;
+        return {
+          selector: '',
+          aria: '',
+          testid: '',
+          disabled: true,
+        };
+      }
+
+      const testid = String(btn.getAttribute('data-testid') || '-');
+      const id = String(btn.id || '').trim();
+      const aria = String(btn.getAttribute('aria-label') || '-');
+      const type = String(btn.getAttribute('type') || '').trim();
+      const selector = testid !== '-'
+        ? `button[data-testid="${testid}"]`
+        : (id ? `button#${id}` : (type ? `button[type="${type}"]` : 'button'));
+
+      return {
+        selector,
+        aria,
+        testid,
+        disabled: !isSendButtonReady(btn),
+      };
+    }
+
+    function isExcludedComposerButton(btn) {
+      if (!(btn instanceof HTMLButtonElement)) {
+        return true;
       }
 
       const testId = String(btn.getAttribute('data-testid') || '').toLowerCase();
@@ -889,14 +939,57 @@
       const aria = String(btn.getAttribute('aria-label') || '').trim().toLowerCase();
       const title = String(btn.getAttribute('title') || '').trim().toLowerCase();
       const text = String(btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const negativeText = `${testId} ${id} ${aria} ${title} ${text}`;
+
+      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|dictat|录音|语音|tool|工具|plugin|plug-in|model|模型|gpt-|search|搜索|browse|浏览|think|reason|plus|pro-mode|settings|设置|menu|菜单|share|分享|copy|复制|edit|编辑|regenerate|重新生成|thumb|赞|踩|file-picker|composer-plus|composer-attach|composer-voice|composer-mic/i.test(negativeText)) {
+        return true;
+      }
+
+      if (
+        testId.includes('attach')
+        || testId.includes('upload')
+        || testId.includes('voice')
+        || testId.includes('mic')
+        || testId.includes('model')
+        || testId.includes('tool')
+        || testId.includes('search')
+      ) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function isLikelyComposerSendButton(btn) {
+      if (!(btn instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      if (isExcludedComposerButton(btn)) {
+        return false;
+      }
+
+      const testId = String(btn.getAttribute('data-testid') || '').toLowerCase();
+      const id = String(btn.id || '').toLowerCase();
+      const aria = String(btn.getAttribute('aria-label') || '').trim();
+      const ariaLower = aria.toLowerCase();
+      const title = String(btn.getAttribute('title') || '').trim().toLowerCase();
+      const text = String(btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const type = String(btn.getAttribute('type') || '').toLowerCase();
 
       const positive = [
         testId === 'send-button',
         testId === 'composer-submit-button',
+        testId.includes('send'),
+        testId.includes('submit'),
         id === 'composer-submit-button',
-        ['发送', '发送消息', '发送提示', 'send', 'send message', 'send prompt'].includes(aria),
+        id.includes('composer-submit'),
+        ['发送', '发送消息', '发送提示', 'send', 'send message', 'send prompt'].includes(ariaLower),
+        ariaLower.includes('send'),
+        aria.includes('发送'),
         ['发送', '发送消息', 'send', 'send message'].includes(title),
+        title.includes('send'),
+        title.includes('发送'),
         ['发送', 'send'].includes(text),
       ];
 
@@ -904,22 +997,194 @@
         return true;
       }
 
-      const negativeText = `${testId} ${id} ${aria} ${title} ${text}`;
+      const negativeText = `${testId} ${id} ${ariaLower} ${title} ${text}`;
+
       if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|tool|工具|model|模型|search|搜索/i.test(negativeText)) {
         return false;
       }
 
       if (type === 'submit') {
-        return false;
+        return true;
+      }
+
+      const hasSvg = !!btn.querySelector('svg');
+      if (hasSvg) {
+        const composer = getComposer();
+        if (composer instanceof HTMLElement && isButtonNearComposer(btn, composer)) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.width <= 72 && rect.height > 0 && rect.height <= 72) {
+            return true;
+          }
+        }
       }
 
       return false;
+    }
+
+    function isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope) {
+      if (!(btn instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      if (isInToolbox(btn)) {
+        return false;
+      }
+
+      if (!isElementVisible(btn)) {
+        return false;
+      }
+
+      if (
+        scope !== document.body &&
+        !isButtonBelongsToComposer(btn, composer, composerRoot, composerForm)
+      ) {
+        return false;
+      }
+
+      if (
+        scope === document.body &&
+        !isButtonBelongsToComposer(btn, composer, composerRoot, composerForm) &&
+        !isButtonNearComposer(btn, composer)
+      ) {
+        return false;
+      }
+
+      if (isExcludedComposerButton(btn)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function buildSendButtonPreview(buttons, limit = 6) {
+      return buttons.slice(0, limit).map((btn) => {
+        const info = describeSendButton(btn);
+        return [
+          info.testid,
+          info.aria,
+          String(btn.id || '-'),
+          btn.disabled ? 'disabled' : 'enabled',
+        ].join('|');
+      }).join('; ');
+    }
+
+    function findSendButtonByAriaScan(scope, composer, composerRoot, composerForm) {
+      const buttons = Array.from(scope.querySelectorAll('button'));
+      for (let i = 0; i < buttons.length; i += 1) {
+        const btn = buttons[i];
+        if (!isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope)) {
+          continue;
+        }
+
+        const aria = String(btn.getAttribute('aria-label') || '').trim();
+        if (!aria || !SEND_ARIA_POSITIVE.test(aria)) {
+          continue;
+        }
+
+        if (!isLikelyComposerSendButton(btn)) {
+          continue;
+        }
+
+        return { btn, source: 'aria-scan', selector: 'aria-label~=Send|发送' };
+      }
+
+      return null;
+    }
+
+    function findSendButtonByLastClickable(scope, composer, composerRoot, composerForm) {
+      const buttons = Array.from(scope.querySelectorAll('button'))
+        .filter((btn) => isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope));
+
+      for (let i = buttons.length - 1; i >= 0; i -= 1) {
+        const btn = buttons[i];
+        if (isExcludedComposerButton(btn)) {
+          continue;
+        }
+
+        const rect = btn.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          continue;
+        }
+
+        if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
+          continue;
+        }
+
+        if (!isLikelyComposerSendButton(btn)) {
+          continue;
+        }
+
+        return {
+          btn,
+          source: 'last-clickable',
+          selector: 'composer:last-visible-button',
+        };
+      }
+
+      return null;
+    }
+
+    function logSendButtonFound(hit, silent) {
+      if (!hit || !hit.btn) {
+        return;
+      }
+
+      const info = describeSendButton(hit.btn);
+      const line = `[COMPOSER][SEND_BUTTON_FOUND] selector=${hit.selector || info.selector} `
+        + `aria=${info.aria} testid=${info.testid} disabled=${info.disabled ? '1' : '0'}`;
+
+      lastSendButtonScanMeta = {
+        total: lastSendButtonScanMeta.total,
+        matched: 1,
+        reason: hit.source || 'found',
+        selector: hit.selector || info.selector,
+        at: Date.now(),
+      };
+
+      if (!silent) {
+        appendComposerLogThrottled(`send-button-found:${hit.source || 'found'}`, line, 1000);
+      }
+    }
+
+    function logSendButtonScan(total, matched, reason, silent) {
+      lastSendButtonScanMeta = {
+        total,
+        matched,
+        reason: reason || '',
+        selector: matched > 0 ? lastSendButtonScanMeta.selector : '',
+        at: Date.now(),
+      };
+
+      if (silent) {
+        return;
+      }
+
+      appendComposerLogThrottled(
+        `send-button-scan:${reason || 'scan'}`,
+        `[COMPOSER][SEND_BUTTON_SCAN] total=${total} matched=${matched} reason=${reason || '-'}`,
+        5000,
+      );
+    }
+
+    function logSendButtonNotFound(composer, buttonCount, preview, silent) {
+      const composerTag = composer instanceof HTMLElement
+        ? String(composer.tagName || '').toLowerCase()
+        : 'missing';
+
+      if (!silent) {
+        appendComposerLogThrottled(
+          'send-button-not-found',
+          `[COMPOSER][SEND_BUTTON_NOT_FOUND] composer=${composerTag} buttonCount=${buttonCount} preview=${preview || '-'}`,
+          5000,
+        );
+      }
     }
 
     function findSendButton(options = {}) {
       const silent = options.silent === true;
       const composer = getComposer();
       if (!(composer instanceof HTMLElement)) {
+        logSendButtonScan(0, 0, 'composer-not-found', silent);
         if (!silent) {
           appendComposerLogThrottled(
             'find-send-button:composer-not-found',
@@ -941,38 +1206,26 @@
         scopes.push(composerForm);
       }
 
-      const main = qs('main');
-      if (main instanceof HTMLElement && !scopes.includes(main)) {
-        scopes.push(main);
-      }
-
-      if (document.body instanceof HTMLElement && !scopes.includes(document.body)) {
-        scopes.push(document.body);
+      const mainEl = qs('main');
+      if (mainEl instanceof HTMLElement && !scopes.includes(mainEl)) {
+        scopes.push(mainEl);
       }
 
       const selectors = SELECTORS.sendButton || [];
+      let totalScanned = 0;
+      const previewButtons = [];
 
       for (const scope of scopes) {
+        const scopeButtons = Array.from(scope.querySelectorAll('button'))
+          .filter((btn) => !isInToolbox(btn));
+        totalScanned += scopeButtons.length;
+        previewButtons.push(...scopeButtons.slice(0, 12));
+
         for (const sel of selectors) {
           const candidates = Array.from(scope.querySelectorAll(sel));
 
           for (const candidate of candidates) {
-            if (!(candidate instanceof HTMLButtonElement)) {
-              continue;
-            }
-
-            if (isInToolbox(candidate)) {
-              continue;
-            }
-
-            if (!isElementVisible(candidate)) {
-              continue;
-            }
-
-            if (
-              scope !== document.body &&
-              !isButtonBelongsToComposer(candidate, composer, composerRoot, composerForm)
-            ) {
+            if (!isComposerSendButtonCandidate(candidate, composer, composerRoot, composerForm, scope)) {
               continue;
             }
 
@@ -980,32 +1233,31 @@
               continue;
             }
 
-            if (
-              scope === document.body &&
-              !isButtonBelongsToComposer(candidate, composer, composerRoot, composerForm) &&
-              !isButtonNearComposer(candidate, composer)
-            ) {
-              continue;
-            }
-
-            const source = scope === composerRoot
-              ? 'composerRoot'
-              : (scope === composerForm ? 'composerForm' : (scope === main ? 'main' : 'document.body'));
-            if (!silent) {
-              appendComposerLogThrottled(
-                `find-send-button:found:${source}`,
-                `[COMPOSER][find-send-button:found] source=${source} `
-                + `testid=${String(candidate.getAttribute('data-testid') || '-')}`
-                + ` id=${String(candidate.id || '-')}`
-                + ` aria=${String(candidate.getAttribute('aria-label') || '-')}`
-                + ` title=${String(candidate.getAttribute('title') || '-')}`,
-                1000,
-              );
-            }
+            const hit = { btn: candidate, source: 'selector', selector: sel };
+            logSendButtonScan(totalScanned, 1, `selector:${sel}`, silent);
+            logSendButtonFound(hit, silent);
             return candidate;
           }
         }
+
+        const ariaHit = findSendButtonByAriaScan(scope, composer, composerRoot, composerForm);
+        if (ariaHit && ariaHit.btn) {
+          logSendButtonScan(totalScanned, 1, ariaHit.source, silent);
+          logSendButtonFound(ariaHit, silent);
+          return ariaHit.btn;
+        }
+
+        const lastHit = findSendButtonByLastClickable(scope, composer, composerRoot, composerForm);
+        if (lastHit && lastHit.btn) {
+          logSendButtonScan(totalScanned, 1, lastHit.source, silent);
+          logSendButtonFound(lastHit, silent);
+          return lastHit.btn;
+        }
       }
+
+      const preview = buildSendButtonPreview(previewButtons);
+      logSendButtonScan(totalScanned, 0, 'no-match', silent);
+      logSendButtonNotFound(composer, totalScanned, preview, silent);
 
       if (!silent) {
         appendComposerLogThrottled(
@@ -1013,6 +1265,7 @@
           '[COMPOSER][find-send-button:not-found] reason=no-scoped-send-button',
         );
       }
+
       return null;
     }
 
@@ -1219,7 +1472,67 @@
       forEachLikelyAttachmentElement(() => {
         count += 1;
       });
+
+      if (count > 0) {
+        return count;
+      }
+
+      const roots = [
+        getComposerRoot(),
+        qs('[data-testid="composer"]'),
+      ].filter(Boolean);
+
+      const chipSelectors = [
+        '[data-testid*="attachment"]',
+        '[data-testid*="file-chip"]',
+        '[data-testid*="composer-file"]',
+        '[data-testid*="file-preview"]',
+        '[class*="attachment-chip"]',
+        '[class*="file-chip"]',
+      ];
+
+      const seen = new Set();
+
+      roots.forEach((root) => {
+        chipSelectors.forEach((sel) => {
+          qsa(sel, root).forEach((el) => {
+            if (!(el instanceof HTMLElement)) return;
+            if (isInToolbox(el)) return;
+            if (!isElementVisible(el)) return;
+            if (seen.has(el)) return;
+            seen.add(el);
+            count += 1;
+          });
+        });
+      });
+
       return count;
+    }
+
+    function hasComposerDraftPayload() {
+      if (String(getComposerText() || '').trim()) {
+        return true;
+      }
+
+      if (countAttachmentChips() > 0) {
+        return true;
+      }
+
+      const roots = [
+        getComposerRoot(),
+        qs('[data-testid="composer"]'),
+      ].filter(Boolean);
+
+      for (let i = 0; i < roots.length; i += 1) {
+        const root = roots[i];
+        const rootText = String(root.innerText || root.textContent || '').replace(/\s+/g, ' ').trim();
+
+        if (/已粘贴|pasted|attached file|uploaded file|file attached|个文件/i.test(rootText)) {
+          return true;
+        }
+      }
+
+      return false;
     }
 
     function isLikelyAttachmentRemoveButton(el) {
@@ -1912,7 +2225,88 @@
       return topLevel;
     }
 
+    function getLatestAssistantTextForDebug() {
+      const nodes = Array.from(
+        document.querySelectorAll('[data-message-author-role="assistant"]'),
+      );
+      const lastNode = nodes.length > 0 ? nodes[nodes.length - 1] : null;
+      if (!lastNode) {
+        return '';
+      }
+      return String(lastNode.innerText || lastNode.textContent || '').trim();
+    }
+
+    function isAssistantDoneSignalTextForDebug(text) {
+      const configuredStopSignal = (
+        typeof getCopyHotkeyContinueStopSignal === 'function'
+          ? getCopyHotkeyContinueStopSignal()
+          : 'CHATGPT_TOOLBOX_DONE'
+      );
+      const allowedSignals = new Set([
+        'CHATGPT_TOOLBOX_DONE',
+        '<<<CHATGPT_TOOLBOX_DONE>>>',
+        configuredStopSignal,
+      ]);
+      const raw = String(text || '').replace(/\r\n/g, '\n').trim();
+      if (!raw) {
+        return false;
+      }
+      const lines = raw
+        .split('\n')
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+      return lines.length === 1 && allowedSignals.has(lines[0]);
+    }
+
+    function buildComposerDebugSnapshot() {
+      const composer = getComposer();
+      const composerRoot = getComposerRoot();
+      const inputFound = composer instanceof HTMLElement;
+      const sendBtn = findSendButton({ silent: true });
+      const sendInfo = describeSendButton(sendBtn);
+      const responseState = detectComposerResponseState();
+      const latestAssistantText = getLatestAssistantTextForDebug();
+      const latestAssistantPreview = latestAssistantText.length > 160
+        ? `${latestAssistantText.slice(0, 160)}...`
+        : latestAssistantText;
+
+      return {
+        composerFound: composerRoot instanceof HTMLElement || inputFound,
+        inputFound,
+        sendButtonFound: sendBtn instanceof HTMLButtonElement,
+        sendButtonSelector: sendInfo.selector || lastSendButtonScanMeta.selector || '',
+        sendButtonDisabled: sendInfo.disabled,
+        sendButtonScan: { ...lastSendButtonScanMeta },
+        responseState: responseState.response_state || 'unknown',
+        responseStateReason: responseState.response_state_reason || '',
+        canAcceptInput: Boolean(responseState.can_accept_input),
+        canSendNow: Boolean(responseState.can_send_now),
+        latestAssistantPreview,
+        latestAssistantDoneSignalMatched: isAssistantDoneSignalTextForDebug(latestAssistantText),
+      };
+    }
+
+    function registerComposerDebugApi() {
+      const target = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      target.__cgptToolboxDebugComposer = function __cgptToolboxDebugComposer() {
+        const snapshot = buildComposerDebugSnapshot();
+        console.warn('[COMPOSER][DEBUG]', snapshot);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COMPOSER][DEBUG] send=${snapshot.sendButtonFound ? '1' : '0'} `
+            + `reason=${snapshot.responseStateReason || '-'} `
+            + `doneSignal=${snapshot.latestAssistantDoneSignalMatched ? '1' : '0'}`,
+          );
+        }
+        return snapshot;
+      };
+    }
+
+    registerComposerDebugApi();
+
     return {
+      getComposer,
+      getComposerRoot,
       getComposerText,
       setComposerValue,
       findSendButton,
@@ -1927,10 +2321,12 @@
       clearAttachments,
       collectAttachmentChipText,
       countAttachmentChips,
+      hasComposerDraftPayload,
       findAttachmentEvidence,
       fileNameEvidence,
       isAttachmentStillUploading,
       getChatMessageElementsInOrder,
+      buildComposerDebugSnapshot,
     };
   })();
 
@@ -1942,6 +2338,11 @@
         ? ComposerApi.hasComposer()
         : !!ComposerApi.getComposerText());
     const composerText = ComposerApi.getComposerText();
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const hasAttachmentPayload = attachmentCount > 0
+      || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload());
     const sendButton = ComposerApi.findSendButton({ silent: true });
     const canAcceptInput = composerAvailable && !isResponding;
     const canSendNow = composerAvailable
@@ -1978,6 +2379,33 @@
         response_state_reason: 'composer_has_text',
         can_accept_input: canAcceptInput,
         can_send_now: canSendNow,
+        attachment_count: attachmentCount,
+        response_state_at: Date.now(),
+      };
+    }
+
+    const sendButtonReady = !!sendButton && ComposerApi.isSendButtonReady(sendButton);
+
+    if (hasAttachmentPayload && sendButtonReady) {
+      return {
+        is_responding: false,
+        response_state: 'attachment_ready',
+        response_state_reason: 'composer_has_attachment',
+        can_accept_input: canAcceptInput,
+        can_send_now: canSendNow,
+        attachment_count: attachmentCount,
+        response_state_at: Date.now(),
+      };
+    }
+
+    if (!composerText && sendButtonReady && canSendNow) {
+      return {
+        is_responding: false,
+        response_state: 'attachment_ready',
+        response_state_reason: 'native_send_ready',
+        can_accept_input: canAcceptInput,
+        can_send_now: canSendNow,
+        attachment_count: attachmentCount,
         response_state_at: Date.now(),
       };
     }
@@ -1988,6 +2416,7 @@
       response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
       can_accept_input: canAcceptInput,
       can_send_now: canSendNow,
+      attachment_count: attachmentCount,
       response_state_at: Date.now(),
     };
   }
@@ -2108,28 +2537,6 @@
   function hasValidPageDisplayId(value) {
     const text = String(value ?? '').trim();
     return text !== '' && text !== '-';
-  }
-
-  function extractPageDisplayIdFromPollResult(result) {
-    if (!result || typeof result !== 'object') {
-      return null;
-    }
-
-    const candidates = [
-      result.page_display_id,
-      result.pageDisplayId,
-      result.page && result.page.page_display_id,
-      result.runtime && result.runtime.page_display_id,
-    ];
-
-    for (let i = 0; i < candidates.length; i += 1) {
-      const text = String(candidates[i] ?? '').trim();
-      if (hasValidPageDisplayId(text)) {
-        return text;
-      }
-    }
-
-    return null;
   }
 
   function warnPageDisplayIdMissingInResponse(result) {
@@ -2761,40 +3168,115 @@
     }
   }
 
-  async function waitComposerSendConfirmed(content, timeoutMs = 5000) {
+  async function waitComposerSendConfirmed(content, timeoutMs = 5000, options = {}) {
     const startedAt = Date.now();
     const contentText = String(content || '').trim();
     const contentProbe = contentText.slice(0, 80);
+    const beforeLatestKey = String(options.beforeLatestKey || '');
+    const attachmentCountBefore = Number(options.attachmentCountBeforeSend || 0);
+
+    let sawAssistantBusy = false;
+    let sawAttachmentCleared = false;
+    let sawComposerCleared = false;
+    let lastReason = 'pending';
 
     while (Date.now() - startedAt < timeoutMs) {
-      if (ComposerApi.isAssistantLikelyBusy()) {
-        const latestBusy = getLatestConversationMessageRecord({ preferAssistant: false });
-        if (latestBusy && latestBusy.role === 'user') {
-          const latestBusyText = String(latestBusy.text || '').trim();
-          if (!contentText || (contentProbe && latestBusyText.includes(contentProbe))) {
-            return { ok: true, reason: 'assistant_busy_user_visible' };
-          }
-        }
-        return { ok: false, reason: 'assistant_busy' };
-      }
+      const attachmentCountNow = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
 
       const latest = getLatestConversationMessageRecord({ preferAssistant: false });
+      const latestKey = buildMessageRecordKey(latest);
+      const latestUserChanged = !!beforeLatestKey && !!latestKey && latestKey !== beforeLatestKey;
+
+      const composerText = ComposerApi.getComposerText();
+      const canSendNow = typeof ComposerApi.canSendNow === 'function'
+        ? ComposerApi.canSendNow()
+        : false;
+
+      const assistantBusy = ComposerApi.isAssistantLikelyBusy();
+
+      if (attachmentCountBefore > 0 && attachmentCountNow === 0) {
+        sawAttachmentCleared = true;
+      }
+
+      if (!composerText && !canSendNow) {
+        sawComposerCleared = true;
+      }
+
+      if (assistantBusy) {
+        sawAssistantBusy = true;
+        lastReason = 'assistant_busy_after_click';
+      }
+
       if (latest && latest.role === 'user') {
         const latestText = String(latest.text || '').trim();
-        if (!contentText || (contentProbe && latestText.includes(contentProbe))) {
-          return { ok: true, reason: 'latest_user_matches' };
+
+        if (latestUserChanged && !contentText) {
+          return { ok: true, reason: 'latest_user_changed' };
+        }
+
+        if (contentProbe && latestText.includes(contentProbe)) {
+          return { ok: true, reason: latestUserChanged ? 'latest_user_matches' : 'latest_user_text_matches' };
+        }
+
+        if (latestUserChanged && attachmentCountBefore > 0) {
+          return { ok: true, reason: 'attachments_sent_new_user_turn' };
         }
       }
 
-      const composerText = ComposerApi.getComposerText();
-      if (!composerText && !ComposerApi.canSendNow()) {
-        return { ok: true, reason: 'composer_cleared' };
+      if (sawAttachmentCleared) {
+        if (assistantBusy) {
+          return { ok: true, reason: 'attachments_sent_assistant_busy' };
+        }
+
+        if (sawComposerCleared) {
+          return { ok: true, reason: 'attachments_sent_composer_cleared' };
+        }
+
+        if (latestUserChanged) {
+          return { ok: true, reason: 'attachments_sent_latest_user_changed' };
+        }
+      }
+
+      if (sawComposerCleared) {
+        if (contentText) {
+          return { ok: true, reason: 'composer_cleared' };
+        }
+
+        if (attachmentCountBefore > 0) {
+          return { ok: true, reason: 'composer_cleared_after_attachments' };
+        }
+
+        if (latestUserChanged) {
+          return { ok: true, reason: 'composer_cleared_new_user_turn' };
+        }
+      }
+
+      if (assistantBusy) {
+        await sleep(250);
+        continue;
       }
 
       await sleep(250);
     }
 
-    return { ok: false, reason: 'timeout' };
+    if (sawAttachmentCleared) {
+      return { ok: true, reason: 'attachments_sent_after_timeout' };
+    }
+
+    if (sawComposerCleared && (contentText || attachmentCountBefore > 0)) {
+      return { ok: true, reason: 'composer_cleared_after_timeout' };
+    }
+
+    if (sawAssistantBusy && (contentText || attachmentCountBefore > 0)) {
+      return { ok: true, reason: 'assistant_busy_after_click' };
+    }
+
+    return {
+      ok: false,
+      reason: sawAssistantBusy ? 'assistant_busy_unconfirmed' : lastReason === 'pending' ? 'timeout' : lastReason,
+    };
   }
 
   async function sendContentViaComposer(options = {}) {
@@ -2853,9 +3335,55 @@
       }
 
       await sleep(300);
-    } else if (!ComposerApi.getComposerText()) {
-      return { ok: false, reason: 'composer_empty', source };
+    } else {
+      const composerTextBeforeSend = ComposerApi.getComposerText();
+      const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+      const hasDraftPayload = typeof ComposerApi.hasComposerDraftPayload === 'function'
+        && ComposerApi.hasComposerDraftPayload();
+      const hasAttachmentPayload = attachmentCountBeforeSend > 0 || hasDraftPayload;
+      const hasComposerPayload = !!composerTextBeforeSend || hasAttachmentPayload;
+      const nativeSendReady = typeof ComposerApi.canSendNow === 'function' && ComposerApi.canSendNow();
+
+      const payloadLog = `[SEND][PAYLOAD] source=${source} textLen=${String(composerTextBeforeSend || '').length} `
+        + `attachmentCount=${attachmentCountBeforeSend} draftPayload=${hasDraftPayload ? 1 : 0} `
+        + `nativeSendReady=${nativeSendReady ? 1 : 0} sendExistingComposer=${sendExistingComposer ? 1 : 0}`;
+
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(payloadLog);
+      } else {
+        console.log(payloadLog);
+      }
+
+      if (!hasComposerPayload && !nativeSendReady) {
+        updateChatInputStateBadge();
+        return {
+          ok: false,
+          reason: 'composer_empty',
+          source,
+          attachment_count: attachmentCountBeforeSend,
+        };
+      }
+
+      if (!hasComposerPayload && nativeSendReady) {
+        const nativeOverrideLog = `[SEND][PAYLOAD] source=${source} reason=native_send_ready_without_detected_payload`;
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(nativeOverrideLog);
+        } else {
+          console.log(nativeOverrideLog);
+        }
+      }
     }
+
+    const composerTextBeforeSend = sendExistingComposer
+      ? ComposerApi.getComposerText()
+      : content;
+    const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const beforeLatestRecord = getLatestConversationMessageRecord({ preferAssistant: false });
+    const beforeLatestKey = buildMessageRecordKey(beforeLatestRecord);
 
     const startedAt = Date.now();
     while (waitUntilSendable && !ComposerApi.canSendNow()) {
@@ -2875,8 +3403,13 @@
     }
 
     const confirmed = await waitComposerSendConfirmed(
-      sendExistingComposer ? ComposerApi.getComposerText() : content,
+      sendExistingComposer ? composerTextBeforeSend : content,
       Number(options.confirmTimeoutMs || 5000),
+      {
+        beforeLatestKey,
+        beforeLatestRecord,
+        attachmentCountBeforeSend,
+      },
     );
 
     if (!confirmed.ok) {

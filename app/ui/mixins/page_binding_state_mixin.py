@@ -341,8 +341,17 @@ class PageBindingStateMixin:
                 last_seen = selected_page.get("last_poll_at") or time.time()
             try:
                 last_seen_val = float(last_seen)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as error:
                 last_seen_val = time.time()
+                if hasattr(self, "_append_log"):
+                    self._append_log(
+                        "[PAGE_BIND][LAST_SEEN_INVALID] "
+                        f"field=last_seen raw={last_seen!r} "
+                        f"fallback={last_seen_val} "
+                        f"error_type={type(error).__name__} error={error}",
+                        echo=True,
+                        level="WARNING",
+                    )
 
             bind_url = (
                 (selected_page.get("url") or page_url_from(selected_page) or page_url or "")

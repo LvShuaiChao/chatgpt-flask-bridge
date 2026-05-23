@@ -10,6 +10,7 @@ import time
 import traceback
 
 from flask import jsonify, request
+from werkzeug.exceptions import BadRequest
 
 from app.server import state as st
 from app.server.runtime_state import _dispatch_to_gui, _log
@@ -136,6 +137,11 @@ def execute_system_hotkey(hotkey: str, *, source: str = "") -> dict:
     try:
         keys = _parse_hotkey_for_pyautogui(hotkey)
     except ValueError as error:
+        _log(
+            "[SYSTEM_HOTKEY][INVALID_HOTKEY] "
+            f"hotkey={hotkey!r} source={source or '-'} "
+            f"error_type={type(error).__name__} error={error}"
+        )
         return {"ok": False, "error": str(error), "code": "INVALID_HOTKEY"}
 
     try:
@@ -161,8 +167,24 @@ def api_v1_system_hotkey():
     if not _external_auth_ok():
         return _hotkey_error("认证失败", "UNAUTHORIZED", 401)
 
-    body = request.get_json(silent=True) or {}
+    try:
+        body = request.get_json(silent=False)
+    except BadRequest as error:
+        _log(
+            "[SYSTEM_HOTKEY][INVALID_JSON] "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"error_type={type(error).__name__} error={error}\n"
+            f"{traceback.format_exc()}"
+        )
+        return _hotkey_error(f"JSON 解析失败：{error}", "INVALID_JSON", 400)
     if not isinstance(body, dict):
+        _log(
+            "[SYSTEM_HOTKEY][INVALID_JSON_OBJECT] "
+            f"method={request.method} path={request.path} "
+            f"body_type={type(body).__name__}"
+        )
         return _hotkey_error("JSON body 必须是对象", "INVALID_JSON", 400)
     hotkey = (body.get("hotkey") or body.get("shortcut") or "").strip()
     source = (body.get("source") or request.headers.get("X-Request-Source") or "").strip()

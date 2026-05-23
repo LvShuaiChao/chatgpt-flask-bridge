@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import traceback
 
 SENSITIVE_KEYS = {
@@ -44,12 +45,18 @@ def dumps_full_json_for_log(obj):
             default=str,
         )
     except Exception as exc:
+        detail = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        print(
+            "[JSON_LOG][DUMPS_FAILED] "
+            f"error_type={type(exc).__name__} error={exc}",
+            file=sys.stderr,
+        )
         return json.dumps(
-            {
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            },
+            detail,
             ensure_ascii=False,
             sort_keys=True,
             indent=None,

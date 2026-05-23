@@ -228,7 +228,9 @@
         `[TOOLBOX_DRAG][dragging-position] left=${Math.round(left)} top=${Math.round(top)} reason=${reason || '-'} panelVisible=${isPanelVisibleNow() ? 1 : 0}`,
       );
 
-      updateFloatingTitlePosition(reason || 'dragging');
+      if (isToolboxInAnyHiddenState()) {
+        updateFloatingTitlePosition(reason || 'dragging');
+      }
     }
 
     function schedulePostDragLayout(work) {
@@ -2744,7 +2746,7 @@
           }
         }
 
-        /* 独立悬浮标题牌：正常展开时显示在面板上方 */
+        /* 独立悬浮标题牌：仅在面板隐藏/折叠/贴边隐藏时显示 */
         #cgpt-toolbox-floating-title {
           position: fixed;
           z-index: 2147483647;
@@ -2786,10 +2788,6 @@
         #${APP.rootId}.cgpt-toolbox-panel-hidden #cgpt-toolbox-floating-title,
         #${APP.rootId}.cgpt-toolbox-edge-hidden:not(.cgpt-toolbox-edge-revealed) #cgpt-toolbox-floating-title,
         #${APP.rootId}.cgpt-edge-hidden #cgpt-toolbox-floating-title {
-          display: inline-flex !important;
-        }
-
-        #${APP.rootId}.cgpt-toolbox-dragging:not(.cgpt-toolbox-panel-hidden):not(.cgpt-toolbox-edge-hidden):not(.cgpt-edge-hidden) #cgpt-toolbox-floating-title {
           display: inline-flex !important;
         }
 
@@ -4229,8 +4227,7 @@
       ensureRestoreHandleElement();
       bindToolboxConsoleRescueApi();
 
-      bindPanelHeaderDrag();
-bindToggleDrag();
+      bindToggleDrag();
       bindEdgeHoverReveal();
       bindFloatingTitleToggleEvents();
 
@@ -6999,20 +6996,17 @@ bindToggleDrag();
 
       const hiddenState = isToolboxInAnyHiddenState();
       const panelVisible = isPanelVisibleNow();
-      const isDragActive =
-        isDraggingToolbox ||
-        root.classList.contains('cgpt-toolbox-dragging');
 
-      // Panel expanded, hide floating title to avoid duplicate with panel header
-      if (panelVisible && !hiddenState && !isDragActive) {
+      // 主面板展开且非隐藏状态时，永远不显示独立浮动标题
+      if (panelVisible && !hiddenState) {
         title.style.display = 'none';
         title.classList.remove('cgpt-floating-title-visible');
         title.classList.add('cgpt-floating-title-hidden');
         return;
       }
 
-      // Only show floating title when toolbox is hidden/collapsed, or while dragging
-      if (!hiddenState && !isDragActive) {
+      // 浮动标题仅在隐藏/折叠/贴边隐藏时参与定位
+      if (!hiddenState) {
         title.style.display = 'none';
         title.classList.remove('cgpt-floating-title-visible');
         title.classList.add('cgpt-floating-title-hidden');
@@ -7030,39 +7024,27 @@ bindToggleDrag();
       let targetTop;
       let source = 'unknown';
 
-      if (panel && panelVisible) {
-        const panelRect = panel.getBoundingClientRect();
-        targetLeft = panelRect.left;
-        targetTop = panelRect.top - titleRect.height - gap;
-        source = isDragActive ? 'panel-visible-drag' : 'panel-visible';
-      } else if (hiddenState) {
-        const locked = getLockedHiddenTitlePosition(`update-title:${reason || '-'}`);
+      const locked = getLockedHiddenTitlePosition(`update-title:${reason || '-'}`);
 
-        if (locked) {
-          targetLeft = locked.left;
-          targetTop = locked.top;
-          source = 'hidden-title-locked';
-        } else if (
-          lastPanelVisibleRect &&
-          Number.isFinite(Number(lastPanelVisibleRect.left)) &&
-          Number.isFinite(Number(lastPanelVisibleRect.top))
-        ) {
-          targetLeft = Number(lastPanelVisibleRect.left);
-          targetTop = Math.max(margin, Number(lastPanelVisibleRect.top) - titleRect.height - gap);
-          source = 'last-panel-visible-fallback';
-        } else {
-          const savedPos = MemoryManager.get(MemoryManager.KEYS.panelPosition, null) || {};
-          targetLeft = Number.isFinite(Number(savedPos.left)) ? Number(savedPos.left) : margin;
-          targetTop = Number.isFinite(Number(savedPos.top))
-            ? Math.max(margin, Number(savedPos.top) - titleRect.height - gap)
-            : margin;
-          source = 'saved-panel-position-fallback';
-        }
+      if (locked) {
+        targetLeft = locked.left;
+        targetTop = locked.top;
+        source = 'hidden-title-locked';
+      } else if (
+        lastPanelVisibleRect &&
+        Number.isFinite(Number(lastPanelVisibleRect.left)) &&
+        Number.isFinite(Number(lastPanelVisibleRect.top))
+      ) {
+        targetLeft = Number(lastPanelVisibleRect.left);
+        targetTop = Math.max(margin, Number(lastPanelVisibleRect.top) - titleRect.height - gap);
+        source = 'last-panel-visible-fallback';
       } else {
-        const rootRect = root.getBoundingClientRect();
-        targetLeft = rootRect.left;
-        targetTop = rootRect.top;
-        source = 'root-visible-fallback';
+        const savedPos = MemoryManager.get(MemoryManager.KEYS.panelPosition, null) || {};
+        targetLeft = Number.isFinite(Number(savedPos.left)) ? Number(savedPos.left) : margin;
+        targetTop = Number.isFinite(Number(savedPos.top))
+          ? Math.max(margin, Number(savedPos.top) - titleRect.height - gap)
+          : margin;
+        source = 'saved-panel-position-fallback';
       }
       const safeLeft = clampNumber(
         targetLeft,
@@ -7905,11 +7887,9 @@ bindToggleDrag();
               addGlobalDraggingClass();
               edgeAutoHideSuspendUntil = Date.now() + 2000;
 
-              const floatingTitle = getFloatingTitleEl();
-              if (floatingTitle && panel && isPanelVisibleNow() && !isEdgeHidden()) {
-                floatingTitle.style.display = 'inline-flex';
+              if (isToolboxInAnyHiddenState()) {
                 updateFloatingTitlePosition('toggle-drag-start');
-                appendLog('[TOOLBOX_DRAG][drag-start-title] visible=1');
+                appendLog('[TOOLBOX_DRAG][drag-start-title] hidden-state=1');
               }
 
               appendLog('[TOOLBOX_DRAG][restore-before-real-drag]');
@@ -8184,8 +8164,16 @@ bindToggleDrag();
           keepPanelInViewport({
             save: false,
           });
-          updateFloatingTitlePosition('panel-drag-end');
-          appendLog('[TOOLBOX_DRAG][drag-end-title] visible=1');
+
+          const floatingTitle = getFloatingTitleEl();
+          if (floatingTitle && isPanelVisibleNow() && !isToolboxInAnyHiddenState()) {
+            floatingTitle.style.display = 'none';
+            floatingTitle.classList.remove('cgpt-floating-title-visible');
+            floatingTitle.classList.add('cgpt-floating-title-hidden');
+          } else if (isToolboxInAnyHiddenState()) {
+            updateFloatingTitlePosition('panel-drag-end');
+          }
+
           savePanelPositionFromDom('panel-drag-end');
           rememberLastPanelVisibleRect('panel-drag-end');
           updateRestoreHotzone('panel-drag-end');
@@ -8234,7 +8222,7 @@ bindToggleDrag();
         committedDx = 0;
         committedDy = 0;
 
-        if (isPanelVisibleNow() && panel) {
+        if (isToolboxInAnyHiddenState()) {
           primeFloatingTitlePositionForPanelDrag(startLeft, startTop, 'panel-drag-start');
         }
 
@@ -8916,6 +8904,7 @@ bindToggleDrag();
       }
     }
 
+    /** @deprecated TODO(cleanup-observe): 无引用，仅输出 disabled 日志。 */
     async function applyConversationToolboxState(reason = '') {
       appendLog(`[TOOLBOX_CONV_STATE][disabled] reason=${reason || '-'}`);
     }

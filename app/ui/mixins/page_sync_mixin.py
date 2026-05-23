@@ -1358,9 +1358,18 @@ class PageSyncMixin:
             self._set_active_sync_trace_id(trace_id)
         request_id = f"sync-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         mode = "merge"
+        raw_max_messages = getattr(self, "_sync_conversation_max_messages", 10)
         try:
-            max_messages = int(getattr(self, "_sync_conversation_max_messages", 10) or 10)
-        except (TypeError, ValueError):
+            max_messages = int(raw_max_messages or 10)
+        except (TypeError, ValueError) as error:
+            self._append_log(
+                "[SYNC][PLAN][MAX_MESSAGES_INVALID] "
+                f"field=_sync_conversation_max_messages "
+                f"raw={raw_max_messages!r} fallback=10 "
+                f"error_type={type(error).__name__} error={error}",
+                echo=True,
+                level="WARNING",
+            )
             max_messages = 10
         max_messages = max(1, max_messages)
 
@@ -1873,7 +1882,6 @@ class PageSyncMixin:
         sync_req_map[message_id] = {
             "session_id": session_id,
             "conversation_id": plan.conversation_id,
-            "client_id": plan.client_id,
             "client_id": plan.client_id,
             "page_instance_id": plan.page_instance_id,
             "request_id": plan.request_id,

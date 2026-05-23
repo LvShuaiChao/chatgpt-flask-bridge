@@ -332,6 +332,7 @@ def is_port_available(host, port):
             f"winerror={getattr(error, 'winerror', None)} "
             f"error={error}"
         )
+        _log(f"[SERVER][PORT_CHECK_FAILED] {detail}")
         return False, detail
     finally:
         sock.close()

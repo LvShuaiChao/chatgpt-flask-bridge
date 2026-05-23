@@ -571,6 +571,14 @@ def _request_body_preview(max_len=500):
     try:
         raw = request.get_data(cache=True, as_text=True) or ""
     except Exception as error:
+        _log(
+            "[EXTERNAL_API][REQUEST_BODY_PREVIEW_FAILED] "
+            f"method={request.method} path={request.path} "
+            f"remote={request.remote_addr or '-'} "
+            f"content_type={request.content_type!r} "
+            f"error_type={type(error).__name__} error={error}\n"
+            f"{traceback.format_exc()}"
+        )
         return f"<read_body_failed {type(error).__name__}: {error}>"
     raw = raw.replace("\r", "\\r").replace("\n", "\\n")
     if len(raw) > max_len:

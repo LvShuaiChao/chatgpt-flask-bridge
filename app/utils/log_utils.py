@@ -106,6 +106,7 @@ def set_log_runtime_options(verbose=None, mirror_to_console=None, include_callsi
         _LOG_INCLUDE_CALLSITE = bool(include_callsite)
 
 
+# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
 def get_log_runtime_options():
     return {
         "verbose": _LOG_VERBOSE,
@@ -115,6 +116,7 @@ def get_log_runtime_options():
     }
 
 
+# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
 def set_log_min_level(level):
     global _LOG_MIN_LEVEL
     text = str(level or "INFO").strip().upper()
@@ -314,6 +316,7 @@ def get_log_file_path():
     return str(LOG_FILE.resolve())
 
 
+# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
 def read_last_lines(path, max_lines=1000, encoding="utf-8", max_read_bytes=2 * 1024 * 1024):
     """Read at most the last ``max_lines`` from a log file without loading the whole file."""
     log_path = Path(path)

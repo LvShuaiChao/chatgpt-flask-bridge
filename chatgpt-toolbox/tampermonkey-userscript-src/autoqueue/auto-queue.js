@@ -17,6 +17,24 @@ const AutoQueueModule = (() => {
         saveConfig();
         ToolboxShell.appendLog('[自动指令] 已修复被污染的列表模式默认指令');
       }
+
+      if (typeof migrateContinuePromptTextIfNeeded === 'function') {
+        const migration = migrateContinuePromptTextIfNeeded(
+          continueText,
+          (line) => ToolboxShell.appendLog(line),
+        );
+        if (migration.migrated) {
+          config.continuePromptsText = migration.value;
+          saveConfig();
+        }
+      }
+    }
+
+    function getDefaultContinuePromptTextForUi() {
+      if (typeof getDefaultContinuePromptText === 'function') {
+        return getDefaultContinuePromptText();
+      }
+      return '继续';
     }
 
     function normalizeListProfiles() {
@@ -195,7 +213,8 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      promptsEl.value = String(config.continuePromptsText || '继续');
+      const storedContinue = String(config.continuePromptsText || '').trim();
+      promptsEl.value = storedContinue || getDefaultContinuePromptTextForUi();
     }
 
     function switchPromptMode(nextMode) {
@@ -337,7 +356,8 @@ const AutoQueueModule = (() => {
 
     function getPromptsTextByMode(mode) {
       if (mode === 'continue') {
-        return config.continuePromptsText || '继续';
+        const stored = String(config.continuePromptsText || '').trim();
+        return stored || getDefaultContinuePromptTextForUi();
       }
 
       normalizeListProfiles();
@@ -347,9 +367,13 @@ const AutoQueueModule = (() => {
     }
 
     function setPromptsTextByMode(mode, text) {
-      const value = String(text || '');
+      let value = String(text || '');
 
       if (mode === 'continue') {
+        const trimmed = value.trim();
+        if (trimmed === getDefaultContinuePromptTextForUi()) {
+          value = '';
+        }
         config.continuePromptsText = value;
         return;
       }
@@ -889,6 +913,20 @@ const AutoQueueModule = (() => {
         debouncedSaveConfig();
       });
 
+      const resetContinuePromptBtn = qs('#cgpt-autoq-continue-prompt-reset', root);
+      if (resetContinuePromptBtn) {
+        bindOnce(resetContinuePromptBtn, 'click', () => {
+          if (config.promptMode !== 'continue') {
+            switchPromptMode('continue');
+          }
+          config.continuePromptsText = '';
+          saveConfig();
+          refreshPromptTextareaForMode('continue');
+          log('已恢复默认继续指令');
+          ToolboxShell.appendLog('[AUTOQ][continue-prompt-reset-defaults]');
+        });
+      }
+
       qs('#cgpt-autoq-send-once', root).addEventListener('click', () => {
         void triggerContinueOnce();
       });
@@ -1014,7 +1052,10 @@ const AutoQueueModule = (() => {
 
           <div class="cgpt-autoq-editor-block">
             <label class="cgpt-autoq-label" for="cgpt-autoq-prompts">指令内容</label>
-            <textarea class="cgpt-textarea" id="cgpt-autoq-prompts"></textarea>
+            <textarea class="cgpt-textarea" id="cgpt-autoq-prompts" placeholder="继续模式留空则使用内置默认继续指令。"></textarea>
+            <div class="cgpt-row" style="margin-top: 6px;">
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-continue-prompt-reset">恢复默认继续指令</button>
+            </div>
           </div>
 
           <div class="cgpt-autoq-actions">
@@ -2797,23 +2838,58 @@ const AutoQueueModule = (() => {
     let host = null;
     let root = null;
     let activeSettingsSubtab = 'basic';
+    let continuePromptMigrationChecked = false;
+
+    function migrateCompactContinuePromptIfNeeded(cfg, options = {}) {
+      if (!cfg || typeof cfg !== 'object') {
+        return cfg;
+      }
+      if (typeof migrateContinuePromptTextIfNeeded !== 'function') {
+        return cfg;
+      }
+
+      const stored = String(cfg.copyHotkeyContinuePromptText || '').trim();
+      const logFn = options.log === false
+        ? null
+        : (line) => ToolboxShell.appendLog(line);
+      const migration = migrateContinuePromptTextIfNeeded(stored, logFn);
+
+      if (migration.migrated) {
+        cfg.copyHotkeyContinuePromptText = migration.value;
+      }
+
+      return cfg;
+    }
 
     function getConfig() {
       const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
-      const cfg = normalizeCompactUiConfig(saved);
+      let cfg = normalizeCompactUiConfig(saved);
 
       if (saved && !saved.quickPromptActionVersion && saved.quickPromptClickAction === 'fill') {
         cfg.quickPromptClickAction = 'send';
         cfg.quickPromptActionVersion = 1;
         MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
-        return normalizeCompactUiConfig(cfg);
+        cfg = normalizeCompactUiConfig(cfg);
+      }
+
+      if (!continuePromptMigrationChecked) {
+        continuePromptMigrationChecked = true;
+        const before = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        cfg = migrateCompactContinuePromptIfNeeded(cfg, { log: true });
+        const after = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        if (before !== after) {
+          MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
+        }
       }
 
       return cfg;
     }
 
     function saveConfig(next) {
-      const cfg = normalizeCompactUiConfig(next || {});
+      const cfg = migrateCompactContinuePromptIfNeeded(
+        normalizeCompactUiConfig(next || {}),
+        { log: false },
+      );
       cfg.quickPromptActionVersion = 1;
       MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
 
@@ -2865,8 +2941,17 @@ const AutoQueueModule = (() => {
           || current.copyHotkeyLoopHomeNavUrl
           || 'https://chatgpt.com/'
         ).trim(),
-        copyHotkeyContinuePromptText: String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim(),
-        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim() || '__CHATGPT_TOOLBOX_DONE__',
+        copyHotkeyContinuePromptText: (() => {
+          const raw = String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim();
+          const defaultText = typeof getDefaultContinuePromptText === 'function'
+            ? getDefaultContinuePromptText()
+            : '';
+          if (defaultText && raw === defaultText) {
+            return '';
+          }
+          return raw;
+        })(),
+        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim() || 'CHATGPT_TOOLBOX_DONE',
       };
     }
 
@@ -2953,12 +3038,13 @@ const AutoQueueModule = (() => {
 
       const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
       if (stopSignalEl) {
-        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal || '__CHATGPT_TOOLBOX_DONE__';
+        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal || 'CHATGPT_TOOLBOX_DONE';
       }
 
       const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
       if (promptTextEl) {
-        promptTextEl.value = cfg.copyHotkeyContinuePromptText || '';
+        promptTextEl.value = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        promptTextEl.placeholder = '留空则使用内置默认继续指令（完成时仅回复 CHATGPT_TOOLBOX_DONE）。';
       }
 
       const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
@@ -3221,6 +3307,34 @@ const AutoQueueModule = (() => {
           renderShortcutSettings();
           applyUploadShortcutButtonTitles();
           ToolboxShell.appendLog('[SETTINGS][shortcut-reset-defaults]');
+        });
+      }
+
+      const resetContinuePromptBtn = qs('#cgpt-setting-copy-hotkey-continue-prompt-reset', root);
+      if (resetContinuePromptBtn) {
+        resetContinuePromptBtn.addEventListener('click', () => {
+          const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
+          const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
+          const defaultPrompt = typeof getDefaultContinuePromptText === 'function'
+            ? getDefaultContinuePromptText()
+            : '';
+          const defaultStop = typeof DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL === 'string'
+            ? DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL
+            : 'CHATGPT_TOOLBOX_DONE';
+
+          if (promptTextEl) {
+            promptTextEl.value = '';
+          }
+          if (stopSignalEl) {
+            stopSignalEl.value = defaultStop;
+          }
+
+          const cfg = readFromUi();
+          cfg.copyHotkeyContinuePromptText = '';
+          cfg.copyHotkeyContinueStopSignal = defaultStop;
+          saveConfig(cfg);
+          render();
+          ToolboxShell.appendLog('[SETTINGS][continue-prompt-reset-defaults]');
         });
       }
 
@@ -3649,7 +3763,7 @@ const AutoQueueModule = (() => {
                 type="text"
                 class="cgpt-input"
                 id="cgpt-setting-copy-hotkey-continue-stop-signal"
-                placeholder="__CHATGPT_TOOLBOX_DONE__"
+                placeholder="CHATGPT_TOOLBOX_DONE"
               >
             </div>
 
@@ -3658,10 +3772,16 @@ const AutoQueueModule = (() => {
               <textarea
                 class="cgpt-input"
                 id="cgpt-setting-copy-hotkey-continue-prompt-text"
-                rows="8"
+                rows="12"
                 style="width: 100%; resize: vertical;"
-                placeholder="请继续完成上一个任务。&#10;&#10;如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充，请只回复下面这一行终止信号：&#10;&#10;__CHATGPT_TOOLBOX_DONE__&#10;&#10;除此之外不要输出任何多余文字。&#10;&#10;如果还需要继续，请直接继续输出后续内容，不要解释。"
+                placeholder="留空则使用内置默认继续指令（完成时仅回复 CHATGPT_TOOLBOX_DONE）。"
               ></textarea>
+            </div>
+
+            <div class="cgpt-row">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-copy-hotkey-continue-prompt-reset">
+                恢复默认继续指令
+              </button>
             </div>
 
             <div class="cgpt-hint">
@@ -4453,12 +4573,6 @@ const AutoQueueModule = (() => {
       state.onWindowBlur = null;
       state.onVisibilityChange = null;
       state.focusStateListenersInstalled = false;
-    }
-
-    function isAssistantBusySendReason(reason) {
-      const normalized = String(reason || '').trim().toLowerCase();
-      return normalized === 'assistant_busy'
-        || normalized.includes('assistant_busy');
     }
 
     function shouldBridgeWaitReplyAfterBusyFailure(reason) {
