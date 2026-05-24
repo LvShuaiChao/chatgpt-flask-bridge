@@ -153,7 +153,7 @@ class ExternalApiGuiMixin:
         title = (payload.get("title") or "新对话").strip() or "新对话"
         session = self._create_session(title=title, select=False)
         session.remote_chatgpt = default_remote_chatgpt()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return {"ok": True, "session": self._external_session_payload(session)}
 
     def _external_api_sessions_get(self, payload):
@@ -228,7 +228,7 @@ class ExternalApiGuiMixin:
                 "error": "绑定失败",
                 "code": "BIND_FAILED",
             }
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         return {
             "ok": True,
@@ -256,7 +256,7 @@ class ExternalApiGuiMixin:
             self._clear_session_binding(session_id, reason=reason)
         else:
             session.remote_chatgpt = default_remote_chatgpt()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
         if hasattr(self, "_clear_pending_web_sync_for_session"):
             self._clear_pending_web_sync_for_session(session_id)
         if session_id == getattr(self, "_current_session_id", ""):
@@ -321,7 +321,7 @@ class ExternalApiGuiMixin:
                 f"new_session_id={session.session_id}",
                 echo=True,
             )
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             return session
 
         if new_session:
@@ -330,7 +330,7 @@ class ExternalApiGuiMixin:
             self._external_client_last_session[client_name] = session.session_id
             session_meta["new_session_created"] = True
             session_meta["new_session_reason"] = "new_session"
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             return session, session_meta
 
         if session_id:
@@ -363,7 +363,7 @@ class ExternalApiGuiMixin:
             self._external_client_last_session[client_name] = session.session_id
             session_meta["new_session_created"] = True
             session_meta["new_session_reason"] = "auto_create"
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             return session, session_meta
 
         return None, session_meta
@@ -470,7 +470,7 @@ class ExternalApiGuiMixin:
             )
         elif session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return True
 
     def _external_enqueue_pending_message_response(
@@ -598,7 +598,12 @@ class ExternalApiGuiMixin:
             session
         ):
             if not auto_open_home:
-                idle_home = self._find_idle_chatgpt_home_client(
+                reusable_home = None
+                if hasattr(self, "_find_reusable_chatgpt_home_page_for_session"):
+                    reusable_home = self._find_reusable_chatgpt_home_page_for_session(
+                        session
+                    )
+                idle_home = reusable_home or self._find_idle_chatgpt_home_client(
                     session_id=session.session_id
                 )
                 if not idle_home and not self._session_has_sendable_bound_page(
@@ -762,7 +767,7 @@ class ExternalApiGuiMixin:
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="bootstrap_queued")
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return {
             "ok": True,
             "bridge_message_id": bridge_message_id,

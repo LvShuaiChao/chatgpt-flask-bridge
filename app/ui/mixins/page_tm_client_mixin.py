@@ -1022,11 +1022,9 @@ class PageTmClientMixin:
         }
 
     def _remote_conversation_id(self, remote):
-        remote = normalize_remote_chatgpt(remote)
-        conversation_id = (remote.get("conversation_id") or "").strip()
-        if conversation_id:
-            return conversation_id
-        return parse_conversation_id((remote.get("url") or "").strip()) or ""
+        from app.utils.page_binding_identity import remote_conversation_id
+
+        return remote_conversation_id(remote)
 
     def _remote_conversation_url(self, remote):
         remote = normalize_remote_chatgpt(remote)

@@ -30,7 +30,9 @@ from app.server.message_queue import (
 )
 from app.server.tm_page_registry import get_tm_online_summary
 from app.server.control_commands import (
+    close_chatgpt_pages,
     enqueue_control_command,
+    push_close_bound_page,
     push_close_other_pages,
     push_close_page,
     push_open_url,
@@ -80,7 +82,9 @@ __all__ = [
     "get_message_state",
     "push_message",
     "get_tm_online_summary",
+    "close_chatgpt_pages",
     "enqueue_control_command",
+    "push_close_bound_page",
     "push_close_other_pages",
     "push_close_page",
     "push_open_url",

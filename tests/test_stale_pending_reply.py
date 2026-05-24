@@ -43,6 +43,10 @@ class _PendingHost(SessionMixin, SendFlowMixin, BridgeMixin):
         self._effective_bind_state = MagicMock(return_value="bound_conversation")
         self._session_bound_page_display_id_text = MagicMock(return_value="5")
         self._apply_reopen_checks_to_plan = MagicMock(return_value=None)
+        self._save_chat_history = True
+
+    def _is_session_unbound(self, session):
+        return False
 
     def _is_finalized(self, bridge_message_id):
         return bridge_message_id in self._bridge_msg.finalized_bridge_message_ids
@@ -51,10 +55,10 @@ class _PendingHost(SessionMixin, SendFlowMixin, BridgeMixin):
         self._bridge_msg.finalized_bridge_message_ids.add(bridge_message_id)
 
     def _mark_session_waiting_finished(self, session, reason=""):
-        session.pending_reply_since = 0
+        session.reply_waiting_since = 0
 
     def _mark_session_waiting_started(self, session, reason=""):
-        session.pending_reply_since = time.time()
+        session.reply_waiting_since = time.time()
 
     def request_sync_conversation(self, session, reason=""):
         return True, "ok"
@@ -90,7 +94,7 @@ def _session_with_local_placeholder(
         updated_at=now,
         remote_chatgpt=remote,
     )
-    session.pending_reply_since = created_at or time.time()
+    session.reply_waiting_since = created_at or time.time()
     user = ChatMessage(
         role="user",
         content="hi",
@@ -120,7 +124,7 @@ def test_stale_pending_missing_bridge_message_id():
     session = _session_with_local_placeholder(
         use_local_parent=False, created_at=old
     )
-    session.pending_reply_since = old
+    session.reply_waiting_since = old
     pending = host._get_pending_reply_state(session)
     assert pending is not None
     assert not host._pending_reply_is_actionable(session, pending)
@@ -135,7 +139,7 @@ def test_stale_pending_not_cleared_before_hard_timeout():
     session = _session_with_local_placeholder(
         bridge_id="bridge-1", created_at=old
     )
-    session.pending_reply_since = old
+    session.reply_waiting_since = old
     assert not host._is_stale_pending_reply(session)
     assert not host._clear_stale_pending_reply_before_send(session)
 
@@ -146,7 +150,7 @@ def test_stale_pending_timeout():
     session = _session_with_local_placeholder(
         bridge_id="bridge-1", created_at=old
     )
-    session.pending_reply_since = old
+    session.reply_waiting_since = old
     assert host._is_stale_pending_reply(session)
     assert host._clear_stale_pending_reply_before_send(session)
     assert host._get_pending_reply_state(session) is None
@@ -163,10 +167,10 @@ def test_stale_pending_page_idle_not_cleared_when_young():
 def test_maybe_recover_pending_reply_requests_sync_once():
     host = _PendingHost()
     session = _session_with_local_placeholder(bridge_id="bridge-sync")
-    session.pending_reply_since = time.time() - 50
+    session.reply_waiting_since = time.time() - 50
     for message in session.messages:
         if message.role == "assistant":
-            message.created_at = session.pending_reply_since
+            message.created_at = session.reply_waiting_since
     assert host._maybe_recover_pending_reply(session) is True
     assert session.pending_sync_requested is True
     assert host._maybe_recover_pending_reply(session) is False
@@ -176,7 +180,7 @@ def test_stale_pending_cleared_after_timeout_even_when_page_idle():
     host = _PendingHost()
     old = time.time() - PENDING_REPLY_HARD_TIMEOUT_SECONDS - 5
     session = _session_with_local_placeholder(bridge_id="bridge-2", created_at=old)
-    session.pending_reply_since = old
+    session.reply_waiting_since = old
     assert host._bound_page_indicates_idle(session)
     assert host._stale_pending_clear_reason(session) == "timeout"
     assert host._is_stale_pending_reply(session)
@@ -215,13 +219,13 @@ def test_actionable_pending_blocks_send():
     assert host._session_send_busy_reason(session) == "pending_reply"
 
 
-def test_orphan_pending_reply_since_cleared_before_send():
+def test_orphan_reply_waiting_since_cleared_before_send():
     host = _PendingHost()
     session = _session_with_local_placeholder(use_local_parent=True)
     session.messages = []
-    session.pending_reply_since = time.time() - (PENDING_REPLY_HARD_TIMEOUT_SECONDS + 30)
+    session.reply_waiting_since = time.time() - (PENDING_REPLY_HARD_TIMEOUT_SECONDS + 30)
     assert host._clear_stale_pending_reply_before_send(session)
-    assert float(session.pending_reply_since or 0) <= 0
+    assert float(session.reply_waiting_since or 0) <= 0
     assert host._session_send_busy_reason(session) == ""
 
 

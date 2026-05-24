@@ -103,20 +103,39 @@ class WaitingTimerMixin:
     def _is_pending_wait_display_message(self, message):
         if message is None:
             return False
-        status = (message.ui_status or "").strip()
+
+        role = (getattr(message, "role", "") or "").strip().lower()
+        if role != "assistant":
+            return False
+
+        status = (getattr(message, "ui_status", "") or "").strip()
         text = (getattr(message, "content", "") or "").strip()
+        source = (getattr(message, "message_source", "") or "").strip()
+
+        if source == "local_placeholder":
+            return True
+
         if status in PENDING_ASSISTANT_STATUSES:
             return True
+
         if text in ASSISTANT_WAIT_TEXTS:
             return True
+
         return False
 
     def _display_text_for_message(self, message, session):
         plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
+
+        role = (getattr(message, "role", "") or "").strip().lower()
+        if role != "assistant":
+            return plain
+
         if not session or not self._session_is_waiting_reply(session):
             return plain
+
         if not self._is_pending_wait_display_message(message):
             return plain
+
         base = self._waiting_reply_display_base(plain)
         elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
         return f"{base} {elapsed}"

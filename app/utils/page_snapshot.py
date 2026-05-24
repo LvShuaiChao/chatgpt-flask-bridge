@@ -7,20 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from app.models import BIND_STATE_TEMP_HOME_BOUND, BIND_STATE_UNBOUND, normalize_remote_chatgpt
-from app.utils.page_status import (
-    build_page_key,
-    can_sync_conversation,
-    evaluate_page_capability,
-    get_page_liveness,
-    is_page_online,
-    is_page_url_syncable,
-    is_prebound_home_page,
-    is_strict_page_online,
-    normalize_page,
-    page_registry_key,
-    page_url_from,
-    read_snapshot_identity,
-)
+
+
+def _ps():
+    from app.utils import page_status
+
+    return page_status
 
 __all__ = [
     "PageSnapshot",
@@ -81,7 +73,7 @@ def status_pages_token(status: Any) -> str:
                     parts.append(f"summary.{key}:{_page_source_len(value)}")
     parts.extend([
         f"running={int(bool(status.get('server_running')))}",
-        f"bound={read_snapshot_identity(status, 'bound')['client_id']}",
+        f"bound={_ps().read_snapshot_identity(status, 'bound')['client_id']}",
         f"q={status.get('queue_length', 0)}",
         f"cq={status.get('control_queue_length', 0)}",
     ])
@@ -96,11 +88,11 @@ def compute_list_fingerprint(pages: List[dict]) -> str:
         rows.append(
             "|".join(
                 [
-                    page_registry_key(page),
-                    "1" if is_page_online(page) else "0",
+                    _ps().page_registry_key(page),
+                    "1" if _ps().is_page_online(page) else "0",
                     (page.get("page_type") or "").strip(),
                     (page.get("conversation_id") or "").strip(),
-                    page_url_from(page),
+                    _ps().page_url_from(page),
                     str(page.get("page_display_id") or "").strip(),
                 ]
             )
@@ -218,10 +210,12 @@ def binding_from_session(session: Any) -> Dict[str, Any]:
     remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None))
     return {
         "bind_state": (remote.get("bind_state") or "").strip(),
+        "bind_mode": (remote.get("bind_mode") or "").strip(),
         "client_id": (remote.get("client_id") or "").strip(),
         "page_instance_id": (remote.get("page_instance_id") or "").strip(),
         "conversation_id": (remote.get("conversation_id") or "").strip(),
         "url": (remote.get("url") or "").strip(),
+        "page_no": (remote.get("page_no") or "").strip(),
         "temp_page_id": (
             remote.get("temp_page_id")
             or remote.get("page_display_id")
@@ -259,17 +253,17 @@ class PageSnapshot:
 
     @property
     def page_key(self) -> str:
-        return build_page_key(self._raw or self.to_dict())
+        return _ps().build_page_key(self._raw or self.to_dict())
 
     @property
     def url_syncable(self) -> bool:
         raw = self._raw or self.to_dict()
-        return is_page_url_syncable(raw) if raw else False
+        return _ps().is_page_url_syncable(raw) if raw else False
 
     @property
     def conversation_syncable(self) -> bool:
         raw = self._raw or self.to_dict()
-        return can_sync_conversation(raw) if raw else False
+        return _ps().can_sync_conversation(raw) if raw else False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -290,19 +284,24 @@ class PageSnapshot:
         }
 
     @classmethod
+    def from_dict(cls, data: Any, *, now: float | None = None) -> Optional[PageSnapshot]:
+        return cls.from_raw(data, now=now)
+
+    @classmethod
     def from_raw(cls, raw: Any, *, now: float | None = None) -> Optional[PageSnapshot]:
         if not isinstance(raw, dict):
             return None
         if now is None:
             now = time.time()
-        norm = normalize_page(raw, now=now)
+        ps = _ps()
+        norm = ps.normalize_page(raw, now=now)
         client_id = (norm.get("client_id") or "").strip()
         page_instance_id = (norm.get("page_instance_id") or "").strip()
         if not client_id or not page_instance_id:
             return None
-        liveness = get_page_liveness(norm, now=now)
-        online = is_strict_page_online(norm, now=now)
-        send_cap = evaluate_page_capability(norm, action="send", now=now)
+        liveness = ps.get_page_liveness(norm, now=now)
+        online = ps.is_strict_page_online(norm, now=now)
+        send_cap = ps.evaluate_page_capability(norm, action="send", now=now)
         display_id = str(
             raw.get("page_display_id")
             or norm.get("page_display_id")
@@ -403,7 +402,7 @@ class PageRegistry:
         registry = cls()
         registry.status_token = status_pages_token(status)
         registry.page_dicts = sort_pages_by_display_id(list(page_dicts or []))
-        online_fn = is_online or is_page_online
+        online_fn = is_online or _ps().is_page_online
         (
             registry.online_count,
             registry.total_count,
@@ -450,7 +449,7 @@ class PageRegistry:
             self.fingerprint = compute_list_fingerprint(self.page_dicts)
         if not self.total_count:
             online, total, conv_count, home_count = compute_page_counts(
-                self.page_dicts, is_online=is_page_online
+                self.page_dicts, is_online=_ps().is_page_online
             )
             self.online_count = online
             self.total_count = total
@@ -460,7 +459,7 @@ class PageRegistry:
     def get_by_identity(
         self, client_id: str, page_instance_id: str
     ) -> Optional[PageSnapshot]:
-        key = build_page_key(client_id, page_instance_id)
+        key = _ps().build_page_key(client_id, page_instance_id)
         if not key:
             return None
         return self.by_key.get(key)
@@ -527,7 +526,7 @@ class PageRegistry:
         return [p for p in self.pages if p.conversation_syncable]
 
     def list_blank_pages(self) -> List[PageSnapshot]:
-        return [p for p in self.pages if is_prebound_home_page(p._raw)]
+        return [p for p in self.pages if _ps().is_prebound_home_page(p._raw)]
 
     def summary(self) -> Dict[str, int]:
         online = self.list_online_pages()

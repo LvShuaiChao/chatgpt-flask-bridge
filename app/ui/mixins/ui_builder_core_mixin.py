@@ -110,6 +110,14 @@ class UiBuilderCoreMixin:
                     "如果绑定页离线，将自动取消。"
                 ),
             },
+            "close_bound": {
+                "text": "关闭当前绑定 ChatGPT 页面",
+                "handler": self._on_close_bound_tm_page,
+                "danger": True,
+                "tooltip": (
+                    "只关闭当前本地会话绑定的 ChatGPT 页面，不关闭其他 ChatGPT 页面。"
+                ),
+            },
         }
 
     def _create_tm_action_button_from_spec(self, spec_key, specs=None, object_name=""):
@@ -131,24 +139,27 @@ class UiBuilderCoreMixin:
         return btn
 
     def _ensure_tm_action_buttons(self):
-        if getattr(self, "_tm_action_buttons_ready", False):
-            return
-        self._tm_action_buttons_ready = True
         specs = self._tm_action_button_specs()
-        self.open_chatgpt_btn = self._create_tm_action_button_from_spec(
-            "open_chatgpt", specs
-        )
-        self.bind_current_page_btn = self._create_tm_action_button_from_spec(
-            "bind_current",
-            specs,
-            object_name=BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME,
-        )
-        self.sync_web_conversation_btn = self._create_tm_action_button_from_spec(
-            "sync_web", specs, object_name="sync_web_conversation_btn"
-        )
-        self.close_other_pages_btn = self._create_tm_action_button_from_spec(
-            "close_other", specs
-        )
+        if not getattr(self, "_tm_action_buttons_ready", False):
+            self._tm_action_buttons_ready = True
+            self.open_chatgpt_btn = self._create_tm_action_button_from_spec(
+                "open_chatgpt", specs
+            )
+            self.bind_current_page_btn = self._create_tm_action_button_from_spec(
+                "bind_current",
+                specs,
+                object_name=BIND_SELECTED_PAGE_BUTTON_OBJECT_NAME,
+            )
+            self.sync_web_conversation_btn = self._create_tm_action_button_from_spec(
+                "sync_web", specs, object_name="sync_web_conversation_btn"
+            )
+            self.close_other_pages_btn = self._create_tm_action_button_from_spec(
+                "close_other", specs
+            )
+        if getattr(self, "close_bound_page_btn", None) is None:
+            self.close_bound_page_btn = self._create_tm_action_button_from_spec(
+                "close_bound", specs
+            )
         self._apply_tm_action_button_roles()
 
     def _apply_tm_action_button_roles(self):
@@ -161,7 +172,12 @@ class UiBuilderCoreMixin:
         apply_bind_button_style(self.bind_current_page_btn)
         if self.bind_current_page_btn is not None:
             self.bind_current_page_btn.setEnabled(True)
-        for btn in (self.close_other_pages_btn,):
+        for btn in (
+            self.close_other_pages_btn,
+            getattr(self, "close_bound_page_btn", None),
+        ):
+            if btn is None:
+                continue
             btn.setObjectName("DangerButton")
             btn.setEnabled(True)
 
@@ -214,6 +230,13 @@ class UiBuilderCoreMixin:
         self.close_other_pages_btn.setMinimumHeight(30)
         self.close_other_pages_btn.setMaximumHeight(30)
         row.addWidget(self.close_other_pages_btn)
+
+        self.close_bound_page_btn.setObjectName("DangerButton")
+        self.close_bound_page_btn.setFixedHeight(30)
+        self.close_bound_page_btn.setMinimumHeight(30)
+        self.close_bound_page_btn.setMaximumHeight(30)
+        row.addWidget(self.close_bound_page_btn)
+
         row.addStretch()
 
         page_layout.addLayout(row)

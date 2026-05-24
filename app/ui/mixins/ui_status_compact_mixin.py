@@ -1,10 +1,23 @@
 """主界面状态条 / 页面下拉 / 底部提示的精简显示（技术字段见顶部「详情」弹窗）。"""
 
-from app.models import normalize_remote_chatgpt, remote_binding_enabled
+from app.models import (
+    BIND_MODE_HOME_PENDING,
+    derive_bind_mode,
+    normalize_remote_chatgpt,
+    remote_binding_enabled,
+)
 from app.utils.page_status import BUSY_RESPONSE_STATES, page_url_from
 
 
 class UiStatusCompactMixin:
+    def _compact_bind_channel_label(self, bind_mode: str) -> str:
+        mode = (bind_mode or "").strip()
+        if mode == BIND_MODE_HOME_PENDING:
+            return "首页临时通道"
+        if mode == "page_channel":
+            return "页面通道"
+        return "对话已绑定"
+
     def _is_ui_verbose_status_enabled(self):
         if hasattr(self, "_is_debug_mode_enabled"):
             return bool(self._is_debug_mode_enabled())
@@ -146,27 +159,43 @@ class UiStatusCompactMixin:
 
     def _format_bound_page_line_text(self, page_no, url="", state_text=""):
         page_no = str(page_no or "").strip() or "-"
-        url = str(url or "").strip()
         state_text = str(state_text or "").strip()
-        if state_text in ("等待创建对话", "等待首页上线"):
-            return f"绑定页面：页面ID:{page_no} ｜ 临时首页绑定"
+        if state_text == "页面通道":
+            return f"绑定：页面ID:{page_no} / 页面通道"
+        if state_text in ("对话已绑定", "已绑定对话"):
+            conv_hint = ""
+            if url and "/c/" in url:
+                conv_hint = url.split("/c/", 1)[1].split("?", 1)[0].split("#", 1)[0][:12]
+            if conv_hint:
+                return f"绑定：页面ID:{page_no} / 对话已绑定"
+            return f"绑定：页面ID:{page_no} / 对话已绑定"
+        if state_text in ("未绑定", ""):
+            return "绑定：未绑定"
+        url = str(url or "").strip()
         if url:
             return f"绑定页面：页面ID:{page_no} ｜ {url}"
-        fallback = state_text or "未绑定 ChatGPT 页面"
+        fallback = state_text or "未绑定"
         return f"绑定页面：页面ID:{page_no} ｜ {fallback}"
 
     def _format_bound_page_line_segments(self, page_no, url="", state_text=""):
         page_no = str(page_no or "").strip() or "-"
-        url = str(url or "").strip()
         state_text = str(state_text or "").strip()
-        if state_text in ("等待创建对话", "等待首页上线"):
-            tail = "临时首页绑定"
+        if state_text == "页面通道":
+            tail = "页面通道"
+        elif state_text in ("对话已绑定", "已绑定对话"):
+            tail = "对话已绑定"
+        elif state_text in ("未绑定", ""):
+            return [
+                {"role": "prefix", "text": "绑定："},
+                {"role": "bind", "tag": "未绑定", "text": "未绑定"},
+            ]
         else:
-            tail = url or state_text or "未绑定 ChatGPT 页面"
+            url = str(url or "").strip()
+            tail = url or state_text or "未绑定"
         return [
-            {"role": "prefix", "text": "绑定页面："},
+            {"role": "prefix", "text": "绑定："},
             {"role": "page_id", "text": f"页面ID:{page_no}"},
-            {"role": "separator", "text": " ｜ "},
+            {"role": "separator", "text": " / "},
             {"role": "url", "text": tail, "elide": True},
         ]
 
@@ -174,32 +203,75 @@ class UiStatusCompactMixin:
         if session is None:
             return [
                 {"role": "prefix", "text": "当前会话：新对话 ｜ "},
-                {"role": "page_id", "text": "页面ID：-"},
+                {"role": "bind", "tag": "未绑定", "text": "未绑定"},
             ]
         title = ""
         if hasattr(self, "_session_display_title"):
             title = self._session_display_title(session)
+        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", {}) or {})
+        bind_mode = derive_bind_mode(remote)
+        page_no = self._current_bound_page_no_text(session=session)
         if not title or title == "新对话":
+            if remote_binding_enabled(remote) and page_no != "-":
+                if bind_mode in ("page_channel", BIND_MODE_HOME_PENDING):
+                    channel = self._compact_bind_channel_label(bind_mode)
+                    bind_text = f"{channel}：页面ID:{page_no}"
+                elif bind_mode == "conversation":
+                    bind_text = f"对话绑定：页面ID:{page_no}"
+                else:
+                    bind_text = f"页面ID：{page_no}"
+                return [
+                    {"role": "prefix", "text": "当前会话：新对话 ｜ "},
+                    {"role": "page_id", "text": bind_text},
+                ]
             return [
                 {"role": "prefix", "text": "当前会话：新对话 ｜ "},
-                {"role": "page_id", "text": "页面ID：-"},
+                {"role": "bind", "tag": "未绑定", "text": "未绑定"},
             ]
-        page_no = self._current_bound_page_no_text(session=session)
+        if remote_binding_enabled(remote):
+            if bind_mode in ("page_channel", BIND_MODE_HOME_PENDING):
+                channel = self._compact_bind_channel_label(bind_mode)
+                bind_text = f"{channel}：页面ID:{page_no}"
+            elif bind_mode == "conversation":
+                bind_text = f"对话绑定：页面ID:{page_no}"
+            else:
+                bind_text = f"页面ID：{page_no}"
+        else:
+            bind_text = "未绑定"
         return [
             {"role": "prefix", "text": f"当前会话：{title} ｜ "},
-            {"role": "page_id", "text": f"页面ID：{page_no}"},
+            {"role": "page_id", "text": bind_text},
         ]
 
     def _format_current_session_header_with_page_id(self, session=None):
         if session is None:
-            return "当前会话：新对话 ｜ 页面ID：-"
+            return "当前会话：新对话 ｜ 未绑定"
         title = ""
         if hasattr(self, "_session_display_title"):
             title = self._session_display_title(session)
-        if not title or title == "新对话":
-            return "当前会话：新对话 ｜ 页面ID：-"
+        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", {}) or {})
+        bind_mode = derive_bind_mode(remote)
         page_no = self._current_bound_page_no_text(session=session)
-        return f"当前会话：{title} ｜ 页面ID：{page_no}"
+        if not title or title == "新对话":
+            if remote_binding_enabled(remote) and page_no != "-":
+                if bind_mode in ("page_channel", BIND_MODE_HOME_PENDING):
+                    channel = self._compact_bind_channel_label(bind_mode)
+                    return f"当前会话：新对话 ｜ {channel}：页面ID:{page_no}"
+                if bind_mode == "conversation":
+                    return f"当前会话：新对话 ｜ 对话绑定：页面ID:{page_no}"
+                return f"当前会话：新对话 ｜ 页面ID：{page_no}"
+            return "当前会话：新对话 ｜ 未绑定"
+        if remote_binding_enabled(remote):
+            if bind_mode in ("page_channel", BIND_MODE_HOME_PENDING):
+                channel = self._compact_bind_channel_label(bind_mode)
+                bind_text = f"{channel}：页面ID:{page_no}"
+            elif bind_mode == "conversation":
+                bind_text = f"对话绑定：页面ID:{page_no}"
+            else:
+                bind_text = f"页面ID：{page_no}"
+        else:
+            bind_text = "未绑定"
+        return f"当前会话：{title} ｜ {bind_text}"
 
     def _log_chat_header_bound_page_id(
         self,
@@ -390,10 +462,14 @@ class UiStatusCompactMixin:
     def _format_compact_page_chip(self, page=None, *, session=None, status=None):
         from app.constants import STATUS_CHIP_SESSION_BIND_TOOLTIP
 
-        _text, chip, tip = self._format_compact_session_bind_chip(
-            session=session,
-            status=status,
+        status = status if status is not None else (getattr(self._bridge_ui, 'last_bridge_status', None) or {})
+        session = session if session is not None else (
+            self._current_session() if hasattr(self, "_current_session") else None
         )
+        remote = normalize_remote_chatgpt(
+            session.remote_chatgpt if session else None
+        )
+        bind_mode = derive_bind_mode(remote)
         page_no = "-"
         if isinstance(page, dict) and hasattr(self, "_tm_page_no_text"):
             page_no = self._tm_page_no_text(page)
@@ -402,18 +478,41 @@ class UiStatusCompactMixin:
                 session=session,
                 status=status,
             )
-        state_text = "未绑定"
-        if chip == "ok":
-            state_text = "在线"
-        elif chip == "warn":
-            state_text = "离线"
-        elif chip == "error":
-            state_text = "不一致"
-        if page_no and page_no != "-":
-            text = f"绑定：页面ID:{page_no} / {state_text}"
-            tip = f"页面 ID：{page_no}\n{tip or text}"
+
+        if not remote_binding_enabled(remote):
+            text = "绑定：未绑定"
+            chip = ""
+            tip = STATUS_CHIP_SESSION_BIND_TOOLTIP
+            return text, chip, tip
+
+        list_state = ""
+        if session is not None and hasattr(self, "_session_bind_list_state"):
+            list_state = self._session_bind_list_state(session, status)
+
+        if list_state == "bind_mismatch":
+            chip = "error"
+            bind_label = "不一致"
+        elif list_state in ("bound_online", "prebound_home"):
+            chip = "ok"
+            bind_label = self._compact_bind_channel_label(bind_mode)
+            if bind_mode == "conversation":
+                bind_label = "对话已绑定"
+        elif list_state in ("bound_offline", "bound_stale"):
+            chip = "warn"
+            bind_label = self._compact_bind_channel_label(bind_mode)
+            if bind_mode == "conversation":
+                bind_label = "对话已绑定"
         else:
-            text = f"绑定：{state_text}"
+            chip = "warn"
+            bind_label = self._compact_bind_channel_label(bind_mode)
+            if bind_mode == "conversation":
+                bind_label = "对话已绑定"
+
+        if page_no and page_no != "-":
+            text = f"绑定：页面ID:{page_no} / {bind_label}"
+            tip = f"页面 ID：{page_no}\n{STATUS_CHIP_SESSION_BIND_TOOLTIP}"
+        else:
+            text = f"绑定：{bind_label}"
             tip = STATUS_CHIP_SESSION_BIND_TOOLTIP
         return text, chip, tip
 
@@ -430,6 +529,11 @@ class UiStatusCompactMixin:
         page_type = (data.get("page_type") or "").strip()
         liveness = (data.get("page_liveness") or "").strip()
         online = bool(data.get("online")) or liveness == "online"
+        bind_mode = (data.get("bind_mode") or "").strip()
+        if data.get("prebound_home") or bind_mode in ("page_channel", BIND_MODE_HOME_PENDING):
+            if online:
+                return "同步：等待生成对话ID", "warn"
+            return "同步：页面离线", "warn"
         sync_readable = bool(
             data.get("conversation_syncable")
             or data.get("sync_readable")
@@ -439,9 +543,7 @@ class UiStatusCompactMixin:
         if sync_readable and online:
             return "同步：可同步", "ok"
         if conversation_id and online and page_type == "conversation":
-            return "同步：可同步", "ok"
-        if data.get("prebound_home"):
-            return "同步：不可同步", "warn"
+            return f"同步：conversation_id: {conversation_id[:12]}...", "ok"
         if conversation_id and not online:
             return "同步：页面离线", "warn"
         if not conversation_id and not online:

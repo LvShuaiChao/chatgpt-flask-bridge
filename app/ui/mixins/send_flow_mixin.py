@@ -9,15 +9,23 @@ import uuid
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
     ASSISTANT_WAIT_TEXTS,
+    BOOTSTRAP_CLAIM_UNCLAIMED_WARN_TEXT,
+    BOOTSTRAP_CLAIM_WAIT_TEXT,
+    BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS,
+    BOOTSTRAP_CLAIMED_WAIT_TEXT,
     PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
     remote_binding_enabled,
+    BIND_MODE_CONVERSATION,
+    BIND_MODE_HOME_PENDING,
+    BIND_MODE_PAGE_CHANNEL,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_TEMP_HOME_BOUND,
     BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_HOME,
     default_remote_chatgpt,
+    derive_bind_mode,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
@@ -26,17 +34,124 @@ from app.utils.send_plan import LocalTurn, SendPlan
 from app.utils.trace_log import kv_line, make_send_trace_id
 
 
-def _turn_get(turn, key, default=None):
-    if isinstance(turn, dict):
-        return turn.get(key, default)
-    return getattr(turn, key, default)
-
-
 class SendFlowMixin:
+    def _schedule_save_sessions_to_disk(self, delay_ms=800):
+        """无 SessionMixin 时回退为立即保存（测试桩 / 轻量宿主）。"""
+        save_fn = getattr(self, "_save_sessions_to_disk", None)
+        if callable(save_fn):
+            save_fn()
+
     def _is_temp_home_bound_state(self, bind_state: str) -> bool:
         from app.models import is_temp_home_bound_state
 
         return is_temp_home_bound_state(bind_state)
+
+    def _session_bootstrap_message_id(self, session) -> str:
+        if session is None:
+            return ""
+        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None) or {})
+        bridge_id = (remote.get("bootstrap_message_id") or "").strip()
+        if bridge_id:
+            return bridge_id
+        from app.server.message_queue import get_message_state
+
+        for message in reversed(getattr(session, "messages", []) or []):
+            if message.role != "user":
+                continue
+            candidate = (message.bridge_message_id or "").strip()
+            if not candidate:
+                continue
+            state = get_message_state(candidate)
+            if state and state.get("bootstrap_conversation"):
+                return candidate
+        return ""
+
+    def _bootstrap_message_delivery_phase(self, bridge_message_id: str) -> str:
+        from app.server.message_queue import get_message_state
+
+        bridge_message_id = (bridge_message_id or "").strip()
+        if not bridge_message_id:
+            return ""
+        state = get_message_state(bridge_message_id)
+        if not state or not state.get("bootstrap_conversation"):
+            return ""
+        status = (state.get("message_status") or "").strip().lower()
+        if status in ("failed", "cancelled"):
+            return "failed"
+        if status == "queued":
+            return "queued"
+        if status in ("delivered", "acked", "waiting_reply", "replied"):
+            return "delivered"
+        return ""
+
+    def _session_bootstrap_claim_pending(self, session) -> bool:
+        bridge_id = self._session_bootstrap_message_id(session)
+        if not bridge_id:
+            return False
+        return self._bootstrap_message_delivery_phase(bridge_id) == "queued"
+
+    def _bootstrap_waiting_assistant_text(self, session) -> str:
+        bridge_id = self._session_bootstrap_message_id(session)
+        if not bridge_id:
+            return ASSISTANT_WAIT_TEXT
+        phase = self._bootstrap_message_delivery_phase(bridge_id)
+        if phase == "failed":
+            return "发送失败"
+        if phase == "delivered":
+            return BOOTSTRAP_CLAIMED_WAIT_TEXT
+        if phase == "queued":
+            elapsed = 0.0
+            if hasattr(self, "_session_pending_elapsed_sec"):
+                elapsed = float(self._session_pending_elapsed_sec(session) or 0)
+            if elapsed >= float(BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS):
+                return BOOTSTRAP_CLAIM_UNCLAIMED_WARN_TEXT
+            return BOOTSTRAP_CLAIM_WAIT_TEXT
+        return ASSISTANT_WAIT_TEXT
+
+    def _sync_bootstrap_waiting_display(self, session, *, force_render: bool = False) -> bool:
+        if session is None or not self._session_has_pending_assistant_reply(session):
+            return False
+        bridge_id = self._session_bootstrap_message_id(session)
+        if not bridge_id:
+            return False
+        desired = self._bootstrap_waiting_assistant_text(session)
+        changed = False
+        for message in reversed(getattr(session, "messages", []) or []):
+            if message.role != "assistant":
+                continue
+            msg_bridge = (message.bridge_message_id or "").strip()
+            if msg_bridge and msg_bridge != bridge_id:
+                continue
+            text = (message.content or "").strip()
+            status = (message.ui_status or "").strip()
+            if (
+                not msg_bridge
+                and text not in ASSISTANT_WAIT_TEXTS
+                and status not in PENDING_ASSISTANT_STATUSES
+            ):
+                continue
+            if text == desired:
+                break
+            message.content = desired
+            message.ui_status = "等待中"
+            session.updated_at = time.time()
+            changed = True
+            break
+        if not changed:
+            return False
+        if force_render or session.session_id == getattr(self, "_current_session_id", ""):
+            if hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=False,
+                    reason="bootstrap_waiting_display_sync",
+                )
+            elif hasattr(self, "_render_session_chat"):
+                self._render_session_chat(session, scroll_policy="keep")
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list(select_session_id=session.session_id)
+        if hasattr(self, "_schedule_save_sessions_to_disk"):
+            self._schedule_save_sessions_to_disk()
+        return True
 
     def _new_local_send_turn(
         self,
@@ -68,7 +183,17 @@ class SendFlowMixin:
         *,
         clear_input: bool = True,
     ) -> dict[str, str] | None:
-        """plan 允许发送后追加 user 消息与 assistant 占位。"""
+        """仅用于允许立即 dispatch 到网页的发送，不用于 queued 消息。
+
+        此函数会：
+        - 追加 user 消息
+        - 创建 assistant waiting 占位
+        - 设置 session.has_pending_reply = True
+        - 设置 session.reply_waiting_since
+        - 调用 _mark_session_waiting_started()
+
+        对于 queued 消息，请使用 _append_local_queued_user_turn()。
+        """
         session = turn.session
         content = turn.content
         turn_id = turn.turn_id
@@ -93,11 +218,20 @@ class SendFlowMixin:
         )
 
         if getattr(self, "_show_assistant_placeholder", True):
+            wait_text = ASSISTANT_WAIT_TEXT
+            remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None) or {})
+            bind_state = (
+                self._effective_bind_state(session)
+                if hasattr(self, "_effective_bind_state")
+                else (remote.get("bind_state") or "")
+            )
+            if self._is_temp_home_bound_state(bind_state):
+                wait_text = BOOTSTRAP_CLAIM_WAIT_TEXT
             self._append_message_to_session(
                 session.session_id,
                 {
                     "role": "assistant",
-                    "content": ASSISTANT_WAIT_TEXT,
+                    "content": wait_text,
                     "message_id": assistant_message_id,
                     "turn_id": turn_id,
                     "ui_status": "waiting",
@@ -113,7 +247,7 @@ class SendFlowMixin:
                 )
 
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
 
         if hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
@@ -134,25 +268,64 @@ class SendFlowMixin:
             "turn_id": turn_id,
         }
 
-    def _create_local_send_turn(
+    def _append_local_queued_user_turn(
         self,
-        content: str,
+        turn: LocalTurn,
         *,
-        session=None,
-        trace_id: str = "",
-        button: str = "send",
         clear_input: bool = True,
-    ) -> LocalTurn | None:
-        """创建本地 user 消息与 assistant 占位，返回 LocalTurn。"""
-        turn = self._new_local_send_turn(
-            content,
-            session=session,
-            trace_id=trace_id,
-            button=button,
+    ) -> dict[str, str] | None:
+        """仅用于 queued 消息：只追加 user 消息，不追加 assistant 占位。
+
+        与 _append_local_send_turn 不同：
+        - 不创建 assistant waiting 占位
+        - 不设置 session.has_pending_reply
+        - 不设置 session.reply_waiting_since
+        - 不调用 _mark_session_waiting_started()
+
+        queued 消息在队列中等待，不应产生 pending_reply 阻塞。
+        """
+        session = turn.session
+        content = turn.content
+        turn_id = turn.turn_id
+        user_message_id = turn.user_message_id
+
+        setattr(self, "_pending_send_turn_id", turn_id)
+        setattr(self, "_pending_send_user_message_id", user_message_id)
+
+        self._append_message_to_session(
+            session.session_id,
+            {
+                "role": "user",
+                "content": content,
+                "message_id": user_message_id,
+                "turn_id": turn_id,
+                "ui_status": "已加入队列",
+                "message_source": "local_queue",
+                "bridge_message_id": "",
+                "created_at": time.time(),
+            },
         )
-        if not self._append_local_send_turn(turn, clear_input=clear_input):
-            return None
-        return turn
+
+        session.updated_at = time.time()
+        self._schedule_save_sessions_to_disk()
+
+        if hasattr(self, "_render_current_chat_messages"):
+            self._render_current_chat_messages(
+                force_bottom=True,
+                reason="queue_enqueue_local",
+            )
+
+        if clear_input and self._auto_clear_input_after_send:
+            self.message_edit.clear()
+            if hasattr(self, "_ensure_default_chat_input_text"):
+                self._ensure_default_chat_input_text()
+            if hasattr(self, "_stash_session_compose_draft"):
+                self._stash_session_compose_draft(session.session_id)
+
+        return {
+            "user_message_id": user_message_id,
+            "turn_id": turn_id,
+        }
 
     def _local_turn_from_reuse(
         self,
@@ -223,10 +396,11 @@ class SendFlowMixin:
             self._clear_stale_pending_reply_before_send(session)
 
         if not skip_prebind_checks:
-            if self._is_session_unbound(session) and hasattr(
-                self, "_ensure_temp_home_bound_for_send"
-            ):
-                ok = self._ensure_temp_home_bound_for_send(session)
+            ensure_page = getattr(
+                self, "_ensure_page_for_local_conversation_send", None
+            ) or getattr(self, "_ensure_temp_home_bound_for_send", None)
+            if self._is_session_unbound(session) and callable(ensure_page):
+                ok = ensure_page(session)
                 if not ok:
                     plan.decision = "blocked"
                     plan.reason = "auto_open_chatgpt_failed"
@@ -280,15 +454,16 @@ class SendFlowMixin:
                         page_no = (
                             self._session_bound_page_no_text(session) or "-"
                         )
-                    if not plan.client_id or not plan.conversation_id:
+                    if not (plan.client_id or plan.page_instance_id):
                         self._append_log(
-                            "[SEND][QUEUE_BLOCKED] "
+                            "[SEND][BLOCKED] "
                             + kv_line(
                                 reason="missing_target_for_pending_queue",
                                 session_id=session.session_id,
                                 bind_state=bind_state or "-",
                                 page_no=page_no,
                                 client_id=plan.client_id or "-",
+                                page_instance_id=plan.page_instance_id or "-",
                                 conversation_id=plan.conversation_id or "-",
                             ),
                             echo=True,
@@ -341,7 +516,7 @@ class SendFlowMixin:
                                 force_bottom=True,
                                 reason="send_first_bind_waiting_home",
                             )
-                        self._save_sessions_to_disk()
+                        self._schedule_save_sessions_to_disk()
                         plan.stop_after_handle = True
                         self._log_send_plan(plan)
                         return plan
@@ -641,7 +816,7 @@ class SendFlowMixin:
                     )
                 else:
                     self._render_session_chat(session)
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
                 self._apply_chat_bind_visual_state()
                 plan.stop_after_handle = True
                 return plan
@@ -668,6 +843,47 @@ class SendFlowMixin:
         return None
 
     def _log_send_plan(self, plan: SendPlan) -> None:
+        session = plan.session
+        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
+        page_no = "-"
+        if session and hasattr(self, "_session_bound_page_no_text"):
+            page_no = self._session_bound_page_no_text(session) or "-"
+        bind_mode = derive_bind_mode(remote)
+        if plan.decision == "blocked":
+            self._append_log(
+                "[SEND][BLOCKED] "
+                + kv_line(
+                    reason=plan.reason or "-",
+                    session_id=session.session_id if session else "-",
+                    page_no=page_no,
+                ),
+                echo=True,
+            )
+        elif bind_mode in (BIND_MODE_PAGE_CHANNEL, BIND_MODE_HOME_PENDING) or plan.is_bootstrap:
+            self._append_log(
+                "[SEND][PAGE_CHANNEL] "
+                + kv_line(
+                    session_id=session.session_id if session else "-",
+                    page_no=page_no,
+                    page_instance_id=plan.page_instance_id or "-",
+                    conversation_id=plan.conversation_id or "-",
+                    trace_id=plan.trace_id or "-",
+                    decision=plan.decision or "-",
+                ),
+                echo=True,
+            )
+        elif bind_mode == BIND_MODE_CONVERSATION or (plan.conversation_id or "").strip():
+            self._append_log(
+                "[SEND][CONVERSATION] "
+                + kv_line(
+                    session_id=session.session_id if session else "-",
+                    page_no=page_no,
+                    conversation_id=plan.conversation_id or remote.get("conversation_id") or "-",
+                    trace_id=plan.trace_id or "-",
+                    decision=plan.decision or "-",
+                ),
+                echo=True,
+            )
         self._append_log(
             "[SEND][PLAN] "
             + kv_line(
@@ -766,7 +982,7 @@ class SendFlowMixin:
                 self._mark_session_waiting_finished(
                     session, reason=f"send_blocked:{reason}"
                 )
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
         self._apply_chat_bind_visual_state()
         return {
             "ok": False,
@@ -854,7 +1070,7 @@ class SendFlowMixin:
                 session, reason=f"send_failed:{err_type}"
             )
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         if hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,

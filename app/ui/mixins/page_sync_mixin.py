@@ -679,7 +679,7 @@ class PageSyncMixin:
             remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
             remote["page_type"] = "conversation"
             session.remote_chatgpt = remote
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
 
         return True, ""
 
@@ -2681,7 +2681,7 @@ class PageSyncMixin:
         if not normalized_web:
             if not (session.messages or []):
                 session.updated_at = time.time()
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
                 self._refresh_local_conversation_after_sync(
                     session.session_id,
                     force_bottom=True,
@@ -2757,7 +2757,7 @@ class PageSyncMixin:
             echo=True,
         )
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         self._refresh_local_conversation_after_sync(
             session.session_id,
             force_bottom=True,
@@ -3081,10 +3081,6 @@ class PageSyncMixin:
 
 
     def _session_bound_client_id(self):
-        session = self._current_session()
-        if not session:
-            return ""
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if not remote_binding_enabled(remote):
-            return ""
-        return (remote.get("client_id") or "").strip()
+        from app.utils.page_binding_identity import session_bound_client_id
+
+        return session_bound_client_id(self._current_session())

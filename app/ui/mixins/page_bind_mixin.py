@@ -132,53 +132,42 @@ class PageBindMixin(
         elif hasattr(self, "_clear_chat_widgets"):
             self._clear_chat_widgets()
 
-    def _get_active_send_trace_id(self):
-        value = getattr(self, "_active_send_trace_id_value", "")
+    def _get_active_trace_id(self, attr_name, log_prefix):
+        value = getattr(self, attr_name, "")
         if value is None:
             return ""
         if callable(value):
             self._append_log(
-                "[SEND][TRACE_ID_INVALID] _active_send_trace_id_value is callable, ignored"
+                f"[{log_prefix}][TRACE_ID_INVALID] {attr_name} is callable, ignored"
             )
             return ""
         return str(value).strip()
+
+    def _set_active_trace_id(self, attr_name, trace_id, log_prefix):
+        if trace_id is None:
+            setattr(self, attr_name, "")
+            return
+        if callable(trace_id):
+            self._append_log(
+                f"[{log_prefix}][TRACE_ID_INVALID] trying to set callable trace_id, ignored"
+            )
+            setattr(self, attr_name, "")
+            return
+        setattr(self, attr_name, str(trace_id).strip())
+
+    def _get_active_send_trace_id(self):
+        return self._get_active_trace_id("_active_send_trace_id_value", "SEND")
 
     def _set_active_send_trace_id(self, trace_id):
-        if trace_id is None:
-            self._active_send_trace_id_value = ""
-            return
-        if callable(trace_id):
-            self._append_log(
-                "[SEND][TRACE_ID_INVALID] trying to set callable trace_id, ignored"
-            )
-            self._active_send_trace_id_value = ""
-            return
-        self._active_send_trace_id_value = str(trace_id).strip()
+        self._set_active_trace_id("_active_send_trace_id_value", trace_id, "SEND")
 
     def _get_active_sync_trace_id(self):
-        value = getattr(self, "_active_sync_trace_id_value", "")
-        if value is None:
-            return ""
-        if callable(value):
-            self._append_log(
-                "[SYNC][TRACE_ID_INVALID] _active_sync_trace_id_value is callable, ignored"
-            )
-            return ""
-        return str(value).strip()
+        return self._get_active_trace_id("_active_sync_trace_id_value", "SYNC")
 
     def _set_active_sync_trace_id(self, trace_id):
-        if trace_id is None:
-            self._active_sync_trace_id_value = ""
-            return
-        if callable(trace_id):
-            self._append_log(
-                "[SYNC][TRACE_ID_INVALID] trying to set callable trace_id, ignored"
-            )
-            self._active_sync_trace_id_value = ""
-            return
-        self._active_sync_trace_id_value = str(trace_id).strip()
+        self._set_active_trace_id("_active_sync_trace_id_value", trace_id, "SYNC")
 
-    def _elide_middle(text, max_len=42):
+    def _elide_middle(self, text, max_len=42):
         value = str(text or "").strip()
         if len(value) <= max_len:
             return value
@@ -303,46 +292,74 @@ class PageBindMixin(
         }, "offline", "reentrant_session_only"
 
     def _resolve_bound_page_info_impl(self, status=None, snapshot=None):
+        from app.utils.page_command import resolve_bound_page_in_registry
+        from app.utils.page_status import PageRegistry, binding_from_session
+
         status = status or self._bridge_ui.last_bridge_status or {}
-        if snapshot is None and hasattr(self, "_get_tm_page_snapshot"):
-            snapshot = self._get_tm_page_snapshot(status, log_stages=False)
         session = self._current_session()
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         if not remote_binding_enabled(remote):
             return None, "unbound", "session_unbound"
+
         client_id = (remote.get("client_id") or "").strip()
         page_instance_id = (remote.get("page_instance_id") or "").strip()
-        bound_info = (
-            self._client_info_by_id(
-                client_id,
-                status=status,
-                page_instance_id=page_instance_id,
-                snapshot=snapshot,
-            )
-            if client_id
-            else None
-        )
-        if isinstance(bound_info, dict):
-            if page_instance_id and (
-                bound_info.get("page_instance_id") or ""
-            ).strip() != page_instance_id:
-                return {
-                    "client_id": client_id,
-                    "page_instance_id": page_instance_id,
-                    "conversation_id": (remote.get("conversation_id") or "").strip(),
-                    "url": ((remote.get("url") or "").strip()).strip(),
-                    "page_type": (remote.get("page_type") or "").strip(),
-                }, "offline", "bound_identity_missing"
-            if self._tm_page_is_online_simple(bound_info):
-                return bound_info, "online", "bound_client_online"
-            return bound_info, "offline", "bound_client_offline"
-        return {
+        fallback_info = {
             "client_id": client_id,
             "page_instance_id": page_instance_id,
             "conversation_id": (remote.get("conversation_id") or "").strip(),
             "url": ((remote.get("url") or "").strip()).strip(),
             "page_type": (remote.get("page_type") or "").strip(),
-        }, "offline", "bound_info_missing"
+            "page_no": (remote.get("page_no") or remote.get("temp_page_id") or "").strip(),
+            "page_display_id": (
+                remote.get("page_display_id")
+                or remote.get("temp_page_id")
+                or remote.get("page_no")
+                or ""
+            ).strip(),
+        }
+
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+        binding = binding_from_session(session)
+        resolved = resolve_bound_page_in_registry(
+            reg,
+            binding,
+            allow_same_conversation=bool((binding.get("conversation_id") or "").strip()),
+        )
+        page = resolved.get("page")
+        matched_by = (resolved.get("matched_by") or "none").strip()
+        online = bool(resolved.get("online"))
+        reason_code = (resolved.get("reason_code") or "").strip()
+
+        if page is not None:
+            raw = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
+            bound_info = dict(raw) if raw else {
+                **fallback_info,
+                "client_id": page.client_id or client_id,
+                "page_instance_id": page.page_instance_id or page_instance_id,
+                "conversation_id": page.conversation_id or fallback_info["conversation_id"],
+                "url": page.url or fallback_info["url"],
+                "page_type": page.page_type or fallback_info["page_type"],
+            }
+            if hasattr(self, "_append_log"):
+                page_type = (bound_info.get("page_type") or "-").strip() or "-"
+                page_conv = (bound_info.get("conversation_id") or "-").strip() or "-"
+                self._append_log(
+                    "[BOUND_PAGE][RESOLVE] "
+                    f"matched_by={matched_by or 'none'} "
+                    f"page_type={page_type} "
+                    f"conversation_id={page_conv} "
+                    f"online={'true' if online else 'false'}",
+                    echo=False,
+                )
+            if online:
+                return bound_info, "online", ""
+            return bound_info, "offline", reason_code or "bound_client_offline"
+
+        if client_id or page_instance_id:
+            return fallback_info, "offline", reason_code or "bound_info_missing"
+        return None, "unbound", reason_code or "not_bound"
 
 
 

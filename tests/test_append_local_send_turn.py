@@ -1,7 +1,7 @@
 """_append_local_send_turn：message id 来自 turn，不裸用未定义变量。"""
 from unittest.mock import MagicMock
 
-from app.ui.mixins.send_flow_mixin import SendFlowMixin, _turn_get
+from app.ui.mixins.send_flow_mixin import SendFlowMixin
 from app.utils.send_plan import LocalTurn
 
 
@@ -19,19 +19,6 @@ class _AppendHost(SendFlowMixin):
 
     def _mark_session_waiting_started(self, session, reason=""):
         pass
-
-
-def test_turn_get_dict_and_object():
-    turn = LocalTurn(
-        session=MagicMock(session_id="s1"),
-        content="hi",
-        trace_id="t1",
-        turn_id="turn-1",
-        user_message_id="u1",
-        assistant_message_id="a1",
-    )
-    assert _turn_get(turn, "user_message_id") == "u1"
-    assert _turn_get({"user_message_id": "u2"}, "user_message_id") == "u2"
 
 
 def test_append_local_send_turn_uses_turn_ids():

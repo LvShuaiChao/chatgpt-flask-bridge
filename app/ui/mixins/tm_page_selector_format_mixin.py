@@ -854,6 +854,19 @@ class TmPageSelectorFormatMixin:
         if combo_idx >= 0:
             return combo_idx
 
+        list_idx = page_index_in_list(
+            lambda p: self._tm_page_is_online_simple(p),
+            online_only=False,
+        )
+        combo_idx = try_restore(list_idx)
+        if combo_idx >= 0:
+            return combo_idx
+
+        if pages:
+            combo_idx = try_restore(0)
+            if combo_idx >= 0:
+                return combo_idx
+
         return -1
 
 

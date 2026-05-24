@@ -41,9 +41,9 @@ def register_job_routes(app) -> None:
 
 
 def _json_body_or_error(tag):
-    from app.server import external_api as ext
+    from app.server.request_utils import json_body_or_error
 
-    return ext._json_body_or_error(tag)
+    return json_body_or_error(tag)
 
 
 def api_jobs_create(job_scheduler):

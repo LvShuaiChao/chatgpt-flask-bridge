@@ -204,9 +204,9 @@
       'form div[contenteditable="true"]',
     ],
     sendButton: [
-      'button[data-testid="send-button"]',
-      'button[data-testid="composer-submit-button"]',
       'button#composer-submit-button',
+      'button[data-testid="composer-submit-button"]',
+      'button[data-testid="send-button"]',
       '[data-testid="composer"] button[type="submit"]',
       'form button[type="submit"]',
       'button[aria-label="发送"]',
@@ -215,7 +215,6 @@
       'button[aria-label="Send"]',
       'button[aria-label="Send message"]',
       'button[aria-label="Send prompt"]',
-      'button[type="submit"]',
     ],
     stopButton: 'button[data-testid="stop-button"]',
     duplicateDialog: '[role="dialog"], [role="alertdialog"], [aria-modal="true"]',
@@ -301,30 +300,286 @@
     };
   }
 
-  const DEFAULT_TASK_DONE_SIGNAL = '__CHATGPT_TOOLBOX_DONE__';
+  const DEFAULT_BATCH_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+  const DEFAULT_TASK_DONE_SIGNAL = DEFAULT_BATCH_DONE_SIGNAL;
+
+  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成上一个任务。
+
+默认行为：继续输出剩余内容。
+
+你必须优先判断“还有没有未输出完的内容”，而不是优先判断是否停止。
+
+只有同时满足下面所有条件时，才允许停止：
+1. 你能明确回忆并确认最开始的任务目标是什么。
+2. 你能确认该目标的所有部分都已经完整覆盖。
+3. 上一轮回答不是因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止。
+4. 没有任何剩余文件、剩余检查项、剩余代码、剩余 Cursor 指令、剩余结论需要补充。
+5. 不是因为“看起来已经总结过”而停止，必须是确实没有任何可继续输出的内容。
+
+如果以上 5 条有任何一条不能确定，请不要停止，继续输出剩余内容。
+
+如果你非常确定任务已经完整完成，并且没有任何剩余内容，只能回复下面这一行，不能有任何其他文字：
+{{DONE_SIGNAL}}
+
+如果不确定是否已经完成，必须继续输出，禁止输出终止信号。
+
+继续输出时必须遵守：
+1. 不要重复已经输出过的内容。
+2. 不要重新开始整个任务。
+3. 不要扩展到新任务。
+4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
+5. 如果上一轮回答像是被截断，请从中断位置继续。`;
+
+  const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V1 = `请继续完成上一个任务。
+
+你必须先判断“最开始的任务目标”是否已经完整完成，而不是机械地继续输出。
+
+判断规则：
+1. 如果最开始的任务目标已经完整完成，并且没有遗漏内容、没有未输出完的代码、没有未覆盖的文件、没有剩余检查项，只能回复下面这一行，不能有任何其他文字：
+{{DONE_SIGNAL}}
+
+2. 如果还没有完成，请继续输出剩余内容。
+3. 不要重复已经输出过的内容。
+4. 不要重新开始整个任务。
+5. 不要扩展到新任务。
+6. 只补充当前任务中尚未完成、尚未输出、尚未覆盖的部分。
+7. 如果上一轮回答因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止，请从中断位置继续。`;
+
+  const LEGACY_TASK_DONE_SIGNALS = Object.freeze([
+    'CHATGPT_TOOLBOX_DONE',
+    '__CHATGPT_TOOLBOX_DONE__',
+    '<<<CHATGPT_TOOLBOX_DONE>>>',
+    '<<<TASK_DONE>>>',
+    'TASK_DONE',
+  ]);
+
+  function isLegacyTaskDoneSignalValue(value) {
+    const trimmed = String(value || '').trim();
+    return trimmed.length > 0 && LEGACY_TASK_DONE_SIGNALS.includes(trimmed);
+  }
+
+  function migrateTaskDoneSignalValue(value, logFn) {
+    const trimmed = String(value || '').trim();
+    if (!trimmed || !isLegacyTaskDoneSignalValue(trimmed)) {
+      return trimmed;
+    }
+    if (typeof logFn === 'function') {
+      logFn(`[AUTOQ][TASK_SIGNAL][MIGRATE] from=${trimmed} to=${DEFAULT_TASK_DONE_SIGNAL}`);
+    }
+    return DEFAULT_TASK_DONE_SIGNAL;
+  }
+
+  function cleanAssistantTextForDoneSignal(text) {
+    const raw = String(text || '').trim();
+    if (
+      typeof ChatMessageExtractor !== 'undefined'
+      && ChatMessageExtractor
+      && typeof ChatMessageExtractor.cleanMessageText === 'function'
+    ) {
+      return String(ChatMessageExtractor.cleanMessageText(raw) || '').trim();
+    }
+    return raw;
+  }
+
+  function analyzeDoneSignalText(text, options = {}) {
+    const configuredSignal = typeof options.doneSignal === 'string'
+      ? normalizeDoneSignal(options.doneSignal)
+      : normalizeDoneSignal(DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL);
+  // 连续运行/批量任务：仅匹配当前配置的终止信号，避免旧版别名或模型偶发短句误触发停止。
+    const allowedSignals = new Set([configuredSignal]);
+
+    const checked = cleanAssistantTextForDoneSignal(text)
+      .replace(/\r\n/g, '\n')
+      .trim();
+
+    if (typeof isCorruptedBatchSignalText === 'function' && isCorruptedBatchSignalText(checked)) {
+      return {
+        matched: false,
+        corrupted: true,
+        lineCount: 0,
+        reason: 'corrupted-signal',
+        allowedSignals: Array.from(allowedSignals),
+        configuredSignal,
+      };
+    }
+
+    const lines = checked
+      .split('\n')
+      .map((line) => String(line || '').trim())
+      .filter(Boolean);
+
+    if (lines.length === 1 && allowedSignals.has(lines[0])) {
+      return {
+        matched: true,
+        corrupted: false,
+        lineCount: 1,
+        reason: 'strict-exact-single-line-match',
+        allowedSignals: Array.from(allowedSignals),
+        configuredSignal,
+      };
+    }
+
+    return {
+      matched: false,
+      corrupted: false,
+      lineCount: lines.length,
+      reason: lines.length === 0 ? 'empty' : 'not-single-line-stop-signal',
+      allowedSignals: Array.from(allowedSignals),
+      configuredSignal,
+    };
+  }
+
+  function isCorruptedBatchSignalText(text) {
+    const value = String(text || '');
+    return (
+      value.includes('<<<XZ_TOOLBOX_BATCH_<<<XZ_TOOLBOX_BATCH_')
+      || value.includes('_7F3B9C>>>_7F3B9C>>>')
+      || (value.match(/XZ_TOOLBOX_BATCH_/g) || []).length >= 2
+    );
+  }
+
+  function repairCorruptedDoneSignalText(value, logFn) {
+    const text = String(value || '').trim();
+
+    if (!text) {
+      return DEFAULT_BATCH_DONE_SIGNAL;
+    }
+
+    const knownGood = [
+      '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
+      'CHATGPT_TOOLBOX_DONE',
+      '__CHATGPT_TOOLBOX_DONE__',
+      '<<<CHATGPT_TOOLBOX_DONE>>>',
+      '<<<TASK_DONE>>>',
+      'TASK_DONE',
+    ];
+
+    if (knownGood.includes(text)) {
+      if (text !== DEFAULT_BATCH_DONE_SIGNAL && typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_DONE_SIGNAL}`,
+        );
+      }
+      return DEFAULT_BATCH_DONE_SIGNAL;
+    }
+
+    if (
+      text.includes('XZ_TOOLBOX_BATCH_')
+      || text.includes('TASK_DONE_7F3B9C')
+      || text.length > 80
+    ) {
+      if (typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_DONE_SIGNAL}`,
+        );
+      }
+      return DEFAULT_BATCH_DONE_SIGNAL;
+    }
+
+    return text;
+  }
+
+  function normalizeContinuePromptTemplateForCompare(text) {
+    return String(text || '').replace(/\r\n/g, '\n').trim();
+  }
+
+  function isLegacyDefaultBatchContinuePromptTemplate(text) {
+    const normalized = normalizeContinuePromptTemplateForCompare(text);
+    if (!normalized) {
+      return false;
+    }
+
+    if (normalized === normalizeContinuePromptTemplateForCompare(LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V1)) {
+      return true;
+    }
+
+    if (normalized === normalizeContinuePromptTemplateForCompare(getLegacyShortContinuePromptText())) {
+      return true;
+    }
+
+    if (normalized === normalizeContinuePromptTemplateForCompare(getLegacyDefaultContinuePromptText())) {
+      return true;
+    }
+
+    if (
+      normalized.includes('你必须先判断“最开始的任务目标”是否已经完整完成，而不是机械地继续输出')
+      || normalized.includes('你需要先判断上一个任务是否还有剩余内容，但默认不要轻易停止')
+      || (
+        normalized.includes('如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充')
+        && normalized.includes('除此之外不要输出任何多余文字')
+      )
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function repairCorruptedContinuePromptTemplate(value, logFn, fieldName) {
+    const text = String(value || '').trim();
+    const field = String(fieldName || 'continuePromptTemplate');
+
+    if (!text) {
+      return '';
+    }
+
+    if (isCorruptedBatchSignalText(text)) {
+      if (typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_PROMPT][REPAIR_CORRUPTED_TEMPLATE] field=${field} oldLength=${text.length}`,
+        );
+      }
+      return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    }
+
+    if (isLegacyDefaultBatchContinuePromptTemplate(text)) {
+      if (typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_PROMPT][MIGRATE_DEFAULT_TEMPLATE] field=${field} oldLength=${text.length}`,
+        );
+      }
+      return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    }
+
+    if (text.includes(DEFAULT_BATCH_DONE_SIGNAL)) {
+      const repaired = text.replaceAll(DEFAULT_BATCH_DONE_SIGNAL, '{{DONE_SIGNAL}}');
+      if (repaired !== text && typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_PROMPT][TEMPLATE_REPAIR] field=${field} action=replace-done-signal-with-placeholder`,
+        );
+      }
+      return repaired;
+    }
+
+    return text;
+  }
+
+  function normalizeDoneSignal(value) {
+    return repairCorruptedDoneSignalText(value);
+  }
+
+  function renderContinuePromptTemplate(template, doneSignal) {
+    const safeTemplate = String(template || DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
+    const safeDoneSignal = normalizeDoneSignal(doneSignal || DEFAULT_BATCH_DONE_SIGNAL);
+    return safeTemplate.replaceAll('{{DONE_SIGNAL}}', safeDoneSignal);
+  }
+
+  function getContinuePromptTemplateForDisplay(value, logFn, fieldName) {
+    const text = String(value || '').trim();
+    if (!text) {
+      return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    }
+    return repairCorruptedContinuePromptTemplate(text, logFn, fieldName || 'continuePromptTemplate');
+  }
 
   function getDefaultTaskContinuePromptText() {
-    return [
-      '请继续完成上一个任务。',
-      '',
-      '你必须先判断“最开始的任务目标”是否已经完整完成，而不是机械地继续输出。',
-      '',
-      '判断规则：',
-      '1. 如果最开始的任务目标已经完整完成，并且没有遗漏内容、没有未输出完的代码、没有未覆盖的文件、没有剩余检查项，请只回复下面这一行终止信号：',
-      DEFAULT_TASK_DONE_SIGNAL,
-      '',
-      '2. 如果还没有完成，请继续输出剩余内容。',
-      '3. 不要重复已经输出过的内容。',
-      '4. 不要重新开始整个任务。',
-      '5. 不要扩展到新任务。',
-      '6. 只补充当前任务中尚未完成、尚未输出、尚未覆盖的部分。',
-      '7. 如果上一轮回答因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止，请从中断位置继续。',
-    ].join('\n');
+    return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
   }
 
   function createDefaultTaskQueueSettings() {
     return {
       stopOnMaxContinueRounds: true,
+      defaultMaxContinueRoundsMigratedToUnlimited: false,
     };
   }
 
@@ -332,13 +587,13 @@
     return cloneDefaultModeSettings();
   }
 
-  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = 'CHATGPT_TOOLBOX_DONE';
+  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
 
   function getLegacyShortContinuePromptText() {
     return [
       '请继续完成上一个任务。',
       '',
-      '如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充，请只回复下面这一行终止信号：',
+      '如果上一个任务已经完整完成、没有必要继续、没有剩余内容需要补充，只能回复下面这一行，不能有任何其他文字：',
       '',
       DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
       '',
@@ -348,7 +603,7 @@
     ].join('\n');
   }
 
-  function getDefaultContinuePromptText() {
+  function getLegacyDefaultContinuePromptText() {
     return [
       '请继续完成上一个任务。',
       '',
@@ -359,7 +614,7 @@
       '2. 如果还有任何遗漏内容、未输出完的代码、未输出完的检查项、未输出完的整改指令、未覆盖的文件或未完成的步骤，请继续输出。',
       '3. 如果只是阶段性完成、局部完成、当前小节完成，不代表整个任务完成，必须继续。',
       '4. 如果上一次回答因为长度限制、网络中断、生成中断、代码块未闭合、列表未完成、编号未结束而停止，请从中断位置继续。',
-      '5. 只有在你非常确定最开始的任务已经完整完成，并且没有任何剩余内容需要输出时，才允许只回复下面这一行终止信号：',
+      '5. 只有在你非常确定最开始的任务已经完整完成，并且没有任何剩余内容需要输出时，才允许只回复下面这一行，不能有任何其他文字：',
       '',
       DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
       '',
@@ -380,6 +635,10 @@
     ].join('\n');
   }
 
+  function getDefaultContinuePromptText() {
+    return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+  }
+
   function isLegacyContinuePromptText(text) {
     const trimmed = String(text || '').trim();
     if (!trimmed) {
@@ -389,6 +648,13 @@
       return true;
     }
     if (trimmed === getLegacyShortContinuePromptText()) {
+      return true;
+    }
+    if (typeof isLegacyDefaultBatchContinuePromptTemplate === 'function'
+      && isLegacyDefaultBatchContinuePromptTemplate(trimmed)) {
+      return true;
+    }
+    if (trimmed === getLegacyDefaultContinuePromptText()) {
       return true;
     }
     if (trimmed.includes('<<<TASK_DONE>>>')) {

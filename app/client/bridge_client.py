@@ -698,7 +698,12 @@ class BridgeClient:
         timeout: Optional[float] = None,
         client_name: str = DEFAULT_CLIENT_NAME,
     ) -> str:
-        """异步 send + 本地轮询 wait_result。"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：外部脚本可能直接调用 BridgeClient.send_and_wait()。
+        新代码请优先使用 ask() 或 send() + wait_result()。
+        """
         sent = self.send(
             text,
             session_id=session_id,
@@ -722,7 +727,12 @@ class BridgeClient:
         return list(sessions) if isinstance(sessions, list) else []
 
     def create_session(self, title: str = "新对话") -> dict[str, Any]:
-        """POST /api/v1/sessions"""
+        """
+        @deprecated 当前 GUI / CLI 内部不再使用。
+
+        保留原因：BridgeClient 可能作为外部 SDK 使用。
+        新代码请优先使用服务端 /api/v1/sessions 或 GUI 会话创建流程。
+        """
         data = self._request(
             "POST",
             "/api/v1/sessions",

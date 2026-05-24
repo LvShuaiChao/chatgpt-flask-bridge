@@ -355,6 +355,7 @@
       const intervalMs = Number(options.intervalMs ?? 300);
       const stableRounds = Number(options.stableRounds ?? 2);
       const isGenerating = typeof options.isGenerating === 'function' ? options.isGenerating : () => false;
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
       const startedAt = Date.now();
       let stableCount = 0;
@@ -362,6 +363,16 @@
       let lastPicked = null;
 
       while (Date.now() - startedAt < timeoutMs) {
+        if (shouldStop()) {
+          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-cancelled]');
+          return {
+            ok: false,
+            reason: 'cancelled',
+            lastRecord: lastPicked?.record || null,
+            latestUser: lastPicked?.latestUser || null,
+          };
+        }
+
         if (isGenerating()) {
           stableCount = 0;
           lastSignature = '';
@@ -1091,6 +1102,35 @@
       return null;
     }
 
+    function findSendButtonBySvgFallback(scope, composer, composerRoot, composerForm) {
+      const svgList = Array.from(scope.querySelectorAll(
+        '#composer-submit-button > svg, button#composer-submit-button svg',
+      ));
+
+      for (const svg of svgList) {
+        const btn = svg.closest('button');
+        if (!(btn instanceof HTMLButtonElement)) {
+          continue;
+        }
+
+        if (!isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope)) {
+          continue;
+        }
+
+        if (!isLikelyComposerSendButton(btn)) {
+          continue;
+        }
+
+        return {
+          btn,
+          source: 'svg-fallback',
+          selector: '#composer-submit-button > svg -> closest(button)',
+        };
+      }
+
+      return null;
+    }
+
     function findSendButtonByLastClickable(scope, composer, composerRoot, composerForm) {
       const buttons = Array.from(scope.querySelectorAll('button'))
         .filter((btn) => isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope));
@@ -1253,6 +1293,13 @@
           logSendButtonFound(lastHit, silent);
           return lastHit.btn;
         }
+
+        const svgHit = findSendButtonBySvgFallback(scope, composer, composerRoot, composerForm);
+        if (svgHit && svgHit.btn) {
+          logSendButtonScan(totalScanned, 1, svgHit.source, silent);
+          logSendButtonFound(svgHit, silent);
+          return svgHit.btn;
+        }
       }
 
       const preview = buildSendButtonPreview(previewButtons);
@@ -1296,6 +1343,77 @@
       }
     }
 
+    function isComposerTextSynced(expectedText) {
+      const expected = String(expectedText || '').trim();
+      if (!expected) {
+        return true;
+      }
+
+      const actual = String(getComposerText() || '').trim();
+      if (!actual) {
+        return false;
+      }
+
+      if (actual === expected) {
+        return true;
+      }
+
+      const expectedProbe = expected.slice(0, 80);
+      const actualProbe = actual.slice(0, 80);
+      return actual.includes(expectedProbe) || expected.includes(actualProbe);
+    }
+
+    async function waitForComposerTextSynced(expectedText, timeoutMs = 8000, options = {}) {
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const startedAt = Date.now();
+
+      while (Date.now() - startedAt < timeoutMs) {
+        if (shouldStop()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+
+        if (isComposerTextSynced(expectedText)) {
+          return { ok: true, reason: 'composer_text_synced' };
+        }
+
+        await sleep(100);
+      }
+
+      return { ok: false, reason: 'composer_text_not_synced' };
+    }
+
+    function dispatchComposerSendKeyboard(method) {
+      const el = getComposer();
+      if (!(el instanceof HTMLElement)) {
+        return false;
+      }
+
+      el.focus();
+
+      const base = {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+      };
+
+      const normalized = String(method || '').toLowerCase();
+
+      if (normalized === 'ctrl_enter' || normalized === 'ctrl+enter') {
+        el.dispatchEvent(new KeyboardEvent('keydown', { ...base, ctrlKey: true }));
+        el.dispatchEvent(new KeyboardEvent('keypress', { ...base, ctrlKey: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { ...base, ctrlKey: true }));
+        return true;
+      }
+
+      el.dispatchEvent(new KeyboardEvent('keydown', base));
+      el.dispatchEvent(new KeyboardEvent('keypress', base));
+      el.dispatchEvent(new KeyboardEvent('keyup', base));
+      return true;
+    }
+
     function setComposerValue(value) {
       const el = getComposer();
       if (!el) return false;
@@ -1304,6 +1422,16 @@
 
       if (el.matches && el.matches('textarea,input')) {
         setNativeTextareaValue(el, value);
+        try {
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: value,
+          }));
+        } catch (beforeInputErr) {
+          console.error('[ChatGPT toolbox] setComposerValue beforeinput failed', beforeInputErr);
+        }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
@@ -1325,6 +1453,17 @@
         } catch (e) {
           console.warn('[ChatGPT toolbox] execCommand insertText failed; fallback to textContent', e);
           el.textContent = value;
+        }
+
+        try {
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: value,
+          }));
+        } catch (beforeInputErr) {
+          console.error('[ChatGPT toolbox] setComposerValue contenteditable beforeinput failed', beforeInputErr);
         }
 
         el.dispatchEvent(new InputEvent('input', {
@@ -1379,6 +1518,11 @@
     function clickSend() {
       const sendBtn = findSendButton();
 
+      if (!(sendBtn instanceof HTMLButtonElement)) {
+        ToolboxShell.appendLog('[COMPOSER][click-send:blocked] reason=send-button-not-found-or-not-button');
+        return false;
+      }
+
       if (!isSendButtonReady(sendBtn)) {
         ToolboxShell.appendLog('[COMPOSER][click-send:blocked] reason=send-button-not-ready');
         return false;
@@ -1394,6 +1538,7 @@
 
       ToolboxShell.appendLog(`[COMPOSER][click-send] ${debugText}`);
 
+      sendBtn.focus();
       sendBtn.click();
       return true;
     }
@@ -1467,20 +1612,63 @@
       });
     }
 
-    function countAttachmentChips() {
-      let count = 0;
-      forEachLikelyAttachmentElement(() => {
-        count += 1;
-      });
+    function isInsideConversationHistory(el) {
+      if (!(el instanceof HTMLElement)) return false;
+      return !!el.closest(
+        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+      );
+    }
 
-      if (count > 0) {
-        return count;
+    function isExcludedNonAttachmentChip(el) {
+      if (!(el instanceof HTMLElement)) return true;
+
+      const testId = String(el.getAttribute('data-testid') || '').toLowerCase();
+      const role = String(el.getAttribute('role') || '').toLowerCase();
+
+      if (role === 'tab') return true;
+      if (/prompt|starter|suggestion|memory|plugin|tool-|mode-|model-selector|voice|dictation/.test(testId)) {
+        return true;
       }
 
+      const raw = [
+        el.innerText || '',
+        el.textContent || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('title') || '',
+        testId,
+        String(el.className || ''),
+      ].join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      const attachmentHint = /attach|attachment|file-chip|composer-file|file-preview|upload|附件|文件|\.zip|\.js|\.py|\.txt|\.json|\.md|\.csv|\.xlsx|\.docx|\.pdf/.test(raw);
+      if (!attachmentHint) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function isComposerAttachmentChipElement(el) {
+      if (!(el instanceof HTMLElement)) return false;
+      if (isInToolbox(el)) return false;
+      if (!isElementVisible(el)) return false;
+      if (isInsideConversationHistory(el)) return false;
+      if (isExcludedNonAttachmentChip(el)) return false;
+
+      const composerRoot = getComposerRoot();
+      const composerEl = qs('[data-testid="composer"]');
+      const inComposerScope = (
+        (composerRoot instanceof HTMLElement && composerRoot.contains(el))
+        || (composerEl instanceof HTMLElement && composerEl.contains(el))
+      );
+
+      return inComposerScope;
+    }
+
+    function countAttachmentChips() {
       const roots = [
         getComposerRoot(),
         qs('[data-testid="composer"]'),
-      ].filter(Boolean);
+      ].filter((root, index, list) => root instanceof HTMLElement && list.indexOf(root) === index);
 
       const chipSelectors = [
         '[data-testid*="attachment"]',
@@ -1492,19 +1680,25 @@
       ];
 
       const seen = new Set();
+      let count = 0;
 
       roots.forEach((root) => {
         chipSelectors.forEach((sel) => {
           qsa(sel, root).forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            if (isInToolbox(el)) return;
-            if (!isElementVisible(el)) return;
+            if (!isComposerAttachmentChipElement(el)) return;
             if (seen.has(el)) return;
             seen.add(el);
             count += 1;
           });
         });
       });
+
+      const countLog = `[COMPOSER][ATTACH_COUNT] count=${count} scope=composer visibleOnly=1`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(countLog);
+      } else {
+        console.log(countLog);
+      }
 
       return count;
     }
@@ -2240,11 +2434,15 @@
       const configuredStopSignal = (
         typeof getCopyHotkeyContinueStopSignal === 'function'
           ? getCopyHotkeyContinueStopSignal()
-          : 'CHATGPT_TOOLBOX_DONE'
+          : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'
       );
       const allowedSignals = new Set([
+        '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
         'CHATGPT_TOOLBOX_DONE',
+        '__CHATGPT_TOOLBOX_DONE__',
         '<<<CHATGPT_TOOLBOX_DONE>>>',
+        '<<<TASK_DONE>>>',
+        'TASK_DONE',
         configuredStopSignal,
       ]);
       const raw = String(text || '').replace(/\r\n/g, '\n').trim();
@@ -2309,6 +2507,9 @@
       getComposerRoot,
       getComposerText,
       setComposerValue,
+      isComposerTextSynced,
+      waitForComposerTextSynced,
+      dispatchComposerSendKeyboard,
       findSendButton,
       isSendButtonReady,
       clickSend,
@@ -2518,6 +2719,8 @@
   /** Flask 为当前页分配的展示编号（仅来自 poll 响应 page_display_id）。 */
   const BRIDGE_STATE = {
     page_display_id: '',
+    /** 当前页面对话轮次（DOM 观测或 poll 响应同步，供自动指令等模块只读使用）。 */
+    page_turn_count: null,
   };
 
   let lastPageDisplayIdMissingWarnAt = 0;
@@ -2530,9 +2733,135 @@
     last_poll_at: 0,
   };
 
+  const MESSAGE_STATUS = Object.freeze({
+    QUEUED: 'queued',
+    DISPATCHING: 'dispatching',
+    BROWSER_SENT: 'browser_sent',
+    WAITING_REPLY: 'waiting_reply',
+    DONE: 'done',
+    FAILED: 'failed',
+  });
+
+  const ASSISTANT_STATUS = Object.freeze({
+    QUEUED_PLACEHOLDER: 'queued_placeholder',
+    WAITING_REPLY: 'waiting_reply',
+    DONE: 'done',
+  });
+
+  function createQueuedMessageEntry(normalized) {
+    const messageId = normalized.message_id || normalized.id || '';
+    return {
+      message_id: messageId,
+      session_id: String(normalized.session_id || '').trim(),
+      turn_id: String(normalized.turn_id || '').trim(),
+      content: String(normalized.content || '').trim(),
+      status: MESSAGE_STATUS.QUEUED,
+      request_id: normalized.request_id || '',
+      created_at: Date.now(),
+      retry_count: 0,
+    };
+  }
+
+  const CHAT_QUEUE = [];
+
   const ChatInputStateRuntime = {
     waitingForReply: false,
+    sendInProgress: false,
+    lastTopStatusText: '',
+    lastTopStatusType: '',
+    pendingTurnId: '',
+    pendingRequestId: '',
   };
+
+  function hasPendingReply(sessionId) {
+    if (ChatInputStateRuntime.waitingForReply) {
+      return true;
+    }
+
+    const activeCount = CHAT_QUEUE.filter((entry) => {
+      if (entry.status === MESSAGE_STATUS.QUEUED) return false;
+      if (entry.status === ASSISTANT_STATUS.QUEUED_PLACEHOLDER) return false;
+      if (!entry.status || entry.status === MESSAGE_STATUS.DONE || entry.status === MESSAGE_STATUS.FAILED) return false;
+      return true;
+    }).length;
+
+    const ignoredQueued = CHAT_QUEUE.filter((e) => e.status === MESSAGE_STATUS.QUEUED).length;
+    const pendingIds = CHAT_QUEUE
+      .filter((e) => e.status !== MESSAGE_STATUS.QUEUED && e.status !== MESSAGE_STATUS.DONE && e.status !== MESSAGE_STATUS.FAILED)
+      .map((e) => e.message_id);
+
+    const decision = activeCount > 0 ? 'wait' : 'process';
+    ToolboxShell.appendLog(
+      `[CHAT_QUEUE][PENDING_CHECK]`
+      + ` session_id=${sessionId || '-'}`
+      + ` queue_size=${CHAT_QUEUE.length}`
+      + ` active_pending_count=${activeCount}`
+      + ` ignored_queued_count=${ignoredQueued}`
+      + ` pending_message_ids=${pendingIds.join(',') || '-'}`
+      + ` decision=${decision}`
+    );
+
+    return activeCount > 0;
+  }
+
+  function findQueuedEntryByMessageId(messageId) {
+    return CHAT_QUEUE.find((entry) => entry.message_id === messageId) || null;
+  }
+
+  function updateQueuedEntryStatus(messageId, status, extra) {
+    const entry = findQueuedEntryByMessageId(messageId);
+    if (!entry) return;
+    entry.status = status;
+    if (extra && typeof extra === 'object') {
+      Object.assign(entry, extra);
+    }
+  }
+
+  function removeQueuedEntry(messageId) {
+    const idx = CHAT_QUEUE.findIndex((entry) => entry.message_id === messageId);
+    if (idx >= 0) {
+      CHAT_QUEUE.splice(idx, 1);
+    }
+  }
+
+  function createAssistantPlaceholder(normalized) {
+    const messageId = normalized.message_id || normalized.id || '';
+    const entry = {
+      message_id: messageId,
+      role: 'assistant',
+      status: ASSISTANT_STATUS.QUEUED_PLACEHOLDER,
+      session_id: String(normalized.session_id || '').trim(),
+      turn_id: String(normalized.turn_id || '').trim(),
+      content: '',
+      created_at: Date.now(),
+    };
+    CHAT_QUEUE.push(entry);
+    return entry;
+  }
+
+  function releasePendingReplyState(reason, messageId, extra) {
+    const requestId = String(extra && extra.request_id ? extra.request_id : '').trim() || ChatInputStateRuntime.pendingRequestId;
+    const turnId = String(extra && extra.turn_id ? extra.turn_id : '').trim() || ChatInputStateRuntime.pendingTurnId;
+
+    ChatInputStateRuntime.waitingForReply = false;
+    ChatInputStateRuntime.sendInProgress = false;
+    ChatInputStateRuntime.pendingTurnId = '';
+    ChatInputStateRuntime.pendingRequestId = '';
+
+    if (messageId) {
+      updateQueuedEntryStatus(messageId, MESSAGE_STATUS.DONE);
+    }
+
+    ToolboxShell.appendLog(
+      `[CHAT][PENDING_RELEASE]`
+      + ` reason=${reason || '-'}`
+      + ` request_id=${requestId || '-'}`
+      + ` turn_id=${turnId || '-'}`
+      + ` released=true`
+    );
+
+    updateChatInputStateBadge();
+  }
 
   function hasValidPageDisplayId(value) {
     const text = String(value ?? '').trim();
@@ -2558,8 +2887,10 @@
     const nextPageDisplayId =
       result.page_display_id
       ?? result.pageDisplayId
-      ?? (result.page && result.page.page_display_id)
-      ?? (result.runtime && result.runtime.page_display_id)
+      ?? result.page_no
+      ?? result.pageNo
+      ?? (result.page && (result.page.page_display_id ?? result.page.page_no))
+      ?? (result.runtime && (result.runtime.page_display_id ?? result.runtime.page_no))
       ?? null;
 
     if (
@@ -2574,6 +2905,7 @@
           old_page_display_id: prev || '-',
           new_page_display_id: nextText,
           response_page_display_id: result.page_display_id,
+          response_page_no: result.page_no,
         });
       }
       BRIDGE_STATE.page_display_id = nextText;
@@ -2586,7 +2918,59 @@
       warnPageDisplayIdMissingInResponse(result);
     }
 
+    const pollTurnCount = extractTurnCountFromPollResult(result);
+    if (pollTurnCount !== null) {
+      syncBridgePageTurnCount(pollTurnCount, reason || 'bridge-poll');
+    }
+
     refreshToolboxPageStatusDisplay(reason || 'bridge-poll');
+  }
+
+  function extractTurnCountFromPollResult(result) {
+    if (!result || typeof result !== 'object') {
+      return null;
+    }
+
+    const raw = result.turn_count
+      ?? result.turnCount
+      ?? (result.page && (result.page.turn_count ?? result.page.turnCount))
+      ?? (result.runtime && (result.runtime.turn_count ?? result.runtime.turnCount))
+      ?? null;
+
+    if (raw === null || raw === undefined || raw === '') {
+      return null;
+    }
+
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) {
+      return null;
+    }
+
+    return Math.floor(n);
+  }
+
+  function notifyAutoQueueProgressStatusRefresh(reason = '') {
+    if (
+      typeof AutoQueueModule !== 'undefined'
+      && typeof AutoQueueModule.refreshProgressStatus === 'function'
+    ) {
+      AutoQueueModule.refreshProgressStatus(reason);
+    }
+  }
+
+  function syncBridgePageTurnCount(nextCount, reason = '') {
+    const prev = BRIDGE_STATE.page_turn_count ?? BRIDGE_STATE.turn_count ?? BRIDGE_STATE.turnCount ?? null;
+    const normalized = nextCount === null || nextCount === undefined
+      ? null
+      : (Number.isFinite(Number(nextCount)) && Number(nextCount) > 0
+        ? Math.floor(Number(nextCount))
+        : null);
+
+    BRIDGE_STATE.page_turn_count = normalized;
+
+    if (prev !== normalized) {
+      notifyAutoQueueProgressStatusRefresh(reason || 'page-turn-changed');
+    }
   }
 
   function refreshToolboxPageStatusDisplay(reason = '') {
@@ -2595,6 +2979,14 @@
       && typeof UploadModule.refreshToolboxTopStatus === 'function'
     ) {
       UploadModule.refreshToolboxTopStatus(reason);
+    }
+
+    if (typeof getConversationTurnCount === 'function') {
+      const liveCount = Number(getConversationTurnCount());
+      syncBridgePageTurnCount(
+        Number.isFinite(liveCount) && liveCount > 0 ? liveCount : null,
+        reason || 'toolbox-page-status',
+      );
     }
 
     updateChatInputStateBadge();
@@ -2849,6 +3241,24 @@
     return 0;
   }
 
+  function getCurrentPageTurnCount() {
+    const fromState = BRIDGE_STATE.page_turn_count ?? BRIDGE_STATE.turn_count ?? BRIDGE_STATE.turnCount ?? null;
+
+    if (fromState !== null && fromState !== undefined) {
+      const cached = Number(fromState);
+      if (Number.isFinite(cached) && cached > 0) {
+        return Math.floor(cached);
+      }
+    }
+
+    const live = Number(getConversationTurnCount());
+    if (Number.isFinite(live) && live > 0) {
+      return Math.floor(live);
+    }
+
+    return null;
+  }
+
   function updateBridgePollRuntime(patch) {
     if (!patch || typeof patch !== 'object') {
       return;
@@ -3031,10 +3441,14 @@
       return true;
     }
 
+    if (typeof hasPendingReply === 'function' && hasPendingReply('')) {
+      return true;
+    }
+
     if (
       typeof UploadModule !== 'undefined'
-      && typeof UploadModule.isWaitingForReply === 'function'
-      && UploadModule.isWaitingForReply()
+      && typeof UploadModule.isWaitingReplyOnly === 'function'
+      && UploadModule.isWaitingReplyOnly()
     ) {
       return true;
     }
@@ -3042,85 +3456,168 @@
     return false;
   }
 
-  function getChatInputState() {
-    const capability = typeof getPageCapability === 'function'
-      ? getPageCapability('input-state')
-      : null;
-    const domState = detectChatInputStateFromDom();
-
-    const bridgeConnected = !!(capability && capability.bridge_connected);
-    let isResponding = !!(
-      capability
-      && (
-        capability.is_responding
-        || capability.is_responding
-        || capability.response_state === 'responding'
-        || capability.response_state === 'generating'
-      )
-    );
-    let canSendNow = !!(
-      capability
-      && (
-        capability.can_send_now
-        || capability.can_send_now
-        || capability.can_accept_input
-        || capability.can_accept_input
-      )
-    );
-
-    if (!bridgeConnected) {
-      return {
-        text: '未连接',
-        cls: 'cgpt-state-offline',
-        title: '油猴桥接未连接或页面未注册到 Flask',
-      };
+  function resolveIsSending() {
+    if (ChatInputStateRuntime.sendInProgress) {
+      return true;
     }
 
-    if (domState && domState.cls === 'cgpt-state-generating') {
-      isResponding = true;
-    }
-
-    if (isResponding) {
-      return {
-        text: '生成中',
-        cls: 'cgpt-state-generating',
-        title: 'ChatGPT 正在回答，暂时不建议发送新消息',
-      };
+    if (
+      typeof UploadModule !== 'undefined'
+      && typeof UploadModule.isWaitingSendActive === 'function'
+      && UploadModule.isWaitingSendActive()
+    ) {
+      return true;
     }
 
     if (resolveWaitingForReply()) {
+      const internal = detectTopMainResponseSignals(
+        typeof getPageCapability === 'function' ? getPageCapability('send-wait') : null,
+        detectChatInputStateFromDom(),
+      );
+      if (!internal.responseInProgress) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function detectTopMainResponseSignals(capability, domState) {
+    const domGenerating = !!(domState && domState.cls === 'cgpt-state-generating');
+    const isGenerating = domGenerating
+      || !!(
+        capability
+        && capability.response_state === 'generating'
+      );
+    const isResponding = !!(
+      capability
+      && (
+        capability.is_responding
+        || capability.response_state === 'responding'
+        || capability.response_state === 'generating'
+      )
+    ) || domGenerating;
+    const isAnswering = isResponding || isGenerating;
+    const responseInProgress = isAnswering;
+
+    return {
+      isGenerating,
+      isResponding,
+      isAnswering,
+      responseInProgress,
+    };
+  }
+
+  function getTopMainStatus() {
+    const capability = typeof getPageCapability === 'function'
+      ? getPageCapability('top-main-status')
+      : null;
+    const domState = detectChatInputStateFromDom();
+    const internal = detectTopMainResponseSignals(capability, domState);
+
+    const bridgeOnline = !!(capability && capability.bridge_connected);
+    const pageOnline = capability ? capability.online !== false : true;
+
+    if (!bridgeOnline || !pageOnline) {
       return {
-        text: '等待中',
-        cls: 'cgpt-state-waiting',
-        title: '消息已发送，正在等待回复',
+        text: '离线',
+        cls: 'cgpt-state-offline',
+        type: 'offline',
+        title: 'Bridge / 油猴页面不可用或未连接',
+        reason: !bridgeOnline ? 'bridge_offline' : 'page_offline',
+        ...internal,
       };
     }
 
-    if (canSendNow || (domState && domState.cls === 'cgpt-state-ready')) {
+    if (internal.responseInProgress) {
+      return {
+        text: '回答中',
+        cls: 'cgpt-state-answering',
+        type: 'answering',
+        title: 'ChatGPT 正在生成回复',
+        reason: 'generating',
+        ...internal,
+      };
+    }
+
+    if (resolveIsSending()) {
+      return {
+        text: '发送中',
+        cls: 'cgpt-state-sending',
+        type: 'sending',
+        title: '消息正在送入页面或等待发送完成',
+        reason: 'sending',
+        ...internal,
+      };
+    }
+
+    const canSendNow = !!(
+      capability
+      && (
+        capability.can_send_now
+        || capability.can_accept_input
+      )
+    );
+    const canInput = canSendNow || (domState && domState.cls === 'cgpt-state-ready');
+
+    if (canInput) {
       return {
         text: '可输入',
         cls: 'cgpt-state-ready',
+        type: 'ready',
         title: '当前页面可以输入并发送消息',
+        reason: 'ready',
+        ...internal,
       };
     }
 
-    if (domState && domState.cls === 'cgpt-state-blocked') {
-      return domState;
-    }
-
-    if (capability) {
-      return {
-        text: '不可发',
-        cls: 'cgpt-state-blocked',
-        title: '当前输入框或发送按钮不可用',
-      };
-    }
-
-    return domState || {
-      text: '未知',
-      cls: 'cgpt-state-unknown',
-      title: '无法判断当前页面输入状态',
+    return {
+      text: '不可发送',
+      cls: 'cgpt-state-blocked',
+      type: 'blocked',
+      title: domState && domState.title
+        ? domState.title
+        : '当前页面无法发送',
+      reason: 'blocked',
+      ...internal,
     };
+  }
+
+  function getTopMainStatusLogContext() {
+    const pageId = typeof getBridgePageDisplayIdText === 'function'
+      ? getBridgePageDisplayIdText()
+      : '-';
+    const turnCount = typeof getConversationTurnCount === 'function'
+      ? getConversationTurnCount()
+      : '-';
+    return { pageId, turnCount };
+  }
+
+  function logTopMainStatusChange(info) {
+    const nextText = String(info && info.text ? info.text : '').trim();
+    const prevText = String(ChatInputStateRuntime.lastTopStatusText || '').trim();
+
+    if (nextText === prevText) {
+      return;
+    }
+
+    const { pageId, turnCount } = getTopMainStatusLogContext();
+    const reason = String(info && info.reason ? info.reason : '-');
+
+    if (info && info.isGenerating && info.isAnswering) {
+      console.log('[TOOLBOX][TOP_STATUS][MERGED] generating=true answering=true display=回答中');
+    }
+
+    console.log(
+      `[TOOLBOX][TOP_STATUS] old=${prevText || '-'} new=${nextText || '-'} page_id=${pageId} turn_count=${turnCount} reason=${reason}`,
+    );
+
+    ChatInputStateRuntime.lastTopStatusText = nextText;
+    ChatInputStateRuntime.lastTopStatusType = String(info && info.type ? info.type : '');
+  }
+
+  function getChatInputState() {
+    return getTopMainStatus();
   }
 
   function updateChatInputStateBadge() {
@@ -3129,7 +3626,8 @@
       return;
     }
 
-    const info = getChatInputState();
+    const info = getTopMainStatus();
+    logTopMainStatusChange(info);
 
     badge.textContent = info.text;
     badge.title = info.title || info.text;
@@ -3137,6 +3635,8 @@
     badge.classList.remove(
       'cgpt-state-ready',
       'cgpt-state-waiting',
+      'cgpt-state-sending',
+      'cgpt-state-answering',
       'cgpt-state-generating',
       'cgpt-state-blocked',
       'cgpt-state-offline',
@@ -3168,114 +3668,811 @@
     }
   }
 
-  async function waitComposerSendConfirmed(content, timeoutMs = 5000, options = {}) {
-    const startedAt = Date.now();
-    const contentText = String(content || '').trim();
-    const contentProbe = contentText.slice(0, 80);
-    const beforeLatestKey = String(options.beforeLatestKey || '');
-    const attachmentCountBefore = Number(options.attachmentCountBeforeSend || 0);
+  const SEND_CONFIRM_POLL_MS = 250;
+  const SEND_CONFIRM_DEFAULT_TIMEOUT_MS = 12000;
+  const SEND_ATTACH_WAIT_DEFAULT_MS = 30000;
+  const SEND_WAIT_TIMEOUT_MS = 60000;
+  const SEND_FALLBACK_WAIT_MS = 2500;
+  const SEND_TEXT_SYNC_TIMEOUT_MS = 8000;
+  const SEND_CONVERSATION_SWITCH_EXTRA_MS = 8000;
 
-    let sawAssistantBusy = false;
-    let sawAttachmentCleared = false;
-    let sawComposerCleared = false;
-    let lastReason = 'pending';
+  function appendSendLog(line) {
+    const text = String(line || '').trim();
+    if (!text) {
+      return;
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(text);
+    } else {
+      console.log(text);
+    }
+  }
+
+  function getSendFlowDiagnostics() {
+    let responseState = {};
+
+    try {
+      responseState = detectComposerResponseState();
+    } catch (err) {
+      console.error('[ChatGPT toolbox] getSendFlowDiagnostics response_state failed', err);
+    }
+
+    return {
+      url: location.href || '',
+      conversation_id: parseConversationIdFromPath(location.pathname || '') || '',
+      page_instance_id: getToolboxPageInstanceId(),
+      response_state: responseState.response_state || 'unknown',
+      sendable: typeof ComposerApi.canSendNow === 'function' ? ComposerApi.canSendNow() : false,
+    };
+  }
+
+  function logSendFlowError(tag, err, extra = {}) {
+    const errText = err && err.message ? err.message : String(err);
+    const stack = err && err.stack ? String(err.stack) : '';
+    const diag = getSendFlowDiagnostics();
+    console.error(`[ChatGPT toolbox] ${tag}`, err, { ...diag, ...extra });
+    appendSendLog(
+      `[SEND][ERROR] tag=${tag} error=${errText} url=${diag.url} `
+      + `conversation_id=${diag.conversation_id || '-'} page_instance_id=${diag.page_instance_id || '-'} `
+      + `response_state=${diag.response_state || '-'} sendable=${diag.sendable ? 1 : 0} `
+      + `extra=${JSON.stringify(extra || {})}${stack ? ` stack=${stack.slice(0, 400)}` : ''}`,
+    );
+  }
+
+  function isResponseStateIndicatingSendTriggered(responseState) {
+    if (!responseState || typeof responseState !== 'object') {
+      return false;
+    }
+
+    if (responseState.is_responding) {
+      return true;
+    }
+
+    const state = String(responseState.response_state || '').toLowerCase();
+    const reason = String(responseState.response_state_reason || '').toLowerCase();
+
+    return ['generating', 'streaming', 'submitted', 'responding'].includes(state)
+      || /streaming|submitted|responding|assistant_busy/.test(reason);
+  }
+
+  function doesLatestUserMatchContent(latest, contentProbe) {
+    if (!latest || latest.role !== 'user' || !contentProbe) {
+      return false;
+    }
+
+    return String(latest.text || '').trim().includes(contentProbe);
+  }
+
+  function buildSendConfirmSnapshot(ctx) {
+    const attachmentCountNow = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const latest = getLatestConversationMessageRecord({ preferAssistant: false });
+    const latestKey = buildMessageRecordKey(latest);
+    const beforeLatestKey = String(ctx.beforeLatestKey || '');
+    const latestUserChanged = !!beforeLatestKey && !!latestKey && latestKey !== beforeLatestKey;
+    const composerText = ComposerApi.getComposerText();
+    const sendBtn = typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+    const sendButtonEnabled = !!(sendBtn && ComposerApi.isSendButtonReady(sendBtn));
+    const responseState = detectComposerResponseState();
+    const assistantBusy = ComposerApi.isAssistantLikelyBusy();
+    const conversationId = parseConversationIdFromPath(location.pathname || '') || '';
+    const contentProbe = String(ctx.contentProbe || '');
+
+    return {
+      composerText,
+      inputEmpty: !String(composerText || '').trim(),
+      attachmentCountNow,
+      latest,
+      latestKey,
+      latestUserChanged,
+      latestUserMatchesContent: doesLatestUserMatchContent(latest, contentProbe),
+      userBubbleFound: latestUserChanged || doesLatestUserMatchContent(latest, contentProbe),
+      sendButtonEnabled,
+      sendButtonDisabled: !sendButtonEnabled,
+      responseState,
+      responseStateTriggered: isResponseStateIndicatingSendTriggered(responseState),
+      assistantBusy,
+      conversationId,
+      url: location.href || '',
+      pageInstanceId: getToolboxPageInstanceId(),
+    };
+  }
+
+  function hasSendProgressSinceBaseline(snapshot, baseline) {
+    if (!baseline || !snapshot) {
+      return false;
+    }
+
+    if (snapshot.inputEmpty && !baseline.inputEmpty) {
+      return true;
+    }
+
+    if (snapshot.latestUserChanged && !baseline.latestUserChanged) {
+      return true;
+    }
+
+    if (snapshot.latestUserMatchesContent && !baseline.latestUserMatchesContent) {
+      return true;
+    }
+
+    if (snapshot.responseStateTriggered && !baseline.responseStateTriggered) {
+      return true;
+    }
+
+    if (snapshot.assistantBusy && !baseline.assistantBusy) {
+      return true;
+    }
+
+    if (snapshot.sendButtonDisabled && baseline.sendButtonEnabled) {
+      return true;
+    }
+
+    if (snapshot.conversationId && !baseline.conversationId) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function evaluateSendConfirmed(snapshot, ctx) {
+    const contentText = String(ctx.contentText || '').trim();
+    const contentProbe = String(ctx.contentProbe || '');
+    const attachmentCountBefore = Number(ctx.attachmentCountBeforeSend || 0);
+    const hadTextPayload = !!contentText;
+    const hadAttachmentPayload = attachmentCountBefore > 0;
+
+    if (snapshot.inputEmpty && (hadTextPayload || hadAttachmentPayload)) {
+      return { ok: true, reason: 'input_cleared' };
+    }
+
+    if (snapshot.latestUserChanged) {
+      return { ok: true, reason: 'user_bubble_new' };
+    }
+
+    if (snapshot.latestUserMatchesContent && contentProbe) {
+      return { ok: true, reason: 'user_bubble_text_matches' };
+    }
+
+    if (snapshot.responseStateTriggered) {
+      return { ok: true, reason: `response_state_${snapshot.responseState.response_state || 'triggered'}` };
+    }
+
+    if (snapshot.assistantBusy && (hadTextPayload || hadAttachmentPayload || snapshot.latestUserMatchesContent)) {
+      return { ok: true, reason: 'assistant_busy_after_send' };
+    }
+
+    if (snapshot.sendButtonDisabled && ctx.sendButtonEnabledBefore) {
+      return { ok: true, reason: 'send_button_disabled_after_click' };
+    }
+
+    if (ctx.conversationSwitchSeen && snapshot.conversationId) {
+      if (snapshot.inputEmpty || snapshot.userBubbleFound || snapshot.responseStateTriggered || snapshot.assistantBusy) {
+        return { ok: true, reason: 'conversation_switched_confirmed' };
+      }
+    }
+
+    if (attachmentCountBefore > 0 && snapshot.attachmentCountNow === 0) {
+      if (snapshot.inputEmpty || snapshot.assistantBusy || snapshot.latestUserChanged) {
+        return { ok: true, reason: 'attachments_sent' };
+      }
+    }
+
+    return { ok: false, reason: '' };
+  }
+
+  function pickSendNotConfirmedReason(snapshot, ctx) {
+    const signals = {
+      input_cleared: snapshot.inputEmpty,
+      user_bubble: snapshot.userBubbleFound,
+      responding: snapshot.responseStateTriggered || snapshot.assistantBusy,
+      conversation_updated: !!snapshot.conversationId && (
+        snapshot.conversationId !== String(ctx.conversationIdBefore || '')
+        || ctx.conversationSwitchSeen
+      ),
+      send_button_changed: snapshot.sendButtonDisabled && ctx.sendButtonEnabledBefore,
+      generating: snapshot.assistantBusy,
+    };
+
+    const anySuccessSignal = signals.input_cleared
+      || signals.user_bubble
+      || signals.responding
+      || signals.conversation_updated
+      || signals.send_button_changed
+      || signals.generating;
+
+    if (anySuccessSignal) {
+      return 'timeout';
+    }
+
+    if (ctx.conversationSwitchPending && !ctx.conversationSwitchSeen) {
+      return 'conversation_switch_timeout';
+    }
+
+    if (!snapshot.inputEmpty && ctx.hadTextPayload) {
+      return 'input_not_cleared';
+    }
+
+    if (!signals.user_bubble) {
+      return 'no_user_bubble_after_click';
+    }
+
+    return 'timeout';
+  }
+
+  function appendSendConfirmWaitLog(elapsedMs, snapshot) {
+    appendSendLog(
+      `[SEND][CONFIRM_WAIT] elapsed=${elapsedMs} input_empty=${snapshot.inputEmpty ? 1 : 0} `
+      + `user_bubble_found=${snapshot.userBubbleFound ? 1 : 0} response_state=${snapshot.responseState.response_state || '-'} `
+      + `conversation_id=${snapshot.conversationId || '-'} send_button_enabled=${snapshot.sendButtonEnabled ? 1 : 0}`,
+    );
+  }
+
+  function notifyPreSendStatus(options, text) {
+    if (typeof options.onPreSendStatus === 'function') {
+      options.onPreSendStatus(String(text || ''));
+    }
+  }
+
+  async function waitAttachmentsStableForSend(timeoutMs, shouldStop, options = {}) {
+    const startedAt = Date.now();
+    let lastLogAt = 0;
+
+    notifyPreSendStatus(options, '附件仍在处理中，等待发送...');
 
     while (Date.now() - startedAt < timeoutMs) {
-      const attachmentCountNow = typeof ComposerApi.countAttachmentChips === 'function'
-        ? ComposerApi.countAttachmentChips()
-        : 0;
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
 
-      const latest = getLatestConversationMessageRecord({ preferAssistant: false });
-      const latestKey = buildMessageRecordKey(latest);
-      const latestUserChanged = !!beforeLatestKey && !!latestKey && latestKey !== beforeLatestKey;
+      if (typeof ComposerApi.isAttachmentStillUploading !== 'function'
+        || !ComposerApi.isAttachmentStillUploading()) {
+        return { ok: true, reason: 'attachment_stable' };
+      }
 
-      const composerText = ComposerApi.getComposerText();
+      const elapsed = Date.now() - startedAt;
+      if (elapsed - lastLogAt >= 2000) {
+        appendSendLog(`[SEND][ATTACH_WAIT] elapsed=${elapsed} status=processing`);
+        lastLogAt = elapsed;
+      }
+
+      await sleep(SEND_CONFIRM_POLL_MS);
+    }
+
+    return { ok: false, reason: 'attachment_not_ready' };
+  }
+
+  async function waitSendButtonReadyForSend(timeoutMs, shouldStop, options = {}) {
+    const startedAt = Date.now();
+    let lastLogAt = 0;
+
+    notifyPreSendStatus(options, '正在等待 ChatGPT 发送按钮可用...');
+
+    while (Date.now() - startedAt < timeoutMs) {
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      let responseState = {};
+      try {
+        responseState = detectComposerResponseState();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] waitSendButtonReadyForSend response_state failed', err);
+        appendSendLog(`[SEND][WAIT_BUTTON][error] response_state error=${errText}`);
+      }
+
       const canSendNow = typeof ComposerApi.canSendNow === 'function'
-        ? ComposerApi.canSendNow()
-        : false;
+        && ComposerApi.canSendNow();
 
-      const assistantBusy = ComposerApi.isAssistantLikelyBusy();
+      const sendBtn = typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
 
-      if (attachmentCountBefore > 0 && attachmentCountNow === 0) {
-        sawAttachmentCleared = true;
+      const sendButtonReady = !!(
+        sendBtn
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(sendBtn)
+      );
+
+      if (canSendNow || sendButtonReady) {
+        return { ok: true, reason: 'send_button_ready' };
       }
 
-      if (!composerText && !canSendNow) {
-        sawComposerCleared = true;
+      const elapsed = Date.now() - startedAt;
+      if (elapsed - lastLogAt >= 2000) {
+        appendSendLog(
+          `[SEND][WAIT_BUTTON] elapsed=${elapsed} canSendNow=${canSendNow ? 1 : 0} `
+          + `buttonReady=${sendButtonReady ? 1 : 0} `
+          + `response_state=${responseState.response_state || '-'} `
+          + `reason=${responseState.response_state_reason || '-'}`,
+        );
+        lastLogAt = elapsed;
       }
 
-      if (assistantBusy) {
-        sawAssistantBusy = true;
-        lastReason = 'assistant_busy_after_click';
+      await sleep(SEND_CONFIRM_POLL_MS);
+    }
+
+    return { ok: false, reason: 'send_button_wait_timeout' };
+  }
+
+  const SEND_FOREVER_COMPOSER_MISSING_MS = 120000;
+
+  async function waitSendButtonForeverUntilReady(options = {}) {
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const pollMs = Number(options.pollMs || 250);
+    const logIntervalMs = Number(options.logIntervalMs || 2000);
+    let lastLogAt = 0;
+    let loopCount = 0;
+    let composerMissingSince = 0;
+
+    while (true) {
+      loopCount += 1;
+
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
       }
 
-      if (latest && latest.role === 'user') {
-        const latestText = String(latest.text || '').trim();
+      const composer = typeof ComposerApi.getComposer === 'function'
+        ? ComposerApi.getComposer()
+        : null;
 
-        if (latestUserChanged && !contentText) {
-          return { ok: true, reason: 'latest_user_changed' };
+      if (!(composer instanceof HTMLElement)) {
+        if (!composerMissingSince) {
+          composerMissingSince = Date.now();
+        } else if (Date.now() - composerMissingSince >= SEND_FOREVER_COMPOSER_MISSING_MS) {
+          return { ok: false, reason: 'composer_not_found' };
         }
-
-        if (contentProbe && latestText.includes(contentProbe)) {
-          return { ok: true, reason: latestUserChanged ? 'latest_user_matches' : 'latest_user_text_matches' };
-        }
-
-        if (latestUserChanged && attachmentCountBefore > 0) {
-          return { ok: true, reason: 'attachments_sent_new_user_turn' };
-        }
+      } else {
+        composerMissingSince = 0;
       }
 
-      if (sawAttachmentCleared) {
-        if (assistantBusy) {
-          return { ok: true, reason: 'attachments_sent_assistant_busy' };
-        }
-
-        if (sawComposerCleared) {
-          return { ok: true, reason: 'attachments_sent_composer_cleared' };
-        }
-
-        if (latestUserChanged) {
-          return { ok: true, reason: 'attachments_sent_latest_user_changed' };
-        }
+      let responseState = {};
+      try {
+        responseState = detectComposerResponseState();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] waitSendButtonForeverUntilReady response_state failed', err);
+        appendSendLog(`[SEND][WAIT_FOREVER][error] response_state error=${errText}`);
       }
 
-      if (sawComposerCleared) {
-        if (contentText) {
-          return { ok: true, reason: 'composer_cleared' };
-        }
-
-        if (attachmentCountBefore > 0) {
-          return { ok: true, reason: 'composer_cleared_after_attachments' };
-        }
-
-        if (latestUserChanged) {
-          return { ok: true, reason: 'composer_cleared_new_user_turn' };
-        }
+      if (responseState && responseState.is_responding) {
+        return { ok: false, reason: 'assistant_busy', response_state: responseState };
       }
 
-      if (assistantBusy) {
-        await sleep(250);
+      if (
+        typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading()
+      ) {
+        const now = Date.now();
+        if (now - lastLogAt >= logIntervalMs) {
+          appendSendLog(
+            `[SEND][WAIT_FOREVER] phase=attachment_processing loop=${loopCount} `
+            + `response_state=${responseState.response_state || '-'} `
+            + `reason=${responseState.response_state_reason || '-'}`,
+          );
+          lastLogAt = now;
+        }
+        await sleep(pollMs);
         continue;
       }
 
-      await sleep(250);
+      const sendBtn = typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
+
+      const buttonReady = !!(
+        sendBtn
+        && sendBtn instanceof HTMLButtonElement
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(sendBtn)
+      );
+
+      if (buttonReady) {
+        appendSendLog(
+          `[SEND][WAIT_FOREVER][READY] loop=${loopCount} `
+          + `id=${sendBtn.id || '-'} `
+          + `testid=${sendBtn.getAttribute('data-testid') || '-'} `
+          + `aria=${sendBtn.getAttribute('aria-label') || '-'}`,
+        );
+        return {
+          ok: true,
+          reason: 'send_button_ready',
+          button: sendBtn,
+        };
+      }
+
+      const now = Date.now();
+      if (now - lastLogAt >= logIntervalMs) {
+        appendSendLog(
+          `[SEND][WAIT_FOREVER] phase=wait_button loop=${loopCount} `
+          + `found=${sendBtn ? 1 : 0} `
+          + `disabled=${sendBtn && sendBtn.disabled ? 1 : 0} `
+          + `ariaDisabled=${sendBtn && sendBtn.getAttribute('aria-disabled') === 'true' ? 1 : 0} `
+          + `response_state=${responseState.response_state || '-'} `
+          + `reason=${responseState.response_state_reason || '-'}`,
+        );
+        lastLogAt = now;
+      }
+
+      await sleep(pollMs);
+    }
+  }
+
+  async function sendUntilConfirmedForever(options = {}) {
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const source = String(options.source || 'manual-send-forever');
+    const confirmTimeoutMs = Number(options.confirmTimeoutMs || 5000);
+    let attempt = 0;
+
+    ChatInputStateRuntime.sendInProgress = true;
+    updateChatInputStateBadge();
+
+    try {
+      while (true) {
+        attempt += 1;
+
+        if (shouldStop()) {
+          return { ok: false, reason: 'cancelled', source };
+        }
+
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          return { ok: false, reason: 'page_offline', source };
+        }
+
+        const ready = await waitSendButtonForeverUntilReady({
+          shouldStop,
+          pollMs: 250,
+          logIntervalMs: 2000,
+        });
+
+        if (!ready.ok) {
+          if (ready.reason === 'assistant_busy') {
+            return { ok: false, reason: 'assistant_busy', source, response_state: ready.response_state };
+          }
+          if (ready.reason === 'cancelled') {
+            return { ok: false, reason: 'cancelled', source };
+          }
+          if (ready.reason === 'composer_not_found') {
+            return { ok: false, reason: 'composer_not_found', source };
+          }
+
+          appendSendLog(`[SEND][FOREVER][WAIT_NOT_READY] attempt=${attempt} reason=${ready.reason || '-'}`);
+          await sleep(500);
+          continue;
+        }
+
+        const beforeLatestRecord = getLatestConversationMessageRecord({ preferAssistant: false });
+        const beforeLatestKey = buildMessageRecordKey(beforeLatestRecord);
+        const conversationIdBefore = parseConversationIdFromPath(location.pathname || '') || '';
+        const urlBefore = location.href || '';
+        const composerTextBeforeSend = ComposerApi.getComposerText();
+        const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
+          ? ComposerApi.countAttachmentChips()
+          : 0;
+
+        const confirmCtx = {
+          contentText: String(composerTextBeforeSend || '').trim(),
+          contentProbe: String(composerTextBeforeSend || '').trim().slice(0, 80),
+          attachmentCountBeforeSend,
+          beforeLatestKey,
+          conversationIdBefore,
+          urlBefore,
+          sendButtonEnabledBefore: true,
+          hadTextPayload: !!String(composerTextBeforeSend || '').trim() || attachmentCountBeforeSend > 0,
+        };
+
+        appendSendLog(
+          `[SEND][FOREVER][ATTEMPT] attempt=${attempt} `
+          + `textLen=${String(composerTextBeforeSend || '').length} `
+          + `attachmentCount=${attachmentCountBeforeSend} `
+          + `url=${urlBefore}`,
+        );
+
+        const sendAction = await performSendActionsWithFallback(confirmCtx, shouldStop);
+        if (!sendAction.ok) {
+          appendSendLog(
+            `[SEND][FOREVER][ACTION_FAILED] attempt=${attempt} `
+            + `reason=${sendAction.reason || '-'}`,
+          );
+          await sleep(500);
+          continue;
+        }
+
+        const confirmed = await waitComposerSendConfirmed(
+          composerTextBeforeSend,
+          confirmTimeoutMs,
+          {
+            shouldStop,
+            beforeLatestKey,
+            beforeLatestRecord,
+            attachmentCountBeforeSend,
+            conversationIdBefore,
+            urlBefore,
+            sendButtonEnabledBefore: true,
+          },
+        );
+
+        if (confirmed.ok) {
+          appendSendLog(
+            `[SEND][FOREVER][SUCCESS] attempt=${attempt} `
+            + `reason=${confirmed.reason || '-'}`,
+          );
+          ChatInputStateRuntime.waitingForReply = true;
+          return {
+            ok: true,
+            reason: confirmed.reason || 'sent',
+            source,
+            attempts: attempt,
+          };
+        }
+
+        appendSendLog(
+          `[SEND][FOREVER][NOT_CONFIRMED] attempt=${attempt} `
+          + `reason=${confirmed.reason || '-'}`,
+        );
+        await sleep(800);
+      }
+    } catch (err) {
+      const errText = err && err.message ? err.message : String(err);
+      const stack = err && err.stack ? String(err.stack).slice(0, 400) : '';
+      console.error('[ChatGPT toolbox] sendUntilConfirmedForever failed', err);
+      ToolboxShell.appendLog(`[SEND][FOREVER][ERROR] ${errText}${stack ? ` stack=${stack}` : ''}`);
+      return { ok: false, reason: 'send_exception', source, error: errText };
+    } finally {
+      ChatInputStateRuntime.sendInProgress = false;
+      updateChatInputStateBadge();
+    }
+  }
+
+  function isSendButtonReadyForPreSend() {
+    const sendBtn = typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+
+    if (!sendBtn) {
+      return false;
     }
 
-    if (sawAttachmentCleared) {
-      return { ok: true, reason: 'attachments_sent_after_timeout' };
+    if (typeof ComposerApi.canSendNow === 'function' && ComposerApi.canSendNow()) {
+      return true;
     }
 
-    if (sawComposerCleared && (contentText || attachmentCountBefore > 0)) {
-      return { ok: true, reason: 'composer_cleared_after_timeout' };
+    return typeof ComposerApi.isSendButtonReady === 'function'
+      && ComposerApi.isSendButtonReady(sendBtn);
+  }
+
+  async function runPreSendChecks(options = {}) {
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const expectedText = String(options.expectedText || '').trim();
+    const requireTextSynced = options.requireTextSynced === true;
+    const attachmentWaitTimeoutMs = Number(options.attachmentWaitTimeoutMs || SEND_ATTACH_WAIT_DEFAULT_MS);
+    const waitUntilSendable = options.waitUntilSendable !== false;
+    const sendButtonWaitTimeoutMs = Number(
+      options.sendButtonWaitTimeoutMs || SEND_WAIT_TIMEOUT_MS,
+    );
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled' };
     }
 
-    if (sawAssistantBusy && (contentText || attachmentCountBefore > 0)) {
-      return { ok: true, reason: 'assistant_busy_after_click' };
+    const composer = typeof ComposerApi.getComposer === 'function' ? ComposerApi.getComposer() : null;
+    if (!(composer instanceof HTMLElement)) {
+      return { ok: false, reason: 'composer_not_found' };
+    }
+
+    if (typeof ComposerApi.canAcceptInput === 'function' && !ComposerApi.canAcceptInput()) {
+      return { ok: false, reason: 'composer_not_inputable' };
+    }
+
+    if (composer.getAttribute && composer.getAttribute('aria-disabled') === 'true') {
+      return { ok: false, reason: 'composer_disabled' };
+    }
+
+    if (requireTextSynced && expectedText) {
+      const synced = typeof ComposerApi.waitForComposerTextSynced === 'function'
+        ? await ComposerApi.waitForComposerTextSynced(expectedText, SEND_TEXT_SYNC_TIMEOUT_MS, { shouldStop })
+        : { ok: ComposerApi.isComposerTextSynced(expectedText) };
+
+      if (!synced.ok) {
+        return { ok: false, reason: synced.reason || 'composer_text_not_synced' };
+      }
+    }
+
+    if (typeof ComposerApi.isAttachmentStillUploading === 'function' && ComposerApi.isAttachmentStillUploading()) {
+      const attachWait = await waitAttachmentsStableForSend(attachmentWaitTimeoutMs, shouldStop, options);
+      if (!attachWait.ok) {
+        return { ok: false, reason: attachWait.reason || 'attachment_not_ready' };
+      }
+    }
+
+    if (isSendButtonReadyForPreSend()) {
+      return { ok: true, reason: 'pre_send_ready' };
+    }
+
+    if (waitUntilSendable) {
+      const buttonWait = await waitSendButtonReadyForSend(sendButtonWaitTimeoutMs, shouldStop, options);
+      if (!buttonWait.ok) {
+        return { ok: false, reason: buttonWait.reason || 'send_button_wait_timeout' };
+      }
+      return { ok: true, reason: 'pre_send_ready' };
+    }
+
+    const sendBtn = typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+
+    if (!sendBtn) {
+      return { ok: false, reason: 'send_button_not_found' };
+    }
+
+    return { ok: false, reason: 'button_disabled' };
+  }
+
+  async function waitForSendProgressSinceBaseline(baseline, ctx, timeoutMs, shouldStop) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      const snapshot = buildSendConfirmSnapshot(ctx);
+      if (hasSendProgressSinceBaseline(snapshot, baseline, ctx)) {
+        return { ok: true, snapshot };
+      }
+
+      const confirmed = evaluateSendConfirmed(snapshot, ctx);
+      if (confirmed.ok) {
+        return { ok: true, snapshot, reason: confirmed.reason };
+      }
+
+      await sleep(SEND_CONFIRM_POLL_MS);
+    }
+
+    return { ok: false, reason: 'no_progress' };
+  }
+
+  async function performSendActionsWithFallback(ctx, shouldStop) {
+    const baseline = buildSendConfirmSnapshot(ctx);
+    ctx.baselineSnapshot = baseline;
+
+    appendSendLog('[SEND][ACTION] method=button_click');
+    const okClick = ComposerApi.clickSend();
+    if (!okClick) {
+      return { ok: false, reason: 'click_send_failed' };
+    }
+
+    let progress = await waitForSendProgressSinceBaseline(baseline, ctx, SEND_FALLBACK_WAIT_MS, shouldStop);
+    if (progress.ok) {
+      return { ok: true, methods: ['button_click'], snapshot: progress.snapshot };
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled' };
+    }
+
+    appendSendLog('[SEND][ACTION] method=ctrl_enter_fallback');
+    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
+      ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
+    }
+
+    progress = await waitForSendProgressSinceBaseline(baseline, ctx, SEND_FALLBACK_WAIT_MS, shouldStop);
+    if (progress.ok) {
+      return { ok: true, methods: ['button_click', 'ctrl_enter_fallback'], snapshot: progress.snapshot };
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled' };
+    }
+
+    appendSendLog('[SEND][ACTION] method=enter_fallback');
+    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
+      ComposerApi.dispatchComposerSendKeyboard('enter');
+    }
+
+    return { ok: true, methods: ['button_click', 'ctrl_enter_fallback', 'enter_fallback'] };
+  }
+
+  async function waitComposerSendConfirmed(content, timeoutMs = SEND_CONFIRM_DEFAULT_TIMEOUT_MS, options = {}) {
+    const startedAt = Date.now();
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const contentText = String(content || '').trim();
+    const contentProbe = contentText.slice(0, 80);
+    const attachmentCountBefore = Number(options.attachmentCountBeforeSend || 0);
+    const conversationIdBefore = String(options.conversationIdBefore || parseConversationIdFromPath(location.pathname || '') || '');
+    const urlBefore = String(options.urlBefore || location.href || '');
+    const sendButtonEnabledBefore = options.sendButtonEnabledBefore !== false;
+
+    const ctx = {
+      contentText,
+      contentProbe,
+      attachmentCountBeforeSend: attachmentCountBefore,
+      beforeLatestKey: String(options.beforeLatestKey || ''),
+      conversationIdBefore,
+      urlBefore,
+      sendButtonEnabledBefore,
+      hadTextPayload: !!contentText,
+      conversationSwitchSeen: false,
+      conversationSwitchPending: !conversationIdBefore,
+      conversationSwitchDeadline: 0,
+    };
+
+    let lastConfirmLogAt = 0;
+    let effectiveTimeoutMs = Math.max(Number(timeoutMs) || 0, SEND_CONFIRM_DEFAULT_TIMEOUT_MS);
+
+    while (Date.now() - startedAt < effectiveTimeoutMs) {
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      const conversationIdNow = parseConversationIdFromPath(location.pathname || '') || '';
+      const urlNow = location.href || '';
+
+      if (!conversationIdBefore && conversationIdNow && !ctx.conversationSwitchSeen) {
+        ctx.conversationSwitchSeen = true;
+        ctx.conversationSwitchPending = false;
+        ctx.conversationSwitchDeadline = Date.now() + SEND_CONVERSATION_SWITCH_EXTRA_MS;
+        effectiveTimeoutMs = Math.max(
+          effectiveTimeoutMs,
+          (Date.now() - startedAt) + SEND_CONVERSATION_SWITCH_EXTRA_MS,
+        );
+
+        const latestOnNewPage = getLatestConversationMessageRecord({ preferAssistant: false });
+        ctx.beforeLatestKey = buildMessageRecordKey(latestOnNewPage);
+
+        appendSendLog(
+          `[SEND][CONVERSATION_SWITCH] old_id=${conversationIdBefore || '-'} new_id=${conversationIdNow} `
+          + `old_url=${urlBefore} new_url=${urlNow}`,
+        );
+      }
+
+      if (ctx.conversationSwitchPending && !conversationIdNow) {
+        const switchWaitElapsed = Date.now() - startedAt;
+        if (switchWaitElapsed > effectiveTimeoutMs - 500) {
+          return { ok: false, reason: 'conversation_switch_timeout' };
+        }
+      }
+
+      if (ctx.conversationSwitchSeen && ctx.conversationSwitchDeadline > 0 && Date.now() > ctx.conversationSwitchDeadline) {
+        const snapshotAtDeadline = buildSendConfirmSnapshot(ctx);
+        const confirmedAtDeadline = evaluateSendConfirmed(snapshotAtDeadline, ctx);
+        if (!confirmedAtDeadline.ok) {
+          return { ok: false, reason: 'conversation_switch_timeout' };
+        }
+      }
+
+      const snapshot = buildSendConfirmSnapshot(ctx);
+      const elapsed = Date.now() - startedAt;
+
+      if (elapsed - lastConfirmLogAt >= 1000) {
+        appendSendConfirmWaitLog(elapsed, snapshot);
+        lastConfirmLogAt = elapsed;
+      }
+
+      const confirmed = evaluateSendConfirmed(snapshot, ctx);
+      if (confirmed.ok) {
+        return { ok: true, reason: confirmed.reason };
+      }
+
+      await sleep(SEND_CONFIRM_POLL_MS);
+    }
+
+    const finalSnapshot = buildSendConfirmSnapshot(ctx);
+    appendSendConfirmWaitLog(Date.now() - startedAt, finalSnapshot);
+
+    const finalConfirmed = evaluateSendConfirmed(finalSnapshot, ctx);
+    if (finalConfirmed.ok) {
+      return { ok: true, reason: finalConfirmed.reason };
     }
 
     return {
       ok: false,
-      reason: sawAssistantBusy ? 'assistant_busy_unconfirmed' : lastReason === 'pending' ? 'timeout' : lastReason,
+      reason: pickSendNotConfirmedReason(finalSnapshot, ctx),
+      snapshot: finalSnapshot,
     };
   }
 
@@ -3287,9 +4484,14 @@
     const waitUntilSendable = options.waitUntilSendable !== false;
     const blockWhenResponding = options.blockWhenResponding !== false;
     const timeoutMs = Number(options.timeoutMs || 60000);
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
     logPageCapability(getPageCapability(`send:${source}`), '[SEND][CAPABILITY]');
-    updateChatInputStateBadge();
+
+    if (shouldStop()) {
+      updateChatInputStateBadge();
+      return { ok: false, reason: 'cancelled', source };
+    }
 
     if (!sendExistingComposer && !content) {
       updateChatInputStateBadge();
@@ -3329,12 +4531,29 @@
         };
       }
 
+      if (shouldStop()) {
+        updateChatInputStateBadge();
+        return { ok: false, reason: 'cancelled', source };
+      }
+
       const okSet = ComposerApi.setComposerValue(content);
       if (!okSet) {
         return { ok: false, reason: 'composer_not_found', source };
       }
 
-      await sleep(300);
+      const textSynced = typeof ComposerApi.waitForComposerTextSynced === 'function'
+        ? await ComposerApi.waitForComposerTextSynced(content, SEND_TEXT_SYNC_TIMEOUT_MS, { shouldStop })
+        : { ok: false, reason: 'composer_text_sync_unavailable' };
+
+      if (!textSynced.ok) {
+        return {
+          ok: false,
+          reason: `send_not_confirmed:${textSynced.reason || 'composer_text_not_synced'}`,
+          source,
+        };
+      }
+
+      await sleep(200);
     } else {
       const composerTextBeforeSend = ComposerApi.getComposerText();
       const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
@@ -3384,46 +4603,115 @@
       : 0;
     const beforeLatestRecord = getLatestConversationMessageRecord({ preferAssistant: false });
     const beforeLatestKey = buildMessageRecordKey(beforeLatestRecord);
+    const conversationIdBefore = parseConversationIdFromPath(location.pathname || '') || '';
+    const urlBefore = location.href || '';
+    const sendBtnBefore = typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+    const sendButtonEnabledBefore = !!(sendBtnBefore && ComposerApi.isSendButtonReady(sendBtnBefore));
+
+    const preSend = await runPreSendChecks({
+      shouldStop,
+      expectedText: sendExistingComposer ? '' : content,
+      requireTextSynced: !sendExistingComposer && !!content,
+      attachmentWaitTimeoutMs: Number(options.attachmentWaitTimeoutMs || SEND_ATTACH_WAIT_DEFAULT_MS),
+      waitUntilSendable,
+      sendButtonWaitTimeoutMs: timeoutMs,
+      onPreSendStatus: typeof options.onPreSendStatus === 'function' ? options.onPreSendStatus : null,
+    });
+
+    if (!preSend.ok) {
+      const preReason = preSend.reason || 'pre_send_failed';
+      const mappedReason = [
+        'attachment_not_ready',
+        'button_disabled',
+        'send_button_wait_timeout',
+        'composer_text_not_synced',
+        'composer_not_found',
+        'composer_not_inputable',
+      ].includes(preReason)
+        ? `send_not_confirmed:${preReason}`
+        : preReason;
+
+      updateChatInputStateBadge();
+      return { ok: false, reason: mappedReason, source };
+    }
+
+    ChatInputStateRuntime.sendInProgress = true;
+    updateChatInputStateBadge();
+
+    const confirmCtx = {
+      contentText: String(composerTextBeforeSend || '').trim(),
+      contentProbe: String(composerTextBeforeSend || '').trim().slice(0, 80),
+      attachmentCountBeforeSend,
+      beforeLatestKey,
+      conversationIdBefore,
+      urlBefore,
+      sendButtonEnabledBefore,
+      hadTextPayload: !!String(composerTextBeforeSend || '').trim() || attachmentCountBeforeSend > 0,
+    };
 
     const startedAt = Date.now();
-    while (waitUntilSendable && !ComposerApi.canSendNow()) {
-      if (Date.now() - startedAt >= timeoutMs) {
-        return { ok: false, reason: 'send_button_wait_timeout', source };
+
+    try {
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled', source };
       }
-      await sleep(250);
-    }
 
-    if (!ComposerApi.canSendNow()) {
-      return { ok: false, reason: 'send_button_unavailable', source };
-    }
+      const sendAction = await performSendActionsWithFallback(confirmCtx, shouldStop);
+      if (!sendAction.ok) {
+        return { ok: false, reason: sendAction.reason || 'click_send_failed', source };
+      }
 
-    const okClick = ComposerApi.clickSend();
-    if (!okClick) {
-      return { ok: false, reason: 'click_send_failed', source };
-    }
+      const confirmStartedAt = Date.now();
+      const confirmBudgetMs = Math.max(
+        Number(options.confirmTimeoutMs || SEND_CONFIRM_DEFAULT_TIMEOUT_MS),
+        SEND_CONFIRM_DEFAULT_TIMEOUT_MS,
+      );
+      const confirmRemainingMs = Math.max(
+        confirmBudgetMs - (confirmStartedAt - startedAt),
+        SEND_CONFIRM_DEFAULT_TIMEOUT_MS,
+      );
 
-    const confirmed = await waitComposerSendConfirmed(
-      sendExistingComposer ? composerTextBeforeSend : content,
-      Number(options.confirmTimeoutMs || 5000),
-      {
-        beforeLatestKey,
-        beforeLatestRecord,
-        attachmentCountBeforeSend,
-      },
-    );
+      const confirmed = await waitComposerSendConfirmed(
+        composerTextBeforeSend,
+        confirmRemainingMs,
+        {
+          shouldStop,
+          beforeLatestKey,
+          beforeLatestRecord,
+          attachmentCountBeforeSend,
+          conversationIdBefore,
+          urlBefore,
+          sendButtonEnabledBefore,
+        },
+      );
 
-    if (!confirmed.ok) {
+      if (!confirmed.ok) {
+        const diag = getSendFlowDiagnostics();
+        appendSendLog(
+          `[SEND][FAILED] reason=${confirmed.reason || 'timeout'} url=${diag.url} `
+          + `conversation_id=${diag.conversation_id || '-'} page_instance_id=${diag.page_instance_id || '-'} `
+          + `response_state=${diag.response_state || '-'} sendable=${diag.sendable ? 1 : 0}`,
+        );
+
+        return {
+          ok: false,
+          reason: `send_not_confirmed:${confirmed.reason || 'timeout'}`,
+          source,
+          diagnostics: diag,
+        };
+      }
+
+      ChatInputStateRuntime.waitingForReply = true;
+      return { ok: true, reason: confirmed.reason, source };
+    } catch (sendErr) {
+      logSendFlowError('sendContentViaComposer', sendErr, { source });
+      return { ok: false, reason: 'send_exception', source };
+    } finally {
+      ChatInputStateRuntime.sendInProgress = false;
       updateChatInputStateBadge();
-      return {
-        ok: false,
-        reason: `send_not_confirmed:${confirmed.reason}`,
-        source,
-      };
     }
-
-    ChatInputStateRuntime.waitingForReply = true;
-    updateChatInputStateBadge();
-    return { ok: true, reason: confirmed.reason, source };
   }
 
   function getCopiedTextStats(text) {

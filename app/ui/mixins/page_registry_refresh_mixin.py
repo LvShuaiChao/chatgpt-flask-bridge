@@ -485,16 +485,35 @@ class PageRegistryRefreshMixin:
             return
         session = self._current_session() if hasattr(self, "_current_session") else None
         snap = self.get_bound_page_snapshot(session=session)
-        if snap.get("sync_ok"):
-            sync_text, chip = "同步：可同步", "ok"
+        remote = normalize_remote_chatgpt(
+            session.remote_chatgpt if session else None
+        )
+        from app.models import derive_bind_mode
+
+        bind_mode = derive_bind_mode(remote)
+        conversation_id = (snap.get("conversation_id") or "").strip()
+        if not conversation_id and remote_binding_enabled(remote):
+            conversation_id = (remote.get("conversation_id") or "").strip()
+
+        if bind_mode in ("page_channel", "home_pending") or (
+            remote_binding_enabled(remote) and not conversation_id
+        ):
+            if snap.get("online"):
+                sync_text, chip = "同步：等待生成对话ID", "warn"
+            elif snap.get("found"):
+                sync_text, chip = "同步：页面离线", "warn"
+            else:
+                sync_text, chip = "同步：未绑定", "warn"
+        elif snap.get("sync_ok"):
+            if conversation_id:
+                sync_text, chip = f"同步：conversation_id: {conversation_id[:12]}...", "ok"
+            else:
+                sync_text, chip = "同步：可同步", "ok"
         elif snap.get("found") and not snap.get("online"):
             sync_text, chip = "同步：页面离线", "warn"
         elif snap.get("found"):
             sync_text, chip = "同步：不可同步", "error"
         else:
-            remote = normalize_remote_chatgpt(
-                session.remote_chatgpt if session else None
-            )
             if remote_binding_enabled(remote):
                 sync_text, chip = "同步：页面离线", "warn"
             else:

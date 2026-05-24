@@ -82,12 +82,15 @@ _session_external_pending = {}
 _pending_gui_actions = {}
 _external_action_lock = threading.Lock()
 _external_client_sessions = {}
+EXTERNAL_REQUEST_TTL_SEC = 3600
+EXTERNAL_REQUEST_MAX_RECORDS = 300
 # GUI 本地直读上传：file_id -> 登记记录；session / client 索引待上传列表
 _upload_files_by_id = {}
 _session_upload_file_ids = {}
 _client_upload_file_ids = {}
 DEFAULT_FORCE_NEW_SESSION_AFTER_TURNS = 0
 
+MAX_CURSOR_TASK_QUEUE_SIZE = 100
 cursor_task_queue = deque()
 cursor_task_reports = deque(maxlen=200)
 cursor_task_history = deque(maxlen=200)

@@ -219,7 +219,7 @@ QComboBox#{name} QAbstractItemView::item:selected {{
             page_row_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def _build_tm_page_selector_row(self, parent_layout):
-        """页面 [下拉/空态] stretch [刷新页面列表] [绑定所选页面]"""
+        """页面 [下拉/空态] stretch [绑定所选页面] [刷新页面列表]"""
         self._ensure_tm_action_buttons()
         self._ensure_refresh_page_list_button()
         self._ensure_tm_page_combo()
@@ -247,8 +247,8 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         row.addWidget(self.tm_page_empty_label, 1)
         row.addWidget(self.tm_page_combo, 1)
         row.addStretch(1)
-        row.addWidget(self.refresh_page_list_btn, 0, Qt.AlignVCenter)
         row.addWidget(self.bind_current_page_btn, 0, Qt.AlignVCenter)
+        row.addWidget(self.refresh_page_list_btn, 0, Qt.AlignVCenter)
         parent_layout.addLayout(row)
         self._sync_tm_page_list_empty_ui()
 
@@ -460,14 +460,27 @@ QComboBox#{name} QAbstractItemView::item:selected {{
                 selected_page
             )
             if combo.count() > 0 and selected_page is None:
-                self._append_log(
-                    "[BIND][BUTTON_STATE_INVALID] "
-                    "reason=combo_has_text_but_no_user_data "
-                    f"combo_index={combo.currentIndex()} "
-                    f"combo_text={combo.currentText()!r} "
-                    f"combo_count={combo.count()}",
-                    echo=True,
-                )
+                combo_text = (combo.currentText() or "").strip()
+                combo_index = combo.currentIndex()
+                if combo_index == -1 and not combo_text:
+                    pass
+                elif combo_text:
+                    now_ts = time.time()
+                    log_at = getattr(self, "_bind_button_invalid_log_at", None)
+                    if not isinstance(log_at, dict):
+                        log_at = {}
+                        self._bind_button_invalid_log_at = log_at
+                    last_at = float(log_at.get("combo_has_text_but_no_user_data", 0) or 0)
+                    if now_ts - last_at >= 5.0:
+                        log_at["combo_has_text_but_no_user_data"] = now_ts
+                        self._append_log(
+                            "[BIND][BUTTON_STATE_INVALID] "
+                            "reason=combo_has_text_but_no_user_data "
+                            f"combo_index={combo_index} "
+                            f"combo_text={combo.currentText()!r} "
+                            f"combo_count={combo.count()}",
+                            echo=True,
+                        )
             bind_btn.setEnabled(can_bind)
             bind_btn.setVisible(True)
 
@@ -708,7 +721,7 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         self._append_log(
             "[PAGE_SELECTOR][AUTO_REFRESH] "
             f"restore_index={restore_index} "
-            f"reason={'matched_current_page' if restore_index >= 0 else 'no_matching_current_page_no_auto_first'} "
+            f"reason={'matched_or_fallback_page' if restore_index >= 0 else 'no_pages_available'} "
             f"restored_page_id={restored_page_id} "
             f"manual_client_id={manual_client_id or '-'} "
             f"session_bound={session_bound or '-'} "

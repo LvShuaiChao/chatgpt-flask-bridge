@@ -106,6 +106,7 @@ def create_job(
 
     append_job_log(job_id, "CREATE", f"title={job['title']}")
     update_job_status(job_id, "created", "任务已创建")
+    cleanup_job_records()
     return job_id, job
 
 
@@ -129,6 +130,7 @@ def update_job_status(job_id, status, message=""):
     if message:
         append_job_log(job_id, status.upper(), message)
     _notify_job_change()
+    cleanup_job_records()
     return True, "ok"
 
 
@@ -265,62 +267,6 @@ def on_assistant_reply_failed(message, *, outbound_message_id=""):
     return job_id
 
 
-# TODO(cleanup-observe): 当前无路由/调用方引用；若 Job 仅保留手动发 Cursor 可删，否则补 /api/jobs/send_to_chatgpt。
-def send_job_to_chatgpt(job_id, push_message_fn, payload_extra=None):
-    """
-    将 job 的 chatgpt_prompt 通过 push_message_fn 发往 ChatGPT。
-    push_message_fn 签名与 server.push_message 一致。
-    """
-    job = get_job(job_id)
-    if not job:
-        return False, "job not found"
-
-    if job_status_from(job) == "cancelled":
-        return False, "job cancelled"
-
-    prompt = (job.get("chatgpt_prompt") or "").strip()
-    if not prompt:
-        return False, "chatgpt_prompt is empty"
-
-    payload = {
-        "content": prompt,
-        "job_id": job_id,
-    }
-    if isinstance(payload_extra, dict):
-        payload.update(payload_extra)
-
-    update_job_status(job_id, "queued_chatgpt", "已加入 ChatGPT 发送队列")
-    append_job_log(job_id, "SEND_TO_CHATGPT", f"prompt_len={len(prompt)}")
-
-    try:
-        msg = push_message_fn(payload)
-    except Exception as exc:
-        detail = f"{exc}\n{traceback.format_exc()}"
-        append_job_log(job_id, "SEND_TO_CHATGPT_FAILED", detail)
-        update_job_status(job_id, "cursor_failed", str(exc))
-        return False, str(exc)
-
-    if not isinstance(msg, dict):
-        update_job_status(job_id, "cursor_failed", "push_message returned invalid result")
-        return False, "push_message returned invalid result"
-
-    message_id = (msg.get("message_id") or "").strip()
-    with job_lock:
-        stored = job_map.get(job_id)
-        if stored:
-            stored["outbound_message_id"] = message_id
-            stored["updated_at"] = _now_text()
-
-    update_job_status(job_id, "sent_to_chatgpt", f"message_id={message_id[:8] if message_id else '-'}")
-    update_job_status(job_id, "waiting_chatgpt_reply", "等待 ChatGPT 回复")
-    append_job_log(
-        job_id,
-        "WAITING_CHATGPT",
-        f"outbound_message_id={message_id or '-'}",
-    )
-    return True, message_id
-
-
 def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
     job = get_job(job_id)
     if not job:
@@ -434,6 +380,7 @@ def handle_cursor_task_report(report):
         update_job_status(job_id, "cursor_failed", err)
         return True, "cursor_failed"
 
+    cleanup_job_records()
     return False, f"unknown report status: {status}"
 
 
@@ -453,7 +400,121 @@ def cancel_job(job_id, reason=""):
     return True, "ok"
 
 
+JOB_TERMINAL_STATUSES = frozenset({"cursor_done", "cancelled", "cursor_failed"})
+JOB_CLEANUP_MAX = 300
+JOB_CLEANUP_TTL_HOURS = 24
+JOB_STALE_ACTIVE_TTL_HOURS = 2
+JOB_STALE_ACTIVE_STATUSES = frozenset({
+    "waiting_chatgpt_reply",
+    "queued_cursor",
+    "cursor_claimed",
+    "cursor_running",
+})
+
+
+def _job_timestamp_seconds(job):
+    if not isinstance(job, dict):
+        return None
+    for field in ("updated_at", "created_at"):
+        text = (job.get(field) or "").strip()
+        if not text:
+            continue
+        try:
+            return time.mktime(time.strptime(text, "%Y-%m-%d %H:%M:%S"))
+        except (ValueError, OSError):
+            continue
+    return None
+
+
+def cleanup_job_records():
+    """清理终端状态且超过 TTL 的任务记录；job_map 不超过 JOB_CLEANUP_MAX。"""
+    now_ts = time.time()
+    ttl_sec = JOB_CLEANUP_TTL_HOURS * 3600
+    stale_active_ttl_sec = JOB_STALE_ACTIVE_TTL_HOURS * 3600
+    max_records = JOB_CLEANUP_MAX
+    stale_marked = 0
+    with job_lock:
+        for job_id, job in list(job_map.items()):
+            if not isinstance(job, dict):
+                continue
+            status = job_status_from(job)
+            if status not in JOB_STALE_ACTIVE_STATUSES:
+                continue
+            ts = _job_timestamp_seconds(job)
+            if ts is None or (now_ts - ts) <= stale_active_ttl_sec:
+                continue
+            job["job_status"] = "cursor_failed"
+            job.pop("status", None)
+            job["error"] = (
+                f"stale timeout: status={status} exceeded "
+                f"{JOB_STALE_ACTIVE_TTL_HOURS}h"
+            )
+            job["updated_at"] = _now_text()
+            stale_marked += 1
+        to_remove = set()
+        for job_id, job in list(job_map.items()):
+            if not isinstance(job, dict):
+                to_remove.add(job_id)
+                continue
+            status = job_status_from(job)
+            if status not in JOB_TERMINAL_STATUSES:
+                continue
+            ts = _job_timestamp_seconds(job)
+            if ts is None:
+                continue
+            if now_ts - ts > ttl_sec:
+                to_remove.add(job_id)
+        # remove oldest terminal jobs if over max
+        alive = [
+            (jid, j)
+            for jid, j in job_map.items()
+            if jid not in to_remove and isinstance(j, dict)
+        ]
+        if len(alive) > max_records:
+            alive.sort(key=lambda kv: kv[1].get("created_at") or "")
+            overflow = len(alive) - max_records
+            for jid, _j in alive[:overflow]:
+                status = job_status_from(_j)
+                if status in JOB_TERMINAL_STATUSES:
+                    to_remove.add(jid)
+        if not to_remove:
+            if stale_marked:
+                _log_line(
+                    "[JOB][CLEANUP] "
+                    f"stale_marked={stale_marked} "
+                    f"removed=0 "
+                    f"remaining_jobs={len(job_map)} "
+                    f"remaining_queue={len(job_queue)} "
+                    f"remaining_task_to_job={len(cursor_task_to_job)}"
+                )
+            return
+        for jid in to_remove:
+            job_map.pop(jid, None)
+            # sync remove from cursor_task_to_job
+            task_ids_to_remove = [
+                tid for tid, stored_jid in list(cursor_task_to_job.items())
+                if stored_jid == jid
+            ]
+            for tid in task_ids_to_remove:
+                cursor_task_to_job.pop(tid, None)
+            # remove from queue
+            while jid in job_queue:
+                try:
+                    job_queue.remove(jid)
+                except ValueError:
+                    break
+    _log_line(
+        "[JOB][CLEANUP] "
+        f"stale_marked={stale_marked} "
+        f"removed={len(to_remove)} "
+        f"remaining_jobs={len(job_map)} "
+        f"remaining_queue={len(job_queue)} "
+        f"remaining_task_to_job={len(cursor_task_to_job)}"
+    )
+
+
 def get_job_scheduler_snapshot(limit=20):
+    cleanup_job_records()
     jobs = list_jobs(limit=limit)
     active = None
     for job in jobs:

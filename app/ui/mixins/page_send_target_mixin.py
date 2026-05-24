@@ -19,6 +19,7 @@ from app.utils.page_status import (
 )
 from app.utils.tm_activity import classify_tm_client_activity
 from app.models import (
+    remote_binding_active,
     remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_PREBOUND_HOME,
@@ -121,6 +122,21 @@ class PageSendTargetMixin:
         if not conversation_id:
             return None
         status = status or self._bridge_ui.last_bridge_status or {}
+        from app.utils.page_status import PageRegistry, find_online_fallback_page_for_binding
+
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+        binding = {"conversation_id": conversation_id}
+        fallback, _matched_by = find_online_fallback_page_for_binding(
+            reg,
+            binding,
+            require_conversation_syncable=True,
+        )
+        if fallback is not None:
+            raw = fallback._raw if isinstance(fallback._raw, dict) else {}
+            if raw:
+                return dict(raw)
         candidates = []
         for item in self._iter_tm_clients(status, online_only=False):
             if not isinstance(item, dict):
@@ -158,23 +174,16 @@ class PageSendTargetMixin:
         }
 
     def _session_bound_identity(self, remote):
-        remote = normalize_remote_chatgpt(remote)
-        return {
-            "client_id": (remote.get("client_id") or "").strip(),
-            "page_instance_id": (remote.get("page_instance_id") or "").strip(),
-            "conversation_id": self._remote_conversation_id(remote) or "",
-            "url": page_url_from(remote),
-        }
+        from app.utils.page_binding_identity import remote_binding_identity
+
+        return remote_binding_identity(remote)
 
     def _session_bound_client_id(self, session=None):
+        from app.utils.page_binding_identity import session_bound_client_id
+
         if session is None and hasattr(self, "_current_session"):
             session = self._current_session()
-        if session is None:
-            return ""
-        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None))
-        if not remote_binding_enabled(remote):
-            return ""
-        return (remote.get("client_id") or "").strip()
+        return session_bound_client_id(session)
 
     def _page_matches_bound_identity(self, item, remote):
         if not isinstance(item, dict):
@@ -241,6 +250,8 @@ class PageSendTargetMixin:
         {
             "auto_relink_fresh_page",
             "before_send_relink",
+            "before_send_offline_fallback",
+            "before_sync_relink",
         }
     )
 
@@ -818,7 +829,7 @@ class PageSendTargetMixin:
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         binding = binding_from_session(session)
-        allow_same_conversation = False
+        allow_same_conversation = bool((binding.get("conversation_id") or "").strip())
         if action == "sync_conversation":
             relink = False
         resolved = resolve_bound_page_in_registry(
@@ -834,6 +845,14 @@ class PageSendTargetMixin:
 
         session_id = session.session_id if session else "-"
         if hasattr(self, "_append_log"):
+            page_type = "-"
+            page_conv = "-"
+            if page is not None:
+                raw = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
+                page_type = (raw.get("page_type") or getattr(page, "page_type", "") or "-").strip() or "-"
+                page_conv = (
+                    raw.get("conversation_id") or getattr(page, "conversation_id", "") or "-"
+                ).strip() or "-"
             self._append_log(
                 "[BOUND_PAGE][RESOLVE] "
                 f"session_id={session_id} "
@@ -842,6 +861,8 @@ class PageSendTargetMixin:
                 f"remote_page_instance_id={(remote.get('page_instance_id') or '-')} "
                 f"remote_conversation_id={(self._remote_conversation_id(remote) or '-')} "
                 f"matched_by={matched_by or 'none'} "
+                f"page_type={page_type} "
+                f"conversation_id={page_conv} "
                 f"online={'true' if online else 'false'} "
                 f"last_poll_at={last_poll_at:.3f} "
                 f"reason_code={reason_code or '-'}",
@@ -864,21 +885,63 @@ class PageSendTargetMixin:
                             echo=user_initiated,
                         )
 
+        if resolved.get("offline_fallback") and page is not None and hasattr(self, "_append_log"):
+            fb_raw = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
+            self._append_log(
+                "[BOUND_PAGE][OFFLINE_FALLBACK_FOUND] "
+                f"session_id={session_id} "
+                f"old_client_id={(remote.get('client_id') or '-')} "
+                f"old_page_instance_id={(remote.get('page_instance_id') or '-')} "
+                f"old_page_no={str(remote.get('page_no') or remote.get('page_display_id') or '-')} "
+                f"old_conversation_id={(self._remote_conversation_id(remote) or '-')} "
+                f"new_client_id={(fb_raw.get('client_id') or getattr(page, 'client_id', '') or '-')} "
+                f"new_page_instance_id={(fb_raw.get('page_instance_id') or getattr(page, 'page_instance_id', '') or '-')} "
+                f"new_page_no={str(fb_raw.get('page_no') or '-')} "
+                f"new_url={page_url_from(fb_raw) or '-'} "
+                f"reason={matched_by or 'same_conversation'}",
+                echo=user_initiated,
+            )
+
         if (
             relink
             and page is not None
             and bool(resolved.get("relink_needed"))
-            and matched_by == "same_conversation"
         ):
             item = page._raw if isinstance(page._raw, dict) else {}
             if isinstance(item, dict):
                 old_client = (remote.get("client_id") or "").strip()
                 old_instance = (remote.get("page_instance_id") or "").strip()
-                relink_reason = (
-                    "before_send_relink"
-                    if action == "send"
-                    else "before_sync_relink"
+                old_page_no = (
+                    remote.get("page_no")
+                    or remote.get("page_display_id")
+                    or remote.get("temp_page_id")
+                    or ""
                 )
+                old_conv = self._remote_conversation_id(remote) or ""
+                relink_reason = (
+                    "before_send_offline_fallback"
+                    if resolved.get("offline_fallback") and action == "send"
+                    else (
+                        "before_send_relink"
+                        if action == "send"
+                        else "before_sync_relink"
+                    )
+                )
+                if resolved.get("offline_fallback") and hasattr(self, "_append_log"):
+                    self._append_log(
+                        "[BOUND_PAGE][OFFLINE_FALLBACK_REBIND] "
+                        f"session_id={session_id} "
+                        f"old_client_id={old_client or '-'} "
+                        f"old_page_instance_id={old_instance or '-'} "
+                        f"old_page_no={str(old_page_no or '-')} "
+                        f"old_conversation_id={old_conv or '-'} "
+                        f"new_client_id={(item.get('client_id') or '-')} "
+                        f"new_page_instance_id={(item.get('page_instance_id') or '-')} "
+                        f"new_page_no={str(item.get('page_no') or '-')} "
+                        f"new_url={page_url_from(item) or '-'} "
+                        f"reason={relink_reason}",
+                        echo=True,
+                    )
                 if hasattr(self, "_relink_session_binding_from_tm_page"):
                     self._relink_session_binding_from_tm_page(
                         session, item, reason=relink_reason
@@ -890,7 +953,14 @@ class PageSendTargetMixin:
                         reason="auto_relink_fresh_page",
                         silent=True,
                     )
-                if hasattr(self, "_append_log"):
+                if hasattr(self, "_refresh_current_session_binding_display"):
+                    self._refresh_current_session_binding_display()
+                if hasattr(self, "_refresh_tm_page_selector"):
+                    self._refresh_tm_page_selector(
+                        status=status,
+                        reason="offline_fallback_rebind",
+                    )
+                if hasattr(self, "_append_log") and not resolved.get("offline_fallback"):
                     display_id = str(item.get("page_no") or "-")
                     self._append_log(
                         "[BOUND_PAGE][RELINK_TO_FRESH_PAGE] "
@@ -904,7 +974,7 @@ class PageSendTargetMixin:
                     )
                 binding = binding_from_session(session)
                 resolved = resolve_bound_page_in_registry(
-                    reg, binding, allow_same_conversation=False
+                    reg, binding, allow_same_conversation=allow_same_conversation
                 )
                 page = resolved.get("page")
                 matched_by = (resolved.get("matched_by") or "exact").strip()
@@ -912,6 +982,23 @@ class PageSendTargetMixin:
                 reason_code = (resolved.get("reason_code") or "").strip()
 
         if page is None or not online:
+            if hasattr(self, "_append_log"):
+                bound_conv_log = (
+                    (binding.get("conversation_id") or "").strip()
+                    or self._remote_conversation_id(remote)
+                    or ""
+                )
+                if bound_conv_log:
+                    self._append_log(
+                        "[BOUND_PAGE][OFFLINE_FALLBACK_MISS] "
+                        f"session_id={session_id} "
+                        f"old_client_id={(remote.get('client_id') or '-')} "
+                        f"old_page_instance_id={(remote.get('page_instance_id') or '-')} "
+                        f"old_page_no={str(remote.get('page_no') or remote.get('page_display_id') or '-')} "
+                        f"old_conversation_id={bound_conv_log} "
+                        f"reason={reason_code or 'bound_page_offline'}",
+                        echo=user_initiated,
+                    )
             return {
                 "ok": False,
                 "page": None,
@@ -1334,7 +1421,7 @@ class PageSendTargetMixin:
             )
             if hasattr(self, "schedule_page_registry_refresh"):
                 self.schedule_page_registry_refresh(reason="reopen_match_conversation")
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
 
         return ok
     def _preferred_open_url_for_session(self, session):

@@ -48,6 +48,71 @@ def _resolve_stored_upload_path(entry: dict) -> Path:
     return candidate
 
 
+def _file_entry_age_hours(entry):
+    try:
+        return (_now() - float(entry.get("created_at") or 0)) / 3600.0
+    except (TypeError, ValueError):
+        return 999.0
+
+
+UPLOAD_FILE_TTL_HOURS = 6
+UPLOAD_FILE_MAX_RECORDS = 500
+
+
+def cleanup_upload_file_records_locked():
+    now = _now()
+    ttl_sec = UPLOAD_FILE_TTL_HOURS * 3600
+    expired_ids = []
+    # collect expired by TTL
+    for file_id, entry in list(st._upload_files_by_id.items()):
+        if not isinstance(entry, dict):
+            expired_ids.append(file_id)
+            continue
+        created = entry.get("created_at")
+        try:
+            age = now - float(created)
+        except (TypeError, ValueError):
+            age = 999999.0
+        if age > ttl_sec:
+            expired_ids.append(file_id)
+    # collect oldest if over max
+    current_count = len(st._upload_files_by_id)
+    if current_count - len(expired_ids) > UPLOAD_FILE_MAX_RECORDS:
+        alive = [
+            (fid, entry)
+            for fid, entry in st._upload_files_by_id.items()
+            if fid not in expired_ids and isinstance(entry, dict)
+        ]
+        alive.sort(key=lambda kv: float(kv[1].get("created_at") or 0))
+        overflow = len(alive) - UPLOAD_FILE_MAX_RECORDS
+        for fid, _entry in alive[:overflow]:
+            expired_ids.append(fid)
+    if not expired_ids:
+        return
+    expired_set = set(expired_ids)
+    for fid in expired_ids:
+        st._upload_files_by_id.pop(fid, None)
+    for sid in list(st._session_upload_file_ids.keys()):
+        bucket = st._session_upload_file_ids.get(sid)
+        if isinstance(bucket, list):
+            st._session_upload_file_ids[sid] = [f for f in bucket if f not in expired_set]
+            if not st._session_upload_file_ids[sid]:
+                st._session_upload_file_ids.pop(sid, None)
+    for ck in list(st._client_upload_file_ids.keys()):
+        bucket = st._client_upload_file_ids.get(ck)
+        if isinstance(bucket, list):
+            st._client_upload_file_ids[ck] = [f for f in bucket if f not in expired_set]
+            if not st._client_upload_file_ids[ck]:
+                st._client_upload_file_ids.pop(ck, None)
+    _log(
+        "[UPLOAD_FILES][CLEANUP] "
+        f"removed={len(expired_ids)} "
+        f"remaining_by_id={len(st._upload_files_by_id)} "
+        f"remaining_sessions={len(st._session_upload_file_ids)} "
+        f"remaining_clients={len(st._client_upload_file_ids)}"
+    )
+
+
 def _public_base_url() -> str:
     host = (st._server_public_host or "127.0.0.1").strip() or "127.0.0.1"
     port = int(st._server_port or 5000)
@@ -108,6 +173,7 @@ def register_upload_file(
             cbucket = st._client_upload_file_ids.setdefault(ckey, [])
             if file_id not in cbucket:
                 cbucket.append(file_id)
+        cleanup_upload_file_records_locked()
     _log(
         "[UPLOAD_FILES][REGISTER] "
         f"file_id={file_id} name={entry['name']} size={entry['size']} "
@@ -129,6 +195,7 @@ def list_upload_files_for_client(
             st._upload_files_by_id.get(fid)
             for fid in ids
         ]
+        cleanup_upload_file_records_locked()
     result = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -137,18 +204,6 @@ def list_upload_files_for_client(
             continue
         result.append(_file_public_meta(entry, base_url))
     return result
-
-
-# TODO(cleanup-observe): 当前无调用方；确认油猴上传完成后是否需要回写 uploaded 再决定删除。
-def mark_upload_files_uploaded(file_ids: list[str]) -> None:
-    now = _now()
-    with st._state_lock:
-        for fid in file_ids or []:
-            entry = st._upload_files_by_id.get((fid or "").strip())
-            if not isinstance(entry, dict):
-                continue
-            entry["upload_status"] = "uploaded"
-            entry["updated_at"] = now
 
 
 def get_upload_file_entry(file_id: str) -> dict | None:

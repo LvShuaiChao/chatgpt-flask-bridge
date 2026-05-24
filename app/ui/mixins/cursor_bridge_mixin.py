@@ -152,66 +152,36 @@ class CursorBridgeMixin:
 
 
 
+    def _get_cursor_combo_value(self, combo_attr, values_by_index, default):
+        combo = getattr(self, combo_attr, None)
+        return self._combo_stored_value(combo, values_by_index, default)
+
     def _get_cursor_delivery_mode(self):
-
-        combo = getattr(self, "delivery_mode_combo", None)
-
-        return self._combo_stored_value(
-
-            combo,
-
+        return self._get_cursor_combo_value(
+            "delivery_mode_combo",
             self._CURSOR_DELIVERY_MODE_BY_INDEX,
-
             "auto_send",
-
         )
-
-
 
     def _get_cursor_command(self):
-
-        combo = getattr(self, "cursor_command_combo", None)
-
-        return self._combo_stored_value(
-
-            combo,
-
+        return self._get_cursor_combo_value(
+            "cursor_command_combo",
             self._CURSOR_COMMAND_BY_INDEX,
-
             "send_message",
-
         )
-
-
 
     def _get_cursor_prompt_mode(self):
-
-        combo = getattr(self, "prompt_mode_combo", None)
-
-        return self._combo_stored_value(
-
-            combo,
-
+        return self._get_cursor_combo_value(
+            "prompt_mode_combo",
             self._CURSOR_PROMPT_MODE_BY_INDEX,
-
             "raw",
-
         )
 
-
-
     def _get_cursor_submit_mode(self):
-
-        combo = getattr(self, "submit_mode_combo", None)
-
-        return self._combo_stored_value(
-
-            combo,
-
+        return self._get_cursor_combo_value(
+            "submit_mode_combo",
             self._CURSOR_SUBMIT_MODE_BY_INDEX,
-
             "enter",
-
         )
 
 

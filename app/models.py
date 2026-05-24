@@ -6,17 +6,25 @@ from app.url_utils import parse_conversation_id
 
 logger = logging.getLogger(__name__)
 
+# 会话消息保留上限（防止 chat_sessions.json 无限增长）
+MAX_SESSION_MESSAGES = 500
+
 BIND_STATE_UNBOUND = "UNBOUND"
 BIND_STATE_TEMP_HOME_BOUND = "TEMP_HOME_BOUND"
 BIND_STATE_BOUND_CONVERSATION = "BOUND_CONVERSATION"
 
-# legacy 别名；TODO(cleanup-observe): 全局无引用，观察一个版本后可删。
-BIND_STATE_BOUND = BIND_STATE_BOUND_CONVERSATION
 BIND_STATE_PREBOUND_HOME = BIND_STATE_TEMP_HOME_BOUND
 BIND_STATE_WAITING_HOME = BIND_STATE_UNBOUND
 BIND_STATE_WAITING_CONVERSATION_CREATED = BIND_STATE_UNBOUND
 BIND_STATE_BOUND_OFFLINE = "BOUND_OFFLINE"
 BIND_STATE_WAITING_BOUND_CONVERSATION = BIND_STATE_UNBOUND
+
+BIND_MODE_PAGE_CHANNEL = "page_channel"
+BIND_MODE_HOME_PENDING = "home_pending"
+BIND_MODE_CONVERSATION = "conversation"
+VALID_BIND_MODES = frozenset(
+    {BIND_MODE_PAGE_CHANNEL, BIND_MODE_HOME_PENDING, BIND_MODE_CONVERSATION}
+)
 
 VALID_BIND_STATES = frozenset(
     {
@@ -53,10 +61,12 @@ REMOTE_CHATGPT_PERSISTENT_KEYS = (
     "pending_send_content",
     "pending_send_message_id",
     "reopen_started_at",
+    "bind_mode",
 )
 
 _REMOTE_NORMALIZE_KEYS = (
     "bind_state",
+    "bind_mode",
     "url",
     "conversation_id",
     "client_id",
@@ -85,7 +95,33 @@ def default_remote_chatgpt():
         "page_type": "",
         "page_title": "",
         "last_seen": 0,
+        "bind_mode": "",
     }
+
+
+def derive_bind_mode(remote) -> str:
+    """由 bind_mode / bind_state / conversation_id 推导绑定模式。"""
+    if not isinstance(remote, dict):
+        return ""
+    explicit = (remote.get("bind_mode") or "").strip()
+    if explicit in VALID_BIND_MODES:
+        return explicit
+    conversation_id = (remote.get("conversation_id") or "").strip()
+    bind_state = _canonical_bind_state(remote.get("bind_state") or "")
+    if conversation_id or bind_state == BIND_STATE_BOUND_CONVERSATION:
+        return BIND_MODE_CONVERSATION
+    if is_temp_home_bound_state(bind_state):
+        return BIND_MODE_HOME_PENDING
+    return ""
+
+
+def is_page_channel_bound(remote) -> bool:
+    mode = derive_bind_mode(remote)
+    return mode in (BIND_MODE_PAGE_CHANNEL, BIND_MODE_HOME_PENDING)
+
+
+def is_conversation_bound(remote) -> bool:
+    return derive_bind_mode(remote) == BIND_MODE_CONVERSATION
 
 
 def _canonical_bind_state(raw_state: str) -> str:
@@ -142,17 +178,45 @@ def derive_remote_page_type(url: str = "", conversation_id: str = "") -> str:
     return ""
 
 
-def _infer_bind_state(remote, base):
-    explicit = _canonical_bind_state(remote.get("bind_state") or base.get("bind_state") or "")
-    if explicit in VALID_BIND_STATES and explicit != BIND_STATE_BOUND_OFFLINE:
-        return explicit
+def _infer_bind_state(
+    remote,
+    base,
+    *,
+    bootstrap_in_progress=False,
+    bootstrap_message_id="",
+    raw_bind_state="",
+):
+    raw_bind_state = (
+        raw_bind_state
+        or (remote.get("bind_state") or base.get("bind_state") or "")
+    ).strip()
+    explicit = _canonical_bind_state(raw_bind_state)
     conversation_id = (remote.get("conversation_id") or base.get("conversation_id") or "").strip()
-    if conversation_id:
-        return BIND_STATE_BOUND_CONVERSATION
+    client_id = (remote.get("client_id") or base.get("client_id") or "").strip()
+    page_instance_id = (
+        remote.get("page_instance_id") or base.get("page_instance_id") or ""
+    ).strip()
     temp_page_id = (
         (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
         .strip()
     )
+    page_channel_waiting = raw_bind_state in (
+        "WAITING_CONVERSATION_CREATED",
+        "PREBOUND_HOME",
+    ) or bootstrap_in_progress or bool(bootstrap_message_id)
+    if page_channel_waiting and client_id and page_instance_id and not conversation_id:
+        return BIND_STATE_TEMP_HOME_BOUND
+    if explicit == BIND_STATE_UNBOUND and client_id and page_instance_id and not conversation_id:
+        page_type = derive_remote_page_type(
+            remote.get("url") or base.get("url") or "",
+            conversation_id,
+        )
+        if page_type == "home" or temp_page_id:
+            return BIND_STATE_TEMP_HOME_BOUND
+    if explicit in VALID_BIND_STATES and explicit != BIND_STATE_BOUND_OFFLINE:
+        return explicit
+    if conversation_id:
+        return BIND_STATE_BOUND_CONVERSATION
     page_type = derive_remote_page_type(
         remote.get("url") or base.get("url") or "",
         conversation_id,
@@ -183,6 +247,9 @@ def _core_remote_dict(remote: dict) -> dict:
             out["page_display_id"] = temp_page_id
         if not (out.get("page_no") or "").strip():
             out["page_no"] = temp_page_id
+    bind_mode = derive_bind_mode(out)
+    if bind_mode:
+        out["bind_mode"] = bind_mode
     return out
 
 
@@ -199,6 +266,9 @@ def normalize_remote_chatgpt(remote):
     from app.utils.legacy_cleanup import assert_no_legacy_fields
 
     remote_work = dict(remote)
+    bootstrap_in_progress = bool(remote_work.get("bootstrap_in_progress"))
+    bootstrap_message_id = (remote_work.get("bootstrap_message_id") or "").strip()
+    raw_bind_state_before = (remote_work.get("bind_state") or "").strip()
     remote_work.pop("binding", None)
     for drop_key in (
         "enabled",
@@ -244,7 +314,13 @@ def normalize_remote_chatgpt(remote):
             if not (base.get("url") or "").strip():
                 base["url"] = f"https://chatgpt.com/c/{legacy_conversation_id}"
 
-    base["bind_state"] = _infer_bind_state(remote_work, base)
+    base["bind_state"] = _infer_bind_state(
+        remote_work,
+        base,
+        bootstrap_in_progress=bootstrap_in_progress,
+        bootstrap_message_id=bootstrap_message_id,
+        raw_bind_state=raw_bind_state_before,
+    )
     conversation_id = (base.get("conversation_id") or "").strip()
     if conversation_id and base["bind_state"] in (
         BIND_STATE_UNBOUND,
@@ -388,6 +464,23 @@ class ChatSession:
                 object.__setattr__(self, "reply_waiting_since", 0)
             return
         super().__setattr__(name, value)
+
+    def trim_messages(self, max_count=None):
+        """裁剪消息列表，只保留最近 max_count 条消息。"""
+        max_count = max_count or MAX_SESSION_MESSAGES
+        if max_count <= 0:
+            return 0
+        if len(self.messages) <= max_count:
+            return 0
+        removed = len(self.messages) - max_count
+        self.messages = self.messages[-max_count:]
+        logger.info(
+            "[SESSION][TRIM_MESSAGES] session_id=%s removed=%d remaining=%d",
+            self.session_id,
+            removed,
+            len(self.messages),
+        )
+        return removed
 
 
 def _message_field(message, key, default=""):

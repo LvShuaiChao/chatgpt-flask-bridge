@@ -177,22 +177,39 @@ def _extract_page_no_for_poll(result, body):
 
 
 def _ensure_poll_top_level_page_no(result, body):
-    """保证油猴 poll 响应 JSON 顶层含有 page_no。"""
+    """保证油猴 poll 响应 JSON 顶层含有 page_no / page_display_id。"""
     if not isinstance(result, dict):
         return result
+
     page_no = _extract_page_no_for_poll(result, body)
     if page_no:
         result["page_no"] = page_no
+        result["page_display_id"] = str(page_no)
+
+    if isinstance(body, dict):
+        client_id = (body.get("client_id") or "").strip()
+        page_instance_id = (body.get("page_instance_id") or "").strip()
+        if client_id and page_instance_id:
+            page_key = _page_registry_key(client_id, page_instance_id)
+            with st._state_lock:
+                entry = st._tampermonkey_pages.get(page_key) or {}
+            promotion = entry.get("page_channel_promotion")
+            if isinstance(promotion, dict) and promotion.get("conversation_id"):
+                result["page_channel_promotion"] = dict(promotion)
+
     client_id = (body.get("client_id") or "").strip() if isinstance(body, dict) else "-"
     page_instance_id = (
         (body.get("page_instance_id") or "").strip() if isinstance(body, dict) else "-"
     )
+
     _log(
         "[TM_PAGE_DISPLAY_ID][POLL_RESPONSE] "
         f"client_id={client_id or '-'} "
         f"page_instance_id={page_instance_id or '-'} "
-        f"page_no={result.get('page_no') or '-'}"
+        f"page_no={result.get('page_no') or '-'} "
+        f"page_display_id={result.get('page_display_id') or '-'}"
     )
+
     return result
 
 
@@ -203,6 +220,7 @@ def _apply_bridge_runtime_patch(result, body, *, action="poll", identity_changed
         page_no = _extract_page_no_for_poll(result, body)
         if page_no:
             result["page_no"] = page_no
+            result["page_display_id"] = str(page_no)
     if action in ("poll", "poll_idle") and not result.get("has_message"):
         if not _poll_response_needs_runtime_patch(
             result, body, identity_changed=identity_changed
@@ -309,7 +327,23 @@ def _overwrite_page_identity_fields(entry, meta):
     if "page_title" in meta:
         entry["page_title"] = (meta.get("page_title") or "").strip()
     if "conversation_id" in meta:
-        entry["conversation_id"] = (meta.get("conversation_id") or "").strip()
+        incoming_conv = (meta.get("conversation_id") or "").strip()
+        prev_conv = (entry.get("conversation_id") or "").strip()
+        incoming_type = (meta.get("page_type") or entry.get("page_type") or "").strip()
+        if (
+            prev_conv
+            and not incoming_conv
+            and incoming_type == "home"
+        ):
+            _log(
+                "[TM][STALE_HOME_REGISTRY_UPDATE] "
+                f"client_id={(entry.get('client_id') or '-')} "
+                f"page_instance_id={(entry.get('page_instance_id') or '-')} "
+                f"prev_conversation_id={prev_conv} "
+                f"incoming_page_type={incoming_type or '-'} "
+                f"reason=home_report_empty_conversation_id"
+            )
+        entry["conversation_id"] = incoming_conv
     if "page_type" in meta:
         entry["page_type"] = (meta.get("page_type") or "").strip()
 
@@ -498,6 +532,7 @@ def get_tm_online_summary(
 def _snapshot_clients():
     items = []
     now = _now()
+    cleanup_tampermonkey_pages_locked()
     source_entries = list(st._tampermonkey_pages.items())
     for _key, info in sorted(source_entries, key=lambda row: row[1].get("client_id") or ""):
         client_id = (info.get("client_id") or "").strip()
@@ -892,13 +927,22 @@ def _touch_tampermonkey(meta, action="poll"):
                 and new_conv
                 and new_conv != "-"
             ):
+                old_url = prev_snap.get("url") or "https://chatgpt.com/"
+                new_url = new_snap.get("url") or "-"
                 _log(
                     f"[TM][HOME_TO_CONVERSATION] registry_key={snap_key} client_id={client_id} "
                     f"page_instance_id={page_instance_id or '-'} "
                     f"old_conv=- new_conv={new_conv} "
-                    f"old_url={prev_snap.get('url') or 'https://chatgpt.com/'} "
-                    f"new_url={new_snap.get('url') or '-'}"
+                    f"old_url={old_url} "
+                    f"new_url={new_url}"
                 )
+                entry["page_channel_promotion"] = {
+                    "client_id": client_id,
+                    "page_instance_id": page_instance_id or "",
+                    "conversation_id": new_conv,
+                    "old_url": old_url,
+                    "new_url": new_url,
+                }
         st._tm_prev_snapshot[snap_key] = new_snap
 
     response_key = (
@@ -922,3 +966,89 @@ def _touch_tampermonkey(meta, action="poll"):
         st._last_tm_response_state_log[response_log_key] = response_key
 
     _maybe_log_tm_activity_classify(client_id, entry, meta)
+    cleanup_tampermonkey_pages_locked()
+
+
+TM_PAGE_MAX_AGE_SEC = 1800  # 30 分钟
+TM_PAGE_MAX_RECORDS = 200
+
+
+def cleanup_tampermonkey_pages_locked():
+    """清理超过 1800 秒未心跳的页面记录，超过 200 条时按 last_seen 最旧删除。"""
+    now = _now()
+    max_age = TM_PAGE_MAX_AGE_SEC
+    max_records = TM_PAGE_MAX_RECORDS
+    with st._state_lock:
+        expired_keys = []
+        for page_key, entry in list(st._tampermonkey_pages.items()):
+            if not isinstance(entry, dict):
+                expired_keys.append(page_key)
+                continue
+            last_seen = entry.get("last_seen")
+            try:
+                age = now - float(last_seen)
+            except (TypeError, ValueError):
+                age = 999999.0
+            if age > max_age:
+                expired_keys.append(page_key)
+        # max records: sort by last_seen, remove oldest
+        if len(st._tampermonkey_pages) - len(expired_keys) > max_records:
+            alive = [
+                (k, v)
+                for k, v in st._tampermonkey_pages.items()
+                if k not in expired_keys and isinstance(v, dict)
+            ]
+            alive.sort(key=lambda kv: float(kv[1].get("last_seen") or 0))
+            overflow = len(alive) - max_records
+            for k, _v in alive[:overflow]:
+                expired_keys.append(k)
+        if not expired_keys:
+            return
+        expired_set = set(expired_keys)
+        for key in expired_keys:
+            entry = st._tampermonkey_pages.pop(key, None)
+            if isinstance(entry, dict):
+                pi = (entry.get("page_instance_id") or "").strip()
+                if pi and pi in st._known_page_instances:
+                    st._known_page_instances.discard(pi)
+        # sync cleanup: _tm_prev_snapshot
+        for key in list(st._tm_prev_snapshot.keys()):
+            if key in expired_set:
+                st._tm_prev_snapshot.pop(key, None)
+        # sync cleanup: _last_tm_activity_classify_log
+        expired_client_ids = set()
+        for key in expired_keys:
+            parts = key.split("|", 1)
+            if parts:
+                expired_client_ids.add(parts[0])
+        for cid in expired_client_ids:
+            st._last_tm_activity_classify_log.pop(cid, None)
+        # sync cleanup: _last_tm_response_state_log (keys are page_key format)
+        for key in list(st._last_tm_response_state_log.keys()):
+            if key in expired_set:
+                st._last_tm_response_state_log.pop(key, None)
+        # sync cleanup: _poll_summaries
+        for cid in expired_client_ids:
+            st._poll_summaries.pop(cid, None)
+        # sync cleanup: _last_poll_identity
+        for cid in expired_client_ids:
+            st._last_poll_identity.pop(cid, None)
+        # sync cleanup: _last_poll_empty_log_at
+        for key in list(st._last_poll_empty_log_at.keys()):
+            if key.startswith(tuple(expired_client_ids)):
+                st._last_poll_empty_log_at.pop(key, None)
+        # sync cleanup: _last_poll_other_reason_log_at
+        for key in list(st._last_poll_other_reason_log_at.keys()):
+            if key.startswith(tuple(expired_client_ids)):
+                st._last_poll_other_reason_log_at.pop(key, None)
+        # sync cleanup: _tm_page_no_by_key / _tm_page_no_updated_at
+        for key in list(st._tm_page_no_by_key.keys()):
+            if key in expired_set:
+                st._tm_page_no_by_key.pop(key, None)
+                st._tm_page_no_updated_at.pop(key, None)
+    _log(
+        "[TM_PAGE][CLEANUP] "
+        f"removed={len(expired_keys)} "
+        f"remaining_pages={len(st._tampermonkey_pages)} "
+        f"remaining_instances={len(st._known_page_instances)}"
+    )

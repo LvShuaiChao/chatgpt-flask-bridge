@@ -34,7 +34,11 @@ from app.constants import (
     UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
+    remote_binding_active,
     remote_binding_enabled,
+    BIND_MODE_CONVERSATION,
+    BIND_MODE_HOME_PENDING,
+    BIND_MODE_PAGE_CHANNEL,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
@@ -51,10 +55,14 @@ from app.url_utils import parse_conversation_id
 from app.utils.page_status import (
     PageRegistry,
     can_sync_conversation,
+    find_reusable_chatgpt_home_page,
     is_page_online,
     is_prebound_home_page,
+    is_reusable_chatgpt_home_page,
+    page_list_display_id,
     page_url_from,
 )
+from app.utils.page_snapshot import pages_from_bridge_status
 from app.utils.tm_activity import classify_tm_client_activity
 
 
@@ -126,28 +134,45 @@ class PageAutoBindMixin:
             .strip()
         )
         status = bridge_status if bridge_status is not None else self._bridge_ui.last_bridge_status
-        if temp_page_id:
-            from app.utils.page_status import PageRegistry, is_prebound_home_page, is_page_online
+        from app.utils.page_status import PageRegistry, is_page_online
 
-            reg = getattr(self, "page_registry", None)
-            if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
-                reg = PageRegistry.from_bridge_status(status)
+        reg = getattr(self, "page_registry", None)
+        if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
+            reg = PageRegistry.from_bridge_status(status)
+
+        page_instance_id = (remote.get("page_instance_id") or "").strip()
+        client_id = (remote.get("client_id") or "").strip()
+        page_no = (remote.get("page_no") or temp_page_id or "").strip()
+
+        if page_instance_id:
+            page = reg.get_by_identity(client_id, page_instance_id)
+            if page is not None:
+                raw = page._raw if isinstance(page._raw, dict) else {}
+                if is_page_online(raw):
+                    return True
+
+        if temp_page_id:
             page = reg.get_by_page_display_id(temp_page_id)
             if page is not None:
                 raw = page._raw if isinstance(page._raw, dict) else {}
-                if is_page_online(raw) and is_prebound_home_page(raw):
+                if is_page_online(raw):
                     return True
-        client_id = (
-            remote.get("client_id") or ""
-        ).strip()
-        page_instance_id = (
-            remote.get("page_instance_id")
-            or remote.get("page_instance_id")
-            or ""
-        ).strip()
+
+        if client_id and page_no:
+            matches = [
+                p
+                for p in reg.pages
+                if str((p._raw or {}).get("page_no") or p.page_display_id or "").strip() == page_no
+                and (p.client_id or "").strip() == client_id
+            ]
+            if len(matches) == 1:
+                raw = matches[0]._raw if isinstance(matches[0]._raw, dict) else {}
+                if is_page_online(raw):
+                    return True
+
         if not client_id:
             return False
-        for item in self._iter_tm_clients(status, online_only=True, page_type="home"):
+        for item in self._iter_tm_clients(status, online_only=True):
             if self._tm_client_id(item) != client_id:
                 continue
             if page_instance_id and self._tm_page_instance_id(item) != page_instance_id:
@@ -784,7 +809,7 @@ class PageAutoBindMixin:
                 "bind_request_id": bind_request_id,
                 "bind_started_at": time.time(),
             }
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
 
         url = f"{CHATGPT_HOME_URL}#xz_bind_token={bind_request_id}"
@@ -915,6 +940,7 @@ class PageAutoBindMixin:
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_TEMP_HOME_BOUND,
+            bind_mode=BIND_MODE_HOME_PENDING,
             page_display_id=page_display_id,
             temp_page_id=page_display_id,
             page_no=page_display_id,
@@ -925,7 +951,7 @@ class PageAutoBindMixin:
             page_type="home",
         )
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         if hasattr(self, "_refresh_current_session_binding_display"):
             self._refresh_current_session_binding_display()
         if hasattr(self, "_refresh_session_list"):
@@ -1046,42 +1072,97 @@ class PageAutoBindMixin:
         )
         return False
 
-    def _ensure_temp_home_bound_for_send(self, session) -> bool:
-        """
-        当前会话未绑定时：打开 ChatGPT 首页 → 等待油猴上报 → 以页面 ID 临时绑定。
-        """
-        if session is None:
-            return False
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        bind_state = self._remote_bind_state(remote)
-        if bind_state == BIND_STATE_BOUND_CONVERSATION:
-            return True
-        if self._is_temp_home_bound_state(bind_state):
-            if hasattr(self, "_resolve_temp_home_send_target"):
-                temp_info = self._resolve_temp_home_send_target(session, remote)
-                if temp_info.get("matched"):
-                    self._append_log(
-                        "[AUTO_BIND_HOME][SKIP_ALREADY_TEMP_BOUND] "
-                        f"session_id={session.session_id} "
-                        f"temp_page_id={temp_info.get('temp_page_id') or '-'} "
-                        f"online=true",
-                        echo=True,
-                    )
-                    return True
-            temp_page_id = (
-                remote.get("temp_page_id")
-                or remote.get("page_display_id")
-                or ""
-            ).strip()
-            if temp_page_id:
-                return self._wait_for_existing_temp_home_page_online(
-                    session, temp_page_id
+    def _get_current_bridge_pages(self):
+        """bridge 页面列表（pages / summary.pages）。"""
+        status = self._bridge_ui.last_bridge_status or {}
+        if is_server_running():
+            try:
+                status = get_bridge_status() or status
+                self._bridge_ui.last_bridge_status = status
+            except Exception as exc:
+                self._append_log(
+                    f"[CHAT_BIND][BRIDGE_STATUS_FAILED] error={exc!r}",
+                    echo=True,
+                    level="ERROR",
                 )
+        return pages_from_bridge_status(status)
 
-        if bind_state != BIND_STATE_UNBOUND and remote_binding_enabled(remote):
-            return True
+    def _get_selected_page_id_from_ui(self) -> str:
+        if not hasattr(self, "_get_selected_tm_page_from_combo"):
+            return ""
+        selected = self._get_selected_tm_page_from_combo()
+        if not isinstance(selected, dict):
+            return ""
+        return page_list_display_id(selected)
 
+    def _reusable_home_page_eligible_for_session(self, page, session_id="") -> bool:
+        if not isinstance(page, dict):
+            return False
+        if not is_reusable_chatgpt_home_page(page):
+            return False
+        client_id = (page.get("client_id") or "").strip()
+        page_instance_id = (page.get("page_instance_id") or "").strip()
+        if self._is_home_client_used_by_any_session(
+            client_id,
+            page_instance_id,
+            exclude_session_id=session_id,
+        ):
+            return False
+        if self._home_client_has_pending_bridge_work(
+            client_id,
+            page_instance_id,
+            self._bridge_ui.last_bridge_status,
+        ):
+            return False
+        return True
+
+    def _find_reusable_chatgpt_home_page_for_session(self, session):
+        pages = self._get_current_bridge_pages()
+        session_id = (session.session_id if session else "").strip()
+        preferred_page_id = self._get_selected_page_id_from_ui()
+        reusable_count = sum(
+            1
+            for page in pages
+            if isinstance(page, dict) and is_reusable_chatgpt_home_page(page)
+        )
+        self._append_log(
+            "[CHAT_BIND][FIND_REUSABLE_HOME] "
+            f"selectedPageId={preferred_page_id or '-'} "
+            f"totalPages={len(pages)} reusableCount={reusable_count}",
+            echo=True,
+        )
+
+        def _eligible(page: dict) -> bool:
+            return self._reusable_home_page_eligible_for_session(page, session_id)
+
+        return find_reusable_chatgpt_home_page(
+            pages,
+            preferred_page_id,
+            is_eligible=_eligible,
+        )
+
+    def _bind_local_conversation_to_temporary_home_page(self, session, page, *, reserve_reason=""):
+        if not self._prebound_home_bind_to_session(
+            session,
+            page,
+            silent=True,
+            reserve_reason=reserve_reason or "reuse_existing_home",
+        ):
+            return False
+        page_id = page_list_display_id(page)
+        page_instance_id = (page.get("page_instance_id") or "").strip()
+        self._append_log(
+            "[CHAT_BIND][REUSE_HOME_PAGE] "
+            f"localConversationId={session.session_id} "
+            f"page_id={page_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"url={page_url_from(page) or '-'}",
+            echo=True,
+        )
+        return True
+
+    def _open_new_chatgpt_home_page_for_conversation(self, session) -> bool:
+        """无可用复用首页时，打开新的 ChatGPT 首页并等待上报。"""
         bind_display = getattr(self, "_bind_display", None)
         if bind_display is not None and bind_display.auto_open_home_in_progress:
             pending_sid = (bind_display.auto_open_home_session_id or "").strip()
@@ -1143,6 +1224,83 @@ class PageAutoBindMixin:
         finally:
             self._set_auto_open_home_in_progress(False)
 
+    def _ensure_page_for_local_conversation_send(self, session) -> bool:
+        """
+        本地对话首条发送前确保 ChatGPT 页面：
+        稳定对话绑定 → 已有临时绑定 → 复用在线首页 → 打开新首页。
+        """
+        if session is None:
+            return False
+
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state = self._remote_bind_state(remote)
+        conversation_id = (remote.get("conversation_id") or "").strip()
+
+        if bind_state == BIND_STATE_BOUND_CONVERSATION and conversation_id:
+            return True
+
+        if self._is_temp_home_bound_state(bind_state):
+            if hasattr(self, "_resolve_temp_home_send_target"):
+                temp_info = self._resolve_temp_home_send_target(session, remote)
+                if temp_info.get("matched"):
+                    self._append_log(
+                        "[CHAT_BIND][REUSE_PENDING_HOME] "
+                        f"localConversationId={session.session_id} "
+                        f"page_id={temp_info.get('temp_page_id') or '-'} "
+                        f"page_instance_id={temp_info.get('page_instance_id') or '-'}",
+                        echo=True,
+                    )
+                    return True
+            temp_page_id = (
+                remote.get("temp_page_id")
+                or remote.get("page_display_id")
+                or ""
+            ).strip()
+            if temp_page_id:
+                return self._wait_for_existing_temp_home_page_online(
+                    session, temp_page_id
+                )
+
+        if bind_state != BIND_STATE_UNBOUND and remote_binding_enabled(remote):
+            return True
+
+        reusable_home = self._find_reusable_chatgpt_home_page_for_session(session)
+        if reusable_home is not None:
+            return self._bind_local_conversation_to_temporary_home_page(
+                session,
+                reusable_home,
+                reserve_reason="reuse_existing_home_for_first_send",
+            )
+
+        self._append_log(
+            "[CHAT_BIND][OPEN_NEW_HOME] "
+            f"reason=no_reusable_home_page localConversationId={session.session_id}",
+            echo=True,
+        )
+        return self._open_new_chatgpt_home_page_for_conversation(session)
+
+    def _selected_home_usable_for_first_send(self, session, selected_page=None):
+        if selected_page is None:
+            if not hasattr(self, "_get_selected_tm_page_from_combo"):
+                return None
+            selected_page = self._get_selected_tm_page_from_combo()
+        if not isinstance(selected_page, dict):
+            return None
+        session_id = (session.session_id if session else "").strip()
+        if not self._reusable_home_page_eligible_for_session(selected_page, session_id):
+            return None
+        from app.utils.page_status import can_accept_input
+
+        send_requestable = bool(selected_page.get("send_requestable"))
+        can_accept = can_accept_input(selected_page)
+        if not send_requestable and not can_accept:
+            return None
+        return selected_page
+
+    def _ensure_temp_home_bound_for_send(self, session) -> bool:
+        """兼容入口：统一走 _ensure_page_for_local_conversation_send。"""
+        return self._ensure_page_for_local_conversation_send(session)
+
     def _prepare_first_message_binding(self, session, text):
         if self._session_has_wrong_existing_conversation_bind(session):
             self._append_log(
@@ -1151,7 +1309,7 @@ class PageAutoBindMixin:
             )
             session.remote_chatgpt = default_remote_chatgpt()
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         bind_state = self._remote_bind_state(remote)
@@ -1172,7 +1330,7 @@ class PageAutoBindMixin:
                 "bind_state": BIND_STATE_UNBOUND,
             }
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             bind_state = self._remote_bind_state(remote)
 
@@ -1191,6 +1349,18 @@ class PageAutoBindMixin:
             bind_state = self._remote_bind_state(remote)
             if bind_state == BIND_STATE_WAITING_HOME:
                 return False, "正在等待 ChatGPT 首页上线，请稍候。"
+
+        reusable_home = self._find_reusable_chatgpt_home_page_for_session(session)
+        if reusable_home is not None:
+            if self._bind_local_conversation_to_temporary_home_page(
+                session,
+                reusable_home,
+                reserve_reason="first_send_reuse_home",
+            ):
+                self._add_system_message(
+                    "已复用现有 ChatGPT 首页，发送首条消息后将等待创建新对话..."
+                )
+                return True, ""
 
         idle_home = self._find_idle_chatgpt_home_client(
             session_id=session.session_id if session else "",
@@ -1223,14 +1393,18 @@ class PageAutoBindMixin:
             )
             return True, ""
 
-        if hasattr(self, "_ensure_temp_home_bound_for_send"):
+        if hasattr(self, "_ensure_page_for_local_conversation_send"):
+            ok = self._ensure_page_for_local_conversation_send(session)
+        elif hasattr(self, "_ensure_temp_home_bound_for_send"):
             ok = self._ensure_temp_home_bound_for_send(session)
-            if ok:
-                return True, ""
-            return (
-                False,
-                "自动打开 ChatGPT 页面失败，请手动打开页面后重试。",
-            )
+        else:
+            ok = False
+        if ok:
+            return True, ""
+        return (
+            False,
+            "自动打开 ChatGPT 页面失败，请手动打开页面后重试。",
+        )
 
         self._append_log(
             f"[AUTO_BIND][FIRST_SEND_BLOCKED] session_id={session.session_id} "
@@ -1249,12 +1423,36 @@ class PageAutoBindMixin:
             )
             session.remote_chatgpt = default_remote_chatgpt()
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
 
         if not self._session_is_local_new_chat_flow(session):
             return
 
         sid = session.session_id
+        reusable_home = self._find_reusable_chatgpt_home_page_for_session(session)
+        if reusable_home is not None:
+            if self._bind_local_conversation_to_temporary_home_page(
+                session,
+                reusable_home,
+                reserve_reason="new_session_reuse_home",
+            ):
+                self._append_log(
+                    f"[NEW_SESSION][HOME_REUSED] session_id={sid} "
+                    f"page_id={page_list_display_id(reusable_home) or '-'}",
+                    echo=True,
+                )
+                self._append_session_message(
+                    session,
+                    "system",
+                    "已复用现有 ChatGPT 首页，可以发送首条消息。",
+                )
+                self._render_session_chat(session, force_bottom=True)
+                if hasattr(self, "schedule_page_registry_refresh"):
+                    self.schedule_page_registry_refresh(reason="auto_bind")
+                self._apply_chat_bind_visual_state()
+                self._schedule_save_sessions_to_disk()
+            return
+
         vhome = self._find_idle_chatgpt_home_client(
             session_id=sid, require_user_visible=True
         )
@@ -1279,7 +1477,7 @@ class PageAutoBindMixin:
                 if hasattr(self, "schedule_page_registry_refresh"):
                     self.schedule_page_registry_refresh(reason="auto_bind")
                 self._apply_chat_bind_visual_state()
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
             return
 
         hhome = self._find_idle_chatgpt_home_client(
@@ -1307,7 +1505,7 @@ class PageAutoBindMixin:
             "opened_home_at": now,
         }
         session.updated_at = now
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         self._start_waiting_home_on_send(session)
         self._append_session_message(
             session,
@@ -1368,7 +1566,7 @@ class PageAutoBindMixin:
                 "pending_send_created_at": time.time(),
             }
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             if session.session_id == self._current_session_id:
                 self._add_system_message_once(
                     "绑定的 ChatGPT 对话页离线，正在自动打开原对话页。该消息会在页面上线后自动发送。",
@@ -1396,7 +1594,7 @@ class PageAutoBindMixin:
             "reopen_target_url": target_url,
         }
         session.updated_at = now
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         opened = self._open_bound_conversation_url(
             target_url, reopen_request_id=reopen_request_id
         )
@@ -1444,7 +1642,7 @@ class PageAutoBindMixin:
                     self._set_user_message_status(
                         session, pending_message_id, "发送失败"
                     )
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
                 if session.session_id == self._current_session_id:
                     self._add_system_message_once(
                         "自动打开绑定页面超时，消息未发送。请打开绑定页面后点击重新发送。",
@@ -1523,7 +1721,7 @@ class PageAutoBindMixin:
                     "reopen_target_url": "",
                 }
                 session.updated_at = time.time()
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
                 self._append_log(
                     "[SEND][RESUME_AFTER_BOUND_REOPEN] "
                     f"session_id={session.session_id} "
@@ -1542,13 +1740,60 @@ class PageAutoBindMixin:
                     "reopen_target_url": "",
                 }
                 session.updated_at = time.time()
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
             self._refresh_session_list(select_session_id=self._current_session_id)
             if hasattr(self, "schedule_page_registry_refresh"):
                 self.schedule_page_registry_refresh(reason="auto_bind")
             self._apply_chat_bind_visual_state()
             if hasattr(self, "_try_send_next_queued_message"):
                 self._try_send_next_queued_message(session)
+    def _page_channel_bind_to_session(
+        self, session, client_info, silent=False, reserve_reason=""
+    ):
+        """页面通道绑定：在线页面 + page_no + client_id/page_instance_id，不要求 conversation_id。"""
+        return self._prebound_home_bind_to_session(
+            session,
+            client_info,
+            silent=silent,
+            reserve_reason=reserve_reason or "page_channel_bind",
+        )
+
+    def _maybe_show_home_with_local_history_notice(self, session, page_no=""):
+        """绑定首页且本地已有历史时，仅提醒一次。"""
+        if session is None:
+            return
+        # 已升级为对话绑定时禁止显示首页通道提示
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        bind_state = self._remote_bind_state(remote)
+        if bind_state == BIND_STATE_BOUND_CONVERSATION:
+            self._append_log(
+                "[BIND][HOME_WITH_LOCAL_HISTORY_NOTICE][SKIP] "
+                f"reason=already_bound_conversation "
+                f"session_id={session.session_id}",
+                echo=True,
+            )
+            return
+        user_count = self._session_user_message_count(session)
+        if user_count <= 0:
+            return
+        seen = getattr(self, "_home_with_local_history_notice_sessions", None)
+        if not isinstance(seen, set):
+            seen = set()
+            self._home_with_local_history_notice_sessions = seen
+        if session.session_id in seen:
+            return
+        seen.add(session.session_id)
+        self._append_log(
+            "[BIND][HOME_WITH_LOCAL_HISTORY_NOTICE] "
+            f"session_id={session.session_id} page_no={page_no or '-'}",
+            echo=True,
+        )
+        self._add_system_message(
+            "当前绑定的是 ChatGPT 首页页面通道。\n"
+            "如果本地会话已有历史，远端新对话不会自动继承这些历史。\n"
+            "如需继续同一个远端对话，请绑定对应 /c/... 页面。"
+        )
+
     def _prebound_home_bind_to_session(
         self, session, client_info, silent=False, reserve_reason=""
     ):
@@ -1561,12 +1806,29 @@ class PageAutoBindMixin:
         ).strip()
         client_id = (client_info.get("client_id") or "").strip()
         page_instance_id = (client_info.get("page_instance_id") or "").strip()
-        if not client_id:
-            self._add_system_message("缺少 client_id，无法预绑定首页。")
+        page_no = (
+            self._tm_page_no_text(client_info)
+            if hasattr(self, "_tm_page_no_text")
+            else str(client_info.get("page_no") or "").strip()
+        )
+        if page_no == "-":
+            page_no = ""
+        if not client_id and not page_instance_id:
+            self._add_system_message("缺少 client_id / page_instance_id，无法绑定页面通道。")
             return False
-        if not self._is_bindable_chatgpt_url(page_url):
-            self._add_system_message("该 URL 不是可绑定的 ChatGPT 首页。")
-            return False
+        if not page_instance_id and page_no:
+            self._append_log(
+                "[BIND][PAGE_CHANNEL][WARN] "
+                f"session_id={session.session_id} "
+                f"page_no={page_no} "
+                f"reason=missing_page_instance_id fallback=page_no_only",
+                echo=True,
+                level="WARNING",
+            )
+        if page_url and not self._is_bindable_chatgpt_url(page_url):
+            if not page_instance_id and not client_id:
+                self._add_system_message("该 URL 不是可绑定的 ChatGPT 页面。")
+                return False
         remote_prev = normalize_remote_chatgpt(session.remote_chatgpt)
         old_client_id = (
             remote_prev.get("prebound_home_client_id")
@@ -1579,6 +1841,21 @@ class PageAutoBindMixin:
             or ""
         ).strip()
         old_bind_state = self._remote_bind_state(remote_prev)
+        # ????????????????????
+        old_conversation_id = (remote_prev.get("conversation_id") or "").strip()
+        old_url_val = (remote_prev.get("url") or "").strip()
+        incoming_url = (page_url or CHATGPT_HOME_URL).strip()
+        if old_bind_state == BIND_STATE_BOUND_CONVERSATION:
+            if old_conversation_id or "/c/" in old_url_val:
+                self._append_log(
+                    "[BIND][PREBOUND_HOME_SKIP] "
+                    f"reason=already_bound_conversation "
+                    f"session_id={session.session_id} "
+                    f"old_conversation_id={old_conversation_id or '(from url)'} "
+                    f"incoming_url={incoming_url}",
+                    echo=True,
+                )
+                return False
         same_current_home = (
             old_bind_state == BIND_STATE_PREBOUND_HOME
             and old_client_id
@@ -1644,20 +1921,15 @@ class PageAutoBindMixin:
             return False
         now = time.time()
         bind_request_id = session_bind_token or client_bind_token
-        page_no = (
-            self._tm_page_no_text(client_info)
-            if hasattr(self, "_tm_page_no_text")
-            else str(client_info.get("page_no") or "").strip()
-        )
-        if page_no == "-":
-            page_no = ""
         temp_page_id = (
             str(client_info.get("page_display_id") or client_info.get("page_no") or page_no or "")
             .strip()
         )
+        page_type = (client_info.get("page_type") or "").strip() or "home"
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_TEMP_HOME_BOUND,
+            bind_mode=BIND_MODE_HOME_PENDING,
             conversation_id="",
             url=page_url or CHATGPT_HOME_URL,
             client_id=client_id,
@@ -1665,7 +1937,7 @@ class PageAutoBindMixin:
             page_no=page_no,
             page_display_id=temp_page_id,
             temp_page_id=temp_page_id,
-            page_type="home",
+            page_type=page_type,
             page_title=(client_info.get("page_title") or "").strip(),
             last_seen=self._auto_bind_float_field(
                 client_info,
@@ -1683,21 +1955,22 @@ class PageAutoBindMixin:
 
         update_bind_runtime(self, session, bootstrap_in_progress=False)
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
+        self._maybe_show_home_with_local_history_notice(session, page_no=page_no or temp_page_id)
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason="prebound_home")
         self._apply_chat_bind_visual_state()
         if silent:
-            self._set_settings_hint("已预绑定 ChatGPT 首页到当前对话。")
+            self._set_settings_hint("已绑定页面通道到当前对话。")
         else:
             self._add_system_message(
-                "已预绑定 ChatGPT 首页。发送第一条消息后，"
+                "已绑定页面通道。发送第一条消息后，"
                 "将自动创建并绑定新的 ChatGPT 对话。"
             )
         self._append_log(
-            "[BIND][TEMP_HOME][SUCCESS] "
+            "[BIND][PAGE_CHANNEL_BOUND] "
             f"session_id={session.session_id} "
-            f"temp_page_id={temp_page_id or '-'} "
+            f"page_no={page_no or temp_page_id or '-'} "
             f"client_id={client_id or '-'} "
             f"page_instance_id={page_instance_id or '-'} "
             f"url={page_url or CHATGPT_HOME_URL} "
@@ -1707,10 +1980,10 @@ class PageAutoBindMixin:
         return True
 
     def _upgrade_temp_home_sessions_from_registry(self, registry=None):
-        """首页临时绑定在目标页创建对话后，自动升级为 conversation 绑定。"""
+        """页面通道绑定在目标页创建对话后，自动升级为 conversation 绑定。"""
         from app.models import (
+            BIND_MODE_CONVERSATION,
             BIND_STATE_BOUND_CONVERSATION,
-            BIND_STATE_PREBOUND_HOME,
             write_session_remote_chatgpt,
         )
         from app.url_utils import parse_conversation_id
@@ -1729,11 +2002,18 @@ class PageAutoBindMixin:
                 (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
                 .strip()
             )
-            if not temp_page_id:
-                continue
-            page = reg.get_by_page_display_id(temp_page_id)
+            bound_client_id = (remote.get("client_id") or "").strip()
+            bound_instance_id = (remote.get("page_instance_id") or "").strip()
+            old_url = (remote.get("url") or "https://chatgpt.com/").strip()
+
+            page = None
+            if bound_client_id and bound_instance_id:
+                page = reg.get_by_identity(bound_client_id, bound_instance_id)
+            if page is None and temp_page_id:
+                page = reg.get_by_page_display_id(temp_page_id)
             if page is None:
                 continue
+
             raw = page._raw if isinstance(page._raw, dict) else {}
             page_url = page_url_from(raw) or (page.url or "")
             conversation_id = (
@@ -1744,32 +2024,48 @@ class PageAutoBindMixin:
             if not conversation_id:
                 continue
             conversation_url = page_url if "/c/" in page_url else f"https://chatgpt.com/c/{conversation_id}"
+            page_no = temp_page_id or str(remote.get("page_no") or "").strip()
             write_session_remote_chatgpt(
                 session,
                 bind_state=BIND_STATE_BOUND_CONVERSATION,
+                bind_mode=BIND_MODE_CONVERSATION,
                 conversation_id=conversation_id,
                 url=conversation_url,
                 page_type="conversation",
-                client_id=(raw.get("client_id") or page.client_id or remote.get("client_id") or "").strip(),
+                client_id=(raw.get("client_id") or page.client_id or bound_client_id or "").strip(),
                 page_instance_id=(
-                    raw.get("page_instance_id") or page.page_instance_id or remote.get("page_instance_id") or ""
+                    raw.get("page_instance_id") or page.page_instance_id or bound_instance_id or ""
                 ).strip(),
-                page_no=temp_page_id,
-                page_display_id=temp_page_id,
+                page_no=page_no,
+                page_display_id=page_no,
                 temp_page_id="",
             )
             session.updated_at = time.time()
             changed = True
             self._append_log(
-                "[BIND][TEMP_HOME_UPGRADED] "
-                f"session_id={session.session_id} "
-                f"temp_page_id={temp_page_id} "
+                "[CHAT_BIND][PROMOTE_HOME_TO_CONVERSATION] "
+                f"localConversationId={session.session_id} "
+                f"page_id={page_no or '-'} "
                 f"conversation_id={conversation_id} "
-                f"conversation_url={conversation_url}",
+                f"url={conversation_url}",
                 echo=True,
             )
+            self._append_log(
+                "[BIND][PROMOTE_PAGE_TO_CONVERSATION] "
+                f"session_id={session.session_id} "
+                f"page_no={page_no or '-'} "
+                f"conversation_id={conversation_id} "
+                f"old_url={old_url or 'https://chatgpt.com/'} "
+                f"new_url={conversation_url}",
+                echo=True,
+            )
+            # 升级提示：从首页页面通道升级为对话绑定
+            if session.session_id == self._current_session_id:
+                self._add_system_message(
+                    "已从首页页面通道升级为 ChatGPT 对话绑定。"
+                )
         if changed:
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             if hasattr(self, "_refresh_current_session_binding_display"):
                 self._refresh_current_session_binding_display()
             if hasattr(self, "_refresh_session_list"):
@@ -1842,6 +2138,7 @@ class PageAutoBindMixin:
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_BOUND_CONVERSATION,
+            bind_mode=BIND_MODE_CONVERSATION,
             conversation_id=conversation_id,
             url=conversation_url,
             client_id=client_id,
@@ -1873,7 +2170,7 @@ class PageAutoBindMixin:
                 f"new_client_id={client_id} "
                 f"url={conversation_url or page_url}"
             )
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         self._refresh_session_list(select_session_id=session.session_id)
         if session.session_id == (self._current_session_id or ""):
             self._update_current_session_title(session)
@@ -1922,6 +2219,7 @@ class PageAutoBindMixin:
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_BOUND_CONVERSATION,
+            bind_mode=BIND_MODE_CONVERSATION,
             conversation_id=conversation_id,
             url=page_url,
             client_id=bound_client_id,
@@ -1946,7 +2244,7 @@ class PageAutoBindMixin:
             opened_home_at=0,
         )
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason="auto_bind")
         self._apply_chat_bind_visual_state()
@@ -2046,7 +2344,7 @@ class PageAutoBindMixin:
             )
 
         if changed:
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             self._refresh_session_list(select_session_id=self._current_session_id)
             if self._current_session():
                 self._render_session_chat(self._current_session())
@@ -2325,7 +2623,7 @@ class PageAutoBindMixin:
                 "pending_bootstrap_created_at": 0,
                 "opened_home_at": 0,
             }
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             self._clear_pending_auto_bind()
             self._refresh_session_list(select_session_id=self._current_session_id)
             self._apply_chat_bind_visual_state()
@@ -2420,7 +2718,7 @@ class PageAutoBindMixin:
                 "已预绑定新打开的 ChatGPT 首页，正在发送首条消息..."
             )
         self._clear_pending_auto_bind()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         self._refresh_session_list(select_session_id=self._current_session_id)
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason="auto_bind")
@@ -2619,7 +2917,7 @@ class PageAutoBindMixin:
                 f"client_id={client_id} old={old_url or '-'} new={page_url}"
             )
         if changed:
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             if self._current_session():
                 if hasattr(self, "schedule_page_registry_refresh"):
                     self.schedule_page_registry_refresh(reason="auto_bind")

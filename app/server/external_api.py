@@ -52,6 +52,65 @@ def _set_external_request_status(req, status):
         req.pop("status", None)
 
 
+_EXTERNAL_TERMINAL_STATUSES = frozenset({"done", "failed", "timeout"})
+
+
+def cleanup_external_requests_locked():
+    """清理终态且超过 TTL 的外部 API 请求；总数超过上限时优先删最旧终态记录。"""
+    now = _now()
+    ttl_sec = float(st.EXTERNAL_REQUEST_TTL_SEC)
+    max_records = int(st.EXTERNAL_REQUEST_MAX_RECORDS)
+    to_remove = set()
+    with st._state_lock:
+        for request_id, req in list(st._external_requests.items()):
+            if not isinstance(req, dict):
+                to_remove.add(request_id)
+                continue
+            status = _external_request_status(req)
+            if status not in _EXTERNAL_TERMINAL_STATUSES:
+                continue
+            updated_at = _external_req_float(req, "updated_at", req.get("created_at", 0))
+            if updated_at and (now - updated_at) > ttl_sec:
+                to_remove.add(request_id)
+        alive_count = len(st._external_requests) - len(to_remove)
+        if alive_count > max_records:
+            terminal = []
+            for request_id, req in st._external_requests.items():
+                if request_id in to_remove or not isinstance(req, dict):
+                    continue
+                if _external_request_status(req) in _EXTERNAL_TERMINAL_STATUSES:
+                    terminal.append(
+                        (
+                            _external_req_float(
+                                req, "updated_at", req.get("created_at", 0)
+                            ),
+                            request_id,
+                        )
+                    )
+            terminal.sort(key=lambda item: item[0])
+            overflow = alive_count - max_records
+            for _ts, request_id in terminal[:overflow]:
+                to_remove.add(request_id)
+        if not to_remove:
+            return 0
+        for request_id in to_remove:
+            st._external_requests.pop(request_id, None)
+        for bridge_id, request_id in list(st._bridge_message_to_external.items()):
+            if request_id in to_remove or request_id not in st._external_requests:
+                st._bridge_message_to_external.pop(bridge_id, None)
+        for session_id, request_id in list(st._session_external_pending.items()):
+            if request_id in to_remove or request_id not in st._external_requests:
+                st._session_external_pending.pop(session_id, None)
+    _log(
+        "[EXTERNAL_API][CLEANUP] "
+        f"removed={len(to_remove)} "
+        f"remaining={len(st._external_requests)} "
+        f"bridge_map={len(st._bridge_message_to_external)} "
+        f"session_pending={len(st._session_external_pending)}"
+    )
+    return len(to_remove)
+
+
 def _register_external_request(
     request_id,
     session_id,
@@ -81,6 +140,7 @@ def _register_external_request(
             st._bridge_message_to_external[bridge_message_id] = request_id
         if session_id and not bridge_message_id:
             st._session_external_pending[session_id] = request_id
+        cleanup_external_requests_locked()
     return entry
 
 
@@ -161,6 +221,7 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
         if _external_request_status(req) in ("done", "failed", "timeout"):
             return False
         session_id = req.get("session_id") or ""
+        terminal_after = False
         if event == "assistant_reply":
             text = (
                 payload.get("content") or ""
@@ -174,6 +235,7 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
             req["reply"] = text
             req["error"] = ""
             req["updated_at"] = _now()
+            terminal_after = True
             _log(
                 f"[EXTERNAL_API][REQUEST_DONE] request_id={request_id} "
                 f"session_id={session_id} bridge_message_id={message_id} "
@@ -190,10 +252,13 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
             _set_external_request_status(req, "failed")
             req["error"] = str(reason)
             req["updated_at"] = _now()
+            terminal_after = True
             _log(
                 f"[EXTERNAL_API][REQUEST_FAILED] request_id={request_id} "
                 f"reason={reason}"
             )
+    if terminal_after:
+        cleanup_external_requests_locked()
     return True
 
 
@@ -247,6 +312,9 @@ def _get_external_request(request_id):
                 f"session_id={req.get('session_id') or '-'} "
                 f"bridge_message_id={req.get('bridge_message_id') or '-'}"
             )
+            cleanup_external_requests_locked()
+    else:
+        cleanup_external_requests_locked()
     return req
 
 
@@ -568,95 +636,12 @@ def _external_auth_denied():
 
 
 def _request_body_preview(max_len=500):
-    try:
-        raw = request.get_data(cache=True, as_text=True) or ""
-    except Exception as error:
-        _log(
-            "[EXTERNAL_API][REQUEST_BODY_PREVIEW_FAILED] "
-            f"method={request.method} path={request.path} "
-            f"remote={request.remote_addr or '-'} "
-            f"content_type={request.content_type!r} "
-            f"error_type={type(error).__name__} error={error}\n"
-            f"{traceback.format_exc()}"
-        )
-        return f"<read_body_failed {type(error).__name__}: {error}>"
-    raw = raw.replace("\r", "\\r").replace("\n", "\\n")
-    if len(raw) > max_len:
-        return raw[:max_len] + "...<truncated>"
-    return raw
+    from app.server.request_utils import request_body_preview
+
+    return request_body_preview(max_len=max_len)
 
 
 def _json_body_or_error(log_tag, *, allow_empty=True):
-    preview = _request_body_preview()
-    if not preview.strip() and allow_empty:
-        return {}, None
-    try:
-        body = request.get_json(silent=False)
-    except BadRequest as exc:
-        _log(
-            f"{log_tag} reason=json_decode_failed "
-            f"method={request.method} path={request.path} "
-            f"remote={request.remote_addr or '-'} "
-            f"content_type={request.content_type!r} "
-            f"error_type={type(exc).__name__} error={exc} "
-            f"body_preview={preview!r}\n{traceback.format_exc()}"
-        )
-        return None, (
-            jsonify({
-                "ok": False,
-                "error": f"invalid json: {exc}",
-                "code": "INVALID_JSON",
-            }),
-            400,
-        )
-    except Exception as exc:
-        _log(
-            f"{log_tag} reason=json_parse_exception "
-            f"method={request.method} path={request.path} "
-            f"remote={request.remote_addr or '-'} "
-            f"content_type={request.content_type!r} "
-            f"error_type={type(exc).__name__} error={exc} "
-            f"body_preview={preview!r}\n{traceback.format_exc()}"
-        )
-        return None, (
-            jsonify({
-                "ok": False,
-                "error": f"invalid json: {exc}",
-                "code": "INVALID_JSON",
-            }),
-            400,
-        )
-    if body is None:
-        if allow_empty:
-            return {}, None
-        _log(
-            f"{log_tag} reason=json_body_empty "
-            f"method={request.method} path={request.path} "
-            f"remote={request.remote_addr or '-'} "
-            f"content_type={request.content_type!r}"
-        )
-        return None, (
-            jsonify({
-                "ok": False,
-                "error": "request body must be JSON",
-                "code": "EMPTY_JSON_BODY",
-            }),
-            400,
-        )
-    if not isinstance(body, dict):
-        _log(
-            f"{log_tag} reason=json_body_not_object "
-            f"method={request.method} path={request.path} "
-            f"remote={request.remote_addr or '-'} "
-            f"content_type={request.content_type!r} "
-            f"body_type={type(body).__name__} body_preview={preview!r}"
-        )
-        return None, (
-            jsonify({
-                "ok": False,
-                "error": "json body must be an object",
-                "code": "INVALID_JSON",
-            }),
-            400,
-        )
-    return body, None
+    from app.server.request_utils import json_body_or_error
+
+    return json_body_or_error(log_tag, allow_empty=allow_empty)

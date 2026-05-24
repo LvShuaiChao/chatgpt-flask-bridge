@@ -461,6 +461,102 @@
     }, delayMs);
   }
 
+  const BUTTON_LONG_WAIT_DANGER_MS = 10000;
+  const buttonWaitTimers = new WeakMap();
+
+  const PERMANENT_DANGER_BUTTON_IDS = new Set([
+    'cgpt-log-clear',
+    'cgpt-autoq-stop',
+    'cgpt-prompt-delete-btn',
+    'cgpt-prompt-reset-btn',
+  ]);
+
+  function isPermanentDangerButton(button) {
+    if (!button) {
+      return false;
+    }
+
+    const id = String(button.id || '').trim();
+    if (PERMANENT_DANGER_BUTTON_IDS.has(id)) {
+      return true;
+    }
+
+    if (id === 'cgpt-copy-hotkey-continue-loop' && button.classList.contains('cgpt-action-running')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function setButtonWaitingDanger(button, enabled, reason) {
+    if (!button || isPermanentDangerButton(button)) {
+      return;
+    }
+
+    if (enabled) {
+      button.classList.add('cgpt-btn-waiting-danger');
+      button.dataset.waitDanger = '1';
+      button.dataset.waitDangerReason = reason || 'waiting';
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BUTTON][WAIT_DANGER_ON] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+        );
+      }
+      return;
+    }
+
+    button.classList.remove('cgpt-btn-waiting-danger');
+    delete button.dataset.waitDanger;
+    delete button.dataset.waitDangerReason;
+
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[BUTTON][WAIT_DANGER_OFF] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+      );
+    }
+  }
+
+  function startButtonLongWaitDangerTimer(button, reason, delayMs) {
+    if (!button || isPermanentDangerButton(button)) {
+      return;
+    }
+
+    clearButtonLongWaitDangerTimer(button, 'restart');
+
+    const waitMs = Number(delayMs || BUTTON_LONG_WAIT_DANGER_MS);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[BUTTON][LONG_WAIT_TIMER_START] id=${button.id || '-'} text=${String(button.textContent || '').trim()} delayMs=${waitMs} reason=${reason || '-'}`,
+      );
+    }
+
+    const timer = window.setTimeout(() => {
+      setButtonWaitingDanger(button, true, reason || 'long_wait');
+    }, waitMs);
+
+    buttonWaitTimers.set(button, timer);
+  }
+
+  function clearButtonLongWaitDangerTimer(button, reason) {
+    if (!button) {
+      return;
+    }
+
+    const timer = buttonWaitTimers.get(button);
+    if (timer) {
+      window.clearTimeout(timer);
+      buttonWaitTimers.delete(button);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BUTTON][LONG_WAIT_TIMER_CLEAR] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+        );
+      }
+    }
+
+    setButtonWaitingDanger(button, false, reason || 'clear');
+  }
+
   function shouldSkipGlobalShortcutForToolboxTarget(target) {
     const toolbox = document.querySelector(`#${APP.panelId}`);
     if (!toolbox || !(target instanceof Element) || !toolbox.contains(target)) {
@@ -854,6 +950,7 @@
       formatFailStatus,
       logPrefix,
       emptyText,
+      playSuccessBeep = true,
     } = options || {};
 
     const content = String(text ?? '');
@@ -874,11 +971,13 @@
       ToolboxShell.setStatus(resolvedSuccessStatus, 'success');
       ToolboxShell.appendLog(`[${resolvedLogPrefix}][ok] chars=${content.length} ${resolvedSuccessLog}`);
 
-      void playCopySuccessBeep(`copyWithStatus:${resolvedLogPrefix}`).catch((error) => {
-        const errText = error && error.message ? error.message : String(error);
-        console.warn('[ChatGPT toolbox] copyWithStatus beep failed', error);
-        ToolboxShell.appendLog(`[BEEP][COPY_SUCCESS_FAILED] source=copyWithStatus:${resolvedLogPrefix} error=${errText}`);
-      });
+      if (playSuccessBeep !== false) {
+        void playCopySuccessBeep(`copyWithStatus:${resolvedLogPrefix}`).catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.warn('[ChatGPT toolbox] copyWithStatus beep failed', error);
+          ToolboxShell.appendLog(`[BEEP][COPY_SUCCESS_FAILED] source=copyWithStatus:${resolvedLogPrefix} error=${errText}`);
+        });
+      }
 
       return true;
     } catch (error) {
@@ -1529,23 +1628,6 @@
     return conversationId ? `conversationState:${conversationId}` : '';
   }
 
-  /** @deprecated 对话级状态已停用，仅保留空对象兼容读取。 */
-  function readToolboxConversationState() {
-    return {};
-  }
-
-  /** @deprecated 对话级状态已停用，不再写入。 */
-  function saveToolboxConversationStatePatch(_patch, reason = '') {
-    toolboxPageStateAppendLog(
-      `[TOOLBOX_CONV_STATE][save-skip] reason=${reason || '-'} deprecated=conversation_state_disabled`,
-    );
-  }
-
-  /** @deprecated TODO(cleanup-observe): 无引用，旧 page/conversation 合并逻辑残留。 */
-  function getMergedToolboxApplyState() {
-    return getToolboxPageState();
-  }
-
   function toolboxPageStateAppendLog(text) {
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(text);
@@ -1670,16 +1752,6 @@
     return state;
   }
 
-  /** @deprecated TODO(cleanup-observe): 无引用，固定返回空对象。 */
-  function collectCurrentToolboxConversationState() {
-    return {};
-  }
-
-  /** @deprecated TODO(cleanup-observe): 无引用，仅转调 collectCurrentToolboxPageState。 */
-  function collectCurrentToolboxBaseState() {
-    return collectCurrentToolboxPageState();
-  }
-
   function saveCurrentToolboxBaseState(reason = '') {
     if (isApplyingToolboxPageState) {
       toolboxPageStateAppendLog(
@@ -1745,6 +1817,12 @@
   let lastToolboxConversationKey = '';
 
 
+  const DEFAULT_MULTI_UPLOAD_LAST_SELECTION = Object.freeze({
+    projectKey: '',
+    folderKey: '',
+    updatedAt: 0,
+  });
+
   const DEFAULT_COMPACT_UI_CONFIG = Object.freeze({
     showUploadGroups: true,
     showUploadStartButton: true,
@@ -1763,7 +1841,8 @@
     copyHotkeyLoopHomeNavInterval: 20,
     copyHotkeyLoopHomeNavUrl: 'https://chatgpt.com/',
     copyHotkeyContinuePromptText: '',
-    copyHotkeyContinueStopSignal: 'CHATGPT_TOOLBOX_DONE',
+    copyHotkeyContinueStopSignal: '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
+    multiUploadLastSelection: DEFAULT_MULTI_UPLOAD_LAST_SELECTION,
   });
 
   function normalizeCompactUiConfig(input) {
@@ -1776,7 +1855,16 @@
     }
 
     cfg.quickPromptClickAction = cfg.quickPromptClickAction === 'fill' ? 'fill' : 'send';
-    cfg.quickPromptActiveCategory = String(cfg.quickPromptActiveCategory || '全部').trim() || '全部';
+    const rawQuickCategory = String(cfg.quickPromptActiveCategory || '全部').trim();
+    if (rawQuickCategory === '鍏ㄩ儴') {
+      console.info('[QUICK_PROMPT][CATEGORY][NORMALIZE_MOJIBAKE]', {
+        from: rawQuickCategory,
+        to: '全部',
+      });
+      cfg.quickPromptActiveCategory = '全部';
+    } else {
+      cfg.quickPromptActiveCategory = rawQuickCategory || '全部';
+    }
 
     cfg.confirmPromptDraftOverwrite = cfg.confirmPromptDraftOverwrite === true;
 
@@ -1827,24 +1915,35 @@
     const legacyLoopStop = typeof cfg.copyHotkeyLoopStopSignal === 'string'
       ? cfg.copyHotkeyLoopStopSignal.trim()
       : '';
+    const DEFAULT_BATCH_TASK_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
     const LEGACY_COPY_HOTKEY_CONTINUE_STOP_SIGNALS = new Set([
+      'CHATGPT_TOOLBOX_DONE',
       '<<<CHATGPT_TOOLBOX_DONE>>>',
       '__CHATGPT_TOOLBOX_DONE__',
       '<<<TASK_DONE>>>',
       'TASK_DONE',
     ]);
     const nextStopSignal = String(
-      cfg.copyHotkeyContinueStopSignal || legacyLoopStop || 'CHATGPT_TOOLBOX_DONE',
+      cfg.copyHotkeyContinueStopSignal || legacyLoopStop || DEFAULT_BATCH_TASK_DONE_SIGNAL,
     ).trim();
     if (LEGACY_COPY_HOTKEY_CONTINUE_STOP_SIGNALS.has(nextStopSignal)) {
-      cfg.copyHotkeyContinueStopSignal = 'CHATGPT_TOOLBOX_DONE';
+      cfg.copyHotkeyContinueStopSignal = DEFAULT_BATCH_TASK_DONE_SIGNAL;
     } else {
-      cfg.copyHotkeyContinueStopSignal = nextStopSignal || 'CHATGPT_TOOLBOX_DONE';
+      cfg.copyHotkeyContinueStopSignal = nextStopSignal || DEFAULT_BATCH_TASK_DONE_SIGNAL;
     }
 
     delete cfg.copyHotkeyLoopContinuePrompt;
     delete cfg.copyHotkeyLoopStopSignalEnabled;
     delete cfg.copyHotkeyLoopStopSignal;
+
+    const savedSelection = raw.multiUploadLastSelection && typeof raw.multiUploadLastSelection === 'object'
+      ? raw.multiUploadLastSelection
+      : {};
+    cfg.multiUploadLastSelection = {
+      projectKey: typeof savedSelection.projectKey === 'string' ? savedSelection.projectKey : '',
+      folderKey: typeof savedSelection.folderKey === 'string' ? savedSelection.folderKey : '',
+      updatedAt: Number(savedSelection.updatedAt) || 0,
+    };
 
     return cfg;
   }
@@ -1852,10 +1951,10 @@
   const DEFAULT_SHORTCUT_CONFIG = Object.freeze({
     sendMessage: {
       enabled: true,
-      label: 'Ctrl+Enter',
+      label: 'Enter',
       key: 'Enter',
       code: 'Enter',
-      ctrl: true,
+      ctrl: false,
       alt: false,
       shift: false,
       meta: false,
@@ -1897,17 +1996,40 @@
     };
   }
 
+  function isLegacyDefaultSendShortcut(item) {
+    if (!item || typeof item !== 'object') return false;
+    return String(item.label || '') === 'Ctrl+Enter'
+      && String(item.key || '').toLowerCase() === 'enter'
+      && String(item.code || '').toLowerCase() === 'enter'
+      && item.ctrl === true
+      && item.alt !== true
+      && item.shift !== true
+      && item.meta !== true;
+  }
+
   function getShortcutConfig() {
     const raw = MemoryManager.get(
       MemoryManager.KEYS.shortcutConfig,
       null,
     );
 
+    const sendMessage = cloneShortcutItem(
+      raw && raw.sendMessage,
+      DEFAULT_SHORTCUT_CONFIG.sendMessage,
+    );
+
+    if (isLegacyDefaultSendShortcut(raw && raw.sendMessage)) {
+      sendMessage.label = 'Enter';
+      sendMessage.key = 'Enter';
+      sendMessage.code = 'Enter';
+      sendMessage.ctrl = false;
+      sendMessage.alt = false;
+      sendMessage.shift = false;
+      sendMessage.meta = false;
+    }
+
     return {
-      sendMessage: cloneShortcutItem(
-        raw && raw.sendMessage,
-        DEFAULT_SHORTCUT_CONFIG.sendMessage,
-      ),
+      sendMessage,
       copyLastMessage: cloneShortcutItem(
         raw && raw.copyLastMessage,
         DEFAULT_SHORTCUT_CONFIG.copyLastMessage,

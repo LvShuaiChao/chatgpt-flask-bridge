@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.constants import (
@@ -52,6 +52,23 @@ __all__ = [
     "PageCapability",
     "PageActionPlan",
     "read_snapshot_identity",
+    "PageRegistry",
+    "PageSnapshot",
+    "binding_from_session",
+    "bridge_status_online",
+    "page_display_id_sort_key",
+    "page_display_ids_for_log",
+    "pages_from_bridge_status",
+    "sort_pages_by_display_id",
+    "status_pages_token",
+    "page_effective_conversation_id",
+    "page_poll_recency_ts",
+    "find_online_fallback_page_for_binding",
+    "has_stable_conversation_id",
+    "is_chatgpt_home_location",
+    "is_reusable_chatgpt_home_page",
+    "page_list_display_id",
+    "find_reusable_chatgpt_home_page",
 ]
 
 
@@ -344,6 +361,254 @@ def _page_dialog_ready(page: Any, *, now: float | None = None) -> bool:
     if page_type and page_type not in ("conversation", "-"):
         return False
     return can_sync_conversation(page, now=now)
+
+
+def page_effective_conversation_id(page: Any, *, now: float | None = None) -> str:
+    """页面有效 conversation_id：字段优先，其次 URL /c/<id>。"""
+    if not isinstance(page, dict):
+        return ""
+    norm = normalize_page(page, now=now)
+    conversation_id = (norm.get("conversation_id") or "").strip()
+    if conversation_id and conversation_id != "-":
+        return conversation_id
+    url = (norm.get("url") or "").strip()
+    if url:
+        return parse_conversation_id(url) or ""
+    return ""
+
+
+def page_poll_recency_ts(page: Any) -> float:
+    """页面 poll/seen 新鲜度键（越大越新）。"""
+    if not isinstance(page, dict):
+        raw = getattr(page, "_raw", None)
+        page = raw if isinstance(raw, dict) else {}
+    if not isinstance(page, dict):
+        return 0.0
+    for key in ("last_poll_at", "last_seen", "last_heartbeat_at", "last_report_at"):
+        ts = _float_ts(page.get(key), context=f"page_status.page_poll_recency_ts.{key}")
+        if ts:
+            return ts
+    return 0.0
+
+
+_FALLBACK_STRATEGY_RANK = {
+    "same_conversation": 3,
+    "url_conversation": 2,
+    "client_id_conversation": 1,
+}
+
+
+def find_online_fallback_page_for_binding(
+    registry: "PageRegistry",
+    binding: Mapping[str, Any] | None,
+    *,
+    now: float | None = None,
+    require_conversation_syncable: bool = False,
+    exclude_client_id: str = "",
+    exclude_page_instance_id: str = "",
+) -> Tuple[Optional["PageSnapshot"], str]:
+    """
+    绑定页离线/失效时，在在线页面中按 conversation 兜底：
+    1. conversation_id 字段
+    2. URL /c/<conversation_id>
+    3. 同 client_id 且 conversation 一致
+    多个候选时取 last_poll_at 最新；策略优先级高于 poll 时间。
+    """
+    if now is None:
+        now = time.time()
+    if not binding or not isinstance(registry, PageRegistry):
+        return None, ""
+    bound_conv = (binding.get("conversation_id") or "").strip()
+    if not bound_conv:
+        url = (binding.get("url") or "").strip()
+        bound_conv = parse_conversation_id(url) or ""
+    if not bound_conv:
+        return None, ""
+    bound_client = (binding.get("client_id") or "").strip()
+    exclude_client = (exclude_client_id or bound_client or "").strip()
+    exclude_instance = (exclude_page_instance_id or "").strip()
+    if not exclude_instance:
+        exclude_instance = (binding.get("page_instance_id") or "").strip()
+
+    candidates: list[tuple[int, float, str, PageSnapshot]] = []
+    seen_keys: set[str] = set()
+
+    def _consider(page: PageSnapshot, matched_by: str) -> None:
+        if page is None:
+            return
+        key = page.page_key
+        if not key or key in seen_keys:
+            return
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        if not is_page_online(raw, now=now):
+            return
+        if is_prebound_home_page(raw, now=now):
+            return
+        page_type = (raw.get("page_type") or page.page_type or "").strip()
+        if page_type == "home":
+            return
+        page_conv = page_effective_conversation_id(raw, now=now)
+        if page_conv != bound_conv:
+            return
+        if require_conversation_syncable and not can_sync_conversation(raw, now=now):
+            return
+        if (
+            exclude_client
+            and exclude_instance
+            and page.client_id == exclude_client
+            and page.page_instance_id == exclude_instance
+        ):
+            return
+        strategy_rank = _FALLBACK_STRATEGY_RANK.get(matched_by, 0)
+        if strategy_rank <= 0:
+            return
+        seen_keys.add(key)
+        candidates.append(
+            (strategy_rank, page_poll_recency_ts(raw), matched_by, page)
+        )
+
+    for snap in registry.get_by_conversation_id(bound_conv):
+        _consider(snap, "same_conversation")
+
+    for snap in registry.list_online_pages():
+        raw = snap._raw if isinstance(snap._raw, dict) else {}
+        url_conv = parse_conversation_id((raw.get("url") or snap.url or "").strip())
+        if url_conv == bound_conv:
+            _consider(snap, "url_conversation")
+
+    if bound_client:
+        for snap in registry.pages:
+            if (snap.client_id or "").strip() != bound_client:
+                continue
+            _consider(snap, "client_id_conversation")
+
+    if not candidates:
+        return None, ""
+    candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    _, _, matched_by, best = candidates[0]
+    return best, matched_by
+
+
+def has_stable_conversation_id(page: Any, *, now: float | None = None) -> bool:
+    """conversation_id 为有效稳定值（非空、非 -、非 null 占位）。"""
+    if not isinstance(page, dict):
+        return False
+    norm = normalize_page(page, now=now)
+    conversation_id = (norm.get("conversation_id") or "").strip()
+    if conversation_id in ("", "-", "null", "undefined"):
+        return False
+    if conversation_id:
+        return True
+    url = (norm.get("url") or "").strip()
+    return bool(parse_conversation_id(url))
+
+
+def is_chatgpt_home_location(page: Any) -> bool:
+    """是否为 ChatGPT 根路径首页（url 与 pathname 任一满足即可）。"""
+    if not isinstance(page, dict):
+        return False
+    url = (page.get("url") or page_url_from(page) or "").strip()
+    pathname = (page.get("pathname") or "").strip()
+    if url in ("https://chatgpt.com/", "https://chatgpt.com"):
+        return True
+    if pathname in ("/", ""):
+        if not url:
+            page_type = (page.get("page_type") or "").strip()
+            return page_type == "home"
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower()
+            if host in _CHATGPT_HOSTS:
+                path = (parsed.path or "/").rstrip("/") or "/"
+                return path == "/"
+        except ValueError as exc:
+            print(f"[PAGE_STATUS][URL_PARSE_FAILED] url={url!r} error={exc!r}")
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        print(f"[PAGE_STATUS][URL_PARSE_FAILED] url={url!r} error={exc!r}")
+        return False
+    path = (parsed.path or "/").rstrip("/") or "/"
+    host = (parsed.netloc or "").lower()
+    return host in _CHATGPT_HOSTS and path == "/"
+
+
+def is_reusable_chatgpt_home_page(page: Any, *, now: float | None = None) -> bool:
+    """
+    是否可作为「新建本地对话首条发送」的复用首页。
+    仅做页面形态判定，不执行绑定或打开页面。
+    """
+    if not isinstance(page, dict):
+        return False
+    if not is_page_online(page, now=now):
+        return False
+    if has_stable_conversation_id(page, now=now):
+        return False
+    if is_chatgpt_home_location(page):
+        return True
+    norm = normalize_page(page, now=now)
+    page_type = (norm.get("page_type") or "").strip()
+    return page_type == "home" and not has_stable_conversation_id(page, now=now)
+
+
+def page_list_display_id(page: Any) -> str:
+    """bridge 页面列表中的展示 ID（page_display_id / page_no / page_id）。"""
+    if not isinstance(page, dict):
+        return ""
+    for key in ("page_display_id", "page_no", "page_id", "id"):
+        value = str(page.get(key) or "").strip()
+        if value and value != "-":
+            return value
+    return ""
+
+
+def find_reusable_chatgpt_home_page(
+    pages: List[Dict[str, Any]],
+    preferred_page_id: str = "",
+    *,
+    now: float | None = None,
+    is_eligible: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    在 bridge 页面列表中查找可复用的 ChatGPT 首页。
+    优先 preferred_page_id（下拉框当前选中），否则取最近活跃在线首页。
+    """
+    if not isinstance(pages, list) or not pages:
+        return None
+    preferred_page_id = str(preferred_page_id or "").strip()
+
+    if preferred_page_id:
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            if page_list_display_id(page) != preferred_page_id:
+                continue
+            if not is_reusable_chatgpt_home_page(page, now=now):
+                continue
+            if is_eligible is not None and not is_eligible(page):
+                continue
+            return page
+
+    reusable_pages: List[Dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        if not is_reusable_chatgpt_home_page(page, now=now):
+            continue
+        if is_eligible is not None and not is_eligible(page):
+            continue
+        reusable_pages.append(page)
+
+    if not reusable_pages:
+        return None
+
+    reusable_pages.sort(
+        key=lambda row: page_poll_recency_ts(row),
+        reverse=True,
+    )
+    return reusable_pages[0]
 
 
 def is_prebound_home_page(page: Any, *, now: float | None = None) -> bool:

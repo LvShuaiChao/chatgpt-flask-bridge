@@ -157,7 +157,7 @@ class ChatSessionMixin:
                 continue
             message.ui_status = status
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             self._append_log(
                 "[CHAT_MESSAGE][STATUS] "
                 f"session_id={session_id} request_id={request_id} "
@@ -226,7 +226,7 @@ class ChatSessionMixin:
             ),
             created_at=message.get("created_at"),
             bridge_message_id=(
-                (message.get("message_id") or message.get("request_id") or "")
+                (message.get("bridge_message_id") or message.get("request_id") or "")
                 .strip()
             ),
             parent_message_id=(message.get("parent_message_id") or "").strip(),
@@ -258,7 +258,7 @@ class ChatSessionMixin:
                 echo=True,
             )
             return False
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return True
 
     def _update_local_user_message_status(
@@ -300,7 +300,7 @@ class ChatSessionMixin:
                 echo=True,
             )
 
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             return True
 
         self._append_log(

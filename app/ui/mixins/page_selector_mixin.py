@@ -274,10 +274,15 @@ class PageSelectorMixin:
     def _get_page_combo_selection_ids(self):
         item = self._get_tm_page_combo_selection()
         if not isinstance(item, dict):
-            return {"client_id": "", "page_instance_id": ""}
+            return {
+                "client_id": "",
+                "page_instance_id": "",
+                "conversation_id": "",
+            }
         return {
             "client_id": (item.get("client_id") or "").strip(),
             "page_instance_id": (item.get("page_instance_id") or "").strip(),
+            "conversation_id": (item.get("conversation_id") or "").strip(),
         }
 
     def _sync_tm_page_combo_selection(self, item, *, source="", auto=False):
@@ -293,36 +298,13 @@ class PageSelectorMixin:
 
     def _on_set_manual_current_page_clicked(self):
         self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)
-        combo = getattr(self, "tm_page_combo", None) or getattr(
-            self, "tm_page_selector", None
-        )
-        if combo is None:
-            return
-
-        index = combo.currentIndex()
-        if index < 0:
-            self._set_tm_action_hint("请先在可用页面列表中选择一个页面。")
-            return
-
-        client_id = combo.itemData(index, Qt.UserRole)
-        if isinstance(client_id, dict):
-            client_id = (client_id.get("client_id") or "").strip()
-        else:
-            client_id = str(client_id or "").strip()
-
-        item = self._find_tm_client_by_client_id(client_id)
-        if not isinstance(item, dict) and hasattr(self, "_tm_page_combo_page_from_index"):
-            item = self._tm_page_combo_page_from_index(index)
-
+        item = self._get_tm_page_combo_selection()
         if not isinstance(item, dict):
+            self._set_tm_action_hint("请先在可用页面列表中选择一个页面。")
             self._append_log(
-                "[TM_CURRENT_PAGE][BUTTON_FAILED] "
-                f"index={index} "
-                f"client_id={client_id or '-'} "
-                f"reason=item_not_found",
+                "[TM_CURRENT_PAGE][BUTTON_FAILED] reason=item_not_found",
                 echo=True,
             )
-            self._set_tm_action_hint("未找到所选页面，请刷新页面列表后重试。")
             return
 
         self._set_page_combo_selection(item, source="set_current_button")

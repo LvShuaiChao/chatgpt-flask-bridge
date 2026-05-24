@@ -554,6 +554,11 @@ class SessionMixin:
             if message.role != "assistant":
                 continue
 
+            # queued 消息的 assistant 占位不应算 pending
+            msg_source = (getattr(message, "message_source", "") or "").strip()
+            if msg_source in ("queued_placeholder", "local_queue"):
+                continue
+
             bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
             if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
                 continue
@@ -570,11 +575,20 @@ class SessionMixin:
                     if parent is not None
                     else ""
                 )
+                parent_ui_status = (
+                    (getattr(parent, "ui_status", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                # parent 是 queued 消息且没有 bridge_message_id，不算 pending
                 if (
                     parent is not None
                     and not parent_bridge_id
                     and parent_source in ("local_send", "local_queue")
                 ):
+                    continue
+                # parent 的 ui_status 是队列状态，不算 pending
+                if parent is not None and parent_ui_status in ("已加入队列", "queued"):
                     continue
 
             status = (message.ui_status or "").strip()
@@ -603,6 +617,12 @@ class SessionMixin:
                 continue
             if message.role != "assistant":
                 continue
+
+            # queued 消息的 assistant 占位不应算 pending
+            msg_source = (getattr(message, "message_source", "") or "").strip()
+            if msg_source in ("queued_placeholder", "local_queue"):
+                continue
+
             bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
             if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(
                 bridge_id
@@ -621,11 +641,20 @@ class SessionMixin:
                     if parent is not None
                     else ""
                 )
+                parent_ui_status = (
+                    (getattr(parent, "ui_status", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                # parent 是 queued 消息且没有 bridge_message_id，不算 pending
                 if (
                     parent is not None
                     and not parent_bridge_id
                     and parent_source in ("local_send", "local_queue")
                 ):
+                    continue
+                # parent 的 ui_status 是队列状态，不算 pending
+                if parent is not None and parent_ui_status in ("已加入队列", "queued"):
                     continue
             status = (message.ui_status or "").strip()
             text = (message.content or "").strip()
@@ -668,15 +697,45 @@ class SessionMixin:
         return max(0.0, time.time() - since)
 
     def _pending_reply_is_actionable(self, session, pending=None):
-        """仅当存在有效 bridge_message_id 且未 finalize 时，pending 才可拦截发送。"""
+        """仅当存在有效 bridge_message_id 且未 finalize 时，pending 才可拦截发送。
+
+        queued 消息不应产生 pending_reply 阻塞：
+        - assistant.message_source in ("queued_placeholder", "local_queue") 不算 pending
+        - 没有 bridge_message_id 的 assistant 不算 actionable pending
+        - parent user 的 message_source == "local_queue" 且无 bridge_message_id 不算 pending
+        """
         pending = pending or self._get_pending_reply_state(session)
         if not pending:
             return False
+
+        # 检查 assistant 消息的 message_source
+        message = pending.get("message")
+        if message is not None:
+            msg_source = (getattr(message, "message_source", "") or "").strip()
+            if msg_source in ("queued_placeholder", "local_queue"):
+                return False
+
         bridge_id = (pending.get("bridge_message_id") or "").strip()
         if not bridge_id:
             return False
         if hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
             return False
+
+        # 检查 parent user 消息
+        parent_id = (pending.get("parent_message_id") or "").strip()
+        if parent_id and hasattr(self, "_find_session_message_by_id"):
+            parent_msg = self._find_session_message_by_id(session, parent_id)
+            if parent_msg is not None:
+                parent_source = (getattr(parent_msg, "message_source", "") or "").strip()
+                parent_bridge_id = (getattr(parent_msg, "bridge_message_id", "") or "").strip()
+                parent_ui_status = (getattr(parent_msg, "ui_status", "") or "").strip()
+                # 如果 parent 是 queued 消息且没有 bridge_message_id，不算 actionable
+                if parent_source == "local_queue" and not parent_bridge_id:
+                    return False
+                # 如果 parent 的 ui_status 是队列状态，不算 actionable
+                if parent_ui_status in ("已加入队列", "queued"):
+                    return False
+
         return True
 
     def _bound_page_indicates_idle(self, session):
@@ -738,8 +797,8 @@ class SessionMixin:
                 echo=True,
             )
         session.pending_sync_requested = True
-        if hasattr(self, "_save_sessions_to_disk"):
-            self._save_sessions_to_disk()
+        if hasattr(self, "_schedule_save_sessions_to_disk"):
+            self._schedule_save_sessions_to_disk()
         return True
 
     def _stale_pending_clear_reason(self, session, pending=None):
@@ -832,12 +891,35 @@ class SessionMixin:
 
         for message in messages_to_clear:
             bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            is_bootstrap_stale = False
+            if bridge_id:
+                try:
+                    from app.server.message_queue import get_message_state
+
+                    msg_state = get_message_state(bridge_id)
+                    is_bootstrap_stale = bool(
+                        msg_state and msg_state.get("bootstrap_conversation")
+                    )
+                except Exception as exc:
+                    self._append_log(
+                        "[CHAT][STALE_PENDING_CLEAR][BOOTSTRAP_CHECK_FAILED] "
+                        f"bridge_id={bridge_id or '-'} error={exc!r}",
+                        echo=True,
+                        level="ERROR",
+                    )
+            from app.constants import BOOTSTRAP_STALE_TIMEOUT_TEXT
+
+            stale_text = (
+                BOOTSTRAP_STALE_TIMEOUT_TEXT
+                if is_bootstrap_stale
+                else (
+                    "上一条回复的本地等待状态已重置。"
+                    "如果网页中已有回复，请点击「同步网页对话」刷新完整内容。"
+                )
+            )
             message.role = "error"
             message.ui_status = "已重置"
-            message.content = (
-                "上一条回复的本地等待状态已重置。"
-                "如果网页中已有回复，请点击「同步网页对话」刷新完整内容。"
-            )
+            message.content = stale_text
             if bridge_id and hasattr(self, "_finalize_bridge"):
                 self._finalize_bridge(bridge_id)
                 if hasattr(self, "_bridge_msg"):
@@ -886,8 +968,8 @@ class SessionMixin:
             self._refresh_session_list(
                 select_session_id=getattr(self, "_current_session_id", None)
             )
-        if hasattr(self, "_save_sessions_to_disk"):
-            self._save_sessions_to_disk()
+        if hasattr(self, "_schedule_save_sessions_to_disk"):
+            self._schedule_save_sessions_to_disk()
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
         return True
@@ -998,6 +1080,32 @@ class SessionMixin:
             return f"{ts} · 等待绑定..."
 
         if has_pending:
+            if hasattr(self, "_session_bootstrap_claim_pending") and self._session_bootstrap_claim_pending(session):
+                elapsed = ""
+                if hasattr(self, "_session_waiting_preview_suffix"):
+                    elapsed = self._session_waiting_preview_suffix(session)
+                from app.constants import BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS
+
+                pending_elapsed = 0.0
+                if hasattr(self, "_session_pending_elapsed_sec"):
+                    pending_elapsed = float(self._session_pending_elapsed_sec(session) or 0)
+                if pending_elapsed >= float(BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS):
+                    if elapsed:
+                        return f"{ts} · 首页未领取 {elapsed}"
+                    return f"{ts} · 首页未领取..."
+                if elapsed:
+                    return f"{ts} · 等待首页领取 {elapsed}"
+                return f"{ts} · 等待首页领取..."
+            if hasattr(self, "_session_bootstrap_message_id"):
+                bridge_id = self._session_bootstrap_message_id(session)
+                if bridge_id and hasattr(self, "_bootstrap_message_delivery_phase"):
+                    if self._bootstrap_message_delivery_phase(bridge_id) == "delivered":
+                        elapsed = ""
+                        if hasattr(self, "_session_waiting_preview_suffix"):
+                            elapsed = self._session_waiting_preview_suffix(session)
+                        if elapsed:
+                            return f"{ts} · 页面已领取 {elapsed}"
+                        return f"{ts} · 页面已领取..."
             elapsed = ""
             if hasattr(self, "_session_waiting_preview_suffix"):
                 elapsed = self._session_waiting_preview_suffix(session)
@@ -1271,13 +1379,16 @@ class SessionMixin:
                     f"last_seen：{self._format_last_seen_ago(client_info.get('last_seen'))}"
                 )
         if self._session_has_pending_assistant_reply(session):
-            elapsed = ""
-            if hasattr(self, "_session_waiting_preview_suffix"):
-                elapsed = self._session_waiting_preview_suffix(session)
-            if elapsed:
-                lines.append(f"消息状态：等待回复 {elapsed}")
+            if hasattr(self, "_session_bootstrap_claim_pending") and self._session_bootstrap_claim_pending(session):
+                lines.append("消息状态：等待 ChatGPT 首页领取首条消息")
             else:
-                lines.append("消息状态：等待回复")
+                elapsed = ""
+                if hasattr(self, "_session_waiting_preview_suffix"):
+                    elapsed = self._session_waiting_preview_suffix(session)
+                if elapsed:
+                    lines.append(f"消息状态：等待回复 {elapsed}")
+                else:
+                    lines.append("消息状态：等待回复")
         else:
             response_state = self._session_bound_response_state(session)
             if response_state["is_responding"]:
@@ -1475,7 +1586,7 @@ class SessionMixin:
         self._select_session(session_id)
     def _on_session_list_reordered(self, parent, start, end, destination, row):
         self._sync_session_order_from_list()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
     def _on_session_list_double_clicked(self, item):
         if not item:
             return
@@ -1636,7 +1747,7 @@ class SessionMixin:
         session.updated_at = time.time()
         self._refresh_session_list(select_session_id=session.session_id)
         self._update_current_session_title(session)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
     def _clear_current_session_messages_before_rebind_or_sync(self, reason: str = ""):
         """绑定/同步前清空当前选中会话的聊天记录（不清标题、输入框、上传文件）。"""
         session = self._current_session()
@@ -1770,7 +1881,7 @@ class SessionMixin:
         self._render_session_chat(session, force_bottom=True)
         self._refresh_session_list(select_session_id=session.session_id)
         self._update_current_session_title(session)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
     def _append_session_message(
         self,
         session,
@@ -1800,6 +1911,8 @@ class SessionMixin:
         )
         session.messages.append(message)
         session.updated_at = time.time()
+        # 裁剪超出上限的旧消息
+        session.trim_messages()
         return message
     def _find_assistant_by_turn(self, session, turn_id):
         if not session or not turn_id:
@@ -1869,7 +1982,7 @@ class SessionMixin:
                     self._finalize_bridge(bridge_id)
                 if hasattr(self, "_bridge_msg"):
                     self._bridge_msg.ack_success_message_ids.discard(bridge_id)
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             if session.session_id == getattr(self, "_current_session_id", ""):
                 if hasattr(self, "_render_current_chat_messages"):
                     self._render_current_chat_messages(
@@ -1917,7 +2030,7 @@ class SessionMixin:
         session.reply_waiting_since = 0
         session.pending_sync_requested = False
         session.updated_at = time.time()
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         if session.session_id == getattr(self, "_current_session_id", ""):
             if hasattr(self, "_render_current_chat_messages"):
                 self._render_current_chat_messages(
@@ -2106,7 +2219,7 @@ class SessionMixin:
                 continue
             messages.append(self._message_from_dict(self._normalize_legacy_message_dict(item)))
         remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
-        return ChatSession(
+        session = ChatSession(
             session_id=data.get("session_id") or str(uuid.uuid4()),
             title=data.get("title") or "新对话",
             created_at=self._session_float_field(data, "created_at"),
@@ -2119,6 +2232,38 @@ class SessionMixin:
             messages=messages,
             reply_waiting_since=0,
         )
+        session.trim_messages()
+        return session
+
+    def _schedule_save_sessions_to_disk(self, delay_ms=800):
+        """防抖保存：合并短时间内的多次全量 JSON 写入。"""
+        if not getattr(self, "_save_chat_history", True):
+            return
+        save_fn = getattr(self, "_save_sessions_to_disk", None)
+        if not callable(save_fn):
+            return
+        from PyQt5.QtCore import QObject
+
+        if not isinstance(self, QObject):
+            save_fn()
+            return
+        delay_ms = max(100, min(int(delay_ms or 800), 5000))
+        timer = getattr(self, "_session_save_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._save_sessions_to_disk)
+            self._session_save_timer = timer
+        timer.stop()
+        timer.start(delay_ms)
+
+    def _flush_pending_sessions_save(self):
+        """立即落盘：先取消待执行的防抖保存，再写入磁盘。"""
+        timer = getattr(self, "_session_save_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._save_sessions_to_disk()
+
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:
             return
@@ -2247,6 +2392,8 @@ class SessionMixin:
                     startup_cleared = True
             else:
                 self._cleanup_stale_pending_on_load(session)
+            # 加载后裁剪超出上限的消息
+            session.trim_messages()
         if startup_cleared:
             self._save_sessions_to_disk()
 

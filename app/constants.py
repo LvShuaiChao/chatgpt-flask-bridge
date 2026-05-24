@@ -4,6 +4,13 @@ RUNTIME_DIR = Path(__file__).resolve().parent.parent / "runtime"
 SESSIONS_FILE = RUNTIME_DIR / "chat_sessions.json"
 SESSIONS_JSON_VERSION = 2
 ASSISTANT_WAIT_TEXT = "等待回复…"
+BOOTSTRAP_CLAIM_WAIT_TEXT = "等待 ChatGPT 首页领取首条消息…"
+BOOTSTRAP_CLAIMED_WAIT_TEXT = "ChatGPT 页面已领取，等待回复…"
+BOOTSTRAP_CLAIM_UNCLAIMED_WARN_TEXT = (
+    "ChatGPT 首页尚未领取消息，请检查页面ID、绑定状态和油猴脚本是否在线。"
+)
+BOOTSTRAP_STALE_TIMEOUT_TEXT = "发送超时：页面未领取或未回传发送结果。"
+BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS = 30
 DEFAULT_CHAT_INPUT_TEXT = "你好"
 ASSISTANT_WAIT_TEXTS = frozenset(
     {
@@ -11,6 +18,12 @@ ASSISTANT_WAIT_TEXTS = frozenset(
         "等待 ChatGPT 回复…",
         "等待回复...",
         "等待 ChatGPT 回复...",
+        BOOTSTRAP_CLAIM_WAIT_TEXT,
+        "等待 ChatGPT 首页领取首条消息...",
+        BOOTSTRAP_CLAIMED_WAIT_TEXT,
+        "ChatGPT 页面已领取，等待回复...",
+        BOOTSTRAP_CLAIM_UNCLAIMED_WARN_TEXT,
+        BOOTSTRAP_STALE_TIMEOUT_TEXT,
     }
 )
 PENDING_ASSISTANT_STATUSES = frozenset(
@@ -89,7 +102,7 @@ SESSION_BIND_LIST_STYLES = {
         "border": "#bfdbfe",
         "left": "#3b82f6",
         "text": "#1e3a8a",
-        "label": "等待创建对话",
+        "label": "页面通道",
         "selected_border": "#2563eb",
     },
     "waiting_home": {

@@ -178,7 +178,10 @@ class MainWindow(QMainWindow, *_main_window_bases()):
     def closeEvent(self, event):
         if hasattr(self, "_save_splitter_sizes_now"):
             self._save_splitter_sizes_now()
-        self._save_sessions_to_disk()
+        if hasattr(self, "_flush_pending_sessions_save"):
+            self._flush_pending_sessions_save()
+        else:
+            self._save_sessions_to_disk()
         self._save_app_settings()
         if is_server_running():
             try:

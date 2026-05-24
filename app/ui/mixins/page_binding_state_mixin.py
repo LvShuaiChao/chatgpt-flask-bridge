@@ -29,12 +29,16 @@ from urllib.parse import urlparse
 
 from app.models import (
     remote_binding_enabled,
+    remote_binding_active,
+    BIND_MODE_CONVERSATION,
+    BIND_MODE_PAGE_CHANNEL,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_UNBOUND,
     normalize_remote_chatgpt,
     write_session_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.constants import CHATGPT_HOME_URL
 from app.utils.page_status import page_url_from
 
 
@@ -250,77 +254,6 @@ class PageBindingStateMixin:
                 or selected_page.get("page_type")
                 or ""
             ).strip()
-            if not client_id and not page_url:
-                self._append_log(
-                    "[BIND][FAILED] reason_code=missing_page_identity "
-                    "error_type=BindError error=missing_client_id_and_url "
-                    "traceback=-",
-                    echo=True,
-                )
-                return False
-            if not conversation_id:
-                is_home_page = False
-                if page_type == "home":
-                    is_home_page = True
-                elif page_url and self._is_bindable_chatgpt_url(page_url):
-                    parsed_path = urlparse(page_url).path or "/"
-                    is_home_page = parsed_path in ("", "/")
-                if is_home_page:
-                    bind_candidate = dict(selected_page)
-                    bind_candidate.update(normalized)
-                    bind_candidate["url"] = page_url or "https://chatgpt.com/"
-                    bind_candidate["page_type"] = "home"
-                    bind_candidate["conversation_id"] = ""
-                    temp_page_id = (
-                        str(
-                            bind_candidate.get("page_display_id")
-                            or bind_candidate.get("page_no")
-                            or selected_page.get("page_no")
-                            or normalized.get("page_no")
-                            or ""
-                        ).strip()
-                    )
-                    if not client_id and not temp_page_id:
-                        self._append_log(
-                            "[BIND][FAILED] reason_code=missing_page_identity "
-                            "error_type=BindError error=missing_client_id_and_page_id "
-                            "traceback=-",
-                            echo=True,
-                        )
-                        return False
-                    ok = self._prebound_home_bind_to_session(
-                        session,
-                        bind_candidate,
-                        silent=True,
-                        reserve_reason="manual_bind_home",
-                    )
-                    if ok:
-                        self._set_tm_action_hint(
-                            "已绑定 ChatGPT 首页（页面ID 临时绑定）。发送第一条消息后将自动绑定新对话。"
-                        )
-                        self._refresh_current_session_binding_display()
-                        self._refresh_session_list(select_session_id=session.session_id)
-                        self._save_sessions_to_disk()
-                        self._apply_chat_bind_visual_state()
-                        return True
-                    self._append_log(
-                        "[BIND][MANUAL_HOME][FAILED] "
-                        f"session_id={session.session_id} "
-                        f"client_id={client_id or '-'} "
-                        f"page_instance_id={page_instance_id or '-'} "
-                        f"url={page_url or '-'}",
-                        echo=True,
-                    )
-                    return False
-                self._append_log(
-                    "[BIND][FAILED] reason_code=missing_conversation_id "
-                    "error_type=BindError error=missing_conversation_id "
-                    "traceback=-",
-                    echo=True,
-                )
-                self._set_tm_action_hint("所选页面既不是 ChatGPT 首页，也不是 ChatGPT 对话页，无法绑定。")
-                return False
-
             page_no = _binding_log_text(
                 selected_page.get("page_no")
                 or normalized.get("page_no"),
@@ -330,6 +263,76 @@ class PageBindingStateMixin:
                 display_text = self._tm_page_no_text(selected_page)
                 if display_text and display_text != "-":
                     page_no = str(display_text).strip()
+
+            if not page_no:
+                self._append_log(
+                    "[BIND][FAILED] reason_code=missing_page_no "
+                    "error_type=BindError error=missing_page_no "
+                    "traceback=-",
+                    echo=True,
+                )
+                self._set_tm_action_hint("所选页面缺少页面 ID（page_no），请刷新页面列表后重试。")
+                return False
+
+            if not client_id and not page_instance_id:
+                self._append_log(
+                    "[BIND][FAILED] reason_code=missing_page_identity "
+                    "error_type=BindError error=missing_client_id_and_page_instance_id "
+                    "traceback=-",
+                    echo=True,
+                )
+                self._set_tm_action_hint("所选页面缺少 client_id / page_instance_id，无法绑定。")
+                return False
+
+            if not conversation_id:
+                bind_candidate = dict(selected_page)
+                bind_candidate.update(normalized)
+                bind_candidate["page_no"] = page_no
+                bind_candidate["page_display_id"] = page_no
+                if page_type == "home" or (
+                    page_url
+                    and self._is_bindable_chatgpt_url(page_url)
+                    and (urlparse(page_url).path or "/") in ("", "/")
+                ):
+                    bind_candidate["url"] = page_url or "https://chatgpt.com/"
+                    bind_candidate["page_type"] = "home"
+                elif page_url:
+                    bind_candidate["url"] = page_url
+                bind_candidate["conversation_id"] = ""
+                ok = self._page_channel_bind_to_session(
+                    session,
+                    bind_candidate,
+                    silent=True,
+                    reserve_reason="manual_bind_page_channel",
+                )
+                if ok:
+                    self._set_tm_action_hint(
+                        f"已绑定页面通道（页面ID:{page_no}）。发送消息后将等待生成对话 ID。"
+                    )
+                    self._refresh_current_session_binding_display()
+                    self._refresh_session_list(select_session_id=session.session_id)
+                    self._save_sessions_to_disk()
+                    self._apply_chat_bind_visual_state()
+                    return True
+                self._append_log(
+                    "[BIND][PAGE_CHANNEL][FAILED] "
+                    f"session_id={session.session_id} "
+                    f"page_no={page_no} "
+                    f"client_id={client_id or '-'} "
+                    f"page_instance_id={page_instance_id or '-'} "
+                    f"url={page_url or '-'}",
+                    echo=True,
+                )
+                return False
+
+            if not client_id and not page_url:
+                self._append_log(
+                    "[BIND][FAILED] reason_code=missing_page_identity "
+                    "error_type=BindError error=missing_client_id_and_url "
+                    "traceback=-",
+                    echo=True,
+                )
+                return False
 
             page_type = (
                 (normalized.get("page_type") or selected_page.get("page_type") or "")
@@ -365,6 +368,7 @@ class PageBindingStateMixin:
             write_session_remote_chatgpt(
                 session,
                 bind_state=BIND_STATE_BOUND_CONVERSATION,
+                bind_mode=BIND_MODE_CONVERSATION,
                 conversation_id=conversation_id,
                 url=bind_url,
                 client_id=client_id,
@@ -384,6 +388,13 @@ class PageBindingStateMixin:
             conversation_title = ""
             if hasattr(self, "_session_display_title"):
                 conversation_title = self._session_display_title(session)
+            self._append_log(
+                "[BIND][CONVERSATION_BOUND] "
+                f"session_id={session.session_id} "
+                f"page_no={_binding_log_text(remote_after.get('page_no') or page_no)} "
+                f"conversation_id={_binding_log_text(remote_after.get('conversation_id'))}",
+                echo=True,
+            )
             self._append_log(
                 "[BIND][SESSION_UPDATED] "
                 f"session_id={session.session_id} "
@@ -655,6 +666,27 @@ class PageBindingStateMixin:
             or parse_conversation_id(page_url)
             or ""
         ).strip()
+        # 防止状态刷新使用旧首页快照覆盖新对话快照
+        if not conversation_id and (page_url or "").strip().rstrip("/") in (
+            CHATGPT_HOME_URL.rstrip("/"),
+            "https://chatgpt.com",
+        ):
+            remote_prev = normalize_remote_chatgpt(session.remote_chatgpt)
+            if self._remote_bind_state(remote_prev) == BIND_STATE_BOUND_CONVERSATION:
+                old_conv = (remote_prev.get("conversation_id") or "").strip()
+                if not old_conv:
+                    old_conv = parse_conversation_id((remote_prev.get("url") or "").strip()) or ""
+                if old_conv:
+                    self._append_log(
+                        "[BIND][IGNORE_STALE_HOME_PAGE] "
+                        f"reason=conversation_already_bound "
+                        f"session_id={session.session_id} "
+                        f"old_conversation_id={old_conv} "
+                        f"incoming_page_no={(client_info.get('page_no') or '-')} "
+                        f"incoming_client_id={(client_info.get('client_id') or '-')}",
+                        echo=True,
+                    )
+                    return False
         page_type = (client_info.get("page_type") or "").strip()
         if not page_type:
             if conversation_id:

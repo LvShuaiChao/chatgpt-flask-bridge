@@ -16,6 +16,7 @@ from app.models import (
     BIND_STATE_WAITING_BOUND_CONVERSATION,
     BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
+    derive_bind_mode,
     normalize_remote_chatgpt,
 )
 from app.utils.page_status import page_url_from, read_snapshot_identity
@@ -549,33 +550,34 @@ class PageBindingDisplayMixin:
         self._fix_session_remote_url_from_conversation(session, echo=False)
         remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", {}) or {})
         bind_state = self._remote_bind_state(remote)
-        effective_state = self._effective_bind_state(session)
+        bind_mode = derive_bind_mode(remote)
 
         if not remote_binding_enabled(remote):
-            return "", "未绑定 ChatGPT 页面"
+            return "", "未绑定"
 
         conversation_id = self._remote_conversation_id(remote)
         url = self._remote_conversation_url(remote)
-        if bind_state == BIND_STATE_PREBOUND_HOME and not url:
-            url = "https://chatgpt.com/"
-
-        if bind_state == BIND_STATE_PREBOUND_HOME and not conversation_id:
-            return url or "https://chatgpt.com/", "临时首页绑定"
+        if bind_mode in ("page_channel", "home_pending") or (
+            bind_state == BIND_STATE_PREBOUND_HOME and not conversation_id
+        ):
+            if not url:
+                url = "https://chatgpt.com/"
+            if bind_mode == "home_pending":
+                return url, "首页临时通道"
+            return url, "页面通道"
 
         if url:
             if conversation_id:
-                state_text = "已绑定对话"
-            elif "xz_bind_token=" in url or bind_state == BIND_STATE_PREBOUND_HOME:
-                state_text = "等待创建对话"
-            elif effective_state == BIND_STATE_BOUND_OFFLINE:
+                state_text = "对话已绑定"
+            elif bind_state == BIND_STATE_BOUND_OFFLINE:
                 state_text = "离线"
             elif bind_state == BIND_STATE_BOUND_CONVERSATION:
-                state_text = "已记录对话页"
+                state_text = "对话已绑定"
             else:
                 state_text = "已记录网址"
             return url, state_text
 
-        return "", "未绑定 ChatGPT 页面"
+        return "", "未绑定"
 
     def _update_current_session_url_display(self):
         label = getattr(self, "current_session_url_label", None)
@@ -599,7 +601,7 @@ class PageBindingDisplayMixin:
         elif url:
             text = f"绑定页面：页面ID:{page_no} ｜ {url}"
         else:
-            text = f"绑定页面：页面ID:{page_no} ｜ {state_text or '未绑定 ChatGPT 页面'}"
+            text = f"绑定：未绑定"
 
         if hasattr(self, "_log_chat_header_bound_page_id"):
             missing_reason = ""

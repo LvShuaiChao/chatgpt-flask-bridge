@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -10,8 +11,10 @@ from app.utils.page_status import PageRegistry, PageSnapshot, binding_from_sessi
 from app.utils.page_status import (
     can_sync_conversation,
     evaluate_page_capability,
+    find_online_fallback_page_for_binding,
     is_page_online,
     is_prebound_home_page,
+    page_effective_conversation_id,
     page_url_from,
 )
 from app.utils.time_utils import float_ts
@@ -23,6 +26,8 @@ __all__ = [
     "evaluate_sync_poll_freshness",
     "is_page_polling_active",
 ]
+
+logger = logging.getLogger(__name__)
 
 _COMMAND_ALIASES = {
     "sync": "sync_conversation",
@@ -146,6 +151,7 @@ def _pick_fresh_conversation_page(
     *,
     now: float | None = None,
     for_sync: bool = False,
+    binding: Mapping[str, Any] | None = None,
 ) -> Optional[PageSnapshot]:
     """同 conversation 选最新在线页；sync 要求 poll 新鲜且可同步。"""
     conversation_id = (conversation_id or "").strip()
@@ -153,22 +159,102 @@ def _pick_fresh_conversation_page(
         return None
     if now is None:
         now = time.time()
-    candidates: list[tuple[float, PageSnapshot]] = []
-    for page in registry.get_by_conversation_id(conversation_id):
-        raw = page._raw if isinstance(page._raw, dict) else {}
-        if not is_page_online(raw, now=now):
-            continue
-        if not can_sync_conversation(raw, now=now):
-            continue
-        if for_sync:
-            poll_ok, _, _ = evaluate_sync_poll_freshness(page, now=now)
-            if not poll_ok:
-                continue
-        candidates.append((_page_poll_recency_key(page), page))
-    if not candidates:
+    bind = dict(binding or {})
+    if not bind.get("conversation_id"):
+        bind["conversation_id"] = conversation_id
+    fallback, _matched_by = find_online_fallback_page_for_binding(
+        registry,
+        bind,
+        now=now,
+        require_conversation_syncable=True,
+    )
+    if fallback is None:
         return None
-    candidates.sort(key=lambda row: row[0], reverse=True)
-    return candidates[0][1]
+    if for_sync:
+        poll_ok, _, _ = evaluate_sync_poll_freshness(fallback, now=now)
+        if not poll_ok:
+            return None
+    return fallback
+
+
+def _resolve_page_channel_page(
+    registry: PageRegistry,
+    binding: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> tuple[Optional[PageSnapshot], str, str]:
+    """
+    页面通道绑定解析优先级：
+    1. page_instance_id 精确匹配
+    2. client_id + page_no
+    3. 仅 page_no（在线且唯一）
+    """
+    if now is None:
+        now = time.time()
+    bound_instance = (binding.get("page_instance_id") or "").strip()
+    bound_client = (binding.get("client_id") or "").strip()
+    page_no = (
+        (binding.get("page_no") or binding.get("temp_page_id") or binding.get("page_display_id") or "")
+        .strip()
+    )
+
+    if bound_client and bound_instance:
+        page = registry.get_by_identity(bound_client, bound_instance)
+        if page is not None:
+            raw = page._raw if isinstance(page._raw, dict) else {}
+            if is_page_online(raw, now=now):
+                return page, "client_and_page_instance", ""
+            return page, "client_and_page_instance", "bound_page_offline"
+
+    if bound_client and page_no:
+        matches = []
+        for page in registry.pages:
+            raw = page._raw if isinstance(page._raw, dict) else {}
+            raw_no = str(raw.get("page_no") or page.page_display_id or "").strip()
+            if raw_no == page_no and (page.client_id or "").strip() == bound_client:
+                matches.append(page)
+        if len(matches) == 1:
+            raw = matches[0]._raw if isinstance(matches[0]._raw, dict) else {}
+            if is_page_online(raw, now=now):
+                return matches[0], "client_id_page_no", ""
+            return matches[0], "client_id_page_no", "bound_page_offline"
+        if len(matches) > 1:
+            return None, "page_no_ambiguous", "ambiguous_page_no"
+
+    if page_no:
+        matches = []
+        for page in registry.pages:
+            raw = page._raw if isinstance(page._raw, dict) else {}
+            raw_no = str(raw.get("page_no") or page.page_display_id or "").strip()
+            if raw_no == page_no:
+                matches.append(page)
+        online_matches = [
+            p
+            for p in matches
+            if is_page_online(p._raw if isinstance(p._raw, dict) else {}, now=now)
+        ]
+        if len(online_matches) == 1:
+            logger.warning(
+                "[SEND][RESOLVE][PAGE_NO_FALLBACK] page_no=%s reason=page_no_unique_online",
+                page_no,
+            )
+            return online_matches[0], "page_no_unique", ""
+        if len(matches) > 1:
+            return None, "page_no_ambiguous", "ambiguous_page_no"
+
+    temp_page_id = (
+        (binding.get("temp_page_id") or binding.get("page_display_id") or "")
+        .strip()
+    )
+    if temp_page_id:
+        page = registry.get_by_page_display_id(temp_page_id)
+        if page is not None:
+            raw = page._raw if isinstance(page._raw, dict) else {}
+            if is_page_online(raw, now=now):
+                return page, "page_display_id", ""
+            return page, "page_display_id", "bound_page_offline"
+
+    return None, "none", "temp_home_page_not_found"
 
 
 def resolve_bound_page_in_registry(
@@ -201,34 +287,47 @@ def resolve_bound_page_in_registry(
     reg = registry if isinstance(registry, PageRegistry) else PageRegistry.empty()
     bind_state = (binding.get("bind_state") or "").strip()
     if is_temp_home_bound_state(bind_state):
-        temp_page_id = (
-            (binding.get("temp_page_id") or binding.get("page_display_id") or "")
-            .strip()
-        )
-        if not temp_page_id:
-            return {
-                **empty,
-                "reason_code": "temp_home_page_not_found",
-            }
-        page = reg.get_by_page_display_id(temp_page_id)
+        page, matched_by, reason_code = _resolve_page_channel_page(reg, binding, now=now)
         if page is None:
             return {
                 **empty,
-                "reason_code": "temp_home_page_not_found",
+                "matched_by": matched_by or "none",
+                "reason_code": reason_code or "temp_home_page_not_found",
             }
         raw = page._raw if isinstance(page._raw, dict) else {}
         page_url = page_url_from(raw) or (page.url or "")
-        page_type = (raw.get("page_type") or page.page_type or "").strip()
-        is_home = is_prebound_home_page(raw, now=now) or page_type == "home"
-        if not is_home:
+        page_conv = (raw.get("conversation_id") or page.conversation_id or "").strip()
+        if page_conv:
+            online = is_page_online(raw, now=now)
+            last_poll_at = float_ts(
+                raw.get("last_poll_at"),
+                default=0.0,
+                context="page_command.page_channel.promoted_poll",
+            )
             return {
                 "page": page,
-                "matched_by": "page_display_id",
+                "matched_by": matched_by,
+                "online": online,
+                "last_poll_at": last_poll_at,
+                "reason_code": "" if online else "bound_page_offline",
+                "relink_needed": False,
+                "bootstrap_conversation": False,
+                "target_page_id": (
+                    (binding.get("temp_page_id") or binding.get("page_no") or binding.get("page_display_id") or "")
+                    .strip()
+                ),
+            }
+        page_type = (raw.get("page_type") or page.page_type or "").strip()
+        is_home = is_prebound_home_page(raw, now=now) or page_type == "home" or not page_conv
+        if not is_home and not page_conv:
+            return {
+                "page": page,
+                "matched_by": matched_by,
                 "online": False,
                 "last_poll_at": float_ts(
                     raw.get("last_poll_at"),
                     default=0.0,
-                    context="page_command.temp_home.not_home_poll",
+                    context="page_command.page_channel.not_home_poll",
                 ),
                 "reason_code": "temp_home_page_not_home",
                 "relink_needed": False,
@@ -237,58 +336,66 @@ def resolve_bound_page_in_registry(
         last_poll_at = float_ts(
             raw.get("last_poll_at"),
             default=0.0,
-            context="page_command.temp_home.last_poll_at",
+            context="page_command.page_channel.last_poll_at",
         )
         if not online:
             return {
                 "page": page,
-                "matched_by": "page_display_id",
+                "matched_by": matched_by,
                 "online": False,
                 "last_poll_at": last_poll_at,
                 "reason_code": "bound_page_offline",
                 "relink_needed": False,
             }
+        target_page_id = (
+            (binding.get("temp_page_id") or binding.get("page_no") or binding.get("page_display_id") or "")
+            .strip()
+        )
         return {
             "page": page,
-            "matched_by": "page_display_id",
+            "matched_by": matched_by,
             "online": True,
             "last_poll_at": last_poll_at,
             "reason_code": "",
             "relink_needed": False,
             "bootstrap_conversation": True,
-            "target_page_id": temp_page_id,
+            "target_page_id": target_page_id,
         }
     bound_client = (binding.get("client_id") or "").strip()
     bound_instance = (binding.get("page_instance_id") or "").strip()
     bound_conv = (binding.get("conversation_id") or "").strip()
+    if not bound_conv:
+        bound_conv = page_effective_conversation_id({"url": binding.get("url") or ""})
 
     page = reg.get_bound_page(binding, strict_identity=True)
     matched_by = "exact" if page is not None else "none"
     reason_code = ""
+    last_poll_at = 0.0
+    exact_online = False
 
     if page is not None:
         raw = page._raw if isinstance(page._raw, dict) else {}
-        page_conv = (raw.get("conversation_id") or page.conversation_id or "").strip()
-        if bound_conv and page_conv and page_conv != bound_conv:
-            return {
-                "page": page,
-                "matched_by": "identity_conversation_mismatch",
-                "online": False,
-                "last_poll_at": float_ts(
-                    raw.get("last_poll_at"),
-                    default=0.0,
-                    context="page_command.resolve.mismatch_poll",
-                ),
-                "reason_code": "conversation_id_mismatch",
-                "relink_needed": False,
-            }
-        online = is_page_online(raw, now=now)
+        page_conv = page_effective_conversation_id(raw)
         last_poll_at = float_ts(
             raw.get("last_poll_at"),
             default=0.0,
             context="page_command.resolve.last_poll_at",
         )
-        if online:
+        if bound_conv and page_conv and page_conv != bound_conv:
+            return {
+                "page": page,
+                "matched_by": "identity_conversation_mismatch",
+                "online": False,
+                "last_poll_at": last_poll_at,
+                "reason_code": "conversation_id_mismatch",
+                "relink_needed": False,
+                "offline_fallback": False,
+            }
+        exact_online = is_page_online(raw, now=now)
+        exact_usable = exact_online and (
+            not bound_conv or bool(page_conv)
+        )
+        if exact_usable:
             return {
                 "page": page,
                 "matched_by": "exact",
@@ -296,23 +403,87 @@ def resolve_bound_page_in_registry(
                 "last_poll_at": last_poll_at,
                 "reason_code": "",
                 "relink_needed": False,
+                "offline_fallback": False,
             }
         reason_code = "bound_page_offline"
     else:
         reason_code = "bound_page_offline"
+
+    offline_fallback_attempted = bool(bound_conv)
+    if offline_fallback_attempted:
+        logger.info(
+            "[BOUND_PAGE][OFFLINE_FALLBACK_START] "
+            "session_binding client_id=%s page_instance_id=%s conversation_id=%s "
+            "exact_matched=%s exact_online=%s reason=%s",
+            bound_client or "-",
+            bound_instance or "-",
+            bound_conv or "-",
+            matched_by == "exact",
+            exact_online,
+            reason_code or "-",
+        )
+        fallback, fb_matched_by = find_online_fallback_page_for_binding(
+            reg,
+            binding,
+            now=now,
+            require_conversation_syncable=False,
+        )
+        if fallback is not None:
+            fb_raw = fallback._raw if isinstance(fallback._raw, dict) else {}
+            fb_last_poll_at = float_ts(
+                fb_raw.get("last_poll_at"),
+                default=0.0,
+                context="page_command.resolve.offline_fallback_poll",
+            )
+            relink_needed = (
+                (fallback.client_id or "").strip() != bound_client
+                or (fallback.page_instance_id or "").strip() != bound_instance
+            )
+            logger.info(
+                "[BOUND_PAGE][OFFLINE_FALLBACK_FOUND] "
+                "old_client_id=%s old_page_instance_id=%s old_conversation_id=%s "
+                "new_client_id=%s new_page_instance_id=%s new_page_no=%s "
+                "matched_by=%s reason=%s",
+                bound_client or "-",
+                bound_instance or "-",
+                bound_conv or "-",
+                (fallback.client_id or "-"),
+                (fallback.page_instance_id or "-"),
+                str(fb_raw.get("page_no") or fallback.page_display_id or "-"),
+                fb_matched_by or "same_conversation",
+                reason_code or "bound_page_offline",
+            )
+            return {
+                "page": fallback,
+                "matched_by": fb_matched_by or "same_conversation",
+                "online": True,
+                "last_poll_at": fb_last_poll_at,
+                "reason_code": "",
+                "relink_needed": relink_needed,
+                "offline_fallback": True,
+            }
+        logger.info(
+            "[BOUND_PAGE][OFFLINE_FALLBACK_MISS] "
+            "old_client_id=%s old_page_instance_id=%s old_conversation_id=%s reason=%s",
+            bound_client or "-",
+            bound_instance or "-",
+            bound_conv or "-",
+            reason_code or "bound_page_offline",
+        )
 
     if not allow_same_conversation or not bound_conv:
         return {
             "page": page,
             "matched_by": matched_by,
             "online": False,
-            "last_poll_at": 0.0,
+            "last_poll_at": last_poll_at,
             "reason_code": reason_code,
             "relink_needed": False,
+            "offline_fallback": False,
         }
 
     fallback = _pick_fresh_conversation_page(
-        reg, bound_conv, now=now, for_sync=False
+        reg, bound_conv, now=now, for_sync=False, binding=binding
     )
     if fallback is None:
         return {
@@ -322,6 +493,7 @@ def resolve_bound_page_in_registry(
             "last_poll_at": 0.0,
             "reason_code": reason_code,
             "relink_needed": False,
+            "offline_fallback": False,
         }
 
     raw = fallback._raw if isinstance(fallback._raw, dict) else {}
@@ -341,6 +513,7 @@ def resolve_bound_page_in_registry(
         "last_poll_at": last_poll_at,
         "reason_code": "",
         "relink_needed": relink_needed,
+        "offline_fallback": True,
     }
 
 
@@ -406,16 +579,26 @@ def resolve_page_command_target(
                 page=page,
                 matched_by=matched_by,
             )
-        poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
-        if not poll_ok:
-            return command_target_result(
-                ok=False,
-                reason=poll_reason,
-                reason_code=poll_code,
-                page=page,
-                matched_by=matched_by,
+        raw = page._raw if isinstance(page._raw, dict) else {}
+        need_fallback = False
+        if not can_sync_conversation(raw, now=now):
+            need_fallback = True
+        else:
+            poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
+            if not poll_ok:
+                need_fallback = True
+        if need_fallback and allow_same_conversation:
+            fresh = _pick_fresh_conversation_page(
+                reg,
+                binding.get("conversation_id") or "",
+                now=now,
+                for_sync=True,
             )
-        if not can_sync_conversation(page._raw, now=now):
+            if fresh is not None:
+                page = fresh
+                matched_by = "same_conversation"
+                raw = page._raw if isinstance(page._raw, dict) else {}
+        if not can_sync_conversation(raw, now=now):
             return command_target_result(
                 ok=False,
                 reason="绑定页面暂不可同步对话",
@@ -425,27 +608,13 @@ def resolve_page_command_target(
             )
         poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(page, now=now)
         if not poll_ok:
-            if allow_same_conversation and cmd != "sync_conversation" and matched_by == "same_conversation":
-                fresh = _pick_fresh_conversation_page(
-                    reg,
-                    binding.get("conversation_id") or "",
-                    now=now,
-                    for_sync=True,
-                )
-                if fresh is not None:
-                    page = fresh
-                    matched_by = "same_conversation"
-                    poll_ok, poll_code, poll_reason = evaluate_sync_poll_freshness(
-                        page, now=now
-                    )
-            if not poll_ok:
-                return command_target_result(
-                    ok=False,
-                    reason=poll_reason,
-                    reason_code=poll_code,
-                    page=page,
-                    matched_by=matched_by,
-                )
+            return command_target_result(
+                ok=False,
+                reason=poll_reason,
+                reason_code=poll_code,
+                page=page,
+                matched_by=matched_by,
+            )
         return command_target_result(
             ok=True, reason="", reason_code="", page=page, matched_by=matched_by
         )

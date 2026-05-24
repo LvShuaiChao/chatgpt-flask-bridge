@@ -465,6 +465,116 @@ def _archive_waiting(message_id):
     return msg
 
 
+WAITING_TIMEOUT_SEC = 1800  # 30 分钟
+
+
+def cleanup_stale_waiting_messages():
+    """清理 _outbound_waiting 和 _control_waiting 中超时未收到最终回复的消息。
+
+    对状态为 acked / delivered / waiting_reply 且超过 30 分钟无最终 report 的消息，
+    标记为 stale/failed，移入 history，然后从 waiting 字典中删除。
+    """
+    now = _now()
+    timeout = WAITING_TIMEOUT_SEC
+    stale_outbound_ids = []
+    with st._state_lock:
+        for message_id, msg in list(st._outbound_waiting.items()):
+            if not isinstance(msg, dict):
+                stale_outbound_ids.append(message_id)
+                continue
+            status = (msg.get("message_status") or "").strip()
+            if status not in ("acked", "delivered", "waiting_reply"):
+                continue
+            if _is_finalized(msg):
+                stale_outbound_ids.append(message_id)
+                continue
+            # determine waiting start time
+            ts = msg.get("acked_at") or msg.get("delivered_at") or msg.get("created_at") or 0
+            try:
+                elapsed = now - float(ts)
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            if elapsed < timeout:
+                continue
+            stale_outbound_ids.append(message_id)
+        stale_control_ids = []
+        for message_id, msg in list(st._control_waiting.items()):
+            if not isinstance(msg, dict):
+                stale_control_ids.append(message_id)
+                continue
+            status = (msg.get("message_status") or "").strip()
+            if status not in ("acked", "delivered", "waiting_reply"):
+                continue
+            if _is_finalized(msg):
+                stale_control_ids.append(message_id)
+                continue
+            ts = msg.get("acked_at") or msg.get("delivered_at") or msg.get("created_at") or 0
+            try:
+                elapsed = now - float(ts)
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            if elapsed < timeout:
+                continue
+            stale_control_ids.append(message_id)
+        # move stale outbound to history
+        for message_id in stale_outbound_ids:
+            msg = st._outbound_waiting.pop(message_id, None)
+            if msg is None:
+                continue
+            client_id = (msg.get("delivered_to") or msg.get("client_id") or "-").strip()
+            page_key = (msg.get("delivered_page_instance_id") or "").strip()
+            ts = msg.get("acked_at") or msg.get("delivered_at") or msg.get("created_at") or 0
+            try:
+                wait_duration = now - float(ts)
+            except (TypeError, ValueError):
+                wait_duration = 0.0
+            old_status = (msg.get("message_status") or "-").strip()
+            msg["message_status"] = "failed"
+            msg["error_detail"] = "timeout_no_final_report"
+            msg["finalized_at"] = now
+            st._outbound_history.append(dict(msg))
+            _log(
+                "[WAITING][TIMEOUT_RELEASE] "
+                f"message_id={message_id or '-'} "
+                f"client_id={client_id} "
+                f"page_key={page_key or '-'} "
+                f"wait_duration_sec={int(wait_duration)} "
+                f"old_status={old_status}"
+            )
+        # move stale control to history
+        for message_id in stale_control_ids:
+            msg = st._control_waiting.pop(message_id, None)
+            if msg is None:
+                continue
+            client_id = (msg.get("delivered_to") or msg.get("client_id") or "-").strip()
+            ts = msg.get("acked_at") or msg.get("delivered_at") or msg.get("created_at") or 0
+            try:
+                wait_duration = now - float(ts)
+            except (TypeError, ValueError):
+                wait_duration = 0.0
+            old_status = (msg.get("message_status") or "-").strip()
+            msg["message_status"] = "failed"
+            msg["error_detail"] = "timeout_no_final_report"
+            msg["finalized_at"] = now
+            st._outbound_history.append(dict(msg))
+            _log(
+                "[WAITING][TIMEOUT_RELEASE] "
+                f"message_id={message_id or '-'} "
+                f"client_id={client_id} "
+                f"page_key=- "
+                f"wait_duration_sec={int(wait_duration)} "
+                f"old_status={old_status}"
+            )
+        if stale_outbound_ids or stale_control_ids:
+            _log(
+                "[WAITING][TIMEOUT_CLEANUP] "
+                f"outbound_released={len(stale_outbound_ids)} "
+                f"control_released={len(stale_control_ids)} "
+                f"remaining_outbound={len(st._outbound_waiting)} "
+                f"remaining_control={len(st._control_waiting)}"
+            )
+
+
 def _waiting_messages_for_client(client_id):
     return [
         msg
@@ -612,37 +722,104 @@ def _message_matches_page(msg, body):
     if not _message_matches_client(msg, client_id):
         return False
 
-    target_page_id = (msg.get("target_page_id") or "").strip()
-    if target_page_id:
-        body_page_id = (
-            str(body.get("page_display_id") or body.get("page_no") or "").strip()
-        )
-        if not body_page_id or body_page_id != target_page_id:
-            return False
+    is_bootstrap = bool(msg.get("bootstrap_conversation"))
 
-    if msg.get("bootstrap_conversation"):
+    if not is_bootstrap:
+        target_page_id = (msg.get("target_page_id") or "").strip()
+        if target_page_id:
+            body_page_id = (
+                str(body.get("page_display_id") or body.get("page_no") or "").strip()
+            )
+            if not body_page_id or body_page_id != target_page_id:
+                return False
+
+    if is_bootstrap:
         page_type = (body.get("page_type") or "").strip()
         if page_type != "home":
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=bootstrap_not_home "
+                f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                f"page_type={page_type or '-'} "
+                f"client_id={(body.get('client_id') or '-')}"
+            )
             return False
+
         body_conv = (body.get("conversation_id") or "").strip()
         if body_conv:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=bootstrap_has_conversation "
+                f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                f"body_conv={body_conv or '-'} "
+                f"client_id={(body.get('client_id') or '-')}"
+            )
             return False
+
         target_client = read_bridge_client_id(msg)
         target_instance = read_bridge_page_instance_id(msg)
         body_client = (body.get("client_id") or "").strip()
         body_instance = (body.get("page_instance_id") or "").strip()
+
         if target_client and target_client != body_client:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=bootstrap_client_mismatch "
+                f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                f"target_client={target_client or '-'} "
+                f"body_client={body_client or '-'}"
+            )
             return False
+
         if target_instance and target_instance != body_instance:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=bootstrap_page_instance_mismatch "
+                f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                f"target_instance={target_instance or '-'} "
+                f"body_instance={body_instance or '-'}"
+            )
             return False
+
+        target_page_id = (msg.get("target_page_id") or "").strip()
+        body_page_id = (
+            str(body.get("page_display_id") or body.get("page_no") or "").strip()
+        )
+
+        if target_page_id and body_page_id and body_page_id != target_page_id:
+            _log(
+                "[BRIDGE][MATCH_SKIP] reason=bootstrap_page_id_mismatch "
+                f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                f"target_page_id={target_page_id or '-'} "
+                f"body_page_id={body_page_id or '-'} "
+                f"target_client={target_client or '-'} "
+                f"body_client={body_client or '-'} "
+                f"target_instance={target_instance or '-'} "
+                f"body_instance={body_instance or '-'}"
+            )
+            return False
+
         target_bind = (msg.get("bind_request_id") or "").strip()
         body_bind = (body.get("bind_request_id") or "").strip()
         if target_bind:
             if not body_bind or body_bind != target_bind:
+                _log(
+                    "[BRIDGE][MATCH_SKIP] reason=bootstrap_bind_request_mismatch "
+                    f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+                    f"target_bind={target_bind or '-'} "
+                    f"body_bind={body_bind or '-'} "
+                    f"client_id={body_client or '-'}"
+                )
                 return False
+
         target_conv = (msg.get("conversation_id") or "").strip()
         if target_conv:
             return False
+
+        _log(
+            "[BRIDGE][MATCH_OK] type=bootstrap "
+            f"message_id={get_bridge_message_id(msg)[:8] or '-'} "
+            f"target_page_id={target_page_id or '-'} "
+            f"body_page_id={body_page_id or '-'} "
+            f"client_id={body_client or '-'} "
+            f"page_instance_id={body_instance or '-'}"
+        )
         return True
 
     body_conv_early = (body.get("conversation_id") or "").strip()
@@ -1081,17 +1258,14 @@ def _log_poll_request(body):
     client_id = (body.get("client_id") or "").strip()
     page_type = (body.get("page_type") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
-    visible = (body.get("visibility_state") or "-")
-    focus = "yes" if body.get("has_focus") else "no"
-    input_txt = "yes" if body.get("can_accept_input", True) else "no"
-    state = (body.get("response_state") or "-").strip() or "-"
-    poll_url = page_url_from(body) or "-"
+    page_instance_id = (body.get("page_instance_id") or "-")
+    page_no = str(body.get("page_display_id") or body.get("page_no") or "-").strip() or "-"
     _poll_log_immediate(
-        f"[BRIDGE][POLL][REQUEST] client_id={client_id} "
-        f"page_instance_id={(body.get('page_instance_id') or '-')} "
-        f"page_type={page_type or '-'} conversation_id={conversation_id or '-'} "
-        f"url={poll_url} visible={visible} focus={focus} "
-        f"input={input_txt} state={state}"
+        f"[BRIDGE][POLL] client_id={client_id} "
+        f"page_instance_id={page_instance_id} "
+        f"page_no={page_no} "
+        f"page_type={page_type or '-'} "
+        f"conversation_id={conversation_id or '-'}"
     )
 
 
@@ -1217,8 +1391,8 @@ def _handle_poll_impl(
         client_id, page_type, conversation_id, url
     )
     _touch_tampermonkey(body, action="poll")
-    if st._debug_mode:
-        _log_poll_request(body)
+    cleanup_stale_waiting_messages()
+    _log_poll_request(body)
     need_notify = False
     now = _now()
     cmd = _pop_control_command_for_client(body)
@@ -1300,6 +1474,13 @@ def _handle_poll_impl(
             _claim_message(msg, client_id)
             message_id = get_bridge_message_id(msg)
             st._outbound_waiting[message_id] = msg
+            page_instance_id = (body.get("page_instance_id") or "-").strip() or "-"
+            _log(
+                f"[BRIDGE][QUEUE_TAKE] message_id={message_id[:8] or '-'} "
+                f"client_id={client_id} "
+                f"page_instance_id={page_instance_id} "
+                f"bootstrap=true"
+            )
             _log(
                 f"[BRIDGE][WAITING_ADD] message_id={message_id[:8]}… "
                 f"session_id={(msg.get('session_id') or '-')[:8]} "
@@ -1339,6 +1520,14 @@ def _handle_poll_impl(
         _claim_message(msg, client_id)
         message_id = get_bridge_message_id(msg)
         st._outbound_waiting[message_id] = msg
+        page_instance_id = (body.get("page_instance_id") or "-").strip() or "-"
+        is_bootstrap = bool(msg.get("bootstrap_conversation"))
+        _log(
+            f"[BRIDGE][QUEUE_TAKE] message_id={message_id[:8] or '-'} "
+            f"client_id={client_id} "
+            f"page_instance_id={page_instance_id} "
+            f"bootstrap={'true' if is_bootstrap else 'false'}"
+        )
         _log(
             f"[BRIDGE][WAITING_ADD] message_id={message_id[:8]}… "
             f"session_id={(msg.get('session_id') or '-')[:8]} "
@@ -1793,6 +1982,14 @@ def _handle_ack(body):
                 waiting,
             )
     if success:
+        ack_conv = (body.get("conversation_id") or "").strip()
+        if not ack_conv and waiting:
+            ack_conv = (waiting.get("conversation_id") or "").strip()
+        _log(
+            "[BRIDGE][ACK][SEND_SUCCESS] "
+            f"message_id={message_id} "
+            f"conversation_id={ack_conv or '-'}"
+        )
         _log(
             "[BRIDGE][ACK][OK] "
             f"client_id={client_id} message_id={message_id} "

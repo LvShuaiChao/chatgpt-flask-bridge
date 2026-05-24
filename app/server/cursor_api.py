@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import time
+import traceback
+import uuid
 
+from app.core import job_scheduler as _job_scheduler
 from app.server import state as st
-from app.server.runtime_state import _format_time, _log, _now
+from app.server.runtime_state import _log, _notify_status
+
+CURSOR_ONLINE_TIMEOUT_SEC = st.CURSOR_ONLINE_TIMEOUT_SEC
 
 def _cursor_now_ts():
     return time.time()
@@ -69,6 +74,17 @@ def enqueue_cursor_task(task):
     task.setdefault("status", "queued")
 
     with st.cursor_task_lock:
+        current_size = len(st.cursor_task_queue)
+        max_size = st.MAX_CURSOR_TASK_QUEUE_SIZE
+        if current_size >= max_size:
+            _log(
+                "[CURSOR_BRIDGE][TASK_QUEUE_FULL] "
+                f"current_size={current_size} "
+                f"max_size={max_size} "
+                f"task_id={task_id} "
+                f"title={task.get('title') or '-'}"
+            )
+            return False, f"cursor task queue full ({current_size}/{max_size})"
         st.cursor_task_queue.append(task)
         st.cursor_task_history.append({
             "task_id": task_id,

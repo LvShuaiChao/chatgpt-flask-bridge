@@ -1,8 +1,6 @@
 """Bridge JSON request/response logging (full payload, no truncation)."""
 from __future__ import annotations
 
-import traceback
-
 from app.constants import DEBUG_FULL_BRIDGE_JSON
 from app.server.runtime_state import _is_bridge_debug_enabled, _log
 from app.utils.bridge_json_file_log import append_bridge_json_log
@@ -67,24 +65,6 @@ def _log_bridge_json_block(tag, fields, payload):
         parts.append(f"{key}={value}")
     parts.append(f"json={dumps_full_json_for_log(payload)}")
     _log_bridge_json_line("\n".join(parts))
-
-
-def _log_bridge_json_payload(direction, payload, *, action="", event="", message_id="", client_id=""):
-    action = (action or "").strip() or "-"
-    event = (event or "").strip() or "-"
-    message_id = (message_id or "").strip() or "-"
-    client_id = (client_id or "").strip() or "-"
-    tag = f"[BRIDGE][JSON][{direction}]"
-    _log_bridge_json_block(
-        tag,
-        {
-            "action": action,
-            "event": event,
-            "client_id": client_id,
-            "message_id": message_id,
-        },
-        payload if isinstance(payload, dict) else {"payload": payload},
-    )
 
 
 def log_tm_to_server_full(body):

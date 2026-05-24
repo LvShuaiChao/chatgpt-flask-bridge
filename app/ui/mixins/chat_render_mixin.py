@@ -529,7 +529,7 @@ class ChatRenderMixin:
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, scroll_policy="force_bottom")
         self._refresh_session_list(select_session_id=session.session_id)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
 
     def _add_system_message_once(self, text, dedupe_seconds=10):
         text = (text or "").strip()
@@ -579,7 +579,7 @@ class ChatRenderMixin:
         else:
             self._mark_session_pending(session.session_id)
         self._refresh_session_list(select_session_id=self._current_session_id)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
 
@@ -603,6 +603,22 @@ class ChatRenderMixin:
         self._log_chat_update_assistant(session, turn_id, status_text, len(text or ""), msg_id)
         self._apply_reply_ui_change(session)
 
+    def _assistant_message_is_waiting_placeholder(self, message):
+        """判断 assistant 消息是否仍是等待占位"""
+        if message is None:
+            return False
+        if message.role != "assistant":
+            return False
+        content = (message.content or "").strip()
+        ui_status = (message.ui_status or "").strip()
+        from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
+        if content in ASSISTANT_WAIT_TEXTS:
+            return True
+        if ui_status in PENDING_ASSISTANT_STATUSES:
+            return True
+        if ui_status in ("sending", "queued"):
+            return True
+        return False
     def _set_reply_waiting(self, session, turn_id):
         target = self._find_assistant_by_turn(session, turn_id)
         if target is None:
@@ -616,5 +632,5 @@ class ChatRenderMixin:
         if session.session_id == self._current_session_id:
             self._render_session_chat(session, scroll_policy="force_bottom")
         self._refresh_session_list(select_session_id=session.session_id)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return True

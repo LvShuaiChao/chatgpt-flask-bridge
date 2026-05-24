@@ -138,7 +138,6 @@
     let appendingLog = false;
     let toolboxWatchdogTimer = 0;
     let globalErrorGuardBound = false;
-    let toolboxEnterSendLocked = false;
     let hiddenTitlePosition = null;
     let hiddenTitlePositionLocked = false;
 
@@ -989,6 +988,15 @@
           box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
         }
 
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge.cgpt-toolbox-turn-count-warning {
+          color: #ffffff;
+          background: linear-gradient(180deg, #ef4444 0%, #b91c1c 100%);
+          border-color: rgba(248, 113, 113, 0.85);
+          box-shadow:
+            0 0 0 1px rgba(248, 113, 113, 0.22),
+            inset 0 1px 0 rgba(255, 255, 255, 0.10);
+        }
+
         .cgpt-status-pill {
           display: inline-flex;
           align-items: center;
@@ -1012,22 +1020,24 @@
           border-color: rgba(74, 222, 128, 0.9);
         }
 
-        .cgpt-state-waiting {
-          color: #dbeafe;
-          background: rgba(37, 99, 235, 0.88);
-          border-color: rgba(96, 165, 250, 0.9);
-        }
-
-        .cgpt-state-generating {
+        .cgpt-state-waiting,
+        .cgpt-state-sending {
           color: #ffedd5;
           background: rgba(217, 119, 6, 0.92);
           border-color: rgba(251, 191, 36, 0.9);
         }
 
-        .cgpt-state-blocked {
+        .cgpt-state-generating,
+        .cgpt-state-answering {
           color: #fee2e2;
           background: rgba(220, 38, 38, 0.9);
           border-color: rgba(248, 113, 113, 0.9);
+        }
+
+        .cgpt-state-blocked {
+          color: #e5e7eb;
+          background: rgba(71, 85, 105, 0.86);
+          border-color: rgba(148, 163, 184, 0.65);
         }
 
         .cgpt-state-offline,
@@ -1690,6 +1700,29 @@
           background: #b45309;
         }
 
+        .cgpt-btn.cgpt-btn-waiting-danger,
+        .cgpt-btn[data-wait-danger="1"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35), 0 0 10px rgba(239, 68, 68, 0.35) !important;
+        }
+
+        .cgpt-btn.cgpt-btn-waiting-danger:hover,
+        .cgpt-btn[data-wait-danger="1"]:hover {
+          background: #b91c1c !important;
+          border-color: #f87171 !important;
+          color: #ffffff !important;
+        }
+
+        .cgpt-btn.cgpt-btn-waiting-danger:disabled,
+        .cgpt-btn[data-wait-danger="1"]:disabled {
+          background: #991b1b !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+        }
+
         .cgpt-btn.teal {
           background: #0f766e;
           border-color: #14b8a6;
@@ -1749,6 +1782,17 @@
         #cgpt-upload-start:disabled {
           opacity: 0.55;
           cursor: not-allowed;
+        }
+
+        .cgpt-upload-action-toolbar {
+          margin: 0 0 10px;
+          min-width: 0;
+          max-width: 100%;
+        }
+
+        .cgpt-upload-action-toolbar .cgpt-upload-action-row {
+          margin-top: 0;
+          justify-content: flex-start;
         }
 
         .cgpt-upload-action-row {
@@ -1877,6 +1921,17 @@
           border-radius: 9px;
           padding: 8px;
           outline: none;
+        }
+
+        #${APP.rootId} input[type="number"]::-webkit-outer-spin-button,
+        #${APP.rootId} input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+
+        #${APP.rootId} input[type="number"] {
+          appearance: textfield;
+          -moz-appearance: textfield;
         }
 
         .cgpt-textarea {
@@ -2485,6 +2540,92 @@
           margin-top: 8px;
         }
 
+        .cgpt-autoq-batch-subtabs {
+          display: flex;
+          gap: 6px;
+          margin-top: 8px;
+          padding: 4px;
+          border: 1px solid #2f3542;
+          background: #111827;
+          border-radius: 10px;
+        }
+
+        .cgpt-autoq-batch-subtab {
+          flex: 1;
+          height: 30px;
+          border: 1px solid #334155;
+          background: #171b22;
+          color: #cbd5e1;
+          border-radius: 8px;
+          cursor: pointer;
+          font-size: 12px;
+        }
+
+        .cgpt-autoq-batch-subtab:hover {
+          background: #202633;
+        }
+
+        .cgpt-autoq-batch-subtab.active {
+          background: #1d4ed8;
+          border-color: #3b82f6;
+          color: #ffffff;
+          font-weight: 700;
+        }
+
+        .cgpt-autoq-batch-subtab-content {
+          margin-top: 8px;
+        }
+
+        .cgpt-autoq-batch-tab-panel-scroll {
+          max-height: 420px;
+          overflow-y: auto;
+          padding-right: 2px;
+        }
+
+        .cgpt-autoq-batch-actions-slot .cgpt-autoq-actions {
+          margin-top: 10px;
+          flex-wrap: wrap;
+        }
+
+        .cgpt-autoq-batch-settings-slot .cgpt-autoq-settings-section {
+          margin: 0;
+          padding: 0;
+          border: none;
+          background: transparent;
+        }
+
+        .cgpt-autoq-batch-settings-slot .cgpt-section-title {
+          margin-top: 0;
+        }
+
+        .cgpt-autoq-task-list-toolbar-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          justify-content: flex-end;
+        }
+
+        .cgpt-autoq-batch-rules-continue {
+          min-height: 110px;
+          max-height: 140px;
+          resize: vertical;
+        }
+
+        .cgpt-autoq-batch-rules-preview {
+          min-height: 130px;
+          max-height: 160px;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid .cgpt-autoq-batch-rules-inline-row {
+          grid-column: span 1;
+        }
+
+        .cgpt-autoq-task-initial-field {
+          min-height: 160px;
+          max-height: 220px;
+          resize: vertical;
+        }
+
         .cgpt-autoq-task-list-toolbar {
           display: flex;
           align-items: center;
@@ -2497,7 +2638,7 @@
           display: flex;
           flex-direction: column;
           gap: 6px;
-          max-height: 220px;
+          max-height: 260px;
           overflow-y: auto;
           border: 1px solid #2f3542;
           border-radius: 10px;
@@ -2591,6 +2732,79 @@
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 8px;
+        }
+
+        .cgpt-autoq-continue-preview {
+          margin: 0;
+          padding: 8px 10px;
+          border-radius: 8px;
+          border: 1px solid #2f3542;
+          background: #0f172a;
+          color: #cbd5e1;
+          font-size: 12px;
+          line-height: 1.45;
+          white-space: pre-wrap;
+          word-break: break-word;
+          max-height: 180px;
+          overflow: auto;
+        }
+
+        .cgpt-prompt-batch-task-check {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          margin-right: 6px;
+          font-size: 12px;
+          color: #94a3b8;
+        }
+
+        .cgpt-autoq-import-prompt-btn {
+          border-color: #3b82f6;
+          color: #93c5fd;
+        }
+
+        .cgpt-autoq-import-prompt-btn:hover {
+          background: rgba(59, 130, 246, 0.15);
+        }
+
+        .cgpt-autoq-prompt-picker-toolbar {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(120px, 160px) auto auto;
+          gap: 8px;
+          margin-top: 10px;
+          align-items: center;
+        }
+
+        .cgpt-autoq-prompt-picker-item {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+        }
+
+        .cgpt-autoq-prompt-picker-item-title {
+          font-weight: 600;
+        }
+
+        .cgpt-autoq-prompt-picker-item-meta {
+          color: #94a3b8;
+          line-height: 1.35;
+        }
+
+        .cgpt-autoq-task-item-source {
+          display: block;
+          margin-top: 2px;
+          font-size: 11px;
+          color: #94a3b8;
+          line-height: 1.35;
+        }
+
+        .cgpt-autoq-prompt-picker-list {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          max-height: 360px;
+          overflow: auto;
+          margin-top: 8px;
         }
 
         .cgpt-autoq-task-advanced {
@@ -3848,97 +4062,6 @@
       return !!(nextPanel && nextToggle && nextHeader && nextContent);
     }
 
-    function bindPanelHeaderDrag() {
-      if (!panel || !root) return;
-
-      const header = panel.querySelector('.cgpt-toolbox-header');
-      if (!header) return;
-      if (header.dataset.panelDragBound === '1') return;
-
-      header.dataset.panelDragBound = '1';
-      header.style.cursor = 'move';
-
-      header.addEventListener('pointerdown', (event) => {
-        if (event.button != null && event.button !== 0) return;
-
-        const target = event.target instanceof Element ? event.target : null;
-        if (
-          target &&
-          target.closest('button,input,textarea,select,[contenteditable="true"],[role="button"]')
-        ) {
-          return;
-        }
-
-        if (!panel || !root) return;
-
-        const rect = panel.getBoundingClientRect();
-        const startX = event.clientX;
-        const startY = event.clientY;
-        const startLeft = rect.left;
-        const startTop = rect.top;
-
-        isDraggingToolbox = true;
-        root.classList.add('cgpt-toolbox-dragging');
-        addGlobalDraggingClass();
-
-        // Hide floating title immediately
-        const floatingTitle = getFloatingTitleEl();
-        if (floatingTitle) {
-          floatingTitle.style.display = 'none';
-        }
-
-        try {
-          header.setPointerCapture(event.pointerId);
-        } catch (error) {
-          const errText = error && error.message ? error.message : String(error);
-          console.warn('[ChatGPT toolbox] header setPointerCapture failed', error);
-          appendLog('[TOOLBOX_DRAG][error] header setPointerCapture failed: ' + errText);
-        }
-
-        const onMove = (moveEvent) => {
-          moveEvent.preventDefault();
-          moveEvent.stopPropagation();
-
-          const nextLeft = startLeft + moveEvent.clientX - startX;
-          const nextTop = startTop + moveEvent.clientY - startY;
-
-          applyPanelPosition(nextLeft, nextTop);
-        };
-
-        const onUp = (upEvent) => {
-          upEvent.preventDefault();
-          upEvent.stopPropagation();
-
-          window.removeEventListener('pointermove', onMove, true);
-          window.removeEventListener('pointerup', onUp, true);
-          window.removeEventListener('pointercancel', onUp, true);
-
-          try {
-            header.releasePointerCapture(event.pointerId);
-          } catch (error) {
-            const errText = error && error.message ? error.message : String(error);
-            console.warn('[ChatGPT toolbox] header releasePointerCapture failed', error);
-            appendLog('[TOOLBOX_DRAG][error] header releasePointerCapture failed: ' + errText);
-          }
-
-          isDraggingToolbox = false;
-          root.classList.remove('cgpt-toolbox-dragging');
-          removeGlobalDraggingClass();
-
-          keepPanelInViewport({ save: false });
-          savePanelPositionFromDom('panel-header-drag-end');
-          updateFloatingTitlePosition('panel-header-drag-end');
-        };
-
-        window.addEventListener('pointermove', onMove, true);
-        window.addEventListener('pointerup', onUp, true);
-        window.addEventListener('pointercancel', onUp, true);
-
-        event.preventDefault();
-        event.stopPropagation();
-      }, true);
-    }
-
     function create() {
       if (creatingToolbox && root) {
         return root;
@@ -4154,158 +4277,6 @@
       }
     }
 
-    function isToolboxPanelVisibleForHotkey() {
-      if (!panel) return false;
-
-      if (panel.classList.contains('cgpt-toolbox-hidden')) {
-        return false;
-      }
-
-      if (root?.classList?.contains('cgpt-toolbox-panel-hidden')) {
-        return false;
-      }
-
-      if (root?.classList?.contains('cgpt-toolbox-edge-hidden')) {
-        return false;
-      }
-
-      if (root?.classList?.contains('cgpt-edge-hidden')) {
-        return false;
-      }
-
-      return true;
-    }
-
-    function isEditableElementForToolboxHotkey(el) {
-      if (!el || el === document || el === window) return false;
-
-      const tagName = String(el.tagName || '').toLowerCase();
-
-      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
-        return true;
-      }
-
-      if (el.isContentEditable) {
-        return true;
-      }
-
-      const role = String(el.getAttribute?.('role') || '').toLowerCase();
-      if (role === 'textbox' || role === 'combobox' || role === 'searchbox') {
-        return true;
-      }
-
-      const editableParent = el.closest?.(
-        'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="searchbox"]',
-      );
-
-      return Boolean(editableParent);
-    }
-
-    function findToolboxSendMessageButton() {
-      if (!root) return null;
-
-      const selectors = [
-        '#cgpt-upload-start-send',
-      ];
-
-      for (const selector of selectors) {
-        const btn = root.querySelector(selector);
-        if (btn) return btn;
-      }
-
-      const buttons = Array.from(root.querySelectorAll('button'));
-      return buttons.find((btn) => {
-        const text = String(btn.textContent || '').trim();
-        return text === '发送消息' || text === '发送信息';
-      }) || null;
-    }
-
-    function shouldSkipEnterSendBecauseOtherButtonFocused(target, sendBtn) {
-      const focusedButton = target?.closest?.('button');
-
-      if (!focusedButton) {
-        return false;
-      }
-
-      if (focusedButton === sendBtn) {
-        return false;
-      }
-
-      return true;
-    }
-
-    function triggerToolboxSendMessageByEnter(event) {
-      if (!event) return;
-
-      if (event.key !== 'Enter') {
-        return;
-      }
-
-      if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
-        return;
-      }
-
-      if (event.isComposing) {
-        appendLog('[TOOLBOX_HOTKEY][enter-send-skip] reason=ime-composing');
-        return;
-      }
-
-      if (!isToolboxPanelVisibleForHotkey()) {
-        return;
-      }
-
-      const target = event.target;
-
-      if (!root || !root.contains(target)) {
-        return;
-      }
-
-      if (isEditableElementForToolboxHotkey(target)) {
-        return;
-      }
-
-      const sendBtn = findToolboxSendMessageButton();
-
-      if (!sendBtn) {
-        appendLog('[TOOLBOX_HOTKEY][enter-send-skip] reason=send-button-missing');
-        return;
-      }
-
-      if (shouldSkipEnterSendBecauseOtherButtonFocused(target, sendBtn)) {
-        appendLog('[TOOLBOX_HOTKEY][enter-send-skip] reason=other-button-focused');
-        return;
-      }
-
-      if (sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true') {
-        appendLog('[TOOLBOX_HOTKEY][enter-send-skip] reason=send-button-disabled');
-        return;
-      }
-
-      if (toolboxEnterSendLocked) {
-        appendLog('[TOOLBOX_HOTKEY][enter-send-skip] reason=locked');
-        return;
-      }
-
-      toolboxEnterSendLocked = true;
-
-      window.setTimeout(() => {
-        toolboxEnterSendLocked = false;
-      }, 800);
-
-      event.preventDefault();
-      event.stopPropagation();
-
-      appendLog('[TOOLBOX_HOTKEY][enter-send] trigger=enter');
-
-      try {
-        sendBtn.click();
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.warn('[ChatGPT toolbox] enter send failed', err);
-        appendLog(`[TOOLBOX_HOTKEY][enter-send-failed] error=${errText}`);
-      }
-    }
-
     function bindToolboxEnterSendHotkey() {
       if (!root) {
         appendLog('[TOOLBOX_HOTKEY][bind-skip] reason=root-missing');
@@ -4321,8 +4292,6 @@
       if (!root.hasAttribute('tabindex')) {
         root.setAttribute('tabindex', '-1');
       }
-
-      root.addEventListener('keydown', triggerToolboxSendMessageByEnter, true);
 
       root.addEventListener('pointerdown', (e) => {
         if (!root) return;
@@ -4354,7 +4323,49 @@
         }
       });
 
-      appendLog('[TOOLBOX_HOTKEY][enter-send-bind]');
+      appendLog('[TOOLBOX_HOTKEY][root-focus-bind] send=upload-shortcut-system');
+    }
+
+    function installNumberInputWheelGuard(rootEl) {
+      const scope = rootEl || root || document;
+
+      if (scope.dataset && scope.dataset.numberInputWheelGuardBound === '1') {
+        return;
+      }
+
+      if (scope.dataset) {
+        scope.dataset.numberInputWheelGuardBound = '1';
+      }
+
+      const onWheel = (event) => {
+        const target = event.target;
+        if (!target) return;
+
+        const input = target.closest && target.closest('input[type="number"], input[data-no-wheel-number="1"]');
+        if (!input) return;
+
+        const toolboxRoot = input.closest && input.closest(`#${APP.rootId}, .cgpt-toolbox, [data-cgpt-toolbox-root="1"]`);
+        if (!toolboxRoot) return;
+
+        event.preventDefault();
+
+        if (document.activeElement === input) {
+          input.blur();
+        }
+
+        const scrollBox =
+          input.closest('.cgpt-toolbox-content') ||
+          input.closest('.cgpt-toolbox-body') ||
+          input.closest('.cgpt-autoq-panel') ||
+          input.closest('.cgpt-scroll-area') ||
+          input.closest('[data-scroll-container="1"]');
+
+        if (scrollBox) {
+          scrollBox.scrollTop += event.deltaY;
+        }
+      };
+
+      scope.addEventListener('wheel', onWheel, { capture: true, passive: false });
     }
 
     function bindEvents() {
@@ -4388,6 +4399,7 @@
       ensureToolboxResizeHandle(panel);
       bindToolboxResize(panel);
       installToolboxKeyboardGuard(root);
+      installNumberInputWheelGuard(root);
 
       if (root.dataset.shellEventsVersion === SHELL_EVENTS_VERSION) {
         return;
@@ -6620,91 +6632,6 @@
       return true;
     }
 
-    function applyToolboxLayoutStateFromPage(pageState, reason = '') {
-      const layout = pageState && pageState.layout_state;
-
-      if (!layout || typeof layout !== 'object') {
-        return false;
-      }
-
-      const savedGlobal = readSavedPanelPosition();
-      const layoutUpdatedAt = Number(layout.updatedAt || 0);
-      const globalUpdatedAt = Number(savedGlobal && savedGlobal.updatedAt || 0);
-
-      const wantPanelHidden = layout.panel_hidden === true
-        || (layout.hidden === true && layout.edge_docked !== true && layout.floating_hidden !== true);
-      const wantEdgeDocked = layout.edge_docked === true || layout.edge_hidden === true;
-      const wantFloatingHidden = layout.floating_hidden === true;
-      const wantAnyHidden = wantPanelHidden || wantEdgeDocked || wantFloatingHidden || layout.hidden === true;
-      const currentlyHidden = isToolboxInAnyHiddenState();
-
-      if (wantAnyHidden !== currentlyHidden || wantEdgeDocked !== isEdgeHidden()) {
-        if (!wantAnyHidden) {
-          showPanel({ save: false, reason: reason || 'restore-layout-visible' });
-          setFloatingEdgeHidden(false, reason || 'restore-layout-visible');
-          clearFloatEdgeHiddenClasses();
-          root.classList.remove('cgpt-toolbox-edge-hidden', 'cgpt-toolbox-edge-revealed');
-          updateEdgeAutoHide();
-        } else if (wantEdgeDocked) {
-          hidePanel({ save: false, reason: reason || 'restore-layout-edge-docked' });
-          setFloatingEdgeHidden(false, reason || 'restore-layout-edge-docked');
-          root.classList.add('cgpt-toolbox-edge-hidden');
-          if (layout.edge_revealed === true) {
-            root.classList.add('cgpt-toolbox-edge-revealed');
-          } else {
-            root.classList.remove('cgpt-toolbox-edge-revealed');
-          }
-          clearFloatEdgeHiddenClasses();
-          normalizeEdgeVisualState(reason || 'restore-layout-edge-docked');
-        } else {
-          hidePanel({ save: false, reason: reason || 'restore-layout-hidden' });
-          if (wantFloatingHidden) {
-            setFloatingEdgeHidden(true, reason || 'restore-layout-floating-hidden');
-          } else if (isEdgeAutoHideEnabled()) {
-            updateEdgeAutoHide();
-          }
-        }
-      } else if (wantEdgeDocked && layout.edge_revealed === true && !root.classList.contains('cgpt-toolbox-edge-revealed')) {
-        root.classList.add('cgpt-toolbox-edge-revealed');
-        normalizeEdgeVisualState(reason || 'restore-layout-edge-revealed');
-      }
-
-      if (
-        layout.x != null &&
-        layout.y != null &&
-        panel &&
-        !layout.hidden &&
-        layoutUpdatedAt > 0 &&
-        layoutUpdatedAt >= globalUpdatedAt
-      ) {
-        const pos = clampPanelPosition({
-          left: Number(layout.x),
-          top: Number(layout.y),
-        });
-
-        applyPanelPosition(pos.left, pos.top);
-
-        MemoryManager.set(MemoryManager.KEYS.panelPosition, {
-          ...pos,
-          mode: 'panel',
-          edge: layout.anchor || '',
-          updatedAt: layoutUpdatedAt || Date.now(),
-        });
-
-        appendLog(
-          `[TOOLBOX][LAYOUT][apply-page-position] reason=${reason || '-'} left=${pos.left} top=${pos.top} source=page`,
-        );
-
-        return true;
-      }
-
-      appendLog(
-        `[TOOLBOX][LAYOUT][skip-page-position] reason=${reason || '-'} layoutUpdatedAt=${layoutUpdatedAt} globalUpdatedAt=${globalUpdatedAt}`,
-      );
-
-      return false;
-    }
-
     function savePanelPositionFromDom(reason = '') {
       if (!panel) {
         console.warn('[ChatGPT toolbox] savePanelPositionFromDom: panel 未初始化');
@@ -8539,8 +8466,7 @@
       }
 
       if (statusType === 'running') {
-        if (/回答中/.test(value)) return '回答中';
-        if (/生成中/.test(value)) return '生成中';
+        if (/回答中|生成中/.test(value)) return '回答中';
         if (/等待回答/.test(value)) return '等回答';
         if (/等待发送/.test(value)) return '等发送';
         if (/上传/.test(value)) return '上传中';
@@ -8559,6 +8485,51 @@
     function isPromptCountStatusText(text) {
       const value = String(text || '').trim();
       return /^\d+\s*条\s*[，,]\s*当前显示\s*\d+\s*条$/.test(value);
+    }
+
+    const TOP_MAIN_STATUS_SHORT_TEXTS = new Set([
+      '可输入',
+      '发送中',
+      '回答中',
+      '不可发送',
+      '不可发',
+      '离线',
+      '未连接',
+      '生成中',
+      '等待中',
+      '可发送',
+      '待输入',
+    ]);
+
+    function isTopMainStatusDisplayText(text, statusType, options) {
+      const opts = options || {};
+      const shortText = String(opts.shortText || '').trim();
+      if (shortText && TOP_MAIN_STATUS_SHORT_TEXTS.has(shortText)) {
+        return true;
+      }
+
+      const value = String(text || '').trim();
+      if (TOP_MAIN_STATUS_SHORT_TEXTS.has(value)) {
+        return true;
+      }
+
+      if (/^Bridge 已连接 · (回答中|可发送|待输入)/.test(value)) {
+        return true;
+      }
+
+      if (/^Bridge 离线/.test(value)) {
+        return true;
+      }
+
+      if (statusType === 'online' && /可发送|待输入/.test(value)) {
+        return true;
+      }
+
+      if ((statusType === 'danger' || statusType === 'running') && /回答中|生成中/.test(value)) {
+        return true;
+      }
+
+      return false;
     }
 
     function purgeForbiddenStatusBadge(reason) {
@@ -8621,10 +8592,14 @@
 
       const statusType = inferStatusType(latestStatusText, type);
       const persistent = shouldPersistStatus(statusType, latestStatusText, opts);
+      const shortText = buildShortStatusText(latestStatusText, statusType, opts);
+      const isTopMainStatus = isTopMainStatusDisplayText(latestStatusText, statusType, {
+        ...opts,
+        shortText,
+      });
 
-      if (persistent) {
+      if (persistent && !isTopMainStatus) {
         const badge = ensureStatusBadge();
-        const shortText = buildShortStatusText(latestStatusText, statusType, opts);
 
         if (badge) {
           badge.style.display = '';
@@ -8905,82 +8880,6 @@
       }
     }
 
-    function applyPagePanelPositionFromState(savedPos, reason = '') {
-      if (!root || !panel || !savedPos || typeof savedPos !== 'object') {
-        return;
-      }
-
-      const hasSavedPosition = Number.isFinite(Number(savedPos.left))
-        && Number.isFinite(Number(savedPos.top));
-
-      if (!hasSavedPosition) {
-        return;
-      }
-
-      const savedGlobal = readSavedPanelPosition();
-      const pageUpdatedAt = Number(savedPos.updatedAt || 0);
-      const globalUpdatedAt = Number(savedGlobal && savedGlobal.updatedAt || 0);
-
-      if (!(pageUpdatedAt > 0 && pageUpdatedAt >= globalUpdatedAt)) {
-        appendLog(
-          `[TOOLBOX_PAGE_STATE][skip-page-panel-position] reason=${reason || '-'} pageUpdatedAt=${pageUpdatedAt} globalUpdatedAt=${globalUpdatedAt}`,
-        );
-        return;
-      }
-
-      const savedSnapEdge = String(savedPos.edge || '').trim();
-      const hidden = isPanelHiddenNow();
-
-      clearFloatEdgeHiddenClasses();
-      root.classList.remove('cgpt-toolbox-edge-hidden', 'cgpt-toolbox-edge-revealed');
-      root.removeAttribute('data-edge-side');
-      delete root.dataset.edgeSide;
-
-      if (savedSnapEdge) {
-        root.dataset.snapEdge = savedSnapEdge;
-      } else {
-        root.dataset.snapEdge = '';
-      }
-
-      const pos = clampPanelPosition({
-        left: Number(savedPos.left),
-        top: Number(savedPos.top),
-      });
-
-      if (!hidden) {
-        applyPanelPosition(pos.left, pos.top);
-      } else {
-        root.style.left = `${pos.left}px`;
-        root.style.top = `${pos.top}px`;
-        root.style.right = 'auto';
-        root.style.bottom = 'auto';
-      }
-
-      window.requestAnimationFrame(() => {
-        if (hidden) {
-          keepRootInViewport({
-            save: false,
-          });
-          scheduleClampRootToViewport(reason || 'restore-page-position', {
-            save: false,
-            allowEdgeHidden: true,
-          });
-
-          if (root && root.dataset.snapEdge) {
-            snapRootToEdge({
-              log: false,
-            });
-          }
-        } else {
-          keepPanelInViewport({
-            save: false,
-          });
-        }
-
-        updateEdgeAutoHide();
-      });
-    }
-
     async function applyToolboxPageState(reason = '') {
       create();
 
@@ -9056,11 +8955,6 @@
           isApplyingToolboxPageState = false;
         }
       }
-    }
-
-    /** @deprecated TODO(cleanup-observe): 无引用，仅输出 disabled 日志。 */
-    async function applyConversationToolboxState(reason = '') {
-      appendLog(`[TOOLBOX_CONV_STATE][disabled] reason=${reason || '-'}`);
     }
 
     async function handleRouteChange(reason = '') {

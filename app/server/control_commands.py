@@ -141,7 +141,7 @@ def _push_targeted_page_command(command, log_label, client_id, url=None):
         command,
         log_label=log_label,
         client_id=client_id,
-        url=page_url,
+        url=url,
     )
 
 
@@ -258,11 +258,8 @@ def enqueue_control_command(
     )
 
 
-def push_close_other_pages(except_client_id):
-    """关闭除 except_client_id 外所有在线 ChatGPT 页面。"""
-    except_client_id = (except_client_id or "").strip()
-    if not except_client_id:
-        raise ValueError("except_client_id 不能为空")
+def _collect_online_chatgpt_client_pages():
+    """收集所有在线 ChatGPT 页面，返回 [(client_id, info), ...]。"""
     online_clients = []
     seen_client_ids = set()
     for info in _iter_page_registry_entries():
@@ -273,25 +270,124 @@ def push_close_other_pages(except_client_id):
             continue
         seen_client_ids.add(client_id)
         online_clients.append((client_id, info))
-    keep_online = any(client_id == except_client_id for client_id, _ in online_clients)
-    if not keep_online:
-        raise ValueError(
-            f"保留页面不在线或不存在，已取消关闭其他页面：client_id={except_client_id}"
-        )
-    msgs = []
-    for client_id, info in online_clients:
-        if client_id == except_client_id:
-            continue
-        page_url = page_url_from(info)
-        msgs.append(
-            _make_command_message(
-                "close_self",
-                client_id=client_id,
-                url=page_url,
+    return online_clients
+
+
+def close_chatgpt_pages(mode, *, except_client_id=None, target_client_id=None):
+    """
+    统一关闭 ChatGPT 页面入口。
+
+    mode:
+      - "other": 关闭除 except_client_id 外的所有在线页面
+      - "current_bound": 仅关闭 target_client_id 对应的在线页面
+
+    返回 dict: ok, closed, page_id, conversation_id, reason, messages
+    """
+    mode = (mode or "").strip()
+    except_client_id = (except_client_id or "").strip()
+    target_client_id = (target_client_id or "").strip()
+
+    if mode == "other":
+        if not except_client_id:
+            return {"ok": False, "closed": 0, "reason": "missing_except_client_id"}
+        online_clients = _collect_online_chatgpt_client_pages()
+        keep_online = any(client_id == except_client_id for client_id, _ in online_clients)
+        if not keep_online:
+            return {
+                "ok": False,
+                "closed": 0,
+                "reason": "keep_page_not_online",
+                "page_id": except_client_id,
+            }
+        msgs = []
+        for client_id, info in online_clients:
+            if client_id == except_client_id:
+                continue
+            page_url = page_url_from(info)
+            msgs.append(
+                _make_command_message(
+                    "close_self",
+                    client_id=client_id,
+                    url=page_url,
+                )
             )
+        appended = _append_control_messages(
+            msgs,
+            log_label="close_other",
+            log_detail=f"command=close_self keep_client_id={except_client_id}",
         )
-    return _append_control_messages(
-        msgs,
-        log_label="close_other",
-        log_detail=f"command=close_self keep_client_id={except_client_id}",
-    )
+        return {
+            "ok": True,
+            "closed": len(appended),
+            "page_id": except_client_id,
+            "conversation_id": "",
+            "reason": "closed" if appended else "no_other_pages",
+            "messages": appended,
+        }
+
+    if mode == "current_bound":
+        if not target_client_id:
+            return {"ok": False, "closed": 0, "reason": "missing_target_client_id"}
+        online_clients = _collect_online_chatgpt_client_pages()
+        target_info = None
+        for client_id, info in online_clients:
+            if client_id == target_client_id:
+                target_info = info
+                break
+        if not target_info:
+            return {
+                "ok": False,
+                "closed": 0,
+                "reason": "target_not_online",
+                "page_id": target_client_id,
+            }
+        page_url = page_url_from(target_info)
+        conversation_id = (target_info.get("conversation_id") or "").strip()
+        msg = _queue_control_message(
+            "close_self",
+            log_label="close_current_bound",
+            client_id=target_client_id,
+            url=page_url,
+        )
+        if not isinstance(msg, dict):
+            return {
+                "ok": False,
+                "closed": 0,
+                "reason": "queue_failed",
+                "page_id": target_client_id,
+            }
+        return {
+            "ok": True,
+            "closed": 1,
+            "page_id": target_client_id,
+            "conversation_id": conversation_id,
+            "reason": "closed",
+            "messages": [msg],
+        }
+
+    return {"ok": False, "closed": 0, "reason": f"invalid_mode:{mode or '-'}"}
+
+
+def push_close_other_pages(except_client_id):
+    """关闭除 except_client_id 外所有在线 ChatGPT 页面。"""
+    except_client_id = (except_client_id or "").strip()
+    result = close_chatgpt_pages("other", except_client_id=except_client_id)
+    if not result.get("ok"):
+        reason = (result.get("reason") or "").strip()
+        if reason == "missing_except_client_id":
+            raise ValueError("except_client_id 不能为空")
+        if reason == "keep_page_not_online":
+            raise ValueError(
+                f"保留页面不在线或不存在，已取消关闭其他页面：client_id={except_client_id}"
+            )
+        raise ValueError(f"关闭其他页面失败：{reason}")
+    return result.get("messages") or []
+
+
+def push_close_bound_page(client_id):
+    """关闭指定 client_id 对应的在线 ChatGPT 页面（当前绑定页模式）。"""
+    result = close_chatgpt_pages("current_bound", target_client_id=client_id)
+    if not result.get("ok"):
+        reason = (result.get("reason") or "").strip()
+        raise ValueError(f"关闭绑定页面失败：{reason}")
+    return result

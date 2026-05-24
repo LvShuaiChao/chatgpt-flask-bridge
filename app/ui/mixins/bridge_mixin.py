@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import QFileDialog
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
     ASSISTANT_WAIT_TEXTS,
+    BOOTSTRAP_CLAIM_WAIT_TEXT,
     PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
@@ -545,6 +546,10 @@ class BridgeMixin:
             assistant_message_id=assistant_message_id,
             payload=payload,
         )
+        if not self._patch_chat_send_target_payload(session, payload):
+            if not suppress_system_message:
+                self._add_system_message("发送目标字段不完整，消息未入队。")
+            return {"ok": False, "reason": "send_target_incomplete", "retryable": False}
         try:
             msg = push_message(payload)
         except Exception as error:
@@ -564,8 +569,6 @@ class BridgeMixin:
             if not suppress_system_message:
                 self._add_system_message(f"消息入队失败：{error}")
             return {"ok": False, "reason": str(error), "retryable": False}
-
-        self._patch_chat_send_target_payload(session, payload)
 
         bridge_message_id = (
             (msg.get("message_id") or "").strip()
@@ -620,6 +623,7 @@ class BridgeMixin:
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
             target_client = (payload.get("client_id") or "").strip()
             target_instance = (payload.get("page_instance_id") or "").strip()
+            target_page_id = (payload.get("target_page_id") or "").strip()
             session.remote_chatgpt = {
                 **remote_now,
                 "bind_state": BIND_STATE_WAITING_CONVERSATION_CREATED,
@@ -636,7 +640,8 @@ class BridgeMixin:
                 f"session_id={session.session_id} "
                 f"bridge_message_id={bridge_message_id} "
                 f"client_id={target_client or '-'} "
-                f"page_instance_id={target_instance or '-'}"
+                f"page_instance_id={target_instance or '-'} "
+                f"target_page_id={target_page_id or '-'}"
             )
             self._append_log(
                 f"[BIND][WAITING_CONVERSATION_CREATED] session_id={session.session_id} "
@@ -715,12 +720,15 @@ class BridgeMixin:
 
         if self._show_assistant_placeholder:
             existing_assistant = self._find_assistant_by_turn(session, turn_id)
+            wait_text = (
+                BOOTSTRAP_CLAIM_WAIT_TEXT if is_bootstrap else ASSISTANT_WAIT_TEXT
+            )
             if existing_assistant is None:
                 self._append_message_to_session(
                     session.session_id,
                     {
                         "role": "assistant",
-                        "content": ASSISTANT_WAIT_TEXT,
+                        "content": wait_text,
                         "message_id": assistant_message_id,
                         "turn_id": turn_id,
                         "bridge_message_id": bridge_message_id,
@@ -732,7 +740,7 @@ class BridgeMixin:
             else:
                 existing_assistant.bridge_message_id = bridge_message_id
                 existing_assistant.ui_status = "waiting"
-                existing_assistant.content = ASSISTANT_WAIT_TEXT
+                existing_assistant.content = wait_text
 
         session.has_pending_reply = True
         session.reply_waiting_since = time.time()
@@ -746,7 +754,7 @@ class BridgeMixin:
             )
         else:
             self._render_session_chat(session, force_bottom=True)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
 
         if self._auto_clear_input_after_send and not from_pending_bootstrap:
             self.message_edit.clear()
@@ -1771,6 +1779,8 @@ class BridgeMixin:
                 session_list_ms = int((time.perf_counter() - t_list) * 1000)
         self._recover_stuck_bootstrap_sessions()
         for session in list(self._sessions.values()):
+            if hasattr(self, "_sync_bootstrap_waiting_display"):
+                self._sync_bootstrap_waiting_display(session)
             if self._session_send_queue(session.session_id):
                 self._try_send_next_queued_message(session)
         current_session = self._current_session()
@@ -2067,7 +2077,19 @@ class BridgeMixin:
         if success:
             if self._has_assistant_for_turn(session, turn_id):
                 self._bridge_msg.ack_success_message_ids.add(bridge_id)
-                self._set_reply_waiting(session, turn_id)
+                # 仅当 assistant 消息仍是等待占位时才设为等待回复
+                assistant_msg = self._find_assistant_by_turn(session, turn_id)
+                if self._assistant_message_is_waiting_placeholder(assistant_msg):
+                    self._set_reply_waiting(session, turn_id)
+                else:
+                    self._append_log(
+                        "[CHAT_REPLY][WAITING_SET_SKIP] "
+                        f"reason=already_has_final_reply "
+                        f"session_id={session.session_id} "
+                        f"turn_id={turn_id} "
+                        f"request_id={bridge_id or '-'}",
+                        echo=True,
+                    )
             report_client = (item.get("client_id") or "").strip()
             if report_client:
                 remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -2083,7 +2105,7 @@ class BridgeMixin:
                     **remote_now,
                     "bootstrap_in_progress": False,
                 }
-                self._save_sessions_to_disk()
+                self._schedule_save_sessions_to_disk()
             if is_assistant_busy:
                 self._append_log(
                     "[BRIDGE][ACK][BUSY_CONTINUE] "
@@ -2093,7 +2115,18 @@ class BridgeMixin:
                     echo=True,
                 )
                 if self._has_assistant_for_turn(session, turn_id):
-                    self._set_reply_waiting(session, turn_id)
+                    assistant_msg = self._find_assistant_by_turn(session, turn_id)
+                    if self._assistant_message_is_waiting_placeholder(assistant_msg):
+                        self._set_reply_waiting(session, turn_id)
+                    else:
+                        self._append_log(
+                            "[CHAT_REPLY][WAITING_SET_SKIP] "
+                            f"reason=already_has_final_reply "
+                            f"session_id={session.session_id} "
+                            f"turn_id={turn_id} "
+                            f"request_id={bridge_id or '-'}",
+                            echo=True,
+                        )
             else:
                 self._bridge_msg.ack_success_message_ids.discard(bridge_id)
                 if self._has_assistant_for_turn(session, turn_id):
@@ -2133,7 +2166,7 @@ class BridgeMixin:
                 "bind_state": BIND_STATE_UNBOUND,
             }
             session.updated_at = time.time()
-            self._save_sessions_to_disk()
+            self._schedule_save_sessions_to_disk()
             self._append_log(
                 "[BIND][BOOTSTRAP_FAILED_RESET] "
                 f"session_id={session.session_id} "
@@ -2288,7 +2321,7 @@ class BridgeMixin:
             )
         elif session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         return True
 
     def _handle_assistant_reply_event(
@@ -2335,6 +2368,20 @@ class BridgeMixin:
                 f"content_len={len(text)} updated=true",
                 echo=True,
             )
+            # 释放 pending_reply 状态
+            session.has_pending_reply = False
+            session.reply_waiting_since = 0
+            queue = self._session_send_queue(session.session_id)
+            self._append_log(
+                "[CHAT][PENDING_RELEASE] "
+                f"session_id={session.session_id} "
+                f"turn_id={turn_id or '-'} "
+                f"bridge_message_id={bridge_id or '-'} "
+                f"reason=reply_applied "
+                f"released=true "
+                f"queue_size={len(queue)}",
+                echo=True,
+            )
             if hasattr(self, "_mark_session_waiting_finished"):
                 self._mark_session_waiting_finished(
                     session, reason="assistant_reply"
@@ -2347,7 +2394,7 @@ class BridgeMixin:
                     session, report_client
                 )
                 self.schedule_page_registry_refresh(reason="assistant_reply")
-            self._try_send_next_queued_message(session)
+            QTimer.singleShot(0, lambda: self._try_send_next_queued_message(session))
         else:
             self._set_reply_error(
                 session, turn_id, "ChatGPT 返回了空回复。", "空回复"
@@ -2821,7 +2868,7 @@ class BridgeMixin:
                 force_bottom=True,
                 reason="queue_enqueue",
             )
-        self._save_sessions_to_disk()
+        self._schedule_save_sessions_to_disk()
         self._update_queue_badge()
         return True
 
@@ -2832,6 +2879,34 @@ class BridgeMixin:
             self.dump_top_level_windows("before_queue_process")
         queue = self._session_send_queue(session.session_id)
         busy_reason = self._session_send_busy_reason(session)
+
+        # 计算诊断信息
+        active_pending_count = 0
+        ignored_queued_count = 0
+        pending_bridge_ids = []
+        if hasattr(self, "_iter_pending_assistant_messages"):
+            for msg in self._iter_pending_assistant_messages(session):
+                msg_source = (getattr(msg, "message_source", "") or "").strip()
+                bridge_id = (getattr(msg, "bridge_message_id", "") or "").strip()
+                if msg_source in ("queued_placeholder", "local_queue"):
+                    ignored_queued_count += 1
+                elif bridge_id:
+                    active_pending_count += 1
+                    pending_bridge_ids.append(bridge_id[:8])
+        decision = "wait" if busy_reason else "process"
+
+        self._append_log(
+            "[CHAT_QUEUE][PENDING_CHECK] "
+            f"session_id={session.session_id} "
+            f"queue_size={len(queue)} "
+            f"busy_reason={busy_reason or '-'} "
+            f"active_pending_count={active_pending_count} "
+            f"ignored_queued_count={ignored_queued_count} "
+            f"pending_bridge_ids={','.join(pending_bridge_ids) or '-'} "
+            f"decision={decision}",
+            echo=True,
+        )
+
         if busy_reason:
             self._append_log(
                 "[CHAT_QUEUE][WAIT] "
@@ -2959,7 +3034,7 @@ class BridgeMixin:
             if plan.decision == "blocked" or not plan.allows_dispatch():
                 return self._handle_send_blocked(plan, messages_appended=False)
             if plan.decision == "queued" and plan.enqueue:
-                local_append_ids = self._append_local_send_turn(
+                local_append_ids = self._append_local_queued_user_turn(
                     turn, clear_input=True
                 )
                 if not local_append_ids:
@@ -3061,6 +3136,23 @@ class BridgeMixin:
         )
         if plan.stop_after_handle:
             return {"ok": False, "reason": plan.reason or "deferred", "retryable": True}
+
+        # 防止 source="queue" 的消息被二次入队
+        if source == "queue" and plan.decision == "queued" and plan.enqueue:
+            self._append_log(
+                "[CHAT_QUEUE][REQUEUE_SKIP_DUP] "
+                f"session_id={session.session_id} "
+                f"message_id={turn.user_message_id or '-'} "
+                f"reason={plan.reason or 'pending_reply'} "
+                f"action=return_retryable_without_enqueue",
+                echo=True,
+            )
+            return {
+                "ok": False,
+                "reason": plan.reason or "pending_reply",
+                "retryable": True,
+            }
+
         if plan.decision == "blocked" or (
             plan.decision == "queued" and plan.enqueue
         ):
