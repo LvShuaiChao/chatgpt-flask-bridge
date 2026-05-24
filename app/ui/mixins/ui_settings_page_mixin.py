@@ -1,7 +1,6 @@
 """设置页（服务状态 + 油猴连接）与桥接地址展示文案。"""
 import os
 
-from app.server import get_server_port, get_server_public_host, is_server_running
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QGroupBox,
@@ -32,17 +31,6 @@ class UiSettingsPageMixin:
                 "警告：未设置 CHATGPT_PAGE_BRIDGE_TOKEN，Bridge 可能被局域网访问，建议设置 API Token。"
             )
         return "\n".join(lines)
-
-    def _service_host_port_for_display(self, status=None):
-        status = status or {}
-        if status.get("server_running") and status.get("server_port"):
-            return (
-                status.get("server_host") or get_server_public_host(),
-                str(status.get("server_port")),
-            )
-        if is_server_running():
-            return get_server_public_host(), str(get_server_port() or "")
-        return "127.0.0.1", str(getattr(self, "_port_text", None) or "5000")
 
     def _create_scroll_tab(self):
         """创建设置子页用的纵向可滚动区域，返回 scroll_area、content_widget、content_layout。"""

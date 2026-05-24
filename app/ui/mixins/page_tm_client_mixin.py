@@ -282,22 +282,10 @@ class PageTmClientMixin:
         return max(0.0, time.time() - value)
 
     def _tm_float_field(self, item, field, default=0.0, *, context=""):
-        item_dict = item if isinstance(item, dict) else {}
-        raw = item_dict.get(field) if item_dict else None
-        try:
-            return float(raw if raw not in (None, "") else default)
-        except (TypeError, ValueError) as error:
-            if hasattr(self, "_append_log"):
-                self._append_log(
-                    "[TM_PAGE][FLOAT_FIELD_FALLBACK] "
-                    f"context={context or '-'} "
-                    f"field={field} value={raw!r} default={default!r} "
-                    f"client_id={item_dict.get('client_id') or '-'} "
-                    f"page_instance_id={item_dict.get('page_instance_id') or '-'} "
-                    f"error_type={type(error).__name__} error={error}",
-                    echo=False,
-                )
-            return float(default)
+        del context
+        from app.utils.safe_parse import safe_float_field
+
+        return safe_float_field(item, field, default)
 
     def _tm_client_sync_profile(
         self,

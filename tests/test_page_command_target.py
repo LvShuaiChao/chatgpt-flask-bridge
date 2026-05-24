@@ -5,9 +5,14 @@ import unittest
 
 from app.constants import SYNC_COMMAND_POLL_MAX_AGE_SECONDS
 from app.utils.page_command import (
+    build_action_target_payload,
     evaluate_sync_poll_freshness,
+    registry_resolve_to_gui_bound_result,
+    resolve_bound_page_for_action,
+    resolve_bound_page_in_registry,
     resolve_page_command_target,
 )
+from app.models import BIND_STATE_BOUND_CONVERSATION
 from app.utils.page_status import PageRegistry
 
 
@@ -210,6 +215,34 @@ class PageCommandTargetTests(unittest.TestCase):
         self.assertEqual(code, "")
         result = resolve_page_command_target(session, "sync_conversation", reg, now=now)
         self.assertTrue(result["ok"])
+
+    def test_registry_resolve_to_gui_bound_result_ok(self):
+        reg = self._registry_with_bound()
+        binding = {
+            "bind_state": BIND_STATE_BOUND_CONVERSATION,
+            "client_id": "tm-bind",
+            "page_instance_id": "inst-bind",
+            "conversation_id": "conv99",
+        }
+        resolved = resolve_bound_page_in_registry(reg, binding)
+        gui = registry_resolve_to_gui_bound_result(resolved)
+        self.assertTrue(gui["ok"])
+        self.assertEqual(gui["item"]["client_id"], "tm-bind")
+        self.assertIsInstance(gui.get("target"), dict)
+        self.assertEqual(gui["target"]["client_id"], "tm-bind")
+
+    def test_resolve_bound_page_for_action_send(self):
+        reg = self._registry_with_bound()
+        binding = {
+            "bind_state": BIND_STATE_BOUND_CONVERSATION,
+            "client_id": "tm-bind",
+            "page_instance_id": "inst-bind",
+            "conversation_id": "conv99",
+        }
+        gui = resolve_bound_page_for_action(reg, binding, "send")
+        self.assertTrue(gui["ok"])
+        payload = build_action_target_payload(gui["item"], source="bound_page")
+        self.assertEqual(payload["conversation_id"], "conv99")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from flask import jsonify, request
 
 from app.server import state as st
 from app.server.bridge_logging import log_server_to_tm_full, log_tm_to_server_full
-from app.server.external_api import _json_body_or_error
+from app.server.request_utils import json_body_or_error
 from app.utils.legacy_cleanup import reject_legacy_fields
 
 from app.server.message_queue import (
@@ -66,7 +66,7 @@ def api_bridge():
     if source != "tampermonkey":
         error_result = {"ok": False, "error": "需要 X-Request-Source: tampermonkey"}
         return jsonify(error_result), 403
-    body, error_response = _json_body_or_error("[BRIDGE][JSON_BODY]")
+    body, error_response = json_body_or_error("[BRIDGE][JSON_BODY]")
     if error_response:
         return error_response
     legacy_err = reject_legacy_fields(body, context="api_bridge")

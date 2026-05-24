@@ -398,13 +398,36 @@ class UiChatPanelMixin:
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
+        session_title_row = QWidget()
+        session_title_row.setObjectName("CurrentSessionHeader")
+        session_title_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        session_title_row_layout = QHBoxLayout(session_title_row)
+        session_title_row_layout.setContentsMargins(0, 0, 0, 0)
+        session_title_row_layout.setSpacing(12)
+
         self.current_session_title = SegmentedElidedLabel("当前会话：新对话")
         self.current_session_title.setObjectName("CurrentSessionTitle")
         self.current_session_title.setMinimumHeight(28)
+        self.current_session_title.setMinimumWidth(0)
         self.current_session_title.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Preferred
+            QSizePolicy.Ignored, QSizePolicy.Preferred
         )
-        header_layout.addWidget(self.current_session_title)
+        session_title_row_layout.addWidget(self.current_session_title, 1)
+
+        self.chat_stats_label = QLabel(
+            "统计：共 0 条｜我 0 条 0 字｜AI 0 条 0 字｜总 0 字"
+        )
+        self.chat_stats_label.setObjectName("CurrentSessionStatsLabel")
+        self.chat_stats_label.setMinimumHeight(28)
+        self.chat_stats_label.setMinimumWidth(520)
+        self.chat_stats_label.setWordWrap(False)
+        self.chat_stats_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.chat_stats_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.chat_stats_label.setVisible(True)
+        session_title_row_layout.addWidget(
+            self.chat_stats_label, 0, Qt.AlignRight | Qt.AlignVCenter
+        )
+        header_layout.addWidget(session_title_row)
 
         url_row_widget = QWidget()
         url_row_widget.setMinimumHeight(36)

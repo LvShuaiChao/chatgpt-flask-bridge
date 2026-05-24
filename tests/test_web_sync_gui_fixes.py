@@ -6,6 +6,7 @@ from app.ui.mixins.bridge_mixin import BridgeMixin
 from app.ui.mixins.page_binding_diagnostics_mixin import PageBindingDiagnosticsMixin
 from app.ui.mixins.page_sync_mixin import PageSyncMixin
 from app.models import ChatSession
+from app.utils.page_status import PageActionPlan, PageCapability
 
 
 class _AppendLogHost(BridgeMixin):
@@ -27,6 +28,7 @@ class _SnapshotHost(PageSyncMixin):
         self.saved = False
         self._current_session_id = ""
         self._sessions = {}
+        self._bridge_ui = type("BridgeUi", (), {"last_bridge_status": {}})()
 
     def _tm_page_is_online_simple(self, page):
         return bool(page.get("online"))
@@ -70,8 +72,24 @@ class TestAppendLogLevelCompat(unittest.TestCase):
 class TestSyncTargetSnapshotAllowed(unittest.TestCase):
     def test_allowed_true_sets_sync_readable(self):
         host = _SnapshotHost()
+        session = MagicMock()
+        session.remote_chatgpt = {"enabled": True, "client_id": "c1"}
+        host._current_session = MagicMock(return_value=session)
+        host.resolve_page_action = MagicMock(
+            return_value=PageActionPlan(
+                action="sync_conversation",
+                decision="allowed",
+                target_source="bound_page",
+                reason_code="",
+                capability=PageCapability(
+                    online=True,
+                    conversation_syncable=True,
+                ),
+                page={"client_id": "c1", "online": True},
+            )
+        )
         snap = host._build_sync_target_snapshot_from_decision(
-            session=MagicMock(),
+            session=session,
             remote={"enabled": True, "client_id": "c1"},
             page={"client_id": "c1", "online": True},
             source="bound_page",
@@ -80,9 +98,9 @@ class TestSyncTargetSnapshotAllowed(unittest.TestCase):
             status={"active": {"client_id": "other", "conversation_id": ""}},
             allowed=True,
         )
-        self.assertTrue(snap.get("allowed"))
         self.assertTrue(snap.get("sync_readable"))
         self.assertTrue(snap.get("conversation_syncable"))
+        host.resolve_page_action.assert_called_once()
 
     def test_snapshot_sync_preserves_repeated_identical_messages(self):
         host = _SnapshotHost()

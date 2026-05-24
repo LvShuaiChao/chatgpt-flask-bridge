@@ -13,6 +13,7 @@ from app.constants import (
     TM_HEARTBEAT_ONLINE_SECONDS,
 )
 from app.url_utils import parse_conversation_id
+from app.utils.page_identity import PageIdentity
 from app.utils.time_utils import float_ts as _float_ts
 
 
@@ -771,6 +772,15 @@ class PageCapability:
     def url_syncable(self) -> bool:
         return self.online and bool(self.url)
 
+    @property
+    def identity(self) -> PageIdentity:
+        return PageIdentity(
+            client_id=self.client_id,
+            page_instance_id=self.page_instance_id,
+            conversation_id=self.conversation_id,
+            url=self.url,
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "client_id": self.client_id,
@@ -843,20 +853,24 @@ class PageActionPlan:
         return (self.capability.send_decision or "blocked").strip()
 
     @property
+    def identity(self) -> PageIdentity:
+        return PageIdentity.from_mapping(self.capability.to_dict())
+
+    @property
     def client_id(self) -> str:
-        return (self.capability.client_id or "").strip()
+        return self.identity.client_id
 
     @property
     def page_instance_id(self) -> str:
-        return (self.capability.page_instance_id or "").strip()
+        return self.identity.page_instance_id
 
     @property
     def conversation_id(self) -> str:
-        return (self.capability.conversation_id or "").strip()
+        return self.identity.conversation_id
 
     @property
     def url(self) -> str:
-        return (self.capability.url or "").strip()
+        return self.identity.url
 
     @property
     def online(self) -> bool:
@@ -969,6 +983,7 @@ class PageActionPlan:
             TARGET_SOURCE_BOUND_PAGE,
             TARGET_SOURCE_NO_SESSION,
             canonical_target_source,
+            target_source_label,
         )
 
         resolved_source = canonical_target_source(self.target_source) or (
@@ -976,12 +991,7 @@ class PageActionPlan:
             if remote_binding_enabled(remote)
             else TARGET_SOURCE_NO_SESSION
         )
-        if resolved_source == TARGET_SOURCE_BOUND_PAGE:
-            source_label = "已绑定页"
-        elif resolved_source == TARGET_SOURCE_NO_SESSION:
-            source_label = "无会话目标"
-        else:
-            source_label = resolved_source or "未知来源"
+        source_label = target_source_label(resolved_source)
         return {
             "conversation_syncable": conv_sync,
             "sync_readable": sync_readable,

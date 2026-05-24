@@ -1,9 +1,21 @@
 import re
 import time
+import traceback
 
 from PyQt5.QtCore import QTimer
 
-from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
+from app.constants import (
+    ASSISTANT_WAIT_TEXTS,
+    PENDING_ASSISTANT_STATUSES,
+    REPLY_WAKE_MAX_COUNT,
+)
+from app.server import is_server_running
+from app.server.control_commands import push_focus_page
+from app.utils.tm_activity import (
+    describe_reply_wait_page_hint,
+    reply_wait_page_metrics,
+    should_wake_page_for_reply_wait,
+)
 
 
 _WAITING_ELAPSED_SUFFIX_RE = re.compile(
@@ -48,6 +60,8 @@ class WaitingTimerMixin:
         if self._session_is_waiting_reply(session):
             return
         session.reply_waiting_since = time.time()
+        session.reply_wake_count = 0
+        session.last_reply_wake_at = 0
         self._append_log(
             "[CHAT][WAITING_START] "
             f"session_id={session.session_id} "
@@ -62,6 +76,8 @@ class WaitingTimerMixin:
         was_waiting = self._session_is_waiting_reply(session)
         old_elapsed = self._session_pending_elapsed_sec(session) if was_waiting else 0
         session.reply_waiting_since = 0
+        session.reply_wake_count = 0
+        session.last_reply_wake_at = 0
         if was_waiting:
             self._append_log(
                 "[CHAT][WAITING_END] "
@@ -101,27 +117,9 @@ class WaitingTimerMixin:
         return cleaned
 
     def _is_pending_wait_display_message(self, message):
-        if message is None:
-            return False
+        from app.models import is_waiting_placeholder_message
 
-        role = (getattr(message, "role", "") or "").strip().lower()
-        if role != "assistant":
-            return False
-
-        status = (getattr(message, "ui_status", "") or "").strip()
-        text = (getattr(message, "content", "") or "").strip()
-        source = (getattr(message, "message_source", "") or "").strip()
-
-        if source == "local_placeholder":
-            return True
-
-        if status in PENDING_ASSISTANT_STATUSES:
-            return True
-
-        if text in ASSISTANT_WAIT_TEXTS:
-            return True
-
-        return False
+        return is_waiting_placeholder_message(message)
 
     def _display_text_for_message(self, message, session):
         plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
@@ -138,22 +136,188 @@ class WaitingTimerMixin:
 
         base = self._waiting_reply_display_base(plain)
         elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
+        page_hint = self._reply_wait_page_hint_for_session(session)
+        if page_hint:
+            return f"{base} {elapsed}｜{page_hint}"
         return f"{base} {elapsed}"
+
+    def _bound_page_info_for_reply_wait(self, session):
+        if session is None or not hasattr(self, "_resolve_bound_page_info"):
+            return None
+        status = getattr(getattr(self, "_bridge_ui", None), "last_bridge_status", None) or {}
+        bound_info, bound_state, _reason = self._resolve_bound_page_info(status=status)
+        if not isinstance(bound_info, dict) or not bound_info:
+            return None
+        if bound_state in ("offline", "unbound", "missing"):
+            return None
+        return bound_info
+
+    def _reply_wait_page_hint_for_session(self, session, *, waking=False):
+        bound_info = self._bound_page_info_for_reply_wait(session)
+        wake_count = int(getattr(session, "reply_wake_count", 0) or 0)
+        return describe_reply_wait_page_hint(
+            bound_info,
+            wake_count=wake_count,
+            max_wake_count=REPLY_WAKE_MAX_COUNT,
+            waking=waking,
+        )
+
+    def _session_still_waiting_assistant_body(self, session) -> bool:
+        if session is None:
+            return False
+        if hasattr(self, "_session_has_pending_assistant_reply"):
+            return self._session_has_pending_assistant_reply(session)
+        return self._session_is_waiting_reply(session)
+
+    def _maybe_wake_bound_page_for_reply_wait(self, session):
+        if session is None or not self._session_is_waiting_reply(session):
+            return
+        if not self._session_still_waiting_assistant_body(session):
+            return
+        if not is_server_running():
+            return
+
+        wait_seconds = float(self._session_pending_elapsed_sec(session))
+        wake_count = int(getattr(session, "reply_wake_count", 0) or 0)
+        last_wake_at = float(getattr(session, "last_reply_wake_at", 0) or 0)
+
+        bound_info = self._bound_page_info_for_reply_wait(session)
+        if not bound_info:
+            return
+
+        should_wake, block_reason = should_wake_page_for_reply_wait(
+            bound_info,
+            wait_seconds=wait_seconds,
+            wake_count=wake_count,
+            last_wake_at=last_wake_at,
+        )
+        if not should_wake:
+            return
+
+        metrics = reply_wait_page_metrics(bound_info)
+        remote = getattr(session, "remote_chatgpt", None) or {}
+        if not isinstance(remote, dict):
+            remote = {}
+        page_id = (
+            (bound_info.get("page_no") or bound_info.get("page_display_id") or "")
+        )
+        client_id = (bound_info.get("client_id") or remote.get("client_id") or "").strip()
+        page_instance_id = (
+            bound_info.get("page_instance_id") or remote.get("page_instance_id") or ""
+        ).strip()
+        conversation_id = (
+            (bound_info.get("conversation_id") or "")
+            or (getattr(session, "conversation_id", "") or "")
+        ).strip()
+        session_id = (session.session_id or "").strip()
+
+        self._append_log(
+            "[TM_WAKE][REPLY_WAIT][START] "
+            f"session_id={session_id} "
+            f"conversation_id={conversation_id or '-'} "
+            f"page_id={page_id or '-'} "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"wait_seconds={wait_seconds:.1f} "
+            f"poll_age={metrics.get('poll_age', -1):.1f} "
+            f"heartbeat_age={metrics.get('heartbeat_age', -1):.1f} "
+            f"visibility_state={metrics.get('visibility_state') or '-'} "
+            f"has_focus={'true' if metrics.get('has_focus') else 'false'} "
+            f"wake_count={wake_count}",
+            echo=True,
+        )
+
+        session.last_reply_wake_at = time.time()
+        session.reply_wake_count = wake_count + 1
+
+        ok = False
+        fail_reason = ""
+        try:
+            if hasattr(self, "enqueue_page_command"):
+                result = self.enqueue_page_command(session, "focus_self")
+                ok = bool(isinstance(result, dict) and result.get("ok"))
+                if not ok:
+                    fail_reason = (
+                        (result.get("reason") or "")
+                        or (result.get("reason_code") or "")
+                        or "enqueue_focus_self_failed"
+                    )
+            elif client_id:
+                msg = push_focus_page(
+                    client_id,
+                    page_instance_id=page_instance_id,
+                    conversation_id=conversation_id,
+                    url=(bound_info.get("url") or "").strip() or None,
+                )
+                ok = msg is not None
+                if not ok:
+                    fail_reason = "push_focus_page_returned_none"
+            else:
+                fail_reason = "missing_client_id"
+        except Exception as error:
+            fail_reason = f"{type(error).__name__}: {error}"
+            self._append_log(
+                "[TM_WAKE][REPLY_WAIT][FAILED] "
+                f"session_id={session_id} "
+                f"conversation_id={conversation_id or '-'} "
+                f"page_id={page_id or '-'} "
+                f"client_id={client_id or '-'} "
+                f"page_instance_id={page_instance_id or '-'} "
+                f"reason={fail_reason}\n{traceback.format_exc()}",
+                echo=True,
+                level="ERROR",
+            )
+            return
+
+        if ok:
+            self._append_log(
+                "[TM_WAKE][REPLY_WAIT][OK] "
+                f"session_id={session_id} "
+                f"client_id={client_id or '-'} "
+                f"page_instance_id={page_instance_id or '-'} "
+                f"wake_count={session.reply_wake_count}",
+                echo=True,
+            )
+        else:
+            session.reply_wake_count = max(0, int(session.reply_wake_count or 0) - 1)
+            self._append_log(
+                "[TM_WAKE][REPLY_WAIT][FAILED] "
+                f"session_id={session_id} "
+                f"conversation_id={conversation_id or '-'} "
+                f"page_id={page_id or '-'} "
+                f"client_id={client_id or '-'} "
+                f"page_instance_id={page_instance_id or '-'} "
+                f"reason={fail_reason or 'unknown'}",
+                echo=True,
+                level="WARNING",
+            )
 
     def _format_waiting_status_text(self, base_text, session):
         base_text = (base_text or "").strip()
         if not session or not self._session_is_waiting_reply(session):
             return base_text
         elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
+        page_hint = self._reply_wait_page_hint_for_session(session)
         if not base_text:
-            return f"已等待 {elapsed}"
+            return f"等待回复 {elapsed}｜{page_hint}" if page_hint else f"已等待 {elapsed}"
         if "已等待" in base_text:
             base_text = self._strip_waiting_elapsed_suffix(base_text)
             if "已等待" in base_text:
                 base_text = re.sub(r"已等待\s*\d{2}:\d{2}", "", base_text).strip()
-        if base_text.endswith("。"):
-            return f"{base_text}已等待 {elapsed}"
-        return f"{base_text}。已等待 {elapsed}"
+        if "等待回复" in base_text:
+            base_text = re.sub(
+                r"等待回复\s*\d{2}:\d{2}(?:\s*｜[^｜]+)?$",
+                "",
+                base_text,
+            ).strip()
+        prefix = "等待回复" if "等待" in base_text or not base_text else base_text
+        if prefix and prefix != "等待回复":
+            line = f"{prefix} {elapsed}"
+        else:
+            line = f"等待回复 {elapsed}"
+        if page_hint:
+            line = f"{line}｜{page_hint}"
+        return line
 
     def _session_waiting_preview_suffix(self, session):
         if not session or not self._session_is_waiting_reply(session):
@@ -230,6 +394,8 @@ class WaitingTimerMixin:
             elapsed = max(0, int(now_ts - since_ts))
             if hasattr(self, "_maybe_recover_pending_reply"):
                 self._maybe_recover_pending_reply(session)
+            if hasattr(self, "_maybe_wake_bound_page_for_reply_wait"):
+                self._maybe_wake_bound_page_for_reply_wait(session)
             self._maybe_log_waiting_tick(session, elapsed)
 
             if session.session_id == current_session_id:

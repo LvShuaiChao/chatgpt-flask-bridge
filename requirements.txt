@@ -4,3 +4,9 @@ PyQt5>=5.15.0
 requests>=2.28.0
 
 pyautogui
+opencv-python
+mss
+numpy
+Pillow
+pyperclip
+pywin32; platform_system == "Windows"

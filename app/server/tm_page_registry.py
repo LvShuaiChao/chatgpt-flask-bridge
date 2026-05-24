@@ -565,6 +565,11 @@ def _snapshot_clients():
             "visibility_state": info.get("visibility_state") or "",
             "has_focus": bool(info.get("has_focus")),
             "last_focus_at": info.get("last_focus_at"),
+            "browser_hidden": info.get("browser_hidden"),
+            "browser_visibility_state": info.get("browser_visibility_state") or "",
+            "browser_has_focus": info.get("browser_has_focus"),
+            "browser_timer_drift_ms": info.get("browser_timer_drift_ms"),
+            "browser_probably_throttled": bool(info.get("browser_probably_throttled")),
         }
         if is_debug_mode():
             row["debug_detail"] = {
@@ -765,6 +770,11 @@ def _touch_tampermonkey(meta, action="poll"):
             "response_last_text_changed_at": None,
             "upload_bridge_supported": False,
             "upload_bridge_version": 0,
+            "last_dom_mutation_at": 0,
+            "last_reply_watch_at": 0,
+            "pending_reply_active": False,
+            "pending_reply_started_at": 0,
+            "pending_reply_text_length": 0,
         },
     )
     entry["client_id"] = client_id
@@ -820,6 +830,20 @@ def _touch_tampermonkey(meta, action="poll"):
         if has_focus:
             entry["last_focus_at"] = now
             _update_last_focused_tm_page(entry)
+    for telemetry_key in (
+        "last_dom_mutation_at",
+        "last_reply_watch_at",
+        "pending_reply_active",
+        "pending_reply_started_at",
+        "pending_reply_text_length",
+        "browser_hidden",
+        "browser_visibility_state",
+        "browser_has_focus",
+        "browser_timer_drift_ms",
+        "browser_probably_throttled",
+    ):
+        if telemetry_key in meta:
+            entry[telemetry_key] = meta.get(telemetry_key)
     response_state = (meta.get("response_state") or "").strip() or entry.get("response_state") or "unknown"
     can_accept_input = bool(meta.get("can_accept_input", True))
     response_started_at = meta.get("response_started_at") or entry.get("response_started_at")

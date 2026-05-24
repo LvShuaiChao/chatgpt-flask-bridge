@@ -9791,7 +9791,7 @@
     }
 
     return (
-      /^已思考\s*(若干秒|\d+)/.test(text) ||
+      /^已思考\s*(?:若干秒|几\s*秒|\d+)/.test(text) ||
       /^已思考.*(?:秒|分钟|m|s|›|>)/i.test(text) ||
       /^Thought for\s+\d+/i.test(text) ||
       /^Thinking/i.test(text) ||
@@ -9820,7 +9820,7 @@
 
     const normalized = raw
       .replace(
-        /(已思考\s*(?:若干秒|\d+\s*(?:秒|分钟|m|min|s)?(?:\s*\d+\s*s)?)(?:\s*[›>])?)/gi,
+        /(已思考\s*(?:若干秒|几\s*秒|\d+\s*(?:秒|分钟|m|min|s)?(?:\s*\d+\s*s)?)(?:\s*[›>])?)/gi,
         '\n$1\n',
       )
       .replace(

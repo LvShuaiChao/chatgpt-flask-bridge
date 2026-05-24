@@ -22,9 +22,13 @@ from app.utils.time_utils import float_ts
 __all__ = [
     "resolve_page_command_target",
     "resolve_bound_page_in_registry",
+    "resolve_bound_page_for_action",
+    "build_action_target_payload",
+    "registry_resolve_to_gui_bound_result",
     "command_target_result",
     "evaluate_sync_poll_freshness",
     "is_page_polling_active",
+    "normalize_page_action",
 ]
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,121 @@ _COMMAND_ALIASES = {
     "upload": "start_upload",
     "copy_last": "copy_last_message",
 }
+
+
+def normalize_page_action(action: str) -> str:
+    """统一 send / sync / upload / copy_last 动作名。"""
+    act = (action or "").strip() or "send"
+    if act == "sync":
+        return "sync_conversation"
+    return _COMMAND_ALIASES.get(act, act)
+
+
+def build_action_target_payload(
+    item: Mapping[str, Any],
+    *,
+    source: str = "bound_page",
+    matched_by: str = "",
+) -> Dict[str, Any]:
+    """与 UI `_conversation_action_target_payload` 字段对齐（无 Qt）。"""
+    from app.utils.page_status import (
+        can_sync_conversation,
+        conversation_syncable_from,
+        get_page_liveness,
+        is_page_online,
+    )
+
+    raw = dict(item) if isinstance(item, Mapping) else {}
+    client_id = (raw.get("client_id") or "").strip()
+    page_instance_id = (raw.get("page_instance_id") or "").strip()
+    conversation_id = page_effective_conversation_id(raw)
+    url = page_url_from(raw) or (raw.get("url") or "").strip()
+    online = is_page_online(raw)
+    return {
+        "client_id": client_id,
+        "page_instance_id": page_instance_id,
+        "conversation_id": conversation_id,
+        "url": url,
+        "source": (source or "").strip(),
+        "matched_by": (matched_by or "").strip(),
+        "online": online,
+        "page_liveness": get_page_liveness(raw),
+        "conversation_syncable": conversation_syncable_from(raw)
+        or can_sync_conversation(raw),
+        "item": raw,
+    }
+
+
+def registry_resolve_to_gui_bound_result(
+    resolved: Mapping[str, Any],
+    *,
+    default_reason_code: str = "bound_page_offline",
+) -> Dict[str, Any]:
+    """将 `resolve_bound_page_in_registry` 结果转为 GUI `resolve_bound_page_target` 形。"""
+    page = resolved.get("page")
+    matched_by = (resolved.get("matched_by") or "none").strip()
+    online = bool(resolved.get("online"))
+    reason_code = (resolved.get("reason_code") or "").strip()
+
+    if page is None or not online:
+        return {
+            "ok": False,
+            "page": page,
+            "item": None,
+            "target": None,
+            "matched_by": matched_by,
+            "online": online,
+            "reason_code": reason_code or default_reason_code,
+        }
+
+    item = page._raw if isinstance(getattr(page, "_raw", None), dict) else {}
+    if not isinstance(item, dict):
+        return {
+            "ok": False,
+            "page": page,
+            "item": None,
+            "target": None,
+            "matched_by": matched_by,
+            "online": False,
+            "reason_code": "bound_page_offline",
+        }
+
+    source = "bound_page" if matched_by == "exact" else "same_conversation"
+    target = build_action_target_payload(item, source=source, matched_by=matched_by)
+    return {
+        "ok": True,
+        "page": page,
+        "item": item,
+        "target": target,
+        "matched_by": matched_by,
+        "online": online,
+        "reason_code": reason_code,
+    }
+
+
+def resolve_bound_page_for_action(
+    registry: PageRegistry,
+    binding: Mapping[str, Any] | None,
+    action: str,
+    *,
+    now: float | None = None,
+    allow_same_conversation: bool | None = None,
+) -> Dict[str, Any]:
+    """注册表解析 + GUI 绑定目标结构（send/sync 共用入口）。"""
+    act = normalize_page_action(action)
+    if allow_same_conversation is None:
+        allow_same_conversation = bool(
+            ((binding or {}).get("conversation_id") or "").strip()
+        )
+    if act == "sync_conversation":
+        allow_same_conversation = bool(allow_same_conversation)
+    resolved = resolve_bound_page_in_registry(
+        registry,
+        binding,
+        now=now,
+        allow_same_conversation=allow_same_conversation,
+    )
+    return registry_resolve_to_gui_bound_result(resolved)
 
 
 def command_target_result(

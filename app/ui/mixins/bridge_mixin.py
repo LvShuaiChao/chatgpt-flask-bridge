@@ -10,6 +10,10 @@ from app.server import (
     start_server,
     stop_server,
 )
+from app.cursor_code.runtime import (
+    get_cursor_code_pause_reason,
+    is_cursor_code_paused,
+)
 
 import time
 import traceback
@@ -21,6 +25,7 @@ from app.constants import (
     ASSISTANT_WAIT_TEXT,
     ASSISTANT_WAIT_TEXTS,
     BOOTSTRAP_CLAIM_WAIT_TEXT,
+    is_invalid_assistant_reply_text,
     PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
@@ -36,6 +41,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
 from app.utils.bridge_payload import build_gui_push_payload
 from app.utils.page_status import page_url_from, read_snapshot_identity
@@ -48,7 +54,7 @@ from PyQt5.QtWidgets import (
 )
 
 
-class BridgeMixin:
+class BridgeMixin(AssistantReplyUpsertMixin):
     @staticmethod
     def _normalize_enqueue_result(enqueue_result):
         """统一解析 enqueue_control_command 返回值（结构化 / 裸 msg / 旧 bool）。"""
@@ -1875,117 +1881,6 @@ class BridgeMixin:
         self._finalize_bridge(bridge_id)
         self._try_send_next_queued_message(session)
 
-    def _upsert_assistant_reply_from_bridge(
-        self,
-        session,
-        turn_id,
-        bridge_id,
-        text,
-        *,
-        render_reason,
-    ):
-        text = (text or "").strip()
-        invalid_texts = ("姝ｅ湪鎬濊€?", "姝ｅ湪鐢熸垚", "鎬濊€冧腑", "鍥炲瀹屾垚")
-        if text in invalid_texts:
-            session_id = session.session_id if session else ""
-            self._append_log(
-                f"[REPLY][SKIP_INVALID_TEXT] session_id={session_id or '-'} "
-                f"turn_id={turn_id or '-'} text={text!r}",
-                echo=True,
-            )
-            return False
-        session_id = session.session_id if session else ""
-        count_before = self._session_visible_message_count(session)
-        self._append_log(
-            "[CHAT_REPLY][RECV] "
-            f"request_id={bridge_id or '-'} "
-            f"session_id={session_id} "
-            f"content_len={len(text)} "
-            f"count_before={count_before}",
-            echo=True,
-        )
-        if not text:
-            self._append_log(
-                "[CHAT_REPLY][APPEND_FAILED] "
-                f"reason=empty_reply session_id={session_id} "
-                f"request_id={bridge_id or '-'}",
-                echo=True,
-            )
-            return False
-
-        self._append_log(
-            "[CHAT_REPLY][APPEND_BEFORE] "
-            f"session_id={session_id} "
-            f"count_before={count_before} "
-            f"request_id={bridge_id or '-'}",
-            echo=True,
-        )
-        if self._has_assistant_for_turn(session, turn_id):
-            self._set_reply_text(session, turn_id, text, "已回复")
-            count_after = self._session_visible_message_count(session)
-            self._append_log(
-                "[CHAT_REPLY][APPLY] "
-                f"mode=update_placeholder "
-                f"session_id={session_id} "
-                f"turn_id={turn_id or '-'} "
-                f"request_id={bridge_id or '-'} "
-                f"content_len={len(text)} "
-                f"count_before={count_before} "
-                f"count_after={count_after}",
-                echo=True,
-            )
-        else:
-            appended = self._append_message_to_session(
-                session.session_id,
-                {
-                    "role": "assistant",
-                    "content": text,
-                    "turn_id": turn_id,
-                    "status": "done",
-                    "source": "web_reply",
-                    "bridge_message_id": bridge_id,
-                    "request_id": bridge_id,
-                },
-            )
-            count_after = self._session_visible_message_count(session)
-            self._append_log(
-                "[CHAT_REPLY][APPLY] "
-                f"mode=append_new "
-                f"session_id={session_id} "
-                f"turn_id={turn_id or '-'} "
-                f"request_id={bridge_id or '-'} "
-                f"content_len={len(text)} "
-                f"count_before={count_before} "
-                f"count_after={count_after} "
-                f"appended={'true' if appended else 'false'}",
-                echo=True,
-            )
-            if count_after <= count_before:
-                self._append_log(
-                    "[CHAT_MESSAGE][APPEND_FAILED] "
-                    f"reason=reply_count_not_increased session_id={session_id} "
-                    f"request_id={bridge_id or '-'}",
-                    echo=True,
-                )
-
-        if hasattr(self, "_mark_session_reply_done_flash"):
-            self._mark_session_reply_done_flash(
-                session,
-                reason=render_reason or "assistant_reply_recv",
-            )
-
-        if session.session_id == self._current_session_id and hasattr(
-            self, "_render_current_chat_messages"
-        ):
-            self._render_current_chat_messages(
-                force_bottom=True,
-                reason=render_reason or "assistant_reply_recv",
-            )
-        elif session.session_id == self._current_session_id:
-            self._render_session_chat(session, force_bottom=True)
-        self._schedule_save_sessions_to_disk()
-        return True
-
     def _handle_assistant_reply_event(
         self, item, payload, session, turn_id, bridge_id
     ):
@@ -2011,7 +1906,7 @@ class BridgeMixin:
             text = str(
                 payload.get("text") or payload.get("assistant_text") or ""
             ).strip()
-        if text in ("正在思考", "正在生成", "思考中", "回复完成"):
+        if is_invalid_assistant_reply_text(text):
             self._append_log(
                 f"[REPLY][SKIP_INVALID_TEXT] session_id={session.session_id} "
                 f"turn_id={turn_id or '-'} text={text!r}",
@@ -2762,6 +2657,14 @@ class BridgeMixin:
                 )
             QTimer.singleShot(100, self._update_queue_badge)
             return False
+        if is_cursor_code_paused():
+            reason = get_cursor_code_pause_reason() or "cursor_code_paused"
+            self._append_log(
+                f"[SEND][PAUSED_BY_CURSOR_CODE] reason={reason}",
+                echo=True,
+            )
+            QTimer.singleShot(100, self._update_queue_badge)
+            return False
         item = queue.pop(0)
         text = str(item.get("text") or "").strip()
         message_id = str(item.get("message_id") or "").strip()
@@ -2955,6 +2858,17 @@ class BridgeMixin:
         content_text = (content or "").strip()
         if not content_text:
             return {"ok": False, "reason": "empty_text", "retryable": False}
+        if is_cursor_code_paused():
+            reason = get_cursor_code_pause_reason() or "cursor_code_paused"
+            self._append_log(
+                f"[SEND][PAUSED_BY_CURSOR_CODE] reason={reason}",
+                echo=True,
+            )
+            return {
+                "ok": False,
+                "reason": "cursor_code_paused",
+                "retryable": True,
+            }
         turn = self._local_turn_from_reuse(
             session,
             content_text,

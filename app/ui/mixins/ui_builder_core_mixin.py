@@ -152,6 +152,12 @@ class UiBuilderCoreMixin:
             self.close_bound_page_btn = self._create_tm_action_button_from_spec(
                 "close_bound", specs
             )
+        if getattr(self, "sync_web_conversation_btn", None) is not None:
+            self._reconnect_button(
+                self.sync_web_conversation_btn,
+                self._sync_bound_web_conversation,
+                tag="sync_web_conversation_btn",
+            )
         self._apply_tm_action_button_roles()
 
     def _apply_tm_action_button_roles(self):
@@ -265,11 +271,13 @@ class UiBuilderCoreMixin:
         self.main_tabs.setObjectName("MainTabs")
 
         self.chat_page = self._build_chat_page()
+        self.cursor_code_page = self._build_cursor_code_page()
         self.settings_page = self._build_settings_page()
         self.debug_page = self._build_debug_page()
         self.log_page = None
 
         self.main_tabs.addTab(self.chat_page, "聊天")
+        self.main_tabs.addTab(self.cursor_code_page, "Cursor代码")
         self.main_tabs.addTab(self.settings_page, "设置")
         self.main_tabs.addTab(self.debug_page, "调试")
 

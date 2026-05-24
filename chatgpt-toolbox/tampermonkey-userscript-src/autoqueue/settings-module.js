@@ -1,0 +1,1050 @@
+  /********************************************************************
+   * 5b. SettingsModule：精简模式与工具箱设置
+   ********************************************************************/
+
+  function renderPromptCheckboxList(promptList, selectedIds) {
+    const list = Array.isArray(promptList) ? promptList : [];
+    const selected = new Set(
+      Array.isArray(selectedIds)
+        ? selectedIds.map((id) => String(id))
+        : [],
+    );
+
+    if (!list.length) {
+      return '<div class="cgpt-log-empty">暂无 Prompt</div>';
+    }
+
+    return list.map((prompt) => {
+      const id = String(prompt && prompt.id ? prompt.id : '');
+      const title = String(prompt && prompt.title ? prompt.title : '未命名');
+      const category = String(prompt && prompt.category ? prompt.category : '默认');
+      const checked = selected.has(id) ? ' checked' : '';
+
+      return `
+      <label class="cgpt-setting-prompt-checkbox">
+        <input
+          type="checkbox"
+          data-compact-prompt-id="${escapeHtml(id)}"
+          ${checked}
+        >
+        <span>${escapeHtml(title)}</span>
+        <small>${escapeHtml(category)}</small>
+      </label>
+    `;
+    }).join('');
+  }
+
+  const SettingsModule = (() => {
+    let host = null;
+    let root = null;
+    let activeSettingsSubtab = 'basic';
+    let continuePromptMigrationChecked = false;
+
+    function migrateCompactContinuePromptIfNeeded(cfg, options = {}) {
+      if (!cfg || typeof cfg !== 'object') {
+        return cfg;
+      }
+      if (typeof migrateContinuePromptTextIfNeeded !== 'function') {
+        return cfg;
+      }
+
+      const stored = String(cfg.copyHotkeyContinuePromptText || '').trim();
+      const logFn = options.log === false
+        ? null
+        : (line) => ToolboxShell.appendLog(line);
+      const migration = migrateContinuePromptTextIfNeeded(stored, logFn);
+
+      if (migration.migrated) {
+        cfg.copyHotkeyContinuePromptText = migration.value;
+      }
+
+      return cfg;
+    }
+
+    function getConfig() {
+      const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
+      let cfg = normalizeCompactUiConfig(saved);
+
+      if (saved && !saved.quickPromptActionVersion && saved.quickPromptClickAction === 'fill') {
+        cfg.quickPromptClickAction = 'send';
+        cfg.quickPromptActionVersion = 1;
+        MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
+        cfg = normalizeCompactUiConfig(cfg);
+      }
+
+      if (!continuePromptMigrationChecked) {
+        continuePromptMigrationChecked = true;
+        const before = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        cfg = migrateCompactContinuePromptIfNeeded(cfg, { log: true });
+        const after = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        if (before !== after) {
+          MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
+        }
+      }
+
+      return cfg;
+    }
+
+    function saveConfig(next) {
+      const cfg = migrateCompactContinuePromptIfNeeded(
+        normalizeCompactUiConfig(next || {}),
+        { log: false },
+      );
+      cfg.quickPromptActionVersion = 1;
+      MemoryManager.set(MemoryManager.KEYS.compactUiConfig, cfg);
+
+      ToolboxShell.appendLog(
+        `[SETTINGS][quickPrompt] upload=${cfg.showUploadQuickPrompts !== false} compact=${cfg.showCompactQuickPrompts !== false} confirmOverwrite=${cfg.confirmPromptDraftOverwrite ? 1 : 0} selected=${(cfg.quickPromptIds || []).length}`,
+      );
+
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.refresh === 'function') {
+        UploadModule.refresh();
+      }
+    }
+
+    function readFromUi() {
+      const current = getConfig();
+
+      const quickPromptIds = qsa('[data-compact-prompt-id]', root)
+        .filter((x) => x.checked)
+        .map((x) => x.getAttribute('data-compact-prompt-id'))
+        .filter(Boolean);
+
+      const uploadQuickEl = qs('#cgpt-setting-upload-show-quick-prompts', root);
+      const compactQuickEl = qs('#cgpt-setting-compact-show-quick-prompts', root);
+
+      const showUploadQuickPrompts = uploadQuickEl
+        ? !!uploadQuickEl.checked
+        : current.showUploadQuickPrompts !== false;
+
+      const showCompactQuickPrompts = compactQuickEl
+        ? !!compactQuickEl.checked
+        : current.showCompactQuickPrompts !== false;
+
+      return {
+        showUploadStartButton: !!qs(SettingsSelectors.showUploadStart, root)?.checked,
+        showUploadFileList: !!qs(SettingsSelectors.showFileList, root)?.checked,
+        showUploadQuickPrompts,
+        showCompactQuickPrompts,
+        quickPromptClickAction: qs('#cgpt-setting-compact-prompt-action', root)?.value || 'send',
+        confirmPromptDraftOverwrite: !!qs('#cgpt-setting-confirm-prompt-draft-overwrite', root)?.checked,
+        quickPromptActiveCategory: current.quickPromptActiveCategory || '全部',
+        quickPromptIds,
+        globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
+        restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
+        copyHotkeyLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
+        copyHotkeyLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.copyHotkeyLoopAutoUploadInterval || 5),
+        copyHotkeyLoopHomeNavEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)?.checked,
+        copyHotkeyLoopHomeNavInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value || current.copyHotkeyLoopHomeNavInterval || 20),
+        copyHotkeyLoopHomeNavUrl: String(
+          qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          || current.copyHotkeyLoopHomeNavUrl
+          || 'https://chatgpt.com/'
+        ).trim(),
+        copyHotkeyContinuePromptText: (() => {
+          const raw = String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim();
+          const defaultText = typeof getDefaultContinuePromptText === 'function'
+            ? getDefaultContinuePromptText()
+            : '';
+          if (defaultText && raw === defaultText) {
+            return '';
+          }
+          return raw;
+        })(),
+        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim() || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
+      };
+    }
+
+    function renderSettingsSubtabs() {
+      if (!root) return;
+
+      const tabs = qsa('[data-settings-subtab]', root);
+      const panels = qsa('[data-settings-panel]', root);
+
+      tabs.forEach((btn) => {
+        const name = btn.getAttribute('data-settings-subtab') || 'basic';
+        btn.classList.toggle('active', name === activeSettingsSubtab);
+      });
+
+      panels.forEach((panelEl) => {
+        const name = panelEl.getAttribute('data-settings-panel') || 'basic';
+        panelEl.style.display = name === activeSettingsSubtab ? '' : 'none';
+      });
+    }
+
+    function render() {
+      if (!root) return;
+
+      renderSettingsSubtabs();
+
+      const cfg = getConfig();
+
+      const startEl = qs('#cgpt-setting-compact-show-upload-start', root);
+      if (startEl) startEl.checked = !!cfg.showUploadStartButton;
+
+      const fileListEl = qs('#cgpt-setting-compact-show-file-list', root);
+      if (fileListEl) fileListEl.checked = !!cfg.showUploadFileList;
+
+      const uploadQuickEl = qs('#cgpt-setting-upload-show-quick-prompts', root);
+      if (uploadQuickEl) {
+        uploadQuickEl.checked = cfg.showUploadQuickPrompts !== false;
+      }
+
+      const quickEl = qs('#cgpt-setting-compact-show-quick-prompts', root);
+      if (quickEl) {
+        quickEl.checked = cfg.showCompactQuickPrompts !== false;
+      }
+
+      const actionEl = qs('#cgpt-setting-compact-prompt-action', root);
+      if (actionEl) actionEl.value = cfg.quickPromptClickAction || 'send';
+
+      const confirmPromptDraftOverwriteEl = qs('#cgpt-setting-confirm-prompt-draft-overwrite', root);
+      if (confirmPromptDraftOverwriteEl) {
+        confirmPromptDraftOverwriteEl.checked = cfg.confirmPromptDraftOverwrite === true;
+      }
+
+      const globalDropEl = qs('#cgpt-setting-global-drop-capture', root);
+      if (globalDropEl) globalDropEl.checked = !!cfg.globalDropCaptureEnabled;
+
+      const restoreScrollEl = qs('#cgpt-setting-restore-scroll-after-copy', root);
+      if (restoreScrollEl) {
+        restoreScrollEl.checked = cfg.restoreScrollAfterCopyLastMessage === true;
+      }
+
+      const loopAutoUploadEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root);
+      if (loopAutoUploadEnabledEl) {
+        loopAutoUploadEnabledEl.checked = cfg.copyHotkeyLoopAutoUploadEnabled !== false;
+      }
+
+      const loopAutoUploadIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root);
+      if (loopAutoUploadIntervalEl) {
+        loopAutoUploadIntervalEl.value = String(cfg.copyHotkeyLoopAutoUploadInterval || 5);
+      }
+
+      const loopHomeNavEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
+      if (loopHomeNavEnabledEl) {
+        loopHomeNavEnabledEl.checked = cfg.copyHotkeyLoopHomeNavEnabled !== false;
+      }
+
+      const loopHomeNavIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root);
+      if (loopHomeNavIntervalEl) {
+        loopHomeNavIntervalEl.value = String(cfg.copyHotkeyLoopHomeNavInterval || 20);
+      }
+
+      const loopHomeNavUrlEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root);
+      if (loopHomeNavUrlEl) {
+        loopHomeNavUrlEl.value = cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
+      }
+
+      const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
+      if (stopSignalEl) {
+        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+      }
+
+      const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
+      if (promptTextEl) {
+        promptTextEl.value = String(cfg.copyHotkeyContinuePromptText || '').trim();
+        promptTextEl.placeholder = '留空则使用内置默认继续指令（完成时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>）。';
+      }
+
+      const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
+      if (edgeAutoHideEl) {
+        edgeAutoHideEl.checked = MemoryManager.get(MemoryManager.KEYS.edgeAutoHideEnabled, false) === true;
+      }
+
+      const beepCfg = getBeepConfig();
+      const beepCopySuccessEl = qs('#cgpt-setting-beep-copy-success-enabled', root);
+      if (beepCopySuccessEl) {
+        beepCopySuccessEl.checked = beepCfg.copySuccessEnabled !== false;
+      }
+
+      const beepVolumeEl = qs('#cgpt-setting-beep-volume', root);
+      if (beepVolumeEl) {
+        beepVolumeEl.value = String(beepCfg.volume);
+      }
+
+      const beepDurationEl = qs('#cgpt-setting-beep-duration', root);
+      if (beepDurationEl) {
+        beepDurationEl.value = String(beepCfg.durationMs);
+      }
+
+      const beepFrequencyEl = qs('#cgpt-setting-beep-frequency', root);
+      if (beepFrequencyEl) {
+        beepFrequencyEl.value = String(beepCfg.frequency);
+      }
+
+      const promptListEl = qs('#cgpt-setting-compact-prompt-list', root);
+
+      if (promptListEl) {
+        const promptList = typeof PromptManagerModule !== 'undefined'
+          && typeof PromptManagerModule.getPrompts === 'function'
+          ? PromptManagerModule.getPrompts()
+          : [];
+
+        promptListEl.innerHTML = renderPromptCheckboxList(
+          promptList,
+          cfg.quickPromptIds || [],
+        );
+      }
+    }
+
+    function renderShortcutSettings() {
+      if (!host) {
+        return;
+      }
+
+      const cfg = getShortcutConfig();
+
+      const map = [
+        {
+          action: 'sendMessage',
+          enabledId: 'cgpt-shortcut-send-enabled',
+          labelId: 'cgpt-shortcut-send-label',
+        },
+        {
+          action: 'copyLastMessage',
+          enabledId: 'cgpt-shortcut-copy-enabled',
+          labelId: 'cgpt-shortcut-copy-label',
+        },
+        {
+          action: 'copyAndHotkeyOnce',
+          enabledId: 'cgpt-shortcut-copy-hotkey-enabled',
+          labelId: 'cgpt-shortcut-copy-hotkey-label',
+        },
+        {
+          action: 'startUpload',
+          enabledId: 'cgpt-shortcut-upload-enabled',
+          labelId: 'cgpt-shortcut-upload-label',
+        },
+      ];
+
+      map.forEach((item) => {
+        const data = cfg[item.action];
+        const enabledEl = qs(`#${item.enabledId}`, host);
+        const labelEl = qs(`#${item.labelId}`, host);
+
+        if (enabledEl) {
+          enabledEl.checked = data.enabled !== false;
+        }
+
+        if (labelEl) {
+          labelEl.value = data.label || '未设置';
+        }
+      });
+    }
+
+    function bindEvents() {
+      function updateShortcutAction(action, patch) {
+        const cfg = getShortcutConfig();
+        const oldActionConfig = cloneShortcutItem(
+          cfg[action],
+          DEFAULT_SHORTCUT_CONFIG[action],
+        );
+
+        cfg[action] = Object.assign(
+          {},
+          cfg[action] || {},
+          patch || {},
+        );
+
+        const conflict = findShortcutConflict(cfg, action);
+
+        if (conflict) {
+          cfg[action] = oldActionConfig;
+
+          renderShortcutSettings();
+          applyUploadShortcutButtonTitles();
+
+          ToolboxShell.appendLog(
+            `[SETTINGS][shortcut-conflict-blocked] action=${action} conflict=${conflict}`,
+          );
+          ToolboxShell.setStatus(
+            `快捷键冲突，已取消保存：${oldActionConfig.label || cfg[action].label || ''}`,
+            'warn',
+            {
+              persist: true,
+              shortText: '冲突',
+            },
+          );
+          return;
+        }
+
+        saveShortcutConfig(cfg);
+        renderShortcutSettings();
+        applyUploadShortcutButtonTitles();
+
+        ToolboxShell.appendLog(
+          `[SETTINGS][shortcut] action=${action} label=${cfg[action].label || '-'} enabled=${cfg[action].enabled !== false ? '1' : '0'}`
+        );
+      }
+
+      function bindShortcutEnabled(id, action) {
+        const el = qs(`#${id}`, root);
+        if (!el) return;
+
+        el.addEventListener('change', () => {
+          updateShortcutAction(action, {
+            enabled: !!el.checked,
+          });
+        });
+      }
+
+      function bindShortcutClear(id, action) {
+        const el = qs(`#${id}`, root);
+        if (!el) return;
+
+        el.addEventListener('click', () => {
+          updateShortcutAction(action, {
+            enabled: false,
+            label: '',
+            key: '',
+            code: '',
+            ctrl: false,
+            alt: false,
+            shift: false,
+            meta: false,
+          });
+        });
+      }
+
+      function bindShortcutRecord(id, action) {
+        const el = qs(`#${id}`, root);
+        if (!el) return;
+
+        el.addEventListener('click', () => {
+          const oldText = el.textContent;
+          el.textContent = '按下快捷键...';
+          let recordTimer = 0;
+
+          const cleanupRecordListener = () => {
+            if (recordTimer) {
+              window.clearTimeout(recordTimer);
+              recordTimer = 0;
+            }
+
+            document.removeEventListener('keydown', onKeyDown, true);
+          };
+
+          const onKeyDown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (e.key === 'Escape') {
+              cleanupRecordListener();
+              el.textContent = oldText || '录制';
+              ToolboxShell.appendLog(`[SETTINGS][shortcut-record:cancel] action=${action}`);
+              return;
+            }
+
+            const next = shortcutItemFromEvent(e);
+
+            if (next.pureModifier) {
+              ToolboxShell.appendLog(
+                `[SETTINGS][shortcut-record:wait-main-key] action=${action} key=${e.key || '-'} code=${e.code || '-'} ctrl=${e.ctrlKey ? 1 : 0} alt=${e.altKey ? 1 : 0} shift=${e.shiftKey ? 1 : 0} meta=${e.metaKey ? 1 : 0}`,
+              );
+              el.textContent = '继续按主键...';
+              return;
+            }
+
+            if (!next.key && !next.code) {
+              ToolboxShell.appendLog(`[SETTINGS][shortcut-record:skip] action=${action} reason=empty-key`);
+              el.textContent = oldText || '录制';
+              cleanupRecordListener();
+              return;
+            }
+
+            if (!next.label) {
+              ToolboxShell.appendLog(`[SETTINGS][shortcut-record:skip] action=${action} reason=empty-label`);
+              el.textContent = oldText || '录制';
+              cleanupRecordListener();
+              return;
+            }
+
+            cleanupRecordListener();
+
+            const shortcutData = {
+              enabled: next.enabled,
+              label: next.label,
+              key: next.key,
+              code: next.code,
+              ctrl: next.ctrl,
+              alt: next.alt,
+              shift: next.shift,
+              meta: next.meta,
+            };
+
+            updateShortcutAction(action, shortcutData);
+
+            ToolboxShell.appendLog(
+              `[SETTINGS][shortcut-record:ok] action=${action} label=${next.label}`,
+            );
+
+            el.textContent = oldText || '录制';
+          };
+
+          recordTimer = window.setTimeout(() => {
+            recordTimer = 0;
+            el.textContent = oldText || '录制';
+            document.removeEventListener('keydown', onKeyDown, true);
+            ToolboxShell.appendLog(`[SETTINGS][shortcut-record:timeout] action=${action}`);
+          }, 8000);
+
+          document.addEventListener('keydown', onKeyDown, true);
+        });
+      }
+
+      bindShortcutEnabled('cgpt-shortcut-send-enabled', 'sendMessage');
+      bindShortcutEnabled('cgpt-shortcut-copy-enabled', 'copyLastMessage');
+      bindShortcutEnabled('cgpt-shortcut-copy-hotkey-enabled', 'copyAndHotkeyOnce');
+      bindShortcutEnabled('cgpt-shortcut-upload-enabled', 'startUpload');
+
+      bindShortcutRecord('cgpt-shortcut-send-record', 'sendMessage');
+      bindShortcutRecord('cgpt-shortcut-copy-record', 'copyLastMessage');
+      bindShortcutRecord('cgpt-shortcut-copy-hotkey-record', 'copyAndHotkeyOnce');
+      bindShortcutRecord('cgpt-shortcut-upload-record', 'startUpload');
+
+      bindShortcutClear('cgpt-shortcut-send-clear', 'sendMessage');
+      bindShortcutClear('cgpt-shortcut-copy-clear', 'copyLastMessage');
+      bindShortcutClear('cgpt-shortcut-copy-hotkey-clear', 'copyAndHotkeyOnce');
+      bindShortcutClear('cgpt-shortcut-upload-clear', 'startUpload');
+
+      const resetShortcutBtn = qs('#cgpt-shortcut-reset-defaults', root);
+      if (resetShortcutBtn) {
+        resetShortcutBtn.addEventListener('click', () => {
+          resetShortcutConfig();
+          renderShortcutSettings();
+          applyUploadShortcutButtonTitles();
+          ToolboxShell.appendLog('[SETTINGS][shortcut-reset-defaults]');
+        });
+      }
+
+      const resetContinuePromptBtn = qs('#cgpt-setting-copy-hotkey-continue-prompt-reset', root);
+      if (resetContinuePromptBtn) {
+        resetContinuePromptBtn.addEventListener('click', () => {
+          const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
+          const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
+          const defaultStop = typeof DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL === 'string'
+            ? DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL
+            : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+
+          if (promptTextEl) {
+            promptTextEl.value = '';
+          }
+          if (stopSignalEl) {
+            stopSignalEl.value = defaultStop;
+          }
+
+          const cfg = readFromUi();
+          cfg.copyHotkeyContinuePromptText = '';
+          cfg.copyHotkeyContinueStopSignal = defaultStop;
+          saveConfig(cfg);
+          render();
+          ToolboxShell.appendLog('[SETTINGS][continue-prompt-reset-defaults]');
+        });
+      }
+
+      const onCompactSettingChange = () => {
+        const cfg = readFromUi();
+        saveConfig(cfg);
+        render();
+      };
+
+      [
+        '#cgpt-setting-compact-show-upload-start',
+        '#cgpt-setting-compact-show-file-list',
+        '#cgpt-setting-upload-show-quick-prompts',
+        '#cgpt-setting-compact-show-quick-prompts',
+        '#cgpt-setting-global-drop-capture',
+        '#cgpt-setting-restore-scroll-after-copy',
+        '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
+        '#cgpt-setting-copy-hotkey-loop-auto-upload-interval',
+        '#cgpt-setting-copy-hotkey-loop-home-nav-enabled',
+        '#cgpt-setting-copy-hotkey-loop-home-nav-interval',
+        '#cgpt-setting-copy-hotkey-loop-home-nav-url',
+        '#cgpt-setting-copy-hotkey-continue-stop-signal',
+        '#cgpt-setting-copy-hotkey-continue-prompt-text',
+        '#cgpt-setting-compact-prompt-action',
+        '#cgpt-setting-confirm-prompt-draft-overwrite',
+      ].forEach((selector) => {
+        bindSettingChange(root, selector, onCompactSettingChange, {
+          moduleName: 'SETTINGS',
+        });
+      });
+
+      const listEl = qs('#cgpt-setting-compact-prompt-list', root);
+      if (listEl) {
+        listEl.addEventListener('change', (e) => {
+          const target = e.target;
+          if (!(target instanceof HTMLInputElement)) return;
+          if (!target.matches('[data-compact-prompt-id]')) return;
+
+          const cfg = readFromUi();
+          saveConfig(cfg);
+          render();
+        });
+      }
+
+      const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
+
+      if (edgeAutoHideEl) {
+        edgeAutoHideEl.addEventListener('change', () => {
+          const enabled = !!edgeAutoHideEl.checked;
+
+          if (typeof ToolboxShell.setEdgeAutoHideEnabled === 'function') {
+            ToolboxShell.setEdgeAutoHideEnabled(enabled);
+          } else {
+            MemoryManager.set(MemoryManager.KEYS.edgeAutoHideEnabled, enabled);
+            ToolboxShell.appendLog(
+              `[SETTINGS][edgeAutoHide] ${enabled ? '已开启' : '已关闭'}，但 ToolboxShell.setEdgeAutoHideEnabled 不存在`,
+            );
+          }
+
+          render();
+        });
+      }
+
+      const resetPosBtn = qs('#cgpt-setting-reset-toolbox-position', root);
+      if (resetPosBtn) {
+        resetPosBtn.addEventListener('click', () => {
+          if (typeof ToolboxShell.resetToolboxPosition === 'function') {
+            ToolboxShell.resetToolboxPosition();
+          } else {
+            ToolboxShell.appendLog('[SETTINGS][reset-position] ToolboxShell.resetToolboxPosition 不存在');
+          }
+        });
+      }
+
+      const forceShowBtn = qs('#cgpt-setting-force-show-toolbox', root);
+      bindOnce(forceShowBtn, 'click', () => {
+          if (typeof ToolboxShell.restoreToolboxFromHiddenState === 'function') {
+            ToolboxShell.restoreToolboxFromHiddenState('settings-force-show');
+          } else if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.__cgptToolboxShow === 'function') {
+            unsafeWindow.__cgptToolboxShow();
+          } else if (typeof window.__cgptToolboxShow === 'function') {
+            window.__cgptToolboxShow();
+          } else {
+            ToolboxShell.appendLog('[SETTINGS][force-show-toolbox] restoreToolboxFromHiddenState 不存在');
+          }
+
+          if (typeof ToolboxShell.resetToolboxPosition === 'function') {
+            ToolboxShell.resetToolboxPosition();
+          }
+
+          ToolboxShell.appendLog('[SETTINGS][force-show-toolbox]');
+      });
+
+      function readBeepFromUi() {
+        const volumeEl = qs('#cgpt-setting-beep-volume', root);
+        const durationEl = qs('#cgpt-setting-beep-duration', root);
+        const frequencyEl = qs('#cgpt-setting-beep-frequency', root);
+        const current = getBeepConfig();
+
+        return normalizeBeepConfig({
+          ...current,
+          volume: volumeEl ? Number(volumeEl.value) : current.volume,
+          durationMs: durationEl ? Number(durationEl.value) : current.durationMs,
+          frequency: frequencyEl ? Number(frequencyEl.value) : current.frequency,
+          type: current.type,
+        });
+      }
+
+      function bindBeepSettingInput(id) {
+        const el = qs(`#${id}`, root);
+        bindOnce(el, 'change', () => {
+          const cfg = readBeepFromUi();
+          saveBeepConfig(cfg);
+          ToolboxShell.appendLog(
+            `[SETTINGS][beep] volume=${cfg.volume} durationMs=${cfg.durationMs} frequency=${cfg.frequency}`,
+          );
+        });
+      }
+
+      bindBeepSettingInput('cgpt-setting-beep-volume');
+      bindBeepSettingInput('cgpt-setting-beep-duration');
+      bindBeepSettingInput('cgpt-setting-beep-frequency');
+
+      const beepCopySuccessEl = qs('#cgpt-setting-beep-copy-success-enabled', root);
+      bindOnce(beepCopySuccessEl, 'change', () => {
+        const current = getBeepConfig();
+        const cfg = saveBeepConfig({
+          ...current,
+          copySuccessEnabled: beepCopySuccessEl.checked !== false,
+        });
+
+        ToolboxShell.appendLog(
+          `[SETTINGS][beep-copy-success] enabled=${cfg.copySuccessEnabled !== false ? '1' : '0'}`,
+        );
+      }, {
+        key: 'change:beep-copy-success-enabled',
+        moduleName: 'SETTINGS',
+      });
+
+      const settingsBeepRefs = collectDomRefs(root, {
+        testBeep: {
+          selector: '#cgpt-setting-test-beep',
+          required: false,
+        },
+        testTitleFlash: {
+          selector: '#cgpt-setting-test-title-flash',
+          required: false,
+        },
+        beepStatus: {
+          selector: '#cgpt-setting-beep-status',
+          required: false,
+        },
+      }, {
+        moduleName: 'SETTINGS',
+      });
+
+      bindOnce(settingsBeepRefs.testBeep, 'click', async () => {
+          const statusEl = settingsBeepRefs.beepStatus;
+
+          if (statusEl) {
+            statusEl.textContent = '正在测试...';
+          }
+
+          const cfg = saveBeepConfig(readBeepFromUi());
+
+          ToolboxShell.appendLog(
+            `[SETTINGS][beep-test] start volume=${cfg.volume} durationMs=${cfg.durationMs} frequency=${cfg.frequency}`,
+          );
+
+          const unlocked = await unlockToolboxAudio('settings-test');
+
+          if (!unlocked) {
+            if (statusEl) {
+              statusEl.textContent = '测试失败：浏览器音频未解锁';
+            }
+
+            ToolboxShell.appendLog('[SETTINGS][beep-test] failed reason=unlock-failed');
+            return;
+          }
+
+          const ok = await playToolboxBeep('settings-test', {
+            volume: cfg.volume,
+            durationMs: cfg.durationMs,
+            frequency: cfg.frequency,
+            type: cfg.type,
+          });
+
+          if (statusEl) {
+            statusEl.textContent = ok
+              ? '已播放测试蜂鸣'
+              : '测试失败，请查看日志';
+          }
+
+          ToolboxShell.appendLog(`[SETTINGS][beep-test] result=${ok ? 'ok' : 'failed'}`);
+      });
+
+      bindOnce(settingsBeepRefs.testTitleFlash, 'click', () => {
+        const statusEl = settingsBeepRefs.beepStatus;
+
+        if (
+          typeof TitlePrefixModule !== 'undefined'
+          && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
+        ) {
+          TitlePrefixModule.startReplyDoneFlash('settings-test', {
+            intervalMs: 450,
+            autoStopMs: 2400,
+          });
+
+          if (
+            typeof ToolboxShell !== 'undefined'
+            && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+          ) {
+            ToolboxShell.flashHeaderTitleOnce('回复完成', {
+              intervalMs: 450,
+              autoStopMs: 2400,
+            });
+          }
+
+          if (statusEl) {
+            statusEl.textContent = '已开始测试标题闪烁';
+          }
+
+          ToolboxShell.appendLog('[SETTINGS][title-flash-test] start');
+          return;
+        }
+
+        if (statusEl) {
+          statusEl.textContent = '测试失败：标题闪烁模块不可用';
+        }
+
+        ToolboxShell.appendLog('[SETTINGS][title-flash-test] failed reason=module-missing');
+      });
+
+      const settingsSubtabs = qs('#cgpt-settings-subtabs', root);
+      bindOnce(settingsSubtabs, 'click', (e) => {
+          const btn = e.target instanceof HTMLElement
+            ? e.target.closest('[data-settings-subtab]')
+            : null;
+
+          if (!btn) return;
+
+          e.preventDefault();
+          e.stopPropagation();
+
+          activeSettingsSubtab = btn.getAttribute('data-settings-subtab') || 'basic';
+          MemoryManager.set('settingsActiveSubtab', activeSettingsSubtab);
+          renderSettingsSubtabs();
+
+          ToolboxShell.appendLog(`[SETTINGS][subtab] active=${activeSettingsSubtab}`);
+      });
+    }
+
+    function mount(target) {
+      host = target;
+      if (!host) return;
+
+      host.innerHTML = `
+        <div class="cgpt-section">
+          <div class="cgpt-section-title">设置</div>
+
+          <div class="cgpt-settings-subtabs" id="cgpt-settings-subtabs">
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="basic">基础</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="shortcut">快捷键</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="ui">界面</button>
+          </div>
+
+          <div class="cgpt-settings-panel" data-settings-panel="basic">
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-edge-auto-hide">
+              工具箱贴边自动隐藏
+            </label>
+            <div class="cgpt-hint">开启后，拖动工具箱贴住浏览器右边缘后自动收起，只保留边缘把手；只是靠近边缘不会隐藏。关闭后只保留普通拖拽，不自动隐藏。</div>
+
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-reset-toolbox-position">重置工具箱位置</button>
+              <button type="button" class="cgpt-btn primary" id="cgpt-setting-force-show-toolbox">强制显示工具箱</button>
+            </div>
+            <div class="cgpt-hint">当工具箱跑出屏幕、贴边状态异常或隐藏后找不到入口时，可先点「强制显示工具箱」，再按需重置位置。</div>
+
+            <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-beep-copy-success-enabled">
+              复制成功后播放蜂鸣器
+            </label>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-volume">音量</label>
+              <input type="range" class="cgpt-input" id="cgpt-setting-beep-volume" min="0.05" max="1" step="0.05">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-duration">时长 (毫秒)</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="30" max="10000" step="10">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-beep-frequency" data-no-wheel-number="1" min="80" max="6000" step="10">
+            </div>
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn primary" id="cgpt-setting-test-beep">测试蜂鸣器</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-test-title-flash">测试标题闪烁</button>
+              <span class="cgpt-hint" id="cgpt-setting-beep-status">未测试</span>
+            </div>
+            <div class="cgpt-hint">蜂鸣器用于复制成功提醒；浏览器可能要求先点击页面或工具箱一次后才允许播放声音。</div>
+          </div>
+
+          <div class="cgpt-settings-panel" data-settings-panel="shortcut">
+            <div class="cgpt-hint">
+              点击录制后，按下完整快捷键。例如：Ctrl+Alt+C。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。
+            </div>
+
+            <div class="cgpt-shortcut-settings">
+              <div class="cgpt-shortcut-row" data-shortcut-action="sendMessage">
+                <label class="cgpt-checkbox-line">
+                  <input type="checkbox" id="cgpt-shortcut-send-enabled">
+                  启用发送信息快捷键
+                </label>
+                <input id="cgpt-shortcut-send-label" class="cgpt-input" readonly>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-send-record">录制</button>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-send-clear">清空</button>
+              </div>
+
+              <div class="cgpt-shortcut-row" data-shortcut-action="copyLastMessage">
+                <label class="cgpt-checkbox-line">
+                  <input type="checkbox" id="cgpt-shortcut-copy-enabled">
+                  启用复制最后回复快捷键
+                </label>
+                <input id="cgpt-shortcut-copy-label" class="cgpt-input" readonly>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-record">录制</button>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-clear">清空</button>
+              </div>
+
+              <div class="cgpt-shortcut-row" data-shortcut-action="copyAndHotkeyOnce">
+                <label class="cgpt-checkbox-line">
+                  <input type="checkbox" id="cgpt-shortcut-copy-hotkey-enabled">
+                  启用复制+快捷键快捷键
+                </label>
+                <input id="cgpt-shortcut-copy-hotkey-label" class="cgpt-input" readonly>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-record">录制</button>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-clear">清空</button>
+              </div>
+
+              <div class="cgpt-shortcut-row" data-shortcut-action="startUpload">
+                <label class="cgpt-checkbox-line">
+                  <input type="checkbox" id="cgpt-shortcut-upload-enabled">
+                  启用开始上传快捷键
+                </label>
+                <input id="cgpt-shortcut-upload-label" class="cgpt-input" readonly>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-upload-record">录制</button>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-upload-clear">清空</button>
+              </div>
+
+              <div class="cgpt-row">
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-reset-defaults">
+                  恢复默认快捷键
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="cgpt-settings-panel" data-settings-panel="ui">
+            <div class="cgpt-section-title" style="margin-top: 4px;">精简模式显示内容</div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-upload-start">
+              显示上传按钮
+            </label>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-file-list">
+              显示上传文件列表
+            </label>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-upload-show-quick-prompts">
+              上传页显示常用 Prompt 快捷区
+            </label>
+            <div class="cgpt-hint">开启后，在多文件上传页显示常用 Prompt 快捷按钮。</div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-quick-prompts">
+              精简模式显示常用 Prompt 快捷区
+            </label>
+
+            <div class="cgpt-kv">
+              <label>Prompt 动作</label>
+              <select class="cgpt-select" id="cgpt-setting-compact-prompt-action">
+                <option value="send">填入并发送</option>
+                <option value="fill">只填入输入框</option>
+              </select>
+            </div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-confirm-prompt-draft-overwrite">
+              覆盖输入框草稿前弹窗确认
+            </label>
+            <div class="cgpt-hint">关闭时，点击常用 Prompt 或 Prompt 管理发送会直接覆盖输入框已有内容，不再弹出浏览器确认框。</div>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">常用 Prompt 快捷区</div>
+            <div class="cgpt-hint">选择要显示在上传页快捷区域的 Prompt。点击后默认填入并发送到 ChatGPT，也可改为只填入输入框。</div>
+            <div id="cgpt-setting-compact-prompt-list" class="cgpt-settings-prompt-list"></div>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">拖拽上传</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-global-drop-capture">
+              页面空白处拖入文件时加入工具箱队列
+            </label>
+            <div class="cgpt-hint">拖到 ChatGPT 输入框仍由 ChatGPT 原生处理；拖到工具箱面板内始终加入队列。</div>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">复制回复</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-restore-scroll-after-copy">
+              复制最后消息后恢复原滚动位置
+            </label>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">连续复制+快捷键+继续（循环附加）</div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-copy-hotkey-loop-auto-upload-enabled">
+              每隔指定轮数自动重新上传当前分组文件
+            </label>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-copy-hotkey-loop-auto-upload-interval">上传间隔轮数</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-auto-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+            </div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-copy-hotkey-loop-home-nav-enabled">
+              每隔指定轮数页内跳转到 ChatGPT 主页
+            </label>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-copy-hotkey-loop-home-nav-interval">跳转间隔轮数</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-home-nav-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+            </div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-copy-hotkey-loop-home-nav-url">跳转地址</label>
+              <input type="text" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-home-nav-url">
+            </div>
+
+            <div class="cgpt-hint">
+              默认每 5 轮重新上传一次文件，每 20 轮页内跳转到 https://chatgpt.com/。如果同一轮同时命中上传和跳转，优先跳转，避免旧页面重复上传。
+            </div>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">复制+快捷键+继续</div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-copy-hotkey-continue-stop-signal">终止信号</label>
+              <input
+                type="text"
+                class="cgpt-input"
+                id="cgpt-setting-copy-hotkey-continue-stop-signal"
+                placeholder="<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>"
+              >
+            </div>
+
+            <div class="cgpt-kv cgpt-kv-vertical">
+              <label for="cgpt-setting-copy-hotkey-continue-prompt-text">继续指令</label>
+              <textarea
+                class="cgpt-input"
+                id="cgpt-setting-copy-hotkey-continue-prompt-text"
+                rows="12"
+                style="width: 100%; resize: vertical;"
+                placeholder="留空则使用内置默认继续指令（完成时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>）。"
+              ></textarea>
+            </div>
+
+            <div class="cgpt-row">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-copy-hotkey-continue-prompt-reset">
+                恢复默认继续指令
+              </button>
+            </div>
+
+            <div class="cgpt-hint">
+              单次或连续「复制+快捷键+继续」会发送上面的继续指令。若 ChatGPT 仅回复终止信号（整段回复只有这一行），将停止复制、快捷键与继续发送。
+            </div>
+          </div>
+        </div>
+      `;
+
+      root = host;
+
+      collectDomRefs(root, {
+        subtabs: '#cgpt-settings-subtabs',
+        testBeep: {
+          selector: '#cgpt-setting-test-beep',
+          required: false,
+        },
+        beepStatus: {
+          selector: '#cgpt-setting-beep-status',
+          required: false,
+        },
+      }, {
+        moduleName: 'SETTINGS',
+      });
+
+      activeSettingsSubtab = MemoryManager.get('settingsActiveSubtab', 'basic');
+      bindEvents();
+      render();
+      renderShortcutSettings();
+      renderSettingsSubtabs();
+    }
+
+    return {
+      mount,
+      getConfig,
+      saveConfig,
+    };
+  })();

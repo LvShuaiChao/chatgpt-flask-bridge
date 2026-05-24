@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
+from app.server.request_utils import json_body_or_error
+
 
 def register_cursor_routes(app) -> None:
     from app.server import cursor_api
@@ -34,15 +36,9 @@ def register_cursor_routes(app) -> None:
     )
 
 
-def _json_body_or_error(tag):
-    from app.server.request_utils import json_body_or_error
-
-    return json_body_or_error(tag)
-
-
 def _api_cursor_tasks_create(cursor_api):
     def view():
-        body, error_response = _json_body_or_error(
+        body, error_response = json_body_or_error(
             "[CURSOR_BRIDGE][TASK_CREATE_FAILED]"
         )
         if error_response:
@@ -67,7 +63,7 @@ def _api_cursor_tasks_next(cursor_api):
 
 def _api_cursor_tasks_report(cursor_api):
     def view():
-        report, error_response = _json_body_or_error(
+        report, error_response = json_body_or_error(
             "[CURSOR_BRIDGE][REPORT_FAILED]"
         )
         if error_response:
@@ -98,7 +94,7 @@ def _api_cursor_tasks_status(cursor_api):
 
 def _api_cursor_client_heartbeat(cursor_api):
     def view():
-        payload, error_response = _json_body_or_error(
+        payload, error_response = json_body_or_error(
             "[CURSOR_BRIDGE][HEARTBEAT_FAILED]"
         )
         if error_response:

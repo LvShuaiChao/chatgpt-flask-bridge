@@ -430,6 +430,8 @@ class ChatSession:
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
     messages: list = field(default_factory=list)
     reply_waiting_since: float = 0
+    reply_wake_count: int = 0
+    last_reply_wake_at: float = 0
 
     @property
     def has_pending_reply(self) -> bool:
@@ -497,32 +499,76 @@ def _message_field(message, key, default=""):
 
 
 def is_waiting_placeholder_message(message) -> bool:
-    """assistant 本地占位 / 等待回复类消息（运行态，不应跨 GUI 重启保留）。"""
-    role = (_message_field(message, "role") or "").strip()
+    """判断 assistant 本地等待占位消息。
+
+    关键原则：
+    只要 assistant 消息已经有真实正文，就不能再因为 source/status 残留旧值而判定为等待占位。
+    否则 GUI 启动或保存时会把真实回复覆盖成“上一次回复未完成”。
+    """
+    role = str(_message_field(message, "role") or "").strip()
     if role != "assistant":
         return False
-    source = (
+
+    source = str(
         _message_field(message, "message_source")
         or _message_field(message, "source")
+        or ""
     ).strip()
-    status = (
+
+    status = str(
         _message_field(message, "ui_status")
         or _message_field(message, "status")
+        or ""
     ).strip()
-    content = (_message_field(message, "content") or "").strip()
+
+    content = str(_message_field(message, "content") or "").strip()
+
     from app.constants import (
         ASSISTANT_WAIT_TEXTS,
         WAITING_PLACEHOLDER_SOURCES,
         WAITING_PLACEHOLDER_STATUSES,
     )
 
+    content_is_waiting = (
+        not content
+        or content in ASSISTANT_WAIT_TEXTS
+        or content.startswith("等待回复")
+        or content.startswith("等待 ChatGPT")
+        or content.startswith("ChatGPT 页面已领取，等待回复")
+        or content.startswith("发送超时：页面未领取")
+    )
+
+    # 关键保护：有真实正文时，绝对不能再按 source/status 当成占位消息。
+    if content and not content_is_waiting:
+        return False
+
     if source in WAITING_PLACEHOLDER_SOURCES:
         return True
+
     if status in WAITING_PLACEHOLDER_STATUSES:
         return True
-    if content in ASSISTANT_WAIT_TEXTS:
+
+    return content_is_waiting
+
+
+def is_reset_placeholder_error_message(message) -> bool:
+    """判断是否为 GUI 自己生成的等待占位错误消息。"""
+    content = str(_message_field(message, "content") or "").strip()
+    if not content:
+        return False
+
+    from app.constants import RESET_PLACEHOLDER_ERROR_TEXTS
+
+    if content in RESET_PLACEHOLDER_ERROR_TEXTS:
         return True
-    return content.startswith("等待回复")
+
+    if content.startswith("错误：GUI 已关闭，上一条回复未完成"):
+        return True
+
+    if content.startswith("错误：上一次回复未完成，已在重新打开 GUI 时重置"):
+        return True
+
+    return False
 
 
 def mark_waiting_placeholder_failed(message, *, content: str) -> bool:

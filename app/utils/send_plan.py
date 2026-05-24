@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from app.utils.page_identity import PageIdentity
 from app.utils.page_status import PageActionPlan
 
 
@@ -65,28 +66,33 @@ class SendPlan:
         return self.turn.assistant_message_id
 
     @property
-    def client_id(self) -> str:
+    def identity(self) -> PageIdentity:
         if self.page_action is None:
-            return ""
-        return self.page_action.client_id
+            return PageIdentity()
+        return PageIdentity.from_mapping(
+            {
+                "client_id": self.page_action.client_id,
+                "page_instance_id": self.page_action.page_instance_id,
+                "conversation_id": self.page_action.conversation_id,
+                "url": self.page_action.url,
+            }
+        )
+
+    @property
+    def client_id(self) -> str:
+        return self.identity.client_id
 
     @property
     def page_instance_id(self) -> str:
-        if self.page_action is None:
-            return ""
-        return self.page_action.page_instance_id
+        return self.identity.page_instance_id
 
     @property
     def conversation_id(self) -> str:
-        if self.page_action is None:
-            return ""
-        return self.page_action.conversation_id
+        return self.identity.conversation_id
 
     @property
     def url(self) -> str:
-        if self.page_action is None:
-            return ""
-        return self.page_action.url
+        return self.identity.url
 
     @property
     def target_source(self) -> str:

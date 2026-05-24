@@ -29,6 +29,7 @@ from app.ui.mixins.external_api_gui_mixin import ExternalApiGuiMixin
 from app.ui.mixins.send_flow_mixin import SendFlowMixin
 from app.ui.mixins.chat_session_mixin import ChatSessionMixin
 from app.ui.mixins.chat_render_mixin import ChatRenderMixin
+from app.ui.mixins.cursor_code_mixin import CursorCodeMixin
 from app.ui.mixins.cursor_bridge_mixin import CursorBridgeMixin
 from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.ui.mixins.session_mixin import SessionMixin
@@ -59,11 +60,16 @@ def _main_window_bases():
         ChatRenderMixin,
         PageBindMixin,
         SendFlowMixin,
-        BridgeMixin,
-        CursorBridgeMixin,
     ]
     if enable_external_api():
         bases.append(ExternalApiGuiMixin)
+    bases.extend(
+        [
+            BridgeMixin,
+            CursorBridgeMixin,
+            CursorCodeMixin,
+        ]
+    )
     return tuple(bases)
 
 
@@ -107,6 +113,8 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         set_external_gui_dispatch(self._notifier.external_dispatch_signal.emit)
         self._notifier.external_dispatch_signal.connect(self._handle_external_gui_dispatch)
         self._build_ui()
+        if hasattr(self, "_init_cursor_code_state"):
+            self._init_cursor_code_state()
         self._setup_window_shortcuts()
         self._load_sessions_from_disk()
         if self._restore_chat_tab:
@@ -170,6 +178,15 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         else:
             self._save_sessions_to_disk()
         self._save_app_settings()
+        if hasattr(self, "_stop_cursor_upgrade_monitor"):
+            try:
+                self._stop_cursor_upgrade_monitor(wait_ms=3000)
+            except Exception as error:
+                detail = (
+                    f"关闭窗口时停止 Cursor 升级监控失败：{error}\n"
+                    f"{traceback.format_exc()}"
+                )
+                self._append_log(detail, echo=True)
         if is_server_running():
             try:
                 stop_server()

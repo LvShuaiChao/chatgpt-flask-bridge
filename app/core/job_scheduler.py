@@ -4,6 +4,11 @@ import traceback
 import uuid
 from collections import deque
 
+from app.cursor_code.runtime import (
+    get_cursor_code_pause_reason,
+    is_cursor_code_paused,
+)
+
 job_queue = deque()
 job_map = {}
 job_lock = threading.RLock()
@@ -274,6 +279,11 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
 
     if job_status_from(job) == "cancelled":
         return False, "job cancelled"
+    if is_cursor_code_paused():
+        reason = get_cursor_code_pause_reason() or "cursor_code_paused"
+        append_job_log(job_id, "PAUSED_BY_CURSOR_CODE", reason)
+        _log_line(f"[JOB][PAUSED_BY_CURSOR_CODE] job_id={job_id} reason={reason}")
+        return False, "paused_by_cursor_code"
 
     content = job.get("chatgpt_reply") or ""
     if not content.strip():

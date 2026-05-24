@@ -1,11 +1,19 @@
 {
   "parts": [
+    "core/done-signal.js",
     "core/state.js",
     "core/logger.js",
     "ui/toolbox-shell.js",
     "core/main.js",
     "upload/upload-module.js",
-    "autoqueue/auto-queue.js",
+    "autoqueue/floating-panel-utils.js",
+    "autoqueue/auto-queue-core.js",
+    "autoqueue/prompt-manager-module.js",
+    "autoqueue/settings-module.js",
+    "autoqueue/bridge-module.js",
+    "autoqueue/export-module.js",
+    "autoqueue/log-module.js",
+    "core/browser-runtime-health.js",
     "core/boot.js"
   ],
   "uploadInsertMarker": "/*__UPLOAD_MODULES__*/"

@@ -6,6 +6,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication
 
+from app.cursor_code.capture import enable_dpi_awareness
 from app.ui.main_window import MainWindow
 from app.utils.log_utils import (
     append_log,
@@ -35,6 +36,7 @@ def main():
         source="GUI",
         fields={"log_file": get_log_file_path()},
     )
+    enable_dpi_awareness()
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     app = QApplication(sys.argv)
     append_log("[APP][QT] QApplication created", source="GUI", fields={"argv": sys.argv})

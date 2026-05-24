@@ -44,34 +44,9 @@ from app.utils.target_sources import (
 class PageSendTargetMixin:
 
     def _page_float_field(self, item, field, default=0.0):
-        raw = item.get(field) if isinstance(item, dict) else None
-        try:
-            return float(raw if raw not in (None, "") else default)
-        except (TypeError, ValueError) as error:
-            if (
-                hasattr(self, "_is_debug_mode_enabled")
-                and self._is_debug_mode_enabled()
-                and hasattr(self, "_append_log")
-            ):
-                self._append_log(
-                    "[SEND_TARGET][FLOAT_FIELD_FALLBACK] "
-                    f"field={field} value={raw!r} default={default!r} "
-                    f"client_id={(item or {}).get('client_id') or '-'} "
-                    f"page_instance_id={(item or {}).get('page_instance_id') or '-'} "
-                    f"error_type={type(error).__name__} error={error}",
-                    echo=False,
-                )
-            try:
-                return float(default)
-            except (TypeError, ValueError) as nested_error:
-                if hasattr(self, "_append_log"):
-                    self._append_log(
-                        "[SEND_TARGET][FLOAT_DEFAULT_INVALID] "
-                        f"field={field} default={default!r} "
-                        f"error_type={type(nested_error).__name__} error={nested_error}",
-                        echo=False,
-                    )
-                return 0.0
+        from app.utils.safe_parse import safe_float_field
+
+        return safe_float_field(item, field, default)
 
     def _page_instance_recency_key(self, item):
         page_instance_id = (item.get("page_instance_id") or "").strip()
@@ -154,24 +129,12 @@ class PageSendTargetMixin:
         return dict(candidates[0])
 
     def _conversation_action_target_payload(self, item, *, source):
-        client_id = (item.get("client_id") or "").strip()
-        page_instance_id = (item.get("page_instance_id") or "").strip()
-        conversation_id = self._client_conversation_id(item) or ""
-        url = page_url_from(item)
-        online = self._tm_page_is_online_simple(item)
-        conversation_syncable = conversation_syncable_from(item) or can_sync_conversation(item)
-        page_liveness = get_page_liveness(item)
-        return {
-            "client_id": client_id,
-            "page_instance_id": page_instance_id,
-            "conversation_id": conversation_id,
-            "url": url,
-            "source": source,
-            "online": online,
-            "page_liveness": page_liveness,
-            "conversation_syncable": conversation_syncable,
-            "item": item,
-        }
+        from app.utils.page_command import build_action_target_payload
+
+        payload = build_action_target_payload(item, source=source)
+        if isinstance(item, dict) and not payload.get("online"):
+            payload["online"] = self._tm_page_is_online_simple(item)
+        return payload
 
     def _session_bound_identity(self, remote):
         from app.utils.page_binding_identity import remote_binding_identity
@@ -999,39 +962,14 @@ class PageSendTargetMixin:
                         f"reason={reason_code or 'bound_page_offline'}",
                         echo=user_initiated,
                     )
-            return {
-                "ok": False,
-                "page": None,
-                "item": None,
-                "matched_by": matched_by,
-                "online": False,
-                "reason_code": reason_code or "bound_page_offline",
-            }
+        from app.utils.page_command import registry_resolve_to_gui_bound_result
 
-        item = page._raw if isinstance(page._raw, dict) else {}
-        if not isinstance(item, dict):
-            return {
-                "ok": False,
-                "page": page,
-                "item": None,
-                "matched_by": matched_by,
-                "online": False,
-                "reason_code": "bound_page_offline",
-            }
-        source = "bound_page" if matched_by == "exact" else "same_conversation"
-        target = self._conversation_action_target_payload(item, source=source)
-        self._log_action_target_selected(
-            session, target, action=action, force=user_initiated
-        )
-        return {
-            "ok": True,
-            "page": page,
-            "item": item,
-            "target": target,
-            "matched_by": matched_by,
-            "online": online,
-            "reason_code": reason_code,
-        }
+        result = registry_resolve_to_gui_bound_result(resolved)
+        if result.get("ok") and isinstance(result.get("target"), dict):
+            self._log_action_target_selected(
+                session, result["target"], action=action, force=user_initiated
+            )
+        return result
 
     def _resolve_conversation_action_target(
         self,
@@ -1469,26 +1407,6 @@ class PageSendTargetMixin:
                 "当前对话正在等待新打开的 ChatGPT 页面上线并自动绑定，请稍后再发送。",
             )
 
-        remote_early = normalize_remote_chatgpt(
-            session.remote_chatgpt if session else None
-        )
-        if (
-            self._bind_each_chat_to_page
-            and self._remote_bind_state(remote_early) == BIND_STATE_BOUND_CONVERSATION
-            and remote_binding_active(remote_early)
-        ):
-            page_action = self.resolve_page_action(session, action="send")
-            if page_action.decision in ("allowed", "queued"):
-                return self._send_target_ok(
-                    page_action.client_id,
-                    page_action.url,
-                    page_action.reason_code or "",
-                )
-            blocked = page_action.reason_code or "send_blocked"
-            return self._send_target_blocked(
-                self._send_target_blocked_user_message(blocked) or blocked
-            )
-
         remote = normalize_remote_chatgpt(
             session.remote_chatgpt if session else None
         )
@@ -1564,58 +1482,20 @@ class PageSendTargetMixin:
 
             return self._send_target_blocked("当前对话未绑定 ChatGPT 页面。")
 
-        bound_info, bound_state, bound_reason = self._resolve_bound_page_info(
-            status=status
-        )
-        if bound_state == "online" and isinstance(bound_info, dict):
-            resolved_client_id = (bound_info.get("client_id") or "").strip()
-            resolved_page_url = page_url_from(bound_info) or page_url
-            if (
-                bound_reason == "matched_by_conversation"
-                and resolved_client_id
-                and resolved_client_id != client_id
-                and bind_state != BIND_STATE_PREBOUND_HOME
-            ):
-                self.set_bound_page(
-                    session, bound_info, reason="auto_rebind_bound_info", silent=True
-                )
-                remote = normalize_remote_chatgpt(session.remote_chatgpt)
-                client_id = (remote.get("client_id") or "").strip()
-                resolved_page_url = (
-                    ((remote.get("url") or "") or "").strip()
-                    or resolved_page_url
-                )
-            return (
-                client_id or resolved_client_id,
-                resolved_page_url or page_url,
-                True,
-                "绑定页面在线。",
+        if enabled and bind_state == BIND_STATE_BOUND_CONVERSATION:
+            page_action = self.resolve_page_action(
+                session, action="send", user_initiated=False
             )
-
-        ok_send, stale_detail = self._client_sendable_for_bridge(client_id)
-        if ok_send:
-            return self._send_target_ok(client_id, page_url, "绑定页面在线。")
-        if client_id and self._is_client_online(client_id) and stale_detail:
-            self._append_log(
-                f"[SEND][PAGE_ACTIVITY_REJECT] session_id={session_id} "
-                f"client_id={client_id or '-'} reason=bound_client_poll_not_fresh "
-                f"poll_age={stale_detail.get('poll_age')} "
-                f"seen_age={stale_detail.get('seen_age')} "
-                f"activity_state={stale_detail.get('activity_state')}"
-            )
-
-        bound_conversation_id = self._remote_conversation_id(remote)
-        if bound_conversation_id:
-            details = self._binding_status_details(session)
-            online = details.get("online") if isinstance(details.get("online"), dict) else {}
-            active_conv = (online.get("conversation_id") or "").strip()
-            if active_conv and active_conv != "-" and active_conv != bound_conversation_id:
-                self._append_log(
-                    f"[SEND][BLOCK_WRONG_ACTIVE_PAGE] session_id={session_id} "
-                    f"bound_conversation_id={bound_conversation_id} "
-                    f"active_conversation_id={active_conv} "
-                    f"reason=bound_page_offline_reopen_required"
+            if page_action.decision in ("allowed", "queued"):
+                return self._send_target_ok(
+                    page_action.client_id,
+                    page_action.url,
+                    page_action.reason_code or "绑定页面在线。",
                 )
+            blocked = page_action.reason_code or "send_blocked"
+            return self._send_target_blocked(
+                self._send_target_blocked_user_message(blocked) or blocked
+            )
 
         return self._send_target_blocked(
             "绑定页面未在线，请先打开当前对话绑定页面，或重新绑定所选页面。"

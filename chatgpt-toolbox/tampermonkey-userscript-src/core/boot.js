@@ -2,6 +2,55 @@
  * 初始化入口：创建工具箱壳并挂载各功能模块
  ********************************************************************/
 
+const CGPT_TOOLBOX_INSTANCE_KEY = '__cgpt_toolbox_active_instance__';
+
+function cleanupStaleToolboxDomBeforeInit(reason = '') {
+  const selectors = [
+    '#cgpt-toolbox-root',
+    '#cgpt-toolbox-toggle',
+    '#cgpt-toolbox-panel',
+    '#cgpt-toolbox-edge-hotzone',
+    '#cgpt-toolbox-restore-hotzone',
+    '#cgpt-toolbox-restore-handle',
+    '#cgpt-autoq-prompt-picker-overlay',
+    '#cgpt-prompt-editor-overlay',
+  ];
+
+  selectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((node, index) => {
+      node.remove();
+      console.info(
+        `[TOOLBOX][STALE_DOM_REMOVED] reason=${reason || '-'} selector=${selector} index=${index}`,
+      );
+    });
+  });
+}
+
+function installToolboxInstanceGuard() {
+  const now = Date.now();
+  const instanceId = `cgpt_toolbox_${now}_${Math.random().toString(36).slice(2)}`;
+
+  const previous = window[CGPT_TOOLBOX_INSTANCE_KEY];
+
+  if (previous && previous.instanceId) {
+    console.warn(
+      '[TOOLBOX][INSTANCE_GUARD][PREVIOUS_FOUND]',
+      previous,
+      'newInstanceId=',
+      instanceId,
+    );
+    cleanupStaleToolboxDomBeforeInit('replace-previous-instance');
+  }
+
+  window[CGPT_TOOLBOX_INSTANCE_KEY] = {
+    instanceId,
+    startedAt: now,
+    version: '3.6.6',
+  };
+
+  return instanceId;
+}
+
 async function safeInitStep(name, fn) {
   try {
     await fn();
@@ -96,6 +145,9 @@ async function mountAllModules(reason = 'init') {
 }
 
 async function initToolbox() {
+  installToolboxInstanceGuard();
+  cleanupStaleToolboxDomBeforeInit('init-start');
+
   await safeInitStep('ToolboxShell.create', () => {
     ToolboxShell.create();
   });
@@ -115,6 +167,12 @@ async function initToolbox() {
   });
 
   await mountAllModules('init');
+
+  await safeInitStep('BrowserRuntimeHealth.start', () => {
+    if (typeof BrowserRuntimeHealth !== 'undefined' && typeof BrowserRuntimeHealth.start === 'function') {
+      BrowserRuntimeHealth.start();
+    }
+  });
 
   await safeInitStep('bindConversationTurnCountObserver', () => {
     bindConversationTurnCountObserver();

@@ -86,8 +86,10 @@
       const trimmed = String(line || '').trim();
       if (!trimmed) return false;
       if (UI_NOISE_EXACT_LINES.has(trimmed)) return true;
-      if (/^已思考.*秒$/.test(trimmed)) return true;
-      if (/^Thought for \d+/i.test(trimmed)) return true;
+      if (/^已思考\s*(?:若干秒|几\s*秒|\d+\s*(?:秒|分钟|m(?:in)?)(?:\s+\d+\s*s)?)\s*›?\s*$/i.test(trimmed)) {
+        return true;
+      }
+      if (/^Thought for\s+\d+/i.test(trimmed)) return true;
       if (/^Read for \d+/i.test(trimmed)) return true;
       return false;
     }
@@ -1882,24 +1884,141 @@
       }
     }
 
+    function normalizeComposerText(value) {
+      return String(value || '')
+        .replace(/\u00A0/g, ' ')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{2,}/g, '\n')
+        .trimEnd();
+    }
+
+    function normalizeComposerTextForCompare(value) {
+      return normalizeComposerText(value).trim();
+    }
+
+    function compactComposerTextForCompare(value) {
+      return normalizeComposerTextForCompare(value)
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function resolveComposerTextElement(el) {
+      if (!(el instanceof HTMLElement)) {
+        return null;
+      }
+
+      if (el.matches && el.matches('textarea,input')) {
+        return el;
+      }
+
+      const proseMirror = el.querySelector('.ProseMirror[contenteditable="true"]');
+      if (proseMirror instanceof HTMLElement) {
+        return proseMirror;
+      }
+
+      if (el.isContentEditable) {
+        return el;
+      }
+
+      const nestedEditable = el.querySelector('[contenteditable="true"]');
+      if (nestedEditable instanceof HTMLElement) {
+        return nestedEditable;
+      }
+
+      return el;
+    }
+
+    function dispatchComposerInputEvents(el, value, options = {}) {
+      if (!(el instanceof HTMLElement)) {
+        return;
+      }
+
+      const inputType = String(options.inputType || 'insertText');
+      const data = String(value || '');
+
+      try {
+        el.dispatchEvent(new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          inputType,
+          data,
+        }));
+      } catch (beforeInputErr) {
+        console.error('[ChatGPT toolbox] dispatchComposerInputEvents beforeinput failed', beforeInputErr);
+      }
+
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+
+      try {
+        el.dispatchEvent(new KeyboardEvent('keyup', {
+          bubbles: true,
+          cancelable: true,
+          key: 'a',
+          code: 'KeyA',
+          keyCode: 65,
+          which: 65,
+        }));
+      } catch (keyupErr) {
+        console.error('[ChatGPT toolbox] dispatchComposerInputEvents keyup failed', keyupErr);
+      }
+    }
+
     function isComposerTextSynced(expectedText) {
-      const expected = String(expectedText || '').trim();
-      if (!expected) {
+      const expectedRaw = String(expectedText || '').trim();
+      if (!expectedRaw) {
         return true;
       }
 
-      const actual = String(getComposerText() || '').trim();
-      if (!actual) {
+      const actualRaw = String(getComposerText() || '').trim();
+      if (!actualRaw) {
         return false;
       }
+
+      const expected = normalizeComposerText(expectedRaw);
+      const actual = normalizeComposerText(actualRaw);
 
       if (actual === expected) {
         return true;
       }
 
-      const expectedProbe = expected.slice(0, 80);
-      const actualProbe = actual.slice(0, 80);
-      return actual.includes(expectedProbe) || expected.includes(actualProbe);
+      const expectedCompact = compactComposerTextForCompare(expectedRaw);
+      const actualCompact = compactComposerTextForCompare(actualRaw);
+
+      if (actualCompact === expectedCompact) {
+        return true;
+      }
+
+      if (expectedCompact.length < 8 || actualCompact.length < 8) {
+        return actualCompact === expectedCompact;
+      }
+
+      const expectedProbe = expectedCompact.slice(0, 120);
+      const actualProbe = actualCompact.slice(0, 120);
+
+      return actualCompact.includes(expectedProbe) || expectedCompact.includes(actualProbe);
+    }
+
+    function checkComposerTextSyncDetailed(expectedText) {
+      const expectedRaw = String(expectedText || '');
+      const actualRaw = String(getComposerText() || '');
+      const expectedNorm = normalizeComposerText(expectedRaw);
+      const actualNorm = normalizeComposerText(actualRaw);
+      const synced = isComposerTextSynced(expectedText);
+
+      return {
+        ok: synced,
+        reason: synced ? 'composer_text_synced' : 'composer_text_not_synced',
+        expectedLen: expectedNorm.length,
+        actualLen: actualNorm.length,
+        expectedPreview: expectedNorm.slice(0, 80),
+        actualPreview: actualNorm.slice(0, 80),
+      };
     }
 
     async function waitForComposerTextSynced(expectedText, timeoutMs = 8000, options = {}) {
@@ -1953,34 +2072,62 @@
       return true;
     }
 
+    function clearComposerValue() {
+      const el = getComposer();
+      if (!el) {
+        return false;
+      }
+
+      el.focus();
+      const target = resolveComposerTextElement(el) || el;
+
+      if (target.matches && target.matches('textarea,input')) {
+        setNativeTextareaValue(target, '');
+        dispatchComposerInputEvents(target, '', { inputType: 'deleteContentBackward' });
+        return true;
+      }
+
+      if (target.isContentEditable) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        try {
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+        } catch (deleteErr) {
+          console.error('[ChatGPT toolbox] clearComposerValue execCommand delete failed', deleteErr);
+          target.textContent = '';
+        }
+
+        dispatchComposerInputEvents(target, '', { inputType: 'deleteContentBackward' });
+        return true;
+      }
+
+      return false;
+    }
+
     function setComposerValue(value) {
       const el = getComposer();
       if (!el) return false;
 
       el.focus();
+      const target = resolveComposerTextElement(el) || el;
+      const textValue = String(value || '');
 
-      if (el.matches && el.matches('textarea,input')) {
-        setNativeTextareaValue(el, value);
-        try {
-          el.dispatchEvent(new InputEvent('beforeinput', {
-            bubbles: true,
-            cancelable: true,
-            inputType: 'insertText',
-            data: value,
-          }));
-        } catch (beforeInputErr) {
-          console.error('[ChatGPT toolbox] setComposerValue beforeinput failed', beforeInputErr);
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (target.matches && target.matches('textarea,input')) {
+        setNativeTextareaValue(target, textValue);
+        dispatchComposerInputEvents(target, textValue);
         return true;
       }
 
-      if (el.isContentEditable) {
+      if (target.isContentEditable) {
         const selection = window.getSelection();
         const range = document.createRange();
 
-        range.selectNodeContents(el);
+        range.selectNodeContents(target);
         range.collapse(false);
 
         selection.removeAllRanges();
@@ -1988,33 +2135,13 @@
 
         try {
           document.execCommand('selectAll', false, null);
-          document.execCommand('insertText', false, value);
+          document.execCommand('insertText', false, textValue);
         } catch (e) {
           console.warn('[ChatGPT toolbox] execCommand insertText failed; fallback to textContent', e);
-          el.textContent = value;
+          target.textContent = textValue;
         }
 
-        try {
-          el.dispatchEvent(new InputEvent('beforeinput', {
-            bubbles: true,
-            cancelable: true,
-            inputType: 'insertText',
-            data: value,
-          }));
-        } catch (beforeInputErr) {
-          console.error('[ChatGPT toolbox] setComposerValue contenteditable beforeinput failed', beforeInputErr);
-        }
-
-        el.dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          cancelable: true,
-          inputType: 'insertText',
-          data: value,
-        }));
-
-        el.dispatchEvent(new Event('change', {
-          bubbles: true,
-        }));
+        dispatchComposerInputEvents(target, textValue);
 
         return true;
       }
@@ -2026,14 +2153,13 @@
       const el = getComposer();
       if (!el) return '';
 
-      if (el.matches && el.matches('textarea,input')) {
-        return String(el.value || '').trim();
+      const target = resolveComposerTextElement(el) || el;
+
+      if (target.matches && target.matches('textarea,input')) {
+        return String(target.value || '');
       }
 
-      return String(el.innerText || el.textContent || '')
-        .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+      return String(target.innerText || target.textContent || '');
     }
 
     let sendButtonScanCache = {
@@ -3262,7 +3388,10 @@
       getComposerRoot,
       getComposerText,
       setComposerValue,
+      clearComposerValue,
+      normalizeComposerText,
       isComposerTextSynced,
+      checkComposerTextSyncDetailed,
       waitForComposerTextSynced,
       dispatchComposerSendKeyboard,
       findSendButton,
@@ -3901,7 +4030,12 @@
   let toolboxTurnStatusRefreshPendingMode = 'light';
   let lastLoggedConversationTurnCount = null;
 
-  function countUserTurnsFromDomDirect() {
+  function countTurnsFromDomDirect(role) {
+    const safeRole = String(role || '').trim();
+    if (!safeRole) {
+      return 0;
+    }
+
     const roots = [];
 
     const main = document.querySelector('main');
@@ -3919,7 +4053,9 @@
         return;
       }
 
-      const nodes = Array.from(root.querySelectorAll('[data-message-author-role="user"]'));
+      const nodes = Array.from(
+        root.querySelectorAll(`[data-message-author-role="${safeRole}"]`),
+      );
 
       nodes.forEach((node) => {
         if (!(node instanceof HTMLElement)) {
@@ -3943,7 +4079,10 @@
           return;
         }
 
-        const turn = node.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]') || node;
+        const turn = node.closest(
+          'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+        ) || node;
+
         if (!(turn instanceof HTMLElement)) {
           return;
         }
@@ -3960,63 +4099,12 @@
     return count;
   }
 
+  function countUserTurnsFromDomDirect() {
+    return countTurnsFromDomDirect('user');
+  }
+
   function countAssistantTurnsFromDomDirect() {
-    const roots = [];
-
-    const main = document.querySelector('main');
-    if (main instanceof HTMLElement) {
-      roots.push(main);
-    }
-
-    roots.push(document.body);
-
-    const seen = new Set();
-    let count = 0;
-
-    roots.forEach((root) => {
-      if (!(root instanceof HTMLElement)) {
-        return;
-      }
-
-      const nodes = Array.from(root.querySelectorAll('[data-message-author-role="assistant"]'));
-
-      nodes.forEach((node) => {
-        if (!(node instanceof HTMLElement)) {
-          return;
-        }
-
-        if (isInToolbox(node)) {
-          return;
-        }
-
-        if (isInComposerArea(node)) {
-          return;
-        }
-
-        if (isChatSidebarElement(node)) {
-          return;
-        }
-
-        const text = String(node.innerText || node.textContent || '').trim();
-        if (!text) {
-          return;
-        }
-
-        const turn = node.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]') || node;
-        if (!(turn instanceof HTMLElement)) {
-          return;
-        }
-
-        if (seen.has(turn)) {
-          return;
-        }
-
-        seen.add(turn);
-        count += 1;
-      });
-    });
-
-    return count;
+    return countTurnsFromDomDirect('assistant');
   }
 
   function countUserMessagesFromConversationRecords() {
@@ -5334,6 +5422,58 @@
         };
 
         if (sendButtonDisabled) {
+          const disabledWaitMs = Math.max(
+            intervalMs,
+            Number(options.disabledButtonEnterFallbackMs || 3000),
+          );
+          const disabledStartedAt = options._disabledButtonWaitStartedAt || Date.now();
+          if (!options._disabledButtonWaitStartedAt) {
+            options._disabledButtonWaitStartedAt = disabledStartedAt;
+          }
+
+          if (Date.now() - disabledStartedAt >= disabledWaitMs) {
+            appendSendLogFields('[SEND][ENTER_FALLBACK]', {
+              attempt,
+              composer_type: composerType,
+              reason: 'send_button_disabled_timeout',
+            });
+
+            const beforeTextDisabled = getComposerTextFromElement(composer);
+            const beforeStopDisabled = findChatGPTStopButton();
+            const confirmCtxDisabled = buildStableSendConfirmCtx(
+              beforeTextDisabled,
+              beforeStopDisabled,
+              true,
+            );
+
+            focusComposer(composer);
+            dispatchEnterSend(composer, 'ctrl_enter');
+            result.usedFallbackEnter = true;
+
+            let verifiedDisabledEnter = await verifySendStarted(confirmCtxDisabled, {
+              shouldStop,
+              attempt,
+            });
+            if (!verifiedDisabledEnter.ok) {
+              dispatchEnterSend(composer, 'enter');
+              verifiedDisabledEnter = await verifySendStarted(confirmCtxDisabled, {
+                shouldStop,
+                attempt,
+              });
+            }
+
+            if (verifiedDisabledEnter.ok) {
+              result.ok = true;
+              result.reason = 'sent_by_enter_fallback_disabled_button';
+              ChatInputStateRuntime.waitingForReply = true;
+              return result;
+            }
+
+            result.reason = verifiedDisabledEnter.reason || 'send_not_confirmed';
+            await sleep(intervalMs);
+            continue;
+          }
+
           result.reason = 'send_button_disabled';
           appendSendLogFields('[SEND][ATTEMPT]', {
             attempt,
@@ -5345,6 +5485,8 @@
           await sleep(intervalMs);
           continue;
         }
+
+        options._disabledButtonWaitStartedAt = 0;
 
         const beforeText = getComposerTextFromElement(composer);
         const beforeStopButton = findChatGPTStopButton();
@@ -6125,104 +6267,132 @@
 
     const methods = [];
 
-    appendSendLog('[SEND][ACTION] method=button_click');
-    const okClick = ComposerApi.clickSend();
-    methods.push('button_click');
-
-    if (!okClick) {
-      return { ok: false, reason: 'click_send_failed' };
-    }
-
-    let progress = await waitForSendProgressSinceBaseline(
-      baseline,
-      ctx,
-      SEND_FALLBACK_WAIT_MS,
-      shouldStop,
-    );
-
-    if (progress.ok) {
-      return { ok: true, methods, snapshot: progress.snapshot };
-    }
-
-    if (shouldStop()) {
-      return { ok: false, reason: 'cancelled' };
-    }
-
-    appendSendLog('[SEND][ACTION] method=ctrl_enter_fallback');
-    methods.push('ctrl_enter_fallback');
-
-    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
-      ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
-    }
-
-    progress = await waitForSendProgressSinceBaseline(
-      baseline,
-      ctx,
-      SEND_FALLBACK_WAIT_MS,
-      shouldStop,
-    );
-
-    if (progress.ok) {
-      return { ok: true, methods, snapshot: progress.snapshot };
-    }
-
-    if (shouldStop()) {
-      return { ok: false, reason: 'cancelled' };
-    }
-
-    appendSendLog('[SEND][ACTION] method=enter_fallback');
-    methods.push('enter_fallback');
-
-    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
-      ComposerApi.dispatchComposerSendKeyboard('enter');
-    }
-
-    progress = await waitForSendProgressSinceBaseline(
-      baseline,
-      ctx,
-      SEND_FALLBACK_WAIT_MS,
-      shouldStop,
-    );
-
-    if (progress.ok) {
-      return { ok: true, methods, snapshot: progress.snapshot };
-    }
-
-    if (shouldStop()) {
-      return { ok: false, reason: 'cancelled' };
-    }
-
-    appendSendLog('[SEND][ACTION] method=native_enter_fallback');
-    methods.push('native_enter_fallback');
-
-    if (
-      typeof ComposerApi.focusComposerForNativeSend === 'function'
-      && ComposerApi.focusComposerForNativeSend()
-      && typeof BridgeModule !== 'undefined'
-      && BridgeModule
-      && typeof BridgeModule.sendSystemHotkey === 'function'
-    ) {
-      try {
-        await sleep(150);
-        await BridgeModule.sendSystemHotkey('enter');
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] native enter fallback failed', err);
-        appendSendLog(`[SEND][ACTION_FAILED] method=native_enter_fallback error=${errText}`);
+    async function runActionAndConfirm(method, actionFn, waitMs = SEND_FALLBACK_WAIT_MS) {
+      if (shouldStop()) {
+        return { ok: false, cancelled: true, reason: 'cancelled' };
       }
 
-      progress = await waitForSendProgressSinceBaseline(
+      appendSendLog(`[SEND][ACTION] method=${method}`);
+      methods.push(method);
+
+      let actionOk = false;
+
+      try {
+        actionOk = await actionFn();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] send action failed', {
+          method,
+          error_type: err && err.name ? err.name : 'Error',
+          error: errText,
+          stack: err && err.stack ? err.stack : '',
+        });
+        appendSendLog(`[SEND][ACTION_FAILED] method=${method} error=${errText}`);
+        actionOk = false;
+      }
+
+      if (!actionOk) {
+        appendSendLog(`[SEND][ACTION_FAILED] method=${method} reason=action_return_false`);
+        return { ok: false, reason: `${method}_failed` };
+      }
+
+      const progress = await waitForSendProgressSinceBaseline(
         baseline,
         ctx,
-        Math.max(SEND_FALLBACK_WAIT_MS, 4000),
+        waitMs,
         shouldStop,
       );
 
       if (progress.ok) {
-        return { ok: true, methods, snapshot: progress.snapshot };
+        return {
+          ok: true,
+          methods,
+          snapshot: progress.snapshot,
+          reason: progress.reason || method,
+        };
       }
-    } else {
-      appendSendLog('[SEND][ACTION_SKIP] method=native_enter_fallback reason=bridge-or-composer-unavailable');
+
+      appendSendLog(
+        `[SEND][ACTION_NO_PROGRESS] method=${method} reason=${progress.reason || 'no_progress'}`,
+      );
+
+      return {
+        ok: false,
+        reason: progress.reason || 'no_progress',
+      };
+    }
+
+    const buttonClick = await runActionAndConfirm('button_click', () => {
+      return ComposerApi.clickSend();
+    });
+
+    if (buttonClick.ok) {
+      return buttonClick;
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled', methods };
+    }
+
+    const ctrlEnter = await runActionAndConfirm('ctrl_enter_fallback', () => {
+      if (typeof ComposerApi.dispatchComposerSendKeyboard !== 'function') {
+        return false;
+      }
+      return ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
+    });
+
+    if (ctrlEnter.ok) {
+      return ctrlEnter;
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled', methods };
+    }
+
+    const enter = await runActionAndConfirm('enter_fallback', () => {
+      if (typeof ComposerApi.dispatchComposerSendKeyboard !== 'function') {
+        return false;
+      }
+      return ComposerApi.dispatchComposerSendKeyboard('enter');
+    });
+
+    if (enter.ok) {
+      return enter;
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled', methods };
+    }
+
+    const nativeEnter = await runActionAndConfirm(
+      'native_enter_fallback',
+      async () => {
+        if (
+          typeof ComposerApi.focusComposerForNativeSend !== 'function'
+          || !ComposerApi.focusComposerForNativeSend()
+        ) {
+          appendSendLog('[SEND][ACTION_SKIP] method=native_enter_fallback reason=composer-focus-failed');
+          return false;
+        }
+
+        if (
+          typeof BridgeModule === 'undefined'
+          || !BridgeModule
+          || typeof BridgeModule.sendSystemHotkey !== 'function'
+        ) {
+          appendSendLog('[SEND][ACTION_SKIP] method=native_enter_fallback reason=bridge-unavailable');
+          return false;
+        }
+
+        await sleep(150);
+        await BridgeModule.sendSystemHotkey('enter');
+        return true;
+      },
+      Math.max(SEND_FALLBACK_WAIT_MS, 4000),
+    );
+
+    if (nativeEnter.ok) {
+      return nativeEnter;
     }
 
     return {
@@ -6517,7 +6687,7 @@
       return { ok: false, reason: mappedReason, source };
     }
 
-    if (waitUntilSendable && !isSendButtonReadyForPreSend()) {
+    if (waitUntilSendable && !sendExistingComposer && !isSendButtonReadyForPreSend()) {
       const buttonWait = await waitSendButtonReadyForSend(timeoutMs, shouldStop, options);
       if (!buttonWait.ok) {
         const waitReason = buttonWait.reason || 'send_button_wait_timeout';
@@ -6527,6 +6697,10 @@
         updateChatInputStateBadge();
         return { ok: false, reason: mappedWaitReason, source };
       }
+    }
+
+    if (waitUntilSendable && sendExistingComposer && !isSendButtonReadyForPreSend()) {
+      appendSendLog('[SEND][WAIT_BUTTON_SKIP] reason=existing-composer-use-action-fallback');
     }
 
     ChatInputStateRuntime.sendInProgress = true;
@@ -6603,6 +6777,240 @@
       ChatInputStateRuntime.sendInProgress = false;
       updateChatInputStateBadge();
     }
+  }
+
+  function appendAutoQueueLog(message) {
+    const line = String(message || '');
+    if (!line) return;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+  }
+
+  async function waitUntilComposerReady(options = {}) {
+    const timeoutMs = Number(options.timeoutMs || 10000);
+    const intervalMs = Number(options.intervalMs || 200);
+    const source = String(options.source || 'unknown');
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const composer = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.getComposer === 'function'
+        ? ComposerApi.getComposer()
+        : null;
+
+      if (composer) {
+        appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_READY] source=${source}`);
+        return true;
+      }
+
+      await sleep(intervalMs);
+    }
+
+    appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_READY_TIMEOUT] source=${source}`);
+    return false;
+  }
+
+  async function clickRealComposerSendButton(source) {
+    const sourceTag = String(source || 'unknown');
+    const scan = typeof findComposerSendButtonDetailed === 'function'
+      ? findComposerSendButtonDetailed()
+      : null;
+
+    const button = scan && scan.button
+      ? scan.button
+      : (typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null);
+
+    if (!button) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_BUTTON_MISS] source=${sourceTag}`);
+      return { ok: false, reason: 'send_button_not_found' };
+    }
+
+    const info = describeComposerSendButtonForLog(button);
+    appendAutoQueueLog(
+      `[AUTO_QUEUE][SEND_BUTTON_FOUND] source=${sourceTag} selector=${info.selector || '-'} `
+      + `aria=${info.aria || '-'} testid=${info.testid || '-'} disabled=${info.disabled ? 1 : 0}`,
+    );
+
+    if (isVoiceComposerButton(button)) {
+      appendAutoQueueLog(
+        `[AUTO_QUEUE][SEND_BUTTON_REJECT] source=${sourceTag} reason=voice_button `
+        + `aria=${info.aria || '-'} testid=${info.testid || '-'}`,
+      );
+      return { ok: false, reason: 'voice_button' };
+    }
+
+    if (isSendButtonDisabled(button)) {
+      appendAutoQueueLog(
+        `[AUTO_QUEUE][SEND_BUTTON_DISABLED] source=${sourceTag} aria=${info.aria || '-'} testid=${info.testid || '-'}`,
+      );
+      return { ok: false, reason: 'send_button_disabled' };
+    }
+
+    const clickResult = clickSendButton(button, sourceTag);
+    if (clickResult.ok) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_BUTTON_CLICK] source=${sourceTag}`);
+    }
+    return clickResult;
+  }
+
+  async function sendTextThroughComposer(text, source) {
+    const cleanText = String(text || '').trim();
+    const sourceTag = String(source || 'unknown');
+
+    if (!cleanText) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_SKIP] reason=empty_text source=${sourceTag}`);
+      return { ok: false, reason: 'empty_text', source: sourceTag };
+    }
+
+    appendAutoQueueLog(`[AUTO_QUEUE][SEND_START] source=${sourceTag} text_len=${cleanText.length}`);
+
+    const ready = await waitUntilComposerReady({
+      timeoutMs: 10000,
+      intervalMs: 200,
+      source: sourceTag,
+    });
+    if (!ready) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_not_ready`);
+      return { ok: false, reason: 'composer_not_ready', source: sourceTag };
+    }
+
+    const responseState = typeof detectComposerResponseState === 'function'
+      ? detectComposerResponseState()
+      : {};
+    if (responseState.is_responding) {
+      appendAutoQueueLog('[AUTO_QUEUE][BATCH_INITIAL_WAIT_RESPONDING]');
+      return { ok: false, reason: 'assistant_busy', wait: true, source: sourceTag };
+    }
+
+    const composer = typeof ComposerApi.getComposer === 'function'
+      ? ComposerApi.getComposer()
+      : null;
+    if (!composer) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_not_found`);
+      return { ok: false, reason: 'composer_not_found', source: sourceTag };
+    }
+
+    const okSet = ComposerApi.setComposerValue(cleanText);
+    if (!okSet) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_set_failed`);
+      return { ok: false, reason: 'composer_set_failed', source: sourceTag };
+    }
+
+    appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_TEXT_SET] source=${sourceTag} text_len=${cleanText.length}`);
+
+    const textSynced = typeof ComposerApi.waitForComposerTextSynced === 'function'
+      ? await ComposerApi.waitForComposerTextSynced(cleanText, 5000, {})
+      : { ok: false, reason: 'composer_text_sync_unavailable' };
+
+    if (!textSynced.ok) {
+      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_text_not_synced`);
+      return { ok: false, reason: 'composer_text_not_synced', source: sourceTag };
+    }
+
+    appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_TEXT_SYNCED] source=${sourceTag} text_len=${cleanText.length}`);
+
+    if (typeof sendContentViaComposer === 'function') {
+      const viaComposer = await sendContentViaComposer({
+        source: sourceTag,
+        sendExistingComposer: true,
+        allowReplaceDraft: true,
+        waitUntilSendable: true,
+        timeoutMs: 60000,
+        blockWhenResponding: true,
+      });
+
+      if (viaComposer.ok) {
+        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=sendContentViaComposer`);
+        return {
+          ok: true,
+          method: 'sendContentViaComposer',
+          reason: viaComposer.reason,
+          source: sourceTag,
+        };
+      }
+
+      appendAutoQueueLog(
+        `[AUTO_QUEUE][SEND_STABLE_FAILED] source=${sourceTag} reason=${viaComposer.reason || 'unknown'}`,
+      );
+    }
+
+    if (typeof stableSendMessage === 'function') {
+      const stableResult = await stableSendMessage({
+        source: sourceTag,
+        text: '',
+        sendExistingComposer: true,
+        blockWhenResponding: true,
+        maxAttempts: 8,
+      });
+
+      if (stableResult.ok) {
+        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=stableSendMessage`);
+        return {
+          ok: true,
+          method: 'stableSendMessage',
+          reason: stableResult.reason,
+          source: sourceTag,
+        };
+      }
+
+      appendAutoQueueLog(
+        `[AUTO_QUEUE][SEND_STABLE_FAILED] source=${sourceTag} reason=${stableResult.reason || 'unknown'}`,
+      );
+    }
+
+    const buttonResult = await clickRealComposerSendButton(sourceTag);
+    if (buttonResult.ok) {
+      const confirmText = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : cleanText;
+      if (typeof waitComposerSendConfirmed === 'function') {
+        const confirmedClick = await waitComposerSendConfirmed(confirmText, 8000, {});
+        if (confirmedClick.ok) {
+          appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=click_button`);
+          return { ok: true, method: 'click_button', source: sourceTag };
+        }
+      } else if (
+        typeof ComposerApi.isAssistantLikelyBusy === 'function'
+        && ComposerApi.isAssistantLikelyBusy()
+      ) {
+        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=click_button`);
+        return { ok: true, method: 'click_button', source: sourceTag };
+      }
+    }
+
+    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
+      const confirmText = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : cleanText;
+
+      ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
+      await sleep(250);
+      let confirmedKeyboard = typeof waitComposerSendConfirmed === 'function'
+        ? await waitComposerSendConfirmed(confirmText, 4000, {})
+        : { ok: false };
+      if (!confirmedKeyboard.ok) {
+        ComposerApi.dispatchComposerSendKeyboard('enter');
+        await sleep(250);
+        confirmedKeyboard = typeof waitComposerSendConfirmed === 'function'
+          ? await waitComposerSendConfirmed(confirmText, 4000, {})
+          : { ok: false };
+      }
+      if (
+        confirmedKeyboard.ok
+        || (typeof ComposerApi.isAssistantLikelyBusy === 'function' && ComposerApi.isAssistantLikelyBusy())
+      ) {
+        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=keyboard_enter`);
+        return { ok: true, method: 'keyboard_enter', source: sourceTag };
+      }
+    }
+
+    appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=no_send_method`);
+    return { ok: false, reason: 'no_send_method', source: sourceTag };
   }
 
   function getCopiedTextStats(text) {

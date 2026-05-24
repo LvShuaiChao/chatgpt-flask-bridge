@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
+from app.server.request_utils import json_body_or_error
 from app.server.runtime_state import _log
 
 
@@ -40,15 +41,9 @@ def register_job_routes(app) -> None:
     app.config["_job_push_message"] = push_message
 
 
-def _json_body_or_error(tag):
-    from app.server.request_utils import json_body_or_error
-
-    return json_body_or_error(tag)
-
-
 def api_jobs_create(job_scheduler):
     def view():
-        body, error_response = _json_body_or_error("[JOB][API_CREATE_FAILED]")
+        body, error_response = json_body_or_error("[JOB][API_CREATE_FAILED]")
         if error_response:
             return error_response
         requirement = (body.get("user_requirement") or body.get("requirement") or "").strip()
@@ -115,7 +110,7 @@ def api_jobs_send_to_cursor(job_scheduler):
     def view():
         from app.server import cursor_api
 
-        body, error_response = _json_body_or_error("[JOB][API_SEND_CURSOR_FAILED]")
+        body, error_response = json_body_or_error("[JOB][API_SEND_CURSOR_FAILED]")
         if error_response:
             return error_response
         job_id = (body.get("job_id") or "").strip()
@@ -131,7 +126,7 @@ def api_jobs_send_to_cursor(job_scheduler):
 
 def api_jobs_cancel(job_scheduler):
     def view():
-        body, error_response = _json_body_or_error("[JOB][API_CANCEL_FAILED]")
+        body, error_response = json_body_or_error("[JOB][API_CANCEL_FAILED]")
         if error_response:
             return error_response
         job_id = (body.get("job_id") or "").strip()

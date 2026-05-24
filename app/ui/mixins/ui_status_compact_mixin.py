@@ -578,6 +578,25 @@ class UiStatusCompactMixin:
         ]
         return "\n".join(lines)
 
+    def _page_browser_probably_throttled(self, page):
+        if not isinstance(page, dict):
+            return False
+        raw = page.get("browser_probably_throttled")
+        if raw in (1, True, "1", "true", "yes"):
+            return True
+        if str(raw or "").strip().lower() in ("1", "true", "yes"):
+            return True
+        return False
+
+    def _bound_page_browser_probably_throttled(self, *, session=None, status=None):
+        if not hasattr(self, "_resolve_bound_page_info"):
+            return False
+        bound_info, _bound_state, _bound_reason = self._resolve_bound_page_info(
+            status=status,
+            session=session,
+        )
+        return self._page_browser_probably_throttled(bound_info)
+
     def _format_compact_send_target_action_hint(self, *, session=None, status=None):
         session = session if session is not None else (
             self._current_session() if hasattr(self, "_current_session") else None
@@ -590,6 +609,13 @@ class UiStatusCompactMixin:
             return "未绑定页面，请先绑定所选页面", (
                 "当前本地对话尚未绑定 ChatGPT 页面。\n"
                 "请从可用页面列表选择页面后点击「绑定所选页面」。"
+            )
+
+        if self._bound_page_browser_probably_throttled(session=session, status=status):
+            return (
+                "ChatGPT 页面处于后台限速，建议切回该页面或保持窗口可见",
+                "绑定页在后台标签、最小化或被遮挡时，Chrome 可能限制定时器与 DOM 轮询；\n"
+                "自动化发送/等待回复会延迟，切回页面后会自动补偿扫描。",
             )
 
         bound_info, bound_state, bound_reason = (
@@ -763,3 +789,11 @@ class UiStatusCompactMixin:
 
         if hasattr(self, "_refresh_send_target_action_hint"):
             self._refresh_send_target_action_hint(status=status)
+
+        status_bar = self.statusBar() if hasattr(self, "statusBar") else None
+        if status_bar is not None and hasattr(self, "_bound_page_browser_probably_throttled"):
+            if self._bound_page_browser_probably_throttled(status=status):
+                status_bar.showMessage(
+                    "ChatGPT 页面处于后台限速，建议切回该页面或保持窗口可见",
+                    12000,
+                )

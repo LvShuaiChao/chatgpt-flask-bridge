@@ -230,6 +230,7 @@
     homeBtn: '#cgpt-open-chatgpt-home',
     autoContinueBtn: '#cgpt-auto-continue-once',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
+    copyHotkeyOnceBtn: '#cgpt-copy-hotkey-once',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
     copyHotkeyContinueLoopBtn: '#cgpt-copy-hotkey-continue-loop',
     groupList: '#cgpt-upload-group-list',
@@ -368,18 +369,6 @@
       logFn(`[AUTOQ][TASK_SIGNAL][MIGRATE] from=${trimmed} to=${DEFAULT_TASK_DONE_SIGNAL}`);
     }
     return DEFAULT_TASK_DONE_SIGNAL;
-  }
-
-  function cleanAssistantTextForDoneSignal(text) {
-    const raw = String(text || '').trim();
-    if (
-      typeof ChatMessageExtractor !== 'undefined'
-      && ChatMessageExtractor
-      && typeof ChatMessageExtractor.cleanMessageText === 'function'
-    ) {
-      return String(ChatMessageExtractor.cleanMessageText(raw) || '').trim();
-    }
-    return raw;
   }
 
   function analyzeDoneSignalText(text, options = {}) {
@@ -581,6 +570,23 @@
     return {
       stopOnMaxContinueRounds: true,
       defaultMaxContinueRoundsMigratedToUnlimited: false,
+      /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
+      stopBatchOnTaskSendFailure: false,
+      verifyAfterDoneSignal: true,
+      verifyAfterDoneSignalUploadFile: true,
+      verifyAfterDoneSignalPrompt: [
+        '请根据我刚才上传的代码文件和当前任务要求，检查任务是否已经完整完成。',
+        '',
+        '当前任务标题：{{taskTitle}}',
+        '当前任务内容：',
+        '{{taskContent}}',
+        '',
+        '你需要判断：',
+        '1. 是否已经完整完成当前任务。',
+        '2. 是否还有遗漏文件、遗漏检查项、遗漏代码、遗漏结论。',
+        '3. 如果确实完成，只回复：{{doneSignal}}',
+        '4. 如果没有完成，请继续输出剩余内容，不要回复终止信号。',
+      ].join('\n'),
     };
   }
 

@@ -8,22 +8,17 @@ import uuid
 from flask import jsonify, request
 
 from app.server import state as st
+from app.server.auth_utils import external_auth_ok
 from app.server.runtime_state import (
     _dispatch_to_gui,
     _log,
     _notify_status,
     _now,
 )
+
+
 def _external_auth_ok():
-    token = (st.API_TOKEN or "").strip()
-    if not token:
-        return True
-    auth_header = (request.headers.get("Authorization") or "").strip()
-    if auth_header.lower().startswith("bearer "):
-        provided = auth_header[7:].strip()
-    else:
-        provided = (request.headers.get("X-API-Key") or "").strip()
-    return provided == token
+    return external_auth_ok()
 
 
 def _external_json_error(error, code, status=400):
@@ -669,9 +664,3 @@ def _require_external_auth():
 
 def _external_auth_denied():
     return _require_external_auth()
-
-
-def _json_body_or_error(log_tag, *, allow_empty=True):
-    from app.server.request_utils import json_body_or_error
-
-    return json_body_or_error(log_tag, allow_empty=allow_empty)

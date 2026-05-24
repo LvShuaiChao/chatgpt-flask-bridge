@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
+    is_invalid_assistant_reply_text,
     PENDING_ASSISTANT_STATUSES,
     PENDING_REPLY_HARD_TIMEOUT_SECONDS,
     PENDING_REPLY_STALE_TIMEOUT_SEC,
@@ -540,6 +541,8 @@ class SessionMixin:
         return session.title or "新对话"
 
     def _session_has_pending_assistant_reply(self, session):
+        from app.models import is_waiting_placeholder_message
+
         if not session:
             return False
 
@@ -593,12 +596,7 @@ class SessionMixin:
                 if parent is not None and parent_ui_status in ("已加入队列", "queued"):
                     continue
 
-            status = (message.ui_status or "").strip()
-            if status in PENDING_ASSISTANT_STATUSES:
-                return True
-
-            text = (message.content or "").strip()
-            if text in ASSISTANT_WAIT_TEXTS:
+            if is_waiting_placeholder_message(message):
                 return True
 
         return False
@@ -611,6 +609,8 @@ class SessionMixin:
         }
 
     def _iter_pending_assistant_messages(self, session):
+        from app.models import is_waiting_placeholder_message
+
         if not session:
             return
         messages_by_id = self._session_pending_messages_index(session)
@@ -658,9 +658,7 @@ class SessionMixin:
                 # parent 的 ui_status 是队列状态，不算 pending
                 if parent is not None and parent_ui_status in ("已加入队列", "queued"):
                     continue
-            status = (message.ui_status or "").strip()
-            text = (message.content or "").strip()
-            if status in PENDING_ASSISTANT_STATUSES or text in ASSISTANT_WAIT_TEXTS:
+            if is_waiting_placeholder_message(message):
                 yield message
 
     def _get_pending_reply_state(self, session):
@@ -1312,8 +1310,10 @@ class SessionMixin:
             label, "set_segments"
         ):
             label.set_segments(self._format_current_session_header_segments(session))
-            return
-        label.setText(self._format_current_session_header_text(session))
+        else:
+            label.setText(self._format_current_session_header_text(session))
+        if hasattr(self, "_refresh_current_conversation_stats"):
+            self._refresh_current_conversation_stats(session)
 
     def _session_list_item_tooltip(self, session, bind_state):
         style = SESSION_BIND_LIST_STYLES.get(
@@ -1449,6 +1449,8 @@ class SessionMixin:
                 self.current_session_title.setText("当前会话：新对话")
             if hasattr(self, "_update_current_session_url_display"):
                 self._update_current_session_url_display()
+            if hasattr(self, "_refresh_current_conversation_stats"):
+                self._refresh_current_conversation_stats(None)
             return
         if self._is_default_session_title(session.title):
             self._auto_rename_session_from_messages(session)
@@ -1464,6 +1466,9 @@ class SessionMixin:
             )
         if hasattr(self, "_update_current_session_url_display"):
             self._update_current_session_url_display()
+        if hasattr(self, "_refresh_current_conversation_stats"):
+            self._refresh_current_conversation_stats(session)
+
     def _list_index_for_session(self, session_id):
         for index in range(self.session_list.count()):
             item = self.session_list.item(index)
@@ -1962,7 +1967,7 @@ class SessionMixin:
             self._append_log("[REPLY][SKIP] reason=empty_content", echo=True)
             return False
 
-        if content in ("正在思考", "正在生成", "思考中", "回复完成"):
+        if is_invalid_assistant_reply_text(content):
             self._append_log(
                 f"[REPLY][SKIP_INVALID_TEXT] session_id={session_id or '-'} "
                 f"turn_id={turn_id or '-'} text={content!r}",
@@ -2249,30 +2254,11 @@ class SessionMixin:
             "visible_in_chat": message.visible_in_chat,
         }
     def _session_float_field(self, data, field, default=None, *, scope="session"):
+        del scope
+        from app.utils.safe_parse import safe_float_field
+
         fallback = time.time() if default is None else default
-        raw = data.get(field) if isinstance(data, dict) else None
-        try:
-            return float(raw if raw is not None else fallback)
-        except (TypeError, ValueError) as error:
-            if hasattr(self, "_append_log"):
-                self._append_log(
-                    "[SESSION][FLOAT_FIELD_FALLBACK] "
-                    f"scope={scope} field={field} value={raw!r} "
-                    f"default={fallback!r} "
-                    f"error_type={type(error).__name__} error={error}",
-                    echo=True,
-                )
-            try:
-                return float(fallback)
-            except (TypeError, ValueError) as nested_error:
-                if hasattr(self, "_append_log"):
-                    self._append_log(
-                        "[SESSION][FLOAT_DEFAULT_INVALID] "
-                        f"scope={scope} field={field} fallback={fallback!r} "
-                        f"error_type={type(nested_error).__name__} error={nested_error}",
-                        echo=True,
-                    )
-                return time.time()
+        return safe_float_field(data, field, fallback)
 
     @staticmethod
     def _normalize_legacy_message_dict(data):

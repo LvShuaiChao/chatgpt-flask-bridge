@@ -43,7 +43,11 @@ def _queue_control_message(command, *, log_label="", **extra):
     request_id = ""
     payload = msg.get("payload")
     if isinstance(payload, dict):
-        request_id = (payload.get("request_id") or "").strip()
+        request_id = (
+            payload.get("sync_request_id")
+            or payload.get("request_id")
+            or ""
+        ).strip()
     _log(
         f"[BRIDGE][CONTROL][QUEUE] command={command} "
         f"message_id={message_id}… "
@@ -152,6 +156,28 @@ def push_close_page(client_id, url=None):
         "close_page",
         client_id,
         url=url,
+    )
+
+
+def push_focus_page(client_id, *, page_instance_id="", conversation_id="", url=None):
+    """向指定油猴客户端下发聚焦当前标签页命令（等待回复自动唤醒）。"""
+    client_id = (client_id or "").strip()
+    if not client_id:
+        raise ValueError("client_id 不能为空")
+    extra = {}
+    page_instance_id = (page_instance_id or "").strip()
+    conversation_id = (conversation_id or "").strip()
+    url = (url or "").strip() or None
+    if page_instance_id:
+        extra["page_instance_id"] = page_instance_id
+    if conversation_id:
+        extra["conversation_id"] = conversation_id
+    return _queue_control_message(
+        "focus_self",
+        log_label="focus_self",
+        client_id=client_id,
+        url=url,
+        **extra,
     )
 
 

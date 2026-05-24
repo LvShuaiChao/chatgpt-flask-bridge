@@ -20,6 +20,7 @@ from app.utils.bridge_payload import (
     read_bridge_page_instance_id,
     validate_outbound_queue_message,
 )
+from app.constants import is_invalid_assistant_reply_text
 from app.utils.legacy_cleanup import assert_no_legacy_fields
 from app.utils.page_status import page_url_from
 from app.server.runtime_state import (
@@ -64,21 +65,8 @@ STRICT_TARGET_CONTROL_COMMANDS = frozenset({
     "start_upload",
 })
 
-_INVALID_ASSISTANT_REPLY_TEXTS = frozenset({
-    "正在思考",
-    "正在生成",
-    "思考中",
-    "回复完成",
-})
-
-
 def _is_invalid_assistant_reply_text(text):
-    value = str(text or "").strip()
-    if not value:
-        return True
-    if value in _INVALID_ASSISTANT_REPLY_TEXTS:
-        return True
-    return False
+    return is_invalid_assistant_reply_text(text)
 
 
 def _bridge_message_id_matches(msg, message_id):

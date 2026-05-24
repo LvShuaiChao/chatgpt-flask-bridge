@@ -88,21 +88,9 @@ class PageAutoBindMixin:
         return remote
 
     def _auto_bind_float_field(self, item, field, default=0.0):
-        item_dict = item if isinstance(item, dict) else {}
-        raw = item_dict.get(field) if item_dict else None
-        try:
-            return float(raw if raw not in (None, "") else default)
-        except (TypeError, ValueError) as error:
-            if hasattr(self, "_append_log"):
-                self._append_log(
-                    "[AUTO_BIND][FLOAT_FIELD_FALLBACK] "
-                    f"field={field} value={raw!r} default={default!r} "
-                    f"client_id={item_dict.get('client_id') or '-'} "
-                    f"page_instance_id={item_dict.get('page_instance_id') or '-'} "
-                    f"error_type={type(error).__name__} error={error}",
-                    echo=False,
-                )
-            return float(default)
+        from app.utils.safe_parse import safe_float_field
+
+        return safe_float_field(item, field, default)
 
     def _session_has_prebound_home_online(self, remote, bridge_status=None):
         remote = normalize_remote_chatgpt(remote)

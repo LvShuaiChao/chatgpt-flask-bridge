@@ -5,6 +5,10 @@ import time
 import traceback
 import uuid
 
+from app.cursor_code.runtime import (
+    get_cursor_code_pause_reason,
+    is_cursor_code_paused,
+)
 from app.core import job_scheduler as _job_scheduler
 from app.server import state as st
 from app.server.runtime_state import _log, _notify_status
@@ -110,6 +114,9 @@ def enqueue_cursor_task(task):
 
 def claim_next_cursor_task(client=""):
     """Cursor 插件领取下一条任务。"""
+    if is_cursor_code_paused():
+        _log("[CURSOR_BRIDGE][CLAIM_PAUSED] reason=" + get_cursor_code_pause_reason())
+        return None
     with st.cursor_task_lock:
         if not st.cursor_task_queue:
             return None

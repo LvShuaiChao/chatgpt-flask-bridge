@@ -63,15 +63,9 @@ _ALLOWED_NON_MODIFIER_KEYS = {
 
 
 def _external_auth_ok() -> bool:
-    token = (st.API_TOKEN or "").strip()
-    if not token:
-        return True
-    auth_header = (request.headers.get("Authorization") or "").strip()
-    if auth_header.lower().startswith("bearer "):
-        provided = auth_header[7:].strip()
-    else:
-        provided = (request.headers.get("X-API-Key") or "").strip()
-    return provided == token
+    from app.server.auth_utils import external_auth_ok
+
+    return external_auth_ok()
 
 
 def _is_local_request() -> bool:

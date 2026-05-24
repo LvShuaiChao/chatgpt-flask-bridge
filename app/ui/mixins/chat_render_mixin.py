@@ -464,6 +464,8 @@ class ChatRenderMixin:
             scroll_policy=scroll_policy,
             force_bottom=force_bottom,
         )
+        if hasattr(self, "_refresh_current_conversation_stats"):
+            self._refresh_current_conversation_stats(session)
         self._append_log(
             "[CHAT_RENDER][DONE] "
             f"session_id={session.session_id} "
@@ -579,6 +581,8 @@ class ChatRenderMixin:
         self._schedule_save_sessions_to_disk()
         if hasattr(self, "_update_upload_action_buttons_state"):
             self._update_upload_action_buttons_state()
+        if hasattr(self, "_refresh_current_conversation_stats"):
+            self._refresh_current_conversation_stats(session)
 
     def _set_reply_text(self, session, turn_id, text, status_text="已回复"):
         target = self._find_assistant_by_turn(session, turn_id)
@@ -602,20 +606,9 @@ class ChatRenderMixin:
 
     def _assistant_message_is_waiting_placeholder(self, message):
         """判断 assistant 消息是否仍是等待占位"""
-        if message is None:
-            return False
-        if message.role != "assistant":
-            return False
-        content = (message.content or "").strip()
-        ui_status = (message.ui_status or "").strip()
-        from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
-        if content in ASSISTANT_WAIT_TEXTS:
-            return True
-        if ui_status in PENDING_ASSISTANT_STATUSES:
-            return True
-        if ui_status in ("sending", "queued"):
-            return True
-        return False
+        from app.models import is_waiting_placeholder_message
+
+        return is_waiting_placeholder_message(message)
     def _set_reply_waiting(self, session, turn_id):
         target = self._find_assistant_by_turn(session, turn_id)
         if target is None:

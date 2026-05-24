@@ -1,9 +1,60 @@
+import re
 from pathlib import Path
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent / "runtime"
 SESSIONS_FILE = RUNTIME_DIR / "chat_sessions.json"
 SESSIONS_JSON_VERSION = 2
 ASSISTANT_WAIT_TEXT = "等待回复…"
+INVALID_ASSISTANT_REPLY_TEXTS = frozenset(
+    {
+        "正在思考",
+        "正在生成",
+        "思考中",
+        "回复完成",
+    }
+)
+# ChatGPT 思考阶段 UI 文案（如「已思考 4m 54s」「已思考 12 秒」），不得当作正式回复
+_THINKING_DURATION_PLACEHOLDER_RE = re.compile(
+    r"^已思考\s*"
+    r"(?:若干秒|"
+    r"几\s*秒|"
+    r"\d+\s*秒|"
+    r"\d+\s*分钟|"
+    r"\d+\s*m(?:in)?(?:\s+\d+\s*s)?)"
+    r"(?:\s*›)?\s*$",
+    re.IGNORECASE,
+)
+_THOUGHT_FOR_DURATION_PLACEHOLDER_RE = re.compile(
+    r"^Thought for\s+"
+    r"(?:\d+\s*(?:seconds?|minutes?|m(?:in)?)(?:\s+\d+\s*s)?|.+?)"
+    r"(?:\s*›)?\s*$",
+    re.IGNORECASE,
+)
+# ChatGPT 风控/限流页（如 Unusual activity has been detected）
+_CHATGPT_PLATFORM_ERROR_RE = re.compile(
+    r"(?:unusual\s+activity\s+has\s+been\s+detected|检测到.{0,16}异常.{0,8}活动)",
+    re.IGNORECASE,
+)
+
+
+def is_chatgpt_platform_error_text(text) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(_CHATGPT_PLATFORM_ERROR_RE.search(value))
+
+
+def is_invalid_assistant_reply_text(text) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value in INVALID_ASSISTANT_REPLY_TEXTS:
+        return True
+    if _THINKING_DURATION_PLACEHOLDER_RE.match(value):
+        return True
+    if _THOUGHT_FOR_DURATION_PLACEHOLDER_RE.match(value):
+        return True
+    return False
 BOOTSTRAP_CLAIM_WAIT_TEXT = "等待 ChatGPT 首页领取首条消息…"
 BOOTSTRAP_CLAIMED_WAIT_TEXT = "ChatGPT 页面已领取，等待回复…"
 BOOTSTRAP_CLAIM_UNCLAIMED_WARN_TEXT = (
@@ -53,6 +104,14 @@ STARTUP_PENDING_RESET_MESSAGE = (
 PERSIST_PENDING_RESET_MESSAGE = (
     "错误：GUI 已关闭，上一条回复未完成。请重新同步网页对话。"
 )
+RESET_PLACEHOLDER_ERROR_TEXTS = frozenset(
+    {
+        STARTUP_PENDING_RESET_MESSAGE,
+        PERSIST_PENDING_RESET_MESSAGE,
+        "错误：GUI 已关闭，上一条回复未完成。请重新同步网页对话。",
+        "错误：上一次回复未完成，已在重新打开 GUI 时重置。若网页中已有回复，请点击【同步网页对话】刷新完整内容。",
+    }
+)
 WAITING_PLACEHOLDER_SOURCES = frozenset({"local_placeholder"})
 WAITING_PLACEHOLDER_STATUSES = frozenset(
     {
@@ -73,6 +132,11 @@ CHATGPT_HOME_URL = "https://chatgpt.com/"
 # 油猴页面在线/活跃度（server.ONLINE_TIMEOUT_SEC 与此同源）
 TM_POLL_FRESH_SECONDS = 5.0
 TM_HEARTBEAT_ONLINE_SECONDS = 10.0
+# 等待回复期间自动唤醒绑定页（后台节流补偿）
+REPLY_WAKE_WAIT_SECONDS = 6.0
+REPLY_WAKE_MIN_INTERVAL_SECONDS = 10.0
+REPLY_WAKE_MAX_COUNT = 3
+REPLY_WAKE_STALE_POLL_SECONDS = 5.0
 # sync_conversation 入队前要求绑定页 last_poll_at 不超过此秒数
 SYNC_COMMAND_POLL_MAX_AGE_SECONDS = 10.0
 BOUND_PAGE_ONLINE_SECONDS = 30.0

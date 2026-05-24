@@ -2274,6 +2274,16 @@
       shift: false,
       meta: false,
     },
+    copyAndHotkeyOnce: {
+      enabled: true,
+      label: 'Ctrl+Shift+K',
+      key: 'k',
+      code: 'KeyK',
+      ctrl: true,
+      alt: false,
+      shift: true,
+      meta: false,
+    },
     startUpload: {
       enabled: false,
       label: '',
@@ -2339,6 +2349,10 @@
         raw && raw.copyLastMessage,
         DEFAULT_SHORTCUT_CONFIG.copyLastMessage,
       ),
+      copyAndHotkeyOnce: cloneShortcutItem(
+        raw && raw.copyAndHotkeyOnce,
+        DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+      ),
       startUpload: cloneShortcutItem(
         raw && raw.startUpload,
         DEFAULT_SHORTCUT_CONFIG.startUpload,
@@ -2352,6 +2366,10 @@
       {
         sendMessage: cloneShortcutItem(config && config.sendMessage, DEFAULT_SHORTCUT_CONFIG.sendMessage),
         copyLastMessage: cloneShortcutItem(config && config.copyLastMessage, DEFAULT_SHORTCUT_CONFIG.copyLastMessage),
+        copyAndHotkeyOnce: cloneShortcutItem(
+          config && config.copyAndHotkeyOnce,
+          DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+        ),
         startUpload: cloneShortcutItem(config && config.startUpload, DEFAULT_SHORTCUT_CONFIG.startUpload),
       },
     );
@@ -2363,9 +2381,26 @@
       {
         sendMessage: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.sendMessage, DEFAULT_SHORTCUT_CONFIG.sendMessage),
         copyLastMessage: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.copyLastMessage, DEFAULT_SHORTCUT_CONFIG.copyLastMessage),
+        copyAndHotkeyOnce: cloneShortcutItem(
+          DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+          DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+        ),
         startUpload: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.startUpload, DEFAULT_SHORTCUT_CONFIG.startUpload),
       },
     );
+  }
+
+  function getCopyAndHotkeyShortcutConfig() {
+    const cfg = getShortcutConfig();
+    return cloneShortcutItem(
+      cfg.copyAndHotkeyOnce,
+      DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+    );
+  }
+
+  function getCopyAndHotkeyButtonTitle() {
+    const item = getCopyAndHotkeyShortcutConfig();
+    return `复制+快捷键：${item.label || '未设置'}`;
   }
 
   function isPureModifierKeyEvent(e) {
@@ -2544,6 +2579,11 @@
     const autoContinueBtn = qs(UploadSelectors.autoContinueBtn, scope);
     if (autoContinueBtn) {
       autoContinueBtn.title = '发送自动指令队列中的下一条（继续一次）';
+    }
+
+    const copyHotkeyOnceBtn = qs(UploadSelectors.copyHotkeyOnceBtn, scope);
+    if (copyHotkeyOnceBtn) {
+      copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
     }
   }
 

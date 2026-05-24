@@ -7,6 +7,7 @@ import traceback
 from flask import jsonify, request
 
 from app.server import state as st
+from app.server.request_utils import json_body_or_error
 from app.server.runtime_state import _log, _now
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
@@ -80,7 +81,7 @@ def _api_v1_chat_send(ext):
         denied = ext._external_auth_denied()
         if denied:
             return denied
-        body, error_response = ext._json_body_or_error("[EXTERNAL_API][SEND_JSON]")
+        body, error_response = json_body_or_error("[EXTERNAL_API][SEND_JSON]")
         if error_response:
             return error_response
         try:
@@ -151,7 +152,7 @@ def _api_v1_chat_ask(ext):
         denied = ext._external_auth_denied()
         if denied:
             return denied
-        body, error_response = ext._json_body_or_error("[EXTERNAL_API][ASK_JSON]")
+        body, error_response = json_body_or_error("[EXTERNAL_API][ASK_JSON]")
         if error_response:
             return error_response
         text = (body.get("text") or "").strip()
@@ -260,7 +261,7 @@ def _api_v1_sessions(ext):
                     500,
                 )
             return ext._external_json_ok(sessions=gui_result.get("sessions") or [])
-        body, error_response = ext._json_body_or_error("[EXTERNAL_API][SESSIONS_CREATE_JSON]")
+        body, error_response = json_body_or_error("[EXTERNAL_API][SESSIONS_CREATE_JSON]")
         if error_response:
             return error_response
         gui_result = _dispatch_to_gui(
@@ -311,7 +312,7 @@ def _api_v1_session_bind(ext):
         denied = ext._external_auth_denied()
         if denied:
             return denied
-        body, error_response = ext._json_body_or_error("[EXTERNAL_API][SESSION_BIND_JSON]")
+        body, error_response = json_body_or_error("[EXTERNAL_API][SESSION_BIND_JSON]")
         if error_response:
             return error_response
         if request.method == "DELETE" or body.get("clear"):

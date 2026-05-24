@@ -495,6 +495,14 @@ APP_STYLESHEET = """
                 padding: 0px 4px;
                 min-height: 28px;
             }
+            QLabel#CurrentSessionStatsLabel {
+                color: #64748b;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 0px 8px 0px 4px;
+                min-height: 28px;
+                background: transparent;
+            }
             QLabel#CurrentSessionUrlLabel {
                 font-size: 12px;
                 color: #475569;
