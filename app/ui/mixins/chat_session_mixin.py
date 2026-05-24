@@ -51,10 +51,13 @@ class ChatSessionMixin:
         if not isinstance(msg_dict, dict):
             return msg_dict
         item = dict(msg_dict)
+        if hasattr(self, "_normalize_legacy_message_dict"):
+            item = self._normalize_legacy_message_dict(item)
         role = (item.get("role") or "").strip()
-        ui_status = (item.get("status") or "").strip()
+        ui_status = (item.get("ui_status") or "").strip()
         if role == "user" and ui_status in PENDING_USER_SEND_STATUSES:
-            item["status"] = ""
+            item["ui_status"] = ""
+        item.pop("status", None)
         if mark_waiting_placeholder_failed(
             item, content=PERSIST_PENDING_RESET_MESSAGE
         ):
@@ -80,12 +83,13 @@ class ChatSessionMixin:
                     "role": getattr(item, "role", ""),
                     "content": getattr(item, "content", ""),
                     "created_at": getattr(item, "created_at", 0),
-                    "status": getattr(item, "status", "") or "",
+                    "ui_status": getattr(item, "ui_status", "") or "",
                     "detail": getattr(item, "detail", "") or "",
-                    "source": getattr(item, "source", "") or "",
+                    "message_source": getattr(item, "message_source", "") or "",
+                    "bridge_message_id": getattr(item, "bridge_message_id", ""),
                     "parent_message_id": getattr(item, "parent_message_id", ""),
-                    "visible": bool(
-                        getattr(item, "visible", True)
+                    "visible_in_chat": bool(
+                        getattr(item, "visible_in_chat", True)
                     ),
                 }
             messages_out.append(
@@ -117,7 +121,7 @@ class ChatSessionMixin:
         return sum(
             1
             for message in session.messages
-            if getattr(message, "visible", True)
+            if getattr(message, "visible_in_chat", True)
         )
 
     def _update_message_status_by_request_id(
@@ -234,7 +238,11 @@ class ChatSessionMixin:
                 (message.get("message_source") or message.get("source") or "")
                 .strip()
             ),
-            visible_in_chat=bool(message.get("visible", True)),
+            visible_in_chat=(
+                message.get("visible_in_chat")
+                if "visible_in_chat" in message
+                else bool(message.get("visible", True))
+            ),
         )
         count_after = self._session_visible_message_count(session)
 

@@ -274,15 +274,6 @@ class PageRegistryRefreshMixin:
             return True
         return False
 
-    def render_all_from_registry(self, reason="render"):
-        reg = getattr(self, "page_registry", None)
-        if not isinstance(reg, PageRegistry):
-            reg = PageRegistry.empty()
-        self.render_page_combo(reg, reason=reason)
-        self.render_status_chips(reg, reason=reason)
-        self.render_binding_panel(reg, reason=reason)
-        self.render_sync_send_state()
-
     def render_status_chips(self, registry=None, reason="render"):
         del reason
         reg = registry
@@ -316,9 +307,6 @@ class PageRegistryRefreshMixin:
                 monkey_stats = self._collect_monkey_window_binding_stats(status)
             self.update_monkey_binding_summary(status, monkey_stats=monkey_stats)
 
-    def render_header_chips(self, registry=None, reason="render"):
-        return self.render_status_chips(registry, reason=reason)
-
     def render_page_combo(
         self,
         registry=None,
@@ -339,9 +327,6 @@ class PageRegistryRefreshMixin:
             )
         if hasattr(self, "_sync_tm_page_list_empty_ui"):
             self._sync_tm_page_list_empty_ui()
-
-    def render_page_selector(self, registry=None, reason="render"):
-        return self.render_page_combo(registry, reason=reason)
 
     def render_binding_panel(self, registry=None, reason="render"):
         del reason
@@ -371,21 +356,6 @@ class PageRegistryRefreshMixin:
             else:
                 btn.setEnabled(True)
                 btn.setText("同步网页对话")
-        if hasattr(self, "_update_upload_action_buttons_state"):
-            self._update_upload_action_buttons_state_from_runtime(runtime)
-
-    def _update_upload_action_buttons_state_from_runtime(self, runtime=None):
-        runtime = runtime or getattr(self, "page_command_runtime", None) or {}
-        if hasattr(self, "_update_upload_action_buttons_state"):
-            self._update_upload_action_buttons_state()
-        if runtime.get("running") and (runtime.get("command") or "") in (
-            "start_upload",
-            "send_message",
-        ):
-            for attr in ("trigger_upload_btn", "upload_and_send_btn"):
-                btn = getattr(self, attr, None)
-                if btn is not None:
-                    btn.setEnabled(False)
 
     def get_bound_page_snapshot(self, session=None, registry=None):
         """仅判断绑定页能力；使用 PageRegistry + resolve_page_command_target。"""
@@ -522,17 +492,22 @@ class PageRegistryRefreshMixin:
         if hasattr(self, "_refresh_status_chip"):
             self._refresh_status_chip(self.tm_sync_target_label, chip)
         if hasattr(self, "_format_compact_sync_target_tooltip"):
+            send_decision = (snap.get("send_decision") or "").strip()
             tip_target = {
                 "conversation_syncable": snap.get("conversation_syncable"),
-                "send_now_available": (snap.get("send_decision") in ("allowed", "queued")),
+                "send_now_available": send_decision == "allowed",
+                "send_requestable": send_decision in ("allowed", "queued"),
             }
             self.tm_sync_target_label.setToolTip(
                 self._format_compact_sync_target_tooltip(tip_target, {}, status=None)
             )
         send_label = getattr(self, "tm_send_label", None)
         if send_label is not None:
-            if (snap.get("send_decision") in ("allowed", "queued")):
+            send_decision = (snap.get("send_decision") or "").strip()
+            if send_decision == "allowed":
                 send_text, send_chip = "发送：可发送", "ok"
+            elif send_decision == "queued":
+                send_text, send_chip = "发送：可排队", "warn"
             elif snap.get("found") and snap.get("online"):
                 send_text, send_chip = "发送：等待", "warn"
             else:
@@ -583,10 +558,6 @@ class PageRegistryRefreshMixin:
         if command:
             return (rt.get("command") or "").strip() == (command or "").strip()
         return True
-
-    def is_sync_runtime_active(self):
-        """兼容旧名：仅表示 sync_conversation 命令进行中。"""
-        return self.is_page_command_active("sync_conversation")
 
     def clear_page_command_runtime(self, reason=""):
         rt = getattr(self, "page_command_runtime", None) or {}

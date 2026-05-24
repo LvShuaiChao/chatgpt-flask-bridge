@@ -133,6 +133,9 @@
     let compactMode = false;
     let panelResizeObserver = null;
     let clampViewportTimer = 0;
+    let panelPositionSaveDebounceTimer = 0;
+    let panelPositionSavePendingReason = '';
+    let panelPositionSaveLastSignature = '';
     let viewportGuardBound = false;
     let creatingToolbox = false;
     let appendingLog = false;
@@ -140,6 +143,11 @@
     let globalErrorGuardBound = false;
     let hiddenTitlePosition = null;
     let hiddenTitlePositionLocked = false;
+
+    let headerTitleFlashTimer = 0;
+    let headerTitleFlashStopTimer = 0;
+    let headerTitleFlashBaseText = '';
+    let headerTitleFlashOn = false;
 
     function addGlobalDraggingClass() {
       if (document.documentElement) {
@@ -1813,7 +1821,15 @@
         }
 
         #cgpt-upload-start-send.cgpt-wait-send-cancel,
-        #cgpt-upload-start-send.cgpt-wait-send-cancel:hover:not(:disabled) {
+        #cgpt-upload-start-send.danger,
+        #cgpt-upload-start-send[data-upload-send-state="sending"],
+        #cgpt-upload-start-send[data-upload-send-state="waiting-reply"],
+        #cgpt-upload-start-send[aria-busy="true"],
+        #cgpt-upload-start-send.cgpt-wait-send-cancel:hover:not(:disabled),
+        #cgpt-upload-start-send.danger:hover:not(:disabled),
+        #cgpt-upload-start-send[data-upload-send-state="sending"]:hover:not(:disabled),
+        #cgpt-upload-start-send[data-upload-send-state="waiting-reply"]:hover:not(:disabled),
+        #cgpt-upload-start-send[aria-busy="true"]:hover:not(:disabled) {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
@@ -2044,9 +2060,31 @@
           box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.10);
         }
 
+        .toolbox-upload-drop-zone.is-drag-over,
+        .toolbox-upload-file-list.is-drag-over,
+        .toolbox-upload-empty-state.is-drag-over,
+        #cgpt-upload-module.is-drag-over,
         #cgpt-upload-module.cgpt-upload-dragging {
           outline: 1px dashed #60a5fa;
           outline-offset: -4px;
+        }
+
+        .toolbox-upload-drop-over-hint {
+          display: none;
+          color: #93c5fd;
+        }
+
+        .toolbox-upload-drop-zone.is-drag-over .toolbox-upload-drop-over-hint,
+        .toolbox-upload-file-list.is-drag-over .toolbox-upload-drop-over-hint,
+        .toolbox-upload-empty-state.is-drag-over .toolbox-upload-drop-over-hint,
+        #cgpt-upload-module.is-drag-over .toolbox-upload-drop-over-hint {
+          display: block;
+        }
+
+        .toolbox-upload-drop-zone.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint,
+        .toolbox-upload-file-list.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint,
+        #cgpt-upload-module.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint {
+          display: none;
         }
 
         #${APP.panelId}.cgpt-toolbox-file-dragover {
@@ -2412,6 +2450,30 @@
           margin-top: 10px;
         }
 
+        .cgpt-autoq-top-action-bar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+          margin: 10px 0 8px 0;
+          padding: 8px;
+          border: 1px solid rgba(148, 163, 184, 0.25);
+          border-radius: 8px;
+          background: rgba(15, 23, 42, 0.45);
+        }
+
+        .cgpt-autoq-top-action-bar button {
+          min-height: 30px;
+          padding: 5px 12px;
+        }
+
+        .cgpt-autoq-bottom-action-bar,
+        .cgpt-autoq-footer-action-bar,
+        .cgpt-autoq-batch-actions-slot .cgpt-autoq-actions {
+          position: static;
+          bottom: auto;
+        }
+
         #cgpt-autoq-start {
           background: #166534 !important;
           border-color: #22c55e !important;
@@ -2580,11 +2642,6 @@
           max-height: 420px;
           overflow-y: auto;
           padding-right: 2px;
-        }
-
-        .cgpt-autoq-batch-actions-slot .cgpt-autoq-actions {
-          margin-top: 10px;
-          flex-wrap: wrap;
         }
 
         .cgpt-autoq-batch-settings-slot .cgpt-autoq-settings-section {
@@ -3546,6 +3603,85 @@
       return toolboxTitle || TOOLBOX_DEFAULT_TITLE;
     }
 
+    function stopHeaderTitleFlash(reason = '') {
+      if (headerTitleFlashTimer) {
+        window.clearInterval(headerTitleFlashTimer);
+        headerTitleFlashTimer = 0;
+      }
+
+      if (headerTitleFlashStopTimer) {
+        window.clearTimeout(headerTitleFlashStopTimer);
+        headerTitleFlashStopTimer = 0;
+      }
+
+      if (!titleEl && root) {
+        titleEl = qs('.cgpt-toolbox-title', root);
+      }
+
+      if (titleEl && headerTitleFlashBaseText) {
+        titleEl.textContent = headerTitleFlashBaseText;
+        titleEl.title = latestStatusText
+          ? `${getToolboxTitle()} - ${latestStatusText}`
+          : getToolboxTitle();
+      }
+
+      headerTitleFlashBaseText = '';
+      headerTitleFlashOn = false;
+
+      appendLog(`[TITLE_FLASH][header-stop] reason=${reason || '-'}`);
+    }
+
+    function flashHeaderTitleOnce(message = '回复完成', options = {}) {
+      create();
+
+      if (!titleEl && root) {
+        titleEl = qs('.cgpt-toolbox-title', root);
+      }
+
+      if (!titleEl) {
+        appendLog('[TITLE_FLASH][header-skip] reason=missing-title');
+        return false;
+      }
+
+      stopHeaderTitleFlash(`restart:${message || '-'}`);
+
+      const rawBase = String(titleEl.textContent || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE)
+        .replace(/^【回复完成】\s*/u, '')
+        .trim();
+
+      const baseText = rawBase || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE;
+      const noticeText = `【${String(message || '回复完成').trim()}】 ${baseText}`;
+
+      headerTitleFlashBaseText = baseText;
+      headerTitleFlashOn = false;
+
+      const intervalMs = Number(options.intervalMs || 450);
+      const autoStopMs = Number(options.autoStopMs || 2400);
+
+      const tick = () => {
+        headerTitleFlashOn = !headerTitleFlashOn;
+        titleEl.textContent = headerTitleFlashOn ? noticeText : baseText;
+        titleEl.title = headerTitleFlashOn
+          ? noticeText
+          : (
+            latestStatusText
+              ? `${getToolboxTitle()} - ${latestStatusText}`
+              : getToolboxTitle()
+          );
+      };
+
+      tick();
+
+      headerTitleFlashTimer = window.setInterval(tick, intervalMs);
+
+      headerTitleFlashStopTimer = window.setTimeout(() => {
+        stopHeaderTitleFlash(`auto-stop:${message || '-'}`);
+      }, autoStopMs);
+
+      appendLog(`[TITLE_FLASH][header-start] message=${message || '-'} intervalMs=${intervalMs} autoStopMs=${autoStopMs}`);
+      return true;
+    }
+
     function applyToolboxTitle(_nextTitle) {
       const text = TOOLBOX_DEFAULT_TITLE;
       toolboxTitle = text;
@@ -4083,6 +4219,9 @@
               panel = qs(`#${APP.panelId}`, root);
               titleEl = qs('.cgpt-toolbox-title', root);
               migrateToolboxToastToPanel('create-existing-root-detached');
+              if (typeof cleanupRuntimeHandles === 'function') {
+                cleanupRuntimeHandles('toolbox-remount-detached-root');
+              }
               appendLog('[TOOLBOX_WATCHDOG][REMOUNT] reason=create-existing-root-detached');
             } catch (err) {
               const errText = err && err.message ? err.message : String(err);
@@ -6632,7 +6771,7 @@
       return true;
     }
 
-    function savePanelPositionFromDom(reason = '') {
+    function savePanelPositionFromDomNow(reason = '') {
       if (!panel) {
         console.warn('[ChatGPT toolbox] savePanelPositionFromDom: panel 未初始化');
         return;
@@ -6652,6 +6791,12 @@
         updatedAt: Date.now(),
       };
 
+      const signature = `${Math.round(pos.left)}|${Math.round(pos.top)}|${panelPosition.edge || ''}`;
+      if (signature === panelPositionSaveLastSignature) {
+        return;
+      }
+      panelPositionSaveLastSignature = signature;
+
       MemoryManager.set(MemoryManager.KEYS.panelPosition, panelPosition);
 
       saveToolboxLayoutState(reason || 'panel-drag-end');
@@ -6660,6 +6805,60 @@
       appendLog(
         `[TOOLBOX_POSITION][SAVE_PANEL] reason=${reason || '-'} left=${pos.left} top=${pos.top}`,
       );
+    }
+
+    function savePanelPositionFromDom(reason = '') {
+      const reasonText = String(reason || '').trim();
+      const shouldDebounce = reasonText === 'keepPanelInViewport'
+        || reasonText.includes('keepPanelInViewport');
+
+      if (!shouldDebounce) {
+        if (panelPositionSaveDebounceTimer) {
+          window.clearTimeout(panelPositionSaveDebounceTimer);
+          panelPositionSaveDebounceTimer = 0;
+          panelPositionSavePendingReason = '';
+        }
+        savePanelPositionFromDomNow(reasonText);
+        return;
+      }
+
+      panelPositionSavePendingReason = reasonText || 'keepPanelInViewport';
+
+      if (panelPositionSaveDebounceTimer) {
+        window.clearTimeout(panelPositionSaveDebounceTimer);
+      }
+
+      panelPositionSaveDebounceTimer = window.setTimeout(() => {
+        panelPositionSaveDebounceTimer = 0;
+        const pendingReason = panelPositionSavePendingReason || 'keepPanelInViewport';
+        panelPositionSavePendingReason = '';
+        savePanelPositionFromDomNow(pendingReason);
+      }, 800);
+    }
+
+    function clearViewportTimers(source) {
+      if (clampViewportTimer) {
+        window.clearTimeout(clampViewportTimer);
+        clampViewportTimer = 0;
+      }
+
+      if (panelPositionSaveDebounceTimer) {
+        window.clearTimeout(panelPositionSaveDebounceTimer);
+        panelPositionSaveDebounceTimer = 0;
+        panelPositionSavePendingReason = '';
+      }
+
+      if (edgeRevealTimer) {
+        window.clearTimeout(edgeRevealTimer);
+        edgeRevealTimer = 0;
+      }
+
+      if (restoreHotzoneHoverTimer) {
+        window.clearTimeout(restoreHotzoneHoverTimer);
+        restoreHotzoneHoverTimer = 0;
+      }
+
+      appendLog(`[TOOLBOX][CLEAR_VIEWPORT_TIMERS] source=${source || '-'}`);
     }
 
     function keepPanelInViewport(options = {}) {
@@ -8988,6 +9187,10 @@
 
         lastToolboxRouteKey = nextPageKey;
 
+        if (typeof cleanupChatMessageCaches === 'function') {
+          cleanupChatMessageCaches(`route-key-changed:${reason || '-'}`);
+        }
+
         appendLog(
           `[TOOLBOX_PAGE_STATE][page-change] reason=${reason || '-'} old=${oldKey} next=${nextPageKey}`,
         );
@@ -8997,8 +9200,13 @@
 
       if (convKeyChanged) {
         lastToolboxConversationKey = nextConvKey;
+
+        if (typeof cleanupChatMessageCaches === 'function') {
+          cleanupChatMessageCaches(`conversation-id-changed:${reason || '-'}`);
+        }
+
         appendLog(
-          `[TOOLBOX_CONV_STATE][conversation-change-skip] reason=${reason || '-'} next=${nextConvKey || '-'} disabled=conversation_state`,
+          `[TOOLBOX_CONV_STATE][conversation-change] reason=${reason || '-'} next=${nextConvKey || '-'}`,
         );
       }
     }
@@ -9047,6 +9255,9 @@
       suspendEdgeAutoHide,
       resetToolboxPosition,
       restoreToolboxFromHiddenState,
+      clearViewportTimers,
+      flashHeaderTitleOnce,
+      stopHeaderTitleFlash,
     };
   })();
 
@@ -9219,7 +9430,7 @@
       child.remove();
     });
 
-    const rawText = String(clone.textContent || clone.innerText || '');
+    const rawText = String(clone.innerText || clone.textContent || '');
     return cleanCopiedMessageText(rawText);
   }
 
@@ -9234,7 +9445,13 @@
       };
     }
 
-    const contentNodes = getMessageContentElements(el);
+    const fullTurnEl =
+      el.closest &&
+      el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
+        ? el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
+        : el;
+
+    const contentNodes = getMessageContentElements(fullTurnEl);
 
     const contentText = contentNodes
       .map((node) => extractCleanTextFromNode(node))
@@ -9243,7 +9460,7 @@
       .replace(/\n{3,}/g, '\n\n')
       .trim();
 
-    const fullTurnText = extractCleanTextFromNode(el)
+    const fullTurnText = extractCleanTextFromNode(fullTurnEl)
       .replace(/\n{3,}/g, '\n\n')
       .trim();
 
@@ -9257,10 +9474,10 @@
     const cleanedContentText = cleanFn(contentText);
     const cleanedFullTurnText = cleanFn(fullTurnText);
 
-    const afterThinkingText = extractFinalAnswerAfterThinkingText(cleanedFullTurnText || fullTurnText);
+    const afterThinkingText = extractFinalAnswerAfterThinkingText(fullTurnText);
     const cleanedAfterThinking = cleanFn(afterThinkingText);
 
-    if (afterThinkingText && afterThinkingText.length >= 20 && cleanedAfterThinking.length >= 20) {
+    if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
       return {
         text: cleanedAfterThinking,
         contentNodeCount: contentNodes.length,
@@ -9275,8 +9492,11 @@
 
     if (
       cleanedFullTurnText &&
-      cleanedFullTurnText.length > cleanedContentText.length * 1.5 &&
-      cleanedFullTurnText.length - cleanedContentText.length > 80
+      (
+        !finalText ||
+        cleanedFullTurnText.length > finalText.length + 80 ||
+        cleanedFullTurnText.length > finalText.length * 1.3
+      )
     ) {
       finalText = cleanedFullTurnText;
       source = 'full-turn-fallback';
@@ -9491,44 +9711,6 @@
     return containers;
   }
 
-  function saveChatScrollPositionsForCopy(tag = 'copy-last-message') {
-    const tagText = String(tag || 'copy-last-message');
-    const containers = getChatScrollContainers();
-    const snapshots = containers.map((container) => ({
-      container,
-      scrollTop: container.scrollTop,
-      scrollLeft: container.scrollLeft,
-      scrollHeight: container.scrollHeight,
-      clientHeight: container.clientHeight,
-    }));
-
-    ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:save-scroll] count=${snapshots.length}`);
-
-    return snapshots;
-  }
-
-  function restoreChatScrollPositions(saved, tag = 'copy-last-message') {
-    const tagText = String(tag || 'copy-last-message');
-
-    if (!Array.isArray(saved) || !saved.length) {
-      ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:restore-scroll] count=0 enabled=true`);
-      return;
-    }
-
-    saved.forEach((item) => {
-      const container = item && item.container;
-
-      if (!container) {
-        return;
-      }
-
-      container.scrollTop = Number(item.scrollTop) || 0;
-      container.scrollLeft = Number(item.scrollLeft) || 0;
-    });
-
-    ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:restore-scroll] count=${saved.length} enabled=true`);
-  }
-
   async function forceChatPageToAbsoluteEnd(reason = 'unknown') {
     const reasonText = String(reason || 'unknown');
 
@@ -9609,9 +9791,8 @@
     }
 
     return (
-      /^已思考\s*\d+/.test(text) ||
-      /^已思考.*秒/.test(text) ||
-      /^已思考.*分钟/.test(text) ||
+      /^已思考\s*(若干秒|\d+)/.test(text) ||
+      /^已思考.*(?:秒|分钟|m|s|›|>)/i.test(text) ||
       /^Thought for\s+\d+/i.test(text) ||
       /^Thinking/i.test(text) ||
       /^正在思考/.test(text)
@@ -9636,7 +9817,22 @@
 
   function extractFinalAnswerAfterThinkingText(text) {
     const raw = String(text || '').replace(/\r\n/g, '\n');
-    const lines = raw.split('\n');
+
+    const normalized = raw
+      .replace(
+        /(已思考\s*(?:若干秒|\d+\s*(?:秒|分钟|m|min|s)?(?:\s*\d+\s*s)?)(?:\s*[›>])?)/gi,
+        '\n$1\n',
+      )
+      .replace(
+        /(Thought for\s+\d+[^\n]*)/gi,
+        '\n$1\n',
+      )
+      .replace(
+        /(正在思考[^\n]*)/g,
+        '\n$1\n',
+      );
+
+    const lines = normalized.split('\n');
 
     let boundaryIndex = -1;
 
@@ -9654,23 +9850,7 @@
       .slice(boundaryIndex + 1)
       .filter((line) => !isThinkingUiNoiseLine(line));
 
-    const afterText = afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-
-    return afterText;
-  }
-
-  function isTextBeforeThinkingBoundary(rawText, selectedText) {
-    const raw = String(rawText || '');
-    const selected = String(selectedText || '').trim();
-
-    if (!raw || !selected) return false;
-
-    const boundaryMatch = raw.search(/已思考\s*\d+|Thought for\s+\d+|Thinking|正在思考/i);
-    if (boundaryMatch < 0) return false;
-
-    const selectedIndex = raw.indexOf(selected.slice(0, Math.min(40, selected.length)));
-
-    return selectedIndex >= 0 && selectedIndex < boundaryMatch;
+    return afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
   function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
@@ -9682,15 +9862,15 @@
         : cleanCopiedMessageText;
 
     const cleanedRaw = cleanFn(rawText || '');
+    const cleanedFallback = cleanFn(fallbackText || '');
 
     const afterThinking = extractFinalAnswerAfterThinkingText(rawText);
-
     const cleanedAfterThinking = cleanFn(afterThinking || '');
 
     if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
         ToolboxShell.appendLog(
-          `[CHAT_PAGE][assistant-final-answer-picked] source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(fallbackText || cleanedRaw || '').length} turn=${meta.turnId || '-'}`,
+          `[CHAT_PAGE][assistant-final-answer-picked] source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
         );
       }
 
@@ -9700,11 +9880,24 @@
       };
     }
 
-    const fallback = String(fallbackText || cleanedRaw || '').trim();
+    let finalText = cleanedFallback;
+    let source = 'fallback-content';
+
+    if (
+      cleanedRaw &&
+      (
+        !finalText ||
+        cleanedRaw.length > finalText.length + 80 ||
+        cleanedRaw.length > finalText.length * 1.3
+      )
+    ) {
+      finalText = cleanedRaw;
+      source = 'raw-full-turn';
+    }
 
     return {
-      text: fallback,
-      source: 'fallback-full',
+      text: String(finalText || '').trim(),
+      source,
     };
   }
 

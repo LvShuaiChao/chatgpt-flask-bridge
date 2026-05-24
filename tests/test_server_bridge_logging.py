@@ -12,9 +12,9 @@ def server_module():
     return server_mod
 
 
-def test_bridge_json_should_log_poll_always_when_full_json_enabled(server_module):
-    assert DEBUG_FULL_BRIDGE_JSON is True
-    assert server_module._bridge_json_should_log("poll", {}, {"has_message": False}) is True
+def test_bridge_json_should_log_poll_only_when_has_message_or_debug(server_module):
+    assert DEBUG_FULL_BRIDGE_JSON is False
+    assert server_module._bridge_json_should_log("poll", {}, {"has_message": False}) is False
     assert server_module._bridge_json_should_log("poll", {}, {"has_message": True}) is True
 
 
@@ -32,9 +32,9 @@ def test_bridge_json_should_log_assistant_reply_report(server_module):
     assert server_module._bridge_json_should_log("report", body, {"ok": True}) is True
 
 
-def test_bridge_json_should_log_conversation_snapshot_report(server_module):
+def test_bridge_json_should_log_conversation_snapshot_report_only_in_debug(server_module):
     body = {"event": "conversation_snapshot"}
-    assert server_module._bridge_json_should_log("report", body, {"ok": True}) is True
+    assert server_module._bridge_json_should_log("report", body, {"ok": True}) is False
 
 
 def test_bridge_json_should_log_page_heartbeat_report(server_module):

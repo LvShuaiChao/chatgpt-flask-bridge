@@ -10,7 +10,7 @@
 - 默认缩小合并包（省略 ``runtime/`` 会话状态、``.claude/``、本脚本等）：``--include-runtime-state``、``--include-claude``、``--include-export-script`` 可逐项恢复。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
-- **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前尝试 ``npm run build``，合并包收录 ``tampermonkey-userscript-src/`` 与 ``chatgpt-toolbox/dist/client.user.js``；根目录 ``client.user.js`` 与 dist 重复时只保留 dist 版本。
+- **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前可尝试 ``npm run build``；合并包只收录 ``tampermonkey-userscript-src/``，排除 ``chatgpt-toolbox/dist/client.user.js`` 与根目录 ``client.user.js`` 构建产物。
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def _detect_project_root(script_home: Path) -> Path:
 
 PROJECT_ROOT = _detect_project_root(_SCRIPT_HOME)
 CHATGPT_TOOLBOX_DIR = PROJECT_ROOT / "chatgpt-toolbox"
-USERSCRIPT_DIST_REL = "chatgpt-toolbox/dist/client.user.js"
+USERSCRIPT_DIST_REL = "chatgpt-toolbox/dist/client.user.js"  # 仅用于构建检测，不纳入合并包
 
 # 导出前构建油猴 dist（需 chatgpt-toolbox/package.json）
 RUN_BUILD_BEFORE_EXPORT = True
@@ -157,7 +157,9 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         ".venv",
         "venv",
         "runtime",
+        "logs",
         "exports",
+        "dist",
     }
 )
 
@@ -202,8 +204,10 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
         return True
     if SLIM_SKIP_EXPORT_SCRIPT and rel == "export_for_chatgpt.py":
         return True
-    # 模块化工程存在时，根目录 monolith 与 dist 重复，只导出 dist
-    if rel == "client.user.js" and (CHATGPT_TOOLBOX_DIR / "dist" / "client.user.js").is_file():
+    # 油猴构建产物：只分析 tampermonkey-userscript-src/
+    if rel == "client.user.js":
+        return True
+    if rel == USERSCRIPT_DIST_REL.lower():
         return True
 
     return False
@@ -448,7 +452,6 @@ _STDLIB_TOP: frozenset[str] | None = None
 CORE_EXPORT_ROOT_FILES: frozenset[str] = frozenset(
     {
         "gui.py",
-        "client.user.js",
         "requirements.txt",
         "export_for_chatgpt.py",
     }

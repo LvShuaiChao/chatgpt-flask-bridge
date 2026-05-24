@@ -73,6 +73,15 @@ class SessionListItemWidget(QWidget):
         self.pending_dot.setFixedSize(14, 20)
         title_row.addWidget(self.pending_dot, alignment=Qt.AlignVCenter)
 
+        self.reply_done_badge = QLabel("新回复")
+        self.reply_done_badge.setObjectName("SessionReplyDoneBadge")
+        self.reply_done_badge.setAlignment(Qt.AlignCenter)
+        self.reply_done_badge.setMinimumHeight(20)
+        self.reply_done_badge.setMinimumWidth(44)
+        self.reply_done_badge.setMaximumWidth(58)
+        self.reply_done_badge.setVisible(False)
+        title_row.addWidget(self.reply_done_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
+
         self.current_badge = QLabel("当前")
         self.current_badge.setObjectName("CurrentSessionBadge")
         self.current_badge.setAlignment(Qt.AlignCenter)
@@ -138,6 +147,8 @@ class SessionListItemWidget(QWidget):
             border_color=style.get("border") or "#d1d5db",
             background_color=style.get("bg") or "#f9fafb",
             selected_border=style.get("selected_border") or style.get("border") or "#d1d5db",
+            reply_flash=bool(state.get("reply_flash")),
+            reply_flash_phase=int(state.get("reply_flash_phase") or 0),
         )
         return True
 
@@ -151,6 +162,8 @@ class SessionListItemWidget(QWidget):
         border_color,
         background_color,
         selected_border,
+        reply_flash=False,
+        reply_flash_phase=0,
     ):
         is_current = bool(is_current)
         selected = bool(selected)
@@ -160,11 +173,24 @@ class SessionListItemWidget(QWidget):
         self._sync_current_card_property(is_current)
         self._sync_session_state_property(bind_state)
 
-        bar_color = left_color
-        card_bg = background_color
-        card_border = selected_border if selected else border_color
-        border_width = 1
-        bar_width = 5 if selected else 4
+        if reply_flash:
+            if int(reply_flash_phase or 0) % 2:
+                bar_color = "#f97316"
+                card_bg = "#fff7ed"
+                card_border = "#fb923c"
+            else:
+                bar_color = "#16a34a"
+                card_bg = "#ecfdf5"
+                card_border = "#86efac"
+            selected_border = card_border
+            border_width = 2
+            bar_width = 6
+        else:
+            bar_color = left_color
+            card_bg = background_color
+            card_border = selected_border if selected else border_color
+            border_width = 1
+            bar_width = 5 if selected else 4
 
         self.left_bar.show()
         self.left_bar.setFixedWidth(bar_width)
@@ -180,13 +206,14 @@ class SessionListItemWidget(QWidget):
         )
 
         if is_current:
+            current_border = card_border if reply_flash else _CURRENT_BORDER
             self.card.setStyleSheet(
                 f"""
                 QFrame#SessionCard {{
                     background: {card_bg};
-                    border-top: 2px solid {_CURRENT_BORDER};
-                    border-right: 2px solid {_CURRENT_BORDER};
-                    border-bottom: 2px solid {_CURRENT_BORDER};
+                    border-top: 2px solid {current_border};
+                    border-right: 2px solid {current_border};
+                    border-bottom: 2px solid {current_border};
                     border-left: none;
                     border-radius: {SESSION_LIST_ITEM_RADIUS}px;
                 }}
@@ -263,6 +290,21 @@ class SessionListItemWidget(QWidget):
         self.update()
         return True
 
+    def update_subtitle_fast(self, subtitle):
+        subtitle = (subtitle or "").replace("\n", " ")
+        state = getattr(self, "_last_apply_state", None)
+        if not isinstance(state, dict):
+            return False
+        if state.get("subtitle") == subtitle:
+            return True
+        state["subtitle"] = subtitle
+        if isinstance(getattr(self, "_last_apply_state_key", None), tuple) and len(self._last_apply_state_key) >= 2:
+            key_parts = list(self._last_apply_state_key)
+            key_parts[1] = subtitle
+            self._last_apply_state_key = tuple(key_parts)
+        self.subtitle_label.setText(subtitle)
+        return True
+
     def apply_state(
         self,
         *,
@@ -270,6 +312,8 @@ class SessionListItemWidget(QWidget):
         subtitle,
         bind_state,
         pending_reply=False,
+        reply_flash=False,
+        reply_flash_phase=0,
         selected=False,
         is_current=None,
         tooltip="",
@@ -288,6 +332,8 @@ class SessionListItemWidget(QWidget):
             "subtitle": subtitle,
             "bind_state": bind_state,
             "pending_reply": pending_reply,
+            "reply_flash": bool(reply_flash),
+            "reply_flash_phase": int(reply_flash_phase or 0),
             "selected": selected,
             "is_current": is_current,
             "tooltip": tooltip,
@@ -314,6 +360,8 @@ class SessionListItemWidget(QWidget):
             subtitle,
             bind_state,
             bool(pending_reply),
+            bool(reply_flash),
+            int(reply_flash_phase or 0),
             bool(is_current),
             bool(selected),
             tooltip_text,
@@ -333,9 +381,47 @@ class SessionListItemWidget(QWidget):
         self.pending_dot.setText("●" if pending_reply else "")
         self.pending_dot.setVisible(bool(pending_reply))
 
+        if reply_flash:
+            self.reply_done_badge.setVisible(True)
+            if int(reply_flash_phase or 0) % 2:
+                self.reply_done_badge.setStyleSheet(
+                    """
+                    QLabel#SessionReplyDoneBadge {
+                        color: #ffffff;
+                        background: #f97316;
+                        border-radius: 6px;
+                        padding: 1px 6px;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    """
+                )
+            else:
+                self.reply_done_badge.setStyleSheet(
+                    """
+                    QLabel#SessionReplyDoneBadge {
+                        color: #ffffff;
+                        background: #16a34a;
+                        border-radius: 6px;
+                        padding: 1px 6px;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    """
+                )
+        else:
+            self.reply_done_badge.setVisible(False)
+
         self.setToolTip(tooltip_text)
 
-        style_key = (bind_state, bool(selected), bool(pending_reply), bool(is_current))
+        style_key = (
+            bind_state,
+            bool(selected),
+            bool(pending_reply),
+            bool(is_current),
+            bool(reply_flash),
+            int(reply_flash_phase or 0),
+        )
         if style_key == getattr(self, "_last_style_key", None):
             self.update()
             return
@@ -350,6 +436,8 @@ class SessionListItemWidget(QWidget):
             border_color=style["border"],
             background_color=style["bg"],
             selected_border=style["selected_border"],
+            reply_flash=bool(reply_flash),
+            reply_flash_phase=int(reply_flash_phase or 0),
         )
 
         self.status_label.setStyleSheet(

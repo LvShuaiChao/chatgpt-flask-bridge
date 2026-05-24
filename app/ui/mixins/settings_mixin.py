@@ -1,25 +1,10 @@
 from app.server import (
-    cancel_message,
-    complete_gui_dispatch,
-    enqueue_control_command,
     get_bridge_status,
-    get_message_state,
-    get_server_bridge_url,
     get_server_port,
     get_server_public_host,
     get_server_url,
-    get_tm_online_summary,
     is_server_running,
-    push_close_other_pages,
-    push_close_page,
-    push_message,
-    push_open_url,
     set_debug_mode,
-    set_external_gui_dispatch,
-    set_log_callback,
-    set_status_callback,
-    start_server,
-    stop_server,
 )
 
 import time
@@ -316,26 +301,6 @@ class SettingsMixin:
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
-
-    def _update_service_settings_status(self):
-        label = getattr(self, "settings_service_status_label", None)
-        if label is None:
-            return
-        if is_server_running():
-            service_url = get_server_url() or "-"
-            bridge_url = get_server_bridge_url() or "-"
-            label.setText(
-                f"当前状态：运行中\n"
-                f"服务地址：{service_url}\n"
-                f"油猴填写：{bridge_url}"
-            )
-            return
-        server_ui = getattr(self, "_server_ui", None)
-        if server_ui is not None and getattr(server_ui, "start_failed", False):
-            message = getattr(server_ui, "start_error", "") or "未知错误"
-            label.setText(f"当前状态：启动失败\n{message}")
-            return
-        label.setText("当前状态：未启动")
 
     def _on_check_tampermonkey(self):
         if not is_server_running():

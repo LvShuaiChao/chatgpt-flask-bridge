@@ -48,13 +48,6 @@ def _resolve_stored_upload_path(entry: dict) -> Path:
     return candidate
 
 
-def _file_entry_age_hours(entry):
-    try:
-        return (_now() - float(entry.get("created_at") or 0)) / 3600.0
-    except (TypeError, ValueError):
-        return 999.0
-
-
 UPLOAD_FILE_TTL_HOURS = 6
 UPLOAD_FILE_MAX_RECORDS = 500
 
@@ -262,7 +255,13 @@ def api_register_upload_file():
             "error": "JSON body 必须是对象",
             "code": "INVALID_JSON",
         }), 400
-    path_text = (body.get("path") or body.get("file_path") or "").strip()
+    if "file_path" in body:
+        return jsonify({
+            "ok": False,
+            "error": "legacy field file_path is not allowed, use path",
+            "code": "LEGACY_FIELD",
+        }), 400
+    path_text = (body.get("path") or "").strip()
     if not path_text:
         return jsonify({"ok": False, "error": "缺少 path"}), 400
     try:

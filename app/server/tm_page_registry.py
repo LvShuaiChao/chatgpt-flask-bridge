@@ -1033,13 +1033,16 @@ def cleanup_tampermonkey_pages_locked():
         # sync cleanup: _last_poll_identity
         for cid in expired_client_ids:
             st._last_poll_identity.pop(cid, None)
+        expired_client_prefixes = tuple(
+            f"{cid}|" for cid in expired_client_ids if cid
+        )
         # sync cleanup: _last_poll_empty_log_at
         for key in list(st._last_poll_empty_log_at.keys()):
-            if key.startswith(tuple(expired_client_ids)):
+            if expired_client_prefixes and key.startswith(expired_client_prefixes):
                 st._last_poll_empty_log_at.pop(key, None)
         # sync cleanup: _last_poll_other_reason_log_at
         for key in list(st._last_poll_other_reason_log_at.keys()):
-            if key.startswith(tuple(expired_client_ids)):
+            if expired_client_prefixes and key.startswith(expired_client_prefixes):
                 st._last_poll_other_reason_log_at.pop(key, None)
         # sync cleanup: _tm_page_no_by_key / _tm_page_no_updated_at
         for key in list(st._tm_page_no_by_key.keys()):

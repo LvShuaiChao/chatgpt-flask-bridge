@@ -427,6 +427,8 @@ class UiChatPanelMixin:
 
         self.chat_transcript = QTextBrowser()
         self.chat_transcript.setObjectName("ChatTranscript")
+        self.chat_transcript.setProperty("replyFlash", "false")
+        self.chat_transcript.setProperty("replyFlashPhase", "0")
         self.chat_transcript.document().setDocumentMargin(0)
         self.chat_transcript.setOpenExternalLinks(False)
         self.chat_transcript.setReadOnly(True)

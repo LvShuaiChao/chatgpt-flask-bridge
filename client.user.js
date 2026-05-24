@@ -35,7 +35,7 @@
 // To modify behavior, edit source files first, then run:
 // npm run build
 //
-// Generated at: 2026-05-24 16:38:42
+// Generated at: 2026-05-24 19:13:18
 // =============================================================================
 
 (function () {
@@ -270,6 +270,7 @@
     startSendBtn: '#cgpt-upload-start-send',
     copyContinueBtn: '#cgpt-upload-continue-once',
     sendHotkeyBtn: '#cgpt-send-hotkey-once',
+    homeBtn: '#cgpt-open-chatgpt-home',
     autoContinueBtn: '#cgpt-auto-continue-once',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
@@ -846,6 +847,16 @@
     uploadItems: [],
   };
 
+  let toolboxPageNavigating = false;
+
+  function isToolboxPageNavigating() {
+    return toolboxPageNavigating === true;
+  }
+
+  function setToolboxPageNavigating(active) {
+    toolboxPageNavigating = !!active;
+  }
+
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
   function bindOnce(el, eventName, handler, fourth) {
@@ -1247,6 +1258,53 @@
     }
   }
 
+  function setButtonStateIfChanged(button, options = {}) {
+    if (!button) return false;
+
+    const sig = JSON.stringify({
+      text: options.text != null ? String(options.text) : '',
+      title: options.title != null ? String(options.title) : '',
+      disabled: options.disabled === true,
+      ariaDisabled: options.ariaDisabled === true,
+      addClasses: Array.isArray(options.addClasses) ? options.addClasses : [],
+      removeClasses: Array.isArray(options.removeClasses) ? options.removeClasses : [],
+    });
+
+    if (button.dataset.lastStateSig === sig) {
+      return false;
+    }
+
+    button.dataset.lastStateSig = sig;
+    setButtonState(button, options);
+    return true;
+  }
+
+  const perfLogThrottleAt = {};
+
+  function isToolboxPerfDebugEnabled() {
+    if (typeof MemoryManager === 'undefined' || typeof MemoryManager.get !== 'function') {
+      return false;
+    }
+    return !!MemoryManager.get('bridgeDebugEnabled', false);
+  }
+
+  function logPerfThrottled(tag, message, throttleMs = 2000) {
+    if (!isToolboxPerfDebugEnabled()) return;
+
+    const key = String(tag || 'default');
+    const now = Date.now();
+    const lastAt = Number(perfLogThrottleAt[key] || 0);
+    if (now - lastAt < throttleMs) {
+      return;
+    }
+
+    perfLogThrottleAt[key] = now;
+    console.log(message);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(message);
+    }
+  }
+
   function isWaitingAnswerVisualState(options = {}) {
     const text = String(options.text || options.buttonText || '').trim();
     const state = String(options.state || '').trim().toLowerCase();
@@ -1330,6 +1388,102 @@
         button.blur();
       }
     }, delayMs);
+  }
+
+  const BUTTON_LONG_WAIT_DANGER_MS = 10000;
+  const buttonWaitTimers = new WeakMap();
+
+  const PERMANENT_DANGER_BUTTON_IDS = new Set([
+    'cgpt-log-clear',
+    'cgpt-autoq-stop',
+    'cgpt-prompt-delete-btn',
+    'cgpt-prompt-reset-btn',
+  ]);
+
+  function isPermanentDangerButton(button) {
+    if (!button) {
+      return false;
+    }
+
+    const id = String(button.id || '').trim();
+    if (PERMANENT_DANGER_BUTTON_IDS.has(id)) {
+      return true;
+    }
+
+    if (id === 'cgpt-copy-hotkey-continue-loop' && button.classList.contains('cgpt-action-running')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function setButtonWaitingDanger(button, enabled, reason) {
+    if (!button || isPermanentDangerButton(button)) {
+      return;
+    }
+
+    if (enabled) {
+      button.classList.add('cgpt-btn-waiting-danger');
+      button.dataset.waitDanger = '1';
+      button.dataset.waitDangerReason = reason || 'waiting';
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BUTTON][WAIT_DANGER_ON] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+        );
+      }
+      return;
+    }
+
+    button.classList.remove('cgpt-btn-waiting-danger');
+    delete button.dataset.waitDanger;
+    delete button.dataset.waitDangerReason;
+
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[BUTTON][WAIT_DANGER_OFF] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+      );
+    }
+  }
+
+  function startButtonLongWaitDangerTimer(button, reason, delayMs) {
+    if (!button || isPermanentDangerButton(button)) {
+      return;
+    }
+
+    clearButtonLongWaitDangerTimer(button, 'restart');
+
+    const waitMs = Number(delayMs || BUTTON_LONG_WAIT_DANGER_MS);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[BUTTON][LONG_WAIT_TIMER_START] id=${button.id || '-'} text=${String(button.textContent || '').trim()} delayMs=${waitMs} reason=${reason || '-'}`,
+      );
+    }
+
+    const timer = window.setTimeout(() => {
+      setButtonWaitingDanger(button, true, reason || 'long_wait');
+    }, waitMs);
+
+    buttonWaitTimers.set(button, timer);
+  }
+
+  function clearButtonLongWaitDangerTimer(button, reason) {
+    if (!button) {
+      return;
+    }
+
+    const timer = buttonWaitTimers.get(button);
+    if (timer) {
+      window.clearTimeout(timer);
+      buttonWaitTimers.delete(button);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BUTTON][LONG_WAIT_TIMER_CLEAR] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'}`,
+        );
+      }
+    }
+
+    setButtonWaitingDanger(button, false, reason || 'clear');
   }
 
   function shouldSkipGlobalShortcutForToolboxTarget(target) {
@@ -2330,30 +2484,119 @@
   })();
 
   const TOOLBOX_PAGE_STATE_ROOT_KEY = 'cgpt_toolbox_page_state_v1';
+  const TOOLBOX_PAGE_STATE_SAVE_DEBOUNCE_MS = 750;
+  let toolboxPageStateSaveTimer = 0;
+  let toolboxPageStateSavePending = null;
+  let toolboxPageStateSaveLastSignature = '';
+
+  function buildToolboxPageStateSaveSignature(toolboxRouteKey, patch) {
+    const key = String(toolboxRouteKey || '').trim();
+    let patchText = '';
+
+    try {
+      patchText = JSON.stringify(patch || {});
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[ChatGPT toolbox] buildToolboxPageStateSaveSignature failed', error);
+      patchText = `serialize-failed:${errText}`;
+    }
+
+    return `${key}|${patchText}`;
+  }
+
+  function flushToolboxPageStateSaveNow() {
+    if (toolboxPageStateSaveTimer) {
+      window.clearTimeout(toolboxPageStateSaveTimer);
+      toolboxPageStateSaveTimer = 0;
+    }
+
+    const pending = toolboxPageStateSavePending;
+    toolboxPageStateSavePending = null;
+
+    if (!pending) {
+      return;
+    }
+
+    const signature = buildToolboxPageStateSaveSignature(
+      pending.toolboxRouteKey,
+      pending.patch,
+    );
+
+    if (signature === toolboxPageStateSaveLastSignature) {
+      return;
+    }
+
+    toolboxPageStateSaveLastSignature = signature;
+    saveToolboxPageStatePatchImmediate(pending.patch, pending.reason);
+  }
+
+  const TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES = Object.freeze({
+    activeTab: ['active_tab'],
+    uploadActiveGroupId: ['upload_active_group_id'],
+    quickPromptCategory: ['quick_prompt_category'],
+  });
+
+  const TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS = Object.freeze([
+    'active_tab',
+    'upload_active_group_id',
+    'quick_prompt_category',
+  ]);
+
+  const TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS = Object.freeze([
+    'activeTab',
+    'uploadActiveGroupId',
+    'quickPromptCategory',
+    'toolboxRouteKey',
+    'page_instance_id',
+    'url',
+    'pathname',
+    'conversation_id',
+    'updatedAt',
+  ]);
 
   function readToolboxStateField(state, fieldName, fallback = '') {
     const src = state && typeof state === 'object' ? state : {};
     const key = String(fieldName || '').trim();
-    if (!key || !Object.prototype.hasOwnProperty.call(src, key)) {
+    if (!key) {
       return fallback;
     }
 
-    const value = src[key];
-    if (value == null) {
-      return fallback;
+    const readValue = (fieldKey) => {
+      if (!Object.prototype.hasOwnProperty.call(src, fieldKey)) {
+        return undefined;
+      }
+      const value = src[fieldKey];
+      if (value == null) {
+        return undefined;
+      }
+      if (typeof value === 'string') {
+        const text = value.trim();
+        return text || undefined;
+      }
+      return value;
+    };
+
+    const direct = readValue(key);
+    if (direct !== undefined) {
+      return direct;
     }
 
-    if (typeof value === 'string') {
-      const text = value.trim();
-      return text || fallback;
+    const legacyKeys = TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES[key];
+    if (Array.isArray(legacyKeys)) {
+      for (let i = 0; i < legacyKeys.length; i += 1) {
+        const legacyValue = readValue(legacyKeys[i]);
+        if (legacyValue !== undefined) {
+          return legacyValue;
+        }
+      }
     }
 
-    return value;
+    return fallback;
   }
 
   function normalizeToolboxStatePatchForWrite(patch) {
     const input = patch && typeof patch === 'object' ? patch : {};
-    const out = { ...input };
+    const out = {};
 
     const activeTab = readToolboxStateField(input, 'activeTab', '');
     if (activeTab) {
@@ -2370,7 +2613,126 @@
       out.quickPromptCategory = quickPromptCategory;
     }
 
+    TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS.forEach((key) => {
+      if (key === 'activeTab' || key === 'uploadActiveGroupId' || key === 'quickPromptCategory') {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(input, key)) {
+        return;
+      }
+      const value = input[key];
+      if (value == null) {
+        return;
+      }
+      out[key] = value;
+    });
+
     return out;
+  }
+
+  let didLogCanonicalFieldValidation = false;
+
+  function logLegacyFieldFinding(scope, fields) {
+    const list = Array.isArray(fields) ? fields.filter(Boolean) : [];
+    if (!list.length) {
+      return;
+    }
+    const line = `[FIELD][LEGACY_FOUND] scope=${scope} fields=${list.join(',')}`;
+    console.warn(line);
+    toolboxPageStateAppendLog(line);
+  }
+
+  async function scanUploadQueueCanonicalFields() {
+    if (typeof UploadModule === 'undefined'
+      || typeof UploadModule.scanQueueRowsForLegacyFields !== 'function') {
+      return;
+    }
+    try {
+      await UploadModule.scanQueueRowsForLegacyFields();
+    } catch (error) {
+      console.error('[ChatGPT toolbox] scanUploadQueueCanonicalFields failed', error);
+    }
+  }
+
+  function validateCanonicalFieldsOnStartup() {
+    if (didLogCanonicalFieldValidation) {
+      return;
+    }
+    didLogCanonicalFieldValidation = true;
+
+    try {
+      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+        const cfg = MemoryManager.get(MemoryManager.KEYS.autoQueueConfig, null);
+        if (cfg && typeof cfg === 'object' && Array.isArray(cfg.taskProfiles)) {
+          const legacyTaskFields = [];
+          cfg.taskProfiles.forEach((profile, profileIndex) => {
+            if (!profile || typeof profile !== 'object') {
+              return;
+            }
+            if (Object.prototype.hasOwnProperty.call(profile, 'continuePrompt')) {
+              legacyTaskFields.push(`taskProfiles[${profileIndex}].continuePrompt`);
+            }
+            if (Object.prototype.hasOwnProperty.call(profile, 'defaultContinuePrompt')) {
+              legacyTaskFields.push(`taskProfiles[${profileIndex}].defaultContinuePrompt`);
+            }
+            (profile.tasks || []).forEach((task, taskIndex) => {
+              if (task && Object.prototype.hasOwnProperty.call(task, 'continuePrompt')) {
+                legacyTaskFields.push(`taskProfiles[${profileIndex}].tasks[${taskIndex}].continuePrompt`);
+              }
+            });
+          });
+          logLegacyFieldFinding('autoQueueConfig', legacyTaskFields);
+        }
+      }
+    } catch (error) {
+      console.error('[ChatGPT toolbox] validateCanonicalFieldsOnStartup autoQueueConfig failed', error);
+    }
+
+    try {
+      const states = readAllToolboxPageStates();
+      const pageLegacyFields = [];
+      Object.entries(states).forEach(([routeKey, state]) => {
+        if (!state || typeof state !== 'object') {
+          return;
+        }
+        TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS.forEach((legacyKey) => {
+          if (Object.prototype.hasOwnProperty.call(state, legacyKey)) {
+            pageLegacyFields.push(`${routeKey}.${legacyKey}`);
+          }
+        });
+      });
+      logLegacyFieldFinding('pageState', pageLegacyFields);
+
+      if (pageLegacyFields.length) {
+        let migrated = false;
+        Object.keys(states).forEach((routeKey) => {
+          const state = states[routeKey];
+          if (!state || typeof state !== 'object') {
+            return;
+          }
+          const patch = normalizeToolboxStatePatchForWrite(state);
+          const nextState = {
+            ...state,
+            ...patch,
+          };
+          TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS.forEach((legacyKey) => {
+            if (Object.prototype.hasOwnProperty.call(nextState, legacyKey)) {
+              delete nextState[legacyKey];
+              migrated = true;
+            }
+          });
+          states[routeKey] = nextState;
+        });
+        if (migrated) {
+          writeAllToolboxPageStates(states);
+          toolboxPageStateAppendLog('[FIELD][LEGACY_MIGRATED] scope=pageState');
+        }
+      }
+    } catch (error) {
+      console.error('[ChatGPT toolbox] validateCanonicalFieldsOnStartup pageState failed', error);
+    }
+
+    void scanUploadQueueCanonicalFields();
   }
 
   function parseConversationIdFromPath(pathname) {
@@ -2447,7 +2809,7 @@
     return state;
   }
 
-  function saveToolboxPageStatePatch(patch, reason = '') {
+  function saveToolboxPageStatePatchImmediate(patch, reason = '') {
     const toolboxRouteKey = getToolboxRouteKey();
     const states = readAllToolboxPageStates();
     const oldState = states[toolboxRouteKey] && typeof states[toolboxRouteKey] === 'object'
@@ -2494,6 +2856,56 @@
     toolboxPageStateAppendLog(
       `[TOOLBOX_PAGE_STATE][save] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKey} fields=${Object.keys(patch || {}).join(',')}`,
     );
+  }
+
+  function saveToolboxPageStatePatch(patch, reason = '') {
+    const toolboxRouteKey = getToolboxRouteKey();
+    const normalizedPatch = patch && typeof patch === 'object' ? patch : {};
+    const signature = buildToolboxPageStateSaveSignature(toolboxRouteKey, normalizedPatch);
+    const reasonText = String(reason || '').trim();
+    const immediateReasons = new Set([
+      'before-route-key-change',
+      'panel-drag-end',
+      'panel-hide',
+      'panel-show',
+      'init',
+    ]);
+    const shouldFlushImmediately = immediateReasons.has(reasonText)
+      || reasonText.includes('drag-end')
+      || reasonText.includes('route-change');
+
+    if (shouldFlushImmediately) {
+      if (toolboxPageStateSaveTimer) {
+        window.clearTimeout(toolboxPageStateSaveTimer);
+        toolboxPageStateSaveTimer = 0;
+      }
+      toolboxPageStateSavePending = null;
+
+      if (signature !== toolboxPageStateSaveLastSignature) {
+        toolboxPageStateSaveLastSignature = signature;
+        saveToolboxPageStatePatchImmediate(normalizedPatch, reasonText);
+      }
+      return;
+    }
+
+    if (signature === toolboxPageStateSaveLastSignature && toolboxPageStateSaveTimer) {
+      return;
+    }
+
+    toolboxPageStateSavePending = {
+      patch: normalizedPatch,
+      reason: reasonText,
+      toolboxRouteKey,
+    };
+
+    if (toolboxPageStateSaveTimer) {
+      window.clearTimeout(toolboxPageStateSaveTimer);
+    }
+
+    toolboxPageStateSaveTimer = window.setTimeout(() => {
+      toolboxPageStateSaveTimer = 0;
+      flushToolboxPageStateSaveNow();
+    }, TOOLBOX_PAGE_STATE_SAVE_DEBOUNCE_MS);
   }
 
   let isApplyingToolboxPageState = false;
@@ -3802,6 +4214,7 @@
     let titleObserver = null;
     let headObserver = null;
     let replyDoneFlashTimer = 0;
+    let replyDoneFlashStopTimer = 0;
     let replyDoneFlashBaseTitle = '';
     let replyDoneFlashOn = false;
 
@@ -3998,6 +4411,11 @@
         replyDoneFlashTimer = 0;
       }
 
+      if (replyDoneFlashStopTimer) {
+        window.clearTimeout(replyDoneFlashStopTimer);
+        replyDoneFlashStopTimer = 0;
+      }
+
       if (replyDoneFlashBaseTitle) {
         document.title = normalizeTitle(replyDoneFlashBaseTitle || 'ChatGPT');
       }
@@ -4010,27 +4428,40 @@
       }
     }
 
-    function startReplyDoneFlash(reason = '') {
+    function startReplyDoneFlash(reason = '', options = {}) {
       const currentBase = stripKnownPrefixes(document.title) || 'ChatGPT';
-      const cleanBase = currentBase.replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '').trim() || 'ChatGPT';
+      const cleanBase = currentBase
+        .replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '')
+        .replace(/^【回复完成】\s*/u, '')
+        .trim() || 'ChatGPT';
 
       stopReplyDoneFlash(`restart:${reason || '-'}`);
 
       replyDoneFlashBaseTitle = cleanBase;
       replyDoneFlashOn = false;
 
+      const intervalMs = Number(options.intervalMs || 450);
+      const autoStopMs = Number(options.autoStopMs || 2400);
+
       const tick = () => {
         replyDoneFlashOn = !replyDoneFlashOn;
         document.title = replyDoneFlashOn
-          ? `🔔 回复完成 - ${replyDoneFlashBaseTitle}`
-          : replyDoneFlashBaseTitle;
+          ? normalizeTitle(`【回复完成】 ${replyDoneFlashBaseTitle}`)
+          : normalizeTitle(replyDoneFlashBaseTitle);
       };
 
       tick();
-      replyDoneFlashTimer = window.setInterval(tick, 900);
+      replyDoneFlashTimer = window.setInterval(tick, intervalMs);
+
+      replyDoneFlashStopTimer = window.setTimeout(() => {
+        stopReplyDoneFlash(`auto-stop:${reason || '-'}`);
+      }, autoStopMs);
 
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[TITLE_FLASH][start] reason=${reason || '-'} base=${replyDoneFlashBaseTitle}`);
+        ToolboxShell.appendLog(
+          `[TITLE_FLASH][start] reason=${reason || '-'} base=${replyDoneFlashBaseTitle} `
+          + `intervalMs=${intervalMs} autoStopMs=${autoStopMs}`,
+        );
       }
     }
 
@@ -4181,6 +4612,9 @@
     let compactMode = false;
     let panelResizeObserver = null;
     let clampViewportTimer = 0;
+    let panelPositionSaveDebounceTimer = 0;
+    let panelPositionSavePendingReason = '';
+    let panelPositionSaveLastSignature = '';
     let viewportGuardBound = false;
     let creatingToolbox = false;
     let appendingLog = false;
@@ -4188,6 +4622,11 @@
     let globalErrorGuardBound = false;
     let hiddenTitlePosition = null;
     let hiddenTitlePositionLocked = false;
+
+    let headerTitleFlashTimer = 0;
+    let headerTitleFlashStopTimer = 0;
+    let headerTitleFlashBaseText = '';
+    let headerTitleFlashOn = false;
 
     function addGlobalDraggingClass() {
       if (document.documentElement) {
@@ -5748,6 +6187,29 @@
           background: #b45309;
         }
 
+        .cgpt-btn.cgpt-btn-waiting-danger,
+        .cgpt-btn[data-wait-danger="1"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35), 0 0 10px rgba(239, 68, 68, 0.35) !important;
+        }
+
+        .cgpt-btn.cgpt-btn-waiting-danger:hover,
+        .cgpt-btn[data-wait-danger="1"]:hover {
+          background: #b91c1c !important;
+          border-color: #f87171 !important;
+          color: #ffffff !important;
+        }
+
+        .cgpt-btn.cgpt-btn-waiting-danger:disabled,
+        .cgpt-btn[data-wait-danger="1"]:disabled {
+          background: #991b1b !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+        }
+
         .cgpt-btn.teal {
           background: #0f766e;
           border-color: #14b8a6;
@@ -5838,7 +6300,15 @@
         }
 
         #cgpt-upload-start-send.cgpt-wait-send-cancel,
-        #cgpt-upload-start-send.cgpt-wait-send-cancel:hover:not(:disabled) {
+        #cgpt-upload-start-send.danger,
+        #cgpt-upload-start-send[data-upload-send-state="sending"],
+        #cgpt-upload-start-send[data-upload-send-state="waiting-reply"],
+        #cgpt-upload-start-send[aria-busy="true"],
+        #cgpt-upload-start-send.cgpt-wait-send-cancel:hover:not(:disabled),
+        #cgpt-upload-start-send.danger:hover:not(:disabled),
+        #cgpt-upload-start-send[data-upload-send-state="sending"]:hover:not(:disabled),
+        #cgpt-upload-start-send[data-upload-send-state="waiting-reply"]:hover:not(:disabled),
+        #cgpt-upload-start-send[aria-busy="true"]:hover:not(:disabled) {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
@@ -6069,9 +6539,31 @@
           box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.10);
         }
 
+        .toolbox-upload-drop-zone.is-drag-over,
+        .toolbox-upload-file-list.is-drag-over,
+        .toolbox-upload-empty-state.is-drag-over,
+        #cgpt-upload-module.is-drag-over,
         #cgpt-upload-module.cgpt-upload-dragging {
           outline: 1px dashed #60a5fa;
           outline-offset: -4px;
+        }
+
+        .toolbox-upload-drop-over-hint {
+          display: none;
+          color: #93c5fd;
+        }
+
+        .toolbox-upload-drop-zone.is-drag-over .toolbox-upload-drop-over-hint,
+        .toolbox-upload-file-list.is-drag-over .toolbox-upload-drop-over-hint,
+        .toolbox-upload-empty-state.is-drag-over .toolbox-upload-drop-over-hint,
+        #cgpt-upload-module.is-drag-over .toolbox-upload-drop-over-hint {
+          display: block;
+        }
+
+        .toolbox-upload-drop-zone.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint,
+        .toolbox-upload-file-list.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint,
+        #cgpt-upload-module.is-drag-over .toolbox-upload-empty-state .toolbox-upload-drop-hint {
+          display: none;
         }
 
         #${APP.panelId}.cgpt-toolbox-file-dragover {
@@ -6437,6 +6929,30 @@
           margin-top: 10px;
         }
 
+        .cgpt-autoq-top-action-bar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+          margin: 10px 0 8px 0;
+          padding: 8px;
+          border: 1px solid rgba(148, 163, 184, 0.25);
+          border-radius: 8px;
+          background: rgba(15, 23, 42, 0.45);
+        }
+
+        .cgpt-autoq-top-action-bar button {
+          min-height: 30px;
+          padding: 5px 12px;
+        }
+
+        .cgpt-autoq-bottom-action-bar,
+        .cgpt-autoq-footer-action-bar,
+        .cgpt-autoq-batch-actions-slot .cgpt-autoq-actions {
+          position: static;
+          bottom: auto;
+        }
+
         #cgpt-autoq-start {
           background: #166534 !important;
           border-color: #22c55e !important;
@@ -6605,11 +7121,6 @@
           max-height: 420px;
           overflow-y: auto;
           padding-right: 2px;
-        }
-
-        .cgpt-autoq-batch-actions-slot .cgpt-autoq-actions {
-          margin-top: 10px;
-          flex-wrap: wrap;
         }
 
         .cgpt-autoq-batch-settings-slot .cgpt-autoq-settings-section {
@@ -7571,6 +8082,85 @@
       return toolboxTitle || TOOLBOX_DEFAULT_TITLE;
     }
 
+    function stopHeaderTitleFlash(reason = '') {
+      if (headerTitleFlashTimer) {
+        window.clearInterval(headerTitleFlashTimer);
+        headerTitleFlashTimer = 0;
+      }
+
+      if (headerTitleFlashStopTimer) {
+        window.clearTimeout(headerTitleFlashStopTimer);
+        headerTitleFlashStopTimer = 0;
+      }
+
+      if (!titleEl && root) {
+        titleEl = qs('.cgpt-toolbox-title', root);
+      }
+
+      if (titleEl && headerTitleFlashBaseText) {
+        titleEl.textContent = headerTitleFlashBaseText;
+        titleEl.title = latestStatusText
+          ? `${getToolboxTitle()} - ${latestStatusText}`
+          : getToolboxTitle();
+      }
+
+      headerTitleFlashBaseText = '';
+      headerTitleFlashOn = false;
+
+      appendLog(`[TITLE_FLASH][header-stop] reason=${reason || '-'}`);
+    }
+
+    function flashHeaderTitleOnce(message = '回复完成', options = {}) {
+      create();
+
+      if (!titleEl && root) {
+        titleEl = qs('.cgpt-toolbox-title', root);
+      }
+
+      if (!titleEl) {
+        appendLog('[TITLE_FLASH][header-skip] reason=missing-title');
+        return false;
+      }
+
+      stopHeaderTitleFlash(`restart:${message || '-'}`);
+
+      const rawBase = String(titleEl.textContent || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE)
+        .replace(/^【回复完成】\s*/u, '')
+        .trim();
+
+      const baseText = rawBase || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE;
+      const noticeText = `【${String(message || '回复完成').trim()}】 ${baseText}`;
+
+      headerTitleFlashBaseText = baseText;
+      headerTitleFlashOn = false;
+
+      const intervalMs = Number(options.intervalMs || 450);
+      const autoStopMs = Number(options.autoStopMs || 2400);
+
+      const tick = () => {
+        headerTitleFlashOn = !headerTitleFlashOn;
+        titleEl.textContent = headerTitleFlashOn ? noticeText : baseText;
+        titleEl.title = headerTitleFlashOn
+          ? noticeText
+          : (
+            latestStatusText
+              ? `${getToolboxTitle()} - ${latestStatusText}`
+              : getToolboxTitle()
+          );
+      };
+
+      tick();
+
+      headerTitleFlashTimer = window.setInterval(tick, intervalMs);
+
+      headerTitleFlashStopTimer = window.setTimeout(() => {
+        stopHeaderTitleFlash(`auto-stop:${message || '-'}`);
+      }, autoStopMs);
+
+      appendLog(`[TITLE_FLASH][header-start] message=${message || '-'} intervalMs=${intervalMs} autoStopMs=${autoStopMs}`);
+      return true;
+    }
+
     function applyToolboxTitle(_nextTitle) {
       const text = TOOLBOX_DEFAULT_TITLE;
       toolboxTitle = text;
@@ -8108,6 +8698,9 @@
               panel = qs(`#${APP.panelId}`, root);
               titleEl = qs('.cgpt-toolbox-title', root);
               migrateToolboxToastToPanel('create-existing-root-detached');
+              if (typeof cleanupRuntimeHandles === 'function') {
+                cleanupRuntimeHandles('toolbox-remount-detached-root');
+              }
               appendLog('[TOOLBOX_WATCHDOG][REMOUNT] reason=create-existing-root-detached');
             } catch (err) {
               const errText = err && err.message ? err.message : String(err);
@@ -10657,7 +11250,7 @@
       return true;
     }
 
-    function savePanelPositionFromDom(reason = '') {
+    function savePanelPositionFromDomNow(reason = '') {
       if (!panel) {
         console.warn('[ChatGPT toolbox] savePanelPositionFromDom: panel 未初始化');
         return;
@@ -10677,6 +11270,12 @@
         updatedAt: Date.now(),
       };
 
+      const signature = `${Math.round(pos.left)}|${Math.round(pos.top)}|${panelPosition.edge || ''}`;
+      if (signature === panelPositionSaveLastSignature) {
+        return;
+      }
+      panelPositionSaveLastSignature = signature;
+
       MemoryManager.set(MemoryManager.KEYS.panelPosition, panelPosition);
 
       saveToolboxLayoutState(reason || 'panel-drag-end');
@@ -10685,6 +11284,60 @@
       appendLog(
         `[TOOLBOX_POSITION][SAVE_PANEL] reason=${reason || '-'} left=${pos.left} top=${pos.top}`,
       );
+    }
+
+    function savePanelPositionFromDom(reason = '') {
+      const reasonText = String(reason || '').trim();
+      const shouldDebounce = reasonText === 'keepPanelInViewport'
+        || reasonText.includes('keepPanelInViewport');
+
+      if (!shouldDebounce) {
+        if (panelPositionSaveDebounceTimer) {
+          window.clearTimeout(panelPositionSaveDebounceTimer);
+          panelPositionSaveDebounceTimer = 0;
+          panelPositionSavePendingReason = '';
+        }
+        savePanelPositionFromDomNow(reasonText);
+        return;
+      }
+
+      panelPositionSavePendingReason = reasonText || 'keepPanelInViewport';
+
+      if (panelPositionSaveDebounceTimer) {
+        window.clearTimeout(panelPositionSaveDebounceTimer);
+      }
+
+      panelPositionSaveDebounceTimer = window.setTimeout(() => {
+        panelPositionSaveDebounceTimer = 0;
+        const pendingReason = panelPositionSavePendingReason || 'keepPanelInViewport';
+        panelPositionSavePendingReason = '';
+        savePanelPositionFromDomNow(pendingReason);
+      }, 800);
+    }
+
+    function clearViewportTimers(source) {
+      if (clampViewportTimer) {
+        window.clearTimeout(clampViewportTimer);
+        clampViewportTimer = 0;
+      }
+
+      if (panelPositionSaveDebounceTimer) {
+        window.clearTimeout(panelPositionSaveDebounceTimer);
+        panelPositionSaveDebounceTimer = 0;
+        panelPositionSavePendingReason = '';
+      }
+
+      if (edgeRevealTimer) {
+        window.clearTimeout(edgeRevealTimer);
+        edgeRevealTimer = 0;
+      }
+
+      if (restoreHotzoneHoverTimer) {
+        window.clearTimeout(restoreHotzoneHoverTimer);
+        restoreHotzoneHoverTimer = 0;
+      }
+
+      appendLog(`[TOOLBOX][CLEAR_VIEWPORT_TIMERS] source=${source || '-'}`);
     }
 
     function keepPanelInViewport(options = {}) {
@@ -13013,6 +13666,10 @@
 
         lastToolboxRouteKey = nextPageKey;
 
+        if (typeof cleanupChatMessageCaches === 'function') {
+          cleanupChatMessageCaches(`route-key-changed:${reason || '-'}`);
+        }
+
         appendLog(
           `[TOOLBOX_PAGE_STATE][page-change] reason=${reason || '-'} old=${oldKey} next=${nextPageKey}`,
         );
@@ -13022,8 +13679,13 @@
 
       if (convKeyChanged) {
         lastToolboxConversationKey = nextConvKey;
+
+        if (typeof cleanupChatMessageCaches === 'function') {
+          cleanupChatMessageCaches(`conversation-id-changed:${reason || '-'}`);
+        }
+
         appendLog(
-          `[TOOLBOX_CONV_STATE][conversation-change-skip] reason=${reason || '-'} next=${nextConvKey || '-'} disabled=conversation_state`,
+          `[TOOLBOX_CONV_STATE][conversation-change] reason=${reason || '-'} next=${nextConvKey || '-'}`,
         );
       }
     }
@@ -13072,6 +13734,9 @@
       suspendEdgeAutoHide,
       resetToolboxPosition,
       restoreToolboxFromHiddenState,
+      clearViewportTimers,
+      flashHeaderTitleOnce,
+      stopHeaderTitleFlash,
     };
   })();
 
@@ -13244,7 +13909,7 @@
       child.remove();
     });
 
-    const rawText = String(clone.textContent || clone.innerText || '');
+    const rawText = String(clone.innerText || clone.textContent || '');
     return cleanCopiedMessageText(rawText);
   }
 
@@ -13259,7 +13924,13 @@
       };
     }
 
-    const contentNodes = getMessageContentElements(el);
+    const fullTurnEl =
+      el.closest &&
+      el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
+        ? el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
+        : el;
+
+    const contentNodes = getMessageContentElements(fullTurnEl);
 
     const contentText = contentNodes
       .map((node) => extractCleanTextFromNode(node))
@@ -13268,7 +13939,7 @@
       .replace(/\n{3,}/g, '\n\n')
       .trim();
 
-    const fullTurnText = extractCleanTextFromNode(el)
+    const fullTurnText = extractCleanTextFromNode(fullTurnEl)
       .replace(/\n{3,}/g, '\n\n')
       .trim();
 
@@ -13282,10 +13953,10 @@
     const cleanedContentText = cleanFn(contentText);
     const cleanedFullTurnText = cleanFn(fullTurnText);
 
-    const afterThinkingText = extractFinalAnswerAfterThinkingText(cleanedFullTurnText || fullTurnText);
+    const afterThinkingText = extractFinalAnswerAfterThinkingText(fullTurnText);
     const cleanedAfterThinking = cleanFn(afterThinkingText);
 
-    if (afterThinkingText && afterThinkingText.length >= 20 && cleanedAfterThinking.length >= 20) {
+    if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
       return {
         text: cleanedAfterThinking,
         contentNodeCount: contentNodes.length,
@@ -13300,8 +13971,11 @@
 
     if (
       cleanedFullTurnText &&
-      cleanedFullTurnText.length > cleanedContentText.length * 1.5 &&
-      cleanedFullTurnText.length - cleanedContentText.length > 80
+      (
+        !finalText ||
+        cleanedFullTurnText.length > finalText.length + 80 ||
+        cleanedFullTurnText.length > finalText.length * 1.3
+      )
     ) {
       finalText = cleanedFullTurnText;
       source = 'full-turn-fallback';
@@ -13516,44 +14190,6 @@
     return containers;
   }
 
-  function saveChatScrollPositionsForCopy(tag = 'copy-last-message') {
-    const tagText = String(tag || 'copy-last-message');
-    const containers = getChatScrollContainers();
-    const snapshots = containers.map((container) => ({
-      container,
-      scrollTop: container.scrollTop,
-      scrollLeft: container.scrollLeft,
-      scrollHeight: container.scrollHeight,
-      clientHeight: container.clientHeight,
-    }));
-
-    ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:save-scroll] count=${snapshots.length}`);
-
-    return snapshots;
-  }
-
-  function restoreChatScrollPositions(saved, tag = 'copy-last-message') {
-    const tagText = String(tag || 'copy-last-message');
-
-    if (!Array.isArray(saved) || !saved.length) {
-      ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:restore-scroll] count=0 enabled=true`);
-      return;
-    }
-
-    saved.forEach((item) => {
-      const container = item && item.container;
-
-      if (!container) {
-        return;
-      }
-
-      container.scrollTop = Number(item.scrollTop) || 0;
-      container.scrollLeft = Number(item.scrollLeft) || 0;
-    });
-
-    ToolboxShell.appendLog(`[CHAT_PAGE][${tagText}:restore-scroll] count=${saved.length} enabled=true`);
-  }
-
   async function forceChatPageToAbsoluteEnd(reason = 'unknown') {
     const reasonText = String(reason || 'unknown');
 
@@ -13634,9 +14270,8 @@
     }
 
     return (
-      /^已思考\s*\d+/.test(text) ||
-      /^已思考.*秒/.test(text) ||
-      /^已思考.*分钟/.test(text) ||
+      /^已思考\s*(若干秒|\d+)/.test(text) ||
+      /^已思考.*(?:秒|分钟|m|s|›|>)/i.test(text) ||
       /^Thought for\s+\d+/i.test(text) ||
       /^Thinking/i.test(text) ||
       /^正在思考/.test(text)
@@ -13661,7 +14296,22 @@
 
   function extractFinalAnswerAfterThinkingText(text) {
     const raw = String(text || '').replace(/\r\n/g, '\n');
-    const lines = raw.split('\n');
+
+    const normalized = raw
+      .replace(
+        /(已思考\s*(?:若干秒|\d+\s*(?:秒|分钟|m|min|s)?(?:\s*\d+\s*s)?)(?:\s*[›>])?)/gi,
+        '\n$1\n',
+      )
+      .replace(
+        /(Thought for\s+\d+[^\n]*)/gi,
+        '\n$1\n',
+      )
+      .replace(
+        /(正在思考[^\n]*)/g,
+        '\n$1\n',
+      );
+
+    const lines = normalized.split('\n');
 
     let boundaryIndex = -1;
 
@@ -13679,23 +14329,7 @@
       .slice(boundaryIndex + 1)
       .filter((line) => !isThinkingUiNoiseLine(line));
 
-    const afterText = afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-
-    return afterText;
-  }
-
-  function isTextBeforeThinkingBoundary(rawText, selectedText) {
-    const raw = String(rawText || '');
-    const selected = String(selectedText || '').trim();
-
-    if (!raw || !selected) return false;
-
-    const boundaryMatch = raw.search(/已思考\s*\d+|Thought for\s+\d+|Thinking|正在思考/i);
-    if (boundaryMatch < 0) return false;
-
-    const selectedIndex = raw.indexOf(selected.slice(0, Math.min(40, selected.length)));
-
-    return selectedIndex >= 0 && selectedIndex < boundaryMatch;
+    return afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
   function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
@@ -13707,15 +14341,15 @@
         : cleanCopiedMessageText;
 
     const cleanedRaw = cleanFn(rawText || '');
+    const cleanedFallback = cleanFn(fallbackText || '');
 
     const afterThinking = extractFinalAnswerAfterThinkingText(rawText);
-
     const cleanedAfterThinking = cleanFn(afterThinking || '');
 
     if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
         ToolboxShell.appendLog(
-          `[CHAT_PAGE][assistant-final-answer-picked] source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(fallbackText || cleanedRaw || '').length} turn=${meta.turnId || '-'}`,
+          `[CHAT_PAGE][assistant-final-answer-picked] source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
         );
       }
 
@@ -13725,11 +14359,24 @@
       };
     }
 
-    const fallback = String(fallbackText || cleanedRaw || '').trim();
+    let finalText = cleanedFallback;
+    let source = 'fallback-content';
+
+    if (
+      cleanedRaw &&
+      (
+        !finalText ||
+        cleanedRaw.length > finalText.length + 80 ||
+        cleanedRaw.length > finalText.length * 1.3
+      )
+    ) {
+      finalText = cleanedRaw;
+      source = 'raw-full-turn';
+    }
 
     return {
-      text: fallback,
-      source: 'fallback-full',
+      text: String(finalText || '').trim(),
+      source,
     };
   }
 
@@ -13746,7 +14393,15 @@
       '油猴上传': 'youhou-upload',
       'cursor插件': 'cursor-plugin',
     });
-    const SEND_WAIT_TIMEOUT_MS = 60 * 1000;
+    const UPLOAD_DB_MAX_GROUPS = 50;
+    const UPLOAD_DB_MAX_QUEUE_ROWS = 1000;
+    const UPLOAD_DB_EMPTY_GROUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const UPLOAD_DB_FAILED_ROW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+    const SEND_STABLE_RETRY_LIMIT = 30;
+    const SEND_STABLE_RETRY_INTERVAL_MS = 300;
+    const SEND_STABLE_OUTER_RETRY_MAX = 12;
+    const SEND_WAIT_TIMEOUT_MS = SEND_STABLE_RETRY_LIMIT * SEND_STABLE_RETRY_INTERVAL_MS;
     const COPY_CONTINUE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
     const COPY_CONTINUE_STABLE_ROUNDS = 2;
     const COPY_CONTINUE_STABLE_INTERVAL_MS = 350;
@@ -13791,7 +14446,6 @@
     let groupListEl = null;
     let startBtn = null;
     let rootElRef = null;
-    const uploadDropBoundTargets = new WeakSet();
     let panelDropEl = null;
     let dbPromise = null;
     let managePanelEl = null;
@@ -13827,7 +14481,6 @@
     let copyLastReplyTaskStatus = '';
     let copyLastMessageWaiting = false;
     let copyLastMessageWaitRunId = 0;
-    let copyLastMessageHardResetTimer = 0;
     let copyContinueTaskRunning = false;
     let copyTaskStatus = 'idle';
     let copyContinueTaskStartedAt = 0;
@@ -14337,6 +14990,9 @@
         applyWaitingAnswerButtonStyle(btn, false, {
           extraIdleClasses: ['copy-continue'],
         });
+        if (typeof clearButtonLongWaitDangerTimer === 'function') {
+          clearButtonLongWaitDangerTimer(btn, 'copy-continue-idle');
+        }
         btn.disabled = false;
         btn.removeAttribute('disabled');
         btn.removeAttribute('aria-disabled');
@@ -14362,6 +15018,9 @@
       });
       btn.disabled = true;
       btn.setAttribute('aria-disabled', 'true');
+      if (typeof startButtonLongWaitDangerTimer === 'function') {
+        startButtonLongWaitDangerTimer(btn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+      }
     }
 
     function playCopySuccessBeepSafe(source, logPrefix) {
@@ -14977,47 +15636,301 @@
     async function clearPersistedUploadBlobs(reason) {
       if (!APP || !APP.uploadStore) {
         console.warn('[ChatGPT toolbox] clearPersistedUploadBlobs: APP.uploadStore not available');
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][clear-persisted-blob:skip] reason=${reason || '-'} error=uploadStore-not-available`,
+        );
         return;
       }
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][clear-persisted-blob:start] reason=${reason || '-'}`
+        `[UPLOAD_DIAG][clear-persisted-blob:start] reason=${reason || '-'}`,
       );
 
       let changed = 0;
 
       try {
-        const all = await APP.uploadStore.getAll();
+        const db = await openDb();
 
-        for (const record of all) {
-          if (!record) continue;
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(APP.uploadStore, 'readwrite');
+          const store = tx.objectStore(APP.uploadStore);
+          const req = store.getAll();
 
-          const hasBlob = record.blob !== null && record.blob !== undefined;
+          req.onerror = () => {
+            reject(req.error || new Error('IndexedDB uploadStore getAll failed'));
+          };
 
-          if (hasBlob || record.blobSaved || record.blobSavedAt || record.debugSavedFrom) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][clear-persisted-blob:item] name=${record.name || '-'} id=${record.id || '-'} oldBlob=${hasBlob ? 1 : 0}`
-            );
+          req.onsuccess = () => {
+            const rows = Array.isArray(req.result) ? req.result : [];
 
-            record.blob = null;
-            record.blobSaved = false;
-            record.blobSavedAt = 0;
-            record.debugSavedFrom = '';
+            rows.forEach((record) => {
+              if (!record) {
+                return;
+              }
 
-            await APP.uploadStore.put(record);
-            changed++;
-          }
-        }
+              const hasBlob = record.blob !== null && record.blob !== undefined;
+
+              if (hasBlob || record.blobSaved || record.blobSavedAt || record.debugSavedFrom) {
+                ToolboxShell.appendLog(
+                  `[UPLOAD_DIAG][clear-persisted-blob:item] name=${record.name || '-'} id=${record.id || '-'} oldBlob=${hasBlob ? 1 : 0}`,
+                );
+
+                record.blob = null;
+                record.blobSaved = false;
+                record.blobSavedAt = 0;
+                record.debugSavedFrom = '';
+
+                store.put(record);
+                changed += 1;
+              }
+            });
+          };
+
+          tx.oncomplete = () => {
+            resolve();
+          };
+
+          tx.onerror = () => {
+            reject(tx.error || new Error('IndexedDB clearPersistedUploadBlobs transaction failed'));
+          };
+
+          tx.onabort = () => {
+            reject(tx.error || new Error('IndexedDB clearPersistedUploadBlobs transaction aborted'));
+          };
+        });
       } catch (e) {
         console.error('[ChatGPT toolbox] clearPersistedUploadBlobs failed', e);
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][clear-persisted-blob:error] reason=${reason || '-'} error=${e && e.message ? e.message : String(e)}`
+          `[UPLOAD_DIAG][clear-persisted-blob:error] reason=${reason || '-'} error=${e && e.message ? e.message : String(e)}`,
         );
       }
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][clear-persisted-blob:done] changed=${changed}`
+        `[UPLOAD_DIAG][clear-persisted-blob:done] changed=${changed}`,
       );
+    }
+
+    function isProtectedUploadGroup(group, activeGroupId) {
+      const groupId = String(group && group.id ? group.id : '');
+      if (!groupId || groupId === activeGroupId) {
+        return true;
+      }
+      if (groupId === 'default' || String(group.key || '') === 'default') {
+        return true;
+      }
+      return false;
+    }
+
+    function isStaleFailedUploadRow(row, now) {
+      const stateText = String(row && row.state ? row.state : '');
+      const isFailedOrMissing = (
+        stateText === UploadState.FAILED
+        || stateText === UploadState.MISSING_FILE
+      );
+      if (!isFailedOrMissing) {
+        return false;
+      }
+      const updatedAt = Number(row.updatedAt || row.createdAt || 0);
+      return updatedAt > 0 && now - updatedAt > UPLOAD_DB_FAILED_ROW_TTL_MS;
+    }
+
+    async function cleanupUploadDbGarbage(reason) {
+      const now = Date.now();
+
+      try {
+        const db = await openDb();
+
+        const { groups, rows } = await new Promise((resolve, reject) => {
+          const tx = db.transaction([APP.uploadGroupStore, APP.uploadStore], 'readonly');
+          const groupStore = tx.objectStore(APP.uploadGroupStore);
+          const queueStore = tx.objectStore(APP.uploadStore);
+
+          const groupReq = groupStore.getAll();
+          const queueReq = queueStore.getAll();
+
+          let groupsResult = [];
+          let rowsResult = [];
+
+          groupReq.onerror = () => {
+            reject(groupReq.error || new Error('getAll groups failed'));
+          };
+
+          queueReq.onerror = () => {
+            reject(queueReq.error || new Error('getAll queue failed'));
+          };
+
+          groupReq.onsuccess = () => {
+            groupsResult = Array.isArray(groupReq.result) ? groupReq.result : [];
+          };
+
+          queueReq.onsuccess = () => {
+            rowsResult = Array.isArray(queueReq.result) ? queueReq.result : [];
+          };
+
+          tx.oncomplete = () => {
+            resolve({ groups: groupsResult, rows: rowsResult });
+          };
+
+          tx.onerror = () => {
+            reject(tx.error || new Error('cleanupUploadDbGarbage read transaction failed'));
+          };
+
+          tx.onabort = () => {
+            reject(tx.error || new Error('cleanupUploadDbGarbage read transaction aborted'));
+          };
+        });
+
+        const activeGroupId = String(state.activeGroupId || '');
+        const groupIds = new Set(
+          groups.map((group) => String(group.id || '')).filter(Boolean),
+        );
+
+        const rowCountByGroup = new Map();
+        rows.forEach((row) => {
+          const groupId = String(row.groupId || '');
+          rowCountByGroup.set(groupId, (rowCountByGroup.get(groupId) || 0) + 1);
+        });
+
+        const queueIdsToDelete = new Set();
+        rows.forEach((row) => {
+          const groupId = String(row.groupId || '');
+          if (!groupId || !groupIds.has(groupId)) {
+            queueIdsToDelete.add(row.id);
+          }
+        });
+
+        rows.forEach((row) => {
+          if (queueIdsToDelete.has(row.id)) {
+            return;
+          }
+          if (isStaleFailedUploadRow(row, now)) {
+            queueIdsToDelete.add(row.id);
+          }
+        });
+
+        let survivingRowCount = rows.length - queueIdsToDelete.size;
+        if (survivingRowCount > UPLOAD_DB_MAX_QUEUE_ROWS) {
+          const overflowCandidates = rows
+            .filter((row) => !queueIdsToDelete.has(row.id))
+            .filter((row) => {
+              const groupId = String(row.groupId || '');
+              if (!groupId || !groupIds.has(groupId)) {
+                return true;
+              }
+              return isStaleFailedUploadRow(row, now);
+            })
+            .sort(
+              (a, b) => Number(a.updatedAt || a.createdAt || 0)
+                - Number(b.updatedAt || b.createdAt || 0),
+            );
+
+          for (const row of overflowCandidates) {
+            if (survivingRowCount <= UPLOAD_DB_MAX_QUEUE_ROWS) {
+              break;
+            }
+            if (!queueIdsToDelete.has(row.id)) {
+              queueIdsToDelete.add(row.id);
+              survivingRowCount -= 1;
+            }
+          }
+        }
+
+        const groupsToDelete = new Set();
+        const removableByTtl = groups
+          .filter((group) => {
+            const groupId = String(group.id || '');
+            if (isProtectedUploadGroup(group, activeGroupId)) {
+              return false;
+            }
+            const count = rowCountByGroup.get(groupId) || 0;
+            if (count > 0) {
+              return false;
+            }
+            const updatedAt = Number(group.updatedAt || group.createdAt || 0);
+            return updatedAt > 0 && now - updatedAt > UPLOAD_DB_EMPTY_GROUP_TTL_MS;
+          })
+          .sort(
+            (a, b) => Number(a.updatedAt || a.createdAt || 0)
+              - Number(b.updatedAt || b.createdAt || 0),
+          );
+
+        removableByTtl.forEach((group) => {
+          groupsToDelete.add(group.id);
+        });
+
+        let projectedGroupCount = groups.length - groupsToDelete.size;
+        if (projectedGroupCount > UPLOAD_DB_MAX_GROUPS) {
+          const moreEmptyGroups = groups
+            .filter((group) => {
+              const groupId = String(group.id || '');
+              if (groupsToDelete.has(groupId) || isProtectedUploadGroup(group, activeGroupId)) {
+                return false;
+              }
+              return (rowCountByGroup.get(groupId) || 0) === 0;
+            })
+            .sort(
+              (a, b) => Number(a.updatedAt || a.createdAt || 0)
+                - Number(b.updatedAt || b.createdAt || 0),
+            );
+
+          for (const group of moreEmptyGroups) {
+            if (projectedGroupCount <= UPLOAD_DB_MAX_GROUPS) {
+              break;
+            }
+            groupsToDelete.add(group.id);
+            projectedGroupCount -= 1;
+          }
+        }
+
+        if (!queueIdsToDelete.size && !groupsToDelete.size) {
+          return;
+        }
+
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction([APP.uploadGroupStore, APP.uploadStore], 'readwrite');
+          const groupStore = tx.objectStore(APP.uploadGroupStore);
+          const queueStore = tx.objectStore(APP.uploadStore);
+
+          rows.forEach((row) => {
+            if (!queueIdsToDelete.has(row.id)) {
+              return;
+            }
+            const groupId = String(row.groupId || '');
+            queueStore.delete(row.id);
+            const isOrphan = !groupId || !groupIds.has(groupId);
+            ToolboxShell.appendLog(
+              `[UPLOAD_DB_CLEANUP][${isOrphan ? 'queue_orphan_deleted' : 'queue_row_deleted'}] reason=${reason || '-'} id=${row.id || '-'} groupId=${groupId || '-'} state=${row.state || '-'}`,
+            );
+          });
+
+          groups.forEach((group) => {
+            if (!groupsToDelete.has(group.id)) {
+              return;
+            }
+            groupStore.delete(group.id);
+            ToolboxShell.appendLog(
+              `[UPLOAD_DB_CLEANUP][empty_group_deleted] reason=${reason || '-'} groupId=${group.id || '-'} name=${group.name || '-'}`,
+            );
+          });
+
+          tx.oncomplete = () => {
+            resolve();
+          };
+
+          tx.onerror = () => {
+            reject(tx.error || new Error('cleanupUploadDbGarbage delete transaction failed'));
+          };
+
+          tx.onabort = () => {
+            reject(tx.error || new Error('cleanupUploadDbGarbage delete transaction aborted'));
+          };
+        });
+      } catch (error) {
+        console.error('[ChatGPT toolbox] cleanupUploadDbGarbage failed', error);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DB_CLEANUP][error] reason=${reason || '-'} error=${error && error.message ? error.message : String(error)}`,
+        );
+      }
     }
 
     function openDb() {
@@ -15227,6 +16140,7 @@
 
         await debugReadBackPersistedQueue('persistQueue:after-write');
         await refreshUploadGroupCounts();
+        void cleanupUploadDbGarbage('persist-queue');
       } catch (e) {
         const errText = e && e.stack ? e.stack : (e && e.message ? e.message : String(e));
         console.error('[ChatGPT toolbox] persist upload queue failed', e);
@@ -15500,6 +16414,7 @@
           ensureActiveUploadGroupIdValid('load-groups-default-created');
           syncUploadGroupAppState();
           appendUploadGroupLog('INIT', { stage: 'loadGroups:created-default' });
+          void cleanupUploadDbGarbage('load-groups');
           return;
         }
 
@@ -15520,6 +16435,7 @@
         ensureActiveUploadGroupIdValid('load-groups');
         syncUploadGroupAppState();
         appendUploadGroupLog('INIT', { stage: 'loadGroups:ok' });
+        void cleanupUploadDbGarbage('load-groups');
       } catch (e) {
         const errStack = e && e.stack ? e.stack : String(e);
         const errName = e && e.name ? e.name : 'Error';
@@ -15893,11 +16809,6 @@
       return state.groups.find((group) => group && getUploadGroupStableKey(group) === key) || null;
     }
 
-    function findGroupIdForStableKey(projectKey) {
-      const group = findGroupByStableKey(projectKey);
-      return group && group.id ? group.id : '';
-    }
-
     function getQueueFilesForGroupId(groupId) {
       const gid = String(groupId || '').trim();
       if (!gid) {
@@ -15906,22 +16817,6 @@
       return (state.queue || []).filter(
         (file) => file && String(file.groupId || '').trim() === gid,
       );
-    }
-
-    function buildMultiUploadProjectsFromGroups() {
-      return state.groups.map((group) => {
-        const projectKey = getUploadGroupStableKey(group);
-        const folders = getQueueFilesForGroupId(group.id).map((file) => ({
-          key: getUploadFileFolderKey(file),
-          id: file.id,
-        }));
-
-        return {
-          key: projectKey,
-          id: group.id,
-          folders,
-        };
-      });
     }
 
     function persistCompactUiConfigPatch(patch) {
@@ -15994,33 +16889,6 @@
       console.info(line);
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(line);
-      }
-    }
-
-    function logMultiUploadLastSelectionRestore(resolved, saved) {
-      const payload = {
-        savedProjectKey: saved.projectKey || '',
-        savedFolderKey: saved.folderKey || '',
-        resolvedProjectKey: resolved.projectKey || '',
-        resolvedFolderKey: resolved.folderKey || '',
-        reason: resolved.reason || '',
-      };
-
-      logMultiUploadLastSelectionEvent('RESTORE', payload);
-
-      if (resolved.reason === 'project_missing') {
-        logMultiUploadLastSelectionEvent('PROJECT_MISSING', {
-          saved: resolved.savedProjectKey || saved.projectKey || '',
-          fallback: resolved.projectKey || '',
-        });
-      } else if (resolved.reason === 'folder_missing') {
-        logMultiUploadLastSelectionEvent('FOLDER_MISSING', {
-          projectKey: resolved.projectKey || '',
-          savedFolder: resolved.savedFolderKey || saved.folderKey || '',
-          fallback: resolved.folderKey || '',
-        });
-      } else if (resolved.reason === 'empty_use_default') {
-        logMultiUploadLastSelectionEvent('EMPTY_USE_DEFAULT', payload);
       }
     }
 
@@ -16196,20 +17064,6 @@
       }
 
       return result;
-    }
-
-    function resolvePageUploadGroupId(pageState) {
-      const stateObj = pageState && typeof pageState === 'object'
-        ? pageState
-        : getToolboxPageState();
-
-      const groupId = String(readToolboxStateField(stateObj, 'uploadActiveGroupId', '')).trim();
-
-      if (groupId && state.groups.some((g) => g.id === groupId)) {
-        return groupId;
-      }
-
-      return '';
     }
 
     function getLastManualUploadGroupId() {
@@ -16704,6 +17558,10 @@
         render();
         syncGroupManagePanel();
 
+        if (typeof cleanupChatMessageCaches === 'function') {
+          cleanupChatMessageCaches('upload-group-cleared');
+        }
+
         setStatus(`已清空分组：${group.name}`, 'success');
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][clear-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'} removed=${prevQueue.length}`,
@@ -16837,6 +17695,7 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][delete-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'}`,
         );
+        void cleanupUploadDbGarbage('delete-active-group');
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
@@ -17448,7 +18307,7 @@
       const cfg = getCompactUiConfig();
       const text = String(prompt && prompt.content ? prompt.content : '').trim();
       const title = String(prompt && prompt.title ? prompt.title : '未命名').trim() || '未命名';
-      const action = cfg.quickPromptClickAction === 'fill' ? 'fill' : 'send';
+      const action = 'send';
 
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][quick-prompt:click] title=${title} action=${action} waiting=${isWaitingSendActive() ? '1' : '0'}`
@@ -17654,11 +18513,22 @@
       copyLastMessageWaiting = true;
       renderUploadButtonsOnly();
 
+      if (typeof markLatestAssistantMessageCacheDirty === 'function') {
+        markLatestAssistantMessageCacheDirty();
+      }
+
+      if (btn && typeof setButtonWaitingDanger === 'function') {
+        setButtonWaitingDanger(btn, true, 'wait_last_reply');
+      }
+
       try {
         ToolboxShell.appendLog(
           `[COPY_LAST_REPLY][start] source=${String(source || '-')}`,
         );
         setStatus('正在等待最后回复稳定...', 'running');
+        if (typeof forceChatPageToAbsoluteEnd === 'function') {
+          await forceChatPageToAbsoluteEnd('copy-last-reply:start');
+        }
 
         let text = '';
         if (typeof waitAssistantStableForCopyContinue === 'function') {
@@ -17679,6 +18549,13 @@
             return false;
           }
           text = String(waitResult.text || '').trim();
+        }
+
+        if (typeof getLatestAssistantMessageForCopy === 'function') {
+          const freshPick = getLatestAssistantMessageForCopy({ forceRefresh: true });
+          if (freshPick && freshPick.ok && freshPick.text) {
+            text = String(freshPick.text).trim();
+          }
         } else if (typeof extractLatestAssistantMessageText === 'function') {
           text = String(extractLatestAssistantMessageText() || '').trim();
         } else if (typeof getLastAssistantText === 'function') {
@@ -17721,6 +18598,9 @@
         }
 
         await copyTextToClipboard(text);
+        if (typeof forceChatPageToAbsoluteEnd === 'function') {
+          await forceChatPageToAbsoluteEnd('copy-last-reply:after-copy');
+        }
         copyLastReplyTaskStatus = 'success';
         copyLastMessageTaskStatus = 'success';
         renderUploadButtonsOnly();
@@ -17756,6 +18636,9 @@
         }
         return false;
       } finally {
+        if (btn && typeof clearButtonLongWaitDangerTimer === 'function') {
+          clearButtonLongWaitDangerTimer(btn, 'copy_last_reply_done');
+        }
         const resetDelay = copyLastReplyTaskStatus === 'success' ? 800 : 1200;
         window.setTimeout(() => {
           copyLastReplyTaskRunning = false;
@@ -18073,10 +18956,13 @@
         if (
           typeof ChatMessageExtractor !== 'undefined'
           && ChatMessageExtractor
-          && typeof ChatMessageExtractor.buildRecords === 'function'
           && typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser === 'function'
+          && (typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+            || typeof ChatMessageExtractor.buildRecords === 'function')
         ) {
-          const records = ChatMessageExtractor.buildRecords({ includeEmpty: false });
+          const records = typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+            ? ChatMessageExtractor.getFastTailMessageRecords({ includeHidden: false })
+            : ChatMessageExtractor.buildRecords({ includeEmpty: false });
           const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
           if (picked && picked.ok && picked.record) {
             const recordText = String(picked.record.text || '').trim();
@@ -18271,6 +19157,10 @@
 
         setCopyContinueButtonBusy(btn, false);
 
+        if (btn && typeof clearButtonLongWaitDangerTimer === 'function') {
+          clearButtonLongWaitDangerTimer(btn, 'task_done');
+        }
+
         renderUploadButtonsOnly();
       }
     }
@@ -18301,12 +19191,15 @@
       try {
         if (
           typeof ChatMessageExtractor === 'undefined'
-          || typeof ChatMessageExtractor.buildRecords !== 'function'
           || typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser !== 'function'
+          || (typeof ChatMessageExtractor.getFastTailMessageRecords !== 'function'
+            && typeof ChatMessageExtractor.buildRecords !== 'function')
         ) {
           return '';
         }
-        const records = ChatMessageExtractor.buildRecords({ includeEmpty: false });
+        const records = typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+          ? ChatMessageExtractor.getFastTailMessageRecords({ includeHidden: false })
+          : ChatMessageExtractor.buildRecords({ includeEmpty: false });
         const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
         if (!picked || !picked.ok || !picked.record) {
           return '';
@@ -18373,6 +19266,13 @@
       }
       copyHotkeyContinueTaskRunning = true;
       copyHotkeyContinueTaskStartedAt = Date.now();
+      const loopOnceBtn = isLoopMode && rootElRef
+        ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef)
+        : null;
+      const waitDangerBtn = (!isLoopMode && btn) ? btn : loopOnceBtn;
+      if (waitDangerBtn && typeof startButtonLongWaitDangerTimer === 'function') {
+        startButtonLongWaitDangerTimer(waitDangerBtn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+      }
       try {
         if (btn && !isLoopMode) {
           btn.dataset.busy = '1';
@@ -18690,6 +19590,13 @@
         copyHotkeyContinueTaskRunning = false;
         copyHotkeyContinueTaskStartedAt = 0;
 
+        if (waitDangerBtn && typeof clearButtonLongWaitDangerTimer === 'function') {
+          clearButtonLongWaitDangerTimer(
+            waitDangerBtn,
+            isLoopMode ? 'loop-cycle-finally' : 'finally',
+          );
+        }
+
         if (!isLoopMode) {
           if (btn) {
             btn.dataset.busy = '0';
@@ -18735,6 +19642,11 @@
       );
 
       while (Date.now() - startedAt < maxWaitMs) {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          safeAppendLog('[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-page-navigating]');
+          return false;
+        }
+
         if (copyHotkeyContinueLoopStopRequested) {
           safeAppendLog('[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-stop-requested]');
           return false;
@@ -19119,6 +20031,12 @@
         safeAppendLog(
           `[COPY_HOTKEY_CONTINUE_LOOP][done] cycles=${copyHotkeyContinueLoopCount} stoppedByUser=${stoppedByUser ? '1' : '0'} reason=${loopStopReason}`,
         );
+        const loopOnceBtn = rootElRef
+          ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef)
+          : null;
+        if (loopOnceBtn && typeof clearButtonLongWaitDangerTimer === 'function') {
+          clearButtonLongWaitDangerTimer(loopOnceBtn, 'loop-finally');
+        }
         renderUploadButtonsOnly();
       }
       return true;
@@ -19185,74 +20103,71 @@
       return false;
     }
 
-    async function handleUploadDropEvent(e) {
-      e.preventDefault();
-      e.stopPropagation();
+    const UPLOAD_DRAG_DEPTH_PROP = '__cgptUploadDragDepthV1';
+    const UPLOAD_DRAG_BIND_CLEANUP_PROP = '__cgptUploadDragBindCleanupV1';
+    const MULTI_UPLOAD_DRAG_OVER_LOG_INTERVAL_MS = 800;
+    let lastMultiUploadDragOverLogAt = 0;
 
-      const transfer = e.dataTransfer;
+    function getDragEventTargetTag(e) {
+      const target = e && e.target instanceof Element ? e.target : null;
+      if (!target) return '-';
+      const id = target.id ? `#${target.id}` : '';
+      const cls = target.classList && target.classList.length
+        ? `.${Array.from(target.classList).slice(0, 2).join('.')}`
+        : '';
+      return `${target.tagName.toLowerCase()}${id}${cls}`;
+    }
 
-      if (!transfer) {
-        setStatus('拖拽失败：没有文件数据');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][drop:failed] reason=no-dataTransfer');
-        return;
+    function getDragTransferMeta(e) {
+      const transfer = e && e.dataTransfer ? e.dataTransfer : null;
+      const items = transfer && transfer.items ? Array.from(transfer.items) : [];
+      const files = transfer && transfer.files ? Array.from(transfer.files) : [];
+      const hasFiles = hasDraggedFiles(e);
+      return {
+        has_files: hasFiles,
+        items_len: items.length,
+        files_len: files.length,
+      };
+    }
+
+    function hasDraggedFiles(e) {
+      const transfer = e && e.dataTransfer ? e.dataTransfer : null;
+      if (!transfer) return false;
+
+      if (transfer.files && transfer.files.length > 0) {
+        return true;
       }
 
-      if (shouldSkipRecentDuplicateDrop(transfer)) {
-        setStatus('已忽略重复拖拽事件');
-        return;
+      const types = transfer.types ? Array.from(transfer.types) : [];
+      if (types.includes('Files')) {
+        return true;
       }
 
-      if (!state.activeGroupId) {
-        await ensureDefaultGroupReady();
+      const items = transfer.items ? Array.from(transfer.items) : [];
+      return items.some((item) => item && item.kind === 'file');
+    }
+
+    function isEventInToolbox(e) {
+      const target = e && e.target instanceof Element ? e.target : null;
+      if (!target || typeof target.closest !== 'function') {
+        return false;
       }
 
-      if (!state.activeGroupId) {
-        setStatus('拖拽失败：没有可用文件组');
-        console.warn('[ChatGPT toolbox] drop failed: activeGroupId empty');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][drop:failed] reason=empty-activeGroupId');
-        return;
+      if (typeof isInToolbox === 'function' && isInToolbox(target)) {
+        return true;
       }
 
-      const dropped = await collectDroppedFilesWithHandles(transfer);
-
-      if (!dropped.length) {
-        setStatus('没有检测到可添加的文件');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][drop:empty]');
-        return;
-      }
-
-      const beforeCount = state.queue.length;
-
-      await addDroppedFiles(dropped);
-
-      dedupeActiveGroupQueue('drop');
-
-      const afterCount = state.queue.length;
-      const addedCount = Math.max(0, afterCount - beforeCount);
-
-      setStatus(`已拖入：${dropped.length} 个文件，新增：${addedCount} 个`);
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][drop:done] dropped=${dropped.length} added=${addedCount} before=${beforeCount} after=${afterCount}`
-      );
+      return !!target.closest(`#${APP.rootId}, #${APP.panelId}`);
     }
 
     function shouldLetNativeChatGptHandleDrop(e) {
       try {
+        if (isEventInToolbox(e)) {
+          return false;
+        }
+
         const target = e && e.target instanceof Element ? e.target : null;
         if (!target) {
-          return false;
-        }
-
-        if (typeof isInToolbox === 'function' && isInToolbox(target)) {
-          return false;
-        }
-
-        const toolboxRoot = document.getElementById('cgpt-toolbox-root')
-          || document.getElementById('cgpt-toolbox-panel')
-          || rootElRef;
-
-        if (toolboxRoot && toolboxRoot.contains(target)) {
           return false;
         }
 
@@ -19270,7 +20185,7 @@
 
         return !!nativeTarget;
       } catch (error) {
-        console.error('[UPLOAD][DROP][shouldLetNativeChatGptHandleDrop]', {
+        console.error('[MULTI_UPLOAD][DROP_ERROR]', {
           error_type: error && error.name,
           error: error && error.message,
           stack: error && error.stack,
@@ -19296,6 +20211,7 @@
 
       return true;
     }
+
     function prepareUploadDragEvent(e, options = {}) {
       if (!hasDraggedFiles(e)) {
         return false;
@@ -19319,60 +20235,434 @@
       return true;
     }
 
-    function onUploadRootDragOver(e) {
-      if (!prepareUploadDragEvent(e)) return;
+    function setMultiUploadDragOverVisual(on) {
+      const targets = [];
 
       if (rootElRef) {
-        rootElRef.classList.add('cgpt-upload-dragging');
-      }
-    }
-
-    function onUploadRootDragLeave() {
-      if (rootElRef) {
-        rootElRef.classList.remove('cgpt-upload-dragging');
-      }
-    }
-
-    async function onUploadRootDrop(e) {
-      if (!prepareUploadDragEvent(e)) return;
-      if (!claimUploadDropEvent(e, 'root')) return;
-
-      if (rootElRef) {
-        rootElRef.classList.remove('cgpt-upload-dragging');
+        targets.push(rootElRef);
       }
 
-      await handleUploadDropEvent(e);
-    }
+      if (listEl) {
+        targets.push(listEl);
+      }
 
-    function onGlobalUploadDragOver(e) {
-      if (!prepareUploadDragEvent(e)) return;
+      if (rootElRef && typeof rootElRef.querySelectorAll === 'function') {
+        rootElRef.querySelectorAll(
+          '.toolbox-upload-drop-zone, .toolbox-upload-file-list, .toolbox-upload-empty-state',
+        ).forEach((el) => {
+          targets.push(el);
+        });
+      }
 
       if (panelDropEl) {
-        panelDropEl.classList.add('cgpt-toolbox-file-dragover');
+        targets.push(panelDropEl);
+      }
+
+      const seen = new Set();
+      targets.forEach((el) => {
+        if (!el || seen.has(el)) return;
+        seen.add(el);
+        el.classList.toggle('is-drag-over', on);
+        el.classList.toggle('cgpt-upload-dragging', on);
+      });
+
+      if (panelDropEl) {
+        panelDropEl.classList.toggle('cgpt-toolbox-file-dragover', on);
       }
     }
 
-    function onGlobalUploadDragLeave(e) {
-      const related = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+    function adjustMultiUploadDragDepth(hostEl, delta) {
+      if (!hostEl) return 0;
 
-      if (related && document.contains(related)) {
+      const next = Math.max(0, Number(hostEl[UPLOAD_DRAG_DEPTH_PROP] || 0) + delta);
+      hostEl[UPLOAD_DRAG_DEPTH_PROP] = next;
+      return next;
+    }
+
+    async function collectDroppedFilesWithHandles(transfer) {
+      const result = [];
+      const seen = new Set();
+
+      function pushEntry(file, handle) {
+        if (!file) return;
+
+        const key = buildQueueFileKey(file) || buildQueueLooseFileKey(file);
+        if (key && seen.has(key)) {
+          return;
+        }
+
+        if (key) {
+          seen.add(key);
+        }
+
+        result.push({
+          file,
+          handle: isFileHandleLike(handle) ? handle : null,
+        });
+      }
+
+      const directFiles = Array.from(transfer && transfer.files ? transfer.files : []).filter(Boolean);
+      directFiles.forEach((file) => {
+        pushEntry(file, null);
+      });
+
+      if (result.length) {
+        return result;
+      }
+
+      const items = Array.from(transfer && transfer.items ? transfer.items : []);
+      for (const item of items) {
+        if (!item || item.kind !== 'file') {
+          continue;
+        }
+
+        let handle = null;
+        if (typeof item.getAsFileSystemHandle === 'function') {
+          try {
+            handle = await item.getAsFileSystemHandle();
+          } catch (handleError) {
+            console.error('[MULTI_UPLOAD][DROP_ERROR]', {
+              error_type: handleError && handleError.name,
+              error: handleError && handleError.message,
+              stack: handleError && handleError.stack,
+            });
+          }
+        }
+
+        const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
+        pushEntry(file, handle);
+      }
+
+      return result;
+    }
+
+    async function ensureUploadProjectForDrop(source) {
+      if (state.activeGroupId && state.groups.some((g) => g && g.id === state.activeGroupId)) {
+        return state.activeGroupId;
+      }
+
+      if (state.groups.length) {
+        ensureActiveUploadGroupIdValid(`drop-${source || 'drag'}`);
+        if (state.activeGroupId) {
+          return state.activeGroupId;
+        }
+      }
+
+      await ensureDefaultGroupReady();
+
+      if (state.activeGroupId) {
+        return state.activeGroupId;
+      }
+
+      const dragGroup = {
+        id: createId('upload_group'),
+        name: '当前拖拽项目',
+        key: '',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      dragGroup.key = deriveUploadGroupStableKey(dragGroup);
+
+      state.groups.push(dragGroup);
+      state.activeGroupId = dragGroup.id;
+      state.selectedFileIdByGroup[dragGroup.id] = '';
+
+      await persistGroups();
+      await schedulePersistQueue();
+      saveCurrentToolboxBaseState(`drop-${source || 'drag'}`);
+      syncUploadGroupAppState();
+      render();
+
+      ToolboxShell.appendLog(
+        `[MULTI_UPLOAD][DROP][CREATE_PROJECT] project_id=${dragGroup.id} name=${dragGroup.name}`,
+      );
+
+      return dragGroup.id;
+    }
+
+    async function addDroppedFiles(dropped) {
+      const entries = Array.isArray(dropped) ? dropped : [];
+      const files = entries.map((entry) => entry && entry.file).filter(Boolean);
+      const handles = entries.map((entry) => (entry && entry.handle) || null);
+
+      await addFiles(files, {
+        handles,
+        sourceKind: 'drop',
+      });
+    }
+
+    async function addDroppedFilesToCurrentUploadProject(files, source) {
+      const fileList = Array.from(files || []).filter(Boolean);
+      const validFiles = [];
+
+      fileList.forEach((file) => {
+        if (!file || Number(file.size) <= 0) {
+          console.info('[MULTI_UPLOAD][DROP_SKIP_EMPTY_FILE]', {
+            name: file && file.name ? file.name : '-',
+            size: file && file.size,
+          });
+          return;
+        }
+
+        validFiles.push(file);
+      });
+
+      if (!validFiles.length) {
+        console.info('[MULTI_UPLOAD][DROP_EMPTY]');
+        setStatus('没有检测到可添加的文件');
+        return {
+          project_id: state.activeGroupId || '',
+          added_count: 0,
+          total_count: getActiveGroupFiles().length,
+        };
+      }
+
+      try {
+        const projectId = await ensureUploadProjectForDrop(source || 'drag_drop_toolbox');
+        const beforeCount = getActiveGroupFiles().length;
+        const dropped = await collectDroppedFilesFromFileList(validFiles);
+
+        await addDroppedFiles(dropped);
+        dedupeActiveGroupQueue('drop');
+
+        const afterCount = getActiveGroupFiles().length;
+        const addedCount = Math.max(0, afterCount - beforeCount);
+
+        setStatus(`已拖入：${validFiles.length} 个文件，新增：${addedCount} 个`);
+
+        const acceptedPayload = {
+          project_id: projectId || state.activeGroupId || '',
+          added_count: addedCount,
+          total_count: afterCount,
+        };
+        console.info('[MULTI_UPLOAD][DROP_ACCEPTED]', acceptedPayload);
+        ToolboxShell.appendLog(
+          `[MULTI_UPLOAD][DROP_ACCEPTED] project_id=${acceptedPayload.project_id} added_count=${addedCount} total_count=${afterCount}`,
+        );
+
+        return acceptedPayload;
+      } catch (error) {
+        console.error('[MULTI_UPLOAD][DROP_ERROR]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+        setStatus(`拖拽添加失败：${error && error.message ? error.message : String(error)}`, 'error');
+        throw error;
+      }
+    }
+
+    function collectDroppedFilesFromFileList(files) {
+      return Array.from(files || []).filter(Boolean).map((file) => ({
+        file,
+        handle: null,
+      }));
+    }
+
+    async function handleUploadDropEvent(e, source) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const transfer = e.dataTransfer;
+      const sourceText = String(source || 'drag_drop_toolbox');
+
+      if (!transfer) {
+        setStatus('拖拽失败：没有文件数据');
+        ToolboxShell.appendLog('[UPLOAD_DIAG][drop:failed] reason=no-dataTransfer');
         return;
       }
 
-      if (panelDropEl) {
-        panelDropEl.classList.remove('cgpt-toolbox-file-dragover');
+      const rawFiles = Array.from(transfer.files || []).filter(Boolean);
+      console.info('[MULTI_UPLOAD][DROP]', {
+        files_len: rawFiles.length,
+        names: rawFiles.map((file) => file.name || 'unknown'),
+        source: sourceText,
+      });
+
+      if (shouldSkipRecentDuplicateDrop(transfer)) {
+        setStatus('已忽略重复拖拽事件');
+        return;
       }
+
+      if (!rawFiles.length) {
+        const dropped = await collectDroppedFilesWithHandles(transfer);
+        if (!dropped.length) {
+          console.info('[MULTI_UPLOAD][DROP_EMPTY]');
+          setStatus('没有检测到可添加的文件');
+          ToolboxShell.appendLog('[UPLOAD_DIAG][drop:empty]');
+          return;
+        }
+
+        await addDroppedFilesToCurrentUploadProject(
+          dropped.map((entry) => entry.file).filter(Boolean),
+          sourceText,
+        );
+        return;
+      }
+
+      await addDroppedFilesToCurrentUploadProject(rawFiles, sourceText);
     }
 
-    async function onGlobalUploadDrop(e) {
-      if (!prepareUploadDragEvent(e)) return;
-      if (!claimUploadDropEvent(e, 'global')) return;
-
-      if (panelDropEl) {
-        panelDropEl.classList.remove('cgpt-toolbox-file-dragover');
+    function bindMultiUploadDragDrop(uploadRootEl) {
+      if (!(uploadRootEl instanceof HTMLElement)) {
+        return;
       }
 
-      await handleUploadDropEvent(e);
+      if (uploadRootEl.dataset.dragDropBound === '1') {
+        return;
+      }
+
+      uploadRootEl.dataset.dragDropBound = '1';
+
+      const allowGlobalCapture = uploadRootEl === document;
+
+      function shouldHandleDragEvent(e) {
+        if (!hasDraggedFiles(e)) {
+          return false;
+        }
+
+        if (allowGlobalCapture) {
+          return prepareUploadDragEvent(e);
+        }
+
+        if (!isEventInToolbox(e)) {
+          return false;
+        }
+
+        if (shouldLetNativeChatGptHandleDrop(e)) {
+          return false;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
+
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = 'copy';
+        }
+
+        return true;
+      }
+
+      function onDragEnter(e) {
+        if (!shouldHandleDragEvent(e)) {
+          return;
+        }
+
+        const depth = adjustMultiUploadDragDepth(uploadRootEl, 1);
+        if (depth === 1) {
+          setMultiUploadDragOverVisual(true);
+        }
+
+        const meta = getDragTransferMeta(e);
+        console.info('[MULTI_UPLOAD][DRAG_ENTER]', {
+          target: getDragEventTargetTag(e),
+          has_files: meta.has_files,
+          items_len: meta.items_len,
+        });
+      }
+
+      function onDragOver(e) {
+        if (!shouldHandleDragEvent(e)) {
+          return;
+        }
+
+        const now = Date.now();
+        if (now - lastMultiUploadDragOverLogAt >= MULTI_UPLOAD_DRAG_OVER_LOG_INTERVAL_MS) {
+          lastMultiUploadDragOverLogAt = now;
+          const meta = getDragTransferMeta(e);
+          console.info('[MULTI_UPLOAD][DRAG_OVER]', {
+            target: getDragEventTargetTag(e),
+            has_files: meta.has_files,
+            items_len: meta.items_len,
+          });
+        }
+      }
+
+      function onDragLeave(e) {
+        if (!hasDraggedFiles(e)) {
+          return;
+        }
+
+        const related = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+        if (related && uploadRootEl.contains(related)) {
+          return;
+        }
+
+        const depth = adjustMultiUploadDragDepth(uploadRootEl, -1);
+        if (depth <= 0) {
+          uploadRootEl[UPLOAD_DRAG_DEPTH_PROP] = 0;
+          setMultiUploadDragOverVisual(false);
+        }
+      }
+
+      async function onDrop(e) {
+        if (!hasDraggedFiles(e)) {
+          return;
+        }
+
+        if (allowGlobalCapture) {
+          if (!prepareUploadDragEvent(e)) {
+            return;
+          }
+        } else if (!isEventInToolbox(e)) {
+          return;
+        } else if (shouldLetNativeChatGptHandleDrop(e)) {
+          return;
+        } else {
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === 'function') {
+            e.stopImmediatePropagation();
+          }
+        }
+
+        uploadRootEl[UPLOAD_DRAG_DEPTH_PROP] = 0;
+        setMultiUploadDragOverVisual(false);
+
+        if (!claimUploadDropEvent(e, allowGlobalCapture ? 'global' : 'toolbox')) {
+          return;
+        }
+
+        try {
+          await handleUploadDropEvent(e, 'drag_drop_toolbox');
+        } catch (error) {
+          console.error('[MULTI_UPLOAD][DROP_ERROR]', {
+            error_type: error && error.name,
+            error: error && error.message,
+            stack: error && error.stack,
+          });
+        }
+      }
+
+      uploadRootEl.addEventListener('dragenter', onDragEnter, true);
+      uploadRootEl.addEventListener('dragover', onDragOver, true);
+      uploadRootEl.addEventListener('dragleave', onDragLeave, true);
+      uploadRootEl.addEventListener('drop', onDrop, true);
+
+      uploadRootEl[UPLOAD_DRAG_BIND_CLEANUP_PROP] = () => {
+        uploadRootEl.removeEventListener('dragenter', onDragEnter, true);
+        uploadRootEl.removeEventListener('dragover', onDragOver, true);
+        uploadRootEl.removeEventListener('dragleave', onDragLeave, true);
+        uploadRootEl.removeEventListener('drop', onDrop, true);
+        uploadRootEl[UPLOAD_DRAG_DEPTH_PROP] = 0;
+        delete uploadRootEl.dataset.dragDropBound;
+        delete uploadRootEl[UPLOAD_DRAG_BIND_CLEANUP_PROP];
+      };
+    }
+
+    function unbindMultiUploadDragDrop(uploadRootEl) {
+      if (!(uploadRootEl instanceof HTMLElement)) {
+        return;
+      }
+
+      const cleanup = uploadRootEl[UPLOAD_DRAG_BIND_CLEANUP_PROP];
+      if (typeof cleanup === 'function') {
+        cleanup();
+      }
     }
 
     function bindGlobalDropTarget(target, name) {
@@ -19381,35 +20671,11 @@
         return;
       }
 
-      if (uploadDropBoundTargets.has(target)) {
-        return;
-      }
-
-      uploadDropBoundTargets.add(target);
-
-      if (target.dataset) {
-        target.dataset.cgptUploadDropBound = '1';
-      }
-
-      target.addEventListener('dragover', onGlobalUploadDragOver, true);
-      target.addEventListener('dragleave', onGlobalUploadDragLeave, true);
-      target.addEventListener('drop', onGlobalUploadDrop, true);
+      bindMultiUploadDragDrop(target);
     }
 
     function unbindGlobalDropTarget(target) {
-      if (!target || !uploadDropBoundTargets.has(target)) {
-        return;
-      }
-
-      target.removeEventListener('dragover', onGlobalUploadDragOver, true);
-      target.removeEventListener('dragleave', onGlobalUploadDragLeave, true);
-      target.removeEventListener('drop', onGlobalUploadDrop, true);
-
-      uploadDropBoundTargets.delete(target);
-
-      if (target.dataset) {
-        delete target.dataset.cgptUploadDropBound;
-      }
+      unbindMultiUploadDragDrop(target);
     }
 
     function syncGlobalDocumentDropBinding() {
@@ -19423,21 +20689,39 @@
       unbindGlobalDropTarget(document);
     }
 
-    function bindUploadRootDropHandlers(rootEl) {
-      if (!rootEl || uploadDropBoundTargets.has(rootEl)) {
-        return;
+    function bindAllMultiUploadDragDropTargets() {
+      panelDropEl = document.getElementById(APP.panelId) || panelDropEl;
+
+      if (rootElRef) {
+        bindMultiUploadDragDrop(rootElRef);
+
+        const uploadSection = rootElRef.querySelector('.toolbox-upload-drop-zone');
+        if (uploadSection) {
+          bindMultiUploadDragDrop(uploadSection);
+        }
       }
 
-      uploadDropBoundTargets.add(rootEl);
+      if (listEl) {
+        bindMultiUploadDragDrop(listEl);
+      }
 
-      rootEl.addEventListener('dragover', onUploadRootDragOver, true);
-      rootEl.addEventListener('dragleave', onUploadRootDragLeave, true);
-      rootEl.addEventListener('drop', onUploadRootDrop, true);
+      if (panelDropEl) {
+        bindMultiUploadDragDrop(panelDropEl);
+      }
+
+      const toolboxRoot = document.getElementById(APP.rootId);
+      if (toolboxRoot && toolboxRoot !== panelDropEl) {
+        bindMultiUploadDragDrop(toolboxRoot);
+      }
+
+      syncGlobalDocumentDropBinding();
     }
 
     function bindUploadDropTargets(rootEl) {
-      bindUploadRootDropHandlers(rootEl);
-      syncGlobalDocumentDropBinding();
+      if (rootEl) {
+        bindMultiUploadDragDrop(rootEl);
+      }
+      bindAllMultiUploadDragDropTargets();
     }
 
     async function ensureDefaultGroupReady() {
@@ -20267,6 +21551,7 @@
           q.attachedInSession = true;
           q.persistedAttached = true;
           q.updatedAt = Date.now();
+          releaseUploadPayload(q, 'attach-ok');
 
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][uploadOne:final] name=${q.name || '-'} state=${q.state} groupId=${q.groupId || '-'} sourceKind=${q.sourceKind || '-'} size=${q.size || 0} err=`
@@ -20292,6 +21577,7 @@
           q.attachedInSession = true;
           q.persistedAttached = true;
           q.updatedAt = Date.now();
+          releaseUploadPayload(q, 'post-evidence-attached');
 
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][uploadOne:post-evidence-attached] name=${q.name || '-'} uploadName=${uploadFile.name || '-'} reason=${postEvidence.reason || '-'} chipCount=${postChipCount}`
@@ -20616,9 +21902,10 @@
 
       if (!files.length && !flaskHtml) {
         return `
-          <div class="cgpt-upload-item empty">
+          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
             <div>
-              <div class="cgpt-upload-meta">当前项目没有文件</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-hint">当前项目没有文件</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">松开鼠标，添加到当前项目</div>
             </div>
           </div>
         `;
@@ -20691,26 +21978,128 @@
       if (!el) return;
 
       listEl = el;
+      el.classList.add('toolbox-upload-file-list');
       refreshQueueReadableState();
       el.innerHTML = buildUploadListHtml();
     }
 
-    function getUploadPageCapability() {
+    const uploadPageCapabilityCache = {
+      at: 0,
+      key: '',
+      light: null,
+      heavy: null,
+    };
+
+    function countActiveUploadItemsForCapability() {
+      return getActiveGroupFiles().filter((item) => {
+        const stateName = String(item && item.state ? item.state : '').trim();
+        return stateName && stateName !== UploadState.CANCELLED && stateName !== UploadState.DONE;
+      }).length;
+    }
+
+    function buildUploadPageCapabilityCacheKey() {
+      const composerTextLen = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').length
+        : 0;
+      const responding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
+        && ComposerApi.isAssistantLikelyBusy();
+
+      return [
+        location.href,
+        composerTextLen,
+        isWaitingSendActive() ? 1 : 0,
+        state.waitingReply ? 1 : 0,
+        countActiveUploadItemsForCapability(),
+        responding ? 1 : 0,
+      ].join('|');
+    }
+
+    function getUploadPageCapabilityLight() {
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       let hasComposer = false;
       let canSendNow = false;
       let isResponding = false;
-      let attachmentCount = 0;
       let response_state = 'not_ready';
       let response_state_reason = '';
+      let hasComposerPayload = false;
 
       try {
         hasComposer = typeof ComposerApi.hasComposer === 'function' && ComposerApi.hasComposer();
-        canSendNow = typeof ComposerApi.canSendNow === 'function' && ComposerApi.canSendNow();
         isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
           && ComposerApi.isAssistantLikelyBusy();
+        canSendNow = typeof ComposerApi.canSendNowLight === 'function'
+          ? ComposerApi.canSendNowLight()
+          : (
+            typeof ComposerApi.canSendNow === 'function'
+            && ComposerApi.canSendNow({ maxAgeMs: 450 })
+          );
+
+        if (typeof detectComposerResponseState === 'function') {
+          const responseState = detectComposerResponseState({ light: true });
+          response_state = String(responseState.response_state || response_state);
+          response_state_reason = String(responseState.response_state_reason || '');
+          canSendNow = responseState.can_send_now === true;
+          isResponding = responseState.is_responding === true;
+          hasComposerPayload = responseState.has_composer_payload === true;
+        } else {
+          response_state = isResponding ? 'generating' : (canSendNow ? 'ready' : 'not_ready');
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getUploadPageCapabilityLight failed', err);
+        ToolboxShell.appendLog(`[UPLOAD][capability-light-failed] error=${errText}`);
+      }
+
+      const light = {
+        hasComposer,
+        canSendNow,
+        can_send_now: canSendNow,
+        isResponding,
+        is_responding: isResponding,
+        response_state,
+        response_state_reason,
+        hasComposerPayload,
+        has_composer_payload: hasComposerPayload,
+        sendable: hasComposer && canSendNow && !isResponding,
+      };
+
+      if (typeof logPerfThrottled === 'function') {
+        const costMs = Math.round(
+          ((typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()) - startedAt,
+        );
+        logPerfThrottled(
+          'capability-light',
+          `[PERF][capability] cost=${costMs}ms heavy=0 reason=getUploadPageCapabilityLight`,
+        );
+      }
+
+      return light;
+    }
+
+    function getUploadPageCapabilityHeavy() {
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      let attachmentCount = 0;
+      let hasComposerPayload = false;
+      let response_state = 'not_ready';
+      let response_state_reason = '';
+      let canSendNow = false;
+      let isResponding = false;
+
+      try {
         attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
           ? ComposerApi.countAttachmentChips()
           : 0;
+
+        if (typeof ComposerApi.getExistingComposerPayloadSnapshot === 'function') {
+          const payloadSnapshot = ComposerApi.getExistingComposerPayloadSnapshot();
+          hasComposerPayload = !!(payloadSnapshot && payloadSnapshot.hasPayload);
+        }
 
         if (typeof detectComposerResponseState === 'function') {
           const responseState = detectComposerResponseState();
@@ -20721,36 +22110,90 @@
           if (Number.isFinite(Number(responseState.attachment_count))) {
             attachmentCount = Number(responseState.attachment_count);
           }
-        } else {
-          response_state = isResponding ? 'generating' : (canSendNow ? 'ready' : 'not_ready');
+          if (responseState.has_composer_payload === true) {
+            hasComposerPayload = true;
+          }
         }
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] getUploadPageCapability failed', err);
-        ToolboxShell.appendLog(`[UPLOAD][capability-check-failed] error=${errText}`);
+        console.error('[ChatGPT toolbox] getUploadPageCapabilityHeavy failed', err);
+        ToolboxShell.appendLog(`[UPLOAD][capability-heavy-failed] error=${errText}`);
       }
 
       const latestAssistant = getLatestAssistantMessageForCopy();
 
-      return {
-        hasComposer,
+      const heavy = {
+        attachmentCount,
+        hasComposerPayload,
+        has_composer_payload: hasComposerPayload,
+        response_state,
+        response_state_reason,
         canSendNow,
         can_send_now: canSendNow,
         isResponding,
         is_responding: isResponding,
-        response_state,
-        response_state_reason,
-        attachmentCount,
-        sendable: hasComposer && canSendNow && !isResponding,
         copyable: !!(latestAssistant && latestAssistant.ok),
+        latestAssistant,
       };
+
+      if (typeof logPerfThrottled === 'function') {
+        const costMs = Math.round(
+          ((typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()) - startedAt,
+        );
+        logPerfThrottled(
+          'capability-heavy',
+          `[PERF][capability] cost=${costMs}ms heavy=1 reason=getUploadPageCapabilityHeavy attachmentCount=${attachmentCount}`,
+        );
+      }
+
+      return heavy;
     }
 
-    function renderUploadButtonsOnly() {
+    function getUploadPageCapability(options = {}) {
+      const forceHeavy = options && options.heavy === true;
+      const cacheKey = buildUploadPageCapabilityCacheKey();
+      const now = Date.now();
+
+      if (
+        !forceHeavy
+        && uploadPageCapabilityCache.key === cacheKey
+        && uploadPageCapabilityCache.light
+        && uploadPageCapabilityCache.heavy
+        && now - uploadPageCapabilityCache.at < 500
+      ) {
+        return {
+          ...uploadPageCapabilityCache.light,
+          ...uploadPageCapabilityCache.heavy,
+        };
+      }
+
+      const light = getUploadPageCapabilityLight();
+      let heavy = uploadPageCapabilityCache.heavy;
+      if (forceHeavy || !heavy || now - uploadPageCapabilityCache.at >= 500 || uploadPageCapabilityCache.key !== cacheKey) {
+        heavy = getUploadPageCapabilityHeavy();
+      }
+
+      uploadPageCapabilityCache.at = now;
+      uploadPageCapabilityCache.key = cacheKey;
+      uploadPageCapabilityCache.light = light;
+      uploadPageCapabilityCache.heavy = heavy;
+
+      return { ...light, ...heavy };
+    }
+
+    function renderUploadButtonsOnly(options = {}) {
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      let changedButtons = 0;
+      const useHeavy = options && options.heavy === true;
+
       healStaleUploadRunningLockIfNeeded('renderUploadButtonsOnly');
       healStaleSendUiStateIfNeeded('renderUploadButtonsOnly');
 
-      const capability = getUploadPageCapability();
+      const capability = getUploadPageCapability({ heavy: useHeavy });
 
       const currentStartBtn = rootElRef
         ? qs(UploadSelectors.startBtn, rootElRef)
@@ -20763,12 +22206,14 @@
       const uiRunning = isUploadRunActuallyActive();
       const activeFiles = getActiveGroupFiles();
 
-      setButtonState(currentStartBtn, {
+      if (setButtonStateIfChanged(currentStartBtn, {
         text: uiRunning ? '正在上传' : '开始上传',
         disabled: uiRunning || activeFiles.length <= 0,
         removeClasses: ['primary', 'danger'],
         addClasses: ['success'],
-      });
+      })) {
+        changedButtons += 1;
+      }
 
       const startSendBtn = rootElRef ? qs(UploadSelectors.startSendBtn, rootElRef) : null;
       if (startSendBtn) {
@@ -20791,26 +22236,55 @@
           ? String(state.uploadSendFailureHint)
           : '';
 
+        const hasPendingComposerPayload = !!(
+          capability.hasComposerPayload
+          || capability.has_composer_payload
+          || Number(capability.attachmentCount || 0) > 0
+          || (
+            typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+            && ComposerApi.hasVisibleComposerAttachmentPayload()
+          )
+          || (
+            typeof ComposerApi.isAttachmentStillUploading === 'function'
+            && ComposerApi.isAttachmentStillUploading()
+          )
+        );
+        const pendingAttachmentWaitSend = hasPendingComposerPayload
+          && !capability.canSendNow
+          && !waitingSend
+          && !waitingReply;
+
         let sendText = '发送信息';
         if (waitingReply) {
           sendText = '等待回复...';
         } else if (waitingSend) {
           sendText = '发送中...';
+        } else if (pendingAttachmentWaitSend) {
+          sendText = '等待发送...';
+          sendTitle = '附件已存在，正在等待发送按钮';
         } else if (failureHint) {
           sendText = failureHint.length > 22 ? `${failureHint.slice(0, 22)}…` : failureHint;
           sendTitle = failureHint;
         }
 
-        setButtonState(startSendBtn, {
+        const sendBusy = waitingSend || waitingReply;
+        startSendBtn.dataset.uploadSendState = sendBusy
+          ? (waitingReply ? 'waiting-reply' : 'sending')
+          : (failureHint ? 'failed' : 'idle');
+        startSendBtn.setAttribute('aria-busy', sendBusy ? 'true' : 'false');
+
+        if (setButtonStateIfChanged(startSendBtn, {
           text: sendText,
           title: sendTitle,
           disabled: false,
           ariaDisabled: false,
-          removeClasses: ['primary', 'danger', 'cgpt-wait-send-cancel', 'warning'],
-          addClasses: (waitingSend || waitingReply)
+          removeClasses: ['primary', 'danger', 'cgpt-wait-send-cancel', 'warning', 'waiting'],
+          addClasses: sendBusy
             ? ['danger', 'cgpt-wait-send-cancel']
             : (failureHint ? ['warning'] : ['primary']),
-        });
+        })) {
+          changedButtons += 1;
+        }
       }
 
       const copyContinueBtn = rootElRef ? qs(UploadSelectors.copyContinueBtn, rootElRef) : null;
@@ -20829,7 +22303,7 @@
           isResponding: busy,
         }) || waitingReplyBtn;
 
-        setButtonState(copyContinueBtn, {
+        if (setButtonStateIfChanged(copyContinueBtn, {
           text: continueBtnText,
           title: busy
             ? '当前正在回复：点击后会等待回复完成，再复制并继续'
@@ -20851,7 +22325,9 @@
           addClasses: waitingAnswer
             ? ['cgpt-waiting-answer', 'copy-continue', 'cgpt-btn-copy-continue']
             : ['copy-continue', 'cgpt-btn-copy-continue'],
-        });
+        })) {
+          changedButtons += 1;
+        }
         copyContinueBtn.dataset.assistantBusy = busy ? '1' : '0';
       }
 
@@ -20894,7 +22370,7 @@
           }
         }
 
-        setButtonState(copyLastMessageBtn, {
+        if (setButtonStateIfChanged(copyLastMessageBtn, {
           text,
           title,
           disabled,
@@ -20917,14 +22393,16 @@
             'error',
           ],
           addClasses,
-        });
+        })) {
+          changedButtons += 1;
+        }
       }
 
       const copyHotkeyContinueOnceBtn = rootElRef
         ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef)
         : null;
       if (copyHotkeyContinueOnceBtn) {
-        setButtonState(copyHotkeyContinueOnceBtn, {
+        if (setButtonStateIfChanged(copyHotkeyContinueOnceBtn, {
           text: copyHotkeyContinueTaskRunning ? '处理中...' : '复制+快捷键+继续',
           title: '等待回答完成 -> 检查终止信号 -> 复制最后回复 -> Ctrl+Alt+I -> 发送继续指令',
           disabled: copyHotkeyContinueTaskRunning || copyHotkeyContinueLoopRunning,
@@ -20941,7 +22419,9 @@
             'cgpt-btn-ok',
           ],
           addClasses: ['purple'],
-        });
+        })) {
+          changedButtons += 1;
+        }
       }
 
       const copyHotkeyContinueLoopBtn = rootElRef
@@ -20979,6 +22459,18 @@
       }
 
       applyUploadShortcutButtonTitles(rootElRef);
+
+      if (typeof logPerfThrottled === 'function') {
+        const costMs = Math.round(
+          ((typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()) - startedAt,
+        );
+        logPerfThrottled(
+          'renderUploadButtonsOnly',
+          `[PERF][renderUploadButtonsOnly] cost=${costMs}ms changedButtons=${changedButtons} heavy=${useHeavy ? 1 : 0}`,
+        );
+      }
     }
 
     function buildQuickPromptRenderSignature() {
@@ -21146,6 +22638,7 @@
 
       applyCompactUiVisibility();
       renderUploadQuickPrompts();
+      bindAllMultiUploadDragDropTargets();
     }
 
     function healStaleUploadRunningLockIfNeeded(context) {
@@ -21178,7 +22671,7 @@
       };
 
       try {
-        cap = getUploadPageCapability();
+        cap = getUploadPageCapability({ heavy: true });
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] logUploadSendUiState capability failed', err);
@@ -21244,6 +22737,10 @@
         return '发送失败：文本未写入输入框（send_not_confirmed: composer_text_not_synced）';
       }
 
+      if (baseReason === 'no_send_progress_after_actions') {
+        return '发送失败：已尝试点击/快捷键/真实 Enter，但页面没有发送进展';
+      }
+
       if (normalized) {
         return `发送失败：${normalized}`;
       }
@@ -21293,6 +22790,18 @@
       }
 
       logUploadSendUiState('reset', reason, runId);
+
+      const sendBtn = rootElRef ? qs(UploadSelectors.startSendBtn, rootElRef) : null;
+      if (sendBtn && typeof clearButtonLongWaitDangerTimer === 'function') {
+        clearButtonLongWaitDangerTimer(sendBtn, reason || 'reset');
+      }
+    }
+
+    function resetUploadSendButtonState(reason = 'send_failed_or_timeout', runId) {
+      ToolboxShell.appendLog(
+        `[UPLOAD_SEND_UI][RESET] reason=${String(reason || 'send_failed_or_timeout')} runId=${runId == null ? '-' : runId}`,
+      );
+      resetUploadSendUiState(reason, runId);
     }
 
     function healStaleSendUiStateIfNeeded(context) {
@@ -21303,6 +22812,28 @@
       if (elapsed < 8000) return false;
 
       try {
+        const hasPendingComposerPayload = !!(
+          (
+            typeof ComposerApi.getExistingComposerPayloadSnapshot === 'function'
+            && ComposerApi.getExistingComposerPayloadSnapshot().hasPayload
+          )
+          || (
+            typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+            && ComposerApi.hasVisibleComposerAttachmentPayload()
+          )
+          || (
+            typeof ComposerApi.isAttachmentStillUploading === 'function'
+            && ComposerApi.isAttachmentStillUploading()
+          )
+        );
+
+        if (hasPendingComposerPayload) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_SEND_UI][HEAL_STALE_SKIP] reason=${String(context || '-scheduled')} runningMs=${elapsed} cause=pending_composer_payload`,
+          );
+          return false;
+        }
+
         const cap = getUploadPageCapability();
         const pageIdle = !cap.isResponding && cap.response_state !== 'generating';
         const noStopButton = !hasRealStopButtonForCopy();
@@ -21472,6 +23003,11 @@
       scheduleRenderUpload(`wait-send:claim:${source || '-'}`);
       logUploadSendUiState('claim', `wait-send:claim:${source || '-'}`, id);
 
+      const sendBtn = rootElRef ? qs(UploadSelectors.startSendBtn, rootElRef) : null;
+      if (sendBtn && typeof startButtonLongWaitDangerTimer === 'function') {
+        startButtonLongWaitDangerTimer(sendBtn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+      }
+
       return id;
     }
 
@@ -21486,6 +23022,18 @@
       if (normalized === 'composer_not_found') {
         return '长时间未找到 ChatGPT 输入框，已停止发送';
       }
+      if (normalized === 'composer_empty') {
+        return '输入框为空，无法发送';
+      }
+      if (normalized === 'send_button_not_found' || normalized === 'send_button_disabled') {
+        return '发送按钮未就绪，已超时';
+      }
+      if (normalized === 'attachment_not_ready') {
+        return '附件仍在处理，已超时';
+      }
+      if (normalized === 'send_not_confirmed' || normalized.startsWith('send_not_confirmed')) {
+        return '发送未确认，请查看日志';
+      }
       if (normalized === 'page_offline') {
         return '当前页面离线，已停止发送';
       }
@@ -21495,7 +23043,45 @@
       return '';
     }
 
+    function enterUploadWaitingReplyAfterSend(runId, source) {
+      state.waitingSend = false;
+      state.autoSendWaiting = false;
+      uploadSendShortcutRunning = false;
+      uploadSendTaskStartedAt = 0;
+      state.cancelWaitingSend = false;
+      state.uploadSendFailureHint = '';
+      state.uploadSendFailureHintAt = 0;
+      state.waitingReply = true;
+      setStatus('已发送信息');
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][send-message-button:sent] runId=${runId} source=${source || '-'}`,
+      );
+      logUploadSendUiState('sent', 'waiting-reply', runId);
+      updateChatInputStateBadge();
+      startWaitingReplyCheck(runId, Date.now());
+      scheduleRenderUpload('send-message:sent-waiting-reply');
+    }
+
+    function enterUploadWaitingReplyBlocked(runId, source) {
+      state.waitingSend = false;
+      state.autoSendWaiting = false;
+      uploadSendShortcutRunning = false;
+      uploadSendTaskStartedAt = 0;
+      state.waitingReply = true;
+      setStatus('助手正在回复，等待回复完成...', 'running');
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][send-message-button:wait-reply] source=${source || '-'} reason=assistant_busy runId=${runId}`,
+      );
+      logUploadSendUiState('waiting-reply', 'assistant-busy', runId);
+      updateChatInputStateBadge();
+      startWaitingReplyCheck(runId, Date.now());
+      scheduleRenderUpload('send-message:blocked-waiting-reply');
+    }
+
     function shouldStopForeverSend(runId) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return true;
+      }
       if (state.cancelWaitingSend) {
         return true;
       }
@@ -21506,6 +23092,86 @@
         return true;
       }
       return false;
+    }
+
+    function detectPendingComposerPayloadForSend() {
+      const composerText = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '')
+        : '';
+      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+
+      return !!(
+        String(composerText || '').trim()
+        || Number(attachmentCount || 0) > 0
+        || (
+          typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+          && ComposerApi.hasVisibleComposerAttachmentPayload()
+        )
+        || (
+          typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading()
+        )
+      );
+    }
+
+    function stopUploadSendTask(source) {
+      const reason = String(source || 'page-navigation');
+      copyHotkeyContinueLoopStopRequested = true;
+      copyLastMessageWaitRunId += 1;
+      cancelWaitingSend(reason);
+      stopWaitingReplyCheck();
+      state.autoSendRunId += 1;
+      resetUploadSendUiState(`nav-cleanup:${reason}`, state.autoSendRunId);
+      uploadTimers.clearAll();
+      ToolboxShell.appendLog(`[UPLOAD][STOP_SEND_TASK] source=${reason}`);
+    }
+
+    function stopUploadTask(source) {
+      const reason = String(source || 'page-navigation');
+      copyHotkeyContinueLoopStopRequested = true;
+      if (state.running || state.activeId || state.uploadAbortController) {
+        cancelCurrentUploadRun(reason);
+      }
+      stopDuplicateWatcher(0);
+      uploadTimers.clearAll();
+      ToolboxShell.appendLog(`[UPLOAD][STOP_UPLOAD_TASK] source=${reason}`);
+    }
+
+    function clearUploadTransientFileRefs(source) {
+      try {
+        ToolboxShell.appendLog(
+          `[UPLOAD_CLEANUP][TRANSIENT_FILES] source=${source || '-'}`,
+        );
+
+        const releaseItemRefs = (item) => {
+          if (!item) return;
+          releaseUploadPayload(item, `nav-cleanup:${source || '-'}`);
+          if (item.rawFile) {
+            item.rawFile = null;
+          }
+        };
+
+        if (Array.isArray(state.queue)) {
+          state.queue.forEach(releaseItemRefs);
+        }
+
+        if (Array.isArray(UploadGroupAppState.uploadItems)) {
+          UploadGroupAppState.uploadItems.forEach(releaseItemRefs);
+        }
+
+        getActiveGroupFiles().forEach(releaseItemRefs);
+      } catch (err) {
+        console.error('[ChatGPT toolbox] clearUploadTransientFileRefs failed', err);
+
+        const errName = err && err.name ? err.name : 'Error';
+        const errText = err && err.message ? err.message : String(err);
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_CLEANUP][TRANSIENT_FILES_ERROR] source=${source || '-'} type=${errName} error=${errText}`,
+        );
+      }
     }
 
     async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId) {
@@ -21525,62 +23191,193 @@
       let sendFailureHandled = false;
 
       try {
-        setStatus('正在持续寻找发送按钮，直到发送成功...');
-        scheduleRenderUpload('send-message:forever-start');
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          resetUploadSendUiState('send-message:page-navigating', runId);
+          return false;
+        }
+
+        const capability = getUploadPageCapability({ heavy: true });
+
+        const hasPendingComposerPayload = !!(
+          capability.hasComposerPayload
+          || capability.has_composer_payload
+          || Number(capability.attachmentCount || 0) > 0
+          || (
+            typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+            && ComposerApi.hasVisibleComposerAttachmentPayload()
+          )
+          || (
+            typeof ComposerApi.isAttachmentStillUploading === 'function'
+            && ComposerApi.isAttachmentStillUploading()
+          )
+        );
+
+        if (capability.isResponding) {
+          enterUploadWaitingReplyBlocked(runId, source);
+          sendFailureHandled = true;
+          return false;
+        }
+
+        const composerTextNow = typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '').trim()
+          : '';
+        const hasAnythingToSend = !!(
+          hasPendingComposerPayload
+          || composerTextNow
+        );
+
+        if (!capability.hasComposer && !hasAnythingToSend) {
+          const blockReason = 'no-composer';
+          const blockMessage = '未找到 ChatGPT 输入框';
+          setStatus(blockMessage, 'warn');
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:blocked] source=${source} reason=${blockReason}`,
+          );
+          resetUploadSendUiState(`send-message-blocked:${blockReason}`, runId);
+          scheduleRenderUpload('send-message:blocked');
+          sendFailureHandled = true;
+          return false;
+        }
+
+        if (!hasAnythingToSend) {
+          const blockReason = 'composer-empty';
+          const blockMessage = '输入框为空，无法发送';
+          setStatus(blockMessage, 'warn');
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:blocked] source=${source} reason=${blockReason}`,
+          );
+          resetUploadSendUiState(`send-message-blocked:${blockReason}`, runId);
+          scheduleRenderUpload('send-message:blocked');
+          sendFailureHandled = true;
+          return false;
+        }
+
+        if (!capability.canSendNow && hasPendingComposerPayload) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:wait-payload] source=${source} reason=payload_exists_but_send_not_ready attachmentCount=${Number(capability.attachmentCount || 0)} responseState=${capability.response_state || '-'}`,
+          );
+        }
+
+        setStatus(
+          !capability.canSendNow
+            ? (hasPendingComposerPayload
+              ? '附件已存在，继续等待发送按钮...'
+              : '正在等待发送按钮就绪...')
+            : '正在发送...',
+          'running',
+        );
+        scheduleRenderUpload('send-message:start');
 
         const foreverSource = source === 'button' || source === 'shortcut'
           ? 'manual-send-message-button'
           : `manual-send-message-${source}`;
 
-        const sendFn = typeof sendUntilConfirmedForever === 'function'
-          ? sendUntilConfirmedForever
-          : null;
-
-        if (!sendFn) {
-          console.error('[ChatGPT toolbox] sendUntilConfirmedForever is not available');
+        if (typeof stableSendMessage !== 'function') {
+          console.error('[ChatGPT toolbox] stableSendMessage is not available');
           setStatus('发送模块未就绪，请刷新页面后重试', 'error');
           return false;
         }
 
-        const sendResult = await sendFn({
-          source: foreverSource,
-          confirmTimeoutMs: 5000,
-          shouldStop: () => shouldStopForeverSend(runId),
-        });
+        const transientSendReasons = new Set([
+          'composer_empty',
+          'send_button_not_found',
+          'send_button_disabled',
+          'send_not_confirmed',
+          'attachment_not_ready',
+          'send_button_wait_timeout',
+          'send_button_unavailable',
+          'send_not_confirmed:attachment_not_ready',
+          'send_not_confirmed:button_disabled',
+          'send_not_confirmed:no_user_bubble_after_click',
+          'page_navigating',
+        ]);
+
+        let sendResult = null;
+        let outerAttempt = 0;
+        let hasPendingComposerPayloadAfterFail = detectPendingComposerPayloadForSend();
+
+        while (state.autoSendRunId === runId && outerAttempt < SEND_STABLE_OUTER_RETRY_MAX) {
+          outerAttempt += 1;
+
+          if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+            logUploadSendUiState('send-aborted', 'page-navigating', runId);
+            resetUploadSendUiState('send-message:page-navigating', runId);
+            return false;
+          }
+
+          const capabilityNow = getUploadPageCapability({ heavy: true });
+          if (capabilityNow.isResponding) {
+            enterUploadWaitingReplyBlocked(runId, source);
+            sendFailureHandled = true;
+            return false;
+          }
+
+          sendResult = await stableSendMessage({
+            source: foreverSource,
+            sendExistingComposer: true,
+            maxAttempts: SEND_STABLE_RETRY_LIMIT,
+            intervalMs: SEND_STABLE_RETRY_INTERVAL_MS,
+            blockWhenResponding: true,
+            shouldStop: () => shouldStopForeverSend(runId),
+          });
+
+          if (state.autoSendRunId !== runId) {
+            logUploadSendUiState('send-aborted', 'runId-changed', runId);
+            return false;
+          }
+
+          if (sendResult && sendResult.ok) {
+            break;
+          }
+
+          const failReason = String((sendResult && sendResult.reason) || 'unknown');
+
+          if (sendResult && sendResult.wait_reply) {
+            enterUploadWaitingReplyBlocked(runId, source);
+            sendFailureHandled = true;
+            return false;
+          }
+
+          if (failReason === 'page_navigating' || failReason === 'cancelled') {
+            break;
+          }
+
+          const hasPendingComposerPayloadAfterFail = detectPendingComposerPayloadForSend();
+
+          if (!transientSendReasons.has(failReason) || !hasPendingComposerPayloadAfterFail) {
+            break;
+          }
+
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:retry-transient] reason=${failReason} runId=${runId} outerAttempt=${outerAttempt}`,
+          );
+          setStatus('附件已存在，继续等待发送按钮...', 'running');
+          state.waitingSend = true;
+          state.autoSendWaiting = true;
+          uploadSendShortcutRunning = true;
+          uploadSendTaskStartedAt = Date.now();
+          scheduleRenderUpload('send-message:retry-transient');
+          await sleep(800);
+        }
 
         if (state.autoSendRunId !== runId) {
           logUploadSendUiState('send-aborted', 'runId-changed', runId);
           return false;
         }
 
-        if (sendResult.ok) {
-          state.waitingSend = false;
-          state.autoSendWaiting = false;
-          uploadSendShortcutRunning = false;
-          uploadSendTaskStartedAt = 0;
-          state.cancelWaitingSend = false;
-          state.uploadSendFailureHint = '';
-          state.uploadSendFailureHintAt = 0;
-
-          state.waitingReply = true;
-          setStatus('已发送信息');
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][send-message-button:sent] runId=${runId} reason=${sendResult.reason || '-'}`,
-          );
-          logUploadSendUiState('sent', 'waiting-reply', runId);
-          updateChatInputStateBadge();
-          startWaitingReplyCheck(runId, Date.now());
-          scheduleRenderUpload('send-message:sent-waiting-reply');
+        if (sendResult && sendResult.ok) {
+          enterUploadWaitingReplyAfterSend(runId, sendResult.reason || source);
           return true;
         }
 
-        const failReason = String(sendResult.reason || 'unknown');
+        const failReason = String((sendResult && sendResult.reason) || 'unknown');
         const composerTextAfterFail = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '')
           : '';
         const attachmentCountAfterFail = typeof ComposerApi.countAttachmentChips === 'function'
           ? ComposerApi.countAttachmentChips()
           : 0;
+
         const failMessage = mapForeverSendFailureMessage(failReason)
           || mapUploadSendFailureMessage(failReason);
 
@@ -21588,7 +23385,7 @@
           `[UPLOAD_DIAG][send-message-button:not-sent] reason=${failReason} textLen=${composerTextAfterFail.length} attachmentCount=${attachmentCountAfterFail} runId=${runId} autoSendRunId=${state.autoSendRunId}`,
         );
 
-        if (failReason === 'cancelled') {
+        if (failReason === 'cancelled' || failReason === 'page_navigating') {
           logUploadSendUiState('cancelled', failReason, runId);
           return false;
         }
@@ -21604,11 +23401,12 @@
         state.autoSendWaiting = false;
         uploadSendShortcutRunning = false;
         uploadSendTaskStartedAt = 0;
-        resetUploadSendUiState(`send-message-not-sent:${failReason}`, runId);
+        resetUploadSendButtonState('send_failed_or_timeout', runId);
 
-        if (state.autoSendRunId === runId && failMessage) {
-          setStatus(failMessage, 'warn');
-          state.uploadSendFailureHint = failMessage;
+        if (state.autoSendRunId === runId) {
+          const hintText = failMessage || '发送失败';
+          setStatus(hintText, 'warn');
+          state.uploadSendFailureHint = hintText;
           state.uploadSendFailureHintAt = Date.now();
         }
 
@@ -21622,7 +23420,7 @@
         const failMessage = `发送失败：${errText}`;
         ToolboxShell.appendLog(`[UPLOAD_DIAG][send-message-button:failed] runId=${runId} error=${errText}`);
         logUploadSendUiState('error', errText, runId);
-        resetUploadSendUiState(`send-message-not-sent:exception:${errText}`, runId);
+        resetUploadSendButtonState('send_failed_or_timeout', runId);
         if (state.autoSendRunId === runId) {
           setStatus(failMessage, 'warn');
           state.uploadSendFailureHint = failMessage;
@@ -21632,14 +23430,14 @@
         sendFailureHandled = true;
         return false;
       } finally {
-        if (!state.waitingReply) {
+        if (!state.waitingReply && !isWaitingSendActive()) {
           state.waitingSend = false;
           state.autoSendWaiting = false;
           uploadSendShortcutRunning = false;
           uploadSendTaskStartedAt = 0;
         }
 
-        if (!state.waitingReply && !sendFailureHandled) {
+        if (!state.waitingReply && !sendFailureHandled && !isWaitingSendActive()) {
           state.uploadSendFailureHint = '';
           state.uploadSendFailureHintAt = 0;
           resetUploadSendUiState(
@@ -22062,6 +23860,11 @@
 
       try {
         for (let i = 0; i < uploadableTargets.length; i += 1) {
+          if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+            state.cancelled = true;
+            break;
+          }
+
           if (state.cancelled || runId !== state.runId) {
             break;
           }
@@ -22427,18 +24230,37 @@
       const name = item.name || '-';
       const id = item.id || item.file_id || '-';
       let released = false;
+
       if (item.file) {
         item.file = null;
         released = true;
       }
+
       if (item.blob) {
         item.blob = null;
         released = true;
       }
+
+      if (item.arrayBuffer) {
+        item.arrayBuffer = null;
+        released = true;
+      }
+
+      if (item.objectUrl) {
+        try {
+          URL.revokeObjectURL(item.objectUrl);
+        } catch (revokeErr) {
+          const errText = revokeErr && revokeErr.message ? revokeErr.message : String(revokeErr);
+          console.error('[ChatGPT toolbox] releaseUploadPayload revokeObjectURL failed', revokeErr);
+          ToolboxShell.appendLog(`[UPLOAD][RELEASE_LARGE_OBJECTS][revoke-failed] name=${name} error=${errText}`);
+        }
+        item.objectUrl = '';
+        released = true;
+      }
+
       if (released) {
-        console.log(
-          '[UPLOAD][RELEASE_PAYLOAD]',
-          `reason=${reason || '-'} name=${name} id=${id}`,
+        ToolboxShell.appendLog(
+          `[UPLOAD][RELEASE_LARGE_OBJECTS] name=${name} reason=${reason || 'uploaded'}`,
         );
       }
     }
@@ -22636,166 +24458,20 @@
       return await handleStartUploadClick(source);
     }
 
-    function startCopyLastMessageHardResetTimer(source) {
-      if (copyLastMessageHardResetTimer) {
-        window.clearTimeout(copyLastMessageHardResetTimer);
-      }
-
-      copyLastMessageHardResetTimer = window.setTimeout(() => {
-        copyLastMessageHardResetTimer = 0;
-
-        if (!copyLastMessageTaskRunning && !copyLastMessageWaiting) {
-          return;
-        }
-
-        if (copyLastMessageWaiting) {
-          ToolboxShell.appendLog(
-            `[CHAT_PAGE][copy-last-message:hard-reset-skip] reason=waiting-reply source=${source || '-'}`
-          );
-          return;
-        }
-
-        const runningMs = Date.now() - Number(copyLastMessageTaskStartedAt || 0);
-
-        if (runningMs < 8000) {
-          ToolboxShell.appendLog(
-            `[CHAT_PAGE][copy-last-message:hard-reset-skip] reason=not-stale runningMs=${runningMs} source=${source || '-'}`
-          );
-          return;
-        }
-
-        console.warn('[ChatGPT toolbox] copy last message hard reset triggered');
-        ToolboxShell.appendLog(
-          `[CHAT_PAGE][copy-last-message:hard-reset] source=${source || '-'} runningMs=${runningMs}`
-        );
-
-        releaseCopyLastMessageTaskLock('hard-reset-timeout');
-      }, 9000);
-    }
-
-    function clearCopyLastMessageHardResetTimer(reason) {
-      if (copyLastMessageHardResetTimer) {
-        window.clearTimeout(copyLastMessageHardResetTimer);
-        copyLastMessageHardResetTimer = 0;
-        ToolboxShell.appendLog(`[CHAT_PAGE][copy-last-message:hard-reset-clear] reason=${reason || '-'}`);
-      }
-    }
-
-    function releaseCopyLastMessageTaskLock(reason) {
-      copyLastMessageTaskRunning = false;
-      copyLastMessageTaskSource = '';
-      copyLastMessageTaskStartedAt = 0;
-      copyLastMessageTaskStatus = '';
-      copyLastReplyTaskRunning = false;
-      copyLastReplyTaskStartedAt = 0;
-      copyLastReplyTaskStatus = '';
-      copyLastMessageWaiting = false;
-
-      const copyLastMessageBtn = rootElRef
-        ? qs('#cgpt-copy-last-message-scroll-bottom', rootElRef)
-        : null;
-
-      if (copyLastMessageBtn) {
-        setButtonState(copyLastMessageBtn, {
-          text: '复制最后回复',
-          title: '等待最后一条 assistant 回复稳定后复制到剪贴板',
-          disabled: false,
-          removeClasses: [
-            'danger',
-            'success',
-            'warning',
-            'orange',
-            'amber',
-            'teal',
-            'purple',
-            'cyan',
-            'waiting',
-            'cgpt-waiting-answer',
-            'cgpt-btn-error',
-            'cgpt-btn-ok',
-            'failed',
-            'error',
-          ],
-          addClasses: ['primary'],
-        });
-        applyUploadShortcutButtonTitles(rootElRef);
-      }
-
-      ToolboxShell.appendLog(
-        `[CHAT_PAGE][copy-last-message:lock-release] reason=${reason || '-'} running=${copyLastMessageTaskRunning ? '1' : '0'} waiting=${copyLastMessageWaiting ? '1' : '0'}`
-      );
-    }
-
-    function resetCopyLastMessageTaskState(reason) {
-      releaseCopyLastMessageTaskLock(reason || 'reset');
-      ToolboxShell.appendLog(
-        `[CHAT_PAGE][copy-last-message:state-reset] reason=${reason || '-'} running=${copyLastMessageTaskRunning ? '1' : '0'} waiting=${copyLastMessageWaiting ? '1' : '0'}`
-      );
-    }
-
-    function validateStableCopyRecord(stableResult) {
-      const records = ChatMessageExtractor.buildRecords({
-        includeEmpty: false,
-      });
-
-      const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
-      const latestUser = picked.latestUser || null;
-
-      if (!latestUser) {
-        return {
-          ok: false,
-          reason: 'no-latest-user',
-          latestUser: null,
-          picked,
-        };
-      }
-
-      if (!picked.ok || !picked.record) {
-        return {
-          ok: false,
-          reason: picked.reason || 'no-assistant-after-latest-user',
-          latestUser,
-          picked,
-        };
-      }
-
-      const stableTurn = String(stableResult && stableResult.record && stableResult.record.turn_id || '');
-      const pickedTurn = String(picked.record.turn_id || '');
-
-      const stableText = ChatMessageExtractor.cleanMessageText(stableResult && stableResult.text || '').trim();
-      const pickedText = ChatMessageExtractor.cleanMessageText(picked.record.text || '').trim();
-
-      const sameTurn = stableTurn && pickedTurn && stableTurn === pickedTurn;
-      const sameText = stableText && pickedText && stableText === pickedText;
-
-      if (!sameTurn && !sameText) {
-        return {
-          ok: false,
-          reason: 'stable-record-not-current-latest',
-          latestUser,
-          picked,
-          stableTurn,
-          pickedTurn,
-          stableChars: stableText.length,
-          pickedChars: pickedText.length,
-        };
-      }
-
-      return {
-        ok: true,
-        reason: 'validated-current-latest',
-        latestUser,
-        picked,
-        text: pickedText || stableText,
-        record: picked.record,
-      };
-    }
-
     function getLatestAssistantTextForCopyCheck() {
       try {
-        const records = ChatMessageExtractor.buildRecords({
-          includeEmpty: false,
-        });
+        if (typeof getLatestAssistantMessageForCopy === 'function') {
+          const cachedPick = getLatestAssistantMessageForCopy({ forceRefresh: false });
+          if (cachedPick && cachedPick.ok && cachedPick.text) {
+            return String(cachedPick.text).trim();
+          }
+        }
+
+        const records = typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+          ? ChatMessageExtractor.getFastTailMessageRecords({ includeHidden: false })
+          : ChatMessageExtractor.buildRecords({
+            includeEmpty: false,
+          });
         const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
 
         if (!picked.ok || !picked.record) {
@@ -22805,8 +24481,9 @@
         return ChatMessageExtractor.cleanMessageText(picked.record.text || '').trim();
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.warn('[ChatGPT toolbox] getLatestAssistantTextForCopyCheck failed', err);
-        ToolboxShell.appendLog(`[CHAT_PAGE][copy-last-message:assistant-text-check-failed] error=${errText}`);
+        const stack = err && err.stack ? String(err.stack).slice(0, 400) : '';
+        console.error('[ChatGPT toolbox] getLatestAssistantTextForCopyCheck failed', err);
+        ToolboxShell.appendLog(`[CHAT_PAGE][copy-last-message:assistant-text-check-failed] error=${errText} stack=${stack}`);
         return '';
       }
     }
@@ -22843,31 +24520,6 @@
       }
 
       return false;
-    }
-
-    function isAssistantDefinitelyGeneratingForCopyFast() {
-      try {
-        if (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-          && ComposerApi.isAssistantLikelyBusy()
-        ) {
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:busy-fast] reason=composer-busy');
-          return true;
-        }
-
-        if (hasRealStopButtonForCopy()) {
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:busy-fast] reason=real-stop-or-streaming');
-          return true;
-        }
-
-        return false;
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] copy fast busy-check failed', err);
-        ToolboxShell.appendLog(`[CHAT_PAGE][copy-last-message:busy-fast-failed] error=${errText}`);
-        return false;
-      }
     }
 
     async function isAssistantReallyGeneratingForCopy() {
@@ -22920,6 +24572,13 @@
       let lastLogAt = 0;
 
       while (Date.now() - startedAt < timeoutMs) {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          return {
+            ok: false,
+            reason: 'page_navigating',
+          };
+        }
+
         if (!copyLastMessageTaskRunning) {
           return {
             ok: false,
@@ -23097,7 +24756,7 @@
         }
       }
 
-      if (button.disabled && action !== 'copy-last-message' && action !== 'copy-continue') {
+      if (button.disabled && action !== 'copy-last-message' && action !== 'copy-continue' && action !== 'send-message') {
         ToolboxShell.appendLog(
           `[UPLOAD_UI_ACTION][ignored] action=${action} source=${src} reason=button-disabled`
         );
@@ -23148,6 +24807,39 @@
       }
 
       return false;
+    }
+
+    function getChatGptHomeUrl() {
+      return 'https://chatgpt.com/';
+    }
+
+    function jumpToChatGptHome(source) {
+      try {
+        const targetUrl = getChatGptHomeUrl();
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_NAV][HOME] source=${source || '-'} from=${window.location.href} to=${targetUrl}`,
+        );
+
+        setStatus('正在跳转到 ChatGPT 首页...', 'running');
+
+        cleanupBeforePageNavigation(source || 'jump-home');
+
+        window.location.replace(targetUrl);
+        return true;
+      } catch (err) {
+        const errName = err && err.name ? err.name : 'Error';
+        const errText = err && err.message ? err.message : String(err);
+
+        console.error('[ChatGPT toolbox] jump to ChatGPT home failed', err);
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_NAV][HOME_FAILED] source=${source || '-'} type=${errName} error=${errText}`,
+        );
+
+        setStatus(`跳转首页失败：${errText}`, 'error');
+        return false;
+      }
     }
 
     function bindUploadDelegatedClick(rootEl) {
@@ -23239,6 +24931,20 @@
           }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=send-hotkey');
           runUploadActionPromise(triggerSendHotkeyOnce(), '发送 Ctrl+Alt+I');
+          return;
+        }
+
+        const homeBtn = target.closest('#cgpt-open-chatgpt-home');
+        if (homeBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          if (typeof homeBtn.blur === 'function') {
+            homeBtn.blur();
+          }
+
+          ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=jump-home');
+          jumpToChatGptHome('delegated-click');
           return;
         }
 
@@ -23663,6 +25369,7 @@
             <button type="button" class="cgpt-btn primary" id="cgpt-upload-start-send">发送信息</button>
             <button type="button" class="cgpt-btn cgpt-btn-copy-continue" id="cgpt-upload-continue-once" title="先复制最后回复，再发送“继续”">复制并继续</button>
             <button type="button" class="cgpt-btn warning" id="cgpt-send-hotkey-once">发送 Ctrl+Alt+I</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-open-chatgpt-home" title="跳转到 ChatGPT 主页">回到首页</button>
             <button type="button" class="cgpt-btn teal" id="cgpt-auto-continue-once">自动继续</button>
             <button type="button" class="cgpt-btn" id="cgpt-copy-last-message-scroll-bottom">复制最后回复</button>
             <button type="button" class="cgpt-btn purple" id="cgpt-copy-hotkey-continue-once" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> Ctrl+Alt+I -> 发送继续指令">复制+快捷键+继续</button>
@@ -23743,6 +25450,9 @@
       }
 
       const uploadSection = rootEl.querySelector('.cgpt-section');
+      if (uploadSection) {
+        uploadSection.classList.add('toolbox-upload-drop-zone');
+      }
       const sectionTitle = uploadSection
         ? uploadSection.querySelector('.cgpt-section-title')
         : null;
@@ -23820,6 +25530,17 @@
         actionRow.insertBefore(sendHotkeyBtn, copyLastBtn);
       }
 
+      let homeBtn = qs(UploadSelectors.homeBtn, actionRow);
+      if (!homeBtn) {
+        homeBtn = document.createElement('button');
+        homeBtn.type = 'button';
+        homeBtn.className = 'cgpt-btn primary';
+        homeBtn.id = 'cgpt-open-chatgpt-home';
+        homeBtn.textContent = '回到首页';
+        homeBtn.title = '跳转到 ChatGPT 主页';
+        actionRow.insertBefore(homeBtn, copyLastBtn);
+      }
+
       let autoContinueBtn = qs(UploadSelectors.autoContinueBtn, actionRow);
       if (!autoContinueBtn) {
         autoContinueBtn = document.createElement('button');
@@ -23831,7 +25552,8 @@
       }
 
       actionRow.insertBefore(autoContinueBtn, copyLastBtn);
-      actionRow.insertBefore(sendHotkeyBtn, autoContinueBtn);
+      actionRow.insertBefore(homeBtn, autoContinueBtn);
+      actionRow.insertBefore(sendHotkeyBtn, homeBtn);
 
       let copyHotkeyContinueOnceBtn = qs(UploadSelectors.copyHotkeyContinueOnceBtn, actionRow);
       if (!copyHotkeyContinueOnceBtn) {
@@ -23863,7 +25585,13 @@
     }
 
     function bindUploadCompactActionButtons(rootEl) {
-      DomUtil.bindClick(rootEl, UploadSelectors.sendHotkeyBtn, async () => {
+      DomUtil.bindClick(rootEl, UploadSelectors.sendHotkeyBtn, async (event) => {
+        const btn = event && event.currentTarget
+          ? event.currentTarget
+          : qs(UploadSelectors.sendHotkeyBtn, rootEl);
+        if (btn && typeof startButtonLongWaitDangerTimer === 'function') {
+          startButtonLongWaitDangerTimer(btn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+        }
         try {
           await triggerSendHotkeyOnce();
         } catch (error) {
@@ -23873,10 +25601,24 @@
             stack: error && error.stack,
           });
           setStatus(`发送 Ctrl+Alt+I 失败：${error && error.message ? error.message : error}`, 'error');
+        } finally {
+          if (btn && typeof clearButtonLongWaitDangerTimer === 'function') {
+            clearButtonLongWaitDangerTimer(btn, 'finally');
+          }
         }
       }, 'UPLOAD');
 
-      DomUtil.bindClick(rootEl, UploadSelectors.autoContinueBtn, async () => {
+      DomUtil.bindClick(rootEl, UploadSelectors.homeBtn, () => {
+        jumpToChatGptHome('bindClick');
+      }, 'UPLOAD');
+
+      DomUtil.bindClick(rootEl, UploadSelectors.autoContinueBtn, async (event) => {
+        const btn = event && event.currentTarget
+          ? event.currentTarget
+          : qs(UploadSelectors.autoContinueBtn, rootEl);
+        if (btn && typeof startButtonLongWaitDangerTimer === 'function') {
+          startButtonLongWaitDangerTimer(btn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+        }
         try {
           if (!AutoQueueModule || typeof AutoQueueModule.triggerContinueOnce !== 'function') {
             setStatus('自动继续模块不可用', 'warn');
@@ -23890,6 +25632,10 @@
             stack: error && error.stack,
           });
           setStatus(`自动继续失败：${error && error.message ? error.message : error}`, 'error');
+        } finally {
+          if (btn && typeof clearButtonLongWaitDangerTimer === 'function') {
+            clearButtonLongWaitDangerTimer(btn, 'finally');
+          }
         }
       }, 'UPLOAD');
 
@@ -23954,6 +25700,11 @@
         },
         {
           type: 'required',
+          selector: '#cgpt-open-chatgpt-home',
+          missingLog: '[UPLOAD_DOM][missing] #cgpt-open-chatgpt-home',
+        },
+        {
+          type: 'required',
           selector: '#cgpt-auto-continue-once',
           missingLog: '[UPLOAD_DOM][missing] #cgpt-auto-continue-once',
         },
@@ -24005,6 +25756,13 @@
         {
           type: 'notContains',
           parent: '#cgpt-upload-manage-panel',
+          child: '#cgpt-open-chatgpt-home',
+          message: '回到首页按钮被错误包进管理面板',
+          invalidLog: '[UPLOAD_DOM][invalid] 回到首页按钮被错误包进管理面板',
+        },
+        {
+          type: 'notContains',
+          parent: '#cgpt-upload-manage-panel',
           child: '#cgpt-upload-list',
           message: '上传列表被错误包进管理面板',
         },
@@ -24047,8 +25805,14 @@
         {
           type: 'order',
           before: '#cgpt-send-hotkey-once',
+          after: '#cgpt-open-chatgpt-home',
+          message: '回到首页按钮应位于发送 Ctrl+Alt+I按钮之后',
+        },
+        {
+          type: 'order',
+          before: '#cgpt-open-chatgpt-home',
           after: '#cgpt-auto-continue-once',
-          message: '自动继续按钮应位于发送 Ctrl+Alt+I按钮之后',
+          message: '自动继续按钮应位于回到首页按钮之后',
         },
         {
           type: 'order',
@@ -24266,7 +26030,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       rootEl.id = 'cgpt-upload-module';
       rootEl.innerHTML = `
         ${buildUploadActionToolbarHtml()}
-        <div class="cgpt-section">
+        <div class="cgpt-section toolbox-upload-drop-zone">
           <div class="cgpt-section-title">多文件上传</div>
           <div class="cgpt-upload-groups-head" id="cgpt-toolbox-project-stats-row">
             <div class="cgpt-upload-group-bar">
@@ -24317,7 +26081,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
             </div>
           </div>
 
-          <div class="cgpt-upload-list" id="cgpt-upload-list"></div>
+          <div class="cgpt-upload-list toolbox-upload-file-list" id="cgpt-upload-list"></div>
 
           <div id="cgpt-upload-quick-prompts" class="cgpt-upload-quick-prompts">
             <div class="cgpt-upload-quick-prompts-title">常用 Prompt</div>
@@ -24351,6 +26115,12 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       state.waitingReplyRunId = runId;
       state.waitingReplyCheckedAt = Date.now();
       logUploadSendUiState('waiting-reply-start', `runId=${runId}`, runId);
+
+      const sendBtn = rootElRef ? qs(UploadSelectors.startSendBtn, rootElRef) : null;
+      if (sendBtn && typeof startButtonLongWaitDangerTimer === 'function') {
+        startButtonLongWaitDangerTimer(sendBtn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
+      }
+
       state.waitingReplyTimer = setInterval(function () {
         if (!state.waitingReply) {
           stopWaitingReplyCheck();
@@ -24391,13 +26161,32 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
 
     function finishWaitingReply(reason) {
       const runId = state.waitingReplyRunId;
+
       if (reason === 'reply_done') {
         setStatus('回复完成');
+
+        if (
+          typeof TitlePrefixModule !== 'undefined'
+          && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
+        ) {
+          TitlePrefixModule.startReplyDoneFlash('upload-waiting-reply-done');
+        }
+
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+        ) {
+          ToolboxShell.flashHeaderTitleOnce('回复完成', {
+            intervalMs: 450,
+            autoStopMs: 2400,
+          });
+        }
       } else if (reason === 'timeout') {
         setStatus('等待回复超时', 'warn');
       } else if (reason === 'cancel') {
         setStatus('已取消等待回复');
       }
+
       resetUploadSendUiState(`waiting-reply:${reason}`, runId);
       scheduleRenderUpload(`waiting-reply:${reason || 'done'}`);
     }
@@ -24420,6 +26209,63 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
 
     function getUploadInitPromise() {
       return uploadModuleInitPromise || Promise.resolve();
+    }
+
+    let didLogUploadQueueLegacyFields = false;
+
+    async function scanQueueRowsForLegacyFields() {
+      if (didLogUploadQueueLegacyFields) {
+        return;
+      }
+      didLogUploadQueueLegacyFields = true;
+
+      if (!APP || !APP.uploadStore) {
+        return;
+      }
+
+      const missingGroupIds = [];
+      const legacyRowFields = [];
+
+      try {
+        const db = await openDb();
+        const rows = await new Promise((resolve, reject) => {
+          const tx = db.transaction(APP.uploadStore, 'readonly');
+          const store = tx.objectStore(APP.uploadStore);
+          const req = store.getAll();
+          req.onerror = () => {
+            reject(req.error || new Error('IndexedDB uploadStore getAll failed'));
+          };
+          req.onsuccess = () => {
+            resolve(Array.isArray(req.result) ? req.result : []);
+          };
+        });
+
+        rows.forEach((row, index) => {
+          if (!row || typeof row !== 'object') {
+            return;
+          }
+          if (!String(row.groupId || '').trim()) {
+            missingGroupIds.push(`queue[${index}].groupId`);
+          }
+          if (Object.prototype.hasOwnProperty.call(row, 'upload_active_group_id')) {
+            legacyRowFields.push(`queue[${index}].upload_active_group_id`);
+          }
+        });
+      } catch (error) {
+        console.error('[ChatGPT toolbox] scanQueueRowsForLegacyFields failed', error);
+        return;
+      }
+
+      if (missingGroupIds.length) {
+        const line = `[FIELD][LEGACY_FOUND] scope=uploadQueue fields=${missingGroupIds.join(',')}`;
+        console.warn(line);
+        ToolboxShell.appendLog(line);
+      }
+      if (legacyRowFields.length) {
+        const line = `[FIELD][LEGACY_FOUND] scope=uploadQueue fields=${legacyRowFields.join(',')}`;
+        console.warn(line);
+        ToolboxShell.appendLog(line);
+      }
     }
 
     async function startUploadFromBridge(payload = {}) {
@@ -24446,6 +26292,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       getStatus: getUploadStatus,
       getQuickPromptActiveCategory,
       getUploadInitPromise,
+      scanQueueRowsForLegacyFields,
       refresh: () => {
         render();
         syncGlobalDocumentDropBinding();
@@ -24477,6 +26324,22 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
             runRefresh();
           });
       },
+      refreshToolboxTurnStatus: (reason = '', mode = 'light') => {
+        const runRefresh = () => {
+          ensureActiveUploadGroupIdValid('refreshToolboxTurnStatus');
+          renderToolboxTopStatus();
+          syncUploadGroupAppState();
+          renderUploadButtonsOnly({ heavy: mode === 'heavy' });
+        };
+
+        Promise.resolve(uploadModuleInitPromise)
+          .then(runRefresh)
+          .catch((err) => {
+            console.error('[ChatGPT toolbox] refreshToolboxTurnStatus after init failed', err);
+            runRefresh();
+          });
+      },
+      renderUploadButtonsOnly,
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,
       startUploadFromBridge,
@@ -24487,8 +26350,29 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       getPendingUploadItems,
       getUploadCountStats,
       runCopyHotkeyContinueOnceForTaskQueue,
+      stopUploadSendTask,
+      stopUploadTask,
+      clearUploadTransientFileRefs,
     };
   })();
+
+  function stopUploadSendTask(source) {
+    if (typeof UploadModule !== 'undefined' && typeof UploadModule.stopUploadSendTask === 'function') {
+      UploadModule.stopUploadSendTask(source);
+    }
+  }
+
+  function stopUploadTask(source) {
+    if (typeof UploadModule !== 'undefined' && typeof UploadModule.stopUploadTask === 'function') {
+      UploadModule.stopUploadTask(source);
+    }
+  }
+
+  function clearUploadTransientFileRefs(source) {
+    if (typeof UploadModule !== 'undefined' && typeof UploadModule.clearUploadTransientFileRefs === 'function') {
+      UploadModule.clearUploadTransientFileRefs(source);
+    }
+  }
   /********************************************************************
    * 4. AutoQueueModule：自动指令队列模块
    ********************************************************************/
@@ -24498,29 +26382,6 @@ const AutoQueueModule = (() => {
       createDefaultAutoConfig(),
       MemoryManager.get(MemoryManager.KEYS.autoQueueConfig, null) || {},
     );
-
-    function createNumberInput(options = {}) {
-      const input = document.createElement('input');
-      input.type = 'number';
-      input.setAttribute('data-no-wheel-number', '1');
-
-      if (options.value !== undefined) input.value = String(options.value);
-      if (options.min !== undefined) input.min = String(options.min);
-      if (options.max !== undefined) input.max = String(options.max);
-      if (options.step !== undefined) input.step = String(options.step);
-      if (options.placeholder) input.placeholder = options.placeholder;
-      if (options.className) input.className = options.className;
-      if (options.id) input.id = options.id;
-
-      input.addEventListener('wheel', (event) => {
-        event.preventDefault();
-        if (document.activeElement === input) {
-          input.blur();
-        }
-      }, { passive: false });
-
-      return input;
-    }
 
     function repairAutoQueuePromptConfigIfNeeded() {
       const continueText = String(config.continuePromptsText || '').trim();
@@ -24912,7 +26773,7 @@ const AutoQueueModule = (() => {
       const shouldLog = !!(options && options.log);
       const taskTemplate = String(task && task.continuePromptTemplate || '').trim();
       const profileTemplate = String(
-        profile && (profile.continuePromptTemplate || profile.defaultContinuePrompt) || '',
+        profile && profile.continuePromptTemplate || '',
       ).trim();
       const systemDefault = BATCH_CONTINUE_TEMPLATE;
 
@@ -25490,6 +27351,17 @@ const AutoQueueModule = (() => {
       settingsNext: null,
     };
 
+    function syncBatchSubTabRefs() {
+      if (!root) {
+        return;
+      }
+
+      batchSubTabContentEl = qs('#cgpt-autoq-batch-subtab-content', root);
+      taskListEl = qs('#cgpt-autoq-task-list', root);
+      taskEditorEl = qs('#cgpt-autoq-task-editor', root);
+      taskProfileDefaultsEl = qs('#cgpt-autoq-task-profile-defaults', root);
+    }
+
     function refreshBatchTaskPanelRefs() {
       if (!taskPanelEl) return;
 
@@ -25541,7 +27413,6 @@ const AutoQueueModule = (() => {
               </div>
             </div>
             <div class="cgpt-autoq-task-list" id="cgpt-autoq-task-list"></div>
-            <div class="cgpt-autoq-batch-actions-slot" id="cgpt-autoq-batch-actions-slot"></div>
           </div>
         </div>
         <div class="cgpt-autoq-batch-tab-panel cgpt-toolbox-hidden" data-batch-tab-panel="current">
@@ -25625,16 +27496,23 @@ const AutoQueueModule = (() => {
 
       const actionsEl = qs('.cgpt-autoq-actions', root);
       const settingsEl = qs('.cgpt-autoq-settings-section', root);
-      const actionsSlot = qs('#cgpt-autoq-batch-actions-slot', root);
       const settingsSlot = qs('#cgpt-autoq-batch-settings-slot', root);
 
-      if (actionsEl && actionsSlot && actionsEl.parentElement !== actionsSlot) {
+      refreshBatchTaskPanelRefs();
+      const subtabsEl = batchSubTabsEl || (taskPanelEl ? qs('#cgpt-autoq-batch-subtabs', taskPanelEl) : null);
+
+      if (actionsEl && taskPanelEl && subtabsEl) {
         if (!batchUiRestore.actionsParent) {
           batchUiRestore.actionsParent = actionsEl.parentElement;
           batchUiRestore.actionsNext = actionsEl.nextSibling;
         }
 
-        actionsSlot.appendChild(actionsEl);
+        actionsEl.classList.add('cgpt-autoq-top-action-bar');
+        actionsEl.id = 'cgpt-autoq-top-action-bar';
+
+        if (actionsEl.parentElement !== taskPanelEl || actionsEl.nextElementSibling !== subtabsEl) {
+          taskPanelEl.insertBefore(actionsEl, subtabsEl);
+        }
       }
 
       if (settingsEl && settingsSlot && settingsEl.parentElement !== settingsSlot) {
@@ -25651,8 +27529,15 @@ const AutoQueueModule = (() => {
     function restoreBatchModeUiBlocks() {
       if (!root) return;
 
-      const actionsEl = qs('.cgpt-autoq-actions', root);
+      const actionsEl = qs('.cgpt-autoq-actions', root) || qs('#cgpt-autoq-top-action-bar', root);
       const settingsEl = qs('.cgpt-autoq-settings-section', root);
+
+      if (actionsEl) {
+        actionsEl.classList.remove('cgpt-autoq-top-action-bar');
+        if (actionsEl.id === 'cgpt-autoq-top-action-bar') {
+          actionsEl.removeAttribute('id');
+        }
+      }
 
       if (actionsEl && batchUiRestore.actionsParent) {
         if (batchUiRestore.actionsNext) {
@@ -26890,26 +28775,17 @@ const AutoQueueModule = (() => {
     }
 
     function log(text) {
-      const line = `[${nowTimeText()}] ${String(text || '')}`;
+      ToolboxShell.appendLog(`[自动指令] ${text}`);
       const modeSettings = getModeSettings(config.promptMode);
 
-      if (logEl) {
-        logEl.textContent = `${line}\n${logEl.textContent || ''}`.slice(0, 6000);
+      if (modeSettings.autoScrollPanel && root) {
+        const page = root.closest('.cgpt-toolbox-page');
 
-        if (modeSettings.logPinned) {
-          logEl.scrollTop = 0;
-        }
-
-        if (modeSettings.autoScrollPanel && root) {
-          const page = root.closest('.cgpt-toolbox-page');
-
-          if (page) {
-            page.scrollTop = page.scrollHeight;
-          }
+        if (page) {
+          page.scrollTop = page.scrollHeight;
         }
       }
 
-      ToolboxShell.appendLog(`[自动指令] ${text}`);
       updateStatus();
     }
 
@@ -27257,9 +29133,7 @@ const AutoQueueModule = (() => {
         ? activeContinueEl.id
         : '';
       const rawTemplateText = String(
-        profile.continuePromptTemplate
-        || profile.defaultContinuePrompt
-        || BATCH_CONTINUE_TEMPLATE,
+        profile.continuePromptTemplate || BATCH_CONTINUE_TEMPLATE,
       );
       const templateText = typeof getContinuePromptTemplateForDisplay === 'function'
         ? getContinuePromptTemplateForDisplay(
@@ -27451,7 +29325,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      const hasContinueOverride = String(task.continuePromptTemplate || task.continuePrompt || '').trim().length > 0;
+      const hasContinueOverride = String(task.continuePromptTemplate || '').trim().length > 0;
       const profileDoneSignal = typeof repairCorruptedDoneSignalText === 'function'
         ? repairCorruptedDoneSignalText(profile && profile.defaultDoneSignal, null)
         : String(profile && profile.defaultDoneSignal || TASK_DONE_SIGNAL);
@@ -27488,7 +29362,7 @@ const AutoQueueModule = (() => {
               </label>
               <div class="cgpt-kv cgpt-autoq-task-editor-full cgpt-autoq-task-continue-wrap${hasContinueOverride ? '' : ' cgpt-toolbox-hidden'}">
                 <label for="cgpt-autoq-task-continue">任务级继续指令</label>
-                <textarea class="cgpt-textarea" id="cgpt-autoq-task-continue" rows="4">${escapeHtml(task.continuePromptTemplate || task.continuePrompt || '')}</textarea>
+                <textarea class="cgpt-textarea" id="cgpt-autoq-task-continue" rows="4">${escapeHtml(task.continuePromptTemplate || '')}</textarea>
               </div>
               <div class="cgpt-kv">
                 <label for="cgpt-autoq-task-done-signal">单独终止信号（留空继承任务组：${escapeHtml(profileDoneSignal)}）</label>
@@ -28066,13 +29940,8 @@ const AutoQueueModule = (() => {
       <div>当前步骤：-</div>
     </div>`;
 
-      const recentLog = logEl
-        ? String(logEl.textContent || '').split('\n').map((x) => x.trim()).find(Boolean) || ''
-        : '';
-
       if (mainLiteEl) {
-        mainLiteEl.innerHTML = `${liteHtml}
-    <div class="cgpt-autoq-status-recent" title="${escapeHtml(recentLog)}">最近：${escapeHtml(recentLog || '-')}</div>`;
+        mainLiteEl.innerHTML = liteHtml;
       }
 
       if (startBtn) {
@@ -28490,6 +30359,17 @@ const AutoQueueModule = (() => {
 
     function tick() {
       try {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          if (state.running || state.waitingReply) {
+            stop({
+              reason: 'page-navigation',
+              logStop: false,
+              markCurrent: false,
+            });
+          }
+          return;
+        }
+
         if (!state.running && !state.waitingReply) {
           return;
         }
@@ -28677,14 +30557,6 @@ const AutoQueueModule = (() => {
         }, 'autoq-send-once');
       }
 
-      const clearLogBtn = qs('#cgpt-autoq-clear-log', root);
-      if (clearLogBtn) {
-        bindOnce(clearLogBtn, 'click', () => {
-          if (logEl) logEl.textContent = '';
-          updateStatus();
-        }, 'autoq-clear-log');
-      }
-
       if (listProfilesEl) {
         bindOnce(listProfilesEl, 'click', (e) => {
           const btn = e.target instanceof HTMLElement
@@ -28785,7 +30657,7 @@ const AutoQueueModule = (() => {
       if (existed) {
         root = existed;
         promptsEl = qs('#cgpt-autoq-prompts', root);
-        logEl = qs('#cgpt-autoq-log', root);
+        logEl = null;
         startBtn = qs('#cgpt-autoq-start', root);
         stopBtn = qs('#cgpt-autoq-stop', root);
         listPanelEl = qs('#cgpt-autoq-list-panel', root);
@@ -28795,12 +30667,15 @@ const AutoQueueModule = (() => {
         mainLiteEl = qs('#cgpt-autoq-main-lite', root);
         startUploadBtn = ensureAutoQueueStartUploadButton();
         normalizeAutoConfig(config);
-        ensureBatchSubTabShell();
+        renderTaskPanelVisibility();
+        syncBatchSubTabRefs();
         refreshBatchTaskPanelRefs();
         bindEvents();
         bindTaskPanelEvents();
-        renderTaskPanelVisibility();
         renderTaskProfiles();
+        renderTaskList();
+        renderTaskEditor();
+        renderTaskProfileDefaults();
         updateStatus();
         return;
       }
@@ -28853,7 +30728,6 @@ const AutoQueueModule = (() => {
             <button type="button" class="cgpt-btn success" id="cgpt-autoq-start">开始</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">发送一次</button>
             <button type="button" class="cgpt-btn danger" id="cgpt-autoq-stop" disabled>停止</button>
-            <button type="button" class="cgpt-btn" id="cgpt-autoq-clear-log">清空日志</button>
           </div>
         </div>
 
@@ -28864,11 +30738,6 @@ const AutoQueueModule = (() => {
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-autoq-loop" ${uiModeSettings.loopMode ? 'checked' : ''}>
               循环模式
-            </label>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-autoq-log-pinned" ${uiModeSettings.logPinned ? 'checked' : ''}>
-              日志置顶
             </label>
 
             <div class="cgpt-kv">
@@ -28894,17 +30763,12 @@ const AutoQueueModule = (() => {
 
           <div class="cgpt-hint">最大循环次数为 0 表示不限制。</div>
         </div>
-
-        <div class="cgpt-section cgpt-autoq-log-section">
-          <div class="cgpt-section-title">日志</div>
-          <div id="cgpt-autoq-log" class="cgpt-autoq-log"></div>
-        </div>
       `
 
       targetHost.appendChild(root);
 
       promptsEl = qs('#cgpt-autoq-prompts', root);
-      logEl = qs('#cgpt-autoq-log', root);
+      logEl = null;
       startBtn = qs('#cgpt-autoq-start', root);
       startUploadBtn = qs('#cgpt-autoq-start-upload', root);
       stopBtn = qs('#cgpt-autoq-stop', root);
@@ -28922,15 +30786,18 @@ const AutoQueueModule = (() => {
       applyModeSettingsToUi(config.promptMode);
       refreshPromptTextareaForMode(config.promptMode);
       updateModeTabs();
-      ensureBatchSubTabShell();
+      renderListPanelVisibility();
+      renderTaskPanelVisibility();
+      syncBatchSubTabRefs();
       refreshBatchTaskPanelRefs();
+      renderListProfiles();
+      renderTaskProfiles();
+      renderTaskList();
+      renderTaskEditor();
+      renderTaskProfileDefaults();
 
       bindEvents();
       bindTaskPanelEvents();
-      renderListPanelVisibility();
-      renderTaskPanelVisibility();
-      renderListProfiles();
-      renderTaskProfiles();
       updateStatus();
     }
 
@@ -28952,6 +30819,8 @@ const AutoQueueModule = (() => {
 
     return {
       mount,
+      stop,
+      stopAutoContinue: stop,
       triggerContinueOnce,
       refreshProgressStatus,
       getModeLabel: getAutoQueueModeLabel,
@@ -31386,7 +33255,20 @@ const AutoQueueModule = (() => {
           typeof TitlePrefixModule !== 'undefined'
           && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
         ) {
-          TitlePrefixModule.startReplyDoneFlash('settings-test');
+          TitlePrefixModule.startReplyDoneFlash('settings-test', {
+            intervalMs: 450,
+            autoStopMs: 2400,
+          });
+
+          if (
+            typeof ToolboxShell !== 'undefined'
+            && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+          ) {
+            ToolboxShell.flashHeaderTitleOnce('回复完成', {
+              intervalMs: 450,
+              autoStopMs: 2400,
+            });
+          }
 
           if (statusEl) {
             statusEl.textContent = '已开始测试标题闪烁';
@@ -31683,6 +33565,9 @@ const AutoQueueModule = (() => {
     const state = {
       root: null,
       timerId: 0,
+      bridgePollFailCount: 0,
+      bridgePollTimer: 0,
+      bridgePollLoopActive: false,
       bridgeRunId: 0,
       polling: false,
       handlingMessageId: null,
@@ -31699,7 +33584,6 @@ const AutoQueueModule = (() => {
       uploadBlockNextChatSourceMessageId: '',
       pendingReplyContext: null,
       lastReplyWatchResponding: false,
-      bridgeChatQueue: [],
       advancedCapabilityExpanded: false,
     };
 
@@ -31753,7 +33637,7 @@ const AutoQueueModule = (() => {
         bridgeApiToken: String(MemoryManager.get('bridgeApiToken', '') || '').trim(),
         bridgeDebugEnabled: !!MemoryManager.get('bridgeDebugEnabled', false),
         bridgeRequestTimeoutMs: Number(MemoryManager.get('bridgeRequestTimeoutMs', 30000)) || 30000,
-        bridgePollIntervalMs: Number(MemoryManager.get('bridgePollIntervalMs', 1000)) || 1000,
+        bridgePollIntervalMs: Number(MemoryManager.get('bridgePollIntervalMs', 3000)) || 3000,
       };
     }
 
@@ -31787,19 +33671,26 @@ const AutoQueueModule = (() => {
       return `${cfg.bridgeBaseUrl}${cfg.bridgePath}`;
     }
 
-    function logBridgeError(text, errorObj) {
+    function logBridgeError(message, error) {
+      const text = String(message || error || 'unknown');
       const now = Date.now();
-      const content = String(text || 'unknown_error');
-      const shouldLog = content !== state.lastErrorText || (now - state.lastErrorLogAt) >= 5000;
-      if (!shouldLog) return;
-      state.lastErrorText = content;
-      state.lastErrorLogAt = now;
-      if (errorObj) {
-        console.error('[BridgeModule]', content, errorObj);
-      } else {
-        console.error('[BridgeModule]', content);
+      const sameError = text === state.lastErrorText;
+
+      if (sameError && now - state.lastErrorLogAt < 5000) {
+        return;
       }
-      ToolboxShell.appendLog(`[BRIDGE][ERROR] ${content}`);
+
+      state.lastErrorLogAt = now;
+      state.lastErrorText = text;
+
+      console.error('[BRIDGE][ERROR]', text, error || '');
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        const errText = error && error.message ? error.message : String(error || '');
+        ToolboxShell.appendLog(
+          `[BRIDGE][ERROR] ${text}${errText && errText !== text ? ` error=${errText}` : ''}`,
+        );
+      }
     }
 
     function debugLog(text) {
@@ -32136,7 +34027,11 @@ const AutoQueueModule = (() => {
           can_send_now: Boolean(responseState.can_send_now),
         };
         logIdentityThrottled(identity);
-        logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
+
+        const cfg = getConfig();
+        if (cfg.bridgeDebugEnabled) {
+          logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
+        }
 
         return identity;
       } catch (error) {
@@ -32186,7 +34081,7 @@ const AutoQueueModule = (() => {
       }
     }
 
-    const DEBUG_FULL_BRIDGE_JSON = true;
+    const DEBUG_FULL_BRIDGE_JSON = false;
 
     const BRIDGE_JSON_QUIET_REPORT_EVENTS = new Set([
       'focus_state',
@@ -32217,11 +34112,34 @@ const AutoQueueModule = (() => {
     }
 
     function shouldLogFullBridgeJson(payload) {
-      if (!DEBUG_FULL_BRIDGE_JSON || !payload) {
+      if (!payload) {
         return false;
       }
+
+      const cfg = getConfig();
+      const debugEnabled = !!cfg.bridgeDebugEnabled;
       const action = String(payload.action || '').trim();
       const event = String(payload.event || '').trim();
+
+      if (!DEBUG_FULL_BRIDGE_JSON && !debugEnabled) {
+        if (action === 'assistant_reply') {
+          return true;
+        }
+
+        if (action === 'ack') {
+          return true;
+        }
+
+        if (action === 'report') {
+          if (BRIDGE_JSON_QUIET_REPORT_EVENTS.has(event)) {
+            return false;
+          }
+          return event === 'assistant_reply';
+        }
+
+        return false;
+      }
+
       if (
         action === 'poll'
         || action === 'ack'
@@ -32231,12 +34149,14 @@ const AutoQueueModule = (() => {
       ) {
         return true;
       }
+
       if (action === 'report') {
         if (BRIDGE_JSON_QUIET_REPORT_EVENTS.has(event)) {
           return false;
         }
         return true;
       }
+
       return false;
     }
 
@@ -32472,6 +34392,72 @@ const AutoQueueModule = (() => {
     function getPendingReplyContextKey(pageInstanceId = PAGE_INSTANCE_ID) {
       const safeId = String(pageInstanceId || CLIENT_ID || 'default').trim() || 'default';
       return `cgpt_pending_reply_context:${safeId}`;
+    }
+
+    function clearPendingReplyContext(reason = '') {
+      state.pendingReplyContext = null;
+      try {
+        localStorage.removeItem(getPendingReplyContextKey());
+        localStorage.removeItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][CLEAR_FAILED]', {
+          reason,
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+      }
+    }
+
+    function cleanupPendingReplyContextStorage() {
+      const now = Date.now();
+      const ttlMs = 24 * 60 * 60 * 1000;
+      const prefix = 'cgpt_pending_reply_context:';
+      try {
+        Object.keys(localStorage).forEach((key) => {
+          if (!key.startsWith(prefix)) {
+            return;
+          }
+          let ctx = null;
+          try {
+            ctx = JSON.parse(localStorage.getItem(key) || 'null');
+          } catch (parseError) {
+            console.error('[REPLY_CONTEXT][CLEANUP_PARSE_FAILED]', {
+              key,
+              error_type: parseError && parseError.name,
+              error: parseError && parseError.message,
+              stack: parseError && parseError.stack,
+            });
+          }
+          const sentAt = Number((ctx && ctx.sent_at) || 0);
+          if (!ctx || ctx.reply_reported || !sentAt || now - sentAt > ttlMs) {
+            localStorage.removeItem(key);
+          }
+        });
+        const legacyRaw = localStorage.getItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+        if (legacyRaw) {
+          let legacyCtx = null;
+          try {
+            legacyCtx = JSON.parse(legacyRaw);
+          } catch (legacyParseError) {
+            console.error('[REPLY_CONTEXT][CLEANUP_LEGACY_PARSE_FAILED]', {
+              error_type: legacyParseError && legacyParseError.name,
+              error: legacyParseError && legacyParseError.message,
+              stack: legacyParseError && legacyParseError.stack,
+            });
+          }
+          const legacySentAt = Number((legacyCtx && legacyCtx.sent_at) || 0);
+          if (!legacyCtx || legacyCtx.reply_reported || !legacySentAt || now - legacySentAt > ttlMs) {
+            localStorage.removeItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+          }
+        }
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][CLEANUP_FAILED]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+      }
     }
 
     function getConversationIdFromLocation() {
@@ -32855,17 +34841,7 @@ const AutoQueueModule = (() => {
         logAssistantReplyReportFull(payload, ctx.message_id);
 
         ctx.reply_reported = true;
-        state.pendingReplyContext = ctx;
-
-        try {
-          localStorage.setItem(getPendingReplyContextKey(), JSON.stringify(ctx));
-        } catch (storageError) {
-          console.error('[REPLY_CONTEXT][MARK_REPORTED_FAILED]', {
-            error_type: storageError && storageError.name,
-            error: storageError && storageError.message,
-            stack: storageError && storageError.stack,
-          });
-        }
+        clearPendingReplyContext('reported');
 
         console.log('[REPLY_REPORT][DONE]', {
           message_id: ctx.message_id,
@@ -32995,6 +34971,12 @@ const AutoQueueModule = (() => {
       updateChatInputStateBadge();
 
       while (Date.now() - startedAt < timeoutMs) {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          ChatInputStateRuntime.waitingForReply = false;
+          updateChatInputStateBadge();
+          return false;
+        }
+
         const busy = safeCheckAssistantBusy();
 
         if (busy) {
@@ -33886,8 +35868,18 @@ const AutoQueueModule = (() => {
       const content = bridgeContentFrom(normalized);
 
       if (typeof hasPendingReply === 'function' && hasPendingReply(sessionId)) {
-        const queuedEntry = createQueuedMessageEntry(normalized);
-        CHAT_QUEUE.push(queuedEntry);
+        const queueResult = typeof enqueueChatQueueEntry === 'function'
+          ? enqueueChatQueueEntry(normalized, 'pending-reply')
+          : { ok: true, queued: true, duplicate: false, entry: createQueuedMessageEntry(normalized) };
+        if (queueResult.duplicate) {
+          return {
+            handled: true,
+            ok: true,
+            queued: true,
+            duplicate: true,
+            reason: 'duplicate_message_id',
+          };
+        }
 
         ToolboxShell.appendLog(
           `[SEND][BLOCK] reason=pending_reply message_id=${String(messageId || '').slice(0, 8)}`
@@ -33913,8 +35905,18 @@ const AutoQueueModule = (() => {
       }
 
       if (state.handlingMessageId && state.handlingMessageId !== messageId) {
-        const busyEntry = createQueuedMessageEntry(normalized);
-        CHAT_QUEUE.push(busyEntry);
+        const queueResult = typeof enqueueChatQueueEntry === 'function'
+          ? enqueueChatQueueEntry(normalized, 'handling-other')
+          : { ok: true, queued: true, duplicate: false, entry: createQueuedMessageEntry(normalized) };
+        if (queueResult.duplicate) {
+          return {
+            handled: true,
+            ok: true,
+            queued: true,
+            duplicate: true,
+            reason: 'duplicate_message_id',
+          };
+        }
 
         ToolboxShell.appendLog(
           `[SEND][BLOCK] reason=handling_other_message current=${String(state.handlingMessageId || '').slice(0, 8)} incoming=${String(messageId || '').slice(0, 8)}`
@@ -34048,7 +36050,7 @@ const AutoQueueModule = (() => {
       const cfg = getConfig();
 
       if (!cfg.bridgeEnabled || state.polling) {
-        return;
+        return true;
       }
 
       if (state.handlingMessageId) {
@@ -34071,7 +36073,7 @@ const AutoQueueModule = (() => {
           }, state.handlingMessageId);
         }
 
-        return;
+        return true;
       }
 
       const runId = state.bridgeRunId;
@@ -34079,9 +36081,9 @@ const AutoQueueModule = (() => {
       try {
         const result = await apiRequest({ action: 'poll' });
 
-        if (runId !== state.bridgeRunId || !state.timerId) {
+        if (runId !== state.bridgeRunId || !state.bridgePollLoopActive) {
           ToolboxShell.appendLog('[BRIDGE][POLL][STALE_RESULT_IGNORED]');
-          return;
+          return true;
         }
 
         applyBridgeStateFromPollResult(result, 'poll');
@@ -34098,7 +36100,7 @@ const AutoQueueModule = (() => {
 
         const handled = await handleOutboundMessage(result);
 
-        if (runId === state.bridgeRunId && state.timerId) {
+        if (runId === state.bridgeRunId && state.bridgePollLoopActive) {
           markBridgePollSuccess();
           if (!handled || handled.handled !== true || handled.ok === true) {
             const pres = getBridgePollStatusPresentation();
@@ -34116,6 +36118,7 @@ const AutoQueueModule = (() => {
             updateChatInputStateBadge();
           }
         }
+        return true;
       } catch (error) {
         const errName = error && error.name ? error.name : 'Error';
         const errText = error && error.message ? error.message : String(error);
@@ -34135,12 +36138,7 @@ const AutoQueueModule = (() => {
           `[pollBridge][failed] action=poll url=${bridgeUrl} type=${errName} error=${errText}`,
           error,
         );
-
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(
-            `[BRIDGE][POLL][FAILED] url=${bridgeUrl} type=${errName} error=${errText}`,
-          );
-        }
+        return false;
       } finally {
         if (runId === state.bridgeRunId) {
           state.polling = false;
@@ -34274,8 +36272,73 @@ const AutoQueueModule = (() => {
       state.pageIdentityListenersInstalled = false;
     }
 
+    function getNextBridgePollDelayMs(ok) {
+      const cfg = getConfig();
+
+      if (ok) {
+        state.bridgePollFailCount = 0;
+        return Math.max(1000, Number(cfg.bridgePollIntervalMs || 3000));
+      }
+
+      state.bridgePollFailCount = Math.min(Number(state.bridgePollFailCount || 0) + 1, 5);
+
+      if (state.bridgePollFailCount <= 1) {
+        return 3000;
+      }
+
+      if (state.bridgePollFailCount === 2) {
+        return 5000;
+      }
+
+      if (state.bridgePollFailCount === 3) {
+        return 10000;
+      }
+
+      return 15000;
+    }
+
+    function scheduleBridgePoll(ok) {
+      if (state.bridgePollTimer) {
+        window.clearTimeout(state.bridgePollTimer);
+        state.bridgePollTimer = 0;
+      }
+
+      const delayMs = getNextBridgePollDelayMs(ok);
+
+      state.bridgePollTimer = window.setTimeout(() => {
+        state.bridgePollTimer = 0;
+        void runBridgePollLoop();
+      }, delayMs);
+    }
+
+    async function runBridgePollLoop() {
+      if (!getConfig().bridgeEnabled || !state.bridgePollLoopActive) {
+        return;
+      }
+
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        stop();
+        return;
+      }
+
+      let ok = true;
+
+      try {
+        checkPageIdentityChange();
+        ok = (await pollBridge()) !== false;
+      } catch (error) {
+        ok = false;
+        logBridgeError('[pollBridge][loop-failed]', error);
+      } finally {
+        if (state.bridgePollLoopActive) {
+          scheduleBridgePoll(ok);
+        }
+      }
+    }
+
     function start() {
       stop();
+      cleanupPendingReplyContextStorage();
       const cfg = getConfig();
       if (!cfg.bridgeEnabled) {
         resetBridgePollRuntime('bridge_disabled');
@@ -34283,6 +36346,8 @@ const AutoQueueModule = (() => {
         return;
       }
       state.bridgeRunId += 1;
+      state.bridgePollFailCount = 0;
+      state.bridgePollLoopActive = true;
       state.lastIdentityKey = identityKey(getPageIdentity());
       state.lastIdentityLogKey = '';
       state.pendingIdentityOldKey = '';
@@ -34290,17 +36355,18 @@ const AutoQueueModule = (() => {
       installFocusStateListeners();
       installPageIdentityListeners();
       reportFocusState('bridge_start');
-      pollBridge();
-      state.timerId = window.setInterval(() => {
-        checkPageIdentityChange();
-        pollBridge();
-      }, cfg.bridgePollIntervalMs);
+      void runBridgePollLoop();
       updateStatus(`已启动：${getBridgeUrl()}`);
       ToolboxShell.appendLog(`[BRIDGE][START] ${getBridgeUrl()}`);
     }
 
     function stop() {
       state.bridgeRunId += 1;
+      state.bridgePollLoopActive = false;
+      if (state.bridgePollTimer) {
+        window.clearTimeout(state.bridgePollTimer);
+        state.bridgePollTimer = 0;
+      }
       if (state.timerId) {
         window.clearInterval(state.timerId);
         state.timerId = 0;
@@ -34309,6 +36375,7 @@ const AutoQueueModule = (() => {
       removeFocusStateListeners();
       removePageIdentityListeners();
       state.polling = false;
+      state.bridgePollFailCount = 0;
       resetBridgePollRuntime('bridge_stopped');
       updateStatus('已停止');
     }
@@ -34393,7 +36460,7 @@ const AutoQueueModule = (() => {
         key: 'bridgePollIntervalMs',
         selector: '#cgpt-bridge-interval',
         type: 'number',
-        defaultValue: 1000,
+        defaultValue: 3000,
       },
     ]);
 
@@ -34892,10 +36959,21 @@ const AutoQueueModule = (() => {
 
     return {
       mount,
+      stop,
       handleRouteChange,
       sendSystemHotkey,
     };
   })();
+
+  function stopAutoContinue(reason) {
+    if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.stop === 'function') {
+      AutoQueueModule.stop({
+        reason: reason || 'page-navigation',
+        logStop: false,
+        markCurrent: false,
+      });
+    }
+  }
 
   /********************************************************************
    * 7. ExportModule：导出统计模   ********************************************************************/
@@ -35504,12 +37582,13 @@ Prompt 总数：${promptCount}
    ********************************************************************/
 
   const LogModule = (() => {
-    // 环形缓冲区上限
-    const MAX_LOG_BUFFER_LINES = 3000;
+    const TOOLBOX_MAX_DOM_LOG_LINES = 500;
+    const TOOLBOX_MAX_MEMORY_LOG_LINES = 1000;
+    const TOOLBOX_MAX_LOG_TEXT_LEN = 3000;
     // 默认显示条数
-    const DEFAULT_LOG_RENDER_LIMIT = 200;
+    const DEFAULT_LOG_RENDER_LIMIT = 100;
     // 持久化存储上限
-    const PERSIST_MAX_LINES = 1000;
+    const PERSIST_MAX_LINES = 300;
 
     const state = {
       lines: [],
@@ -35525,6 +37604,14 @@ Prompt 总数：${promptCount}
     const logTimers = createTimerRegistry('LOG');
     let logDomDirty = false;
     let renderScheduled = false;
+
+    function normalizeToolboxLogText(text) {
+      const raw = String(text || '');
+      if (raw.length <= TOOLBOX_MAX_LOG_TEXT_LEN) {
+        return raw;
+      }
+      return `${raw.slice(0, TOOLBOX_MAX_LOG_TEXT_LEN)} ...[truncated ${raw.length - TOOLBOX_MAX_LOG_TEXT_LEN}]`;
+    }
 
     function isLogPersistEnabled() {
       return !!MemoryManager.get(MemoryManager.KEYS.logPersistEnabled, false);
@@ -35732,13 +37819,12 @@ Prompt 总数：${promptCount}
       const batch = logBuffer.splice(0, logBuffer.length);
 
       batch.forEach((text) => {
-        const line = `[${nowTimeText()}] ${String(text || '')}`;
+        const line = `[${nowTimeText()}] ${normalizeToolboxLogText(text)}`;
         state.lines.unshift(line);
       });
 
-      // 环形缓冲区裁剪
-      if (state.lines.length > MAX_LOG_BUFFER_LINES) {
-        state.lines.length = MAX_LOG_BUFFER_LINES;
+      if (state.lines.length > TOOLBOX_MAX_MEMORY_LOG_LINES) {
+        state.lines.length = TOOLBOX_MAX_MEMORY_LOG_LINES;
       }
 
       logDomDirty = true;
@@ -35778,7 +37864,11 @@ Prompt 总数：${promptCount}
     }
 
     function add(text) {
-      logBuffer.push(String(text || ''));
+      logBuffer.push(normalizeToolboxLogText(text));
+
+      if (logBuffer.length > TOOLBOX_MAX_DOM_LOG_LINES) {
+        logBuffer.splice(0, logBuffer.length - TOOLBOX_MAX_DOM_LOG_LINES);
+      }
 
       if (!logTimers.has('log-flush')) {
         logTimers.timeout('log-flush', flushLogBuffer, 200);
@@ -35804,7 +37894,10 @@ Prompt 总数：${promptCount}
         return;
       }
 
-      const recentLines = state.lines.slice(0, state.renderLimit);
+      const recentLines = state.lines.slice(
+        0,
+        Math.min(state.renderLimit, TOOLBOX_MAX_DOM_LOG_LINES, 100),
+      );
       listEl.innerHTML = recentLines
         .map((line) => `<div class="cgpt-log-line">${escapeHtml(line)}</div>`)
         .join('');
@@ -35841,6 +37934,10 @@ async function safeInitStep(name, fn) {
 }
 
 async function mountAllModules(reason = 'init') {
+  if (typeof cleanupRuntimeHandles === 'function') {
+    cleanupRuntimeHandles(`mount:${reason}`);
+  }
+
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT] reason=${reason}`);
   }
@@ -35901,6 +37998,10 @@ async function mountAllModules(reason = 'init') {
     }
   }
 
+  if (typeof bindConversationTurnCountObserver === 'function') {
+    bindConversationTurnCountObserver();
+  }
+
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_DONE] reason=${reason}`);
   }
@@ -35909,6 +38010,12 @@ async function mountAllModules(reason = 'init') {
 async function initToolbox() {
   await safeInitStep('ToolboxShell.create', () => {
     ToolboxShell.create();
+  });
+
+  await safeInitStep('validateCanonicalFieldsOnStartup', () => {
+    if (typeof validateCanonicalFieldsOnStartup === 'function') {
+      validateCanonicalFieldsOnStartup();
+    }
   });
 
   await safeInitStep('TitlePrefixModule.start', () => {
@@ -36131,7 +38238,7 @@ if (document.readyState === 'loading') {
 
           const containerForText = node instanceof HTMLElement ? node : el;
           const fullTurnRawText = String(
-            containerForText.textContent || containerForText.innerText || '',
+            containerForText.innerText || containerForText.textContent || '',
           );
           const extractResult = getFullMessageTextFromElement(el);
           const finalPick = chooseAssistantFinalAnswerText(
@@ -36270,12 +38377,174 @@ if (document.readyState === 'loading') {
 
     function buildStableSignature(record, text) {
       return [
-        record.turn_id || '',
+        record.turn_id || record.turnId || '',
         text,
-        String(record.char_count || 0),
+        String(record.char_count || record.charCount || 0),
         String(record.no_space_char_count || 0),
       ].join('||');
     }
+
+    const FAST_TAIL_TURN_COUNT = 8;
+
+    function isTurnElementVisible(turnEl) {
+      if (!(turnEl instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (typeof isElementVisible === 'function') {
+        return isElementVisible(turnEl);
+      }
+
+      const rect = turnEl.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+
+    function collectConversationTurnElements(options = {}) {
+      const includeHidden = options.includeHidden === true;
+      const main = document.querySelector('main') || document.body;
+
+      if (!(main instanceof HTMLElement)) {
+        return [];
+      }
+
+      return Array.from(main.querySelectorAll(
+        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+      )).filter((el) => {
+        if (!(el instanceof HTMLElement)) {
+          return false;
+        }
+
+        if (!includeHidden && !isTurnElementVisible(el)) {
+          return false;
+        }
+
+        if (isToolboxRoot(el) || isInToolbox(el)) {
+          return false;
+        }
+
+        if (isInComposerArea(el)) {
+          return false;
+        }
+
+        return true;
+      });
+    }
+
+    function buildMessageRecordFromTurnElement(turnEl) {
+      if (!(turnEl instanceof HTMLElement)) {
+        return null;
+      }
+
+      const roleNode = turnEl.querySelector('[data-message-author-role]');
+      const messageEl = roleNode instanceof HTMLElement ? roleNode : turnEl;
+      const role = resolveMessageRole(messageEl);
+
+      if (role && !['assistant', 'user', 'system', 'tool', 'unknown'].includes(role)) {
+        return null;
+      }
+
+      const fullTurnRawText = String(
+        turnEl.innerText || turnEl.textContent || '',
+      );
+      const extractResult = typeof getFullMessageTextFromElement === 'function'
+        ? getFullMessageTextFromElement(messageEl)
+        : { text: fullTurnRawText, source: 'turn-text' };
+      const finalPick = typeof chooseAssistantFinalAnswerText === 'function'
+        ? chooseAssistantFinalAnswerText(
+          fullTurnRawText,
+          extractResult.text,
+          { turnId: typeof getConversationTurnId === 'function' ? getConversationTurnId(messageEl) : '' },
+        )
+        : { text: extractResult.text || fullTurnRawText, source: extractResult.source || 'unknown' };
+      const text = cleanMessageText(finalPick.text);
+
+      if (!text) {
+        return null;
+      }
+
+      const turnId = typeof getConversationTurnId === 'function'
+        ? getConversationTurnId(messageEl)
+        : '';
+      const stats = typeof getCopiedTextStats === 'function'
+        ? getCopiedTextStats(text)
+        : { charCount: text.length };
+
+      return {
+        role,
+        text,
+        turn_id: turnId,
+        char_count: stats.charCount,
+        extract_source: finalPick.source || extractResult.source || 'unknown',
+      };
+    }
+
+    function getFastTailMessageRecords(options = {}) {
+      const includeHidden = options.includeHidden === true;
+      const turns = collectConversationTurnElements({ includeHidden });
+      const tailTurns = turns.slice(-FAST_TAIL_TURN_COUNT);
+      const records = [];
+
+      tailTurns.forEach((turnEl, offset) => {
+        const record = buildMessageRecordFromTurnElement(turnEl);
+
+        if (record && record.text) {
+          record.index = offset;
+          records.push(record);
+        }
+      });
+
+      records.forEach((record, index) => {
+        record.index = index;
+      });
+
+      return records;
+    }
+
+    function getLatestConversationMessageRecordFromTail(options = {}) {
+      const preferAssistant = options.preferAssistant !== false;
+      const preferredRole = String(options.role || '').toLowerCase();
+      const records = getFastTailMessageRecords({
+        includeHidden: options.includeHidden === true,
+      });
+
+      if (!records.length) {
+        return null;
+      }
+
+      if (preferredRole) {
+        for (let i = records.length - 1; i >= 0; i -= 1) {
+          if (records[i].role === preferredRole) {
+            return records[i];
+          }
+        }
+
+        return null;
+      }
+
+      if (preferAssistant) {
+        const picked = getLatestAssistantAfterLatestUser(records, {
+          allowNoUserFallback: options.allowNoUserFallback === true,
+        });
+
+        if (picked.ok && picked.record) {
+          return picked.record;
+        }
+
+        if (options.allowPreviousAssistantFallback === true || options.allowNoUserFallback === true) {
+          for (let i = records.length - 1; i >= 0; i -= 1) {
+            if (records[i].role === 'assistant') {
+              return records[i];
+            }
+          }
+        }
+
+        return null;
+      }
+
+      return records[records.length - 1] || null;
+    }
+
+    let stableCheckLogAt = 0;
 
     async function waitLatestAssistantStable(options = {}) {
       const timeoutMs = Number(options.timeoutMs ?? 12000);
@@ -36295,8 +38564,12 @@ if (document.readyState === 'loading') {
           return {
             ok: false,
             reason: 'cancelled',
-            lastRecord: lastPicked?.record || null,
-            latestUser: lastPicked?.latestUser || null,
+            lastRecord: lastPicked?.record && typeof stripMessageRecordForCache === 'function'
+              ? stripMessageRecordForCache(lastPicked.record)
+              : lastPicked?.record || null,
+            latestUser: lastPicked?.latestUser && typeof stripMessageRecordForCache === 'function'
+              ? stripMessageRecordForCache(lastPicked.latestUser)
+              : lastPicked?.latestUser || null,
           };
         }
 
@@ -36308,16 +38581,22 @@ if (document.readyState === 'loading') {
           continue;
         }
 
-        const records = buildRecords({ includeEmpty: false });
-        const picked = getLatestAssistantAfterLatestUser(records);
+        const records = getFastTailMessageRecords({ includeHidden: false });
+        const picked = getLatestAssistantAfterLatestUser(records, {
+          allowNoUserFallback: options.allowNoUserFallback === true,
+        });
         lastPicked = picked;
 
         if (!picked.ok) {
           stableCount = 0;
           lastSignature = '';
-          ToolboxShell.appendLog(
-            `[CHAT_PAGE][copy-last-message:stable-check] state=${picked.reason || 'no-assistant'}`
-          );
+          const nowNoPick = Date.now();
+          if (nowNoPick - stableCheckLogAt >= 3000) {
+            stableCheckLogAt = nowNoPick;
+            ToolboxShell.appendLog(
+              `[CHAT_PAGE][copy-last-message:stable-check] state=${picked.reason || 'no-assistant'} mode=fast`,
+            );
+          }
           await sleep(intervalMs);
           continue;
         }
@@ -36326,9 +38605,13 @@ if (document.readyState === 'loading') {
         const text = cleanMessageText(record.text || '');
         const signature = buildStableSignature(record, text);
 
-        ToolboxShell.appendLog(
-          `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count} source=${record.extract_source || '-'} hasThinking=${record.has_thinking_boundary ?? 0} contentNodes=${record.content_node_count ?? '-'} contentChars=${record.content_text_chars ?? '-'} fullTurnChars=${record.full_turn_text_chars ?? '-'} turn=${record.turn_id || '-'}`
-        );
+        const nowStable = Date.now();
+        if (nowStable - stableCheckLogAt >= 3000) {
+          stableCheckLogAt = nowStable;
+          ToolboxShell.appendLog(
+            `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count || record.charCount || 0} mode=fast turn=${record.turn_id || record.turnId || '-'}`,
+          );
+        }
 
         if (signature && signature === lastSignature) {
           stableCount += 1;
@@ -36338,13 +38621,18 @@ if (document.readyState === 'loading') {
         }
 
         if (stableCount >= stableRounds && text) {
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-ok]');
+          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-ok] mode=fast');
+          const safeRecord = typeof stripMessageRecordForCache === 'function'
+            ? stripMessageRecordForCache(record)
+            : record;
           return {
             ok: true,
-            record,
+            record: safeRecord,
             text,
             reason: 'stable',
-            latestUser: picked.latestUser || null,
+            latestUser: picked.latestUser && typeof stripMessageRecordForCache === 'function'
+              ? stripMessageRecordForCache(picked.latestUser)
+              : picked.latestUser || null,
           };
         }
 
@@ -36361,8 +38649,16 @@ if (document.readyState === 'loading') {
         reason: finalPicked.reason === 'no-assistant-after-latest-user'
           ? 'no-assistant-after-latest-user'
           : 'timeout',
-        lastRecord: finalPicked.record || lastPicked?.record || null,
-        latestUser: finalPicked.latestUser || lastPicked?.latestUser || null,
+        lastRecord: finalPicked.record && typeof stripMessageRecordForCache === 'function'
+          ? stripMessageRecordForCache(finalPicked.record)
+          : finalPicked.record || (lastPicked?.record && typeof stripMessageRecordForCache === 'function'
+            ? stripMessageRecordForCache(lastPicked.record)
+            : lastPicked?.record || null),
+        latestUser: finalPicked.latestUser && typeof stripMessageRecordForCache === 'function'
+          ? stripMessageRecordForCache(finalPicked.latestUser)
+          : finalPicked.latestUser || (lastPicked?.latestUser && typeof stripMessageRecordForCache === 'function'
+            ? stripMessageRecordForCache(lastPicked.latestUser)
+            : lastPicked?.latestUser || null),
       };
     }
 
@@ -36371,20 +38667,260 @@ if (document.readyState === 'loading') {
       getLatestAssistantAfterLatestUser,
       cleanMessageText,
       waitLatestAssistantStable,
+      buildMessageRecordFromTurnElement,
+      getFastTailMessageRecords,
+      getLatestConversationMessageRecordFromTail,
+      collectConversationTurnElements,
     };
   })();
 
-  function buildConversationMessageRecords(options = {}) {
-    return ChatMessageExtractor.buildRecords(options);
+  const ChatMessageRuntime = {
+    conversationObserver: null,
+    conversationObserverTarget: null,
+    activeTimers: [],
+    lastMainNode: null,
+  };
+
+  const latestAssistantMessageCache = {
+    dirty: true,
+    at: 0,
+    mutationVersion: 0,
+    conversationId: '',
+    value: null,
+  };
+
+  const CHAT_MSG_PERF_LOG_INTERVAL_MS = 3000;
+  const LATEST_ASSISTANT_CACHE_TTL_MS = 1000;
+  const chatMsgPerfLogAt = new Map();
+
+  function registerChatMessageTimer(timerId) {
+    if (timerId) {
+      ChatMessageRuntime.activeTimers.push(timerId);
+    }
+
+    return timerId;
   }
 
-  function getLatestConversationMessageRecord(options = {}) {
+  function appendChatMsgPerfLog(key, line) {
+    const now = Date.now();
+    const last = Number(chatMsgPerfLogAt.get(key) || 0);
+
+    if (now - last < CHAT_MSG_PERF_LOG_INTERVAL_MS) {
+      return;
+    }
+
+    chatMsgPerfLogAt.set(key, now);
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function markLatestAssistantMessageCacheDirty() {
+    latestAssistantMessageCache.dirty = true;
+    latestAssistantMessageCache.mutationVersion += 1;
+  }
+
+  function getCurrentConversationIdForMessageCache() {
+    return parseConversationIdFromPath(location.pathname || '') || '';
+  }
+
+  function stripMessageRecordForCache(record) {
+    if (!record) {
+      return null;
+    }
+
+    const text = String(record.text || '');
+    const stripped = {
+      role: String(record.role || ''),
+      text,
+      key: String(record.key || buildMessageRecordKey(record) || ''),
+      turnId: String(record.turn_id || record.turnId || ''),
+      index: Number(record.index || 0),
+      textLen: text.length,
+      charCount: Number(record.char_count || record.charCount || text.length || 0),
+      at: Date.now(),
+    };
+
+    stripped.key = stripped.key || buildMessageRecordKey({
+      role: stripped.role,
+      text: stripped.text,
+      turn_id: stripped.turnId,
+      index: stripped.index,
+      char_count: stripped.charCount,
+    });
+
+    return stripped;
+  }
+
+  function cleanupChatMessageCaches(reason) {
+    latestAssistantMessageCache.dirty = true;
+    latestAssistantMessageCache.value = null;
+    latestAssistantMessageCache.at = 0;
+    latestAssistantMessageCache.conversationId = '';
+
+    if (window.__cgptLastConversationRecords) {
+      window.__cgptLastConversationRecords = null;
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[CHAT_MSG][CACHE_CLEAR] reason=${reason || '-'}`);
+    }
+  }
+
+  function cleanupRuntimeHandles(reason) {
+    cleanupChatMessageCaches(reason);
+
+    if (ChatMessageRuntime.conversationObserver) {
+      ChatMessageRuntime.conversationObserver.disconnect();
+      ChatMessageRuntime.conversationObserver = null;
+    }
+
+    ChatMessageRuntime.conversationObserverTarget = null;
+    ChatMessageRuntime.lastMainNode = null;
+
+    for (const timer of ChatMessageRuntime.activeTimers || []) {
+      window.clearTimeout(timer);
+      window.clearInterval(timer);
+    }
+
+    ChatMessageRuntime.activeTimers = [];
+
+    if (window.__cgptTurnCountObserver) {
+      window.__cgptTurnCountObserver.disconnect();
+      window.__cgptTurnCountObserver = null;
+      window.__cgptTurnCountObserverBound = false;
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[RUNTIME][CLEANUP_HANDLES] reason=${reason || '-'}`);
+    }
+  }
+
+  function disconnectToolboxObservers(source) {
+    cleanupRuntimeHandles(source || 'disconnect-toolbox-observers');
+  }
+
+  function clearToolboxTimers(source) {
+    if (toolboxTurnStatusRefreshTimer) {
+      window.clearTimeout(toolboxTurnStatusRefreshTimer);
+      toolboxTurnStatusRefreshTimer = 0;
+    }
+
+    toolboxTurnStatusRefreshPendingMode = 'light';
+
+    if (typeof ReplyDoneTitleFlashWatcher !== 'undefined'
+      && typeof ReplyDoneTitleFlashWatcher.stop === 'function') {
+      ReplyDoneTitleFlashWatcher.stop(source || 'clear-toolbox-timers');
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.clearViewportTimers === 'function') {
+      ToolboxShell.clearViewportTimers(source || 'clear-toolbox-timers');
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[RUNTIME][CLEAR_TIMERS] source=${source || '-'}`);
+    }
+  }
+
+  function cleanupBeforePageNavigation(source) {
+    setToolboxPageNavigating(true);
+
+    try {
+      ToolboxShell.appendLog(
+        `[TOOLBOX_NAV_CLEANUP][START] source=${source || '-'} url=${window.location.href}`,
+      );
+
+      if (typeof stopAutoContinue === 'function') {
+        stopAutoContinue('page-navigation');
+      }
+
+      if (typeof BridgeModule !== 'undefined' && typeof BridgeModule.stop === 'function') {
+        BridgeModule.stop();
+      }
+
+      if (typeof stopUploadSendTask === 'function') {
+        stopUploadSendTask('page-navigation');
+      }
+
+      if (typeof stopUploadTask === 'function') {
+        stopUploadTask('page-navigation');
+      }
+
+      if (typeof disconnectToolboxObservers === 'function') {
+        disconnectToolboxObservers('page-navigation');
+      }
+
+      if (typeof clearToolboxTimers === 'function') {
+        clearToolboxTimers('page-navigation');
+      }
+
+      if (typeof clearUploadTransientFileRefs === 'function') {
+        clearUploadTransientFileRefs('page-navigation');
+      }
+
+      ToolboxShell.appendLog(
+        `[TOOLBOX_NAV_CLEANUP][DONE] source=${source || '-'}`,
+      );
+    } catch (err) {
+      console.error('[ChatGPT toolbox] cleanupBeforePageNavigation failed', err);
+
+      const errName = err && err.name ? err.name : 'Error';
+      const errText = err && err.message ? err.message : String(err);
+
+      ToolboxShell.appendLog(
+        `[TOOLBOX_NAV_CLEANUP][ERROR] source=${source || '-'} type=${errName} error=${errText}`,
+      );
+    }
+  }
+
+  function getLatestConversationMessageRecordFast(options = {}) {
+    const startedAt = Date.now();
+
+    try {
+      const record = ChatMessageExtractor.getLatestConversationMessageRecordFromTail(options);
+      const cost = Date.now() - startedAt;
+      const records = ChatMessageExtractor.getFastTailMessageRecords({
+        includeHidden: options.includeHidden === true,
+      });
+
+      appendChatMsgPerfLog(
+        'latest-fast',
+        `[PERF][latestMessage] mode=fast cost=${cost}ms records=${records.length} textLen=${record ? String(record.text || '').length : 0}`,
+      );
+
+      if (record) {
+        appendChatMsgPerfLog(
+          'latest-fast-ok',
+          `[CHAT_MSG][LATEST_FAST] ok=1 role=${record.role || '-'} textLen=${String(record.text || '').length} cost=${cost}ms`,
+        );
+      }
+
+      return record;
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      const stack = error && error.stack ? String(error.stack).slice(0, 400) : '';
+      console.error('[ChatGPT toolbox] getLatestConversationMessageRecordFast failed', error);
+      ToolboxShell.appendLog(`[CHAT_MSG][LATEST_FAST][failed] error=${errText} stack=${stack}`);
+      return null;
+    }
+  }
+
+  function getLatestConversationMessageRecordFull(options = {}) {
     const preferredRole = String(options.role || '').toLowerCase();
     const preferAssistant = options.preferAssistant !== false;
     const allowPreviousAssistantFallback = options.allowPreviousAssistantFallback === true;
+    const startedAt = Date.now();
     const records = buildConversationMessageRecords({
       includeEmpty: false,
+      includeHidden: options.includeHidden === true,
     });
+    const cost = Date.now() - startedAt;
+
+    appendChatMsgPerfLog(
+      'latest-full',
+      `[PERF][latestMessage] mode=full cost=${cost}ms records=${records.length} textLen=${records.length ? String(records[records.length - 1].text || '').length : 0}`,
+    );
 
     if (!records.length) {
       return null;
@@ -36419,6 +38955,24 @@ if (document.readyState === 'loading') {
     return records[records.length - 1] || null;
   }
 
+  function buildConversationMessageRecords(options = {}) {
+    return ChatMessageExtractor.buildRecords(options);
+  }
+
+  function getLatestConversationMessageRecord(options = {}) {
+    if (options.forceFullScan === true) {
+      return getLatestConversationMessageRecordFull(options);
+    }
+
+    const fastRecord = getLatestConversationMessageRecordFast(options);
+
+    if (fastRecord) {
+      return fastRecord;
+    }
+
+    return getLatestConversationMessageRecordFull(options);
+  }
+
   function buildMessageRecordKey(record) {
     if (!record) {
       return '';
@@ -36426,33 +38980,66 @@ if (document.readyState === 'loading') {
 
     return [
       String(record.role || ''),
-      String(record.turn_id || ''),
+      String(record.turn_id || record.turnId || ''),
       String(record.index ?? ''),
-      String(record.char_count ?? ''),
+      String(record.char_count ?? record.charCount ?? ''),
       String(record.text || '').slice(0, 120),
     ].join('|');
   }
 
   function getLatestAssistantAfterLatestUserRecord(options = {}) {
-    const records = buildConversationMessageRecords({
-      includeEmpty: false,
-      includeHidden: options.includeHidden === true,
-    });
+    const includeHidden = options.includeHidden === true;
+    const records = options.forceFullScan === true
+      ? buildConversationMessageRecords({
+        includeEmpty: false,
+        includeHidden,
+      })
+      : ChatMessageExtractor.getFastTailMessageRecords({
+        includeHidden,
+      });
     const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records, {
       allowNoUserFallback: options.allowNoUserFallback === true,
     });
 
     if (!picked.ok || !picked.record) {
-      return null;
+      if (options.forceFullScan === true) {
+        return null;
+      }
+
+      const fullRecords = buildConversationMessageRecords({
+        includeEmpty: false,
+        includeHidden,
+      });
+      const fullPicked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(fullRecords, {
+        allowNoUserFallback: options.allowNoUserFallback === true,
+      });
+
+      if (!fullPicked.ok || !fullPicked.record) {
+        return null;
+      }
+
+      const fullText = ChatMessageExtractor.cleanMessageText(fullPicked.record.text || '').trim();
+
+      return {
+        ...stripMessageRecordForCache(fullPicked.record),
+        text: fullText,
+        ok: true,
+        latestUser: fullPicked.latestUser
+          ? stripMessageRecordForCache(fullPicked.latestUser)
+          : null,
+        reason: fullPicked.reason || '',
+      };
     }
 
     const text = ChatMessageExtractor.cleanMessageText(picked.record.text || '').trim();
 
     return {
-      ...picked.record,
+      ...stripMessageRecordForCache(picked.record),
       text,
       ok: true,
-      latestUser: picked.latestUser || null,
+      latestUser: picked.latestUser
+        ? stripMessageRecordForCache(picked.latestUser)
+        : null,
       reason: picked.reason || '',
     };
   }
@@ -36553,25 +39140,103 @@ if (document.readyState === 'loading') {
     return text;
   }
 
-  function getLatestAssistantMessageForCopy() {
-    const record = getLatestAssistantAfterLatestUserRecord({
-      includeHidden: true,
-    });
+  function getLatestAssistantMessageForCopy(options = {}) {
+    const forceRefresh = options.forceRefresh === true;
+    const conversationId = getCurrentConversationIdForMessageCache();
+    const now = Date.now();
+    const cache = latestAssistantMessageCache;
 
-    if (!record || !record.text) {
-      return {
+    if (
+      !forceRefresh
+      && cache.dirty === false
+      && now - cache.at < LATEST_ASSISTANT_CACHE_TTL_MS
+      && cache.conversationId === conversationId
+      && cache.value
+    ) {
+      appendChatMsgPerfLog(
+        'cache-hit',
+        `[CHAT_MSG][CACHE_HIT] age=${now - cache.at}ms textLen=${cache.value.textLen || 0}`,
+      );
+      return cache.value;
+    }
+
+    let missReason = 'dirty';
+
+    if (cache.conversationId !== conversationId) {
+      missReason = 'conversation_changed';
+    } else if (now - cache.at >= LATEST_ASSISTANT_CACHE_TTL_MS) {
+      missReason = 'expired';
+    }
+
+    if (forceRefresh || cache.dirty || cache.conversationId !== conversationId) {
+      appendChatMsgPerfLog(
+        'cache-miss',
+        `[CHAT_MSG][CACHE_MISS] reason=${missReason}${forceRefresh ? '/force_refresh' : ''}`,
+      );
+    }
+
+    const startedAt = Date.now();
+    let rawRecord = getLatestConversationMessageRecordFast({
+      preferAssistant: true,
+      includeHidden: false,
+      allowNoUserFallback: options.allowNoUserFallback === true,
+      allowPreviousAssistantFallback: options.allowPreviousAssistantFallback === true,
+    });
+    let mode = 'fast';
+
+    if (!rawRecord || !rawRecord.text) {
+      const fallbackStartedAt = Date.now();
+      const reason = rawRecord ? 'empty_text' : 'no_record';
+      const fullRecords = buildConversationMessageRecords({
+        includeEmpty: false,
+        includeHidden: true,
+      });
+      const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(fullRecords, {
+        allowNoUserFallback: options.allowNoUserFallback === true,
+      });
+      rawRecord = picked.ok ? picked.record : null;
+      mode = 'full';
+      ToolboxShell.appendLog(
+        `[CHAT_MSG][LATEST_FALLBACK_FULL_SCAN] reason=${reason} cost=${Date.now() - fallbackStartedAt}ms records=${fullRecords.length}`,
+      );
+    }
+
+    const cost = Date.now() - startedAt;
+
+    if (!rawRecord || !rawRecord.text) {
+      const failed = {
         ok: false,
         text: '',
         reason: 'no-assistant-after-latest-user',
         record: null,
       };
+      cache.dirty = true;
+      cache.value = null;
+      cache.at = now;
+      cache.conversationId = conversationId;
+      return failed;
     }
 
-    return {
+    const text = ChatMessageExtractor.cleanMessageText(rawRecord.text || '').trim();
+    const strippedRecord = stripMessageRecordForCache(rawRecord);
+    const result = {
       ok: true,
-      text: record.text,
-      record,
+      text,
+      record: strippedRecord,
+      reason: mode === 'fast' ? 'fast-tail' : 'full-scan-fallback',
     };
+
+    appendChatMsgPerfLog(
+      `latest-copy-${mode}`,
+      `[PERF][latestMessage] mode=${mode} cost=${cost}ms textLen=${text.length}`,
+    );
+
+    cache.dirty = false;
+    cache.at = now;
+    cache.conversationId = conversationId;
+    cache.value = result;
+
+    return result;
   }
 
   function pickLatestAssistantTextFromBridgeSnapshot() {
@@ -36597,48 +39262,6 @@ if (document.readyState === 'loading') {
       ToolboxShell.appendLog(`[COPY_LAST][SNAPSHOT_FAIL] error=${errText}`);
       return { ok: false, text: '', reason: 'snapshot_failed', record: null };
     }
-  }
-
-  function tryCopyLastAssistantSnapshotFallback(records, triggerReason = '') {
-    const snapshotPick = pickLatestAssistantTextFromBridgeSnapshot();
-    if (!snapshotPick.ok || !snapshotPick.text) {
-      ToolboxShell.appendLog(
-        `[COPY_LAST][SNAPSHOT_FALLBACK_REJECTED] trigger=${triggerReason || '-'} reason=${snapshotPick.reason || 'no_text'}`,
-      );
-      return null;
-    }
-
-    let latestUser = null;
-    for (let i = records.length - 1; i >= 0; i -= 1) {
-      if (records[i].role === 'user') {
-        latestUser = records[i];
-        break;
-      }
-    }
-
-    const snapIdx =
-      snapshotPick.record && Number.isFinite(snapshotPick.record.index)
-        ? snapshotPick.record.index
-        : -1;
-
-    if (latestUser && snapIdx >= 0 && snapIdx <= latestUser.index) {
-      ToolboxShell.appendLog(
-        `[COPY_LAST][SNAPSHOT_FALLBACK_REJECTED] trigger=${triggerReason || '-'} reason=before_latest_user latestUserIndex=${latestUser.index} snapshotIndex=${snapIdx}`,
-      );
-      return null;
-    }
-
-    ToolboxShell.appendLog(
-      `[COPY_LAST][SNAPSHOT_FALLBACK_OK] trigger=${triggerReason || '-'} chars=${snapshotPick.text.length}`,
-    );
-
-    return {
-      ok: true,
-      text: snapshotPick.text,
-      role: 'assistant',
-      reason: 'snapshot_fallback',
-      record: snapshotPick.record || null,
-    };
   }
 
   function bridgeSafeConversationRecord(record) {
@@ -36879,7 +39502,7 @@ if (document.readyState === 'loading') {
       const text = String(btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const negativeText = `${testId} ${id} ${aria} ${title} ${text}`;
 
-      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|dictat|录音|语音|tool|工具|plugin|plug-in|model|模型|gpt-|search|搜索|browse|浏览|think|reason|plus|pro-mode|settings|设置|menu|菜单|share|分享|copy|复制|edit|编辑|regenerate|重新生成|thumb|赞|踩|file-picker|composer-plus|composer-attach|composer-voice|composer-mic/i.test(negativeText)) {
+      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|dictat|录音|语音|tool|工具|plugin|plug-in|model|模型|gpt-|search|搜索|browse|浏览|think|reason|plus|pro-mode|settings|设置|menu|菜单|share|分享|copy|复制|edit|编辑|regenerate|重新生成|thumb|赞|踩|file-picker|composer-plus|composer-attach|composer-voice|composer-mic|stop|停止|halt|pause/i.test(negativeText)) {
         return true;
       }
 
@@ -36891,6 +39514,7 @@ if (document.readyState === 'loading') {
         || testId.includes('model')
         || testId.includes('tool')
         || testId.includes('search')
+        || testId.includes('stop')
       ) {
         return true;
       }
@@ -37064,6 +39688,15 @@ if (document.readyState === 'loading') {
 
       for (let i = buttons.length - 1; i >= 0; i -= 1) {
         const btn = buttons[i];
+        if (isVoiceComposerButton(btn)) {
+          appendComposerLogThrottled(
+            'send-button-reject-voice:last-clickable',
+            `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_button selector=composer:last-visible-button aria=${String(btn.getAttribute('aria-label') || '-')} testid=${String(btn.getAttribute('data-testid') || '-')}`,
+            1200,
+          );
+          continue;
+        }
+
         if (isExcludedComposerButton(btn)) {
           continue;
         }
@@ -37178,7 +39811,11 @@ if (document.readyState === 'loading') {
         scopes.push(mainEl);
       }
 
-      const selectors = SELECTORS.sendButton || [];
+      const selectors = [
+        'button#composer-submit-button',
+        'button[data-testid="send-button"]',
+        ...(SELECTORS.sendButton || []),
+      ];
       let totalScanned = 0;
       const previewButtons = [];
 
@@ -37193,6 +39830,15 @@ if (document.readyState === 'loading') {
 
           for (const candidate of candidates) {
             if (!isComposerSendButtonCandidate(candidate, composer, composerRoot, composerForm, scope)) {
+              continue;
+            }
+
+            if (isVoiceComposerButton(candidate)) {
+              appendComposerLogThrottled(
+                `send-button-reject-voice:selector:${sel}`,
+                `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_button selector=${sel} aria=${String(candidate.getAttribute('aria-label') || '-')} testid=${String(candidate.getAttribute('data-testid') || '-')}`,
+                1200,
+              );
               continue;
             }
 
@@ -37424,7 +40070,23 @@ if (document.readyState === 'loading') {
         .trim();
     }
 
-    function canSendNow() {
+    let sendButtonScanCache = {
+      at: 0,
+      btn: null,
+      ready: false,
+    };
+
+    function refreshSendButtonScanCache(options = {}) {
+      const sendBtn = findSendButton(options);
+      sendButtonScanCache = {
+        at: Date.now(),
+        btn: sendBtn instanceof HTMLButtonElement ? sendBtn : null,
+        ready: sendBtn instanceof HTMLButtonElement && isSendButtonReady(sendBtn),
+      };
+      return sendButtonScanCache;
+    }
+
+    function canSendNow(options = {}) {
       const composer = getComposer();
       if (!(composer instanceof HTMLElement)) {
         return false;
@@ -37434,12 +40096,50 @@ if (document.readyState === 'loading') {
         return false;
       }
 
-      const sendBtn = findSendButton();
-      if (!sendBtn) {
+      const maxAgeMs = Number(options.maxAgeMs) || 0;
+      if (!options.force && maxAgeMs > 0 && Date.now() - sendButtonScanCache.at < maxAgeMs) {
+        return sendButtonScanCache.ready;
+      }
+
+      const cached = refreshSendButtonScanCache(options);
+      return cached.ready;
+    }
+
+    function canSendNowLight() {
+      if (isAssistantLikelyBusy()) {
+        return false;
+      }
+      return canSendNow({ maxAgeMs: 450 });
+    }
+
+    function focusComposerForNativeSend() {
+      const el = getComposer();
+      if (!(el instanceof HTMLElement)) {
+        ToolboxShell.appendLog('[COMPOSER][native-focus:failed] reason=composer-not-found');
         return false;
       }
 
-      return isSendButtonReady(sendBtn);
+      try {
+        el.focus({ preventScroll: false });
+      } catch (err) {
+        console.error('[ChatGPT toolbox] focusComposerForNativeSend focus failed', err);
+        el.focus();
+      }
+
+      if (el.isContentEditable) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } else if (typeof el.setSelectionRange === 'function') {
+        const len = String(el.value || '').length;
+        el.setSelectionRange(len, len);
+      }
+
+      ToolboxShell.appendLog('[COMPOSER][native-focus:ok]');
+      return true;
     }
 
     function clickSend() {
@@ -37583,19 +40283,43 @@ if (document.readyState === 'loading') {
 
       const composerRoot = getComposerRoot();
       const composerEl = qs('[data-testid="composer"]');
+      const composer = getComposer();
+      const composerForm = composer instanceof HTMLElement ? composer.closest('form') : null;
       const inComposerScope = (
         (composerRoot instanceof HTMLElement && composerRoot.contains(el))
         || (composerEl instanceof HTMLElement && composerEl.contains(el))
+        || (composerForm instanceof HTMLElement && composerForm.contains(el))
       );
 
       return inComposerScope;
     }
 
+    function collectComposerAttachmentRoots() {
+      const roots = [];
+      const addRoot = (root) => {
+        if (!(root instanceof HTMLElement)) return;
+        if (isInToolbox(root)) return;
+        if (roots.includes(root)) return;
+        roots.push(root);
+      };
+
+      addRoot(getComposerRoot());
+      addRoot(qs('[data-testid="composer"]'));
+
+      const composer = getComposer();
+      if (composer instanceof HTMLElement) {
+        const composerForm = composer.closest('form');
+        addRoot(composerForm);
+      }
+
+      return roots;
+    }
+
     function countAttachmentChips() {
-      const roots = [
-        getComposerRoot(),
-        qs('[data-testid="composer"]'),
-      ].filter((root, index, list) => root instanceof HTMLElement && list.indexOf(root) === index);
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const roots = collectComposerAttachmentRoots();
 
       const chipSelectors = [
         '[data-testid*="attachment"]',
@@ -37607,11 +40331,13 @@ if (document.readyState === 'loading') {
       ];
 
       const seen = new Set();
+      let scanned = 0;
       let count = 0;
 
       roots.forEach((root) => {
         chipSelectors.forEach((sel) => {
           qsa(sel, root).forEach((el) => {
+            scanned += 1;
             if (!isComposerAttachmentChipElement(el)) return;
             if (seen.has(el)) return;
             seen.add(el);
@@ -37620,11 +40346,17 @@ if (document.readyState === 'loading') {
         });
       });
 
-      const countLog = `[COMPOSER][ATTACH_COUNT] count=${count} scope=composer visibleOnly=1`;
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(countLog);
-      } else {
-        console.log(countLog);
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+
+      if (typeof logPerfThrottled === 'function') {
+        logPerfThrottled(
+          'countAttachmentChips',
+          `[PERF][countAttachmentChips] cost=${costMs}ms count=${count} roots=${roots.length} scanned=${scanned}`,
+        );
       }
 
       return count;
@@ -37654,6 +40386,136 @@ if (document.readyState === 'loading') {
       }
 
       return false;
+    }
+
+    function collectVisibleComposerPayloadText() {
+      const roots = [
+        getComposerRoot(),
+        qs('[data-testid="composer"]'),
+        qs('form'),
+        qs('main'),
+      ].filter(Boolean);
+
+      const seen = new Set();
+      const pieces = [];
+
+      roots.forEach((root) => {
+        if (!(root instanceof HTMLElement)) return;
+        if (seen.has(root)) return;
+        seen.add(root);
+
+        const rootText = [
+          root.innerText || '',
+          root.textContent || '',
+          root.getAttribute('aria-label') || '',
+          root.getAttribute('title') || '',
+          root.getAttribute('data-testid') || '',
+          root.getAttribute('class') || '',
+        ].join(' ').replace(/\s+/g, ' ').trim();
+
+        if (rootText) {
+          pieces.push(rootText.slice(0, 3000));
+        }
+
+        qsa('[data-testid], [aria-label], [title], [role], button, span, div, svg', root).forEach((el) => {
+          if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) return;
+          if (isInToolbox(el)) return;
+          if (seen.has(el)) return;
+          seen.add(el);
+
+          const text = [
+            el instanceof HTMLElement ? (el.innerText || '') : '',
+            el.textContent || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+            el.getAttribute('data-testid') || '',
+            el.getAttribute('role') || '',
+            el.getAttribute('class') || '',
+          ].join(' ').replace(/\s+/g, ' ').trim();
+
+          if (text) {
+            pieces.push(text.slice(0, 1000));
+          }
+        });
+      });
+
+      return [...new Set(pieces)].join('\n').slice(0, 20000);
+    }
+
+    function hasVisibleComposerAttachmentPayload() {
+      if (countAttachmentChips() > 0) {
+        return true;
+      }
+
+      const text = collectVisibleComposerPayloadText();
+
+      return /(\.zip|\.txt|\.py|\.js|\.json|\.md|\.csv|\.xlsx|\.docx|\.pdf|附件|文件|上传|上传中|处理中|压缩|归档|压缩归档|正在上传|正在处理|已上传|已添加|attached|attachment|file|uploaded|uploading|processing|compress|compressing|archive|progress|spinner|loading|remove|delete|删除|移除)/i.test(text);
+    }
+
+    function getExistingComposerPayloadSnapshot() {
+      const text = String(getComposerText() || '').trim();
+      const attachmentCount = countAttachmentChips();
+      const hasVisibleAttachment = hasVisibleComposerAttachmentPayload();
+      const attachmentUploading = isAttachmentStillUploading();
+      const nativeSendReady = canSendNow();
+
+      return {
+        text,
+        textLen: text.length,
+        attachmentCount,
+        hasVisibleAttachment,
+        attachmentUploading,
+        nativeSendReady,
+        hasPayload: !!text || attachmentCount > 0 || hasVisibleAttachment || attachmentUploading || nativeSendReady,
+        textPreview: collectVisibleComposerPayloadText().slice(0, 500),
+      };
+    }
+
+    async function waitExistingComposerPayloadReadyForSend(timeoutMs, shouldStop, source) {
+      const startedAt = Date.now();
+      const timeout = Number(timeoutMs || 30000);
+      let lastLogAt = 0;
+      const pollMs = 250;
+
+      while (Date.now() - startedAt < timeout) {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          return { ok: false, reason: 'page_navigating' };
+        }
+
+        if (typeof shouldStop === 'function' && shouldStop()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+
+        const snapshot = getExistingComposerPayloadSnapshot();
+
+        if (snapshot.hasPayload) {
+          ToolboxShell.appendLog(
+            `[SEND][PAYLOAD_WAIT_OK] source=${source || '-'} textLen=${snapshot.textLen} attachmentCount=${snapshot.attachmentCount} visibleAttachment=${snapshot.hasVisibleAttachment ? 1 : 0} uploading=${snapshot.attachmentUploading ? 1 : 0} nativeSendReady=${snapshot.nativeSendReady ? 1 : 0}`,
+          );
+          return { ok: true, reason: 'payload_detected', snapshot };
+        }
+
+        const elapsed = Date.now() - startedAt;
+        if (elapsed - lastLogAt >= 1000) {
+          ToolboxShell.appendLog(
+            `[SEND][PAYLOAD_WAIT] source=${source || '-'} elapsed=${elapsed} reason=waiting_existing_composer_payload`,
+          );
+          lastLogAt = elapsed;
+        }
+
+        await sleep(pollMs);
+      }
+
+      const finalSnapshot = getExistingComposerPayloadSnapshot();
+      ToolboxShell.appendLog(
+        `[SEND][PAYLOAD_WAIT_TIMEOUT] source=${source || '-'} textLen=${finalSnapshot.textLen} attachmentCount=${finalSnapshot.attachmentCount} visibleAttachment=${finalSnapshot.hasVisibleAttachment ? 1 : 0} uploading=${finalSnapshot.attachmentUploading ? 1 : 0} preview=${finalSnapshot.textPreview || '-'}`,
+      );
+
+      return {
+        ok: false,
+        reason: 'composer_empty',
+        snapshot: finalSnapshot,
+      };
     }
 
     function isLikelyAttachmentRemoveButton(el) {
@@ -38082,7 +40944,7 @@ if (document.readyState === 'loading') {
 
       const text = collectComposerAttachmentStatusText();
 
-      return /uploading|上传中|processing|处理中|loading|加载中|扫描中|正在上传|正在处理/i.test(text);
+      return /uploading|上传中|processing|处理中|loading|加载中|扫描中|正在上传|正在处理|压缩|归档|压缩归档|准备中|compressing|archive|preparing|analyzing/i.test(text);
     }
 
 
@@ -38438,18 +41300,24 @@ if (document.readyState === 'loading') {
       waitForComposerTextSynced,
       dispatchComposerSendKeyboard,
       findSendButton,
+      describeSendButton,
       isSendButtonReady,
+      focusComposerForNativeSend,
       clickSend,
       hasComposer,
       canAcceptInput,
       canAcceptTextInput,
       canSendNow,
+      canSendNowLight,
       isAssistantLikelyBusy,
       attachFilesByFileInput,
       clearAttachments,
       collectAttachmentChipText,
       countAttachmentChips,
       hasComposerDraftPayload,
+      hasVisibleComposerAttachmentPayload,
+      getExistingComposerPayloadSnapshot,
+      waitExistingComposerPayloadReadyForSend,
       findAttachmentEvidence,
       fileNameEvidence,
       isAttachmentStillUploading,
@@ -38458,7 +41326,85 @@ if (document.readyState === 'loading') {
     };
   })();
 
-  function detectComposerResponseState() {
+  function detectComposerResponseStateLight() {
+    const isResponding = ComposerApi.isAssistantLikelyBusy();
+    const composerAvailable = typeof ComposerApi.canAcceptInput === 'function'
+      ? ComposerApi.canAcceptInput()
+      : (typeof ComposerApi.hasComposer === 'function'
+        ? ComposerApi.hasComposer()
+        : !!ComposerApi.getComposerText());
+    const composerText = ComposerApi.getComposerText();
+    const canAcceptInput = composerAvailable && !isResponding;
+    const canSendNow = composerAvailable
+      && !isResponding
+      && (typeof ComposerApi.canSendNowLight === 'function'
+        ? ComposerApi.canSendNowLight()
+        : ComposerApi.canSendNow({ maxAgeMs: 450 }));
+
+    if (isResponding) {
+      return {
+        is_responding: true,
+        response_state: 'generating',
+        response_state_reason: 'assistant_busy',
+        can_accept_input: false,
+        can_send_now: false,
+        has_composer_payload: !!composerText,
+        response_state_at: Date.now(),
+      };
+    }
+
+    if (!composerAvailable) {
+      return {
+        is_responding: false,
+        response_state: 'no_composer',
+        response_state_reason: 'composer_not_found',
+        can_accept_input: false,
+        can_send_now: false,
+        has_composer_payload: !!composerText,
+        response_state_at: Date.now(),
+      };
+    }
+
+    if (composerText) {
+      return {
+        is_responding: false,
+        response_state: 'composing',
+        response_state_reason: 'composer_has_text',
+        can_accept_input: canAcceptInput,
+        can_send_now: canSendNow,
+        has_composer_payload: true,
+        response_state_at: Date.now(),
+      };
+    }
+
+    if (canSendNow) {
+      return {
+        is_responding: false,
+        response_state: 'ready',
+        response_state_reason: 'native_send_ready',
+        can_accept_input: canAcceptInput,
+        can_send_now: true,
+        has_composer_payload: false,
+        response_state_at: Date.now(),
+      };
+    }
+
+    return {
+      is_responding: false,
+      response_state: 'not_ready',
+      response_state_reason: 'send_button_not_ready',
+      can_accept_input: canAcceptInput,
+      can_send_now: false,
+      has_composer_payload: false,
+      response_state_at: Date.now(),
+    };
+  }
+
+  function detectComposerResponseState(options = {}) {
+    if (options && options.light === true) {
+      return detectComposerResponseStateLight();
+    }
+
     const isResponding = ComposerApi.isAssistantLikelyBusy();
     const composerAvailable = typeof ComposerApi.canAcceptInput === 'function'
       ? ComposerApi.canAcceptInput()
@@ -38470,7 +41416,8 @@ if (document.readyState === 'loading') {
       ? ComposerApi.countAttachmentChips()
       : 0;
     const hasAttachmentPayload = attachmentCount > 0
-      || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload());
+      || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
+      || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function' && ComposerApi.hasVisibleComposerAttachmentPayload());
     const sendButton = ComposerApi.findSendButton({ silent: true });
     const canAcceptInput = composerAvailable && !isResponding;
     const canSendNow = composerAvailable
@@ -38485,6 +41432,7 @@ if (document.readyState === 'loading') {
         response_state_reason: 'assistant_busy',
         can_accept_input: false,
         can_send_now: false,
+        has_composer_payload: hasAttachmentPayload || !!composerText,
         response_state_at: Date.now(),
       };
     }
@@ -38496,6 +41444,7 @@ if (document.readyState === 'loading') {
         response_state_reason: 'composer_not_found',
         can_accept_input: false,
         can_send_now: false,
+        has_composer_payload: hasAttachmentPayload || !!composerText,
         response_state_at: Date.now(),
       };
     }
@@ -38508,6 +41457,7 @@ if (document.readyState === 'loading') {
         can_accept_input: canAcceptInput,
         can_send_now: canSendNow,
         attachment_count: attachmentCount,
+        has_composer_payload: true,
         response_state_at: Date.now(),
       };
     }
@@ -38522,6 +41472,20 @@ if (document.readyState === 'loading') {
         can_accept_input: canAcceptInput,
         can_send_now: canSendNow,
         attachment_count: attachmentCount,
+        has_composer_payload: true,
+        response_state_at: Date.now(),
+      };
+    }
+
+    if (hasAttachmentPayload) {
+      return {
+        is_responding: false,
+        response_state: 'attachment_processing',
+        response_state_reason: 'composer_has_attachment_waiting_send_button',
+        can_accept_input: canAcceptInput,
+        can_send_now: canSendNow,
+        attachment_count: attachmentCount,
+        has_composer_payload: true,
         response_state_at: Date.now(),
       };
     }
@@ -38534,6 +41498,7 @@ if (document.readyState === 'loading') {
         can_accept_input: canAcceptInput,
         can_send_now: canSendNow,
         attachment_count: attachmentCount,
+        has_composer_payload: hasAttachmentPayload,
         response_state_at: Date.now(),
       };
     }
@@ -38545,6 +41510,7 @@ if (document.readyState === 'loading') {
       can_accept_input: canAcceptInput,
       can_send_now: canSendNow,
       attachment_count: attachmentCount,
+      has_composer_payload: hasAttachmentPayload,
       response_state_at: Date.now(),
     };
   }
@@ -38576,6 +41542,11 @@ if (document.readyState === 'loading') {
         if (!wasBusy && typeof TitlePrefixModule.stopReplyDoneFlash === 'function') {
           TitlePrefixModule.stopReplyDoneFlash(`assistant-start:${reason || '-'}`);
         }
+        if (!wasBusy
+          && typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
+          ToolboxShell.stopHeaderTitleFlash(`assistant-start:${reason || '-'}`);
+        }
         if (!wasBusy) {
           ChatInputStateRuntime.waitingForReply = false;
         }
@@ -38596,6 +41567,17 @@ if (document.readyState === 'loading') {
 
         lastFlashAt = now;
         TitlePrefixModule.startReplyDoneFlash(`assistant-finished:${reason || '-'}`);
+
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+        ) {
+          ToolboxShell.flashHeaderTitleOnce('回复完成', {
+            intervalMs: 450,
+            autoStopMs: 2400,
+          });
+        }
+
         refreshToolboxPageStatusDisplay(`assistant-finished:${reason || '-'}`);
       }
 
@@ -38634,6 +41616,9 @@ if (document.readyState === 'loading') {
       started = false;
       wasBusy = false;
       TitlePrefixModule.stopReplyDoneFlash('watcher-stop');
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
+        ToolboxShell.stopHeaderTitleFlash('watcher-stop');
+      }
     }
 
     return {
@@ -38690,6 +41675,55 @@ if (document.readyState === 'loading') {
   }
 
   const CHAT_QUEUE = [];
+  const CHAT_QUEUE_MAX_SIZE = 50;
+  const CHAT_QUEUE_MAX_AGE_MS = 10 * 60 * 1000;
+
+  function pruneChatQueue(reason = '') {
+    const now = Date.now();
+    for (let i = CHAT_QUEUE.length - 1; i >= 0; i -= 1) {
+      const entry = CHAT_QUEUE[i];
+      const age = now - Number((entry && entry.created_at) || 0);
+      if (!entry || !entry.message_id || age > CHAT_QUEUE_MAX_AGE_MS) {
+        CHAT_QUEUE.splice(i, 1);
+      }
+    }
+    while (CHAT_QUEUE.length > CHAT_QUEUE_MAX_SIZE) {
+      const dropped = CHAT_QUEUE.shift();
+      ToolboxShell.appendLog(
+        `[CHAT_QUEUE][DROP_OLDEST] reason=${reason || '-'} message_id=${String((dropped && dropped.message_id) || '').slice(0, 8)}`,
+      );
+    }
+  }
+
+  function enqueueChatQueueEntry(normalized, reason = '') {
+    pruneChatQueue(reason);
+    const messageId = normalized.message_id || normalized.id || '';
+    if (messageId && CHAT_QUEUE.some((entry) => entry && entry.message_id === messageId)) {
+      ToolboxShell.appendLog(
+        `[CHAT_QUEUE][DUP_SKIP] reason=${reason || '-'} message_id=${String(messageId).slice(0, 8)}`,
+      );
+      return {
+        ok: true,
+        queued: false,
+        duplicate: true,
+        entry: null,
+      };
+    }
+    if (CHAT_QUEUE.length >= CHAT_QUEUE_MAX_SIZE) {
+      const dropped = CHAT_QUEUE.shift();
+      ToolboxShell.appendLog(
+        `[CHAT_QUEUE][DROP_OLDEST] reason=max-size message_id=${String((dropped && dropped.message_id) || '').slice(0, 8)}`,
+      );
+    }
+    const entry = createQueuedMessageEntry(normalized);
+    CHAT_QUEUE.push(entry);
+    return {
+      ok: true,
+      queued: true,
+      duplicate: false,
+      entry,
+    };
+  }
 
   const ChatInputStateRuntime = {
     waitingForReply: false,
@@ -38744,28 +41778,6 @@ if (document.readyState === 'loading') {
     }
   }
 
-  function removeQueuedEntry(messageId) {
-    const idx = CHAT_QUEUE.findIndex((entry) => entry.message_id === messageId);
-    if (idx >= 0) {
-      CHAT_QUEUE.splice(idx, 1);
-    }
-  }
-
-  function createAssistantPlaceholder(normalized) {
-    const messageId = normalized.message_id || normalized.id || '';
-    const entry = {
-      message_id: messageId,
-      role: 'assistant',
-      status: ASSISTANT_STATUS.QUEUED_PLACEHOLDER,
-      session_id: String(normalized.session_id || '').trim(),
-      turn_id: String(normalized.turn_id || '').trim(),
-      content: '',
-      created_at: Date.now(),
-    };
-    CHAT_QUEUE.push(entry);
-    return entry;
-  }
-
   function releasePendingReplyState(reason, messageId, extra) {
     const requestId = String(extra && extra.request_id ? extra.request_id : '').trim() || ChatInputStateRuntime.pendingRequestId;
     const turnId = String(extra && extra.turn_id ? extra.turn_id : '').trim() || ChatInputStateRuntime.pendingTurnId;
@@ -38788,11 +41800,6 @@ if (document.readyState === 'loading') {
     );
 
     updateChatInputStateBadge();
-  }
-
-  function hasValidPageDisplayId(value) {
-    const text = String(value ?? '').trim();
-    return text !== '' && text !== '-';
   }
 
   function warnPageDisplayIdMissingInResponse(result) {
@@ -38925,6 +41932,7 @@ if (document.readyState === 'loading') {
   }
 
   let toolboxTurnStatusRefreshTimer = 0;
+  let toolboxTurnStatusRefreshPendingMode = 'light';
   let lastLoggedConversationTurnCount = null;
 
   function countUserTurnsFromDomDirect() {
@@ -39084,29 +42092,71 @@ if (document.readyState === 'loading') {
     lastLoggedConversationTurnCount = count;
   }
 
-  function scheduleToolboxTurnStatusRefresh(reason = 'dom-change') {
+  function scheduleToolboxTurnStatusRefresh(reason = 'dom-change', mode = 'auto') {
+    const startedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const isResponding = typeof ComposerApi !== 'undefined'
+      && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+      && ComposerApi.isAssistantLikelyBusy();
+    let resolvedMode = mode;
+    if (mode === 'auto') {
+      resolvedMode = isResponding ? 'light' : 'heavy';
+    }
+
+    if (resolvedMode === 'heavy') {
+      toolboxTurnStatusRefreshPendingMode = 'heavy';
+    } else if (toolboxTurnStatusRefreshPendingMode !== 'heavy') {
+      toolboxTurnStatusRefreshPendingMode = 'light';
+    }
+
     if (toolboxTurnStatusRefreshTimer) {
       window.clearTimeout(toolboxTurnStatusRefreshTimer);
     }
 
     toolboxTurnStatusRefreshTimer = window.setTimeout(() => {
       toolboxTurnStatusRefreshTimer = 0;
+      const modeToRun = toolboxTurnStatusRefreshPendingMode;
+      toolboxTurnStatusRefreshPendingMode = 'light';
 
       if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.refreshToolboxTurnStatus === 'function'
+      ) {
+        UploadModule.refreshToolboxTurnStatus(reason, modeToRun);
+      } else if (
         typeof UploadModule !== 'undefined'
         && typeof UploadModule.refreshToolboxTopStatus === 'function'
       ) {
         UploadModule.refreshToolboxTopStatus(reason);
+        if (
+          modeToRun === 'heavy'
+          && typeof UploadModule.renderUploadButtonsOnly === 'function'
+        ) {
+          UploadModule.renderUploadButtonsOnly({ heavy: true });
+        } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
+          UploadModule.renderUploadButtonsOnly({ heavy: false });
+        }
+      }
+
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+      if (typeof logPerfThrottled === 'function') {
+        logPerfThrottled(
+          'toolboxTurnStatusRefresh',
+          `[PERF][toolboxTurnStatusRefresh] cost=${costMs}ms mode=${modeToRun} reason=${reason}`,
+        );
       }
     }, 300);
   }
 
   function bindConversationTurnCountObserver() {
-    if (window.__cgptTurnCountObserverBound) {
+    if (ChatMessageRuntime.conversationObserver) {
       return;
     }
-
-    window.__cgptTurnCountObserverBound = true;
 
     const target = document.querySelector('main') || document.body;
     if (!(target instanceof HTMLElement)) {
@@ -39114,17 +42164,39 @@ if (document.readyState === 'loading') {
       return;
     }
 
-    const observer = new MutationObserver(() => {
-      scheduleToolboxTurnStatusRefresh('conversation-dom-mutated');
+    ChatMessageRuntime.lastMainNode = target;
+    ChatMessageRuntime.conversationObserverTarget = target;
+
+    const observer = new MutationObserver((mutations) => {
+      markLatestAssistantMessageCacheDirty();
+
+      const mainNow = document.querySelector('main');
+      if (mainNow && mainNow !== ChatMessageRuntime.lastMainNode) {
+        ChatMessageRuntime.lastMainNode = mainNow;
+        cleanupChatMessageCaches('main-dom-replaced');
+      }
+
+      const isResponding = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+        && ComposerApi.isAssistantLikelyBusy();
+      const onlyCharacterData = mutations.length > 0
+        && mutations.every((mutation) => mutation.type === 'characterData');
+      const mode = (onlyCharacterData || isResponding) ? 'light' : 'heavy';
+      scheduleToolboxTurnStatusRefresh(
+        onlyCharacterData ? 'conversation-character-data' : 'conversation-dom-mutated',
+        mode,
+      );
     });
 
     observer.observe(target, {
       childList: true,
       subtree: true,
-      characterData: true,
+      characterData: false,
     });
 
+    ChatMessageRuntime.conversationObserver = observer;
     window.__cgptTurnCountObserver = observer;
+    window.__cgptTurnCountObserverBound = true;
 
     scheduleToolboxTurnStatusRefresh('observer-bound');
   }
@@ -39543,10 +42615,6 @@ if (document.readyState === 'loading') {
     ChatInputStateRuntime.lastTopStatusType = String(info && info.type ? info.type : '');
   }
 
-  function getChatInputState() {
-    return getTopMainStatus();
-  }
-
   function updateChatInputStateBadge() {
     const badge = document.querySelector('#cgpt-page-input-state');
     if (!badge) {
@@ -39647,6 +42715,795 @@ if (document.readyState === 'loading') {
     );
   }
 
+  const SEND_STABLE_RETRY_LIMIT_DEFAULT = 30;
+  const SEND_STABLE_RETRY_INTERVAL_MS_DEFAULT = 300;
+  const MAX_ATTACHMENT_SEND_WAIT_MS = 120000;
+  const SEND_BUTTON_RETRY_INTERVAL_MS = 300;
+  const SEND_STABLE_VERIFY_WAIT_MS = 500;
+  const SEND_STABLE_VERIFY_TIMEOUT_MS = 2500;
+
+  function formatSendLogFields(fields) {
+    return Object.entries(fields || {})
+      .map(([key, value]) => `${key}=${value == null ? '-' : value}`)
+      .join(' ');
+  }
+
+  function appendSendLogFields(tag, fields) {
+    appendSendLog(`${tag} ${formatSendLogFields(fields)}`);
+  }
+
+  function isVoiceComposerButton(button) {
+    if (!(button instanceof HTMLButtonElement)) {
+      return false;
+    }
+
+    const aria = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
+    const testId = String(button.getAttribute('data-testid') || '').trim().toLowerCase();
+    const id = String(button.id || '').trim().toLowerCase();
+    const title = String(button.getAttribute('title') || '').trim().toLowerCase();
+    const text = String(button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const probe = `${aria} ${testId} ${id} ${title} ${text}`;
+
+    return /开始听写|voice|dictation|microphone|语音|听写|mic|录音/i.test(probe);
+  }
+
+  function getSendLogContext(extra = {}) {
+    const cap = typeof getPageCapability === 'function' ? getPageCapability('send-log') : {};
+    const composerText = typeof ComposerApi.getComposerText === 'function'
+      ? ComposerApi.getComposerText()
+      : '';
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+
+    return {
+      page_display_id: String(BRIDGE_STATE.page_display_id || '').trim() || '-',
+      client_id: String(cap.client_id || '').trim() || '-',
+      conversation_id: String(cap.conversation_id || '').trim() || '-',
+      inputable: cap.can_accept_input ? 1 : 0,
+      sendable: cap.can_send_now ? 1 : 0,
+      response_state: String(cap.response_state || 'unknown'),
+      has_attachment: attachmentCount > 0 ? 1 : 0,
+      text_len: String(composerText || '').length,
+      ...extra,
+    };
+  }
+
+  function findChatGPTComposer() {
+    return typeof ComposerApi.getComposer === 'function' ? ComposerApi.getComposer() : null;
+  }
+
+  function focusComposer(composer) {
+    const el = composer instanceof HTMLElement
+      ? composer
+      : findChatGPTComposer();
+
+    if (!(el instanceof HTMLElement)) {
+      return false;
+    }
+
+    try {
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } catch (scrollErr) {
+      console.error('[ChatGPT toolbox] focusComposer scrollIntoView failed', scrollErr);
+    }
+
+    if (typeof ComposerApi.focusComposerForNativeSend === 'function') {
+      return ComposerApi.focusComposerForNativeSend();
+    }
+
+    try {
+      el.focus({ preventScroll: false });
+    } catch (focusErr) {
+      console.error('[ChatGPT toolbox] focusComposer focus failed', focusErr);
+      el.focus();
+    }
+
+    return true;
+  }
+
+  function setComposerText(composer, text) {
+    if (typeof ComposerApi.setComposerValue !== 'function') {
+      return false;
+    }
+
+    focusComposer(composer);
+    return ComposerApi.setComposerValue(String(text || ''));
+  }
+
+  function getComposerTextFromElement(composer) {
+    if (typeof ComposerApi.getComposerText === 'function') {
+      return String(ComposerApi.getComposerText() || '');
+    }
+
+    if (!(composer instanceof HTMLElement)) {
+      return '';
+    }
+
+    if (composer.matches && composer.matches('textarea,input')) {
+      return String(composer.value || '').trim();
+    }
+
+    return String(composer.innerText || composer.textContent || '').trim();
+  }
+
+  function hasComposerAttachment() {
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+
+    if (attachmentCount > 0) {
+      return true;
+    }
+
+    if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
+      return ComposerApi.hasVisibleComposerAttachmentPayload();
+    }
+
+    if (typeof ComposerApi.hasComposerDraftPayload === 'function') {
+      return ComposerApi.hasComposerDraftPayload();
+    }
+
+    return false;
+  }
+
+  function findChatGPTSendButton() {
+    return typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+  }
+
+  function findChatGPTStopButton() {
+    const selectors = [
+      'button[data-testid="stop-button"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="停止"]',
+      '[data-testid="stop-button"]',
+    ];
+
+    for (let i = 0; i < selectors.length; i += 1) {
+      const el = document.querySelector(selectors[i]);
+      if (el instanceof HTMLElement && isElementVisible(el)) {
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  function isStopComposerButton(button) {
+    if (!(button instanceof HTMLButtonElement)) {
+      return false;
+    }
+
+    const testId = String(button.getAttribute('data-testid') || '').toLowerCase();
+    if (testId.includes('stop')) {
+      return true;
+    }
+
+    const aria = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
+    const title = String(button.getAttribute('title') || '').trim().toLowerCase();
+    const text = String(button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const probe = `${aria} ${title} ${text}`;
+
+    return /(?:^|\b)(?:stop(?:\s+generating)?|停止(?:生成)?|halt|pause)(?:\b|$)/i.test(probe);
+  }
+
+  function isSendButtonDisabled(button) {
+    if (!(button instanceof HTMLButtonElement)) {
+      return true;
+    }
+
+    if (isStopComposerButton(button)) {
+      return true;
+    }
+
+    if (typeof ComposerApi.isSendButtonReady === 'function') {
+      return !ComposerApi.isSendButtonReady(button);
+    }
+
+    if (button.disabled) {
+      return true;
+    }
+
+    if (button.getAttribute('aria-disabled') === 'true') {
+      return true;
+    }
+
+    if (button.getAttribute('data-disabled') === 'true') {
+      return true;
+    }
+
+    const style = window.getComputedStyle(button);
+    return style.pointerEvents === 'none' || !isElementVisible(button);
+  }
+
+  function describeComposerSendButtonForLog(button) {
+    if (typeof ComposerApi.describeSendButton === 'function') {
+      try {
+        const info = ComposerApi.describeSendButton(button);
+        if (info && typeof info === 'object') {
+          return {
+            selector: String(info.selector || '-'),
+            aria: String(info.aria || '-'),
+            testid: String(info.testid || '-'),
+            disabled: Boolean(info.disabled),
+          };
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] describeSendButton failed', {
+          error_type: error && error.name ? error.name : 'Error',
+          error: errText,
+          stack: error && error.stack ? error.stack : '',
+        });
+        appendSendLogFields('[SEND][DESCRIBE_BUTTON_ERROR]', {
+          error_type: error && error.name ? error.name : 'Error',
+          error: errText,
+        });
+      }
+    }
+
+    if (!(button instanceof HTMLButtonElement)) {
+      return {
+        selector: '-',
+        aria: '-',
+        testid: '-',
+        disabled: true,
+      };
+    }
+
+    const testid = String(button.getAttribute('data-testid') || '-');
+    const id = String(button.id || '').trim();
+    const aria = String(button.getAttribute('aria-label') || '-');
+    const type = String(button.getAttribute('type') || '').trim();
+    const selector = testid !== '-'
+      ? `button[data-testid="${testid}"]`
+      : (id ? `button#${id}` : (type ? `button[type="${type}"]` : 'button'));
+
+    return {
+      selector,
+      aria,
+      testid,
+      disabled: isSendButtonDisabled(button),
+    };
+  }
+
+  function findComposerSendButtonDetailed() {
+    const button = typeof ComposerApi.findSendButton === 'function'
+      ? ComposerApi.findSendButton({ silent: true })
+      : null;
+    const composerText = typeof ComposerApi.getComposerText === 'function'
+      ? String(ComposerApi.getComposerText() || '')
+      : '';
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? Number(ComposerApi.countAttachmentChips() || 0)
+      : 0;
+    const responseState = typeof detectComposerResponseState === 'function'
+      ? detectComposerResponseState()
+      : {};
+    const info = describeComposerSendButtonForLog(button);
+
+    return {
+      button,
+      disabled: isSendButtonDisabled(button),
+      buttonSelector: info.selector || '-',
+      composerTextLen: composerText.length,
+      hasAttachment: attachmentCount > 0,
+      attachmentCount,
+      responseState: responseState.response_state || '-',
+      responseStateReason: responseState.response_state_reason || '-',
+    };
+  }
+
+  function clickSendButton(button, source = 'stable-send') {
+    if (!(button instanceof HTMLButtonElement)) {
+      return { ok: false, reason: 'invalid_send_button' };
+    }
+
+    if (isVoiceComposerButton(button)) {
+      appendSendLogFields('[SEND][CLICK_REJECT]', {
+        reason: 'voice_button',
+        source,
+        selector: describeComposerSendButtonForLog(button).selector || '-',
+      });
+      return { ok: false, reason: 'voice_button' };
+    }
+
+    if (isSendButtonDisabled(button)) {
+      return { ok: false, reason: 'send_button_disabled' };
+    }
+
+    try {
+      button.focus();
+      button.click();
+      return { ok: true, reason: 'clicked' };
+    } catch (err) {
+      const errText = err && err.message ? err.message : String(err);
+      console.error('[ChatGPT toolbox] clickSendButton failed', {
+        error_type: err && err.name ? err.name : 'Error',
+        error: errText,
+        stack: err && err.stack ? err.stack : '',
+      });
+      appendSendLogFields('[SEND][ERROR]', {
+        tag: 'clickSendButton',
+        error_type: err && err.name ? err.name : 'Error',
+        error: errText,
+        stack: err && err.stack ? String(err.stack).slice(0, 200) : '-',
+      });
+      return { ok: false, reason: 'send_click_exception', error: errText };
+    }
+  }
+
+  async function waitAndClickSendFromAttachWait(shouldStop, options = {}) {
+    const startedAt = Date.now();
+    const source = String(options.source || 'stable-send');
+
+    while (Date.now() - startedAt < MAX_ATTACHMENT_SEND_WAIT_MS) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      const scan = findComposerSendButtonDetailed();
+      const elapsed = Date.now() - startedAt;
+
+      appendSendLogFields('[SEND][ATTACH_READY]', {
+        elapsed,
+        button_selector: scan.buttonSelector || '-',
+        disabled: scan.disabled ? 1 : 0,
+        composer_text_len: scan.composerTextLen,
+        has_attachment: scan.hasAttachment ? 1 : 0,
+        response_state: scan.responseState || '-',
+        response_state_reason: scan.responseStateReason || '-',
+      });
+
+      if (scan.button && !scan.disabled) {
+        appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
+          elapsed,
+          button_selector: scan.buttonSelector || '-',
+          source,
+        });
+        const clicked = clickSendButton(scan.button, `${source}:attach_wait`);
+        if (clicked.ok) {
+          return { ok: true, reason: 'sent_by_attach_wait_click' };
+        }
+      }
+
+      appendSendLog(
+        `[SEND][ATTACH_WAIT] elapsed=${elapsed} status=processing button_found=${scan.button ? 1 : 0} disabled=${scan.disabled ? 1 : 0}`,
+      );
+      await sleep(SEND_BUTTON_RETRY_INTERVAL_MS);
+    }
+
+    return { ok: false, reason: 'send_button_wait_timeout' };
+  }
+
+  function dispatchEnterSend(composer, method) {
+    focusComposer(composer);
+
+    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
+      return ComposerApi.dispatchComposerSendKeyboard(method || 'enter');
+    }
+
+    return false;
+  }
+
+  function buildStableSendConfirmCtx(beforeText, beforeStopButton, sendButtonEnabledBefore) {
+    const beforeLatestRecordRaw = getLatestConversationMessageRecordFast({ preferAssistant: false });
+    const beforeLatestRecord = stripMessageRecordForCache(beforeLatestRecordRaw);
+    const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const contentText = String(beforeText || '').trim();
+
+    return {
+      contentText,
+      contentProbe: contentText.slice(0, 80),
+      attachmentCountBeforeSend,
+      beforeLatestKey: beforeLatestRecord ? beforeLatestRecord.key : '',
+      conversationIdBefore: parseConversationIdFromPath(location.pathname || '') || '',
+      urlBefore: location.href || '',
+      sendButtonEnabledBefore: sendButtonEnabledBefore !== false,
+      hadTextPayload: !!contentText || attachmentCountBeforeSend > 0,
+      beforeStopButtonVisible: !!beforeStopButton,
+    };
+  }
+
+  async function verifySendStarted(beforeCtx, options = {}) {
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const attempt = Number(options.attempt || 0);
+    const verifyTimeoutMs = Math.max(
+      SEND_STABLE_VERIFY_WAIT_MS,
+      Number(options.timeoutMs || SEND_STABLE_VERIFY_TIMEOUT_MS),
+    );
+    const turnCountBefore = typeof getCurrentPageTurnCount === 'function'
+      ? getCurrentPageTurnCount()
+      : null;
+
+    const confirmed = await waitComposerSendConfirmed(beforeCtx.contentText, verifyTimeoutMs, {
+      shouldStop,
+      beforeLatestKey: beforeCtx.beforeLatestKey,
+      attachmentCountBeforeSend: beforeCtx.attachmentCountBeforeSend,
+      conversationIdBefore: beforeCtx.conversationIdBefore,
+      urlBefore: beforeCtx.urlBefore,
+      sendButtonEnabledBefore: beforeCtx.sendButtonEnabledBefore,
+    });
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled' };
+    }
+
+    const stopButtonVisible = !!findChatGPTStopButton();
+    const stopAppearedAfterSend = stopButtonVisible && !beforeCtx.beforeStopButtonVisible;
+    const snapshot = buildSendConfirmSnapshot(beforeCtx);
+    const turnCountAfter = typeof getCurrentPageTurnCount === 'function'
+      ? getCurrentPageTurnCount()
+      : null;
+    const turnIncreased = (
+      turnCountBefore != null
+      && turnCountAfter != null
+      && Number(turnCountAfter) > Number(turnCountBefore)
+    );
+    const ok = confirmed.ok || turnIncreased || stopAppearedAfterSend;
+    const reason = ok
+      ? (
+        turnIncreased
+          ? 'turn_count_increased'
+          : (stopAppearedAfterSend ? 'stop_button_appeared' : (confirmed.reason || 'confirmed'))
+      )
+      : (confirmed.reason || 'send_not_confirmed');
+
+    appendSendLogFields('[SEND][VERIFY]', {
+      attempt,
+      ok: ok ? 1 : 0,
+      reason,
+      composer_cleared: snapshot.inputEmpty ? 1 : 0,
+      stop_button_visible: stopButtonVisible ? 1 : 0,
+      response_state: snapshot.responseState.response_state || '-',
+      turn_count_before: turnCountBefore == null ? '-' : turnCountBefore,
+      turn_count_after: turnCountAfter == null ? '-' : turnCountAfter,
+    });
+
+    return { ok, reason, snapshot };
+  }
+
+  async function stableSendMessage(options = {}) {
+    const text = String(options.text || '').trim();
+    const sendExistingComposer = options.sendExistingComposer === true;
+    const maxAttempts = Math.max(
+      1,
+      Number(options.maxAttempts || SEND_STABLE_RETRY_LIMIT_DEFAULT),
+    );
+    const intervalMs = Math.max(
+      50,
+      Number(options.intervalMs || SEND_STABLE_RETRY_INTERVAL_MS_DEFAULT),
+    );
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const blockWhenResponding = options.blockWhenResponding !== false;
+    const source = String(options.source || 'stable-send');
+
+    const result = {
+      ok: false,
+      reason: '',
+      attempts: 0,
+      usedFallbackEnter: false,
+      source,
+    };
+
+    appendSendLogFields('[SEND][CLICK]', getSendLogContext({ source }));
+
+    if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+      result.reason = 'page_navigating';
+      appendSendLogFields('[SEND][FAILED]', { reason: result.reason, attempts: 0, last_error: '-' });
+      return result;
+    }
+
+    if (shouldStop()) {
+      result.reason = 'cancelled';
+      appendSendLogFields('[SEND][FAILED]', { reason: result.reason, attempts: 0, last_error: '-' });
+      return result;
+    }
+
+    const responseState = detectComposerResponseState();
+    if (blockWhenResponding && responseState.is_responding) {
+      result.reason = 'assistant_busy';
+      result.wait_reply = true;
+      appendSendLogFields('[SEND][FAILED]', {
+        reason: result.reason,
+        attempts: 0,
+        last_error: responseState.response_state_reason || 'assistant_busy',
+      });
+      return result;
+    }
+
+    ChatInputStateRuntime.sendInProgress = true;
+    updateChatInputStateBadge();
+
+    let precheckLogged = false;
+
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        result.attempts = attempt;
+
+        if (shouldStop()) {
+          result.reason = 'cancelled';
+          break;
+        }
+
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          result.reason = 'page_navigating';
+          break;
+        }
+
+        const composer = findChatGPTComposer();
+        const composerTextNow = composer ? getComposerTextFromElement(composer) : '';
+        const isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          && ComposerApi.isAssistantLikelyBusy();
+        let sendButton = findChatGPTSendButton();
+        let sendButtonDisabled = isSendButtonDisabled(sendButton);
+
+        if (!precheckLogged) {
+          appendSendLogFields('[SEND][PRECHECK]', {
+            composer_found: composer ? 1 : 0,
+            composer_text_len: String(composerTextNow || '').length,
+            has_attachment: hasComposerAttachment() ? 1 : 0,
+            send_button_found: sendButton ? 1 : 0,
+            send_button_disabled: sendButtonDisabled ? 1 : 0,
+            is_responding: isResponding ? 1 : 0,
+          });
+          precheckLogged = true;
+        }
+
+        if (isResponding && blockWhenResponding) {
+          result.reason = 'assistant_busy';
+          result.wait_reply = true;
+          break;
+        }
+
+        if (!(composer instanceof HTMLElement)) {
+          result.reason = 'composer_not_found';
+          appendSendLogFields('[SEND][ATTEMPT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            button_selector: '-',
+            composer_type: 'missing',
+          });
+          await sleep(intervalMs);
+          continue;
+        }
+
+        const composerType = composer.matches && composer.matches('textarea,input')
+          ? 'textarea'
+          : (composer.isContentEditable ? 'contenteditable' : String(composer.tagName || '').toLowerCase());
+
+        if (
+          typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading()
+        ) {
+          const attachWait = await waitAttachmentsStableForSend(
+            SEND_ATTACH_WAIT_DEFAULT_MS,
+            shouldStop,
+            { source, onPreSendStatus: options.onPreSendStatus },
+          );
+
+          if (!attachWait.ok) {
+            result.reason = attachWait.reason || 'attachment_not_ready';
+            appendSendLogFields('[SEND][ATTEMPT]', {
+              attempt,
+              max_attempts: maxAttempts,
+              reason: result.reason,
+              button_selector: '-',
+              composer_type: composerType,
+            });
+            await sleep(intervalMs);
+            continue;
+          }
+
+          if (attachWait.reason === 'sent_by_attach_wait_click') {
+            const beforeText = getComposerTextFromElement(composer);
+            const beforeStopButton = findChatGPTStopButton();
+            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton, true);
+            const verifiedAttachWait = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+            if (verifiedAttachWait.ok) {
+              result.ok = true;
+              result.reason = 'sent_by_attach_wait_click';
+              ChatInputStateRuntime.waitingForReply = true;
+              return result;
+            }
+            result.reason = verifiedAttachWait.reason || 'send_not_confirmed';
+            await sleep(intervalMs);
+            continue;
+          }
+        }
+
+        focusComposer(composer);
+        await sleep(80);
+
+        if (text && !sendExistingComposer) {
+          setComposerText(composer, text);
+          await sleep(80);
+        }
+
+        const currentText = getComposerTextFromElement(composer);
+        if (!String(currentText || '').trim() && !hasComposerAttachment()) {
+          result.reason = 'composer_empty';
+          appendSendLogFields('[SEND][ATTEMPT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            button_selector: '-',
+            composer_type: composerType,
+          });
+          await sleep(intervalMs);
+          continue;
+        }
+
+        sendButton = findChatGPTSendButton();
+        sendButtonDisabled = isSendButtonDisabled(sendButton);
+
+        if (!(sendButton instanceof HTMLButtonElement)) {
+          result.reason = 'send_button_not_found';
+          appendSendLogFields('[SEND][ATTEMPT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            button_selector: '-',
+            composer_type: composerType,
+          });
+          await sleep(intervalMs);
+          continue;
+        }
+
+        const sendTestId = String(sendButton.getAttribute('data-testid') || '-');
+        const sendInfo = {
+          selector: sendTestId !== '-'
+            ? `button[data-testid="${sendTestId}"]`
+            : (sendButton.id ? `button#${sendButton.id}` : 'button'),
+          aria: String(sendButton.getAttribute('aria-label') || '-'),
+          disabled: sendButtonDisabled,
+        };
+
+        if (sendButtonDisabled) {
+          result.reason = 'send_button_disabled';
+          appendSendLogFields('[SEND][ATTEMPT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            button_selector: sendInfo.selector || '-',
+            composer_type: composerType,
+          });
+          await sleep(intervalMs);
+          continue;
+        }
+
+        const beforeText = getComposerTextFromElement(composer);
+        const beforeStopButton = findChatGPTStopButton();
+        const confirmCtx = buildStableSendConfirmCtx(
+          beforeText,
+          beforeStopButton,
+          true,
+        );
+
+        appendSendLogFields('[SEND][ATTEMPT]', {
+          attempt,
+          max_attempts: maxAttempts,
+          reason: 'click_send',
+          button_selector: sendInfo.selector || '-',
+          composer_type: composerType,
+        });
+
+        appendSendLogFields('[SEND][CLICK_NATIVE]', {
+          attempt,
+          button_text: String(sendButton.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) || '-',
+          aria_label: sendInfo.aria || '-',
+          disabled: 0,
+        });
+
+        const clickResult = clickSendButton(sendButton, source);
+        if (!clickResult.ok) {
+          result.reason = clickResult.reason || 'send_click_exception';
+          await sleep(intervalMs);
+          continue;
+        }
+
+        const verifiedClick = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+        if (verifiedClick.ok) {
+          result.ok = true;
+          result.reason = 'sent_by_click';
+          ChatInputStateRuntime.waitingForReply = true;
+          return result;
+        }
+
+        focusComposer(composer);
+        appendSendLogFields('[SEND][ENTER_FALLBACK]', {
+          attempt,
+          composer_type: composerType,
+        });
+
+        dispatchEnterSend(composer, 'ctrl_enter');
+        result.usedFallbackEnter = true;
+
+        let verifiedEnter = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+        if (!verifiedEnter.ok) {
+          dispatchEnterSend(composer, 'enter');
+          verifiedEnter = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+        }
+
+        if (verifiedEnter.ok) {
+          result.ok = true;
+          result.reason = result.usedFallbackEnter ? 'sent_by_enter_fallback' : 'sent';
+          ChatInputStateRuntime.waitingForReply = true;
+          return result;
+        }
+
+        result.reason = verifiedEnter.reason || 'send_not_confirmed';
+        await sleep(intervalMs);
+      }
+
+      if (!result.reason) {
+        result.reason = 'send_not_confirmed';
+      }
+
+      if (result.reason === 'send_button_disabled') {
+        const payloadStillExists = !!(
+          hasComposerAttachment()
+          || String(typeof ComposerApi.getComposerText === 'function' ? ComposerApi.getComposerText() || '' : '').trim()
+        );
+        const responseStateNow = detectComposerResponseState();
+
+        if (payloadStillExists && !(responseStateNow && responseStateNow.is_responding)) {
+          const attachWaitResult = await waitAndClickSendFromAttachWait(shouldStop, { source });
+          if (attachWaitResult.ok) {
+            const composer = findChatGPTComposer();
+            const beforeText = getComposerTextFromElement(composer);
+            const beforeStopButton = findChatGPTStopButton();
+            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton, true);
+            const verifiedAttachWait = await verifySendStarted(confirmCtx, {
+              shouldStop,
+              attempt: result.attempts,
+            });
+
+            if (verifiedAttachWait.ok) {
+              result.ok = true;
+              result.reason = 'sent_by_attach_wait_click';
+              ChatInputStateRuntime.waitingForReply = true;
+              return result;
+            }
+
+            result.reason = verifiedAttachWait.reason || 'send_not_confirmed';
+          } else {
+            result.reason = attachWaitResult.reason || 'send_button_wait_timeout';
+          }
+        }
+      }
+
+      appendSendLogFields('[SEND][FAILED]', {
+        reason: result.reason,
+        attempts: result.attempts,
+        last_error: result.reason,
+      });
+
+      return result;
+    } catch (err) {
+      logSendFlowError('stableSendMessage', err, { source });
+      result.reason = 'send_exception';
+      result.error = err && err.message ? err.message : String(err);
+      appendSendLogFields('[SEND][FAILED]', {
+        reason: result.reason,
+        attempts: result.attempts,
+        last_error: result.error,
+      });
+      return result;
+    } finally {
+      ChatInputStateRuntime.sendInProgress = false;
+      updateChatInputStateBadge();
+    }
+  }
+
   function isResponseStateIndicatingSendTriggered(responseState) {
     if (!responseState || typeof responseState !== 'object') {
       return false;
@@ -39675,7 +43532,9 @@ if (document.readyState === 'loading') {
     const attachmentCountNow = typeof ComposerApi.countAttachmentChips === 'function'
       ? ComposerApi.countAttachmentChips()
       : 0;
-    const latest = getLatestConversationMessageRecord({ preferAssistant: false });
+    const latestRaw = getLatestConversationMessageRecordFast({ preferAssistant: false, includeHidden: false })
+      || getLatestConversationMessageRecord({ preferAssistant: false, forceFullScan: true });
+    const latest = stripMessageRecordForCache(latestRaw);
     const latestKey = buildMessageRecordKey(latest);
     const beforeLatestKey = String(ctx.beforeLatestKey || '');
     const latestUserChanged = !!beforeLatestKey && !!latestKey && latestKey !== beforeLatestKey;
@@ -39846,27 +43705,53 @@ if (document.readyState === 'loading') {
 
   async function waitAttachmentsStableForSend(timeoutMs, shouldStop, options = {}) {
     const startedAt = Date.now();
-    let lastLogAt = 0;
 
     notifyPreSendStatus(options, '附件仍在处理中，等待发送...');
 
     while (Date.now() - startedAt < timeoutMs) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
 
-      if (typeof ComposerApi.isAttachmentStillUploading !== 'function'
-        || !ComposerApi.isAttachmentStillUploading()) {
+      const elapsed = Date.now() - startedAt;
+      const scan = findComposerSendButtonDetailed();
+      appendSendLogFields('[SEND][ATTACH_READY]', {
+        elapsed,
+        button_selector: scan.buttonSelector || '-',
+        disabled: scan.disabled ? 1 : 0,
+        composer_text_len: scan.composerTextLen,
+        has_attachment: scan.hasAttachment ? 1 : 0,
+        response_state: scan.responseState || '-',
+        response_state_reason: scan.responseStateReason || '-',
+      });
+
+      if (scan.button && !scan.disabled) {
+        appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
+          elapsed,
+          button_selector: scan.buttonSelector || '-',
+          source: String(options.source || 'stable-send'),
+        });
+        const clicked = clickSendButton(scan.button, `${String(options.source || 'stable-send')}:attach_wait`);
+        if (clicked.ok) {
+          return { ok: true, reason: 'sent_by_attach_wait_click' };
+        }
+      }
+
+      const attachmentProcessing = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+      appendSendLog(
+        `[SEND][ATTACH_WAIT] elapsed=${elapsed} status=${attachmentProcessing ? 'processing' : 'ready'} button_found=${scan.button ? 1 : 0} disabled=${scan.disabled ? 1 : 0}`,
+      );
+
+      if (!attachmentProcessing && !scan.hasAttachment) {
         return { ok: true, reason: 'attachment_stable' };
       }
 
-      const elapsed = Date.now() - startedAt;
-      if (elapsed - lastLogAt >= 2000) {
-        appendSendLog(`[SEND][ATTACH_WAIT] elapsed=${elapsed} status=processing`);
-        lastLogAt = elapsed;
-      }
-
-      await sleep(SEND_CONFIRM_POLL_MS);
+      await sleep(SEND_BUTTON_RETRY_INTERVAL_MS);
     }
 
     return { ok: false, reason: 'attachment_not_ready' };
@@ -39879,6 +43764,10 @@ if (document.readyState === 'loading') {
     notifyPreSendStatus(options, '正在等待 ChatGPT 发送按钮可用...');
 
     while (Date.now() - startedAt < timeoutMs) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
@@ -39939,6 +43828,10 @@ if (document.readyState === 'loading') {
     while (true) {
       loopCount += 1;
 
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
@@ -39970,23 +43863,6 @@ if (document.readyState === 'loading') {
         return { ok: false, reason: 'assistant_busy', response_state: responseState };
       }
 
-      if (
-        typeof ComposerApi.isAttachmentStillUploading === 'function'
-        && ComposerApi.isAttachmentStillUploading()
-      ) {
-        const now = Date.now();
-        if (now - lastLogAt >= logIntervalMs) {
-          appendSendLog(
-            `[SEND][WAIT_FOREVER] phase=attachment_processing loop=${loopCount} `
-            + `response_state=${responseState.response_state || '-'} `
-            + `reason=${responseState.response_state_reason || '-'}`,
-          );
-          lastLogAt = now;
-        }
-        await sleep(pollMs);
-        continue;
-      }
-
       const sendBtn = typeof ComposerApi.findSendButton === 'function'
         ? ComposerApi.findSendButton({ silent: true })
         : null;
@@ -40010,6 +43886,24 @@ if (document.readyState === 'loading') {
           reason: 'send_button_ready',
           button: sendBtn,
         };
+      }
+
+      if (
+        typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading()
+      ) {
+        const now = Date.now();
+        if (now - lastLogAt >= logIntervalMs) {
+          appendSendLog(
+            `[SEND][WAIT_FOREVER] phase=attachment_processing loop=${loopCount} `
+            + `button_found=${sendBtn ? 1 : 0} disabled=${sendBtn && isSendButtonDisabled(sendBtn) ? 1 : 0} `
+            + `response_state=${responseState.response_state || '-'} `
+            + `reason=${responseState.response_state_reason || '-'}`,
+          );
+          lastLogAt = now;
+        }
+        await sleep(pollMs);
+        continue;
       }
 
       const now = Date.now();
@@ -40072,8 +43966,9 @@ if (document.readyState === 'loading') {
           continue;
         }
 
-        const beforeLatestRecord = getLatestConversationMessageRecord({ preferAssistant: false });
-        const beforeLatestKey = buildMessageRecordKey(beforeLatestRecord);
+        const beforeLatestRecordRaw = getLatestConversationMessageRecordFast({ preferAssistant: false });
+        const beforeLatestRecord = stripMessageRecordForCache(beforeLatestRecordRaw);
+        const beforeLatestKey = beforeLatestRecord ? beforeLatestRecord.key : '';
         const conversationIdBefore = parseConversationIdFromPath(location.pathname || '') || '';
         const urlBefore = location.href || '';
         const composerTextBeforeSend = ComposerApi.getComposerText();
@@ -40115,7 +44010,6 @@ if (document.readyState === 'loading') {
           {
             shouldStop,
             beforeLatestKey,
-            beforeLatestRecord,
             attachmentCountBeforeSend,
             conversationIdBefore,
             urlBefore,
@@ -40177,10 +44071,7 @@ if (document.readyState === 'loading') {
     const expectedText = String(options.expectedText || '').trim();
     const requireTextSynced = options.requireTextSynced === true;
     const attachmentWaitTimeoutMs = Number(options.attachmentWaitTimeoutMs || SEND_ATTACH_WAIT_DEFAULT_MS);
-    const waitUntilSendable = options.waitUntilSendable !== false;
-    const sendButtonWaitTimeoutMs = Number(
-      options.sendButtonWaitTimeoutMs || SEND_WAIT_TIMEOUT_MS,
-    );
+    const allowSendButtonWait = options.allowSendButtonWait === true;
 
     if (shouldStop()) {
       return { ok: false, reason: 'cancelled' };
@@ -40216,33 +44107,32 @@ if (document.readyState === 'loading') {
       }
     }
 
-    if (isSendButtonReadyForPreSend()) {
-      return { ok: true, reason: 'pre_send_ready' };
-    }
-
-    if (waitUntilSendable) {
-      const buttonWait = await waitSendButtonReadyForSend(sendButtonWaitTimeoutMs, shouldStop, options);
-      if (!buttonWait.ok) {
-        return { ok: false, reason: buttonWait.reason || 'send_button_wait_timeout' };
-      }
-      return { ok: true, reason: 'pre_send_ready' };
-    }
-
     const sendBtn = typeof ComposerApi.findSendButton === 'function'
-      ? ComposerApi.findSendButton({ silent: true })
+      ? ComposerApi.findSendButton()
       : null;
 
     if (!sendBtn) {
+      if (allowSendButtonWait) {
+        return { ok: true, reason: 'pre_send_ready_wait_send_button' };
+      }
       return { ok: false, reason: 'send_button_not_found' };
     }
 
-    return { ok: false, reason: 'button_disabled' };
+    if (!ComposerApi.isSendButtonReady(sendBtn) && !allowSendButtonWait) {
+      return { ok: false, reason: 'button_disabled' };
+    }
+
+    return { ok: true, reason: 'pre_send_ready' };
   }
 
   async function waitForSendProgressSinceBaseline(baseline, ctx, timeoutMs, shouldStop) {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
@@ -40267,15 +44157,25 @@ if (document.readyState === 'loading') {
     const baseline = buildSendConfirmSnapshot(ctx);
     ctx.baselineSnapshot = baseline;
 
+    const methods = [];
+
     appendSendLog('[SEND][ACTION] method=button_click');
     const okClick = ComposerApi.clickSend();
+    methods.push('button_click');
+
     if (!okClick) {
       return { ok: false, reason: 'click_send_failed' };
     }
 
-    let progress = await waitForSendProgressSinceBaseline(baseline, ctx, SEND_FALLBACK_WAIT_MS, shouldStop);
+    let progress = await waitForSendProgressSinceBaseline(
+      baseline,
+      ctx,
+      SEND_FALLBACK_WAIT_MS,
+      shouldStop,
+    );
+
     if (progress.ok) {
-      return { ok: true, methods: ['button_click'], snapshot: progress.snapshot };
+      return { ok: true, methods, snapshot: progress.snapshot };
     }
 
     if (shouldStop()) {
@@ -40283,13 +44183,21 @@ if (document.readyState === 'loading') {
     }
 
     appendSendLog('[SEND][ACTION] method=ctrl_enter_fallback');
+    methods.push('ctrl_enter_fallback');
+
     if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
       ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
     }
 
-    progress = await waitForSendProgressSinceBaseline(baseline, ctx, SEND_FALLBACK_WAIT_MS, shouldStop);
+    progress = await waitForSendProgressSinceBaseline(
+      baseline,
+      ctx,
+      SEND_FALLBACK_WAIT_MS,
+      shouldStop,
+    );
+
     if (progress.ok) {
-      return { ok: true, methods: ['button_click', 'ctrl_enter_fallback'], snapshot: progress.snapshot };
+      return { ok: true, methods, snapshot: progress.snapshot };
     }
 
     if (shouldStop()) {
@@ -40297,11 +44205,65 @@ if (document.readyState === 'loading') {
     }
 
     appendSendLog('[SEND][ACTION] method=enter_fallback');
+    methods.push('enter_fallback');
+
     if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
       ComposerApi.dispatchComposerSendKeyboard('enter');
     }
 
-    return { ok: true, methods: ['button_click', 'ctrl_enter_fallback', 'enter_fallback'] };
+    progress = await waitForSendProgressSinceBaseline(
+      baseline,
+      ctx,
+      SEND_FALLBACK_WAIT_MS,
+      shouldStop,
+    );
+
+    if (progress.ok) {
+      return { ok: true, methods, snapshot: progress.snapshot };
+    }
+
+    if (shouldStop()) {
+      return { ok: false, reason: 'cancelled' };
+    }
+
+    appendSendLog('[SEND][ACTION] method=native_enter_fallback');
+    methods.push('native_enter_fallback');
+
+    if (
+      typeof ComposerApi.focusComposerForNativeSend === 'function'
+      && ComposerApi.focusComposerForNativeSend()
+      && typeof BridgeModule !== 'undefined'
+      && BridgeModule
+      && typeof BridgeModule.sendSystemHotkey === 'function'
+    ) {
+      try {
+        await sleep(150);
+        await BridgeModule.sendSystemHotkey('enter');
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] native enter fallback failed', err);
+        appendSendLog(`[SEND][ACTION_FAILED] method=native_enter_fallback error=${errText}`);
+      }
+
+      progress = await waitForSendProgressSinceBaseline(
+        baseline,
+        ctx,
+        Math.max(SEND_FALLBACK_WAIT_MS, 4000),
+        shouldStop,
+      );
+
+      if (progress.ok) {
+        return { ok: true, methods, snapshot: progress.snapshot };
+      }
+    } else {
+      appendSendLog('[SEND][ACTION_SKIP] method=native_enter_fallback reason=bridge-or-composer-unavailable');
+    }
+
+    return {
+      ok: false,
+      reason: 'no_send_progress_after_actions',
+      methods,
+    };
   }
 
   async function waitComposerSendConfirmed(content, timeoutMs = SEND_CONFIRM_DEFAULT_TIMEOUT_MS, options = {}) {
@@ -40332,6 +44294,10 @@ if (document.readyState === 'loading') {
     let effectiveTimeoutMs = Math.max(Number(timeoutMs) || 0, SEND_CONFIRM_DEFAULT_TIMEOUT_MS);
 
     while (Date.now() - startedAt < effectiveTimeoutMs) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return { ok: false, reason: 'page_navigating' };
+      }
+
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
@@ -40348,8 +44314,9 @@ if (document.readyState === 'loading') {
           (Date.now() - startedAt) + SEND_CONVERSATION_SWITCH_EXTRA_MS,
         );
 
-        const latestOnNewPage = getLatestConversationMessageRecord({ preferAssistant: false });
-        ctx.beforeLatestKey = buildMessageRecordKey(latestOnNewPage);
+        const latestOnNewPageRaw = getLatestConversationMessageRecordFast({ preferAssistant: false });
+        const latestOnNewPage = stripMessageRecordForCache(latestOnNewPageRaw);
+        ctx.beforeLatestKey = latestOnNewPage ? latestOnNewPage.key : '';
 
         appendSendLog(
           `[SEND][CONVERSATION_SWITCH] old_id=${conversationIdBefore || '-'} new_id=${conversationIdNow} `
@@ -40414,6 +44381,11 @@ if (document.readyState === 'loading') {
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
     logPageCapability(getPageCapability(`send:${source}`), '[SEND][CAPABILITY]');
+
+    if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+      updateChatInputStateBadge();
+      return { ok: false, reason: 'page_navigating', source };
+    }
 
     if (shouldStop()) {
       updateChatInputStateBadge();
@@ -40503,13 +44475,28 @@ if (document.readyState === 'loading') {
       }
 
       if (!hasComposerPayload && !nativeSendReady) {
-        updateChatInputStateBadge();
-        return {
-          ok: false,
-          reason: 'composer_empty',
-          source,
-          attachment_count: attachmentCountBeforeSend,
-        };
+        const payloadWait = typeof ComposerApi.waitExistingComposerPayloadReadyForSend === 'function'
+          ? await ComposerApi.waitExistingComposerPayloadReadyForSend(
+            Number(options.emptyComposerWaitMs || 30000),
+            shouldStop,
+            source,
+          )
+          : { ok: false, reason: 'composer_empty' };
+
+        if (!payloadWait.ok) {
+          updateChatInputStateBadge();
+          return {
+            ok: false,
+            reason: payloadWait.reason || 'composer_empty',
+            source,
+            attachment_count: attachmentCountBeforeSend,
+            diagnostics: payloadWait.snapshot || {},
+          };
+        }
+
+        ToolboxShell.appendLog(
+          `[SEND][PAYLOAD_RECOVERED] source=${source} reason=${payloadWait.reason || '-'}`,
+        );
       }
 
       if (!hasComposerPayload && nativeSendReady) {
@@ -40528,8 +44515,9 @@ if (document.readyState === 'loading') {
     const attachmentCountBeforeSend = typeof ComposerApi.countAttachmentChips === 'function'
       ? ComposerApi.countAttachmentChips()
       : 0;
-    const beforeLatestRecord = getLatestConversationMessageRecord({ preferAssistant: false });
-    const beforeLatestKey = buildMessageRecordKey(beforeLatestRecord);
+    const beforeLatestRecordRaw = getLatestConversationMessageRecordFast({ preferAssistant: false });
+    const beforeLatestRecord = stripMessageRecordForCache(beforeLatestRecordRaw);
+    const beforeLatestKey = beforeLatestRecord ? beforeLatestRecord.key : '';
     const conversationIdBefore = parseConversationIdFromPath(location.pathname || '') || '';
     const urlBefore = location.href || '';
     const sendBtnBefore = typeof ComposerApi.findSendButton === 'function'
@@ -40542,8 +44530,7 @@ if (document.readyState === 'loading') {
       expectedText: sendExistingComposer ? '' : content,
       requireTextSynced: !sendExistingComposer && !!content,
       attachmentWaitTimeoutMs: Number(options.attachmentWaitTimeoutMs || SEND_ATTACH_WAIT_DEFAULT_MS),
-      waitUntilSendable,
-      sendButtonWaitTimeoutMs: timeoutMs,
+      allowSendButtonWait: waitUntilSendable,
       onPreSendStatus: typeof options.onPreSendStatus === 'function' ? options.onPreSendStatus : null,
     });
 
@@ -40562,6 +44549,18 @@ if (document.readyState === 'loading') {
 
       updateChatInputStateBadge();
       return { ok: false, reason: mappedReason, source };
+    }
+
+    if (waitUntilSendable && !isSendButtonReadyForPreSend()) {
+      const buttonWait = await waitSendButtonReadyForSend(timeoutMs, shouldStop, options);
+      if (!buttonWait.ok) {
+        const waitReason = buttonWait.reason || 'send_button_wait_timeout';
+        const mappedWaitReason = waitReason === 'send_button_wait_timeout'
+          ? waitReason
+          : `send_not_confirmed:${waitReason}`;
+        updateChatInputStateBadge();
+        return { ok: false, reason: mappedWaitReason, source };
+      }
     }
 
     ChatInputStateRuntime.sendInProgress = true;
@@ -40606,7 +44605,6 @@ if (document.readyState === 'loading') {
         {
           shouldStop,
           beforeLatestKey,
-          beforeLatestRecord,
           attachmentCountBeforeSend,
           conversationIdBefore,
           urlBefore,

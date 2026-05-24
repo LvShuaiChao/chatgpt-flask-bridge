@@ -14,10 +14,10 @@ BIND_STATE_TEMP_HOME_BOUND = "TEMP_HOME_BOUND"
 BIND_STATE_BOUND_CONVERSATION = "BOUND_CONVERSATION"
 
 BIND_STATE_PREBOUND_HOME = BIND_STATE_TEMP_HOME_BOUND
-BIND_STATE_WAITING_HOME = BIND_STATE_UNBOUND
-BIND_STATE_WAITING_CONVERSATION_CREATED = BIND_STATE_UNBOUND
+BIND_STATE_WAITING_HOME = "WAITING_HOME"
+BIND_STATE_WAITING_CONVERSATION_CREATED = "WAITING_CONVERSATION_CREATED"
 BIND_STATE_BOUND_OFFLINE = "BOUND_OFFLINE"
-BIND_STATE_WAITING_BOUND_CONVERSATION = BIND_STATE_UNBOUND
+BIND_STATE_WAITING_BOUND_CONVERSATION = "WAITING_BOUND_CONVERSATION"
 
 BIND_MODE_PAGE_CHANNEL = "page_channel"
 BIND_MODE_HOME_PENDING = "home_pending"
@@ -32,15 +32,15 @@ VALID_BIND_STATES = frozenset(
         BIND_STATE_TEMP_HOME_BOUND,
         BIND_STATE_BOUND_CONVERSATION,
         BIND_STATE_BOUND_OFFLINE,
+        BIND_STATE_WAITING_HOME,
+        BIND_STATE_WAITING_CONVERSATION_CREATED,
+        BIND_STATE_WAITING_BOUND_CONVERSATION,
     }
 )
 
 _LEGACY_BIND_STATE_ALIASES = {
     "BOUND": BIND_STATE_BOUND_CONVERSATION,
     "PREBOUND_HOME": BIND_STATE_TEMP_HOME_BOUND,
-    "WAITING_HOME": BIND_STATE_UNBOUND,
-    "WAITING_CONVERSATION_CREATED": BIND_STATE_UNBOUND,
-    "WAITING_BOUND_CONVERSATION": BIND_STATE_UNBOUND,
 }
 
 REMOTE_CHATGPT_PERSISTENT_KEYS = (
@@ -78,6 +78,12 @@ _REMOTE_NORMALIZE_KEYS = (
     "page_title",
     "last_seen",
     "last_poll_at",
+    "bind_request_id",
+    "bind_started_at",
+    "pending_bootstrap_content",
+    "pending_send_content",
+    "pending_send_message_id",
+    "reopen_started_at",
 )
 
 
@@ -96,6 +102,12 @@ def default_remote_chatgpt():
         "page_title": "",
         "last_seen": 0,
         "bind_mode": "",
+        "bind_request_id": "",
+        "bind_started_at": 0,
+        "pending_bootstrap_content": "",
+        "pending_send_content": "",
+        "pending_send_message_id": "",
+        "reopen_started_at": 0,
     }
 
 
@@ -113,15 +125,6 @@ def derive_bind_mode(remote) -> str:
     if is_temp_home_bound_state(bind_state):
         return BIND_MODE_HOME_PENDING
     return ""
-
-
-def is_page_channel_bound(remote) -> bool:
-    mode = derive_bind_mode(remote)
-    return mode in (BIND_MODE_PAGE_CHANNEL, BIND_MODE_HOME_PENDING)
-
-
-def is_conversation_bound(remote) -> bool:
-    return derive_bind_mode(remote) == BIND_MODE_CONVERSATION
 
 
 def _canonical_bind_state(raw_state: str) -> str:
@@ -527,7 +530,7 @@ def mark_waiting_placeholder_failed(message, *, content: str) -> bool:
         return False
     if isinstance(message, dict):
         message["ui_status"] = "failed"
-        message["status"] = "failed"
+        message.pop("status", None)
         message["content"] = content
     else:
         message.ui_status = "failed"

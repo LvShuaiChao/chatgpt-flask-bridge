@@ -570,6 +570,10 @@ APP_STYLESHEET = """
                 color: #111827;
                 font-size: 13px;
             }
+            QTextBrowser#ChatTranscript[replyFlash="false"] {
+                background: #f7f8fa;
+                border: 1px solid #e5e7eb;
+            }
             QTextBrowser#ChatTranscript[bindState="bound_online"],
             QTextBrowser#ChatTranscript[bindState="bound_offline"],
             QTextBrowser#ChatTranscript[bindState="unbound_optional"],
@@ -583,6 +587,14 @@ APP_STYLESHEET = """
             QTextBrowser#ChatTranscript[bindState="bind_mismatch"] {
                 background: #fef2f2;
                 border: 1px solid #fca5a5;
+            }
+            QTextBrowser#ChatTranscript[replyFlash="true"][replyFlashPhase="1"] {
+                background: #fff7ed;
+                border: 2px solid #fb923c;
+            }
+            QTextBrowser#ChatTranscript[replyFlash="true"][replyFlashPhase="2"] {
+                background: #ecfdf5;
+                border: 2px solid #22c55e;
             }
             QWidget#ChatInputBlock {
                 background: transparent;

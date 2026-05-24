@@ -176,7 +176,7 @@ class ChatRenderMixin:
         visible = [
             message
             for message in getattr(session, "messages", [])
-            if getattr(message, "visible", True)
+            if getattr(message, "visible_in_chat", True)
         ]
         if len(visible) <= MAX_RENDER_MESSAGES_ON_SWITCH:
             return visible, 0
@@ -489,9 +489,6 @@ class ChatRenderMixin:
                 self._sessions[session_id],
                 scroll_policy=scroll_policy,
             )
-
-    def _scroll_to_bottom(self):
-        self._schedule_scroll_chat_to_bottom()
 
     def _log_chat_render_ui_state(self, session, messages):
         transcript = self._chat_transcript_widget()

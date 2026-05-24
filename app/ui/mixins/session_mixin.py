@@ -282,6 +282,7 @@ class SessionMixin:
         self._refresh_session_list_current_badges()
         self._update_current_session_title_fast(session)
         self._force_session_list_repaint_now()
+        self._sync_current_reply_done_flash_visual()
 
         QTimer.singleShot(
             350,
@@ -335,6 +336,7 @@ class SessionMixin:
             }
             self._bridge_msg.pending_chat_render_session_id = session_id
             chat_rendered = False
+        self._sync_current_reply_done_flash_visual()
         render_ms = int((time.perf_counter() - t0) * 1000)
 
         QTimer.singleShot(
@@ -460,7 +462,7 @@ class SessionMixin:
         roles = ("user", "assistant") if prefer_user else ("assistant", "user")
         for role in roles:
             for message in session.messages:
-                if not getattr(message, "visible", True):
+                if not getattr(message, "visible_in_chat", True):
                     continue
                 if message.role != role:
                     continue
@@ -476,7 +478,7 @@ class SessionMixin:
         if session is None:
             return ""
         for message in reversed(session.messages):
-            if not getattr(message, "visible", True):
+            if not getattr(message, "visible_in_chat", True):
                 continue
             if message.role not in ("user", "assistant"):
                 continue
@@ -492,7 +494,7 @@ class SessionMixin:
         if session is None:
             return ""
         for message in reversed(session.messages):
-            if not getattr(message, "visible", True):
+            if not getattr(message, "visible_in_chat", True):
                 continue
             if message.role != "assistant":
                 continue
@@ -548,7 +550,7 @@ class SessionMixin:
         }
 
         for message in reversed(session.messages):
-            if not getattr(message, "visible", True):
+            if not getattr(message, "visible_in_chat", True):
                 continue
 
             if message.role != "assistant":
@@ -613,7 +615,7 @@ class SessionMixin:
             return
         messages_by_id = self._session_pending_messages_index(session)
         for message in reversed(session.messages):
-            if not getattr(message, "visible", True):
+            if not getattr(message, "visible_in_chat", True):
                 continue
             if message.role != "assistant":
                 continue
@@ -879,7 +881,7 @@ class SessionMixin:
             messages_to_clear.append(pending["message"])
         elif has_pending_messages:
             for message in reversed(list(session.messages)):
-                if not getattr(message, "visible", True):
+                if not getattr(message, "visible_in_chat", True):
                     continue
                 if message.role != "assistant":
                     continue
@@ -1156,12 +1158,14 @@ class SessionMixin:
             bind_state = self._session_bind_list_state(session, self._bridge_ui.last_bridge_status)
             preview = self._session_preview_text(session)
             pending = self._session_has_pending_assistant_reply(session)
+            reply_flash_phase = self._session_reply_done_flash_phase(session)
             rows.append((
                 sid,
                 self._session_list_title_text(session),
                 preview,
                 bind_state,
                 pending,
+                reply_flash_phase,
             ))
         return tuple(rows)
 
@@ -1417,6 +1421,8 @@ class SessionMixin:
             subtitle=self._session_preview_text(session),
             bind_state=bind_state,
             pending_reply=self._session_has_pending_assistant_reply(session),
+            reply_flash=self._session_reply_done_flash_active(session),
+            reply_flash_phase=self._session_reply_done_flash_phase(session),
             selected=selected,
             is_current=is_current,
             tooltip=self._session_list_item_tooltip(session, bind_state),
@@ -1730,6 +1736,9 @@ class SessionMixin:
             echo=True,
         )
         self._save_sessions_to_disk()
+        if hasattr(self, "_cleanup_bridge_runtime_maps"):
+            self._cleanup_bridge_runtime_maps("session_changed")
+
     def _rename_current_session(self):
         session = self._current_session()
         if not session:
@@ -1882,6 +1891,9 @@ class SessionMixin:
         self._refresh_session_list(select_session_id=session.session_id)
         self._update_current_session_title(session)
         self._schedule_save_sessions_to_disk()
+        if hasattr(self, "_cleanup_bridge_runtime_maps"):
+            self._cleanup_bridge_runtime_maps("session_changed")
+
     def _append_session_message(
         self,
         session,
@@ -1939,9 +1951,11 @@ class SessionMixin:
     def _on_tm_assistant_reply(self, payload):
         session_id = str(payload.get("session_id") or "").strip()
         turn_id = str(payload.get("turn_id") or "").strip()
-        content = str(
-            payload.get("content") or payload.get("text") or payload.get("assistant_text") or ""
-        ).strip()
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            content = str(
+                payload.get("text") or payload.get("assistant_text") or ""
+            ).strip()
         bridge_id = str(payload.get("message_id") or "").strip()
 
         if not content:
@@ -2090,6 +2104,126 @@ class SessionMixin:
                         if user_msg:
                             asst_msg.parent_message_id = user_msg.message_id
         self._message_to_turn = bridge_turn
+
+    REPLY_DONE_FLASH_SECONDS = 4.0
+    REPLY_DONE_FLASH_INTERVAL_MS = 260
+
+    def _session_reply_done_flash_until(self, session):
+        if session is None:
+            return 0.0
+        try:
+            return float(getattr(session, "_reply_done_flash_until", 0) or 0)
+        except (TypeError, ValueError) as error:
+            if hasattr(self, "_append_log"):
+                self._append_log(
+                    "[REPLY_FLASH][INVALID_UNTIL] "
+                    f"session_id={getattr(session, 'session_id', '-') } "
+                    f"value={getattr(session, '_reply_done_flash_until', None)!r} "
+                    f"error_type={type(error).__name__} error={error}",
+                    echo=True,
+                )
+            return 0.0
+
+    def _session_reply_done_flash_active(self, session):
+        return self._session_reply_done_flash_until(session) > time.time()
+
+    def _session_reply_done_flash_phase(self, session):
+        if not self._session_reply_done_flash_active(session):
+            return 0
+        interval = max(80, int(getattr(self, "REPLY_DONE_FLASH_INTERVAL_MS", 260)))
+        return 1 + int((time.time() * 1000) // interval) % 2
+
+    def _mark_session_reply_done_flash(self, session, *, reason=""):
+        if session is None:
+            return
+
+        now = time.time()
+        until = now + float(getattr(self, "REPLY_DONE_FLASH_SECONDS", 4.0) or 4.0)
+        setattr(session, "_reply_done_flash_until", until)
+
+        if hasattr(self, "_append_log"):
+            self._append_log(
+                "[REPLY_FLASH][START] "
+                f"session_id={getattr(session, 'session_id', '-') } "
+                f"reason={reason or '-'} "
+                f"until={until:.3f}",
+                echo=False,
+            )
+
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list(
+                select_session_id=getattr(self, "_current_session_id", "") or session.session_id
+            )
+
+        self._sync_current_reply_done_flash_visual()
+        self._start_reply_done_flash_timer()
+
+    def _start_reply_done_flash_timer(self):
+        timer = getattr(self, "_reply_done_flash_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(int(getattr(self, "REPLY_DONE_FLASH_INTERVAL_MS", 260)))
+            timer.timeout.connect(self._on_reply_done_flash_timer_tick)
+            self._reply_done_flash_timer = timer
+
+        if not timer.isActive():
+            timer.start()
+
+    def _on_reply_done_flash_timer_tick(self):
+        now = time.time()
+        active = False
+
+        for session in getattr(self, "_sessions", {}).values():
+            until = self._session_reply_done_flash_until(session)
+            if until > now:
+                active = True
+                continue
+            if until > 0:
+                setattr(session, "_reply_done_flash_until", 0)
+
+        if hasattr(self, "_refresh_session_list"):
+            self._refresh_session_list(
+                select_session_id=getattr(self, "_current_session_id", "") or None
+            )
+
+        self._sync_current_reply_done_flash_visual()
+
+        if not active:
+            timer = getattr(self, "_reply_done_flash_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+
+    def _sync_current_reply_done_flash_visual(self):
+        transcript = getattr(self, "chat_transcript", None)
+        if transcript is None:
+            return
+
+        session = self._current_session() if hasattr(self, "_current_session") else None
+        active = self._session_reply_done_flash_active(session)
+        phase = self._session_reply_done_flash_phase(session)
+
+        new_flash = "true" if active else "false"
+        new_phase = str(phase)
+
+        if (
+            transcript.property("replyFlash") == new_flash
+            and transcript.property("replyFlashPhase") == new_phase
+        ):
+            return
+
+        transcript.setProperty("replyFlash", new_flash)
+        transcript.setProperty("replyFlashPhase", new_phase)
+
+        style = transcript.style()
+        if style is not None:
+            style.unpolish(transcript)
+            style.polish(transcript)
+
+        transcript.update()
+        viewport = transcript.viewport()
+        if viewport is not None:
+            viewport.update()
+
     def _mark_session_pending(self, session_id):
         session = self._sessions.get(session_id)
         if not session:
@@ -2143,6 +2277,11 @@ class SessionMixin:
     @staticmethod
     def _normalize_legacy_message_dict(data):
         item = dict(data) if isinstance(data, dict) else {}
+        for legacy_key in ("text", "message", "prompt", "raw_content"):
+            if legacy_key in item and not (item.get("content") or "").strip():
+                item["content"] = item.pop(legacy_key)
+            else:
+                item.pop(legacy_key, None)
         if "status" in item:
             if not (item.get("ui_status") or "").strip():
                 item["ui_status"] = item.pop("status")
@@ -2158,6 +2297,11 @@ class SessionMixin:
                 item["visible_in_chat"] = item.pop("visible")
             else:
                 item.pop("visible", None)
+        if "request_id" in item:
+            if not (item.get("bridge_message_id") or "").strip():
+                item["bridge_message_id"] = item.pop("request_id")
+            else:
+                item.pop("request_id", None)
         return item
 
     def _message_from_dict(self, data):
@@ -2396,6 +2540,8 @@ class SessionMixin:
             session.trim_messages()
         if startup_cleared:
             self._save_sessions_to_disk()
+        if hasattr(self, "_cleanup_bridge_runtime_maps"):
+            self._cleanup_bridge_runtime_maps("session_changed")
 
     def _migrate_loaded_remote_bindings(self):
         from app.utils.bind_runtime import migrate_transient_from_remote

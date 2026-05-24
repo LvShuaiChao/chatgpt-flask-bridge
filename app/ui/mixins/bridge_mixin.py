@@ -1,23 +1,12 @@
 from app.server.external_api import attach_external_request_bridge
 from app.server import (
-    cancel_message,
     complete_gui_dispatch,
     enqueue_control_command,
     get_bridge_status,
-    get_message_state,
-    get_server_port,
-    get_server_public_host,
     get_server_url,
-    get_tm_online_summary,
     is_server_running,
-    push_close_other_pages,
-    push_close_page,
     push_message,
-    push_open_url,
     set_debug_mode,
-    set_external_gui_dispatch,
-    set_log_callback,
-    set_status_callback,
     start_server,
     stop_server,
 )
@@ -27,8 +16,6 @@ import traceback
 import uuid
 
 from app.utils.log_utils import append_log
-
-from PyQt5.QtWidgets import QFileDialog
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
@@ -297,11 +284,19 @@ class BridgeMixin:
         attach_external_request_bridge(session_id, bridge_message_id, turn_id)
         self._message_to_session[bridge_message_id] = session_id
         self._message_to_turn[bridge_message_id] = turn_id
-        pending_sends = getattr(self, "_pending_send_requests", None)
-        if pending_sends is None:
+        bridge_msg = getattr(self, "_bridge_msg", None)
+        if bridge_msg is None:
+            print("[BRIDGE_SEND][pending_request_skip] reason=bridge_msg_missing")
+            return
+        pending_sends = getattr(bridge_msg, "pending_send_requests", None)
+        if not isinstance(pending_sends, dict):
             pending_sends = {}
-            self._bridge_msg.pending_send_requests = pending_sends
+            bridge_msg.pending_send_requests = pending_sends
+        existing = pending_sends.get(bridge_message_id)
+        if not isinstance(existing, dict):
+            existing = {}
         pending_sends[bridge_message_id] = {
+            **existing,
             "session_id": session_id,
             "turn_id": turn_id,
             "user_message_id": user_message_id,
@@ -313,7 +308,6 @@ class BridgeMixin:
         {
             "payload",
             "content",
-            "raw_content",
             "turn_id",
             "user_message_id",
             "assistant_message_id",
@@ -344,6 +338,7 @@ class BridgeMixin:
         if pending.get("refresh_send_target"):
             for drop_key in ("client_id", "page_instance_id", "conversation_id", "url"):
                 payload.pop(drop_key, None)
+        # 兼容旧 pending：raw_content 仅在此处迁移一次，不再写回。
         raw_content = (pending.get("content") or pending.get("raw_content") or "").strip()
         turn_id = (pending.get("turn_id") or "").strip()
         user_message_id = (pending.get("user_message_id") or "").strip()
@@ -369,7 +364,6 @@ class BridgeMixin:
         return {
             "payload": payload,
             "content": raw_content,
-            "raw_content": raw_content,
             "turn_id": turn_id,
             "user_message_id": user_message_id,
             "assistant_message_id": assistant_message_id,
@@ -417,9 +411,7 @@ class BridgeMixin:
             or getattr(session, "bound_page_id", None)
             or ""
         ).strip()
-        url = page_url_from(payload) or str(
-            payload.get("url") or payload.get("conversation_url") or ""
-        ).strip()
+        url = page_url_from(payload)
 
         missing = []
 
@@ -694,9 +686,8 @@ class BridgeMixin:
                     "message_id": user_message_id,
                     "turn_id": turn_id,
                     "bridge_message_id": bridge_message_id,
-                    "request_id": bridge_message_id,
-                    "status": "sending",
-                    "source": "local_send",
+                    "ui_status": "sending",
+                    "message_source": "local_send",
                 },
             )
             count_after_enqueue = self._session_visible_message_count(session)
@@ -985,341 +976,6 @@ class BridgeMixin:
                 session, reason=reason_key or "bridge_status_tick"
             )
         return False
-
-    def _update_upload_action_buttons_state(self):
-        if not hasattr(self, "trigger_upload_btn") or not hasattr(
-            self, "upload_and_send_btn"
-        ):
-            return
-
-        session = self._current_session()
-        server_running = is_server_running()
-
-        # 不再通过 disabled 表示不可用，避免按钮变灰。
-        # 点击后仍然走原有前置检查，给出明确失败原因。
-        self.trigger_upload_btn.setEnabled(True)
-        self.upload_and_send_btn.setEnabled(True)
-        if hasattr(self, "send_to_cursor_btn"):
-            self.send_to_cursor_btn.setEnabled(True)
-
-        if session is None:
-            self.trigger_upload_btn.setToolTip("当前没有会话，点击后会提示无法触发上传。")
-            self.upload_and_send_btn.setToolTip("当前没有会话，点击后会提示无法上传并发送。")
-            return
-
-        _, _, _, err = self._strict_targets_for_upload_command(session)
-        target_ready = bool(server_running and not err)
-
-        response_ready = True
-        response_msg = ""
-        if target_ready:
-            response_ready, response_msg = self._check_bound_client_response_ready(
-                session
-            )
-
-        busy_reason = self._session_send_busy_reason(session)
-        is_busy = bool(busy_reason)
-
-        if not server_running:
-            self.trigger_upload_btn.setToolTip("服务未启动，点击后会提示请先启动服务。")
-            self.upload_and_send_btn.setToolTip("服务未启动，点击后会提示请先启动服务。")
-            return
-
-        if err:
-            self.trigger_upload_btn.setToolTip(f"当前可能无法触发上传：{err}")
-            self.upload_and_send_btn.setToolTip(f"当前不能上传并发送：{err}")
-            return
-
-        if not response_ready:
-            tip = response_msg or "当前绑定页面仍在回答或暂不可接收输入。"
-            self.trigger_upload_btn.setToolTip(f"当前可能无法触发上传：{tip}")
-            self.upload_and_send_btn.setToolTip(f"当前不能上传并发送：{tip}")
-            return
-
-        if is_busy:
-            self.trigger_upload_btn.setToolTip(
-                f"当前会话状态：{busy_reason}。点击后会再次检查。"
-            )
-            self.upload_and_send_btn.setToolTip(
-                f"当前会话正在处理上一条消息：{busy_reason}。点击后会给出阻断原因。"
-            )
-            return
-
-        self.trigger_upload_btn.setToolTip(
-            "向当前绑定的油猴页面下发 start_upload，只上传工具箱队列中的文件，不发送文字。"
-        )
-        self.upload_and_send_btn.setToolTip(
-            "先触发油猴上传工具箱队列中的文件，成功后再发送输入框文字。"
-        )
-
-    def _register_local_upload_file_path(self, path: str):
-        """将 GUI 选择的本地文件登记到 Flask，供油猴 poll 拉取并下载上传。"""
-        from app.server.upload_files import register_upload_file
-
-        session = self._current_session()
-        if session is None:
-            self._add_system_message("没有当前会话，无法登记本地文件。")
-            return None
-
-        path_text = (path or "").strip()
-        if not path_text:
-            self._add_system_message("文件路径为空，无法登记。")
-            return None
-
-        remote = getattr(session, "remote_chatgpt", None) or {}
-        if hasattr(remote, "to_dict"):
-            remote = remote.to_dict()
-        if not isinstance(remote, dict):
-            remote = {}
-
-        try:
-            entry = register_upload_file(
-                path_text,
-                session_id=session.session_id,
-                client_id=(remote.get("client_id") or "").strip(),
-                page_instance_id=(remote.get("page_instance_id") or "").strip(),
-                base_url=get_server_url() if is_server_running() else None,
-            )
-        except (FileNotFoundError, ValueError, OSError) as error:
-            self._append_log(
-                "[UPLOAD_FILES][REGISTER][FAILED] "
-                f"path={path_text} error_type={type(error).__name__} error={error}",
-                echo=True,
-            )
-            self._add_system_message(f"登记本地文件失败：{error}")
-            return None
-
-        self._append_log(
-            "[UPLOAD_FILES][REGISTER][OK] "
-            f"file_id={entry.get('file_id') or '-'} "
-            f"name={entry.get('name') or '-'} "
-            f"session_id={session.session_id}",
-            echo=True,
-        )
-        self._add_system_message(
-            f"已登记本地文件：{entry.get('name') or path_text}。"
-            "请在 ChatGPT 页油猴工具箱点击「开始上传」。"
-        )
-        return entry
-
-    def _pick_and_register_upload_file_for_session(self):
-        if not is_server_running():
-            self._add_system_message("请先启动服务，再添加本地文件。")
-            return None
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择要上传到 ChatGPT 的本地文件",
-            "",
-            "所有文件 (*);;ZIP 压缩包 (*.zip)",
-        )
-        if not path:
-            return None
-        return self._register_local_upload_file_path(path)
-
-    def _on_trigger_upload_clicked(self):
-        self._append_log("[UPLOAD_TRIGGER][CLICK]", echo=True)
-
-        if not is_server_running():
-            self._add_system_message("请先启动服务。")
-            self._append_log(
-                "[UPLOAD_TRIGGER][FAILED] reason=server_not_running",
-                echo=True,
-            )
-            return
-
-        session = self._current_session()
-        if session is None:
-            self._add_system_message("没有当前会话，无法触发上传。")
-            self._append_log(
-                "[UPLOAD_TRIGGER][FAILED] reason=no_current_session",
-                echo=True,
-            )
-            return
-
-        response_ready, response_msg = self._check_bound_client_response_ready(session)
-        if not response_ready:
-            self._add_system_message(
-                response_msg or "当前绑定页面暂不可上传，请等待 ChatGPT 回复完成后再试。"
-            )
-            self._append_log(
-                "[UPLOAD_TRIGGER][BLOCKED] "
-                f"reason=response_not_ready detail={response_msg or '-'}",
-                echo=True,
-            )
-            return
-
-        busy_reason = self._session_send_busy_reason(session)
-        if busy_reason == "pending_reply":
-            self._clear_stale_pending_reply_if_bound_page_idle(
-                session,
-                reason="manual_trigger_upload",
-            )
-            busy_reason = self._session_send_busy_reason(session)
-
-        if busy_reason and busy_reason != "pending_reply":
-            self._add_system_message(
-                f"当前会话状态仍不可上传：{busy_reason}。"
-                "请先同步网页对话或等待绑定状态恢复。"
-            )
-            self._append_log(
-                f"[UPLOAD_TRIGGER][BLOCKED] reason=session_busy detail={busy_reason}",
-                echo=True,
-            )
-            return
-
-        if busy_reason == "pending_reply":
-            self._append_log(
-                "[UPLOAD_TRIGGER][PENDING_REPLY_BYPASS] "
-                f"session_id={session.session_id} "
-                "本地仍有 pending_reply，但绑定页已空闲，继续触发上传",
-                echo=True,
-            )
-
-        ok = self._trigger_upload_for_current_bound_page(
-            block_next_chat_on_failed=False
-        )
-
-        if ok:
-            self._add_system_message(
-                "已向绑定页发送 start_upload，请等待油猴完成工具箱上传。"
-            )
-            self.statusBar().showMessage(
-                "已下发上传指令，请等待油猴侧完成上传",
-                5000,
-            )
-        else:
-            self._add_system_message(
-                "触发上传失败，请查看日志中的 [UPLOAD_TRIGGER][FAILED] 详情。"
-            )
-
-    def _on_upload_and_send_clicked(self):
-        self._append_log("[UPLOAD_AND_SEND][CLICK] button=upload_and_send", echo=True)
-        if not is_server_running():
-            self._add_system_message("请先启动服务。")
-            self._append_log(
-                "[UPLOAD_AND_SEND][BLOCKED] reason=server_not_running",
-                echo=True,
-            )
-            return
-        content = self.message_edit.toPlainText().strip()
-        if not content:
-            self._append_log(
-                "[UPLOAD_AND_SEND][EMPTY_TEXT_TO_UPLOAD_ONLY] 输入框为空，自动退化为只触发上传",
-                echo=True,
-            )
-            self._add_system_message("输入框为空，已按「只触发上传」处理。")
-            self._on_trigger_upload_clicked()
-            return
-        session = self._ensure_current_session()
-        if hasattr(self, "resolve_page_action"):
-            upload_action = self.resolve_page_action(session, action="upload")
-            if upload_action.decision == "blocked":
-                upload_reason = upload_action.reason_code or "upload_blocked"
-                self._add_system_message(str(upload_reason))
-                self._append_log(
-                    f"[UPLOAD_AND_SEND][BLOCKED] reason=upload decision=blocked "
-                    f"detail={upload_reason}",
-                    echo=True,
-                )
-                return
-        busy_reason = self._session_send_busy_reason(session)
-
-        if busy_reason == "pending_reply":
-            self._clear_stale_pending_reply_if_bound_page_idle(
-                session,
-                reason="upload_and_send",
-            )
-            busy_reason = self._session_send_busy_reason(session)
-
-        hard_block_reasons = {
-            "waiting_bind",
-            "waiting_home",
-            "prebound_home_wait_conversation",
-            "bind_state_waiting_home",
-            "bind_state_waiting_conversation_created",
-            "bind_state_waiting_bound_conversation",
-        }
-        if busy_reason in hard_block_reasons:
-            self._add_system_message(
-                f"当前会话正忙（{busy_reason}），请等待完成后再使用上传并发送。"
-            )
-            self._append_log(
-                f"[UPLOAD_AND_SEND][BLOCKED] reason=session_busy detail={busy_reason}",
-                echo=True,
-            )
-            return
-        _, _, _, pre_err = self._strict_targets_for_upload_command(session)
-        if pre_err:
-            self._add_system_message(pre_err)
-            self._append_log(
-                f"[UPLOAD_AND_SEND][BLOCKED] reason=precheck {pre_err}",
-                echo=True,
-            )
-            return
-        turn = self._new_local_send_turn(
-            content, session=session, trace_id="", button="upload_and_send"
-        )
-        plan = self._build_send_plan(
-            turn,
-            suppress_system_message=False,
-            source="upload_and_send",
-            skip_prebind_checks=True,
-        )
-        if plan.decision in ("blocked",) or not plan.allows_dispatch():
-            reason = plan.reason or plan.block_status or "send_blocked"
-            self._add_system_message(
-                self._send_target_blocked_user_message(reason)
-                if hasattr(self, "_send_target_blocked_user_message")
-                else str(reason)
-            )
-            self._append_log(
-                f"[UPLOAD_AND_SEND][BLOCKED] reason=send_plan detail={reason}",
-                echo=True,
-            )
-            return
-        prep_ok, payload = self._prepare_send_dispatch_payload(plan)
-        if not prep_ok or payload is None:
-            self._append_log(
-                "[UPLOAD_AND_SEND][BLOCKED] reason=send_payload_incomplete",
-                echo=True,
-            )
-            return
-        if not self._append_local_send_turn(turn, clear_input=False):
-            self._append_log(
-                "[UPLOAD_AND_SEND][BLOCKED] reason=local_append_failed",
-                echo=True,
-            )
-            return
-        control_message_id = self._enqueue_upload_then_send_command(
-            session=session,
-            payload=payload,
-            client_id=plan.client_id,
-        )
-        if not control_message_id:
-            self._append_log(
-                "[UPLOAD_AND_SEND][BLOCKED] reason=upload_enqueue_failed",
-                echo=True,
-            )
-            return
-        pending = {
-            "session_id": session.session_id,
-            "payload": payload,
-            "content": plan.content,
-            "turn_id": turn.turn_id,
-            "user_message_id": turn.user_message_id,
-            "assistant_message_id": turn.assistant_message_id,
-            "from_pending_bootstrap": plan.from_pending_bootstrap,
-            "reuse_user_message_id": turn.user_message_id,
-            "source": plan.message_source,
-            "suppress_system_message": plan.suppress_system_message,
-            "chain": "upload_and_send",
-        }
-        store = getattr(self, "_bridge_msg", None)
-        if store is not None:
-            store.pending_upload_sends[str(control_message_id)] = pending
-        self._append_log("[UPLOAD_AND_SEND][WAIT_UPLOAD_DONE]", echo=True)
-        self._add_system_message("已开始上传，上传成功后会自动发送文本。")
 
     def _find_session_message_by_id(self, session, message_id):
         if session is None:
@@ -2312,6 +1968,12 @@ class BridgeMixin:
                     echo=True,
                 )
 
+        if hasattr(self, "_mark_session_reply_done_flash"):
+            self._mark_session_reply_done_flash(
+                session,
+                reason=render_reason or "assistant_reply_recv",
+            )
+
         if session.session_id == self._current_session_id and hasattr(
             self, "_render_current_chat_messages"
         ):
@@ -2343,9 +2005,12 @@ class BridgeMixin:
                     self.schedule_page_registry_refresh(reason="assistant_reply")
                 self._try_send_next_queued_message(session)
                 return
-        text = (
-            payload.get("content") or payload.get("text") or payload.get("assistant_text") or ""
-        ).strip()
+        text = str(payload.get("content") or "").strip()
+        if not text:
+            # 入口边界：兼容旧 inbound 事件，不向内部继续传播 text/assistant_text。
+            text = str(
+                payload.get("text") or payload.get("assistant_text") or ""
+            ).strip()
         if text in ("正在思考", "正在生成", "思考中", "回复完成"):
             self._append_log(
                 f"[REPLY][SKIP_INVALID_TEXT] session_id={session.session_id} "
@@ -2511,14 +2176,178 @@ class BridgeMixin:
             echo=True,
         )
 
+    def _cleanup_processed_inbound_ids(self):
+        now = time.time()
+        ttl_sec = 30 * 60
+        max_size = 2000
+
+        store = getattr(self, "_processed_inbound_ids", None)
+
+        if isinstance(store, set):
+            converted = {}
+            for key in list(store)[-max_size:]:
+                converted[str(key)] = now
+            self._processed_inbound_ids = converted
+            store = converted
+
+        if not isinstance(store, dict):
+            self._processed_inbound_ids = {}
+            store = self._processed_inbound_ids
+
+        stale_keys = []
+        for key, created_at in list(store.items()):
+            try:
+                created_value = float(created_at or 0)
+            except (TypeError, ValueError) as error:
+                print(
+                    f"[BRIDGE_RUNTIME_CLEANUP][processed_inbound][bad_timestamp] "
+                    f"key={key} error={error}"
+                )
+                created_value = 0
+
+            if created_value <= 0 or now - created_value > ttl_sec:
+                stale_keys.append(key)
+
+        for key in stale_keys:
+            store.pop(key, None)
+
+        if len(store) > max_size:
+            sorted_items = sorted(
+                store.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+            remove_count = len(store) - max_size
+            for key, _created_at in sorted_items[:remove_count]:
+                store.pop(key, None)
+
+    def _cleanup_bridge_runtime_maps(self, reason=""):
+        now = time.time()
+        pending_ttl_sec = 30 * 60
+        pending_max_size = 500
+
+        self._cleanup_processed_inbound_ids()
+
+        bridge_msg = getattr(self, "_bridge_msg", None)
+        if bridge_msg is None:
+            return
+
+        def cleanup_pending_map(mapping, map_name):
+            if not isinstance(mapping, dict):
+                return {}
+
+            for key, value in list(mapping.items()):
+                created_at = 0.0
+
+                if isinstance(value, dict):
+                    raw_created_at = value.get("created_at") or value.get("created") or 0
+                    try:
+                        created_at = float(raw_created_at or 0)
+                    except (TypeError, ValueError) as error:
+                        print(
+                            f"[BRIDGE_RUNTIME_CLEANUP][{map_name}][bad_created_at] "
+                            f"key={key} raw={raw_created_at} error={error}"
+                        )
+                        created_at = 0.0
+
+                    if created_at <= 0:
+                        created_at = now
+                        value["created_at"] = created_at
+                else:
+                    created_at = now
+
+                if now - created_at > pending_ttl_sec:
+                    mapping.pop(key, None)
+
+            if len(mapping) > pending_max_size:
+                sorted_items = sorted(
+                    mapping.items(),
+                    key=lambda item: float(item[1].get("created_at") or 0)
+                    if isinstance(item[1], dict)
+                    else 0,
+                )
+                remove_count = len(mapping) - pending_max_size
+                for key, _value in sorted_items[:remove_count]:
+                    mapping.pop(key, None)
+
+            return mapping
+
+        bridge_msg.pending_upload_sends = cleanup_pending_map(
+            getattr(bridge_msg, "pending_upload_sends", {}),
+            "pending_upload_sends",
+        )
+
+        bridge_msg.pending_send_requests = cleanup_pending_map(
+            getattr(bridge_msg, "pending_send_requests", {}),
+            "pending_send_requests",
+        )
+
+        known_bridge_ids = set()
+
+        sessions = getattr(self, "_sessions", {})
+        if isinstance(sessions, dict):
+            for session in sessions.values():
+                messages = getattr(session, "messages", []) or []
+                for message in messages:
+                    bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+                    if bridge_id:
+                        known_bridge_ids.add(bridge_id)
+
+        if known_bridge_ids:
+            message_to_session = getattr(self, "_message_to_session", None)
+            message_to_turn = getattr(self, "_message_to_turn", None)
+
+            if isinstance(message_to_session, dict):
+                for bridge_id in list(message_to_session.keys()):
+                    if bridge_id not in known_bridge_ids:
+                        message_to_session.pop(bridge_id, None)
+
+            if isinstance(message_to_turn, dict):
+                for bridge_id in list(message_to_turn.keys()):
+                    if bridge_id not in known_bridge_ids:
+                        message_to_turn.pop(bridge_id, None)
+
+            finalized_ids = getattr(bridge_msg, "finalized_bridge_message_ids", None)
+            if isinstance(finalized_ids, set):
+                finalized_ids.intersection_update(known_bridge_ids)
+
+            ack_ids = getattr(bridge_msg, "ack_success_message_ids", None)
+            if isinstance(ack_ids, set):
+                ack_ids.intersection_update(known_bridge_ids)
+
+        print(
+            "[BRIDGE_RUNTIME_CLEANUP][done] "
+            f"reason={reason or '-'} "
+            f"processed_inbound={len(getattr(self, '_processed_inbound_ids', {}) or {})} "
+            f"pending_upload_sends={len(getattr(bridge_msg, 'pending_upload_sends', {}) or {})} "
+            f"pending_send_requests={len(getattr(bridge_msg, 'pending_send_requests', {}) or {})}"
+        )
+
     def _handle_inbound_events(self, items):
+        self._cleanup_bridge_runtime_maps("handle_inbound_events")
+
+        store = getattr(self, "_processed_inbound_ids", None)
+        if not isinstance(store, dict):
+            self._processed_inbound_ids = {}
+            store = self._processed_inbound_ids
+
+        now = time.time()
+
         for item in items:
             event_key = (
-                item.get("event_id") or item.get("message_id") or self._make_inbound_key(item)
+                item.get("event_id")
+                or item.get("message_id")
+                or self._make_inbound_key(item)
             )
-            if event_key in self._processed_inbound_ids:
+            event_key = str(event_key or "").strip()
+
+            if not event_key:
+                print(f"[BRIDGE_INBOUND][skip_empty_event_key] item={item}")
                 continue
-            self._processed_inbound_ids.add(event_key)
+
+            if event_key in store:
+                continue
+
+            store[event_key] = now
             self._handle_inbound_event(item)
 
     def _handle_inbound_event(self, item):
@@ -2566,6 +2395,15 @@ class BridgeMixin:
         self._handle_bound_message_event(item, payload, kind)
 
     def _refresh_status_tick(self):
+        now = time.time()
+        last_cleanup_at = float(
+            getattr(self, "_last_bridge_runtime_cleanup_at", 0.0) or 0.0
+        )
+
+        if now - last_cleanup_at >= 60:
+            self._last_bridge_runtime_cleanup_at = now
+            self._cleanup_bridge_runtime_maps("status_tick")
+
         if is_server_running():
             self._schedule_status_apply(
                 status=get_bridge_status(),

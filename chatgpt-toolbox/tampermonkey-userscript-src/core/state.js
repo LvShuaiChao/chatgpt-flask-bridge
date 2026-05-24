@@ -227,6 +227,7 @@
     startSendBtn: '#cgpt-upload-start-send',
     copyContinueBtn: '#cgpt-upload-continue-once',
     sendHotkeyBtn: '#cgpt-send-hotkey-once',
+    homeBtn: '#cgpt-open-chatgpt-home',
     autoContinueBtn: '#cgpt-auto-continue-once',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
@@ -802,6 +803,16 @@
     activeUploadGroupId: '',
     uploadItems: [],
   };
+
+  let toolboxPageNavigating = false;
+
+  function isToolboxPageNavigating() {
+    return toolboxPageNavigating === true;
+  }
+
+  function setToolboxPageNavigating(active) {
+    toolboxPageNavigating = !!active;
+  }
 
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 

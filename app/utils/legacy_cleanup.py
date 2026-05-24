@@ -4,42 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.utils.legacy_fields import LEGACY_URL_FIELD_NAMES
-
-# 清理边界：URL 旧字段 + 绑定/页面别名 + 少量消息旧字段（不含 LEGACY_MESSAGE 全表，避免误拦 turn_id 等）。
-EXTRA_LEGACY_FIELD_NAMES = frozenset(
-    {
-        "debug_tm_url_syncable",
-        "debug_tm_conversation_syncable",
-        "target_client_id",
-        "target_page_instance_id",
-        "target_conversation_id",
-        "target_page_key",
-        "page_key",
-        "pageKey",
-        "toolbox_page_key",
-        "page_id",
-        "window_id",
-        "current_page_id",
-        "bound_conversation_id",
-        "bound_client_id",
-        "bound_page_instance_id",
-        "chatgpt_conversation_id",
-        "pending_send_text",
-        "pending_bootstrap_text",
-        "raw_user_text",
-        "final_prompt",
-        "visible",
-        "responding",
-        "activity",
-        "active_tab",
-        "selectedQuickCategory",
-        "toolbox_state_key",
-        "launch_token",
-    }
+from app.utils.legacy_fields import (
+    LEGACY_ASSERT_FIELD_NAMES,
+    LEGACY_CLEANUP_FIELD_NAMES,
 )
 
-LEGACY_FIELD_NAMES = LEGACY_URL_FIELD_NAMES | EXTRA_LEGACY_FIELD_NAMES
+# reject_legacy_fields：API 入站（URL + 绑定别名 + 部分消息旧字段）。
+LEGACY_FIELD_NAMES = LEGACY_CLEANUP_FIELD_NAMES
 
 _LEGACY_TARGET_SOURCE_VALUES = frozenset(
     {
@@ -62,7 +33,7 @@ def _collect_legacy_fields(obj: Any, *, path: str = "") -> List[str]:
     if isinstance(obj, dict):
         for key, value in obj.items():
             sub = f"{path}.{key}" if path else key
-            if key in LEGACY_FIELD_NAMES:
+            if key in LEGACY_ASSERT_FIELD_NAMES:
                 found.append(sub)
             elif key == "target_source" and value in _LEGACY_TARGET_SOURCE_VALUES:
                 found.append(f"{sub}={value!r}")
@@ -131,6 +102,8 @@ def reject_legacy_fields(
 
 __all__ = [
     "LEGACY_FIELD_NAMES",
+    "LEGACY_CLEANUP_FIELD_NAMES",
+    "LEGACY_ASSERT_FIELD_NAMES",
     "assert_no_legacy_fields",
     "reject_legacy_fields",
 ]

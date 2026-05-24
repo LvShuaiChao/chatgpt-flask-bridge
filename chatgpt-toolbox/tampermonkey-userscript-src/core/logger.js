@@ -376,6 +376,53 @@
     }
   }
 
+  function setButtonStateIfChanged(button, options = {}) {
+    if (!button) return false;
+
+    const sig = JSON.stringify({
+      text: options.text != null ? String(options.text) : '',
+      title: options.title != null ? String(options.title) : '',
+      disabled: options.disabled === true,
+      ariaDisabled: options.ariaDisabled === true,
+      addClasses: Array.isArray(options.addClasses) ? options.addClasses : [],
+      removeClasses: Array.isArray(options.removeClasses) ? options.removeClasses : [],
+    });
+
+    if (button.dataset.lastStateSig === sig) {
+      return false;
+    }
+
+    button.dataset.lastStateSig = sig;
+    setButtonState(button, options);
+    return true;
+  }
+
+  const perfLogThrottleAt = {};
+
+  function isToolboxPerfDebugEnabled() {
+    if (typeof MemoryManager === 'undefined' || typeof MemoryManager.get !== 'function') {
+      return false;
+    }
+    return !!MemoryManager.get('bridgeDebugEnabled', false);
+  }
+
+  function logPerfThrottled(tag, message, throttleMs = 2000) {
+    if (!isToolboxPerfDebugEnabled()) return;
+
+    const key = String(tag || 'default');
+    const now = Date.now();
+    const lastAt = Number(perfLogThrottleAt[key] || 0);
+    if (now - lastAt < throttleMs) {
+      return;
+    }
+
+    perfLogThrottleAt[key] = now;
+    console.log(message);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(message);
+    }
+  }
+
   function isWaitingAnswerVisualState(options = {}) {
     const text = String(options.text || options.buttonText || '').trim();
     const state = String(options.state || '').trim().toLowerCase();
@@ -1555,30 +1602,119 @@
   })();
 
   const TOOLBOX_PAGE_STATE_ROOT_KEY = 'cgpt_toolbox_page_state_v1';
+  const TOOLBOX_PAGE_STATE_SAVE_DEBOUNCE_MS = 750;
+  let toolboxPageStateSaveTimer = 0;
+  let toolboxPageStateSavePending = null;
+  let toolboxPageStateSaveLastSignature = '';
+
+  function buildToolboxPageStateSaveSignature(toolboxRouteKey, patch) {
+    const key = String(toolboxRouteKey || '').trim();
+    let patchText = '';
+
+    try {
+      patchText = JSON.stringify(patch || {});
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[ChatGPT toolbox] buildToolboxPageStateSaveSignature failed', error);
+      patchText = `serialize-failed:${errText}`;
+    }
+
+    return `${key}|${patchText}`;
+  }
+
+  function flushToolboxPageStateSaveNow() {
+    if (toolboxPageStateSaveTimer) {
+      window.clearTimeout(toolboxPageStateSaveTimer);
+      toolboxPageStateSaveTimer = 0;
+    }
+
+    const pending = toolboxPageStateSavePending;
+    toolboxPageStateSavePending = null;
+
+    if (!pending) {
+      return;
+    }
+
+    const signature = buildToolboxPageStateSaveSignature(
+      pending.toolboxRouteKey,
+      pending.patch,
+    );
+
+    if (signature === toolboxPageStateSaveLastSignature) {
+      return;
+    }
+
+    toolboxPageStateSaveLastSignature = signature;
+    saveToolboxPageStatePatchImmediate(pending.patch, pending.reason);
+  }
+
+  const TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES = Object.freeze({
+    activeTab: ['active_tab'],
+    uploadActiveGroupId: ['upload_active_group_id'],
+    quickPromptCategory: ['quick_prompt_category'],
+  });
+
+  const TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS = Object.freeze([
+    'active_tab',
+    'upload_active_group_id',
+    'quick_prompt_category',
+  ]);
+
+  const TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS = Object.freeze([
+    'activeTab',
+    'uploadActiveGroupId',
+    'quickPromptCategory',
+    'toolboxRouteKey',
+    'page_instance_id',
+    'url',
+    'pathname',
+    'conversation_id',
+    'updatedAt',
+  ]);
 
   function readToolboxStateField(state, fieldName, fallback = '') {
     const src = state && typeof state === 'object' ? state : {};
     const key = String(fieldName || '').trim();
-    if (!key || !Object.prototype.hasOwnProperty.call(src, key)) {
+    if (!key) {
       return fallback;
     }
 
-    const value = src[key];
-    if (value == null) {
-      return fallback;
+    const readValue = (fieldKey) => {
+      if (!Object.prototype.hasOwnProperty.call(src, fieldKey)) {
+        return undefined;
+      }
+      const value = src[fieldKey];
+      if (value == null) {
+        return undefined;
+      }
+      if (typeof value === 'string') {
+        const text = value.trim();
+        return text || undefined;
+      }
+      return value;
+    };
+
+    const direct = readValue(key);
+    if (direct !== undefined) {
+      return direct;
     }
 
-    if (typeof value === 'string') {
-      const text = value.trim();
-      return text || fallback;
+    const legacyKeys = TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES[key];
+    if (Array.isArray(legacyKeys)) {
+      for (let i = 0; i < legacyKeys.length; i += 1) {
+        const legacyValue = readValue(legacyKeys[i]);
+        if (legacyValue !== undefined) {
+          return legacyValue;
+        }
+      }
     }
 
-    return value;
+    return fallback;
   }
 
   function normalizeToolboxStatePatchForWrite(patch) {
     const input = patch && typeof patch === 'object' ? patch : {};
-    const out = { ...input };
+    const out = {};
 
     const activeTab = readToolboxStateField(input, 'activeTab', '');
     if (activeTab) {
@@ -1595,7 +1731,126 @@
       out.quickPromptCategory = quickPromptCategory;
     }
 
+    TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS.forEach((key) => {
+      if (key === 'activeTab' || key === 'uploadActiveGroupId' || key === 'quickPromptCategory') {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(input, key)) {
+        return;
+      }
+      const value = input[key];
+      if (value == null) {
+        return;
+      }
+      out[key] = value;
+    });
+
     return out;
+  }
+
+  let didLogCanonicalFieldValidation = false;
+
+  function logLegacyFieldFinding(scope, fields) {
+    const list = Array.isArray(fields) ? fields.filter(Boolean) : [];
+    if (!list.length) {
+      return;
+    }
+    const line = `[FIELD][LEGACY_FOUND] scope=${scope} fields=${list.join(',')}`;
+    console.warn(line);
+    toolboxPageStateAppendLog(line);
+  }
+
+  async function scanUploadQueueCanonicalFields() {
+    if (typeof UploadModule === 'undefined'
+      || typeof UploadModule.scanQueueRowsForLegacyFields !== 'function') {
+      return;
+    }
+    try {
+      await UploadModule.scanQueueRowsForLegacyFields();
+    } catch (error) {
+      console.error('[ChatGPT toolbox] scanUploadQueueCanonicalFields failed', error);
+    }
+  }
+
+  function validateCanonicalFieldsOnStartup() {
+    if (didLogCanonicalFieldValidation) {
+      return;
+    }
+    didLogCanonicalFieldValidation = true;
+
+    try {
+      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+        const cfg = MemoryManager.get(MemoryManager.KEYS.autoQueueConfig, null);
+        if (cfg && typeof cfg === 'object' && Array.isArray(cfg.taskProfiles)) {
+          const legacyTaskFields = [];
+          cfg.taskProfiles.forEach((profile, profileIndex) => {
+            if (!profile || typeof profile !== 'object') {
+              return;
+            }
+            if (Object.prototype.hasOwnProperty.call(profile, 'continuePrompt')) {
+              legacyTaskFields.push(`taskProfiles[${profileIndex}].continuePrompt`);
+            }
+            if (Object.prototype.hasOwnProperty.call(profile, 'defaultContinuePrompt')) {
+              legacyTaskFields.push(`taskProfiles[${profileIndex}].defaultContinuePrompt`);
+            }
+            (profile.tasks || []).forEach((task, taskIndex) => {
+              if (task && Object.prototype.hasOwnProperty.call(task, 'continuePrompt')) {
+                legacyTaskFields.push(`taskProfiles[${profileIndex}].tasks[${taskIndex}].continuePrompt`);
+              }
+            });
+          });
+          logLegacyFieldFinding('autoQueueConfig', legacyTaskFields);
+        }
+      }
+    } catch (error) {
+      console.error('[ChatGPT toolbox] validateCanonicalFieldsOnStartup autoQueueConfig failed', error);
+    }
+
+    try {
+      const states = readAllToolboxPageStates();
+      const pageLegacyFields = [];
+      Object.entries(states).forEach(([routeKey, state]) => {
+        if (!state || typeof state !== 'object') {
+          return;
+        }
+        TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS.forEach((legacyKey) => {
+          if (Object.prototype.hasOwnProperty.call(state, legacyKey)) {
+            pageLegacyFields.push(`${routeKey}.${legacyKey}`);
+          }
+        });
+      });
+      logLegacyFieldFinding('pageState', pageLegacyFields);
+
+      if (pageLegacyFields.length) {
+        let migrated = false;
+        Object.keys(states).forEach((routeKey) => {
+          const state = states[routeKey];
+          if (!state || typeof state !== 'object') {
+            return;
+          }
+          const patch = normalizeToolboxStatePatchForWrite(state);
+          const nextState = {
+            ...state,
+            ...patch,
+          };
+          TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS.forEach((legacyKey) => {
+            if (Object.prototype.hasOwnProperty.call(nextState, legacyKey)) {
+              delete nextState[legacyKey];
+              migrated = true;
+            }
+          });
+          states[routeKey] = nextState;
+        });
+        if (migrated) {
+          writeAllToolboxPageStates(states);
+          toolboxPageStateAppendLog('[FIELD][LEGACY_MIGRATED] scope=pageState');
+        }
+      }
+    } catch (error) {
+      console.error('[ChatGPT toolbox] validateCanonicalFieldsOnStartup pageState failed', error);
+    }
+
+    void scanUploadQueueCanonicalFields();
   }
 
   function parseConversationIdFromPath(pathname) {
@@ -1672,7 +1927,7 @@
     return state;
   }
 
-  function saveToolboxPageStatePatch(patch, reason = '') {
+  function saveToolboxPageStatePatchImmediate(patch, reason = '') {
     const toolboxRouteKey = getToolboxRouteKey();
     const states = readAllToolboxPageStates();
     const oldState = states[toolboxRouteKey] && typeof states[toolboxRouteKey] === 'object'
@@ -1719,6 +1974,56 @@
     toolboxPageStateAppendLog(
       `[TOOLBOX_PAGE_STATE][save] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKey} fields=${Object.keys(patch || {}).join(',')}`,
     );
+  }
+
+  function saveToolboxPageStatePatch(patch, reason = '') {
+    const toolboxRouteKey = getToolboxRouteKey();
+    const normalizedPatch = patch && typeof patch === 'object' ? patch : {};
+    const signature = buildToolboxPageStateSaveSignature(toolboxRouteKey, normalizedPatch);
+    const reasonText = String(reason || '').trim();
+    const immediateReasons = new Set([
+      'before-route-key-change',
+      'panel-drag-end',
+      'panel-hide',
+      'panel-show',
+      'init',
+    ]);
+    const shouldFlushImmediately = immediateReasons.has(reasonText)
+      || reasonText.includes('drag-end')
+      || reasonText.includes('route-change');
+
+    if (shouldFlushImmediately) {
+      if (toolboxPageStateSaveTimer) {
+        window.clearTimeout(toolboxPageStateSaveTimer);
+        toolboxPageStateSaveTimer = 0;
+      }
+      toolboxPageStateSavePending = null;
+
+      if (signature !== toolboxPageStateSaveLastSignature) {
+        toolboxPageStateSaveLastSignature = signature;
+        saveToolboxPageStatePatchImmediate(normalizedPatch, reasonText);
+      }
+      return;
+    }
+
+    if (signature === toolboxPageStateSaveLastSignature && toolboxPageStateSaveTimer) {
+      return;
+    }
+
+    toolboxPageStateSavePending = {
+      patch: normalizedPatch,
+      reason: reasonText,
+      toolboxRouteKey,
+    };
+
+    if (toolboxPageStateSaveTimer) {
+      window.clearTimeout(toolboxPageStateSaveTimer);
+    }
+
+    toolboxPageStateSaveTimer = window.setTimeout(() => {
+      toolboxPageStateSaveTimer = 0;
+      flushToolboxPageStateSaveNow();
+    }, TOOLBOX_PAGE_STATE_SAVE_DEBOUNCE_MS);
   }
 
   let isApplyingToolboxPageState = false;
@@ -3027,6 +3332,7 @@
     let titleObserver = null;
     let headObserver = null;
     let replyDoneFlashTimer = 0;
+    let replyDoneFlashStopTimer = 0;
     let replyDoneFlashBaseTitle = '';
     let replyDoneFlashOn = false;
 
@@ -3223,6 +3529,11 @@
         replyDoneFlashTimer = 0;
       }
 
+      if (replyDoneFlashStopTimer) {
+        window.clearTimeout(replyDoneFlashStopTimer);
+        replyDoneFlashStopTimer = 0;
+      }
+
       if (replyDoneFlashBaseTitle) {
         document.title = normalizeTitle(replyDoneFlashBaseTitle || 'ChatGPT');
       }
@@ -3235,27 +3546,40 @@
       }
     }
 
-    function startReplyDoneFlash(reason = '') {
+    function startReplyDoneFlash(reason = '', options = {}) {
       const currentBase = stripKnownPrefixes(document.title) || 'ChatGPT';
-      const cleanBase = currentBase.replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '').trim() || 'ChatGPT';
+      const cleanBase = currentBase
+        .replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '')
+        .replace(/^【回复完成】\s*/u, '')
+        .trim() || 'ChatGPT';
 
       stopReplyDoneFlash(`restart:${reason || '-'}`);
 
       replyDoneFlashBaseTitle = cleanBase;
       replyDoneFlashOn = false;
 
+      const intervalMs = Number(options.intervalMs || 450);
+      const autoStopMs = Number(options.autoStopMs || 2400);
+
       const tick = () => {
         replyDoneFlashOn = !replyDoneFlashOn;
         document.title = replyDoneFlashOn
-          ? `🔔 回复完成 - ${replyDoneFlashBaseTitle}`
-          : replyDoneFlashBaseTitle;
+          ? normalizeTitle(`【回复完成】 ${replyDoneFlashBaseTitle}`)
+          : normalizeTitle(replyDoneFlashBaseTitle);
       };
 
       tick();
-      replyDoneFlashTimer = window.setInterval(tick, 900);
+      replyDoneFlashTimer = window.setInterval(tick, intervalMs);
+
+      replyDoneFlashStopTimer = window.setTimeout(() => {
+        stopReplyDoneFlash(`auto-stop:${reason || '-'}`);
+      }, autoStopMs);
 
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[TITLE_FLASH][start] reason=${reason || '-'} base=${replyDoneFlashBaseTitle}`);
+        ToolboxShell.appendLog(
+          `[TITLE_FLASH][start] reason=${reason || '-'} base=${replyDoneFlashBaseTitle} `
+          + `intervalMs=${intervalMs} autoStopMs=${autoStopMs}`,
+        );
       }
     }
 

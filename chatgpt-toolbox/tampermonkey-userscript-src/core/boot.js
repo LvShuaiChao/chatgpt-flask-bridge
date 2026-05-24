@@ -22,6 +22,10 @@ async function safeInitStep(name, fn) {
 }
 
 async function mountAllModules(reason = 'init') {
+  if (typeof cleanupRuntimeHandles === 'function') {
+    cleanupRuntimeHandles(`mount:${reason}`);
+  }
+
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT] reason=${reason}`);
   }
@@ -82,6 +86,10 @@ async function mountAllModules(reason = 'init') {
     }
   }
 
+  if (typeof bindConversationTurnCountObserver === 'function') {
+    bindConversationTurnCountObserver();
+  }
+
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_DONE] reason=${reason}`);
   }
@@ -90,6 +98,12 @@ async function mountAllModules(reason = 'init') {
 async function initToolbox() {
   await safeInitStep('ToolboxShell.create', () => {
     ToolboxShell.create();
+  });
+
+  await safeInitStep('validateCanonicalFieldsOnStartup', () => {
+    if (typeof validateCanonicalFieldsOnStartup === 'function') {
+      validateCanonicalFieldsOnStartup();
+    }
   });
 
   await safeInitStep('TitlePrefixModule.start', () => {

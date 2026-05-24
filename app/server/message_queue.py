@@ -1349,13 +1349,14 @@ def _handle_poll(body):
     page_type = str(body.get("page_type") or "").strip()
     conversation_id = str(body.get("conversation_id") or "").strip()
     url = str(body.get("url") or "").strip()
-    _log(
-        "[BRIDGE][POLL][ENTER] "
-        f"client_id={client_id or '-'} "
-        f"page_instance_id={page_instance_id or '-'} "
-        f"conversation_id={conversation_id or '-'} "
-        f"url={url or '-'}"
-    )
+    if st._debug_mode:
+        _log(
+            "[BRIDGE][POLL][ENTER] "
+            f"client_id={client_id or '-'} "
+            f"page_instance_id={page_instance_id or '-'} "
+            f"conversation_id={conversation_id or '-'} "
+            f"url={url or '-'}"
+        )
     try:
         return _handle_poll_impl(
             body,
@@ -1392,7 +1393,8 @@ def _handle_poll_impl(
     )
     _touch_tampermonkey(body, action="poll")
     cleanup_stale_waiting_messages()
-    _log_poll_request(body)
+    if st._debug_mode:
+        _log_poll_request(body)
     need_notify = False
     now = _now()
     cmd = _pop_control_command_for_client(body)
@@ -2019,7 +2021,7 @@ def _report_recv_fields(body, event, payload, message_id):
     reply_len = 0
     reason = ""
     if isinstance(payload, dict):
-        text = payload.get("text") or payload.get("content") or ""
+        text = payload.get("content") or payload.get("text") or ""
         reply_len = len(str(text).strip())
         reason = (
             payload.get("reason")
@@ -2315,7 +2317,7 @@ def _handle_report(body):
             _notify_status()
             return {"ok": True}
         if event == "assistant_reply":
-            text = (payload.get("text") or payload.get("content") or "").strip()
+            text = (payload.get("content") or payload.get("text") or "").strip()
             if _is_invalid_assistant_reply_text(text):
                 _log(
                     "[BRIDGE][ASSISTANT_REPLY][SKIP_INVALID_TEXT] "
@@ -2500,9 +2502,7 @@ def _handle_assistant_reply(body):
     session_id = str(body.get("session_id") or "").strip()
     turn_id = str(body.get("turn_id") or "").strip()
     payload = {
-        "text": content,
         "content": content,
-        "assistant_text": content,
         "session_id": session_id,
         "turn_id": turn_id,
         "client_id": client_id,

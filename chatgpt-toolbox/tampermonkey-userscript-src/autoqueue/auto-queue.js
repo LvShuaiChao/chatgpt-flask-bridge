@@ -8,29 +8,6 @@ const AutoQueueModule = (() => {
       MemoryManager.get(MemoryManager.KEYS.autoQueueConfig, null) || {},
     );
 
-    function createNumberInput(options = {}) {
-      const input = document.createElement('input');
-      input.type = 'number';
-      input.setAttribute('data-no-wheel-number', '1');
-
-      if (options.value !== undefined) input.value = String(options.value);
-      if (options.min !== undefined) input.min = String(options.min);
-      if (options.max !== undefined) input.max = String(options.max);
-      if (options.step !== undefined) input.step = String(options.step);
-      if (options.placeholder) input.placeholder = options.placeholder;
-      if (options.className) input.className = options.className;
-      if (options.id) input.id = options.id;
-
-      input.addEventListener('wheel', (event) => {
-        event.preventDefault();
-        if (document.activeElement === input) {
-          input.blur();
-        }
-      }, { passive: false });
-
-      return input;
-    }
-
     function repairAutoQueuePromptConfigIfNeeded() {
       const continueText = String(config.continuePromptsText || '').trim();
       const listText = String(config.listPromptsText || '').trim();
@@ -421,7 +398,7 @@ const AutoQueueModule = (() => {
       const shouldLog = !!(options && options.log);
       const taskTemplate = String(task && task.continuePromptTemplate || '').trim();
       const profileTemplate = String(
-        profile && (profile.continuePromptTemplate || profile.defaultContinuePrompt) || '',
+        profile && profile.continuePromptTemplate || '',
       ).trim();
       const systemDefault = BATCH_CONTINUE_TEMPLATE;
 
@@ -999,6 +976,17 @@ const AutoQueueModule = (() => {
       settingsNext: null,
     };
 
+    function syncBatchSubTabRefs() {
+      if (!root) {
+        return;
+      }
+
+      batchSubTabContentEl = qs('#cgpt-autoq-batch-subtab-content', root);
+      taskListEl = qs('#cgpt-autoq-task-list', root);
+      taskEditorEl = qs('#cgpt-autoq-task-editor', root);
+      taskProfileDefaultsEl = qs('#cgpt-autoq-task-profile-defaults', root);
+    }
+
     function refreshBatchTaskPanelRefs() {
       if (!taskPanelEl) return;
 
@@ -1050,7 +1038,6 @@ const AutoQueueModule = (() => {
               </div>
             </div>
             <div class="cgpt-autoq-task-list" id="cgpt-autoq-task-list"></div>
-            <div class="cgpt-autoq-batch-actions-slot" id="cgpt-autoq-batch-actions-slot"></div>
           </div>
         </div>
         <div class="cgpt-autoq-batch-tab-panel cgpt-toolbox-hidden" data-batch-tab-panel="current">
@@ -1134,16 +1121,23 @@ const AutoQueueModule = (() => {
 
       const actionsEl = qs('.cgpt-autoq-actions', root);
       const settingsEl = qs('.cgpt-autoq-settings-section', root);
-      const actionsSlot = qs('#cgpt-autoq-batch-actions-slot', root);
       const settingsSlot = qs('#cgpt-autoq-batch-settings-slot', root);
 
-      if (actionsEl && actionsSlot && actionsEl.parentElement !== actionsSlot) {
+      refreshBatchTaskPanelRefs();
+      const subtabsEl = batchSubTabsEl || (taskPanelEl ? qs('#cgpt-autoq-batch-subtabs', taskPanelEl) : null);
+
+      if (actionsEl && taskPanelEl && subtabsEl) {
         if (!batchUiRestore.actionsParent) {
           batchUiRestore.actionsParent = actionsEl.parentElement;
           batchUiRestore.actionsNext = actionsEl.nextSibling;
         }
 
-        actionsSlot.appendChild(actionsEl);
+        actionsEl.classList.add('cgpt-autoq-top-action-bar');
+        actionsEl.id = 'cgpt-autoq-top-action-bar';
+
+        if (actionsEl.parentElement !== taskPanelEl || actionsEl.nextElementSibling !== subtabsEl) {
+          taskPanelEl.insertBefore(actionsEl, subtabsEl);
+        }
       }
 
       if (settingsEl && settingsSlot && settingsEl.parentElement !== settingsSlot) {
@@ -1160,8 +1154,15 @@ const AutoQueueModule = (() => {
     function restoreBatchModeUiBlocks() {
       if (!root) return;
 
-      const actionsEl = qs('.cgpt-autoq-actions', root);
+      const actionsEl = qs('.cgpt-autoq-actions', root) || qs('#cgpt-autoq-top-action-bar', root);
       const settingsEl = qs('.cgpt-autoq-settings-section', root);
+
+      if (actionsEl) {
+        actionsEl.classList.remove('cgpt-autoq-top-action-bar');
+        if (actionsEl.id === 'cgpt-autoq-top-action-bar') {
+          actionsEl.removeAttribute('id');
+        }
+      }
 
       if (actionsEl && batchUiRestore.actionsParent) {
         if (batchUiRestore.actionsNext) {
@@ -2399,26 +2400,17 @@ const AutoQueueModule = (() => {
     }
 
     function log(text) {
-      const line = `[${nowTimeText()}] ${String(text || '')}`;
+      ToolboxShell.appendLog(`[自动指令] ${text}`);
       const modeSettings = getModeSettings(config.promptMode);
 
-      if (logEl) {
-        logEl.textContent = `${line}\n${logEl.textContent || ''}`.slice(0, 6000);
+      if (modeSettings.autoScrollPanel && root) {
+        const page = root.closest('.cgpt-toolbox-page');
 
-        if (modeSettings.logPinned) {
-          logEl.scrollTop = 0;
-        }
-
-        if (modeSettings.autoScrollPanel && root) {
-          const page = root.closest('.cgpt-toolbox-page');
-
-          if (page) {
-            page.scrollTop = page.scrollHeight;
-          }
+        if (page) {
+          page.scrollTop = page.scrollHeight;
         }
       }
 
-      ToolboxShell.appendLog(`[自动指令] ${text}`);
       updateStatus();
     }
 
@@ -2766,9 +2758,7 @@ const AutoQueueModule = (() => {
         ? activeContinueEl.id
         : '';
       const rawTemplateText = String(
-        profile.continuePromptTemplate
-        || profile.defaultContinuePrompt
-        || BATCH_CONTINUE_TEMPLATE,
+        profile.continuePromptTemplate || BATCH_CONTINUE_TEMPLATE,
       );
       const templateText = typeof getContinuePromptTemplateForDisplay === 'function'
         ? getContinuePromptTemplateForDisplay(
@@ -2960,7 +2950,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      const hasContinueOverride = String(task.continuePromptTemplate || task.continuePrompt || '').trim().length > 0;
+      const hasContinueOverride = String(task.continuePromptTemplate || '').trim().length > 0;
       const profileDoneSignal = typeof repairCorruptedDoneSignalText === 'function'
         ? repairCorruptedDoneSignalText(profile && profile.defaultDoneSignal, null)
         : String(profile && profile.defaultDoneSignal || TASK_DONE_SIGNAL);
@@ -2997,7 +2987,7 @@ const AutoQueueModule = (() => {
               </label>
               <div class="cgpt-kv cgpt-autoq-task-editor-full cgpt-autoq-task-continue-wrap${hasContinueOverride ? '' : ' cgpt-toolbox-hidden'}">
                 <label for="cgpt-autoq-task-continue">任务级继续指令</label>
-                <textarea class="cgpt-textarea" id="cgpt-autoq-task-continue" rows="4">${escapeHtml(task.continuePromptTemplate || task.continuePrompt || '')}</textarea>
+                <textarea class="cgpt-textarea" id="cgpt-autoq-task-continue" rows="4">${escapeHtml(task.continuePromptTemplate || '')}</textarea>
               </div>
               <div class="cgpt-kv">
                 <label for="cgpt-autoq-task-done-signal">单独终止信号（留空继承任务组：${escapeHtml(profileDoneSignal)}）</label>
@@ -3575,13 +3565,8 @@ const AutoQueueModule = (() => {
       <div>当前步骤：-</div>
     </div>`;
 
-      const recentLog = logEl
-        ? String(logEl.textContent || '').split('\n').map((x) => x.trim()).find(Boolean) || ''
-        : '';
-
       if (mainLiteEl) {
-        mainLiteEl.innerHTML = `${liteHtml}
-    <div class="cgpt-autoq-status-recent" title="${escapeHtml(recentLog)}">最近：${escapeHtml(recentLog || '-')}</div>`;
+        mainLiteEl.innerHTML = liteHtml;
       }
 
       if (startBtn) {
@@ -3999,6 +3984,17 @@ const AutoQueueModule = (() => {
 
     function tick() {
       try {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          if (state.running || state.waitingReply) {
+            stop({
+              reason: 'page-navigation',
+              logStop: false,
+              markCurrent: false,
+            });
+          }
+          return;
+        }
+
         if (!state.running && !state.waitingReply) {
           return;
         }
@@ -4186,14 +4182,6 @@ const AutoQueueModule = (() => {
         }, 'autoq-send-once');
       }
 
-      const clearLogBtn = qs('#cgpt-autoq-clear-log', root);
-      if (clearLogBtn) {
-        bindOnce(clearLogBtn, 'click', () => {
-          if (logEl) logEl.textContent = '';
-          updateStatus();
-        }, 'autoq-clear-log');
-      }
-
       if (listProfilesEl) {
         bindOnce(listProfilesEl, 'click', (e) => {
           const btn = e.target instanceof HTMLElement
@@ -4294,7 +4282,7 @@ const AutoQueueModule = (() => {
       if (existed) {
         root = existed;
         promptsEl = qs('#cgpt-autoq-prompts', root);
-        logEl = qs('#cgpt-autoq-log', root);
+        logEl = null;
         startBtn = qs('#cgpt-autoq-start', root);
         stopBtn = qs('#cgpt-autoq-stop', root);
         listPanelEl = qs('#cgpt-autoq-list-panel', root);
@@ -4304,12 +4292,15 @@ const AutoQueueModule = (() => {
         mainLiteEl = qs('#cgpt-autoq-main-lite', root);
         startUploadBtn = ensureAutoQueueStartUploadButton();
         normalizeAutoConfig(config);
-        ensureBatchSubTabShell();
+        renderTaskPanelVisibility();
+        syncBatchSubTabRefs();
         refreshBatchTaskPanelRefs();
         bindEvents();
         bindTaskPanelEvents();
-        renderTaskPanelVisibility();
         renderTaskProfiles();
+        renderTaskList();
+        renderTaskEditor();
+        renderTaskProfileDefaults();
         updateStatus();
         return;
       }
@@ -4362,7 +4353,6 @@ const AutoQueueModule = (() => {
             <button type="button" class="cgpt-btn success" id="cgpt-autoq-start">开始</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">发送一次</button>
             <button type="button" class="cgpt-btn danger" id="cgpt-autoq-stop" disabled>停止</button>
-            <button type="button" class="cgpt-btn" id="cgpt-autoq-clear-log">清空日志</button>
           </div>
         </div>
 
@@ -4373,11 +4363,6 @@ const AutoQueueModule = (() => {
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-autoq-loop" ${uiModeSettings.loopMode ? 'checked' : ''}>
               循环模式
-            </label>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-autoq-log-pinned" ${uiModeSettings.logPinned ? 'checked' : ''}>
-              日志置顶
             </label>
 
             <div class="cgpt-kv">
@@ -4403,17 +4388,12 @@ const AutoQueueModule = (() => {
 
           <div class="cgpt-hint">最大循环次数为 0 表示不限制。</div>
         </div>
-
-        <div class="cgpt-section cgpt-autoq-log-section">
-          <div class="cgpt-section-title">日志</div>
-          <div id="cgpt-autoq-log" class="cgpt-autoq-log"></div>
-        </div>
       `
 
       targetHost.appendChild(root);
 
       promptsEl = qs('#cgpt-autoq-prompts', root);
-      logEl = qs('#cgpt-autoq-log', root);
+      logEl = null;
       startBtn = qs('#cgpt-autoq-start', root);
       startUploadBtn = qs('#cgpt-autoq-start-upload', root);
       stopBtn = qs('#cgpt-autoq-stop', root);
@@ -4431,15 +4411,18 @@ const AutoQueueModule = (() => {
       applyModeSettingsToUi(config.promptMode);
       refreshPromptTextareaForMode(config.promptMode);
       updateModeTabs();
-      ensureBatchSubTabShell();
+      renderListPanelVisibility();
+      renderTaskPanelVisibility();
+      syncBatchSubTabRefs();
       refreshBatchTaskPanelRefs();
+      renderListProfiles();
+      renderTaskProfiles();
+      renderTaskList();
+      renderTaskEditor();
+      renderTaskProfileDefaults();
 
       bindEvents();
       bindTaskPanelEvents();
-      renderListPanelVisibility();
-      renderTaskPanelVisibility();
-      renderListProfiles();
-      renderTaskProfiles();
       updateStatus();
     }
 
@@ -4461,6 +4444,8 @@ const AutoQueueModule = (() => {
 
     return {
       mount,
+      stop,
+      stopAutoContinue: stop,
       triggerContinueOnce,
       refreshProgressStatus,
       getModeLabel: getAutoQueueModeLabel,
@@ -6895,7 +6880,20 @@ const AutoQueueModule = (() => {
           typeof TitlePrefixModule !== 'undefined'
           && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
         ) {
-          TitlePrefixModule.startReplyDoneFlash('settings-test');
+          TitlePrefixModule.startReplyDoneFlash('settings-test', {
+            intervalMs: 450,
+            autoStopMs: 2400,
+          });
+
+          if (
+            typeof ToolboxShell !== 'undefined'
+            && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+          ) {
+            ToolboxShell.flashHeaderTitleOnce('回复完成', {
+              intervalMs: 450,
+              autoStopMs: 2400,
+            });
+          }
 
           if (statusEl) {
             statusEl.textContent = '已开始测试标题闪烁';
@@ -7192,6 +7190,9 @@ const AutoQueueModule = (() => {
     const state = {
       root: null,
       timerId: 0,
+      bridgePollFailCount: 0,
+      bridgePollTimer: 0,
+      bridgePollLoopActive: false,
       bridgeRunId: 0,
       polling: false,
       handlingMessageId: null,
@@ -7208,7 +7209,6 @@ const AutoQueueModule = (() => {
       uploadBlockNextChatSourceMessageId: '',
       pendingReplyContext: null,
       lastReplyWatchResponding: false,
-      bridgeChatQueue: [],
       advancedCapabilityExpanded: false,
     };
 
@@ -7262,7 +7262,7 @@ const AutoQueueModule = (() => {
         bridgeApiToken: String(MemoryManager.get('bridgeApiToken', '') || '').trim(),
         bridgeDebugEnabled: !!MemoryManager.get('bridgeDebugEnabled', false),
         bridgeRequestTimeoutMs: Number(MemoryManager.get('bridgeRequestTimeoutMs', 30000)) || 30000,
-        bridgePollIntervalMs: Number(MemoryManager.get('bridgePollIntervalMs', 1000)) || 1000,
+        bridgePollIntervalMs: Number(MemoryManager.get('bridgePollIntervalMs', 3000)) || 3000,
       };
     }
 
@@ -7296,19 +7296,26 @@ const AutoQueueModule = (() => {
       return `${cfg.bridgeBaseUrl}${cfg.bridgePath}`;
     }
 
-    function logBridgeError(text, errorObj) {
+    function logBridgeError(message, error) {
+      const text = String(message || error || 'unknown');
       const now = Date.now();
-      const content = String(text || 'unknown_error');
-      const shouldLog = content !== state.lastErrorText || (now - state.lastErrorLogAt) >= 5000;
-      if (!shouldLog) return;
-      state.lastErrorText = content;
-      state.lastErrorLogAt = now;
-      if (errorObj) {
-        console.error('[BridgeModule]', content, errorObj);
-      } else {
-        console.error('[BridgeModule]', content);
+      const sameError = text === state.lastErrorText;
+
+      if (sameError && now - state.lastErrorLogAt < 5000) {
+        return;
       }
-      ToolboxShell.appendLog(`[BRIDGE][ERROR] ${content}`);
+
+      state.lastErrorLogAt = now;
+      state.lastErrorText = text;
+
+      console.error('[BRIDGE][ERROR]', text, error || '');
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        const errText = error && error.message ? error.message : String(error || '');
+        ToolboxShell.appendLog(
+          `[BRIDGE][ERROR] ${text}${errText && errText !== text ? ` error=${errText}` : ''}`,
+        );
+      }
     }
 
     function debugLog(text) {
@@ -7645,7 +7652,11 @@ const AutoQueueModule = (() => {
           can_send_now: Boolean(responseState.can_send_now),
         };
         logIdentityThrottled(identity);
-        logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
+
+        const cfg = getConfig();
+        if (cfg.bridgeDebugEnabled) {
+          logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
+        }
 
         return identity;
       } catch (error) {
@@ -7695,7 +7706,7 @@ const AutoQueueModule = (() => {
       }
     }
 
-    const DEBUG_FULL_BRIDGE_JSON = true;
+    const DEBUG_FULL_BRIDGE_JSON = false;
 
     const BRIDGE_JSON_QUIET_REPORT_EVENTS = new Set([
       'focus_state',
@@ -7726,11 +7737,34 @@ const AutoQueueModule = (() => {
     }
 
     function shouldLogFullBridgeJson(payload) {
-      if (!DEBUG_FULL_BRIDGE_JSON || !payload) {
+      if (!payload) {
         return false;
       }
+
+      const cfg = getConfig();
+      const debugEnabled = !!cfg.bridgeDebugEnabled;
       const action = String(payload.action || '').trim();
       const event = String(payload.event || '').trim();
+
+      if (!DEBUG_FULL_BRIDGE_JSON && !debugEnabled) {
+        if (action === 'assistant_reply') {
+          return true;
+        }
+
+        if (action === 'ack') {
+          return true;
+        }
+
+        if (action === 'report') {
+          if (BRIDGE_JSON_QUIET_REPORT_EVENTS.has(event)) {
+            return false;
+          }
+          return event === 'assistant_reply';
+        }
+
+        return false;
+      }
+
       if (
         action === 'poll'
         || action === 'ack'
@@ -7740,12 +7774,14 @@ const AutoQueueModule = (() => {
       ) {
         return true;
       }
+
       if (action === 'report') {
         if (BRIDGE_JSON_QUIET_REPORT_EVENTS.has(event)) {
           return false;
         }
         return true;
       }
+
       return false;
     }
 
@@ -7981,6 +8017,72 @@ const AutoQueueModule = (() => {
     function getPendingReplyContextKey(pageInstanceId = PAGE_INSTANCE_ID) {
       const safeId = String(pageInstanceId || CLIENT_ID || 'default').trim() || 'default';
       return `cgpt_pending_reply_context:${safeId}`;
+    }
+
+    function clearPendingReplyContext(reason = '') {
+      state.pendingReplyContext = null;
+      try {
+        localStorage.removeItem(getPendingReplyContextKey());
+        localStorage.removeItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][CLEAR_FAILED]', {
+          reason,
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+      }
+    }
+
+    function cleanupPendingReplyContextStorage() {
+      const now = Date.now();
+      const ttlMs = 24 * 60 * 60 * 1000;
+      const prefix = 'cgpt_pending_reply_context:';
+      try {
+        Object.keys(localStorage).forEach((key) => {
+          if (!key.startsWith(prefix)) {
+            return;
+          }
+          let ctx = null;
+          try {
+            ctx = JSON.parse(localStorage.getItem(key) || 'null');
+          } catch (parseError) {
+            console.error('[REPLY_CONTEXT][CLEANUP_PARSE_FAILED]', {
+              key,
+              error_type: parseError && parseError.name,
+              error: parseError && parseError.message,
+              stack: parseError && parseError.stack,
+            });
+          }
+          const sentAt = Number((ctx && ctx.sent_at) || 0);
+          if (!ctx || ctx.reply_reported || !sentAt || now - sentAt > ttlMs) {
+            localStorage.removeItem(key);
+          }
+        });
+        const legacyRaw = localStorage.getItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+        if (legacyRaw) {
+          let legacyCtx = null;
+          try {
+            legacyCtx = JSON.parse(legacyRaw);
+          } catch (legacyParseError) {
+            console.error('[REPLY_CONTEXT][CLEANUP_LEGACY_PARSE_FAILED]', {
+              error_type: legacyParseError && legacyParseError.name,
+              error: legacyParseError && legacyParseError.message,
+              stack: legacyParseError && legacyParseError.stack,
+            });
+          }
+          const legacySentAt = Number((legacyCtx && legacyCtx.sent_at) || 0);
+          if (!legacyCtx || legacyCtx.reply_reported || !legacySentAt || now - legacySentAt > ttlMs) {
+            localStorage.removeItem(LEGACY_PENDING_REPLY_CONTEXT_KEY);
+          }
+        }
+      } catch (error) {
+        console.error('[REPLY_CONTEXT][CLEANUP_FAILED]', {
+          error_type: error && error.name,
+          error: error && error.message,
+          stack: error && error.stack,
+        });
+      }
     }
 
     function getConversationIdFromLocation() {
@@ -8364,17 +8466,7 @@ const AutoQueueModule = (() => {
         logAssistantReplyReportFull(payload, ctx.message_id);
 
         ctx.reply_reported = true;
-        state.pendingReplyContext = ctx;
-
-        try {
-          localStorage.setItem(getPendingReplyContextKey(), JSON.stringify(ctx));
-        } catch (storageError) {
-          console.error('[REPLY_CONTEXT][MARK_REPORTED_FAILED]', {
-            error_type: storageError && storageError.name,
-            error: storageError && storageError.message,
-            stack: storageError && storageError.stack,
-          });
-        }
+        clearPendingReplyContext('reported');
 
         console.log('[REPLY_REPORT][DONE]', {
           message_id: ctx.message_id,
@@ -8504,6 +8596,12 @@ const AutoQueueModule = (() => {
       updateChatInputStateBadge();
 
       while (Date.now() - startedAt < timeoutMs) {
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          ChatInputStateRuntime.waitingForReply = false;
+          updateChatInputStateBadge();
+          return false;
+        }
+
         const busy = safeCheckAssistantBusy();
 
         if (busy) {
@@ -9395,8 +9493,18 @@ const AutoQueueModule = (() => {
       const content = bridgeContentFrom(normalized);
 
       if (typeof hasPendingReply === 'function' && hasPendingReply(sessionId)) {
-        const queuedEntry = createQueuedMessageEntry(normalized);
-        CHAT_QUEUE.push(queuedEntry);
+        const queueResult = typeof enqueueChatQueueEntry === 'function'
+          ? enqueueChatQueueEntry(normalized, 'pending-reply')
+          : { ok: true, queued: true, duplicate: false, entry: createQueuedMessageEntry(normalized) };
+        if (queueResult.duplicate) {
+          return {
+            handled: true,
+            ok: true,
+            queued: true,
+            duplicate: true,
+            reason: 'duplicate_message_id',
+          };
+        }
 
         ToolboxShell.appendLog(
           `[SEND][BLOCK] reason=pending_reply message_id=${String(messageId || '').slice(0, 8)}`
@@ -9422,8 +9530,18 @@ const AutoQueueModule = (() => {
       }
 
       if (state.handlingMessageId && state.handlingMessageId !== messageId) {
-        const busyEntry = createQueuedMessageEntry(normalized);
-        CHAT_QUEUE.push(busyEntry);
+        const queueResult = typeof enqueueChatQueueEntry === 'function'
+          ? enqueueChatQueueEntry(normalized, 'handling-other')
+          : { ok: true, queued: true, duplicate: false, entry: createQueuedMessageEntry(normalized) };
+        if (queueResult.duplicate) {
+          return {
+            handled: true,
+            ok: true,
+            queued: true,
+            duplicate: true,
+            reason: 'duplicate_message_id',
+          };
+        }
 
         ToolboxShell.appendLog(
           `[SEND][BLOCK] reason=handling_other_message current=${String(state.handlingMessageId || '').slice(0, 8)} incoming=${String(messageId || '').slice(0, 8)}`
@@ -9557,7 +9675,7 @@ const AutoQueueModule = (() => {
       const cfg = getConfig();
 
       if (!cfg.bridgeEnabled || state.polling) {
-        return;
+        return true;
       }
 
       if (state.handlingMessageId) {
@@ -9580,7 +9698,7 @@ const AutoQueueModule = (() => {
           }, state.handlingMessageId);
         }
 
-        return;
+        return true;
       }
 
       const runId = state.bridgeRunId;
@@ -9588,9 +9706,9 @@ const AutoQueueModule = (() => {
       try {
         const result = await apiRequest({ action: 'poll' });
 
-        if (runId !== state.bridgeRunId || !state.timerId) {
+        if (runId !== state.bridgeRunId || !state.bridgePollLoopActive) {
           ToolboxShell.appendLog('[BRIDGE][POLL][STALE_RESULT_IGNORED]');
-          return;
+          return true;
         }
 
         applyBridgeStateFromPollResult(result, 'poll');
@@ -9607,7 +9725,7 @@ const AutoQueueModule = (() => {
 
         const handled = await handleOutboundMessage(result);
 
-        if (runId === state.bridgeRunId && state.timerId) {
+        if (runId === state.bridgeRunId && state.bridgePollLoopActive) {
           markBridgePollSuccess();
           if (!handled || handled.handled !== true || handled.ok === true) {
             const pres = getBridgePollStatusPresentation();
@@ -9625,6 +9743,7 @@ const AutoQueueModule = (() => {
             updateChatInputStateBadge();
           }
         }
+        return true;
       } catch (error) {
         const errName = error && error.name ? error.name : 'Error';
         const errText = error && error.message ? error.message : String(error);
@@ -9644,12 +9763,7 @@ const AutoQueueModule = (() => {
           `[pollBridge][failed] action=poll url=${bridgeUrl} type=${errName} error=${errText}`,
           error,
         );
-
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(
-            `[BRIDGE][POLL][FAILED] url=${bridgeUrl} type=${errName} error=${errText}`,
-          );
-        }
+        return false;
       } finally {
         if (runId === state.bridgeRunId) {
           state.polling = false;
@@ -9783,8 +9897,73 @@ const AutoQueueModule = (() => {
       state.pageIdentityListenersInstalled = false;
     }
 
+    function getNextBridgePollDelayMs(ok) {
+      const cfg = getConfig();
+
+      if (ok) {
+        state.bridgePollFailCount = 0;
+        return Math.max(1000, Number(cfg.bridgePollIntervalMs || 3000));
+      }
+
+      state.bridgePollFailCount = Math.min(Number(state.bridgePollFailCount || 0) + 1, 5);
+
+      if (state.bridgePollFailCount <= 1) {
+        return 3000;
+      }
+
+      if (state.bridgePollFailCount === 2) {
+        return 5000;
+      }
+
+      if (state.bridgePollFailCount === 3) {
+        return 10000;
+      }
+
+      return 15000;
+    }
+
+    function scheduleBridgePoll(ok) {
+      if (state.bridgePollTimer) {
+        window.clearTimeout(state.bridgePollTimer);
+        state.bridgePollTimer = 0;
+      }
+
+      const delayMs = getNextBridgePollDelayMs(ok);
+
+      state.bridgePollTimer = window.setTimeout(() => {
+        state.bridgePollTimer = 0;
+        void runBridgePollLoop();
+      }, delayMs);
+    }
+
+    async function runBridgePollLoop() {
+      if (!getConfig().bridgeEnabled || !state.bridgePollLoopActive) {
+        return;
+      }
+
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        stop();
+        return;
+      }
+
+      let ok = true;
+
+      try {
+        checkPageIdentityChange();
+        ok = (await pollBridge()) !== false;
+      } catch (error) {
+        ok = false;
+        logBridgeError('[pollBridge][loop-failed]', error);
+      } finally {
+        if (state.bridgePollLoopActive) {
+          scheduleBridgePoll(ok);
+        }
+      }
+    }
+
     function start() {
       stop();
+      cleanupPendingReplyContextStorage();
       const cfg = getConfig();
       if (!cfg.bridgeEnabled) {
         resetBridgePollRuntime('bridge_disabled');
@@ -9792,6 +9971,8 @@ const AutoQueueModule = (() => {
         return;
       }
       state.bridgeRunId += 1;
+      state.bridgePollFailCount = 0;
+      state.bridgePollLoopActive = true;
       state.lastIdentityKey = identityKey(getPageIdentity());
       state.lastIdentityLogKey = '';
       state.pendingIdentityOldKey = '';
@@ -9799,17 +9980,18 @@ const AutoQueueModule = (() => {
       installFocusStateListeners();
       installPageIdentityListeners();
       reportFocusState('bridge_start');
-      pollBridge();
-      state.timerId = window.setInterval(() => {
-        checkPageIdentityChange();
-        pollBridge();
-      }, cfg.bridgePollIntervalMs);
+      void runBridgePollLoop();
       updateStatus(`已启动：${getBridgeUrl()}`);
       ToolboxShell.appendLog(`[BRIDGE][START] ${getBridgeUrl()}`);
     }
 
     function stop() {
       state.bridgeRunId += 1;
+      state.bridgePollLoopActive = false;
+      if (state.bridgePollTimer) {
+        window.clearTimeout(state.bridgePollTimer);
+        state.bridgePollTimer = 0;
+      }
       if (state.timerId) {
         window.clearInterval(state.timerId);
         state.timerId = 0;
@@ -9818,6 +10000,7 @@ const AutoQueueModule = (() => {
       removeFocusStateListeners();
       removePageIdentityListeners();
       state.polling = false;
+      state.bridgePollFailCount = 0;
       resetBridgePollRuntime('bridge_stopped');
       updateStatus('已停止');
     }
@@ -9902,7 +10085,7 @@ const AutoQueueModule = (() => {
         key: 'bridgePollIntervalMs',
         selector: '#cgpt-bridge-interval',
         type: 'number',
-        defaultValue: 1000,
+        defaultValue: 3000,
       },
     ]);
 
@@ -10401,10 +10584,21 @@ const AutoQueueModule = (() => {
 
     return {
       mount,
+      stop,
       handleRouteChange,
       sendSystemHotkey,
     };
   })();
+
+  function stopAutoContinue(reason) {
+    if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.stop === 'function') {
+      AutoQueueModule.stop({
+        reason: reason || 'page-navigation',
+        logStop: false,
+        markCurrent: false,
+      });
+    }
+  }
 
   /********************************************************************
    * 7. ExportModule：导出统计模   ********************************************************************/
@@ -11013,12 +11207,13 @@ Prompt 总数：${promptCount}
    ********************************************************************/
 
   const LogModule = (() => {
-    // 环形缓冲区上限
-    const MAX_LOG_BUFFER_LINES = 3000;
+    const TOOLBOX_MAX_DOM_LOG_LINES = 500;
+    const TOOLBOX_MAX_MEMORY_LOG_LINES = 1000;
+    const TOOLBOX_MAX_LOG_TEXT_LEN = 3000;
     // 默认显示条数
-    const DEFAULT_LOG_RENDER_LIMIT = 200;
+    const DEFAULT_LOG_RENDER_LIMIT = 100;
     // 持久化存储上限
-    const PERSIST_MAX_LINES = 1000;
+    const PERSIST_MAX_LINES = 300;
 
     const state = {
       lines: [],
@@ -11034,6 +11229,14 @@ Prompt 总数：${promptCount}
     const logTimers = createTimerRegistry('LOG');
     let logDomDirty = false;
     let renderScheduled = false;
+
+    function normalizeToolboxLogText(text) {
+      const raw = String(text || '');
+      if (raw.length <= TOOLBOX_MAX_LOG_TEXT_LEN) {
+        return raw;
+      }
+      return `${raw.slice(0, TOOLBOX_MAX_LOG_TEXT_LEN)} ...[truncated ${raw.length - TOOLBOX_MAX_LOG_TEXT_LEN}]`;
+    }
 
     function isLogPersistEnabled() {
       return !!MemoryManager.get(MemoryManager.KEYS.logPersistEnabled, false);
@@ -11241,13 +11444,12 @@ Prompt 总数：${promptCount}
       const batch = logBuffer.splice(0, logBuffer.length);
 
       batch.forEach((text) => {
-        const line = `[${nowTimeText()}] ${String(text || '')}`;
+        const line = `[${nowTimeText()}] ${normalizeToolboxLogText(text)}`;
         state.lines.unshift(line);
       });
 
-      // 环形缓冲区裁剪
-      if (state.lines.length > MAX_LOG_BUFFER_LINES) {
-        state.lines.length = MAX_LOG_BUFFER_LINES;
+      if (state.lines.length > TOOLBOX_MAX_MEMORY_LOG_LINES) {
+        state.lines.length = TOOLBOX_MAX_MEMORY_LOG_LINES;
       }
 
       logDomDirty = true;
@@ -11287,7 +11489,11 @@ Prompt 总数：${promptCount}
     }
 
     function add(text) {
-      logBuffer.push(String(text || ''));
+      logBuffer.push(normalizeToolboxLogText(text));
+
+      if (logBuffer.length > TOOLBOX_MAX_DOM_LOG_LINES) {
+        logBuffer.splice(0, logBuffer.length - TOOLBOX_MAX_DOM_LOG_LINES);
+      }
 
       if (!logTimers.has('log-flush')) {
         logTimers.timeout('log-flush', flushLogBuffer, 200);
@@ -11313,7 +11519,10 @@ Prompt 总数：${promptCount}
         return;
       }
 
-      const recentLines = state.lines.slice(0, state.renderLimit);
+      const recentLines = state.lines.slice(
+        0,
+        Math.min(state.renderLimit, TOOLBOX_MAX_DOM_LOG_LINES, 100),
+      );
       listEl.innerHTML = recentLines
         .map((line) => `<div class="cgpt-log-line">${escapeHtml(line)}</div>`)
         .join('');

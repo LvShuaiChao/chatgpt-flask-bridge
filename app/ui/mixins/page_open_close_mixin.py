@@ -1,27 +1,12 @@
 """打开 / 关闭 / 刷新 ChatGPT 页面与油猴页面表格。"""
 
 from app.server import (
-    cancel_message,
-    complete_gui_dispatch,
-    enqueue_control_command,
+    close_chatgpt_pages,
     get_bridge_status,
-    get_message_state,
-    get_server_port,
-    get_server_public_host,
-    get_server_url,
-    get_tm_online_summary,
     is_server_running,
     push_close_other_pages,
-    close_chatgpt_pages,
     push_close_page,
-    push_message,
     push_open_url,
-    set_debug_mode,
-    set_external_gui_dispatch,
-    set_log_callback,
-    set_status_callback,
-    start_server,
-    stop_server,
 )
 
 import traceback

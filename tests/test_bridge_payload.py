@@ -187,9 +187,6 @@ class BridgePayloadTests(unittest.TestCase):
             "target_page_url",
             "target_url",
             "raw_user_text",
-            "status",
-            "source",
-            "id",
             "page_id",
             "window_id",
             "current_page_id",
@@ -197,6 +194,9 @@ class BridgePayloadTests(unittest.TestCase):
             self.assertIn(key, LEGACY_FIELD_NAMES)
             with self.assertRaises(ValueError):
                 assert_no_legacy_fields({key: "x"}, owner="test")
+
+        with self.assertRaises(ValueError):
+            assert_no_legacy_fields({"id": "legacy-id"}, owner="test")
 
 
 if __name__ == "__main__":

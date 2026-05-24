@@ -461,6 +461,12 @@ class ExternalApiGuiMixin:
                     echo=True,
                 )
 
+        if hasattr(self, "_mark_session_reply_done_flash"):
+            self._mark_session_reply_done_flash(
+                session,
+                reason=render_reason or "assistant_reply_recv",
+            )
+
         if session.session_id == self._current_session_id and hasattr(
             self, "_render_current_chat_messages"
         ):

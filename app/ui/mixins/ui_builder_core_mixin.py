@@ -25,14 +25,6 @@ class UiBuilderCoreMixin:
         label.setStyleSheet("color: #666;")
         return label
 
-    def _make_button(self, text, object_name="", clicked=None):
-        btn = QPushButton(text)
-        if object_name:
-            btn.setObjectName(object_name)
-        if clicked is not None:
-            btn.clicked.connect(clicked)
-        return btn
-
     def _make_group_vbox(self, title):
         group = QGroupBox(title)
         layout = QVBoxLayout(group)

@@ -504,7 +504,11 @@ def _resolve_external_session_for_send(body):
 
     if reuse_last_session:
         with st._state_lock:
-            last = (st._external_client_sessions.get(client_key) or "").strip()
+            stored = st._external_client_sessions.get(client_key)
+            if isinstance(stored, dict):
+                last = (stored.get("session_id") or "").strip()
+            else:
+                last = str(stored or "").strip()
         if last:
             return last, False, "reuse_last_session"
 
@@ -514,13 +518,45 @@ def _resolve_external_session_for_send(body):
     return "", False, ""
 
 
+def cleanup_external_client_sessions_locked(now=None):
+    now = _now() if now is None else float(now)
+    rows = st._external_client_sessions
+    remove_keys = []
+    for key, value in list(rows.items()):
+        if isinstance(value, dict):
+            updated_at = float(value.get("updated_at") or 0)
+        else:
+            updated_at = 0
+        if not isinstance(value, dict) or not updated_at:
+            remove_keys.append(key)
+            continue
+        if now - updated_at > st.EXTERNAL_CLIENT_SESSION_TTL_SEC:
+            remove_keys.append(key)
+    for key in remove_keys:
+        rows.pop(key, None)
+    if len(rows) > st.EXTERNAL_CLIENT_SESSION_MAX_RECORDS:
+        sorted_items = sorted(
+            rows.items(),
+            key=lambda kv: float(kv[1].get("updated_at") or 0)
+            if isinstance(kv[1], dict)
+            else 0,
+        )
+        overflow = len(rows) - st.EXTERNAL_CLIENT_SESSION_MAX_RECORDS
+        for key, _value in sorted_items[:overflow]:
+            rows.pop(key, None)
+
+
 def _remember_external_client_session(body, session_id):
     session_id = (session_id or "").strip()
-    if not session_id:
-        return
     client_key = _external_client_key(body)
+    if not client_key or not session_id:
+        return
     with st._state_lock:
-        st._external_client_sessions[client_key] = session_id
+        st._external_client_sessions[client_key] = {
+            "session_id": session_id,
+            "updated_at": _now(),
+        }
+        cleanup_external_client_sessions_locked()
 
 
 def _external_create_chat_send(body):
@@ -633,12 +669,6 @@ def _require_external_auth():
 
 def _external_auth_denied():
     return _require_external_auth()
-
-
-def _request_body_preview(max_len=500):
-    from app.server.request_utils import request_body_preview
-
-    return request_body_preview(max_len=max_len)
 
 
 def _json_body_or_error(log_tag, *, allow_empty=True):

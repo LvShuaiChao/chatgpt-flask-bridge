@@ -82,6 +82,8 @@ _session_external_pending = {}
 _pending_gui_actions = {}
 _external_action_lock = threading.Lock()
 _external_client_sessions = {}
+EXTERNAL_CLIENT_SESSION_TTL_SEC = 24 * 60 * 60
+EXTERNAL_CLIENT_SESSION_MAX_RECORDS = 200
 EXTERNAL_REQUEST_TTL_SEC = 3600
 EXTERNAL_REQUEST_MAX_RECORDS = 300
 # GUI 本地直读上传：file_id -> 登记记录；session / client 索引待上传列表

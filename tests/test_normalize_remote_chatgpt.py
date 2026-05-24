@@ -14,14 +14,23 @@ def test_default_remote_chatgpt_core_fields():
     base = default_remote_chatgpt()
     assert set(base.keys()) == {
         "bind_state",
+        "bind_mode",
         "url",
         "conversation_id",
         "client_id",
         "page_instance_id",
+        "page_no",
         "page_display_id",
+        "temp_page_id",
         "page_type",
         "page_title",
         "last_seen",
+        "bind_request_id",
+        "bind_started_at",
+        "pending_bootstrap_content",
+        "pending_send_content",
+        "pending_send_message_id",
+        "reopen_started_at",
     }
 
 

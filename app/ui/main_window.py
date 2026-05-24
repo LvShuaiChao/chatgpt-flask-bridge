@@ -1,23 +1,9 @@
 from app.server import (
-    cancel_message,
-    complete_gui_dispatch,
-    enqueue_control_command,
-    get_bridge_status,
-    get_message_state,
-    get_server_port,
-    get_server_public_host,
-    get_server_url,
-    get_tm_online_summary,
     is_server_running,
-    push_close_other_pages,
-    push_close_page,
-    push_message,
-    push_open_url,
     set_debug_mode,
     set_external_gui_dispatch,
     set_log_callback,
     set_status_callback,
-    start_server,
     stop_server,
 )
 
@@ -96,7 +82,8 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         self._message_to_turn = {}
         self._session_send_queues = {}
         self._external_client_last_session = {}
-        self._processed_inbound_ids = set()
+        self._processed_inbound_ids = {}
+        self._last_bridge_runtime_cleanup_at = 0.0
         self._bridge_ui = BridgeUiState()
         self._page_selector = PageSelectorState()
         self._web_sync = WebSyncState()

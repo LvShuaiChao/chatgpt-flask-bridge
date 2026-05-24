@@ -205,11 +205,22 @@ python -m app.client.bridge_client --status
 | `assistant_text` | 助手回复 | 不再与 `content` 混写 |
 | `online` | 页面在线 | **仅**看最近心跳 `last_seen` |
 | `conversation_syncable` | 对话可同步 | `online` + `conversation_id` + `/c/` 对话页 |
-| `can_accept_input` / `can_send_now` / `send_decision` | 油猴上报的输入/发送/判定能力 | 供 GUI 展示，**不**作为同步硬条件；`syncable`/`sendable`/`inputable` 仅限 UI 展示局部变量 |
+| `can_accept_input` / `can_send_now` / `is_responding` / `response_state` | 油猴 Bridge 上报的原始能力字段 | 协议与 poll/report 只用这一套；`inputable` / `sendable` / `responding` / `syncable` 仅限 UI 展示层派生 |
 | `visibility_state` / `has_focus` | 可见性/焦点 | 仅日志与展示，不拦截同步 |
-| `active_tab` | 工具箱当前 tab | 页面级 `pageState`，新页默认 `upload` |
-| `upload_active_group_id` | 上传分组 | 页面级持久化 |
-| `quick_prompt_category` | 快捷 Prompt 分类 | 页面级，勿与全局设置混读 |
+| `activeTab` | 工具箱当前 tab | 页面级 `pageState`（camelCase），新页默认 `upload` |
+| `uploadActiveGroupId` | 上传分组 | 页面级 `pageState`；运行时内存用 `state.activeGroupId`，IndexedDB 队列表行用 `groupId` |
+| `quickPromptCategory` | 快捷 Prompt 分类 | 页面级 `pageState`，勿与全局设置混读 |
+| `toolboxRouteKey` / `page_instance_id` / `url` / `pathname` / `updatedAt` | 页面状态元数据 | `pageState` 标准字段 |
+
+### 历史字段（已废弃，仅迁移边界可读）
+
+| 旧字段 | 标准字段 |
+|--------|----------|
+| `active_tab` | `activeTab` |
+| `upload_active_group_id` | `uploadActiveGroupId` |
+| `quick_prompt_category` | `quickPromptCategory` |
+| `continuePrompt` / `defaultContinuePrompt`（任务） | `continuePromptTemplate` |
+| `bridge_message_id`（出站队列） | `message_id`（GUI 本地 `ChatMessage.bridge_message_id` 仅作内部映射） |
 
 发送统一入口：油猴 `sendContentViaComposer()`。路由变化统一走 `runToolboxRouteChangePipeline()`（先恢复 pageState，再 `identity_change`）。
 
