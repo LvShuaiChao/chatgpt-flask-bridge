@@ -127,9 +127,18 @@ class BridgePayloadTests(unittest.TestCase):
 
     def test_persist_qsettings_last_url_only_writes_new_key(self):
         settings = _FakeSettings({"last_page_url": "https://chatgpt.com/c/stale"})
-        persist_qsettings_last_url(settings, "https://chatgpt.com/c/fresh")
+        with self.assertLogs("app.utils.deprecation_log", level="INFO") as captured:
+            persist_qsettings_last_url(settings, "https://chatgpt.com/c/fresh")
         self.assertEqual(settings.value("last_url"), "https://chatgpt.com/c/fresh")
         self.assertFalse(settings.contains("last_page_url"))
+        messages = [record.getMessage() for record in captured.records]
+        self.assertTrue(
+            any(
+                "[MIGRATION_HIT]" in line and "old=last_page_url" in line
+                for line in messages
+            ),
+            messages,
+        )
 
     def test_normalize_inbound_push_payload_rejects_legacy_target_url(self):
         with self.assertRaises(ValueError):

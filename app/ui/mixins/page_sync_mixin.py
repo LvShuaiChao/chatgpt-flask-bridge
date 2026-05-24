@@ -580,6 +580,21 @@ class PageSyncMixin:
             else:
                 return False, "绑定 page_instance_id 与回传页面不一致"
 
+        report_page_id = str(
+            payload.get("page_display_id")
+            or payload.get("page_no")
+            or ""
+        ).strip()
+        bound_page_id = str(
+            remote.get("target_page_id")
+            or remote.get("page_display_id")
+            or remote.get("page_no")
+            or remote.get("temp_page_id")
+            or ""
+        ).strip()
+        if bound_page_id and report_page_id and bound_page_id != report_page_id:
+            return False, "绑定页面ID与回传页面ID不一致"
+
         if report_conv and not bound_conv and bind_state in (
             BIND_STATE_PREBOUND_HOME,
             BIND_STATE_WAITING_CONVERSATION_CREATED,
@@ -607,8 +622,10 @@ class PageSyncMixin:
             "client_id",
             "page_instance_id",
             "url",
+            "page_no",
+            "page_display_id",
         ):
-            if not (payload.get(key) or "").strip():
+            if not str(payload.get(key) or "").strip():
                 alt = (
                     item.get(key)
                     or pending_sync.get(key)
@@ -628,6 +645,58 @@ class PageSyncMixin:
         snapshot_url = (payload.get("url") or "").strip()
         if snapshot_url:
             payload["url"] = snapshot_url
+
+        stats = payload.get("stats")
+        if not isinstance(stats, dict):
+            stats = {}
+
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+
+        if not stats:
+            user_count = 0
+            assistant_count = 0
+            total_chars = 0
+
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role") or "").strip().lower()
+                text = str(msg.get("text") or msg.get("content") or "").strip()
+                char_count = len("".join(text.split()))
+                total_chars += char_count
+
+                if role == "user":
+                    user_count += 1
+                elif role == "assistant":
+                    assistant_count += 1
+
+            stats = {
+                "total_count": len(messages),
+                "user_count": user_count,
+                "assistant_count": assistant_count,
+                "round_count": (
+                    min(user_count, assistant_count)
+                    if user_count and assistant_count
+                    else (len(messages) + 1) // 2
+                ),
+                "total_chars": total_chars,
+                "dom_estimated_round_count": int(
+                    payload.get("dom_estimated_round_count") or 0
+                ),
+            }
+
+        payload["stats"] = stats
+        payload["message_count"] = int(stats.get("total_count") or len(messages))
+        payload["user_count"] = int(stats.get("user_count") or 0)
+        payload["assistant_count"] = int(stats.get("assistant_count") or 0)
+        payload["round_count"] = int(stats.get("round_count") or 0)
+        payload["dom_estimated_round_count"] = int(
+            stats.get("dom_estimated_round_count")
+            or payload.get("dom_estimated_round_count")
+            or 0
+        )
         return payload
 
     def _handle_conversation_snapshot_inbound(self, item):
@@ -711,11 +780,18 @@ class PageSyncMixin:
         payload = self._normalize_conversation_snapshot_payload(
             payload, item=item, pending_sync=pending_sync
         )
+        stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
         self._append_log(
-            f"[WEB_SYNC][SNAPSHOT_RECEIVED] request_id={request_id or '-'} "
+            "[WEB_SYNC][SNAPSHOT_RECEIVED] "
+            f"request_id={request_id or '-'} "
             f"client_id={(payload.get('client_id') or item.get('client_id') or '-')} "
+            f"page_display_id={(payload.get('page_display_id') or payload.get('page_no') or '-')} "
             f"conversation_id={(payload.get('conversation_id') or '-')} "
-            f"message_count={len(payload.get('messages') or [])}",
+            f"message_count={payload.get('message_count') or len(payload.get('messages') or [])} "
+            f"user_count={payload.get('user_count') or stats.get('user_count') or 0} "
+            f"assistant_count={payload.get('assistant_count') or stats.get('assistant_count') or 0} "
+            f"round_count={payload.get('round_count') or stats.get('round_count') or 0} "
+            f"dom_estimated_round_count={payload.get('dom_estimated_round_count') or stats.get('dom_estimated_round_count') or 0}",
             echo=True,
         )
         session_id = (
@@ -846,6 +922,24 @@ class PageSyncMixin:
                 self._render_session_chat(session, force_bottom=True)
                 self._refresh_session_list(select_session_id=session.session_id)
             return
+
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        remote["last_web_snapshot_stats"] = payload.get("stats") or {}
+        remote["last_web_snapshot_page_display_id"] = (
+            payload.get("page_display_id")
+            or payload.get("page_no")
+            or ""
+        )
+        remote["last_web_snapshot_message_count"] = int(payload.get("message_count") or 0)
+        remote["last_web_snapshot_user_count"] = int(payload.get("user_count") or 0)
+        remote["last_web_snapshot_assistant_count"] = int(
+            payload.get("assistant_count") or 0
+        )
+        remote["last_web_snapshot_round_count"] = int(payload.get("round_count") or 0)
+        remote["last_web_snapshot_dom_estimated_round_count"] = int(
+            payload.get("dom_estimated_round_count") or 0
+        )
+        session.remote_chatgpt = remote
 
         mode = str(
             payload.get("mode")

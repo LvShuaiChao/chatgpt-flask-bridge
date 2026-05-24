@@ -1248,43 +1248,6 @@
       };
     }
 
-    function buildImportConfirmMessage(rawCount, dedupedCount, internalRemoved) {
-      let msg = `读取 ${rawCount} 条 Prompt`;
-      if (internalRemoved > 0) {
-        msg += `（文件内去重 ${internalRemoved} 条）`;
-      }
-      msg += `，待导入 ${dedupedCount} 条。\n\n点击“确定”：覆盖当前列表。\n点击“取消”：追加到当前列表。`;
-      return msg;
-    }
-
-    function buildImportStatusMessage({
-      added,
-      skipped,
-      conflicts,
-      internalRemoved,
-      replace,
-    }) {
-      const parts = [];
-
-      if (replace) {
-        parts.push(`覆盖导入完成：${added} 条`);
-      } else {
-        parts.push(`追加导入完成：新增 ${added} 条`);
-        if (skipped > 0) {
-          parts.push(`跳过完全相同 ${skipped} 条`);
-        }
-        if (conflicts > 0) {
-          parts.push(`标题冲突已重命名 ${conflicts} 条`);
-        }
-      }
-
-      if (internalRemoved > 0) {
-        parts.push(`文件内去重 ${internalRemoved} 条`);
-      }
-
-      return parts.join('，');
-    }
-
     function prepareAppendImportItems(importItems, existingPrompts) {
       const workingList = existingPrompts.slice();
       const toPrepend = [];
@@ -1322,7 +1285,14 @@
     }
 
     async function importPrompts(event) {
+      const file = event && event.target && event.target.files
+        ? event.target.files[0]
+        : null;
+      const fileName = file && file.name ? file.name : '-';
+
       try {
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][START] file=${fileName}`);
+
         const data = await readJsonFileFromInput(event, {
           tag: '[PROMPT_IMPORT]',
         });
@@ -1332,8 +1302,12 @@
         const importedData = normalizePromptManagerData(data);
         const rawCount = importedData.prompts.length;
 
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][PARSED] count=${rawCount}`);
+
         if (!rawCount) {
-          alert('导入失败：文件中没有有效 Prompt');
+          const msg = '文件中没有有效 Prompt';
+          setStatus(`Prompt 导入失败：${msg}`);
+          ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${msg}`);
           return;
         }
 
@@ -1342,56 +1316,26 @@
         );
 
         if (!dedupedImport.length) {
-          alert('导入失败：去重后没有可导入的 Prompt');
+          const msg = '去重后没有可导入的 Prompt';
+          setStatus(`Prompt 导入失败：${msg}`);
+          ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${msg}`);
           return;
         }
 
-        const replace = confirm(
-          buildImportConfirmMessage(rawCount, dedupedImport.length, internalRemoved),
-        );
+        const appendResult = prepareAppendImportItems(dedupedImport, prompts);
+        prompts = [...appendResult.toPrepend, ...prompts];
+        const { added, skipped, conflicts } = appendResult;
 
-        let added = 0;
-        let skipped = 0;
-        let conflicts = 0;
-
-        if (replace) {
-          const seenImportIds = new Set();
-
-          prompts = dedupedImport.map((item) => {
-            const record = createImportedPromptRecord(item, {}, { preserveId: true });
-
-            if (!record.id || seenImportIds.has(record.id)) {
-              record.id = createId('prompt');
-            }
-
-            seenImportIds.add(record.id);
-            return record;
-          });
-          categories = importedData.categories.map((cat) => ({
-            ...cat,
-            id: createId('cat'),
-            createdAt: nowMs(),
-            updatedAt: nowMs(),
-          }));
-          added = prompts.length;
-        } else {
-          const appendResult = prepareAppendImportItems(dedupedImport, prompts);
-          prompts = [...appendResult.toPrepend, ...prompts];
-          added = appendResult.added;
-          skipped = appendResult.skipped;
-          conflicts = appendResult.conflicts;
-
-          importedData.categories.forEach((cat) => {
-            if (!categories.some((x) => x.name === cat.name)) {
-              categories.push({
-                ...cat,
-                id: createId('cat'),
-                createdAt: nowMs(),
-                updatedAt: nowMs(),
-              });
-            }
-          });
-        }
+        importedData.categories.forEach((cat) => {
+          if (!categories.some((x) => x.name === cat.name)) {
+            categories.push({
+              ...cat,
+              id: createId('cat'),
+              createdAt: nowMs(),
+              updatedAt: nowMs(),
+            });
+          }
+        });
 
         prompts.forEach((p) => {
           p.category = ensureCategoryExists(p.category);
@@ -1406,20 +1350,28 @@
         );
         render();
         notifyUploadQuickPromptsRefresh('prompt-import');
-        setStatus(buildImportStatusMessage({
-          added,
-          skipped,
-          conflicts,
-          internalRemoved,
-          replace,
-        }));
+
+        setStatus(`Prompt 导入完成：新增 ${added} 条，跳过重复 ${skipped} 条`);
+
         ToolboxShell.appendLog(
-          `[PROMPT_IMPORT] mode=${replace ? 'replace' : 'append'} raw=${rawCount} deduped=${dedupedImport.length} added=${added} skipped=${skipped} conflicts=${conflicts} internalRemoved=${internalRemoved}`,
+          `[PROMPT_IMPORT][DEDUP] added=${added} skipped=${skipped} conflicts=${conflicts} internalRemoved=${internalRemoved}`,
+        );
+        ToolboxShell.appendLog(
+          `[PROMPT_IMPORT][DONE] added=${added} skipped=${skipped} total=${dedupedImport.length}`,
         );
       } catch (e) {
         const errText = getErrorText(e);
-        console.error('[ChatGPT toolbox] Prompt import failed', e);
-        alert(`导入失败：${errText}`);
+        console.error('[PROMPT_IMPORT][FAILED]', {
+          error_type: e && e.name,
+          error: errText,
+          stack: e && e.stack,
+        });
+        setStatus(`Prompt 导入失败：${errText}`);
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${errText}`);
+      } finally {
+        if (event && event.target) {
+          event.target.value = '';
+        }
       }
     }
 

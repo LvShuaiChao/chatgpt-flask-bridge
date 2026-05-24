@@ -2454,15 +2454,25 @@
             || snapshot.request_id
             || ''
           ).trim();
+          const snapshotStats = snapshot.stats && typeof snapshot.stats === 'object'
+            ? snapshot.stats
+            : {};
           const reportPayload = {
             request_id: syncRequestId,
             session_id: cmdPayload.session_id || snapshot.session_id || '',
             conversation_id: cmdPayload.conversation_id || snapshot.conversation_id || identity.conversation_id || '',
             client_id: cmdPayload.client_id || snapshot.client_id || identity.client_id || CLIENT_ID,
             page_instance_id: cmdPayload.page_instance_id || snapshot.page_instance_id || identity.page_instance_id || PAGE_INSTANCE_ID,
+            page_no: identity.page_no || identity.page_display_id || getCurrentBridgePageDisplayId() || '',
+            page_display_id: identity.page_display_id || identity.page_no || getCurrentBridgePageDisplayId() || '',
             url: snapshotUrl,
             messages: snapshot.messages || [],
-            message_count: Array.isArray(snapshot.messages) ? snapshot.messages.length : 0,
+            stats: snapshotStats,
+            message_count: Number(snapshotStats.total_count || 0) || (Array.isArray(snapshot.messages) ? snapshot.messages.length : 0),
+            user_count: Number(snapshotStats.user_count || 0),
+            assistant_count: Number(snapshotStats.assistant_count || 0),
+            round_count: Number(snapshotStats.round_count || 0),
+            dom_estimated_round_count: Number(snapshotStats.dom_estimated_round_count || 0),
             mode: cmdPayload.mode || snapshot.mode || 'merge',
             ok: true,
             command_type: cmdPayload.command_type || 'read_snapshot',
@@ -2480,6 +2490,11 @@
           ToolboxShell.appendLog(
             `[BRIDGE][SYNC_CONVERSATION][report] message_id=${String(messageId).slice(0, 8)} `
             + `messages=${reportPayload.message_count} `
+            + `user=${reportPayload.user_count} `
+            + `assistant=${reportPayload.assistant_count} `
+            + `round=${reportPayload.round_count} `
+            + `dom_estimated_round=${reportPayload.dom_estimated_round_count} `
+            + `page_display_id=${reportPayload.page_display_id || '-'} `
             + `session_id=${reportPayload.session_id || '-'} `
             + `request_id=${reportPayload.request_id || '-'}`,
           );

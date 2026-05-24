@@ -3,6 +3,7 @@
     "core/done-signal.js",
     "core/state.js",
     "core/logger.js",
+    "core/chatgpt-dom-helpers.js",
     "ui/toolbox-shell.js",
     "core/main.js",
     "upload/upload-module.js",

@@ -35,7 +35,7 @@
 // To modify behavior, edit source files first, then run:
 // npm run build
 //
-// Generated at: 2026-05-24 23:41:05
+// Generated at: 2026-05-25 01:35:28
 // =============================================================================
 
 (function () {
@@ -671,6 +671,8 @@
     return {
       stopOnMaxContinueRounds: true,
       defaultMaxContinueRoundsMigratedToUnlimited: false,
+      /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
+      switchNewChatBetweenTasks: true,
       /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
       stopBatchOnTaskSendFailure: false,
       verifyAfterDoneSignal: true,
@@ -812,7 +814,9 @@
     };
   }
 
-  const DEFAULT_AUTO_CONFIG = Object.freeze(createDefaultAutoConfig());
+  function getDefaultAutoListPromptsText() {
+    return createDefaultAutoConfig().listPromptsText;
+  }
 
   function createDefaultPrompts() {
     return [
@@ -4581,6 +4585,175 @@
    * 1. ToolboxShell：统一外壳
    ********************************************************************/
 
+function isInsideToolbox(el) {
+  if (!el) return false;
+  return !!(
+    el.closest('#cgpt-toolbox-root')
+    || el.closest('[id^="cgpt-"]')
+    || el.closest('[class*="cgpt-toolbox"]')
+    || (typeof isInToolbox === 'function' && isInToolbox(el))
+  );
+}
+
+function isChatGPTHomeNewChatPage() {
+  const pathname = String(location.pathname || '').trim();
+  return pathname === '/' || pathname === '';
+}
+
+function hasRealChatGPTStopGeneratingButton() {
+  const selectors = [
+    'button[data-testid="stop-button"]',
+    'button[data-testid="composer-stop-button"]',
+    'button[aria-label="停止生成"]',
+    'button[aria-label="Stop generating"]',
+    'button[aria-label*="Stop generating"]',
+  ];
+
+  for (const selector of selectors) {
+    const buttons = Array.from(document.querySelectorAll(selector));
+
+    for (const btn of buttons) {
+      if (!btn || isInsideToolbox(btn)) continue;
+
+      const rect = btn.getBoundingClientRect();
+      const style = window.getComputedStyle(btn);
+
+      if (
+        rect.width > 0
+        && rect.height > 0
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && !btn.disabled
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function findRealChatGPTSendButton() {
+  const selectors = [
+    'button#composer-submit-button',
+    'button[data-testid="send-button"]',
+    'button[aria-label="发送提示"]',
+    'button[aria-label="Send prompt"]',
+  ];
+
+  for (const selector of selectors) {
+    const buttons = Array.from(document.querySelectorAll(selector));
+
+    for (const btn of buttons) {
+      if (!btn || isInsideToolbox(btn)) continue;
+
+      const rect = btn.getBoundingClientRect();
+      const style = window.getComputedStyle(btn);
+
+      if (
+        rect.width > 0
+        && rect.height > 0
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && !btn.disabled
+        && btn.getAttribute('aria-disabled') !== 'true'
+      ) {
+        return btn;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getChatGPTComposerText() {
+  const candidates = [
+    document.querySelector('#prompt-textarea'),
+    document.querySelector('[data-testid="prompt-textarea"]'),
+    document.querySelector('div.ProseMirror[contenteditable="true"]'),
+    document.querySelector('[contenteditable="true"]'),
+    document.querySelector('textarea'),
+  ].filter(Boolean);
+
+  for (const el of candidates) {
+    if (!el || isInsideToolbox(el)) continue;
+
+    const value = String(el.value || el.innerText || el.textContent || '').trim();
+
+    if (value) {
+      return value;
+    }
+  }
+
+  return '';
+}
+
+function hasChatGPTComposerAttachmentOnHome() {
+  const attachmentSelectors = [
+    '[data-testid*="attachment"]',
+    '[data-testid*="file"]',
+    '[class*="attachment"]',
+  ];
+
+  for (const selector of attachmentSelectors) {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (const node of nodes) {
+      if (!node || isInsideToolbox(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isHomeNewChatReadyToSendNow() {
+  if (!isChatGPTHomeNewChatPage()) {
+    return false;
+  }
+
+  if (hasRealChatGPTStopGeneratingButton()) {
+    return false;
+  }
+
+  const sendBtn = findRealChatGPTSendButton();
+  if (!sendBtn) {
+    return false;
+  }
+
+  const composerText = getChatGPTComposerText();
+  const hasText = composerText.length > 0;
+  const hasAttachment = hasChatGPTComposerAttachmentOnHome();
+
+  return !!(hasText || hasAttachment);
+}
+
+function applyHomeNewChatCapabilityOverride(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return snapshot;
+  }
+
+  if (!isHomeNewChatReadyToSendNow()) {
+    return snapshot;
+  }
+
+  snapshot.is_responding = false;
+  snapshot.can_send_now = true;
+  snapshot.can_accept_input = true;
+  snapshot.response_state = 'ready';
+  snapshot.response_state_reason = 'home_new_chat_composer_ready_override';
+
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog(
+      '[BRIDGE][STATE_OVERRIDE] reason=home_new_chat_composer_ready_override '
+      + `url=${location.href} conversation_id=-`,
+    );
+  }
+
+  return snapshot;
+}
   const ToolboxShell = (() => {
     const TOOLBOX_DEFAULT_TITLE = '小张工具箱';
     const TOOLBOX_RESTORE_HANDLE_TITLE = '小张工具箱';
@@ -14504,8 +14677,8 @@
 
     const SEND_STABLE_RETRY_LIMIT = 30;
     const SEND_STABLE_RETRY_INTERVAL_MS = 300;
-    const SEND_STABLE_OUTER_RETRY_MAX = 12;
     const SEND_WAIT_TIMEOUT_MS = SEND_STABLE_RETRY_LIMIT * SEND_STABLE_RETRY_INTERVAL_MS;
+    const PRE_SEND_OPPORTUNITY_POLL_MS = 350;
     const COPY_CONTINUE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
     const COPY_CONTINUE_STABLE_ROUNDS = 2;
     const COPY_CONTINUE_STABLE_INTERVAL_MS = 350;
@@ -14529,7 +14702,6 @@
       activeId: '',
       observer: null,
       uploadAbortController: null,
-      uploadSending: false,
       uploadCancelRequested: false,
       runId: 0,
       waitingSend: false,
@@ -14546,6 +14718,11 @@
       waitingReplyRunId: null,
       waitingReplyCheckedAt: 0,
       waitingReplyTimer: null,
+      pendingSendAfterReply: false,
+      pendingSendAfterReplySource: '',
+      pendingSendRetrying: false,
+      replyWaitSawBusy: false,
+      replyWaitAssistantCountBefore: 0,
       uploadSendFailureHint: '',
       uploadSendFailureHintAt: 0,
     };
@@ -18089,6 +18266,23 @@
       appendUploadGroupLog('RENDER', { phase: 'ok' });
     }
 
+    function getCurrentConversationSnapshotStatsForHeader() {
+      try {
+        if (typeof buildConversationSnapshotForBridge === 'function') {
+          const snapshot = buildConversationSnapshotForBridge(null);
+          if (snapshot && snapshot.stats && typeof snapshot.stats === 'object') {
+            return snapshot.stats;
+          }
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] read snapshot stats for header failed', err);
+        ToolboxShell.appendLog(`[TOOLBOX_TOP_STATUS][SNAPSHOT_STATS_FAILED] error=${errText}`);
+      }
+
+      return null;
+    }
+
     function renderToolboxPageStatusRow() {
       let pageStatusRowEl = document.getElementById('cgpt-toolbox-page-status-row');
 
@@ -18106,28 +18300,39 @@
       }
 
       const pageDisplayId = getBridgePageDisplayIdText();
-      const turnCount = getConversationTurnCount();
-      logConversationTurnCountIfChanged(turnCount, 'renderToolboxPageStatusRow');
+      const stats = getCurrentConversationSnapshotStatsForHeader();
+
+      const messageCount = stats ? Number(stats.total_count || 0) : 0;
+      const roundCount = stats ? Number(stats.round_count || 0) : 0;
+      const domEstimatedRound = stats
+        ? Number(stats.dom_estimated_round_count || 0)
+        : Number(getConversationTurnCount() || 0);
+
+      logConversationTurnCountIfChanged(domEstimatedRound, 'renderToolboxPageStatusRow');
 
       const pageIdText = `页面ID:${pageDisplayId}`;
-      const turnText = `轮次:${turnCount}`;
+      const messageText = `消息:${messageCount}`;
+      const roundText = `问答:${roundCount}`;
+      const estimatedText = `估轮:${domEstimatedRound}`;
 
-      const turnCountNumber = Number(turnCount);
-      const isTurnCountWarning = Number.isFinite(turnCountNumber) && turnCountNumber > 20;
-      const turnBadgeClass = [
+      const domEstimatedNumber = Number(domEstimatedRound);
+      const isDomEstimatedWarning = Number.isFinite(domEstimatedNumber) && domEstimatedNumber > 20;
+      const estimatedBadgeClass = [
         'cgpt-toolbox-top-status-badge',
         'cgpt-toolbox-turn-count-badge',
-        isTurnCountWarning ? 'cgpt-toolbox-turn-count-warning' : '',
+        isDomEstimatedWarning ? 'cgpt-toolbox-turn-count-warning' : '',
       ].filter(Boolean).join(' ');
 
-      const turnTitle = isTurnCountWarning
-        ? `${turnText}，超过20次，仅红色视觉提示，不播放蜂鸣器`
-        : turnText;
+      const estimatedTitle = isDomEstimatedWarning
+        ? `${estimatedText}（页面 DOM 估算轮次，超过20次仅红色提示）`
+        : `${estimatedText}（页面 DOM 估算轮次，不等于同步消息数）`;
 
       pageStatusRowEl.innerHTML = `
         <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
-        <span class="${turnBadgeClass}" title="${escapeHtml(turnTitle)}">${escapeHtml(turnText)}</span>
+        <span class="cgpt-toolbox-top-status-badge" title="${escapeHtml(messageText)}（同步快照总消息数）">${escapeHtml(messageText)}</span>
+        <span class="cgpt-toolbox-top-status-badge" title="${escapeHtml(roundText)}（用户/AI 配对问答轮次）">${escapeHtml(roundText)}</span>
+        <span class="${estimatedBadgeClass}" title="${escapeHtml(estimatedTitle)}">${escapeHtml(estimatedText)}</span>
       `;
       updateChatInputStateBadge();
     }
@@ -18740,6 +18945,116 @@
         text,
         chars: text.length,
       };
+    }
+
+    function normalizeClipboardTextForCompare(text) {
+      return String(text || '')
+        .replace(/\r\n/g, '\n')
+        .trim();
+    }
+
+    function waitClipboardHotkeyDelay(ms) {
+      return new Promise((resolve) => {
+        window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
+      });
+    }
+
+    async function ensureClipboardReadyBeforeSystemHotkey(expectedText, reason = 'copy-hotkey') {
+      const reasonText = String(reason || 'copy-hotkey').trim() || 'copy-hotkey';
+      const expected = String(expectedText || '');
+      const expectedNormalized = normalizeClipboardTextForCompare(expected);
+
+      if (!expectedNormalized) {
+        ToolboxShell.appendLog(`[COPY_ACTION][CLIPBOARD_READY_FAILED] reason=${reasonText} error=empty-expected-text`);
+        return {
+          ok: false,
+          verified: false,
+          reason: 'empty-expected-text',
+        };
+      }
+
+      await waitClipboardHotkeyDelay(220);
+
+      const canReadClipboard = !!(
+        navigator.clipboard
+        && typeof navigator.clipboard.readText === 'function'
+        && (!document.hasFocus || document.hasFocus())
+      );
+
+      if (!canReadClipboard) {
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][CLIPBOARD_READY_SKIP_VERIFY] reason=${reasonText} chars=${expected.length} readText=unavailable`,
+        );
+        return {
+          ok: true,
+          verified: false,
+          reason: 'readText-unavailable',
+        };
+      }
+
+      const deadline = Date.now() + 900;
+      let lastText = '';
+      let lastError = '';
+
+      while (Date.now() < deadline) {
+        try {
+          lastText = String(await navigator.clipboard.readText() || '');
+          if (normalizeClipboardTextForCompare(lastText) === expectedNormalized) {
+            ToolboxShell.appendLog(
+              `[COPY_ACTION][CLIPBOARD_READY_OK] reason=${reasonText} chars=${expected.length} verified=1`,
+            );
+            return {
+              ok: true,
+              verified: true,
+              reason: 'ok',
+            };
+          }
+        } catch (error) {
+          lastError = error && error.message ? error.message : String(error);
+          console.warn('[ChatGPT toolbox] clipboard read before hotkey failed', error);
+          ToolboxShell.appendLog(
+            `[COPY_ACTION][CLIPBOARD_READ_FAILED] reason=${reasonText} error=${lastError}`,
+          );
+          await waitClipboardHotkeyDelay(180);
+          return {
+            ok: true,
+            verified: false,
+            reason: 'readText-failed',
+            error: lastError,
+          };
+        }
+
+        await waitClipboardHotkeyDelay(90);
+      }
+
+      ToolboxShell.appendLog(
+        `[COPY_ACTION][CLIPBOARD_READY_FAILED] reason=${reasonText} error=clipboard-mismatch expectedChars=${expected.length} actualChars=${lastText.length} lastError=${lastError || '-'}`,
+      );
+
+      try {
+        await copyTextToClipboard(expected);
+        await waitClipboardHotkeyDelay(260);
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][CLIPBOARD_RECOPY_OK] reason=${reasonText} chars=${expected.length}`,
+        );
+        return {
+          ok: true,
+          verified: false,
+          reason: 'recopy-ok',
+        };
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] clipboard recopy before hotkey failed', error);
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][CLIPBOARD_RECOPY_FAILED] reason=${reasonText} error=${errText}`,
+        );
+        return {
+          ok: false,
+          verified: false,
+          reason: 'recopy-failed',
+          error: errText,
+        };
+      }
     }
 
     async function sendConfiguredHotkey(reason) {
@@ -19635,9 +19950,53 @@
       return isShortcutEventMatched(event, item);
     }
 
+    async function handleCopyHotkeyOnceTrigger(source = 'button', event = null) {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+      }
+
+      const sourceText = String(source || 'button').trim() || 'button';
+      const actionSource = sourceText === 'delegated-click' ? 'button' : sourceText;
+
+      if (actionSource === 'shortcut') {
+        ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][shortcut-trigger]');
+      } else {
+        ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][click] source=button');
+      }
+
+      try {
+        return await runCopyAndHotkeyAction(actionSource);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        const failTag = actionSource === 'shortcut'
+          ? '[COPY_HOTKEY_ONCE][SHORTCUT_FAILED]'
+          : '[COPY_HOTKEY_ONCE][CLICK_FAILED]';
+
+        console.error(failTag, {
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        ToolboxShell.appendLog(`${failTag} ${errText}`);
+        setStatus(`复制+快捷键失败：${errText}`, 'error');
+
+        return {
+          ok: false,
+          reason: 'exception',
+          detail: errText,
+          copied: false,
+          hotkeySent: false,
+        };
+      }
+    }
+
     function bindCopyAndHotkeyShortcut() {
       if (window.__xzCopyAndHotkeyShortcutBound) {
-        console.log('[TOOLBOX][COPY_HOTKEY][SHORTCUT_ALREADY_BOUND]');
+        ToolboxShell.appendLog('[SHORTCUT][bind-skip] copyAndHotkeyOnce=already-bound');
         return;
       }
 
@@ -19660,32 +20019,16 @@
             return;
           }
 
-          if (shouldSkipGlobalShortcutForToolboxTarget(event.target)) {
-            return;
-          }
-
           event.preventDefault();
           event.stopPropagation();
 
-          const item = getCopyAndHotkeyShortcutConfig();
-
-          console.log('[TOOLBOX][COPY_HOTKEY][SHORTCUT_TRIGGER]', {
-            shortcut: item.label || '-',
-          });
-
-          runCopyAction('copy-and-hotkey', { source: 'shortcut' }).catch((error) => {
-            console.error('[TOOLBOX][COPY_HOTKEY][SHORTCUT_FAILED]', {
-              error_type: error && error.name,
-              error: error && error.message,
-              stack: error && error.stack,
-            });
-          });
+          void handleCopyHotkeyOnceTrigger('shortcut', event);
         },
         true,
       );
 
       const item = getCopyAndHotkeyShortcutConfig();
-
+      ToolboxShell.appendLog('[SHORTCUT][bind] copyAndHotkeyOnce=configurable');
       console.log('[TOOLBOX][COPY_HOTKEY][SHORTCUT_BOUND]', {
         shortcut: item.label || '-',
       });
@@ -19693,6 +20036,8 @@
 
     async function runCopyAndHotkeyAction(source = 'button', options = {}) {
       const sourceText = String(source || '');
+      ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][start] source=${sourceText || '-'}`);
+      setStatus('正在执行复制+快捷键...', 'running');
       console.log('[TOOLBOX][COPY_HOTKEY][START]', { source: sourceText });
       const flowOptions = options && typeof options === 'object' ? options : {};
       const shouldStop = typeof flowOptions.shouldStop === 'function'
@@ -19751,7 +20096,6 @@
         }
 
         setStatus('正在等待回答完成，然后复制并发送快捷键', 'running');
-        ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][start] source=${sourceText || '-'}`);
 
         const waitResult = await waitAssistantStableForCopyContinue(source, { shouldStop });
 
@@ -19826,6 +20170,29 @@
         ToolboxShell.appendLog(
           `[COPY_HOTKEY_ONCE][copied] chars=${copyResult.chars || 0}`,
         );
+
+        if (btn) {
+          btn.textContent = '确认剪贴板...';
+        }
+
+        const clipboardReady = await ensureClipboardReadyBeforeSystemHotkey(
+          copyResult.text || waitResult.text,
+          'copy-and-hotkey',
+        );
+
+        if (!clipboardReady || clipboardReady.ok !== true) {
+          const failReason = clipboardReady && clipboardReady.reason ? clipboardReady.reason : 'clipboard-not-ready';
+          const errText = clipboardReady && clipboardReady.error ? clipboardReady.error : failReason;
+          ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][failed] reason=${failReason} detail=${errText}`);
+          setStatus(`复制+快捷键失败：剪贴板未就绪：${errText}`, 'error');
+          return {
+            ok: false,
+            reason: failReason,
+            detail: errText,
+            copied: false,
+            hotkeySent: false,
+          };
+        }
 
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyOnce');
@@ -20116,6 +20483,37 @@
         ToolboxShell.appendLog(
           `[COPY_HOTKEY_CONTINUE][copied] chars=${copyResult.chars || 0}`,
         );
+
+        if (btn && !isLoopMode) {
+          btn.textContent = '确认剪贴板...';
+        }
+
+        const clipboardReady = await ensureClipboardReadyBeforeSystemHotkey(
+          copyResult.text || waitResult.text,
+          'copy-hotkey-continue',
+        );
+
+        if (!clipboardReady || clipboardReady.ok !== true) {
+          const failReason = clipboardReady && clipboardReady.reason ? clipboardReady.reason : 'clipboard-not-ready';
+          const errText = clipboardReady && clipboardReady.error ? clipboardReady.error : failReason;
+          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=${failReason} detail=${errText}`);
+          if (!isLoopMode) {
+            setStatus(`复制+快捷键+继续失败：剪贴板未就绪：${errText}`, 'error');
+          }
+          return {
+            ok: false,
+            assistantDoneSignal: false,
+            reason: failReason,
+            detail: errText,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: false,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey,
+          };
+        }
+
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyContinue');
         }
@@ -22892,14 +23290,11 @@
       const uiRunning = isUploadRunActuallyActive();
       const activeFiles = getActiveGroupFiles();
 
-      if (state.uploadSending) {
-        setUploadButtonSending();
-        changedButtons += 1;
-      } else if (setButtonStateIfChanged(currentStartBtn, {
-        text: uiRunning ? '发送中...' : '开始上传',
+      if (setButtonStateIfChanged(currentStartBtn, {
+        text: uiRunning ? '上传中...' : '开始上传',
         title: uiRunning
-          ? '正在发送中，再点击一次取消本次发送'
-          : '开始上传并发送',
+          ? '正在上传中，再点击一次取消'
+          : '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
         disabled: uiRunning ? false : activeFiles.length <= 0,
         removeClasses: ['primary', 'danger'],
         addClasses: uiRunning ? ['danger'] : ['success'],
@@ -22911,9 +23306,11 @@
       if (startSendBtn) {
         const waitingSend = isWaitingSendActive();
         const waitingReply = !!state.waitingReply;
-        let sendTitle = '';
+        let sendTitle = '发送当前输入框中的文字和附件';
 
-        if (waitingReply) {
+        if (waitingReply && state.pendingSendAfterReply) {
+          sendTitle = '助手正在回复或发送按钮未就绪，脚本会持续检测，页面一可发送就自动点击发送；再次点击可取消';
+        } else if (waitingReply) {
           sendTitle = '再次点击可取消等待回复';
         } else if (waitingSend) {
           sendTitle = '正在持续寻找发送按钮，直到发送成功；再次点击可取消';
@@ -22947,7 +23344,9 @@
           && !waitingReply;
 
         let sendText = '发送信息';
-        if (waitingReply) {
+        if (waitingReply && state.pendingSendAfterReply) {
+          sendText = '等待可发...';
+        } else if (waitingReply) {
           sendText = '等待回复...';
         } else if (waitingSend) {
           sendText = '发送中...';
@@ -23394,11 +23793,11 @@
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] logUploadSendUiState capability failed', err);
-        ToolboxShell.appendLog(`[UPLOAD_SEND_UI][STATE][capability-error] error=${errText}`);
+        ToolboxShell.appendLog(`[SEND_UI][STATE][capability-error] error=${errText}`);
       }
 
       ToolboxShell.appendLog(
-        `[UPLOAD_SEND_UI][STATE] action=${String(action || '-')} reason=${String(reason || '-')} runId=${runId == null ? '-' : runId} autoSendRunId=${state.autoSendRunId || '-'} waitingSend=${state.waitingSend ? '1' : '0'} autoSendWaiting=${state.autoSendWaiting ? '1' : '0'} waitingReply=${state.waitingReply ? '1' : '0'} shortcutRunning=${uploadSendShortcutRunning ? '1' : '0'} isResponding=${cap.isResponding ? '1' : '0'} canSendNow=${cap.canSendNow ? '1' : '0'} responseState=${cap.response_state || '-'} attachmentCount=${Number(cap.attachmentCount || 0)}`
+        `[SEND_UI][STATE] action=${String(action || '-')} reason=${String(reason || '-')} runId=${runId == null ? '-' : runId} autoSendRunId=${state.autoSendRunId || '-'} waitingSend=${state.waitingSend ? '1' : '0'} autoSendWaiting=${state.autoSendWaiting ? '1' : '0'} waitingReply=${state.waitingReply ? '1' : '0'} shortcutRunning=${uploadSendShortcutRunning ? '1' : '0'} isResponding=${cap.isResponding ? '1' : '0'} canSendNow=${cap.canSendNow ? '1' : '0'} responseState=${cap.response_state || '-'} attachmentCount=${Number(cap.attachmentCount || 0)}`
       );
     }
 
@@ -23475,7 +23874,7 @@
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] resetUploadSendUiState abort failed', err);
           ToolboxShell.appendLog(
-            `[UPLOAD_SEND_UI][abort-error] reason=${String(reason || '-')} error=${errText}`,
+            `[SEND_UI][abort-error] reason=${String(reason || '-')} error=${errText}`,
           );
         }
         state.waitingSendAbortController = null;
@@ -23493,15 +23892,21 @@
 
       stopWaitingReplyCheck();
       waitingReplyIdleStreak = 0;
+      state.replyWaitSawBusy = false;
+      state.replyWaitAssistantCountBefore = 0;
 
       state.waitingSend = false;
       state.autoSendWaiting = false;
       state.cancelWaitingSend = false;
+      state.uploadCancelRequested = false;
       uploadSendShortcutRunning = false;
       uploadSendTaskStartedAt = 0;
       state.waitingReply = false;
       state.waitingReplyRunId = null;
       state.waitingReplyTimer = null;
+      state.pendingSendAfterReply = false;
+      state.pendingSendAfterReplySource = '';
+      state.pendingSendRetrying = false;
 
       if (!String(reason || '').startsWith('send-message-not-sent:')) {
         state.uploadSendFailureHint = '';
@@ -23518,7 +23923,7 @@
 
     function resetUploadSendButtonState(reason = 'send_failed_or_timeout', runId) {
       ToolboxShell.appendLog(
-        `[UPLOAD_SEND_UI][RESET] reason=${String(reason || 'send_failed_or_timeout')} runId=${runId == null ? '-' : runId}`,
+        `[SEND_UI][RESET] reason=${String(reason || 'send_failed_or_timeout')} runId=${runId == null ? '-' : runId}`,
       );
       resetUploadSendUiState(reason, runId);
     }
@@ -23548,7 +23953,7 @@
 
         if (hasPendingComposerPayload) {
           ToolboxShell.appendLog(
-            `[UPLOAD_SEND_UI][HEAL_STALE_SKIP] reason=${String(context || '-scheduled')} runningMs=${elapsed} cause=pending_composer_payload`,
+            `[SEND_UI][HEAL_STALE_SKIP] reason=${String(context || '-scheduled')} runningMs=${elapsed} cause=pending_composer_payload`,
           );
           return false;
         }
@@ -23559,7 +23964,7 @@
 
         if (pageIdle && noStopButton) {
           ToolboxShell.appendLog(
-            `[UPLOAD_SEND_UI][HEAL_STALE] reason=${String(context || '-scheduled')} runningMs=${elapsed} isResponding=${cap.isResponding ? '1' : '0'} responseState=${cap.response_state || '-'} stopButton=${noStopButton ? '0' : '1'}`
+            `[SEND_UI][HEAL_STALE] reason=${String(context || '-scheduled')} runningMs=${elapsed} isResponding=${cap.isResponding ? '1' : '0'} responseState=${cap.response_state || '-'} stopButton=${noStopButton ? '0' : '1'}`
           );
           resetUploadSendUiState('stale-send-ui:' + (context || '-scheduled'), state.autoSendRunId);
           scheduleRenderUpload('heal-stale-send-ui');
@@ -23568,7 +23973,7 @@
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] healStaleSendUiStateIfNeeded error', err);
-        ToolboxShell.appendLog(`[UPLOAD_SEND_UI][HEAL_STALE_ERROR] error=${errText}`);
+        ToolboxShell.appendLog(`[SEND_UI][HEAL_STALE_ERROR] error=${errText}`);
       }
       return false;
     }
@@ -23698,86 +24103,61 @@
       return !!(state.waitingSend || state.autoSendWaiting || uploadSendShortcutRunning);
     }
 
-    function getUploadStartButton() {
-      return rootElRef
-        ? qs(UploadSelectors.startBtn, rootElRef)
-        : startBtn;
-    }
-
-    function setUploadButtonSending() {
-      const button = getUploadStartButton();
-      if (!(button instanceof HTMLElement)) {
-        ToolboxShell.appendLog('[UPLOAD][BUTTON_STATE] sending button-missing');
-        return;
+    function clearStaleBusySendStateOnHomeReady(reason) {
+      if (typeof isHomeNewChatReadyToSendNow !== 'function' || !isHomeNewChatReadyToSendNow()) {
+        return false;
       }
 
-      button.textContent = '发送中...';
-      button.disabled = false;
-      button.removeAttribute('disabled');
-      button.setAttribute('aria-disabled', 'false');
-      button.classList.add('danger');
-      button.classList.remove('success');
-      button.title = '正在发送中，再点击一次取消本次发送';
-      delete button.dataset.lastStateSig;
-      ToolboxShell.appendLog('[UPLOAD][BUTTON_STATE] sending');
-    }
+      state.waitingSend = false;
+      state.autoSendWaiting = false;
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      uploadSendShortcutRunning = false;
+      uploadSendTaskStartedAt = 0;
+      state.pendingSendAfterReply = false;
+      state.pendingSendAfterReplySource = '';
+      state.pendingSendRetrying = false;
 
-    function setUploadButtonIdle() {
-      const button = getUploadStartButton();
-      if (!(button instanceof HTMLElement)) {
-        ToolboxShell.appendLog('[UPLOAD][BUTTON_STATE] idle button-missing');
-        return;
-      }
-
-      button.textContent = '开始上传';
-      button.disabled = false;
-      button.removeAttribute('disabled');
-      button.setAttribute('aria-disabled', 'false');
-      button.classList.remove('danger');
-      button.classList.add('success');
-      button.title = '开始上传并发送';
-      delete button.dataset.lastStateSig;
-      ToolboxShell.appendLog('[UPLOAD][BUTTON_STATE] idle');
+      ToolboxShell.appendLog(`[SEND][CLEAR_STALE_BUSY_STATE] reason=${reason || 'home-ready'}`);
+      return true;
     }
 
     async function stopChatGPTGeneratingIfPossible() {
       const selectors = [
-        '[data-testid="stop-button"]',
-        'button[aria-label*="停止"]',
-        'button[aria-label*="Stop"]',
-        'button[data-testid*="stop"]',
+        'button[data-testid="stop-button"]',
+        'button[data-testid="composer-stop-button"]',
+        'button[aria-label="停止生成"]',
+        'button[aria-label="Stop generating"]',
+        'button[aria-label*="Stop generating"]',
       ];
 
       for (const selector of selectors) {
-        const btn = document.querySelector(selector);
-        if (btn && !btn.disabled) {
-          btn.click();
-          ToolboxShell.appendLog(`[UPLOAD][STOP_GENERATING_CLICKED] selector=${selector}`);
-          return true;
+        const buttons = Array.from(document.querySelectorAll(selector));
+
+        for (const btn of buttons) {
+          if (!btn || (typeof isInsideToolbox === 'function' && isInsideToolbox(btn))) {
+            continue;
+          }
+
+          const rect = btn.getBoundingClientRect();
+          const style = window.getComputedStyle(btn);
+
+          if (
+            rect.width > 0
+            && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && !btn.disabled
+          ) {
+            btn.click();
+            ToolboxShell.appendLog(`[UPLOAD][STOP_GENERATING_CLICKED] selector=${selector}`);
+            return true;
+          }
         }
       }
 
       ToolboxShell.appendLog('[UPLOAD][STOP_GENERATING_NOT_FOUND]');
       return false;
-    }
-
-    function finishUploadSendFlow(reason) {
-      state.uploadSending = false;
-      state.uploadCancelRequested = false;
-      state.uploadAbortController = null;
-      setUploadButtonIdle();
-      scheduleRenderUpload(`upload-send-flow:finish:${reason || '-'}`);
-      ToolboxShell.appendLog(`[UPLOAD][FINISH] reason=${reason || '-'}`);
-    }
-
-    function uploadSendFlowCancelCheck(stage) {
-      if (!state.uploadCancelRequested) {
-        return false;
-      }
-
-      ToolboxShell.appendLog(`[UPLOAD][CANCELLED] stage=${String(stage || '-')}`);
-      finishUploadSendFlow('cancelled');
-      return true;
     }
 
     function cancelCurrentUploadSend(reason) {
@@ -23810,102 +24190,103 @@
       ToolboxShell.appendLog(`[UPLOAD][CANCEL_REQUEST] reason=${reason || 'manual'}`);
       void stopChatGPTGeneratingIfPossible();
       setStatus('已取消发送', 'warning');
-      finishUploadSendFlow('cancelled');
+      scheduleRenderUpload('send-cancel');
+
       return true;
     }
 
-    async function startUploadSendFlow(options = {}) {
+    function countVisibleAssistantMessagesForReplyWait() {
+      try {
+        if (typeof getValidAssistantTextsFromDom === 'function') {
+          return getValidAssistantTextsFromDom().length;
+        }
+      } catch (err) {
+        console.error('[ChatGPT toolbox] countVisibleAssistantMessagesForReplyWait failed', err);
+      }
+
+      return 0;
+    }
+
+    function isReplyGeneratingState(responseState) {
+      const normalized = String(responseState || '').toLowerCase();
+      return normalized === 'generating'
+        || normalized === 'streaming'
+        || normalized === 'responding'
+        || normalized === 'submitted';
+    }
+
+    async function startUploadOnlyFlow(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const source = String(opts.source || 'button').trim() || 'button';
-      const sendOnly = opts.sendOnly === true;
 
-      if (state.uploadSending) {
-        ToolboxShell.appendLog('[UPLOAD][START][SKIP] reason=already-upload-sending');
+      if (state.running) {
+        ToolboxShell.appendLog('[UPLOAD_ONLY][START][SKIP] reason=already-running');
         return false;
       }
 
-      state.uploadSending = true;
-      state.uploadCancelRequested = false;
-      state.uploadAbortController = new AbortController();
-
-      ToolboxShell.appendLog('[UPLOAD][START]');
-      setUploadButtonSending();
+      ToolboxShell.appendLog('[UPLOAD_ONLY][START]');
+      setStatus('正在上传文件...', 'running');
+      scheduleRenderUpload('upload-only:start');
 
       try {
-        if (!sendOnly) {
-          if (uploadSendFlowCancelCheck('before-queue-read')) {
-            return false;
-          }
+        const uploadResult = await startUploadFromCurrentQueue({
+          source: `upload-only:${source}`,
+        });
 
-          const uploadResult = await startUploadFromCurrentQueue({
-            source: `upload-send-flow:${source}`,
-            shouldStop: () => state.uploadCancelRequested,
-          });
-
-          if (uploadSendFlowCancelCheck('after-upload-before-send-text')) {
-            return false;
-          }
-
-          if (uploadResult && uploadResult.cancelled) {
-            finishUploadSendFlow('cancelled');
-            return false;
-          }
-
-          if (uploadResult && !uploadResult.ok && uploadResult.reason !== 'no-files') {
-            finishUploadSendFlow(`upload-failed:${uploadResult.reason || 'unknown'}`);
-            return false;
-          }
-        } else if (uploadSendFlowCancelCheck('before-send-text')) {
+        if (uploadResult && uploadResult.cancelled) {
+          setStatus('上传已取消', 'warning');
+          ToolboxShell.appendLog('[UPLOAD_ONLY][DONE] reason=cancelled');
           return false;
         }
 
-        if (uploadSendFlowCancelCheck('before-find-send-button')) {
+        if (uploadResult && !uploadResult.ok && uploadResult.reason !== 'no-files') {
+          setStatus(`上传失败：${uploadResult.reason || 'unknown'}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_ONLY][DONE] reason=${uploadResult.reason || 'failed'}`);
           return false;
         }
 
-        const runId = claimWaitingSendRun(source, Date.now());
-
-        if (uploadSendFlowCancelCheck('before-click-send-button')) {
-          return false;
-        }
-
-        const sent = await sendCurrentMessageFromUploadPanel(source, runId);
-
-        if (uploadSendFlowCancelCheck('before-wait-reply')) {
-          return false;
-        }
-
-        if (!sent) {
-          if (!state.uploadCancelRequested) {
-            finishUploadSendFlow('send-not-completed');
-          }
-          return false;
-        }
-
-        if (state.uploadCancelRequested) {
-          finishUploadSendFlow('cancelled');
-          return false;
-        }
-
-        finishUploadSendFlow(state.waitingReply ? 'waiting-reply' : 'success');
+        setStatus('文件已上传到输入框', 'success');
+        ToolboxShell.appendLog('[UPLOAD_ONLY][DONE]');
+        scheduleRenderUpload('upload-only:done');
         return true;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] startUploadSendFlow failed', err);
-        ToolboxShell.appendLog(`[UPLOAD][FAILED] source=${source} error=${errText}`);
-        setStatus(`上传/发送失败：${errText}`, 'error');
-        finishUploadSendFlow('error');
+        console.error('[ChatGPT toolbox] startUploadOnlyFlow failed', err);
+        ToolboxShell.appendLog(`[UPLOAD_ONLY][FAILED] error=${errText}`);
+        setStatus(`上传失败：${errText}`, 'error');
+        return false;
+      }
+    }
+
+    async function startSendMessageFlow(options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const source = String(opts.source || 'button').trim() || 'button';
+
+      clearStaleBusySendStateOnHomeReady('send-start');
+
+      if (isWaitingSendActive() || state.waitingReply) {
+        ToolboxShell.appendLog('[SEND][START][SKIP] reason=already-waiting-send-or-reply');
+        return false;
+      }
+
+      ToolboxShell.appendLog('[SEND][START]');
+      const runId = claimWaitingSendRun(source, Date.now());
+
+      try {
+        return await sendCurrentMessageFromUploadPanel(source, runId);
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] startSendMessageFlow failed', err);
+        ToolboxShell.appendLog(`[SEND][FAILED] source=${source} error=${errText}`);
+        setStatus(`发送信息失败：${errText}`, 'error');
+        resetUploadSendUiState('send-flow-error', runId);
         return false;
       }
     }
 
     function cancelWaitingSend(reason = 'user-click') {
-      if (!isWaitingSendActive() && !state.waitingReply && !state.uploadSending) {
+      if (!isWaitingSendActive() && !state.waitingReply) {
         return false;
-      }
-
-      if (state.uploadSending) {
-        return cancelCurrentUploadSend(reason);
       }
 
       const cancelRunId = state.autoSendRunId;
@@ -23922,6 +24303,7 @@
       const id = Number(runId) || Date.now();
 
       state.cancelWaitingSend = false;
+      state.uploadCancelRequested = false;
       state.autoSendRunId = id;
       setWaitingSendActive(true);
       uploadSendShortcutRunning = true;
@@ -23975,6 +24357,9 @@
       uploadSendShortcutRunning = false;
       uploadSendTaskStartedAt = 0;
       state.cancelWaitingSend = false;
+      state.pendingSendAfterReply = false;
+      state.pendingSendAfterReplySource = '';
+      state.pendingSendRetrying = false;
       state.uploadSendFailureHint = '';
       state.uploadSendFailureHintAt = 0;
       state.waitingReply = true;
@@ -23989,19 +24374,32 @@
     }
 
     function enterUploadWaitingReplyBlocked(runId, source) {
-      state.waitingSend = false;
-      state.autoSendWaiting = false;
-      uploadSendShortcutRunning = false;
-      uploadSendTaskStartedAt = 0;
+      clearStaleBusySendStateOnHomeReady('wait-reply-blocked');
+      if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+        ToolboxShell.appendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_skip_wait_reply_blocked');
+        return;
+      }
+
+      state.waitingSend = true;
+      state.autoSendWaiting = true;
+      uploadSendShortcutRunning = true;
+      uploadSendTaskStartedAt = Date.now();
+
       state.waitingReply = true;
-      setStatus('助手正在回复，等待回复完成...', 'running');
+      state.pendingSendAfterReply = true;
+      state.pendingSendAfterReplySource = String(source || 'button');
+      state.pendingSendRetrying = false;
+
+      setStatus('助手正在回复，持续等待可发送机会...', 'running');
+
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][send-message-button:wait-reply] source=${source || '-'} reason=assistant_busy runId=${runId}`,
+        `[UPLOAD_DIAG][send-message-button:wait-reply] source=${source || '-'} reason=assistant_busy action=retry_after_reply runId=${runId}`,
       );
-      logUploadSendUiState('waiting-reply', 'assistant-busy', runId);
+
+      logUploadSendUiState('waiting-reply', 'assistant-busy-retry-after-reply', runId);
       updateChatInputStateBadge();
       startWaitingReplyCheck(runId, Date.now());
-      scheduleRenderUpload('send-message:blocked-waiting-reply');
+      scheduleRenderUpload('send-message:blocked-waiting-reply-retry');
     }
 
     function shouldStopForeverSend(runId) {
@@ -24043,6 +24441,37 @@
           && ComposerApi.isAttachmentStillUploading()
         )
       );
+    }
+
+    function isForeverRetryableSendReason(reason) {
+      const normalized = String(reason || '').trim();
+
+      if (!normalized) {
+        return false;
+      }
+
+      if (normalized === 'cancelled' || normalized === 'page_navigating') {
+        return false;
+      }
+
+      if (normalized === 'assistant_busy') {
+        return true;
+      }
+
+      if (normalized === 'send_not_confirmed' || normalized.startsWith('send_not_confirmed:')) {
+        return true;
+      }
+
+      return [
+        'composer_empty',
+        'send_button_not_found',
+        'send_button_disabled',
+        'attachment_not_ready',
+        'send_button_wait_timeout',
+        'send_button_unavailable',
+        'click_send_failed',
+        'no_send_progress_after_actions',
+      ].includes(normalized);
     }
 
     function stopUploadSendTask(source) {
@@ -24116,8 +24545,51 @@
       );
 
       logUploadSendUiState('click', 'send-message-start', runId);
+      clearStaleBusySendStateOnHomeReady('send-panel-click');
 
       let sendFailureHandled = false;
+
+      function uploadSendFlowCancelCheck(stage) {
+        const stageText = String(stage || '-');
+
+        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:cancel-check] stage=${stageText} reason=page_navigating runId=${runId}`,
+          );
+          logUploadSendUiState('send-aborted', `page-navigating:${stageText}`, runId);
+          resetUploadSendUiState(`send-message:page-navigating:${stageText}`, runId);
+          return true;
+        }
+
+        if (state.autoSendRunId !== runId) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:cancel-check] stage=${stageText} reason=runId_changed runId=${runId} current=${state.autoSendRunId}`,
+          );
+          logUploadSendUiState('send-aborted', `runId-changed:${stageText}`, runId);
+          return true;
+        }
+
+        if (state.uploadCancelRequested || state.cancelWaitingSend) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:cancel-check] stage=${stageText} reason=user_cancel runId=${runId} uploadCancelRequested=${state.uploadCancelRequested ? 1 : 0} cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0}`,
+          );
+          logUploadSendUiState('send-aborted', `user-cancel:${stageText}`, runId);
+          resetUploadSendUiState(`send-message:cancelled:${stageText}`, runId);
+          return true;
+        }
+
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:cancel-check] stage=${stageText} reason=offline runId=${runId}`,
+          );
+          setStatus('网络离线，已暂停发送', 'warn');
+          logUploadSendUiState('send-aborted', `offline:${stageText}`, runId);
+          resetUploadSendUiState(`send-message:offline:${stageText}`, runId);
+          return true;
+        }
+
+        return false;
+      }
 
       try {
         if (uploadSendFlowCancelCheck('enter-send-panel')) {
@@ -24130,7 +24602,10 @@
           return false;
         }
 
+        clearStaleBusySendStateOnHomeReady('send-panel-before-capability');
         const capability = getUploadPageCapability({ heavy: true });
+        const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
+          && isHomeNewChatReadyToSendNow();
 
         const hasPendingComposerPayload = !!(
           capability.hasComposerPayload
@@ -24146,10 +24621,14 @@
           )
         );
 
-        if (capability.isResponding) {
+        if (capability.isResponding && !homeReadyToSend) {
           enterUploadWaitingReplyBlocked(runId, source);
           sendFailureHandled = true;
           return false;
+        }
+
+        if (capability.isResponding && homeReadyToSend) {
+          ToolboxShell.appendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_ready_to_send');
         }
 
         const composerTextNow = typeof ComposerApi.getComposerText === 'function'
@@ -24222,25 +24701,11 @@
           return false;
         }
 
-        const transientSendReasons = new Set([
-          'composer_empty',
-          'send_button_not_found',
-          'send_button_disabled',
-          'send_not_confirmed',
-          'attachment_not_ready',
-          'send_button_wait_timeout',
-          'send_button_unavailable',
-          'send_not_confirmed:attachment_not_ready',
-          'send_not_confirmed:button_disabled',
-          'send_not_confirmed:no_user_bubble_after_click',
-          'page_navigating',
-        ]);
-
         let sendResult = null;
         let outerAttempt = 0;
         let hasPendingComposerPayloadAfterFail = detectPendingComposerPayloadForSend();
 
-        while (state.autoSendRunId === runId && outerAttempt < SEND_STABLE_OUTER_RETRY_MAX) {
+        while (state.autoSendRunId === runId) {
           outerAttempt += 1;
 
           if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
@@ -24250,10 +24715,15 @@
           }
 
           const capabilityNow = getUploadPageCapability({ heavy: true });
-          if (capabilityNow.isResponding) {
+          const homeReadyNow = typeof isHomeNewChatReadyToSendNow === 'function'
+            && isHomeNewChatReadyToSendNow();
+          if (capabilityNow.isResponding && !homeReadyNow) {
             enterUploadWaitingReplyBlocked(runId, source);
             sendFailureHandled = true;
             return false;
+          }
+          if (capabilityNow.isResponding && homeReadyNow) {
+            ToolboxShell.appendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_ready_to_send');
           }
 
           if (uploadSendFlowCancelCheck('before-stable-send-attempt')) {
@@ -24293,13 +24763,15 @@
 
           const hasPendingComposerPayloadAfterFail = detectPendingComposerPayloadForSend();
 
-          if (!transientSendReasons.has(failReason) || !hasPendingComposerPayloadAfterFail) {
+          if (!isForeverRetryableSendReason(failReason) || !hasPendingComposerPayloadAfterFail) {
             break;
           }
 
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][send-message-button:retry-transient] reason=${failReason} runId=${runId} outerAttempt=${outerAttempt}`,
-          );
+          if (outerAttempt === 1 || outerAttempt % 10 === 0) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_DIAG][send-message-button:retry-forever] reason=${failReason} runId=${runId} outerAttempt=${outerAttempt}`,
+            );
+          }
           setStatus('附件已存在，继续等待发送按钮...', 'running');
           state.waitingSend = true;
           state.autoSendWaiting = true;
@@ -24416,6 +24888,22 @@
       ].join(','));
     }
 
+    function isChatGPTComposerEditableTarget(target) {
+      const el = target instanceof Element ? target : null;
+      if (!el) {
+        return false;
+      }
+
+      return !!el.closest([
+        '#prompt-textarea',
+        '[data-testid="prompt-textarea"]',
+        '[data-testid="composer-root"]',
+        'main form [contenteditable="true"]',
+        'main form textarea',
+        'main [role="textbox"]',
+      ].join(','));
+    }
+
     function shouldIgnoreSendShortcutTarget(target) {
       const el = target instanceof Element ? target : null;
       if (!el) return false;
@@ -24423,7 +24911,7 @@
       const inToolbox = !!el.closest(`#${APP.rootId}, #${APP.panelId}`);
 
       if (!inToolbox) {
-        return false;
+        return isChatGPTComposerEditableTarget(el);
       }
 
       const editable = el.closest([
@@ -24534,6 +25022,11 @@
       e.preventDefault();
       e.stopPropagation();
       if (isWaitingSendActive()) {
+        if (isChatGPTComposerEditableTarget(e.target)) {
+          logUploadShortcutDebug(e, 'send-ignore', 'chatgpt-composer-waiting-send');
+          return false;
+        }
+
         const runningMs = uploadSendTaskStartedAt ? Date.now() - uploadSendTaskStartedAt : 0;
         if (runningMs > 30000 && !ComposerApi.isAssistantLikelyBusy()) {
           ToolboxShell.appendLog(
@@ -25473,34 +25966,44 @@
     }
 
     function hasRealStopButtonForCopy() {
+      if (typeof hasRealChatGPTStopGeneratingButton === 'function') {
+        return hasRealChatGPTStopGeneratingButton();
+      }
+
       const selectors = [
         'button[data-testid="stop-button"]',
-        'button[aria-label*="Stop"]',
-        'button[aria-label*="停止"]',
-        '.result-streaming',
-        '[data-testid="stop-button"]',
+        'button[data-testid="composer-stop-button"]',
+        'button[aria-label="停止生成"]',
+        'button[aria-label="Stop generating"]',
+        'button[aria-label*="Stop generating"]',
       ];
 
       for (const selector of selectors) {
-        const btn = qs(selector);
+        const buttons = Array.from(document.querySelectorAll(selector));
 
-        if (!btn) {
-          continue;
+        for (const btn of buttons) {
+          if (!btn) {
+            continue;
+          }
+
+          if (typeof isInsideToolbox === 'function' && isInsideToolbox(btn)) {
+            continue;
+          }
+
+          if (isInToolbox(btn)) {
+            continue;
+          }
+
+          if (!isElementVisible(btn)) {
+            continue;
+          }
+
+          if (btn.disabled) {
+            continue;
+          }
+
+          return true;
         }
-
-        if (isInToolbox(btn)) {
-          continue;
-        }
-
-        if (!isElementVisible(btn)) {
-          continue;
-        }
-
-        if (btn.disabled) {
-          continue;
-        }
-
-        return true;
       }
 
       return false;
@@ -25721,7 +26224,7 @@
 
       if (
         action === 'send-message'
-        && (state.uploadSending || isWaitingSendActive() || state.waitingReply)
+        && (isWaitingSendActive() || state.waitingReply)
       ) {
         cancelCurrentUploadSend(
           src === 'delegated-click' ? 'manual-click-upload-button' : src,
@@ -25731,7 +26234,7 @@
 
       if (
         action === 'start-upload'
-        && (state.uploadSending || state.running || isWaitingSendActive() || state.waitingReply)
+        && (state.running || isWaitingSendActive() || state.waitingReply)
       ) {
         cancelCurrentUploadSend('manual-click-upload-button');
         return true;
@@ -25770,7 +26273,7 @@
       }
 
       if (action === 'send-message') {
-        void startUploadSendFlow({ source: src, sendOnly: true }).catch((err) => {
+        void startSendMessageFlow({ source: src }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] send message UI action failed', err);
           setStatus(`发送信息失败：${errText}`, 'error');
@@ -25791,11 +26294,19 @@
         return true;
       }
 
+      if (action === 'copy-hotkey-once') {
+        runUploadActionPromise(
+          handleCopyHotkeyOnceTrigger('button', event),
+          '复制+快捷键',
+        );
+        return true;
+      }
+
       if (action === 'start-upload') {
-        void startUploadSendFlow({ source: src || 'button' }).catch((err) => {
+        void startUploadOnlyFlow({ source: src || 'button' }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] start upload UI action failed', err);
-          setStatus(`上传/发送失败：${errText}`, 'error');
+          setStatus(`上传失败：${errText}`, 'error');
           ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][start-upload:failed] error=${errText}`);
         });
 
@@ -26081,19 +26592,15 @@
           return;
         }
 
-        const copyHotkeyOnceBtn = target.closest('#cgpt-copy-hotkey-once');
+        const copyHotkeyOnceBtn = target.closest('#cgpt-copy-hotkey-once, [data-action="copy-hotkey-once"]');
         if (copyHotkeyOnceBtn) {
-          e.preventDefault();
-          e.stopPropagation();
-
           if (typeof copyHotkeyOnceBtn.blur === 'function') {
             copyHotkeyOnceBtn.blur();
           }
 
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-hotkey-once');
-
           runUploadActionPromise(
-            runCopyAction('copy-and-hotkey', { source: 'delegated-click' }),
+            handleCopyHotkeyOnceTrigger('delegated-click', e),
             '复制+快捷键',
           );
 
@@ -26195,6 +26702,7 @@
       }
 
       if (rootEl.dataset.uploadEventsBound === '1') {
+        ensureUploadActionButtons(rootEl);
         bindUploadDropTargets(rootEl);
         bindUploadSendShortcut();
         bindCopyLastMessageShortcut();
@@ -26521,14 +27029,20 @@
     function buildUploadActionRowHtml() {
       return `
           <div class="cgpt-row cgpt-upload-action-row">
-            <button type="button" class="cgpt-btn success" id="cgpt-upload-start">开始上传</button>
-            <button type="button" class="cgpt-btn primary" id="cgpt-upload-start-send">发送信息</button>
+            <button type="button" class="cgpt-btn success" id="cgpt-upload-start" title="只上传/绑定文件到 ChatGPT 输入框，不自动发送">开始上传</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-upload-start-send" title="发送当前输入框中的文字和附件">发送信息</button>
             <button type="button" class="cgpt-btn cgpt-btn-copy-continue" id="cgpt-upload-continue-once" title="先复制最后回复，再发送“继续”">复制并继续</button>
             <button type="button" class="cgpt-btn warning" id="cgpt-send-hotkey-once">发送 Ctrl+Alt+I</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-open-chatgpt-home" title="点击左侧新聊天">回到首页</button>
             <button type="button" class="cgpt-btn teal" id="cgpt-auto-continue-once">自动继续</button>
             <button type="button" class="cgpt-btn" id="cgpt-copy-last-message-scroll-bottom">复制最后回复</button>
-            <button type="button" class="cgpt-btn purple" id="cgpt-copy-hotkey-once" title="复制+快捷键">复制+快捷键</button>
+            <button
+              type="button"
+              class="cgpt-btn purple"
+              id="cgpt-copy-hotkey-once"
+              data-action="copy-hotkey-once"
+              title="复制最后回复，并发送配置的快捷键"
+            >复制+快捷键</button>
             <button type="button" class="cgpt-btn purple" id="cgpt-copy-hotkey-continue-once" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> Ctrl+Alt+I -> 发送继续指令">复制+快捷键+继续</button>
             <button type="button" class="cgpt-btn cyan" id="cgpt-copy-hotkey-continue-loop" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> Ctrl+Alt+I -> 发送继续指令">连续复制+快捷键+继续</button>
           </div>
@@ -26677,6 +27191,22 @@
         return;
       }
 
+      const legacyUploadAndSendBtn = qs('#cgpt-upload-start-and-send', actionRow);
+      if (legacyUploadAndSendBtn) {
+        legacyUploadAndSendBtn.remove();
+        ToolboxShell.appendLog('[UPLOAD_UI][REMOVED_LEGACY] button=cgpt-upload-start-and-send');
+      }
+
+      const uploadStartBtn = qs(UploadSelectors.startBtn, actionRow);
+      if (uploadStartBtn) {
+        uploadStartBtn.title = '只上传/绑定文件到 ChatGPT 输入框，不自动发送';
+      }
+
+      const uploadSendBtn = qs(UploadSelectors.startSendBtn, actionRow);
+      if (uploadSendBtn) {
+        uploadSendBtn.title = '发送当前输入框中的文字和附件';
+      }
+
       let sendHotkeyBtn = qs(UploadSelectors.sendHotkeyBtn, actionRow);
       if (!sendHotkeyBtn) {
         sendHotkeyBtn = document.createElement('button');
@@ -26718,9 +27248,11 @@
         copyHotkeyOnceBtn.type = 'button';
         copyHotkeyOnceBtn.className = 'cgpt-btn purple';
         copyHotkeyOnceBtn.id = 'cgpt-copy-hotkey-once';
+        copyHotkeyOnceBtn.dataset.action = 'copy-hotkey-once';
         copyHotkeyOnceBtn.textContent = '复制+快捷键';
         copyLastBtn.insertAdjacentElement('afterend', copyHotkeyOnceBtn);
       }
+      copyHotkeyOnceBtn.dataset.action = 'copy-hotkey-once';
       copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
 
       let copyHotkeyContinueOnceBtn = qs(UploadSelectors.copyHotkeyContinueOnceBtn, actionRow);
@@ -26805,12 +27337,6 @@
             clearButtonLongWaitDangerTimer(btn, 'finally');
           }
         }
-      }, 'UPLOAD');
-
-      DomUtil.bindClick(rootEl, UploadSelectors.copyHotkeyOnceBtn, () => {
-        runCopyAction('copy-and-hotkey', { source: 'button' }).catch((error) => {
-          console.error('[TOOLBOX][COPY_HOTKEY][BUTTON_FAILED]', error);
-        });
       }, 'UPLOAD');
 
       DomUtil.bindClick(rootEl, UploadSelectors.copyHotkeyContinueOnceBtn, async () => {
@@ -27294,9 +27820,94 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       return uploadModuleInitPromise;
     }
 
+    async function trySendPendingAfterReplyOpportunity(runId) {
+      if (!state.pendingSendAfterReply || state.pendingSendRetrying) {
+        return false;
+      }
+
+      if (state.autoSendRunId !== runId) {
+        return false;
+      }
+
+      if (shouldStopForeverSend(runId)) {
+        resetUploadSendUiState('pending-send-after-reply:stopped', runId);
+        scheduleRenderUpload('pending-send-after-reply:stopped');
+        return true;
+      }
+
+      if (!detectPendingComposerPayloadForSend()) {
+        resetUploadSendUiState('pending-send-after-reply:no-payload', runId);
+        setStatus('待发送内容已不存在，停止等待发送', 'warn');
+        scheduleRenderUpload('pending-send-after-reply:no-payload');
+        return true;
+      }
+
+      const capability = getUploadPageCapability({ heavy: false });
+
+      const canSendNow = !!(
+        capability.canSendNow
+        || capability.can_send_now
+        || (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.canSendNowLight === 'function'
+          && ComposerApi.canSendNowLight()
+        )
+        || (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.canSendNow === 'function'
+          && ComposerApi.canSendNow({ maxAgeMs: 450 })
+        )
+      );
+
+      const isResponding = !!(capability.isResponding || capability.is_responding);
+
+      if (isResponding || !canSendNow) {
+        return false;
+      }
+
+      state.pendingSendRetrying = true;
+      state.waitingReply = false;
+      state.waitingSend = true;
+      state.autoSendWaiting = true;
+      uploadSendShortcutRunning = true;
+      uploadSendTaskStartedAt = Date.now();
+
+      setStatus('检测到可发送，正在自动发送...', 'running');
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][send-message-button:opportunity-send] runId=${runId} source=${state.pendingSendAfterReplySource || '-'}`,
+      );
+
+      scheduleRenderUpload('pending-send-after-reply:opportunity');
+      stopWaitingReplyCheck();
+
+      try {
+        await sendCurrentMessageFromUploadPanel(
+          state.pendingSendAfterReplySource || 'retry-after-reply',
+          runId,
+        );
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] pending send after reply failed', err);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][send-message-button:opportunity-send-error] runId=${runId} error=${errText}`,
+        );
+      } finally {
+        if (state.pendingSendRetrying && state.pendingSendAfterReply) {
+          state.pendingSendRetrying = false;
+          state.waitingReply = true;
+          startWaitingReplyCheck(runId, Date.now());
+        }
+      }
+
+      return true;
+    }
+
     function startWaitingReplyCheck(runId, sendStartedAt) {
       stopWaitingReplyCheck();
       waitingReplyIdleStreak = 0;
+      state.replyWaitSawBusy = false;
+      state.replyWaitAssistantCountBefore = countVisibleAssistantMessagesForReplyWait();
       state.waitingReplyRunId = runId;
       state.waitingReplyCheckedAt = Date.now();
       logUploadSendUiState('waiting-reply-start', `runId=${runId}`, runId);
@@ -27307,33 +27918,72 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       }
 
       state.waitingReplyTimer = setInterval(function () {
-        if (!state.waitingReply) {
-          stopWaitingReplyCheck();
-          return;
-        }
-        var elapsed = Date.now() - state.waitingReplyCheckedAt;
-        if (elapsed > 120000) {
-          logUploadSendUiState('timeout', 'waiting-reply', runId);
-          finishWaitingReply('timeout');
-          return;
-        }
-        try {
-          var capability = getPageCapability('waiting-reply');
-          if (!capability.is_responding && capability.response_state !== 'generating') {
-            waitingReplyIdleStreak += 1;
-            if (waitingReplyIdleStreak >= 2) {
-              logUploadSendUiState('reply_done', `idleStreak=${waitingReplyIdleStreak}`, runId);
-              finishWaitingReply('reply_done');
+        void (async function tickWaitingReplyOrSendOpportunity() {
+          try {
+            if (!state.waitingReply) {
+              stopWaitingReplyCheck();
+              return;
             }
-          } else {
-            waitingReplyIdleStreak = 0;
+
+            if (await trySendPendingAfterReplyOpportunity(runId)) {
+              return;
+            }
+
+            var elapsed = Date.now() - state.waitingReplyCheckedAt;
+
+            if (elapsed > 120000 && !state.pendingSendAfterReply) {
+              logUploadSendUiState('timeout', 'waiting-reply', runId);
+              finishWaitingReply('timeout');
+              return;
+            }
+
+            var capability = getPageCapability('waiting-reply');
+            var assistantCountNow = countVisibleAssistantMessagesForReplyWait();
+            var assistantCountIncreased = assistantCountNow > state.replyWaitAssistantCountBefore;
+            var stopVisible = hasRealStopButtonForCopy();
+
+            var assistantBusy = typeof ComposerApi !== 'undefined'
+              && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+              && ComposerApi.isAssistantLikelyBusy();
+
+            var generatingState = isReplyGeneratingState(capability.response_state);
+
+            if (stopVisible || assistantBusy || generatingState || assistantCountIncreased) {
+              state.replyWaitSawBusy = true;
+            }
+
+            if (!capability.is_responding && !generatingState) {
+              waitingReplyIdleStreak += 1;
+
+              if (waitingReplyIdleStreak >= 2) {
+                var latestAssistantTextLen = getLatestAssistantTextForCopyCheck().length;
+                var hasReplyEvidence = state.replyWaitSawBusy || assistantCountIncreased;
+
+                if (!hasReplyEvidence || latestAssistantTextLen <= 0) {
+                  ToolboxShell.appendLog(
+                    `[SEND_UI][reply_done_skip] runId=${runId} sawBusy=${state.replyWaitSawBusy ? 1 : 0} `
+                    + `assistantIncreased=${assistantCountIncreased ? 1 : 0} textLen=${latestAssistantTextLen}`,
+                  );
+                  return;
+                }
+
+                if (state.pendingSendAfterReply) {
+                  return;
+                }
+
+                logUploadSendUiState('reply_done', `idleStreak=${waitingReplyIdleStreak}`, runId);
+                finishWaitingReply('reply_done');
+              }
+            } else {
+              waitingReplyIdleStreak = 0;
+            }
+          } catch (err) {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] waiting reply check error', err);
+            ToolboxShell.appendLog(`[SEND_UI][waiting-reply-check-error] error=${errText}`);
           }
-        } catch (err) {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] waiting reply check error', err);
-          ToolboxShell.appendLog(`[UPLOAD_SEND_UI][waiting-reply-check-error] error=${errText}`);
-        }
-      }, 1500);
+        })();
+      }, PRE_SEND_OPPORTUNITY_POLL_MS);
       state.waitingReplyTimerRef = state.waitingReplyTimer;
     }
 
@@ -27529,6 +28179,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       importGroupsAndQueueMeta,
       resumeAfterForeground: async (reason = '-') => {
         const tag = String(reason || '-').trim() || '-';
+        clearStaleBusySendStateOnHomeReady(`foreground-resume:${tag}`);
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
           ToolboxShell.appendLog(`[UPLOAD][FOREGROUND_RESUME] reason=${tag}`);
         }
@@ -27548,7 +28199,9 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       startUploadFromCurrentQueue,
       triggerStartUpload,
       handleStartUploadClick,
-      startUploadSendFlow,
+      startUploadOnlyFlow,
+      startSendMessageFlow,
+      clearStaleBusySendStateOnHomeReady,
       cancelCurrentUploadSend,
       applyBridgeUploadFiles,
       getPendingUploadItems,
@@ -27873,7 +28526,7 @@ const AutoQueueModule = (() => {
       const listText = String(config.listPromptsText || '').trim();
 
       if (continueText === '继续' && listText === '继续') {
-        config.listPromptsText = DEFAULT_AUTO_CONFIG.listPromptsText;
+        config.listPromptsText = getDefaultAutoListPromptsText();
         saveConfig();
         ToolboxShell.appendLog('[自动指令] 已修复被污染的列表模式默认指令');
       }
@@ -27931,7 +28584,7 @@ const AutoQueueModule = (() => {
             fallbackName: '默认列表',
             maxNameLength: 24,
           }),
-          text: String(config.listPromptsText || DEFAULT_AUTO_CONFIG.listPromptsText),
+          text: String(config.listPromptsText || getDefaultAutoListPromptsText()),
         });
       }
 
@@ -28087,6 +28740,9 @@ const AutoQueueModule = (() => {
       'verify-upload-file': '重新上传文件校验',
       'verify-send-prompt': '发送完成校验',
       'verify-wait-reply': '等待校验回复',
+      'new-chat-switch': '正在切换到新聊天',
+      'new-chat-wait': '等待新聊天页面就绪',
+      'new-chat-ready': '新聊天已就绪',
       'next-task': '进入下一个任务',
       'all-done': '已完成',
       stopped: '已停止',
@@ -28118,7 +28774,7 @@ const AutoQueueModule = (() => {
         const title = task ? task.title : (getCurrentRunningTask() ? getCurrentRunningTask().title : '-');
         ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][STEP] task=${title} step=${run.currentStep}`);
       }
-      updateStatus();
+      updateStatus(`step:${run.currentStep}`);
     }
 
     function createTaskId() {
@@ -28536,6 +29192,7 @@ const AutoQueueModule = (() => {
           ...taskQueueDefaults,
           ...rawTaskQueue,
           stopOnMaxContinueRounds: rawTaskQueue.stopOnMaxContinueRounds !== false,
+          switchNewChatBetweenTasks: rawTaskQueue.switchNewChatBetweenTasks !== false,
           stopBatchOnTaskSendFailure: rawTaskQueue.stopBatchOnTaskSendFailure === true,
           defaultMaxContinueRoundsMigratedToUnlimited:
             rawTaskQueue.defaultMaxContinueRoundsMigratedToUnlimited === true,
@@ -29306,6 +29963,54 @@ const AutoQueueModule = (() => {
       }
 
       return { prompt: null, relinked: false };
+    }
+
+    function getPromptTaskLinkState(task) {
+      if (!task || task.sourceType !== 'prompt-manager' || !task.promptId) {
+        return {
+          isPromptTask: false,
+          linked: false,
+          missing: false,
+          prompt: null,
+        };
+      }
+
+      const result = findPromptForLinkedTask(task);
+      const prompt = result && result.prompt ? result.prompt : null;
+
+      return {
+        isPromptTask: true,
+        linked: !!prompt,
+        missing: !prompt,
+        prompt,
+        relinked: !!(result && result.relinked),
+      };
+    }
+
+    function detachPromptTaskFromPromptManager(task, reason = '-') {
+      if (!task) {
+        return {
+          ok: false,
+          reason: 'missing_task',
+        };
+      }
+
+      const resolved = resolveTaskInitialPrompt(task, { log: false });
+
+      task.title = String(resolved.title || task.title || '未命名任务');
+      task.initialPrompt = String(resolved.initialPrompt || task.initialPrompt || '');
+      task.sourceType = 'manual';
+      delete task.promptId;
+      delete task.promptMissing;
+      task.updatedAt = nowMs();
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][PROMPT_TASK][DETACH] taskId=${task.id || '-'} title=${task.title || '-'} reason=${reason}`,
+      );
+
+      return {
+        ok: true,
+      };
     }
 
     function refreshPromptLinkedTasks(reason = '') {
@@ -30144,6 +30849,253 @@ const AutoQueueModule = (() => {
       return profile.tasks.find((item) => item.id === taskId) || null;
     }
 
+    function getTaskById(taskId) {
+      const profile = getActiveTaskProfile();
+      if (!profile || !Array.isArray(profile.tasks) || !taskId) {
+        return null;
+      }
+      return profile.tasks.find((item) => item && item.id === taskId) || null;
+    }
+
+    function findChatGPTNewChatButton() {
+      const candidates = [];
+
+      const selectors = [
+        'a[href="/"]',
+        'a[href="/?"]',
+        'a[href^="/?"]',
+        'a[aria-label*="新聊天"]',
+        'button[aria-label*="新聊天"]',
+        'a[aria-label*="New chat"]',
+        'button[aria-label*="New chat"]',
+        '[data-testid*="new-chat"]',
+        '[data-testid*="new-chat-button"]',
+        'a[data-testid="create-new-chat-button"]',
+        '[data-testid="create-new-chat-button"]',
+        '[data-sidebar-action="new-chat"]',
+      ];
+
+      for (const selector of selectors) {
+        document.querySelectorAll(selector).forEach((el) => candidates.push(el));
+      }
+
+      document.querySelectorAll('a, button, [role="button"]').forEach((el) => {
+        const text = String(el.textContent || '').trim();
+        const aria = String(el.getAttribute('aria-label') || '').trim();
+        const title = String(el.getAttribute('title') || '').trim();
+        const merged = `${text} ${aria} ${title}`;
+
+        if (
+          merged.includes('新聊天')
+          || merged.includes('New chat')
+        ) {
+          candidates.push(el);
+        }
+      });
+
+      const unique = Array.from(new Set(candidates));
+
+      for (const el of unique) {
+        if (!el) continue;
+        if (el.closest('#cgpt-toolbox-root')) continue;
+        if (el.closest('[id*="cgpt"]')) continue;
+        if (el.closest('[class*="toolbox"]')) continue;
+        if (el.id === 'cgpt-open-chatgpt-home') continue;
+
+        const text = String(el.textContent || '').trim();
+        const aria = String(el.getAttribute('aria-label') || '').trim();
+        const title = String(el.getAttribute('title') || '').trim();
+        const merged = `${text} ${aria} ${title}`;
+        if (text === '回到首页' || merged.includes('回到首页')) continue;
+
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (rect.width <= 0 || rect.height <= 0) continue;
+
+        return el;
+      }
+
+      return null;
+    }
+
+    function getCurrentConversationKey() {
+      const url = new URL(window.location.href);
+      const match = url.pathname.match(/\/c\/([^/]+)/);
+      if (match) {
+        return `conversation:${match[1]}`;
+      }
+      return `path:${url.pathname}${url.search}`;
+    }
+
+    function clickElementLikeUserForAutoQueue(el, reasonText) {
+      if (!(el instanceof HTMLElement)) {
+        throw new Error('new_chat_click_target_not_html_element');
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        throw new Error('new_chat_click_target_not_visible');
+      }
+
+      el.scrollIntoView({
+        block: 'center',
+        inline: 'center',
+        behavior: 'instant',
+      });
+
+      if (typeof el.focus === 'function') {
+        el.focus({ preventScroll: true });
+      }
+
+      try {
+        if (typeof el.click === 'function') {
+          el.click();
+          return {
+            ok: true,
+            method: 'native_click',
+          };
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] auto queue native new chat click failed', err);
+        ToolboxShell.appendLog(
+          `[AUTOQ][NEW_CHAT][NATIVE_CLICK_FAILED] reason=${reasonText || '-'} error=${errText}`,
+        );
+      }
+
+      const nextRect = el.getBoundingClientRect();
+      const x = nextRect.left + nextRect.width / 2;
+      const y = nextRect.top + nextRect.height / 2;
+
+      const common = {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons: 1,
+      };
+
+      const eventWindow = el.ownerDocument && el.ownerDocument.defaultView
+        ? el.ownerDocument.defaultView
+        : window;
+
+      if (eventWindow.PointerEvent) {
+        el.dispatchEvent(new eventWindow.PointerEvent('pointerdown', common));
+        el.dispatchEvent(new eventWindow.PointerEvent('pointerup', common));
+      }
+
+      el.dispatchEvent(new eventWindow.MouseEvent('mousedown', common));
+      el.dispatchEvent(new eventWindow.MouseEvent('mouseup', common));
+      el.dispatchEvent(new eventWindow.MouseEvent('click', common));
+
+      return {
+        ok: true,
+        method: 'mouse_events',
+      };
+    }
+
+    async function clickChatGPTNewChatInPage(reason) {
+      const reasonText = reason || 'autoq-next-task';
+      const beforeKey = getCurrentConversationKey();
+
+      ToolboxShell.appendLog(`[AUTOQ][NEW_CHAT][START] reason=${reasonText} before=${beforeKey}`);
+
+      const startedAt = Date.now();
+      let lastKey = beforeKey;
+      let lastClickAt = 0;
+      let clickAttempt = 0;
+      let lastClickError = '';
+
+      while (Date.now() - startedAt < 15000) {
+        const currentKey = getCurrentConversationKey();
+        lastKey = currentKey;
+
+        const capability = typeof getPageCapability === 'function'
+          ? getPageCapability(`new-chat-wait:${reasonText}`)
+          : null;
+
+        const responseState = capability && capability.response_state
+          ? capability.response_state
+          : '';
+
+        const inputable = capability && capability.can_accept_input ? true : false;
+        const sendable = capability && capability.can_send_now ? true : false;
+        const leftOldConversation = currentKey !== beforeKey;
+
+        if (leftOldConversation && inputable && responseState !== 'generating') {
+          ToolboxShell.appendLog(
+            `[AUTOQ][NEW_CHAT][READY] reason=${reasonText} before=${beforeKey} after=${currentKey} inputable=${inputable} sendable=${sendable} response_state=${responseState}`,
+          );
+
+          ToolboxShell.setStatus('新聊天已就绪，准备发送下一个任务');
+
+          return {
+            ok: true,
+            beforeKey,
+            afterKey: currentKey,
+          };
+        }
+
+        if (!leftOldConversation && Date.now() - lastClickAt >= 1200) {
+          lastClickAt = Date.now();
+          clickAttempt += 1;
+
+          const btn = findChatGPTNewChatButton();
+
+          if (!btn) {
+            ToolboxShell.appendLog(
+              `[AUTOQ][NEW_CHAT][BUTTON_NOT_FOUND_RETRY] reason=${reasonText} attempt=${clickAttempt}`,
+            );
+          } else {
+            try {
+              const clickResult = clickElementLikeUserForAutoQueue(btn, reasonText);
+              ToolboxShell.appendLog(
+                `[AUTOQ][NEW_CHAT][CLICKED] reason=${reasonText} attempt=${clickAttempt} method=${clickResult && clickResult.method ? clickResult.method : '-'}`,
+              );
+            } catch (err) {
+              const errText = err && err.message ? err.message : String(err);
+              lastClickError = errText;
+              console.error('[ChatGPT toolbox] click new chat failed', err);
+              ToolboxShell.appendLog(
+                `[AUTOQ][NEW_CHAT][CLICK_FAILED_RETRY] reason=${reasonText} attempt=${clickAttempt} error=${errText}`,
+              );
+            }
+          }
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][NEW_CHAT][TIMEOUT] reason=${reasonText} before=${beforeKey} last=${lastKey} attempts=${clickAttempt} last_error=${lastClickError || '-'}`,
+      );
+      ToolboxShell.setStatus('切换新聊天超时，已停止批量任务组');
+
+      return {
+        ok: false,
+        reason: lastClickError ? 'new-chat-click-timeout-after-error' : 'new-chat-timeout',
+        beforeKey,
+        afterKey: lastKey,
+        error: lastClickError,
+      };
+    }
+
+    function handleMoveToNextTaskError(err) {
+      const errText = err && err.message ? err.message : String(err);
+      console.error('[ChatGPT toolbox] moveToNextTask failed', err);
+      ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][MOVE_NEXT_FAILED] error=${errText}`);
+      ToolboxShell.setStatus(`批量任务组已停止：${errText}`);
+      stop({
+        reason: errText || 'move-next-task-failed',
+        finalStep: 'stopped',
+        markCurrent: false,
+        logStop: false,
+      });
+    }
+
     function markTaskStatus(task, status) {
       if (!task) return;
 
@@ -30220,7 +31172,7 @@ const AutoQueueModule = (() => {
       return true;
     }
 
-    function moveToNextTask() {
+    async function moveToNextTask() {
       const run = state.taskRun || {};
       const nextIndex = Number(run.currentIndex) + 1;
 
@@ -30238,11 +31190,57 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      const currentTask = getCurrentRunningTask();
+      const nextTaskId = run.enabledTaskIds[nextIndex];
+      const nextTask = getTaskById(nextTaskId);
+
+      const shouldSwitchNewChat = !(
+        config.taskQueueSettings
+        && config.taskQueueSettings.switchNewChatBetweenTasks === false
+      );
+
+      if (shouldSwitchNewChat) {
+        ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_PENDING]');
+        setTaskBatchStep('new-chat-switch', currentTask || nextTask);
+
+        state.taskBatchStepRunning = true;
+        try {
+          const switchReason = `task-${currentTask ? currentTask.id : 'unknown'}-to-${nextTask ? nextTask.id : 'unknown'}`;
+          const switchResult = await clickChatGPTNewChatInPage(switchReason);
+
+          if (!switchResult || switchResult.ok !== true) {
+            const failReason = switchResult && switchResult.reason
+              ? switchResult.reason
+              : 'unknown';
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_BATCH][NEW_CHAT_FAILED_CONTINUE_CURRENT] reason=${failReason}`,
+            );
+            ToolboxShell.setStatus('切换新聊天失败，继续在当前对话发送下一个任务');
+          } else {
+            setTaskBatchStep('new-chat-ready', nextTask, { log: false });
+          }
+
+          if (typeof updateChatInputStateBadge === 'function') {
+            updateChatInputStateBadge();
+          }
+          updateStatus('new-chat-ready');
+        } finally {
+          state.taskBatchStepRunning = false;
+        }
+      }
+
       run.currentIndex = nextIndex;
       run.pendingSendKind = 'initial';
-      const nextTask = getCurrentRunningTask();
-      setTaskBatchStep('send-initial', nextTask);
+      run.pendingReplyKind = null;
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.idleSince = 0;
+      state.waitingStartedAt = 0;
+
+      const activeNextTask = getCurrentRunningTask();
+      setTaskBatchStep('send-initial', activeNextTask);
       state.nextSendAt = Date.now() + getRandomDelayMs();
+      ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_START]');
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][NEXT_TASK] index=${nextIndex + 1} total=${run.enabledTaskIds.length}`);
       ToolboxShell.appendLog(`[AUTOQ][TASK][NEXT] index=${nextIndex + 1}/${run.enabledTaskIds.length}`);
       log(`进入下一个任务 (${nextIndex + 1}/${run.enabledTaskIds.length})`);
@@ -30282,9 +31280,11 @@ const AutoQueueModule = (() => {
       }
 
       ToolboxShell.setStatus(`任务发送失败，继续下一个：${reasonText}`);
-      if (!moveToNextTask()) {
-        ToolboxShell.setStatus('批量任务组：无可继续的任务');
-      }
+      void moveToNextTask().then((moved) => {
+        if (!moved) {
+          ToolboxShell.setStatus('批量任务组：无可继续的任务');
+        }
+      }).catch(handleMoveToNextTaskError);
     }
 
     function failCurrentTask(reason) {
@@ -30399,17 +31399,34 @@ const AutoQueueModule = (() => {
 
         if (!uploadResult || uploadResult.ok !== true) {
           const reason = uploadReason || 'verify-upload-failed';
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_FAILED] task=${task.title} uploaded=${uploadedCount} failed=${failedCount} reason=${reason}`,
-          );
-          state.taskRun.doneSignalVerificationRunning = false;
-          failCurrentTask(reason);
-          return { ok: false, reason };
-        }
 
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_DONE] task=${task.title} uploaded=${uploadedCount} failed=${failedCount}`,
-        );
+          if (reason === 'no-files') {
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_SKIPPED] task=${task.title} reason=no-files`,
+            );
+            ToolboxShell.appendLog(`[AUTOQ][TASK_VERIFY][NO_FILES] task=${task.title}`);
+          } else if (reason === 'cancelled' || uploadResult.cancelled === true) {
+            state.taskRun.doneSignalVerificationRunning = false;
+            if (!state.running) {
+              return { ok: false, reason: 'cancelled' };
+            }
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_CANCELLED] task=${task.title}`,
+            );
+            return { ok: false, reason: 'cancelled' };
+          } else {
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_FAILED] task=${task.title} uploaded=${uploadedCount} failed=${failedCount} reason=${reason}`,
+            );
+            state.taskRun.doneSignalVerificationRunning = false;
+            failCurrentTask(reason);
+            return { ok: false, reason };
+          }
+        } else {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_DONE] task=${task.title} uploaded=${uploadedCount} failed=${failedCount}`,
+          );
+        }
       }
 
       const verifyPrompt = buildVerifyAfterDoneSignalPrompt(task, resolved, replyText);
@@ -30492,7 +31509,7 @@ const AutoQueueModule = (() => {
           markTaskStatus(task, 'completed');
           state.taskRun.pendingSendKind = 'initial';
           setTaskBatchStep('next-task', task, { log: false });
-          moveToNextTask();
+          void moveToNextTask().catch(handleMoveToNextTaskError);
           return;
         }
 
@@ -30573,7 +31590,7 @@ const AutoQueueModule = (() => {
             markTaskStatus(task, 'completed');
             state.taskRun.pendingSendKind = 'initial';
             setTaskBatchStep('next-task', task, { log: false });
-            moveToNextTask();
+            void moveToNextTask().catch(handleMoveToNextTaskError);
             return;
           }
 
@@ -30640,7 +31657,7 @@ const AutoQueueModule = (() => {
         markTaskStatus(task, 'completed');
         state.taskRun.pendingSendKind = 'initial';
         setTaskBatchStep('next-task', task, { log: false });
-        moveToNextTask();
+        void moveToNextTask().catch(handleMoveToNextTaskError);
         return;
       }
 
@@ -30732,7 +31749,7 @@ const AutoQueueModule = (() => {
           markTaskStatus(task, 'completed');
           state.taskRun.pendingSendKind = 'initial';
           setTaskBatchStep('next-task', task, { log: false });
-          moveToNextTask();
+          void moveToNextTask().catch(handleMoveToNextTaskError);
           return;
         }
 
@@ -31325,6 +32342,7 @@ const AutoQueueModule = (() => {
           ${sourceMeta ? `<span class="cgpt-autoq-task-item-source">${escapeHtml(sourceMeta)}</span>` : ''}
         </div>
         <div class="cgpt-autoq-task-item-actions">
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="edit" data-task-id="${escapeHtml(task.id)}">编辑</button>
           <button type="button" class="cgpt-toolbox-small-btn" data-task-action="top" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>置顶</button>
           <button type="button" class="cgpt-toolbox-small-btn" data-task-action="up" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>上移</button>
           <button type="button" class="cgpt-toolbox-small-btn" data-task-action="down" data-task-id="${escapeHtml(task.id)}" ${index === profile.tasks.length - 1 ? 'disabled' : ''}>下移</button>
@@ -31353,8 +32371,13 @@ const AutoQueueModule = (() => {
         const maxEl = qs('#cgpt-autoq-task-max-rounds', taskEditorEl);
         const enabledEl = qs('#cgpt-autoq-task-enabled', taskEditorEl);
 
+        const promptLinkState = getPromptTaskLinkState(task);
+        const isPromptLinkedTask = promptLinkState.isPromptTask && promptLinkState.linked;
+
         if (titleEl) task.title = String(titleEl.value || '').trim() || '未命名任务';
-        if (initialEl) task.initialPrompt = String(initialEl.value || '');
+        if (initialEl && !isPromptLinkedTask) {
+          task.initialPrompt = String(initialEl.value || '');
+        }
         if (continueOverrideEl && continueOverrideEl.checked) {
           if (continueEl) {
             task.continuePromptTemplate = String(continueEl.value || '');
@@ -31400,11 +32423,26 @@ const AutoQueueModule = (() => {
         profile && profile.defaultMaxContinueRounds,
       );
       const resolvedInitial = resolveTaskInitialPrompt(task, { log: false });
-      const isPromptTask = task.sourceType === 'prompt-manager' && task.promptId;
-      const initialFieldValue = isPromptTask
+      const promptLinkState = getPromptTaskLinkState(task);
+
+      const isPromptLinkedTask = promptLinkState.isPromptTask && promptLinkState.linked;
+      const isPromptSnapshotTask = promptLinkState.isPromptTask && promptLinkState.missing;
+
+      const initialFieldValue = isPromptLinkedTask
         ? resolvedInitial.initialPrompt
-        : task.initialPrompt;
-      const initialReadonly = isPromptTask ? ' readonly' : '';
+        : String(task.initialPrompt || resolvedInitial.initialPrompt || '');
+
+      const initialReadonly = isPromptLinkedTask ? ' readonly' : '';
+
+      const initialLabelSuffix = isPromptLinkedTask
+        ? '（来自 Prompt 管理，运行前自动同步；如需修改，请到 Prompt 管理中编辑，或先转为独立任务）'
+        : (isPromptSnapshotTask
+          ? '（原 Prompt 已删除，当前为快照，可直接编辑）'
+          : '');
+
+      const detachBtnHtml = (isPromptLinkedTask || isPromptSnapshotTask)
+        ? `<button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-detach-prompt">${isPromptLinkedTask ? '转为独立任务' : '解除失效关联'}</button>`
+        : '';
 
       taskEditorEl.innerHTML = `
         <div class="cgpt-autoq-task-editor-grid">
@@ -31413,7 +32451,7 @@ const AutoQueueModule = (() => {
             <input class="cgpt-input" id="cgpt-autoq-task-title" value="${escapeHtml(resolvedInitial.title || task.title)}">
           </div>
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
-            <label for="cgpt-autoq-task-initial">初始指令${isPromptTask ? '（来自 Prompt 管理，运行前自动同步）' : ''}</label>
+            <label for="cgpt-autoq-task-initial">初始指令${escapeHtml(initialLabelSuffix)}</label>
             <textarea class="cgpt-textarea cgpt-autoq-task-initial-field" id="cgpt-autoq-task-initial" rows="6"${initialReadonly}>${escapeHtml(initialFieldValue)}</textarea>
           </div>
           <label class="cgpt-checkbox-line cgpt-autoq-task-editor-full">
@@ -31443,8 +32481,33 @@ const AutoQueueModule = (() => {
           </details>
         </div>
         <div class="cgpt-row cgpt-autoq-task-editor-actions">
+          ${detachBtnHtml}
           <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-save">保存任务</button>
         </div>`;
+
+      const detachBtn = qs('#cgpt-autoq-task-detach-prompt', taskEditorEl);
+
+      if (detachBtn) {
+        bindOnce(detachBtn, 'click', () => {
+          const activeProfile = getActiveTaskProfile();
+          const currentTask = getSelectedTask(activeProfile);
+
+          const result = detachPromptTaskFromPromptManager(currentTask, 'editor-button');
+
+          if (!result || !result.ok) {
+            const reason = result && result.reason ? result.reason : 'unknown';
+            ToolboxShell.appendLog(`[AUTOQ][PROMPT_TASK][DETACH_FAILED] reason=${reason}`);
+            ToolboxShell.setStatus(`解除关联失败：${reason}`);
+            return;
+          }
+
+          saveConfig();
+          renderTaskList();
+          renderTaskEditor();
+          updateStatus();
+          ToolboxShell.setStatus('已转为独立任务，可以直接编辑');
+        });
+      }
 
       const continueOverrideEl = qs('#cgpt-autoq-task-continue-override', taskEditorEl);
       const continueWrapEl = qs('.cgpt-autoq-task-continue-wrap', taskEditorEl);
@@ -31953,6 +33016,16 @@ const AutoQueueModule = (() => {
 
       if (!taskId || !action) return;
 
+      if (action === 'edit') {
+        readTaskEditorIntoSelected();
+        selectedTaskId = taskId;
+        renderTaskList();
+        renderTaskEditor();
+        switchBatchSubTab('current');
+        ToolboxShell.setStatus('已打开任务编辑');
+        return;
+      }
+
       if (action === 'delete') {
         deleteTaskById(taskId);
         return;
@@ -32108,15 +33181,39 @@ const AutoQueueModule = (() => {
     function buildProgressStatusSnapshot() {
       const taskMode = config.promptMode === 'task';
       const taskInfo = taskMode ? getCurrentTaskRunInfo() : null;
-      const taskProgress = taskInfo && taskInfo.total
-        ? `${Math.min(taskInfo.doneCount, taskInfo.total)}/${taskInfo.total}`
-        : '-';
+
+      let taskProgress = '-';
+      let taskCurrentIndex = 0;
+      let taskDoneCount = 0;
+      let taskTotal = 0;
+
+      if (taskInfo && taskInfo.total) {
+        taskTotal = Math.max(0, Number(taskInfo.total) || 0);
+        taskDoneCount = Math.min(
+          taskTotal,
+          Math.max(0, Number(taskInfo.doneCount) || 0),
+        );
+
+        if (state.running) {
+          taskCurrentIndex = Math.min(
+            taskTotal,
+            Math.max(1, Number(taskInfo.progressIndex) || taskDoneCount + 1),
+          );
+
+          taskProgress = `${taskCurrentIndex}/${taskTotal}（已完成 ${taskDoneCount}）`;
+        } else {
+          taskCurrentIndex = taskDoneCount;
+          taskProgress = `${taskDoneCount}/${taskTotal}`;
+        }
+      }
+
       const pageTurn = readPageTurnCount();
       const pageTurnText = pageTurn === null ? '-' : String(pageTurn);
       const profile = getActiveTaskProfile();
       const displayTask = state.running
         ? getCurrentRunningTask()
         : (taskMode ? getSelectedTask(profile) : null);
+
       const continueStatus = taskMode
         ? getTaskContinueStatusDisplay(displayTask, profile)
         : {
@@ -32125,6 +33222,7 @@ const AutoQueueModule = (() => {
           maxRaw: null,
           display: '-',
         };
+
       const taskStepKey = state.taskRun && state.taskRun.currentStep
         ? state.taskRun.currentStep
         : 'idle';
@@ -32134,6 +33232,9 @@ const AutoQueueModule = (() => {
         taskMode,
         taskInfo,
         taskProgress,
+        taskCurrentIndex,
+        taskDoneCount,
+        taskTotal,
         pageTurn,
         pageTurnText,
         continueStatus,
@@ -32164,15 +33265,23 @@ const AutoQueueModule = (() => {
       }
 
       const taskIndex = snapshot.taskInfo && snapshot.taskInfo.total
-        ? Math.min(snapshot.taskInfo.doneCount, snapshot.taskInfo.total)
+        ? Math.min(
+          Math.max(0, Number(snapshot.taskCurrentIndex) || 0),
+          Number(snapshot.taskTotal) || Number(snapshot.taskInfo.total) || 0,
+        )
         : 0;
-      const taskTotal = snapshot.taskInfo ? snapshot.taskInfo.total : 0;
+      const taskTotal = snapshot.taskInfo
+        ? Math.max(0, Number(snapshot.taskTotal) || Number(snapshot.taskInfo.total) || 0)
+        : 0;
+      const taskDoneCount = snapshot.taskInfo
+        ? Math.min(taskTotal, Math.max(0, Number(snapshot.taskDoneCount) || 0))
+        : 0;
       const maxContinueLog = isUnlimitedMaxContinueRounds(snapshot.continueStatus.maxRaw)
         ? 'unlimited'
         : String(snapshot.continueStatus.maxRaw);
 
       console.log(
-        `[AUTOQ][PROGRESS_STATUS] task_index=${taskIndex} task_total=${taskTotal} page_turn=${snapshot.pageTurn === null ? '-' : snapshot.pageTurn} continue_round=${snapshot.continueStatus.continueCount} max_continue=${maxContinueLog} step=${snapshot.taskStepText}${reason ? ` reason=${reason}` : ''}`,
+        `[AUTOQ][PROGRESS_STATUS] task_index=${taskIndex} task_total=${taskTotal} task_done=${taskDoneCount} page_turn=${snapshot.pageTurn === null ? '-' : snapshot.pageTurn} continue_round=${snapshot.continueStatus.continueCount} max_continue=${maxContinueLog} step=${snapshot.taskStepText}${reason ? ` reason=${reason}` : ''}`,
       );
     }
 
@@ -32898,7 +34007,16 @@ const AutoQueueModule = (() => {
       const run = state.taskRun || {};
       if (run.pendingSendKind === 'processing') return;
 
-      if (ComposerApi.isAssistantLikelyBusy()) {
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearStaleBusySendStateOnHomeReady === 'function'
+      ) {
+        UploadModule.clearStaleBusySendStateOnHomeReady('maybe-send-next-task');
+      }
+
+      const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
+        && isHomeNewChatReadyToSendNow();
+      if (ComposerApi.isAssistantLikelyBusy() && !homeReadyToSend) {
         if ((run.pendingSendKind || 'initial') === 'initial') {
           const now = Date.now();
           if (!state.batchInitialWaitLoggedAt || now - state.batchInitialWaitLoggedAt > 5000) {
@@ -32915,9 +34033,13 @@ const AutoQueueModule = (() => {
       const task = getCurrentRunningTask();
 
       if (!task) {
-        if (!moveToNextTask()) {
-          return;
-        }
+        void moveToNextTask().then((moved) => {
+          if (!moved) {
+            return;
+          }
+          maybeSendNextTask();
+        }).catch(handleMoveToNextTaskError);
+        return;
       }
 
       const currentTask = getCurrentRunningTask();
@@ -32937,14 +34059,14 @@ const AutoQueueModule = (() => {
         if (currentTask.sourceType === 'prompt-manager' && currentTask.promptId && !initial) {
           log(`任务「${currentTask.title}」关联的 Prompt 不存在或内容为空`);
           markTaskStatus(currentTask, 'failed');
-          moveToNextTask();
+          void moveToNextTask().catch(handleMoveToNextTaskError);
           return;
         }
 
         if (!initial) {
           log(`任务「${currentTask.title}」缺少初始指令，跳过`);
           markTaskStatus(currentTask, 'skipped');
-          moveToNextTask();
+          void moveToNextTask().catch(handleMoveToNextTaskError);
           return;
         }
 
@@ -34830,43 +35952,6 @@ const AutoQueueModule = (() => {
       };
     }
 
-    function buildImportConfirmMessage(rawCount, dedupedCount, internalRemoved) {
-      let msg = `读取 ${rawCount} 条 Prompt`;
-      if (internalRemoved > 0) {
-        msg += `（文件内去重 ${internalRemoved} 条）`;
-      }
-      msg += `，待导入 ${dedupedCount} 条。\n\n点击“确定”：覆盖当前列表。\n点击“取消”：追加到当前列表。`;
-      return msg;
-    }
-
-    function buildImportStatusMessage({
-      added,
-      skipped,
-      conflicts,
-      internalRemoved,
-      replace,
-    }) {
-      const parts = [];
-
-      if (replace) {
-        parts.push(`覆盖导入完成：${added} 条`);
-      } else {
-        parts.push(`追加导入完成：新增 ${added} 条`);
-        if (skipped > 0) {
-          parts.push(`跳过完全相同 ${skipped} 条`);
-        }
-        if (conflicts > 0) {
-          parts.push(`标题冲突已重命名 ${conflicts} 条`);
-        }
-      }
-
-      if (internalRemoved > 0) {
-        parts.push(`文件内去重 ${internalRemoved} 条`);
-      }
-
-      return parts.join('，');
-    }
-
     function prepareAppendImportItems(importItems, existingPrompts) {
       const workingList = existingPrompts.slice();
       const toPrepend = [];
@@ -34904,7 +35989,14 @@ const AutoQueueModule = (() => {
     }
 
     async function importPrompts(event) {
+      const file = event && event.target && event.target.files
+        ? event.target.files[0]
+        : null;
+      const fileName = file && file.name ? file.name : '-';
+
       try {
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][START] file=${fileName}`);
+
         const data = await readJsonFileFromInput(event, {
           tag: '[PROMPT_IMPORT]',
         });
@@ -34914,8 +36006,12 @@ const AutoQueueModule = (() => {
         const importedData = normalizePromptManagerData(data);
         const rawCount = importedData.prompts.length;
 
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][PARSED] count=${rawCount}`);
+
         if (!rawCount) {
-          alert('导入失败：文件中没有有效 Prompt');
+          const msg = '文件中没有有效 Prompt';
+          setStatus(`Prompt 导入失败：${msg}`);
+          ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${msg}`);
           return;
         }
 
@@ -34924,56 +36020,26 @@ const AutoQueueModule = (() => {
         );
 
         if (!dedupedImport.length) {
-          alert('导入失败：去重后没有可导入的 Prompt');
+          const msg = '去重后没有可导入的 Prompt';
+          setStatus(`Prompt 导入失败：${msg}`);
+          ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${msg}`);
           return;
         }
 
-        const replace = confirm(
-          buildImportConfirmMessage(rawCount, dedupedImport.length, internalRemoved),
-        );
+        const appendResult = prepareAppendImportItems(dedupedImport, prompts);
+        prompts = [...appendResult.toPrepend, ...prompts];
+        const { added, skipped, conflicts } = appendResult;
 
-        let added = 0;
-        let skipped = 0;
-        let conflicts = 0;
-
-        if (replace) {
-          const seenImportIds = new Set();
-
-          prompts = dedupedImport.map((item) => {
-            const record = createImportedPromptRecord(item, {}, { preserveId: true });
-
-            if (!record.id || seenImportIds.has(record.id)) {
-              record.id = createId('prompt');
-            }
-
-            seenImportIds.add(record.id);
-            return record;
-          });
-          categories = importedData.categories.map((cat) => ({
-            ...cat,
-            id: createId('cat'),
-            createdAt: nowMs(),
-            updatedAt: nowMs(),
-          }));
-          added = prompts.length;
-        } else {
-          const appendResult = prepareAppendImportItems(dedupedImport, prompts);
-          prompts = [...appendResult.toPrepend, ...prompts];
-          added = appendResult.added;
-          skipped = appendResult.skipped;
-          conflicts = appendResult.conflicts;
-
-          importedData.categories.forEach((cat) => {
-            if (!categories.some((x) => x.name === cat.name)) {
-              categories.push({
-                ...cat,
-                id: createId('cat'),
-                createdAt: nowMs(),
-                updatedAt: nowMs(),
-              });
-            }
-          });
-        }
+        importedData.categories.forEach((cat) => {
+          if (!categories.some((x) => x.name === cat.name)) {
+            categories.push({
+              ...cat,
+              id: createId('cat'),
+              createdAt: nowMs(),
+              updatedAt: nowMs(),
+            });
+          }
+        });
 
         prompts.forEach((p) => {
           p.category = ensureCategoryExists(p.category);
@@ -34988,20 +36054,28 @@ const AutoQueueModule = (() => {
         );
         render();
         notifyUploadQuickPromptsRefresh('prompt-import');
-        setStatus(buildImportStatusMessage({
-          added,
-          skipped,
-          conflicts,
-          internalRemoved,
-          replace,
-        }));
+
+        setStatus(`Prompt 导入完成：新增 ${added} 条，跳过重复 ${skipped} 条`);
+
         ToolboxShell.appendLog(
-          `[PROMPT_IMPORT] mode=${replace ? 'replace' : 'append'} raw=${rawCount} deduped=${dedupedImport.length} added=${added} skipped=${skipped} conflicts=${conflicts} internalRemoved=${internalRemoved}`,
+          `[PROMPT_IMPORT][DEDUP] added=${added} skipped=${skipped} conflicts=${conflicts} internalRemoved=${internalRemoved}`,
+        );
+        ToolboxShell.appendLog(
+          `[PROMPT_IMPORT][DONE] added=${added} skipped=${skipped} total=${dedupedImport.length}`,
         );
       } catch (e) {
         const errText = getErrorText(e);
-        console.error('[ChatGPT toolbox] Prompt import failed', e);
-        alert(`导入失败：${errText}`);
+        console.error('[PROMPT_IMPORT][FAILED]', {
+          error_type: e && e.name,
+          error: errText,
+          stack: e && e.stack,
+        });
+        setStatus(`Prompt 导入失败：${errText}`);
+        ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${errText}`);
+      } finally {
+        if (event && event.target) {
+          event.target.value = '';
+        }
       }
     }
 
@@ -38974,15 +40048,25 @@ const AutoQueueModule = (() => {
             || snapshot.request_id
             || ''
           ).trim();
+          const snapshotStats = snapshot.stats && typeof snapshot.stats === 'object'
+            ? snapshot.stats
+            : {};
           const reportPayload = {
             request_id: syncRequestId,
             session_id: cmdPayload.session_id || snapshot.session_id || '',
             conversation_id: cmdPayload.conversation_id || snapshot.conversation_id || identity.conversation_id || '',
             client_id: cmdPayload.client_id || snapshot.client_id || identity.client_id || CLIENT_ID,
             page_instance_id: cmdPayload.page_instance_id || snapshot.page_instance_id || identity.page_instance_id || PAGE_INSTANCE_ID,
+            page_no: identity.page_no || identity.page_display_id || getCurrentBridgePageDisplayId() || '',
+            page_display_id: identity.page_display_id || identity.page_no || getCurrentBridgePageDisplayId() || '',
             url: snapshotUrl,
             messages: snapshot.messages || [],
-            message_count: Array.isArray(snapshot.messages) ? snapshot.messages.length : 0,
+            stats: snapshotStats,
+            message_count: Number(snapshotStats.total_count || 0) || (Array.isArray(snapshot.messages) ? snapshot.messages.length : 0),
+            user_count: Number(snapshotStats.user_count || 0),
+            assistant_count: Number(snapshotStats.assistant_count || 0),
+            round_count: Number(snapshotStats.round_count || 0),
+            dom_estimated_round_count: Number(snapshotStats.dom_estimated_round_count || 0),
             mode: cmdPayload.mode || snapshot.mode || 'merge',
             ok: true,
             command_type: cmdPayload.command_type || 'read_snapshot',
@@ -39000,6 +40084,11 @@ const AutoQueueModule = (() => {
           ToolboxShell.appendLog(
             `[BRIDGE][SYNC_CONVERSATION][report] message_id=${String(messageId).slice(0, 8)} `
             + `messages=${reportPayload.message_count} `
+            + `user=${reportPayload.user_count} `
+            + `assistant=${reportPayload.assistant_count} `
+            + `round=${reportPayload.round_count} `
+            + `dom_estimated_round=${reportPayload.dom_estimated_round_count} `
+            + `page_display_id=${reportPayload.page_display_id || '-'} `
             + `session_id=${reportPayload.session_id || '-'} `
             + `request_id=${reportPayload.request_id || '-'}`,
           );
@@ -42809,6 +43898,63 @@ if (document.readyState === 'loading') {
     return safe;
   }
 
+  function buildConversationSnapshotStats(messages, domEstimatedRoundCount) {
+    const list = Array.isArray(messages) ? messages : [];
+
+    let userCount = 0;
+    let assistantCount = 0;
+    let systemCount = 0;
+    let unknownCount = 0;
+    let userChars = 0;
+    let assistantChars = 0;
+    let totalChars = 0;
+
+    list.forEach((msg) => {
+      if (!msg || typeof msg !== 'object') {
+        return;
+      }
+
+      const role = String(msg.role || '').trim().toLowerCase();
+      const text = String(msg.text || msg.content || '').trim();
+      const charCount = text.replace(/\s+/g, '').length;
+
+      totalChars += charCount;
+
+      if (role === 'user') {
+        userCount += 1;
+        userChars += charCount;
+      } else if (role === 'assistant') {
+        assistantCount += 1;
+        assistantChars += charCount;
+      } else if (role === 'system' || role === 'tool') {
+        systemCount += 1;
+      } else {
+        unknownCount += 1;
+      }
+    });
+
+    const totalCount = list.length;
+    const pairedRoundCount = Math.min(userCount, assistantCount);
+    const roundCount = pairedRoundCount > 0
+      ? pairedRoundCount
+      : Math.ceil(totalCount / 2);
+
+    return {
+      total_count: totalCount,
+      user_count: userCount,
+      assistant_count: assistantCount,
+      system_count: systemCount,
+      unknown_count: unknownCount,
+      user_chars: userChars,
+      assistant_chars: assistantChars,
+      total_chars: totalChars,
+      round_count: roundCount,
+      dom_estimated_round_count: Number.isFinite(Number(domEstimatedRoundCount))
+        ? Number(domEstimatedRoundCount)
+        : 0,
+    };
+  }
+
   function buildConversationSnapshotForBridge(resolvePageIdentity) {
     try {
       const rawMessages = buildConversationMessageRecords({
@@ -42826,6 +43972,17 @@ if (document.readyState === 'loading') {
         .map((record) => bridgeSafeConversationRecord(record))
         .filter(Boolean);
 
+      let domEstimatedRoundCount = 0;
+      try {
+        domEstimatedRoundCount = countConversationTurnsFromTurnIndex();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] count dom estimated round failed', err);
+        ToolboxShell.appendLog(`[CHAT_PAGE][snapshot-stats-dom-round-failed] error=${errText}`);
+      }
+
+      const stats = buildConversationSnapshotStats(messages, domEstimatedRoundCount);
+
       const latestAny = messages.length ? messages[messages.length - 1] : null;
       const pickedAssistant = ChatMessageExtractor.getLatestAssistantAfterLatestUser(rawMessages);
       const latestAssistant = pickedAssistant.ok && pickedAssistant.record
@@ -42836,7 +43993,12 @@ if (document.readyState === 'loading') {
 
       return {
         page,
-        message_count: messages.length,
+        stats,
+        message_count: stats.total_count,
+        user_count: stats.user_count,
+        assistant_count: stats.assistant_count,
+        round_count: stats.round_count,
+        dom_estimated_round_count: stats.dom_estimated_round_count,
         latest_message: latestAny,
         latest_assistant_reply: latestAssistant,
         latest_assistant_message: latestAssistant,
@@ -43819,22 +44981,21 @@ if (document.readyState === 'loading') {
     }
 
     function isAssistantLikelyBusy() {
+      if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+        ToolboxShell.appendLog('[COMPOSER][BUSY_OVERRIDE] reason=home_new_chat_ready_to_send');
+        return false;
+      }
+
+      if (typeof hasRealChatGPTStopGeneratingButton === 'function') {
+        return hasRealChatGPTStopGeneratingButton();
+      }
+
       const stopBtn = qs(SELECTORS.stopButton);
-      if (stopBtn && isElementVisible(stopBtn) && !stopBtn.disabled) {
+      if (stopBtn && !isInsideToolbox(stopBtn) && isElementVisible(stopBtn) && !stopBtn.disabled) {
         return true;
       }
 
-      const hints = [
-        '.result-streaming',
-        '[data-testid="stop-button"]',
-        '[aria-label*="Stop"]',
-        '[aria-label*="停止"]',
-      ];
-
-      return hints.some((sel) => {
-        const el = qs(sel);
-        return el && !isInToolbox(el) && isElementVisible(el);
-      });
+      return false;
     }
 
 
@@ -44978,6 +46139,19 @@ if (document.readyState === 'loading') {
   })();
 
   function detectComposerResponseStateLight() {
+    if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+      const composerText = ComposerApi.getComposerText();
+      return {
+        is_responding: false,
+        response_state: 'ready',
+        response_state_reason: 'home_new_chat_composer_ready_override',
+        can_accept_input: true,
+        can_send_now: true,
+        has_composer_payload: !!composerText,
+        response_state_at: Date.now(),
+      };
+    }
+
     const isResponding = ComposerApi.isAssistantLikelyBusy();
     const composerAvailable = typeof ComposerApi.canAcceptInput === 'function'
       ? ComposerApi.canAcceptInput()
@@ -45054,6 +46228,28 @@ if (document.readyState === 'loading') {
   function detectComposerResponseState(options = {}) {
     if (options && options.light === true) {
       return detectComposerResponseStateLight();
+    }
+
+    if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+      const composerText = ComposerApi.getComposerText();
+      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+      const hasAttachmentPayload = attachmentCount > 0
+        || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
+        || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+          && ComposerApi.hasVisibleComposerAttachmentPayload());
+
+      return {
+        is_responding: false,
+        response_state: 'ready',
+        response_state_reason: 'home_new_chat_composer_ready_override',
+        can_accept_input: true,
+        can_send_now: true,
+        attachment_count: attachmentCount,
+        has_composer_payload: hasAttachmentPayload || !!composerText,
+        response_state_at: Date.now(),
+      };
     }
 
     const isResponding = ComposerApi.isAssistantLikelyBusy();
@@ -45663,6 +46859,204 @@ if (document.readyState === 'loading') {
     return countTurnsFromDomDirect('assistant');
   }
 
+  function extractConversationTurnNumberFromId(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/conversation-turn-(\d+)/i);
+    if (!match) {
+      return 0;
+    }
+    const turnNo = Number(match[1]);
+    return Number.isFinite(turnNo) && turnNo > 0 ? Math.floor(turnNo) : 0;
+  }
+
+  function getConversationTurnNumberFromElement(el) {
+    if (!(el instanceof HTMLElement)) {
+      return 0;
+    }
+
+    const directId = el.getAttribute('data-testid');
+    if (directId) {
+      const directNo = extractConversationTurnNumberFromId(directId);
+      if (directNo > 0) {
+        return directNo;
+      }
+    }
+
+    const turnEl = el.closest(
+      'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+    );
+    if (turnEl instanceof HTMLElement) {
+      return extractConversationTurnNumberFromId(turnEl.getAttribute('data-testid'));
+    }
+
+    return 0;
+  }
+
+  function getConversationTurnRoleFromElement(turnEl) {
+    if (!(turnEl instanceof HTMLElement)) {
+      return '';
+    }
+
+    if (typeof getMessageRole === 'function') {
+      const fromHelper = String(getMessageRole(turnEl) || '').toLowerCase();
+      if (fromHelper === 'user' || fromHelper === 'assistant') {
+        return fromHelper;
+      }
+    }
+
+    const roleNode = turnEl.querySelector('[data-message-author-role]');
+    if (roleNode) {
+      const role = String(roleNode.getAttribute('data-message-author-role') || '').toLowerCase();
+      if (role === 'user' || role === 'assistant') {
+        return role;
+      }
+    }
+
+    if (turnEl.querySelector('[data-message-author-role="user"]')) {
+      return 'user';
+    }
+
+    if (
+      turnEl.querySelector(
+        '[data-message-author-role="assistant"], .markdown, [data-message-content]',
+      )
+    ) {
+      return 'assistant';
+    }
+
+    const turnNo = getConversationTurnNumberFromElement(turnEl);
+    if (turnNo > 0) {
+      return turnNo % 2 === 1 ? 'user' : 'assistant';
+    }
+
+    return '';
+  }
+
+  function isValidConversationTurnCounterElement(el) {
+    if (!(el instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (typeof isInToolbox === 'function' && isInToolbox(el)) {
+      return false;
+    }
+
+    if (typeof isInComposerArea === 'function' && isInComposerArea(el)) {
+      return false;
+    }
+
+    if (typeof isChatSidebarElement === 'function' && isChatSidebarElement(el)) {
+      return false;
+    }
+
+    const testId = String(el.getAttribute('data-testid') || '').trim();
+    if (!/^conversation-turn-\d+$/i.test(testId)) {
+      return false;
+    }
+
+    return extractConversationTurnNumberFromId(testId) > 0;
+  }
+
+  function collectConversationTurnIndexInfos() {
+    const byTurnNo = new Map();
+    const roots = [];
+
+    const main = document.querySelector('main');
+    if (main instanceof HTMLElement) {
+      roots.push(main);
+    }
+    roots.push(document.body);
+
+    roots.forEach((root) => {
+      if (!(root instanceof HTMLElement)) {
+        return;
+      }
+
+      root.querySelectorAll(
+        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+      ).forEach((el) => {
+        if (!isValidConversationTurnCounterElement(el)) {
+          return;
+        }
+
+        const turnNo = getConversationTurnNumberFromElement(el);
+        if (!(turnNo > 0)) {
+          return;
+        }
+
+        const role = getConversationTurnRoleFromElement(el);
+        const existing = byTurnNo.get(turnNo);
+
+        if (!existing) {
+          byTurnNo.set(turnNo, { turnNo, role, element: el });
+          return;
+        }
+
+        if (!existing.role && role) {
+          byTurnNo.set(turnNo, { turnNo, role, element: el });
+        }
+      });
+    });
+
+    return Array.from(byTurnNo.values()).sort((a, b) => a.turnNo - b.turnNo);
+  }
+
+  function estimateRoundCountByTurnNumber(turnNo, role) {
+    const n = Number(turnNo);
+    if (!Number.isFinite(n) || n <= 0) {
+      return 0;
+    }
+
+    const safeRole = String(role || '').toLowerCase();
+    if (safeRole === 'user') {
+      return Math.ceil(n / 2);
+    }
+    if (safeRole === 'assistant') {
+      return Math.floor(n / 2);
+    }
+
+    return n % 2 === 1 ? Math.ceil(n / 2) : Math.floor(n / 2);
+  }
+
+  function inferRoleForHighestTurnInfo(highest, infos) {
+    if (!highest) {
+      return '';
+    }
+
+    if (highest.role === 'user' || highest.role === 'assistant') {
+      return highest.role;
+    }
+
+    if (Array.isArray(infos) && infos.length) {
+      const anchor = infos.find((info) => info && (info.role === 'user' || info.role === 'assistant'));
+      if (anchor && anchor.turnNo > 0) {
+        const oddIsUser = (anchor.turnNo % 2 === 1) === (anchor.role === 'user');
+        return oddIsUser
+          ? (highest.turnNo % 2 === 1 ? 'user' : 'assistant')
+          : (highest.turnNo % 2 === 1 ? 'assistant' : 'user');
+      }
+    }
+
+    return highest.turnNo % 2 === 1 ? 'user' : 'assistant';
+  }
+
+  function countConversationTurnsFromTurnIndex() {
+    const infos = collectConversationTurnIndexInfos();
+    if (!infos.length) {
+      return 0;
+    }
+
+    let highest = infos[0];
+    infos.forEach((info) => {
+      if (info.turnNo > highest.turnNo) {
+        highest = info;
+      }
+    });
+
+    const role = inferRoleForHighestTurnInfo(highest, infos);
+    return estimateRoundCountByTurnNumber(highest.turnNo, role);
+  }
+
   function countUserMessagesFromConversationRecords() {
     const records = buildConversationMessageRecords({
       includeEmpty: false,
@@ -45680,12 +47074,35 @@ if (document.readyState === 'loading') {
     if (userCount > 0) {
       return userCount;
     }
-    return snapshot.messages.length;
+    const assistantCount = snapshot.messages.filter(
+      (message) => message && message.role === 'assistant',
+    ).length;
+    if (assistantCount > 0) {
+      return assistantCount;
+    }
+    if (snapshot.messages.length > 0) {
+      return Math.ceil(snapshot.messages.length / 2);
+    }
+    return 0;
   }
 
   function countConversationTurnsFromDom() {
+    const userCount = countUserTurnsFromDomDirect();
+    if (userCount > 0) {
+      return userCount;
+    }
+
+    const assistantCount = countAssistantTurnsFromDomDirect();
+    if (assistantCount > 0) {
+      return assistantCount;
+    }
+
     const turnElements = findConversationMessageElements({ includeHidden: true });
-    return turnElements.length;
+    if (turnElements.length > 0) {
+      return Math.ceil(turnElements.length / 2);
+    }
+
+    return 0;
   }
 
   function logConversationTurnCountIfChanged(count, reason = '') {
@@ -45813,6 +47230,7 @@ if (document.readyState === 'loading') {
 
   function getConversationTurnCount() {
     const strategies = [
+      { name: 'conversation-turn-index', run: countConversationTurnsFromTurnIndex },
       { name: 'user-role-dom-direct', run: countUserTurnsFromDomDirect },
       { name: 'conversation-records-user', run: countUserMessagesFromConversationRecords },
       { name: 'conversation-snapshot-user', run: countConversationTurnsFromSnapshot },
@@ -45851,18 +47269,17 @@ if (document.readyState === 'loading') {
   }
 
   function getCurrentPageTurnCount() {
-    const fromState = BRIDGE_STATE.page_turn_count ?? BRIDGE_STATE.turn_count ?? BRIDGE_STATE.turnCount ?? null;
+    const live = Number(getConversationTurnCount());
+    if (Number.isFinite(live) && live > 0) {
+      return Math.floor(live);
+    }
 
+    const fromState = BRIDGE_STATE.page_turn_count ?? BRIDGE_STATE.turn_count ?? BRIDGE_STATE.turnCount ?? null;
     if (fromState !== null && fromState !== undefined) {
       const cached = Number(fromState);
       if (Number.isFinite(cached) && cached > 0) {
         return Math.floor(cached);
       }
-    }
-
-    const live = Number(getConversationTurnCount());
-    if (Number.isFinite(live) && live > 0) {
-      return Math.floor(live);
     }
 
     return null;
@@ -45941,7 +47358,7 @@ if (document.readyState === 'loading') {
 
     const responding = Boolean(responseState.is_responding);
 
-    return {
+    const capability = {
       client_id: clientId,
       page_instance_id: getToolboxPageInstanceId(),
       conversation_id: conversationId,
@@ -45961,6 +47378,12 @@ if (document.readyState === 'loading') {
       has_focus: document.hasFocus(),
       reason: String(reason || '').trim(),
     };
+
+    if (typeof applyHomeNewChatCapabilityOverride === 'function') {
+      applyHomeNewChatCapabilityOverride(capability);
+    }
+
+    return capability;
   }
 
   function isDomElementVisible(el) {
@@ -45977,22 +47400,20 @@ if (document.readyState === 'loading') {
   }
 
   function detectChatInputStateFromDom() {
-    const stopSelectors = [
-      'button[data-testid="stop-button"]',
-      'button[aria-label*="Stop"]',
-      'button[aria-label*="停止"]',
-      'button[data-testid*="stop"]',
-    ];
+    if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+      return {
+        text: '可输入',
+        cls: 'cgpt-state-ready',
+        title: '新聊天首页已就绪，可以发送',
+      };
+    }
 
-    for (const selector of stopSelectors) {
-      const stopBtn = document.querySelector(selector);
-      if (isDomElementVisible(stopBtn)) {
-        return {
-          text: '生成中',
-          cls: 'cgpt-state-generating',
-          title: 'ChatGPT 正在回答，暂时不建议发送新消息',
-        };
-      }
+    if (typeof hasRealChatGPTStopGeneratingButton === 'function' && hasRealChatGPTStopGeneratingButton()) {
+      return {
+        text: '生成中',
+        cls: 'cgpt-state-generating',
+        title: 'ChatGPT 正在回答，暂时不建议发送新消息',
+      };
     }
 
     const composer = document.querySelector('#prompt-textarea')
@@ -46118,6 +47539,23 @@ if (document.readyState === 'loading') {
   }
 
   function getTopMainStatus() {
+    if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[TOOLBOX_TOP_STATUS][STATE_OVERRIDE] reason=home_new_chat_ready_to_send');
+      }
+      return {
+        text: '可输入',
+        cls: 'cgpt-state-ready',
+        type: 'online',
+        title: '新聊天首页已就绪，可以发送',
+        reason: 'home_new_chat_composer_ready_override',
+        isGenerating: false,
+        isResponding: false,
+        isAnswering: false,
+        responseInProgress: false,
+      };
+    }
+
     const capability = typeof getPageCapability === 'function'
       ? getPageCapability('top-main-status')
       : null;
@@ -46466,15 +47904,21 @@ if (document.readyState === 'loading') {
   function findChatGPTStopButton() {
     const selectors = [
       'button[data-testid="stop-button"]',
-      'button[aria-label*="Stop"]',
-      'button[aria-label*="停止"]',
-      '[data-testid="stop-button"]',
+      'button[data-testid="composer-stop-button"]',
+      'button[aria-label="停止生成"]',
+      'button[aria-label="Stop generating"]',
+      'button[aria-label*="Stop generating"]',
     ];
 
     for (let i = 0; i < selectors.length; i += 1) {
-      const el = document.querySelector(selectors[i]);
-      if (el instanceof HTMLElement && isElementVisible(el)) {
-        return el;
+      const buttons = Array.from(document.querySelectorAll(selectors[i]));
+      for (const el of buttons) {
+        if (!(el instanceof HTMLElement) || isInsideToolbox(el)) {
+          continue;
+        }
+        if (isElementVisible(el) && !el.disabled) {
+          return el;
+        }
       }
     }
 
@@ -46708,6 +48152,12 @@ if (document.readyState === 'loading') {
       ? ComposerApi.countAttachmentChips()
       : 0;
     const contentText = String(beforeText || '').trim();
+    const currentSendButton = findChatGPTSendButton();
+    const actualSendButtonEnabled = !!(
+      currentSendButton
+      && currentSendButton instanceof HTMLButtonElement
+      && !isSendButtonDisabled(currentSendButton)
+    );
 
     return {
       contentText,
@@ -46716,7 +48166,9 @@ if (document.readyState === 'loading') {
       beforeLatestKey: beforeLatestRecord ? beforeLatestRecord.key : '',
       conversationIdBefore: parseConversationIdFromPath(location.pathname || '') || '',
       urlBefore: location.href || '',
-      sendButtonEnabledBefore: sendButtonEnabledBefore !== false,
+      sendButtonEnabledBefore: typeof sendButtonEnabledBefore === 'boolean'
+        ? sendButtonEnabledBefore
+        : actualSendButtonEnabled,
       hadTextPayload: !!contentText || attachmentCountBeforeSend > 0,
       beforeStopButtonVisible: !!beforeStopButton,
     };
@@ -46817,8 +48269,10 @@ if (document.readyState === 'loading') {
       return result;
     }
 
+    const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
+      && isHomeNewChatReadyToSendNow();
     const responseState = detectComposerResponseState();
-    if (blockWhenResponding && responseState.is_responding) {
+    if (blockWhenResponding && responseState.is_responding && !homeReadyToSend) {
       result.reason = 'assistant_busy';
       result.wait_reply = true;
       appendSendLogFields('[SEND][FAILED]', {
@@ -46827,6 +48281,10 @@ if (document.readyState === 'loading') {
         last_error: responseState.response_state_reason || 'assistant_busy',
       });
       return result;
+    }
+
+    if (homeReadyToSend) {
+      appendSendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_ready_to_send');
     }
 
     ChatInputStateRuntime.sendInProgress = true;
@@ -46867,7 +48325,7 @@ if (document.readyState === 'loading') {
           precheckLogged = true;
         }
 
-        if (isResponding && blockWhenResponding) {
+        if (isResponding && blockWhenResponding && !homeReadyToSend) {
           result.reason = 'assistant_busy';
           result.wait_reply = true;
           break;
@@ -46916,7 +48374,7 @@ if (document.readyState === 'loading') {
           if (attachWait.reason === 'sent_by_attach_wait_click') {
             const beforeText = getComposerTextFromElement(composer);
             const beforeStopButton = findChatGPTStopButton();
-            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton, true);
+            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton);
             const verifiedAttachWait = await verifySendStarted(confirmCtx, { shouldStop, attempt });
             if (verifiedAttachWait.ok) {
               result.ok = true;
@@ -46999,7 +48457,6 @@ if (document.readyState === 'loading') {
             const confirmCtxDisabled = buildStableSendConfirmCtx(
               beforeTextDisabled,
               beforeStopDisabled,
-              true,
             );
 
             focusComposer(composer);
@@ -47049,7 +48506,6 @@ if (document.readyState === 'loading') {
         const confirmCtx = buildStableSendConfirmCtx(
           beforeText,
           beforeStopButton,
-          true,
         );
 
         appendSendLogFields('[SEND][ATTEMPT]', {
@@ -47125,7 +48581,7 @@ if (document.readyState === 'loading') {
             const composer = findChatGPTComposer();
             const beforeText = getComposerTextFromElement(composer);
             const beforeStopButton = findChatGPTStopButton();
-            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton, true);
+            const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton);
             const verifiedAttachWait = await verifySendStarted(confirmCtx, {
               shouldStop,
               attempt: result.attempts,
@@ -47168,8 +48624,21 @@ if (document.readyState === 'loading') {
     }
   }
 
+  function isWeakComposerResponseState(responseState) {
+    if (!responseState || typeof responseState !== 'object') {
+      return true;
+    }
+
+    const state = String(responseState.response_state || '').toLowerCase();
+    return ['composing', 'idle', 'ready', 'inputable', 'not_ready'].includes(state);
+  }
+
   function isResponseStateIndicatingSendTriggered(responseState) {
     if (!responseState || typeof responseState !== 'object') {
+      return false;
+    }
+
+    if (isWeakComposerResponseState(responseState)) {
       return false;
     }
 
@@ -47257,10 +48726,6 @@ if (document.readyState === 'loading') {
       return true;
     }
 
-    if (snapshot.sendButtonDisabled && baseline.sendButtonEnabled) {
-      return true;
-    }
-
     if (snapshot.conversationId && !baseline.conversationId) {
       return true;
     }
@@ -47287,16 +48752,19 @@ if (document.readyState === 'loading') {
       return { ok: true, reason: 'user_bubble_text_matches' };
     }
 
-    if (snapshot.responseStateTriggered) {
+    if (snapshot.responseStateTriggered && !isWeakComposerResponseState(snapshot.responseState)) {
       return { ok: true, reason: `response_state_${snapshot.responseState.response_state || 'triggered'}` };
     }
 
-    if (snapshot.assistantBusy && (hadTextPayload || hadAttachmentPayload || snapshot.latestUserMatchesContent)) {
+    if (
+      snapshot.assistantBusy
+      && (
+        snapshot.inputEmpty
+        || snapshot.latestUserChanged
+        || snapshot.latestUserMatchesContent
+      )
+    ) {
       return { ok: true, reason: 'assistant_busy_after_send' };
-    }
-
-    if (snapshot.sendButtonDisabled && ctx.sendButtonEnabledBefore) {
-      return { ok: true, reason: 'send_button_disabled_after_click' };
     }
 
     if (ctx.conversationSwitchSeen && snapshot.conversationId) {
@@ -47331,7 +48799,6 @@ if (document.readyState === 'loading') {
       || signals.user_bubble
       || signals.responding
       || signals.conversation_updated
-      || signals.send_button_changed
       || signals.generating;
 
     if (anySuccessSignal) {
@@ -47958,6 +49425,55 @@ if (document.readyState === 'loading') {
     };
   }
 
+  function resolveSendButtonEnabledBefore(explicitValue) {
+    if (typeof explicitValue === 'boolean') {
+      return explicitValue;
+    }
+
+    const currentSendButton = findChatGPTSendButton();
+    return !!(
+      currentSendButton
+      && currentSendButton instanceof HTMLButtonElement
+      && !isSendButtonDisabled(currentSendButton)
+    );
+  }
+
+  function logSendConfirmFailed(snapshot, ctx, reason) {
+    const turnCountAfter = typeof getCurrentPageTurnCount === 'function'
+      ? getCurrentPageTurnCount()
+      : null;
+
+    appendSendLogFields('[SEND][CONFIRM_FAILED]', {
+      reason: reason || '-',
+      input_empty: snapshot && snapshot.inputEmpty ? 1 : 0,
+      user_bubble_found: snapshot && snapshot.userBubbleFound ? 1 : 0,
+      latest_user_changed: snapshot && snapshot.latestUserChanged ? 1 : 0,
+      latest_user_matches: snapshot && snapshot.latestUserMatchesContent ? 1 : 0,
+      response_state: snapshot && snapshot.responseState
+        ? (snapshot.responseState.response_state || '-')
+        : '-',
+      stop_button_visible: findChatGPTStopButton() ? 1 : 0,
+      turn_count_before: ctx && ctx.turnCountBefore != null ? ctx.turnCountBefore : '-',
+      turn_count_after: turnCountAfter == null ? '-' : turnCountAfter,
+      composer_text_len: snapshot && snapshot.composerText
+        ? String(snapshot.composerText).length
+        : 0,
+    });
+
+    if (snapshot && snapshot.sendButtonDisabled) {
+      appendSendLogFields('[SEND][DISABLED_NOT_SUCCESS]', {
+        reason: 'disabled_without_strong_evidence',
+        composer_cleared: snapshot.inputEmpty ? 1 : 0,
+        stop_button_visible: findChatGPTStopButton() ? 1 : 0,
+        response_state: snapshot.responseState
+          ? (snapshot.responseState.response_state || '-')
+          : '-',
+        turn_count_before: ctx && ctx.turnCountBefore != null ? ctx.turnCountBefore : '-',
+        turn_count_after: turnCountAfter == null ? '-' : turnCountAfter,
+      });
+    }
+  }
+
   async function waitComposerSendConfirmed(content, timeoutMs = SEND_CONFIRM_DEFAULT_TIMEOUT_MS, options = {}) {
     const startedAt = Date.now();
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
@@ -47966,7 +49482,7 @@ if (document.readyState === 'loading') {
     const attachmentCountBefore = Number(options.attachmentCountBeforeSend || 0);
     const conversationIdBefore = String(options.conversationIdBefore || parseConversationIdFromPath(location.pathname || '') || '');
     const urlBefore = String(options.urlBefore || location.href || '');
-    const sendButtonEnabledBefore = options.sendButtonEnabledBefore !== false;
+    const sendButtonEnabledBefore = resolveSendButtonEnabledBefore(options.sendButtonEnabledBefore);
 
     const ctx = {
       contentText,
@@ -47976,7 +49492,7 @@ if (document.readyState === 'loading') {
       conversationIdBefore,
       urlBefore,
       sendButtonEnabledBefore,
-      hadTextPayload: !!contentText,
+      hadTextPayload: !!contentText || attachmentCountBefore > 0,
       conversationSwitchSeen: false,
       conversationSwitchPending: !conversationIdBefore,
       conversationSwitchDeadline: 0,
@@ -48055,9 +49571,12 @@ if (document.readyState === 'loading') {
       return { ok: true, reason: finalConfirmed.reason };
     }
 
+    const failReason = pickSendNotConfirmedReason(finalSnapshot, ctx);
+    logSendConfirmFailed(finalSnapshot, ctx, failReason);
+
     return {
       ok: false,
-      reason: pickSendNotConfirmedReason(finalSnapshot, ctx),
+      reason: failReason,
       snapshot: finalSnapshot,
     };
   }

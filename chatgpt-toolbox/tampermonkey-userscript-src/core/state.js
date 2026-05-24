@@ -570,6 +570,8 @@
     return {
       stopOnMaxContinueRounds: true,
       defaultMaxContinueRoundsMigratedToUnlimited: false,
+      /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
+      switchNewChatBetweenTasks: true,
       /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
       stopBatchOnTaskSendFailure: false,
       verifyAfterDoneSignal: true,
@@ -711,7 +713,9 @@
     };
   }
 
-  const DEFAULT_AUTO_CONFIG = Object.freeze(createDefaultAutoConfig());
+  function getDefaultAutoListPromptsText() {
+    return createDefaultAutoConfig().listPromptsText;
+  }
 
   function createDefaultPrompts() {
     return [

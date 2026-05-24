@@ -148,8 +148,25 @@ def remote_binding_active(remote) -> bool:
     return (remote.get("bind_state") or "").strip() != BIND_STATE_UNBOUND
 
 
+_REMOTE_BINDING_DEPRECATED_LOGGED = False
+
+
 def remote_binding_enabled(remote) -> bool:
-    """由 bind_state 推导是否已绑定/预绑定（替代 remote.get('enabled')）。"""
+    """
+    @deprecated
+    兼容旧调用名。新代码使用 remote_binding_active(remote)。
+    确认全项目无引用后删除。
+    """
+    global _REMOTE_BINDING_DEPRECATED_LOGGED
+    if not _REMOTE_BINDING_DEPRECATED_LOGGED:
+        from app.utils.deprecation_log import log_deprecated_hit
+
+        _REMOTE_BINDING_DEPRECATED_LOGGED = True
+        log_deprecated_hit(
+            name="remote_binding_enabled",
+            reason="compat_wrapper",
+            replacement="remote_binding_active",
+        )
     return remote_binding_active(remote)
 
 

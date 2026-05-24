@@ -106,10 +106,19 @@ def persist_qsettings_last_url(settings, url: str) -> None:
 
     settings.setValue("last_url", url)
 
+    # @deprecated-migration:
+    # 旧版本曾使用 last_page_url / page_url / conversation_url 保存页面地址。
+    # 当前统一使用 last_url。连续 2 个版本确认无旧配置恢复需求后，可删除本循环。
+    from app.utils.deprecation_log import log_migration_hit
+
     for legacy_key in ("last_page_url", "page_url", "conversation_url"):
-
         if settings.contains(legacy_key):
-
+            log_migration_hit(
+                name="persist_qsettings_last_url",
+                old=legacy_key,
+                new="last_url",
+                reason="cleanup_legacy_qsettings_key",
+            )
             settings.remove(legacy_key)
 
 

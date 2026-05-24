@@ -4,7 +4,7 @@ from app.constants import (
     PERSIST_PENDING_RESET_MESSAGE,
     STARTUP_PENDING_RESET_MESSAGE,
 )
-from app.models import _message_field, is_waiting_placeholder_message
+from app.models import _message_field, is_waiting_placeholder_message, normalize_remote_chatgpt
 
 
 class ConversationStatsMixin:
@@ -187,7 +187,7 @@ class ConversationStatsMixin:
         stats = stats or self._EMPTY_CONVERSATION_STATS
 
         parts = [
-            f"统计：共 {stats['total_count']} 条",
+            f"本地统计：共 {stats['total_count']} 条",
             f"我 {stats['user_count']} 条 {stats['user_chars']} 字",
             f"AI {stats['assistant_count']} 条 {stats['assistant_chars']} 字",
         ]
@@ -210,6 +210,45 @@ class ConversationStatsMixin:
         parts.append(f"总 {stats['total_chars']} 字")
         return "｜".join(parts)
 
+    def _format_web_snapshot_stats_tooltip(self, session):
+        if session is None:
+            return ""
+
+        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None))
+        message_count = int(remote.get("last_web_snapshot_message_count") or 0)
+        if message_count <= 0 and not remote.get("last_web_snapshot_stats"):
+            return ""
+
+        web_stats = remote.get("last_web_snapshot_stats")
+        if isinstance(web_stats, dict) and web_stats:
+            user_count = int(web_stats.get("user_count") or remote.get("last_web_snapshot_user_count") or 0)
+            assistant_count = int(
+                web_stats.get("assistant_count")
+                or remote.get("last_web_snapshot_assistant_count")
+                or 0
+            )
+            round_count = int(web_stats.get("round_count") or remote.get("last_web_snapshot_round_count") or 0)
+            dom_estimated = int(
+                web_stats.get("dom_estimated_round_count")
+                or remote.get("last_web_snapshot_dom_estimated_round_count")
+                or 0
+            )
+            total_count = int(web_stats.get("total_count") or message_count)
+        else:
+            user_count = int(remote.get("last_web_snapshot_user_count") or 0)
+            assistant_count = int(remote.get("last_web_snapshot_assistant_count") or 0)
+            round_count = int(remote.get("last_web_snapshot_round_count") or 0)
+            dom_estimated = int(remote.get("last_web_snapshot_dom_estimated_round_count") or 0)
+            total_count = message_count
+
+        page_display_id = str(remote.get("last_web_snapshot_page_display_id") or "").strip()
+        page_part = f"页面ID {page_display_id}｜" if page_display_id else ""
+        return (
+            f"{page_part}网页快照：共 {total_count} 条｜"
+            f"我 {user_count} 条｜AI {assistant_count} 条｜"
+            f"问答 {round_count} 轮｜页面估轮 {dom_estimated}"
+        )
+
     def _refresh_current_conversation_stats(self, session=None):
         label = getattr(self, "chat_stats_label", None)
         if label is None:
@@ -221,8 +260,12 @@ class ConversationStatsMixin:
         try:
             stats = self._calc_conversation_stats(session)
             text = self._format_conversation_stats_text(stats)
+            tooltip = text
+            web_tooltip = self._format_web_snapshot_stats_tooltip(session)
+            if web_tooltip:
+                tooltip = f"{text}\n{web_tooltip}"
             label.setText(text)
-            label.setToolTip(text)
+            label.setToolTip(tooltip)
             label.setVisible(True)
             label.adjustSize()
             label.updateGeometry()
