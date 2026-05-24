@@ -137,8 +137,3 @@ def load_templates(
             f"from {template_root}"
         )
     return templates, errors
-
-
-def template_abs_path(template_root: Path, rel_path: str) -> Path:
-    name = Path(rel_path).name
-    return template_root / name

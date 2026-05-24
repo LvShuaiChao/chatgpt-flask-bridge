@@ -255,15 +255,6 @@ def evaluate_sync_poll_freshness(
     return True, "", ""
 
 
-def _page_poll_recency_key(page: PageSnapshot) -> float:
-    raw = page._raw if isinstance(page._raw, dict) else {}
-    for key in ("last_poll_at", "last_seen", "last_heartbeat_at"):
-        ts = float_ts(raw.get(key), default=0.0, context=f"page_command.pick.{key}")
-        if ts > 0:
-            return ts
-    return 0.0
-
-
 def _pick_fresh_conversation_page(
     registry: PageRegistry,
     conversation_id: str,

@@ -37,6 +37,7 @@ _CHATGPT_PLATFORM_ERROR_RE = re.compile(
 )
 
 
+# TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入回复/页面风控检测或删除。
 def is_chatgpt_platform_error_text(text) -> bool:
     value = str(text or "").strip()
     if not value:

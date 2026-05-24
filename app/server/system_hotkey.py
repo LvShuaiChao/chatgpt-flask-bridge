@@ -12,7 +12,6 @@ import traceback
 from flask import jsonify, request
 from werkzeug.exceptions import BadRequest
 
-from app.server import state as st
 from app.server.runtime_state import _dispatch_to_gui, _log
 
 SYSTEM_HOTKEY_MIN_INTERVAL_SEC = 0.8

@@ -85,19 +85,6 @@ def _segment_draw_text(segment: dict) -> str:
     return str(segment.get("text") or "")
 
 
-def measure_segments_width(segments, base_font: QFont) -> int:
-    total = 0
-    for segment in segments:
-        if not isinstance(segment, dict):
-            continue
-        text = _segment_draw_text(segment)
-        if not text:
-            continue
-        font = segment_font(base_font, segment)
-        total += QFontMetrics(font).horizontalAdvance(text)
-    return total
-
-
 def paint_text_segments(
     painter: QPainter,
     rect: QRect,

@@ -1,7 +1,6 @@
 """Server lifecycle, logging, callbacks, debug mode."""
 from __future__ import annotations
 
-import json
 import logging
 import socket
 import threading
@@ -9,9 +8,9 @@ import time
 import traceback
 import uuid
 
-from flask import Flask, jsonify
+from flask import Flask
 from flask_cors import CORS
-from app.utils.log_utils import append_log, clear_log_file
+from app.utils.log_utils import append_log
 from werkzeug.serving import WSGIRequestHandler, make_server
 
 from app.server import state as st

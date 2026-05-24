@@ -571,6 +571,7 @@ def is_reset_placeholder_error_message(message) -> bool:
     return False
 
 
+# TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入等待占位失败处理或删除。
 def mark_waiting_placeholder_failed(message, *, content: str) -> bool:
     if not is_waiting_placeholder_message(message):
         return False

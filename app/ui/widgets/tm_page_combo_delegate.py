@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.ui.page_display_segments import paint_item_view_segments
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
+from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 
 
 class TmPageComboDelegate(QStyledItemDelegate):

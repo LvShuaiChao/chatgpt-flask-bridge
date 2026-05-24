@@ -17,9 +17,7 @@ import uuid
 
 
 
-from PyQt5.QtCore import Qt, QUrl
-
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import Qt
 
 from PyQt5.QtWidgets import QMessageBox
 
@@ -704,6 +702,7 @@ class CursorBridgeMixin:
             tag="send_last_to_cursor_btn",
         )
 
+    # TODO(cleanup-observe): 当前静态扫描无调用（UI 未绑定此方法），待确认是否增加「发送输入框给 Cursor」按钮或删除。
     def _on_send_to_cursor_clicked(self):
         """ChatGPT -> Cursor Bridge：将输入框原文发送到 Cursor 任务队列。"""
         message_edit = getattr(self, "message_edit", None)

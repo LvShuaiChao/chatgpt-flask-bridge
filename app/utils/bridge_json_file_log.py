@@ -6,16 +6,6 @@ import time
 import traceback
 from pathlib import Path
 
-BRIDGE_JSON_LOG_TAGS = (
-    "[GUI][JSON][SEND_PAYLOAD_FULL]",
-    "[BRIDGE][JSON][SERVER_TO_TM_QUEUE_FULL]",
-    "[BRIDGE][JSON][TM_TO_SERVER_FULL]",
-    "[BRIDGE][JSON][SERVER_TO_TM_FULL]",
-    "[BRIDGE][JSON][ASSISTANT_REPLY_REPORT_FULL]",
-    "[BRIDGE][JSON][ASSISTANT_REPLY_RECV_FULL]",
-    "[BRIDGE][JSON][ASSISTANT_REPLY_UNKNOWN_FULL]",
-)
-
 _BRIDGE_JSON_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 BRIDGE_JSON_LOG_FILE = _BRIDGE_JSON_LOG_DIR / "bridge_json.log"
 _BRIDGE_JSON_LOG_LOCK = threading.RLock()
@@ -23,11 +13,6 @@ _BRIDGE_JSON_LOG_LOCK = threading.RLock()
 
 def _now_text():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-
-def should_write_bridge_json_file(message: str) -> bool:
-    text = str(message or "")
-    return any(tag in text for tag in BRIDGE_JSON_LOG_TAGS)
 
 
 def append_bridge_json_log(message: str) -> None:

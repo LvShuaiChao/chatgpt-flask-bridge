@@ -593,7 +593,6 @@ class UiStatusCompactMixin:
             return False
         bound_info, _bound_state, _bound_reason = self._resolve_bound_page_info(
             status=status,
-            session=session,
         )
         return self._page_browser_probably_throttled(bound_info)
 

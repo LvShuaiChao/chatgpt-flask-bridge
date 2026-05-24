@@ -20,7 +20,6 @@ from app.url_utils import parse_conversation_id
 from app.utils.page_status import PageRegistry
 from app.utils.page_status import (
     evaluate_page_capability,
-    evaluate_send_page,
     explain_page_decision,
     is_page_online,
     log_page_decision_fields,
@@ -38,7 +37,7 @@ from app.ui.mixins.page_selector_mixin import PageSelectorMixin
 from app.ui.mixins.page_send_target_mixin import PageSendTargetMixin
 from app.ui.mixins.page_sync_mixin import PageSyncMixin
 from app.ui.mixins.page_tm_client_mixin import PageTmClientMixin
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QTimer
 
 
 class PageBindMixin(

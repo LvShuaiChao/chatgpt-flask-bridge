@@ -8,7 +8,6 @@ import uuid
 from app.server.external_api import attach_external_request_bridge, count_user_turns
 from app.server import (
     complete_gui_dispatch,
-    execute_system_hotkey,
     is_server_running,
     push_message,
 )

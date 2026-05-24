@@ -1279,16 +1279,6 @@ const AutoQueueModule = (() => {
       renderTaskProfileDefaults();
     }
 
-    function renderBatchTaskGroupMode() {
-      if (config.promptMode !== 'task') return;
-
-      ensureBatchSubTabShell();
-      renderBatchModeSubTabs();
-      renderBatchSubTabPanels();
-      reparentBatchModeUiBlocks();
-      renderBatchTaskGroupContent();
-    }
-
     function bindBatchSubTabEvents() {
       if (!batchSubTabsEl) return;
 
@@ -1792,14 +1782,6 @@ const AutoQueueModule = (() => {
           });
         });
       }
-    }
-
-    function readPromptPickerModalPosition() {
-      return promptPickerPosition.readPosition();
-    }
-
-    function savePromptPickerModalPosition(left, top, reason = '') {
-      return promptPickerPosition.savePosition(left, top, reason);
     }
 
     function clampPromptPickerModalPosition(left, top, modal) {

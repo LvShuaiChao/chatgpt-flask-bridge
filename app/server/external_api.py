@@ -1,7 +1,6 @@
 """External REST API helpers (/api/v1/*)."""
 from __future__ import annotations
 
-import time
 import traceback
 import uuid
 
@@ -12,7 +11,6 @@ from app.server.auth_utils import external_auth_ok
 from app.server.runtime_state import (
     _dispatch_to_gui,
     _log,
-    _notify_status,
     _now,
 )
 

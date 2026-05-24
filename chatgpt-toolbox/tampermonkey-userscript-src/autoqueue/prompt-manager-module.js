@@ -1540,14 +1540,6 @@
       }
     }
 
-    function readPromptEditorModalPosition() {
-      return promptEditorPosition.readPosition();
-    }
-
-    function savePromptEditorModalPosition(left, top, reason = '') {
-      return promptEditorPosition.savePosition(left, top, reason);
-    }
-
     function clampPromptEditorModalPosition(left, top, modal) {
       return promptEditorPosition.clampPosition(left, top, modal);
     }

@@ -1,7 +1,7 @@
 """Cursor 升级监控线程。"""
 import time
 import traceback
-from typing import Callable, Optional
+from typing import Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 

@@ -27,9 +27,8 @@ from app.utils.page_status import conversation_syncable_from
 from app.utils.page_status import is_page_url_syncable
 from app.utils.page_status import bridge_status_online
 from app.utils.page_status import page_url_from, read_snapshot_identity
-from PyQt5.QtCore import QTimer, QUrl, Qt
-from PyQt5.QtGui import QColor, QDesktopServices
-from PyQt5.QtWidgets import QTableWidgetItem
+from PyQt5.QtCore import QUrl
+from PyQt5.QtGui import QDesktopServices
 
 
 class PageOpenCloseMixin:

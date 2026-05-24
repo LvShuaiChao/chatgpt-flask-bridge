@@ -35,7 +35,7 @@
 // To modify behavior, edit source files first, then run:
 // npm run build
 //
-// Generated at: 2026-05-24 23:26:09
+// Generated at: 2026-05-24 23:41:05
 // =============================================================================
 
 (function () {
@@ -16859,24 +16859,6 @@
       return normalizedPath;
     }
 
-    function findGroupByStableKey(projectKey) {
-      const key = String(projectKey || '').trim();
-      if (!key) {
-        return null;
-      }
-      return state.groups.find((group) => group && getUploadGroupStableKey(group) === key) || null;
-    }
-
-    function getQueueFilesForGroupId(groupId) {
-      const gid = String(groupId || '').trim();
-      if (!gid) {
-        return [];
-      }
-      return (state.queue || []).filter(
-        (file) => file && String(file.groupId || '').trim() === gid,
-      );
-    }
-
     function persistCompactUiConfigPatch(patch) {
       const cfg = getCompactUiConfig();
       const next = Object.assign({}, cfg, patch || {});
@@ -18576,6 +18558,268 @@
       }
     }
 
+    async function scrollChatToBottom(reason) {
+      const reasonText = reason || 'unknown';
+
+      const candidates = [
+        document.scrollingElement,
+        document.documentElement,
+        document.body,
+        document.querySelector('main'),
+        document.querySelector('[role="main"]'),
+        document.querySelector('[data-testid="conversation-turn-list"]')?.parentElement,
+      ].filter(Boolean);
+
+      const scrollables = Array.from(document.querySelectorAll('div, main, section'))
+        .filter((el) => {
+          const style = window.getComputedStyle(el);
+          const overflowY = style.overflowY;
+          const canScroll = el.scrollHeight > el.clientHeight + 80;
+          return canScroll && ['auto', 'scroll', 'overlay'].includes(overflowY);
+        })
+        .sort((a, b) => b.scrollHeight - a.scrollHeight);
+
+      const targets = [...new Set([...candidates, ...scrollables])];
+
+      for (const el of targets) {
+        try {
+          if (!el) {
+            continue;
+          }
+          el.scrollTop = el.scrollHeight;
+        } catch (err) {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] scrollChatToBottom element failed', err);
+          ToolboxShell.appendLog(`[SCROLL][BOTTOM_ELEMENT_FAILED] reason=${reasonText} error=${errText}`);
+        }
+      }
+
+      try {
+        window.scrollTo({
+          top: Math.max(
+            document.body ? document.body.scrollHeight : 0,
+            document.documentElement ? document.documentElement.scrollHeight : 0,
+          ),
+          behavior: 'auto',
+        });
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] scrollChatToBottom window failed', err);
+        ToolboxShell.appendLog(`[SCROLL][BOTTOM_WINDOW_FAILED] reason=${reasonText} error=${errText}`);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      ToolboxShell.appendLog(`[SCROLL][BOTTOM] reason=${reasonText}`);
+    }
+
+    function getLastAssistantReplyText() {
+      try {
+        if (typeof getLatestAssistantMessageForCopy === 'function') {
+          const picked = getLatestAssistantMessageForCopy({ forceRefresh: true });
+          if (picked && picked.ok && picked.text) {
+            return String(picked.text).trim();
+          }
+        }
+
+        if (
+          typeof ChatMessageExtractor !== 'undefined'
+          && ChatMessageExtractor
+          && typeof ChatMessageExtractor.buildRecords === 'function'
+          && typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser === 'function'
+        ) {
+          const records = ChatMessageExtractor.buildRecords({ includeEmpty: false });
+          const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
+
+          if (picked && picked.ok && picked.record) {
+            const recordText = String(picked.record.text || '').trim();
+            if (recordText) {
+              return recordText;
+            }
+          }
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getLastAssistantReplyText extractor failed', err);
+        ToolboxShell.appendLog(`[COPY][LATEST_READ_FAILED] reason=getLastAssistantReplyText error=${errText}`);
+      }
+
+      const assistantNodes = Array.from(
+        document.querySelectorAll('[data-message-author-role="assistant"]'),
+      );
+      const lastNode = assistantNodes.length > 0
+        ? assistantNodes[assistantNodes.length - 1]
+        : null;
+
+      if (!lastNode) {
+        return '';
+      }
+
+      return String(lastNode.innerText || lastNode.textContent || '').trim();
+    }
+
+    async function copyLatestAssistantReplyUnified(options) {
+      const opts = Object.assign({
+        reason: 'copy-latest',
+        scrollBeforeCopy: true,
+        scrollAfterCopy: true,
+        prefilledText: '',
+      }, options || {});
+
+      ToolboxShell.appendLog(`[COPY][UNIFIED_START] reason=${opts.reason}`);
+
+      if (opts.scrollBeforeCopy) {
+        await scrollChatToBottom(`${opts.reason}:before-copy`);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+
+      let text = String(opts.prefilledText || '').trim();
+
+      if (!text) {
+        try {
+          text = getLastAssistantReplyText();
+        } catch (err) {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] getLastAssistantReplyText failed', err);
+          ToolboxShell.appendLog(`[COPY][LATEST_READ_FAILED] reason=${opts.reason} error=${errText}`);
+          setStatus('复制失败：无法读取最后回复', 'error');
+          return {
+            ok: false,
+            reason: 'read-failed',
+            error: errText,
+          };
+        }
+      }
+
+      text = String(text || '').trim();
+
+      if (!text || (typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(text))) {
+        ToolboxShell.appendLog(
+          `[COPY][LATEST_EMPTY] reason=${opts.reason} invalid=${text ? '1' : '0'}`,
+        );
+        setStatus('复制失败：最后回复为空', 'error');
+        return {
+          ok: false,
+          reason: text ? 'invalid-assistant-text' : 'empty',
+        };
+      }
+
+      if (typeof copyTextToClipboard !== 'function') {
+        ToolboxShell.appendLog(`[COPY][CLIPBOARD_FAILED] reason=${opts.reason} error=copyTextToClipboard-missing`);
+        setStatus('复制失败：剪贴板写入失败', 'error');
+        return {
+          ok: false,
+          reason: 'clipboard-failed',
+          error: 'copyTextToClipboard-missing',
+        };
+      }
+
+      try {
+        await copyTextToClipboard(text);
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] clipboard write failed', err);
+        ToolboxShell.appendLog(`[COPY][CLIPBOARD_FAILED] reason=${opts.reason} error=${errText}`);
+        setStatus('复制失败：剪贴板写入失败', 'error');
+        return {
+          ok: false,
+          reason: 'clipboard-failed',
+          error: errText,
+        };
+      }
+
+      ToolboxShell.appendLog(`[COPY][UNIFIED_DONE] reason=${opts.reason} chars=${text.length}`);
+      setStatus(`已复制最后回复：${text.length} 字`, 'success');
+
+      if (opts.scrollAfterCopy) {
+        await scrollChatToBottom(`${opts.reason}:after-copy`);
+      }
+
+      return {
+        ok: true,
+        text,
+        chars: text.length,
+      };
+    }
+
+    async function sendConfiguredHotkey(reason) {
+      const reasonText = String(reason || 'copy-hotkey').trim() || 'copy-hotkey';
+      const hotkeyOk = await triggerSendHotkeyOnce();
+      ToolboxShell.appendLog(
+        `[COPY_ACTION][HOTKEY] reason=${reasonText} ok=${hotkeyOk ? 1 : 0}`,
+      );
+      return {
+        ok: !!hotkeyOk,
+        reason: hotkeyOk ? 'ok' : 'hotkey-failed',
+        hotkeySent: !!hotkeyOk,
+      };
+    }
+
+    async function sendContinuePromptFromUnifiedPipeline(reason, options = {}) {
+      const reasonText = String(reason || 'copy-continue').trim() || 'copy-continue';
+      const continueResult = await sendContinueMessageOnly(reasonText, options);
+      const ok = !!(continueResult && continueResult.ok);
+      ToolboxShell.appendLog(
+        `[COPY_ACTION][CONTINUE] reason=${reasonText} ok=${ok ? 1 : 0}`,
+      );
+      return Object.assign({}, continueResult || {}, {
+        ok,
+        continueSent: ok,
+      });
+    }
+
+    async function startLoopCopyHotkeyContinueFlow(source = 'button') {
+      return toggleCopyHotkeyContinueLoop(source);
+    }
+
+    async function runCopyAction(actionType, options = {}) {
+      const type = String(actionType || 'copy-only').trim() || 'copy-only';
+      const source = String(options.source || 'runCopyAction').trim() || 'runCopyAction';
+      const flowOptions = options && typeof options === 'object' ? options : {};
+
+      ToolboxShell.appendLog(`[COPY_ACTION][START] type=${type}`);
+
+      if (type === 'copy-only') {
+        const result = await copyLastReplyWithState(source);
+        ToolboxShell.appendLog(`[COPY_ACTION][DONE] type=${type} ok=${result ? 1 : 0}`);
+        return result;
+      }
+
+      if (type === 'copy-and-continue') {
+        const result = await copyLastMessageAndContinue(source);
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][CONTINUE_DONE] type=${type} ok=${result ? 1 : 0}`,
+        );
+        return result;
+      }
+
+      if (type === 'copy-and-hotkey') {
+        const result = await runCopyAndHotkeyAction(source, flowOptions);
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][HOTKEY_DONE] type=${type} ok=${result && result.ok ? 1 : 0}`,
+        );
+        return result;
+      }
+
+      if (type === 'copy-hotkey-continue') {
+        const result = await copyHotkeyAndContinueOnce(source, flowOptions);
+        ToolboxShell.appendLog(
+          `[COPY_ACTION][DONE] type=${type} ok=${result && result.ok ? 1 : 0}`,
+        );
+        return result;
+      }
+
+      if (type === 'loop-copy-hotkey-continue') {
+        return startLoopCopyHotkeyContinueFlow(source);
+      }
+
+      ToolboxShell.appendLog(`[COPY_ACTION][UNKNOWN_TYPE] type=${type}`);
+      return {
+        ok: false,
+        reason: 'unknown-action-type',
+      };
+    }
+
     async function waitAssistantStableForCopyContinue(source = 'copy-continue', options = {}) {
       const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
@@ -18708,11 +18952,8 @@
           `[COPY_LAST_REPLY][start] source=${String(source || '-')}`,
         );
         setStatus('正在等待最后回复稳定...', 'running');
-        if (typeof forceChatPageToAbsoluteEnd === 'function') {
-          await forceChatPageToAbsoluteEnd('copy-last-reply:start');
-        }
 
-        let text = '';
+        let prefilledText = '';
         if (typeof waitAssistantStableForCopyContinue === 'function') {
           const waitResult = await waitAssistantStableForCopyContinue(source);
           if (!waitResult || !waitResult.ok) {
@@ -18730,27 +18971,24 @@
             }
             return false;
           }
-          text = String(waitResult.text || '').trim();
+          prefilledText = String(waitResult.text || '').trim();
         }
 
-        if (typeof getLatestAssistantMessageForCopy === 'function') {
-          const freshPick = getLatestAssistantMessageForCopy({ forceRefresh: true });
-          if (freshPick && freshPick.ok && freshPick.text) {
-            text = String(freshPick.text).trim();
-          }
-        } else if (typeof extractLatestAssistantMessageText === 'function') {
-          text = String(extractLatestAssistantMessageText() || '').trim();
-        } else if (typeof getLastAssistantText === 'function') {
-          text = String(getLastAssistantText() || '').trim();
-        }
+        copyLastReplyTaskStatus = 'copying';
+        copyLastMessageTaskStatus = 'copying';
+        copyLastMessageWaiting = false;
+        renderUploadButtonsOnly();
 
-        if (
-          !text
-          || (typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(text))
-        ) {
-          ToolboxShell.appendLog(
-            `[COPY_LAST_REPLY][abort] reason=${text ? 'invalid-assistant-text' : 'empty-text'}`,
-          );
+        const copyResult = await copyLatestAssistantReplyUnified({
+          reason: `copy-only:${String(source || '-')}`,
+          scrollBeforeCopy: true,
+          scrollAfterCopy: true,
+          prefilledText,
+        });
+
+        if (!copyResult || copyResult.ok !== true) {
+          const failReason = copyResult && copyResult.reason ? copyResult.reason : 'copy-failed';
+          ToolboxShell.appendLog(`[COPY_LAST_REPLY][abort] reason=${failReason}`);
           setStatus('复制最后回复失败：没有找到可复制的回复', 'warn');
           copyLastReplyTaskStatus = 'failed';
           copyLastMessageTaskStatus = 'failed';
@@ -18762,35 +19000,13 @@
           return false;
         }
 
-        copyLastReplyTaskStatus = 'copying';
-        copyLastMessageTaskStatus = 'copying';
-        copyLastMessageWaiting = false;
-        renderUploadButtonsOnly();
-
-        if (typeof copyTextToClipboard !== 'function') {
-          ToolboxShell.appendLog('[COPY_LAST_REPLY][abort] reason=copyTextToClipboard-missing');
-          setStatus('复制失败：剪贴板函数不可用', 'error');
-          copyLastReplyTaskStatus = 'failed';
-          copyLastMessageTaskStatus = 'failed';
-          renderUploadButtonsOnly();
-          if (btn && typeof setButtonTemporaryError === 'function') {
-            setButtonTemporaryError(btn, '复制失败', 1200);
-          }
-          return false;
-        }
-
-        await copyTextToClipboard(text);
-        if (typeof forceChatPageToAbsoluteEnd === 'function') {
-          await forceChatPageToAbsoluteEnd('copy-last-reply:after-copy');
-        }
         copyLastReplyTaskStatus = 'success';
         copyLastMessageTaskStatus = 'success';
         renderUploadButtonsOnly();
 
         ToolboxShell.appendLog(
-          `[COPY_LAST_REPLY][done] chars=${text.length}`,
+          `[COPY_LAST_REPLY][done] chars=${copyResult.chars || 0}`,
         );
-        setStatus('已复制最后回复', 'success');
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(source || '-', 'copyLastReply');
         }
@@ -19288,17 +19504,24 @@
           btn.disabled = true;
         }
 
-        if (typeof copyTextToClipboard !== 'function') {
+        const copyResult = await copyLatestAssistantReplyUnified({
+          reason: `copy-and-continue:${String(source || '-')}`,
+          scrollBeforeCopy: true,
+          scrollAfterCopy: true,
+          prefilledText: waitResult.text,
+        });
+
+        if (!copyResult || copyResult.ok !== true) {
+          const failReason = copyResult && copyResult.reason ? copyResult.reason : 'copy-failed';
+          ToolboxShell.appendLog(`[UPLOAD_COPY_CONTINUE][abort] reason=${failReason}`);
           setStatus('复制最后回复失败：剪贴板 API 不可用', 'error');
-          ToolboxShell.appendLog('[UPLOAD_COPY_CONTINUE][abort] reason=copyTextToClipboard-missing');
           return false;
         }
 
-        await copyTextToClipboard(waitResult.text);
         copyTaskStatus = 'copied';
 
         ToolboxShell.appendLog(
-          `[UPLOAD_COPY_CONTINUE][copied] chars=${String(waitResult.text || '').length}`,
+          `[UPLOAD_COPY_CONTINUE][copied] chars=${copyResult.chars || 0}`,
         );
 
         void playCopySuccessBeepSafe(source || '-', 'copyContinue');
@@ -19309,7 +19532,7 @@
           btn.disabled = true;
         }
 
-        const sentResult = await sendContinueMessageOnly('copy-continue-after-wait');
+        const sentResult = await sendContinuePromptFromUnifiedPipeline('copy-continue-after-wait');
 
         if (!sentResult || !sentResult.ok) {
           ToolboxShell.appendLog('[UPLOAD_COPY_CONTINUE][failed] reason=continue-send-failed');
@@ -19450,7 +19673,7 @@
             shortcut: item.label || '-',
           });
 
-          runCopyAndHotkeyAction('shortcut').catch((error) => {
+          runCopyAction('copy-and-hotkey', { source: 'shortcut' }).catch((error) => {
             console.error('[TOOLBOX][COPY_HOTKEY][SHORTCUT_FAILED]', {
               error_type: error && error.name,
               error: error && error.message,
@@ -19574,36 +19797,26 @@
           btn.textContent = '复制中...';
         }
 
-        if (typeof copyTextToClipboard !== 'function') {
-          ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][abort] reason=copyTextToClipboard-missing');
-          setStatus('复制+快捷键失败：剪贴板 API 不可用', 'error');
+        const copyResult = await copyLatestAssistantReplyUnified({
+          reason: `copy-and-hotkey:${sourceText || '-'}`,
+          scrollBeforeCopy: true,
+          scrollAfterCopy: true,
+          prefilledText: waitResult.text,
+        });
 
-          return {
-            ok: false,
-            reason: 'copyTextToClipboard-missing',
-            copied: false,
-            hotkeySent: false,
-          };
-        }
-
-        try {
-          await copyTextToClipboard(waitResult.text);
-        } catch (copyError) {
-          const errText = formatToolboxError(copyError);
-
+        if (!copyResult || copyResult.ok !== true) {
+          const failReason = copyResult && copyResult.reason ? copyResult.reason : 'copy-failed';
+          const errText = copyResult && copyResult.error ? copyResult.error : failReason;
           console.error('[COPY_HOTKEY_ONCE][COPY_FAILED]', {
             source: sourceText,
-            error_type: copyError && copyError.name,
+            reason: failReason,
             error: errText,
-            stack: copyError && copyError.stack,
           });
-
-          ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][failed] reason=copy-failed detail=${errText}`);
+          ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][failed] reason=${failReason} detail=${errText}`);
           setStatus(`复制+快捷键失败：${errText}`, 'error');
-
           return {
             ok: false,
-            reason: 'copy-failed',
+            reason: failReason,
             detail: errText,
             copied: false,
             hotkeySent: false,
@@ -19611,7 +19824,7 @@
         }
 
         ToolboxShell.appendLog(
-          `[COPY_HOTKEY_ONCE][copied] chars=${String(waitResult.text || '').length}`,
+          `[COPY_HOTKEY_ONCE][copied] chars=${copyResult.chars || 0}`,
         );
 
         if (typeof playCopySuccessBeepSafe === 'function') {
@@ -19632,9 +19845,9 @@
           btn.textContent = '发送快捷键...';
         }
 
-        const hotkeyOk = await triggerSendHotkeyOnce();
+        const hotkeyResult = await sendConfiguredHotkey('copy-and-hotkey');
 
-        if (!hotkeyOk) {
+        if (!hotkeyResult || !hotkeyResult.ok) {
           ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][failed] reason=hotkey-failed');
           setStatus('复制成功，但 Ctrl+Alt+I 执行失败', 'error');
 
@@ -19865,42 +20078,31 @@
         if (btn && !isLoopMode) {
           btn.textContent = '复制中...';
         }
-        if (typeof copyTextToClipboard !== 'function') {
-          if (!isLoopMode) {
-            setStatus('复制失败：剪贴板 API 不可用', 'error');
-          }
-          ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][abort] reason=copyTextToClipboard-missing');
-          return {
-            ok: false,
-            assistantDoneSignal: false,
-            reason: 'copyTextToClipboard-missing',
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: false,
-            hotkeySent: false,
-            continueSent: false,
-            assistantMessageKey,
-          };
-        }
-        try {
-          await copyTextToClipboard(waitResult.text);
-        } catch (copyError) {
-          const errText = formatToolboxError(copyError);
+
+        const copyResult = await copyLatestAssistantReplyUnified({
+          reason: `copy-hotkey-continue:${sourceText || '-'}`,
+          scrollBeforeCopy: true,
+          scrollAfterCopy: true,
+          prefilledText: waitResult.text,
+        });
+
+        if (!copyResult || copyResult.ok !== true) {
+          const failReason = copyResult && copyResult.reason ? copyResult.reason : 'copy-failed';
+          const errText = copyResult && copyResult.error ? copyResult.error : failReason;
           console.error('[COPY_HOTKEY_CONTINUE][COPY_FAILED]', {
             source: sourceText,
             loopMode: isLoopMode,
-            error_type: copyError && copyError.name,
+            reason: failReason,
             error: errText,
-            stack: copyError && copyError.stack,
           });
-          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=copy-failed detail=${errText}`);
+          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=${failReason} detail=${errText}`);
           if (!isLoopMode) {
             setStatus(`复制+快捷键+继续失败：${errText}`, 'error');
           }
           return {
             ok: false,
             assistantDoneSignal: false,
-            reason: 'copy-failed',
+            reason: failReason,
             detail: errText,
             source: sourceText,
             loopMode: isLoopMode,
@@ -19910,8 +20112,9 @@
             assistantMessageKey,
           };
         }
+
         ToolboxShell.appendLog(
-          `[COPY_HOTKEY_CONTINUE][copied] chars=${String(waitResult.text || '').length}`,
+          `[COPY_HOTKEY_CONTINUE][copied] chars=${copyResult.chars || 0}`,
         );
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyContinue');
@@ -19935,7 +20138,8 @@
         if (btn && !isLoopMode) {
           btn.textContent = '发送快捷键...';
         }
-        const hotkeyOk = await triggerSendHotkeyOnce();
+        const hotkeyResult = await sendConfiguredHotkey('copy-hotkey-continue');
+        const hotkeyOk = !!(hotkeyResult && hotkeyResult.ok);
         if (!hotkeyOk) {
           ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][failed] reason=hotkey-failed');
           if (!isLoopMode) {
@@ -19976,7 +20180,7 @@
         const continueSource = sourceText || 'copy-hotkey-continue-once';
         const loopContinuePromptTxt = getCopyHotkeyContinuePromptText(flowOptions);
         safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
-        const continueResult = await sendContinueMessageOnly(continueSource, flowOptions);
+        const continueResult = await sendContinuePromptFromUnifiedPipeline(continueSource, flowOptions);
         if (!continueResult || !continueResult.ok) {
           const detail = continueResult && continueResult.reason ? continueResult.reason : '';
           if (
@@ -22135,6 +22339,7 @@
       }
     }
 
+    // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否增加「上传此文件」UI 或删除。
     async function uploadSingleById(id) {
       healStaleUploadRunningLockIfNeeded('uploadSingleById');
 
@@ -22279,6 +22484,7 @@
       }
     }
 
+    // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否增加列表单文件上传入口或删除。
     async function uploadSingleFromListClick(id) {
       const q = getActiveGroupFiles().find((item) => item && item.id === id);
 
@@ -25337,6 +25543,7 @@
       }
     }
 
+    // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入「等待回复完成再复制」流程或删除。
     async function waitUntilAssistantIdleForCopy(options) {
       const opts = options || {};
       const runId = opts.runId;
@@ -25461,7 +25668,7 @@
           `[CHAT_PAGE][copy-last-message-shortcut:trigger] key=${e.key || '-'} code=${e.code || '-'}`
         );
         runUploadActionPromise(
-          copyLastReplyWithState('shortcut'),
+          runCopyAction('copy-only', { source: 'shortcut' }),
           '复制最后回复',
         );
         window.setTimeout(() => {
@@ -25556,7 +25763,7 @@
 
       if (action === 'copy-last-message') {
         runUploadActionPromise(
-          copyLastReplyWithState(src),
+          runCopyAction('copy-only', { source: src }),
           '复制最后回复',
         );
         return true;
@@ -25577,7 +25784,7 @@
         button.disabled = false;
         button.removeAttribute('disabled');
         runUploadActionPromise(
-          copyLastMessageAndContinue(src || 'runUploadUiAction'),
+          runCopyAction('copy-and-continue', { source: src || 'runUploadUiAction' }),
           '复制并继续',
         );
 
@@ -25794,7 +26001,7 @@
           }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-last-reply');
           runUploadActionPromise(
-            copyLastReplyWithState('delegated-click'),
+            runCopyAction('copy-only', { source: 'delegated-click' }),
             '复制最后回复',
           );
           return;
@@ -25886,7 +26093,7 @@
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-hotkey-once');
 
           runUploadActionPromise(
-            runCopyAndHotkeyAction('delegated-click'),
+            runCopyAction('copy-and-hotkey', { source: 'delegated-click' }),
             '复制+快捷键',
           );
 
@@ -25902,7 +26109,7 @@
           }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-hotkey-continue-once');
           runUploadActionPromise(
-            copyHotkeyAndContinueOnce('delegated-click'),
+            runCopyAction('copy-hotkey-continue', { source: 'delegated-click' }),
             '复制+快捷键+继续',
           );
           return;
@@ -25917,7 +26124,7 @@
           }
           ToolboxShell.appendLog('[UPLOAD_UI_ACTION][event] source=delegated-click action=copy-hotkey-continue-loop');
           runUploadActionPromise(
-            toggleCopyHotkeyContinueLoop('delegated-click'),
+            runCopyAction('loop-copy-hotkey-continue', { source: 'delegated-click' }),
             '连续复制+快捷键+继续',
           );
           return;
@@ -26601,14 +26808,14 @@
       }, 'UPLOAD');
 
       DomUtil.bindClick(rootEl, UploadSelectors.copyHotkeyOnceBtn, () => {
-        runCopyAndHotkeyAction('button').catch((error) => {
+        runCopyAction('copy-and-hotkey', { source: 'button' }).catch((error) => {
           console.error('[TOOLBOX][COPY_HOTKEY][BUTTON_FAILED]', error);
         });
       }, 'UPLOAD');
 
       DomUtil.bindClick(rootEl, UploadSelectors.copyHotkeyContinueOnceBtn, async () => {
         try {
-          await copyHotkeyAndContinueOnce('bindClick');
+          await runCopyAction('copy-hotkey-continue', { source: 'bindClick' });
         } catch (error) {
           console.error('[COPY_HOTKEY_CONTINUE][FAILED]', {
             error_type: error && error.name,
@@ -26621,7 +26828,7 @@
 
       DomUtil.bindClick(rootEl, UploadSelectors.copyHotkeyContinueLoopBtn, async () => {
         try {
-          await toggleCopyHotkeyContinueLoop('bindClick');
+          await runCopyAction('loop-copy-hotkey-continue', { source: 'bindClick' });
         } catch (error) {
           console.error('[COPY_HOTKEY_CONTINUE_LOOP][FAILED]', {
             error_type: error && error.name,
@@ -28932,16 +29139,6 @@ const AutoQueueModule = (() => {
       renderTaskProfileDefaults();
     }
 
-    function renderBatchTaskGroupMode() {
-      if (config.promptMode !== 'task') return;
-
-      ensureBatchSubTabShell();
-      renderBatchModeSubTabs();
-      renderBatchSubTabPanels();
-      reparentBatchModeUiBlocks();
-      renderBatchTaskGroupContent();
-    }
-
     function bindBatchSubTabEvents() {
       if (!batchSubTabsEl) return;
 
@@ -29445,14 +29642,6 @@ const AutoQueueModule = (() => {
           });
         });
       }
-    }
-
-    function readPromptPickerModalPosition() {
-      return promptPickerPosition.readPosition();
-    }
-
-    function savePromptPickerModalPosition(left, top, reason = '') {
-      return promptPickerPosition.savePosition(left, top, reason);
     }
 
     function clampPromptPickerModalPosition(left, top, modal) {
@@ -34931,14 +35120,6 @@ const AutoQueueModule = (() => {
         datalist.id = 'cgpt-prompt-category-options';
         categoryInput.insertAdjacentElement('afterend', datalist);
       }
-    }
-
-    function readPromptEditorModalPosition() {
-      return promptEditorPosition.readPosition();
-    }
-
-    function savePromptEditorModalPosition(left, top, reason = '') {
-      return promptEditorPosition.savePosition(left, top, reason);
     }
 
     function clampPromptEditorModalPosition(left, top, modal) {
@@ -42581,6 +42762,7 @@ if (document.readyState === 'loading') {
     return result;
   }
 
+  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入「复制最后回复」bridge snapshot 路径或删除。
   function pickLatestAssistantTextFromBridgeSnapshot() {
     try {
       const snapshot = buildConversationSnapshotForBridge(null);
@@ -48232,6 +48414,7 @@ if (document.readyState === 'loading') {
     return clickResult;
   }
 
+  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入稳定发送链路或删除。
   async function sendTextThroughComposer(text, source) {
     const cleanText = String(text || '').trim();
     const sourceTag = String(source || 'unknown');

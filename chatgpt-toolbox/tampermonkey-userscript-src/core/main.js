@@ -1207,6 +1207,7 @@
     return result;
   }
 
+  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入「复制最后回复」bridge snapshot 路径或删除。
   function pickLatestAssistantTextFromBridgeSnapshot() {
     try {
       const snapshot = buildConversationSnapshotForBridge(null);
@@ -6858,6 +6859,7 @@
     return clickResult;
   }
 
+  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入稳定发送链路或删除。
   async function sendTextThroughComposer(text, source) {
     const cleanText = String(text || '').trim();
     const sourceTag = String(source || 'unknown');

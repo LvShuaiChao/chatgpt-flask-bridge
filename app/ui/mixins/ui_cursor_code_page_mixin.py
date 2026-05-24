@@ -13,7 +13,6 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QTabWidget,
     QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
