@@ -1,6 +1,7 @@
 """External REST API helpers (/api/v1/*)."""
 from __future__ import annotations
 
+import logging
 import traceback
 import uuid
 
@@ -13,6 +14,8 @@ from app.server.runtime_state import (
     _log,
     _now,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _external_auth_ok():
@@ -45,7 +48,116 @@ def _set_external_request_status(req, status):
         req.pop("status", None)
 
 
-_EXTERNAL_TERMINAL_STATUSES = frozenset({"done", "failed", "timeout"})
+_EXTERNAL_STATUSES = frozenset({
+    "queued",
+    "sent_to_bridge",
+    "waiting_reply",
+    "reply_ready",
+    "done",
+    "failed",
+    "timeout",
+    "cancelled",
+})
+
+_EXTERNAL_TERMINAL_STATUSES = frozenset({
+    "done",
+    "failed",
+    "timeout",
+    "cancelled",
+})
+
+_EXTERNAL_STATUS_TRANSITIONS = {
+    "queued": {"sent_to_bridge", "waiting_reply", "failed", "timeout", "cancelled"},
+    "sent_to_bridge": {"waiting_reply", "reply_ready", "failed", "timeout", "cancelled"},
+    "waiting_reply": {"reply_ready", "done", "failed", "timeout", "cancelled"},
+    "reply_ready": {"done", "failed", "timeout", "cancelled"},
+    "done": set(),
+    "failed": set(),
+    "timeout": set(),
+    "cancelled": set(),
+}
+
+
+def _is_allowed_external_transition(current_status, next_status):
+    current_status = (current_status or "").strip()
+    next_status = (next_status or "").strip()
+    if not next_status:
+        return False
+    if current_status == next_status:
+        return True
+    if current_status in _EXTERNAL_TERMINAL_STATUSES:
+        return False
+    allowed = _EXTERNAL_STATUS_TRANSITIONS.get(current_status)
+    if allowed is None:
+        return False
+    return next_status in allowed
+
+
+def update_external_request_status(req, next_status, reason=""):
+    """统一外部请求状态更新入口。"""
+    if not isinstance(req, dict):
+        return False
+    next_status = (next_status or "").strip()
+    if next_status and next_status not in _EXTERNAL_STATUSES:
+        logger.warning(
+            "[EXTERNAL][INVALID_STATUS] request_id=%s status=%s",
+            req.get("request_id") or "-",
+            next_status,
+        )
+        return False
+
+    current_status = _external_request_status(req) or "queued"
+    reason_text = (reason or "").strip()
+
+    if current_status == next_status:
+        req["updated_at"] = _now()
+        if reason_text:
+            req["status_reason"] = reason_text
+        return True
+
+    if current_status in _EXTERNAL_TERMINAL_STATUSES:
+        logger.info(
+            "[EXTERNAL][STALE_STATUS_IGNORED] request_id=%s current=%s next=%s reason=%s",
+            req.get("request_id") or "-",
+            current_status,
+            next_status,
+            reason_text,
+        )
+        return False
+
+    if not _is_allowed_external_transition(current_status, next_status):
+        logger.warning(
+            "[EXTERNAL][INVALID_TRANSITION] request_id=%s current=%s next=%s reason=%s",
+            req.get("request_id") or "-",
+            current_status,
+            next_status,
+            reason_text,
+        )
+        return False
+
+    _set_external_request_status(req, next_status)
+    req["updated_at"] = _now()
+    if reason_text:
+        req["status_reason"] = reason_text
+
+    logger.info(
+        "[EXTERNAL][STATUS] request_id=%s %s -> %s reason=%s",
+        req.get("request_id") or "-",
+        current_status,
+        next_status,
+        reason_text,
+    )
+    _log(
+        "[EXTERNAL][STATUS] "
+        f"request_id={req.get('request_id') or '-'} "
+        f"{current_status} -> {next_status} "
+        f"reason={reason_text or '-'}"
+    )
+    return True
+
+
+def _set_external_request_status_safe(req, status, reason=""):
+    return update_external_request_status(req, status, reason=reason)
 
 
 def cleanup_external_requests_locked():
@@ -155,14 +267,27 @@ def attach_external_request_bridge(session_id, bridge_message_id, turn_id=""):
         req = st._external_requests.get(request_id)
         if not req:
             return False
+        current = _external_request_status(req)
+        if current in _EXTERNAL_TERMINAL_STATUSES:
+            logger.info(
+                "[EXTERNAL][ATTACH_SKIP_TERMINAL] request_id=%s status=%s bridge_message_id=%s",
+                request_id,
+                current,
+                bridge_message_id,
+            )
+            return False
+
         req["bridge_message_id"] = bridge_message_id
         req["turn_id"] = turn_id or req.get("turn_id") or ""
-        req["updated_at"] = _now()
-        if _external_request_status(req) in ("queued", "waiting"):
-            _set_external_request_status(req, "queued")
+        req["bridge_attached_at"] = _now()
         st._bridge_message_to_external[bridge_message_id] = request_id
+        update_external_request_status(
+            req,
+            "sent_to_bridge",
+            reason="bridge message attached",
+        )
     _log(
-        f"[EXTERNAL_API][ATTACH] request_id={request_id} session_id={session_id} "
+        f"[EXTERNAL][ATTACH] request_id={request_id} session_id={session_id} "
         f"bridge_message_id={bridge_message_id[:8]}… turn_id={turn_id[:8] + '…' if turn_id else '-'}"
     )
     return True
@@ -177,9 +302,9 @@ def _update_external_status_for_bridge(bridge_message_id, status):
         if not request_id:
             return
         req = st._external_requests.get(request_id)
-        if not req or _external_request_status(req) in ("done", "failed", "timeout"):
+        if not req or _external_request_status(req) in _EXTERNAL_TERMINAL_STATUSES:
             return
-        _set_external_request_status(req, status)
+        _set_external_request_status_safe(req, status)
         req["updated_at"] = _now()
 
 
@@ -211,7 +336,7 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
         req = st._external_requests.get(request_id)
         if not req:
             return False
-        if _external_request_status(req) in ("done", "failed", "timeout"):
+        if _external_request_status(req) in _EXTERNAL_TERMINAL_STATUSES:
             return False
         session_id = req.get("session_id") or ""
         terminal_after = False
@@ -224,7 +349,8 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
                     f"[FIELD][MISSING_CONTENT] request_id={request_id} "
                     f"bridge_message_id={message_id}"
                 )
-            _set_external_request_status(req, "done")
+            _set_external_request_status_safe(req, "reply_ready")
+            _set_external_request_status_safe(req, "done")
             req["reply"] = text
             req["error"] = ""
             req["updated_at"] = _now()
@@ -242,7 +368,7 @@ def _notify_external_request_from_bridge_locked(message_id, event, payload, msg=
                 or (msg or {}).get("error_detail")
                 or event
             )
-            _set_external_request_status(req, "failed")
+            _set_external_request_status_safe(req, "failed")
             req["error"] = str(reason)
             req["updated_at"] = _now()
             terminal_after = True
@@ -292,7 +418,7 @@ def _get_external_request(request_id):
         if not req:
             return None
         req = dict(req)
-    if _external_request_status(req) not in ("done", "failed", "timeout"):
+    if _external_request_status(req) not in _EXTERNAL_TERMINAL_STATUSES:
         if _check_external_request_timeout(req):
             with st._state_lock:
                 stored = st._external_requests.get(request_id)

@@ -3,7 +3,6 @@ import os
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -52,7 +51,7 @@ class UiSettingsPageMixin:
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        self.settings_scroll, self.settings_tab, self.settings_layout = (
+        self.settings_scroll, settings_content, self.settings_layout = (
             self._create_scroll_tab()
         )
         self.settings_layout.setContentsMargins(12, 10, 12, 10)

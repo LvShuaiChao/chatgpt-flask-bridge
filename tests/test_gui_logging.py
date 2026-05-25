@@ -2,20 +2,8 @@ from app.utils.gui_logging import (
     adjust_level_for_message,
     infer_level_from_message,
     level_for_decision_message,
-    should_emit_log,
     should_show_gui_log,
 )
-
-
-def test_should_emit_log_default_blocks_debug():
-    assert should_emit_log("DEBUG", debug_mode=False) is False
-    assert should_emit_log("INFO", debug_mode=False) is True
-    assert should_emit_log("ERROR", debug_mode=False) is True
-
-
-def test_should_emit_log_debug_mode_allows_debug():
-    assert should_emit_log("DEBUG", debug_mode=True) is True
-    assert should_emit_log("TRACE", debug_mode=True) is True
 
 
 def test_infer_level_from_message():

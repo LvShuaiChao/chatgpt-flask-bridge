@@ -290,21 +290,6 @@ class SessionListItemWidget(QWidget):
         self.update()
         return True
 
-    def update_subtitle_fast(self, subtitle):
-        subtitle = (subtitle or "").replace("\n", " ")
-        state = getattr(self, "_last_apply_state", None)
-        if not isinstance(state, dict):
-            return False
-        if state.get("subtitle") == subtitle:
-            return True
-        state["subtitle"] = subtitle
-        if isinstance(getattr(self, "_last_apply_state_key", None), tuple) and len(self._last_apply_state_key) >= 2:
-            key_parts = list(self._last_apply_state_key)
-            key_parts[1] = subtitle
-            self._last_apply_state_key = tuple(key_parts)
-        self.subtitle_label.setText(subtitle)
-        return True
-
     def apply_state(
         self,
         *,

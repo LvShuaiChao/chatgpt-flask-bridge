@@ -2,12 +2,10 @@ from app.server import (
     get_bridge_status,
     get_server_port,
     get_server_public_host,
-    get_server_url,
     is_server_running,
     set_debug_mode,
 )
 
-import time
 import traceback
 
 from app.utils.log_utils import append_log, set_log_runtime_options
@@ -17,32 +15,44 @@ from app.constants import (
     RUNTIME_DIR,
 )
 # 无设置页 UI 的布尔项：仅用 DEFAULT_APP_SETTINGS 固定值，不写入 QSettings。
-_FIXED_BOOL_SETTING_ATTRS = (
+_ACTIVE_FIXED_BOOL_SETTING_ATTRS = (
     "remember_window_geometry",
     "remember_window_position",
     "restore_main_tab",
     "restore_chat_tab",
     "show_top_status_bar",
     "debug_mode",
-    "show_raw_payload",
     "mirror_log_to_console",
     "include_log_callsite",
-    "log_ack_events",
-    "log_assistant_reply_events",
-    "log_send_failed_events",
     "auto_clear_input_after_send",
     "auto_name_new_chat",
     "show_timestamp",
     "show_assistant_placeholder",
 )
+# legacy cleanup only: 不再生成 self._xxx，仅保留 key 用于清理旧 QSettings。
+_LEGACY_CLEANUP_ONLY_BOOL_SETTING_ATTRS = (
+    "show_raw_payload",
+    "log_ack_events",
+    "log_assistant_reply_events",
+    "log_send_failed_events",
+)
+_FIXED_BOOL_SETTING_ATTRS = (
+    *_ACTIVE_FIXED_BOOL_SETTING_ATTRS,
+    *_LEGACY_CLEANUP_ONLY_BOOL_SETTING_ATTRS,
+)
 
 FIXED_BRIDGE_BEHAVIOR_SETTINGS = {
     "bind_each_chat_to_page": True,
+    # legacy cleanup only: 当前已无运行时消费者，保留 key 用于清理旧 QSettings。
     "auto_open_bound_page_when_missing": True,
     "auto_bind_unbound_page": True,
+    # legacy cleanup only: 当前已无运行时消费者，保留 key 用于清理旧 QSettings。
     "sync_full_conversation_enabled": True,
+    # legacy cleanup only: 当前已无运行时消费者，保留 key 用于清理旧 QSettings。
     "auto_sync_conversation_on_bind": False,
+    # legacy cleanup only: 当前已无运行时消费者，保留 key 用于清理旧 QSettings。
     "auto_sync_conversation_after_reply": False,
+    # legacy cleanup only: 当前已无运行时消费者，保留 key 用于清理旧 QSettings。
     "sync_conversation_mode": "replace",
     "sync_conversation_max_messages": 200,
 }
@@ -84,16 +94,9 @@ class SettingsMixin:
             result = min(max_value, result)
         return result
 
-    @staticmethod
-    def _qsettings_bool(value, default):
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return bool(default)
-        return str(value).lower() in ("1", "true", "yes", "on")
     def _apply_fixed_bool_settings_from_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
-        for key in _FIXED_BOOL_SETTING_ATTRS:
+        for key in _ACTIVE_FIXED_BOOL_SETTING_ATTRS:
             setattr(self, f"_{key}", bool(defaults.get(key, False)))
 
     def _remove_legacy_bool_qsettings(self):
@@ -105,20 +108,7 @@ class SettingsMixin:
     def _apply_fixed_bridge_behavior_settings(self):
         fixed = FIXED_BRIDGE_BEHAVIOR_SETTINGS
         self._bind_each_chat_to_page = bool(fixed["bind_each_chat_to_page"])
-        self._auto_open_bound_page_when_missing = bool(
-            fixed["auto_open_bound_page_when_missing"]
-        )
         self._auto_bind_unbound_page = bool(fixed["auto_bind_unbound_page"])
-        self._sync_full_conversation_enabled = bool(
-            fixed["sync_full_conversation_enabled"]
-        )
-        self._auto_sync_conversation_on_bind = bool(
-            fixed["auto_sync_conversation_on_bind"]
-        )
-        self._auto_sync_conversation_after_reply = bool(
-            fixed["auto_sync_conversation_after_reply"]
-        )
-        self._sync_conversation_mode = str(fixed["sync_conversation_mode"])
         self._sync_conversation_max_messages = int(
             fixed["sync_conversation_max_messages"]
         )
@@ -130,14 +120,14 @@ class SettingsMixin:
             self._settings.remove(key)
 
     def _apply_fixed_service_settings(self):
-        self._enable_lan_access = False
-        self._host = "127.0.0.1"
         self._port_text = "5000"
         self._auto_start_server = True
 
     def _remove_fixed_service_qsettings(self):
         if not hasattr(self, "_settings"):
             return
+        # host / enable_lan_access 当前已固定为 127.0.0.1，不再生成 self._host / self._enable_lan_access；
+        # 这里保留 key，仅用于清理历史 QSettings。
         for key in (
             "host",
             "enable_lan_access",
@@ -174,12 +164,9 @@ class SettingsMixin:
 
     def _force_ui_settings_to_defaults(self):
         defaults = DEFAULT_APP_SETTINGS
-        self._enable_lan_access = bool(defaults.get("enable_lan_access", False))
-        self._host = str(defaults.get("host", "127.0.0.1"))
         self._port_text = str(defaults.get("port", "5000"))
         self._auto_start_server = bool(defaults.get("auto_start_server", True))
         self._debug_mode = bool(defaults.get("debug_mode", False))
-        self._show_raw_payload = bool(defaults.get("show_raw_payload", False))
         self._mirror_log_to_console = bool(defaults.get("mirror_log_to_console", False))
         self._include_log_callsite = bool(defaults.get("include_log_callsite", False))
         self._chat_font_pt = int(defaults.get("font_size", 11))
@@ -198,13 +185,6 @@ class SettingsMixin:
         self._restore_main_tab = bool(defaults.get("restore_main_tab", True))
         self._restore_chat_tab = bool(defaults.get("restore_chat_tab", True))
         self._show_top_status_bar = bool(defaults.get("show_top_status_bar", True))
-        self._log_ack_events = bool(defaults.get("log_ack_events", True))
-        self._log_assistant_reply_events = bool(
-            defaults.get("log_assistant_reply_events", True)
-        )
-        self._log_send_failed_events = bool(
-            defaults.get("log_send_failed_events", True)
-        )
         self._auto_clear_input_after_send = bool(
             defaults.get("auto_clear_input_after_send", True)
         )
@@ -314,10 +294,3 @@ class SettingsMixin:
             self._set_settings_hint("油猴离线（曾连接过）。")
         else:
             self._set_settings_hint("油猴未连接。")
-
-    def _show_log_tab(self):
-        if not hasattr(self, "main_tabs") or not hasattr(self, "log_page"):
-            return
-        index = self.main_tabs.indexOf(self.log_page)
-        if index >= 0:
-            self.main_tabs.setCurrentIndex(index)

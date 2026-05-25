@@ -11,7 +11,7 @@ from app.cursor_code.runtime import (
 )
 from app.cursor_code.templates import discover_templates
 from app.cursor_code.upgrade_monitor import CursorFindOnceWorker, CursorUpgradeMonitorWorker
-from PyQt5.QtWidgets import QTableWidgetItem
+from app.utils.qt_table_items import set_table_item
 
 
 class CursorCodeMixin:
@@ -60,10 +60,10 @@ class CursorCodeMixin:
         rows = discover_templates(resolve_template_root(cfg))
         self.cursor_code_template_table.setRowCount(len(rows))
         for i, item in enumerate(rows):
-            self.cursor_code_template_table.setItem(i, 0, QTableWidgetItem(item["path"]))
-            self.cursor_code_template_table.setItem(i, 1, QTableWidgetItem(item["state"]))
-            self.cursor_code_template_table.setItem(i, 2, QTableWidgetItem(item["kind"]))
-            self.cursor_code_template_table.setItem(i, 3, QTableWidgetItem("-"))
+            set_table_item(self.cursor_code_template_table, i, 0, item["path"], tooltip=item["path"])
+            set_table_item(self.cursor_code_template_table, i, 1, item["state"], tooltip=item["state"])
+            set_table_item(self.cursor_code_template_table, i, 2, item["kind"], tooltip=item["kind"])
+            set_table_item(self.cursor_code_template_table, i, 3, "-")
         self._append_cursor_code_log(
             f"[CURSOR_CODE][TEMPLATE_LOAD] count={len(rows)}"
         )

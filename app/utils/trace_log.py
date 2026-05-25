@@ -25,18 +25,3 @@ def kv_line(**fields):
             continue
         parts.append(f"{key}={text}")
     return " ".join(parts)
-
-
-def page_type_label(page_type="", conversation_id="", url=""):
-    pt = (page_type or "").strip()
-    if pt:
-        return pt
-    conv = (conversation_id or "").strip()
-    if conv and conv != "-":
-        return "conversation"
-    raw = (url or "").strip().rstrip("/")
-    if raw.endswith("chatgpt.com") or raw == "https://chatgpt.com":
-        return "home"
-    if "/c/" in raw:
-        return "conversation"
-    return "unknown"

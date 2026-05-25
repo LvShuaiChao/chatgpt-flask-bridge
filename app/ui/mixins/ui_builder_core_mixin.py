@@ -1,7 +1,6 @@
 """主界面骨架、通用控件工厂与油猴操作按钮。"""
-import traceback
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -274,7 +273,6 @@ class UiBuilderCoreMixin:
         self.cursor_code_page = self._build_cursor_code_page()
         self.settings_page = self._build_settings_page()
         self.debug_page = self._build_debug_page()
-        self.log_page = None
 
         self.main_tabs.addTab(self.chat_page, "聊天")
         self.main_tabs.addTab(self.cursor_code_page, "Cursor代码")

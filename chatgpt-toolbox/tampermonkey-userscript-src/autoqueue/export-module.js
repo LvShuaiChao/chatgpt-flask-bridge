@@ -5,8 +5,92 @@
     let root = null;
     let statsLineEl = null;
     let settingsImportFileEl = null;
+    let settingsImportBtn = null;
 
     const REVIEW_JSON_MARKER = '<<<REVIEW_JSON>>>';
+
+    function rememberExportButtonIdleText(btn) {
+      if (!btn) {
+        return '';
+      }
+      if (!btn.dataset.cgptExportIdleText) {
+        btn.dataset.cgptExportIdleText = String(btn.textContent || '').trim() || '操作';
+      }
+      return btn.dataset.cgptExportIdleText;
+    }
+
+    function setExportButtonRunning(btn, text) {
+      if (!btn) {
+        return;
+      }
+      rememberExportButtonIdleText(btn);
+      if (typeof setButtonRunning === 'function') {
+        setButtonRunning(btn, text, { reason: 'export-running', disabled: true });
+        return;
+      }
+      btn.textContent = text;
+      btn.disabled = true;
+    }
+
+    function setExportButtonSuccess(btn, text) {
+      if (!btn) {
+        return;
+      }
+      if (typeof setButtonSuccess === 'function') {
+        setButtonSuccess(btn, text, { reason: 'export-success' });
+        return;
+      }
+      btn.textContent = text;
+    }
+
+    function setExportButtonFailed(btn, text) {
+      if (!btn) {
+        return;
+      }
+      if (typeof setButtonFailed === 'function') {
+        setButtonFailed(btn, text, { reason: 'export-failed' });
+        return;
+      }
+      btn.textContent = text;
+    }
+
+    function restoreExportButton(btn, originalText) {
+      if (!btn) {
+        return;
+      }
+      const idleText = originalText || rememberExportButtonIdleText(btn);
+      if (typeof setButtonIdle === 'function') {
+        setButtonIdle(btn, idleText, { reason: 'export-restore' });
+        return;
+      }
+      btn.textContent = idleText;
+      btn.disabled = false;
+      btn.removeAttribute('disabled');
+    }
+
+    function flashExportButton(btn, runningText, successText, failedText, taskFn) {
+      if (!btn) {
+        return Promise.resolve(false);
+      }
+      const idleText = rememberExportButtonIdleText(btn);
+      setExportButtonRunning(btn, runningText);
+      return Promise.resolve(taskFn())
+        .then((ok) => {
+          if (ok) {
+            setExportButtonSuccess(btn, successText);
+          } else {
+            setExportButtonFailed(btn, failedText);
+          }
+          window.setTimeout(() => restoreExportButton(btn, idleText), 1200);
+          return ok;
+        })
+        .catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          setExportButtonFailed(btn, failedText);
+          window.setTimeout(() => restoreExportButton(btn, idleText), 1400);
+          throw error;
+        });
+    }
 
     function getExportMessageRole(el) {
       return getMessageRole(el);
@@ -346,6 +430,9 @@ Prompt 总数：${promptCount}
       {
         selector: '#cgpt-export-copy-chat',
         name: 'copy-chat',
+        runningText: '复制中',
+        successText: '已复制',
+        failedText: '复制失败',
         handler: () => copyWithStatus({
           text: buildChatExportText(),
           successText: '已复制完整对话',
@@ -356,6 +443,9 @@ Prompt 总数：${promptCount}
       {
         selector: '#cgpt-export-copy-panel',
         name: 'copy-panel',
+        runningText: '复制中',
+        successText: '已复制',
+        failedText: '复制失败',
         handler: () => copyWithStatus({
           text: buildPanelExportText(),
           successText: '已复制工具箱配置',
@@ -366,14 +456,21 @@ Prompt 总数：${promptCount}
       {
         selector: '#cgpt-export-refresh-stats',
         name: 'refresh-stats',
+        runningText: '刷新中',
+        successText: '已刷新',
+        failedText: '刷新失败',
         handler: () => {
           const s = renderStats();
           ToolboxShell.appendLog(`issues 统计刷新：${s.issueTotal} 条`);
+          return true;
         },
       },
       {
         selector: '#cgpt-export-copy-stats',
         name: 'copy-stats',
+        runningText: '复制中',
+        successText: '已复制',
+        failedText: '复制失败',
         handler: () => {
           const s = renderStats();
           return copyWithStatus({
@@ -386,36 +483,63 @@ Prompt 总数：${promptCount}
       },
     ]);
 
+    function bindExportActionWithButtonState(action) {
+      DomUtil.bindClick(root, action.selector, () => {
+        const btn = root ? qs(action.selector, root) : null;
+        void flashExportButton(
+          btn,
+          action.runningText,
+          action.successText,
+          action.failedText,
+          () => Promise.resolve(action.handler()),
+        ).catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.error(`[EXPORT][${action.name}][failed]`, error);
+          ToolboxShell.appendLog(`[EXPORT][${action.name}][failed] error=${errText}`);
+        });
+      }, 'EXPORT');
+    }
+
     function bindEvents() {
       EXPORT_ACTIONS.forEach((action) => {
-        DomUtil.bindClick(root, action.selector, () => {
-          void Promise.resolve(action.handler()).catch((error) => {
-            const errText = error && error.message ? error.message : String(error);
-            console.error(`[ChatGPT toolbox] Export action failed: ${action.name}`, error);
-            ToolboxShell.appendLog(`[EXPORT][${action.name}][failed] error=${errText}`);
-          });
-        }, 'EXPORT');
+        bindExportActionWithButtonState(action);
       });
 
       DomUtil.bindClick(root, '#cgpt-export-prompts', () => {
-        const data = PromptManagerModule.exportData();
-        downloadJsonFile(`chatgpt-prompts-${buildDateStamp()}.json`, data);
-        ToolboxShell.appendLog('已导出 Prompt 管理数据');
-        ToolboxShell.setStatus('已导出 Prompt 管理数据');
+        const btn = root ? qs('#cgpt-export-prompts', root) : null;
+        void flashExportButton(btn, '导出中', '已导出', '导出失败', () => {
+          try {
+            const data = PromptManagerModule.exportData();
+            downloadJsonFile(`chatgpt-prompts-${buildDateStamp()}.json`, data);
+            ToolboxShell.appendLog('已导出 Prompt 管理数据');
+            ToolboxShell.setStatus('已导出 Prompt 管理数据');
+            return true;
+          } catch (error) {
+            console.error('[EXPORT][prompts-export][failed]', error);
+            throw error;
+          }
+        }).catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[EXPORT][prompts-export][failed]', error);
+          ToolboxShell.setStatus(`导出 Prompt 失败：${errText}`, 'error');
+        });
       }, 'EXPORT');
 
       bindClick(root, '#cgpt-export-settings', () => {
-        void (async () => {
+        const btn = root ? qs('#cgpt-export-settings', root) : null;
+        void flashExportButton(btn, '导出中', '已导出', '导出失败', async () => {
           try {
             const payload = await buildSettingsExportPayload();
             downloadJsonFile(`chatgpt-toolbox-settings-${buildDateTimeStamp()}.json`, payload);
             ToolboxShell.appendLog('已导出工具箱设置');
             ToolboxShell.setStatus('已导出工具箱设置');
+            return true;
           } catch (e) {
             const errText = logError('[EXPORT][settings-export]', e);
             ToolboxShell.setStatus(`导出设置失败：${errText}`);
+            return false;
           }
-        })();
+        });
       }, {
         moduleName: 'ExportModule',
         bindMissingConsole: '[ChatGPT toolbox] ExportModule.bindEvents: 缺少 #cgpt-export-settings',
@@ -423,10 +547,16 @@ Prompt 总数：${promptCount}
       });
 
       settingsImportFileEl = qs('#cgpt-export-settings-import-file', root);
+      settingsImportBtn = qs('#cgpt-export-settings-import', root);
 
       bindClick(root, '#cgpt-export-settings-import', () => {
+        if (settingsImportBtn) {
+          setExportButtonRunning(settingsImportBtn, '选择文件');
+        }
         if (settingsImportFileEl) {
           settingsImportFileEl.click();
+        } else if (settingsImportBtn) {
+          restoreExportButton(settingsImportBtn);
         }
       }, {
         moduleName: 'ExportModule',
@@ -436,24 +566,61 @@ Prompt 总数：${promptCount}
 
       if (settingsImportFileEl) {
         bindOnce(settingsImportFileEl, 'change', async (event) => {
+          const files = event && event.target && event.target.files
+            ? event.target.files
+            : null;
+          if (!files || !files.length) {
+            if (settingsImportBtn) {
+              restoreExportButton(settingsImportBtn);
+            }
+            ToolboxShell.appendLog('[EXPORT][settings-import][cancelled] reason=no-file-selected');
+            return;
+          }
+
+          if (settingsImportBtn) {
+            setExportButtonRunning(settingsImportBtn, '导入中');
+          }
+
           try {
             const payload = await readJsonFileFromInput(event, {
               tag: '[SETTINGS_IMPORT]',
             });
 
-            if (!payload) return;
+            if (!payload) {
+              if (settingsImportBtn) {
+                restoreExportButton(settingsImportBtn);
+              }
+              return;
+            }
 
             const ok = await importSettingsPayload(payload);
 
             if (ok) {
               ToolboxShell.appendLog('已导入工具箱设置');
               ToolboxShell.setStatus('已导入工具箱设置');
+              if (settingsImportBtn) {
+                setExportButtonSuccess(settingsImportBtn, '已导入');
+                window.setTimeout(() => restoreExportButton(settingsImportBtn), 1200);
+              }
             } else {
               ToolboxShell.setStatus('导入失败：文件格式无效');
+              if (settingsImportBtn) {
+                setExportButtonFailed(settingsImportBtn, '导入失败');
+                window.setTimeout(() => restoreExportButton(settingsImportBtn), 1400);
+              }
             }
           } catch (e) {
             const errText = logError('[EXPORT][settings-import]', e);
+            console.error('[EXPORT][settings-import][failed]', e);
             ToolboxShell.setStatus(`导入失败：${errText}`);
+            if (settingsImportBtn) {
+              setExportButtonFailed(settingsImportBtn, '导入失败');
+              window.setTimeout(() => restoreExportButton(settingsImportBtn), 1400);
+            }
+          } finally {
+            if (settingsImportFileEl) {
+              settingsImportFileEl.value = '';
+            }
           }
         });
       }

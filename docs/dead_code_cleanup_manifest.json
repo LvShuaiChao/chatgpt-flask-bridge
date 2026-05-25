@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "project": "chatgpt-flask-bridge",
+  "purpose": "dead-code-cleanup-control-manifest",
+  "validation": {
+    "snapshot_minimum": [
+      "python -m compileall -q app GUI.py",
+      "cd chatgpt-toolbox && npm run build --silent"
+    ],
+    "full_repo_optional": [
+      "pytest -q tests/test_job_scheduler_status_migration.py"
+    ],
+    "notes": [
+      "精简导出快照通常不含 tests/、tools/、独立 server.py；勿将 pytest 或 python tools/… 当作快照强制项。",
+      "Python 入口为 GUI.py（不是 gui.py / server.py）。",
+      "合并导出 zip（0_merged_for_chatgpt*.zip）解压后常为单文件 0_merged_for_chatgpt.txt；须按 FILE: 分隔符还原文件树后再审，勿把单个 txt 当目录结构。",
+      "静态 import 不可达 ≠ 可删：保留 app/client/bridge_client.py 与各包 __init__.py（见 categories.must_keep）。",
+      "导出快照通常不含 __pycache__/、*.pyc、client.user.js、chatgpt-toolbox/dist/client.user.js；缺失正常。",
+      "client.user.js 与 chatgpt-toolbox/dist/client.user.js 为 npm run build 生成产物；不做 baseline sha256 强校验；禁止手工编辑。"
+    ]
+  },
+  "categories": {
+    "replace_then_remove": [
+      {
+        "path": "app/core/job_scheduler.py",
+        "symbol": "job.get(\"status\") == \"cancelled\"",
+        "replacement": "job_status_from(job) == \"cancelled\"",
+        "reason": "job status field has migrated to job_status; direct status reads become stale after migration",
+        "risk": "low",
+        "required_tests": [
+          "python -m compileall -q app GUI.py"
+        ],
+        "full_repo_required_tests": [
+          "pytest -q tests/test_job_scheduler_status_migration.py"
+        ]
+      },
+      {
+        "path": "app/core/job_scheduler.py",
+        "symbol": "j.get(\"status\") == \"waiting_chatgpt_reply\"",
+        "replacement": "job_status_from(j) == \"waiting_chatgpt_reply\"",
+        "reason": "job status field has migrated to job_status; direct status reads break pending_chatgpt counting",
+        "risk": "low",
+        "required_tests": [
+          "python -m compileall -q app GUI.py"
+        ],
+        "full_repo_required_tests": [
+          "pytest -q tests/test_job_scheduler_status_migration.py"
+        ]
+      },
+      {
+        "path": "chatgpt-toolbox/tampermonkey-userscript-src/**",
+        "symbol": "DEFAULT_AUTO_CONFIG",
+        "replacement": "createDefaultAutoConfig() / getDefaultAutoListPromptsText()",
+        "reason": "duplicated default config source; createDefaultAutoConfig() should be the single source of truth",
+        "risk": "medium",
+        "required_tests": [
+          "npm run build",
+          "rg \"DEFAULT_AUTO_CONFIG\""
+        ]
+      }
+    ],
+    "observe_before_remove": [
+      {
+        "path": "app/models.py",
+        "symbol": "remote_binding_enabled(remote)",
+        "replacement": "remote_binding_active(remote)",
+        "reason": "compatibility wrapper for old call name",
+        "risk": "medium",
+        "remove_after": "two exported versions without DEPRECATED_HIT / COMPAT_HIT"
+      },
+      {
+        "path": "app/utils/bridge_payload.py",
+        "symbol": "persist_qsettings_last_url() legacy key cleanup loop",
+        "replacement": "last_url",
+        "reason": "legacy QSettings key cleanup for last_page_url/page_url/conversation_url",
+        "risk": "medium",
+        "remove_after": "two exported versions without MIGRATION_HIT"
+      },
+      {
+        "path": "app/constants.py",
+        "symbol": "status_chip_text(prefix, state)",
+        "replacement": "inline f\"{prefix}：{state}\" only when safe",
+        "reason": "possible thin UI helper; keep if reused for UI consistency",
+        "risk": "low",
+        "remove_after": "rg confirms only definition or one safe inline call"
+      }
+    ],
+    "must_keep": [
+      {
+        "path": "app/utils/legacy_cleanup.py",
+        "symbols": [
+          "LEGACY_FIELD_NAMES",
+          "assert_no_legacy_fields",
+          "reject_legacy_fields"
+        ],
+        "reason": "legacy field guard must remain active to block stale payload fields"
+      },
+      {
+        "path": "app/utils/bridge_payload.py",
+        "symbols": [
+          "validate_outbound_queue_message",
+          "assert_no_legacy_fields"
+        ],
+        "reason": "outbound queue payload validation must continue rejecting legacy fields"
+      },
+      {
+        "path": "client.user.js",
+        "symbols": [
+          "generated userscript artifact"
+        ],
+        "reason": "runtime artifact; do not manually edit or delete during source-level cleanup"
+      },
+      {
+        "path": "app/server/__init__.py",
+        "symbols": [
+          "__getattr__",
+          "__dir__"
+        ],
+        "reason": "Python module lazy attribute and dir hooks"
+      },
+      {
+        "path": "app/server/runtime_state.py",
+        "symbols": [
+          "log_request"
+        ],
+        "reason": "Werkzeug SilentWSGIRequestHandler lifecycle callback"
+      },
+      {
+        "path": "app/ui/main_window.py",
+        "symbols": [
+          "closeEvent"
+        ],
+        "reason": "Qt window close event override"
+      },
+      {
+        "path": "app/ui/widgets/no_wheel_combo_box.py",
+        "symbols": [
+          "wheelEvent"
+        ],
+        "reason": "Qt wheel event override"
+      },
+      {
+        "path": "chatgpt-toolbox/tampermonkey-userscript-src/upload/upload-module.js",
+        "symbols": [
+          "tickWaitingReplyOrSendOpportunity"
+        ],
+        "reason": "named async IIFE inside setInterval; not dead code"
+      },
+      {
+        "path": "app/client/bridge_client.py",
+        "symbols": [
+          "BridgeClient",
+          "main"
+        ],
+        "reason": "external SDK / CLI entry; not required to be statically reachable from GUI.py"
+      },
+      {
+        "path": "app/__init__.py",
+        "symbols": [],
+        "reason": "package marker; keep even if empty"
+      },
+      {
+        "path": "app/client/__init__.py",
+        "symbols": [],
+        "reason": "package marker; SDK package export entry"
+      },
+      {
+        "path": "app/cursor_code/__init__.py",
+        "symbols": [],
+        "reason": "package marker; may be imported externally"
+      },
+      {
+        "path": "app/ui/__init__.py",
+        "symbols": [],
+        "reason": "package marker"
+      },
+      {
+        "path": "app/ui/mixins/__init__.py",
+        "symbols": [],
+        "reason": "package marker"
+      },
+      {
+        "path": "app/ui/widgets/__init__.py",
+        "symbols": [],
+        "reason": "package marker"
+      },
+      {
+        "path": "app/utils/__init__.py",
+        "symbols": [],
+        "reason": "package marker"
+      }
+    ],
+    "exclude_from_source_level_cleanup": [
+      "client.user.js",
+      "dist/client.user.js",
+      "chatgpt-toolbox/dist/client.user.js",
+      "dist/**",
+      "build/**",
+      "runtime/**",
+      "logs/**",
+      "__pycache__/**",
+      ".venv/**",
+      "venv/**"
+    ]
+  }
+}

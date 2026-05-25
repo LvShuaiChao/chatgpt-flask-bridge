@@ -191,6 +191,12 @@ async function initToolbox() {
   await safeInitStep('ToolboxShell.appendLog', () => {
     ToolboxShell.appendLog('工具箱初始化完成');
   });
+
+  await safeInitStep('RuntimeStatsModule.onAppStart', () => {
+    if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.onAppStart === 'function') {
+      RuntimeStatsModule.onAppStart();
+    }
+  });
 }
 
 if (document.readyState === 'loading') {

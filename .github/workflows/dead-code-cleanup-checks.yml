@@ -1,0 +1,43 @@
+name: Dead Code Cleanup Checks
+
+# 精简发布包不含 tools/；CI 仅跑当前仓库必然存在的检查。
+# 恢复 tools/run_dead_code_cleanup_checks.py 后，可在本 workflow 中重新加入该步骤。
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  dead-code-cleanup-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Python compile check
+        run: python -m compileall -q app GUI.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build userscript
+        working-directory: chatgpt-toolbox
+        run: |
+          npm ci
+          npm run build --silent

@@ -21,3 +21,34 @@ runtime/logs/
 
 # Local git stash / diff scratch files
 _stash_*.patch
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime / temp directories (keep .gitkeep if needed)
+logs/
+runtime/
+tmp/
+temp/
+cache/
+caches/
+
+# Backup / editor swap files
+*.tmp
+*.bak
+*.backup
+*.old
+*.orig
+*.swp
+*.swo
+
+# Build outputs
+dist/
+build/
+chatgpt-toolbox/dist/
+client.user.js
+
+# Node dependencies
+node_modules/

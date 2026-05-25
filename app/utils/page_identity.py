@@ -38,17 +38,3 @@ class PageIdentity:
             "conversation_id": self.conversation_id,
             "url": self.url,
         }
-
-    def has_page_channel(self) -> bool:
-        return bool(self.client_id or self.page_instance_id)
-
-    def has_conversation(self) -> bool:
-        return bool(self.conversation_id)
-
-    def display_key(self) -> str:
-        return (
-            self.page_instance_id
-            or self.client_id
-            or self.conversation_id
-            or self.url
-        )

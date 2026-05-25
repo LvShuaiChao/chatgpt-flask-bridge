@@ -152,40 +152,6 @@ class PageBindMixin(
         keep = max(6, (max_len - 3) // 2)
         return value[:keep] + "..." + value[-keep:]
 
-    def _resolve_manual_bind_candidate(self, status=None):
-        """
-        解析手动绑定候选页：仅使用可用页面列表当前选中项（UserRole dict）。
-        在线判断与下拉框 [在线] 展示一致。
-        """
-        del status
-        item = None
-        source = ""
-        if hasattr(self, "_get_selected_tm_page_from_combo"):
-            item = self._get_selected_tm_page_from_combo()
-        elif hasattr(self, "_get_tm_page_combo_selection"):
-            item = self._get_tm_page_combo_selection()
-        if item:
-            source = "page_combo"
-
-        if not isinstance(item, dict):
-            return None, source, "no_page_selected"
-
-        normalized = self._normalize_tm_page_for_binding(item)
-        bind_candidate = dict(item)
-        bind_candidate.update(normalized)
-        bindable, reason = self._tm_client_bindable(
-            bind_candidate, for_manual_ui=True
-        )
-        if not bindable:
-            return None, source, reason or "missing_page_identity"
-
-        if normalized.get("url"):
-            bind_candidate["url"] = normalized["url"]
-        return bind_candidate, source, ""
-
-
-
-
     LAST_FOCUSED_TM_PAGE_MAX_AGE_SEC = 60
 
     def _page_item_float(self, item, field, default=0.0, *, context=""):
@@ -764,7 +730,10 @@ class PageBindMixin(
         return plan.as_send_decision_tuple()
 
     def request_send_message(self, session, content="", source="gui", status=None):
-        """统一发送入口：返回 ok/decision/target 等，供 GUI / 外部 API / 队列恢复共用。"""
+        """@deprecated 当前 GUI / 外部 API / 队列恢复未调用；保留一版观察，确认无外部动态调用后删除。
+
+        统一发送入口：返回 ok/decision/target 等，供 GUI / 外部 API / 队列恢复共用。
+        """
         content_text = (content or "").strip()
         if not content_text:
             return {

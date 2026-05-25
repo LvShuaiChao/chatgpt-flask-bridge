@@ -90,7 +90,6 @@
         bridgeEnabled: true,
         bridgeBaseUrl: normalizeBridgeBaseUrl(MemoryManager.get('bridgeBaseUrl', DEFAULT_BRIDGE_BASE_URL)),
         bridgePath: normalizeBridgePath(MemoryManager.get('bridgePath', DEFAULT_BRIDGE_PATH)),
-        bridgeApiToken: String(MemoryManager.get('bridgeApiToken', '') || '').trim(),
         bridgeDebugEnabled: !!MemoryManager.get('bridgeDebugEnabled', false),
         bridgeRequestTimeoutMs: Number(MemoryManager.get('bridgeRequestTimeoutMs', 30000)) || 30000,
         bridgePollIntervalMs: Number(MemoryManager.get('bridgePollIntervalMs', 3000)) || 3000,
@@ -105,6 +104,7 @@
         MemoryManager.set(key, patch[key]);
       });
       MemoryManager.set('bridgeEnabled', true);
+      MemoryManager.remove('bridgeApiToken');
     }
 
     function normalizeBridgeBaseUrl(value) {
@@ -156,17 +156,11 @@
     }
 
     function buildBridgeHeaders() {
-      const cfg = getConfig();
-      const headers = {
+      return {
         'Content-Type': 'application/json',
         Accept: 'application/json',
         'X-Request-Source': SOURCE,
       };
-      if (cfg.bridgeApiToken) {
-        headers.Authorization = `Bearer ${cfg.bridgeApiToken}`;
-        headers['X-API-Key'] = cfg.bridgeApiToken;
-      }
-      return headers;
     }
 
     function detectResponseState() {
@@ -2436,9 +2430,21 @@
           return false;
         }
         try {
+          if (typeof waitChatPageReady === 'function') {
+            const readyResult = await waitChatPageReady({ timeoutMs: 30000 });
+
+            if (readyResult && readyResult.ok) {
+              ToolboxShell.appendLog('[CONVERSATION][RESTORE_READY]');
+            } else {
+              ToolboxShell.appendLog('[CONVERSATION][RESTORE_TIMEOUT]');
+            }
+          }
+
           const responseState = detectResponseState();
           const capability = getPageCapability('sync_conversation');
-          const snapshot = buildConversationSnapshotForBridge(getPageIdentity);
+          const snapshot = buildConversationSnapshotForBridge(getPageIdentity, {
+            source: 'bridge-sync-conversation',
+          });
           const cmdPayload = normalized.payload && typeof normalized.payload === 'object'
             ? normalized.payload
             : {};
@@ -3217,13 +3223,6 @@
         defaultValue: DEFAULT_BRIDGE_PATH,
       },
       {
-        key: 'bridgeApiToken',
-        selector: '#cgpt-bridge-token',
-        type: 'value',
-        normalize: (value) => String(value || '').trim(),
-        defaultValue: '',
-      },
-      {
         key: 'bridgeDebugEnabled',
         selector: '#cgpt-bridge-debug',
         type: 'checked',
@@ -3645,9 +3644,6 @@
             <label>接口路径</label>
             <input class="cgpt-input" id="cgpt-bridge-path" placeholder="/api/bridge">
 
-            <label>API Token</label>
-            <input class="cgpt-input" id="cgpt-bridge-token" placeholder="可留空">
-
             <label>请求超时 ms</label>
             <input class="cgpt-input" id="cgpt-bridge-timeout" type="number" data-no-wheel-number="1" min="1000">
 
@@ -3722,8 +3718,8 @@
       }
     }
 
-    async function sendSystemHotkey(combo = 'ctrl+alt+i') {
-      const normalizedCombo = String(combo || '').trim().toLowerCase() || 'ctrl+alt+i';
+    async function sendSystemHotkey(combo = DEFAULT_SYSTEM_HOTKEY_COMBO) {
+      const normalizedCombo = String(combo || '').trim().toLowerCase() || DEFAULT_SYSTEM_HOTKEY_COMBO;
       const result = await apiRequest({
         action: 'system_hotkey',
         combo: normalizedCombo,

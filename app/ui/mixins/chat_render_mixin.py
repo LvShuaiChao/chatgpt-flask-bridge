@@ -475,10 +475,9 @@ class ChatRenderMixin:
         )
 
     def _flush_pending_chat_render(self):
-        pending = getattr(self, "_pending_chat_render", None) or {}
+        pending = getattr(self._bridge_msg, "pending_chat_render", None) or {}
         session_id = (pending.get("session_id") or "").strip()
         self._bridge_msg.pending_chat_render = None
-        self._bridge_msg.pending_chat_render_session_id = ""
         if session_id and session_id in self._sessions:
             pending_policy = pending.get("scroll_policy")
             if pending_policy:

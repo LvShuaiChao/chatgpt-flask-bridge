@@ -8,9 +8,8 @@ import uuid
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
     CHATGPT_HOME_URL,
-    PENDING_ASSISTANT_STATUSES,
+    ASSISTANT_REPLY_PENDING_STATUSES,
     TM_POLL_FRESH_SECONDS,
-    UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     remote_binding_active,
@@ -66,25 +65,6 @@ class PageAutoBindMixin:
 
     def _remote_runtime_bool(self, session, remote, key):
         return bool(self._remote_runtime_get(session, remote, key, False))
-
-    def _apply_remote_and_runtime(self, session, remote, **fields):
-        from app.utils.bind_runtime import (
-            TRANSIENT_REMOTE_CHATGPT_KEYS,
-            update_bind_runtime,
-        )
-
-        runtime_fields = {
-            k: v for k, v in fields.items() if k in TRANSIENT_REMOTE_CHATGPT_KEYS
-        }
-        persistent_fields = {
-            k: v for k, v in fields.items() if k not in TRANSIENT_REMOTE_CHATGPT_KEYS
-        }
-        if runtime_fields:
-            update_bind_runtime(self, session, **runtime_fields)
-        remote = dict(remote or normalize_remote_chatgpt(session.remote_chatgpt))
-        remote.update(persistent_fields)
-        session.remote_chatgpt = normalize_remote_chatgpt(remote)
-        return remote
 
     def _auto_bind_float_field(self, item, field, default=0.0):
         from app.utils.safe_parse import safe_float_field
@@ -456,30 +436,6 @@ class PageAutoBindMixin:
         if require_user_visible and not self._idle_home_is_user_visible(item):
             return "hidden_or_background_home"
         return ""
-    def _recent_focus_home_client_id(self, status=None):
-        status = status or self._bridge_ui.last_bridge_status or {}
-        best_id = ""
-        best_focus_at = 0.0
-        best_has_focus = False
-        for item in status.get("pages") or []:
-            if not isinstance(item, dict) or not is_page_online(item):
-                continue
-            if (item.get("page_type") or "").strip() != "home":
-                continue
-            client_id = (item.get("client_id") or "").strip()
-            if not client_id:
-                continue
-            last_focus_at = self._auto_bind_float_field(item, "last_focus_at", 0)
-            has_focus = bool(item.get("has_focus"))
-            if has_focus and not best_has_focus:
-                best_id = client_id
-                best_focus_at = last_focus_at
-                best_has_focus = True
-                continue
-            if has_focus == best_has_focus and last_focus_at > best_focus_at:
-                best_id = client_id
-                best_focus_at = last_focus_at
-        return best_id
     def _is_fresh_idle_home_client(self, item):
         if not isinstance(item, dict):
             return False
@@ -624,7 +580,7 @@ class PageAutoBindMixin:
                     if self._is_finalized(bridge_id):
                         continue
                     status_text = (message.ui_status or "").strip()
-                    if status_text in PENDING_ASSISTANT_STATUSES:
+                    if status_text in ASSISTANT_REPLY_PENDING_STATUSES:
                         return True
                     if message.content in ASSISTANT_WAIT_TEXTS:
                         return True
@@ -1245,24 +1201,6 @@ class PageAutoBindMixin:
         )
         return self._open_new_chatgpt_home_page_for_conversation(session)
 
-    def _selected_home_usable_for_first_send(self, session, selected_page=None):
-        if selected_page is None:
-            if not hasattr(self, "_get_selected_tm_page_from_combo"):
-                return None
-            selected_page = self._get_selected_tm_page_from_combo()
-        if not isinstance(selected_page, dict):
-            return None
-        session_id = (session.session_id if session else "").strip()
-        if not self._reusable_home_page_eligible_for_session(selected_page, session_id):
-            return None
-        from app.utils.page_status import can_accept_input
-
-        send_requestable = bool(selected_page.get("send_requestable"))
-        can_accept = can_accept_input(selected_page)
-        if not send_requestable and not can_accept:
-            return None
-        return selected_page
-
     def _ensure_temp_home_bound_for_send(self, session) -> bool:
         """兼容入口：统一走 _ensure_page_for_local_conversation_send。"""
         return self._ensure_page_for_local_conversation_send(session)
@@ -1371,12 +1309,6 @@ class PageAutoBindMixin:
             False,
             "自动打开 ChatGPT 页面失败，请手动打开页面后重试。",
         )
-
-        self._append_log(
-            f"[AUTO_BIND][FIRST_SEND_BLOCKED] session_id={session.session_id} "
-            f"reason=no_idle_home auto_open=false"
-        )
-        return False, UNBOUND_SESSION_SEND_HINT
 
     def _ensure_visible_chatgpt_home_for_new_session(self, session):
         """新建本地会话后：绑定用户可见的空闲首页，或通过绑定令牌打开新的可见首页。"""
@@ -2257,7 +2189,7 @@ class PageAutoBindMixin:
                 continue
             current_status = (message.ui_status or "").strip()
             current_text = (getattr(message, "content", "") or "").strip()
-            if current_status in PENDING_ASSISTANT_STATUSES or current_text in ASSISTANT_WAIT_TEXTS:
+            if current_status in ASSISTANT_REPLY_PENDING_STATUSES or current_text in ASSISTANT_WAIT_TEXTS:
                 message.role = "error"
                 message.content = (text or "").strip()
                 message.ui_status = (status_text or "失败").strip()
@@ -2348,31 +2280,6 @@ class PageAutoBindMixin:
                 return True
 
         return False
-    def _candidate_matches_remote(self, client_info, remote):
-        if not isinstance(client_info, dict):
-            return False
-
-        remote = normalize_remote_chatgpt(remote)
-
-        current_url = ((remote.get("url") or "") or "").strip()
-        current_conv = (remote.get("conversation_id") or "").strip()
-
-        page_url = (client_info.get("url") or "").strip()
-        candidate_conv = (client_info.get("conversation_id") or "").strip()
-
-        if not candidate_conv:
-            candidate_conv = parse_conversation_id(page_url)
-
-        if current_conv and candidate_conv and current_conv == candidate_conv:
-            return True
-
-        if current_url and page_url and current_url == page_url:
-            return True
-
-        if not current_conv and not current_url:
-            return True
-
-        return False
     def _pick_auto_bind_client(self, status, current_session_id, remote=None):
         """当前 conversation_id 对应在线且可同步页面唯一时返回该页，否则 None。"""
         del remote
@@ -2436,13 +2343,8 @@ class PageAutoBindMixin:
             )
         return ok
     def _mark_auto_bind_waiting(self):
-        clients = self._bridge_ui.last_bridge_status.get("pages") or []
-        self._auto_bind.known_clients = {
-            (item.get("client_id") or "").strip()
-            for item in clients
-            if isinstance(item, dict) and (item.get("client_id") or "").strip()
-        }
-        self._auto_bind.wait_until = time.time() + 30
+        """历史兼容入口：当前自动绑定等待状态由 pending_* 字段维护。"""
+        return
     def _clear_pending_auto_bind(self):
         self._auto_bind.pending_session_id = ""
         self._auto_bind.pending_until = 0

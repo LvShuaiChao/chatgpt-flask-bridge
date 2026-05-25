@@ -7,7 +7,6 @@ import pytest
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
     PENDING_REPLY_HARD_TIMEOUT_SECONDS,
-    PENDING_REPLY_STALE_TIMEOUT_SEC,
 )
 from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
@@ -120,7 +119,7 @@ def _session_with_local_placeholder(
 
 def test_stale_pending_missing_bridge_message_id():
     host = _PendingHost()
-    old = time.time() - PENDING_REPLY_STALE_TIMEOUT_SEC - 5
+    old = time.time() - PENDING_REPLY_HARD_TIMEOUT_SECONDS - 5
     session = _session_with_local_placeholder(
         use_local_parent=False, created_at=old
     )
@@ -135,7 +134,8 @@ def test_stale_pending_missing_bridge_message_id():
 
 def test_stale_pending_not_cleared_before_hard_timeout():
     host = _PendingHost()
-    old = time.time() - 90
+    # Under sync-timeout (45s) and hard-timeout (180s) thresholds.
+    old = time.time() - 30
     session = _session_with_local_placeholder(
         bridge_id="bridge-1", created_at=old
     )
@@ -182,7 +182,7 @@ def test_stale_pending_cleared_after_timeout_even_when_page_idle():
     session = _session_with_local_placeholder(bridge_id="bridge-2", created_at=old)
     session.reply_waiting_since = old
     assert host._bound_page_indicates_idle(session)
-    assert host._stale_pending_clear_reason(session) == "timeout"
+    assert host._stale_pending_clear_reason(session) == "hard_timeout"
     assert host._is_stale_pending_reply(session)
 
 

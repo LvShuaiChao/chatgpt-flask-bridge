@@ -37,8 +37,21 @@ _CHATGPT_PLATFORM_ERROR_RE = re.compile(
 )
 
 
-# TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入回复/页面风控检测或删除。
+_CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED = False
+
+
+# @deprecated 当前静态扫描无调用；确认无外部脚本引用后可删除。
 def is_chatgpt_platform_error_text(text) -> bool:
+    global _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED
+    if not _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED:
+        from app.utils.deprecation_log import log_deprecated_hit
+
+        _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED = True
+        log_deprecated_hit(
+            name="is_chatgpt_platform_error_text",
+            reason="no_internal_call",
+            replacement="none",
+        )
     value = str(text or "").strip()
     if not value:
         return False
@@ -67,6 +80,10 @@ DEFAULT_CHAT_INPUT_TEXT = "你好"
 ASSISTANT_WAIT_TEXTS = frozenset(
     {
         ASSISTANT_WAIT_TEXT,
+        "等待回复…",
+        "等待回复...",
+        "等待中…",
+        "等待中...",
         "等待 ChatGPT 回复…",
         "等待回复...",
         "等待 ChatGPT 回复...",
@@ -78,24 +95,82 @@ ASSISTANT_WAIT_TEXTS = frozenset(
         BOOTSTRAP_STALE_TIMEOUT_TEXT,
     }
 )
-PENDING_ASSISTANT_STATUSES = frozenset(
+ASSISTANT_REPLY_PENDING_STATUSES = frozenset(
     {
         "waiting",
+        "assistant_pending",
+        "waiting_reply",
         "等待中",
-        "已加入队列",
         "等待回复",
-        "发送中",
-        "读取中",
+        "等待回复中",
     }
 )
+
+USER_SEND_PENDING_STATUSES = frozenset(
+    {
+        "sending",
+        "queued",
+        "waiting_send",
+        "send_waiting",
+        "发送中",
+        "已加入队列",
+        "等待发送",
+    }
+)
+
+SYNC_PENDING_STATUSES = frozenset(
+    {
+        "syncing",
+        "reading",
+        "读取中",
+        "同步中",
+    }
+)
+
+UI_STATUS_DISPLAY_TEXT = {
+    "sending": "发送中",
+    "queued": "已加入队列",
+    "waiting_send": "等待发送",
+    "waiting": "等待回复…",
+    "assistant_pending": "等待回复…",
+    "waiting_reply": "等待回复…",
+    "syncing": "同步中",
+    "reading": "读取中",
+    "failed": "失败",
+    "timeout": "超时",
+    "cancelled": "已取消",
+    "done": "已完成",
+}
+
+PENDING_MISSING_ID_CLEAR_SECONDS = 15
+
+# 仅保留 assistant 回复等待态；发送/同步态见 USER_SEND_PENDING_STATUSES / SYNC_PENDING_STATUSES
+PENDING_ASSISTANT_STATUSES = ASSISTANT_REPLY_PENDING_STATUSES
+
+
+def is_assistant_reply_pending_status(status: str | None) -> bool:
+    if not status:
+        return False
+    return str(status).strip() in ASSISTANT_REPLY_PENDING_STATUSES
+
+
+def is_user_send_pending_status(status: str | None) -> bool:
+    if not status:
+        return False
+    return str(status).strip() in USER_SEND_PENDING_STATUSES
+
+
+def is_sync_pending_status(status: str | None) -> bool:
+    if not status:
+        return False
+    return str(status).strip() in SYNC_PENDING_STATUSES
 PENDING_REPLY_SYNC_AFTER_SECONDS = 45
 PENDING_REPLY_HARD_TIMEOUT_SECONDS = 180
-PENDING_REPLY_STALE_TIMEOUT_SEC = PENDING_REPLY_HARD_TIMEOUT_SECONDS
 
 # 桥接完整 JSON 日志（GUI / Flask / 油猴）；仅临时排查时改为 True
 DEBUG_FULL_BRIDGE_JSON = False
 
-PENDING_USER_SEND_STATUSES = frozenset({"sending", "queued", "waiting_send"})
+PENDING_USER_SEND_STATUSES = USER_SEND_PENDING_STATUSES
 
 # GUI 重启 / 写盘时不应保留的运行态等待文案
 STARTUP_PENDING_RESET_MESSAGE = (
@@ -114,20 +189,10 @@ RESET_PLACEHOLDER_ERROR_TEXTS = frozenset(
     }
 )
 WAITING_PLACEHOLDER_SOURCES = frozenset({"local_placeholder"})
-WAITING_PLACEHOLDER_STATUSES = frozenset(
-    {
-        "waiting",
-        "读取中",
-        "等待回复",
-        "assistant_pending",
-    }
-) | PENDING_ASSISTANT_STATUSES
-UI_STATUS_DISPLAY_TEXT = {
-    "sending": "发送中",
-    "queued": "已加入队列",
-    "waiting": ASSISTANT_WAIT_TEXT,
-    "assistant_pending": ASSISTANT_WAIT_TEXT,
-}
+WAITING_PLACEHOLDER_STATUSES = (
+    ASSISTANT_REPLY_PENDING_STATUSES
+    | frozenset({"等待回复"})
+)
 
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 # 油猴页面在线/活跃度（server.ONLINE_TIMEOUT_SEC 与此同源）
@@ -212,28 +277,12 @@ SESSION_BIND_LIST_STYLES = {
     },
 }
 
-# 顶部状态栏三种页面角色（仅 UI 文案，不改变业务逻辑）
-STATUS_CHIP_AUTO_FOCUS_PREFIX = "自动焦点页"
-STATUS_CHIP_MANUAL_SELECT_PREFIX = "所选页面"
+# 顶部状态栏会话绑定页（仅 UI 文案，不改变业务逻辑）
 STATUS_CHIP_SESSION_BIND_PREFIX = "会话绑定页"
 
-STATUS_CHIP_AUTO_FOCUS_TOOLTIP = (
-    "表示油猴脚本自动检测到的当前浏览器焦点页面。\n"
-    "如果显示“浏览器页面未获得焦点”，不代表页面不存在，"
-    "只表示 ChatGPT 网页当前没有获得浏览器焦点。"
-)
-STATUS_CHIP_MANUAL_SELECT_TOOLTIP = (
-    "表示「可用页面列表」中当前选中的页面。\n"
-    "点击「绑定所选页面」后才会成为本会话的绑定目标。"
-)
 STATUS_CHIP_SESSION_BIND_TOOLTIP = (
     "表示当前本地对话真正绑定的远端 ChatGPT 页面。\n"
     "发送消息、同步网页对话、复制最后回复时，应优先使用这个绑定页面。"
-)
-
-STATUS_PAGE_ROLES_HINT = (
-    "会话绑定页是当前对话实际发送和同步使用的目标页面；"
-    "先在可用页面列表选中页面，再点击「绑定所选页面」。"
 )
 
 UNBOUND_SESSION_SEND_HINT = (
@@ -250,6 +299,9 @@ def status_chip_text(prefix, state):
     """顶部状态芯片：「前缀：状态」。"""
     return f"{prefix}：{state}"
 
+
+# 油猴「发送快捷键」按钮经 GUI 模拟的系统级组合键（与 bridge 白名单一致）
+DEFAULT_SYSTEM_HOTKEY_COMBO = "ctrl+alt+i"
 
 DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",

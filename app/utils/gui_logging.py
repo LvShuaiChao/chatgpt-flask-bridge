@@ -35,7 +35,6 @@ class LogThrottle:
 
 LOG_LEVELS = ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR")
 _LEVEL_RANK = {name: i for i, name in enumerate(LOG_LEVELS)}
-_DEFAULT_MIN_LEVEL = "INFO"
 
 # 普通模式下不在 GUI 显示的高频诊断标签（调试模式可显示）
 GUI_NOISY_TAGS = (
@@ -170,26 +169,6 @@ GUI_CRITICAL_INFO_TAGS = (
 
 _STRUCTURED_LOG_TAG_RE = re.compile(r"\[[A-Z][A-Z0-9_]*(?:\[[A-Z0-9_]+\])*\]")
 
-# 桥接 JSON 在普通模式下仍用 INFO 的关键 action（report 由 event 白名单单独处理）
-BRIDGE_JSON_INFO_ACTIONS = frozenset({
-    "ack",
-    "assistant_reply",
-    "send_failed",
-    "start_upload",
-    "sync_result",
-    "upload_result",
-})
-
-BRIDGE_JSON_REPORT_INFO_EVENTS = frozenset({
-    "assistant_reply",
-    "assistant_reply_empty",
-    "assistant_reply_failed",
-    "send_failed",
-    "sync_result",
-    "upload_result",
-    "conversation_created",
-})
-
 BRIDGE_JSON_FOCUS_NOISE_EVENTS = frozenset({
     "focus_state",
     "visibility",
@@ -224,19 +203,6 @@ def normalize_level(level) -> str:
     if text in _LEVEL_RANK:
         return text
     return "INFO"
-
-
-def level_rank(level) -> int:
-    return _LEVEL_RANK.get(normalize_level(level), _LEVEL_RANK["INFO"])
-
-
-def should_emit_log(level, *, debug_mode: bool = False, min_level: str = _DEFAULT_MIN_LEVEL) -> bool:
-    """默认仅 INFO 及以上；DEBUG/TRACE 需 debug_mode。"""
-    norm = normalize_level(level)
-    if norm in ("DEBUG", "TRACE") and not debug_mode:
-        return False
-    effective_min = "TRACE" if debug_mode else min_level
-    return level_rank(norm) >= level_rank(effective_min)
 
 
 def parse_level_from_log_line(line: str) -> str:

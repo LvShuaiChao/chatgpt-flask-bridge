@@ -6,12 +6,11 @@ from __future__ import annotations
 
 
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 
 
 from app.utils.legacy_cleanup import (
-    LEGACY_FIELD_NAMES,
     assert_no_legacy_fields,
     reject_legacy_fields,
 )

@@ -64,8 +64,10 @@ class ExternalApiGuiMixin:
         complete_gui_dispatch(action_id, result)
 
     def _external_api_system_hotkey(self, payload):
+        from app.constants import DEFAULT_SYSTEM_HOTKEY_COMBO
+
         combo = str((payload or {}).get("combo") or "").strip().lower()
-        if combo != "ctrl+alt+i":
+        if combo != DEFAULT_SYSTEM_HOTKEY_COMBO:
             return {
                 "ok": False,
                 "error": f"不允许的快捷键: {combo}",
@@ -73,14 +75,25 @@ class ExternalApiGuiMixin:
             }
 
         import pyautogui
-        self._append_log("[SYSTEM_HOTKEY][EXEC] combo=ctrl+alt+i", echo=True)
-        pyautogui.hotkey("ctrl", "alt", "i", interval=0.04)
-        self._append_log("[SYSTEM_HOTKEY][DONE] combo=ctrl+alt+i", echo=True)
+        self._append_log(
+            f"[SYSTEM_HOTKEY][EXEC] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+            echo=True,
+        )
+        keys = [
+            part.strip()
+            for part in DEFAULT_SYSTEM_HOTKEY_COMBO.split("+")
+            if part.strip()
+        ]
+        pyautogui.hotkey(*keys, interval=0.04)
+        self._append_log(
+            f"[SYSTEM_HOTKEY][DONE] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+            echo=True,
+        )
 
         return {
             "ok": True,
-            "combo": "ctrl+alt+i",
-            "keys": ["ctrl", "alt", "i"],
+            "combo": DEFAULT_SYSTEM_HOTKEY_COMBO,
+            "keys": keys,
         }
 
     def _external_api_sessions_summary(self):

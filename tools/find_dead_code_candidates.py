@@ -10,10 +10,6 @@ PY_TARGETS = [
     ROOT / "server.py",
 ]
 
-JS_TARGETS = [
-    ROOT / "client.user.js",
-]
-
 IGNORE_DIR_NAMES = {
     "__pycache__",
     ".git",
@@ -33,7 +29,6 @@ DEPRECATED_PATTERNS = [
     "last_page_url",
     "conversation_url",
     "remote_binding_enabled",
-    "PENDING_REPLY_STALE_TIMEOUT_SEC",
     "status_chip_text",
 ]
 
@@ -61,9 +56,6 @@ def iter_files():
                 continue
             yield path
 
-    for target in JS_TARGETS:
-        if target.exists():
-            yield target
 
 
 def read_text(path):
@@ -134,6 +126,10 @@ def main():
         "以上只是候选清单，不能自动删除。"
         "Qt 信号、Flask 路由、getattr、字符串动态调用都可能导致误判。"
         "删除前请先运行: python tools/find_dynamic_reference_entries.py"
+    )
+    print(
+        "已排除构建产物扫描: client.user.js、dist/**、build/**、runtime/**、logs/** 等。"
+        "油猴请改 chatgpt-toolbox/tampermonkey-userscript-src/ 后 npm run build。"
     )
 
 

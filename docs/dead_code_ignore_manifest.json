@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "purpose": "dead-code-scan-ignore-manifest",
+  "rules": [
+    {
+      "id": "keep-legacy-cleanup-guards",
+      "path": "app/utils/legacy_cleanup.py",
+      "symbol": "LEGACY_FIELD_NAMES",
+      "scanner": "find_dead_config_keys",
+      "reason": "旧字段枚举用于 reject/assert guard，不能按旧字段残留删除",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-legacy-cleanup-assert",
+      "path": "app/utils/legacy_cleanup.py",
+      "symbol": "assert_no_legacy_fields",
+      "scanner": "find_python_dead_statements",
+      "reason": "用于桥接 payload 旧字段 fail-fast 校验",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-userscript-generated-artifact",
+      "path": "client.user.js",
+      "symbol": "generated userscript artifact",
+      "scanner": "find_dead_artifact_files",
+      "reason": "client.user.js 是 npm run build 生成产物；当前源码导出快照可能不包含它。若存在，不作为源码修改入口；若不存在，不应判为缺失源码。",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-debug-full-bridge-json",
+      "path": "app/constants.py",
+      "symbol": "DEBUG_FULL_BRIDGE_JSON",
+      "scanner": "find_feature_flag_dead_code_candidates",
+      "reason": "桥接调试开关，属于诊断能力，不按 dead code 删除",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-qt-mainwindow-close-event",
+      "path": "app/ui/main_window.py",
+      "symbol": "def closeEvent",
+      "scanner": "find_python_dead_statements",
+      "reason": "MainWindow.closeEvent Qt window close event override; called by Qt runtime",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-qt-mainwindow-show-event",
+      "path": "app/ui/main_window.py",
+      "symbol": "def showEvent",
+      "scanner": "find_python_dead_statements",
+      "reason": "MainWindow.showEvent Qt show event override; called by Qt runtime",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-qt-nowheelcombo-wheel-event",
+      "path": "app/ui/widgets/no_wheel_combo_box.py",
+      "symbol": "def wheelEvent",
+      "scanner": "find_python_dead_statements",
+      "reason": "NoWheelComboBox.wheelEvent Qt wheel event override; called by Qt runtime",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-werkzeug-silent-log-request",
+      "path": "app/server/runtime_state.py",
+      "symbol": "def log_request",
+      "scanner": "find_python_dead_statements",
+      "reason": "SilentWSGIRequestHandler.log_request Werkzeug request handler override; called by Werkzeug runtime",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-server-module-getattr",
+      "path": "app/server/__init__.py",
+      "symbol": "def __getattr__",
+      "scanner": "find_python_dead_statements",
+      "reason": "Module-level lazy attribute hook; called by Python import/runtime",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-server-module-dir",
+      "path": "app/server/__init__.py",
+      "symbol": "def __dir__",
+      "scanner": "find_python_dead_statements",
+      "reason": "Module-level dir hook; called by Python runtime/tools",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-userscript-waiting-reply-iife",
+      "path": "chatgpt-toolbox/tampermonkey-userscript-src/upload/upload-module.js",
+      "symbol": "tickWaitingReplyOrSendOpportunity",
+      "scanner": "find_dead_code_candidates",
+      "reason": "Named async IIFE inside setInterval; executed periodically; single name occurrence is expected",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-cursor-automation-runtime-singleton",
+      "path": "app/cursor_code/runtime.py",
+      "symbol": "CursorAutomationRuntime",
+      "scanner": "find_dead_code_candidates",
+      "reason": "Module-level _runtime singleton; not safe to delete by name count alone",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    },
+    {
+      "id": "keep-future-annotations-import-global",
+      "path": "app/**/*.py",
+      "symbol": "from __future__ import annotations",
+      "scanner": "find_python_dead_statements",
+      "reason": "Not a runtime import: enables postponed evaluation of type annotations. Simple unused-import scanners false-positive because the name annotations is never referenced in-file. Do not delete in app/client, app/server, app/ui/main_window_state.py, app/utils, app/ui/mixins, or app/ui/widgets.",
+      "expires_after": "manual-review-required",
+      "owner": "project-maintainer"
+    }
+  ]
+}

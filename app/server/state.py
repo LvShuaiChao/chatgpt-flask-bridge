@@ -41,24 +41,6 @@ MAX_CONTROL_QUEUE_SIZE = 50
 MAX_INBOUND_HISTORY_SIZE = 100
 MAX_OUTBOUND_HISTORY_SIZE = 50
 
-
-class BridgeQueueFullError(RuntimeError):
-    def __init__(self, current_size, max_size):
-        self.current_size = int(current_size or 0)
-        self.max_size = int(max_size or 0)
-        super().__init__(f"outbound queue full: {self.current_size}/{self.max_size}")
-
-    def to_dict(self):
-        return {
-            "ok": False,
-            "code": "queue_full",
-            "queue_full": True,
-            "current_size": self.current_size,
-            "max_size": self.max_size,
-            "suggestion": "队列已满，请稍后再试或等待油猴窗口处理完已有消息。",
-        }
-
-
 _outbound_queue = deque()
 _outbound_waiting = {}
 _control_queue = deque()
@@ -71,11 +53,6 @@ LEASE_SEC = 30
 _tm_page_no_by_key = {}
 _tm_page_no_updated_at = {}
 
-import uuid
-import time
-
-_server_instance_id = str(uuid.uuid4())
-_server_start_time = time.time()
 _external_requests = {}
 _bridge_message_to_external = {}
 _session_external_pending = {}

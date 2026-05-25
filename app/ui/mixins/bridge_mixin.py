@@ -8,7 +8,6 @@ from app.server import (
     push_message,
     set_debug_mode,
     start_server,
-    stop_server,
 )
 from app.cursor_code.runtime import (
     get_cursor_code_pause_reason,
@@ -23,15 +22,10 @@ from app.utils.log_utils import append_log
 
 from app.constants import (
     ASSISTANT_WAIT_TEXT,
-    ASSISTANT_WAIT_TEXTS,
     BOOTSTRAP_CLAIM_WAIT_TEXT,
     is_invalid_assistant_reply_text,
-    PENDING_ASSISTANT_STATUSES,
 )
 from app.models import (
-    remote_binding_enabled,
-    BIND_STATE_BOUND_CONVERSATION,
-    BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_BOUND_CONVERSATION,
@@ -40,18 +34,12 @@ from app.models import (
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
-from app.url_utils import parse_conversation_id
 from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
-from app.utils.bridge_payload import build_gui_push_payload
-from app.utils.page_status import page_url_from, read_snapshot_identity
+from app.utils.page_status import page_url_from
 from app.utils.trace_log import kv_line, make_send_trace_id
-from app.utils.page_status import bridge_status_online
 from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import (
-    QApplication,
-    QTableWidgetItem,
-)
+from PyQt5.QtWidgets import QApplication
 
 
 class BridgeMixin(AssistantReplyUpsertMixin):
@@ -154,88 +142,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         "status_signal",
         "deferred_bridge_status",
     })
-    def _enqueue_upload_then_send_command(
-        self,
-        session,
-        payload,
-        target_client_id,
-    ):
-        target_client_id = (target_client_id or "").strip()
-        if not target_client_id:
-            self._append_log(
-                "[UPLOAD_THEN_SEND][SKIP] reason=empty_target_client_id",
-                echo=True,
-            )
-            return False
-
-        target_page_instance_id = (
-            (payload.get("page_instance_id") or "").strip()
-        )
-        target_conversation_id = (
-            (payload.get("conversation_id") or "").strip()
-        )
-
-        enqueue_result = enqueue_control_command(
-            command="start_upload",
-            client_id=target_client_id,
-            page_instance_id=target_page_instance_id,
-            conversation_id=target_conversation_id,
-            payload={
-                "source": "gui-send-before-message",
-                "session_id": session.session_id if session else "",
-                "turn_id": payload.get("turn_id") or "",
-                "require_all_success": True,
-                "block_next_chat_on_failed": True,
-            },
-        )
-        queued, queued_msg, enqueue_reason = self._normalize_enqueue_result(
-            enqueue_result
-        )
-
-        if not queued:
-            self._append_log(
-                "[UPLOAD_BEFORE_SEND][FAILED] reason=enqueue_failed "
-                f"enqueue_reason={enqueue_reason or '-'} "
-                f"session_id={(session.session_id if session else '-')} "
-                f"client_id={target_client_id or '-'} "
-                f"page_instance_id={target_page_instance_id or '-'} "
-                f"conversation_id={target_conversation_id or '-'}",
-                echo=True,
-            )
-            return False
-
-        message_id = ""
-        if isinstance(queued_msg, dict):
-            message_id = (
-                (queued_msg.get("message_id") or "") or ""
-            ).strip()
-        if not message_id and isinstance(enqueue_result, dict):
-            message_id = (enqueue_result.get("message_id") or "").strip()
-
-        self._append_log(
-            "[TM_CONTROL][START_UPLOAD][QUEUE] "
-            f"target_client_id={target_client_id or '-'} "
-            "command=start_upload "
-            f"session_id={(session.session_id if session else '-')} "
-            f"page_instance_id={target_page_instance_id or '-'} "
-            f"conversation_id={target_conversation_id or '-'} "
-            f"command_message_id={message_id or '-'}",
-            echo=True,
-        )
-
-        if not message_id:
-            self._append_log(
-                "[UPLOAD_THEN_SEND][WARN] reason=missing_command_message_id",
-                echo=True,
-            )
-            return False
-        if hasattr(self, "start_page_command"):
-            self.start_page_command(
-                "start_upload",
-                payload={"message_id": message_id},
-            )
-        return message_id
-
     def _pop_pending_upload_send(self, control_message_id):
         key = str(control_message_id or "").strip()
         if not key:
@@ -824,144 +730,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         self._add_system_message(f"上传失败，已取消发送：{reason_text}")
         self._apply_chat_bind_visual_state()
 
-    def _strict_targets_for_upload_command(self, session):
-        """
-        解析用于 start_upload 严格定向的 client / page_instance / conversation。
-        返回 (target_client_id, page_instance_id, conversation_id, err)。
-        err 非空表示当前不允许从 GUI 触发上传。
-        """
-        if session is None:
-            return "", "", "", "没有当前会话"
-        if not is_server_running():
-            return "", "", "", "请先启动桥接服务"
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if not remote_binding_enabled(remote):
-            return "", "", "", "当前对话未启用远程 ChatGPT 联动"
-        bind_eff = self._effective_bind_state(session)
-        if bind_eff != BIND_STATE_BOUND_CONVERSATION:
-            return (
-                "",
-                "",
-                "",
-                f"上传仅适用于已绑定且在线的对话页（当前状态：{bind_eff}）",
-            )
-        target_client_id = (remote.get("client_id") or "").strip()
-        page_instance_id = (remote.get("page_instance_id") or "").strip()
-        conv = (remote.get("conversation_id") or "").strip()
-        if not conv:
-            conv = (
-                parse_conversation_id(
-                    (remote.get("url") or "").strip()
-                )
-                or ""
-            ).strip()
-        if not target_client_id:
-            return "", "", "", "缺少绑定页面的 client_id"
-        if not page_instance_id:
-            return "", "", "", "缺少 page_instance_id，请重新绑定对话页面"
-        if not conv:
-            return "", "", "", "缺少 conversation_id，请打开已绑定的 ChatGPT 对话页"
-        info = self._client_info_by_id(
-            target_client_id, getattr(self._bridge_ui, "last_bridge_status", None)
-        )
-        if not isinstance(info, dict):
-            return "", "", "", "无法从桥接状态解析绑定页面信息"
-        if not self._tm_page_is_online_simple(info):
-            return "", "", "", "当前绑定页面离线，请打开对应浏览器标签页"
-        if not bool(info.get("upload_bridge_supported")):
-            return (
-                "",
-                "",
-                "",
-                "绑定页面油猴脚本不支持 start_upload，请更新 Tampermonkey 脚本并刷新 ChatGPT 页面",
-            )
-        return target_client_id, page_instance_id, conv, ""
-
-    def _trigger_upload_for_current_bound_page(
-        self, block_next_chat_on_failed=True
-    ):
-        """
-        向当前绑定的油猴页面下发 start_upload 控制命令。
-        只负责触发上传，不负责发送文本。
-        """
-        session = self._current_session()
-        cid, pins, conv, err = self._strict_targets_for_upload_command(session)
-        if err:
-            self._add_system_message(err)
-            self._append_log(
-                f"[UPLOAD_TRIGGER][FAILED] reason=precheck {err}",
-                echo=True,
-            )
-            return False
-        self._append_log(
-            "[UPLOAD_TRIGGER][TARGET] "
-            f"client_id={cid or '-'} "
-            f"page_instance_id={pins or '-'} "
-            f"conversation_id={conv or '-'}",
-            echo=True,
-        )
-        self._add_system_message(
-            "上传命令将发送到绑定页："
-            f"client_id={cid}，page_instance_id={pins}，conversation_id={conv}。"
-        )
-        current_client_id = (self._selected_tm_page_client_id() or "").strip()
-        if current_client_id and current_client_id != cid:
-            self._add_system_message(
-                "注意：当前选中的页面不是绑定页，上传命令会发送到当前会话的绑定页。"
-                "如果当前页面没有反应，请点击「定位绑定页」查看。"
-            )
-            self._append_log(
-                "[UPLOAD_TRIGGER][TARGET_NOT_CURRENT] "
-                f"current_client_id={current_client_id} target_client_id={cid}",
-                echo=True,
-            )
-        payload = {
-            "source": "python_gui",
-            "session_id": session.session_id if session else "",
-            "require_all_success": True,
-            "block_next_chat_on_failed": block_next_chat_on_failed,
-        }
-        try:
-            enqueue_result = enqueue_control_command(
-                command="start_upload",
-                client_id=cid,
-                page_instance_id=pins,
-                conversation_id=conv,
-                payload=payload,
-            )
-        except Exception as error:
-            detail = (
-                f"[UPLOAD_TRIGGER][FAILED] reason=exception {error}\n"
-                f"{traceback.format_exc()}"
-            )
-            self._append_log(detail, echo=True)
-            return False
-        queued, queued_msg, enqueue_reason = self._normalize_enqueue_result(
-            enqueue_result
-        )
-        if not queued:
-            self._append_log(
-                "[UPLOAD_TRIGGER][FAILED] reason=enqueue_returned_falsy "
-                f"enqueue_reason={enqueue_reason or '-'}",
-                echo=True,
-            )
-            return False
-        message_id = ""
-        if isinstance(queued_msg, dict):
-            message_id = ((queued_msg.get("message_id") or "") or "").strip()
-        self._append_log(
-            "[TM_CONTROL][START_UPLOAD][QUEUE] "
-            f"target_client_id={cid} "
-            "command=start_upload "
-            f"session_id={(session.session_id if session else '-')} "
-            f"page_instance_id={pins} "
-            f"conversation_id={conv} "
-            f"command_message_id={message_id or '-'} "
-            f"block_next_chat_on_failed={block_next_chat_on_failed}",
-            echo=True,
-        )
-        return True
-
     def _clear_stale_pending_reply_if_bound_page_idle(self, session, reason=""):
         """桥接状态 tick / ack / 发送失败等场景下清理 stale pending。"""
         if session is None or not hasattr(self, "_clear_stale_pending_reply"):
@@ -1031,29 +799,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             level=level or parse_level_from_log_line(str(line or "")),
             debug_mode=self._is_debug_mode_enabled(),
         )
-
-    def _make_tm_clients_signature(self, clients):
-        parts = []
-        for client in clients or []:
-            if not isinstance(client, dict):
-                continue
-            parts.append("|".join([
-                str(client.get("client_id", "")),
-                str(client.get("page_instance_id", "")),
-                str(client.get("conversation_id", "")),
-                str(page_url_from(client) or ""),
-                str(client.get("visibility_state") or ""),
-                str(
-                    client.get("focus")
-                    or client.get("has_focus")
-                    or client.get("focused")
-                    or ""
-                ),
-                str(client.get("response_state") or client.get("is_responding") or ""),
-                str(client.get("can_accept_input") or ""),
-                str(client.get("response_state") or ""),
-            ]))
-        return "\n".join(sorted(parts))
 
     def _debug_status_step(self, text):
         if not self._is_debug_mode_enabled():
@@ -1181,69 +926,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             self._bridge_ui.pending_status_apply_reason = reason
         self._schedule_status_apply(status=status, reason=reason or "direct", force=force)
 
-    def _render_status_summary(self, status):
-        status = status or {}
-        host, port = self._service_host_port_for_display(status)
-        pages = status.get("pages") or []
-        last_seen_vals = [
-            float(p.get("last_seen") or 0)
-            for p in pages
-            if isinstance(p, dict) and p.get("last_seen")
-        ]
-        last_seen = max(last_seen_vals) if last_seen_vals else None
-        summary = self._tm_summary_for_session()
-        active = read_snapshot_identity(summary, "active")
-        active_client_id = active["client_id"]
-        active_info = (
-            self._client_info_by_id(active_client_id, status=status)
-            if active_client_id
-            else None
-        )
-        page_url = page_url_from(active_info) if active_info else "-"
-        if bridge_status_online(status):
-            tm_text = "在线"
-        else:
-            tm_text = "未连接"
-        lines = [
-            f"服务运行：{'是' if status.get('server_running') else '否'}",
-            f"监听地址：{host}:{port}",
-            f"油猴状态：{tm_text}",
-            f"最后心跳：{self._format_ts(last_seen)}",
-            f"油猴 client_id：{active_client_id or '-'}",
-            f"全局绑定 client_id：{read_snapshot_identity(status, 'bound')['client_id'] or '-'}",
-            f"本对话绑定 client_id：{self._session_bound_client_id() or '-'}",
-            f"已知 ChatGPT 页面数：{self._status_summary_page_count(status)}",
-        ]
-        lines.extend([
-            f"油猴在线：{summary.get('online_clients', 0)} / 总 {summary.get('total_clients', 0)}",
-            f"会话页在线：{summary.get('online_conversation_clients', 0)}",
-            f"首页在线：{summary.get('online_home_clients', 0)}",
-            f"绑定在线：{summary.get('bound_online')}",
-            f"活跃 client：{active_client_id or '-'}",
-        ])
-        current_queue = self._current_session_queue_size()
-        total_queue = self._total_session_queue_size()
-        lines.extend([
-            f"聊天队列：当前 {current_queue} / 总 {total_queue}",
-            f"待发队列：{status.get('queue_length', 0)}",
-            f"控制命令队列：{status.get('control_queue_length', 0)}",
-            f"控制命令等待：{status.get('control_waiting_count', 0)}",
-            f"入站事件数：{status.get('inbound_count', 0)}",
-            f"当前油猴页面：{page_url}",
-            f"本对话绑定页面：{self._bound_conversation_url() or '未绑定'}",
-        ])
-        waiting_acks = status.get("waiting_acks") or []
-        if not waiting_acks and status.get("waiting_ack"):
-            waiting_acks = [status.get("waiting_ack")]
-        if waiting_acks:
-            lines.append(f"等待回执消息数：{len(waiting_acks)}")
-            for waiting in waiting_acks[:5]:
-                lines.append(
-                    f"  · {waiting.get('id', '?')[:8]}… "
-                    f"status={waiting.get('status', '?')} "
-                    f"delivered_to={waiting.get('delivered_to', '-')}"
-                )
-        return "\n".join(lines)
     @staticmethod
     def _refresh_status_chip(label, state=""):
         state = state or ""
@@ -1262,7 +944,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
                 lambda: self._refresh_page_selector_after_heavy_skip(),
             )
             return
-        self._pending_page_selector_refresh = False
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason="after_heavy_skip")
 
@@ -1403,7 +1084,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             QTimer.singleShot(0, lambda s=status: self._auto_bind_current_session_if_needed(s))
         self._debug_status_step("[STATUS_APPLY][STEP] page_registry_deferred")
         if skip_heavy_ui:
-            self._pending_page_selector_refresh = True
             QTimer.singleShot(
                 300,
                 lambda: self._refresh_page_selector_after_heavy_skip(),
@@ -1413,7 +1093,7 @@ class BridgeMixin(AssistantReplyUpsertMixin):
                     "[STATUS_APPLY][SKIP_HEAVY] "
                     f"reason={apply_reason or 'session_switch'} "
                     "skip=page_selector,tm_table "
-                    "pending_page_selector_refresh=True",
+                    "defer_page_selector_refresh=True",
                     echo=False,
                 )
         elif refresh_page_list:
@@ -2414,26 +2094,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             self._append_log(message, echo=True)
             self._add_system_message(message)
             self._update_running_ui(False)
-    def _stop_server(self):
-        try:
-            stopped = stop_server()
-        except Exception as error:
-            detail = f"服务停止失败：{error}\n{traceback.format_exc()}"
-            self._append_log(detail, echo=True)
-            self._add_system_message(f"服务停止失败：{error}")
-            return
-        if stopped:
-            self._server_ui.start_failed = False
-            self._server_ui.start_error = ""
-            self._update_running_ui(False)
-            self._schedule_status_apply(
-                get_bridge_status(),
-                reason="server_stopped",
-                force=True,
-            )
-            self._add_system_message("服务已停止。")
-        else:
-            self._add_system_message("服务当前没有运行。")
 
     def _check_bound_client_response_ready(self, session):
         if session is None:
@@ -2529,16 +2189,6 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         if session is None:
             return 0
         return len(self._session_send_queue(session.session_id))
-
-    def _total_session_queue_size(self):
-        queues = getattr(self, "_session_send_queues", {})
-        if not isinstance(queues, dict):
-            return 0
-        total = 0
-        for items in queues.values():
-            if isinstance(items, list):
-                total += len(items)
-        return total
 
     def _update_queue_badge(self):
         return
@@ -2925,8 +2575,10 @@ class BridgeMixin(AssistantReplyUpsertMixin):
     def _handle_external_gui_dispatch(self, action_id, action, payload):
         from app.server.runtime_state import complete_gui_dispatch
         if action == "system_hotkey":
+            from app.constants import DEFAULT_SYSTEM_HOTKEY_COMBO
+
             combo = str((payload or {}).get("combo") or "").strip().lower()
-            if combo != "ctrl+alt+i":
+            if combo != DEFAULT_SYSTEM_HOTKEY_COMBO:
                 result = {
                     "ok": False,
                     "error": f"不允许的快捷键: {combo}",
@@ -2935,13 +2587,24 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             else:
                 try:
                     import pyautogui
-                    self._append_log("[SYSTEM_HOTKEY][EXEC] combo=ctrl+alt+i", echo=True)
-                    pyautogui.hotkey("ctrl", "alt", "i", interval=0.04)
-                    self._append_log("[SYSTEM_HOTKEY][DONE] combo=ctrl+alt+i", echo=True)
+                    self._append_log(
+                        f"[SYSTEM_HOTKEY][EXEC] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+                        echo=True,
+                    )
+                    keys = [
+                        part.strip()
+                        for part in DEFAULT_SYSTEM_HOTKEY_COMBO.split("+")
+                        if part.strip()
+                    ]
+                    pyautogui.hotkey(*keys, interval=0.04)
+                    self._append_log(
+                        f"[SYSTEM_HOTKEY][DONE] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+                        echo=True,
+                    )
                     result = {
                         "ok": True,
-                        "combo": "ctrl+alt+i",
-                        "keys": ["ctrl", "alt", "i"],
+                        "combo": DEFAULT_SYSTEM_HOTKEY_COMBO,
+                        "keys": keys,
                     }
                 except Exception as error:
                     import traceback

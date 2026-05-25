@@ -13,7 +13,7 @@ from app.constants import (
     BOOTSTRAP_CLAIM_WAIT_TEXT,
     BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS,
     BOOTSTRAP_CLAIMED_WAIT_TEXT,
-    PENDING_ASSISTANT_STATUSES,
+    ASSISTANT_REPLY_PENDING_STATUSES,
 )
 from app.models import (
     remote_binding_enabled,
@@ -21,14 +21,10 @@ from app.models import (
     BIND_MODE_HOME_PENDING,
     BIND_MODE_PAGE_CHANNEL,
     BIND_STATE_PREBOUND_HOME,
-    BIND_STATE_TEMP_HOME_BOUND,
-    BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_HOME,
-    default_remote_chatgpt,
     derive_bind_mode,
     normalize_remote_chatgpt,
 )
-from app.url_utils import parse_conversation_id
 from app.utils.page_status import PageActionPlan, PageCapability, page_url_from
 from app.utils.send_plan import LocalTurn, SendPlan
 from app.utils.trace_log import kv_line, make_send_trace_id
@@ -127,7 +123,7 @@ class SendFlowMixin:
             if (
                 not msg_bridge
                 and text not in ASSISTANT_WAIT_TEXTS
-                and status not in PENDING_ASSISTANT_STATUSES
+                and status not in ASSISTANT_REPLY_PENDING_STATUSES
             ):
                 continue
             if text == desired:
@@ -972,7 +968,7 @@ class SendFlowMixin:
                     continue
                 text = (message.content or "").strip()
                 msg_status = (message.ui_status or "").strip()
-                if text in ASSISTANT_WAIT_TEXTS or msg_status in PENDING_ASSISTANT_STATUSES:
+                if text in ASSISTANT_WAIT_TEXTS or msg_status in ASSISTANT_REPLY_PENDING_STATUSES:
                     fail_text = f"发送失败：目标不可用 {reason}"
                     message.content = fail_text
                     message.ui_status = "目标不可用"
@@ -1049,7 +1045,7 @@ class SendFlowMixin:
             if placeholder is not None and placeholder.role == "assistant":
                 text = (placeholder.content or "").strip()
                 status = (placeholder.ui_status or "").strip()
-                if status in PENDING_ASSISTANT_STATUSES or text in ASSISTANT_WAIT_TEXTS:
+                if status in ASSISTANT_REPLY_PENDING_STATUSES or text in ASSISTANT_WAIT_TEXTS:
                     placeholder.content = fail_text
                     placeholder.ui_status = "发送失败"
                     placeholder.detail = err_type

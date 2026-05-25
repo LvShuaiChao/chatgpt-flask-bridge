@@ -41,7 +41,6 @@ from app.ui.main_window_state import (
     BindDisplayState,
     BridgeMessageState,
     BridgeUiState,
-    LogUiState,
     PageCommandUiState,
     PageSelectorState,
     ServerUiState,
@@ -97,7 +96,6 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         self._bind_display = BindDisplayState()
         self._page_cmd = PageCommandUiState()
         self._bridge_msg = BridgeMessageState()
-        self._log_ui = LogUiState()
         self._session_ui = SessionUiState()
         self._server_ui = ServerUiState()
         self._saved_page_url = self._load_saved_page_url()

@@ -223,16 +223,25 @@
   const UploadSelectors = Object.freeze({
     module: '#cgpt-upload-module',
     list: '#cgpt-upload-list',
+
+    // 上传按钮：只负责上传
     startBtn: '#cgpt-upload-start',
-    startSendBtn: '#cgpt-upload-start-send',
+
+    // 发送按钮：只负责发送。新 ID 不再带 upload-start，避免语义和状态污染。
+    sendMessageBtn: '#cgpt-send-message-once',
+
+    // 旧 ID 只用于兼容迁移，不允许新渲染继续使用。
+    legacyStartSendBtn: '#cgpt-upload-start-send',
+
     copyContinueBtn: '#cgpt-upload-continue-once',
     sendHotkeyBtn: '#cgpt-send-hotkey-once',
-    homeBtn: '#cgpt-open-chatgpt-home',
     autoContinueBtn: '#cgpt-auto-continue-once',
+    autoContinueUntilDoneBtn: '#cgpt-auto-continue-until-done',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
     copyHotkeyOnceBtn: '#cgpt-copy-hotkey-once',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
     copyHotkeyContinueLoopBtn: '#cgpt-copy-hotkey-continue-loop',
+    copyHotkeyContinueLoopUploadVerifyBtn: '#cgpt-copy-hotkey-continue-loop-upload-verify',
     groupList: '#cgpt-upload-group-list',
     managePanel: '#cgpt-upload-manage-panel',
     manageGroupList: '#cgpt-upload-manage-group-list',
@@ -240,7 +249,30 @@
     quickPrompts: '#cgpt-upload-quick-prompts',
   });
 
+  /** Upload area core action buttons (upload/copy/hotkey). Send is separate — see SendActionSelectors. */
+  const UploadCoreActionSelectors = Object.freeze([
+    UploadSelectors.startBtn,
+    UploadSelectors.copyContinueBtn,
+    UploadSelectors.sendHotkeyBtn,
+    UploadSelectors.autoContinueBtn,
+    UploadSelectors.autoContinueUntilDoneBtn,
+    UploadSelectors.copyLastMessageBtn,
+    UploadSelectors.copyHotkeyOnceBtn,
+    UploadSelectors.copyHotkeyContinueOnceBtn,
+    UploadSelectors.copyHotkeyContinueLoopBtn,
+    UploadSelectors.copyHotkeyContinueLoopUploadVerifyBtn,
+  ]);
+
+  const SendActionSelectors = Object.freeze([
+    UploadSelectors.sendMessageBtn,
+  ]);
+
+  const HomeActionSelectors = Object.freeze({
+    homeBtn: '#cgpt-open-chatgpt-home',
+  });
+
   const SettingsSelectors = Object.freeze({
+    showUploadGroups: '#cgpt-setting-compact-show-upload-groups',
     showUploadStart: '#cgpt-setting-compact-show-upload-start',
     showFileList: '#cgpt-setting-compact-show-file-list',
   });
@@ -303,9 +335,11 @@
   }
 
   const DEFAULT_BATCH_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+  const DEFAULT_BATCH_BLOCKED_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+  const DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
   const DEFAULT_TASK_DONE_SIGNAL = DEFAULT_BATCH_DONE_SIGNAL;
 
-  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成上一个任务。
+  const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V2 = `请继续完成上一个任务。
 
 默认行为：继续输出剩余内容。
 
@@ -324,6 +358,26 @@
 {{DONE_SIGNAL}}
 
 如果不确定是否已经完成，必须继续输出，禁止输出终止信号。
+
+继续输出时必须遵守：
+1. 不要重复已经输出过的内容。
+2. 不要重新开始整个任务。
+3. 不要扩展到新任务。
+4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
+5. 如果上一轮回答像是被截断，请从中断位置继续。`;
+
+  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成上一个任务。
+
+如果还有未输出完的内容，请继续输出剩余内容。
+
+如果已经没有可继续输出的内容，但由于缺少源码、日志、构建结果、测试结果、用户确认等外部材料，无法判断任务是否真实完成，请只输出：
+{{BLOCKED_SIGNAL}}
+
+如果你非常确定任务已经完整完成，并且没有任何剩余内容，只输出：
+{{DONE_SIGNAL}}
+
+如果你确定当前回复内容已经输出完，但不能证明工程任务真实完成，只输出：
+{{NO_MORE_CONTENT_SIGNAL}}
 
 继续输出时必须遵守：
 1. 不要重复已经输出过的内容。
@@ -424,8 +478,79 @@
     return (
       value.includes('<<<XZ_TOOLBOX_BATCH_<<<XZ_TOOLBOX_BATCH_')
       || value.includes('_7F3B9C>>>_7F3B9C>>>')
-      || (value.match(/XZ_TOOLBOX_BATCH_/g) || []).length >= 2
+      || /<<<XZ_TOOLBOX_BATCH_[^>]+<<<XZ_TOOLBOX_BATCH_/.test(value)
     );
+  }
+
+  function normalizeReplyText(text) {
+    return String(text || '')
+      .replace(/\u200B|\u200C|\u200D|\uFEFF/g, '')
+      .replace(/\r\n/g, '\n')
+      .trim();
+  }
+
+  const BATCH_REPLY_BLOCKED_TEXT_PATTERNS = [
+    /当前没有新的?剩余内容可以继续输出/,
+    /当前没有可继续补充的剩余内容/,
+    /没有可继续输出的内容/,
+    /不能输出[\s\S]*XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C/,
+    /缺少?实际验证材料/,
+    /没有实际修改、扫描、构建、测试结果/,
+    /任务不能判定完整完成/,
+    /无法判定任务完整完成/,
+    /需要用户提供/,
+  ];
+
+  function classifyBatchReply(replyText) {
+    const text = normalizeReplyText(replyText);
+
+    if (!text) {
+      return {
+        shouldStop: false,
+        status: 'empty',
+        reason: 'empty-reply',
+      };
+    }
+
+    if (text.includes(DEFAULT_BATCH_DONE_SIGNAL)) {
+      return {
+        shouldStop: true,
+        status: 'done',
+        reason: 'done-marker-detected',
+      };
+    }
+
+    if (text.includes(DEFAULT_BATCH_BLOCKED_SIGNAL)) {
+      return {
+        shouldStop: true,
+        status: 'blocked',
+        reason: 'blocked-marker-detected',
+      };
+    }
+
+    if (text.includes(DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
+      return {
+        shouldStop: true,
+        status: 'no_more_content',
+        reason: 'no-more-content-marker-detected',
+      };
+    }
+
+    for (const pattern of BATCH_REPLY_BLOCKED_TEXT_PATTERNS) {
+      if (pattern.test(text)) {
+        return {
+          shouldStop: true,
+          status: 'blocked',
+          reason: 'blocked-text-detected',
+        };
+      }
+    }
+
+    return {
+      shouldStop: false,
+      status: 'continue',
+      reason: 'no-terminal-state-detected',
+    };
   }
 
   function repairCorruptedDoneSignalText(value, logFn) {
@@ -480,6 +605,17 @@
     }
 
     if (normalized === normalizeContinuePromptTemplateForCompare(LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V1)) {
+      return true;
+    }
+
+    if (normalized === normalizeContinuePromptTemplateForCompare(LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V2)) {
+      return true;
+    }
+
+    if (
+      normalized.includes('如果不确定是否已经完成，必须继续输出，禁止输出终止信号')
+      || normalized.includes('只有同时满足下面所有条件时，才允许停止')
+    ) {
       return true;
     }
 
@@ -551,7 +687,10 @@
   function renderContinuePromptTemplate(template, doneSignal) {
     const safeTemplate = String(template || DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
     const safeDoneSignal = normalizeDoneSignal(doneSignal || DEFAULT_BATCH_DONE_SIGNAL);
-    return safeTemplate.replaceAll('{{DONE_SIGNAL}}', safeDoneSignal);
+    return safeTemplate
+      .replaceAll('{{DONE_SIGNAL}}', safeDoneSignal)
+      .replaceAll('{{BLOCKED_SIGNAL}}', DEFAULT_BATCH_BLOCKED_SIGNAL)
+      .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL);
   }
 
   function getContinuePromptTemplateForDisplay(value, logFn, fieldName) {
@@ -576,6 +715,39 @@
       stopBatchOnTaskSendFailure: false,
       verifyAfterDoneSignal: true,
       verifyAfterDoneSignalUploadFile: true,
+
+      // 批量任务组：每 N 次对话自动上传一次文件
+      taskAutoUploadEveryNMessagesEnabled: true,
+      taskAutoUploadEveryNMessages: 5,
+      taskAutoUploadCountInitialPrompt: true,
+      taskAutoUploadCountContinuePrompt: true,
+      taskAutoUploadCountVerifyPrompt: true,
+
+      taskRotateNewChatByPageTurnEnabled: true,
+      taskRotateNewChatPageTurnThreshold: 30,
+      taskRotateForceUploadAfterNewChat: true,
+      maxConversationRoundsPerPage: 30,
+      enableAutoNewChatWhenRoundLimitReached: true,
+
+      // 批量任务组发送限速：默认 3 小时最多 150 条，低于 ChatGPT 3 小时 160 条的默认上限，预留 10 条安全余量
+      taskSendRateLimitEnabled: true,
+      taskSendRateLimitWindowMinutes: 180,
+      taskSendRateLimitMaxMessages: 150,
+
+      // 批量任务组上传限速：默认 3 小时最多 80 个文件，避免超过 ChatGPT 文件上传额度
+      taskUploadRateLimitEnabled: true,
+      taskUploadRateLimitWindowMinutes: 180,
+      taskUploadRateLimitMaxFiles: 80,
+
+      showRuntimeStats: true,
+      preserveRuntimeStatsAverage: false,
+      runtimeStatsRefreshIntervalMs: 1000,
+
+      taskRelentlessSendRetryEnabled: true,
+      taskRelentlessSendRetryIntervalMs: 1500,
+      taskRelentlessSendRetryMaxIntervalMs: 10000,
+      taskRelentlessSendRetryBackoffEnabled: true,
+
       verifyAfterDoneSignalPrompt: [
         '请根据我刚才上传的代码文件和当前任务要求，检查任务是否已经完整完成。',
         '',
@@ -597,6 +769,8 @@
   }
 
   const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+  const DEFAULT_SYSTEM_HOTKEY_COMBO = 'ctrl+alt+i';
+  const DEFAULT_SYSTEM_HOTKEY_LABEL = 'Ctrl+Alt+I';
 
   function getLegacyShortContinuePromptText() {
     return [
@@ -826,7 +1000,7 @@
 
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-  function bindOnce(el, eventName, handler, fourth) {
+  function normalizeBindOptions(eventName, fourth, defaultModuleName = '') {
     const opts = {};
 
     if (typeof fourth === 'string') {
@@ -844,6 +1018,20 @@
     }
 
     opts.key = opts.key || String(eventName || '');
-    return EventBinder.on(el, eventName, handler, opts);
+
+    if (defaultModuleName && !opts.moduleName) {
+      opts.moduleName = defaultModuleName;
+    }
+
+    return opts;
+  }
+
+  function bindOnce(el, eventName, handler, fourth) {
+    return EventBinder.on(
+      el,
+      eventName,
+      handler,
+      normalizeBindOptions(eventName, fourth),
+    );
   }
 

@@ -1,13 +1,9 @@
 """油猴页面下拉框 UI 构建、列表刷新与空状态展示。"""
-from app.server import get_bridge_status, is_server_running
-
 import time
-import traceback
 
 from app.models import normalize_remote_chatgpt
 from app.utils.page_status import (
     get_page_liveness,
-    is_page_online,
     page_display_ids_for_log,
     page_url_from,
     read_snapshot_identity,
@@ -17,7 +13,7 @@ from app.ui.mixins.tm_page_selector_format_mixin import TmPageSelectorFormatMixi
 from app.ui.styles import apply_bind_button_style, apply_refresh_button_style
 from app.ui.widgets.no_wheel_combo_box import NoWheelComboBox
 from app.ui.widgets.tm_page_combo_delegate import TmPageComboDelegate
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QComboBox,
@@ -25,7 +21,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
-    QWidget,
 )
 
 
@@ -35,9 +30,7 @@ class UiPageSelectorMixin(TmPageSelectorFormatMixin):
     TM_PAGE_COMBO_ONLINE_COLOR = "#047857"
     TM_PAGE_COMBO_OFFLINE_COLOR = "#374151"
     TM_PAGE_COMBO_BOUND_COLOR = "#065f46"
-    TM_PAGE_COMBO_UNBOUND_COLOR = "#92400e"
     TM_PAGE_COMBO_TEXT_COLOR = "#111827"
-    TM_PAGE_COMBO_URL_COLOR = "#1d4ed8"
     TM_PAGE_COMBO_SELECTED_BG = "#bfdbfe"
     TM_PAGE_COMBO_HOVER_BG = "#e0f2fe"
 
@@ -111,25 +104,6 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         )
         if hasattr(combo, "update"):
             combo.update()
-
-    def _bridge_status_has_page_sources(self, status):
-        if not isinstance(status, dict):
-            return False
-        if "pages" in status:
-            return True
-        nested = status.get("summary")
-        return isinstance(nested, dict) and "pages" in nested
-
-    def _full_bridge_status_for_page_selector(self, status=None):
-        status = status if isinstance(status, dict) else {}
-        if self._bridge_status_has_page_sources(status):
-            return status
-        if is_server_running():
-            live = get_bridge_status()
-            if isinstance(live, dict):
-                self._bridge_ui.last_bridge_status = live
-                return live
-        return getattr(self._bridge_ui, "last_bridge_status", None) or status
 
     def _ensure_tm_page_combo(self):
         if hasattr(self, "tm_page_combo"):
@@ -230,28 +204,6 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         row.addWidget(self.refresh_page_list_btn, 0, Qt.AlignVCenter)
         parent_layout.addLayout(row)
         self._sync_tm_page_list_empty_ui()
-
-    def _build_tm_action_buttons(
-        self, layout, *, include_page_selector=False, include_view_logs=False
-    ):
-        self._ensure_tm_action_buttons()
-        layout.setSpacing(6)
-        for btn in (
-            self.open_chatgpt_btn,
-            self.sync_web_conversation_btn,
-        ):
-            layout.addWidget(btn)
-        if include_page_selector:
-            self._build_tm_page_selector_row(layout)
-        # close_other_pages_btn 只允许放在“调试”选项卡，避免在聊天主页误操作。
-        if include_view_logs:
-            layout.addStretch()
-            if not hasattr(self, "view_logs_btn"):
-                self.view_logs_btn = QPushButton("日志")
-                self.view_logs_btn.setObjectName("GhostButton")
-                self.view_logs_btn.setToolTip("切换到日志页")
-                self.view_logs_btn.clicked.connect(self._show_log_tab)
-            layout.addWidget(self.view_logs_btn)
 
     def _tm_combo_page_item_dict(self, page):
         """下拉项 UserRole 载荷：完整页面 dict，供绑定/选中读取。"""
@@ -494,7 +446,7 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         full_status = status if isinstance(status, dict) else None
         client_keys = ("pages",)
         if not full_status or not any(key in full_status for key in client_keys):
-            full_status = getattr(self, "_last_bridge_status", None) or {}
+            full_status = getattr(self._bridge_ui, "last_bridge_status", None) or {}
         pages = self._extract_tm_pages_from_status(full_status)
         reg = getattr(self, "page_registry", None)
         if reg is not None and hasattr(reg, "pages"):
@@ -615,11 +567,11 @@ QComboBox#{name} QAbstractItemView::item:selected {{
         page_selector_key = self._tm_page_selector_signature(pages)
         if (
             not force_rebuild
-            and page_selector_key == getattr(self, "_last_page_selector_key", "")
+            and page_selector_key == self._page_selector.last_page_selector_key
         ):
             self._sync_tm_page_list_empty_ui()
             return
-        self._last_page_selector_key = page_selector_key
+        self._page_selector.last_page_selector_key = page_selector_key
         manual_client_id = (
             getattr(self, "_manual_current_tm_client_id", "") or ""
         ).strip()

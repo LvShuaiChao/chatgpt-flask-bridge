@@ -3,7 +3,6 @@ import traceback
 
 from app.constants import DEFAULT_CHAT_INPUT_TEXT, STATUS_CHIP_SESSION_BIND_TOOLTIP
 from app.ui.widgets.chat_input import ChatInput
-from app.ui.widgets.elided_label import ElidedLabel
 from app.ui.widgets.segmented_elided_label import SegmentedElidedLabel
 from app.ui.widgets.session_list import SessionListWidget
 from PyQt5.QtCore import Qt, QTimer
@@ -89,9 +88,6 @@ class UiChatPanelMixin:
             return
         self._ensure_default_chat_input_text()
 
-    CHAT_SUB_TAB_CHAT = 0
-    CHAT_SUB_TAB_CURSOR_FLOW = 1
-    CURSOR_FLOW_TAB_TITLE_BASE = "Cursor 流程"
     CHAT_SIDEBAR_MIN_WIDTH = 260
     CHAT_SIDEBAR_DEFAULT_WIDTH = 320
     CHAT_SIDEBAR_MAX_WIDTH = 460
@@ -205,9 +201,6 @@ class UiChatPanelMixin:
                 f"raw={sizes} saved={[left, right]}"
             )
 
-    def _save_chat_splitter_sizes(self):
-        self._save_splitter_sizes_now()
-
     def _build_chat_page(self):
         page = QWidget()
         page.setObjectName("ChatPage")
@@ -216,7 +209,6 @@ class UiChatPanelMixin:
         page_layout.setSpacing(8)
 
         self.chat_page = page
-        self.chat_page_layout = page_layout
 
         self._chat_status_group = self._build_chat_status_bar()
         self.bridge_status_panel = QFrame()
@@ -237,23 +229,6 @@ class UiChatPanelMixin:
         self._chat_panel = self._build_chat_panel()
         page_layout.addWidget(self._chat_panel, 1)
         return page
-
-    def _sync_bridge_status_panel_height(self):
-        panel = getattr(self, "bridge_status_panel", None)
-        status_group = getattr(self, "_chat_status_group", None)
-        if panel is None or status_group is None:
-            return
-        panel_layout = panel.layout()
-        if panel_layout is not None:
-            panel_layout.invalidate()
-            panel_layout.activate()
-        status_group.updateGeometry()
-        margins = panel_layout.contentsMargins() if panel_layout is not None else None
-        extra = 0
-        if margins is not None:
-            extra = margins.top() + margins.bottom()
-        panel.setMinimumHeight(max(0, status_group.sizeHint().height() + extra))
-        panel.updateGeometry()
 
     def _build_chat_status_bar(self):
         bar = QWidget()

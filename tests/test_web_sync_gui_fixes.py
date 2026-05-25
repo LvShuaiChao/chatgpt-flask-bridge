@@ -48,6 +48,12 @@ class _SnapshotHost(PageSyncMixin):
     def _save_sessions_to_disk(self):
         self.saved = True
 
+    def _schedule_save_sessions_to_disk(self):
+        self._save_sessions_to_disk()
+
+    def _clear_pending_wait_messages_after_web_sync(self, session, normalized_web):
+        return 0
+
     def _refresh_local_conversation_after_sync(self, session_id, **kwargs):
         self.refreshed.append((session_id, kwargs))
         return True
@@ -88,15 +94,8 @@ class TestSyncTargetSnapshotAllowed(unittest.TestCase):
                 page={"client_id": "c1", "online": True},
             )
         )
-        snap = host._build_sync_target_snapshot_from_decision(
-            session=session,
-            remote={"enabled": True, "client_id": "c1"},
-            page={"client_id": "c1", "online": True},
-            source="bound_page",
-            block_reason="",
-            detail={"conversation_syncable": True, "online": True},
+        snap = host._sync_target_snapshot(
             status={"active": {"client_id": "other", "conversation_id": ""}},
-            allowed=True,
         )
         self.assertTrue(snap.get("sync_readable"))
         self.assertTrue(snap.get("conversation_syncable"))

@@ -16,6 +16,7 @@
       useLog: false,
     });
     let importFileEl = null;
+    let promptImporting = false;
     let modalOverlay = null;
 
     const PROMPT_EDITOR_MODAL_POSITION_KEY = 'promptEditorModalPosition';
@@ -45,10 +46,26 @@
       MemoryManager.KEYS.promptManagerActiveCategory,
       '全部',
     );
-    let activePromptSubtab = MemoryManager.get(
-      MemoryManager.KEYS.promptManagerActiveSubtab,
-      'list',
+    let activePromptSubtab = normalizePromptSubtab(
+      MemoryManager.get(
+        MemoryManager.KEYS.promptManagerActiveSubtab,
+        'manage',
+      ),
     );
+
+    function normalizePromptSubtab(value) {
+      const raw = String(value || '').trim();
+
+      if (raw === 'display') {
+        return 'display';
+      }
+
+      if (raw === 'list' || raw === 'category' || raw === 'manage') {
+        return 'manage';
+      }
+
+      return 'manage';
+    }
     let editingPromptId = null;
     let sendLock = false;
 
@@ -221,13 +238,19 @@
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
           ToolboxShell.appendLog('[Prompt 管理] 保存失败：浏览器存储写入失败');
         }
+      } else {
+        let preserveAutoQueue = 0;
+        if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getConfig === 'function') {
+          const autoCfg = AutoQueueModule.getConfig();
+          const tasks = autoCfg && Array.isArray(autoCfg.autoQueueTasks) ? autoCfg.autoQueueTasks : [];
+          preserveAutoQueue = tasks.length;
+        }
+        ToolboxShell.appendLog(
+          `[PROMPT][SAVE] count=${(payload.prompts || prompts).length} preserveAutoQueue=${preserveAutoQueue}`,
+        );
       }
 
       return ok;
-    }
-
-    function savePrompts() {
-      return savePromptManagerData({ prompts, categories });
     }
 
     function getPromptCategoryCount(categoryName) {
@@ -594,38 +617,244 @@
       );
     }
 
-    function renderPromptSubtabs() {
-      const tabs = qsa('[data-prompt-subtab]', root);
-      tabs.forEach((btn) => {
-        const name = btn.getAttribute('data-prompt-subtab');
-        btn.classList.toggle('active', name === activePromptSubtab);
-      });
-
-      const listPanel = qs('#cgpt-prompt-list-panel', root);
-      const categoryPanel = qs('#cgpt-prompt-category-panel', root);
-
-      if (listPanel) {
-        listPanel.style.display = activePromptSubtab === 'list' ? '' : 'none';
+    function getPromptDisplayConfig() {
+      if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.getConfig === 'function') {
+        return SettingsModule.getConfig();
       }
 
-      if (categoryPanel) {
-        categoryPanel.style.display = activePromptSubtab === 'category' ? '' : 'none';
+      const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
+
+      if (typeof normalizeCompactUiConfig === 'function') {
+        return normalizeCompactUiConfig(saved);
+      }
+
+      return Object.assign({}, DEFAULT_COMPACT_UI_CONFIG || {}, saved);
+    }
+
+    function savePromptDisplayConfig(nextConfig, reason = '') {
+      const current = getPromptDisplayConfig();
+      const next = Object.assign({}, current, nextConfig || {});
+
+      if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.saveConfig === 'function') {
+        SettingsModule.saveConfig(next);
+      } else if (typeof normalizeCompactUiConfig === 'function') {
+        MemoryManager.set(MemoryManager.KEYS.compactUiConfig, normalizeCompactUiConfig(next));
+      } else {
+        MemoryManager.set(MemoryManager.KEYS.compactUiConfig, next);
+      }
+
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.refresh === 'function') {
+        UploadModule.refresh();
+      }
+
+      notifyUploadQuickPromptsRefresh(reason || 'prompt-display-config-change');
+
+      ToolboxShell.appendLog(
+        `[PROMPT_DISPLAY][SAVE] reason=${reason || '-'} selected=${Array.isArray(next.quickPromptIds) ? next.quickPromptIds.length : 0}`,
+      );
+    }
+
+    function getPromptIdsFromPromptList(promptList) {
+      return (Array.isArray(promptList) ? promptList : [])
+        .map((item) => String(item && item.id ? item.id : '').trim())
+        .filter(Boolean);
+    }
+
+    function readPromptDisplayConfigFromUi() {
+      const current = getPromptDisplayConfig();
+
+      const selectedIds = qsa('[data-prompt-display-id]', root)
+        .filter((input) => input instanceof HTMLInputElement && input.checked)
+        .map((input) => String(input.getAttribute('data-prompt-display-id') || '').trim())
+        .filter(Boolean);
+
+      const uploadVisibleEl = qs('#cgpt-prompt-display-upload-visible', root);
+      const compactVisibleEl = qs('#cgpt-prompt-display-compact-visible', root);
+      const actionEl = qs('#cgpt-prompt-display-click-action', root);
+      const confirmEl = qs('#cgpt-prompt-display-confirm-overwrite', root);
+
+      return Object.assign({}, current, {
+        showUploadQuickPrompts: uploadVisibleEl
+          ? !!uploadVisibleEl.checked
+          : current.showUploadQuickPrompts !== false,
+
+        showCompactQuickPrompts: compactVisibleEl
+          ? !!compactVisibleEl.checked
+          : current.showCompactQuickPrompts !== false,
+
+        quickPromptClickAction: actionEl && actionEl.value === 'fill'
+          ? 'fill'
+          : 'send',
+
+        confirmPromptDraftOverwrite: confirmEl
+          ? !!confirmEl.checked
+          : current.confirmPromptDraftOverwrite === true,
+
+        quickPromptIds: selectedIds,
+      });
+    }
+
+    function renderPromptDisplayCheckboxList(promptList, selectedIds) {
+      const list = Array.isArray(promptList) ? promptList : [];
+      const selected = new Set(
+        Array.isArray(selectedIds)
+          ? selectedIds.map((id) => String(id))
+          : [],
+      );
+
+      if (!list.length) {
+        return '<div class="cgpt-log-empty">暂无 Prompt，请先在“Prompt 管理”里新建。</div>';
+      }
+
+      return list.map((item) => {
+        const id = String(item && item.id ? item.id : '');
+        const title = String(item && item.title ? item.title : '未命名 Prompt');
+        const category = String(item && item.category ? item.category : '默认');
+        const content = String(item && item.content ? item.content : '');
+        const checked = selected.has(id) ? ' checked' : '';
+
+        return `
+      <label class="cgpt-prompt-display-row">
+        <input
+          type="checkbox"
+          data-prompt-display-id="${escapeHtml(id)}"
+          ${checked}
+        >
+        <span class="cgpt-prompt-display-main">
+          <strong>${escapeHtml(title)}</strong>
+          <small>分类：${escapeHtml(category)}｜字数：${content.length}</small>
+        </span>
+      </label>
+    `;
+      }).join('');
+    }
+
+    function renderPromptDisplayPanel() {
+      if (!root) return;
+
+      const cfg = getPromptDisplayConfig();
+      const list = prompts.slice();
+      const allIds = getPromptIdsFromPromptList(list);
+      const selectedIds = Array.isArray(cfg.quickPromptIds)
+        ? cfg.quickPromptIds.map((id) => String(id)).filter(Boolean)
+        : [];
+
+      const selectedSet = new Set(selectedIds);
+      const validSelectedCount = allIds.filter((id) => selectedSet.has(id)).length;
+
+      const uploadVisibleEl = qs('#cgpt-prompt-display-upload-visible', root);
+      if (uploadVisibleEl) {
+        uploadVisibleEl.checked = cfg.showUploadQuickPrompts !== false;
+      }
+
+      const compactVisibleEl = qs('#cgpt-prompt-display-compact-visible', root);
+      if (compactVisibleEl) {
+        compactVisibleEl.checked = cfg.showCompactQuickPrompts !== false;
+      }
+
+      const actionEl = qs('#cgpt-prompt-display-click-action', root);
+      if (actionEl) {
+        actionEl.value = cfg.quickPromptClickAction === 'fill' ? 'fill' : 'send';
+      }
+
+      const confirmEl = qs('#cgpt-prompt-display-confirm-overwrite', root);
+      if (confirmEl) {
+        confirmEl.checked = cfg.confirmPromptDraftOverwrite === true;
+      }
+
+      const countEl = qs('#cgpt-prompt-display-count', root);
+      if (countEl) {
+        countEl.textContent = `已选 ${validSelectedCount} / ${allIds.length}`;
+      }
+
+      [
+        '#cgpt-prompt-display-select-all',
+        '#cgpt-prompt-display-clear-all',
+        '#cgpt-prompt-display-invert',
+      ].forEach((selector) => {
+        const btn = qs(selector, root);
+        if (btn) {
+          btn.disabled = allIds.length === 0;
+        }
+      });
+
+      const displayListEl = qs('#cgpt-prompt-display-list', root);
+      if (displayListEl) {
+        displayListEl.innerHTML = renderPromptDisplayCheckboxList(list, selectedIds);
+      }
+    }
+
+    function applyPromptDisplaySelection(mode) {
+      const list = prompts.slice();
+      const allIds = getPromptIdsFromPromptList(list);
+      const cfg = readPromptDisplayConfigFromUi();
+      const currentSelected = new Set(
+        Array.isArray(cfg.quickPromptIds)
+          ? cfg.quickPromptIds.map((id) => String(id)).filter(Boolean)
+          : [],
+      );
+
+      if (mode === 'all') {
+        cfg.quickPromptIds = allIds;
+      } else if (mode === 'none') {
+        cfg.quickPromptIds = [];
+      } else if (mode === 'invert') {
+        cfg.quickPromptIds = allIds.filter((id) => !currentSelected.has(id));
+      } else {
+        ToolboxShell.appendLog(`[PROMPT_DISPLAY][BULK][SKIP] unknownMode=${mode}`);
+        return;
+      }
+
+      savePromptDisplayConfig(cfg, `bulk-${mode}`);
+      renderPromptDisplayPanel();
+
+      ToolboxShell.appendLog(
+        `[PROMPT_DISPLAY][BULK] mode=${mode} selected=${cfg.quickPromptIds.length}/${allIds.length}`,
+      );
+    }
+
+    function renderPromptSubtabs() {
+      const normalized = normalizePromptSubtab(activePromptSubtab);
+      activePromptSubtab = normalized;
+
+      const tabs = qsa('[data-prompt-subtab]', root);
+      tabs.forEach((btn) => {
+        const name = normalizePromptSubtab(btn.getAttribute('data-prompt-subtab'));
+        btn.classList.toggle('active', name === normalized);
+      });
+
+      const managePanel = qs('#cgpt-prompt-manage-panel', root);
+      const displayPanel = qs('#cgpt-prompt-display-panel', root);
+
+      if (managePanel) {
+        managePanel.style.display = normalized === 'manage' ? '' : 'none';
+      }
+
+      if (displayPanel) {
+        displayPanel.style.display = normalized === 'display' ? '' : 'none';
       }
     }
 
     function render() {
       if (!listEl) return;
 
+      activePromptSubtab = normalizePromptSubtab(activePromptSubtab);
       renderPromptSubtabs();
 
-      if (activePromptSubtab === 'list') {
-        renderCategoryBar();
+      if (activePromptSubtab === 'display') {
+        renderPromptDisplayPanel();
+        clearPromptStatus();
+
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.purgeForbiddenStatusBadge === 'function') {
+          ToolboxShell.purgeForbiddenStatusBadge('prompt-render-display');
+        }
+
+        return;
       }
 
-      if (activePromptSubtab === 'category') {
-        renderCategoryManager();
-        renderCategoryDatalist();
-      }
+      renderCategoryBar();
+      renderCategoryManager();
+      renderCategoryDatalist();
 
       const items = filteredPrompts();
       listEl.innerHTML = '';
@@ -668,10 +897,10 @@
         row.appendChild(preview);
 
         const actions = document.createElement('div');
-        actions.className = 'cgpt-prompt-actions';
+        actions.className = 'cgpt-prompt-actions cgpt-prompt-actions-compact';
 
         const batchLabel = document.createElement('label');
-        batchLabel.className = 'cgpt-checkbox-line cgpt-prompt-batch-task-check';
+        batchLabel.className = 'cgpt-prompt-batch-check';
         batchLabel.title = '加入批量任务';
         const batchCheck = document.createElement('input');
         batchCheck.type = 'checkbox';
@@ -742,15 +971,19 @@
           deletePromptById(item.id);
         });
 
-        const upBtn = createActionButton('↑');
+        const upBtn = createActionButton('↑', '', 'cgpt-prompt-order-btn');
         upBtn.title = '上移';
+        upBtn.dataset.promptId = item.id;
+        upBtn.dataset.action = 'move-up';
         upBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           movePrompt(item.id, -1);
         });
 
-        const downBtn = createActionButton('↓');
+        const downBtn = createActionButton('↓', '', 'cgpt-prompt-order-btn');
         downBtn.title = '下移';
+        downBtn.dataset.promptId = item.id;
+        downBtn.dataset.action = 'move-down';
         downBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           movePrompt(item.id, 1);
@@ -774,13 +1007,114 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.purgeForbiddenStatusBadge === 'function') {
         ToolboxShell.purgeForbiddenStatusBadge('prompt-render-end');
       }
+
+      logPromptListCompactLayout('render');
     }
 
-    function createActionButton(text, type) {
+    function logPromptListCompactLayout(reason = '') {
+      const list = root ? root.querySelector('#cgpt-prompt-list') : null;
+      if (!list) {
+        ToolboxShell.appendLog(`[PROMPT_UI][COMPACT_CHECK] reason=${reason} result=missing-list`);
+        return;
+      }
+
+      const firstItem = list.querySelector('.cgpt-prompt-item');
+      const firstActions = list.querySelector('.cgpt-prompt-actions, .cgpt-prompt-actions-compact');
+
+      if (!firstItem || !firstActions) {
+        ToolboxShell.appendLog(`[PROMPT_UI][COMPACT_CHECK] reason=${reason} result=empty`);
+        return;
+      }
+
+      const itemStyle = window.getComputedStyle(firstItem);
+      const actionStyle = window.getComputedStyle(firstActions);
+
+      ToolboxShell.appendLog(
+        `[PROMPT_UI][COMPACT_CHECK] reason=${reason} itemPadding=${itemStyle.padding} itemMargin=${itemStyle.margin} actionGap=${actionStyle.gap} actionWrap=${actionStyle.flexWrap}`,
+      );
+    }
+
+    function createActionButton(text, type, extraClass = '') {
+      const classes = ['compact'];
+      const extra = String(extraClass || '').trim();
+      if (extra) {
+        classes.push(extra);
+      }
       return createToolboxButton(text, {
         variant: type === 'primary' ? 'primary' : '',
-        height: '28px',
-        padding: '0 8px',
+        classes,
+      });
+    }
+
+    let promptAutoSaveTimer = null;
+
+    function updatePromptEditorCharCount(textarea, reason = '') {
+      if (!(textarea instanceof HTMLTextAreaElement)) {
+        return 0;
+      }
+
+      const chars = String(textarea.value || '').length;
+      const counter = textarea.parentElement
+        ? textarea.parentElement.querySelector('[data-char-count-for]')
+        : null;
+
+      if (counter instanceof HTMLElement) {
+        counter.textContent = `字数：${chars}`;
+      }
+
+      return chars;
+    }
+
+    function setPromptTextareaValueAndUpdateCount(textarea, value, reason) {
+      if (!(textarea instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      textarea.value = String(value || '');
+      const chars = updatePromptEditorCharCount(textarea, reason || 'program-set');
+
+      textarea.dispatchEvent(new Event('input', {
+        bubbles: true,
+      }));
+
+      ToolboxShell.appendLog(
+        `[TEXTAREA][SET_VALUE] reason=${reason || '-'} chars=${chars}`,
+      );
+    }
+
+    function savePromptListFromState(reason) {
+      const ok = savePromptManagerData({ prompts, categories });
+
+      if (ok) {
+        ToolboxShell.appendLog(
+          `[PROMPT][AUTO_SAVE] reason=${reason || '-'} count=${prompts.length}`,
+        );
+      }
+
+      return ok;
+    }
+
+    function schedulePromptAutoSave(reason) {
+      if (promptAutoSaveTimer) {
+        clearTimeout(promptAutoSaveTimer);
+      }
+
+      promptAutoSaveTimer = setTimeout(() => {
+        promptAutoSaveTimer = null;
+        savePromptListFromState(reason || 'auto-save');
+      }, 500);
+    }
+
+    function focusMoveButtonById(itemId, actionName) {
+      requestAnimationFrame(() => {
+        const selector = `[data-prompt-id="${CSS.escape(String(itemId))}"][data-action="${CSS.escape(String(actionName))}"]`;
+        const btn = document.querySelector(selector);
+
+        if (btn instanceof HTMLElement) {
+          btn.focus({
+            preventScroll: true,
+          });
+        }
       });
     }
 
@@ -795,10 +1129,18 @@
       prompts[index] = prompts[nextIndex];
       prompts[nextIndex] = temp;
 
-      savePrompts();
+      savePromptListFromState(direction < 0 ? 'move-up' : 'move-down');
       render();
       notifyUploadQuickPromptsRefresh('prompt-move');
       setStatus('已调整排序');
+
+      if (direction < 0) {
+        ToolboxShell.appendLog(`[PROMPT][MOVE_UP] id=${temp.id} from=${index} to=${nextIndex}`);
+        focusMoveButtonById(temp.id, 'move-up');
+      } else {
+        ToolboxShell.appendLog(`[PROMPT][MOVE_DOWN] id=${temp.id} from=${index} to=${nextIndex}`);
+        focusMoveButtonById(temp.id, 'move-down');
+      }
     }
 
     function getPromptEditorDraftKey() {
@@ -929,8 +1271,40 @@
           return;
         }
 
-        bindOnce(field, 'input', () => {
+        bindOnce(field, 'input', (event) => {
           savePromptEditorDraftDebounced();
+
+          if (field.id === 'cgpt-prompt-edit-content' && editingPromptId) {
+            const item = prompts.find((prompt) => prompt.id === editingPromptId);
+
+            if (item) {
+              item.content = String(event.target.value || '');
+              item.updatedAt = Date.now();
+              schedulePromptAutoSave('content-input');
+            } else {
+              ToolboxShell.appendLog(`[PROMPT][EDIT_MISSING] id=${editingPromptId || '-'}`);
+            }
+          }
+
+          if (field.id === 'cgpt-prompt-edit-title' && editingPromptId) {
+            const item = prompts.find((prompt) => prompt.id === editingPromptId);
+
+            if (item) {
+              item.title = String(event.target.value || '');
+              item.updatedAt = Date.now();
+              schedulePromptAutoSave('title-input');
+            }
+          }
+
+          if (field.id === 'cgpt-prompt-edit-category' && editingPromptId) {
+            const item = prompts.find((prompt) => prompt.id === editingPromptId);
+
+            if (item) {
+              item.category = String(event.target.value || '') || '默认';
+              item.updatedAt = Date.now();
+              schedulePromptAutoSave('category-input');
+            }
+          }
         });
       });
     }
@@ -1005,7 +1379,7 @@
         modalTitle.textContent = '编辑 Prompt';
         titleInput.value = item.title;
         categoryInput.value = item.category || '默认';
-        contentInput.value = item.content;
+        setPromptTextareaValueAndUpdateCount(contentInput, item.content, 'open-editor');
         deleteBtn.style.display = '';
         duplicateBtn.style.display = '';
       } else {
@@ -1081,89 +1455,172 @@
     }
 
     function saveEditor() {
-      const titleInput = qs('#cgpt-prompt-edit-title', modalOverlay);
-      const categoryInput = qs('#cgpt-prompt-edit-category', modalOverlay);
-      const contentInput = qs('#cgpt-prompt-edit-content', modalOverlay);
+      const saveBtn = modalOverlay ? qs('#cgpt-prompt-save-btn', modalOverlay) : null;
 
-      const title = String(titleInput.value || '').trim();
-      const category = ensureCategoryExists(categoryInput.value);
-      const content = String(contentInput.value || '');
+      try {
+        if (saveBtn && typeof setButtonRunning === 'function') {
+          setButtonRunning(saveBtn, '保存中', { reason: 'prompt-save', disabled: true, allowCancel: false });
+        }
 
-      if (!title) {
-        alert('标题不能为空');
-        return;
-      }
+        const titleInput = qs('#cgpt-prompt-edit-title', modalOverlay);
+        const categoryInput = qs('#cgpt-prompt-edit-category', modalOverlay);
+        const contentInput = qs('#cgpt-prompt-edit-content', modalOverlay);
 
-      if (!content.trim()) {
-        alert('Prompt 内容不能为空');
-        return;
-      }
+        const title = String(titleInput.value || '').trim();
+        const category = ensureCategoryExists(categoryInput.value);
+        const content = String(contentInput.value || '');
 
-      const existing = prompts.find((item) => item.id === editingPromptId);
+        if (!title) {
+          alert('标题不能为空');
+          if (saveBtn && typeof setButtonIdle === 'function') {
+            setButtonIdle(saveBtn, '保存', { reason: 'prompt-save-validation' });
+          }
+          return;
+        }
 
-      if (editingPromptId && !existing) {
-        const msg = `保存失败：原 Prompt 已不存在，editingPromptId=${editingPromptId}`;
-        console.warn('[PROMPT][SAVE_MISSING_EDITING_ID]', msg);
-        ToolboxShell.appendLog(`[PROMPT][SAVE_MISSING_EDITING_ID] ${msg}`);
-        alert('保存失败：原 Prompt 已不存在，请刷新 Prompt 管理后重试');
-        reloadFromStorage();
-        return;
-      }
+        if (!content.trim()) {
+          alert('Prompt 内容不能为空');
+          if (saveBtn && typeof setButtonIdle === 'function') {
+            setButtonIdle(saveBtn, '保存', { reason: 'prompt-save-validation' });
+          }
+          return;
+        }
 
-      if (existing) {
-        existing.title = title;
-        existing.category = category;
-        existing.content = content;
-        existing.updatedAt = nowMs();
-      } else {
-        prompts.unshift({
-          id: createId('prompt'),
-          title,
-          category,
-          content,
-          createdAt: nowMs(),
-          updatedAt: nowMs(),
+        const existing = prompts.find((item) => item.id === editingPromptId);
+
+        if (editingPromptId && !existing) {
+          const msg = `保存失败：原 Prompt 已不存在，editingPromptId=${editingPromptId}`;
+          console.warn('[PROMPT][SAVE_MISSING_EDITING_ID]', msg);
+          ToolboxShell.appendLog(`[PROMPT][SAVE_MISSING_EDITING_ID] ${msg}`);
+          alert('保存失败：原 Prompt 已不存在，请刷新 Prompt 管理后重试');
+          reloadFromStorage();
+          if (saveBtn && typeof setButtonFailed === 'function') {
+            setButtonFailed(saveBtn, '保存失败', { reason: 'prompt-save-missing' });
+          }
+          return;
+        }
+
+        if (existing) {
+          existing.title = title;
+          existing.category = category;
+          existing.content = content;
+          existing.updatedAt = nowMs();
+        } else {
+          prompts.unshift({
+            id: createId('prompt'),
+            title,
+            category,
+            content,
+            createdAt: nowMs(),
+            updatedAt: nowMs(),
+          });
+        }
+
+        const message = existing ? '已保存修改' : UiMessages.promptCreated;
+        const ok = savePromptManagerData();
+
+        if (!ok) {
+          if (saveBtn && typeof setButtonFailed === 'function') {
+            setButtonFailed(saveBtn, '保存失败', { reason: 'prompt-save-storage' });
+          }
+          setStatus('保存失败：浏览器存储写入失败', 'error');
+          return;
+        }
+
+        clearPromptEditorDraft();
+        commitPromptManagerChange(message, {
+          closeEditor: true,
+          skipPersist: true,
+          reason: 'prompt-save',
         });
+      } catch (err) {
+        console.error('[PROMPT][SAVE_FAILED]', err);
+        if (saveBtn && typeof setButtonFailed === 'function') {
+          setButtonFailed(saveBtn, '保存失败', { reason: 'prompt-save-exception' });
+        }
+        setStatus('保存 Prompt 失败', 'error');
       }
-
-      const message = existing ? '已保存修改' : UiMessages.promptCreated;
-      const ok = savePromptManagerData();
-
-      if (!ok) {
-        setStatus('保存失败：浏览器存储写入失败', 'error');
-        return;
-      }
-
-      clearPromptEditorDraft();
-      commitPromptManagerChange(message, {
-        closeEditor: true,
-        skipPersist: true,
-        reason: 'prompt-save',
-      });
     }
 
     function deleteCurrentPrompt() {
       if (!editingPromptId) return;
-      deletePromptById(editingPromptId, { closeEditor: true });
+
+      const deleteBtn = modalOverlay ? qs('#cgpt-prompt-delete-btn', modalOverlay) : null;
+
+      try {
+        const item = prompts.find((prompt) => prompt.id === editingPromptId);
+        if (!item) {
+          setStatus('Prompt 不存在', 'warn');
+          return;
+        }
+
+        const ok = window.confirm(`确定删除这个 Prompt 吗？\n\n${item.title}`);
+        if (!ok) {
+          return;
+        }
+
+        if (deleteBtn && typeof setButtonRunning === 'function') {
+          setButtonRunning(deleteBtn, '删除中', {
+            reason: 'prompt-delete',
+            disabled: true,
+            allowCancel: false,
+          });
+        }
+
+        const deleted = deletePromptById(editingPromptId, { closeEditor: true, confirm: false });
+        if (!deleted) {
+          if (deleteBtn && typeof setButtonFailed === 'function') {
+            setButtonFailed(deleteBtn, '删除失败', { reason: 'prompt-delete-failed' });
+          }
+          setStatus('删除 Prompt 失败', 'error');
+        }
+      } catch (err) {
+        console.error('[PROMPT][DELETE_FAILED]', err);
+        if (deleteBtn && typeof setButtonFailed === 'function') {
+          setButtonFailed(deleteBtn, '删除失败', { reason: 'prompt-delete-exception' });
+        }
+        setStatus('删除 Prompt 失败', 'error');
+      }
     }
 
     function duplicateCurrentPrompt() {
-      const item = prompts.find((prompt) => prompt.id === editingPromptId);
-      if (!item) return;
+      const duplicateBtn = modalOverlay ? qs('#cgpt-prompt-duplicate-btn', modalOverlay) : null;
 
-      prompts.unshift({
-        id: createId('prompt'),
-        title: `${item.title} - 副本`,
-        category: ensureCategoryExists(item.category),
-        content: item.content,
-        createdAt: nowMs(),
-        updatedAt: nowMs(),
-      });
+      try {
+        const item = prompts.find((prompt) => prompt.id === editingPromptId);
+        if (!item) {
+          setStatus('Prompt 不存在', 'warn');
+          return;
+        }
 
-      commitPromptManagerChange(UiMessages.promptDuplicated, {
-        closeEditor: true,
-        reason: 'prompt-save',
-      });
+        if (duplicateBtn && typeof setButtonRunning === 'function') {
+          setButtonRunning(duplicateBtn, '复制中', {
+            reason: 'prompt-duplicate',
+            disabled: true,
+            allowCancel: false,
+          });
+        }
+
+        prompts.unshift({
+          id: createId('prompt'),
+          title: `${item.title} - 副本`,
+          category: ensureCategoryExists(item.category),
+          content: item.content,
+          createdAt: nowMs(),
+          updatedAt: nowMs(),
+        });
+
+        commitPromptManagerChange(UiMessages.promptDuplicated, {
+          closeEditor: true,
+          reason: 'prompt-duplicate',
+        });
+      } catch (err) {
+        console.error('[PROMPT][DUPLICATE_FAILED]', err);
+        if (duplicateBtn && typeof setButtonFailed === 'function') {
+          setButtonFailed(duplicateBtn, '复制失败', { reason: 'prompt-duplicate-exception' });
+        }
+        setStatus('复制 Prompt 失败', 'error');
+      }
     }
 
     function exportPrompts() {
@@ -1285,10 +1742,17 @@
     }
 
     async function importPrompts(event) {
+      if (promptImporting) {
+        ToolboxShell.appendLog('[PROMPT_IMPORT][SKIP] reason=already-importing');
+        return;
+      }
+
       const file = event && event.target && event.target.files
         ? event.target.files[0]
         : null;
       const fileName = file && file.name ? file.name : '-';
+
+      promptImporting = true;
 
       try {
         ToolboxShell.appendLog(`[PROMPT_IMPORT][START] file=${fileName}`);
@@ -1351,7 +1815,7 @@
         render();
         notifyUploadQuickPromptsRefresh('prompt-import');
 
-        setStatus(`Prompt 导入完成：新增 ${added} 条，跳过重复 ${skipped} 条`);
+        setStatus(`已导入 ${added} 条 Prompt`, 'success');
 
         ToolboxShell.appendLog(
           `[PROMPT_IMPORT][DEDUP] added=${added} skipped=${skipped} conflicts=${conflicts} internalRemoved=${internalRemoved}`,
@@ -1369,6 +1833,7 @@
         setStatus(`Prompt 导入失败：${errText}`);
         ToolboxShell.appendLog(`[PROMPT_IMPORT][FAILED] ${errText}`);
       } finally {
+        promptImporting = false;
         if (event && event.target) {
           event.target.value = '';
         }
@@ -1733,23 +2198,56 @@
           e.preventDefault();
           e.stopPropagation();
 
-          activePromptSubtab = btn.getAttribute('data-prompt-subtab') || 'list';
+          activePromptSubtab = normalizePromptSubtab(btn.getAttribute('data-prompt-subtab'));
 
           MemoryManager.set(
             MemoryManager.KEYS.promptManagerActiveSubtab,
             activePromptSubtab,
           );
 
-          renderPromptSubtabs();
+          render();
+        });
+      }
 
-          if (activePromptSubtab === 'category') {
-            renderCategoryManager();
-            renderCategoryDatalist();
-          }
+      [
+        ['#cgpt-prompt-display-select-all', 'all'],
+        ['#cgpt-prompt-display-clear-all', 'none'],
+        ['#cgpt-prompt-display-invert', 'invert'],
+      ].forEach(([selector, mode]) => {
+        const btn = qs(selector, root);
+        if (!btn) return;
 
-          if (activePromptSubtab === 'list') {
-            renderCategoryBar();
-          }
+        btn.addEventListener('click', () => {
+          applyPromptDisplaySelection(mode);
+        });
+      });
+
+      [
+        '#cgpt-prompt-display-upload-visible',
+        '#cgpt-prompt-display-compact-visible',
+        '#cgpt-prompt-display-click-action',
+        '#cgpt-prompt-display-confirm-overwrite',
+      ].forEach((selector) => {
+        const el = qs(selector, root);
+        if (!el) return;
+
+        el.addEventListener('change', () => {
+          const cfg = readPromptDisplayConfigFromUi();
+          savePromptDisplayConfig(cfg, 'display-option-change');
+          renderPromptDisplayPanel();
+        });
+      });
+
+      const promptDisplayList = qs('#cgpt-prompt-display-list', root);
+      if (promptDisplayList) {
+        promptDisplayList.addEventListener('change', (e) => {
+          const target = e.target;
+          if (!(target instanceof HTMLInputElement)) return;
+          if (!target.matches('[data-prompt-display-id]')) return;
+
+          const cfg = readPromptDisplayConfigFromUi();
+          savePromptDisplayConfig(cfg, 'display-prompt-check-change');
+          renderPromptDisplayPanel();
         });
       }
     }
@@ -1765,25 +2263,65 @@
           </div>
 
           <div id="cgpt-prompt-subtabs" class="cgpt-prompt-subtabs">
-            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="list">Prompt 列表</button>
-            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="category">类别管理</button>
+            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="manage">Prompt 管理</button>
+            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="display">Prompt 展示</button>
           </div>
 
-          <div id="cgpt-prompt-list-panel" class="cgpt-prompt-panel">
+          <div id="cgpt-prompt-manage-panel" class="cgpt-prompt-panel">
             <div id="cgpt-prompt-category-bar" class="cgpt-prompt-category-bar"></div>
-            <input id="cgpt-prompt-search" class="cgpt-input" placeholder="搜索标题、分类或内容..." style="margin-top:8px;">
-            <div id="cgpt-prompt-list" class="cgpt-prompt-list" style="margin-top:8px;"></div>
-            <div id="cgpt-prompt-status" class="cgpt-hint" style="margin-top:8px; display:none;"></div>
-          </div>
+            <input id="cgpt-prompt-search" class="cgpt-input" placeholder="搜索标题、分类或内容...">
+            <div id="cgpt-prompt-list" class="cgpt-prompt-list"></div>
 
-          <div id="cgpt-prompt-category-panel" class="cgpt-prompt-panel" style="display:none;">
-            <div class="cgpt-section" id="cgpt-prompt-category-manager" style="padding:10px; border:1px solid #2f3542; border-radius:10px;">
+            <div class="cgpt-section" id="cgpt-prompt-category-manager" style="margin-top:10px; padding:10px; border:1px solid #2f3542; border-radius:10px;">
+              <div class="cgpt-section-title">类别管理</div>
               <div class="cgpt-prompt-category-edit-row">
                 <input class="cgpt-input" id="cgpt-prompt-category-name" placeholder="输入类别名称，例如：论文">
                 <button type="button" class="cgpt-btn primary" id="cgpt-prompt-category-add">新建类别</button>
               </div>
-
               <div id="cgpt-prompt-category-manage-list" class="cgpt-prompt-category-manage-list"></div>
+            </div>
+
+            <div id="cgpt-prompt-status" class="cgpt-hint" style="margin-top:8px; display:none;"></div>
+          </div>
+
+          <div id="cgpt-prompt-display-panel" class="cgpt-prompt-panel" style="display:none;">
+            <div class="cgpt-section" style="padding:10px; border:1px solid #2f3542; border-radius:10px;">
+              <div class="cgpt-section-title">Prompt 展示设置</div>
+
+              <label class="cgpt-checkbox-line">
+                <input type="checkbox" id="cgpt-prompt-display-upload-visible">
+                多文件上传页显示常用 Prompt 区
+              </label>
+
+              <label class="cgpt-checkbox-line">
+                <input type="checkbox" id="cgpt-prompt-display-compact-visible">
+                精简模式显示常用 Prompt 区
+              </label>
+
+              <div class="cgpt-kv">
+                <label>点击 Prompt 后的动作</label>
+                <select class="cgpt-select" id="cgpt-prompt-display-click-action">
+                  <option value="send">填入并发送</option>
+                  <option value="fill">只填入输入框</option>
+                </select>
+              </div>
+
+              <label class="cgpt-checkbox-line">
+                <input type="checkbox" id="cgpt-prompt-display-confirm-overwrite">
+                覆盖输入框草稿前弹窗确认
+              </label>
+
+              <div class="cgpt-section-title" style="margin-top:10px;">主页显示的 Prompt</div>
+              <div class="cgpt-hint">勾选后，这些 Prompt 会显示在多文件上传页/主页的“常用 Prompt”区域。</div>
+
+              <div class="cgpt-setting-prompt-toolbar">
+                <button type="button" class="cgpt-btn compact" id="cgpt-prompt-display-select-all">全选</button>
+                <button type="button" class="cgpt-btn compact" id="cgpt-prompt-display-clear-all">全不选</button>
+                <button type="button" class="cgpt-btn compact" id="cgpt-prompt-display-invert">反选</button>
+                <span class="cgpt-hint" id="cgpt-prompt-display-count">已选 0 / 0</span>
+              </div>
+
+              <div id="cgpt-prompt-display-list" class="cgpt-settings-prompt-list"></div>
             </div>
           </div>
 
@@ -1810,9 +2348,11 @@
           bindEvents();
         },
         onRender: () => {
-          activePromptSubtab = MemoryManager.get(
-            MemoryManager.KEYS.promptManagerActiveSubtab,
-            'list',
+          activePromptSubtab = normalizePromptSubtab(
+            MemoryManager.get(
+              MemoryManager.KEYS.promptManagerActiveSubtab,
+              'manage',
+            ),
           );
           render();
         },

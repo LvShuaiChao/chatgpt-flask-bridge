@@ -1,90 +1,13 @@
 """模板匹配。"""
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 import cv2
-import numpy as np
 
 from app.cursor_code.capture import capture_mode_label, screenshot_capture
 from app.cursor_code.config import CursorCodeConfig, resolve_template_root
 from app.cursor_code.templates import load_templates
-
-
-@dataclass
-class CursorMatchResult:
-    ok: bool = False
-    state: str = ""
-    label: str = ""
-    kind: str = "unknown"
-    template_path: str = ""
-    similarity: float = 0.0
-    center: Dict[str, int] = field(default_factory=lambda: {"x": 0, "y": 0})
-    capture_origin: Dict[str, int] = field(default_factory=lambda: {"x": 0, "y": 0})
-    capture_size: Dict[str, int] = field(
-        default_factory=lambda: {"width": 0, "height": 0}
-    )
-    updated_at: str = ""
-    # 内部：用于预览高亮
-    screen: Optional[np.ndarray] = field(default=None, repr=False)
-    loc: Optional[Tuple[int, int]] = field(default=None, repr=False)
-    size: Optional[Tuple[int, int]] = field(default=None, repr=False)
-    match_scale: float = 1.0
-
-    def to_dict(self) -> dict:
-        return {
-            "ok": self.ok,
-            "state": self.state,
-            "label": self.label,
-            "kind": self.kind,
-            "template_path": self.template_path,
-            "similarity": round(self.similarity, 4),
-            "center": dict(self.center),
-            "capture_origin": dict(self.capture_origin),
-            "capture_size": dict(self.capture_size),
-            "updated_at": self.updated_at,
-        }
-
-
-def normalize_match_dict(raw: Optional[dict]) -> Optional[CursorMatchResult]:
-    if not raw:
-        return None
-    cx, cy = raw.get("center", (0, 0))
-    if isinstance(cx, dict):
-        center = {"x": int(cx.get("x", 0)), "y": int(cx.get("y", 0))}
-    else:
-        center = {"x": int(cx), "y": int(cy)}
-    ox, oy = raw.get("capture_origin", (0, 0))
-    if isinstance(ox, dict):
-        origin = {"x": int(ox.get("x", 0)), "y": int(ox.get("y", 0))}
-    else:
-        origin = {"x": int(ox), "y": int(oy)}
-    cw, ch = raw.get("capture_size", (0, 0))
-    if isinstance(cw, dict):
-        size = {
-            "width": int(cw.get("width", 0)),
-            "height": int(cw.get("height", 0)),
-        }
-    else:
-        size = {"width": int(cw), "height": int(ch)}
-    return CursorMatchResult(
-        ok=True,
-        state=str(raw.get("state") or ""),
-        label=str(raw.get("label") or ""),
-        kind=str(raw.get("kind") or "unknown"),
-        template_path=str(raw.get("template_path") or ""),
-        similarity=float(raw.get("similarity") or 0.0),
-        center=center,
-        capture_origin=origin,
-        capture_size=size,
-        updated_at=raw.get("updated_at")
-        or time.strftime("%Y-%m-%d %H:%M:%S"),
-        screen=raw.get("screen"),
-        loc=raw.get("loc"),
-        size=raw.get("size"),
-        match_scale=float(raw.get("match_scale") or 1.0),
-    )
 
 
 def match_template_multiscale(screen, template, scales: List[float]):

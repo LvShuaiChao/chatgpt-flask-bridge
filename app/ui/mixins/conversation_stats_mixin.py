@@ -110,22 +110,6 @@ class ConversationStatsMixin:
 
         return "unknown"
 
-    def _normalize_message_role(self, message):
-        if message is None:
-            return "unknown"
-
-        base_role = self._base_message_role(message)
-        if base_role == "waiting":
-            return "waiting"
-
-        if base_role == "assistant" and self._is_failed_conversation_message(message):
-            return "assistant"
-
-        if self._is_failed_conversation_message(message):
-            return "failed"
-
-        return base_role
-
     def _conversation_stats_messages(self, conversation):
         if conversation is None:
             return []

@@ -65,19 +65,6 @@ class PageBindingDisplayMixin:
             return "后台"
         return "未知"
 
-    def _bool_alias_value(self, page, *keys, default=False, true_values=None):
-        if not isinstance(page, dict):
-            return default
-        values = true_values or ("yes", "true", "1")
-        for key in keys:
-            value = page.get(key)
-            if value is None:
-                continue
-            if isinstance(value, str):
-                return value.strip().lower() in values
-            return bool(value)
-        return default
-
     def _yes_no_text(self, value):
         return "是" if bool(value) else "否"
 
@@ -121,33 +108,6 @@ class PageBindingDisplayMixin:
     def _page_syncable_text(self, page):
         """对话可同步（/c/ 对话页），不等同于 URL 级 syncable。"""
         return self._page_conversation_syncable_text(page)
-
-    def _page_identity_text(self, page, *, instance_unknown=False):
-        if not isinstance(page, dict):
-            return (
-                "ChatGPT对话ID：-\n"
-                "油猴ID：-\n"
-                "页面实例ID：-\n"
-                "URL：-"
-            )
-
-        self._maybe_log_conversation_id_mismatch(page)
-
-        chatgpt_id = (page.get('conversation_id') or '').strip() or "-"
-        client_id = str(page.get("client_id") or "-").strip() or "-"
-        page_instance_id = str(page.get("page_instance_id") or "").strip()
-        if not page_instance_id:
-            page_instance_id = "未知" if instance_unknown else "-"
-        full_url = self._page_full_url(page) or "-"
-        last_seen_text = self._format_last_seen_ago(page.get("last_seen"))
-
-        return (
-            f"URL：{full_url}\n"
-            f"conversation_id：{chatgpt_id}\n"
-            f"client_id：{client_id}\n"
-            f"page_instance_id：{page_instance_id}\n"
-            f"last_seen：{last_seen_text}"
-        )
 
     def _page_ids_for_log(self, page):
         if not isinstance(page, dict):
@@ -355,7 +315,7 @@ class PageBindingDisplayMixin:
         if session is None:
             return
         if raw_state == display_state:
-            last_logged = getattr(self, "_last_session_bind_logged_pair", {}).get(
+            last_logged = self._bind_display.last_session_bind_logged_pair.get(
                 session.session_id
             )
             if last_logged == (raw_state, display_state):
@@ -366,8 +326,6 @@ class PageBindingDisplayMixin:
         last_at = self._bind_display.last_session_bind_state_log_at.get(key, 0.0)
         if now - last_at < 1.0:
             return
-        if not hasattr(self, "_last_session_bind_logged_pair"):
-            self._bind_display.last_session_bind_logged_pair = {}
         self._bind_display.last_session_bind_logged_pair[session.session_id] = (
             raw_state,
             display_state,
@@ -507,7 +465,7 @@ class PageBindingDisplayMixin:
             str(active_page_syncable),
             str(style),
         ])
-        if style_key != getattr(self, "_last_chat_area_style_key", ""):
+        if style_key != self._bind_display.last_chat_area_style_key:
             self._bind_display.last_chat_area_style_key = style_key
             self._append_log(
                 "[CHAT_AREA_STYLE] "

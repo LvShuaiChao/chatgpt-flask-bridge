@@ -34,6 +34,20 @@
     }).join('');
   }
 
+  function getSettingsPromptList() {
+    if (typeof PromptManagerModule === 'undefined' || typeof PromptManagerModule.getPrompts !== 'function') {
+      return [];
+    }
+    const promptList = PromptManagerModule.getPrompts();
+    return Array.isArray(promptList) ? promptList : [];
+  }
+
+  function getPromptIdsFromList(promptList) {
+    return (Array.isArray(promptList) ? promptList : [])
+      .map((prompt) => String(prompt && prompt.id ? prompt.id : '').trim())
+      .filter(Boolean);
+  }
+
   const SettingsModule = (() => {
     let host = null;
     let root = null;
@@ -85,6 +99,55 @@
       return cfg;
     }
 
+    function getAutoQueueTaskQueueSettings() {
+      if (typeof AutoQueueModule === 'undefined' || typeof AutoQueueModule.getConfig !== 'function') {
+        return typeof createDefaultTaskQueueSettings === 'function'
+          ? createDefaultTaskQueueSettings()
+          : {};
+      }
+      const autoCfg = AutoQueueModule.getConfig();
+      return autoCfg && autoCfg.taskQueueSettings && typeof autoCfg.taskQueueSettings === 'object'
+        ? autoCfg.taskQueueSettings
+        : (typeof createDefaultTaskQueueSettings === 'function' ? createDefaultTaskQueueSettings() : {});
+    }
+
+    function saveAutoQueueTaskQueueSettings(patch) {
+      if (typeof AutoQueueModule === 'undefined' || typeof AutoQueueModule.getConfig !== 'function' || typeof AutoQueueModule.applyConfig !== 'function') {
+        return;
+      }
+      const autoCfg = AutoQueueModule.getConfig();
+      autoCfg.taskQueueSettings = Object.assign({}, autoCfg.taskQueueSettings || {}, patch || {});
+      AutoQueueModule.applyConfig(autoCfg);
+      if (typeof MemoryManager !== 'undefined' && MemoryManager.KEYS && MemoryManager.KEYS.autoQueueConfig) {
+        MemoryManager.set(MemoryManager.KEYS.autoQueueConfig, autoCfg);
+      }
+      if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.onSettingsChanged === 'function') {
+        RuntimeStatsModule.onSettingsChanged();
+      }
+    }
+
+    function readRuntimeStatsSettingsFromUi() {
+      const showEl = qs('#cgpt-setting-runtime-stats-show', root);
+      const preserveEl = qs('#cgpt-setting-runtime-stats-preserve-average', root);
+      const intervalEl = qs('#cgpt-setting-runtime-stats-refresh-interval', root);
+      const intervalMs = Number(intervalEl && intervalEl.value ? intervalEl.value : 1000);
+      const allowed = [1000, 2000, 5000];
+
+      return {
+        showRuntimeStats: showEl ? !!showEl.checked : true,
+        preserveRuntimeStatsAverage: preserveEl ? !!preserveEl.checked : false,
+        runtimeStatsRefreshIntervalMs: allowed.includes(intervalMs) ? intervalMs : 1000,
+      };
+    }
+
+    function saveRuntimeStatsSettingsFromUi() {
+      const patch = readRuntimeStatsSettingsFromUi();
+      saveAutoQueueTaskQueueSettings(patch);
+      ToolboxShell.appendLog(
+        `[SETTINGS][runtime-stats] show=${patch.showRuntimeStats ? 1 : 0} preserveAverage=${patch.preserveRuntimeStatsAverage ? 1 : 0} intervalMs=${patch.runtimeStatsRefreshIntervalMs}`,
+      );
+    }
+
     function saveConfig(next) {
       const cfg = migrateCompactContinuePromptIfNeeded(
         normalizeCompactUiConfig(next || {}),
@@ -100,18 +163,116 @@
       if (typeof UploadModule !== 'undefined' && typeof UploadModule.refresh === 'function') {
         UploadModule.refresh();
       }
+
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.renderToolboxTopStatus === 'function') {
+        UploadModule.renderToolboxTopStatus();
+      }
+    }
+
+    function parseQuotaLimitInput(raw) {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        return null;
+      }
+      return Math.min(10000, Math.floor(n));
+    }
+
+    function readQuotaLimitsFromUi() {
+      const current = getConfig();
+      const uploadEl = qs('#cgpt-setting-upload-quota-limit', root);
+      const messageEl = qs('#cgpt-setting-message-quota-limit', root);
+
+      const uploadLimit = parseQuotaLimitInput(uploadEl && uploadEl.value);
+      const messageLimit = parseQuotaLimitInput(messageEl && messageEl.value);
+
+      return {
+        uploadQuotaMaxFiles: uploadLimit != null ? uploadLimit : current.uploadQuotaMaxFiles,
+        messageQuotaMaxMessages: messageLimit != null ? messageLimit : current.messageQuotaMaxMessages,
+      };
+    }
+
+    function saveQuotaSettingsFromUi() {
+      const limits = readQuotaLimitsFromUi();
+      const uploadEl = qs('#cgpt-setting-upload-quota-limit', root);
+      const messageEl = qs('#cgpt-setting-message-quota-limit', root);
+
+      if (
+        parseQuotaLimitInput(uploadEl && uploadEl.value) == null
+        || parseQuotaLimitInput(messageEl && messageEl.value) == null
+      ) {
+        ToolboxShell.setStatus('额度上限必须是大于 0 的整数', 'warn');
+        return false;
+      }
+
+      const current = getConfig();
+      const next = Object.assign({}, current, limits);
+      saveConfig(next);
+      render();
+
+      ToolboxShell.appendLog(
+        `[SETTINGS][QUOTA_SAVE] uploadLimit=${limits.uploadQuotaMaxFiles} messageLimit=${limits.messageQuotaMaxMessages}`,
+      );
+      ToolboxShell.setStatus('额度设置已保存', 'ok');
+      return true;
+    }
+
+    function resetQuotaStatsFromUi() {
+      const uploadBefore = (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getUploadQuotaState === 'function'
+      )
+        ? UploadModule.getUploadQuotaState()
+        : { used: 0 };
+      const messageBefore = (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getMessageQuotaState === 'function'
+      )
+        ? UploadModule.getMessageQuotaState()
+        : { used: 0 };
+
+      const confirmed = window.confirm(
+        '确定要重置今日上传额度和消息额度统计吗？这只会重置工具箱内部统计，不会影响 ChatGPT 官方额度。',
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearUploadQuotaRecords === 'function'
+      ) {
+        UploadModule.clearUploadQuotaRecords('settings-quota-reset');
+      }
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearMessageQuotaRecords === 'function'
+      ) {
+        UploadModule.clearMessageQuotaRecords('settings-quota-reset');
+      }
+
+      ToolboxShell.appendLog(
+        `[SETTINGS][QUOTA_RESET] uploadUsedBefore=${uploadBefore.used} messageUsedBefore=${messageBefore.used}`,
+      );
+      ToolboxShell.setStatus('今日额度统计已重置', 'ok');
     }
 
     function readFromUi() {
       const current = getConfig();
 
-      const quickPromptIds = qsa('[data-compact-prompt-id]', root)
-        .filter((x) => x.checked)
-        .map((x) => x.getAttribute('data-compact-prompt-id'))
-        .filter(Boolean);
+      const quickPromptInputs = qsa('[data-compact-prompt-id]', root);
+      const quickPromptIds = quickPromptInputs.length
+        ? quickPromptInputs
+            .filter((x) => x.checked)
+            .map((x) => x.getAttribute('data-compact-prompt-id'))
+            .filter(Boolean)
+        : Array.isArray(current.quickPromptIds)
+          ? current.quickPromptIds.slice()
+          : [];
 
       const uploadQuickEl = qs('#cgpt-setting-upload-show-quick-prompts', root);
       const compactQuickEl = qs('#cgpt-setting-compact-show-quick-prompts', root);
+      const promptActionEl = qs('#cgpt-setting-compact-prompt-action', root);
+      const confirmOverwriteEl = qs('#cgpt-setting-confirm-prompt-draft-overwrite', root);
 
       const showUploadQuickPrompts = uploadQuickEl
         ? !!uploadQuickEl.checked
@@ -121,13 +282,22 @@
         ? !!compactQuickEl.checked
         : current.showCompactQuickPrompts !== false;
 
+      const quickPromptClickAction = promptActionEl
+        ? (promptActionEl.value === 'fill' ? 'fill' : 'send')
+        : (current.quickPromptClickAction === 'fill' ? 'fill' : 'send');
+
+      const confirmPromptDraftOverwrite = confirmOverwriteEl
+        ? !!confirmOverwriteEl.checked
+        : current.confirmPromptDraftOverwrite === true;
+
       return {
+        showUploadGroups: !!qs(SettingsSelectors.showUploadGroups, root)?.checked,
         showUploadStartButton: !!qs(SettingsSelectors.showUploadStart, root)?.checked,
         showUploadFileList: !!qs(SettingsSelectors.showFileList, root)?.checked,
         showUploadQuickPrompts,
         showCompactQuickPrompts,
-        quickPromptClickAction: qs('#cgpt-setting-compact-prompt-action', root)?.value || 'send',
-        confirmPromptDraftOverwrite: !!qs('#cgpt-setting-confirm-prompt-draft-overwrite', root)?.checked,
+        quickPromptClickAction,
+        confirmPromptDraftOverwrite,
         quickPromptActiveCategory: current.quickPromptActiveCategory || '全部',
         quickPromptIds,
         globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
@@ -179,28 +349,22 @@
 
       const cfg = getConfig();
 
-      const startEl = qs('#cgpt-setting-compact-show-upload-start', root);
-      if (startEl) startEl.checked = !!cfg.showUploadStartButton;
-
-      const fileListEl = qs('#cgpt-setting-compact-show-file-list', root);
-      if (fileListEl) fileListEl.checked = !!cfg.showUploadFileList;
-
-      const uploadQuickEl = qs('#cgpt-setting-upload-show-quick-prompts', root);
-      if (uploadQuickEl) {
-        uploadQuickEl.checked = cfg.showUploadQuickPrompts !== false;
+      const groupsEl = qs(SettingsSelectors.showUploadGroups, root);
+      if (groupsEl) {
+        groupsEl.checked = cfg.showUploadGroups !== false;
+        groupsEl.disabled = false;
       }
 
-      const quickEl = qs('#cgpt-setting-compact-show-quick-prompts', root);
-      if (quickEl) {
-        quickEl.checked = cfg.showCompactQuickPrompts !== false;
+      const startEl = qs(SettingsSelectors.showUploadStart, root);
+      if (startEl) {
+        startEl.checked = !!cfg.showUploadStartButton;
+        startEl.disabled = false;
       }
 
-      const actionEl = qs('#cgpt-setting-compact-prompt-action', root);
-      if (actionEl) actionEl.value = cfg.quickPromptClickAction || 'send';
-
-      const confirmPromptDraftOverwriteEl = qs('#cgpt-setting-confirm-prompt-draft-overwrite', root);
-      if (confirmPromptDraftOverwriteEl) {
-        confirmPromptDraftOverwriteEl.checked = cfg.confirmPromptDraftOverwrite === true;
+      const fileListEl = qs(SettingsSelectors.showFileList, root);
+      if (fileListEl) {
+        fileListEl.checked = !!cfg.showUploadFileList;
+        fileListEl.disabled = false;
       }
 
       const globalDropEl = qs('#cgpt-setting-global-drop-capture', root);
@@ -247,6 +411,20 @@
         promptTextEl.placeholder = '留空则使用内置默认继续指令（完成时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>）。';
       }
 
+      const runtimeStatsCfg = getAutoQueueTaskQueueSettings();
+      const runtimeStatsShowEl = qs('#cgpt-setting-runtime-stats-show', root);
+      if (runtimeStatsShowEl) {
+        runtimeStatsShowEl.checked = runtimeStatsCfg.showRuntimeStats !== false;
+      }
+      const runtimeStatsPreserveEl = qs('#cgpt-setting-runtime-stats-preserve-average', root);
+      if (runtimeStatsPreserveEl) {
+        runtimeStatsPreserveEl.checked = runtimeStatsCfg.preserveRuntimeStatsAverage === true;
+      }
+      const runtimeStatsIntervalEl = qs('#cgpt-setting-runtime-stats-refresh-interval', root);
+      if (runtimeStatsIntervalEl) {
+        runtimeStatsIntervalEl.value = String(runtimeStatsCfg.runtimeStatsRefreshIntervalMs || 1000);
+      }
+
       const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
       if (edgeAutoHideEl) {
         edgeAutoHideEl.checked = MemoryManager.get(MemoryManager.KEYS.edgeAutoHideEnabled, false) === true;
@@ -273,19 +451,16 @@
         beepFrequencyEl.value = String(beepCfg.frequency);
       }
 
-      const promptListEl = qs('#cgpt-setting-compact-prompt-list', root);
-
-      if (promptListEl) {
-        const promptList = typeof PromptManagerModule !== 'undefined'
-          && typeof PromptManagerModule.getPrompts === 'function'
-          ? PromptManagerModule.getPrompts()
-          : [];
-
-        promptListEl.innerHTML = renderPromptCheckboxList(
-          promptList,
-          cfg.quickPromptIds || [],
-        );
+      const uploadQuotaLimitEl = qs('#cgpt-setting-upload-quota-limit', root);
+      if (uploadQuotaLimitEl) {
+        uploadQuotaLimitEl.value = String(cfg.uploadQuotaMaxFiles || 80);
       }
+
+      const messageQuotaLimitEl = qs('#cgpt-setting-message-quota-limit', root);
+      if (messageQuotaLimitEl) {
+        messageQuotaLimitEl.value = String(cfg.messageQuotaMaxMessages || 150);
+      }
+
     }
 
     function renderShortcutSettings() {
@@ -310,6 +485,11 @@
           action: 'copyAndHotkeyOnce',
           enabledId: 'cgpt-shortcut-copy-hotkey-enabled',
           labelId: 'cgpt-shortcut-copy-hotkey-label',
+        },
+        {
+          action: 'copyThenShortcutTargetHotkey',
+          enabledId: 'cgpt-shortcut-copy-target-enabled',
+          labelId: 'cgpt-shortcut-copy-target-label',
         },
         {
           action: 'startUpload',
@@ -372,6 +552,7 @@
         saveShortcutConfig(cfg);
         renderShortcutSettings();
         applyUploadShortcutButtonTitles();
+        logShortcutTargetWarnings(cfg);
 
         ToolboxShell.appendLog(
           `[SETTINGS][shortcut] action=${action} label=${cfg[action].label || '-'} enabled=${cfg[action].enabled !== false ? '1' : '0'}`
@@ -496,16 +677,19 @@
       bindShortcutEnabled('cgpt-shortcut-send-enabled', 'sendMessage');
       bindShortcutEnabled('cgpt-shortcut-copy-enabled', 'copyLastMessage');
       bindShortcutEnabled('cgpt-shortcut-copy-hotkey-enabled', 'copyAndHotkeyOnce');
+      bindShortcutEnabled('cgpt-shortcut-copy-target-enabled', 'copyThenShortcutTargetHotkey');
       bindShortcutEnabled('cgpt-shortcut-upload-enabled', 'startUpload');
 
       bindShortcutRecord('cgpt-shortcut-send-record', 'sendMessage');
       bindShortcutRecord('cgpt-shortcut-copy-record', 'copyLastMessage');
       bindShortcutRecord('cgpt-shortcut-copy-hotkey-record', 'copyAndHotkeyOnce');
+      bindShortcutRecord('cgpt-shortcut-copy-target-record', 'copyThenShortcutTargetHotkey');
       bindShortcutRecord('cgpt-shortcut-upload-record', 'startUpload');
 
       bindShortcutClear('cgpt-shortcut-send-clear', 'sendMessage');
       bindShortcutClear('cgpt-shortcut-copy-clear', 'copyLastMessage');
       bindShortcutClear('cgpt-shortcut-copy-hotkey-clear', 'copyAndHotkeyOnce');
+      bindShortcutClear('cgpt-shortcut-copy-target-clear', 'copyThenShortcutTargetHotkey');
       bindShortcutClear('cgpt-shortcut-upload-clear', 'startUpload');
 
       const resetShortcutBtn = qs('#cgpt-shortcut-reset-defaults', root);
@@ -549,11 +733,50 @@
         render();
       };
 
+      const onRuntimeStatsSettingChange = () => {
+        saveRuntimeStatsSettingsFromUi();
+        render();
+      };
+
       [
-        '#cgpt-setting-compact-show-upload-start',
-        '#cgpt-setting-compact-show-file-list',
-        '#cgpt-setting-upload-show-quick-prompts',
-        '#cgpt-setting-compact-show-quick-prompts',
+        '#cgpt-setting-runtime-stats-show',
+        '#cgpt-setting-runtime-stats-preserve-average',
+        '#cgpt-setting-runtime-stats-refresh-interval',
+      ].forEach((selector) => {
+        bindSettingChange(root, selector, onRuntimeStatsSettingChange, {
+          moduleName: 'SETTINGS',
+        });
+      });
+
+      const resetRuntimeStatsBtn = qs('#cgpt-setting-runtime-stats-reset', root);
+      if (resetRuntimeStatsBtn) {
+        resetRuntimeStatsBtn.addEventListener('click', () => {
+          if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.resetUserStats === 'function') {
+            RuntimeStatsModule.resetUserStats();
+          }
+          ToolboxShell.appendLog('[SETTINGS][runtime-stats-reset]');
+          ToolboxShell.setStatus('已重置批量任务计时统计（程序运行时长保留）');
+        });
+      }
+
+      const saveQuotaBtn = qs('#cgpt-setting-quota-save', root);
+      if (saveQuotaBtn) {
+        saveQuotaBtn.addEventListener('click', () => {
+          saveQuotaSettingsFromUi();
+        });
+      }
+
+      const resetQuotaStatsBtn = qs('#cgpt-setting-quota-reset-stats', root);
+      if (resetQuotaStatsBtn) {
+        resetQuotaStatsBtn.addEventListener('click', () => {
+          resetQuotaStatsFromUi();
+        });
+      }
+
+      [
+        SettingsSelectors.showUploadGroups,
+        SettingsSelectors.showUploadStart,
+        SettingsSelectors.showFileList,
         '#cgpt-setting-global-drop-capture',
         '#cgpt-setting-restore-scroll-after-copy',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
@@ -563,26 +786,11 @@
         '#cgpt-setting-copy-hotkey-loop-home-nav-url',
         '#cgpt-setting-copy-hotkey-continue-stop-signal',
         '#cgpt-setting-copy-hotkey-continue-prompt-text',
-        '#cgpt-setting-compact-prompt-action',
-        '#cgpt-setting-confirm-prompt-draft-overwrite',
       ].forEach((selector) => {
         bindSettingChange(root, selector, onCompactSettingChange, {
           moduleName: 'SETTINGS',
         });
       });
-
-      const listEl = qs('#cgpt-setting-compact-prompt-list', root);
-      if (listEl) {
-        listEl.addEventListener('change', (e) => {
-          const target = e.target;
-          if (!(target instanceof HTMLInputElement)) return;
-          if (!target.matches('[data-compact-prompt-id]')) return;
-
-          const cfg = readFromUi();
-          saveConfig(cfg);
-          render();
-        });
-      }
 
       const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
 
@@ -804,6 +1012,7 @@
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="basic">基础</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="shortcut">快捷键</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="ui">界面</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="batch-timing">批量计时</button>
           </div>
 
           <div class="cgpt-settings-panel" data-settings-panel="basic">
@@ -818,6 +1027,41 @@
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-force-show-toolbox">强制显示工具箱</button>
             </div>
             <div class="cgpt-hint">当工具箱跑出屏幕、贴边状态异常或隐藏后找不到入口时，可先点「强制显示工具箱」，再按需重置位置。</div>
+
+            <div class="cgpt-section-title" style="margin-top: 12px;">额度设置</div>
+            <div class="cgpt-hint">说明：该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。</div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-upload-quota-limit">上传额度上限</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-upload-quota-limit"
+                data-no-wheel-number="1"
+                min="1"
+                max="10000"
+                step="1"
+              >
+            </div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-message-quota-limit">消息额度上限</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-message-quota-limit"
+                data-no-wheel-number="1"
+                min="1"
+                max="10000"
+                step="1"
+              >
+            </div>
+
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save">保存额度设置</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats">重置今日统计</button>
+            </div>
+            <div class="cgpt-hint">修改上限后顶部「上传额度 / 消息额度」的分母会立即更新；「重置今日统计」只清空工具箱内部已用计数，不会改动上限配置。</div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器</div>
             <label class="cgpt-checkbox-line">
@@ -847,6 +1091,10 @@
           <div class="cgpt-settings-panel" data-settings-panel="shortcut">
             <div class="cgpt-hint">
               点击录制后，按下完整快捷键。例如：Ctrl+Alt+C。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。
+              发送信息快捷键用于直接发送消息。
+              「复制并触发快捷键」用于启动“先复制最后回复，再触发目标快捷键”的动作。
+              「复制后触发的目标快捷键」才是复制完成后真正通过 GUI 派发出去的组合键。
+              发送信息建议使用 Ctrl+Enter 或 Alt+Enter 作为全局快捷键；普通 Enter 仅在 ChatGPT 输入框内由页面原生处理，避免在任务列表、设置页、弹窗中误触发送。
             </div>
 
             <div class="cgpt-shortcut-settings">
@@ -873,11 +1121,21 @@
               <div class="cgpt-shortcut-row" data-shortcut-action="copyAndHotkeyOnce">
                 <label class="cgpt-checkbox-line">
                   <input type="checkbox" id="cgpt-shortcut-copy-hotkey-enabled">
-                  启用复制+快捷键快捷键
+                  启用复制并触发快捷键
                 </label>
                 <input id="cgpt-shortcut-copy-hotkey-label" class="cgpt-input" readonly>
                 <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-record">录制</button>
                 <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-clear">清空</button>
+              </div>
+
+              <div class="cgpt-shortcut-row" data-shortcut-action="copyThenShortcutTargetHotkey">
+                <label class="cgpt-checkbox-line">
+                  <input type="checkbox" id="cgpt-shortcut-copy-target-enabled">
+                  复制后触发的目标快捷键
+                </label>
+                <input id="cgpt-shortcut-copy-target-label" class="cgpt-input" readonly>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-target-record">录制</button>
+                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-target-clear">清空</button>
               </div>
 
               <div class="cgpt-shortcut-row" data-shortcut-action="startUpload">
@@ -902,6 +1160,11 @@
             <div class="cgpt-section-title" style="margin-top: 4px;">精简模式显示内容</div>
 
             <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-upload-groups">
+              显示项目分组栏
+            </label>
+
+            <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-setting-compact-show-upload-start">
               显示上传按钮
             </label>
@@ -910,34 +1173,7 @@
               <input type="checkbox" id="cgpt-setting-compact-show-file-list">
               显示上传文件列表
             </label>
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-upload-show-quick-prompts">
-              上传页显示常用 Prompt 快捷区
-            </label>
-            <div class="cgpt-hint">开启后，在多文件上传页显示常用 Prompt 快捷按钮。</div>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-compact-show-quick-prompts">
-              精简模式显示常用 Prompt 快捷区
-            </label>
-
-            <div class="cgpt-kv">
-              <label>Prompt 动作</label>
-              <select class="cgpt-select" id="cgpt-setting-compact-prompt-action">
-                <option value="send">填入并发送</option>
-                <option value="fill">只填入输入框</option>
-              </select>
-            </div>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-confirm-prompt-draft-overwrite">
-              覆盖输入框草稿前弹窗确认
-            </label>
-            <div class="cgpt-hint">关闭时，点击常用 Prompt 或 Prompt 管理发送会直接覆盖输入框已有内容，不再弹出浏览器确认框。</div>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">常用 Prompt 快捷区</div>
-            <div class="cgpt-hint">选择要显示在上传页快捷区域的 Prompt。点击后默认填入并发送到 ChatGPT，也可改为只填入输入框。</div>
-            <div id="cgpt-setting-compact-prompt-list" class="cgpt-settings-prompt-list"></div>
+            <div class="cgpt-hint">常用 Prompt 的展示选择已移动到「Prompt 管理 → Prompt 展示」。</div>
 
             <div class="cgpt-section-title" style="margin-top: 10px;">拖拽上传</div>
             <label class="cgpt-checkbox-line">
@@ -1015,6 +1251,36 @@
             <div class="cgpt-hint">
               单次或连续「复制+快捷键+继续」会发送上面的继续指令。若 ChatGPT 仅回复终止信号（整段回复只有这一行），将停止复制、快捷键与继续发送。
             </div>
+          </div>
+
+          <div class="cgpt-settings-panel" data-settings-panel="batch-timing">
+            <div class="cgpt-section-title" style="margin-top: 4px;">批量任务计时统计</div>
+            <div class="cgpt-hint">在「自动指令 → 批量任务组模式」状态区显示运行/批量/当前任务耗时、平均耗时与预计剩余时间。当前任务耗时仅在消息真正发送成功后开始计时。</div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-runtime-stats-show">
+              显示计时统计
+            </label>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-runtime-stats-preserve-average">
+              保留历史平均耗时
+            </label>
+            <div class="cgpt-hint">开启后，开始新的批量任务组时仍沿用上一轮已完成任务的平均耗时；关闭则每轮批量重新开始统计。</div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-runtime-stats-refresh-interval">计时刷新间隔</label>
+              <select class="cgpt-select" id="cgpt-setting-runtime-stats-refresh-interval">
+                <option value="1000">1000 ms</option>
+                <option value="2000">2000 ms</option>
+                <option value="5000">5000 ms</option>
+              </select>
+            </div>
+
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-runtime-stats-reset">重置计时统计</button>
+            </div>
+            <div class="cgpt-hint">重置会清空批量/任务计时与平均耗时，但不会重置「程序运行时长」。</div>
           </div>
         </div>
       `;

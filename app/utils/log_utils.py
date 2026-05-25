@@ -106,8 +106,23 @@ def set_log_runtime_options(verbose=None, mirror_to_console=None, include_callsi
         _LOG_INCLUDE_CALLSITE = bool(include_callsite)
 
 
-# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
+_LOG_RUNTIME_OPTIONS_DEPRECATED_LOGGED = False
+_LOG_MIN_LEVEL_DEPRECATED_LOGGED = False
+_READ_LAST_LINES_DEPRECATED_LOGGED = False
+
+
+# @deprecated 当前无内部调用方，可能供外部调试脚本使用；确认无 DEPRECATED_HIT 后可删除。
 def get_log_runtime_options():
+    global _LOG_RUNTIME_OPTIONS_DEPRECATED_LOGGED
+    if not _LOG_RUNTIME_OPTIONS_DEPRECATED_LOGGED:
+        from app.utils.deprecation_log import log_deprecated_hit
+
+        _LOG_RUNTIME_OPTIONS_DEPRECATED_LOGGED = True
+        log_deprecated_hit(
+            name="get_log_runtime_options",
+            reason="no_internal_call",
+            replacement="none",
+        )
     return {
         "verbose": _LOG_VERBOSE,
         "mirror_to_console": _LOG_MIRROR_TO_CONSOLE,
@@ -116,9 +131,18 @@ def get_log_runtime_options():
     }
 
 
-# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
+# @deprecated 当前无内部调用方；日志最小等级由环境变量与 GUI 设置控制。
 def set_log_min_level(level):
-    global _LOG_MIN_LEVEL
+    global _LOG_MIN_LEVEL, _LOG_MIN_LEVEL_DEPRECATED_LOGGED
+    if not _LOG_MIN_LEVEL_DEPRECATED_LOGGED:
+        from app.utils.deprecation_log import log_deprecated_hit
+
+        _LOG_MIN_LEVEL_DEPRECATED_LOGGED = True
+        log_deprecated_hit(
+            name="set_log_min_level",
+            reason="no_internal_call",
+            replacement="env_or_gui_settings",
+        )
     text = str(level or "INFO").strip().upper()
     _LOG_MIN_LEVEL = text if text in _LOG_LEVEL_RANK else "INFO"
 
@@ -316,9 +340,19 @@ def get_log_file_path():
     return str(LOG_FILE.resolve())
 
 
-# TODO(cleanup-observe): 当前无调用方，可能供外部调试脚本使用。
+# @deprecated 当前无内部调用方；GUI/server 未接入尾部日志读取。
 def read_last_lines(path, max_lines=1000, encoding="utf-8", max_read_bytes=2 * 1024 * 1024):
     """Read at most the last ``max_lines`` from a log file without loading the whole file."""
+    global _READ_LAST_LINES_DEPRECATED_LOGGED
+    if not _READ_LAST_LINES_DEPRECATED_LOGGED:
+        from app.utils.deprecation_log import log_deprecated_hit
+
+        _READ_LAST_LINES_DEPRECATED_LOGGED = True
+        log_deprecated_hit(
+            name="read_last_lines",
+            reason="no_internal_call",
+            replacement="direct_log_viewer",
+        )
     log_path = Path(path)
     if not log_path.exists():
         return []

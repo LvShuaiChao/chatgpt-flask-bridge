@@ -21,19 +21,16 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.text_utils import short_id, short_page_display
+from app.utils.text_utils import short_id
 from app.utils.page_status import (
     conversation_syncable_from,
     can_accept_input,
-    classify_page_state,
     evaluate_page_capability,
-    evaluate_send_page,
     explain_page_decision,
     get_page_liveness,
     can_sync_conversation,
     is_page_busy,
     is_page_online,
-    is_page_url_syncable,
     is_prebound_home_page,
     normalize_page,
     page_registry_key,
@@ -43,7 +40,6 @@ from app.utils.page_status import (
 from app.utils.tm_activity import (
     classify_tm_client_activity,
     compute_tm_activity_metrics,
-    tm_send_allowed,
 )
 from app.utils.page_status import PageRegistry, sort_pages_by_display_id
 
@@ -120,58 +116,6 @@ class PageTmClientMixin:
         """首页预绑定（统一 app.utils.page_status.is_prebound_home_page）。"""
         return is_prebound_home_page(item)
 
-    def _classify_page_state(self, item, *, log=True):
-        classified = (
-            classify_page_state(item) if isinstance(item, dict) else {}
-        )
-        online = bool(classified.get("online"))
-        dialog_ready = bool(classified.get("dialog_ready"))
-        prebound_home = bool(classified.get("prebound_home"))
-        if log and isinstance(item, dict):
-            client_id = (item.get("client_id") or "-").strip() or "-"
-            page_type = (item.get("page_type") or "-").strip() or "-"
-            conversation_id = (
-                item.get("conversation_id")
-                or self._client_conversation_id(item)
-                or "-"
-            )
-            url = self._page_url_from_item(item) or "-"
-            key = (
-                client_id,
-                page_type,
-                conversation_id,
-                url,
-                online,
-                dialog_ready,
-                prebound_home,
-            )
-            last = getattr(self, "_last_page_state_classify_key", None)
-            if key != last:
-                self._last_page_state_classify_key = key
-                self._append_log(
-                    "[PAGE_STATE][CLASSIFY] "
-                    f"client_id={client_id} "
-                    f"page_type={page_type} "
-                    f"conversation_id={conversation_id} "
-                    f"url={url} "
-                    f"online={'true' if online else 'false'} "
-                    f"dialog_ready={'true' if dialog_ready else 'false'} "
-                    f"prebound_home={'true' if prebound_home else 'false'}",
-                    echo=False,
-                )
-        return {
-            "online": online,
-            "dialog_ready": dialog_ready,
-            "prebound_home": prebound_home,
-        }
-
-    def _find_online_page_by_conversation_id(
-        self, conversation_id, status=None, snapshot=None
-    ):
-        return self._find_online_tm_client_by_conversation_id(
-            conversation_id, status=status, sync_only=False, snapshot=snapshot
-        )
-
     def _get_selected_tm_page_from_combo(self, status=None):
         """统一从页面下拉框读取当前选中页（UserRole 完整 dict，不解析 currentText）。"""
         del status
@@ -205,7 +149,17 @@ class PageTmClientMixin:
 
         return None
 
+    # @deprecated 无外部调用；确认无 DEPRECATED_HIT 后删除。
     def _get_current_or_recent_online_tm_page(self, status=None):
+        if not getattr(self, "_get_current_or_recent_online_tm_page_deprecated_logged", False):
+            from app.utils.deprecation_log import log_deprecated_hit
+
+            self._get_current_or_recent_online_tm_page_deprecated_logged = True
+            log_deprecated_hit(
+                name="_get_current_or_recent_online_tm_page",
+                reason="no_external_call",
+                replacement="_find_online_tm_client_by_conversation_id / _find_focused_tm_page",
+            )
         status = status or self._bridge_ui.last_bridge_status or {}
         for getter in (
             lambda: self._pick_current_page_client_info(status),
@@ -634,7 +588,7 @@ class PageTmClientMixin:
         resolved_bound_client_id = ""
         bound_conversation_id = ""
         # 仅从 session.remote 读取绑定字段，勿调用 _resolve_bound_page_info：
-        # 后者会通过 _find_online_page_by_conversation_id → _iter_tm_clients
+        # 后者会通过 _find_online_tm_client_by_conversation_id → _iter_tm_clients
         # → _extract_tm_pages_from_status → 本方法 形成无限递归。
         session = self._current_session() if hasattr(self, "_current_session") else None
         if session is not None:
@@ -799,10 +753,6 @@ class PageTmClientMixin:
             return cached
         return self.build_tm_page_snapshot(status, log_stages=log_stages)
 
-    def _status_summary_page_count(self, status=None):
-        """状态摘要用的页面总数（复用 snapshot，不重复解析）。"""
-        return self._get_tm_page_snapshot(status, log_stages=False).total_count
-
     def _extract_tm_pages_from_status(
         self, status=None, *, log_stages=True, snapshot=None
     ):
@@ -855,12 +805,6 @@ class PageTmClientMixin:
         extracted_syncable = sum(
             1 for page in pages if conversation_syncable_from(page)
         )
-        self._tm_liveness_counts = {
-            "strict_online": extracted_strict_online,
-            "recently_seen": extracted_recently_seen,
-            "conversation_syncable": extracted_syncable,
-            "total": extracted_total,
-        }
         extracted_online = extracted_strict_online
         if summary is None:
             summary = {}
@@ -1037,16 +981,6 @@ class PageTmClientMixin:
                 return BIND_STATE_BOUND_CONVERSATION
             return BIND_STATE_BOUND_OFFLINE
         return state
-
-    @staticmethod
-    def _short_page_display(url):
-        try:
-            return short_page_display(url)
-        except Exception as exc:
-            print(
-                f"[LOG_HELPER][SHORT_PAGE_DISPLAY_FAIL] url={url!r} error={exc!r}"
-            )
-            return str(url or "-")
 
     def _format_last_seen_ago(self, last_seen):
         if not last_seen:
@@ -1264,25 +1198,6 @@ class PageTmClientMixin:
             return f"对话 {short_id(conv, length=8)}"
         return "ChatGPT 页面"
 
-    @staticmethod
-    def _format_monkey_label_list(labels, max_show=3):
-        items = []
-        seen = set()
-        for raw in labels or []:
-            text = str(raw or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            items.append(text)
-        if not items:
-            return "—"
-        shown = items[:max_show]
-        line = "、".join(shown)
-        rest = len(items) - len(shown)
-        if rest > 0:
-            line += f" 等 {rest} 个"
-        return line
-
     def _find_bound_session_for_tm_client(self, item):
         if not isinstance(item, dict):
             return None
@@ -1449,28 +1364,3 @@ class PageTmClientMixin:
             "blank_home_bound_labels": blank_home_bound_labels,
             "blank_home_available_labels": blank_home_available_labels,
         }
-
-    def build_monkey_binding_summary_text(self, stats=None):
-        stats = stats or self._collect_monkey_window_binding_stats()
-        blank_total = int(stats.get("blank_home_total") or 0)
-        blank_online = int(stats.get("blank_home_online") or 0)
-        blank_available = int(stats.get("blank_home_available") or 0)
-        blank_bound = int(stats.get("blank_home_bound") or 0)
-        raw_count = int(stats.get("raw_count") or stats.get("total") or 0)
-        unique_count = int(stats.get("unique_count") or stats.get("total") or 0)
-        duplicate_count = int(stats.get("duplicate_count") or 0)
-        window_line = (
-            "窗口统计："
-            f"总数 {raw_count}｜"
-            f"去重后 {unique_count}｜"
-            f"重复 {duplicate_count}｜"
-            f"空白页 {blank_online}/{blank_total}｜"
-            f"空白可用 {blank_available}｜"
-            f"空白已绑 {blank_bound}｜"
-            f"已绑定 {stats.get('bound_count', 0)}｜"
-            f"未绑定 {stats.get('unbound_count', 0)}"
-        )
-        bound_text = self._format_monkey_label_list(stats.get("bound_labels") or [])
-        unbound_text = self._format_monkey_label_list(stats.get("unbound_labels") or [])
-        detail_line = f"绑定明细：已绑定：{bound_text}｜未绑定：{unbound_text}"
-        return window_line, detail_line

@@ -1,9 +1,9 @@
 """可用页面列表与所选页面状态。"""
 
-import re
 import time
 
 from app.models import normalize_remote_chatgpt, remote_binding_enabled
+from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
 from PyQt5.QtCore import Qt
 
@@ -13,17 +13,6 @@ class PageSelectorMixin:
         if not isinstance(page, dict):
             return ""
         return page_url_from(page)
-
-    def _extract_chatgpt_conversation_id_from_url(self, url):
-        text = str(url or "").strip()
-        if not text:
-            return ""
-
-        match = re.search(r"/c/([a-zA-Z0-9-]+)", text)
-        if match:
-            return match.group(1)
-
-        return ""
 
     def _page_chatgpt_conversation_id(self, page):
         if not isinstance(page, dict):
@@ -120,9 +109,6 @@ class PageSelectorMixin:
         return None
 
     def _page_combo_refreshing(self):
-        ps = getattr(self, "_page_selector", None)
-        if ps is not None and getattr(ps, "selector_refreshing", False):
-            return True
         return bool(getattr(self, "_tm_page_selector_refreshing", False))
 
     def _on_tm_page_selector_changed(self, index):
@@ -271,31 +257,6 @@ class PageSelectorMixin:
             )
         return False
 
-    def _get_page_combo_selection_ids(self):
-        item = self._get_tm_page_combo_selection()
-        if not isinstance(item, dict):
-            return {
-                "client_id": "",
-                "page_instance_id": "",
-                "conversation_id": "",
-            }
-        return {
-            "client_id": (item.get("client_id") or "").strip(),
-            "page_instance_id": (item.get("page_instance_id") or "").strip(),
-            "conversation_id": (item.get("conversation_id") or "").strip(),
-        }
-
-    def _sync_tm_page_combo_selection(self, item, *, source="", auto=False):
-        del auto
-        return self._set_page_combo_selection(item, source=source)
-
-    def _on_bind_selected_tm_page(self):
-        """绑定所选页面（兼容旧入口，委托统一绑定流程）。"""
-        if hasattr(self, "_on_bind_current_page"):
-            self._on_bind_current_page()
-            return
-        self._on_set_manual_current_page_clicked()
-
     def _on_set_manual_current_page_clicked(self):
         self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)
         item = self._get_tm_page_combo_selection()
@@ -333,9 +294,6 @@ class PageSelectorMixin:
         if isinstance(info, dict):
             return info
         return self._find_tm_page_by_selector_data(client_id)
-
-    def _current_focused_tm_page(self, status=None):
-        return self._find_focused_tm_page(status)
 
     def _current_bound_tm_page(self, status=None, session=None):
         session = session or self._current_session()

@@ -23,8 +23,6 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.page_status import conversation_syncable_from
-from app.utils.page_status import is_page_url_syncable
 from app.utils.page_status import bridge_status_online
 from app.utils.page_status import page_url_from, read_snapshot_identity
 from PyQt5.QtCore import QUrl
@@ -53,41 +51,6 @@ class PageOpenCloseMixin:
                 self._append_log(
                     f"[打开网页] 系统浏览器打开失败，已通过油猴队列打开："
                     f"{label or target}"
-                )
-                return True
-
-        self._append_log(f"[打开网页] 打开失败：{target}")
-        return False
-    def _auto_open_url_once(self, session, url, label="", interval=20):
-        target = (url or "").strip()
-        if not target:
-            return False
-
-        session_id = session.session_id if session else "-"
-        key = f"{session_id}|{target}"
-        now = time.time()
-        last_open_at = self._bind_display.last_auto_open_url_at.get(key, 0)
-
-        if now - last_open_at < interval:
-            self._append_log(
-                f"[打开网页] 跳过重复自动打开，{interval} 秒内已打开过：{target}"
-            )
-            return False
-
-        self._bind_display.last_auto_open_url_at[key] = now
-        self._mark_auto_bind_waiting()
-
-        if self._open_url_in_browser(target, label):
-            self._append_log(
-                f"[打开网页] 已通过系统浏览器打开：{label or target}"
-            )
-            return True
-
-        if is_server_running():
-            msg = self._push_open_url(target, active=True, label=label)
-            if msg is not None:
-                self._append_log(
-                    f"[打开网页] 已通过油猴队列打开：{label or target}"
                 )
                 return True
 
@@ -140,15 +103,6 @@ class PageOpenCloseMixin:
             if self._is_bindable_chatgpt_url(url):
                 return url
         return ""
-    def _session_bound_conversation_url(self, session):
-        if session is None:
-            return ""
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if not remote_binding_enabled(remote):
-            return ""
-        return self._chatgpt_url_from_remote(remote)
-    def _bound_conversation_url(self):
-        return self._session_bound_conversation_url(self._current_session())
     def _remember_session_page_from_client(self, session, client_id):
         if session is None:
             return
@@ -323,117 +277,6 @@ class PageOpenCloseMixin:
         self._add_system_message(
             "无法打开 ChatGPT。请检查默认浏览器，或确认服务和油猴在线。"
         )
-    def _on_open_bound_chatgpt_page(self, _url=None):
-        session = self._current_session()
-        if session is None:
-            self._add_system_message("当前没有选中的对话。")
-            self._append_log(
-                "[OPEN_BOUND_PAGE][FAILED] reason=no_current_session",
-                echo=True,
-            )
-            return
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        status = self._bridge_ui.last_bridge_status or {}
-        bound_info, _, _ = self._resolve_bound_page_info(status=status)
-
-        bound_url = (
-            (remote.get("url") or "")
-            or remote.get("url")
-            or ""
-        ).strip()
-
-        conversation_id = self._remote_conversation_id(remote)
-
-        if isinstance(bound_info, dict):
-            if not bound_url:
-                bound_url = (
-                    bound_info.get("url")
-                    or bound_info.get("url")
-                    or (bound_info.get("url") or "")
-                    or ""
-                ).strip()
-            if not conversation_id:
-                conversation_id = (self._client_conversation_id(bound_info) or "").strip()
-                if not conversation_id:
-                    conversation_id = parse_conversation_id(bound_url)
-
-        if not bound_url and conversation_id:
-            bound_url = f"https://chatgpt.com/c/{conversation_id}"
-
-        if not bound_url:
-            self._add_system_message(
-                "当前对话没有可打开的绑定页面 URL。请先打开目标 ChatGPT 页面，然后点击“绑定所选页面”。"
-            )
-            self._append_log(
-                f"[OPEN_BOUND_PAGE][FAILED] session_id={session.session_id} "
-                "reason=no_bound_url",
-                echo=True,
-            )
-            return
-
-        bound_url = bound_url.split("#", 1)[0]
-        self._append_log(
-            "[OPEN_BOUND_PAGE][START] "
-            f"session_id={session.session_id} "
-            f"conversation_id={conversation_id or '-'} "
-            f"url={bound_url}",
-            echo=True,
-        )
-
-        ok = self._open_bound_conversation_url(bound_url)
-
-        if ok:
-            self._add_system_message(f"已打开绑定页面：{bound_url}")
-            self._append_log(
-                "[OPEN_BOUND_PAGE][DONE] "
-                f"session_id={session.session_id} "
-                f"conversation_id={conversation_id or '-'}",
-                echo=True,
-            )
-        else:
-            self._add_system_message(f"打开绑定页面失败：{bound_url}")
-            self._append_log(
-                "[OPEN_BOUND_PAGE][FAILED] "
-                f"session_id={session.session_id} "
-                "reason=open_failed "
-                f"url={bound_url}",
-                echo=True,
-            )
-
-    def _tm_table_signature(self, status=None, snapshot=None):
-        status = status or {}
-        snapshot = snapshot or (
-            self._get_tm_page_snapshot(status, log_stages=False)
-            if hasattr(self, "_get_tm_page_snapshot")
-            else None
-        )
-        clients = list(
-            snapshot.page_dicts
-            if snapshot is not None
-            else self._iter_tm_clients(status)
-        )
-        rows = []
-        for c in clients:
-            rows.append(
-                "|".join([
-                    str(c.get("client_id", "")),
-                    str(c.get("page_instance_id", "")),
-                    str(c.get("page_type", "")),
-                    str(c.get("conversation_id", "")),
-                    str(c.get("visibility_state", "")),
-                    str(bool(c.get("has_focus"))),
-                    str(c.get("last_focus_at", "")),
-                    str(c.get("last_seen", "")),
-                    str(bool(self._page_is_online(c))),
-                    str(c.get("url", "")),
-                    str(c.get("conversation_syncable")),
-                    str(c.get("send_now_available")),
-                    str(c.get("can_send_now")),
-                    str(c.get("response_state", "")),
-                ])
-            )
-        return tuple(sorted(rows))
 
     def _set_page_list_refresh_busy(self, busy):
         refresh_btn = getattr(self, "refresh_page_list_btn", None)
@@ -447,41 +290,6 @@ class PageOpenCloseMixin:
             return
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason=reason or "auto")
-
-    def _page_list_refresh_metrics(self, status=None):
-        status = status or (getattr(self._bridge_ui, 'last_bridge_status', None) or {})
-        clients = list(self._iter_tm_clients(status))
-        raw_clients_count = len(clients)
-        online_clients_count = sum(
-            1 for item in clients if self._page_is_online(item)
-        )
-        url_syncable_count = sum(
-            1 for item in clients if is_page_url_syncable(item)
-        )
-        conversation_syncable_count = sum(
-            1 for item in clients if conversation_syncable_from(item)
-        )
-        monkey_stats = {}
-        if hasattr(self, "_collect_monkey_window_binding_stats"):
-            monkey_stats = self._collect_monkey_window_binding_stats(status)
-        blank_page_count = int(monkey_stats.get("blank_home_total") or 0)
-        summary = {}
-        if hasattr(self, "_tm_summary_for_session"):
-            summary = self._tm_summary_for_session() or {}
-        bound_page_id = (
-            read_snapshot_identity(summary, "bound")["client_id"]
-            or (self._session_bound_client_id() if hasattr(self, "_session_bound_client_id") else "")
-        )
-        bound_page_online = bool(summary.get("bound_online"))
-        return {
-            "raw_clients_count": raw_clients_count,
-            "online_clients_count": online_clients_count,
-            "url_syncable_count": url_syncable_count,
-            "conversation_syncable_count": conversation_syncable_count,
-            "blank_page_count": blank_page_count,
-            "bound_page_id": bound_page_id or "-",
-            "bound_page_online": bound_page_online,
-        }
 
     def _enqueue_close_page(self, client_id, label=""):
         if not is_server_running():
@@ -501,16 +309,6 @@ class PageOpenCloseMixin:
         desc = label or client_id
         self._append_log(f"[关闭页面] 已下发 close_self ({short_id}…) {desc}")
         return msg
-    def _on_close_selected_tm_page(self):
-        client_id = self._selected_tm_page_client_id()
-        if not client_id:
-            self._set_tm_action_hint(
-                "请先在聊天页「可用页面列表」中选择要关闭的页面。"
-            )
-            self._append_log("[关闭页面] 未选中页面，已取消。")
-            return
-        self._enqueue_close_page(client_id, label=f"选中页面 {client_id}")
-        self._set_tm_action_hint(f"已向 {client_id} 下发关闭命令。")
     def _on_close_other_tm_pages(self):
         if not is_server_running():
             self._append_log("[关闭页面] 服务未启动，无法下发命令。")
@@ -660,87 +458,6 @@ class PageOpenCloseMixin:
             "存在多个 ChatGPT 页面，但无法确定当前绑定页，请先切换或重新绑定页面。"
         ),
     }
-
-    def _on_close_current_bound_tm_page(self):
-        self._append_log("[DEBUG][CLOSE_CURRENT_BOUND][CLICK]")
-        if not is_server_running():
-            self._append_log(
-                "[DEBUG][CLOSE_CURRENT_BOUND][FAILED] reason=server_not_running"
-            )
-            self._append_log("[关闭页面] 服务未启动，无法下发命令。")
-            self._set_tm_action_hint("请先启动服务。")
-            return
-
-        status = get_bridge_status()
-        self._bridge_ui.last_bridge_status = status
-        resolved = self._resolve_current_bound_chatgpt_page(status=status)
-        if not resolved.get("ok"):
-            fail_reason = (resolved.get("fail_reason") or "").strip()
-            hint = self._CLOSE_CURRENT_BOUND_FAIL_HINTS.get(
-                fail_reason, "无法确定要关闭的 ChatGPT 页面。"
-            )
-            self._set_tm_action_hint(hint)
-            if fail_reason == "ambiguous":
-                count = resolved.get("ambiguous_count") or 0
-                self._append_log(
-                    f"[关闭页面] 存在 {count} 个在线页面但无法确定绑定页，已取消。"
-                )
-            elif fail_reason == "bound_page_gone":
-                self._append_log("[关闭页面] 绑定页面已不存在或已关闭，已取消。")
-            else:
-                self._append_log("[关闭页面] 当前没有绑定的 ChatGPT 页面，已取消。")
-            return
-
-        page = resolved.get("page") or {}
-        client_id = (page.get("client_id") or "").strip()
-        conversation_id = ""
-        if hasattr(self, "_client_conversation_id"):
-            conversation_id = (self._client_conversation_id(page) or "").strip()
-        page_url = page_url_from(page) or (page.get("url") or "").strip()
-        self._append_log(
-            "[DEBUG][CLOSE_CURRENT_BOUND][TARGET] "
-            f"page_id={client_id or '-'} "
-            f"conversation_id={conversation_id or '-'} "
-            f"url={page_url or '-'} "
-            f"resolve_reason={resolved.get('resolve_reason') or '-'}"
-        )
-
-        try:
-            result = close_chatgpt_pages("current_bound", target_client_id=client_id)
-        except Exception as error:
-            detail = f"{error}\n{traceback.format_exc()}"
-            self._append_log(
-                f"[DEBUG][CLOSE_CURRENT_BOUND][FAILED] reason=exception error={detail}",
-                echo=True,
-            )
-            self._set_tm_action_hint(f"关闭绑定页面失败：{error}")
-            return
-
-        if not result.get("ok"):
-            reason = (result.get("reason") or "").strip()
-            self._append_log(
-                f"[DEBUG][CLOSE_CURRENT_BOUND][FAILED] reason={reason or '-'} "
-                f"page_id={client_id or '-'}"
-            )
-            if reason == "target_not_online":
-                self._set_tm_action_hint(
-                    "当前绑定的 ChatGPT 页面已不存在或已关闭"
-                )
-            else:
-                self._set_tm_action_hint(f"关闭绑定页面失败：{reason or '未知错误'}")
-            return
-
-        self._append_log(
-            "[DEBUG][CLOSE_CURRENT_BOUND][DONE] "
-            f"closed={result.get('closed', 0)} page_id={client_id or '-'}"
-        )
-        self._append_log(
-            f"[关闭页面] 已关闭当前绑定页 {client_id}，"
-            f"conversation_id={conversation_id or '-'}"
-        )
-        self._set_tm_action_hint(
-            f"已向绑定页面 {client_id} 下发关闭命令。"
-        )
 
     def _on_close_bound_tm_page(self):
         """调试页按钮入口：关闭当前绑定 ChatGPT 页面。"""

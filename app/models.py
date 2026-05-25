@@ -543,8 +543,13 @@ def is_waiting_placeholder_message(message) -> bool:
     from app.constants import (
         ASSISTANT_WAIT_TEXTS,
         WAITING_PLACEHOLDER_SOURCES,
-        WAITING_PLACEHOLDER_STATUSES,
+        is_assistant_reply_pending_status,
+        is_sync_pending_status,
+        is_user_send_pending_status,
     )
+
+    if is_user_send_pending_status(status) or is_sync_pending_status(status):
+        return False
 
     content_is_waiting = (
         not content
@@ -562,7 +567,7 @@ def is_waiting_placeholder_message(message) -> bool:
     if source in WAITING_PLACEHOLDER_SOURCES:
         return True
 
-    if status in WAITING_PLACEHOLDER_STATUSES:
+    if is_assistant_reply_pending_status(status):
         return True
 
     return content_is_waiting
@@ -586,17 +591,3 @@ def is_reset_placeholder_error_message(message) -> bool:
         return True
 
     return False
-
-
-# TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入等待占位失败处理或删除。
-def mark_waiting_placeholder_failed(message, *, content: str) -> bool:
-    if not is_waiting_placeholder_message(message):
-        return False
-    if isinstance(message, dict):
-        message["ui_status"] = "failed"
-        message.pop("status", None)
-        message["content"] = content
-    else:
-        message.ui_status = "failed"
-        message.content = content
-    return True

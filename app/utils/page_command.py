@@ -55,7 +55,7 @@ def build_action_target_payload(
     source: str = "bound_page",
     matched_by: str = "",
 ) -> Dict[str, Any]:
-    """与 UI `_conversation_action_target_payload` 字段对齐（无 Qt）。"""
+    """构造页面动作目标 payload，供 send/sync/open 等页面命令共用。"""
     from app.utils.page_status import (
         can_sync_conversation,
         conversation_syncable_from,

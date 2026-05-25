@@ -10,14 +10,11 @@ from app.server import get_bridge_status, is_server_running
 from app.utils.page_command import resolve_page_command_target
 from app.utils.page_status import (
     PageRegistry,
-    PageSnapshot,
     binding_from_session,
     pages_from_bridge_status,
 )
 from app.utils.page_status import (
-    evaluate_page_capability,
     is_page_online,
-    normalize_page,
     page_registry_key,
 )
 from PyQt5.QtCore import QTimer

@@ -1,3 +1,10 @@
+"""旧版 ChatGPT -> Cursor 自动任务调度（孤儿模块候选）。"""
+
+# @deprecated-candidate
+# 当前源码中未发现 app.core.job_scheduler 的真实业务 import。
+# 该模块疑似旧版 ChatGPT -> Cursor 自动任务调度残留。
+# 暂保留一个版本观察；若确认没有 UI、server route、外部脚本依赖，再整文件删除。
+
 import threading
 import time
 import traceback
@@ -26,14 +33,87 @@ JOB_STATUSES = frozenset({
     "cursor_running",
     "cursor_done",
     "cursor_failed",
+    "chatgpt_failed",
     "cancelled",
 })
+
+JOB_TERMINAL_STATUSES = frozenset({
+    "cursor_done",
+    "cursor_failed",
+    "chatgpt_failed",
+    "cancelled",
+})
+
+JOB_TRANSITIONS = {
+    "created": {"queued_chatgpt", "cancelled"},
+    "queued_chatgpt": {"sent_to_chatgpt", "chatgpt_failed", "cancelled"},
+    "sent_to_chatgpt": {"waiting_chatgpt_reply", "chatgpt_failed", "cancelled"},
+    "waiting_chatgpt_reply": {"chatgpt_reply_ready", "chatgpt_failed", "cancelled"},
+    "chatgpt_reply_ready": {"queued_cursor", "cursor_failed", "cancelled"},
+    "queued_cursor": {"cursor_claimed", "cursor_failed", "cancelled"},
+    "cursor_claimed": {"cursor_submitted", "cursor_failed", "cancelled"},
+    "cursor_submitted": {"cursor_running", "cursor_failed", "cancelled"},
+    "cursor_running": {"cursor_done", "cursor_failed", "cancelled"},
+    "cursor_done": set(),
+    "cursor_failed": set(),
+    "chatgpt_failed": set(),
+    "cancelled": set(),
+}
 
 
 def job_status_from(job):
     if not isinstance(job, dict):
         return ""
     return (job.get("job_status") or "").strip()
+
+
+def is_job_terminal_status(status: str) -> bool:
+    return (status or "").strip() in JOB_TERMINAL_STATUSES
+
+
+def can_transition_job_status(current_status: str, next_status: str) -> bool:
+    current_status = (current_status or "").strip()
+    next_status = (next_status or "").strip()
+    if not next_status:
+        return False
+    if current_status == next_status:
+        return True
+    if is_job_terminal_status(current_status):
+        return False
+    allowed = JOB_TRANSITIONS.get(current_status)
+    if allowed is None:
+        return False
+    return next_status in allowed
+
+
+def reject_invalid_job_transition(
+    job_id: str,
+    current_status: str,
+    next_status: str,
+    message: str = "",
+) -> None:
+    _log_line(
+        "[JOB][INVALID_TRANSITION] "
+        f"job_id={job_id} "
+        f"current={current_status or '-'} "
+        f"next={next_status or '-'} "
+        f"message={message or '-'}"
+    )
+
+
+def reject_terminal_job_update(
+    job_id: str,
+    current_status: str,
+    next_status: str,
+    message: str = "",
+) -> None:
+    _log_line(
+        "[JOB][TERMINAL_UPDATE_REJECTED] "
+        f"job_id={job_id} "
+        f"current={current_status or '-'} "
+        f"next={next_status or '-'} "
+        f"message={message or '-'}"
+    )
 
 
 def _migrate_job_status_inplace(job):
@@ -118,21 +198,70 @@ def create_job(
 def update_job_status(job_id, status, message=""):
     job_id = (job_id or "").strip()
     status = (status or "").strip()
+    message = str(message or "").strip()
     if status and status not in JOB_STATUSES:
+        _log_line(
+            "[JOB][UNKNOWN_STATUS] "
+            f"job_id={job_id or '-'} "
+            f"status={status} "
+            f"message={message or '-'}"
+        )
         return False, f"invalid status: {status}"
 
     with job_lock:
         job = job_map.get(job_id)
         if not job:
+            _log_line(
+                "[JOB][STATUS_UPDATE_MISSING_JOB] "
+                f"job_id={job_id or '-'} "
+                f"status={status or '-'} "
+                f"message={message or '-'}"
+            )
             return False, "job not found"
-        if status:
+        _migrate_job_status_inplace(job)
+        current_status = job_status_from(job)
+        if not status:
+            job["updated_at"] = _now_text()
+        elif current_status == status:
             job["job_status"] = status
             job.pop("status", None)
+            job["updated_at"] = _now_text()
+        else:
+            if is_job_terminal_status(current_status):
+                reject_terminal_job_update(
+                    job_id, current_status, status, message
+                )
+                return False, f"terminal status {current_status} cannot transition to {status}"
+            if not can_transition_job_status(current_status, status):
+                reject_invalid_job_transition(
+                    job_id, current_status, status, message
+                )
+                return (
+                    False,
+                    f"{current_status or '-'} -> {status} not allowed",
+                )
+            job["job_status"] = status
+            job.pop("status", None)
+            if status == "chatgpt_failed":
+                job["failure_stage"] = "chatgpt"
+            elif status == "cursor_failed":
+                job.setdefault("failure_stage", "cursor")
+            job["updated_at"] = _now_text()
+            _log_line(
+                "[JOB][STATUS] "
+                f"job_id={job_id} "
+                f"{current_status or '-'} -> {status} "
+                f"message={message or '-'}"
+            )
         if message:
-            job["error"] = message if status in ("cursor_failed", "cancelled") else ""
-        job["updated_at"] = _now_text()
+            if status in ("cursor_failed", "chatgpt_failed", "cancelled"):
+                job["error"] = message
+                job["status_message"] = message
+            elif status and status not in JOB_TERMINAL_STATUSES:
+                job["error"] = ""
+                job["status_message"] = message
 
-    if message:
+    if message and status:
         append_job_log(job_id, status.upper(), message)
     _notify_job_change()
     cleanup_job_records()
@@ -187,6 +316,16 @@ def list_jobs(limit=50):
         return jobs
 
 
+def _count_waiting_chatgpt_jobs():
+    count = 0
+    with job_lock:
+        for job_id in job_queue:
+            job = job_map.get(job_id)
+            if job and job_status_from(job) == "waiting_chatgpt_reply":
+                count += 1
+    return count
+
+
 def _find_waiting_chatgpt_job(*, outbound_message_id=""):
     outbound_message_id = (outbound_message_id or "").strip()
     with job_lock:
@@ -198,12 +337,25 @@ def _find_waiting_chatgpt_job(*, outbound_message_id=""):
                 if job.get("outbound_message_id") == outbound_message_id:
                     if job_status_from(job) == "waiting_chatgpt_reply":
                         return job_id, job
+            return None, None
+
+        waiting = []
         for job_id in reversed(job_queue):
             job = job_map.get(job_id)
             if not job:
                 continue
             if job_status_from(job) == "waiting_chatgpt_reply":
-                return job_id, job
+                waiting.append((job_id, job))
+        if len(waiting) == 1:
+            return waiting[0]
+        if len(waiting) > 1:
+            waiting_ids = ",".join(jid for jid, _job in waiting)
+            _log_line(
+                "[JOB][AMBIGUOUS_REPLY] "
+                f"outbound_message_id=- "
+                f"waiting_job_count={len(waiting)} "
+                f"waiting_job_ids={waiting_ids}"
+            )
     return None, None
 
 
@@ -214,15 +366,42 @@ def on_assistant_reply(text, *, outbound_message_id="", auto_send_hook=None):
     """
     reply_text = (text or "").strip()
     if not reply_text:
+        _log_line(
+            "[JOB][ASSISTANT_REPLY_ORPHAN] "
+            f"outbound_message_id={outbound_message_id or '-'} "
+            "reply_len=0"
+        )
         return None
 
     job_id, job = _find_waiting_chatgpt_job(outbound_message_id=outbound_message_id)
     if not job_id:
+        _log_line(
+            "[JOB][ASSISTANT_REPLY_ORPHAN] "
+            f"outbound_message_id={outbound_message_id or '-'} "
+            f"reply_len={len(reply_text)}"
+        )
         return None
 
     with job_lock:
         stored = job_map.get(job_id)
-        if not stored or job_status_from(stored) != "waiting_chatgpt_reply":
+        if not stored:
+            return None
+        current = job_status_from(stored)
+        if current in JOB_TERMINAL_STATUSES:
+            _log_line(
+                "[JOB][STALE_REPLY_IGNORED] "
+                f"job_id={job_id} "
+                f"status={current} "
+                f"outbound_message_id={outbound_message_id or '-'}"
+            )
+            return None
+        if current != "waiting_chatgpt_reply":
+            _log_line(
+                "[JOB][STALE_REPLY_IGNORED] "
+                f"job_id={job_id} "
+                f"status={current} "
+                "expected=waiting_chatgpt_reply"
+            )
             return None
         stored["chatgpt_reply"] = reply_text
         stored["updated_at"] = _now_text()
@@ -232,7 +411,19 @@ def on_assistant_reply(text, *, outbound_message_id="", auto_send_hook=None):
         "CHATGPT_REPLY_READY",
         f"reply_len={len(reply_text)}",
     )
-    update_job_status(job_id, "chatgpt_reply_ready", "ChatGPT 已返回 Cursor 修改指令")
+    update_ok, _update_reason = update_job_status(
+        job_id,
+        "chatgpt_reply_ready",
+        "ChatGPT 已返回 Cursor 修改指令",
+    )
+    if not update_ok:
+        _log_line(
+            "[JOB][ASSISTANT_REPLY_STATUS_UPDATE_FAILED] "
+            f"job_id={job_id} "
+            f"outbound_message_id={outbound_message_id or '-'} "
+            f"reason={_update_reason}"
+        )
+        return None
 
     job_after = get_job(job_id)
     if job_after and job_after.get("auto_send_to_cursor"):
@@ -268,7 +459,11 @@ def on_assistant_reply_failed(message, *, outbound_message_id=""):
         return None
     detail = (message or "").strip() or "ChatGPT 回复失败"
     append_job_log(job_id, "CHATGPT_FAILED", detail)
-    update_job_status(job_id, "cursor_failed", detail)
+    with job_lock:
+        stored = job_map.get(job_id)
+        if stored is not None:
+            stored["failure_stage"] = "chatgpt"
+    update_job_status(job_id, "chatgpt_failed", detail)
     return job_id
 
 
@@ -277,8 +472,17 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
     if not job:
         return False, "job not found"
 
-    if job_status_from(job) == "cancelled":
+    current = job_status_from(job)
+    if current == "cancelled":
+        _log_line(f"[JOB][CURSOR_DISPATCH_SKIP_CANCELLED] job_id={job_id}")
         return False, "job cancelled"
+    if current != "chatgpt_reply_ready":
+        _log_line(
+            "[JOB][CURSOR_DISPATCH_INVALID_STATUS] "
+            f"job_id={job_id} "
+            f"status={current or '-'}"
+        )
+        return False, f"job status must be chatgpt_reply_ready, got {current or '-'}"
     if is_cursor_code_paused():
         reason = get_cursor_code_pause_reason() or "cursor_code_paused"
         append_job_log(job_id, "PAUSED_BY_CURSOR_CODE", reason)
@@ -287,6 +491,20 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
 
     content = job.get("chatgpt_reply") or ""
     if not content.strip():
+        with job_lock:
+            stored = job_map.get(job_id)
+            if stored is not None:
+                stored["failure_stage"] = "cursor_dispatch"
+                stored["error"] = "chatgpt_reply is empty"
+                stored["updated_at"] = _now_text()
+        update_ok, _ = update_job_status(
+            job_id, "cursor_failed", "chatgpt_reply is empty"
+        )
+        _log_line(
+            "[JOB][CURSOR_DISPATCH_EMPTY_REPLY] "
+            f"job_id={job_id} "
+            f"update_ok={update_ok}"
+        )
         return False, "chatgpt_reply is empty"
 
     task_id = f"cursor_task_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -319,6 +537,12 @@ def send_job_to_cursor(job_id, enqueue_cursor_task_fn):
         return False, str(exc)
 
     if not ok:
+        with job_lock:
+            stored = job_map.get(job_id)
+            if stored is not None:
+                stored["failure_stage"] = "cursor_dispatch"
+                stored["error"] = str(result)
+                stored["updated_at"] = _now_text()
         update_job_status(job_id, "cursor_failed", str(result))
         return False, result
 
@@ -345,11 +569,44 @@ def handle_cursor_task_report(report):
         job_id = cursor_task_to_job.get(task_id)
 
     if not job_id:
+        _log_line(
+            "[JOB][CURSOR_REPORT_ORPHAN] "
+            f"task_id={task_id or '-'} "
+            f"status={status or '-'}"
+        )
         return False, "no job for task_id"
 
     job = get_job(job_id)
     if not job:
+        _log_line(
+            "[JOB][CURSOR_REPORT_JOB_MISSING] "
+            f"task_id={task_id or '-'} "
+            f"job_id={job_id} "
+            f"status={status or '-'}"
+        )
         return False, "job not found"
+
+    stored_task_id = (job.get("cursor_task_id") or "").strip()
+    if stored_task_id != task_id:
+        _log_line(
+            "[JOB][CURSOR_REPORT_TASK_MISMATCH] "
+            f"job_id={job_id} "
+            f"report_task_id={task_id or '-'} "
+            f"job_task_id={stored_task_id or '-'} "
+            f"status={status or '-'}"
+        )
+        return False, "task_id mismatch"
+
+    current = job_status_from(job)
+    if is_job_terminal_status(current):
+        _log_line(
+            "[JOB][STALE_CURSOR_REPORT_IGNORED] "
+            f"job_id={job_id} "
+            f"task_id={task_id or '-'} "
+            f"current_status={current} "
+            f"report_status={status or '-'}"
+        )
+        return False, f"job in terminal status {current}"
 
     with job_lock:
         stored = job_map.get(job_id)
@@ -386,10 +643,23 @@ def handle_cursor_task_report(report):
 
     if status == "failed":
         err = message or "Cursor 任务失败"
+        with job_lock:
+            stored = job_map.get(job_id)
+            if stored is not None:
+                stored["failure_stage"] = "cursor"
+                stored["error"] = err
+                stored["updated_at"] = _now_text()
         append_job_log(job_id, "CURSOR_FAILED", err)
         update_job_status(job_id, "cursor_failed", err)
         return True, "cursor_failed"
 
+    _log_line(
+        "[JOB][CURSOR_REPORT_UNKNOWN_STATUS] "
+        f"job_id={job_id} "
+        f"task_id={task_id or '-'} "
+        f"status={status or '-'} "
+        f"payload={report!r}"
+    )
     cleanup_job_records()
     return False, f"unknown report status: {status}"
 
@@ -401,16 +671,18 @@ def cancel_job(job_id, reason=""):
         if not job:
             return False, "job not found"
         current_status = job_status_from(job)
-        if current_status in ("cursor_done", "cancelled"):
+        if current_status in JOB_TERMINAL_STATUSES:
             return False, f"cannot cancel status={current_status}"
 
     detail = (reason or "").strip() or "用户取消"
+    with job_lock:
+        stored = job_map.get(job_id)
+        if stored is not None:
+            stored["cancel_reason"] = detail
     append_job_log(job_id, "CANCELLED", detail)
     update_job_status(job_id, "cancelled", detail)
     return True, "ok"
 
-
-JOB_TERMINAL_STATUSES = frozenset({"cursor_done", "cancelled", "cursor_failed"})
 JOB_CLEANUP_MAX = 300
 JOB_CLEANUP_TTL_HOURS = 24
 JOB_STALE_ACTIVE_TTL_HOURS = 2
@@ -443,6 +715,7 @@ def cleanup_job_records():
     stale_active_ttl_sec = JOB_STALE_ACTIVE_TTL_HOURS * 3600
     max_records = JOB_CLEANUP_MAX
     stale_marked = 0
+    stale_to_fail = []
     with job_lock:
         for job_id, job in list(job_map.items()):
             if not isinstance(job, dict):
@@ -453,14 +726,37 @@ def cleanup_job_records():
             ts = _job_timestamp_seconds(job)
             if ts is None or (now_ts - ts) <= stale_active_ttl_sec:
                 continue
-            job["job_status"] = "cursor_failed"
-            job.pop("status", None)
-            job["error"] = (
-                f"stale timeout: status={status} exceeded "
-                f"{JOB_STALE_ACTIVE_TTL_HOURS}h"
+            stale_to_fail.append(
+                (
+                    job_id,
+                    status,
+                    (
+                        f"stale timeout: status={status} exceeded "
+                        f"{JOB_STALE_ACTIVE_TTL_HOURS}h"
+                    ),
+                )
             )
-            job["updated_at"] = _now_text()
+    for job_id, prev_status, err_text in stale_to_fail:
+        fail_status = (
+            "chatgpt_failed"
+            if prev_status == "waiting_chatgpt_reply"
+            else "cursor_failed"
+        )
+        failure_stage = "chatgpt" if fail_status == "chatgpt_failed" else "cursor"
+        with job_lock:
+            stored = job_map.get(job_id)
+            if stored is not None:
+                stored["failure_stage"] = failure_stage
+                stored["error"] = err_text
+        ok, _ = update_job_status(job_id, fail_status, err_text)
+        if ok:
             stale_marked += 1
+            _log_line(
+                "[JOB][STALE_ACTIVE_TIMEOUT] "
+                f"job_id={job_id} "
+                f"previous_status={prev_status}"
+            )
+    with job_lock:
         to_remove = set()
         for job_id, job in list(job_map.items()):
             if not isinstance(job, dict):
@@ -529,7 +825,7 @@ def get_job_scheduler_snapshot(limit=20):
     active = None
     for job in jobs:
         st = job_status_from(job)
-        if st not in ("cursor_done", "cancelled", "cursor_failed"):
+        if st not in JOB_TERMINAL_STATUSES:
             active = job
             break
     if active is None and jobs:

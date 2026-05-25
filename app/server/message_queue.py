@@ -11,14 +11,13 @@ from app.server.bridge_logging import (
     log_assistant_reply_unknown_full,
     log_server_to_tm_queue_full,
 )
-from app.server.state import BridgeQueueFullError, LEASE_SEC, MAX_OUTBOUND_QUEUE_SIZE
+from app.server.state import LEASE_SEC, MAX_OUTBOUND_QUEUE_SIZE
 from app.utils.bridge_payload import (
     get_bridge_message_id,
     normalize_inbound_push_payload,
     normalize_outbound_bridge_message,
     read_bridge_client_id,
     read_bridge_page_instance_id,
-    validate_outbound_queue_message,
 )
 from app.constants import is_invalid_assistant_reply_text
 from app.utils.legacy_cleanup import assert_no_legacy_fields
@@ -29,12 +28,8 @@ from app.server.runtime_state import (
     _normalize_chatgpt_url_for_compare,
     _now,
     _notify_status,
-    get_server_bind_host,
-    get_server_port,
-    get_server_public_host,
     get_server_bridge_url,
     get_server_url,
-    is_debug_mode,
     is_server_running,
 )
 from app.server.tm_page_registry import (
@@ -48,22 +43,10 @@ from app.server import external_api as ext
 from app.server.external_api import (
     _notify_external_request_from_bridge as _notify_external_request_impl,
 )
-from app.server.state import (
-    POLL_SUMMARY_INTERVAL_SEC,
-    _last_focused_tm_page,
-    _last_focused_tm_page_at,
-    _last_poll_empty_log_at,
-    _last_poll_identity,
-    _last_poll_other_reason_log_at,
-    _poll_summaries,
-    _server_instance_id,
-    _server_start_time,
-)
+from app.server.state import POLL_SUMMARY_INTERVAL_SEC
 
-STRICT_TARGET_CONTROL_COMMANDS = frozenset({
-    "sync_conversation",
-    "start_upload",
-})
+from app.server.control_commands import STRICT_TARGET_CONTROL_COMMANDS
+
 
 def _is_invalid_assistant_reply_text(text):
     return is_invalid_assistant_reply_text(text)
@@ -667,11 +650,39 @@ def _log_sync_conversation_no_match(pending, body, *, mismatch_reason=""):
     )
 
 
+def _strict_target_control_commands():
+    commands = globals().get("STRICT_TARGET_CONTROL_COMMANDS")
+    if commands:
+        return commands
+    _log(
+        "[BRIDGE][CONTROL][CONFIG_MISSING] "
+        "STRICT_TARGET_CONTROL_COMMANDS undefined; using fallback"
+    )
+    return frozenset({"sync_conversation", "start_upload"})
+
+
 def _targeted_control_matches(msg, body):
     """定向控制命令：优先 client_id+page_instance_id，再 client_id+conversation_id，再 conversation_id。"""
+    try:
+        return _targeted_control_matches_impl(msg, body)
+    except Exception as exc:
+        _log(
+            "[BRIDGE][CONTROL_MATCH_FAILED] "
+            f"error_type={type(exc).__name__} error={exc}"
+        )
+        return False
+
+
+def _targeted_control_matches_impl(msg, body):
+    if not isinstance(msg, dict):
+        _log(f"[BRIDGE][CONTROL_INVALID_COMMAND] command={msg!r}")
+        return False
+    if not isinstance(body, dict):
+        body = {}
+
     client_id = (body.get("client_id") or "").strip()
-    command = (msg.get("command") or "").strip()
-    if command not in STRICT_TARGET_CONTROL_COMMANDS:
+    command = (msg.get("command") or msg.get("type") or "").strip()
+    if command not in _strict_target_control_commands():
         return False
 
     message_client_id = _message_message_client_id(msg)
@@ -679,6 +690,25 @@ def _targeted_control_matches(msg, body):
     message_conversation_id = (msg.get("conversation_id") or "").strip()
     body_page_instance_id = (body.get("page_instance_id") or "").strip()
     body_conversation_id = (body.get("conversation_id") or "").strip()
+    target_client_id = (msg.get("target_client_id") or "").strip()
+    target_conversation_id = (msg.get("target_conversation_id") or "").strip()
+    strict_target = command in _strict_target_control_commands()
+
+    if strict_target:
+        if target_client_id and target_client_id != client_id:
+            return False
+        if target_conversation_id and target_conversation_id != body_conversation_id:
+            return False
+        if not target_client_id and not target_conversation_id:
+            if command == "sync_conversation":
+                pass
+            else:
+                _log(
+                    "[BRIDGE][STRICT_CONTROL_MISSING_TARGET] "
+                    f"command={command} client_id={client_id or '-'} "
+                    f"conversation_id={body_conversation_id or '-'}"
+                )
+                return False
 
     if command == "sync_conversation":
         matched, mismatch_reason = _sync_conversation_strict_match(msg, body)
@@ -691,6 +721,11 @@ def _targeted_control_matches(msg, body):
                 f"client_id={client_id or '-'} "
                 f"conversation_id={body_conversation_id or '-'}"
             )
+        return False
+
+    if target_client_id and target_client_id != client_id:
+        return False
+    if target_conversation_id and target_conversation_id != body_conversation_id:
         return False
 
     if not _message_matches_client(msg, client_id):
@@ -983,7 +1018,7 @@ def _pop_control_command_for_client(body):
     # 4) 其余控制命令（含批量 close_self 等；排除严格定向命令）
     return _rotate(
         lambda m: (m.get("command") or "").strip()
-        not in STRICT_TARGET_CONTROL_COMMANDS
+        not in _strict_target_control_commands()
         and _message_matches_client(m, client_id)
     )
 
@@ -1356,12 +1391,22 @@ def _handle_poll(body):
         )
     except Exception as exc:
         _log(
-            "[BRIDGE][POLL][ERROR] "
+            "[BRIDGE][POLL_FAILED] "
             f"error_type={type(exc).__name__} "
             f"error={exc} "
             f"traceback={traceback.format_exc()}"
         )
-        return {"ok": False, "error": str(exc)}, False, False
+        return (
+            {
+                "ok": False,
+                "error": str(exc),
+                "commands": [],
+                "messages": [],
+                "has_message": False,
+            },
+            False,
+            False,
+        )
 
 
 def _handle_poll_impl(

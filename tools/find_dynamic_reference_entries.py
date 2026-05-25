@@ -20,6 +20,14 @@ IGNORE_DIRS = {
     "build",
 }
 
+# 构建产物：不作为源码级动态入口扫描输入（改 tampermonkey-userscript-src/ 后 npm run build）
+GENERATED_SKIP_REL = frozenset(
+    {
+        "client.user.js",
+        "chatgpt-toolbox/dist/client.user.js",
+    }
+)
+
 PATTERNS = [
     ("QT_CONNECT", re.compile(r"\.connect\s*\(")),
     ("QT_CLICKED_CONNECT", re.compile(r"clicked\s*\.\s*connect\s*\(")),
@@ -46,6 +54,12 @@ def iter_files():
         if path.suffix not in TARGET_SUFFIXES:
             continue
         if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        try:
+            rel_posix = str(path.relative_to(ROOT)).replace("\\", "/")
+        except ValueError:
+            continue
+        if rel_posix in GENERATED_SKIP_REL:
             continue
         yield path
 

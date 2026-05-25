@@ -6,7 +6,7 @@ from app.models import (
     normalize_remote_chatgpt,
     remote_binding_enabled,
 )
-from app.utils.page_status import BUSY_RESPONSE_STATES, page_url_from
+from app.utils.page_status import BUSY_RESPONSE_STATES
 
 
 class UiStatusCompactMixin:
@@ -22,27 +22,6 @@ class UiStatusCompactMixin:
         if hasattr(self, "_is_debug_mode_enabled"):
             return bool(self._is_debug_mode_enabled())
         return bool(getattr(self, "_debug_mode", False))
-
-    def _short_id(self, value, keep=12):
-        text = str(value or "").strip()
-        if not text:
-            return "-"
-        if len(text) <= keep:
-            return text
-        return text[:keep] + "..."
-
-    def _shorten_url_for_combo(self, url):
-        text = str(url or "").strip()
-        if not text:
-            return "无URL"
-        marker = "/c/"
-        if marker in text:
-            conv = text.split(marker, 1)[1].split("?", 1)[0].split("#", 1)[0].strip("/")
-            if conv:
-                return conv[:12] + "..."
-        if len(text) <= 60:
-            return text
-        return text[:57] + "..."
 
     def _tm_page_no_text(self, page):
         if not isinstance(page, dict):
@@ -403,62 +382,6 @@ class UiStatusCompactMixin:
         chip = "ok" if online > 0 else "error"
         return f"页面：在线 {online} / 总 {total}", chip
 
-    def _format_compact_tm_online_chip_verbose(self, summary):
-        if hasattr(self, "_format_tm_online_chip_text"):
-            return self._format_tm_online_chip_text(summary)
-        online = int(summary.get("online_clients") or 0)
-        total = int(summary.get("total_clients") or 0)
-        return f"页面：在线 {online}", "warn" if online else "error"
-
-    def _format_compact_session_bind_chip(self, *, session=None, status=None):
-        from app.constants import (
-            STATUS_CHIP_SESSION_BIND_PREFIX,
-            STATUS_CHIP_SESSION_BIND_TOOLTIP,
-            status_chip_text,
-        )
-
-        status = status if status is not None else (getattr(self._bridge_ui, 'last_bridge_status', None) or {})
-        session = session if session is not None else (
-            self._current_session() if hasattr(self, "_current_session") else None
-        )
-        remote = normalize_remote_chatgpt(
-            session.remote_chatgpt if session else None
-        )
-        if not remote_binding_enabled(remote):
-            return (
-                status_chip_text(STATUS_CHIP_SESSION_BIND_PREFIX, "未绑定"),
-                "",
-                STATUS_CHIP_SESSION_BIND_TOOLTIP,
-            )
-        list_state = ""
-        if session is not None and hasattr(self, "_session_bind_list_state"):
-            list_state = self._session_bind_list_state(session, status)
-        if list_state == "bind_mismatch":
-            state_text = "不一致"
-            chip = "error"
-        elif list_state in ("bound_online", "prebound_home"):
-            state_text = "在线"
-            chip = "ok"
-        elif list_state in ("bound_offline", "bound_stale"):
-            state_text = "离线"
-            chip = "warn"
-        else:
-            bound_info = None
-            bound_state = "missing"
-            if hasattr(self, "_resolve_bound_page_info"):
-                bound_info, bound_state, _ = self._resolve_bound_page_info(status=status)
-            if bound_state == "online":
-                state_text = "在线"
-                chip = "ok"
-            elif remote_binding_enabled(remote):
-                state_text = "离线"
-                chip = "warn"
-            else:
-                state_text = "未绑定"
-                chip = ""
-        tip = STATUS_CHIP_SESSION_BIND_TOOLTIP
-        return status_chip_text(STATUS_CHIP_SESSION_BIND_PREFIX, state_text), chip, tip
-
     def _format_compact_page_chip(self, page=None, *, session=None, status=None):
         from app.constants import STATUS_CHIP_SESSION_BIND_TOOLTIP
 
@@ -692,48 +615,6 @@ class UiStatusCompactMixin:
                 + "\n请打开绑定页或重新绑定。"
             ),
         )
-
-    def _format_compact_page_combo_tooltip(self, item):
-        from app.constants import STATUS_DETAIL_TECH_HINT
-
-        if not isinstance(item, dict):
-            return "无效页面"
-        if hasattr(self, "_maybe_log_conversation_id_mismatch"):
-            self._maybe_log_conversation_id_mismatch(item)
-
-        page_id = self._tm_page_no_text(item)
-        online_text = "在线" if (
-            self._page_is_online_for_ui(item)
-            if hasattr(self, "_page_is_online_for_ui")
-            else bool(item.get("online"))
-        ) else "离线"
-        bind_text = self._tm_page_bind_state_text(item)
-        full_url = (
-            self._page_full_url(item)
-            if hasattr(self, "_page_full_url")
-            else page_url_from(item)
-        )
-        profile = (
-            self._tm_client_sync_profile(item)
-            if hasattr(self, "_tm_client_sync_profile")
-            else {}
-        )
-        data = self._merge_status_target_profile(item, profile)
-        conversation_id = (data.get("conversation_id") or "").strip()
-        send_decision = (data.get("send_decision") or "-").strip() or "-"
-        reason_code = (data.get("reason_code") or "-").strip() or "-"
-
-        lines = [
-            f"页面 ID：{page_id}",
-            f"状态：{online_text}",
-            f"绑定：{bind_text}",
-            f"URL：{full_url or '-'}",
-            f"conversation_id：{conversation_id or '-'}",
-            f"send_decision：{send_decision}",
-            f"reason_code：{reason_code}",
-            STATUS_DETAIL_TECH_HINT,
-        ]
-        return "\n".join(lines)
 
     def _apply_top_status_chip_visibility(self):
         """顶部状态栏仅保留：服务、油猴、绑定页、同步、Cursor。"""

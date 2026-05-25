@@ -8,9 +8,7 @@ from urllib.parse import urlparse
 
 from app.models import (
     remote_binding_enabled,
-    remote_binding_active,
     BIND_MODE_CONVERSATION,
-    BIND_MODE_PAGE_CHANNEL,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_UNBOUND,
     normalize_remote_chatgpt,
@@ -83,18 +81,18 @@ class PageBindingStateMixin:
     def _purge_session_binding_caches(self, session_id):
         if not session_id:
             return
-        getattr(self, "_last_bound_page_seen_by_session", {}).pop(session_id, None)
-        getattr(self, "_last_session_bind_display_state", {}).pop(session_id, None)
-        logged = getattr(self, "_last_session_bind_logged_pair", None)
-        if isinstance(logged, dict):
-            logged.pop(session_id, None)
-        log_at = getattr(self, "_last_session_bind_state_log_at", None)
-        if isinstance(log_at, dict):
-            keys_to_drop = [
-                key for key in log_at if isinstance(key, tuple) and key[0] == session_id
-            ]
-            for key in keys_to_drop:
-                log_at.pop(key, None)
+        bind_display = self._bind_display
+        bind_display.last_bound_page_seen_by_session.pop(session_id, None)
+        bind_display.last_session_bind_display_state.pop(session_id, None)
+        bind_display.last_session_bind_logged_pair.pop(session_id, None)
+
+        keys_to_delete = [
+            key
+            for key in bind_display.last_session_bind_state_log_at
+            if isinstance(key, tuple) and key and key[0] == session_id
+        ]
+        for key in keys_to_delete:
+            bind_display.last_session_bind_state_log_at.pop(key, None)
 
     def _clear_pending_web_sync_for_session(self, session_id):
         if not session_id:
@@ -118,17 +116,6 @@ class PageBindingStateMixin:
             f"[WEB_SYNC][PENDING_CLEAR] session_id={session_id} removed={removed}",
             echo=True,
         )
-        return removed
-
-    def _gc_orphan_bindings(self):
-        """清理已无对应本地会话的桥接消息映射（不再写服务端 registry）。"""
-        session_ids = set(self._sessions.keys())
-        removed = 0
-        for bridge_id, sid in list(self._message_to_session.items()):
-            if sid and sid not in session_ids:
-                self._message_to_session.pop(bridge_id, None)
-                self._message_to_turn.pop(bridge_id, None)
-                removed += 1
         return removed
 
     def _refresh_current_session_binding_display(self):
@@ -437,85 +424,6 @@ class PageBindingStateMixin:
             )
         return True
 
-    def _update_session_binding_from_normalized_page(
-        self, session, normalized, *, reason="manual_bind"
-    ):
-        if session is None:
-            self._append_log(
-                "[BIND][WRITE][SKIP] reason=session_is_none",
-                echo=True,
-            )
-            return False
-        normalized = self._normalize_tm_page_for_binding(normalized)
-        if not normalized.get("client_id") and not (
-            normalized.get("url")
-        ):
-            self._append_log(
-                "[BIND][WRITE][SKIP] reason=invalid_normalized_page",
-                echo=True,
-            )
-            return False
-
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        old_url = self._remote_conversation_url(remote) if remote_binding_enabled(remote) else ""
-        old_conversation_id = self._remote_conversation_id(remote) or ""
-        old_client_id = (remote.get("client_id") or "").strip()
-        self._append_log(
-            "[BIND][WRITE][BEFORE] "
-            f"session_id={session.session_id} "
-            f"reason={reason or '-'} "
-            f"old_url={old_url or '-'} "
-            f"old_conversation_id={old_conversation_id or '-'} "
-            f"old_client_id={old_client_id or '-'}",
-            echo=True,
-        )
-
-        new_conversation_id = (normalized.get("conversation_id") or "").strip()
-        new_url = (normalized.get("url") or "").strip()
-        if (
-            new_conversation_id
-            and old_url
-            and "xz_bind_token=" in old_url
-            and "/c/" not in old_url
-        ):
-            self._append_log(
-                "[BIND][REPLACE_PREBOUND_HOME] "
-                f"session_id={session.session_id} "
-                f"old_url={old_url} "
-                f"new_url={new_url or '-'} "
-                f"conversation_id={new_conversation_id}",
-                echo=True,
-            )
-
-        ok = self.set_bound_page(
-            session,
-            normalized,
-            reason=reason or "update_binding_from_normalized",
-            silent=True,
-            allow_existing_conversation_for_new_session=True,
-        )
-
-        remote_after = normalize_remote_chatgpt(session.remote_chatgpt)
-        new_url_after = self._remote_conversation_url(remote_after) if remote_binding_active(remote_after) else ""
-        self._append_log(
-            "[BIND][WRITE][AFTER] "
-            f"session_id={session.session_id} "
-            f"new_url={new_url_after or '-'} "
-            f"new_conversation_id={self._remote_conversation_id(remote_after) or '-'} "
-            f"new_client_id={(remote_after.get('client_id') or '-')} "
-            f"bind_state={self._remote_bind_state(remote_after) or '-'} "
-            f"ok={'yes' if ok else 'no'}",
-            echo=True,
-        )
-        if ok:
-            self._save_sessions_to_disk()
-            self._refresh_session_list(select_session_id=session.session_id)
-            self._refresh_current_session_binding_display()
-            if hasattr(self, "_update_sync_target_display"):
-                self._update_sync_target_display()
-            self._apply_chat_bind_visual_state()
-        return ok
-
     def set_bound_page(
         self,
         session,
@@ -526,7 +434,7 @@ class PageBindingStateMixin:
         allow_existing_conversation_for_new_session=False,
     ):
         """统一绑定写入入口：client_id + page_instance_id + conversation_id + url。"""
-        if getattr(self, "_set_bound_page_running", False):
+        if self._page_cmd.set_bound_page_running:
             if hasattr(self, "_log_reentry_skip"):
                 self._log_reentry_skip("set_bound_page")
             elif hasattr(self, "_append_log"):

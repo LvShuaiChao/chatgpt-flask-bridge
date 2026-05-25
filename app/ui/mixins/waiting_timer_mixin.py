@@ -6,7 +6,6 @@ from PyQt5.QtCore import QTimer
 
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
-    PENDING_ASSISTANT_STATUSES,
     REPLY_WAKE_MAX_COUNT,
 )
 from app.server import is_server_running
@@ -100,10 +99,6 @@ class WaitingTimerMixin:
                 self._mark_session_waiting_finished(
                     session, reason=reason or "sync_idle"
                 )
-
-    def _restore_waiting_timers_after_load(self):
-        # 等待回复计时为运行态；会话从磁盘加载后已在 startup clear 中清零，不再恢复。
-        return
 
     def _strip_waiting_elapsed_suffix(self, text):
         return _WAITING_ELAPSED_SUFFIX_RE.sub("", (text or "").strip()).strip()
@@ -339,11 +334,6 @@ class WaitingTimerMixin:
             f"elapsed_sec={elapsed}",
             echo=False,
         )
-
-    def _refresh_session_list_item_waiting_text(self, session):
-        if not hasattr(self, "_refresh_session_list"):
-            return
-        self._refresh_session_list(select_session_id=session.session_id)
 
     def _refresh_current_chat_waiting_text(self, session):
         if session is None:

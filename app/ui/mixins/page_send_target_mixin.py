@@ -7,11 +7,9 @@ from app.constants import BOUND_PAGE_ONLINE_SECONDS, UNBOUND_SESSION_SEND_HINT
 from app.utils.page_command import evaluate_sync_poll_freshness
 from app.utils.page_status import (
     PageActionPlan,
-    build_page_key,
     can_sync_conversation,
     evaluate_page_capability,
     evaluate_send_page,
-    explain_page_decision,
     get_page_liveness,
     is_page_online,
     log_page_decision_fields,
@@ -19,7 +17,6 @@ from app.utils.page_status import (
 )
 from app.utils.tm_activity import classify_tm_client_activity
 from app.models import (
-    remote_binding_active,
     remote_binding_enabled,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_PREBOUND_HOME,
@@ -128,14 +125,6 @@ class PageSendTargetMixin:
         candidates.sort(key=self._conversation_page_candidate_rank, reverse=True)
         return dict(candidates[0])
 
-    def _conversation_action_target_payload(self, item, *, source):
-        from app.utils.page_command import build_action_target_payload
-
-        payload = build_action_target_payload(item, source=source)
-        if isinstance(item, dict) and not payload.get("online"):
-            payload["online"] = self._tm_page_is_online_simple(item)
-        return payload
-
     def _session_bound_identity(self, remote):
         from app.utils.page_binding_identity import remote_binding_identity
 
@@ -190,6 +179,7 @@ class PageSendTargetMixin:
         return self._find_tm_client_by_client_id(bound_client_id, status=status)
 
     def _bound_page_usable_for_action(self, item, remote):
+        """@deprecated 已由 evaluate_page_capability() / resolve_page_action() 替代；下一版确认无调用后删除。"""
         if not isinstance(item, dict) or not self._page_matches_bound_identity(item, remote):
             return False, "identity_mismatch"
         if not self._tm_page_is_online_simple(item):
@@ -320,6 +310,7 @@ class PageSendTargetMixin:
             self._set_tm_action_hint(hint)
 
     def _explain_page_decision_for_session(self, session, page, action="sync"):
+        """@deprecated 已由 PageActionPlan / evaluate_page_capability() 直接生成；下一版确认无调用后删除。"""
         remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
         identity = self._session_bound_identity(remote)
         expected_client_id = identity["client_id"]
@@ -345,6 +336,7 @@ class PageSendTargetMixin:
         return detail
 
     def _log_action_target_bound_check(self, session, remote, *, action="sync"):
+        """@deprecated 无调用；下一版确认无依赖后删除。"""
         identity = self._session_bound_identity(remote)
         session_id = session.session_id if session else "-"
         self._append_log(
@@ -392,6 +384,7 @@ class PageSendTargetMixin:
         )
 
     def _log_action_target_mismatch(self, session, remote, target):
+        """@deprecated 无调用；下一版确认无依赖后删除。"""
         if not isinstance(target, dict):
             return
         identity = self._session_bound_identity(remote)
@@ -429,6 +422,7 @@ class PageSendTargetMixin:
         )
 
     def _log_action_target_fallback(self, session, remote, target, *, reason=""):
+        """@deprecated 无调用；下一版确认无依赖后删除。"""
         if not isinstance(target, dict):
             return
         identity = self._session_bound_identity(remote)
@@ -1007,6 +1001,7 @@ class PageSendTargetMixin:
         return self._send_target_result("", "", False, reason)
 
     def _is_sendable_chatgpt_client(self, client_info, expected_conversation_id=""):
+        """@deprecated 已由 _is_queueable_chatgpt_client() / evaluate_send_page() 替代；下一版确认无调用后删除。"""
         if not isinstance(client_info, dict):
             return False
         decision, _reason = evaluate_send_page(
@@ -1147,6 +1142,7 @@ class PageSendTargetMixin:
         expected = self._remote_conversation_id(remote)
         return self._is_queueable_chatgpt_client(candidate, expected)
     def _session_bound_page_online(self, session, bridge_status=None):
+        """@deprecated 无调用；下一版确认无依赖后删除。"""
         if session is None:
             return False
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
@@ -1363,6 +1359,7 @@ class PageSendTargetMixin:
 
         return ok
     def _preferred_open_url_for_session(self, session):
+        """@deprecated 打开流程不再调用；下一版确认无依赖后删除。"""
         remote = normalize_remote_chatgpt(
             session.remote_chatgpt if session else None
         )
@@ -1501,6 +1498,7 @@ class PageSendTargetMixin:
             "绑定页面未在线，请先打开当前对话绑定页面，或重新绑定所选页面。"
         )
     def _binding_status_details(self, session=None):
+        """@deprecated 绑定状态展示已由 page_binding_display_mixin / ui_status_compact_mixin 处理；下一版确认无调用后删除。"""
         session = session or self._current_session()
         status = self._bridge_ui.last_bridge_status or {}
         remote = normalize_remote_chatgpt(
@@ -1588,6 +1586,7 @@ class PageSendTargetMixin:
         return False
 
     def _same_conversation_fallback_enabled(self, action="", session=None):
+        """@deprecated 请使用 is_same_conversation_fallback_enabled()；下一版确认无调用后删除。"""
         return self.is_same_conversation_fallback_enabled(action, session=session)
 
     def _send_binding_verify_blocked_reason(

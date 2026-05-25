@@ -160,6 +160,7 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         "logs",
         "exports",
         "dist",
+        "build",
     }
 )
 
@@ -167,7 +168,8 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
 def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> bool:
     """按相对路径（posix、小写）判断是否跳过扫描/合并。
 
-    默认排除（非源码）：log.txt、*.log、runtime/、__pycache__/、.git/、.venv/、venv/ 等。
+    默认排除（非源码）：log.txt、*.log、runtime/、logs/、dist/、build/、
+    __pycache__/、.git/、.venv/、venv/、client.user.js 及 chatgpt-toolbox/dist/client.user.js 等。
     """
     rel = str(rel_posix or "").strip().lower().replace("\\", "/")
     if not rel:

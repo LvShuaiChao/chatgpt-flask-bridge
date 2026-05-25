@@ -178,9 +178,9 @@
         <div class="cgpt-log-panel">
           <div class="cgpt-log-actions">
             <button type="button" class="cgpt-btn" id="cgpt-log-copy">复制日志</button>
-            <button type="button" class="cgpt-btn danger" id="cgpt-log-clear">清空日志</button>
             <button type="button" class="cgpt-btn" id="cgpt-log-toggle">显示最近日志</button>
             <button type="button" class="cgpt-btn" id="cgpt-log-copy-errors">复制错误日志</button>
+            <button type="button" class="cgpt-btn danger cgpt-log-clear-right" id="cgpt-log-clear">清空日志</button>
           </div>
           <label class="cgpt-checkbox-line cgpt-log-advanced" style="margin:6px 0 0;">
             <input type="checkbox" id="cgpt-log-persist">

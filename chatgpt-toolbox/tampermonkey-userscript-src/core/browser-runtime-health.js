@@ -125,8 +125,46 @@ const BrowserRuntimeHealth = (() => {
   };
 })();
 
-async function forceForegroundCatchUp(reason = '-') {
+let foregroundResumeTimer = 0;
+let foregroundResumePendingReason = '-';
+let foregroundResumeInFlight = false;
+
+function scheduleForegroundResume(reason = '-') {
+  foregroundResumePendingReason = String(reason || '-').trim() || '-';
+
+  if (foregroundResumeTimer) {
+    window.clearTimeout(foregroundResumeTimer);
+  }
+
+  foregroundResumeTimer = window.setTimeout(() => {
+    foregroundResumeTimer = 0;
+    void executeForegroundResume(foregroundResumePendingReason);
+  }, 500);
+}
+
+async function executeForegroundResume(reason = '-') {
   const catchReason = String(reason || '-').trim() || '-';
+
+  if (foregroundResumeInFlight) {
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(`[FOREGROUND_CATCH_UP][SKIP] reason=${catchReason} cause=in-flight`);
+    }
+    return;
+  }
+
+  let flowRun = null;
+  if (typeof FlowRuntime !== 'undefined' && typeof FlowRuntime.tryAcquireFlowRun === 'function') {
+    const flowResult = FlowRuntime.tryAcquireFlowRun('foreground-resume');
+    if (!flowResult.ok) {
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(`[FOREGROUND_CATCH_UP][SKIP] reason=${catchReason} cause=flow-locked`);
+      }
+      return;
+    }
+    flowRun = flowResult.run;
+  }
+
+  foregroundResumeInFlight = true;
 
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[FOREGROUND_CATCH_UP][START] reason=${catchReason}`);
@@ -154,12 +192,24 @@ async function forceForegroundCatchUp(reason = '-') {
       BridgeModule.forceCatchUp(`foreground-catch-up:${catchReason}`);
     }
 
-    if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.resumeAfterForeground === 'function') {
-      await AutoQueueModule.resumeAfterForeground(`foreground-catch-up:${catchReason}`);
+    if (typeof AutoQueueModule !== 'undefined') {
+      if (typeof AutoQueueModule.refreshProgressStatus === 'function') {
+        AutoQueueModule.refreshProgressStatus(`foreground-catch-up:${catchReason}`);
+      }
+      if (typeof AutoQueueModule.resumeAfterForeground === 'function') {
+        await AutoQueueModule.resumeAfterForeground(`foreground-catch-up:${catchReason}`);
+      }
     }
 
-    if (typeof UploadModule !== 'undefined' && typeof UploadModule.resumeAfterForeground === 'function') {
-      await UploadModule.resumeAfterForeground(`foreground-catch-up:${catchReason}`);
+    if (typeof UploadModule !== 'undefined') {
+      if (typeof UploadModule.scheduleRenderUpload === 'function') {
+        UploadModule.scheduleRenderUpload(`foreground:${catchReason}`);
+      } else if (typeof UploadModule.refresh === 'function') {
+        UploadModule.refresh();
+      }
+      if (typeof UploadModule.resumeAfterForeground === 'function') {
+        await UploadModule.resumeAfterForeground(`foreground-catch-up:${catchReason}`);
+      }
     }
 
     if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
@@ -172,5 +222,14 @@ async function forceForegroundCatchUp(reason = '-') {
         `[FOREGROUND_CATCH_UP][FAILED] reason=${catchReason} type=${error && error.name ? error.name : 'Error'} error=${error && error.message ? error.message : String(error)}`,
       );
     }
+  } finally {
+    foregroundResumeInFlight = false;
+    if (flowRun && typeof FlowRuntime !== 'undefined' && typeof FlowRuntime.finishFlowRun === 'function') {
+      FlowRuntime.finishFlowRun(flowRun, catchReason);
+    }
   }
+}
+
+async function forceForegroundCatchUp(reason = '-') {
+  scheduleForegroundResume(reason);
 }

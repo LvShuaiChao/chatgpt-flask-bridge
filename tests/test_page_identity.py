@@ -14,9 +14,6 @@ def test_from_mapping_parses_conversation_from_url():
     assert identity.client_id == "tm-1"
     assert identity.page_instance_id == "inst-1"
     assert identity.conversation_id == conv_id
-    assert identity.has_page_channel()
-    assert identity.has_conversation()
-    assert identity.display_key() == "inst-1"
 
 
 def test_to_dict_roundtrip():

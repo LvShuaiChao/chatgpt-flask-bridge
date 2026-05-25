@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-    GUI["PyQt5 GUI\n(gui.py)"] -->|push_message / 状态轮询| Server["Flask 桥接\n(app/server/)"]
+    GUI["PyQt5 GUI\n(GUI.py)"] -->|push_message / 状态轮询| Server["Flask 桥接\n(app/server/)"]
     TM["Tampermonkey\n(client.user.js)"] -->|poll / ack / report| Server
     TM -->|自动输入并发送| Web["ChatGPT 网页"]
     Server -->|入站事件| GUI
@@ -17,7 +17,7 @@ flowchart LR
 
 | 组件 | 文件 | 作用 |
 |------|------|------|
-| 桌面客户端 | `gui.py` / `app/ui/` | 对话列表、消息编辑、页面绑定、设置、日志 |
+| 桌面客户端 | `GUI.py` / `app/ui/` | 对话列表、消息编辑、页面绑定、设置、日志 |
 | 桥接服务 | `app/server/` | 消息队列、油猴在线状态、页面匹配与下发 |
 | 浏览器油猴脚本 | `chatgpt-toolbox/dist/client.user.js` | 浏览器端：轮询服务端、在 ChatGPT 页面发送并抓取回复（由 `tampermonkey-userscript-src/` 构建） |
 | 运行时数据 | `runtime/` | 本地会话 JSON、持久化配置 |
@@ -55,19 +55,20 @@ pip install -r requirements.txt
 
 ## 快速开始
 
+> **精简导出快照**（如 `0_merged_for_chatgpt*.zip` 还原包）通常不含 `tools/`、`tests/`、独立 `server.py`；验收用 `python -m compileall -q app GUI.py` 与 `cd chatgpt-toolbox && npm run build`。勿使用 `python gui.py`、`python server.py`、`python tools/…`、`pytest tests/…`（仅适用于历史完整仓库）。
+
 1. **启动 GUI**
 
    ```bash
-   python gui.py
+   python GUI.py
    ```
 
-2. **启动 GUI**  
    程序会自动在 `127.0.0.1:5000` 启动桥接服务；确认顶部状态栏显示油猴可连接。
 
 3. **安装油猴脚本**  
-   - 在 Tampermonkey 中安装 **`chatgpt-toolbox/dist/client.user.js`**（构建产物；不要直接改 `dist/`）  
+   - 在 Tampermonkey 中安装 **`chatgpt-toolbox/dist/client.user.js`**（构建产物；不要直接改 `dist/`，且已加入 `.gitignore`）  
    - 开发时改 `chatgpt-toolbox/tampermonkey-userscript-src/`，在 `chatgpt-toolbox/` 下执行 `npm run build` 后重新安装/更新脚本  
-   - 根目录 `client.user.js` 会在构建时自动同步，便于测试与旧文档引用  
+   - 根目录 `client.user.js` 由 `npm run build` 同步生成，同样不纳入 Git；本地测试可直接引用该文件或 `dist/` 下的副本  
    - 桥接服务固定监听 `127.0.0.1:5000`；若曾改过端口，在油猴菜单 **「浏览器桥接 · 设置」** 中填写地址（无需改脚本源码）
 
 4. **打开 ChatGPT**  
@@ -144,9 +145,11 @@ python -m app.client.bridge_client --status
 
 ## 项目结构
 
+> **导出快照说明**：若你拿到的是 `export_for_chatgpt.py` 生成的合并包（`0_merged_for_chatgpt*.zip` 解压后往往只有 `0_merged_for_chatgpt.txt`），请按文内 `FILE:` 分隔符还原文件树后再审代码，不要把单个 txt 当作目录结构。常见精简快照**不含** `tools/`、`tests/`；运行入口为 **`GUI.py`**（不是历史文档里的 `gui.py` / 独立 `server.py`）。
+
 ```
 油猴脚本与Python联动/
-├── gui.py                 # 主 GUI 入口（含桥接服务）
+├── GUI.py                 # 主 GUI 入口（含内嵌桥接服务）
 ├── client.user.js         # 油猴脚本构建同步副本（勿手改；以 dist 为准）
 ├── chatgpt-toolbox/      # 油猴脚本模块化工程
 │   ├── tampermonkey-userscript-src/  # 开发源码（勿使用 src/ 目录名）
@@ -166,8 +169,10 @@ python -m app.client.bridge_client --status
 │       ├── main_window.py
 │       └── mixins/        # 桥接、绑定、会话、设置等
 ├── export_for_chatgpt.py  # 导出代码供 ChatGPT 阅读（开发辅助）
-└── tools/                 # 重构脚本等开发工具（含 generate_userscript_modules.py）
+└── tools/                 # 重构脚本等开发工具（完整开发仓库；精简快照常无此目录）
 ```
+
+完整开发仓库还可含 `tests/`（精简快照常无）。二者可用 `export_for_chatgpt.py --include-tests --include-tools` 纳入合并导出。
 
 油猴脚本模块说明见 [chatgpt-toolbox/README.md](chatgpt-toolbox/README.md)。
 
@@ -242,9 +247,9 @@ python -m app.client.bridge_client --status
 
 ## 开发说明
 
-桥接服务由 `gui.py` 启动时内嵌运行；调试可直接 `from app.server import create_app, start_server`。
+桥接服务由 `GUI.py` 启动时内嵌运行；调试可直接 `from app.server import create_app, start_server`。
 
-导出**整个仓库**源码合并包（Python `app/`、`gui.py`、油猴 `chatgpt-toolbox/tampermonkey-userscript-src/` 等），便于发给 ChatGPT 分析。含行数/Token 统计、增量合并、循环检测、日志单独导出等。若存在 `chatgpt-toolbox/`，每轮导出前会尝试 `npm run build`。
+导出**整个仓库**源码合并包（Python `app/`、`GUI.py`、油猴 `chatgpt-toolbox/tampermonkey-userscript-src/` 等），便于发给 ChatGPT 分析。含行数/Token 统计、增量合并、循环检测、日志单独导出等。若存在 `chatgpt-toolbox/`，每轮导出前会尝试 `npm run build`。
 
 ```bash
 # 默认：循环运行，有文件变更才重新合并写盘（Ctrl+C 结束）
@@ -264,7 +269,7 @@ python export_for_chatgpt.py --include-tests --include-tools
 
 ### 生产发布包
 
-主 GUI 运行链路只依赖 `gui.py`、`app/`、`client.user.js` 和运行时配置。制作精简发布包时可排除 `tests/`、`tools/`、`export_for_chatgpt.py` 等开发辅助内容。
+主 GUI 运行链路只依赖 `GUI.py`、`app/`、`client.user.js` 和运行时配置。制作精简发布包时可排除 `tests/`、`tools/`、`export_for_chatgpt.py` 等开发辅助内容；此时 `.github/workflows/dead-code-cleanup-checks.yml` 仅跑 `compileall` 与油猴构建，不含 `python tools/…`。
 
 ## 免责声明
 

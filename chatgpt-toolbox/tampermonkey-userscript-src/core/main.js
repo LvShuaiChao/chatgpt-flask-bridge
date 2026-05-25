@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 工具箱：多文件上传 + 自动指令队列 + Prompt 管理
 // @namespace    https://github.com/xiaozhang/chatgpt-toolbox
-// @version      3.6.6
+// @version      3.6.7
 // @description  一个统一工具箱面板：多文件队列上传、自动指令队列、Prompt 管理、标题前缀、对话导出与 issues 统计。每个功能独立模块，放到不同选项卡。?
 // @author       小张
 // @match        https://chatgpt.com/*
@@ -56,6 +56,23 @@
     function isToolboxRoot(el) {
       if (!el) return false;
       return !!el.closest(`#${APP.rootId}`);
+    }
+
+    function blurActiveElementIfInsideToolbox() {
+      const active = document.activeElement;
+
+      if (!(active instanceof HTMLElement)) {
+        return;
+      }
+
+      const root = document.querySelector(`#${APP.rootId}`);
+
+      if (root && root.contains(active)) {
+        active.blur();
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][BLUR_TOOLBOX_ACTIVE]');
+        }
+      }
     }
 
     function resolveMessageRole(el) {
@@ -514,17 +531,43 @@
 
     let stableCheckLogAt = 0;
 
+    function parseTurnIdForStableCompare(turnId) {
+      const raw = String(turnId || '').trim();
+      if (!raw) {
+        return 0;
+      }
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric;
+      }
+      return raw.length;
+    }
+
     async function waitLatestAssistantStable(options = {}) {
       const timeoutMs = Number(options.timeoutMs ?? 12000);
       const intervalMs = Number(options.intervalMs ?? 300);
-      const stableRounds = Number(options.stableRounds ?? 2);
+      const stableRounds = Math.max(3, Number(options.stableRounds ?? 3));
+      const minQuietAfterChangeMs = Math.max(800, Number(options.minQuietAfterChangeMs ?? 900));
       const isGenerating = typeof options.isGenerating === 'function' ? options.isGenerating : () => false;
       const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const pendingReplyContext = options.pendingReplyContext && typeof options.pendingReplyContext === 'object'
+        ? options.pendingReplyContext
+        : null;
+      const baselineTurnId = pendingReplyContext
+        ? parseTurnIdForStableCompare(
+          pendingReplyContext.baseline_assistant_turn_id
+            || pendingReplyContext.baselineAssistantTurnId
+            || pendingReplyContext.sent_turn_id
+            || pendingReplyContext.sentTurnId
+            || '',
+        )
+        : 0;
 
       const startedAt = Date.now();
       let stableCount = 0;
       let lastSignature = '';
       let lastPicked = null;
+      let lastTextChangedAt = 0;
 
       while (Date.now() - startedAt < timeoutMs) {
         if (shouldStop()) {
@@ -544,6 +587,7 @@
         if (isGenerating()) {
           stableCount = 0;
           lastSignature = '';
+          lastTextChangedAt = 0;
           ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-check] state=generating');
           await sleep(intervalMs);
           continue;
@@ -558,6 +602,7 @@
         if (!picked.ok) {
           stableCount = 0;
           lastSignature = '';
+          lastTextChangedAt = 0;
           const nowNoPick = Date.now();
           if (nowNoPick - stableCheckLogAt >= 3000) {
             stableCheckLogAt = nowNoPick;
@@ -570,14 +615,31 @@
         }
 
         const record = picked.record;
+        const assistantTurnId = parseTurnIdForStableCompare(record.turn_id || record.turnId || '');
+
+        if (baselineTurnId > 0 && assistantTurnId > 0 && assistantTurnId <= baselineTurnId) {
+          stableCount = 0;
+          lastSignature = '';
+          lastTextChangedAt = 0;
+          ToolboxShell.appendLog(
+            `[CHAT_PAGE][copy-last-message:stable-check] state=assistant-before-baseline baseline=${baselineTurnId} current=${assistantTurnId}`,
+          );
+          await sleep(intervalMs);
+          continue;
+        }
+
         const text = cleanMessageText(record.text || '');
         const signature = buildStableSignature(record, text);
-
         const nowStable = Date.now();
+
+        if (signature && signature !== lastSignature) {
+          lastTextChangedAt = nowStable;
+        }
+
         if (nowStable - stableCheckLogAt >= 3000) {
           stableCheckLogAt = nowStable;
           ToolboxShell.appendLog(
-            `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count || record.charCount || 0} mode=fast turn=${record.turn_id || record.turnId || '-'}`,
+            `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count || record.charCount || 0} mode=fast turn=${record.turn_id || record.turnId || '-'} quietMs=${lastTextChangedAt ? nowStable - lastTextChangedAt : 0}`,
           );
         }
 
@@ -588,7 +650,10 @@
           lastSignature = signature;
         }
 
-        if (stableCount >= stableRounds && text) {
+        const quietElapsed = lastTextChangedAt > 0 ? nowStable - lastTextChangedAt : 0;
+        const quietEnough = !lastTextChangedAt || quietElapsed >= minQuietAfterChangeMs;
+
+        if (stableCount >= stableRounds && text && quietEnough) {
           ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-ok] mode=fast');
           const safeRecord = typeof stripMessageRecordForCache === 'function'
             ? stripMessageRecordForCache(record)
@@ -660,14 +725,6 @@
   const CHAT_MSG_PERF_LOG_INTERVAL_MS = 3000;
   const LATEST_ASSISTANT_CACHE_TTL_MS = 1000;
   const chatMsgPerfLogAt = new Map();
-
-  function registerChatMessageTimer(timerId) {
-    if (timerId) {
-      ChatMessageRuntime.activeTimers.push(timerId);
-    }
-
-    return timerId;
-  }
 
   function appendChatMsgPerfLog(key, line) {
     const now = Date.now();
@@ -1035,7 +1092,82 @@
     };
   }
 
+  function findLastAssistantTurn() {
+    const toolboxRoot = document.querySelector(`#${APP.rootId}`);
+    const turnSelectors = [
+      'article[data-testid^="conversation-turn-"]',
+      '[data-testid^="conversation-turn-"]',
+      '[id^="conversation-turn-"]',
+    ];
+
+    let turns = [];
+
+    turnSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (node instanceof HTMLElement && !turns.includes(node)) {
+          turns.push(node);
+        }
+      });
+    });
+
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i];
+
+      if (!(turn instanceof HTMLElement)) {
+        continue;
+      }
+
+      if (toolboxRoot && toolboxRoot.contains(turn)) {
+        continue;
+      }
+
+      if (isInToolbox(turn) || isInComposerArea(turn) || isChatSidebarElement(turn)) {
+        continue;
+      }
+
+      const text = String(turn.innerText || '').trim();
+
+      if (!text) {
+        continue;
+      }
+
+      const isAssistant =
+        turn.querySelector('[data-message-author-role="assistant"]')
+        || turn.getAttribute('data-message-author-role') === 'assistant';
+
+      if (isAssistant) {
+        return turn;
+      }
+    }
+
+    return null;
+  }
+
+  function extractAssistantText(turn) {
+    if (!(turn instanceof HTMLElement)) {
+      return '';
+    }
+
+    const clone = turn.cloneNode(true);
+
+    clone.querySelectorAll(
+      'button, textarea, input, select, #cgpt-toolbox-root, [data-testid*="copy"], [data-testid*="share"]',
+    ).forEach((el) => el.remove());
+
+    return String(clone.innerText || clone.textContent || '').trim();
+  }
+
   function getLatestAssistantTextFromDomDirect() {
+    const turn = findLastAssistantTurn();
+
+    if (turn) {
+      const turnText = extractAssistantText(turn);
+
+      if (turnText) {
+        return turnText;
+      }
+    }
+
     const main = document.querySelector('main') || document.body;
     if (!(main instanceof HTMLElement)) {
       return '';
@@ -1172,10 +1304,25 @@
     const cost = Date.now() - startedAt;
 
     if (!rawRecord || !rawRecord.text) {
+      const domText = getLatestAssistantTextFromDomDirect();
+      if (domText) {
+        const domResult = {
+          ok: true,
+          text: domText,
+          record: null,
+          reason: 'assistant-turn-dom',
+        };
+        cache.dirty = false;
+        cache.at = now;
+        cache.conversationId = conversationId;
+        cache.value = domResult;
+        return domResult;
+      }
+
       const failed = {
         ok: false,
         text: '',
-        reason: 'no-assistant-after-latest-user',
+        reason: 'last-assistant-message-missing',
         record: null,
       };
       cache.dirty = true;
@@ -1205,32 +1352,6 @@
     cache.value = result;
 
     return result;
-  }
-
-  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入「复制最后回复」bridge snapshot 路径或删除。
-  function pickLatestAssistantTextFromBridgeSnapshot() {
-    try {
-      const snapshot = buildConversationSnapshotForBridge(null);
-      const latest = snapshot && (snapshot.latest_assistant_reply || snapshot.latest_message);
-      if (!latest || latest.role !== 'assistant') {
-        return { ok: false, text: '', reason: 'no_assistant_message', record: null };
-      }
-      const text = ChatMessageExtractor.cleanMessageText(latest.text || '').trim();
-      if (!text) {
-        return { ok: false, text: '', reason: 'empty_content', record: latest };
-      }
-      return {
-        ok: true,
-        text,
-        reason: 'bridge_snapshot',
-        record: latest,
-        role: 'assistant',
-      };
-    } catch (err) {
-      const errText = err && err.message ? err.message : String(err);
-      ToolboxShell.appendLog(`[COPY_LAST][SNAPSHOT_FAIL] error=${errText}`);
-      return { ok: false, text: '', reason: 'snapshot_failed', record: null };
-    }
   }
 
   function bridgeSafeConversationRecord(record) {
@@ -1311,7 +1432,151 @@
     };
   }
 
-  function buildConversationSnapshotForBridge(resolvePageIdentity) {
+  function getConversationSnapshotScopeKey() {
+    const convId = parseConversationIdFromPath(location.pathname || '');
+    if (convId) {
+      return `conversation:${convId}`;
+    }
+    return `route:${location.pathname || '/'}${location.search || ''}`;
+  }
+
+  function isStableConversationSnapshotScope(scopeKey) {
+    return String(scopeKey || '').startsWith('conversation:');
+  }
+
+  function getConversationSnapshotScopeFromSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return '';
+    }
+    return String(
+      snapshot.conversation_scope_key
+      || (snapshot.page && snapshot.page.conversation_scope_key)
+      || '',
+    ).trim();
+  }
+
+  function stampConversationSnapshotScope(snapshot) {
+    const next = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const convId = parseConversationIdFromPath(location.pathname || '') || '';
+    const scopeKey = getConversationSnapshotScopeKey();
+
+    next.conversation_scope_key = scopeKey;
+    next.conversation_id = convId;
+    next.pathname = location.pathname || '';
+    next.search = location.search || '';
+    next.saved_at = Date.now();
+
+    if (!next.page || typeof next.page !== 'object') {
+      next.page = {};
+    }
+
+    next.page.conversation_scope_key = scopeKey;
+    next.page.conversation_id = convId;
+    next.page.pathname = location.pathname || '';
+    next.page.search = location.search || '';
+
+    return next;
+  }
+
+  function getSavedConversationSnapshot() {
+    if (typeof MemoryManager === 'undefined' || !MemoryManager.get) {
+      return null;
+    }
+
+    return MemoryManager.get(MemoryManager.KEYS.conversationSnapshotCache, null);
+  }
+
+  function getSavedConversationSnapshotForCurrentScope() {
+    const scopeKey = getConversationSnapshotScopeKey();
+
+    if (!isStableConversationSnapshotScope(scopeKey)) {
+      return null;
+    }
+
+    const saved = getSavedConversationSnapshot();
+    const savedScopeKey = getConversationSnapshotScopeFromSnapshot(saved);
+
+    if (!savedScopeKey || savedScopeKey !== scopeKey) {
+      return null;
+    }
+
+    return saved;
+  }
+
+  function saveConversationSnapshotSafe(snapshot, reason = '') {
+    const scopedSnapshot = stampConversationSnapshotScope(snapshot);
+    const oldSnapshot = getSavedConversationSnapshot();
+    const newMessages = Array.isArray(scopedSnapshot && scopedSnapshot.messages)
+      ? scopedSnapshot.messages
+      : [];
+    const oldMessages = Array.isArray(oldSnapshot && oldSnapshot.messages)
+      ? oldSnapshot.messages
+      : [];
+
+    const currentScopeKey = getConversationSnapshotScopeKey();
+    const oldScopeKey = getConversationSnapshotScopeFromSnapshot(oldSnapshot);
+    const sameStableScope = isStableConversationSnapshotScope(currentScopeKey)
+      && oldScopeKey === currentScopeKey;
+
+    if (newMessages.length === 0 && oldMessages.length > 0 && sameStableScope) {
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[CONVERSATION][SAVE_SKIP] reason=avoid-overwrite-with-empty detail=${reason || '-'} old=${oldMessages.length} scope=${currentScopeKey}`,
+        );
+      }
+
+      return false;
+    }
+
+    if (typeof MemoryManager !== 'undefined' && MemoryManager.set) {
+      MemoryManager.set(MemoryManager.KEYS.conversationSnapshotCache, scopedSnapshot);
+    }
+
+    return true;
+  }
+
+  async function waitChatPageReady(options = {}) {
+    const timeoutMs = Number(options.timeoutMs || 30000);
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const main = document.querySelector('main');
+      const composer = document.querySelector(
+        '#prompt-textarea, [data-testid="prompt-textarea"], textarea, [contenteditable="true"]',
+      );
+      const turns = document.querySelectorAll(
+        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"], [id^="conversation-turn-"]',
+      );
+
+      if (main && composer) {
+        return {
+          ok: true,
+          reason: 'ready',
+          turnCount: turns.length,
+        };
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 300);
+      });
+    }
+
+    return {
+      ok: false,
+      reason: 'chat-page-ready-timeout',
+    };
+  }
+
+  function buildConversationSnapshotForBridge(resolvePageIdentity, options = {}) {
+    const snapshotSource = String(
+      options && (options.source || options.caller)
+        ? (options.source || options.caller)
+        : 'unspecified',
+    );
+    const perfStartedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+
     try {
       const rawMessages = buildConversationMessageRecords({
         includeEmpty: false,
@@ -1320,7 +1585,7 @@
 
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
         ToolboxShell.appendLog(
-          `[CHAT_PAGE][conversation-snapshot] messages=${rawMessages.length} includeHidden=1`,
+          `[CHAT_PAGE][conversation-snapshot] source=${snapshotSource} messages=${rawMessages.length} includeHidden=1`,
         );
       }
 
@@ -1347,7 +1612,7 @@
 
       const page = typeof resolvePageIdentity === 'function' ? resolvePageIdentity() : {};
 
-      return {
+      const snapshot = stampConversationSnapshotScope({
         page,
         stats,
         message_count: stats.total_count,
@@ -1365,11 +1630,56 @@
           const label = m.role === 'assistant' ? '助手' : (m.role === 'user' ? '用户' : m.role || '消息');
           return `--- ${label} ${m.index + 1} ---\n${m.text || ''}`;
         }).join('\n\n'),
-      };
+      });
+
+      if (messages.length === 0) {
+        const saved = getSavedConversationSnapshotForCurrentScope();
+        const savedMessages = Array.isArray(saved && saved.messages) ? saved.messages : [];
+
+        if (savedMessages.length > 0) {
+          saveConversationSnapshotSafe(snapshot, 'build-empty-skip');
+
+          return stampConversationSnapshotScope({
+            ...saved,
+            page,
+            stats: saved.stats || stats,
+          });
+        }
+      }
+
+      saveConversationSnapshotSafe(snapshot, 'build-snapshot');
+
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - perfStartedAt,
+      );
+      const messageCount = Array.isArray(messages) ? messages.length : 0;
+      const totalChars = messages.reduce(
+        (sum, item) => sum + String(item && item.text ? item.text : '').length,
+        0,
+      );
+
+      const perfLine = `[PERF][conversation_snapshot] source=${snapshotSource} messages=${messageCount} total_chars=${totalChars} cost_ms=${costMs}`;
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(perfLine);
+      }
+      if (costMs > 500) {
+        const slowLine = `[PERF][conversation_snapshot_slow] source=${snapshotSource} messages=${messageCount} total_chars=${totalChars} cost_ms=${costMs}`;
+        console.warn(slowLine);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(slowLine);
+        }
+      }
+
+      return snapshot;
     } catch (error) {
       const errText = error && error.message ? error.message : String(error);
+      const errStack = error && error.stack ? String(error.stack) : errText;
       console.error('[ChatGPT toolbox] buildConversationSnapshotForBridge failed', error);
-      ToolboxShell.appendLog(`[CHAT_PAGE][conversation-snapshot:failed] error=${errText}`);
+      ToolboxShell.appendLog(
+        `[CHAT_PAGE][conversation-snapshot:failed] source=${snapshotSource} error=${errText} stack=${errStack}`,
+      );
       throw error;
     }
   }
@@ -1532,6 +1842,179 @@
       };
     }
 
+    function resolveButtonElement(el) {
+      if (el instanceof HTMLButtonElement) {
+        return el;
+      }
+
+      if (el && typeof el.closest === 'function') {
+        const button = el.closest('button');
+        if (button instanceof HTMLButtonElement) {
+          return button;
+        }
+      }
+
+      return null;
+    }
+
+    function isVoiceButton(el) {
+      const button = resolveButtonElement(el);
+
+      if (!(button instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      if (button.classList.contains('composer-speech-button')) {
+        return true;
+      }
+
+      const useHrefList = Array.from(button.querySelectorAll('use'))
+        .map((use) => String(use.getAttribute('href') || use.getAttribute('xlink:href') || ''))
+        .join(' ')
+        .toLowerCase();
+
+      const mark = [
+        button.id || '',
+        button.className || '',
+        button.getAttribute('aria-label') || '',
+        button.getAttribute('title') || '',
+        button.getAttribute('data-testid') || '',
+        button.textContent || '',
+        useHrefList,
+      ].join(' ').toLowerCase();
+
+      return (
+        mark.includes('启动语音功能')
+        || mark.includes('开始听写')
+        || mark.includes('停止听写')
+        || mark.includes('听写')
+        || mark.includes('语音')
+        || mark.includes('麦克风')
+        || mark.includes('录音')
+        || mark.includes('voice')
+        || mark.includes('microphone')
+        || mark.includes('dictate')
+        || mark.includes('dictation')
+        || mark.includes('audio')
+        || mark.includes('speech')
+        || mark.includes('mic')
+        || mark.includes('#f8aa74')
+      );
+    }
+
+    function isStopGeneratingButton(el) {
+      const button = resolveButtonElement(el);
+
+      if (!(button instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      const testId = String(button.getAttribute('data-testid') || '').toLowerCase();
+      if (testId.includes('stop')) {
+        return true;
+      }
+
+      const aria = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
+      const title = String(button.getAttribute('title') || '').trim().toLowerCase();
+      const text = String(button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const probe = `${aria} ${title} ${text}`;
+
+      return /(?:^|\b)(?:stop(?:\s+generating)?|停止(?:生成)?|halt|pause)(?:\b|$)/i.test(probe);
+    }
+
+    function isRealSendButton(el) {
+      const button = resolveButtonElement(el);
+
+      if (!(button instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      if (button.disabled) {
+        return false;
+      }
+
+      if (isVoiceButton(button)) {
+        return false;
+      }
+
+      if (isStopGeneratingButton(button)) {
+        return false;
+      }
+
+      const rect = button.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return false;
+      }
+
+      if (button.id === 'composer-submit-button') {
+        return true;
+      }
+
+      const testid = String(button.getAttribute('data-testid') || '').trim();
+      if (testid === 'send-button' || testid === 'composer-submit-button') {
+        return true;
+      }
+
+      const mark = [
+        button.id || '',
+        button.className || '',
+        button.getAttribute('aria-label') || '',
+        button.getAttribute('title') || '',
+        button.getAttribute('data-testid') || '',
+        button.textContent || '',
+      ].join(' ').toLowerCase();
+
+      return (
+        mark.includes('send')
+        || mark.includes('submit')
+        || mark.includes('发送')
+      );
+    }
+
+    function hasRealComposerText() {
+      const text = String(getComposerText() || '').trim();
+      return text.length > 0;
+    }
+
+    function hasRealSubmitButton() {
+      const byId = document.querySelector('#composer-submit-button');
+      if (byId instanceof HTMLButtonElement && isRealSendButton(byId) && isSendButtonReady(byId)) {
+        return true;
+      }
+
+      const composer = getComposer();
+      const composerRoot = getComposerRoot();
+      const composerForm = composer instanceof HTMLElement ? composer.closest('form') : null;
+
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (let i = 0; i < buttons.length; i += 1) {
+        const btn = buttons[i];
+        if (isInToolbox(btn) || !isElementVisible(btn)) {
+          continue;
+        }
+
+        if (isVoiceButton(btn)) {
+          continue;
+        }
+
+        if (!isRealSendButton(btn) || !isSendButtonReady(btn)) {
+          continue;
+        }
+
+        if (
+          composer instanceof HTMLElement
+          && (
+            isButtonBelongsToComposer(btn, composer, composerRoot, composerForm)
+            || isButtonNearComposer(btn, composer)
+          )
+        ) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
     function isExcludedComposerButton(btn) {
       if (!(btn instanceof HTMLButtonElement)) {
         return true;
@@ -1544,7 +2027,7 @@
       const text = String(btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const negativeText = `${testId} ${id} ${aria} ${title} ${text}`;
 
-      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|dictat|录音|语音|tool|工具|plugin|plug-in|model|模型|gpt-|search|搜索|browse|浏览|think|reason|plus|pro-mode|settings|设置|menu|菜单|share|分享|copy|复制|edit|编辑|regenerate|重新生成|thumb|赞|踩|file-picker|composer-plus|composer-attach|composer-voice|composer-mic|stop|停止|halt|pause/i.test(negativeText)) {
+      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|dictat|录音|语音|听写|启动语音|开始听写|tool|工具|plugin|plug-in|model|模型|gpt-|search|搜索|browse|浏览|think|reason|plus|pro-mode|settings|设置|menu|菜单|share|分享|copy|复制|edit|编辑|regenerate|重新生成|thumb|赞|踩|file-picker|composer-plus|composer-attach|composer-voice|composer-mic|stop|停止|halt|pause/i.test(negativeText)) {
         return true;
       }
 
@@ -1569,60 +2052,51 @@
         return false;
       }
 
-      if (isExcludedComposerButton(btn)) {
+      if (isVoiceButton(btn)) {
+        return false;
+      }
+
+      if (typeof isVoiceComposerButton === 'function' && isVoiceComposerButton(btn)) {
         return false;
       }
 
       const testId = String(btn.getAttribute('data-testid') || '').toLowerCase();
       const id = String(btn.id || '').toLowerCase();
-      const aria = String(btn.getAttribute('aria-label') || '').trim();
-      const ariaLower = aria.toLowerCase();
+      const aria = String(btn.getAttribute('aria-label') || '').trim().toLowerCase();
       const title = String(btn.getAttribute('title') || '').trim().toLowerCase();
       const text = String(btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const type = String(btn.getAttribute('type') || '').toLowerCase();
+      const cls = String(btn.className || '').toLowerCase();
+
+      const allText = `${testId} ${id} ${aria} ${title} ${text} ${cls}`;
+
+      if (
+        /attach|upload|file|附件|上传|voice|mic|microphone|audio|语音|听写|启动语音|开始听写|tool|工具|model|模型|search|搜索/i
+          .test(allText)
+      ) {
+        return false;
+      }
 
       const positive = [
         testId === 'send-button',
         testId === 'composer-submit-button',
-        testId.includes('send'),
-        testId.includes('submit'),
         id === 'composer-submit-button',
-        id.includes('composer-submit'),
-        ['发送', '发送消息', '发送提示', 'send', 'send message', 'send prompt'].includes(ariaLower),
-        ariaLower.includes('send'),
-        aria.includes('发送'),
+        ['发送', '发送消息', '发送提示', 'send', 'send message', 'send prompt'].includes(aria),
         ['发送', '发送消息', 'send', 'send message'].includes(title),
-        title.includes('send'),
-        title.includes('发送'),
         ['发送', 'send'].includes(text),
+        cls.includes('composer-submit-button'),
+        cls.includes('text-submit-btn-text'),
       ];
 
       if (positive.some(Boolean)) {
         return true;
       }
 
-      const negativeText = `${testId} ${id} ${ariaLower} ${title} ${text}`;
-
-      if (/attach|upload|file|附件|上传|voice|mic|microphone|audio|tool|工具|model|模型|search|搜索/i.test(negativeText)) {
-        return false;
-      }
-
       if (type === 'submit') {
         return true;
       }
 
-      const hasSvg = !!btn.querySelector('svg');
-      if (hasSvg) {
-        const composer = getComposer();
-        if (composer instanceof HTMLElement && isButtonNearComposer(btn, composer)) {
-          const rect = btn.getBoundingClientRect();
-          if (rect.width > 0 && rect.width <= 72 && rect.height > 0 && rect.height <= 72) {
-            return true;
-          }
-        }
-      }
-
-      return false;
+      return isRealSendButton(btn);
     }
 
     function isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope) {
@@ -1724,46 +2198,20 @@
       return null;
     }
 
-    function findSendButtonByLastClickable(scope, composer, composerRoot, composerForm) {
-      const buttons = Array.from(scope.querySelectorAll('button'))
-        .filter((btn) => isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope));
-
-      for (let i = buttons.length - 1; i >= 0; i -= 1) {
-        const btn = buttons[i];
-        if (isVoiceComposerButton(btn)) {
-          appendComposerLogThrottled(
-            'send-button-reject-voice:last-clickable',
-            `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_button selector=composer:last-visible-button aria=${String(btn.getAttribute('aria-label') || '-')} testid=${String(btn.getAttribute('data-testid') || '-')}`,
-            1200,
-          );
-          continue;
-        }
-
-        if (isExcludedComposerButton(btn)) {
-          continue;
-        }
-
-        const rect = btn.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) {
-          continue;
-        }
-
-        if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
-          continue;
-        }
-
-        if (!isLikelyComposerSendButton(btn)) {
-          continue;
-        }
-
-        return {
-          btn,
-          source: 'last-clickable',
-          selector: 'composer:last-visible-button',
-        };
+    function logSendButtonReject(button, selector, silent) {
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
       }
 
-      return null;
+      const line = `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_or_dictation selector=${selector || '-'} `
+        + `id=${String(button.id || '-')} class=${String(button.className || '-')} `
+        + `aria=${String(button.getAttribute('aria-label') || '-')} disabled=${button.disabled ? 1 : 0}`;
+
+      if (!silent) {
+        appendComposerLogThrottled(`send-button-reject-voice:${selector || 'scan'}`, line, 1200);
+      } else {
+        ToolboxShell.appendLog(line);
+      }
     }
 
     function logSendButtonFound(hit, silent) {
@@ -1771,9 +2219,11 @@
         return;
       }
 
-      const info = describeSendButton(hit.btn);
-      const line = `[COMPOSER][SEND_BUTTON_FOUND] selector=${hit.selector || info.selector} `
-        + `aria=${info.aria} testid=${info.testid} disabled=${info.disabled ? '1' : '0'}`;
+      const button = resolveButtonElement(hit.btn) || hit.btn;
+      const info = describeSendButton(button);
+      const line = `[COMPOSER][SEND_BUTTON_READY] selector=${hit.selector || info.selector} `
+        + `id=${String(button.id || '-')} class=${String(button.className || '-')} `
+        + `aria=${info.aria} disabled=${info.disabled ? '1' : '0'}`;
 
       lastSendButtonScanMeta = {
         total: lastSendButtonScanMeta.total,
@@ -1783,8 +2233,15 @@
         at: Date.now(),
       };
 
+      const foundLine = `[COMPOSER][SEND_BUTTON_FOUND] selector=${hit.selector || info.selector} `
+        + `aria=${info.aria} testid=${info.testid} disabled=${info.disabled ? '1' : '0'}`;
+
       if (!silent) {
-        appendComposerLogThrottled(`send-button-found:${hit.source || 'found'}`, line, 1000);
+        appendComposerLogThrottled(`send-button-ready:${hit.source || 'found'}`, line, 1000);
+        appendComposerLogThrottled(`send-button-found:${hit.source || 'found'}`, foundLine, 1000);
+      } else {
+        ToolboxShell.appendLog(line);
+        ToolboxShell.appendLog(foundLine);
       }
     }
 
@@ -1816,10 +2273,101 @@
       if (!silent) {
         appendComposerLogThrottled(
           'send-button-not-found',
-          `[COMPOSER][SEND_BUTTON_NOT_FOUND] composer=${composerTag} buttonCount=${buttonCount} preview=${preview || '-'}`,
+          `[COMPOSER][SEND_BUTTON_NOT_FOUND] reason=no-real-submit-button composer=${composerTag} buttonCount=${buttonCount} preview=${preview || '-'}`,
           5000,
         );
+        appendComposerLogThrottled(
+          'send-button-missing',
+          '[COMPOSER][SEND_BUTTON_MISSING] reason=no-real-submit-button',
+          5000,
+        );
+      } else {
+        ToolboxShell.appendLog('[COMPOSER][SEND_BUTTON_NOT_FOUND] reason=no-real-submit-button');
       }
+    }
+
+    function buildComposerSendButtonScopes(composer, composerRoot, composerForm) {
+      const scopes = [];
+
+      if (composerForm instanceof HTMLElement) {
+        scopes.push(composerForm);
+      }
+      if (composerRoot instanceof HTMLElement && !scopes.includes(composerRoot)) {
+        scopes.push(composerRoot);
+      }
+      if (composer instanceof HTMLElement && !scopes.includes(composer)) {
+        scopes.push(composer);
+      }
+
+      const mainEl = qs('main');
+      if (mainEl instanceof HTMLElement && !scopes.includes(mainEl)) {
+        scopes.push(mainEl);
+      }
+
+      return scopes;
+    }
+
+    function findSendButtonByScopedScan(scopes, composer, composerRoot, composerForm, silent, totalScanned) {
+      for (const scope of scopes) {
+        const buttons = Array.from(scope.querySelectorAll('button'));
+
+        for (const btn of buttons) {
+          if (!isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope)) {
+            continue;
+          }
+
+          if (isVoiceButton(btn)) {
+            logSendButtonReject(btn, 'composer:scan', silent);
+            continue;
+          }
+
+          if (!isLikelyComposerSendButton(btn)) {
+            continue;
+          }
+
+          const hit = {
+            btn,
+            source: 'scan',
+            selector: 'composer:scan',
+          };
+          logSendButtonScan(totalScanned, 1, hit.source, silent);
+          logSendButtonFound(hit, silent);
+          return btn;
+        }
+      }
+
+      return null;
+    }
+
+    function findSendButtonByLastVisibleFallback(scopes, composer, composerRoot, composerForm, silent, totalScanned) {
+      for (const scope of scopes) {
+        const buttons = Array.from(scope.querySelectorAll('button'))
+          .filter((btn) => isComposerSendButtonCandidate(btn, composer, composerRoot, composerForm, scope));
+
+        for (let i = buttons.length - 1; i >= 0; i -= 1) {
+          const btn = buttons[i];
+
+          if (isVoiceButton(btn)) {
+            logSendButtonReject(btn, 'composer:last-visible-button', silent);
+            continue;
+          }
+
+          if (!isLikelyComposerSendButton(btn)) {
+            continue;
+          }
+
+          const hit = {
+            btn,
+            source: 'last-visible',
+            selector: 'composer:last-visible-button',
+          };
+          logSendButtonScan(totalScanned, 1, hit.source, silent);
+          logSendButtonFound(hit, silent);
+          return btn;
+        }
+      }
+
+      return null;
     }
 
     function findSendButton(options = {}) {
@@ -1838,49 +2386,60 @@
 
       const composerRoot = getComposerRoot();
       const composerForm = composer.closest('form');
-      const scopes = [];
+      const scopes = buildComposerSendButtonScopes(composer, composerRoot, composerForm);
+      const allButtons = Array.from(document.querySelectorAll('button'));
+      const totalScanned = allButtons.length;
+      const previewButtons = allButtons.filter((btn) => !isInToolbox(btn)).slice(0, 12);
 
-      if (composerRoot instanceof HTMLElement) {
-        scopes.push(composerRoot);
-      }
-
-      if (composerForm instanceof HTMLElement && !scopes.includes(composerForm)) {
-        scopes.push(composerForm);
-      }
-
-      const mainEl = qs('main');
-      if (mainEl instanceof HTMLElement && !scopes.includes(mainEl)) {
-        scopes.push(mainEl);
-      }
-
-      const selectors = [
+      const prioritySelectors = [
         'button#composer-submit-button',
         'button[data-testid="send-button"]',
+        'form button#composer-submit-button',
+        'main form button#composer-submit-button',
+        'main button[data-testid="send-button"]',
+        'button[data-testid="composer-submit-button"]',
+        'button[aria-label*="Send"]',
+        'button[aria-label*="发送"]',
         ...(SELECTORS.sendButton || []),
       ];
-      let totalScanned = 0;
-      const previewButtons = [];
+
+      for (const sel of prioritySelectors) {
+        const candidate = document.querySelector(sel);
+        if (!(candidate instanceof HTMLButtonElement)) {
+          continue;
+        }
+
+        const scope = candidate.closest('form, main, [data-testid="composer"]') || document.body;
+
+        if (!isComposerSendButtonCandidate(candidate, composer, composerRoot, composerForm, scope)) {
+          continue;
+        }
+
+        if (isVoiceButton(candidate)) {
+          logSendButtonReject(candidate, sel, silent);
+          continue;
+        }
+
+        if (!isLikelyComposerSendButton(candidate)) {
+          continue;
+        }
+
+        const hit = { btn: candidate, source: 'selector', selector: sel };
+        logSendButtonScan(totalScanned, 1, `selector:${sel}`, silent);
+        logSendButtonFound(hit, silent);
+        return candidate;
+      }
 
       for (const scope of scopes) {
-        const scopeButtons = Array.from(scope.querySelectorAll('button'))
-          .filter((btn) => !isInToolbox(btn));
-        totalScanned += scopeButtons.length;
-        previewButtons.push(...scopeButtons.slice(0, 12));
-
-        for (const sel of selectors) {
+        for (const sel of prioritySelectors) {
           const candidates = Array.from(scope.querySelectorAll(sel));
-
           for (const candidate of candidates) {
             if (!isComposerSendButtonCandidate(candidate, composer, composerRoot, composerForm, scope)) {
               continue;
             }
 
-            if (isVoiceComposerButton(candidate)) {
-              appendComposerLogThrottled(
-                `send-button-reject-voice:selector:${sel}`,
-                `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_button selector=${sel} aria=${String(candidate.getAttribute('aria-label') || '-')} testid=${String(candidate.getAttribute('data-testid') || '-')}`,
-                1200,
-              );
+            if (isVoiceButton(candidate)) {
+              logSendButtonReject(candidate, sel, silent);
               continue;
             }
 
@@ -1902,13 +2461,6 @@
           return ariaHit.btn;
         }
 
-        const lastHit = findSendButtonByLastClickable(scope, composer, composerRoot, composerForm);
-        if (lastHit && lastHit.btn) {
-          logSendButtonScan(totalScanned, 1, lastHit.source, silent);
-          logSendButtonFound(lastHit, silent);
-          return lastHit.btn;
-        }
-
         const svgHit = findSendButtonBySvgFallback(scope, composer, composerRoot, composerForm);
         if (svgHit && svgHit.btn) {
           logSendButtonScan(totalScanned, 1, svgHit.source, silent);
@@ -1917,14 +2469,38 @@
         }
       }
 
+      const scopedHit = findSendButtonByScopedScan(
+        scopes,
+        composer,
+        composerRoot,
+        composerForm,
+        silent,
+        totalScanned,
+      );
+      if (scopedHit) {
+        return scopedHit;
+      }
+
+      const lastVisibleHit = findSendButtonByLastVisibleFallback(
+        scopes,
+        composer,
+        composerRoot,
+        composerForm,
+        silent,
+        totalScanned,
+      );
+      if (lastVisibleHit) {
+        return lastVisibleHit;
+      }
+
       const preview = buildSendButtonPreview(previewButtons);
       logSendButtonScan(totalScanned, 0, 'no-match', silent);
       logSendButtonNotFound(composer, totalScanned, preview, silent);
-
       if (!silent) {
+        ToolboxShell.appendLog('[COMPOSER][SEND_BUTTON_NOT_FOUND] reason=no-real-submit-button');
         appendComposerLogThrottled(
           'find-send-button:no-scoped-send-button',
-          '[COMPOSER][find-send-button:not-found] reason=no-scoped-send-button',
+          '[COMPOSER][find-send-button:not-found] reason=no-real-submit-button',
         );
       }
 
@@ -1933,13 +2509,16 @@
 
 
     function isSendButtonReady(btn) {
-      if (!btn || !isElementVisible(btn)) return false;
+      if (!btn || !isRealSendButton(btn) || !isElementVisible(btn)) return false;
       if (btn.disabled) return false;
 
       const ariaDisabled = btn.getAttribute('aria-disabled');
       if (ariaDisabled === 'true') return false;
 
       if (btn.getAttribute('data-disabled') === 'true') return false;
+
+      const rect = btn.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
 
       const style = window.getComputedStyle(btn);
       if (style.pointerEvents === 'none') return false;
@@ -2026,7 +2605,18 @@
         console.error('[ChatGPT toolbox] dispatchComposerInputEvents beforeinput failed', beforeInputErr);
       }
 
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      try {
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType,
+          data,
+        }));
+      } catch (inputErr) {
+        console.error('[ChatGPT toolbox] dispatchComposerInputEvents input failed', inputErr);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
       el.dispatchEvent(new Event('change', { bubbles: true }));
 
       try {
@@ -2201,21 +2791,50 @@
         const selection = window.getSelection();
         const range = document.createRange();
 
-        range.selectNodeContents(target);
-        range.collapse(false);
+        target.focus();
 
+        range.selectNodeContents(target);
         selection.removeAllRanges();
         selection.addRange(range);
 
+        let insertedByExecCommand = false;
+
         try {
           document.execCommand('selectAll', false, null);
-          document.execCommand('insertText', false, textValue);
-        } catch (e) {
-          console.warn('[ChatGPT toolbox] execCommand insertText failed; fallback to textContent', e);
-          target.textContent = textValue;
+          document.execCommand('delete', false, null);
+          insertedByExecCommand = document.execCommand('insertText', false, textValue) === true;
+        } catch (insertErr) {
+          console.error('[ChatGPT toolbox] setComposerValue execCommand insertText failed', insertErr);
+          insertedByExecCommand = false;
         }
 
-        dispatchComposerInputEvents(target, textValue);
+        if (!insertedByExecCommand) {
+          try {
+            range.selectNodeContents(target);
+            range.deleteContents();
+
+            const textNode = document.createTextNode(textValue);
+            range.insertNode(textNode);
+            range.setStartAfter(textNode);
+            range.setEndAfter(textNode);
+
+            selection.removeAllRanges();
+            selection.addRange(range);
+          } catch (rangeErr) {
+            console.error('[ChatGPT toolbox] setComposerValue range fallback failed', rangeErr);
+            target.textContent = textValue;
+          }
+        }
+
+        dispatchComposerInputEvents(target, textValue, { inputType: 'insertText' });
+
+        const expectedLen = textValue.length;
+        const actualText = String(getComposerText() || '');
+        const actualLen = actualText.length;
+        const duplicated = actualLen > expectedLen * 1.5 ? 1 : 0;
+        ToolboxShell.appendLog(
+          `[COMPOSER][TEXT_AFTER_SET] expectedLen=${expectedLen} actualLen=${actualLen} duplicated=${duplicated}`,
+        );
 
         return true;
       }
@@ -2242,16 +2861,6 @@
       ready: false,
     };
 
-    function refreshSendButtonScanCache(options = {}) {
-      const sendBtn = findSendButton(options);
-      sendButtonScanCache = {
-        at: Date.now(),
-        btn: sendBtn instanceof HTMLButtonElement ? sendBtn : null,
-        ready: sendBtn instanceof HTMLButtonElement && isSendButtonReady(sendBtn),
-      };
-      return sendButtonScanCache;
-    }
-
     function canSendNow(options = {}) {
       const composer = getComposer();
       if (!(composer instanceof HTMLElement)) {
@@ -2262,13 +2871,26 @@
         return false;
       }
 
-      const maxAgeMs = Number(options.maxAgeMs) || 0;
-      if (!options.force && maxAgeMs > 0 && Date.now() - sendButtonScanCache.at < maxAgeMs) {
-        return sendButtonScanCache.ready;
+      if (isAssistantLikelyBusy()) {
+        return false;
       }
 
-      const cached = refreshSendButtonScanCache(options);
-      return cached.ready;
+      if (!hasRealComposerText()) {
+        return false;
+      }
+
+      const maxAgeMs = Number(options.maxAgeMs) || 0;
+      if (!options.force && maxAgeMs > 0 && Date.now() - sendButtonScanCache.at < maxAgeMs) {
+        return sendButtonScanCache.ready && hasRealComposerText();
+      }
+
+      const ready = hasRealSubmitButton();
+      sendButtonScanCache = {
+        at: Date.now(),
+        btn: findSendButton({ silent: true }),
+        ready,
+      };
+      return ready;
     }
 
     function canSendNowLight() {
@@ -2331,9 +2953,8 @@
 
       ToolboxShell.appendLog(`[COMPOSER][click-send] ${debugText}`);
 
-      sendBtn.focus();
-      sendBtn.click();
-      return true;
+      const clickResult = invokeComposerSubmitClick(sendBtn);
+      return !!clickResult;
     }
 
     function isAssistantLikelyBusy() {
@@ -3098,18 +3719,75 @@
     }
 
     function isAttachmentStillUploading() {
+      if (typeof hasRealSubmitButton === 'function' && hasRealSubmitButton()) {
+        return false;
+      }
+
       const root = getComposerRoot() || qs('main') || document.body;
 
-      const busyNode = qsa('[role="progressbar"], [aria-busy="true"], [data-testid*="progress"], [data-testid*="spinner"], svg[class*="animate"], .animate-spin', root)
-        .find((el) => el instanceof HTMLElement || el instanceof SVGElement);
+      const busyNode = qsa(
+        [
+          '[role="progressbar"]',
+          '[aria-busy="true"]',
+          '[data-testid*="progress"]',
+          '[data-testid*="spinner"]',
+          'svg[class*="animate"]',
+          '.animate-spin',
+        ].join(', '),
+        root,
+      ).find((el) => {
+        if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) {
+          return false;
+        }
+        if (isInToolbox(el)) {
+          return false;
+        }
 
-      if (busyNode && !isInToolbox(busyNode)) {
+        if (el instanceof HTMLElement) {
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === 'none'
+            || style.visibility === 'hidden'
+            || style.opacity === '0'
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      if (busyNode) {
         return true;
       }
 
       const text = collectComposerAttachmentStatusText();
 
-      return /uploading|上传中|processing|处理中|loading|加载中|扫描中|正在上传|正在处理|压缩|归档|压缩归档|准备中|compressing|archive|preparing|analyzing/i.test(text);
+      // 注意：
+      // 这里不能匹配「压缩」「归档」「压缩归档」「archive」。
+      // 这些在 ChatGPT 附件 chip 里通常只是 zip 文件类型说明，不代表正在上传。
+      const strongUploadingTextPattern = new RegExp(
+        [
+          'uploading',
+          'upload\\s+in\\s+progress',
+          'processing\\s+file',
+          'processing\\s+attachment',
+          'analyzing\\s+file',
+          'analyzing\\s+attachment',
+          'loading',
+          '正在上传',
+          '上传中',
+          '正在处理',
+          '处理中',
+          '正在分析',
+          '分析中',
+          '扫描中',
+          '加载中',
+        ].join('|'),
+        'i',
+      );
+
+      return strongUploadingTextPattern.test(text);
     }
 
 
@@ -3468,6 +4146,12 @@
       waitForComposerTextSynced,
       dispatchComposerSendKeyboard,
       findSendButton,
+      findRealComposerSendButton: findSendButton,
+      hasRealComposerText,
+      hasRealSubmitButton,
+      resolveButtonElement,
+      isVoiceButton,
+      isRealSendButton,
       describeSendButton,
       isSendButtonReady,
       focusComposerForNativeSend,
@@ -3491,6 +4175,32 @@
       isAttachmentStillUploading,
       getChatMessageElementsInOrder,
       buildComposerDebugSnapshot,
+      async precheckSendable() {
+        const responseState = detectComposerResponseState();
+        if (responseState.is_responding) {
+          return { ok: false, reason: 'assistant_busy' };
+        }
+        const composer = getComposer();
+        if (!(composer instanceof HTMLElement)) {
+          return { ok: false, reason: 'composer_not_found' };
+        }
+        return { ok: true, reason: 'sendable' };
+      },
+      async waitMessageAccepted(messageTextHash, options = {}) {
+        const composer = findChatGPTComposer();
+        const beforeText = getComposerTextFromElement(composer);
+        const beforeStopButton = findChatGPTStopButton();
+        const confirmCtx = buildStableSendConfirmCtx(beforeText, beforeStopButton);
+        if (messageTextHash) {
+          confirmCtx.contentProbe = String(messageTextHash).slice(0, 80);
+        }
+        const verified = await verifySendStarted(confirmCtx, options);
+        return {
+          ok: !!verified.ok,
+          reason: verified.reason || '',
+          messageId: confirmCtx.beforeLatestKey || '',
+        };
+      },
     };
   })();
 
@@ -3621,12 +4331,21 @@
     const hasAttachmentPayload = attachmentCount > 0
       || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
       || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function' && ComposerApi.hasVisibleComposerAttachmentPayload());
+    const composerTextTrimmed = String(composerText || '').trim();
+    const hasText = composerTextTrimmed.length > 0;
+    const hasRealText = typeof ComposerApi.hasRealComposerText === 'function'
+      ? ComposerApi.hasRealComposerText()
+      : hasText;
+    const hasRealBtn = typeof ComposerApi.hasRealSubmitButton === 'function'
+      ? ComposerApi.hasRealSubmitButton()
+      : false;
     const sendButton = ComposerApi.findSendButton({ silent: true });
     const canAcceptInput = composerAvailable && !isResponding;
+    const hasPayload = hasRealText || hasAttachmentPayload;
     const canSendNow = composerAvailable
       && !isResponding
-      && !!sendButton
-      && ComposerApi.isSendButtonReady(sendButton);
+      && hasPayload
+      && hasRealBtn;
 
     if (isResponding) {
       return {
@@ -3652,68 +4371,53 @@
       };
     }
 
-    if (composerText) {
+    if (!hasPayload) {
       return {
         is_responding: false,
-        response_state: 'composing',
-        response_state_reason: 'composer_has_text',
+        response_state: 'idle',
+        response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
         can_accept_input: canAcceptInput,
-        can_send_now: canSendNow,
+        can_send_now: false,
         attachment_count: attachmentCount,
-        has_composer_payload: true,
+        has_composer_payload: false,
         response_state_at: Date.now(),
       };
     }
 
-    const sendButtonReady = !!sendButton && ComposerApi.isSendButtonReady(sendButton);
-
-    if (hasAttachmentPayload && sendButtonReady) {
-      return {
-        is_responding: false,
-        response_state: 'attachment_ready',
-        response_state_reason: 'composer_has_attachment',
-        can_accept_input: canAcceptInput,
-        can_send_now: canSendNow,
-        attachment_count: attachmentCount,
-        has_composer_payload: true,
-        response_state_at: Date.now(),
-      };
-    }
-
-    if (hasAttachmentPayload) {
+    if (!hasRealText && hasAttachmentPayload) {
       return {
         is_responding: false,
         response_state: 'attachment_processing',
-        response_state_reason: 'composer_has_attachment_waiting_send_button',
+        response_state_reason: 'attachment_ready_waiting_text',
         can_accept_input: canAcceptInput,
-        can_send_now: canSendNow,
+        can_send_now: false,
         attachment_count: attachmentCount,
         has_composer_payload: true,
         response_state_at: Date.now(),
       };
     }
 
-    if (!composerText && sendButtonReady && canSendNow) {
+    if (!hasRealBtn) {
       return {
         is_responding: false,
-        response_state: 'attachment_ready',
-        response_state_reason: 'native_send_ready',
+        response_state: hasAttachmentPayload ? 'attachment_processing' : 'composing',
+        response_state_reason: 'payload_ready_but_send_button_missing',
         can_accept_input: canAcceptInput,
-        can_send_now: canSendNow,
+        can_send_now: false,
         attachment_count: attachmentCount,
-        has_composer_payload: hasAttachmentPayload,
+        has_composer_payload: true,
         response_state_at: Date.now(),
       };
     }
 
     return {
       is_responding: false,
-      response_state: 'idle',
-      response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
+      response_state: 'ready',
+      response_state_reason: 'payload_ready',
       can_accept_input: canAcceptInput,
       can_send_now: canSendNow,
       attachment_count: attachmentCount,
-      has_composer_payload: hasAttachmentPayload,
+      has_composer_payload: true,
       response_state_at: Date.now(),
     };
   }
@@ -4138,70 +4842,136 @@
   let toolboxTurnStatusRefreshPendingMode = 'light';
   let lastLoggedConversationTurnCount = null;
 
+  function getConversationDomScanRoot() {
+    const main = document.querySelector('main');
+    if (main instanceof HTMLElement) {
+      return main;
+    }
+
+    return document.body instanceof HTMLElement ? document.body : null;
+  }
+
+  function getLightConversationStatsForHeader() {
+    const root = getConversationDomScanRoot();
+    if (!(root instanceof HTMLElement)) {
+      return {
+        total_count: 0,
+        round_count: 0,
+        dom_estimated_round_count: 0,
+        user_count: 0,
+        assistant_count: 0,
+      };
+    }
+
+    const turns = Array.from(
+      root.querySelectorAll(
+        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+      ),
+    ).filter((el) => {
+      if (!(el instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (typeof isValidConversationTurnCounterElement === 'function') {
+        return isValidConversationTurnCounterElement(el);
+      }
+
+      if (typeof isInToolbox === 'function' && isInToolbox(el)) {
+        return false;
+      }
+
+      const testId = String(el.getAttribute('data-testid') || '').trim();
+      return /^conversation-turn-\d+$/i.test(testId);
+    });
+
+    let maxTurnNo = 0;
+    let userCount = 0;
+    let assistantCount = 0;
+    const seenTurnNo = new Set();
+
+    turns.forEach((el) => {
+      const turnNo = getConversationTurnNumberFromElement(el);
+      if (!(turnNo > 0)) {
+        return;
+      }
+
+      if (turnNo > maxTurnNo) {
+        maxTurnNo = turnNo;
+      }
+
+      if (seenTurnNo.has(turnNo)) {
+        return;
+      }
+
+      seenTurnNo.add(turnNo);
+      const role = getConversationTurnRoleFromElement(el);
+      if (role === 'user') {
+        userCount += 1;
+      } else if (role === 'assistant') {
+        assistantCount += 1;
+      }
+    });
+
+    const highestRole = maxTurnNo > 0
+      ? (maxTurnNo % 2 === 1 ? 'user' : 'assistant')
+      : '';
+    const estimatedRoundCount = maxTurnNo > 0
+      ? estimateRoundCountByTurnNumber(maxTurnNo, highestRole)
+      : 0;
+
+    return {
+      total_count: turns.length,
+      round_count: estimatedRoundCount,
+      dom_estimated_round_count: estimatedRoundCount,
+      user_count: userCount,
+      assistant_count: assistantCount,
+    };
+  }
+
   function countTurnsFromDomDirect(role) {
     const safeRole = String(role || '').trim();
     if (!safeRole) {
       return 0;
     }
 
-    const roots = [];
-
-    const main = document.querySelector('main');
-    if (main instanceof HTMLElement) {
-      roots.push(main);
+    const root = getConversationDomScanRoot();
+    if (!(root instanceof HTMLElement)) {
+      return 0;
     }
-
-    roots.push(document.body);
 
     const seen = new Set();
     let count = 0;
 
-    roots.forEach((root) => {
-      if (!(root instanceof HTMLElement)) {
+    root.querySelectorAll(
+      'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+    ).forEach((turn) => {
+      if (!(turn instanceof HTMLElement)) {
         return;
       }
 
-      const nodes = Array.from(
-        root.querySelectorAll(`[data-message-author-role="${safeRole}"]`),
-      );
+      if (isInToolbox(turn)) {
+        return;
+      }
 
-      nodes.forEach((node) => {
-        if (!(node instanceof HTMLElement)) {
-          return;
-        }
+      if (isInComposerArea(turn)) {
+        return;
+      }
 
-        if (isInToolbox(node)) {
-          return;
-        }
+      if (isChatSidebarElement(turn)) {
+        return;
+      }
 
-        if (isInComposerArea(node)) {
-          return;
-        }
+      const turnRole = getConversationTurnRoleFromElement(turn);
+      if (turnRole !== safeRole) {
+        return;
+      }
 
-        if (isChatSidebarElement(node)) {
-          return;
-        }
+      if (seen.has(turn)) {
+        return;
+      }
 
-        const text = String(node.innerText || node.textContent || '').trim();
-        if (!text) {
-          return;
-        }
-
-        const turn = node.closest(
-          'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
-        ) || node;
-
-        if (!(turn instanceof HTMLElement)) {
-          return;
-        }
-
-        if (seen.has(turn)) {
-          return;
-        }
-
-        seen.add(turn);
-        count += 1;
-      });
+      seen.add(turn);
+      count += 1;
     });
 
     return count;
@@ -4315,43 +5085,35 @@
 
   function collectConversationTurnIndexInfos() {
     const byTurnNo = new Map();
-    const roots = [];
+    const root = getConversationDomScanRoot();
 
-    const main = document.querySelector('main');
-    if (main instanceof HTMLElement) {
-      roots.push(main);
+    if (!(root instanceof HTMLElement)) {
+      return [];
     }
-    roots.push(document.body);
 
-    roots.forEach((root) => {
-      if (!(root instanceof HTMLElement)) {
+    root.querySelectorAll(
+      'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
+    ).forEach((el) => {
+      if (!isValidConversationTurnCounterElement(el)) {
         return;
       }
 
-      root.querySelectorAll(
-        'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]',
-      ).forEach((el) => {
-        if (!isValidConversationTurnCounterElement(el)) {
-          return;
-        }
+      const turnNo = getConversationTurnNumberFromElement(el);
+      if (!(turnNo > 0)) {
+        return;
+      }
 
-        const turnNo = getConversationTurnNumberFromElement(el);
-        if (!(turnNo > 0)) {
-          return;
-        }
+      const role = getConversationTurnRoleFromElement(el);
+      const existing = byTurnNo.get(turnNo);
 
-        const role = getConversationTurnRoleFromElement(el);
-        const existing = byTurnNo.get(turnNo);
+      if (!existing) {
+        byTurnNo.set(turnNo, { turnNo, role, element: el });
+        return;
+      }
 
-        if (!existing) {
-          byTurnNo.set(turnNo, { turnNo, role, element: el });
-          return;
-        }
-
-        if (!existing.role && role) {
-          byTurnNo.set(turnNo, { turnNo, role, element: el });
-        }
-      });
+      if (!existing.role && role) {
+        byTurnNo.set(turnNo, { turnNo, role, element: el });
+      }
     });
 
     return Array.from(byTurnNo.values()).sort((a, b) => a.turnNo - b.turnNo);
@@ -4422,7 +5184,9 @@
   }
 
   function countConversationTurnsFromSnapshot() {
-    const snapshot = buildConversationSnapshotForBridge(null);
+    const snapshot = buildConversationSnapshotForBridge(null, {
+      source: 'countConversationTurnsFromSnapshot',
+    });
     if (!snapshot || !Array.isArray(snapshot.messages)) {
       return 0;
     }
@@ -4443,6 +5207,11 @@
   }
 
   function countConversationTurnsFromDom() {
+    const fromTurnIndex = countConversationTurnsFromTurnIndex();
+    if (fromTurnIndex > 0) {
+      return fromTurnIndex;
+    }
+
     const userCount = countUserTurnsFromDomDirect();
     if (userCount > 0) {
       return userCount;
@@ -4451,11 +5220,6 @@
     const assistantCount = countAssistantTurnsFromDomDirect();
     if (assistantCount > 0) {
       return assistantCount;
-    }
-
-    const turnElements = findConversationMessageElements({ includeHidden: true });
-    if (turnElements.length > 0) {
-      return Math.ceil(turnElements.length / 2);
     }
 
     return 0;
@@ -4482,9 +5246,11 @@
     const isResponding = typeof ComposerApi !== 'undefined'
       && typeof ComposerApi.isAssistantLikelyBusy === 'function'
       && ComposerApi.isAssistantLikelyBusy();
+    void isResponding;
+
     let resolvedMode = mode;
     if (mode === 'auto') {
-      resolvedMode = isResponding ? 'light' : 'heavy';
+      resolvedMode = 'light';
     }
 
     if (resolvedMode === 'heavy') {
@@ -4514,8 +5280,12 @@
         UploadModule.refreshToolboxTopStatus(reason);
         if (
           modeToRun === 'heavy'
-          && typeof UploadModule.renderUploadButtonsOnly === 'function'
+          && typeof UploadModule.renderAllButtonStates === 'function'
         ) {
+          UploadModule.renderAllButtonStates({ heavy: true });
+        } else if (typeof UploadModule.renderAllButtonStates === 'function') {
+          UploadModule.renderAllButtonStates({ heavy: false });
+        } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
           UploadModule.renderUploadButtonsOnly({ heavy: true });
         } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
           UploadModule.renderUploadButtonsOnly({ heavy: false });
@@ -4559,15 +5329,11 @@
         cleanupChatMessageCaches('main-dom-replaced');
       }
 
-      const isResponding = typeof ComposerApi !== 'undefined'
-        && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-        && ComposerApi.isAssistantLikelyBusy();
       const onlyCharacterData = mutations.length > 0
         && mutations.every((mutation) => mutation.type === 'characterData');
-      const mode = (onlyCharacterData || isResponding) ? 'light' : 'heavy';
       scheduleToolboxTurnStatusRefresh(
         onlyCharacterData ? 'conversation-character-data' : 'conversation-dom-mutated',
-        mode,
+        'light',
       );
     });
 
@@ -4581,15 +5347,17 @@
     window.__cgptTurnCountObserver = observer;
     window.__cgptTurnCountObserverBound = true;
 
-    scheduleToolboxTurnStatusRefresh('observer-bound');
+    scheduleToolboxTurnStatusRefresh('observer-bound', 'heavy');
   }
 
   function getConversationTurnCount() {
     const strategies = [
       { name: 'conversation-turn-index', run: countConversationTurnsFromTurnIndex },
+      { name: 'light-header-stats', run: () => {
+        const stats = getLightConversationStatsForHeader();
+        return Number(stats && stats.dom_estimated_round_count) || 0;
+      } },
       { name: 'user-role-dom-direct', run: countUserTurnsFromDomDirect },
-      { name: 'conversation-records-user', run: countUserMessagesFromConversationRecords },
-      { name: 'conversation-snapshot-user', run: countConversationTurnsFromSnapshot },
       { name: 'assistant-role-dom-direct', run: countAssistantTurnsFromDomDirect },
       { name: 'conversation-turn-dom', run: countConversationTurnsFromDom },
     ];
@@ -4740,19 +5508,6 @@
     }
 
     return capability;
-  }
-
-  function isDomElementVisible(el) {
-    if (!(el instanceof Element)) {
-      return false;
-    }
-
-    if (el.disabled) {
-      return false;
-    }
-
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
   }
 
   function detectChatInputStateFromDom() {
@@ -5124,7 +5879,9 @@
   const MAX_ATTACHMENT_SEND_WAIT_MS = 120000;
   const SEND_BUTTON_RETRY_INTERVAL_MS = 300;
   const SEND_STABLE_VERIFY_WAIT_MS = 500;
-  const SEND_STABLE_VERIFY_TIMEOUT_MS = 2500;
+  const SEND_STABLE_VERIFY_TIMEOUT_MS = 8000;
+  const SEND_TEXT_BUTTON_WAIT_MS = 8000;
+  const SEND_TEXT_BUTTON_POLL_MS = 100;
 
   function formatSendLogFields(fields) {
     return Object.entries(fields || {})
@@ -5136,19 +5893,179 @@
     appendSendLog(`${tag} ${formatSendLogFields(fields)}`);
   }
 
-  function isVoiceComposerButton(button) {
+  function resolveComposerButtonElement(el) {
+    if (typeof ComposerApi.resolveButtonElement === 'function') {
+      return ComposerApi.resolveButtonElement(el);
+    }
+
+    if (el instanceof HTMLButtonElement) {
+      return el;
+    }
+
+    if (el && typeof el.closest === 'function') {
+      const button = el.closest('button');
+      if (button instanceof HTMLButtonElement) {
+        return button;
+      }
+    }
+
+    return null;
+  }
+
+  function isVoiceComposerButton(el) {
+    if (typeof ComposerApi.isVoiceButton === 'function') {
+      return ComposerApi.isVoiceButton(el);
+    }
+
+    const button = resolveComposerButtonElement(el);
     if (!(button instanceof HTMLButtonElement)) {
       return false;
     }
 
-    const aria = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
-    const testId = String(button.getAttribute('data-testid') || '').trim().toLowerCase();
-    const id = String(button.id || '').trim().toLowerCase();
-    const title = String(button.getAttribute('title') || '').trim().toLowerCase();
-    const text = String(button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const probe = `${aria} ${testId} ${id} ${title} ${text}`;
+    if (button.classList && button.classList.contains('composer-speech-button')) {
+      return true;
+    }
 
-    return /开始听写|voice|dictation|microphone|语音|听写|mic|录音/i.test(probe);
+    const useHrefList = Array.from(button.querySelectorAll('use'))
+      .map((use) => String(use.getAttribute('href') || use.getAttribute('xlink:href') || ''))
+      .join(' ')
+      .toLowerCase();
+
+    const probe = [
+      button.id || '',
+      button.className || '',
+      button.getAttribute('aria-label') || '',
+      button.getAttribute('title') || '',
+      button.textContent || '',
+      button.getAttribute('data-testid') || '',
+      useHrefList,
+    ].join(' ').toLowerCase();
+
+    return (
+      probe.includes('启动语音功能')
+      || probe.includes('开始听写')
+      || probe.includes('停止听写')
+      || probe.includes('语音')
+      || probe.includes('听写')
+      || probe.includes('麦克风')
+      || probe.includes('录音')
+      || probe.includes('voice')
+      || probe.includes('microphone')
+      || probe.includes('dictate')
+      || probe.includes('speech')
+      || probe.includes('audio')
+      || probe.includes('mic')
+      || probe.includes('#f8aa74')
+    );
+  }
+
+  function hasVoiceComposerButtonOnly() {
+    const byId = document.querySelector('#composer-submit-button');
+    if (byId instanceof HTMLButtonElement && isVoiceComposerButton(byId)) {
+      return true;
+    }
+
+    const buttons = Array.from(document.querySelectorAll('button'));
+    let sawVoice = false;
+
+    for (const button of buttons) {
+      if (!(button instanceof HTMLButtonElement) || isInsideToolbox(button)) {
+        continue;
+      }
+
+      if (isVoiceComposerButton(button)) {
+        sawVoice = true;
+        continue;
+      }
+
+      if (
+        typeof ComposerApi.isRealSendButton === 'function'
+        && ComposerApi.isRealSendButton(button)
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(button)
+      ) {
+        return false;
+      }
+    }
+
+    return sawVoice;
+  }
+
+  function hasRealComposerText() {
+    if (typeof ComposerApi.hasRealComposerText === 'function') {
+      return ComposerApi.hasRealComposerText();
+    }
+
+    const composer = findChatGPTComposer();
+    const text = composer
+      ? String(composer.innerText || composer.textContent || '').trim()
+      : '';
+    return text.length > 0;
+  }
+
+  function hasRealSubmitButton() {
+    if (typeof ComposerApi.hasRealSubmitButton === 'function') {
+      return ComposerApi.hasRealSubmitButton();
+    }
+
+    const btn = document.querySelector('#composer-submit-button');
+    if (!(btn instanceof HTMLButtonElement) || isVoiceComposerButton(btn)) {
+      return false;
+    }
+
+    if (btn.disabled) {
+      return false;
+    }
+
+    const rect = btn.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getComposerSendDiagnostics() {
+    const composerText = typeof ComposerApi.getComposerText === 'function'
+      ? String(ComposerApi.getComposerText() || '')
+      : '';
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const sendButton = findChatGPTSendButton();
+
+    return {
+      hasText: hasRealComposerText() ? 1 : 0,
+      textLength: composerText.length,
+      hasAttachment: attachmentCount > 0 ? 1 : 0,
+      buttonId: sendButton ? String(sendButton.id || '-') : '-',
+      buttonAria: sendButton ? String(sendButton.getAttribute('aria-label') || '-') : '-',
+      buttonDisabled: sendButton && sendButton.disabled ? 1 : 0,
+    };
+  }
+
+  async function waitUntilPredicate(predicate, timeoutMs, intervalMs, shouldStop) {
+    const startedAt = Date.now();
+    const maxMs = Math.max(0, Number(timeoutMs) || 0);
+    const pollMs = Math.max(50, Number(intervalMs) || 100);
+    const stopFn = typeof shouldStop === 'function' ? shouldStop : () => false;
+
+    while (Date.now() - startedAt < maxMs) {
+      if (stopFn()) {
+        return false;
+      }
+
+      let matched = false;
+      try {
+        matched = !!predicate();
+      } catch (err) {
+        console.error('[ChatGPT toolbox] waitUntilPredicate failed', err);
+      }
+
+      if (matched) {
+        return true;
+      }
+
+      await sleep(pollMs);
+    }
+
+    return false;
   }
 
   function getSendLogContext(extra = {}) {
@@ -5211,8 +6128,14 @@
       return false;
     }
 
+    appendSendLogFields('[COMPOSER][TEXT_FILL_START]', getComposerSendDiagnostics());
     focusComposer(composer);
-    return ComposerApi.setComposerValue(String(text || ''));
+    const ok = ComposerApi.setComposerValue(String(text || ''));
+    appendSendLogFields('[COMPOSER][TEXT_FILL_DONE]', {
+      ...getComposerSendDiagnostics(),
+      ok: ok ? 1 : 0,
+    });
+    return ok;
   }
 
   function getComposerTextFromElement(composer) {
@@ -5252,9 +6175,79 @@
   }
 
   function findChatGPTSendButton() {
-    return typeof ComposerApi.findSendButton === 'function'
-      ? ComposerApi.findSendButton({ silent: true })
-      : null;
+    const prioritySelectors = [
+      '#composer-submit-button',
+      'button[data-testid="send-button"]',
+      'main button[data-testid="send-button"]',
+      'form button#composer-submit-button',
+    ];
+
+    for (let i = 0; i < prioritySelectors.length; i += 1) {
+      const sel = prioritySelectors[i];
+      const candidate = document.querySelector(sel);
+
+      if (!(candidate instanceof HTMLElement)) {
+        continue;
+      }
+
+      if (isVoiceComposerButton(candidate)) {
+        const button = resolveComposerButtonElement(candidate);
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_or_dictation selector=${sel} `
+          + `id=${button ? String(button.id || '-') : '-'} class=${button ? String(button.className || '-') : '-'} `
+          + `aria=${button ? String(button.getAttribute('aria-label') || '-') : '-'} `
+          + `disabled=${button && button.disabled ? 1 : 0}`,
+        );
+        continue;
+      }
+
+      if (
+        typeof ComposerApi.isRealSendButton === 'function'
+        && ComposerApi.isRealSendButton(candidate)
+      ) {
+        const button = resolveComposerButtonElement(candidate);
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_FOUND] selector=${sel} `
+          + `id=${button ? String(button.id || '-') : '-'} class=${button ? String(button.className || '-') : '-'} `
+          + `aria=${button ? String(button.getAttribute('aria-label') || '-') : '-'} `
+          + `testid=${button ? String(button.getAttribute('data-testid') || '-') : '-'} `
+          + `disabled=${button && button.disabled ? 1 : 0}`,
+        );
+        return button;
+      }
+    }
+
+    const buttons = Array.from(document.querySelectorAll('button'));
+
+    for (const button of buttons) {
+      if (!(button instanceof HTMLButtonElement) || isInsideToolbox(button)) {
+        continue;
+      }
+
+      if (isVoiceComposerButton(button)) {
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_REJECT] reason=voice_or_dictation selector=button-scan `
+          + `id=${String(button.id || '-')} class=${String(button.className || '-')} `
+          + `aria=${String(button.getAttribute('aria-label') || '-')} disabled=${button.disabled ? 1 : 0}`,
+        );
+        continue;
+      }
+
+      if (
+        typeof ComposerApi.isRealSendButton === 'function'
+        && ComposerApi.isRealSendButton(button)
+      ) {
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_READY] selector=button-scan `
+          + `id=${String(button.id || '-')} class=${String(button.className || '-')} `
+          + `aria=${String(button.getAttribute('aria-label') || '-')} disabled=${button.disabled ? 1 : 0}`,
+        );
+        return button;
+      }
+    }
+
+    ToolboxShell.appendLog('[COMPOSER][SEND_BUTTON_NOT_FOUND] reason=no-real-submit-button');
+    return null;
   }
 
   function findChatGPTStopButton() {
@@ -5406,27 +6399,59 @@
     };
   }
 
-  function clickSendButton(button, source = 'stable-send') {
-    if (!(button instanceof HTMLButtonElement)) {
+  function invokeComposerSubmitClick(sendButton) {
+    if (typeof clickSendButton === 'function') {
+      return clickSendButton(sendButton, 'composer-api');
+    }
+
+    if (!(sendButton instanceof HTMLButtonElement)) {
       return { ok: false, reason: 'invalid_send_button' };
     }
 
-    if (isVoiceComposerButton(button)) {
+    try {
+      sendButton.focus();
+      HTMLButtonElement.prototype.click.call(sendButton);
+      return { ok: true, reason: 'clicked' };
+    } catch (err) {
+      const errText = err && err.message ? err.message : String(err);
+      console.error('[ChatGPT toolbox] invokeComposerSubmitClick failed', {
+        error_type: err && err.name ? err.name : 'Error',
+        error: errText,
+        stack: err && err.stack ? err.stack : '',
+      });
+      return { ok: false, reason: 'send_click_exception', error: errText };
+    }
+  }
+
+  function clickSendButton(button, source = 'stable-send') {
+    const sendButton = resolveComposerButtonElement(button);
+
+    if (!(sendButton instanceof HTMLButtonElement)) {
+      return { ok: false, reason: 'invalid_send_button' };
+    }
+
+    if (isVoiceComposerButton(sendButton)) {
       appendSendLogFields('[SEND][CLICK_REJECT]', {
         reason: 'voice_button',
         source,
-        selector: describeComposerSendButtonForLog(button).selector || '-',
+        selector: describeComposerSendButtonForLog(sendButton).selector || '-',
       });
-      return { ok: false, reason: 'voice_button' };
+      return { ok: false, reason: 'voice_button_only', retryable: true };
     }
 
-    if (isSendButtonDisabled(button)) {
+    if (isSendButtonDisabled(sendButton)) {
       return { ok: false, reason: 'send_button_disabled' };
     }
 
     try {
-      button.focus();
-      button.click();
+      const diag = getComposerSendDiagnostics();
+      appendSendLogFields('[SEND][CLICK_SUBMIT_BUTTON]', {
+        selector: sendButton.id === 'composer-submit-button' ? '#composer-submit-button' : describeComposerSendButtonForLog(sendButton).selector,
+        ...diag,
+        source,
+      });
+      sendButton.focus();
+      sendButton.click();
       return { ok: true, reason: 'clicked' };
     } catch (err) {
       const errText = err && err.message ? err.message : String(err);
@@ -5470,11 +6495,12 @@
         response_state_reason: scan.responseStateReason || '-',
       });
 
-      if (scan.button && !scan.disabled) {
+      if (scan.button && !scan.disabled && hasRealComposerText()) {
         appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
           elapsed,
           button_selector: scan.buttonSelector || '-',
           source,
+          ...getComposerSendDiagnostics(),
         });
         const clicked = clickSendButton(scan.button, `${source}:attach_wait`);
         if (clicked.ok) {
@@ -5492,6 +6518,11 @@
   }
 
   function dispatchEnterSend(composer, method) {
+    // ChatGPT composer is React/contenteditable based.
+    // Synthetic KeyboardEvent('Enter') may be ignored because event.isTrusted=false,
+    // focus may not be inside the real editor, IME composition may consume Enter,
+    // and Enter can be interpreted as newline depending on frontend state.
+    // Therefore Enter is only a fallback. The primary path is clicking #composer-submit-button.
     focusComposer(composer);
 
     if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
@@ -5572,7 +6603,19 @@
           ? 'turn_count_increased'
           : (stopAppearedAfterSend ? 'stop_button_appeared' : (confirmed.reason || 'confirmed'))
       )
-      : (confirmed.reason || 'send_not_confirmed');
+      : 'send_click_not_confirmed';
+
+    appendSendLogFields(ok ? '[SEND][CLICK_CONFIRMED]' : '[SEND][CLICK_NOT_CONFIRMED]', {
+      attempt,
+      ok: ok ? 1 : 0,
+      reason,
+      ...getComposerSendDiagnostics(),
+      composer_cleared: snapshot.inputEmpty ? 1 : 0,
+      stop_button_visible: stopButtonVisible ? 1 : 0,
+      response_state: snapshot.responseState.response_state || '-',
+      turn_count_before: turnCountBefore == null ? '-' : turnCountBefore,
+      turn_count_after: turnCountAfter == null ? '-' : turnCountAfter,
+    });
 
     appendSendLogFields('[SEND][VERIFY]', {
       attempt,
@@ -5588,6 +6631,60 @@
     return { ok, reason, snapshot };
   }
 
+  const STABLE_SEND_RETRYABLE_REASONS = new Set([
+    'composer_text_not_ready',
+    'composer_text_not_synced',
+    'send_button_not_ready_after_text',
+    'send_button_not_found',
+    'send_button_disabled',
+    'button_disabled',
+    'send_button_wait_timeout',
+    'voice_button_only',
+    'attachment_ready_but_send_button_missing',
+    'attachment_ready_waiting_text',
+    'payload_ready_but_send_button_missing',
+    'composer_text_lost',
+    'composer_text_lost_after_attachment',
+    'composer_text_lost_after_rewrite',
+    'attachment_not_ready',
+    'attachment_processing',
+    'send_click_not_confirmed',
+    'send_not_confirmed',
+    'input_not_cleared',
+    'no_user_bubble_after_click',
+    'no_send_progress_after_actions',
+    'no_progress',
+    'composer_not_ready',
+    'assistant_busy',
+    'send_button_not_found_enter_fallback_failed',
+    'enter_fallback_failed',
+    'stable_send_timeout',
+  ]);
+
+  function applyStableSendRetryableFlags(result) {
+    if (!result || typeof result !== 'object') {
+      return result;
+    }
+
+    let reason = String(result.reason || '').trim();
+    if (reason === 'voice_button') {
+      reason = 'voice_button_only';
+      result.reason = reason;
+    }
+
+    if (
+      STABLE_SEND_RETRYABLE_REASONS.has(reason)
+      || reason.startsWith('send_not_confirmed:')
+    ) {
+      result.retryable = true;
+      if (result.wait !== false) {
+        result.wait = true;
+      }
+    }
+
+    return result;
+  }
+
   async function stableSendMessage(options = {}) {
     const text = String(options.text || '').trim();
     const sendExistingComposer = options.sendExistingComposer === true;
@@ -5601,6 +6698,7 @@
     );
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
     const blockWhenResponding = options.blockWhenResponding !== false;
+    const allowEnterFallbackWhenNoButton = options.allowEnterFallbackWhenNoButton === true;
     const source = String(options.source || 'stable-send');
 
     const result = {
@@ -5636,7 +6734,33 @@
         attempts: 0,
         last_error: responseState.response_state_reason || 'assistant_busy',
       });
-      return result;
+      return applyStableSendRetryableFlags(result);
+    }
+
+    const precheckReason = String(responseState.response_state_reason || '').trim();
+    if (precheckReason === 'attachment_ready_waiting_text') {
+      result.reason = 'composer_text_not_ready';
+      appendSendLogFields('[SEND][FAILED]', {
+        reason: result.reason,
+        attempts: 0,
+        last_error: precheckReason,
+      });
+      return applyStableSendRetryableFlags(result);
+    }
+    if (
+      precheckReason === 'payload_ready_but_send_button_missing'
+      || precheckReason === 'attachment_ready_but_send_button_missing'
+      || precheckReason === 'attachment_processing'
+    ) {
+      result.reason = precheckReason === 'attachment_processing'
+        ? 'payload_ready_but_send_button_missing'
+        : precheckReason;
+      appendSendLogFields('[SEND][FAILED]', {
+        reason: result.reason,
+        attempts: 0,
+        last_error: precheckReason,
+      });
+      return applyStableSendRetryableFlags(result);
     }
 
     if (homeReadyToSend) {
@@ -5747,37 +6871,166 @@
         focusComposer(composer);
         await sleep(80);
 
+        const mustHaveText = !!text || sendExistingComposer;
+
         if (text && !sendExistingComposer) {
           setComposerText(composer, text);
           await sleep(80);
         }
 
+        if (mustHaveText) {
+          const textReady = await waitUntilPredicate(
+            () => hasRealComposerText(),
+            SEND_TEXT_BUTTON_WAIT_MS,
+            SEND_TEXT_BUTTON_POLL_MS,
+            shouldStop,
+          );
+
+          if (!textReady) {
+            result.reason = 'composer_text_not_ready';
+            appendSendLogFields('[SEND][ATTEMPT]', {
+              attempt,
+              max_attempts: maxAttempts,
+              reason: result.reason,
+              ...getComposerSendDiagnostics(),
+              composer_type: composerType,
+            });
+            await sleep(intervalMs);
+            continue;
+          }
+
+          appendSendLogFields('[COMPOSER][TEXT_READY]', getComposerSendDiagnostics());
+        }
+
         const currentText = getComposerTextFromElement(composer);
-        if (!String(currentText || '').trim() && !hasComposerAttachment()) {
-          result.reason = 'composer_empty';
+        const currentTextTrimmed = String(currentText || '').trim();
+
+        if (!currentTextTrimmed) {
+          result.reason = hasComposerAttachment()
+            ? 'composer_text_not_ready'
+            : 'composer_empty';
           appendSendLogFields('[SEND][ATTEMPT]', {
             attempt,
             max_attempts: maxAttempts,
             reason: result.reason,
-            button_selector: '-',
+            ...getComposerSendDiagnostics(),
             composer_type: composerType,
           });
           await sleep(intervalMs);
           continue;
         }
 
-        sendButton = findChatGPTSendButton();
-        sendButtonDisabled = isSendButtonDisabled(sendButton);
+        appendSendLogFields('[COMPOSER][SEND_BUTTON_WAIT]', getComposerSendDiagnostics());
+        const buttonReady = await waitUntilPredicate(
+          () => hasRealSubmitButton(),
+          SEND_TEXT_BUTTON_WAIT_MS,
+          SEND_TEXT_BUTTON_POLL_MS,
+          shouldStop,
+        );
 
-        if (!(sendButton instanceof HTMLButtonElement)) {
-          result.reason = 'send_button_not_found';
+        if (!buttonReady) {
+          result.reason = hasVoiceComposerButtonOnly()
+            ? 'voice_button_only'
+            : 'send_button_not_ready_after_text';
+          result.retryable = result.reason === 'voice_button_only';
           appendSendLogFields('[SEND][ATTEMPT]', {
             attempt,
             max_attempts: maxAttempts,
             reason: result.reason,
-            button_selector: '-',
+            ...getComposerSendDiagnostics(),
             composer_type: composerType,
           });
+          await sleep(intervalMs);
+          continue;
+        }
+
+        appendSendLogFields('[COMPOSER][SEND_BUTTON_READY]', getComposerSendDiagnostics());
+
+        sendButton = findChatGPTSendButton();
+        sendButtonDisabled = isSendButtonDisabled(sendButton);
+
+        if (!(sendButton instanceof HTMLButtonElement)) {
+          const hasPayload = !!currentTextTrimmed;
+          const voiceOnly = hasVoiceComposerButtonOnly();
+
+          appendSendLogFields('[SEND][ATTEMPT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: voiceOnly ? 'voice_button_only' : 'send_button_not_found',
+            button_selector: '-',
+            composer_type: composerType,
+            has_payload: hasPayload ? 1 : 0,
+            allow_enter_fallback: allowEnterFallbackWhenNoButton ? 1 : 0,
+          });
+
+          if (voiceOnly) {
+            result.reason = 'voice_button_only';
+            result.retryable = true;
+            await sleep(intervalMs);
+            continue;
+          }
+
+          if (allowEnterFallbackWhenNoButton && hasPayload) {
+            const beforeTextNoButton = getComposerTextFromElement(composer);
+            const beforeStopNoButton = findChatGPTStopButton();
+            const confirmCtxNoButton = buildStableSendConfirmCtx(
+              beforeTextNoButton,
+              beforeStopNoButton,
+            );
+
+            focusComposer(composer);
+
+            appendSendLogFields('[SEND][ENTER_FALLBACK]', {
+              attempt,
+              composer_type: composerType,
+              reason: 'send_button_not_found',
+              mode: 'ctrl_enter',
+            });
+
+            dispatchEnterSend(composer, 'ctrl_enter');
+            result.usedFallbackEnter = true;
+
+            let verifiedNoButtonEnter = await verifySendStarted(confirmCtxNoButton, {
+              shouldStop,
+              attempt,
+            });
+
+            if (!verifiedNoButtonEnter.ok) {
+              appendSendLogFields('[SEND][ENTER_FALLBACK]', {
+                attempt,
+                composer_type: composerType,
+                reason: 'send_button_not_found',
+                mode: 'enter',
+              });
+
+              dispatchEnterSend(composer, 'enter');
+
+              verifiedNoButtonEnter = await verifySendStarted(confirmCtxNoButton, {
+                shouldStop,
+                attempt,
+              });
+            }
+
+            if (verifiedNoButtonEnter.ok) {
+              result.ok = true;
+              result.reason = 'sent_by_enter_fallback_no_button';
+              ChatInputStateRuntime.waitingForReply = true;
+              return result;
+            }
+
+            result.reason = verifiedNoButtonEnter.reason || 'send_button_not_found_enter_fallback_failed';
+            if (result.reason === 'send_not_confirmed' || result.reason === 'send_click_not_confirmed') {
+              result.reason = 'enter_fallback_failed';
+            }
+
+            appendSendLogFields('[SEND][ENTER_FALLBACK_FAILED]', {
+              attempt,
+              reason: result.reason,
+            });
+          } else {
+            result.reason = 'send_button_not_found';
+          }
+
           await sleep(intervalMs);
           continue;
         }
@@ -5881,17 +7134,35 @@
 
         const clickResult = clickSendButton(sendButton, source);
         if (!clickResult.ok) {
-          result.reason = clickResult.reason || 'send_click_exception';
+          result.reason = (
+            clickResult.reason === 'voice_button'
+            || clickResult.reason === 'voice_button_only'
+          )
+            ? 'voice_button_only'
+            : (clickResult.reason || 'send_click_exception');
+          if (result.reason === 'voice_button_only') {
+            result.retryable = true;
+          }
           await sleep(intervalMs);
           continue;
         }
 
-        const verifiedClick = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+        const verifiedClick = await verifySendStarted(confirmCtx, {
+          shouldStop,
+          attempt,
+          timeoutMs: SEND_STABLE_VERIFY_TIMEOUT_MS,
+        });
         if (verifiedClick.ok) {
           result.ok = true;
           result.reason = 'sent_by_click';
           ChatInputStateRuntime.waitingForReply = true;
           return result;
+        }
+
+        if (mustHaveText) {
+          result.reason = verifiedClick.reason || 'send_click_not_confirmed';
+          await sleep(intervalMs);
+          continue;
         }
 
         focusComposer(composer);
@@ -5903,10 +7174,18 @@
         dispatchEnterSend(composer, 'ctrl_enter');
         result.usedFallbackEnter = true;
 
-        let verifiedEnter = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+        let verifiedEnter = await verifySendStarted(confirmCtx, {
+          shouldStop,
+          attempt,
+          timeoutMs: SEND_STABLE_VERIFY_TIMEOUT_MS,
+        });
         if (!verifiedEnter.ok) {
           dispatchEnterSend(composer, 'enter');
-          verifiedEnter = await verifySendStarted(confirmCtx, { shouldStop, attempt });
+          verifiedEnter = await verifySendStarted(confirmCtx, {
+            shouldStop,
+            attempt,
+            timeoutMs: SEND_STABLE_VERIFY_TIMEOUT_MS,
+          });
         }
 
         if (verifiedEnter.ok) {
@@ -5916,12 +7195,24 @@
           return result;
         }
 
-        result.reason = verifiedEnter.reason || 'send_not_confirmed';
+        result.reason = verifiedEnter.reason || 'send_click_not_confirmed';
         await sleep(intervalMs);
       }
 
       if (!result.reason) {
         result.reason = 'send_not_confirmed';
+      }
+
+      if (
+        !result.ok
+        && result.attempts >= maxAttempts
+        && (
+          !result.reason
+          || result.reason === 'send_not_confirmed'
+          || result.reason === 'send_click_not_confirmed'
+        )
+      ) {
+        result.reason = 'stable_send_timeout';
       }
 
       if (result.reason === 'send_button_disabled') {
@@ -5963,7 +7254,7 @@
         last_error: result.reason,
       });
 
-      return result;
+      return applyStableSendRetryableFlags(result);
     } catch (err) {
       logSendFlowError('stableSendMessage', err, { source });
       result.reason = 'send_exception';
@@ -5973,7 +7264,7 @@
         attempts: result.attempts,
         last_error: result.error,
       });
-      return result;
+      return applyStableSendRetryableFlags(result);
     } finally {
       ChatInputStateRuntime.sendInProgress = false;
       updateChatInputStateBadge();
@@ -6216,11 +7507,12 @@
         response_state_reason: scan.responseStateReason || '-',
       });
 
-      if (scan.button && !scan.disabled) {
+      if (scan.button && !scan.disabled && hasRealComposerText()) {
         appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
           elapsed,
           button_selector: scan.buttonSelector || '-',
           source: String(options.source || 'stable-send'),
+          ...getComposerSendDiagnostics(),
         });
         const clicked = clickSendButton(scan.button, `${String(options.source || 'stable-send')}:attach_wait`);
         if (clicked.ok) {
@@ -6833,7 +8125,15 @@
   async function waitComposerSendConfirmed(content, timeoutMs = SEND_CONFIRM_DEFAULT_TIMEOUT_MS, options = {}) {
     const startedAt = Date.now();
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
-    const contentText = String(content || '').trim();
+    const signal = options.signal || null;
+    const expectedRunId = options.runId != null ? Number(options.runId) : null;
+    const getCurrentRunId = typeof options.getCurrentRunId === 'function'
+      ? options.getCurrentRunId
+      : null;
+    const confirmSource = String(options.source || '-');
+    const contentText = options.trimContent === true
+      ? String(content || '').trim()
+      : String(content ?? '');
     const contentProbe = contentText.slice(0, 80);
     const attachmentCountBefore = Number(options.attachmentCountBeforeSend || 0);
     const conversationIdBefore = String(options.conversationIdBefore || parseConversationIdFromPath(location.pathname || '') || '');
@@ -6858,6 +8158,21 @@
     let effectiveTimeoutMs = Math.max(Number(timeoutMs) || 0, SEND_CONFIRM_DEFAULT_TIMEOUT_MS);
 
     while (Date.now() - startedAt < effectiveTimeoutMs) {
+      if (signal && signal.aborted) {
+        appendSendLog(`[COMPOSER][SEND_CONFIRM_ABORTED] source=${confirmSource}`);
+        return { ok: false, reason: 'aborted' };
+      }
+
+      if (expectedRunId != null && getCurrentRunId) {
+        const currentRunId = Number(getCurrentRunId());
+        if (Number.isFinite(currentRunId) && currentRunId !== expectedRunId) {
+          appendSendLog(
+            `[COMPOSER][SEND_CONFIRM_STALE] source=${confirmSource} expected=${expectedRunId} current=${currentRunId}`,
+          );
+          return { ok: false, reason: 'stale-run' };
+        }
+      }
+
       if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
         return { ok: false, reason: 'page_navigating' };
       }
@@ -6913,6 +8228,9 @@
 
       const confirmed = evaluateSendConfirmed(snapshot, ctx);
       if (confirmed.ok) {
+        appendSendLog(
+          `[COMPOSER][SEND_CONFIRM_OK] reason=${confirmed.reason || 'confirmed'} elapsedMs=${Date.now() - startedAt}`,
+        );
         return { ok: true, reason: confirmed.reason };
       }
 
@@ -6924,22 +8242,29 @@
 
     const finalConfirmed = evaluateSendConfirmed(finalSnapshot, ctx);
     if (finalConfirmed.ok) {
+      appendSendLog(
+        `[COMPOSER][SEND_CONFIRM_OK] reason=${finalConfirmed.reason || 'confirmed'} elapsedMs=${Date.now() - startedAt}`,
+      );
       return { ok: true, reason: finalConfirmed.reason };
     }
 
     const failReason = pickSendNotConfirmedReason(finalSnapshot, ctx);
     logSendConfirmFailed(finalSnapshot, ctx, failReason);
+    appendSendLog(
+      `[COMPOSER][SEND_CONFIRM_TIMEOUT] reason=${failReason || 'send-confirm-timeout'} elapsedMs=${Date.now() - startedAt}`,
+    );
 
     return {
       ok: false,
-      reason: failReason,
+      reason: failReason || 'send-confirm-timeout',
       snapshot: finalSnapshot,
     };
   }
 
   async function sendContentViaComposer(options = {}) {
     const source = String(options.source || 'unknown');
-    const content = String(options.content || '').trim();
+    const rawContent = String(options.content ?? '');
+    const content = options.trimContent === true ? rawContent.trim() : rawContent;
     const sendExistingComposer = options.sendExistingComposer === true;
     const allowReplaceDraft = options.allowReplaceDraft === true;
     const waitUntilSendable = options.waitUntilSendable !== false;
@@ -6959,7 +8284,7 @@
       return { ok: false, reason: 'cancelled', source };
     }
 
-    if (!sendExistingComposer && !content) {
+    if (!sendExistingComposer && !content.trim()) {
       updateChatInputStateBadge();
       return { ok: false, reason: 'empty_content', source };
     }
@@ -7137,15 +8462,18 @@
     ChatInputStateRuntime.sendInProgress = true;
     updateChatInputStateBadge();
 
+    const confirmContentText = options.trimContent === true
+      ? String(composerTextBeforeSend || '').trim()
+      : String(composerTextBeforeSend ?? '');
     const confirmCtx = {
-      contentText: String(composerTextBeforeSend || '').trim(),
-      contentProbe: String(composerTextBeforeSend || '').trim().slice(0, 80),
+      contentText: confirmContentText,
+      contentProbe: confirmContentText.slice(0, 80),
       attachmentCountBeforeSend,
       beforeLatestKey,
       conversationIdBefore,
       urlBefore,
       sendButtonEnabledBefore,
-      hadTextPayload: !!String(composerTextBeforeSend || '').trim() || attachmentCountBeforeSend > 0,
+      hadTextPayload: !!confirmContentText || attachmentCountBeforeSend > 0,
     };
 
     const startedAt = Date.now();
@@ -7175,11 +8503,16 @@
         confirmRemainingMs,
         {
           shouldStop,
+          signal: options.signal || null,
+          runId: options.runId,
+          getCurrentRunId: options.getCurrentRunId,
+          source,
           beforeLatestKey,
           attachmentCountBeforeSend,
           conversationIdBefore,
           urlBefore,
           sendButtonEnabledBefore,
+          trimContent: options.trimContent === true,
         },
       );
 
@@ -7244,207 +8577,6 @@
     return false;
   }
 
-  async function clickRealComposerSendButton(source) {
-    const sourceTag = String(source || 'unknown');
-    const scan = typeof findComposerSendButtonDetailed === 'function'
-      ? findComposerSendButtonDetailed()
-      : null;
-
-    const button = scan && scan.button
-      ? scan.button
-      : (typeof ComposerApi.findSendButton === 'function'
-        ? ComposerApi.findSendButton({ silent: true })
-        : null);
-
-    if (!button) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_BUTTON_MISS] source=${sourceTag}`);
-      return { ok: false, reason: 'send_button_not_found' };
-    }
-
-    const info = describeComposerSendButtonForLog(button);
-    appendAutoQueueLog(
-      `[AUTO_QUEUE][SEND_BUTTON_FOUND] source=${sourceTag} selector=${info.selector || '-'} `
-      + `aria=${info.aria || '-'} testid=${info.testid || '-'} disabled=${info.disabled ? 1 : 0}`,
-    );
-
-    if (isVoiceComposerButton(button)) {
-      appendAutoQueueLog(
-        `[AUTO_QUEUE][SEND_BUTTON_REJECT] source=${sourceTag} reason=voice_button `
-        + `aria=${info.aria || '-'} testid=${info.testid || '-'}`,
-      );
-      return { ok: false, reason: 'voice_button' };
-    }
-
-    if (isSendButtonDisabled(button)) {
-      appendAutoQueueLog(
-        `[AUTO_QUEUE][SEND_BUTTON_DISABLED] source=${sourceTag} aria=${info.aria || '-'} testid=${info.testid || '-'}`,
-      );
-      return { ok: false, reason: 'send_button_disabled' };
-    }
-
-    const clickResult = clickSendButton(button, sourceTag);
-    if (clickResult.ok) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_BUTTON_CLICK] source=${sourceTag}`);
-    }
-    return clickResult;
-  }
-
-  // TODO(cleanup-observe): 当前静态扫描无调用，待确认是否接入稳定发送链路或删除。
-  async function sendTextThroughComposer(text, source) {
-    const cleanText = String(text || '').trim();
-    const sourceTag = String(source || 'unknown');
-
-    if (!cleanText) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_SKIP] reason=empty_text source=${sourceTag}`);
-      return { ok: false, reason: 'empty_text', source: sourceTag };
-    }
-
-    appendAutoQueueLog(`[AUTO_QUEUE][SEND_START] source=${sourceTag} text_len=${cleanText.length}`);
-
-    const ready = await waitUntilComposerReady({
-      timeoutMs: 10000,
-      intervalMs: 200,
-      source: sourceTag,
-    });
-    if (!ready) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_not_ready`);
-      return { ok: false, reason: 'composer_not_ready', source: sourceTag };
-    }
-
-    const responseState = typeof detectComposerResponseState === 'function'
-      ? detectComposerResponseState()
-      : {};
-    if (responseState.is_responding) {
-      appendAutoQueueLog('[AUTO_QUEUE][BATCH_INITIAL_WAIT_RESPONDING]');
-      return { ok: false, reason: 'assistant_busy', wait: true, source: sourceTag };
-    }
-
-    const composer = typeof ComposerApi.getComposer === 'function'
-      ? ComposerApi.getComposer()
-      : null;
-    if (!composer) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_not_found`);
-      return { ok: false, reason: 'composer_not_found', source: sourceTag };
-    }
-
-    const okSet = ComposerApi.setComposerValue(cleanText);
-    if (!okSet) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_set_failed`);
-      return { ok: false, reason: 'composer_set_failed', source: sourceTag };
-    }
-
-    appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_TEXT_SET] source=${sourceTag} text_len=${cleanText.length}`);
-
-    const textSynced = typeof ComposerApi.waitForComposerTextSynced === 'function'
-      ? await ComposerApi.waitForComposerTextSynced(cleanText, 5000, {})
-      : { ok: false, reason: 'composer_text_sync_unavailable' };
-
-    if (!textSynced.ok) {
-      appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=composer_text_not_synced`);
-      return { ok: false, reason: 'composer_text_not_synced', source: sourceTag };
-    }
-
-    appendAutoQueueLog(`[AUTO_QUEUE][COMPOSER_TEXT_SYNCED] source=${sourceTag} text_len=${cleanText.length}`);
-
-    if (typeof sendContentViaComposer === 'function') {
-      const viaComposer = await sendContentViaComposer({
-        source: sourceTag,
-        sendExistingComposer: true,
-        allowReplaceDraft: true,
-        waitUntilSendable: true,
-        timeoutMs: 60000,
-        blockWhenResponding: true,
-      });
-
-      if (viaComposer.ok) {
-        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=sendContentViaComposer`);
-        return {
-          ok: true,
-          method: 'sendContentViaComposer',
-          reason: viaComposer.reason,
-          source: sourceTag,
-        };
-      }
-
-      appendAutoQueueLog(
-        `[AUTO_QUEUE][SEND_STABLE_FAILED] source=${sourceTag} reason=${viaComposer.reason || 'unknown'}`,
-      );
-    }
-
-    if (typeof stableSendMessage === 'function') {
-      const stableResult = await stableSendMessage({
-        source: sourceTag,
-        text: '',
-        sendExistingComposer: true,
-        blockWhenResponding: true,
-        maxAttempts: 8,
-      });
-
-      if (stableResult.ok) {
-        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=stableSendMessage`);
-        return {
-          ok: true,
-          method: 'stableSendMessage',
-          reason: stableResult.reason,
-          source: sourceTag,
-        };
-      }
-
-      appendAutoQueueLog(
-        `[AUTO_QUEUE][SEND_STABLE_FAILED] source=${sourceTag} reason=${stableResult.reason || 'unknown'}`,
-      );
-    }
-
-    const buttonResult = await clickRealComposerSendButton(sourceTag);
-    if (buttonResult.ok) {
-      const confirmText = typeof ComposerApi.getComposerText === 'function'
-        ? String(ComposerApi.getComposerText() || '').trim()
-        : cleanText;
-      if (typeof waitComposerSendConfirmed === 'function') {
-        const confirmedClick = await waitComposerSendConfirmed(confirmText, 8000, {});
-        if (confirmedClick.ok) {
-          appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=click_button`);
-          return { ok: true, method: 'click_button', source: sourceTag };
-        }
-      } else if (
-        typeof ComposerApi.isAssistantLikelyBusy === 'function'
-        && ComposerApi.isAssistantLikelyBusy()
-      ) {
-        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=click_button`);
-        return { ok: true, method: 'click_button', source: sourceTag };
-      }
-    }
-
-    if (typeof ComposerApi.dispatchComposerSendKeyboard === 'function') {
-      const confirmText = typeof ComposerApi.getComposerText === 'function'
-        ? String(ComposerApi.getComposerText() || '').trim()
-        : cleanText;
-
-      ComposerApi.dispatchComposerSendKeyboard('ctrl_enter');
-      await sleep(250);
-      let confirmedKeyboard = typeof waitComposerSendConfirmed === 'function'
-        ? await waitComposerSendConfirmed(confirmText, 4000, {})
-        : { ok: false };
-      if (!confirmedKeyboard.ok) {
-        ComposerApi.dispatchComposerSendKeyboard('enter');
-        await sleep(250);
-        confirmedKeyboard = typeof waitComposerSendConfirmed === 'function'
-          ? await waitComposerSendConfirmed(confirmText, 4000, {})
-          : { ok: false };
-      }
-      if (
-        confirmedKeyboard.ok
-        || (typeof ComposerApi.isAssistantLikelyBusy === 'function' && ComposerApi.isAssistantLikelyBusy())
-      ) {
-        appendAutoQueueLog(`[AUTO_QUEUE][SEND_DONE] source=${sourceTag} method=keyboard_enter`);
-        return { ok: true, method: 'keyboard_enter', source: sourceTag };
-      }
-    }
-
-    appendAutoQueueLog(`[AUTO_QUEUE][SEND_FAILED] source=${sourceTag} reason=no_send_method`);
-    return { ok: false, reason: 'no_send_method', source: sourceTag };
-  }
-
   function getCopiedTextStats(text) {
     const value = String(text || '');
 
@@ -7459,5 +8591,16 @@
       hanCount,
       lineCount,
     };
+  }
+
+  async function sendTextThroughComposer(text, source = 'unknown') {
+    return sendContentViaComposer({
+      content: String(text ?? ''),
+      source,
+      trimContent: false,
+      waitUntilSendable: true,
+      blockWhenResponding: true,
+      timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 60000,
+    });
   }
 /*__UPLOAD_MODULES__*/

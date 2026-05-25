@@ -1,7 +1,6 @@
 """绑定冲突检测与诊断日志。"""
 
 import time
-import traceback
 
 from app.models import (
     remote_binding_enabled,
@@ -10,155 +9,14 @@ from app.models import (
     BIND_STATE_WAITING_HOME,
     normalize_remote_chatgpt,
 )
+from app.url_utils import parse_conversation_id
 from app.utils.page_status import read_snapshot_identity
-from app.utils.trace_log import kv_line, page_type_label
 
 
 FOCUS_SYNC_HINT_DEFAULT = "当前同步目标：绑定网页；焦点页仅用于辅助判断。"
 
 
 class PageBindingDiagnosticsMixin:
-    def _log_send_bind_check(self, session, action="send", *, trace_id=""):
-        trace_id = (trace_id or self._get_active_send_trace_id() or "").strip()
-        summary = self._tm_summary_for_session(session)
-        status = self._bridge_ui.last_bridge_status or {}
-        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        bind_state = self._remote_bind_state(remote)
-        is_prebound_home = bind_state in (
-            BIND_STATE_PREBOUND_HOME,
-            BIND_STATE_WAITING_HOME,
-            BIND_STATE_WAITING_CONVERSATION_CREATED,
-        )
-        bound = read_snapshot_identity(summary, "bound")
-        bound_client_id = bound["client_id"]
-        bound_conversation_id = bound["conversation_id"]
-        bound_url = self._remote_conversation_url(remote) if remote_binding_enabled(remote) else ""
-        if not bound_url:
-            bound_url = bound["url"]
-        if not bound_url and bound_client_id:
-            bound_info = self._client_info_by_id(bound_client_id, status=status)
-            if bound_info:
-                bound_url = (bound_info.get("url") or bound_info.get("url") or "").strip()
-        bound_page_type = page_type_label(
-            summary.get("bound_page_type") or remote.get("page_type"),
-            bound_conversation_id,
-            bound_url,
-        )
-        bound_online = bool(summary.get("bound_online"))
-        active = read_snapshot_identity(summary, "active")
-        active_client_id = active["client_id"]
-        active_conversation_id = active["conversation_id"]
-        active_info = (
-            self._client_info_by_id(active_client_id, status=status) if active_client_id else None
-        )
-        active_url = ""
-        if active_info:
-            active_url = (active_info.get("url") or "").strip()
-        active_page_type = page_type_label(
-            (active_info or {}).get("page_type"),
-            active_conversation_id,
-            active_url,
-        )
-        bound_is_home = not (bound_conversation_id or "").strip()
-        same_client = bool(
-            bound_client_id and active_client_id and bound_client_id == active_client_id
-        )
-        same_conversation = bool(
-            (bound_conversation_id and active_conversation_id and bound_conversation_id == active_conversation_id)
-            or is_prebound_home
-            or bound_is_home
-        )
-        decision = "allow_send"
-        reason = "bound_matches_active_or_no_mismatch"
-        if not remote_binding_enabled(remote):
-            decision = "warn_only"
-            reason = "session_not_bound_to_remote"
-        elif is_prebound_home:
-            decision = "allow_prebound_home"
-            reason = "prebound_home_can_create_conversation"
-        elif not bound_client_id:
-            decision = "block_send"
-            reason = "no_bound_client"
-        elif not bound_online:
-            decision = "block_send"
-            reason = "bound_page_offline"
-        mismatch = self._detect_bind_mismatch(summary, session=session)
-        if mismatch:
-            if is_prebound_home:
-                decision = "allow_prebound_home"
-                reason = "prebound_home_waiting_conversation_created"
-            elif not bound_online:
-                decision = "block_send"
-                reason = "bound_page_offline"
-            elif bound_client_id and active_client_id and bound_client_id != active_client_id:
-                decision = "warn_only" if bound_online else "block_send"
-                reason = "bound_client_differs_from_active_client"
-            elif (
-                bound_conversation_id
-                and active_conversation_id
-                and bound_conversation_id != active_conversation_id
-            ):
-                decision = "block_send"
-                reason = "bound_conversation_differs_from_active_conversation"
-            else:
-                decision = "warn_only"
-                reason = mismatch.get("reason_code") or "bind_mismatch"
-        self._append_log(
-            "[SEND][BIND_CHECK] "
-            + kv_line(
-                trace_id=trace_id or "-",
-                session_id=(session.session_id if session else "-"),
-                bound_client=bound_client_id or "-",
-                bound_conv=bound_conversation_id or "-",
-                bound_url=bound_url or "-",
-                bound_page_type=bound_page_type,
-                bound_state=bind_state or "-",
-                bound_online="true" if bound_online else "false",
-                active_client=active_client_id or "-",
-                active_conv=active_conversation_id or "-",
-                active_url=active_url or "-",
-                active_page_type=active_page_type,
-                same_client="true" if same_client else "false",
-                same_conversation="true" if same_conversation else "false",
-                is_prebound_home="true" if is_prebound_home else "false",
-                decision=decision,
-                reason=reason,
-                action=action,
-            )
-        )
-        if mismatch:
-            if decision == "block_send":
-                mismatch_action = "block_send"
-            elif decision == "allow_prebound_home":
-                mismatch_action = "allow_prebound_home"
-            elif not bound_online:
-                mismatch_action = "auto_rebind"
-            else:
-                mismatch_action = "warn_only"
-            self._append_log(
-                "[BIND][MISMATCH] "
-                + kv_line(
-                    trace_id=trace_id or "-",
-                    bound_client=read_snapshot_identity(mismatch, "bound")["client_id"] or "-",
-                    bound_conv=read_snapshot_identity(mismatch, "bound")["conversation_id"] or "-",
-                    active_client=read_snapshot_identity(mismatch, "active")["client_id"] or "-",
-                    active_conv=read_snapshot_identity(mismatch, "active")["conversation_id"] or "-",
-                    decision=mismatch_action,
-                    reason=mismatch.get("reason_code") or reason,
-                )
-            )
-    def _log_bind_auto_rebind(self, session, new_client_info, reason=""):
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        old_client_id = (remote.get("client_id") or "").strip() or "-"
-        old_conversation_id = self._remote_conversation_id(remote)
-        new_client_id = (new_client_info.get("client_id") or "").strip() or "-"
-        new_conversation_id = self._client_conversation_id(new_client_info) or "-"
-        self._append_log(
-            "[BIND][AUTO_REBIND] "
-            f"old_client_id={old_client_id} old_conversation_id={old_conversation_id or '-'} "
-            f"new_client_id={new_client_id} new_conversation_id={new_conversation_id} "
-            f"reason={reason or '-'}"
-        )
     def _detect_bind_mismatch(self, summary, session=None):
         summary = summary or {}
         bound = read_snapshot_identity(summary, "bound")
@@ -363,7 +221,7 @@ class PageBindingDiagnosticsMixin:
         manual_hint = self._manual_bound_identity_mismatch_text()
         if manual_hint:
             ui_key = manual_hint
-            if ui_key != getattr(self, "_last_bind_mismatch_ui_key", ""):
+            if ui_key != self._bind_display.last_bind_mismatch_ui_key:
                 self._bind_display.last_bind_mismatch_ui_key = ui_key
             self._refresh_focus_sync_hint(summary)
             return
@@ -387,8 +245,8 @@ class PageBindingDiagnosticsMixin:
             str(mismatch.get("severity") or "-"),
         ])
         now = time.time()
-        last_key = getattr(self, "_last_bind_mismatch_key", "")
-        last_at = getattr(self, "_last_bind_mismatch_at", 0.0)
+        last_key = self._bind_display.last_bind_mismatch_key
+        last_at = self._bind_display.last_bind_mismatch_at
         if mismatch_key != last_key or now - last_at >= 5.0:
             self._bind_display.last_bind_mismatch_key = mismatch_key
             self._bind_display.last_bind_mismatch_at = now
@@ -522,26 +380,4 @@ class PageBindingDiagnosticsMixin:
             f"绑定页：{bound_client} | {bound_inst} | "
             "点击「绑定所选页面」后才会更新绑定关系"
         )
-
-    def _sync_target_unavailable_reason_text(self, reason):
-        reason_map = {
-            "bound_page_offline": "绑定网页离线",
-            "bound_page_not_syncable": "绑定页不可同步",
-            "no_syncable_target": "无可用同步目标",
-            "unbound_fallback_current_page": "未绑定，回退到当前页",
-            "poll_stale": "目标页面轮询已过期，请刷新或激活该 ChatGPT 页面",
-            "stale_hidden": "目标页面处于后台且轮询不新鲜",
-            "input_unavailable": "目标页面当前不可输入（不影响同步读取）",
-            "not_readable": "绑定页当前不可读取快照",
-            "client_mismatch": "绑定 client_id 与当前页面不一致",
-            "conversation_mismatch": "绑定 conversation_id 与当前页面不一致",
-            "not_conversation_page": "目标不是 ChatGPT 对话页",
-            "missing_conversation_id": "目标页面缺少 conversation_id",
-            "prebound_home_not_dialog": "当前是首页预绑定页，需进入 /c/ 对话",
-            "prebound_home_wait_conversation": "等待首页进入具体对话页",
-            "bound_online_not_dialog_ready": "绑定页在线但不是可同步的对话页",
-            "no_dialog_ready_page": "没有可同步的在线对话页",
-        }
-        return reason_map.get((reason or "").strip(), (reason or "未知").strip() or "未知")
-
 

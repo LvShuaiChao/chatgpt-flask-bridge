@@ -18,10 +18,12 @@
         return false;
       }
 
-      return EventBinder.on(el, eventName, handler, {
-        key: key || eventName,
-        moduleName: 'DomUtil',
-      });
+      return EventBinder.on(
+        el,
+        eventName,
+        handler,
+        normalizeBindOptions(eventName, key, 'DomUtil'),
+      );
     }
 
     function bindClick(root, selector, handler, moduleName) {
@@ -158,23 +160,6 @@
       : String(item && item.category ? item.category : '');
     const text = String(category || '').trim();
     return text || fallback;
-  }
-
-  function isEditableElement(target, options = {}) {
-    const el = target instanceof Element ? target : null;
-    if (!el) return false;
-
-    if (options.onlyToolbox === true && !el.closest(`#${APP.rootId}`)) {
-      return false;
-    }
-
-    return !!el.closest([
-      'input',
-      'textarea',
-      'select',
-      '[contenteditable="true"]',
-      '[role="textbox"]',
-    ].join(','));
   }
 
   function qs(sel, root) {
@@ -535,8 +520,44 @@
     return false;
   }
 
+  const SEND_ONLY_BUTTON_IDS = new Set([
+    'cgpt-send-message-once',
+    'cgpt-upload-start-send',
+  ]);
+
+  const UPLOAD_ONLY_NO_WAIT_DANGER_IDS = new Set([
+    'cgpt-upload-start',
+  ]);
+
   function setButtonWaitingDanger(button, enabled, reason) {
     if (!button || isPermanentDangerButton(button)) {
+      return;
+    }
+
+    const buttonId = String(button.id || '').trim();
+    if (UPLOAD_ONLY_NO_WAIT_DANGER_IDS.has(buttonId)) {
+      return;
+    }
+
+    if (SEND_ONLY_BUTTON_IDS.has(buttonId)) {
+      if (enabled) {
+        if (
+          typeof UploadModule !== 'undefined'
+          && typeof UploadModule.setSendButtonState === 'function'
+        ) {
+          UploadModule.setSendButtonState('waiting-reply', reason || 'wait_danger');
+          return;
+        }
+
+        button.classList.add('cgpt-btn-waiting-danger');
+        button.dataset.waitDanger = '1';
+        button.dataset.waitDangerReason = reason || 'waiting';
+        return;
+      }
+
+      button.classList.remove('cgpt-btn-waiting-danger');
+      delete button.dataset.waitDanger;
+      delete button.dataset.waitDangerReason;
       return;
     }
 
@@ -569,6 +590,11 @@
       return;
     }
 
+    const buttonId = String(button.id || '').trim();
+    if (UPLOAD_ONLY_NO_WAIT_DANGER_IDS.has(buttonId)) {
+      return;
+    }
+
     clearButtonLongWaitDangerTimer(button, 'restart');
 
     const waitMs = Number(delayMs || BUTTON_LONG_WAIT_DANGER_MS);
@@ -579,6 +605,15 @@
     }
 
     const timer = window.setTimeout(() => {
+      if (SEND_ONLY_BUTTON_IDS.has(buttonId)) {
+        if (
+          typeof UploadModule !== 'undefined'
+          && typeof UploadModule.setSendButtonState === 'function'
+        ) {
+          UploadModule.setSendButtonState('waiting-reply', reason || 'long_wait');
+        }
+        return;
+      }
       setButtonWaitingDanger(button, true, reason || 'long_wait');
     }, waitMs);
 
@@ -605,8 +640,10 @@
   }
 
   function shouldSkipGlobalShortcutForToolboxTarget(target) {
-    const toolbox = document.querySelector(`#${APP.panelId}`);
-    if (!toolbox || !(target instanceof Element) || !toolbox.contains(target)) {
+    const toolboxRoot = document.querySelector(`#${APP.rootId}`)
+      || document.querySelector(`#${APP.panelId}`);
+
+    if (!toolboxRoot || !(target instanceof Element) || !toolboxRoot.contains(target)) {
       return false;
     }
 
@@ -614,9 +651,28 @@
     const isEditable =
       tagName === 'input' ||
       tagName === 'textarea' ||
-      target.isContentEditable === true;
+      target.isContentEditable === true
+      || !!target.closest('[contenteditable="true"]');
 
     return !isEditable;
+  }
+
+  function shouldSkipGlobalShortcutForToolboxEditing(target) {
+    const toolboxRoot = document.querySelector(`#${APP.rootId}`)
+      || document.querySelector(`#${APP.panelId}`);
+
+    if (!toolboxRoot || !(target instanceof Element) || !toolboxRoot.contains(target)) {
+      return false;
+    }
+
+    const tagName = String(target.tagName || '').toLowerCase();
+    const isEditable =
+      tagName === 'input' ||
+      tagName === 'textarea' ||
+      target.isContentEditable === true
+      || !!target.closest('[contenteditable="true"]');
+
+    return isEditable;
   }
 
   function installToolboxKeyboardGuard(rootEl) {
@@ -1323,6 +1379,24 @@
         return;
       }
 
+      if (type === 'contains') {
+        const parent = qs(rule.parent, root);
+        const childSelector = String(rule.child || '').trim();
+
+        if (parent && childSelector && !parent.querySelector(childSelector)) {
+          const msg = rule.message || 'DOM invalid';
+          console.error(`[ChatGPT toolbox] UploadModule DOM 错误：${msg}`);
+
+          if (rule.invalidLog && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+            ToolboxShell.appendLog(rule.invalidLog);
+          } else if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+            ToolboxShell.appendLog(`[${moduleName}][DOM_INVALID] ${msg}`);
+          }
+        }
+
+        return;
+      }
+
       if (type === 'notContains') {
         const parent = qs(rule.parent, root);
         const child = qs(rule.child, root);
@@ -1514,13 +1588,12 @@
       lastManualUploadGroupId: 'lastManualUploadGroupId',
       uploadBlobPersistEnabled: 'uploadBlobPersistEnabled',
       uploadUseUniqueFileName: 'uploadUseUniqueFileName',
-      uploadUseUniqueFileNameMigrated: 'uploadUseUniqueFileNameMigrated',
-      uploadUseUniqueFileNameDefaultOffMigrated: 'uploadUseUniqueFileNameDefaultOffMigrated',
       uploadUseUniqueFileNameTimestampSeqV1: 'uploadUseUniqueFileNameTimestampSeqV1',
       autoQueueConfig: 'autoQueueConfig',
       promptManagerData: 'promptManagerData',
       promptManagerActiveCategory: 'promptManagerActiveCategory',
       promptManagerActiveSubtab: 'promptManagerActiveSubtab',
+      autoqueueActiveSubtab: 'autoqueueActiveSubtab',
       logPersistEnabled: 'logPersistEnabled',
       logPersistLines: 'logPersistLines',
       compactUiConfig: 'compactUiConfig',
@@ -1531,6 +1604,7 @@
       hiddenTitlePosition: 'hiddenTitlePosition',
       shortcutConfig: 'shortcutConfig',
       beepConfig: 'beepConfig',
+      conversationSnapshotCache: 'conversationSnapshotCacheV1',
     });
 
     function get(key, fallback) {
@@ -1545,20 +1619,7 @@
       writeStorage(key, null);
     }
 
-    if (!get(KEYS.uploadUseUniqueFileNameMigrated, false)) {
-      if (get(KEYS.uploadUseUniqueFileName, null) == null) {
-        set(KEYS.uploadUseUniqueFileName, true);
-      }
-      set(KEYS.uploadUseUniqueFileNameMigrated, true);
-    }
-
-    // 关闭默认「时间戳重命名」：上传保持原文件名；仅在勾选时用内存内短序号后缀。
-    if (!get(KEYS.uploadUseUniqueFileNameDefaultOffMigrated, false)) {
-      set(KEYS.uploadUseUniqueFileName, false);
-      set(KEYS.uploadUseUniqueFileNameDefaultOffMigrated, true);
-    }
-
-    // 上传附件默认：时间戳 + 序号（仅内存 File.name，与导出 zip 内 Export time 对应为上传时刻）。
+    // 上传附件默认：时间戳 + 序号（仅内存 File.name；用户可在设置里关闭）。
     if (!get(KEYS.uploadUseUniqueFileNameTimestampSeqV1, false)) {
       set(KEYS.uploadUseUniqueFileName, true);
       set(KEYS.uploadUseUniqueFileNameTimestampSeqV1, true);
@@ -2148,6 +2209,12 @@
     copyHotkeyContinuePromptText: '',
     copyHotkeyContinueStopSignal: '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
     multiUploadLastSelection: DEFAULT_MULTI_UPLOAD_LAST_SELECTION,
+    uploadQuotaWindowHours: 3,
+    uploadQuotaMaxFiles: 80,
+    messageQuotaWindowHours: 3,
+    messageQuotaMaxMessages: 150,
+    uploadQuotaRecords: [],
+    messageQuotaRecords: [],
   });
 
   function normalizeCompactUiConfig(input) {
@@ -2193,8 +2260,7 @@
       cfg.quickPromptIds = [];
     }
 
-    // 项目文件夹栏为核心功能，忽略历史配置中的隐藏项。
-    cfg.showUploadGroups = true;
+    cfg.showUploadGroups = cfg.showUploadGroups !== false;
 
     function normalizePositiveInt(value, fallback, min, max) {
       const n = Number(value);
@@ -2210,6 +2276,13 @@
     cfg.copyHotkeyLoopHomeNavEnabled = cfg.copyHotkeyLoopHomeNavEnabled !== false;
     cfg.copyHotkeyLoopHomeNavInterval = normalizePositiveInt(cfg.copyHotkeyLoopHomeNavInterval, 20, 1, 999);
     cfg.copyHotkeyLoopHomeNavUrl = (typeof cfg.copyHotkeyLoopHomeNavUrl === 'string' && cfg.copyHotkeyLoopHomeNavUrl.trim().length > 0) ? cfg.copyHotkeyLoopHomeNavUrl.trim() : 'https://chatgpt.com/';
+
+    cfg.uploadQuotaWindowHours = normalizePositiveInt(cfg.uploadQuotaWindowHours, 3, 1, 72);
+    cfg.uploadQuotaMaxFiles = normalizePositiveInt(cfg.uploadQuotaMaxFiles, 80, 1, 10000);
+    cfg.messageQuotaWindowHours = normalizePositiveInt(cfg.messageQuotaWindowHours, 3, 1, 72);
+    cfg.messageQuotaMaxMessages = normalizePositiveInt(cfg.messageQuotaMaxMessages, 150, 1, 10000);
+    cfg.uploadQuotaRecords = Array.isArray(cfg.uploadQuotaRecords) ? cfg.uploadQuotaRecords : [];
+    cfg.messageQuotaRecords = Array.isArray(cfg.messageQuotaRecords) ? cfg.messageQuotaRecords : [];
 
     // 继续指令 & 终止信号（兼容旧版 copyHotkeyLoop* 字段）
     const legacyLoopPrompt = typeof cfg.copyHotkeyLoopContinuePrompt === 'string'
@@ -2253,13 +2326,53 @@
     return cfg;
   }
 
+  function getUploadQuotaLimit() {
+    const cfg = normalizeCompactUiConfig(
+      MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {},
+    );
+    return cfg.uploadQuotaMaxFiles;
+  }
+
+  function getMessageQuotaLimit() {
+    const cfg = normalizeCompactUiConfig(
+      MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {},
+    );
+    return cfg.messageQuotaMaxMessages;
+  }
+
+  function setUploadQuotaLimit(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error('上传额度上限必须是大于 0 的数字');
+    }
+    const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
+    const next = normalizeCompactUiConfig(Object.assign({}, saved, {
+      uploadQuotaMaxFiles: Math.floor(n),
+    }));
+    MemoryManager.set(MemoryManager.KEYS.compactUiConfig, next);
+    return next.uploadQuotaMaxFiles;
+  }
+
+  function setMessageQuotaLimit(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error('消息额度上限必须是大于 0 的数字');
+    }
+    const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
+    const next = normalizeCompactUiConfig(Object.assign({}, saved, {
+      messageQuotaMaxMessages: Math.floor(n),
+    }));
+    MemoryManager.set(MemoryManager.KEYS.compactUiConfig, next);
+    return next.messageQuotaMaxMessages;
+  }
+
   const DEFAULT_SHORTCUT_CONFIG = Object.freeze({
     sendMessage: {
       enabled: true,
-      label: 'Enter',
+      label: 'Ctrl+Enter',
       key: 'Enter',
       code: 'Enter',
-      ctrl: false,
+      ctrl: true,
       alt: false,
       shift: false,
       meta: false,
@@ -2282,6 +2395,16 @@
       ctrl: true,
       alt: false,
       shift: true,
+      meta: false,
+    },
+    copyThenShortcutTargetHotkey: {
+      enabled: true,
+      label: 'Ctrl+Alt+I',
+      key: 'i',
+      code: 'KeyI',
+      ctrl: true,
+      alt: true,
+      shift: false,
       meta: false,
     },
     startUpload: {
@@ -2311,15 +2434,35 @@
     };
   }
 
-  function isLegacyDefaultSendShortcut(item) {
+  function isUnsafePlainEnterSendShortcut(item) {
     if (!item || typeof item !== 'object') return false;
-    return String(item.label || '') === 'Ctrl+Enter'
-      && String(item.key || '').toLowerCase() === 'enter'
-      && String(item.code || '').toLowerCase() === 'enter'
-      && item.ctrl === true
-      && item.alt !== true
-      && item.shift !== true
-      && item.meta !== true;
+
+    const key = String(item.key || '').toLowerCase();
+    const code = String(item.code || '').toLowerCase();
+    const label = String(item.label || '').trim();
+    const isEnterKey = key === 'enter' || code === 'enter' || code === 'numpadenter';
+    const isEnterLabel = label === 'Enter' || label.toLowerCase() === 'enter';
+
+    return (isEnterKey || isEnterLabel)
+      && !item.ctrl
+      && !item.alt
+      && !item.shift
+      && !item.meta;
+  }
+
+  function migrateUnsafePlainEnterSendShortcut(sendMessage) {
+    if (!isUnsafePlainEnterSendShortcut(sendMessage)) {
+      return false;
+    }
+
+    sendMessage.label = 'Ctrl+Enter';
+    sendMessage.key = 'Enter';
+    sendMessage.code = 'Enter';
+    sendMessage.ctrl = true;
+    sendMessage.alt = false;
+    sendMessage.shift = false;
+    sendMessage.meta = false;
+    return true;
   }
 
   function getShortcutConfig() {
@@ -2333,30 +2476,40 @@
       DEFAULT_SHORTCUT_CONFIG.sendMessage,
     );
 
-    if (isLegacyDefaultSendShortcut(raw && raw.sendMessage)) {
-      sendMessage.label = 'Enter';
-      sendMessage.key = 'Enter';
-      sendMessage.code = 'Enter';
-      sendMessage.ctrl = false;
-      sendMessage.alt = false;
-      sendMessage.shift = false;
-      sendMessage.meta = false;
+    const copyLastMessage = cloneShortcutItem(
+      raw && raw.copyLastMessage,
+      DEFAULT_SHORTCUT_CONFIG.copyLastMessage,
+    );
+    const copyAndHotkeyOnce = cloneShortcutItem(
+      raw && raw.copyAndHotkeyOnce,
+      DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
+    );
+    const copyThenShortcutTargetHotkey = cloneShortcutItem(
+      raw && raw.copyThenShortcutTargetHotkey,
+      DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey,
+    );
+    const startUpload = cloneShortcutItem(
+      raw && raw.startUpload,
+      DEFAULT_SHORTCUT_CONFIG.startUpload,
+    );
+
+    const migratedUnsafeEnter = migrateUnsafePlainEnterSendShortcut(sendMessage);
+    if (migratedUnsafeEnter && raw) {
+      saveShortcutConfig({
+        sendMessage,
+        copyLastMessage,
+        copyAndHotkeyOnce,
+        copyThenShortcutTargetHotkey,
+        startUpload,
+      });
     }
 
     return {
       sendMessage,
-      copyLastMessage: cloneShortcutItem(
-        raw && raw.copyLastMessage,
-        DEFAULT_SHORTCUT_CONFIG.copyLastMessage,
-      ),
-      copyAndHotkeyOnce: cloneShortcutItem(
-        raw && raw.copyAndHotkeyOnce,
-        DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
-      ),
-      startUpload: cloneShortcutItem(
-        raw && raw.startUpload,
-        DEFAULT_SHORTCUT_CONFIG.startUpload,
-      ),
+      copyLastMessage,
+      copyAndHotkeyOnce,
+      copyThenShortcutTargetHotkey,
+      startUpload,
     };
   }
 
@@ -2370,8 +2523,15 @@
           config && config.copyAndHotkeyOnce,
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
         ),
+        copyThenShortcutTargetHotkey: cloneShortcutItem(
+          config && config.copyThenShortcutTargetHotkey,
+          DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey,
+        ),
         startUpload: cloneShortcutItem(config && config.startUpload, DEFAULT_SHORTCUT_CONFIG.startUpload),
       },
+    );
+    logShortcutTargetWarnings(
+      getShortcutConfig(),
     );
   }
 
@@ -2385,9 +2545,14 @@
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
         ),
+        copyThenShortcutTargetHotkey: cloneShortcutItem(
+          DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey,
+          DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey,
+        ),
         startUpload: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.startUpload, DEFAULT_SHORTCUT_CONFIG.startUpload),
       },
     );
+    logShortcutTargetWarnings(getShortcutConfig());
   }
 
   function getCopyAndHotkeyShortcutConfig() {
@@ -2398,9 +2563,96 @@
     );
   }
 
+  function getCopyThenShortcutTargetConfig() {
+    const cfg = getShortcutConfig();
+    return cloneShortcutItem(
+      cfg.copyThenShortcutTargetHotkey,
+      DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey,
+    );
+  }
+
+  function shortcutItemToSystemCombo(item) {
+    if (!item || typeof item !== 'object') {
+      return '';
+    }
+
+    if (item.label) {
+      return normalizeShortcutText(item.label);
+    }
+
+    const parts = [];
+    if (item.ctrl) parts.push('ctrl');
+    if (item.alt) parts.push('alt');
+    if (item.shift) parts.push('shift');
+    if (item.meta) parts.push('meta');
+
+    const code = String(item.code || '').toLowerCase();
+    const key = String(item.key || '').toLowerCase();
+    let main = '';
+
+    if (/^key[a-z]$/.test(code)) {
+      main = code.replace(/^key/, '');
+    } else if (/^digit\d$/.test(code)) {
+      main = code.replace(/^digit/, '');
+    } else if (/^f\d{1,2}$/.test(key)) {
+      main = key;
+    } else if (key && !['control', 'shift', 'alt', 'meta'].includes(key)) {
+      main = key.length === 1 ? key : key;
+    }
+
+    if (main) {
+      parts.push(main);
+    }
+
+    return parts.join('+');
+  }
+
+  function getCopyThenShortcutTargetLabel() {
+    const item = getCopyThenShortcutTargetConfig();
+    return String(item.label || '').trim();
+  }
+
+  function getCopyThenShortcutTargetCombo() {
+    const item = getCopyThenShortcutTargetConfig();
+    const combo = shortcutItemToSystemCombo(item);
+    return combo || 'ctrl+alt+i';
+  }
+
+  function logShortcutTargetWarnings(cfg) {
+    const config = cfg && typeof cfg === 'object' ? cfg : getShortcutConfig();
+    const norm = (item) => normalizeShortcutText(item && item.label ? item.label : '');
+    const triggerLabel = norm(config.copyAndHotkeyOnce);
+    const targetLabel = norm(config.copyThenShortcutTargetHotkey);
+    const sendLabel = norm(config.sendMessage);
+
+    if (triggerLabel && targetLabel && triggerLabel === targetLabel) {
+      ToolboxShell.appendLog(
+        '[SHORTCUT][WARN] copyThenHotkeyHotkey equals copyThenShortcutTargetHotkey',
+      );
+    }
+
+    if (sendLabel && targetLabel && sendLabel === targetLabel) {
+      ToolboxShell.appendLog(
+        '[SHORTCUT][WARN] copyThenShortcutTargetHotkey equals sendHotkey',
+      );
+    }
+  }
+
+  function getCopyAndHotkeyButtonLabel() {
+    return '复制+快捷键';
+  }
+
   function getCopyAndHotkeyButtonTitle() {
-    const item = getCopyAndHotkeyShortcutConfig();
-    return `复制+快捷键：${item.label || '未设置'}`;
+    const label = getCopyThenShortcutTargetLabel();
+    if (!label) {
+      return '复制最后回复，然后触发目标快捷键（未设置）';
+    }
+    return `复制最后回复，然后触发 ${label}`;
+  }
+
+  function getCopyHotkeyContinueFlowTitle() {
+    const label = getCopyThenShortcutTargetLabel() || '目标快捷键';
+    return `等待回答完成 -> 检查终止信号 -> 复制最后回复 -> ${label} -> 发送继续指令`;
   }
 
   function isPureModifierKeyEvent(e) {
@@ -2492,9 +2744,46 @@
     };
   }
 
+  function normalizeShortcutText(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/control/g, 'ctrl')
+      .replace(/command/g, 'meta')
+      .replace(/cmd/g, 'meta');
+  }
+
+  function shortcutFromEvent(event) {
+    const e = event || {};
+    const parts = [];
+
+    if (e.ctrlKey) parts.push('ctrl');
+    if (e.metaKey) parts.push('meta');
+    if (e.altKey) parts.push('alt');
+    if (e.shiftKey) parts.push('shift');
+
+    const key = String(e.key || '').toLowerCase();
+
+    if (!['control', 'shift', 'alt', 'meta'].includes(key)) {
+      parts.push(key);
+    }
+
+    return parts.join('+');
+  }
+
+  function isShortcutMatched(event, shortcutText) {
+    return normalizeShortcutText(shortcutFromEvent(event))
+      === normalizeShortcutText(shortcutText);
+  }
+
   function isShortcutEventMatched(e, item) {
     if (!item || item.enabled === false) {
       return false;
+    }
+
+    if (item.label && isShortcutMatched(e, item.label)) {
+      return true;
     }
 
     if (!item.key && !item.code) {
@@ -2514,6 +2803,15 @@
     return eventCode === itemCode || eventKey === itemKey;
   }
 
+  function isShortcutConfigEventMatched(e, item) {
+    if (!item || item.enabled === false) {
+      return false;
+    }
+
+    return isShortcutEventMatched(e, item)
+      || (item.label ? isShortcutMatched(e, item.label) : false);
+  }
+
   function shortcutSignature(item) {
     if (!item || !item.enabled || (!item.key && !item.code)) {
       return '';
@@ -2529,6 +2827,10 @@
   }
 
   function findShortcutConflict(config, currentAction) {
+    if (currentAction === 'copyThenShortcutTargetHotkey') {
+      return '';
+    }
+
     const current = config[currentAction];
     const sig = shortcutSignature(current);
 
@@ -2538,6 +2840,7 @@
 
     return Object.keys(config).find((key) => {
       if (key === currentAction) return false;
+      if (key === 'copyThenShortcutTargetHotkey') return false;
       return shortcutSignature(config[key]) === sig;
     }) || '';
   }
@@ -2546,10 +2849,16 @@
     const scope = rootEl || document;
     const shortcutCfg = getShortcutConfig();
 
-    const uploadStartSendBtn = qs(UploadSelectors.startSendBtn, scope);
+    const uploadStartSendBtn = qs(UploadSelectors.sendMessageBtn, scope);
     if (uploadStartSendBtn) {
-      const waitingSend = uploadStartSendBtn.classList.contains('cgpt-wait-send-cancel')
-        || String(uploadStartSendBtn.textContent || '').trim() === '取消等待';
+      let waitingSend = false;
+      if (typeof UploadModule !== 'undefined') {
+        if (typeof UploadModule.isWaitingSendActive === 'function') {
+          waitingSend = UploadModule.isWaitingSendActive();
+        } else if (typeof UploadModule.syncSendTaskPhase === 'function') {
+          waitingSend = UploadModule.syncSendTaskPhase() === 'waiting_send';
+        }
+      }
 
       uploadStartSendBtn.title = waitingSend
         ? '再次点击可取消等待发送'
@@ -2558,7 +2867,21 @@
 
     const copyContinueBtn = qs(UploadSelectors.copyContinueBtn, scope);
     if (copyContinueBtn) {
-      copyContinueBtn.title = '先复制最后回复，再发送“继续”';
+      let copyTitle = '先复制最后回复，再发送“继续”';
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.syncCopyContinueTaskPhase === 'function'
+      ) {
+        const copyPhase = UploadModule.syncCopyContinueTaskPhase();
+        if (copyPhase === 'waiting_reply') {
+          copyTitle = '正在等待回复，再次点击可取消';
+        } else if (copyPhase === 'copying' || copyPhase === 'sending_continue' || copyPhase === 'running') {
+          copyTitle = '复制并继续任务进行中，再次点击可取消';
+        } else if (copyPhase === 'cancelling') {
+          copyTitle = '正在停止复制并继续';
+        }
+      }
+      copyContinueBtn.title = copyTitle;
     }
 
     const copyLastMessageBtn = qs(UploadSelectors.copyLastMessageBtn, scope) ;
@@ -2568,22 +2891,75 @@
 
     const uploadStartBtn = qs(UploadSelectors.startBtn, scope);
     if (uploadStartBtn) {
-      uploadStartBtn.title = `开始上传快捷键：${shortcutCfg.startUpload.label || '未设置'}`;
+      let uploadTitle = `开始上传快捷键：${shortcutCfg.startUpload.label || '未设置'}`;
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.syncUploadTaskPhase === 'function') {
+        const uploadPhase = UploadModule.syncUploadTaskPhase();
+        if (uploadPhase === 'uploading') {
+          uploadTitle = '上传中，点击取消';
+        } else if (uploadPhase === 'cancelling') {
+          uploadTitle = '正在取消上传';
+        } else if (uploadPhase === 'success') {
+          uploadTitle = '上传完成';
+        }
+      }
+      uploadStartBtn.title = uploadTitle;
     }
 
     const sendHotkeyBtn = qs(UploadSelectors.sendHotkeyBtn, scope);
     if (sendHotkeyBtn) {
-      sendHotkeyBtn.title = `发送 Ctrl+Alt+I：${shortcutCfg.sendMessage.label || '未设置'}`;
+      sendHotkeyBtn.title = `发送 ${DEFAULT_SYSTEM_HOTKEY_LABEL}：${shortcutCfg.sendMessage.label || '未设置'}`;
     }
 
-    const autoContinueBtn = qs(UploadSelectors.autoContinueBtn, scope);
+    const autoContinueBtn = (
+      typeof UploadModule !== 'undefined'
+      && (
+        typeof UploadModule.findAutoContinueButton === 'function'
+        || typeof UploadModule.resolveAutoContinueButton === 'function'
+      )
+    )
+      ? (
+        typeof UploadModule.findAutoContinueButton === 'function'
+          ? UploadModule.findAutoContinueButton(scope)
+          : UploadModule.resolveAutoContinueButton(scope)
+      )
+      : qs(UploadSelectors.autoContinueBtn, scope);
     if (autoContinueBtn) {
-      autoContinueBtn.title = '发送自动指令队列中的下一条（继续一次）';
+      let autoTitle = '复用自动指令队列：循环发送“继续”；再点一次停止';
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getAutoContinueButtonView === 'function'
+        && typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.getState === 'function'
+      ) {
+        const view = UploadModule.getAutoContinueButtonView(AutoQueueModule.getState());
+        if (view && view.title) {
+          autoTitle = view.title;
+        }
+      }
+      autoContinueBtn.title = autoTitle;
     }
 
     const copyHotkeyOnceBtn = qs(UploadSelectors.copyHotkeyOnceBtn, scope);
     if (copyHotkeyOnceBtn) {
       copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
+      copyHotkeyOnceBtn.textContent = getCopyAndHotkeyButtonLabel();
+    }
+
+    const continueFlowTitle = getCopyHotkeyContinueFlowTitle();
+    const copyHotkeyContinueOnceBtn = qs(UploadSelectors.copyHotkeyContinueOnceBtn, scope);
+    if (copyHotkeyContinueOnceBtn) {
+      copyHotkeyContinueOnceBtn.title = continueFlowTitle;
+    }
+
+    const copyHotkeyContinueLoopBtn = qs(UploadSelectors.copyHotkeyContinueLoopBtn, scope);
+    if (copyHotkeyContinueLoopBtn) {
+      copyHotkeyContinueLoopBtn.title = continueFlowTitle;
+    }
+
+    const copyHotkeyUploadVerifyLoopBtn = qs(UploadSelectors.copyHotkeyContinueLoopUploadVerifyBtn, scope);
+    if (copyHotkeyUploadVerifyLoopBtn) {
+      const targetLabel = getCopyThenShortcutTargetLabel() || '目标快捷键';
+      copyHotkeyUploadVerifyLoopBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每 5 轮自动上传一次代码`;
     }
   }
 
@@ -2773,10 +3149,6 @@
 
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
-  }
-
-  function isEditableTarget(target) {
-    return isEditableElement(target);
   }
 
   function isInToolbox(el) {

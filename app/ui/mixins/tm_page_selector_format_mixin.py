@@ -6,7 +6,7 @@ import time
 
 from app.models import normalize_remote_chatgpt
 
-from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
+from app.utils.page_status import get_page_liveness, is_page_online
 
 from PyQt5.QtCore import Qt
 
@@ -37,7 +37,7 @@ class TmPageSelectorFormatMixin:
 
         if not conversation_id and hasattr(self, "_page_chatgpt_conversation_id"):
 
-            conversation_id = ((page.get("conversation_id") or "").strip() or "").strip()
+            conversation_id = (self._page_chatgpt_conversation_id(page) or "").strip()
 
         return conversation_id
 

@@ -8,9 +8,9 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
-from app.constants import ASSISTANT_WAIT_TEXTS, PENDING_ASSISTANT_STATUSES
+from app.constants import USER_SEND_PENDING_STATUSES
 from app.utils.page_command import evaluate_sync_poll_freshness, is_page_polling_active, resolve_page_command_target
 from app.utils.page_snapshot import PageRegistry, binding_from_session
 from app.models import (
@@ -18,7 +18,6 @@ from app.models import (
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_PREBOUND_HOME,
     BIND_STATE_WAITING_CONVERSATION_CREATED,
-    BIND_STATE_WAITING_HOME,
     ChatMessage,
     is_reset_placeholder_error_message,
     normalize_remote_chatgpt,
@@ -26,7 +25,6 @@ from app.models import (
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import (
     conversation_syncable_from,
-    explain_page_decision,
     log_page_decision_fields,
     page_url_from,
     read_snapshot_identity,
@@ -86,40 +84,6 @@ class PageSyncMixin:
             return legacy
         self._pending_web_sync_requests = {}
         return self._pending_web_sync_requests
-    def _build_sync_target_snapshot_from_decision(
-        self,
-        *,
-        session,
-        remote,
-        page,
-        source,
-        block_reason,
-        detail,
-        status,
-        allowed=None,
-    ):
-        del session, page, source, block_reason, detail, allowed
-        status = status or self._bridge_ui.last_bridge_status or {}
-        current = self._current_session() if hasattr(self, "_current_session") else None
-        remote = normalize_remote_chatgpt(
-            remote if isinstance(remote, dict) else (
-                current.remote_chatgpt if current is not None else None
-            )
-        )
-        plan = self.resolve_page_action(
-            current,
-            action="sync_conversation",
-            status=status,
-            user_initiated=False,
-        )
-        short_label = ""
-        if isinstance(plan.page, dict) and hasattr(self, "_short_page_label"):
-            short_label = self._short_page_label(plan.page)
-        return plan.to_sync_target_snapshot(
-            remote=remote,
-            status=status,
-            short_label=short_label,
-        )
 
     def _sync_target_snapshot(self, status=None, bound_info=None, current_info=None):
         del bound_info, current_info
@@ -465,7 +429,7 @@ class PageSyncMixin:
             focused_log_fields,
             last_focus_log,
         ])
-        if relation_key != getattr(self, "_last_page_relation_key", ""):
+        if relation_key != self._bind_display.last_page_relation_key:
             self._bind_display.last_page_relation_key = relation_key
             if hasattr(self, "_is_debug_mode_enabled") and self._is_debug_mode_enabled():
                 self._append_log(
@@ -2216,40 +2180,6 @@ class PageSyncMixin:
             )
         return ok
 
-    def _build_bound_sync_target_payload(
-        self,
-        item,
-        *,
-        source,
-        log_context,
-        profile,
-        bound_conversation_id="",
-    ):
-        target_client_id = self._tm_client_id(item)
-        target_conversation_id = (
-            self._client_conversation_id(item) or bound_conversation_id or ""
-        )
-        log_context["target_client_id"] = target_client_id or "-"
-        log_context["target_conversation_id"] = target_conversation_id or "-"
-        conversation_syncable = bool(profile.get("sync_ok"))
-        log_context["conversation_syncable"] = conversation_syncable
-        return {
-            "client_id": target_client_id,
-            "conversation_id": target_conversation_id,
-            "page_instance_id": self._tm_page_instance_id(item),
-            "conversation_syncable": conversation_syncable,
-            "url_syncable": bool(profile.get("url_syncable")),
-            "prebound_home": bool(profile.get("prebound_home")),
-            "send_requestable": (profile.get("send_decision") in ("allowed", "queued")),
-            "send_now_available": bool(profile.get("send_now_available")),
-            "send_queueable": bool(profile.get("send_queueable")),
-            "send_decision": (profile.get("send_decision") or "").strip(),
-            "can_accept_input": bool(profile.get("can_accept_input")),
-            "is_responding": bool(profile.get("is_responding")),
-            "source": source,
-            "log_context": log_context,
-        }
-
     def _is_session_sync_running(self, session_id):
         key = self._get_session_sync_key(session_id)
         running = getattr(self, "_sync_inflight_by_session", {})
@@ -2649,21 +2579,6 @@ class PageSyncMixin:
         value = re.sub(r"[ \t]{2,}", " ", value)
         value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip()
-    def _is_protected_local_message(self, message):
-        from app.models import is_waiting_placeholder_message
-
-        if message.role == "system":
-            return True
-        if message.role == "error":
-            return True
-        if message.role != "assistant":
-            return False
-        if is_waiting_placeholder_message(message):
-            return True
-        status = (message.ui_status or "").strip()
-        if status in ("发送失败", "读取失败", "空回复") or "失败" in status:
-            return True
-        return False
     def _refresh_local_conversation_after_sync(
         self, session_id, *, force_bottom=True, reason="sync"
     ):
@@ -2732,7 +2647,7 @@ class PageSyncMixin:
 
             role = (message.role or "").strip()
             status = (message.ui_status or "").strip()
-            if role == "user" and status in PENDING_ASSISTANT_STATUSES:
+            if role == "user" and status in USER_SEND_PENDING_STATUSES:
                 message.ui_status = "已同步"
 
             kept.append(message)
@@ -2930,72 +2845,6 @@ class PageSyncMixin:
             self._update_upload_action_buttons_state()
         return True, summary
 
-
-    def _check_web_sync_timeout(self, request_id):
-        request_id = (request_id or "").strip()
-        if not request_id:
-            return
-        pending = getattr(self._web_sync, 'pending_requests', {}).get(request_id)
-        if not pending:
-            return
-        if pending.get("timeout_phase") == "slow_waiting":
-            return
-        retry_done = getattr(self._web_sync, 'timeout_retry_done', None)
-        if retry_done is None:
-            retry_done = set()
-            self._web_sync.timeout_retry_done = retry_done
-        old_client_id = (pending.get("client_id") or "").strip()
-        conversation_id = (pending.get("conversation_id") or "").strip()
-        session_id = (pending.get("session_id") or "").strip()
-        session = self._get_session_by_id(session_id) if session_id else None
-
-        if request_id not in retry_done and session is not None and conversation_id:
-            retry_done.add(request_id)
-            self._append_log(
-                "[WEB_SYNC][TIMEOUT_RETRY] "
-                f"request_id={request_id} "
-                f"client_id={old_client_id or '-'} "
-                f"conversation_id={conversation_id or '-'} "
-                f"reason=retry_same_binding_no_relink",
-                echo=True,
-            )
-            request_reason = (pending.get("request_reason") or "manual_button").strip()
-            self._web_sync.pending_requests.pop(request_id, None)
-            message_id = (pending.get("message_id") or "").strip()
-            if message_id:
-                getattr(self._page_cmd, 'pending_sync_requests', {}).pop(message_id, None)
-            self._clear_session_sync_running(
-                session_id, request_id, reason="timeout_retry"
-            )
-            self.request_sync_conversation(
-                session,
-                reason=request_reason,
-                delay_ms=300,
-            )
-            return
-
-        pending["timeout_phase"] = "slow_waiting"
-        pending["slow_wait_at"] = time.time()
-        sync_state = getattr(self, "_sync_progress_state", {}) or {}
-        if sync_state.get("request_id") == request_id:
-            sync_state["slow_waiting"] = True
-            sync_state["running"] = True
-            self._sync_progress_state = sync_state
-        self._append_log(
-            "[WEB_SYNC][SLOW_WAIT] "
-            f"request_id={request_id} "
-            f"client_id={old_client_id or '-'} "
-            f"conversation_id={conversation_id or '-'} "
-            f"elapsed_sec=20",
-            echo=True,
-        )
-        self._update_sync_progress(
-            session_id=session_id,
-            request_id=request_id,
-            text="网页响应较慢，继续等待返回对话快照",
-        )
-        self._schedule_sync_timeout(request_id, phase="hard", delay_ms=40000)
-
     def _check_web_sync_hard_timeout(self, request_id):
         request_id = (request_id or "").strip()
         if not request_id:
@@ -3058,13 +2907,6 @@ class PageSyncMixin:
             success=False,
         )
         self._log_sync_failed_after_clear(session_id, "hard_timeout")
-
-
-    def _schedule_auto_sync_conversation(self, session, request_reason="auto"):
-        delay = 800 if request_reason == "auto_after_reply" else 0
-        self.request_sync_conversation(
-            session, reason=request_reason, delay_ms=delay
-        )
 
     def _get_session_sync_key(self, session_id):
         return str(session_id or "").strip()

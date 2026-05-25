@@ -549,7 +549,6 @@ class CursorBridgeMixin:
 
 
 
-        self._last_cursor_bridge_status = status
         self._set_cursor_bridge_status_badge(text, level, tooltip)
         if hasattr(self, "_update_task_queue_card"):
             self._update_task_queue_card()
@@ -701,18 +700,6 @@ class CursorBridgeMixin:
             self._on_send_last_message_to_cursor_clicked,
             tag="send_last_to_cursor_btn",
         )
-
-    # TODO(cleanup-observe): 当前静态扫描无调用（UI 未绑定此方法），待确认是否增加「发送输入框给 Cursor」按钮或删除。
-    def _on_send_to_cursor_clicked(self):
-        """ChatGPT -> Cursor Bridge：将输入框原文发送到 Cursor 任务队列。"""
-        message_edit = getattr(self, "message_edit", None)
-        if message_edit is None:
-            self._set_cursor_feedback(
-                log_line="[CURSOR_BRIDGE][SEND_TASK_FAILED] reason=no_message_edit",
-                system_message="未找到输入框，无法发送到 Cursor。",
-            )
-            return
-        self._send_raw_content_to_cursor(message_edit.toPlainText())
 
     def _on_send_last_message_to_cursor_clicked(self):
         """将当前会话最后一条 ChatGPT 回复发送到 Cursor 任务队列。"""

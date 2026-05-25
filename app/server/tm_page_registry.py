@@ -1,7 +1,6 @@
 """Tampermonkey client/page registry."""
 from __future__ import annotations
 
-import time
 import traceback
 from urllib.parse import urlparse
 
@@ -9,7 +8,6 @@ from app.utils.page_status import (
     page_registry_key as _psk,
     evaluate_page_capability,
     explain_page_decision,
-    get_page_liveness,
     is_page_online,
     is_page_url_syncable,
     page_url_from,
@@ -18,12 +16,10 @@ from app.utils.tm_activity import classify_tm_client_activity, compute_tm_activi
 from app.server import state as st
 from app.server.runtime_state import (
     _client_online,
-    _format_time,
     _is_bridge_debug_enabled,
     _log,
     _normalize_chatgpt_url_for_compare,
     _now,
-    _notify_status,
     _safe_int_field,
     _tm_seen_float,
     is_debug_mode,

@@ -21,6 +21,19 @@ from app.utils.bridge_payload import (
 from app.utils.legacy_cleanup import assert_no_legacy_fields
 from app.utils.page_status import page_url_from
 
+# Poll 定向投递：必须带 target_client_id / target_conversation_id（sync_conversation 除外）
+STRICT_TARGET_CONTROL_COMMANDS = frozenset({
+    "cancel_job",
+    "cancel_run",
+    "stop_auto_queue",
+    "resume_auto_queue",
+    "clear_pending",
+    "switch_conversation",
+    "sync_conversation",
+    "start_upload",
+})
+
+
 def _queue_control_message(command, *, log_label="", **extra):
     msg = _make_command_message(command, **extra)
     assert_no_legacy_fields(msg, owner="server._queue_control_message")
