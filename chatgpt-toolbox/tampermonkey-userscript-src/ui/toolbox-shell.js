@@ -1857,7 +1857,7 @@
           border-color: #9ca3af !important;
           color: #ffffff !important;
           cursor: not-allowed;
-          opacity: 0.85;
+          opacity: 1 !important;
         }
 
         .cgpt-btn.cgpt-task-running-indicator {
@@ -1963,12 +1963,12 @@
         }
 
         .cgpt-btn.purple:disabled {
-          opacity: 0.55;
+          opacity: 1 !important;
           cursor: not-allowed;
         }
 
         .cgpt-btn.cyan:disabled {
-          opacity: 0.55;
+          opacity: 1 !important;
           cursor: not-allowed;
         }
 
@@ -1998,7 +1998,7 @@
         }
 
         #cgpt-upload-start:disabled {
-          opacity: 0.55;
+          opacity: 1 !important;
           cursor: not-allowed;
         }
 
@@ -2174,7 +2174,7 @@
         }
 
         #cgpt-copy-last-message-scroll-bottom:disabled {
-          opacity: 0.55;
+          opacity: 1 !important;
           cursor: not-allowed;
         }
 
@@ -2211,7 +2211,7 @@
         }
 
         .cgpt-btn:disabled {
-          opacity: 0.5;
+          opacity: 1 !important;
           cursor: not-allowed;
         }
 
@@ -2755,6 +2755,20 @@
           flex-wrap: wrap;
           align-items: center;
           margin-top: 10px;
+          position: relative;
+          z-index: 3;
+          pointer-events: auto !important;
+        }
+
+        .cgpt-autoq-actions button {
+          position: relative;
+          z-index: 3;
+          pointer-events: auto !important;
+        }
+
+        #cgpt-autoq-start-upload,
+        #cgpt-autoq-send-once {
+          pointer-events: auto !important;
         }
 
         .cgpt-autoq-top-action-bar {
@@ -2787,28 +2801,27 @@
           color: #ffffff !important;
         }
 
-        #cgpt-autoq-start:disabled {
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-
-        #cgpt-autoq-stop {
-          background: #991b1b !important;
+        #cgpt-autoq-start.cgpt-btn-danger,
+        #cgpt-autoq-start.cgpt-btn-running,
+        #cgpt-autoq-start.cgpt-btn-sending,
+        #cgpt-autoq-start.cgpt-btn-waiting-danger,
+        #cgpt-autoq-start[aria-busy="true"] {
+          background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
+          opacity: 1 !important;
         }
 
-        #cgpt-autoq-stop.cgpt-btn-waiting,
-        #cgpt-autoq-stop.cgpt-btn-sending,
-        #cgpt-autoq-stop.cgpt-btn-running {
-          background: #166534 !important;
-          border-color: #22c55e !important;
-          color: #ffffff !important;
-        }
-
-        #cgpt-autoq-stop:disabled {
-          opacity: 0.45;
+        #cgpt-autoq-start:disabled {
+          opacity: 1 !important;
           cursor: not-allowed;
+        }
+
+        #cgpt-autoq-start.cgpt-btn-idle,
+        #cgpt-autoq-start.cgpt-btn-running,
+        #cgpt-autoq-start.cgpt-btn-waiting,
+        #cgpt-autoq-start.cgpt-btn-sending {
+          pointer-events: auto !important;
         }
 
         .cgpt-autoq-settings-grid {
@@ -4389,8 +4402,8 @@
         titleEl = qs('.cgpt-toolbox-title', root);
       }
 
-      if (titleEl && headerTitleFlashBaseText) {
-        titleEl.textContent = headerTitleFlashBaseText;
+      if (titleEl) {
+        titleEl.textContent = getToolboxTitle();
         titleEl.title = latestStatusText
           ? `${getToolboxTitle()} - ${latestStatusText}`
           : getToolboxTitle();
@@ -4403,65 +4416,21 @@
     }
 
     function flashHeaderTitleOnce(message = '回复完成', options = {}) {
-      create();
+      stopHeaderTitleFlash(`disabled:${message || '-'}`);
 
       if (!titleEl && root) {
         titleEl = qs('.cgpt-toolbox-title', root);
       }
 
-      if (!titleEl) {
-        appendLog('[TITLE_FLASH][header-skip] reason=missing-title');
-        return false;
+      if (titleEl) {
+        titleEl.textContent = getToolboxTitle();
+        titleEl.title = latestStatusText
+          ? `${getToolboxTitle()} - ${latestStatusText}`
+          : getToolboxTitle();
       }
 
-      stopHeaderTitleFlash(`restart:${message || '-'}`);
-
-      const rawBase = String(titleEl.textContent || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE)
-        .replace(/^【回复完成】\s*/u, '')
-        .trim();
-
-      const baseText = rawBase || getToolboxTitle() || TOOLBOX_DEFAULT_TITLE;
-      const noticeText = `【${String(message || '回复完成').trim()}】 ${baseText}`;
-
-      headerTitleFlashBaseText = baseText;
-      headerTitleFlashOn = false;
-
-      const intervalMs = Number(options.intervalMs || 600);
-      const autoStopMs = Number(options.autoStopMs || 0);
-
-      const tick = () => {
-        headerTitleFlashOn = !headerTitleFlashOn;
-        titleEl.textContent = headerTitleFlashOn ? noticeText : baseText;
-        titleEl.title = headerTitleFlashOn
-          ? noticeText
-          : (
-            latestStatusText
-              ? `${getToolboxTitle()} - ${latestStatusText}`
-              : getToolboxTitle()
-          );
-      };
-
-      tick();
-
-      headerTitleFlashTimer = window.setInterval(tick, intervalMs);
-
-      if (headerTitleFlashStopTimer) {
-        window.clearTimeout(headerTitleFlashStopTimer);
-        headerTitleFlashStopTimer = 0;
-      }
-
-      if (autoStopMs > 0) {
-        headerTitleFlashStopTimer = window.setTimeout(() => {
-          stopHeaderTitleFlash(`auto-stop:${message || '-'}`);
-        }, autoStopMs);
-      }
-
-      const flashMode = autoStopMs > 0 ? 'timed' : 'until-user-action';
-      appendLog(
-        `[TITLE_FLASH][header-start] message=${message || '-'} intervalMs=${intervalMs} `
-        + `autoStopMs=${autoStopMs} mode=${flashMode}`,
-      );
-      return true;
+      appendLog(`[TITLE_FLASH][header-disabled] message=${message || '-'} reason=toolbox-header-flash-disabled`);
+      return false;
     }
 
     function applyToolboxTitle(_nextTitle) {
@@ -5458,6 +5427,14 @@
 
       if (nextTab === 'log' && typeof LogModule.flushDomIfNeeded === 'function') {
         LogModule.flushDomIfNeeded();
+      }
+
+      if (
+        nextTab === 'autoq'
+        && typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.bindDelegatedActions === 'function'
+      ) {
+        AutoQueueModule.bindDelegatedActions('switch-tab-autoq');
       }
 
       scheduleToolboxHorizontalOverflowLog(`switch-tab:${nextTab}`, 0);
@@ -10553,15 +10530,32 @@
     const cleanedAfterThinking = cleanFn(afterThinking || '');
 
     if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
+      const streaming = (
+        (typeof isChatGPTActuallyBusyForTaskQueue === 'function' && isChatGPTActuallyBusyForTaskQueue())
+        || (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          && ComposerApi.isAssistantLikelyBusy()
+        )
+        || (
+          typeof hasRealChatGPTStopGeneratingButton === 'function'
+          && hasRealChatGPTStopGeneratingButton()
+        )
+      );
+
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        const logTag = streaming
+          ? '[CHAT_PAGE][assistant-streaming-answer-picked]'
+          : '[CHAT_PAGE][assistant-final-answer-picked]';
         ToolboxShell.appendLog(
-          `[CHAT_PAGE][assistant-final-answer-picked] source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
+          `${logTag} source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
         );
       }
 
       return {
         text: cleanedAfterThinking,
         source: 'after-thinking',
+        isStreaming: streaming,
       };
     }
 

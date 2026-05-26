@@ -30,32 +30,6 @@ _THOUGHT_FOR_DURATION_PLACEHOLDER_RE = re.compile(
     r"(?:\s*›)?\s*$",
     re.IGNORECASE,
 )
-# ChatGPT 风控/限流页（如 Unusual activity has been detected）
-_CHATGPT_PLATFORM_ERROR_RE = re.compile(
-    r"(?:unusual\s+activity\s+has\s+been\s+detected|检测到.{0,16}异常.{0,8}活动)",
-    re.IGNORECASE,
-)
-
-
-_CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED = False
-
-
-# @deprecated 当前静态扫描无调用；确认无外部脚本引用后可删除。
-def is_chatgpt_platform_error_text(text) -> bool:
-    global _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED
-    if not _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED:
-        from app.utils.deprecation_log import log_deprecated_hit
-
-        _CHATGPT_PLATFORM_ERROR_DEPRECATED_LOGGED = True
-        log_deprecated_hit(
-            name="is_chatgpt_platform_error_text",
-            reason="no_internal_call",
-            replacement="none",
-        )
-    value = str(text or "").strip()
-    if not value:
-        return False
-    return bool(_CHATGPT_PLATFORM_ERROR_RE.search(value))
 
 
 def is_invalid_assistant_reply_text(text) -> bool:

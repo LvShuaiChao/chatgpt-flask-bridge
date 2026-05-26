@@ -167,7 +167,6 @@
     const WAIT_REAL_SEND_BUTTON_LOG_INTERVAL_MS = 2000;
     let waitingReplyIdleStreak = 0;
     let uploadShortcutDebugLastAt = 0;
-    let shortcutDebugLastAt = 0;
     // deprecated: only used for compatibility, do not use as render source
     let copyLastMessageTaskRunning = false;
     let copyLastMessageTaskSource = '';
@@ -215,7 +214,10 @@
      */
     const uploadActionDebounceMap = new Map();
 
-    let quickPromptActiveCategory = '全部';
+    let quickPromptActiveCategory = typeof PromptCategoryState !== 'undefined'
+      && typeof PromptCategoryState.getActiveCategory === 'function'
+      ? PromptCategoryState.getActiveCategory()
+      : '全部';
     let lastManualUploadGroupAt = 0;
     const uploadActionLocks = Object.create(null);
 
@@ -1826,29 +1828,37 @@
       const opts = options || {};
       const forceAll = !!opts.forceAll;
       const forceResetAttached = opts.forceResetAttached === true;
+      const forceResetUploaded = opts.forceResetUploaded === true;
+      const forceResetDone = opts.forceResetDone === true;
       const preserveAttached = opts.preserveAttached !== false;
+      const reason = String(opts.reason || '').trim();
       let changed = false;
+      let resetCount = 0;
 
       state.queue.forEach((q) => {
         if (!q) return;
 
-        if (
-          q.state === UploadState.ATTACHED &&
-          preserveAttached &&
-          !forceResetAttached
-        ) {
+        // 不要重置已经无法读取的记录（例如文件被删除）
+        // 注意：对「强制重传」来说，readable 是必要条件，否则会造成无意义的循环重试
+        const reusable = typeof hasActuallyReusableUploadSource === 'function'
+          ? hasActuallyReusableUploadSource(q)
+          : hasAttemptableUploadSource(q);
+        if (!forceAll && !reusable) {
           return;
         }
 
-        if (
-          q.state === UploadState.ATTACHED &&
-          q.attachedInSession &&
-          !forceResetAttached
-        ) {
+        const isAttached = q.state === UploadState.ATTACHED;
+
+        if (isAttached && preserveAttached && !forceResetAttached && !forceResetUploaded && !forceResetDone) {
           return;
         }
 
-        if (forceAll || hasAttemptableUploadSource(q)) {
+        if (isAttached && q.attachedInSession && !forceResetAttached && !forceResetUploaded && !forceResetDone) {
+          return;
+        }
+
+        // 统一重置为可再次上传的 idle 状态（后续 getPendingUploadItems 会重新判断并进入队列）
+        if (forceAll || forceResetAttached || forceResetUploaded || forceResetDone || hasAttemptableUploadSource(q)) {
           q.state = UploadState.IDLE;
           q.message = '';
           q.uploadName = '';
@@ -1856,10 +1866,22 @@
           q.attachedInSession = false;
           q.updatedAt = Date.now();
           changed = true;
+          resetCount += 1;
         }
       });
 
-      return changed;
+      if (changed) {
+        try {
+          scheduleRenderUpload(`resetQueueItemsForUpload:${reason || 'manual'}`);
+          persistQueueThrottled(`resetQueueItemsForUpload:${reason || 'manual'}`);
+        } catch (e) {
+          const errText = e && e.message ? e.message : String(e);
+          console.error('[ChatGPT toolbox] resetQueueItemsForUpload persist/render failed', e);
+          ToolboxShell.appendLog(`[UPLOAD][RESET_QUEUE_PERSIST_FAILED] error=${errText}`);
+        }
+      }
+
+      return resetCount;
     }
 
     function resetFlaskFilesForUpload(reason = '') {
@@ -2041,7 +2063,7 @@
       }
 
       if (hasLocalReadableHandle(q) || q.fileHandle) {
-        return '实时读取';
+        return '实时读取（本地可读，未必已上传）';
       }
 
       if (q.file) {
@@ -2069,7 +2091,7 @@
       lines.push(`来源：${getUploadInlineStatusText(q)}`);
 
       if (hasLocalReadableHandle(q)) {
-        lines.push('说明：已保存本地文件句柄，刷新后可实时读取最新文件');
+        lines.push('说明：已保存本地文件句柄，刷新后可实时读取最新文件；这不等于已上传到 ChatGPT 对话');
       } else if (isCachedUploadSnapshot(q)) {
               // lines.push('说明：这是浏览器 IndexedDB 中保存的文件快照，不是本地文件句柄；原文件变化后不会自动同步');
       } else if (q.sourceKind === 'session-file' && (q.file || q.blob)) {
@@ -5199,6 +5221,29 @@
       return `${seconds}秒`;
     }
 
+    function formatDurationMsForButton(ms) {
+      const value = Number(ms || 0);
+
+      if (!Number.isFinite(value) || value <= 0) {
+        return '0秒';
+      }
+
+      const totalSeconds = Math.ceil(value / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      if (hours > 0) {
+        return `${hours}小时${minutes}分`;
+      }
+
+      if (minutes > 0) {
+        return `${minutes}分${seconds}秒`;
+      }
+
+      return `${seconds}秒`;
+    }
+
     function recordUploadSuccess(fileCount) {
       const count = Number(fileCount || 0);
       if (!Number.isFinite(count) || count <= 0) {
@@ -5420,6 +5465,10 @@
     }
 
     function getQuickPromptActiveCategory() {
+      if (typeof PromptCategoryState !== 'undefined'
+        && typeof PromptCategoryState.getActiveCategory === 'function') {
+        quickPromptActiveCategory = PromptCategoryState.getActiveCategory();
+      }
       return normalizeQuickPromptCategoryName(quickPromptActiveCategory);
     }
 
@@ -5427,18 +5476,30 @@
       const nextCategory = normalizeQuickPromptCategoryName(category);
       quickPromptActiveCategory = nextCategory;
 
-      const cfg = getCompactUiConfig();
-      const next = Object.assign({}, cfg, {
-        quickPromptActiveCategory: nextCategory,
-      });
-
-      if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.saveConfig === 'function') {
-        SettingsModule.saveConfig(next);
-      } else {
+      if (typeof PromptCategoryState !== 'undefined'
+        && typeof PromptCategoryState.setActiveCategory === 'function') {
+        PromptCategoryState.setActiveCategory(nextCategory, {
+          syncCompactUi: options.syncCompactUi !== false,
+        });
+      } else if (typeof MemoryManager !== 'undefined') {
         MemoryManager.set(
-          MemoryManager.KEYS.compactUiConfig,
-          normalizeCompactUiConfig(next),
+          MemoryManager.KEYS.promptManagerActiveCategory,
+          nextCategory,
         );
+
+        const cfg = getCompactUiConfig();
+        const next = Object.assign({}, cfg, {
+          quickPromptActiveCategory: nextCategory,
+        });
+
+        if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.saveConfig === 'function') {
+          SettingsModule.saveConfig(next);
+        } else {
+          MemoryManager.set(
+            MemoryManager.KEYS.compactUiConfig,
+            normalizeCompactUiConfig(next),
+          );
+        }
       }
 
       if (options.savePageState !== false) {
@@ -5503,42 +5564,6 @@
       return cfg.quickPromptClickAction !== 'fill';
     }
 
-    function isQuickPromptNativeSendReady() {
-      if (typeof ComposerApi.canSendNow !== 'function') {
-        return false;
-      }
-
-      try {
-        return !!ComposerApi.canSendNow({ maxAgeMs: 0 });
-      } catch (canSendErr) {
-        console.error('[ChatGPT toolbox] isQuickPromptNativeSendReady canSendNow failed', canSendErr);
-        return false;
-      }
-    }
-
-    function isQuickPromptComposerReadyForSend(expectedText, composerText) {
-      const expected = String(expectedText || '').trim();
-      const actual = String(composerText || '').trim();
-      if (!actual) {
-        return isQuickPromptNativeSendReady();
-      }
-      if (!expected) {
-        return true;
-      }
-      if (actual === expected) {
-        return true;
-      }
-      const expectedProbe = expected.slice(0, 80);
-      const actualProbe = actual.slice(0, 80);
-      if (actual.includes(expectedProbe) || expected.includes(actualProbe)) {
-        return true;
-      }
-      if (isQuickPromptNativeSendReady()) {
-        return true;
-      }
-      return actual.length >= Math.min(expected.length, 32);
-    }
-
     function normalizePromptPayload(prompt) {
       const rawText = String(prompt && prompt.content != null ? prompt.content : '');
 
@@ -5554,12 +5579,14 @@
       const payload = normalizePromptPayload(prompt);
       const rawText = payload.rawText;
       const title = String(prompt && prompt.title ? prompt.title : '未命名').trim() || '未命名';
-      let shouldSend = shouldQuickPromptAutoSend(cfg);
+      let shouldSend;
 
       if (options.send === true) {
         shouldSend = true;
       } else if (options.send === false) {
         shouldSend = false;
+      } else {
+        shouldSend = shouldQuickPromptAutoSend(cfg);
       }
 
       const action = shouldSend ? 'send' : 'fill';
@@ -5629,52 +5656,67 @@
         };
       }
 
-      setStatus(`正在发送 Prompt：${title}`, 'running');
+      setStatus(`正在写入并发送 Prompt：${title}`, 'running');
 
-      let sendResult = null;
+      const ok = ComposerApi.setComposerValue(rawText);
 
-      if (typeof sendContentViaComposer === 'function') {
-        sendResult = await sendContentViaComposer({
-          source: options.source || 'quick-prompt',
-          content: rawText,
-          allowReplaceDraft: true,
-          waitUntilSendable: true,
-          blockWhenResponding: true,
-          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 60000,
-        });
-      } else {
-        const ok = ComposerApi.setComposerValue(rawText);
-        if (!ok) {
-          setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
-          ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=composer_not_found`);
-          return {
-            ok: false,
-            reason: 'composer_not_found',
-            sent: false,
-          };
-        }
-
-        const clicked = typeof ComposerApi.clickSend === 'function' && ComposerApi.clickSend();
-        sendResult = {
-          ok: !!clicked,
-          reason: clicked ? 'clicked_fallback' : 'send_button_unavailable',
+      if (!ok) {
+        console.warn('[ChatGPT toolbox] quick prompt: composer not found', prompt);
+        setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
+        ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=composer_not_found`);
+        return {
+          ok: false,
+          reason: 'composer_not_found',
+          sent: false,
         };
       }
 
       ToolboxShell.appendLog(
-        `[PROMPT][SEND_RESULT] ok=${sendResult && sendResult.ok ? '1' : '0'} reason=${sendResult && sendResult.reason ? sendResult.reason : '-'}`,
+        `[PROMPT][WRITE_OK] source=${source} id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length}`,
       );
 
-      if (sendResult && sendResult.ok) {
-        setStatus(`Prompt 已发送：${title}`, 'success');
-        return sendResult;
+      const textSynced = typeof ComposerApi.waitForComposerTextSynced === 'function'
+        ? await ComposerApi.waitForComposerTextSynced(rawText, 8000, {
+            shouldStop: () => isWaitingSendActive(),
+          })
+        : { ok: true, reason: 'sync-check-unavailable' };
+
+      if (!textSynced.ok) {
+        const syncReason = textSynced.reason || 'composer_text_not_synced';
+        setStatus(`Prompt 写入后未同步：${syncReason}`, 'warn');
+        ToolboxShell.appendLog(`[PROMPT][SEND_SKIP] source=${source} reason=${syncReason}`);
+        return {
+          ok: false,
+          reason: syncReason,
+          sent: false,
+        };
       }
 
-      const failReason = sendResult && sendResult.reason ? sendResult.reason : 'send-failed';
-      setStatus(`Prompt 发送失败：${failReason}`, 'warn');
-      return sendResult || {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      ToolboxShell.appendLog(`[PROMPT][SEND_TRIGGER] source=${source} title=${title}`);
+
+      const sentOk = typeof triggerSendFromToolbox === 'function'
+        ? await triggerSendFromToolbox('quick-prompt-click')
+        : false;
+
+      ToolboxShell.appendLog(
+        `[PROMPT][SEND_RESULT] ok=${sentOk ? '1' : '0'} reason=${sentOk ? 'trigger_send_ok' : 'trigger_send_failed'}`,
+      );
+
+      if (sentOk) {
+        setStatus(`Prompt 已发送：${title}`, 'success');
+        return {
+          ok: true,
+          reason: 'sent_by_trigger_send',
+          sent: true,
+        };
+      }
+
+      setStatus('Prompt 已写入，但发送失败：发送按钮不可用', 'warn');
+      return {
         ok: false,
-        reason: failReason,
+        reason: 'trigger_send_failed',
         sent: false,
       };
     }
@@ -11097,6 +11139,65 @@
       ].join('|');
     }
 
+    function getComposerAttachmentState() {
+      let attachmentCount = 0;
+      let hasAttachment = false;
+      let attachmentUploading = false;
+      let hasComposerPayload = false;
+
+      try {
+        if (typeof ComposerApi.countAttachmentChips === 'function') {
+          attachmentCount = Number(ComposerApi.countAttachmentChips()) || 0;
+        }
+
+        if (typeof ComposerApi.hasComposerAttachmentUnified === 'function') {
+          hasAttachment = !!ComposerApi.hasComposerAttachmentUnified();
+        } else if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
+          hasAttachment = !!ComposerApi.hasVisibleComposerAttachmentPayload();
+        }
+
+        if (typeof ComposerApi.isAttachmentStillUploading === 'function') {
+          attachmentUploading = !!ComposerApi.isAttachmentStillUploading();
+        }
+
+        if (typeof detectComposerResponseState === 'function') {
+          const responseState = detectComposerResponseState({ light: true });
+          if (Number.isFinite(Number(responseState.attachment_count))) {
+            attachmentCount = Math.max(
+              attachmentCount,
+              Number(responseState.attachment_count) || 0,
+            );
+          }
+          if (responseState.has_composer_payload === true) {
+            hasComposerPayload = true;
+          }
+        }
+
+        if (hasAttachment && attachmentCount <= 0) {
+          attachmentCount = 1;
+        }
+
+        hasComposerPayload = !!(
+          hasComposerPayload
+          || hasAttachment
+          || attachmentUploading
+          || attachmentCount > 0
+        );
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getComposerAttachmentState failed', err);
+        ToolboxShell.appendLog(`[UPLOAD][attachment-state-failed] error=${errText}`);
+      }
+
+      return {
+        attachmentCount,
+        hasAttachment,
+        attachmentUploading,
+        hasComposerPayload,
+        has_composer_payload: hasComposerPayload,
+      };
+    }
+
     function getUploadPageCapabilityLight() {
       const startedAt = (typeof performance !== 'undefined' && performance.now)
         ? performance.now()
@@ -11107,8 +11208,13 @@
       let response_state = 'not_ready';
       let response_state_reason = '';
       let hasComposerPayload = false;
+      let attachmentCount = 0;
 
       try {
+        const attachmentState = getComposerAttachmentState();
+        attachmentCount = attachmentState.attachmentCount;
+        hasComposerPayload = attachmentState.hasComposerPayload;
+
         hasComposer = typeof ComposerApi.hasComposer === 'function' && ComposerApi.hasComposer();
         isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
           && ComposerApi.isAssistantLikelyBusy();
@@ -11125,10 +11231,22 @@
           response_state_reason = String(responseState.response_state_reason || '');
           canSendNow = responseState.can_send_now === true;
           isResponding = responseState.is_responding === true;
-          hasComposerPayload = responseState.has_composer_payload === true;
+          if (responseState.has_composer_payload === true) {
+            hasComposerPayload = true;
+          }
+          if (Number.isFinite(Number(responseState.attachment_count))) {
+            attachmentCount = Math.max(
+              attachmentCount,
+              Number(responseState.attachment_count) || 0,
+            );
+          }
         } else {
           response_state = isResponding ? 'generating' : (canSendNow ? 'ready' : 'not_ready');
         }
+
+        const attachmentStateAfter = getComposerAttachmentState();
+        attachmentCount = Math.max(attachmentCount, attachmentStateAfter.attachmentCount);
+        hasComposerPayload = hasComposerPayload || attachmentStateAfter.hasComposerPayload;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] getUploadPageCapabilityLight failed', err);
@@ -11143,6 +11261,7 @@
         is_responding: isResponding,
         response_state,
         response_state_reason,
+        attachmentCount,
         hasComposerPayload,
         has_composer_payload: hasComposerPayload,
         sendable: hasComposer && canSendNow && !isResponding,
@@ -11167,21 +11286,21 @@
       const startedAt = (typeof performance !== 'undefined' && performance.now)
         ? performance.now()
         : Date.now();
-      let attachmentCount = 0;
-      let hasComposerPayload = false;
+      const attachmentState = getComposerAttachmentState();
+      let attachmentCount = attachmentState.attachmentCount;
+      let hasComposerPayload = attachmentState.hasComposerPayload;
       let response_state = 'not_ready';
       let response_state_reason = '';
       let canSendNow = false;
       let isResponding = false;
 
       try {
-        attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-          ? ComposerApi.countAttachmentChips()
-          : 0;
-
         if (typeof ComposerApi.getExistingComposerPayloadSnapshot === 'function') {
           const payloadSnapshot = ComposerApi.getExistingComposerPayloadSnapshot();
-          hasComposerPayload = !!(payloadSnapshot && payloadSnapshot.hasPayload);
+          if (payloadSnapshot && payloadSnapshot.hasPayload) {
+            hasComposerPayload = true;
+            attachmentCount = Math.max(attachmentCount, 1);
+          }
         }
 
         if (typeof detectComposerResponseState === 'function') {
@@ -11191,12 +11310,20 @@
           canSendNow = responseState.can_send_now === true;
           isResponding = responseState.is_responding === true;
           if (Number.isFinite(Number(responseState.attachment_count))) {
-            attachmentCount = Number(responseState.attachment_count);
+            attachmentCount = Math.max(
+              attachmentCount,
+              Number(responseState.attachment_count) || 0,
+            );
           }
           if (responseState.has_composer_payload === true) {
             hasComposerPayload = true;
+            attachmentCount = Math.max(attachmentCount, 1);
           }
         }
+
+        const attachmentStateAfter = getComposerAttachmentState();
+        attachmentCount = Math.max(attachmentCount, attachmentStateAfter.attachmentCount);
+        hasComposerPayload = hasComposerPayload || attachmentStateAfter.hasComposerPayload;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] getUploadPageCapabilityHeavy failed', err);
@@ -11346,7 +11473,7 @@
       if (stateText === 'uploading') {
         btn.dataset.uploadState = 'uploading';
         btn.setAttribute('aria-busy', 'true');
-        btn.textContent = '上传中，点击取消';
+        btn.textContent = '上传中，点击停止';
       } else {
         btn.dataset.uploadState = 'idle';
         btn.removeAttribute('aria-busy');
@@ -11445,8 +11572,8 @@
 
       if (phase === 'uploading') {
         setUploadButtonState('uploading', reason);
-        return setButtonDanger(button, '上传中，点击取消', {
-          title: '正在上传/绑定文件，再次点击取消',
+        return setButtonDanger(button, '上传中，点击停止', {
+          title: '正在上传/绑定文件，点击停止上传',
           allowCancel: true,
           reason,
         });
@@ -11454,9 +11581,18 @@
 
       if (phase === 'cancelling') {
         setUploadButtonState('uploading', reason);
-        return setButtonWaiting(button, '取消中...', {
-          title: '正在取消上传',
+        return setButtonWaiting(button, '正在停止', {
+          title: '正在停止上传，请稍候',
           allowCancel: false,
+          reason,
+        });
+      }
+
+      if (phase === 'failed') {
+        setUploadButtonState('idle', reason);
+        return setButtonFailed(button, '上传失败，点击重试', {
+          title: '上传失败，点击重新上传',
+          disabled: false,
           reason,
         });
       }
@@ -11560,18 +11696,15 @@
         ? String(state.uploadSendSuccessHint)
         : '';
 
+      const buttonAttachmentState = getComposerAttachmentState();
       const hasPendingComposerPayload = !!(
         capability.hasComposerPayload
         || capability.has_composer_payload
-        || Number(capability.attachmentCount || 0) > 0
-        || (
-          typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-          && ComposerApi.hasVisibleComposerAttachmentPayload()
-        )
-        || (
-          typeof ComposerApi.isAttachmentStillUploading === 'function'
-          && ComposerApi.isAttachmentStillUploading()
-        )
+        || buttonAttachmentState.hasComposerPayload
+        || buttonAttachmentState.has_composer_payload
+        || buttonAttachmentState.hasAttachment
+        || Number(capability.attachmentCount || buttonAttachmentState.attachmentCount || 0) > 0
+        || buttonAttachmentState.attachmentUploading
       );
 
       const pendingAttachmentWaitSend = hasPendingComposerPayload
@@ -11742,6 +11875,18 @@
       }
 
       if (applyStartUploadButtonState(currentStartBtn, { reason: 'renderUploadButtonsOnly' })) {
+        changedButtons += 1;
+      }
+
+      const autoqStartUploadBtn = document.querySelector('#cgpt-autoq-start-upload');
+      if (
+        autoqStartUploadBtn
+        && autoqStartUploadBtn !== currentStartBtn
+        && applyStartUploadButtonState(autoqStartUploadBtn, {
+          reason: 'renderUploadButtonsOnly:autoq-mirror',
+          ignoreAutoQueueRunning: true,
+        })
+      ) {
         changedButtons += 1;
       }
 
@@ -12197,8 +12342,15 @@
         response_state: '-',
       };
 
+      let attachmentCount = 0;
+
       try {
         cap = getUploadPageCapability({ heavy: true });
+        const attachmentState = getComposerAttachmentState();
+        attachmentCount = Math.max(
+          Number(cap.attachmentCount || 0),
+          Number(attachmentState.attachmentCount || 0),
+        );
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] logUploadSendUiState capability failed', err);
@@ -12206,7 +12358,7 @@
       }
 
       ToolboxShell.appendLog(
-        `[SEND_UI][STATE] action=${String(action || '-')} reason=${String(reason || '-')} runId=${runId == null ? '-' : runId} autoSendRunId=${state.autoSendRunId || '-'} waitingSend=${state.waitingSend ? '1' : '0'} autoSendWaiting=${state.autoSendWaiting ? '1' : '0'} waitingReply=${state.waitingReply ? '1' : '0'} shortcutRunning=${uploadSendShortcutRunning ? '1' : '0'} isResponding=${cap.isResponding ? '1' : '0'} canSendNow=${cap.canSendNow ? '1' : '0'} responseState=${cap.response_state || '-'} attachmentCount=${Number(cap.attachmentCount || 0)}`
+        `[SEND_UI][STATE] action=${String(action || '-')} reason=${String(reason || '-')} runId=${runId == null ? '-' : runId} autoSendRunId=${state.autoSendRunId || '-'} waitingSend=${state.waitingSend ? '1' : '0'} autoSendWaiting=${state.autoSendWaiting ? '1' : '0'} waitingReply=${state.waitingReply ? '1' : '0'} shortcutRunning=${uploadSendShortcutRunning ? '1' : '0'} isResponding=${cap.isResponding ? '1' : '0'} canSendNow=${cap.canSendNow ? '1' : '0'} responseState=${cap.response_state || '-'} attachmentCount=${attachmentCount}`
       );
     }
 
@@ -13140,6 +13292,7 @@
       const src = String(source || 'button').trim() || 'button';
 
       ToolboxShell.appendLog(`[SEND_MESSAGE][CLICK] source=${src}`);
+      ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
 
       clearStaleBusySendStateOnHomeReady('trigger-send');
 
@@ -13521,6 +13674,29 @@
       }
     }
 
+    function classifyUploadComposerSendGate(options = {}) {
+      const source = String(options.triggerSource || '').trim();
+      const composerEmpty = !options.hasAnythingToSend;
+      const nativeSendDisabled = !options.realSendButtonEnabled && !options.canSendNow;
+      const assistantBusy = !!options.assistantBusy;
+      const isUserSendTrigger = /^(button|shortcut|send-message|manual-send-message)/i.test(source)
+        || source.includes('shortcut');
+      const workflowCanStart = !!(
+        options.activeFlowRun
+        || state.pendingSendAfterReply
+        || state.autoSendWaiting
+        || isUserSendTrigger
+        || /^(auto-queue|batch|bridge|retry-after-reply|quick-prompt|copy-and-continue|manual-send-message)/i.test(source)
+      );
+
+      return {
+        composer_empty: composerEmpty,
+        native_send_disabled: nativeSendDisabled,
+        assistant_busy: assistantBusy,
+        workflow_can_start: workflowCanStart,
+      };
+    }
+
     async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null) {
       const source = triggerSource || 'button';
       const usePresetRunId = presetRunId != null && Number(presetRunId) > 0;
@@ -13631,18 +13807,16 @@
         const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
           && isHomeNewChatReadyToSendNow();
 
+        const sendAttachmentState = getComposerAttachmentState();
         const hasPendingComposerPayload = !!(
           capability.hasComposerPayload
           || capability.has_composer_payload
           || Number(capability.attachmentCount || 0) > 0
-          || (
-            typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-            && ComposerApi.hasVisibleComposerAttachmentPayload()
-          )
-          || (
-            typeof ComposerApi.isAttachmentStillUploading === 'function'
-            && ComposerApi.isAttachmentStillUploading()
-          )
+          || sendAttachmentState.hasComposerPayload
+          || sendAttachmentState.has_composer_payload
+          || sendAttachmentState.hasAttachment
+          || sendAttachmentState.attachmentCount > 0
+          || sendAttachmentState.attachmentUploading
         );
 
         if (capability.isResponding && !homeReadyToSend) {
@@ -13672,23 +13846,42 @@
           );
         }
 
-        const attachmentCount = Number(capability.attachmentCount || 0);
+        const attachmentCount = Number(
+          sendAttachmentState.attachmentCount
+          || capability.attachmentCount
+          || 0,
+        );
         const textLen = composerTextNow.length;
+        const sendGate = classifyUploadComposerSendGate({
+          triggerSource: source,
+          hasAnythingToSend,
+          realSendButtonEnabled,
+          canSendNow: capability.canSendNow,
+          assistantBusy: !!(capability.isResponding && !homeReadyToSend),
+          activeFlowRun,
+        });
 
         if (capability.hasComposer && !hasAnythingToSend) {
           if (!realSendButtonEnabled) {
+            if (sendGate.workflow_can_start) {
+              ToolboxShell.appendLog(
+                `[SEND_MESSAGE][WAIT_PAYLOAD] reason=empty_but_workflow_started composer_empty=1 native_send_disabled=1 workflow_can_start=1 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+              );
+              setStatus('等待注入内容后发送', 'running');
+            } else {
+              ToolboxShell.appendLog(
+                `[SEND_MESSAGE][SKIP_EMPTY] reason=composer_empty native_send_disabled=1 workflow_can_start=0 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+              );
+              setStatus('输入框为空，请先填写内容或选择 Prompt', 'warn');
+              resetUploadSendUiState('send-message:composer-empty', runId);
+              sendFailureHandled = true;
+              return false;
+            }
+          } else {
             ToolboxShell.appendLog(
-              `[SEND_MESSAGE][SKIP_EMPTY] reason=empty_composer textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=0`,
+              `[SEND_MESSAGE][EMPTY_BUT_NATIVE_SEND] textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=1`,
             );
-            setStatus('输入框为空，无法发送', 'warn');
-            resetUploadSendUiState('send-message:composer-empty', runId);
-            sendFailureHandled = true;
-            return false;
           }
-
-          ToolboxShell.appendLog(
-            `[SEND_MESSAGE][EMPTY_BUT_NATIVE_SEND] textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=1`,
-          );
         }
 
         if (!capability.hasComposer && !hasAnythingToSend) {
@@ -13708,19 +13901,25 @@
         }
 
         if (!hasAnythingToSend && !realSendButtonEnabled) {
-          const blockReason = 'composer-empty';
-          const blockMessage = '输入框为空，无法发送';
-          setStatus(blockMessage, 'warn');
-          ToolboxShell.appendLog(
-            `[SEND_MESSAGE][SKIP_EMPTY] reason=empty_composer textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=0`,
-          );
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][send-message-button:blocked] source=${source} reason=${blockReason}`,
-          );
-          resetUploadSendUiState(`send-message-blocked:${blockReason}`, runId);
-          scheduleRenderUpload('send-message:blocked');
-          sendFailureHandled = true;
-          return false;
+          if (sendGate.workflow_can_start) {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][WAIT_PAYLOAD] reason=empty_but_workflow_started composer_empty=1 native_send_disabled=1 workflow_can_start=1 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+            );
+            setStatus('等待注入内容后发送', 'running');
+          } else {
+            const blockReason = 'composer-empty';
+            setStatus('输入框为空，请先填写内容或选择 Prompt', 'warn');
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][SKIP_EMPTY] reason=${blockReason} composer_empty=1 native_send_disabled=1 workflow_can_start=0 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+            );
+            ToolboxShell.appendLog(
+              `[UPLOAD_DIAG][send-message-button:blocked] source=${source} reason=${blockReason}`,
+            );
+            resetUploadSendUiState(`send-message-blocked:${blockReason}`, runId);
+            scheduleRenderUpload('send-message:blocked');
+            sendFailureHandled = true;
+            return false;
+          }
         }
 
         if (!capability.canSendNow && hasPendingComposerPayload) {
@@ -14273,20 +14472,6 @@
       uploadShortcutDebugLastAt = now;
       ToolboxShell.appendLog(
         `[SHORTCUT][${stage}] key=${e.key || '-'} code=${e.code || '-'} ctrl=${e.ctrlKey ? '1' : '0'} alt=${e.altKey ? '1' : '0'} shift=${e.shiftKey ? '1' : '0'} meta=${e.metaKey ? '1' : '0'} repeat=${e.repeat ? '1' : '0'} target=${getShortcutTargetText(e.target)} extra=${extra || '-'}`
-      );
-    }
-
-    function logShortcutDebug(e, stage, extra) {
-      const now = Date.now();
-      if (now - shortcutDebugLastAt < 250) {
-        return;
-      }
-      shortcutDebugLastAt = now;
-      const target = e && e.target instanceof Element
-        ? `${e.target.tagName.toLowerCase()}${e.target.id ? `#${e.target.id}` : ''}${e.target.className ? `.${String(e.target.className).split(/\s+/).slice(0, 2).join('.')}` : ''}`
-        : '-';
-      ToolboxShell.appendLog(
-        `[SHORTCUT][${stage}] key=${e.key || '-'} code=${e.code || '-'} ctrl=${e.ctrlKey ? '1' : '0'} alt=${e.altKey ? '1' : '0'} shift=${e.shiftKey ? '1' : '0'} meta=${e.metaKey ? '1' : '0'} repeat=${e.repeat ? '1' : '0'} target=${target} extra=${extra || '-'}`
       );
     }
 
@@ -15287,6 +15472,131 @@
       }
     }
 
+    function detectComposerHasUploadPayload() {
+      let composerHasUploadPayload = false;
+
+      if (typeof ComposerApi !== 'undefined') {
+        if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
+          composerHasUploadPayload = composerHasUploadPayload
+            || !!ComposerApi.hasVisibleComposerAttachmentPayload();
+        }
+
+        if (typeof ComposerApi.countAttachmentChips === 'function') {
+          composerHasUploadPayload = composerHasUploadPayload
+            || ComposerApi.countAttachmentChips() > 0;
+        }
+      }
+
+      return composerHasUploadPayload;
+    }
+
+    async function startUploadForAutoQueue(options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const uploadSource = String(opts.source || 'autoq').trim() || 'autoq';
+      const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
+      const forceReupload = opts.forceReupload === true;
+      const maxFilesRaw = Number(opts.maxFiles);
+      const maxFiles = Number.isFinite(maxFilesRaw) && maxFilesRaw > 0
+        ? Math.floor(maxFilesRaw)
+        : 0;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][AUTOQ_START] source=${uploadSource} forceReupload=${forceReupload ? 1 : 0} maxFiles=${maxFiles || '-'}`,
+      );
+
+      if (!forceReupload) {
+        // 兼容旧行为：仅重置已绑定，避免影响其它入口调用
+        resetQueueItemsForUpload({
+          forceResetAttached: true,
+          reason: uploadSource,
+        });
+        resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`);
+
+        const pendingItems = getPendingUploadItems();
+        const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+
+        if (pendingCount > 0) {
+          return startUploadFromCurrentQueue({
+            source: uploadSource,
+            shouldStop,
+            maxFiles,
+          });
+        }
+
+        if (detectComposerHasUploadPayload()) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][AUTOQ_SKIP] source=${uploadSource} reason=composer-already-has-file`,
+          );
+
+          return buildQueueUploadResult({
+            ok: true,
+            reason: 'composer-already-has-file',
+          });
+        }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][AUTOQ_SKIP] source=${uploadSource} reason=no-files pending=0 composer=0`,
+        );
+
+        return buildQueueUploadResult({
+          ok: true,
+          reason: 'no-files',
+        });
+      }
+
+      if (forceReupload) {
+        const resetCount = Number(resetQueueItemsForUpload({
+          forceResetAttached: true,
+          forceResetUploaded: true,
+          forceResetDone: true,
+          reason: uploadSource,
+        })) || 0;
+
+        let flaskResetCount = 0;
+        try {
+          if (typeof resetFlaskFilesForUpload === 'function') {
+            flaskResetCount = resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`) ? 1 : 0;
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[ChatGPT toolbox] resetFlaskFilesForUpload failed', error);
+          ToolboxShell.appendLog(`[UPLOAD][AUTOQ_FORCE_RESET][FLASK_FAILED] source=${uploadSource} error=${errText}`);
+        }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][AUTOQ_FORCE_RESET] source=${uploadSource} resetCount=${resetCount} flaskReset=${flaskResetCount}`,
+        );
+      }
+
+      const pendingItems = getPendingUploadItems();
+      const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][AUTOQ_PENDING_AFTER_RESET] source=${uploadSource} pendingUploadCount=${pendingCount}`,
+      );
+
+      if (pendingCount <= 0) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][AUTOQ_NO_FILES_AFTER_RESET] source=${uploadSource} reason=no-readable-files-after-force-reset`,
+        );
+
+        return buildQueueUploadResult({
+          ok: true,
+          skipped: true,
+          reason: 'no-readable-files-after-force-reset',
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        });
+      }
+
+      return startUploadFromCurrentQueue({
+        source: uploadSource,
+        shouldStop,
+        maxFiles,
+      });
+    }
+
     async function startUploadFromCurrentQueue(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const uploadSource = String(opts.source || 'button').trim() || 'button';
@@ -16203,9 +16513,79 @@
       },
     ]);
 
-    function handleUploadDelegatedActionClick(event) {
+    async function handleUploadQuickPromptClick(target, event, source = 'delegated-click') {
+      if (!(target instanceof Element)) {
+        return false;
+      }
+
+      const categoryBtn = target.closest('[data-upload-quick-prompt-category]');
+      if (categoryBtn) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const category = normalizeQuickPromptCategoryName(
+          categoryBtn.getAttribute('data-upload-quick-prompt-category') || '全部',
+        );
+
+        saveQuickPromptActiveCategory(category, {
+          reason: 'quick-category-click',
+        });
+
+        ToolboxShell.appendLog(`[PROMPT][CATEGORY_CLICK] source=${source} category=${category}`);
+
+        renderUploadQuickPrompts();
+        return true;
+      }
+
+      const promptBtn = target.closest('[data-upload-quick-prompt-id]');
+      if (!promptBtn) {
+        return false;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const id = promptBtn.getAttribute('data-upload-quick-prompt-id');
+      const prompts = typeof PromptManagerModule !== 'undefined'
+        && typeof PromptManagerModule.getPrompts === 'function'
+        ? PromptManagerModule.getPrompts()
+        : [];
+
+      const prompt = prompts.find((p) => p && p.id === id);
+
+      if (!prompt) {
+        setStatus('未找到对应 Prompt', 'warn');
+        ToolboxShell.appendLog(`[PROMPT][CLICK][SKIP] source=${source} reason=prompt_not_found id=${id || '-'}`);
+        return true;
+      }
+
+      ToolboxShell.appendLog(
+        `[PROMPT][CLICK_EVENT] source=${source} id=${id || '-'} title=${String(prompt.title || '未命名')} text_len=${String(prompt.content || '').length}`,
+      );
+
+      await sendOrFillQuickPrompt(prompt, {
+        source: 'quick-prompt-click',
+        send: true,
+      });
+
+      return true;
+    }
+
+    async function handleUploadDelegatedActionClick(event) {
       const target = event && event.target;
       if (!(target instanceof Element)) {
+        return;
+      }
+
+      try {
+        if (await handleUploadQuickPromptClick(target, event, 'root-delegated-click')) {
+          return;
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] quick prompt delegated click failed', err);
+        ToolboxShell.appendLog(`[PROMPT][CLICK][FAILED] source=root-delegated-click error=${errText}`);
+        setStatus(`Prompt 发送失败：${errText}`, 'error');
         return;
       }
 
@@ -16569,51 +16949,7 @@
 
       const quickPromptBox = qs('#cgpt-upload-quick-prompts', rootEl);
       if (quickPromptBox) {
-        quickPromptBox.addEventListener('click', async (e) => {
-          const target = e.target instanceof HTMLElement ? e.target : null;
-          if (!target) return;
-
-          const categoryBtn = target.closest('[data-upload-quick-prompt-category]');
-          if (categoryBtn) {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const category = normalizeQuickPromptCategoryName(
-              categoryBtn.getAttribute('data-upload-quick-prompt-category') || '全部',
-            );
-            saveQuickPromptActiveCategory(category, {
-              reason: 'quick-category-click',
-            });
-
-            ToolboxShell.appendLog(`[UPLOAD_DIAG][quick-prompt:category] ${category}`);
-
-            renderUploadQuickPrompts();
-            return;
-          }
-
-          const promptBtn = target.closest('[data-upload-quick-prompt-id]');
-          if (!promptBtn) return;
-
-          e.preventDefault();
-          e.stopPropagation();
-
-          const id = promptBtn.getAttribute('data-upload-quick-prompt-id');
-          const prompts = typeof PromptManagerModule !== 'undefined' && typeof PromptManagerModule.getPrompts === 'function'
-            ? PromptManagerModule.getPrompts()
-            : [];
-
-          const prompt = prompts.find((p) => p.id === id);
-
-          if (!prompt) {
-            setStatus('未找到对应 Prompt');
-            return;
-          }
-
-          await sendOrFillQuickPrompt(prompt, {
-            source: 'quick-prompt-click',
-            send: shouldQuickPromptAutoSend(getCompactUiConfig()),
-          });
-        });
+        quickPromptBox.dataset.quickPromptClickMode = 'root-delegated';
       }
 
       bindUploadDropTargets(rootEl);
@@ -18070,6 +18406,8 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       },
       startUploadFromBridge,
       startUploadFromCurrentQueue,
+      startUploadForAutoQueue,
+      detectComposerHasUploadPayload,
       triggerStartUpload,
       handleStartUploadClick,
       startUploadOnlyFlow,

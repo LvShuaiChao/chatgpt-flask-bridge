@@ -129,12 +129,13 @@
       : {};
     const phase = normalizeTaskPhase(task.phase);
     const uploadRunning = phase === TaskPhase.UPLOADING || phase === TaskPhase.CANCELLING;
+    const noFiles = Number(snapshot.activeFilesCount || 0) <= 0;
 
     if (task.cancelRequested || phase === TaskPhase.CANCELLING) {
       return {
         phase: TaskPhase.CANCELLING,
-        text: '正在取消',
-        title: '正在取消上传流程',
+        text: '正在停止',
+        title: '正在停止上传，请稍候',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -145,8 +146,8 @@
     if (phase === TaskPhase.FAILED) {
       return {
         phase: TaskPhase.FAILED,
-        text: '上传失败',
-        title: '上传失败，可再次点击开始',
+        text: '上传失败，点击重试',
+        title: '上传失败，点击重新上传',
         disabled: false,
         allowCancel: false,
         action: 'start',
@@ -156,13 +157,13 @@
 
     if (phase === TaskPhase.SUCCESS) {
       return {
-        phase: TaskPhase.SUCCESS,
-        text: '上传完成',
-        title: '上传完成',
-        disabled: false,
+        phase: TaskPhase.IDLE,
+        text: '开始上传',
+        title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
+        disabled: noFiles,
         allowCancel: false,
         action: 'start',
-        buttonPhase: 'success',
+        buttonPhase: 'idle',
       };
     }
 
@@ -195,16 +196,14 @@
     if (uploadRunning) {
       return {
         phase: TaskPhase.UPLOADING,
-        text: '上传中，点击取消',
-        title: '正在上传，再次点击可取消',
+        text: '上传中，点击停止',
+        title: '正在上传，点击停止上传',
         disabled: false,
         allowCancel: true,
         action: 'cancel',
         buttonPhase: 'danger',
       };
     }
-
-    const noFiles = Number(snapshot.activeFilesCount || 0) <= 0;
     return {
       phase: TaskPhase.IDLE,
       text: '开始上传',
@@ -608,7 +607,7 @@
         disabled: false,
         allowCancel: true,
         action: 'stop',
-        buttonPhase: 'waiting',
+        buttonPhase: 'danger',
       };
     }
 

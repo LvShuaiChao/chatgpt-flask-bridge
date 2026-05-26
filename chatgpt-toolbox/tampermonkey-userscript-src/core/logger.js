@@ -498,7 +498,6 @@
 
   const PERMANENT_DANGER_BUTTON_IDS = new Set([
     'cgpt-log-clear',
-    'cgpt-autoq-stop',
     'cgpt-prompt-delete-btn',
     'cgpt-prompt-reset-btn',
   ]);
@@ -2349,6 +2348,74 @@
       get,
       save,
       patch,
+    });
+  })();
+
+  const PromptCategoryState = (() => {
+    const ALL_CATEGORY = '全部';
+    const DEFAULT_EDITOR_CATEGORY = '默认';
+
+    function normalizeCategoryName(name) {
+      const text = String(name || '').trim();
+      if (!text || text === '鍏ㄩ儴') {
+        return ALL_CATEGORY;
+      }
+      return text;
+    }
+
+    function readStoredCategory() {
+      const fromPromptManager = MemoryManager.get(
+        MemoryManager.KEYS.promptManagerActiveCategory,
+        null,
+      );
+      if (fromPromptManager != null && String(fromPromptManager).trim()) {
+        return normalizeCategoryName(fromPromptManager);
+      }
+
+      const compactCfg = CompactUiConfigStore.get();
+      return normalizeCategoryName(compactCfg.quickPromptActiveCategory);
+    }
+
+    let activeCategory = readStoredCategory();
+
+    function getActiveCategory() {
+      return normalizeCategoryName(activeCategory);
+    }
+
+    function getEditorDefaultCategory() {
+      const current = getActiveCategory();
+      return current !== ALL_CATEGORY ? current : DEFAULT_EDITOR_CATEGORY;
+    }
+
+    function setActiveCategory(category, options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      activeCategory = normalizeCategoryName(category);
+
+      MemoryManager.set(
+        MemoryManager.KEYS.promptManagerActiveCategory,
+        activeCategory,
+      );
+
+      if (opts.syncCompactUi !== false) {
+        CompactUiConfigStore.patch({
+          quickPromptActiveCategory: activeCategory,
+        });
+      }
+
+      return activeCategory;
+    }
+
+    function hydrateFromStorage() {
+      activeCategory = readStoredCategory();
+      return activeCategory;
+    }
+
+    return Object.freeze({
+      getActiveCategory,
+      setActiveCategory,
+      getEditorDefaultCategory,
+      normalizeCategoryName,
+      hydrateFromStorage,
     });
   })();
 

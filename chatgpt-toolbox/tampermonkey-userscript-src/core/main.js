@@ -1069,6 +1069,45 @@
     };
   }
 
+  const ASSISTANT_COPY_NOISE_SELECTORS = [
+    'button',
+    'textarea',
+    'input',
+    'select',
+    'svg',
+    'style',
+    'script',
+    '#cgpt-toolbox-root',
+    '[aria-hidden="true"]',
+    '[data-testid="copy-turn-action-button"]',
+    '[data-testid="feedback-actions"]',
+    '[data-testid*="feedback"]',
+    '[data-testid*="copy"]',
+    '[data-testid*="share"]',
+    '[data-testid*="regenerate"]',
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '[class*="text-token-text-tertiary"]',
+  ].join(',');
+
+  function extractAssistantReplyTextFromElement(assistantEl) {
+    if (!(assistantEl instanceof HTMLElement)) {
+      return '';
+    }
+
+    const markdown = assistantEl.querySelector(
+      '.markdown, [data-message-content], [class*="markdown"], .whitespace-pre-wrap',
+    );
+    const source = markdown instanceof HTMLElement ? markdown : assistantEl;
+    const clone = source.cloneNode(true);
+
+    clone.querySelectorAll(ASSISTANT_COPY_NOISE_SELECTORS).forEach((el) => {
+      el.remove();
+    });
+
+    return String(clone.innerText || clone.textContent || '').trim();
+  }
+
   function getValidAssistantTextsFromDom() {
     const main = document.querySelector('main') || document.body;
     if (!(main instanceof HTMLElement)) {
@@ -1078,7 +1117,7 @@
     return Array.from(main.querySelectorAll('[data-message-author-role="assistant"]'))
       .filter((node) => node instanceof HTMLElement)
       .filter((node) => !isInToolbox(node) && !isInComposerArea(node) && !isChatSidebarElement(node))
-      .map((node) => String(node.innerText || node.textContent || '').trim())
+      .map((node) => extractAssistantReplyTextFromElement(node))
       .filter(Boolean);
   }
 
@@ -1148,11 +1187,19 @@
       return '';
     }
 
+    const assistantEl =
+      turn.querySelector('[data-message-author-role="assistant"]')
+      || (turn.getAttribute('data-message-author-role') === 'assistant' ? turn : null);
+
+    if (assistantEl) {
+      return extractAssistantReplyTextFromElement(assistantEl);
+    }
+
     const clone = turn.cloneNode(true);
 
-    clone.querySelectorAll(
-      'button, textarea, input, select, #cgpt-toolbox-root, [data-testid*="copy"], [data-testid*="share"]',
-    ).forEach((el) => el.remove());
+    clone.querySelectorAll(ASSISTANT_COPY_NOISE_SELECTORS).forEach((el) => {
+      el.remove();
+    });
 
     return String(clone.innerText || clone.textContent || '').trim();
   }
@@ -1188,7 +1235,7 @@
         continue;
       }
 
-      const text = String(node.innerText || node.textContent || '').trim();
+      const text = extractAssistantReplyTextFromElement(node);
 
       if (text) {
         return text;
@@ -3175,20 +3222,19 @@
     }
 
     function collectVisibleComposerPayloadText() {
-      const roots = [
-        getComposerRoot(),
-        qs('[data-testid="composer"]'),
-        qs('form'),
-        qs('main'),
-      ].filter(Boolean);
-
+      const roots = collectComposerAttachmentRoots();
       const seen = new Set();
       const pieces = [];
+      let falsePositiveLogged = false;
 
       roots.forEach((root) => {
         if (!(root instanceof HTMLElement)) return;
         if (seen.has(root)) return;
         seen.add(root);
+
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_SCOPE] root=${root.tagName.toLowerCase()} from=collectVisibleComposerPayloadText`,
+        );
 
         const rootText = [
           root.innerText || '',
@@ -3206,6 +3252,15 @@
         qsa('[data-testid], [aria-label], [title], [role], button, span, div, svg', root).forEach((el) => {
           if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) return;
           if (isInToolbox(el)) return;
+          if (isInsideConversationHistory(el)) {
+            if (!falsePositiveLogged) {
+              falsePositiveLogged = true;
+              ToolboxShell.appendLog(
+                '[COMPOSER][ATTACHMENT_FALSE_POSITIVE_SKIP] reason=inside-conversation-history',
+              );
+            }
+            return;
+          }
           if (seen.has(el)) return;
           seen.add(el);
 
@@ -3288,9 +3343,15 @@
         (composerForm instanceof HTMLElement && composerForm)
         || (composerEl instanceof HTMLElement && composerEl)
         || (composerRoot instanceof HTMLElement && composerRoot)
-        || document.querySelector('form[data-type="unified-composer"]')
-        || document.querySelector('form')
-        || document.body
+        || null
+      );
+
+      if (!(composerScope instanceof HTMLElement)) {
+        return false;
+      }
+
+      ToolboxShell.appendLog(
+        `[COMPOSER][ATTACHMENT_SCOPE] root=${composerScope.tagName.toLowerCase()} from=hasComposerAttachmentUnified`,
       );
 
       const selectors = [
@@ -3312,7 +3373,15 @@
       for (let i = 0; i < selectors.length; i += 1) {
         const selector = selectors[i];
         const nodes = Array.from(composerScope.querySelectorAll(selector));
-        const visibleNodes = nodes.filter(looksLikeVisibleComposerAttachmentNode);
+        const visibleNodes = nodes.filter((node) => {
+          if (!looksLikeVisibleComposerAttachmentNode(node)) {
+            return false;
+          }
+          if (isComposerAttachmentChipElement(node)) {
+            return true;
+          }
+          return composerScope.contains(node);
+        });
 
         if (visibleNodes.length > 0) {
           const sample = String(
@@ -3788,27 +3857,34 @@
     }
 
     function collectComposerAttachmentStatusText() {
-      const root = getComposerRoot() || qs('main') || document.body;
+      const roots = collectComposerAttachmentRoots();
       const parts = [];
 
-      qsa('[data-testid], [aria-label], [title], [role], button, div, span', root).forEach((el) => {
-        if (!(el instanceof HTMLElement)) return;
-        if (isInToolbox(el)) return;
+      roots.forEach((root) => {
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_SCOPE] root=${root.tagName.toLowerCase()} from=collectComposerAttachmentStatusText`,
+        );
 
-        const text = [
-          el.innerText || '',
-          el.textContent || '',
-          el.getAttribute('aria-label') || '',
-          el.getAttribute('title') || '',
-          el.getAttribute('data-testid') || '',
-          el.getAttribute('role') || '',
-        ].join(' ').trim();
+        qsa('[data-testid], [aria-label], [title], [role], button, div, span', root).forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          if (isInToolbox(el)) return;
+          if (isInsideConversationHistory(el)) return;
 
-        if (!text) return;
+          const text = [
+            el.innerText || '',
+            el.textContent || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+            el.getAttribute('data-testid') || '',
+            el.getAttribute('role') || '',
+          ].join(' ').trim();
 
-        if (/upload|上传|processing|处理中|loading|加载|progress|spinner|附件|file|文件|remove|删除|移除/i.test(text)) {
-          parts.push(text.slice(0, 300));
-        }
+          if (!text) return;
+
+          if (/upload|上传|processing|处理中|loading|加载|progress|spinner|附件|file|文件|remove|删除|移除/i.test(text)) {
+            parts.push(text.slice(0, 300));
+          }
+        });
       });
 
       return [...new Set(parts)].join('\n');
@@ -3819,39 +3895,58 @@
         return false;
       }
 
-      const root = getComposerRoot() || qs('main') || document.body;
+      const roots = collectComposerAttachmentRoots();
+      if (!roots.length) {
+        return false;
+      }
 
-      const busyNode = qsa(
-        [
-          '[role="progressbar"]',
-          '[aria-busy="true"]',
-          '[data-testid*="progress"]',
-          '[data-testid*="spinner"]',
-          'svg[class*="animate"]',
-          '.animate-spin',
-        ].join(', '),
-        root,
-      ).find((el) => {
-        if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) {
-          return false;
-        }
-        if (isInToolbox(el)) {
-          return false;
-        }
+      let busyNode = null;
 
-        if (el instanceof HTMLElement) {
-          const style = window.getComputedStyle(el);
-          if (
-            style.display === 'none'
-            || style.visibility === 'hidden'
-            || style.opacity === '0'
-          ) {
+      for (let i = 0; i < roots.length; i += 1) {
+        const root = roots[i];
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_SCOPE] root=${root.tagName.toLowerCase()} from=isAttachmentStillUploading`,
+        );
+
+        busyNode = qsa(
+          [
+            '[role="progressbar"]',
+            '[aria-busy="true"]',
+            '[data-testid*="progress"]',
+            '[data-testid*="spinner"]',
+            'svg[class*="animate"]',
+            '.animate-spin',
+          ].join(', '),
+          root,
+        ).find((el) => {
+          if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) {
             return false;
           }
-        }
+          if (isInToolbox(el)) {
+            return false;
+          }
+          if (isInsideConversationHistory(el)) {
+            return false;
+          }
 
-        return true;
-      });
+          if (el instanceof HTMLElement) {
+            const style = window.getComputedStyle(el);
+            if (
+              style.display === 'none'
+              || style.visibility === 'hidden'
+              || style.opacity === '0'
+            ) {
+              return false;
+            }
+          }
+
+          return true;
+        });
+
+        if (busyNode) {
+          break;
+        }
+      }
 
       if (busyNode) {
         return true;

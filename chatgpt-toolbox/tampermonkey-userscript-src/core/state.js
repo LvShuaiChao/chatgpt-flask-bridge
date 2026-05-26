@@ -769,8 +769,6 @@
   }
 
   const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
-  const DEFAULT_SYSTEM_HOTKEY_COMBO = 'ctrl+alt+i';
-  const DEFAULT_SYSTEM_HOTKEY_LABEL = 'Ctrl+Alt+I';
 
   function getLegacyShortContinuePromptText() {
     return [

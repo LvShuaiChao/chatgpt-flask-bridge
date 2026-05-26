@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.constants import is_chatgpt_platform_error_text, is_invalid_assistant_reply_text
+from app.constants import is_invalid_assistant_reply_text
 
 
 @pytest.fixture
@@ -50,7 +50,6 @@ def test_is_invalid_assistant_reply_text_keeps_real_answers(text):
     ],
 )
 def test_chatgpt_platform_error_is_not_invalid_assistant_reply(text):
-    assert is_chatgpt_platform_error_text(text) is True
     assert is_invalid_assistant_reply_text(text) is False
 
 

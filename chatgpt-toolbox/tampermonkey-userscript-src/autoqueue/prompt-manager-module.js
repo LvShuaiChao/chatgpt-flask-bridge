@@ -42,10 +42,13 @@
     let prompts = [];
     let categories = [];
     let searchKeyword = '';
-    let activeCategory = MemoryManager.get(
-      MemoryManager.KEYS.promptManagerActiveCategory,
-      '全部',
-    );
+    let activeCategory = typeof PromptCategoryState !== 'undefined'
+      && typeof PromptCategoryState.getActiveCategory === 'function'
+      ? PromptCategoryState.getActiveCategory()
+      : MemoryManager.get(
+        MemoryManager.KEYS.promptManagerActiveCategory,
+        '全部',
+      );
     let activePromptSubtab = normalizePromptSubtab(
       MemoryManager.get(
         MemoryManager.KEYS.promptManagerActiveSubtab,
@@ -279,15 +282,34 @@
       return ['全部', ...names];
     }
 
+    function syncActiveCategoryFromSharedState() {
+      if (typeof PromptCategoryState !== 'undefined'
+        && typeof PromptCategoryState.getActiveCategory === 'function') {
+        activeCategory = PromptCategoryState.getActiveCategory();
+      }
+      return normalizeActiveCategory();
+    }
+
+    function persistActivePromptCategory(category) {
+      activeCategory = category;
+      if (typeof PromptCategoryState !== 'undefined'
+        && typeof PromptCategoryState.setActiveCategory === 'function') {
+        PromptCategoryState.setActiveCategory(category);
+        return activeCategory;
+      }
+
+      MemoryManager.set(
+        MemoryManager.KEYS.promptManagerActiveCategory,
+        activeCategory,
+      );
+      return activeCategory;
+    }
+
     function normalizeActiveCategory() {
       const filterNames = getPromptCategoriesForFilter().map((cat) => cat.name);
 
       if (!filterNames.includes(activeCategory)) {
-        activeCategory = '全部';
-        MemoryManager.set(
-          MemoryManager.KEYS.promptManagerActiveCategory,
-          activeCategory,
-        );
+        persistActivePromptCategory('全部');
       }
 
       return activeCategory;
@@ -306,6 +328,13 @@
     }
 
     function getDefaultPromptEditorCategory() {
+      syncActiveCategoryFromSharedState();
+
+      if (typeof PromptCategoryState !== 'undefined'
+        && typeof PromptCategoryState.getEditorDefaultCategory === 'function') {
+        return PromptCategoryState.getEditorDefaultCategory();
+      }
+
       const current = normalizePromptCategoryName(activeCategory || '');
 
       if (current && current !== '全部') {
@@ -445,11 +474,7 @@
       });
 
       if (activeCategory === oldName) {
-        activeCategory = nextName;
-        MemoryManager.set(
-          MemoryManager.KEYS.promptManagerActiveCategory,
-          activeCategory,
-        );
+        persistActivePromptCategory(nextName);
       }
 
       savePromptManagerData();
@@ -500,11 +525,7 @@
       }
 
       if (activeCategory === cat.name) {
-        activeCategory = '全部';
-        MemoryManager.set(
-          MemoryManager.KEYS.promptManagerActiveCategory,
-          activeCategory,
-        );
+        persistActivePromptCategory('全部');
       }
 
       if (!savePromptManagerData()) {
@@ -710,9 +731,8 @@
           ? !!compactVisibleEl.checked
           : current.showCompactQuickPrompts !== false,
 
-        quickPromptClickAction: actionEl && actionEl.value === 'fill'
-          ? 'fill'
-          : 'send',
+        // 上传页常用 Prompt 点击固定填入并发送；此配置仅保留兼容，保存时强制 send。
+        quickPromptClickAction: 'send',
 
         confirmPromptDraftOverwrite: confirmEl
           ? !!confirmEl.checked
@@ -871,6 +891,7 @@
     function render() {
       if (!listEl) return;
 
+      syncActiveCategoryFromSharedState();
       activePromptSubtab = normalizePromptSubtab(activePromptSubtab);
       renderPromptSubtabs();
 
@@ -1196,7 +1217,6 @@
 
       return !!(
         String(draft.title || '').trim()
-        || String(draft.category || '').trim()
         || String(draft.content || '').trim()
       );
     }
@@ -1409,9 +1429,12 @@
       overlay.style.display = 'flex';
     }
 
-    function openEditor(id) {
+    function openEditor(id, options = {}) {
       editingPromptId = id;
       editorOpenBaseline = captureEditorBaseline(id);
+
+      const forcedCategory = normalizePromptCategoryName(options.category || '');
+      const defaultCategory = forcedCategory || getDefaultPromptEditorCategory();
 
       const item = prompts.find((prompt) => prompt.id === id) || null;
       const modalTitle = qs('#cgpt-prompt-editor-title', modalOverlay);
@@ -1436,7 +1459,6 @@
         modalTitle.textContent = '新建 Prompt';
         titleInput.value = '';
 
-        const defaultCategory = getDefaultPromptEditorCategory();
         renderEditorCategoryOptions(defaultCategory);
         categoryInput.value = defaultCategory;
 
@@ -1450,7 +1472,9 @@
       if (draftHasMeaningfulContent(draft)) {
         titleInput.value = String(draft.title || '');
 
-        const draftCategory = String(draft.category || '') || getDefaultPromptEditorCategory();
+        const draftCategory = editingPromptId
+          ? String(draft.category || '') || defaultCategory
+          : defaultCategory;
         renderEditorCategoryOptions(draftCategory);
         categoryInput.value = draftCategory;
 
@@ -1458,6 +1482,7 @@
         console.log('[PROMPT_DRAFT][RESTORE]', {
           key: getPromptEditorDraftKey(),
           editingPromptId: editingPromptId || null,
+          source: options.source || '-',
         });
         setStatus('已恢复未保存草稿');
       }
@@ -1566,6 +1591,9 @@
           existing.content = content;
           existing.updatedAt = nowMs();
         } else {
+          ToolboxShell.appendLog(
+            `[PROMPT][CREATE] title=${title} category=${category}`,
+          );
           prompts.unshift({
             id: createId('prompt'),
             title,
@@ -1867,11 +1895,7 @@
 
         categories.sort((a, b) => Number(a.order) - Number(b.order));
         savePromptManagerData();
-        activeCategory = '全部';
-        MemoryManager.set(
-          MemoryManager.KEYS.promptManagerActiveCategory,
-          activeCategory,
-        );
+        persistActivePromptCategory('全部');
         render();
         notifyUploadQuickPromptsRefresh('prompt-import');
 
@@ -2157,7 +2181,16 @@
       root.dataset.promptManagerEventsBound = '1';
       ToolboxShell.appendLog('[PROMPT_MANAGER][BIND_EVENTS_ONCE]');
 
-      bindClick(root, '#cgpt-prompt-new-quick-btn', () => openEditor(null), {
+      bindClick(root, '#cgpt-prompt-new-quick-btn', () => {
+        const category = getDefaultPromptEditorCategory();
+        ToolboxShell.appendLog(
+          `[PROMPT][NEW][CATEGORY] activeCategory=${activeCategory || '-'} defaultCategory=${category || '-'}`,
+        );
+        openEditor(null, {
+          category,
+          source: 'new-quick-from-active-category',
+        });
+      }, {
         moduleName: 'PromptManagerModule',
         bindMissingLog: '[PROMPT][bind-missing] #cgpt-prompt-new-quick-btn',
       });
@@ -2201,10 +2234,7 @@
 
           activeCategory = btn.getAttribute('data-prompt-category') || '全部';
 
-          MemoryManager.set(
-            MemoryManager.KEYS.promptManagerActiveCategory,
-            activeCategory,
-          );
+          persistActivePromptCategory(activeCategory);
 
           render();
           setStatus(`已切换分类：${activeCategory}`);
@@ -2373,12 +2403,12 @@
               </label>
 
               <div class="cgpt-kv">
-                <label>点击 Prompt 后的动作</label>
-                <select class="cgpt-select" id="cgpt-prompt-display-click-action">
-                  <option value="send">填入并发送</option>
-                  <option value="fill">只填入输入框</option>
+                <label>常用 Prompt 默认点击动作</label>
+                <select class="cgpt-select" id="cgpt-prompt-display-click-action" disabled title="多文件上传页常用 Prompt 固定为填入并发送">
+                  <option value="send" selected>填入并发送</option>
                 </select>
               </div>
+              <div class="cgpt-hint">多文件上传页的常用 Prompt 点击后固定为填入并发送，不受此项影响。</div>
 
               <label class="cgpt-checkbox-line">
                 <input type="checkbox" id="cgpt-prompt-display-confirm-overwrite">
@@ -2422,6 +2452,17 @@
           bindEvents();
         },
         onRender: () => {
+          if (typeof PromptCategoryState !== 'undefined'
+            && typeof PromptCategoryState.hydrateFromStorage === 'function') {
+            activeCategory = PromptCategoryState.hydrateFromStorage();
+          } else {
+            activeCategory = persistActivePromptCategory(
+              MemoryManager.get(
+                MemoryManager.KEYS.promptManagerActiveCategory,
+                activeCategory,
+              ),
+            );
+          }
           activePromptSubtab = normalizePromptSubtab(
             MemoryManager.get(
               MemoryManager.KEYS.promptManagerActiveSubtab,

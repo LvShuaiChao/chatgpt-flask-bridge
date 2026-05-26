@@ -118,6 +118,7 @@
         { log: false },
       );
       cfg.quickPromptActionVersion = 1;
+      cfg.quickPromptClickAction = 'send';
       if (typeof CompactUiConfigStore !== 'undefined' && typeof CompactUiConfigStore.save === 'function') {
         CompactUiConfigStore.save(cfg);
       } else {
@@ -250,9 +251,11 @@
         ? !!compactQuickEl.checked
         : current.showCompactQuickPrompts !== false;
 
-      const quickPromptClickAction = promptActionEl
-        ? (promptActionEl.value === 'fill' ? 'fill' : 'send')
-        : (current.quickPromptClickAction === 'fill' ? 'fill' : 'send');
+      // 多文件上传页常用 Prompt 固定填入并发送；不再从设置项读取 fill。
+      const quickPromptClickAction = 'send';
+      if (promptActionEl) {
+        promptActionEl.value = 'send';
+      }
 
       const confirmPromptDraftOverwrite = confirmOverwriteEl
         ? !!confirmOverwriteEl.checked
@@ -450,10 +453,6 @@
           labelId: 'cgpt-shortcut-copy-hotkey-label',
         },
         {
-          action: 'copyThenShortcutTargetHotkey',
-          labelId: 'cgpt-shortcut-copy-then-target-label',
-        },
-        {
           action: 'startUpload',
           enabledId: 'cgpt-shortcut-upload-enabled',
           labelId: 'cgpt-shortcut-upload-label',
@@ -606,7 +605,7 @@
             cleanupRecordListener();
 
             const shortcutData = {
-              enabled: action === 'copyThenShortcutTargetHotkey' ? true : next.enabled,
+              enabled: next.enabled,
               label: next.label,
               key: next.key,
               code: next.code,
@@ -642,12 +641,10 @@
 
       bindShortcutRecord('cgpt-shortcut-send-record', 'sendMessage');
       bindShortcutRecord('cgpt-shortcut-copy-hotkey-record', 'copyAndHotkeyOnce');
-      bindShortcutRecord('cgpt-shortcut-copy-then-target-record', 'copyThenShortcutTargetHotkey');
       bindShortcutRecord('cgpt-shortcut-upload-record', 'startUpload');
 
       bindShortcutClear('cgpt-shortcut-send-clear', 'sendMessage');
       bindShortcutClear('cgpt-shortcut-copy-hotkey-clear', 'copyAndHotkeyOnce');
-      bindShortcutClear('cgpt-shortcut-copy-then-target-clear', 'copyThenShortcutTargetHotkey');
       bindShortcutClear('cgpt-shortcut-upload-clear', 'startUpload');
 
       const resetShortcutBtn = qs('#cgpt-shortcut-reset-defaults', root);
@@ -925,7 +922,7 @@
           }
 
           if (statusEl) {
-            statusEl.textContent = '已开始测试标题闪烁';
+            statusEl.textContent = '已开始测试浏览器标题闪烁；工具箱标题闪烁已禁用';
           }
 
           ToolboxShell.appendLog('[SETTINGS][title-flash-test] start');
@@ -1044,9 +1041,9 @@
           <div class="cgpt-settings-panel" data-settings-panel="shortcut">
             <div class="cgpt-shortcut-settings">
               <div class="cgpt-hotkey-setting-row" data-shortcut-action="sendMessage">
-                <label class="cgpt-hotkey-setting-label" title="发送信息快捷键用于直接发送消息。建议使用 Ctrl+Alt+S 等组合键；普通 Enter 仅在 ChatGPT 输入框内由页面原生处理。">
+                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后执行发送消息。">
                   <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-send-enabled">
-                  <span class="cgpt-hotkey-setting-label-text">启用发送信息快捷键</span>
+                  <span class="cgpt-hotkey-setting-label-text">发送消息</span>
                 </label>
                 <input id="cgpt-shortcut-send-label" class="cgpt-hotkey-setting-input" readonly>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-record" title="点击录制后按下完整快捷键，例如 Ctrl+Alt+S。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
@@ -1054,29 +1051,19 @@
               </div>
 
               <div class="cgpt-hotkey-setting-row" data-shortcut-action="copyAndHotkeyOnce">
-                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后，会先复制最后一条回复，再触发下方配置的目标快捷键。">
+                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后复制最后一条回复，并执行后续触发逻辑。">
                   <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-copy-hotkey-enabled">
-                  <span class="cgpt-hotkey-setting-label-text">启用复制并触发快捷键</span>
+                  <span class="cgpt-hotkey-setting-label-text">复制最后回复并触发</span>
                 </label>
                 <input id="cgpt-shortcut-copy-hotkey-label" class="cgpt-hotkey-setting-input" readonly>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-hotkey-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-hotkey-clear">清空</button>
               </div>
 
-              <div class="cgpt-hotkey-setting-row" data-shortcut-action="copyThenShortcutTargetHotkey">
-                <label class="cgpt-hotkey-setting-label" title="复制完成后由 GUI 发送的系统快捷键，不是页面内快捷键。">
-                  <span class="cgpt-hotkey-setting-checkbox-placeholder" aria-hidden="true"></span>
-                  <span class="cgpt-hotkey-setting-label-text">复制后触发的目标快捷键</span>
-                </label>
-                <input id="cgpt-shortcut-copy-then-target-label" class="cgpt-hotkey-setting-input" readonly>
-                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-then-target-record" title="录制后由 GUI 执行的组合键，例如 Ctrl+Alt+I。按 Esc 可取消。">录制</button>
-                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-then-target-clear">清空</button>
-              </div>
-
               <div class="cgpt-hotkey-setting-row" data-shortcut-action="startUpload">
-                <label class="cgpt-hotkey-setting-label" title="开始上传快捷键用于触发当前队列上传。">
+                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后开始上传当前文件队列。">
                   <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-upload-enabled">
-                  <span class="cgpt-hotkey-setting-label-text">启用开始上传快捷键</span>
+                  <span class="cgpt-hotkey-setting-label-text">开始上传</span>
                 </label>
                 <input id="cgpt-shortcut-upload-label" class="cgpt-hotkey-setting-input" readonly>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-upload-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>

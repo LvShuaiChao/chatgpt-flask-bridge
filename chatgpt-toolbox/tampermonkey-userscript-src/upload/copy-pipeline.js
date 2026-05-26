@@ -10,6 +10,64 @@
         .trim();
     }
 
+    function sanitizeCopiedAssistantText(rawText) {
+      const original = String(rawText || '');
+      if (!original.trim()) {
+        return '';
+      }
+
+      let text = original;
+
+      const exactNoiseLines = [
+        'Is this conversation helpful so far?',
+        'Is this response helpful?',
+        'Was this response helpful?',
+        '这次对话目前有帮助吗？',
+        '这次对话目前有帮助吗?',
+        '这个回答有帮助吗？',
+        '这个回答有帮助吗?',
+      ];
+
+      const before = text;
+
+      const lines = text
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .filter((line) => {
+          const t = line.trim();
+          if (!t) {
+            return true;
+          }
+          return !exactNoiseLines.includes(t);
+        });
+
+      text = lines.join('\n');
+
+      text = text
+        .replace(/\bIs this conversation helpful so far\?\b/gi, '')
+        .replace(/\bIs this response helpful\?\b/gi, '')
+        .replace(/\bWas this response helpful\?\b/gi, '')
+        .replace(/这次对话目前有帮助吗[？?]/g, '')
+        .replace(/这个回答有帮助吗[？?]/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+      if (before !== text) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog('[COPY][SANITIZE_NOISE] removed=helpful-feedback-widget');
+        } else {
+          console.log('[COPY][SANITIZE_NOISE] removed=helpful-feedback-widget');
+        }
+      }
+
+      return text;
+    }
+
+    function finalizeAssistantCopyText(rawText) {
+      return sanitizeCopiedAssistantText(rawText);
+    }
+
     function getLatestAssistantReplyText(options = {}) {
       const label = String(options.label || 'get-latest-assistant-reply').trim() || 'get-latest-assistant-reply';
 
@@ -19,11 +77,11 @@
             forceRefresh: options.forceRefresh !== false,
           });
           if (picked && picked.ok && picked.text) {
-            const text = String(picked.text).trim();
+            const text = finalizeAssistantCopyText(picked.text);
             if (text && !(typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(text))) {
               return { ok: true, text, reason: 'ok' };
             }
-            if (text) {
+            if (String(picked.text || '').trim()) {
               return { ok: false, text: '', reason: 'latest_assistant_reply_invalid' };
             }
           }
@@ -39,11 +97,11 @@
           const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
 
           if (picked && picked.ok && picked.record) {
-            const recordText = String(picked.record.text || '').trim();
+            const recordText = finalizeAssistantCopyText(picked.record.text || '');
             if (recordText && !(typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(recordText))) {
               return { ok: true, text: recordText, reason: 'ok' };
             }
-            if (recordText) {
+            if (String(picked.record.text || '').trim()) {
               return { ok: false, text: '', reason: 'latest_assistant_reply_invalid' };
             }
           }
@@ -51,7 +109,7 @@
 
         if (typeof findLastAssistantTurn === 'function' && typeof extractAssistantText === 'function') {
           const turn = findLastAssistantTurn();
-          const turnText = String(extractAssistantText(turn) || '').trim();
+          const turnText = finalizeAssistantCopyText(extractAssistantText(turn) || '');
           if (turnText) {
             return { ok: true, text: turnText, reason: 'ok' };
           }
@@ -72,7 +130,14 @@
             continue;
           }
 
-          const text = String(lastNode.innerText || lastNode.textContent || '').trim();
+          let text = '';
+          if (typeof extractAssistantReplyTextFromElement === 'function') {
+            text = finalizeAssistantCopyText(extractAssistantReplyTextFromElement(lastNode));
+          } else {
+            const markdown = lastNode.querySelector('.markdown, [data-message-content], [class*="markdown"]');
+            const source = markdown instanceof HTMLElement ? markdown : lastNode;
+            text = finalizeAssistantCopyText(source.innerText || source.textContent || '');
+          }
 
           if (text && !(typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(text))) {
             return { ok: true, text, reason: 'ok' };
@@ -94,9 +159,15 @@
       const rawText = String(text ?? '');
       const label = String(options.label || 'clipboard').trim() || 'clipboard';
       const strictReadVerify = options.strictReadVerify === true;
+      const cleanedText = sanitizeCopiedAssistantText(rawText);
 
-      if (!rawText.trim()) {
-        return { ok: false, reason: 'empty_clipboard_text' };
+      if (!cleanedText) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(`[COPY][SKIP] reason=empty-after-sanitize label=${label}`);
+        } else {
+          console.warn('[COPY][SKIP] reason=empty-after-sanitize', { label });
+        }
+        return { ok: false, reason: 'empty_after_sanitize' };
       }
 
       if (typeof copyTextUnified !== 'function') {
@@ -108,7 +179,7 @@
         return { ok: false, reason: 'clipboard_write_failed', error: missingErr };
       }
 
-      const copied = await copyTextUnified(rawText, `clipboard:${label}`);
+      const copied = await copyTextUnified(cleanedText, `clipboard:${label}`);
       if (!copied) {
         const writeErr = new Error('copyTextUnified-returned-false');
         console.error(`[CLIPBOARD][WRITE_FAIL] label=${label}`, writeErr);
@@ -125,7 +196,7 @@
 
       if (!canReadClipboard) {
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(`[CLIPBOARD][VERIFY_SKIP] label=${label} reason=readText-unavailable chars=${rawText.length}`);
+          ToolboxShell.appendLog(`[CLIPBOARD][VERIFY_SKIP] label=${label} reason=readText-unavailable chars=${cleanedText.length}`);
         }
         return { ok: true, reason: 'clipboard_read_verify_unavailable', verified: false };
       }
@@ -154,10 +225,10 @@
         };
       }
 
-      if (normalizeClipboardTextForCompare(current) !== normalizeClipboardTextForCompare(rawText)) {
+      if (normalizeClipboardTextForCompare(current) !== normalizeClipboardTextForCompare(cleanedText)) {
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
-            `[CLIPBOARD][VERIFY_MISMATCH] label=${label} expectedLen=${rawText.length} actualLen=${String(current || '').length}`,
+            `[CLIPBOARD][VERIFY_MISMATCH] label=${label} expectedLen=${cleanedText.length} actualLen=${String(current || '').length}`,
           );
         }
         return { ok: false, reason: 'clipboard_verify_mismatch' };
@@ -169,6 +240,7 @@
     return {
       getLatestAssistantReplyText,
       writeClipboardAndVerify,
+      sanitizeCopiedAssistantText,
       normalizeClipboardTextForCompare,
     };
   })();

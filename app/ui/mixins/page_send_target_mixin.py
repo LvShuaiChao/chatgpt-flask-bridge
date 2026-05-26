@@ -23,7 +23,6 @@ from app.models import (
     BIND_STATE_TEMP_HOME_BOUND,
     BIND_STATE_UNBOUND,
     BIND_STATE_WAITING_BOUND_CONVERSATION,
-    BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
     normalize_remote_chatgpt,
 )
@@ -158,25 +157,6 @@ class PageSendTargetMixin:
             if item_conversation_id and item_conversation_id != bound_conversation_id:
                 return False
         return True
-
-    def _find_bound_page_item_for_action(self, remote, status=None):
-        """按会话绑定的 client_id + page_instance_id 查找页面（不跨实例回退）。"""
-        identity = self._session_bound_identity(remote)
-        bound_client_id = identity["client_id"]
-        if not bound_client_id:
-            return None
-        status = status or self._bridge_ui.last_bridge_status or {}
-        bound_page_instance_id = identity["page_instance_id"]
-        if bound_page_instance_id and hasattr(self, "_client_info_by_page_identity"):
-            item = self._client_info_by_page_identity(
-                bound_client_id,
-                bound_page_instance_id,
-                status=status,
-            )
-            if isinstance(item, dict):
-                return item
-            return None
-        return self._find_tm_client_by_client_id(bound_client_id, status=status)
 
     MANUAL_SET_BOUND_PAGE_REASONS = frozenset(
         {

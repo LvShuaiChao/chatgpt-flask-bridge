@@ -393,9 +393,7 @@ QComboBox#{name} QAbstractItemView::item:selected {{
             if combo.count() > 0 and selected_page is None:
                 combo_text = (combo.currentText() or "").strip()
                 combo_index = combo.currentIndex()
-                if combo_index == -1 and not combo_text:
-                    pass
-                elif combo_text:
+                if combo_text:
                     now_ts = time.time()
                     log_at = getattr(self, "_bind_button_invalid_log_at", None)
                     if not isinstance(log_at, dict):
