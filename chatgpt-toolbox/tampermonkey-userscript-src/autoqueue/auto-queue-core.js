@@ -1728,19 +1728,6 @@ const AutoQueueModule = (() => {
       return run;
     }
 
-    function freezeAutoQueueRunContext(task, groupId) {
-      const frozenGroupId = String(groupId || resolveRunGroupIdBeforeStart() || '').trim();
-      if (!frozenGroupId || !getUploadGroupById(frozenGroupId)) {
-        transitionAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, 'active upload group missing', { force: true });
-        return false;
-      }
-      createAutoQueueRunContext(
-        task || (typeof getCurrentRunningTask === 'function' ? getCurrentRunningTask() : null),
-        frozenGroupId,
-      );
-      return true;
-    }
-
     function invalidateAutoQueueRun(reason = 'cancelled') {
       const previousRunId = state.currentRunId || '-';
       state.currentRunId = '';
@@ -1765,70 +1752,6 @@ const AutoQueueModule = (() => {
         window.clearInterval(state.tickTimer);
         state.tickTimer = null;
       }
-    }
-
-    function getAutoQueueButtonViewModel() {
-      const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
-      const reason = String(state.phaseReason || '').trim();
-
-      if (phase === AUTO_QUEUE_PHASES.IDLE) {
-        return { text: '开始', enabled: true, action: 'start', statusText: '空闲' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.DONE) {
-        return { text: '开始', enabled: true, action: 'start', statusText: '已完成' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.FAILED) {
-        return {
-          text: '开始',
-          enabled: true,
-          action: 'start',
-          statusText: reason ? `失败：${reason}` : '失败',
-        };
-      }
-      if (phase === AUTO_QUEUE_PHASES.CANCELLED) {
-        return { text: '开始', enabled: true, action: 'start', statusText: '已停止' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.PREPARING) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '准备中' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.UPLOADING) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '上传中' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '上传完成' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.SENDING) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '发送中' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.SENT) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '已发送' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.WAITING_REPLY) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '等待回复中' };
-      }
-      if (phase === AUTO_QUEUE_PHASES.REPLY_READY) {
-        return { text: '停止', enabled: true, action: 'cancel', statusText: '回复就绪' };
-      }
-      return { text: '停止', enabled: true, action: 'cancel', statusText: phase };
-    }
-
-    function getActiveUploadGroupIdForRun() {
-      if (state.running || AUTO_QUEUE_ACTIVE_PHASES.has(state.phase)) {
-        const frozenGroupId = String(state.currentGroupId || '').trim();
-        if (!frozenGroupId) {
-          transitionAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, 'run group missing', { force: true });
-          return '';
-        }
-        if (!getUploadGroupById(frozenGroupId)) {
-          transitionAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, 'run group no longer exists', { force: true });
-          return '';
-        }
-        return frozenGroupId;
-      }
-      if (typeof UploadModule !== 'undefined' && typeof UploadModule.getActiveGroupId === 'function') {
-        return String(UploadModule.getActiveGroupId() || '').trim();
-      }
-      return '';
     }
 
     let root = null;
@@ -3293,7 +3216,148 @@ const AutoQueueModule = (() => {
         newChatRotationCount: 0,
         forceUploadBeforeNextSend: false,
         lastRotatedConversationKey: '',
+        visibleDoneSignalText: '',
+        visibleDoneSignalSeenAt: 0,
       };
+    }
+
+    const VISIBLE_DONE_SIGNAL_STABLE_MS = 1200;
+
+    const WAIT_REPLY_REPAIR_STEPS = new Set([
+      'wait-current-reply',
+      'send-initial',
+      'wait-initial-reply',
+      'wait-next-reply',
+      'check-done-signal',
+    ]);
+
+    function repairWaitingReplyForAssistantBusy(reason) {
+      if (config.promptMode !== 'task' || !state.running) {
+        return false;
+      }
+
+      const task = getCurrentRunningTask();
+      const run = state.taskRun;
+
+      if (!task || !run) {
+        return false;
+      }
+
+      const runStep = String(run.currentStep || '');
+
+      if (!WAIT_REPLY_REPAIR_STEPS.has(runStep)) {
+        return false;
+      }
+
+      if (state.waitingReply) {
+        return false;
+      }
+
+      state.waitingReply = true;
+      state.replyBecameBusy = true;
+      state.waitingStartedAt = state.waitingStartedAt || Date.now();
+      setTaskBatchStep('wait-current-reply', task, { log: false });
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, 'await-assistant');
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][WAITING_REPLY_REPAIR] task=${task.title} step=${runStep} `
+        + `pendingSendKind=${run.pendingSendKind || '-'} reason=${reason}`,
+      );
+
+      updateStatus('waiting-reply-repair');
+      updateChatInputStateBadge();
+      return true;
+    }
+
+    function clearVisibleDoneSignalTracking() {
+      if (!state.taskRun) {
+        return;
+      }
+      state.taskRun.visibleDoneSignalText = '';
+      state.taskRun.visibleDoneSignalSeenAt = 0;
+    }
+
+    function maybeSettleTaskReplyByVisibleDoneSignal(triggerReason) {
+      if (config.promptMode !== 'task' || !state.running || !state.taskRun) {
+        return;
+      }
+
+      const task = getCurrentRunningTask();
+
+      if (!task) {
+        return;
+      }
+
+      let replyText = '';
+
+      try {
+        const snapshot = buildAssistantReplySnapshot();
+        replyText = String(snapshot && snapshot.text ? snapshot.text : '').trim();
+      } catch (err) {
+        console.error('[ChatGPT toolbox] maybeSettleTaskReplyByVisibleDoneSignal snapshot failed', err);
+      }
+
+      if (!replyText) {
+        try {
+          replyText = String(getLastAssistantReplyText() || '').trim();
+        } catch (err) {
+          console.error('[ChatGPT toolbox] maybeSettleTaskReplyByVisibleDoneSignal fallback failed', err);
+        }
+      }
+
+      if (!replyText) {
+        return;
+      }
+
+      const profile = getActiveTaskProfile();
+      const resolved = resolveTaskContinueSettings(task, profile, { log: false });
+      const doneCheck = isTaskDoneSignalMatched(replyText, resolved.actualDoneSignal);
+
+      if (doneCheck.corrupted) {
+        clearVisibleDoneSignalTracking();
+        failCurrentTask('corrupted-assistant-signal');
+        return;
+      }
+
+      if (!doneCheck.matched) {
+        if (
+          state.taskRun.visibleDoneSignalText
+          && state.taskRun.visibleDoneSignalText !== replyText
+        ) {
+          clearVisibleDoneSignalTracking();
+        }
+        return;
+      }
+
+      const run = state.taskRun;
+      const now = Date.now();
+      const prevText = String(run.visibleDoneSignalText || '');
+      const prevSeenAt = Number(run.visibleDoneSignalSeenAt) || 0;
+
+      if (prevText !== replyText) {
+        run.visibleDoneSignalText = replyText;
+        run.visibleDoneSignalSeenAt = now;
+        ToolboxShell.appendLog(
+          `[AUTOQ][VISIBLE_DONE_SIGNAL][SEEN] task=${task.title} stableMs=0 trigger=${triggerReason || '-'}`,
+        );
+        return;
+      }
+
+      const stableMs = Math.max(0, now - prevSeenAt);
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][VISIBLE_DONE_SIGNAL][SEEN] task=${task.title} stableMs=${stableMs} trigger=${triggerReason || '-'}`,
+      );
+
+      if (stableMs < VISIBLE_DONE_SIGNAL_STABLE_MS) {
+        return;
+      }
+
+      clearVisibleDoneSignalTracking();
+      ToolboxShell.appendLog(
+        `[AUTOQ][VISIBLE_DONE_SIGNAL][SETTLE] task=${task.title} reason=visible-done-signal-while-busy`,
+      );
+      void onAssistantReplySettled(replyText, { reason: 'visible-done-signal-while-busy' });
     }
 
     function getLastAssistantReplyText() {
@@ -3674,6 +3738,8 @@ const AutoQueueModule = (() => {
         newChatRotationCount: 0,
         forceUploadBeforeNextSend: false,
         lastRotatedConversationKey: '',
+        visibleDoneSignalText: '',
+        visibleDoneSignalSeenAt: 0,
       };
       state.queue = [];
       state.idx = 0;
@@ -3740,6 +3806,11 @@ const AutoQueueModule = (() => {
             ToolboxShell.setStatus('切换新聊天失败，继续在当前对话发送下一个任务');
           } else {
             setTaskBatchStep('new-chat-ready', nextTask, { log: false });
+            run.forceUploadBeforeNextSend = true;
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_SWITCH_NEW_CHAT][FORCE_UPLOAD_NEXT] from=${currentTask ? currentTask.id : '-'} `
+              + `to=${nextTask ? nextTask.id : '-'} reason=new-chat-between-tasks`,
+            );
           }
 
           if (typeof updateChatInputStateBadge === 'function') {
@@ -3750,6 +3821,8 @@ const AutoQueueModule = (() => {
           state.taskBatchStepRunning = false;
         }
       }
+
+      clearVisibleDoneSignalTracking();
 
       run.currentIndex = nextIndex;
       run.pendingSendKind = 'initial';
@@ -4606,6 +4679,20 @@ const AutoQueueModule = (() => {
       const uploadResult = await runTaskAutoUploadBeforeNextSend(kind, task);
 
       if (!uploadResult || uploadResult.ok !== true) {
+        if (uploadResult && uploadResult.retryable === true) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][PREPARE_WAIT] kind=${String(kind || '-')} `
+            + `reason=${uploadResult.reason || 'upload-wait'}`,
+          );
+          return {
+            ok: false,
+            rotated: !!rotateResult.rotated,
+            reason: uploadResult.reason || 'upload-wait',
+            wait: true,
+            retryable: true,
+          };
+        }
+
         ToolboxShell.appendLog(
           `[PAGE_ROTATE][FAILED] kind=${String(kind || '-')} phase=upload `
           + `reason=${uploadResult && uploadResult.reason ? uploadResult.reason : 'auto-upload-failed'}`,
@@ -4710,51 +4797,90 @@ const AutoQueueModule = (() => {
       return (no - 1) % everyN === 0;
     }
 
-    function shouldRunTaskAutoUploadBeforeNextSend(kind) {
-      if (!state.running) {
-        return false;
-      }
-
-      if (!state.taskRun || typeof state.taskRun !== 'object') {
-        return false;
-      }
-
-      if (state.taskRun.forceUploadBeforeNextSend === true) {
-        return true;
-      }
-
+    function getTaskAutoUploadDecision(kind) {
       const settings = getTaskAutoUploadSettings();
-
-      if (!settings.enabled) {
-        return false;
-      }
-
-      if (!shouldCountTaskSendKindForAutoUpload(kind)) {
-        return false;
-      }
-
-      const currentCount = Math.max(0, Number(state.taskRun.sentMessageCount) || 0);
+      const force = !!(state.taskRun && state.taskRun.forceUploadBeforeNextSend === true);
+      const currentCount = state.taskRun
+        ? Math.max(0, Number(state.taskRun.sentMessageCount) || 0)
+        : 0;
       const interval = Math.max(1, Number(settings.interval) || 5);
       const nextMessageNo = currentCount + 1;
+      const shouldUploadByInterval = shouldUploadFileForTaskMessageNo(nextMessageNo, interval);
+      const lastAutoUploadAt = state.taskRun
+        ? Math.max(0, Number(state.taskRun.lastAutoUploadAtMessageCount) || 0)
+        : 0;
 
-      if (!shouldUploadFileForTaskMessageNo(nextMessageNo, interval)) {
-        return false;
+      const pendingItems = typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getPendingUploadItems === 'function'
+        ? UploadModule.getPendingUploadItems()
+        : [];
+      const pendingFiles = Array.isArray(pendingItems) ? pendingItems.length : 0;
+
+      let skipReason = '';
+
+      if (!state.running) {
+        skipReason = 'not-running';
+      } else if (!state.taskRun) {
+        skipReason = 'no-task-run';
+      } else if (force) {
+        skipReason = 'force-upload';
+      } else if (!settings.enabled) {
+        skipReason = 'disabled';
+      } else if (!shouldCountTaskSendKindForAutoUpload(kind)) {
+        skipReason = 'kind-not-counted';
+      } else if (!shouldUploadByInterval) {
+        skipReason = 'interval-not-hit';
+      } else if (lastAutoUploadAt === nextMessageNo) {
+        skipReason = 'already-uploaded-for-message';
+      } else if (pendingFiles <= 0) {
+        skipReason = 'no-files';
+      } else {
+        skipReason = 'should-upload';
       }
 
-      const lastAutoUploadAt = Math.max(
-        0,
-        Number(state.taskRun.lastAutoUploadAtMessageCount) || 0,
+      const shouldUpload = skipReason === 'force-upload' || skipReason === 'should-upload';
+
+      return {
+        enabled: settings.enabled,
+        force,
+        kind: String(kind || '-'),
+        currentCount,
+        nextMessageNo,
+        interval,
+        shouldUploadByInterval,
+        lastAutoUploadAt,
+        pendingFiles,
+        shouldUpload,
+        skipReason,
+      };
+    }
+
+    function logTaskAutoUploadDecision(kind) {
+      const decision = getTaskAutoUploadDecision(kind);
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_AUTO_UPLOAD][DECISION] enabled=${decision.enabled ? 1 : 0} force=${decision.force ? 1 : 0} `
+        + `kind=${decision.kind} currentCount=${decision.currentCount} nextMessageNo=${decision.nextMessageNo} `
+        + `interval=${decision.interval} shouldUploadByInterval=${decision.shouldUploadByInterval ? 1 : 0} `
+        + `lastAutoUploadAt=${decision.lastAutoUploadAt} pendingFiles=${decision.pendingFiles} `
+        + `shouldUpload=${decision.shouldUpload ? 1 : 0} skipReason=${decision.skipReason}`,
       );
 
-      return lastAutoUploadAt !== nextMessageNo;
+      return decision;
+    }
+
+    function shouldRunTaskAutoUploadBeforeNextSend(kind) {
+      return getTaskAutoUploadDecision(kind).shouldUpload;
     }
 
     async function runTaskAutoUploadBeforeNextSend(kind, task) {
-      if (!shouldRunTaskAutoUploadBeforeNextSend(kind)) {
+      const decision = logTaskAutoUploadDecision(kind);
+
+      if (!decision.shouldUpload) {
         return {
           ok: true,
           skipped: true,
-          reason: 'not-needed',
+          reason: decision.skipReason || 'not-needed',
         };
       }
 
@@ -4786,8 +4912,19 @@ const AutoQueueModule = (() => {
 
       if (pendingUploadCount <= 0) {
         if (forceUpload && state.taskRun) {
-          state.taskRun.forceUploadBeforeNextSend = false;
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][WAIT_FILES] force=1 nextMessageNo=${nextMessageNo} reason=force-upload-no-files-yet`,
+          );
+
+          return {
+            ok: false,
+            skipped: false,
+            reason: 'force-upload-no-files-yet',
+            wait: true,
+            retryable: true,
+          };
         }
+
         state.taskRun.lastAutoUploadAtMessageCount = nextMessageNo;
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_AUTO_UPLOAD][SKIPPED] sentMessageCount=${currentCount} nextMessageNo=${nextMessageNo} reason=no-files-before-upload`,
@@ -4869,8 +5006,19 @@ const AutoQueueModule = (() => {
         if (!uploadResult || uploadResult.ok !== true) {
           if (reason === 'no-files') {
             if (forceUpload && state.taskRun) {
-              state.taskRun.forceUploadBeforeNextSend = false;
+              ToolboxShell.appendLog(
+                `[AUTOQ][TASK_AUTO_UPLOAD][WAIT_FILES] force=1 nextMessageNo=${nextMessageNo} reason=force-upload-no-files-yet`,
+              );
+
+              return {
+                ok: false,
+                skipped: false,
+                reason: 'force-upload-no-files-yet',
+                wait: true,
+                retryable: true,
+              };
             }
+
             ToolboxShell.appendLog(
               `[AUTOQ][TASK_AUTO_UPLOAD][SKIPPED] sentMessageCount=${currentCount} reason=no-files`,
             );
@@ -4983,6 +5131,8 @@ const AutoQueueModule = (() => {
         state.waitingStartedAt = 0;
         ToolboxShell.appendLog('[AUTOQ][WAITING_REPLY_CLEAR]');
       }
+
+      clearVisibleDoneSignalTracking();
 
       await handleTaskReplyReady();
     }
@@ -8176,6 +8326,9 @@ const AutoQueueModule = (() => {
         state.replyBecameBusy = true;
         state.idleSince = 0;
         ChatInputStateRuntime.waitingForReply = false;
+        if (config.promptMode === 'task') {
+          maybeSettleTaskReplyByVisibleDoneSignal('wait-reply-busy');
+        }
         updateStatus();
         updateChatInputStateBadge();
         return;
@@ -8300,57 +8453,6 @@ const AutoQueueModule = (() => {
 
       const ts = Number(item.ts) || 0;
       return ts <= 0 || now - ts >= windowMs;
-    }
-
-    function readTaskSendRateHistory(now = Date.now(), shouldPersist = true) {
-      const settings = normalizeTaskSendRateLimitSettings();
-      const windowMs = settings.windowMinutes * 60 * 1000;
-      const raw = MemoryManager.get(TASK_SEND_RATE_HISTORY_STORAGE_KEY, []);
-      const list = Array.isArray(raw) ? raw : [];
-      const before = list.length;
-      const hadStaleEntries = list.some((item) => isTaskSendRateHistoryEntryStale(item, now, windowMs));
-
-      const cleaned = list
-        .map((item) => {
-          if (typeof item === 'number') {
-            return {
-              ts: item,
-              kind: 'legacy',
-            };
-          }
-
-          if (item && typeof item === 'object') {
-            return {
-              ts: Number(item.ts) || 0,
-              kind: String(item.kind || 'task'),
-              taskId: String(item.taskId || ''),
-            };
-          }
-
-          return null;
-        })
-        .filter((item) => item && item.ts > 0 && now - item.ts < windowMs)
-        .sort((a, b) => a.ts - b.ts);
-
-      const after = cleaned.length;
-      const removed = Math.max(0, before - after);
-
-      if (removed > 0) {
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_SEND_RATE_LIMIT][CLEANUP] before=${before} after=${after} `
-          + `removed=${removed} windowMinutes=${settings.windowMinutes}`,
-        );
-      }
-
-      if (shouldPersist && (removed > 0 || hadStaleEntries || after !== before)) {
-        MemoryManager.set(TASK_SEND_RATE_HISTORY_STORAGE_KEY, cleaned);
-      }
-
-      return cleaned;
-    }
-
-    function saveTaskSendRateHistory(history) {
-      MemoryManager.set(TASK_SEND_RATE_HISTORY_STORAGE_KEY, Array.isArray(history) ? history : []);
     }
 
     function clearTaskSendRateHistory(reason = 'manual') {
@@ -8642,59 +8744,6 @@ const AutoQueueModule = (() => {
       return ts <= 0 || now - ts >= windowMs;
     }
 
-    function readTaskUploadRateHistory(now = Date.now(), shouldPersist = true) {
-      const settings = normalizeTaskUploadRateLimitSettings();
-      const windowMs = settings.windowMinutes * 60 * 1000;
-      const raw = MemoryManager.get(TASK_UPLOAD_RATE_HISTORY_STORAGE_KEY, []);
-      const list = Array.isArray(raw) ? raw : [];
-      const before = list.length;
-      const hadStaleEntries = list.some((item) => isTaskUploadRateHistoryEntryStale(item, now, windowMs));
-
-      const cleaned = list
-        .map((item) => {
-          if (typeof item === 'number') {
-            return {
-              ts: item,
-              count: 1,
-              kind: 'legacy',
-            };
-          }
-
-          if (item && typeof item === 'object') {
-            return {
-              ts: Number(item.ts) || 0,
-              count: Math.max(1, Math.floor(Number(item.count) || 1)),
-              kind: String(item.kind || 'upload'),
-              taskId: String(item.taskId || ''),
-            };
-          }
-
-          return null;
-        })
-        .filter((item) => item && item.ts > 0 && now - item.ts < windowMs)
-        .sort((a, b) => a.ts - b.ts);
-
-      const after = cleaned.length;
-      const removed = Math.max(0, before - after);
-
-      if (removed > 0) {
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][CLEANUP] before=${before} after=${after} `
-          + `removed=${removed} windowMinutes=${settings.windowMinutes}`,
-        );
-      }
-
-      if (shouldPersist && (removed > 0 || hadStaleEntries || after !== before)) {
-        MemoryManager.set(TASK_UPLOAD_RATE_HISTORY_STORAGE_KEY, cleaned);
-      }
-
-      return cleaned;
-    }
-
-    function saveTaskUploadRateHistory(history) {
-      MemoryManager.set(TASK_UPLOAD_RATE_HISTORY_STORAGE_KEY, Array.isArray(history) ? history : []);
-    }
-
     function clearTaskUploadRateHistory(reason = 'manual') {
       MemoryManager.set(TASK_UPLOAD_RATE_HISTORY_STORAGE_KEY, []);
       ToolboxShell.appendLog(`[AUTOQ][TASK_UPLOAD_RATE_LIMIT][CLEAR] reason=${reason}`);
@@ -8814,25 +8863,6 @@ const AutoQueueModule = (() => {
 
         await sleepMs(Math.min(waitMs, 30000));
       }
-    }
-
-    function recordTaskUploadRateLimitHit(uploadedCount, kind = 'task-upload') {
-      const count = Math.max(0, Math.floor(Number(uploadedCount) || 0));
-      const safeKind = String(kind || 'task-upload');
-
-      if (count <= 0) {
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][SKIP] kind=${safeKind} uploaded=0 reason=no-uploaded-files`,
-        );
-        return;
-      }
-
-      const status = getTaskUploadRateLimitStatus(1, { logSnapshot: true });
-      ToolboxShell.appendLog(
-        `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][RECORD] kind=${safeKind} uploaded=${count} `
-        + `used=${status.used}/${status.max} remaining=${status.remaining} `
-        + `source=${status.source || 'upload-quota'} note=recorded-by-upload-module`,
-      );
     }
 
     async function startUploadFromCurrentQueueWithTaskUploadRateLimit(options = {}) {
@@ -9716,13 +9746,19 @@ const AutoQueueModule = (() => {
       const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
         && isHomeNewChatReadyToSendNow();
       if (ComposerApi.isAssistantLikelyBusy() && !homeReadyToSend) {
+        repairWaitingReplyForAssistantBusy('assistant-busy-without-waitingReply');
+        maybeSettleTaskReplyByVisibleDoneSignal('assistant-busy');
+
         if ((run.pendingSendKind || 'initial') === 'initial') {
           const now = Date.now();
           if (!state.batchInitialWaitLoggedAt || now - state.batchInitialWaitLoggedAt > 5000) {
             state.batchInitialWaitLoggedAt = now;
             ToolboxShell.appendLog('[AUTO_QUEUE][BATCH_INITIAL_WAIT_RESPONDING]');
           }
-          setTaskBatchStep('wait-current-reply', getCurrentRunningTask(), { log: false });
+          const busyWaitTask = getCurrentRunningTask();
+          if (busyWaitTask) {
+            setTaskBatchStep('wait-current-reply', busyWaitTask, { log: false });
+          }
         }
         return;
       }
@@ -9806,6 +9842,12 @@ const AutoQueueModule = (() => {
               const prepareReason = prepareResult && prepareResult.reason
                 ? prepareResult.reason
                 : 'prepare-before-send-failed';
+
+              if (prepareResult && prepareResult.retryable === true) {
+                scheduleRelentlessSendRetry(prepareReason, 'initial', currentTask);
+                return;
+              }
+
               handleTaskInitialSendFailure(prepareReason);
               return;
             }
