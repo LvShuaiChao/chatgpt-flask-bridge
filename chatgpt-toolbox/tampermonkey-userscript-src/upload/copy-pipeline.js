@@ -10,6 +10,38 @@
         .trim();
     }
 
+    function collapseInstrumentsCalculatorReply(text) {
+      const value = String(text || '').trim();
+      if (!value) {
+        return '';
+      }
+
+      const lines = value
+        .replace(/\r\n/g, '\n')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+
+      if (lines.length !== 2) {
+        return value;
+      }
+
+      const [exprLine, answerLine] = lines;
+      const answerMatch = String(answerLine).match(/^(.+?)=(.+)$/);
+      if (!answerMatch) {
+        return value;
+      }
+
+      const lhs = String(answerMatch[1] || '').replace(/\s+/g, '');
+      const exprNorm = String(exprLine).replace(/\s+/g, '');
+
+      if (lhs && exprNorm && lhs === exprNorm) {
+        return String(answerLine).trim();
+      }
+
+      return value;
+    }
+
     function sanitizeCopiedAssistantText(rawText) {
       const original = String(rawText || '');
       if (!original.trim()) {
@@ -26,6 +58,9 @@
         '这次对话目前有帮助吗?',
         '这个回答有帮助吗？',
         '这个回答有帮助吗?',
+        'ChatGPT Instruments',
+        '提供反馈',
+        'Provide feedback',
       ];
 
       const before = text;
@@ -50,8 +85,13 @@
         .replace(/\bWas this response helpful\?\b/gi, '')
         .replace(/这次对话目前有帮助吗[？?]/g, '')
         .replace(/这个回答有帮助吗[？?]/g, '')
+        .replace(/\bChatGPT Instruments\b/gi, '')
+        .replace(/\b提供反馈\b/g, '')
+        .replace(/\bProvide feedback\b/gi, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
+
+      text = collapseInstrumentsCalculatorReply(text);
 
       if (before !== text) {
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {

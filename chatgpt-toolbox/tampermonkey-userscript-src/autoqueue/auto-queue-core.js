@@ -452,6 +452,26 @@ const AutoQueueModule = (() => {
       )).join('');
     }
 
+    function buildTaskPageRotateProgressText(progressSnapshot) {
+      const rotationSettings = progressSnapshot && progressSnapshot.rotationSettings
+        ? progressSnapshot.rotationSettings
+        : null;
+
+      if (!rotationSettings || !rotationSettings.enabled) {
+        return '未启用';
+      }
+
+      const threshold = Math.max(1, Number(rotationSettings.threshold) || 20);
+      const current = Math.max(0, Number(progressSnapshot.currentPageDialogueCount) || 0);
+      const displayCurrent = Math.min(current, threshold);
+
+      if (current >= threshold) {
+        return `当前 ${displayCurrent}/${threshold}｜下次发送前进入主页`;
+      }
+
+      return `当前 ${displayCurrent}/${threshold}｜达到 ${threshold} 次后进入主页`;
+    }
+
     function buildBatchTaskStatusPanelHtml(options) {
       const {
         taskProgress,
@@ -476,10 +496,7 @@ const AutoQueueModule = (() => {
         ? `已计入 ${progressSnapshot.autoUploadCount} 次，下次第 ${progressSnapshot.taskAutoUploadNextAt} 次；${strategy.summary}`
         : (strategy ? strategy.summary : '未启用');
 
-      const rotationSettings = progressSnapshot.rotationSettings;
-      const rotationText = rotationSettings && rotationSettings.enabled
-        ? `当前页 ${progressSnapshot.currentPageDialogueCount}/${rotationSettings.threshold}，已切换 ${progressSnapshot.rotationCount} 次`
-        : '未启用';
+      const rotateProgressText = buildTaskPageRotateProgressText(progressSnapshot);
 
       const replyClassifyText = replyClassifyReason && replyClassifyReason !== '-'
         ? `${replyClassifyStatus}（${replyClassifyReason}）`
@@ -511,7 +528,7 @@ const AutoQueueModule = (() => {
         },
 
         { label: '自动上传', value: autoUploadText, className: 'full' },
-        { label: '自动换页', value: rotationText, className: 'full' },
+        { label: '回首页进度', value: rotateProgressText, className: 'full' },
         {
           label: '停止原因',
           value: stopReasonValue,
@@ -950,6 +967,19 @@ const AutoQueueModule = (() => {
       } else {
         const taskQueueDefaults = createDefaultTaskQueueSettings();
         const rawTaskQueue = config.taskQueueSettings;
+
+        if (
+          !rawTaskQueue.taskAutoUploadCountModeMigratedToMessage
+          && rawTaskQueue.taskAutoUploadCountMode === 'taskItem'
+        ) {
+          rawTaskQueue.taskAutoUploadCountMode = 'message';
+          rawTaskQueue.taskAutoUploadCountModeMigratedToMessage = true;
+          repairChanged = true;
+          ToolboxShell.appendLog(
+            '[AUTOQ][TASK_AUTO_UPLOAD][MIGRATE_COUNT_MODE] from=taskItem to=message reason=user-expects-every-5-sends',
+          );
+        }
+
         config.taskQueueSettings = {
           ...taskQueueDefaults,
           ...rawTaskQueue,
@@ -1016,8 +1046,12 @@ const AutoQueueModule = (() => {
           taskAutoUploadCountMode:
             normalizeTaskAutoUploadCountMode(
               rawTaskQueue.taskAutoUploadCountMode
-              || taskQueueDefaults.taskAutoUploadCountMode,
+              || taskQueueDefaults.taskAutoUploadCountMode
+              || 'message',
             ),
+
+          taskAutoUploadCountModeMigratedToMessage:
+            rawTaskQueue.taskAutoUploadCountModeMigratedToMessage === true,
 
           taskRotateNewChatByPageTurnEnabled:
             rawTaskQueue.taskRotateNewChatByPageTurnEnabled !== false,
@@ -4329,6 +4363,46 @@ const AutoQueueModule = (() => {
         .replace(/\{\{lastReply\}\}/g, String(replyText || ''));
     }
 
+    async function handleTaskDoneSignal(task, profile, resolved, replyText, source = 'unknown') {
+      if (!task) {
+        ToolboxShell.appendLog(`[AUTOQ][TASK_DONE][SKIP] source=${source} reason=missing-task`);
+        return false;
+      }
+
+      if (!state.taskRun || typeof state.taskRun !== 'object') {
+        ToolboxShell.appendLog(`[AUTOQ][TASK_DONE][SKIP] source=${source} reason=missing-task-run`);
+        return false;
+      }
+
+      const settings = config.taskQueueSettings || {};
+      const verifyEnabled = settings.verifyAfterDoneSignal !== false;
+      const verificationAlreadyStarted = !!(
+        state.taskRun.doneSignalVerificationRunning
+        || String(state.taskRun.verifyReplyTextForResend || '').trim()
+      );
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_DONE][ENTER] source=${source} task=${task.title || '-'} `
+        + `verifyEnabled=${verifyEnabled ? 1 : 0} verifyRunning=${state.taskRun.doneSignalVerificationRunning ? 1 : 0} `
+        + `verificationAlreadyStarted=${verificationAlreadyStarted ? 1 : 0} running=${state.running ? 1 : 0}`,
+      );
+
+      if (verifyEnabled && !verificationAlreadyStarted) {
+        await runDoneSignalVerification(task, profile, resolved, replyText);
+        return true;
+      }
+
+      ToolboxShell.appendLog(`[AUTOQ][TASK_DONE][COMPLETE] source=${source} task=${task.title || '-'}`);
+      ToolboxShell.appendLog(`[AUTOQ][TASK][COMPLETE] task=${task.title}`);
+
+      markTaskStatus(task, 'completed');
+      notifyRuntimeTaskComplete(task);
+      state.taskRun.pendingSendKind = 'initial';
+      setTaskBatchStep('next-task', task, { log: false });
+      void moveToNextTask().catch(handleMoveToNextTaskError);
+      return true;
+    }
+
     async function runDoneSignalVerification(task, profile, resolved, replyText) {
       void profile;
 
@@ -4337,6 +4411,9 @@ const AutoQueueModule = (() => {
       }
 
       if (!state.running) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_BATCH][VERIFY_SKIP] task=${task.title || '-'} reason=cancelled-not-running running=0`,
+        );
         return { ok: false, reason: 'cancelled' };
       }
 
@@ -4584,7 +4661,7 @@ const AutoQueueModule = (() => {
           taskAutoUploadCountInitialPrompt: true,
           taskAutoUploadCountContinuePrompt: true,
           taskAutoUploadCountVerifyPrompt: true,
-          taskAutoUploadCountMode: 'taskItem',
+          taskAutoUploadCountMode: 'message',
         };
 
       const raw = config.taskQueueSettings && typeof config.taskQueueSettings === 'object'
@@ -4601,7 +4678,7 @@ const AutoQueueModule = (() => {
         countContinuePrompt: raw.taskAutoUploadCountContinuePrompt !== false,
         countVerifyPrompt: raw.taskAutoUploadCountVerifyPrompt !== false,
         countMode: normalizeTaskAutoUploadCountMode(
-          raw.taskAutoUploadCountMode || defaults.taskAutoUploadCountMode,
+          raw.taskAutoUploadCountMode || defaults.taskAutoUploadCountMode || 'message',
         ),
       };
     }
@@ -4611,7 +4688,7 @@ const AutoQueueModule = (() => {
       if (raw === 'message' || raw === 'assistantAnswer' || raw === 'taskItem') {
         return raw;
       }
-      return 'taskItem';
+      return 'message';
     }
 
     function getCurrentTaskAutoUploadSlotNo(kind) {
@@ -5041,6 +5118,18 @@ const AutoQueueModule = (() => {
       return (no - 1) % everyN === 0;
     }
 
+    function getExpectedAutoUploadSlotNo(currentCount, interval) {
+      const everyN = Math.max(1, Number(interval) || 1);
+      const count = Math.max(0, Number(currentCount) || 0);
+
+      if (count <= 0) {
+        return 1;
+      }
+
+      const zeroBased = Math.floor((count - 1) / everyN) * everyN;
+      return zeroBased + 1;
+    }
+
     function getTaskAutoUploadDecision(kind) {
       const settings = getTaskAutoUploadSettings();
       const force = !!(state.taskRun && state.taskRun.forceUploadBeforeNextSend === true);
@@ -5059,10 +5148,23 @@ const AutoQueueModule = (() => {
       })();
       const interval = Math.max(1, Number(settings.interval) || 5);
       const nextMessageNo = currentCount + 1;
-      const shouldUploadByInterval = shouldUploadFileForTaskMessageNo(nextMessageNo, interval);
+      const nextSlotNo = shouldUploadFileForTaskMessageNo(nextMessageNo, interval)
+        ? nextMessageNo
+        : 0;
+
+      const dueSlotNo = getExpectedAutoUploadSlotNo(currentCount, interval);
       const lastAutoUploadAt = state.taskRun
         ? Math.max(0, Number(state.taskRun.lastAutoUploadAtMessageCount) || 0)
         : 0;
+      const missedDueSlot = (
+        dueSlotNo > 0
+        && currentCount >= dueSlotNo
+        && lastAutoUploadAt < dueSlotNo
+      );
+
+      const shouldUploadByInterval = nextSlotNo > 0;
+      const shouldUploadByMissedSlot = missedDueSlot;
+      const uploadSlotNo = shouldUploadByInterval ? nextMessageNo : dueSlotNo;
 
       const pendingItems = typeof UploadModule !== 'undefined'
         && typeof UploadModule.getPendingUploadItems === 'function'
@@ -5082,16 +5184,22 @@ const AutoQueueModule = (() => {
         skipReason = 'disabled';
       } else if (!shouldCountTaskSendKindForAutoUpload(kind)) {
         skipReason = 'kind-not-counted';
-      } else if (!shouldUploadByInterval) {
+      } else if (!shouldUploadByInterval && !shouldUploadByMissedSlot) {
         skipReason = 'interval-not-hit';
-      } else if (lastAutoUploadAt === nextMessageNo) {
+      } else if (lastAutoUploadAt === uploadSlotNo) {
         skipReason = 'already-uploaded-for-message';
+      } else if (shouldUploadByMissedSlot) {
+        skipReason = 'missed-slot-upload';
       } else {
         skipReason = 'should-upload';
       }
 
       // 关键：pendingFiles=0 只能说明内部队列没有 pending 状态文件，不能阻止命中上传间隔时的强制重传策略
-      const shouldUpload = skipReason === 'force-upload' || skipReason === 'should-upload';
+      const shouldUpload = (
+        skipReason === 'force-upload'
+        || skipReason === 'should-upload'
+        || skipReason === 'missed-slot-upload'
+      );
 
       return {
         enabled: settings.enabled,
@@ -5102,6 +5210,8 @@ const AutoQueueModule = (() => {
         nextMessageNo,
         interval,
         shouldUploadByInterval,
+        shouldUploadByMissedSlot,
+        uploadSlotNo,
         lastAutoUploadAt,
         pendingFiles,
         shouldUpload,
@@ -5116,6 +5226,7 @@ const AutoQueueModule = (() => {
         `[AUTOQ][TASK_AUTO_UPLOAD][DECISION] enabled=${decision.enabled ? 1 : 0} force=${decision.force ? 1 : 0} `
         + `kind=${decision.kind} countMode=${decision.countMode} currentCount=${decision.currentCount} nextMessageNo=${decision.nextMessageNo} `
         + `interval=${decision.interval} shouldUploadByInterval=${decision.shouldUploadByInterval ? 1 : 0} `
+        + `shouldUploadByMissedSlot=${decision.shouldUploadByMissedSlot ? 1 : 0} uploadSlotNo=${decision.uploadSlotNo} `
         + `lastAutoUploadAt=${decision.lastAutoUploadAt} pendingFiles=${decision.pendingFiles} `
         + `shouldUpload=${decision.shouldUpload ? 1 : 0} skipReason=${decision.skipReason}`,
       );
@@ -5127,11 +5238,15 @@ const AutoQueueModule = (() => {
       const decision = logTaskAutoUploadDecision(kind);
 
       if (!decision.shouldUpload) {
-        if (decision.skipReason === 'not-running') {
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_AUTO_UPLOAD][SKIP_NOT_RUNNING] countMode=${decision.countMode} nextMessageNo=${decision.nextMessageNo}`,
-          );
-        }
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][SKIP] kind=${decision.kind} `
+          + `countMode=${decision.countMode} currentCount=${decision.currentCount} `
+          + `nextMessageNo=${decision.nextMessageNo} interval=${decision.interval} `
+          + `shouldUploadByInterval=${decision.shouldUploadByInterval ? 1 : 0} `
+          + `lastAutoUploadAt=${decision.lastAutoUploadAt} pendingFiles=${decision.pendingFiles} `
+          + `reason=${decision.skipReason || 'not-needed'}`,
+        );
+
         return {
           ok: true,
           skipped: true,
@@ -5158,6 +5273,10 @@ const AutoQueueModule = (() => {
       const forceUpload = !!(state.taskRun && state.taskRun.forceUploadBeforeNextSend === true);
       const currentCount = Math.max(0, Number(decision.currentCount) || 0);
       const nextMessageNo = Math.max(1, Number(decision.nextMessageNo) || 1);
+      const uploadSlotNo = Math.max(
+        1,
+        Number(decision.uploadSlotNo || decision.nextMessageNo) || decision.nextMessageNo,
+      );
 
       let composerHasUploadPayload = false;
 
@@ -5187,10 +5306,10 @@ const AutoQueueModule = (() => {
 
       if (forceUpload && composerHasUploadPayload) {
         state.taskRun.forceUploadBeforeNextSend = false;
-        state.taskRun.lastAutoUploadAtMessageCount = nextMessageNo;
+        state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
 
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_AUTO_UPLOAD][COMPOSER_HAS_FILE_CONTINUE] force=1 nextMessageNo=${nextMessageNo} reason=composer-already-has-upload-payload`,
+          `[AUTOQ][TASK_AUTO_UPLOAD][COMPOSER_HAS_FILE_CONTINUE] force=1 nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} reason=composer-already-has-upload-payload`,
         );
 
         return {
@@ -5201,7 +5320,7 @@ const AutoQueueModule = (() => {
       }
 
       setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: true });
-      ToolboxShell.setStatus(`批量任务组：第 ${nextMessageNo} 次发送前自动上传文件`);
+      ToolboxShell.setStatus(`批量任务组：第 ${uploadSlotNo} 次发送前自动上传文件`);
       ToolboxShell.appendLog(
         `[AUTOQ][TASK_AUTO_UPLOAD][START] kind=${kind || '-'} countMode=${decision.countMode} currentCount=${currentCount} forceUpload=${forceUpload ? 1 : 0}`,
       );
@@ -5257,11 +5376,11 @@ const AutoQueueModule = (() => {
         }
 
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_START] kind=${kind || '-'} nextMessageNo=${nextMessageNo} interval=${decision.interval} force=${forceUpload ? 1 : 0}`,
+          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_START] kind=${kind || '-'} nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} interval=${decision.interval} force=${forceUpload ? 1 : 0}`,
         );
 
         const uploadResult = await UploadModule.startUploadForAutoQueue({
-          source: `autoq-task-${String(kind || '-').trim() || '-'}-${nextMessageNo}`,
+          source: `autoq-task-${String(kind || '-').trim() || '-'}-${uploadSlotNo}`,
           forceReupload: true,
           shouldStop: () => !state.running,
           maxFiles: maxFilesForThisUpload,
@@ -5273,10 +5392,10 @@ const AutoQueueModule = (() => {
         const reason = String(uploadResult && uploadResult.reason || '').trim();
 
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadedCount} skipped=${skippedCount} reason=${reason || '-'}`,
+          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadedCount} skipped=${skippedCount} reason=${reason || '-'}`,
         );
 
-        state.taskRun.lastAutoUploadAtMessageCount = nextMessageNo;
+        state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
 
         if (!uploadResult || uploadResult.ok !== true) {
           ToolboxShell.appendLog(
@@ -5469,13 +5588,16 @@ const AutoQueueModule = (() => {
 
         if (doneCheck.matched) {
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][VERIFY_COMPLETE] task=${task.title}`);
-          ToolboxShell.appendLog(`[AUTOQ][TASK][COMPLETE] task=${task.title}`);
-          markTaskStatus(task, 'completed');
-          notifyRuntimeTaskComplete(task);
-          state.taskRun.pendingSendKind = 'initial';
-          setTaskBatchStep('next-task', task, { log: false });
           ToolboxShell.appendLog('[AUTOQ][CONTINUE_NEXT] reason=verify-complete');
-          void moveToNextTask().catch(handleMoveToNextTaskError);
+
+          void handleTaskDoneSignal(task, profile, resolved, replyText, 'verify-reply-complete').catch((err) => {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] [AUTOQ][TASK_DONE][FAILED]', err);
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_DONE][FAILED] source=verify-reply-complete task=${task.title || '-'} reason=${errText}`,
+            );
+            failCurrentTask(errText || 'done-signal-handler-failed');
+          });
           return;
         }
 
@@ -5612,28 +5734,17 @@ const AutoQueueModule = (() => {
           }
 
           if (result && result.assistantDoneSignal) {
-            const settings = config.taskQueueSettings || {};
-            const verifyEnabled = settings.verifyAfterDoneSignal !== false;
+            ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][DONE_SIGNAL] task=${task.title}`);
+            ToolboxShell.appendLog(`[AUTOQ][TASK][DONE_SIGNAL] task=${task.title}`);
 
-            if (verifyEnabled) {
-              void runDoneSignalVerification(task, profile, resolved, replyText).catch((err) => {
-                const errText = err && err.message ? err.message : String(err);
-                console.error('[ChatGPT toolbox] [AUTOQ][TASK_BATCH][VERIFY_FAILED]', err);
-                ToolboxShell.appendLog(
-                  `[AUTOQ][TASK_BATCH][VERIFY_FAILED] task=${task.title} reason=${errText}`,
-                );
-                failCurrentTask(errText || 'done-signal-verification-failed');
-              });
-              return;
-            }
-
-            ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][VERIFY_COMPLETE] task=${task.title}`);
-            ToolboxShell.appendLog(`[AUTOQ][TASK][COMPLETE] task=${task.title}`);
-            markTaskStatus(task, 'completed');
-            notifyRuntimeTaskComplete(task);
-            state.taskRun.pendingSendKind = 'initial';
-            setTaskBatchStep('next-task', task, { log: false });
-            void moveToNextTask().catch(handleMoveToNextTaskError);
+            void handleTaskDoneSignal(task, profile, resolved, replyText, 'verify-continue-done-signal').catch((err) => {
+              const errText = err && err.message ? err.message : String(err);
+              console.error('[ChatGPT toolbox] [AUTOQ][TASK_DONE][FAILED]', err);
+              ToolboxShell.appendLog(
+                `[AUTOQ][TASK_DONE][FAILED] source=verify-continue-done-signal task=${task.title || '-'} reason=${errText}`,
+              );
+              failCurrentTask(errText || 'done-signal-handler-failed');
+            });
             return;
           }
 
@@ -5687,27 +5798,14 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][DONE_SIGNAL] task=${task.title}`);
         ToolboxShell.appendLog(`[AUTOQ][TASK][DONE_SIGNAL] task=${task.title}`);
 
-        const settings = config.taskQueueSettings || {};
-        const verifyEnabled = settings.verifyAfterDoneSignal !== false;
-
-        if (verifyEnabled && !state.taskRun.doneSignalVerificationRunning) {
-          void runDoneSignalVerification(task, profile, resolved, replyText).catch((err) => {
-            const errText = err && err.message ? err.message : String(err);
-            console.error('[ChatGPT toolbox] [AUTOQ][TASK_BATCH][VERIFY_FAILED]', err);
-            ToolboxShell.appendLog(
-              `[AUTOQ][TASK_BATCH][VERIFY_FAILED] task=${task.title} reason=${errText}`,
-            );
-            failCurrentTask(errText || 'done-signal-verification-failed');
-          });
-          return;
-        }
-
-        ToolboxShell.appendLog(`[AUTOQ][TASK][COMPLETE] task=${task.title}`);
-        markTaskStatus(task, 'completed');
-        notifyRuntimeTaskComplete(task);
-        state.taskRun.pendingSendKind = 'initial';
-        setTaskBatchStep('next-task', task, { log: false });
-        void moveToNextTask().catch(handleMoveToNextTaskError);
+        void handleTaskDoneSignal(task, profile, resolved, replyText, 'normal-done-check').catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] [AUTOQ][TASK_DONE][FAILED]', err);
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_DONE][FAILED] source=normal-done-check task=${task.title || '-'} reason=${errText}`,
+          );
+          failCurrentTask(errText || 'done-signal-handler-failed');
+        });
         return;
       }
 
@@ -5873,11 +5971,16 @@ const AutoQueueModule = (() => {
 
         if (result.assistantDoneSignal) {
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][DONE_SIGNAL] task=${task.title}`);
-          markTaskStatus(task, 'completed');
-          notifyRuntimeTaskComplete(task);
-          state.taskRun.pendingSendKind = 'initial';
-          setTaskBatchStep('next-task', task, { log: false });
-          void moveToNextTask().catch(handleMoveToNextTaskError);
+          ToolboxShell.appendLog(`[AUTOQ][TASK][DONE_SIGNAL] task=${task.title}`);
+
+          void handleTaskDoneSignal(task, profile, resolved, replyText, 'copy-hotkey-done-signal').catch((err) => {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] [AUTOQ][TASK_DONE][FAILED]', err);
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_DONE][FAILED] source=copy-hotkey-done-signal task=${task.title || '-'} reason=${errText}`,
+            );
+            failCurrentTask(errText || 'done-signal-handler-failed');
+          });
           return;
         }
 
@@ -6572,8 +6675,8 @@ const AutoQueueModule = (() => {
       config.taskQueueSettings && config.taskQueueSettings.taskAutoUploadCountMode,
     );
     const options = [
-      { value: 'taskItem', label: '按任务项序号（推荐）' },
-      { value: 'message', label: '按发送 Prompt 次数' },
+      { value: 'message', label: '按发送 Prompt 次数（推荐）' },
+      { value: 'taskItem', label: '按任务项序号' },
       { value: 'assistantAnswer', label: '按助手回答次数' },
     ];
     return options.map((option) => `<option value="${option.value}" ${currentCountMode === option.value ? 'selected' : ''}>${option.label}</option>`).join('');
@@ -6586,7 +6689,7 @@ const AutoQueueModule = (() => {
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
             <label>自动上传说明</label>
-            <div class="cgpt-hint">默认每 5 个任务项上传一次文件，策略为第 1、6、11... 个任务项发送前强制重传。可切换为按发送 Prompt 次数或按助手回答次数计数。</div>
+            <div class="cgpt-hint">默认每 5 次发送 Prompt 前上传一次文件，策略为第 1、6、11... 次发送前强制重传。可切换为按任务项序号或按助手回答次数计数。</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
             <label for="cgpt-autoq-task-rotate-new-chat-enabled">页面过长自动换新聊天</label>
@@ -7822,14 +7925,14 @@ const AutoQueueModule = (() => {
         ? Number(state.taskRun.sentMessageCount) || 0
         : 0;
       const autoUploadTaskItemCount = state.taskRun && state.taskRun.currentIndex != null
-        ? Math.max(0, Number(state.taskRun.currentIndex) || 0)
+        ? Math.max(0, Number(state.taskRun.currentIndex) || 0) + 1
         : 0;
       const autoUploadAssistantAnswerCount = state.taskRun && state.taskRun.completedAnswerCount != null
         ? Number(state.taskRun.completedAnswerCount) || 0
         : 0;
       const autoUploadCountMode = autoUploadSettings
         ? normalizeTaskAutoUploadCountMode(autoUploadSettings.countMode)
-        : 'taskItem';
+        : 'message';
       const autoUploadCount = autoUploadCountMode === 'message'
         ? autoUploadMessageCount
         : (autoUploadCountMode === 'assistantAnswer' ? autoUploadAssistantAnswerCount : autoUploadTaskItemCount);
@@ -8688,6 +8791,65 @@ const AutoQueueModule = (() => {
       ensureTicker();
       updateStatus('batch-start');
       tick();
+    }
+
+    async function stopTaskBatchWithFinalUpload(reason = 'user-stop') {
+      const stopReason = String(reason || 'user-stop');
+
+      if (!state.running || config.promptMode !== 'task') {
+        stop({ reason: stopReason, finalStep: 'stopped', logStop: true });
+        return;
+      }
+
+      if (state.batchAutoUploading || state.manualUploadRunning) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_SKIP] reason=upload-already-running stopReason=${stopReason}`,
+        );
+        stop({ reason: stopReason, finalStep: 'stopped', logStop: true });
+        return;
+      }
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_START] reason=${stopReason}`,
+      );
+
+      state.batchTask.stopRequested = true;
+      state.batchAutoUploading = true;
+      updateStatus('stop-final-upload-start');
+
+      try {
+        if (
+          typeof UploadModule !== 'undefined'
+          && typeof UploadModule.startUploadForAutoQueue === 'function'
+        ) {
+          const uploadResult = await UploadModule.startUploadForAutoQueue({
+            source: `autoq-stop-final-upload-${stopReason}`,
+            forceReupload: true,
+            shouldStop: () => !state.running,
+          });
+
+          const uploadedCount = Number(uploadResult && uploadResult.uploadedCount) || 0;
+          const skippedCount = Number(uploadResult && uploadResult.skippedCount) || 0;
+          const failedCount = Number(uploadResult && uploadResult.failedCount) || 0;
+          const uploadReason = String(uploadResult && uploadResult.reason || '').trim();
+
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_DONE] ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount} reason=${uploadReason || '-'}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            '[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_SKIP] reason=upload-module-missing',
+          );
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_ERROR]', error);
+        ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][STOP_FINAL_UPLOAD_ERROR] reason=${errText}`);
+      } finally {
+        state.batchAutoUploading = false;
+        updateStatus('stop-final-upload-done');
+        stop({ reason: stopReason, finalStep: 'stopped', logStop: true });
+      }
     }
 
     function stop(options = {}) {
@@ -11045,9 +11207,13 @@ const AutoQueueModule = (() => {
         const active = state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase);
 
         if (active) {
-          ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop`);
-          state.batchTask.stopRequested = true;
-          stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
+          ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop-with-final-upload`);
+          void stopTaskBatchWithFinalUpload('start-button-toggle').catch((error) => {
+            const errText = error && error.stack ? error.stack : String(error);
+            console.error('[AUTOQ][TASK_BATCH][STOP_WITH_FINAL_UPLOAD_ERROR]', error);
+            ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][STOP_WITH_FINAL_UPLOAD_ERROR] ${errText}`);
+            stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
+          });
           return;
         }
 

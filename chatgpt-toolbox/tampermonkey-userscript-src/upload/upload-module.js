@@ -1884,6 +1884,45 @@
       return resetCount;
     }
 
+    function forceResetActiveGroupFilesForUpload(reason = '') {
+      const activeFiles = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles()
+        : [];
+
+      let resetCount = 0;
+
+      activeFiles.forEach((q) => {
+        if (!q) return;
+
+        q.state = UploadState.IDLE;
+        q.message = '';
+        q.uploadName = '';
+        q.persistedAttached = false;
+        q.attachedInSession = false;
+        if (q.status === 'uploaded') {
+          q.status = 'pending';
+        }
+        q.updatedAt = Date.now();
+
+        resetCount += 1;
+      });
+
+      if (resetCount > 0) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FORCE_RESET_ACTIVE_GROUP] reason=${String(reason || '-')} resetCount=${resetCount}`,
+        );
+
+        scheduleRenderUpload(`forceResetActiveGroupFilesForUpload:${reason || 'manual'}`);
+        persistQueueThrottled(`forceResetActiveGroupFilesForUpload:${reason || 'manual'}`);
+      } else {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FORCE_RESET_ACTIVE_GROUP_EMPTY] reason=${String(reason || '-')}`,
+        );
+      }
+
+      return resetCount;
+    }
+
     function resetFlaskFilesForUpload(reason = '') {
       let changed = false;
 
@@ -15215,8 +15254,21 @@
 
       for (const item of state.queue || []) {
         if (!item) continue;
-        if (isQueueItemAlreadyUploaded(item)) continue;
-        if (!hasAttemptableUploadSource(item) && !isFlaskLocalDirectItem(item)) continue;
+
+        if (isQueueItemAlreadyUploaded(item)) {
+          continue;
+        }
+
+        const attemptable = hasAttemptableUploadSource(item);
+        const flaskDirect = isFlaskLocalDirectItem(item);
+
+        if (!attemptable && !flaskDirect) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_FILTERED] name=${item.name || item.filename || '-'} state=${item.state || '-'} source=${item.source || '-'} reason=no-attemptable-source`,
+          );
+          continue;
+        }
+
         pushItem(item, item.source || 'browser_file');
       }
 
@@ -15549,6 +15601,10 @@
           reason: uploadSource,
         })) || 0;
 
+        const activeGroupResetCount = Number(
+          forceResetActiveGroupFilesForUpload(uploadSource),
+        ) || 0;
+
         let flaskResetCount = 0;
         try {
           if (typeof resetFlaskFilesForUpload === 'function') {
@@ -15561,7 +15617,7 @@
         }
 
         ToolboxShell.appendLog(
-          `[UPLOAD][AUTOQ_FORCE_RESET] source=${uploadSource} resetCount=${resetCount} flaskReset=${flaskResetCount}`,
+          `[UPLOAD][AUTOQ_FORCE_RESET] source=${uploadSource} resetCount=${resetCount} activeGroupResetCount=${activeGroupResetCount} flaskReset=${flaskResetCount}`,
         );
       }
 

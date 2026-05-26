@@ -37,6 +37,9 @@
       'Copy',
       'Edit',
       'Share',
+      'ChatGPT Instruments',
+      '提供反馈',
+      'Provide feedback',
     ]);
 
     const COMPOSER_AREA_SELECTORS = [
@@ -111,6 +114,31 @@
       return false;
     }
 
+    function collapseInstrumentsCalculatorReply(text) {
+      const value = String(text || '').trim();
+      if (!value) return '';
+
+      const lines = value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+
+      if (lines.length !== 2) return value;
+
+      const [exprLine, answerLine] = lines;
+      const answerMatch = String(answerLine).match(/^(.+?)=(.+)$/);
+      if (!answerMatch) return value;
+
+      const lhs = String(answerMatch[1] || '').replace(/\s+/g, '');
+      const exprNorm = String(exprLine).replace(/\s+/g, '');
+
+      if (lhs && exprNorm && lhs === exprNorm) {
+        return String(answerLine).trim();
+      }
+
+      return value;
+    }
+
     function cleanMessageText(text) {
       let value = cleanCopiedMessageText(text);
       if (!value) return '';
@@ -131,10 +159,12 @@
         rebuilt.push(filtered.join('\n'));
       });
 
-      return rebuilt
-        .join('')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+      return collapseInstrumentsCalculatorReply(
+        rebuilt
+          .join('')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim(),
+      );
     }
 
     function collectMessageElements(options = {}) {

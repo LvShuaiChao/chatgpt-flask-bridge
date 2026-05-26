@@ -722,6 +722,7 @@
       taskAutoUploadCountInitialPrompt: true,
       taskAutoUploadCountContinuePrompt: true,
       taskAutoUploadCountVerifyPrompt: true,
+      taskAutoUploadCountMode: 'message',
 
       taskRotateNewChatByPageTurnEnabled: true,
       taskRotateNewChatPageTurnThreshold: 30,
