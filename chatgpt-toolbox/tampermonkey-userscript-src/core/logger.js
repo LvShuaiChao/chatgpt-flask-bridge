@@ -3104,7 +3104,7 @@
       copyHotkeyContinueLoopBtn.title = continueFlowTitle;
     }
 
-    const copyHotkeyUploadVerifyLoopBtn = qs(UploadSelectors.copyHotkeyContinueLoopUploadVerifyBtn, scope);
+    const copyHotkeyUploadVerifyLoopBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, scope);
     if (copyHotkeyUploadVerifyLoopBtn) {
       const targetLabel = getCopyThenShortcutTargetLabel() || '目标快捷键';
       copyHotkeyUploadVerifyLoopBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每 5 轮自动上传一次代码`;

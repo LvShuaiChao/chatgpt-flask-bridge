@@ -87,18 +87,6 @@
   }
 
   function getCopyHotkeyMutualBlockView(blockedBy) {
-    if (blockedBy === 'uploadVerify') {
-      return {
-        phase: TaskPhase.RUNNING,
-        text: '闭环继续运行中',
-        title: '闭环继续+每5轮上传正在运行；请先停止该任务后再使用此按钮',
-        disabled: true,
-        allowCancel: false,
-        action: 'none',
-        buttonPhase: 'disabled',
-      };
-    }
-
     if (blockedBy === 'loop') {
       return {
         phase: TaskPhase.RUNNING,
@@ -311,16 +299,6 @@
       'copyHotkeyContinueLoopTask',
       'copyHotkeyLoopActive',
     );
-    const uploadVerifyRunning = resolveSnapshotLoopActive(
-      snapshot,
-      'copyHotkeyUploadVerifyLoopTask',
-      'copyHotkeyUploadVerifyLoopActive',
-    );
-
-    if (uploadVerifyRunning) {
-      return getCopyHotkeyMutualBlockView('uploadVerify');
-    }
-
     if (loopRunning) {
       return getCopyHotkeyMutualBlockView('loop');
     }
@@ -417,19 +395,10 @@
       'copyHotkeyContinueLoopTask',
       'copyHotkeyLoopActive',
     );
-    const uploadVerifyRunning = resolveSnapshotLoopActive(
-      snapshot,
-      'copyHotkeyUploadVerifyLoopTask',
-      'copyHotkeyUploadVerifyLoopActive',
-    );
     const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
     const phase = rawPhase === 'sending_hotkey' || rawPhase === 'sending_continue'
       ? rawPhase
       : normalizeTaskPhase(rawPhase);
-
-    if (uploadVerifyRunning) {
-      return getCopyHotkeyMutualBlockView('uploadVerify');
-    }
 
     if (loopRunning) {
       return getCopyHotkeyMutualBlockView('loop');
@@ -988,6 +957,36 @@
     };
   }
 
+  function getClosedLoopContinueButtonViewState(snapshot = {}) {
+    const running = !!snapshot.closedLoopContinueRunning;
+    const stopping = !!snapshot.closedLoopContinueStopping;
+
+    if (running) {
+      return {
+        phase: stopping ? 'stopping' : TaskPhase.RUNNING,
+        text: stopping ? '正在停止闭环继续' : '停止闭环继续',
+        title: stopping
+          ? '正在停止闭环继续任务'
+          : '闭环继续+每5轮上传运行中，再次点击停止',
+        disabled: false,
+        allowCancel: true,
+        action: 'stop',
+        buttonPhase: 'danger',
+      };
+    }
+
+    return {
+      phase: TaskPhase.IDLE,
+      text: snapshot.closedLoopLabel || '闭环继续+每5轮上传',
+      title: snapshot.closedLoopTitle
+        || '等待回复完成 -> 复制 -> 快捷键 -> 继续；第 1 轮与每 5 轮自动上传代码',
+      disabled: false,
+      allowCancel: false,
+      action: 'start',
+      buttonPhase: 'idle',
+    };
+  }
+
   function getCopyHotkeyLoopButtonViewState(snapshot = {}) {
     const task = snapshot.copyHotkeyContinueLoopTask && typeof snapshot.copyHotkeyContinueLoopTask === 'object'
       ? snapshot.copyHotkeyContinueLoopTask
@@ -1250,6 +1249,7 @@
     getSendHotkeyButtonViewState,
     getCopyHotkeyContinueOnceButtonViewState,
     getCopyHotkeyLoopButtonViewState,
+    getClosedLoopContinueButtonViewState,
     getAutoContinueButtonViewState,
     getAutoContinueUntilDoneButtonViewState,
     getHomeButtonViewState,
