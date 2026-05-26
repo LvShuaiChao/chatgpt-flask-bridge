@@ -2,52 +2,6 @@
    * 5b. SettingsModule：精简模式与工具箱设置
    ********************************************************************/
 
-  function renderPromptCheckboxList(promptList, selectedIds) {
-    const list = Array.isArray(promptList) ? promptList : [];
-    const selected = new Set(
-      Array.isArray(selectedIds)
-        ? selectedIds.map((id) => String(id))
-        : [],
-    );
-
-    if (!list.length) {
-      return '<div class="cgpt-log-empty">暂无 Prompt</div>';
-    }
-
-    return list.map((prompt) => {
-      const id = String(prompt && prompt.id ? prompt.id : '');
-      const title = String(prompt && prompt.title ? prompt.title : '未命名');
-      const category = String(prompt && prompt.category ? prompt.category : '默认');
-      const checked = selected.has(id) ? ' checked' : '';
-
-      return `
-      <label class="cgpt-setting-prompt-checkbox">
-        <input
-          type="checkbox"
-          data-compact-prompt-id="${escapeHtml(id)}"
-          ${checked}
-        >
-        <span>${escapeHtml(title)}</span>
-        <small>${escapeHtml(category)}</small>
-      </label>
-    `;
-    }).join('');
-  }
-
-  function getSettingsPromptList() {
-    if (typeof PromptManagerModule === 'undefined' || typeof PromptManagerModule.getPrompts !== 'function') {
-      return [];
-    }
-    const promptList = PromptManagerModule.getPrompts();
-    return Array.isArray(promptList) ? promptList : [];
-  }
-
-  function getPromptIdsFromList(promptList) {
-    return (Array.isArray(promptList) ? promptList : [])
-      .map((prompt) => String(prompt && prompt.id ? prompt.id : '').trim())
-      .filter(Boolean);
-  }
-
   const SettingsModule = (() => {
     let host = null;
     let root = null;

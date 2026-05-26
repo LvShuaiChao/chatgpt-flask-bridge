@@ -5370,14 +5370,6 @@
     return estimateRoundCountByTurnNumber(highest.turnNo, role);
   }
 
-  function countUserMessagesFromConversationRecords() {
-    const records = buildConversationMessageRecords({
-      includeEmpty: false,
-      includeHidden: true,
-    });
-    return records.filter((record) => record && record.role === 'user').length;
-  }
-
   function countConversationTurnsFromSnapshot() {
     const snapshot = buildConversationSnapshotForBridge(null, {
       source: 'countConversationTurnsFromSnapshot',
@@ -8859,14 +8851,4 @@
     };
   }
 
-  async function sendTextThroughComposer(text, source = 'unknown') {
-    return sendContentViaComposer({
-      content: String(text ?? ''),
-      source,
-      trimContent: false,
-      waitUntilSendable: true,
-      blockWhenResponding: true,
-      timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 60000,
-    });
-  }
 /*__UPLOAD_MODULES__*/

@@ -2366,32 +2366,6 @@
     return cfg.messageQuotaMaxMessages;
   }
 
-  function setUploadQuotaLimit(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error('上传额度上限必须是大于 0 的数字');
-    }
-    const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
-    const next = normalizeCompactUiConfig(Object.assign({}, saved, {
-      uploadQuotaMaxFiles: Math.floor(n),
-    }));
-    MemoryManager.set(MemoryManager.KEYS.compactUiConfig, next);
-    return next.uploadQuotaMaxFiles;
-  }
-
-  function setMessageQuotaLimit(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error('消息额度上限必须是大于 0 的数字');
-    }
-    const saved = MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
-    const next = normalizeCompactUiConfig(Object.assign({}, saved, {
-      messageQuotaMaxMessages: Math.floor(n),
-    }));
-    MemoryManager.set(MemoryManager.KEYS.compactUiConfig, next);
-    return next.messageQuotaMaxMessages;
-  }
-
   const DEFAULT_SHORTCUT_CONFIG = Object.freeze({
     sendMessage: {
       enabled: true,
@@ -2474,10 +2448,6 @@
       && !item.alt
       && !item.shift
       && !item.meta;
-  }
-
-  function isUnsafePlainEnterSendShortcut(item) {
-    return isPlainEnterShortcutItem(item);
   }
 
   function migrateUnsafePlainEnterSendShortcut(sendMessage) {
@@ -3264,33 +3234,6 @@
 
   function isInToolbox(el) {
     return !!(el && el.closest && el.closest(`#${APP.rootId}`));
-  }
-
-  function isChatGptNativeComposerTarget(target) {
-    if (typeof shouldLetNativeChatGptHandleDrop === 'function') {
-      return shouldLetNativeChatGptHandleDrop(
-        { target },
-        { includeFileInput: false, includeForm: true },
-      );
-    }
-
-    const el = target instanceof Element ? target : null;
-    if (!el) return false;
-
-    if (isInToolbox(el)) {
-      return false;
-    }
-
-    return !!el.closest([
-      '[data-testid="composer"]',
-      '#prompt-textarea',
-      'textarea[name="prompt-textarea"]',
-      '[data-testid="composer-textarea"]',
-      '[contenteditable="true"][data-lexical-editor="true"]',
-      'div[contenteditable="true"][role="textbox"]',
-      'form textarea',
-      'form [contenteditable="true"]',
-    ].join(','));
   }
 
   function escapeHtml(s) {
