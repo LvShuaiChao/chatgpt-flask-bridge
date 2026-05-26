@@ -316,16 +316,6 @@ def list_jobs(limit=50):
         return jobs
 
 
-def _count_waiting_chatgpt_jobs():
-    count = 0
-    with job_lock:
-        for job_id in job_queue:
-            job = job_map.get(job_id)
-            if job and job_status_from(job) == "waiting_chatgpt_reply":
-                count += 1
-    return count
-
-
 def _find_waiting_chatgpt_job(*, outbound_message_id=""):
     outbound_message_id = (outbound_message_id or "").strip()
     with job_lock:

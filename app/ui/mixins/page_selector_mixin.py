@@ -257,24 +257,6 @@ class PageSelectorMixin:
             )
         return False
 
-    def _on_set_manual_current_page_clicked(self):
-        self._append_log("[TM_CURRENT_PAGE][BUTTON_CLICK]", echo=True)
-        item = self._get_tm_page_combo_selection()
-        if not isinstance(item, dict):
-            self._set_tm_action_hint("请先在可用页面列表中选择一个页面。")
-            self._append_log(
-                "[TM_CURRENT_PAGE][BUTTON_FAILED] reason=item_not_found",
-                echo=True,
-            )
-            return
-
-        self._set_page_combo_selection(item, source="set_current_button")
-        self._set_tm_action_hint(self._tm_selector_action_hint_for_page(item))
-        self._refresh_manual_current_page_display()
-        self._refresh_current_session_binding_display()
-        self._update_sync_target_display()
-        self._apply_chat_bind_visual_state()
-
     def _refresh_manual_current_page_display(self):
         self._update_manual_current_page_display()
 
