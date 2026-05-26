@@ -3292,22 +3292,6 @@ const AutoQueueModule = (() => {
       'check-done-signal',
     ]);
 
-    function isBridgeAssistantActuallyBusy(snapshot) {
-      if (!snapshot || typeof snapshot !== 'object') {
-        return false;
-      }
-
-      const responseState = String(snapshot.response_state || '').trim();
-      const responseReason = String(snapshot.response_state_reason || '').trim();
-
-      return Boolean(
-        snapshot.is_responding === true
-        || responseState === 'generating'
-        || responseState === 'streaming'
-        || responseReason === 'assistant_busy'
-      );
-    }
-
     function isChatGPTActuallyBusyForTaskQueue() {
       const assistantBusy = typeof ComposerApi !== 'undefined'
         && typeof ComposerApi.isAssistantLikelyBusy === 'function'

@@ -361,27 +361,6 @@
     }
   }
 
-  function setButtonStateIfChanged(button, options = {}) {
-    if (!button) return false;
-
-    const sig = JSON.stringify({
-      text: options.text != null ? String(options.text) : '',
-      title: options.title != null ? String(options.title) : '',
-      disabled: options.disabled === true,
-      ariaDisabled: options.ariaDisabled === true,
-      addClasses: Array.isArray(options.addClasses) ? options.addClasses : [],
-      removeClasses: Array.isArray(options.removeClasses) ? options.removeClasses : [],
-    });
-
-    if (button.dataset.lastStateSig === sig) {
-      return false;
-    }
-
-    button.dataset.lastStateSig = sig;
-    setButtonState(button, options);
-    return true;
-  }
-
   const perfLogThrottleAt = {};
 
   function isToolboxPerfDebugEnabled() {
@@ -636,24 +615,6 @@
     }
 
     setButtonWaitingDanger(button, false, reason || 'clear');
-  }
-
-  function shouldSkipGlobalShortcutForToolboxTarget(target) {
-    const toolboxRoot = document.querySelector(`#${APP.rootId}`)
-      || document.querySelector(`#${APP.panelId}`);
-
-    if (!toolboxRoot || !(target instanceof Element) || !toolboxRoot.contains(target)) {
-      return false;
-    }
-
-    const tagName = String(target.tagName || '').toLowerCase();
-    const isEditable =
-      tagName === 'input' ||
-      tagName === 'textarea' ||
-      target.isContentEditable === true
-      || !!target.closest('[contenteditable="true"]');
-
-    return !isEditable;
   }
 
   function shouldSkipGlobalShortcutForToolboxEditing(target) {
@@ -2200,13 +2161,25 @@
     confirmPromptDraftOverwrite: false,
     globalDropCaptureEnabled: false,
     restoreScrollAfterCopyLastMessage: false,
+    closedLoopAutoUploadEnabled: true,
+    closedLoopAutoUploadInterval: 5,
+    closedLoopHomeNavEnabled: true,
+    closedLoopHomeNavInterval: 20,
+    closedLoopHomeNavUrl: 'https://chatgpt.com/',
     copyHotkeyLoopAutoUploadEnabled: true,
     copyHotkeyLoopAutoUploadInterval: 5,
+    unifiedContinueHomeNavEnabled: true,
+    unifiedContinueHomeNavInterval: 20,
+    unifiedContinueHomeNavUrl: 'https://chatgpt.com/',
     copyHotkeyLoopHomeNavEnabled: true,
     copyHotkeyLoopHomeNavInterval: 20,
     copyHotkeyLoopHomeNavUrl: 'https://chatgpt.com/',
     copyHotkeyContinuePromptText: '',
-    copyHotkeyContinueStopSignal: '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
+    copyHotkeyContinueStopSignal: (
+      typeof getDefaultDoneSignal === 'function'
+        ? getDefaultDoneSignal()
+        : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'
+    ),
     multiUploadLastSelection: DEFAULT_MULTI_UPLOAD_LAST_SELECTION,
     uploadQuotaWindowHours: 3,
     uploadQuotaMaxFiles: 80,
@@ -2270,11 +2243,65 @@
       return intValue;
     }
 
-    cfg.copyHotkeyLoopAutoUploadEnabled = cfg.copyHotkeyLoopAutoUploadEnabled !== false;
-    cfg.copyHotkeyLoopAutoUploadInterval = normalizePositiveInt(cfg.copyHotkeyLoopAutoUploadInterval, 5, 1, 999);
-    cfg.copyHotkeyLoopHomeNavEnabled = cfg.copyHotkeyLoopHomeNavEnabled !== false;
-    cfg.copyHotkeyLoopHomeNavInterval = normalizePositiveInt(cfg.copyHotkeyLoopHomeNavInterval, 20, 1, 999);
-    cfg.copyHotkeyLoopHomeNavUrl = (typeof cfg.copyHotkeyLoopHomeNavUrl === 'string' && cfg.copyHotkeyLoopHomeNavUrl.trim().length > 0) ? cfg.copyHotkeyLoopHomeNavUrl.trim() : 'https://chatgpt.com/';
+    const closedLoopAutoUploadEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopAutoUploadEnabled')
+      ? raw.closedLoopAutoUploadEnabled
+      : raw.copyHotkeyLoopAutoUploadEnabled;
+    const closedLoopAutoUploadIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopAutoUploadInterval')
+      ? raw.closedLoopAutoUploadInterval
+      : raw.copyHotkeyLoopAutoUploadInterval;
+
+    cfg.closedLoopAutoUploadEnabled = closedLoopAutoUploadEnabledRaw !== false;
+    cfg.closedLoopAutoUploadInterval = normalizePositiveInt(closedLoopAutoUploadIntervalRaw, 5, 1, 999);
+    cfg.copyHotkeyLoopAutoUploadEnabled = cfg.closedLoopAutoUploadEnabled;
+    cfg.copyHotkeyLoopAutoUploadInterval = cfg.closedLoopAutoUploadInterval;
+
+    const closedLoopHomeNavEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavEnabled')
+      ? raw.closedLoopHomeNavEnabled
+      : raw.copyHotkeyLoopHomeNavEnabled;
+    const closedLoopHomeNavIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavInterval')
+      ? raw.closedLoopHomeNavInterval
+      : raw.copyHotkeyLoopHomeNavInterval;
+    const closedLoopHomeNavUrlRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavUrl')
+      ? raw.closedLoopHomeNavUrl
+      : raw.copyHotkeyLoopHomeNavUrl;
+
+    cfg.closedLoopHomeNavEnabled = closedLoopHomeNavEnabledRaw !== false;
+    cfg.closedLoopHomeNavInterval = normalizePositiveInt(closedLoopHomeNavIntervalRaw, 20, 1, 999);
+    cfg.closedLoopHomeNavUrl = (
+      typeof closedLoopHomeNavUrlRaw === 'string' && closedLoopHomeNavUrlRaw.trim().length > 0
+    )
+      ? closedLoopHomeNavUrlRaw.trim()
+      : 'https://chatgpt.com/';
+
+    const unifiedHomeNavEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavEnabled')
+      ? raw.unifiedContinueHomeNavEnabled
+      : raw.copyHotkeyLoopHomeNavEnabled;
+    const unifiedHomeNavIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavInterval')
+      ? raw.unifiedContinueHomeNavInterval
+      : raw.copyHotkeyLoopHomeNavInterval;
+    const unifiedHomeNavUrlRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavUrl')
+      ? raw.unifiedContinueHomeNavUrl
+      : raw.copyHotkeyLoopHomeNavUrl;
+
+    cfg.unifiedContinueHomeNavEnabled = unifiedHomeNavEnabledRaw !== false;
+    cfg.unifiedContinueHomeNavInterval = normalizePositiveInt(
+      unifiedHomeNavIntervalRaw,
+      20,
+      1,
+      999,
+    );
+    cfg.unifiedContinueHomeNavUrl = (
+      typeof unifiedHomeNavUrlRaw === 'string' && unifiedHomeNavUrlRaw.trim().length > 0
+    )
+      ? unifiedHomeNavUrlRaw.trim()
+      : 'https://chatgpt.com/';
+
+    cfg.copyHotkeyLoopHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled;
+    cfg.copyHotkeyLoopHomeNavInterval = cfg.unifiedContinueHomeNavInterval;
+    cfg.copyHotkeyLoopHomeNavUrl = cfg.unifiedContinueHomeNavUrl;
+    cfg.closedLoopHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled;
+    cfg.closedLoopHomeNavInterval = cfg.unifiedContinueHomeNavInterval;
+    cfg.closedLoopHomeNavUrl = cfg.unifiedContinueHomeNavUrl;
 
     cfg.uploadQuotaWindowHours = normalizePositiveInt(cfg.uploadQuotaWindowHours, 3, 1, 72);
     cfg.uploadQuotaMaxFiles = normalizePositiveInt(cfg.uploadQuotaMaxFiles, 80, 1, 10000);
@@ -2292,7 +2319,9 @@
     const legacyLoopStop = typeof cfg.copyHotkeyLoopStopSignal === 'string'
       ? cfg.copyHotkeyLoopStopSignal.trim()
       : '';
-    const DEFAULT_BATCH_TASK_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+    const DEFAULT_BATCH_TASK_DONE_SIGNAL = typeof getDefaultDoneSignal === 'function'
+      ? getDefaultDoneSignal()
+      : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
     const LEGACY_COPY_HOTKEY_CONTINUE_STOP_SIGNALS = new Set([
       'CHATGPT_TOOLBOX_DONE',
       '<<<CHATGPT_TOOLBOX_DONE>>>',
@@ -3425,11 +3454,6 @@
       });
       return false;
     }
-  }
-
-  /** @deprecated 请使用 copyTextUnified；保留兼容旧调用。 */
-  async function copyTextToClipboard(text) {
-    return copyTextUnified(text, 'copyTextToClipboard-legacy');
   }
 
   const DEFAULT_BEEP_CONFIG = Object.freeze({

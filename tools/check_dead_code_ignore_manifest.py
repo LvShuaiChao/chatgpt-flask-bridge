@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe as read_text
+
 IGNORE_MANIFEST = ROOT / "docs" / "dead_code_ignore_manifest.json"
 
 REQUIRED_TOP_KEYS = {
@@ -23,12 +24,6 @@ REQUIRED_RULE_KEYS = {
     "expires_after",
     "owner",
 }
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def main() -> int:

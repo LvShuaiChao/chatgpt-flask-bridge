@@ -253,24 +253,6 @@
     quickPrompts: '#cgpt-upload-quick-prompts',
   });
 
-  /** Upload area core action buttons (upload/copy/hotkey). Send is separate — see SendActionSelectors. */
-  const UploadCoreActionSelectors = Object.freeze([
-    UploadSelectors.startBtn,
-    UploadSelectors.copyContinueBtn,
-    UploadSelectors.autoContinueBtn,
-    UploadSelectors.autoContinueUntilDoneBtn,
-    UploadSelectors.copyLastMessageBtn,
-    UploadSelectors.copyHotkeyOnceBtn,
-    UploadSelectors.copyHotkeyContinueOnceBtn,
-    UploadSelectors.copyHotkeyContinueLoopBtn,
-    UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
-    UploadSelectors.closedLoopUploadEvery5Btn,
-  ]);
-
-  const SendActionSelectors = Object.freeze([
-    UploadSelectors.sendMessageBtn,
-  ]);
-
   const HomeActionSelectors = Object.freeze({
     homeBtn: '#cgpt-open-chatgpt-home',
   });
@@ -779,7 +761,11 @@
     return cloneDefaultModeSettings();
   }
 
-  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = DEFAULT_BATCH_DONE_SIGNAL;
+
+  function getDefaultDoneSignal() {
+    return DEFAULT_BATCH_DONE_SIGNAL;
+  }
 
   function getLegacyShortContinuePromptText() {
     return [

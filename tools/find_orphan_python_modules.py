@@ -5,7 +5,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import (
+    DEFAULT_IGNORE_DIRS,
+    PROJECT_ROOT as ROOT,
+    read_text,
+    rel,
+)
 
 SCAN_ROOTS = [
     ROOT / "app",
@@ -30,18 +35,6 @@ ALWAYS_KEEP_PATH_PARTS = {
     "mixins",
 }
 
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-    "node_modules",
-}
-
 
 def iter_python_files():
     for root in SCAN_ROOTS:
@@ -49,7 +42,7 @@ def iter_python_files():
             continue
 
         for path in root.rglob("*.py"):
-            if any(part in IGNORE_DIRS for part in path.parts):
+            if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
                 continue
             yield path
 
@@ -59,17 +52,9 @@ def iter_python_files():
             yield path
 
 
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
-
-
 def module_name_from_path(path: Path) -> str:
     rel_path = path.relative_to(ROOT).with_suffix("")
     return ".".join(rel_path.parts)
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def parse_ast(path: Path):

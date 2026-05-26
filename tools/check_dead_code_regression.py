@@ -1,7 +1,7 @@
 """Static checks to prevent dead-code / field-migration regressions."""
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe as read_text
 
 # 僵尸代码清理时不得删除的 legacy 边界（须存在于源码中）。
 REQUIRED_LEGACY_GUARDS = [
@@ -56,12 +56,6 @@ CHECKS = [
         ),
     },
 ]
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def main():

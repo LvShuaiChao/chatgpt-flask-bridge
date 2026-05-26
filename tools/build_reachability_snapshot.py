@@ -4,7 +4,12 @@ import ast
 from collections import defaultdict, deque
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import (
+    DEFAULT_IGNORE_DIRS,
+    PROJECT_ROOT as ROOT,
+    read_text,
+    rel,
+)
 
 ENTRY_FILES = [
     ROOT / "GUI.py",
@@ -16,18 +21,6 @@ SCAN_ROOTS = [
 ]
 
 OUT_FILE = ROOT / "docs" / "dead_code_reachability_snapshot.md"
-
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-    "node_modules",
-}
 
 DYNAMIC_KEEP_MARKERS = [
     "@app.route",
@@ -55,13 +48,9 @@ def iter_python_files():
             continue
 
         for path in target.rglob("*.py"):
-            if any(part in IGNORE_DIRS for part in path.parts):
+            if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
                 continue
             yield path
-
-
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
 def module_name_from_path(path: Path) -> str:
@@ -80,10 +69,6 @@ def path_from_module(module_name: str, module_to_path: dict[str, Path]) -> Path 
         parts.pop()
 
     return None
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def parse_imports(path: Path) -> set[str]:

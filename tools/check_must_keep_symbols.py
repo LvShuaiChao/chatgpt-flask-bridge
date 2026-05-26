@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe as read_text
 
 MUST_KEEP = [
     {
@@ -34,12 +34,6 @@ FRAMEWORK_MUST_KEEP = [
         "symbols": ["tickWaitingReplyOrSendOpportunity"],
     },
 ]
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def check_group(label: str, items: list[dict]) -> list[str]:

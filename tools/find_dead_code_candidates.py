@@ -1,25 +1,19 @@
-from pathlib import Path
 import ast
 import re
+from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import (
+    DEFAULT_IGNORE_DIRS,
+    PROJECT_ROOT as ROOT,
+    read_text,
+    rel,
+)
 
 PY_TARGETS = [
     ROOT / "app",
     ROOT / "gui.py",
     ROOT / "server.py",
 ]
-
-IGNORE_DIR_NAMES = {
-    "__pycache__",
-    ".git",
-    ".venv",
-    "venv",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-}
 
 DEPRECATED_PATTERNS = [
     "DEFAULT_AUTO_CONFIG",
@@ -52,18 +46,11 @@ def iter_files():
             continue
 
         for path in target.rglob("*.py"):
-            if any(part in IGNORE_DIR_NAMES for part in path.parts):
+            if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
                 continue
             yield path
 
 
-
-def read_text(path):
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def rel(path):
-    return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
 def collect_python_defs(path, text):

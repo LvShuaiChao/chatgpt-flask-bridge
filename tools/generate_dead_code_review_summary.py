@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT
 OUT_FILE = ROOT / "docs" / "dead_code_review_summary.md"
 
 SCAN_COMMANDS = [

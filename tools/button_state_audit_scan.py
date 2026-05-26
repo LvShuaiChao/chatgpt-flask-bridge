@@ -2,6 +2,8 @@
 from pathlib import Path
 import re
 
+from _common import read_text
+
 ROOT = Path("chatgpt-toolbox/tampermonkey-userscript-src")
 OUT = Path("button_state_audit_report.md")
 
@@ -88,13 +90,6 @@ BUTTON_IDS = [
     "cgpt-setting-compact-show-file-list",
     "cgpt-setting-compact-show-quick-prompts",
 ]
-
-
-def read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")
 
 
 def iter_source_files():

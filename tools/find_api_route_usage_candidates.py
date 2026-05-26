@@ -8,7 +8,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import (
+    DEFAULT_IGNORE_DIRS,
+    PROJECT_ROOT as ROOT,
+    read_text,
+    rel,
+)
 
 PY_TARGETS = [
     ROOT / "app",
@@ -20,18 +25,6 @@ JS_TARGETS = [
     ROOT / "chatgpt-toolbox" / "tampermonkey-userscript-src",
     ROOT / "client.user.js",
 ]
-
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-    "node_modules",
-}
 
 ROUTE_RE = re.compile(
     r"@\s*(?:app|bp|blueprint|api|routes|[\w_]+)\.route\s*\(\s*['\"]([^'\"]+)['\"]"
@@ -68,17 +61,9 @@ def iter_files(targets, suffixes):
                 continue
             if path.suffix.lower() not in suffixes:
                 continue
-            if any(part in IGNORE_DIRS for part in path.parts):
+            if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
                 continue
             yield path
-
-
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def normalize_path(path: str) -> str:

@@ -1,13 +1,10 @@
-from pathlib import Path
-
-from app.utils.log_utils import LOG_FILE, append_log, clear_log_file, set_log_min_level
+from app.utils.log_utils import append_log, clear_log_file
 
 
 def test_append_log_writes_debug_to_file_when_ui_min_is_info(tmp_path, monkeypatch):
     log_path = tmp_path / "log.txt"
     monkeypatch.setattr("app.utils.log_utils.LOG_FILE", log_path)
     clear_log_file()
-    set_log_min_level("INFO")
     line = append_log(
         "[TM][HEARTBEAT] client_id=test",
         source="TEST",
@@ -24,7 +21,6 @@ def test_append_log_skips_trace_in_file(tmp_path, monkeypatch):
     log_path = tmp_path / "log.txt"
     monkeypatch.setattr("app.utils.log_utils.LOG_FILE", log_path)
     clear_log_file()
-    set_log_min_level("INFO")
     line = append_log("trace line", source="TEST", level="TRACE")
     assert line == ""
     assert log_path.read_text(encoding="utf-8") == ""

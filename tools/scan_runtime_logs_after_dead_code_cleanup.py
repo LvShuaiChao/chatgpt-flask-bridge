@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, rel
 
 LOG_DIRS = [
     ROOT / "logs",
@@ -45,10 +45,6 @@ def iter_log_files():
         for path in log_dir.rglob("*"):
             if path.is_file() and path.suffix.lower() in {".log", ".txt"}:
                 yield path
-
-
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
 def main() -> int:

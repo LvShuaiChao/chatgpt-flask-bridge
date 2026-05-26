@@ -4052,24 +4052,353 @@
       return strongUploadingTextPattern.test(text);
     }
 
+    const NATIVE_UPLOAD_ERROR_SELECTORS = [
+      '[role="alert"]',
+      '[aria-live]',
+      '[data-testid*="toast"]',
+      '[data-testid*="upload-error"]',
+      '[aria-label*="上传失败"]',
+      '[aria-label*="Upload failed"]',
+    ].join(', ');
 
-    function findFileInputsLegacy() {
-      const root = getComposerRoot();
-      const list = [];
+    const NATIVE_UPLOAD_ERROR_PATTERNS = [
+      /files\.oaiusercontent\.com/i,
+      /上传到\s*files\.oaiusercontent\.com\s*失败/i,
+      /上传失败/i,
+      /upload\s+failed/i,
+      /couldn'?t\s+upload/i,
+      /failed\s+to\s+upload/i,
+    ];
 
-      if (root) {
-        list.push(...qsa('input[type="file"]', root));
+    function isNativeSendReadyForUpload() {
+      return !!(
+        (typeof hasRealSubmitButton === 'function' && hasRealSubmitButton())
+        || (typeof canSendNowLight === 'function' && canSendNowLight())
+        || (typeof canSendNow === 'function' && canSendNow({ force: true }))
+      );
+    }
+
+    function detectChatGPTNativeUploadError() {
+      try {
+        const nodes = qsa(NATIVE_UPLOAD_ERROR_SELECTORS).filter((el) => {
+          if (!(el instanceof HTMLElement)) {
+            return false;
+          }
+          if (isInToolbox(el)) {
+            return false;
+          }
+          if (isInsideConversationHistory(el)) {
+            return false;
+          }
+          return isElementVisible(el);
+        });
+
+        for (let i = 0; i < nodes.length; i += 1) {
+          const el = nodes[i];
+          const text = [
+            el.innerText || '',
+            el.textContent || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+          ].join(' ').replace(/\s+/g, ' ').trim();
+
+          if (!text) {
+            continue;
+          }
+
+          const matched = NATIVE_UPLOAD_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+          if (matched) {
+            return {
+              ok: false,
+              reason: 'native-upload-failed',
+              message: text.slice(0, 500),
+            };
+          }
+        }
+
+        return null;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] detectChatGPTNativeUploadError failed', error);
+        ToolboxShell.appendLog(
+          `[UPLOAD_NATIVE][DETECT_ERROR] error=${errText}`,
+        );
+        return null;
+      }
+    }
+
+    async function waitChatGPTNativeUploadSettled(files, options = {}) {
+      const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 90000);
+      const pollMs = Number(options.pollMs) || 500;
+      const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
+      const signal = options.signal;
+      const isCancelled = typeof options.isCancelled === 'function'
+        ? options.isCancelled
+        : () => !!(signal && signal.aborted);
+
+      const cleanFiles = (files || []).filter(Boolean);
+      const fileNames = cleanFiles.map((f) => f && f.name).filter(Boolean).join('|');
+      const deadline = Date.now() + timeoutMs;
+
+      while (Date.now() < deadline) {
+        if (isCancelled()) {
+          return {
+            ok: false,
+            cancelled: true,
+            reason: 'cancelled',
+          };
+        }
+
+        const nativeErr = detectChatGPTNativeUploadError();
+        if (nativeErr) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][FAILED] names=${fileNames || '-'} message=${nativeErr.message || '-'}`,
+          );
+          return nativeErr;
+        }
+
+        const stillUploading = typeof isAttachmentStillUploading === 'function'
+          && isAttachmentStillUploading();
+        const sendReady = isNativeSendReadyForUpload();
+
+        if (!stillUploading && sendReady) {
+          await sleep(stableMs);
+
+          if (isCancelled()) {
+            return {
+              ok: false,
+              cancelled: true,
+              reason: 'cancelled',
+            };
+          }
+
+          const nativeErrAfterStable = detectChatGPTNativeUploadError();
+          if (nativeErrAfterStable) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][FAILED] names=${fileNames || '-'} message=${nativeErrAfterStable.message || '-'} phase=post-stable`,
+            );
+            return nativeErrAfterStable;
+          }
+
+          const stillUploadingAfterStable = typeof isAttachmentStillUploading === 'function'
+            && isAttachmentStillUploading();
+          const sendReadyAfterStable = isNativeSendReadyForUpload();
+
+          if (!stillUploadingAfterStable && sendReadyAfterStable) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][SETTLED] names=${fileNames || '-'}`,
+            );
+            return {
+              ok: true,
+              reason: 'native-upload-settled',
+            };
+          }
+        }
+
+        await sleep(pollMs);
       }
 
-      list.push(...qsa('main input[type="file"]'));
-      list.push(...qsa('input[type="file"]'));
+      ToolboxShell.appendLog(
+        `[UPLOAD_NATIVE][TIMEOUT] names=${fileNames || '-'} timeoutMs=${timeoutMs}`,
+      );
+      return {
+        ok: false,
+        reason: 'native-upload-settle-timeout',
+      };
+    }
 
-      return [...new Set(list)].filter((x) => {
-        if (!(x instanceof HTMLInputElement)) return false;
-        if (isInToolbox(x)) return false;
-        if (x.disabled) return false;
-        return true;
+    async function finalizeAttachAfterComposerEvidence(cleanFiles, options = {}) {
+      const nativeSettle = await waitChatGPTNativeUploadSettled(cleanFiles, {
+        timeoutMs: options.nativeSettleTimeoutMs || options.timeoutMs || 90000,
+        signal: options.signal,
+        isCancelled: options.isCancelled,
+        stableMs: options.stableMs,
+        pollMs: options.pollMs,
       });
+
+      if (nativeSettle && nativeSettle.cancelled) {
+        return {
+          ok: false,
+          cancelled: true,
+          reason: '用户已停止上传',
+        };
+      }
+
+      if (nativeSettle && nativeSettle.ok) {
+        return {
+          ok: true,
+          method: 'file-input',
+          level: 'native-settled',
+          reason: nativeSettle.reason || 'native-upload-settled',
+        };
+      }
+
+      if (nativeSettle && nativeSettle.reason === 'native-upload-failed') {
+        return {
+          ok: false,
+          method: 'file-input',
+          reason: 'native-upload-failed',
+          detail: nativeSettle.message || '',
+        };
+      }
+
+      const lateNativeErr = detectChatGPTNativeUploadError();
+      if (lateNativeErr) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_NATIVE][FAILED] names=${cleanFiles.map((f) => f.name).join('|') || '-'} message=${lateNativeErr.message || '-'} phase=finalize`,
+        );
+        return {
+          ok: false,
+          method: 'file-input',
+          reason: 'native-upload-failed',
+          detail: lateNativeErr.message || '',
+        };
+      }
+
+      return {
+        ok: false,
+        method: 'file-input',
+        reason: nativeSettle && nativeSettle.reason
+          ? nativeSettle.reason
+          : 'native-upload-settle-timeout',
+        detail: nativeSettle && nativeSettle.message ? nativeSettle.message : '',
+      };
+    }
+
+    function describeFileInputCandidate(input) {
+      const composerRoot = getComposerRoot();
+      const inComposer = composerRoot instanceof HTMLElement && composerRoot.contains(input);
+      const accept = input.getAttribute('accept') || '';
+      const multiple = !!input.multiple;
+      const visible = isElementVisible(input);
+      let display = '-';
+
+      if (input instanceof HTMLElement) {
+        display = window.getComputedStyle(input).display || '-';
+      }
+
+      const outerHtml = input.outerHTML ? input.outerHTML.slice(0, 200) : '';
+
+      return {
+        accept,
+        multiple,
+        inComposer,
+        visible,
+        display,
+        outerHtml,
+      };
+    }
+
+    function scoreFileInputCandidate(input, source) {
+      const composerRoot = getComposerRoot();
+      const inComposer = composerRoot instanceof HTMLElement && composerRoot.contains(input);
+      const visible = isElementVisible(input);
+      let score = 0;
+
+      if (inComposer) {
+        score += 100;
+      }
+      if (visible) {
+        score += 50;
+      }
+      if (source === 'composer-root') {
+        score += 40;
+      } else if (source === 'main') {
+        score += 20;
+      }
+
+      const composerForm = composerRoot instanceof HTMLElement
+        ? composerRoot.closest('form')
+        : null;
+      const inputForm = input.closest('form');
+      if (
+        composerForm instanceof HTMLElement
+        && inputForm instanceof HTMLElement
+        && composerForm === inputForm
+      ) {
+        score += 30;
+      }
+
+      return score;
+    }
+
+    function findFileInputsLegacy() {
+      const composerRoot = getComposerRoot();
+      const ranked = [];
+
+      const addCandidate = (input, source) => {
+        if (!(input instanceof HTMLInputElement)) {
+          return;
+        }
+        if (input.type !== 'file') {
+          return;
+        }
+        if (isInToolbox(input)) {
+          return;
+        }
+        if (input.disabled) {
+          return;
+        }
+        if (isInsideConversationHistory(input)) {
+          return;
+        }
+
+        const inComposer = composerRoot instanceof HTMLElement && composerRoot.contains(input);
+        const visible = isElementVisible(input);
+
+        if (!inComposer && !visible) {
+          const style = window.getComputedStyle(input);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return;
+          }
+        }
+
+        if (ranked.some((row) => row.input === input)) {
+          return;
+        }
+
+        const desc = describeFileInputCandidate(input);
+        const score = scoreFileInputCandidate(input, source);
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_INPUT][CANDIDATE] source=${source} score=${score} accept=${desc.accept} multiple=${desc.multiple ? 1 : 0} inComposer=${desc.inComposer ? 1 : 0} visible=${desc.visible ? 1 : 0} display=${desc.display} html=${desc.outerHtml}`,
+        );
+
+        ranked.push({
+          input,
+          score,
+          desc,
+          source,
+        });
+      };
+
+      if (composerRoot) {
+        qsa('input[type="file"]', composerRoot).forEach((input) => {
+          addCandidate(input, 'composer-root');
+        });
+      }
+
+      const mainEl = document.querySelector('main');
+      if (mainEl instanceof HTMLElement) {
+        qsa('input[type="file"]', mainEl).forEach((input) => {
+          addCandidate(input, 'main');
+        });
+      }
+
+      qsa('input[type="file"]').forEach((input) => {
+        addCandidate(input, 'global');
+      });
+
+      ranked.sort((a, b) => b.score - a.score);
+
+      if (ranked[0]) {
+        const selected = ranked[0];
+        ToolboxShell.appendLog(
+          `[UPLOAD_INPUT][SELECTED] source=${selected.source} score=${selected.score} accept=${selected.desc.accept} multiple=${selected.desc.multiple ? 1 : 0} inComposer=${selected.desc.inComposer ? 1 : 0} visible=${selected.desc.visible ? 1 : 0} display=${selected.desc.display} html=${selected.desc.outerHtml}`,
+        );
+      }
+
+      return ranked.map((row) => row.input);
     }
 
     function dispatchFilesToInputLegacy(input, files) {
@@ -4120,7 +4449,7 @@
       }, 0);
     }
 
-    async function attachFilesByFileInput(files, timeoutMs = 8000, options = {}) {
+    async function attachFilesByFileInput(files, timeoutMs = 90000, options = {}) {
       ToolboxShell.appendLog('[UPLOAD_PATH] using attachFilesByFileInput');
       const signal = options.signal;
       const isCancelled = typeof options.isCancelled === 'function'
@@ -4203,14 +4532,35 @@
 
           if (evidence && evidence.ok) {
             ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][file-input:batch-evidence-ok] reason=${evidence.reason || '-'} level=${evidence.level || '-'}`
+              `[UPLOAD_DIAG][file-input:batch-evidence-ok] reason=${evidence.reason || '-'} level=${evidence.level || '-'} phase=attached_to_composer`
             );
 
+            const nativeResult = await finalizeAttachAfterComposerEvidence(cleanFiles, {
+              timeoutMs: Math.max(timeoutMs, 60000),
+              nativeSettleTimeoutMs: Math.max(timeoutMs, 60000),
+              signal,
+              isCancelled,
+            });
+
+            if (nativeResult.cancelled) {
+              return {
+                ok: false,
+                cancelled: true,
+                reason: nativeResult.reason || '用户已停止上传',
+              };
+            }
+
+            if (nativeResult.ok) {
+              return nativeResult;
+            }
+
             return {
-              ok: true,
+              ok: false,
               method: 'file-input',
-              level: evidence.level || 'evidence',
-              reason: evidence.reason || '旧版 input 上传成功',
+              reason: nativeResult.reason || 'native-upload-failed',
+              detail: nativeResult.detail || '',
+              attachedToComposer: true,
+              composerEvidence: evidence.reason || '',
             };
           }
 
@@ -4262,17 +4612,48 @@
             settledReasons.push(settled.reason || '附件区域识别到文件名');
           }
 
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][file-input:settled-batch-ok] phase=attached_to_composer reasons=${settledReasons.join('；')}`
+          );
+
+          const nativeResult = await finalizeAttachAfterComposerEvidence(cleanFiles, {
+            timeoutMs: Math.max(timeoutMs, 60000),
+            nativeSettleTimeoutMs: Math.max(timeoutMs, 60000),
+            signal,
+            isCancelled,
+          });
+
+          if (nativeResult.cancelled) {
+            return {
+              ok: false,
+              cancelled: true,
+              reason: nativeResult.reason || '用户已停止上传',
+            };
+          }
+
+          if (nativeResult.ok) {
+            return {
+              ...nativeResult,
+              reason: `旧版 input 上传成功：${settledReasons.join('；')}；${nativeResult.reason || 'native-upload-settled'}`,
+            };
+          }
+
           return {
-            ok: true,
+            ok: false,
             method: 'file-input',
-            level: 'name',
-            reason: `旧版 input 上传成功：${settledReasons.join('；')}`,
+            reason: nativeResult.reason || 'native-upload-failed',
+            detail: nativeResult.detail || '',
+            attachedToComposer: true,
           };
         } catch (e) {
-          console.warn('[ChatGPT toolbox] legacy input dispatch failed', {
+          const errText = e && e.message ? e.message : String(e);
+          console.error('[ChatGPT toolbox] legacy input dispatch failed', {
             input,
             files: cleanFiles.map((f) => f.name),
           }, e);
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][file-input:dispatch-error] error=${errText}`,
+          );
         }
       }
 
@@ -4425,6 +4806,8 @@
       canSendNowLight,
       isAssistantLikelyBusy,
       attachFilesByFileInput,
+      detectChatGPTNativeUploadError,
+      waitChatGPTNativeUploadSettled,
       clearAttachments,
       collectAttachmentChipText,
       countAttachmentChips,

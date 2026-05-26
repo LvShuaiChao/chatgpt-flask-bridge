@@ -149,62 +149,6 @@ class PageTmClientMixin:
 
         return None
 
-    # @deprecated 无外部调用；确认无 DEPRECATED_HIT 后删除。
-    def _get_current_or_recent_online_tm_page(self, status=None):
-        if not getattr(self, "_get_current_or_recent_online_tm_page_deprecated_logged", False):
-            from app.utils.deprecation_log import log_deprecated_hit
-
-            self._get_current_or_recent_online_tm_page_deprecated_logged = True
-            log_deprecated_hit(
-                name="_get_current_or_recent_online_tm_page",
-                reason="no_external_call",
-                replacement="_find_online_tm_client_by_conversation_id / _find_focused_tm_page",
-            )
-        status = status or self._bridge_ui.last_bridge_status or {}
-        for getter in (
-            lambda: self._pick_current_page_client_info(status),
-            lambda: self._find_focused_tm_page(status),
-        ):
-            info = getter()
-            if self._tm_page_is_online_simple(info):
-                return info
-        last_focus_info, _last_focus_age = self._find_last_focused_tm_page(status=status)
-        if (
-            isinstance(last_focus_info, dict)
-            and last_focus_info.get("realtime") is not False
-            and self._tm_page_is_online_simple(last_focus_info)
-        ):
-            return last_focus_info
-        best = None
-        best_seen = 0.0
-        for item in self._iter_tm_clients(status, online_only=False):
-            if not self._tm_page_is_online_simple(item):
-                continue
-            seen = max(
-                self._tm_float_field(
-                    item,
-                    "last_seen",
-                    0,
-                    context="_get_current_or_recent_online_tm_page",
-                ),
-                self._tm_float_field(
-                    item,
-                    "last_heartbeat_at",
-                    0,
-                    context="_get_current_or_recent_online_tm_page",
-                ),
-                self._tm_float_field(
-                    item,
-                    "last_poll_at",
-                    0,
-                    context="_get_current_or_recent_online_tm_page",
-                ),
-            )
-            if seen >= best_seen:
-                best_seen = seen
-                best = item
-        return best
-
     @staticmethod
     def _normalize_visibility_state(item):
         raw = (item.get("visibility_state") or "").strip().lower()

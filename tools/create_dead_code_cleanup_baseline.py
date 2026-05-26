@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from shutil import which
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe
 OUT_FILE = ROOT / "docs" / "dead_code_cleanup_baseline.md"
 
 KEY_FILES = [
@@ -68,12 +68,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def python_rg_fallback(pattern: str) -> str:
@@ -180,7 +174,7 @@ def main() -> int:
 
     for rel_path, symbol in MUST_KEEP_SYMBOLS:
         path = ROOT / rel_path
-        text = read_text(path)
+        text = read_text_safe(path)
         exists = symbol in text
         lines.append(f"| `{rel_path}` | `{symbol}` | `{exists}` |")
 

@@ -1,7 +1,9 @@
 """§131 对应场景的 VM 矩阵静态契约验收（无需 ChatGPT 页面）。"""
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
+
+from _common import read_text
 
 ROOT = Path("chatgpt-toolbox/tampermonkey-userscript-src")
 
@@ -80,13 +82,6 @@ MATRIX = [
         ],
     },
 ]
-
-
-def read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")
 
 
 def check_scene(scene: dict) -> list[str]:

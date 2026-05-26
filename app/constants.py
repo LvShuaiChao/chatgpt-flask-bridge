@@ -101,25 +101,7 @@ SYNC_PENDING_STATUSES = frozenset(
     }
 )
 
-UI_STATUS_DISPLAY_TEXT = {
-    "sending": "发送中",
-    "queued": "已加入队列",
-    "waiting_send": "等待发送",
-    "waiting": "等待回复…",
-    "assistant_pending": "等待回复…",
-    "waiting_reply": "等待回复…",
-    "syncing": "同步中",
-    "reading": "读取中",
-    "failed": "失败",
-    "timeout": "超时",
-    "cancelled": "已取消",
-    "done": "已完成",
-}
-
 PENDING_MISSING_ID_CLEAR_SECONDS = 15
-
-# 仅保留 assistant 回复等待态；发送/同步态见 USER_SEND_PENDING_STATUSES / SYNC_PENDING_STATUSES
-PENDING_ASSISTANT_STATUSES = ASSISTANT_REPLY_PENDING_STATUSES
 
 
 def is_assistant_reply_pending_status(status: str | None) -> bool:
@@ -163,10 +145,6 @@ RESET_PLACEHOLDER_ERROR_TEXTS = frozenset(
     }
 )
 WAITING_PLACEHOLDER_SOURCES = frozenset({"local_placeholder"})
-WAITING_PLACEHOLDER_STATUSES = (
-    ASSISTANT_REPLY_PENDING_STATUSES
-    | frozenset({"等待回复"})
-)
 
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 # 油猴页面在线/活跃度（server.ONLINE_TIMEOUT_SEC 与此同源）
@@ -273,9 +251,6 @@ def status_chip_text(prefix, state):
     """顶部状态芯片：「前缀：状态」。"""
     return f"{prefix}：{state}"
 
-
-# 油猴「发送快捷键」按钮经 GUI 模拟的系统级组合键（与 bridge 白名单一致）
-DEFAULT_SYSTEM_HOTKEY_COMBO = "ctrl+alt+i"
 
 DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",

@@ -5,7 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import (
+    DEFAULT_IGNORE_DIRS,
+    PROJECT_ROOT as ROOT,
+    rel,
+)
 
 DEFAULT_INCLUDE_SUFFIXES = {
     ".py",
@@ -18,17 +22,7 @@ DEFAULT_INCLUDE_SUFFIXES = {
     ".yml",
 }
 
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-    "node_modules",
-}
+IGNORE_DIRS = DEFAULT_IGNORE_DIRS
 
 
 def iter_files():
@@ -43,10 +37,6 @@ def iter_files():
             continue
 
         yield path
-
-
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
 def search_text(pattern: str) -> int:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, rel
+
 TESTS_DIR = ROOT / "tests"
 
 STALE_PATTERNS = [
@@ -54,10 +55,6 @@ def iter_test_files():
         if "__pycache__" in path.parts:
             continue
         yield path
-
-
-def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
 def classify_context(line: str, window_text: str) -> str:

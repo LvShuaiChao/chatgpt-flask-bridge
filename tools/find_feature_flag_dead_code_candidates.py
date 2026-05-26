@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import DEFAULT_IGNORE_DIRS, PROJECT_ROOT as ROOT
 
 TARGET_SUFFIXES = {
     ".py",
@@ -13,18 +13,6 @@ TARGET_SUFFIXES = {
     ".json",
     ".md",
     ".txt",
-}
-
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-    "node_modules",
 }
 
 FEATURE_FLAG_PATTERNS = [
@@ -80,7 +68,7 @@ def iter_files():
         if path.suffix.lower() not in TARGET_SUFFIXES:
             continue
 
-        if any(part in IGNORE_DIRS for part in path.parts):
+        if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
             continue
 
         yield path

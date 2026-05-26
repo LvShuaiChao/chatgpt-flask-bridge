@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe as read_text
+
 MANIFEST_PATH = ROOT / "docs" / "dead_code_cleanup_manifest.json"
 
 REQUIRED_TOP_KEYS = {
@@ -21,12 +22,6 @@ REQUIRED_CATEGORIES = {
     "must_keep",
     "exclude_from_source_level_cleanup",
 }
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def load_manifest() -> dict:

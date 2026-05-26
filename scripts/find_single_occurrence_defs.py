@@ -21,7 +21,8 @@ import pathlib
 import re
 import sys
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
+from _common import PROJECT_ROOT
 
 IGNORE_NAMES = frozenset(
     {

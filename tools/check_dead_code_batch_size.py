@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT
 
 MAX_DELETED_LINES_SOFT = 400
 MAX_FILES_CHANGED_SOFT = 20

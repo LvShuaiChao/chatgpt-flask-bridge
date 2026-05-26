@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import PROJECT_ROOT as ROOT, read_text_safe as read_text
 
 RULES_PATH = ROOT / "docs" / "dead_code_cleanup_rules.md"
 REPORT_PATH = ROOT / "docs" / "dead_code_cleanup_report.md"
@@ -69,12 +69,6 @@ REQUIRED_MANIFEST_EXCLUDES = [
     ".venv/**",
     "venv/**",
 ]
-
-
-def read_text(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def load_manifest() -> dict:

@@ -2,23 +2,12 @@
 
 Output is for manual review before dead-code deletion — not a zombie-code list.
 """
-from pathlib import Path
 import re
+from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _common import DEFAULT_IGNORE_DIRS, PROJECT_ROOT as ROOT
 
 TARGET_SUFFIXES = {".py", ".js", ".md"}
-
-IGNORE_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "runtime",
-    "logs",
-    "dist",
-    "build",
-}
 
 # 构建产物：不作为源码级动态入口扫描输入（改 tampermonkey-userscript-src/ 后 npm run build）
 GENERATED_SKIP_REL = frozenset(
@@ -53,7 +42,7 @@ def iter_files():
             continue
         if path.suffix not in TARGET_SUFFIXES:
             continue
-        if any(part in IGNORE_DIRS for part in path.parts):
+        if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
             continue
         try:
             rel_posix = str(path.relative_to(ROOT)).replace("\\", "/")

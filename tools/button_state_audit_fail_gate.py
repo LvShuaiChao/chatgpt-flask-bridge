@@ -1,6 +1,8 @@
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
+
+from _common import read_text
 
 ROOT = Path("chatgpt-toolbox/tampermonkey-userscript-src")
 
@@ -68,14 +70,6 @@ FAIL_PATTERNS = [
 ]
 
 SOURCE_SUFFIXES = {".js", ".mjs", ".ts", ".tsx", ".html", ".css"}
-
-
-def read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as error:
-        print(f"[READ][WARN] UTF-8 decode failed: {path} error={error}")
-        return path.read_text(encoding="utf-8", errors="replace")
 
 
 def iter_source_files():

@@ -275,10 +275,39 @@
         restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
         copyHotkeyLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
         copyHotkeyLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.copyHotkeyLoopAutoUploadInterval || 5),
-        copyHotkeyLoopHomeNavEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)?.checked,
-        copyHotkeyLoopHomeNavInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value || current.copyHotkeyLoopHomeNavInterval || 20),
+        unifiedContinueHomeNavEnabled: !!(
+          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
+        )?.checked,
+        unifiedContinueHomeNavInterval: Number(
+          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+          || current.unifiedContinueHomeNavInterval
+          || current.copyHotkeyLoopHomeNavInterval
+          || 20,
+        ),
+        unifiedContinueHomeNavUrl: String(
+          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          || current.unifiedContinueHomeNavUrl
+          || current.copyHotkeyLoopHomeNavUrl
+          || 'https://chatgpt.com/'
+        ).trim(),
+        copyHotkeyLoopHomeNavEnabled: !!(
+          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
+        )?.checked,
+        copyHotkeyLoopHomeNavInterval: Number(
+          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+          || current.unifiedContinueHomeNavInterval
+          || current.copyHotkeyLoopHomeNavInterval
+          || 20,
+        ),
         copyHotkeyLoopHomeNavUrl: String(
-          qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          || current.unifiedContinueHomeNavUrl
           || current.copyHotkeyLoopHomeNavUrl
           || 'https://chatgpt.com/'
         ).trim(),
@@ -356,19 +385,26 @@
         loopAutoUploadIntervalEl.value = String(cfg.copyHotkeyLoopAutoUploadInterval || 5);
       }
 
-      const loopHomeNavEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
+      const unifiedHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled !== false;
+      const unifiedHomeNavInterval = Number(cfg.unifiedContinueHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20);
+      const unifiedHomeNavUrl = cfg.unifiedContinueHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
+
+      const loopHomeNavEnabledEl = qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
       if (loopHomeNavEnabledEl) {
-        loopHomeNavEnabledEl.checked = cfg.copyHotkeyLoopHomeNavEnabled !== false;
+        loopHomeNavEnabledEl.checked = unifiedHomeNavEnabled;
       }
 
-      const loopHomeNavIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root);
+      const loopHomeNavIntervalEl = qs('#cgpt-setting-unified-continue-home-nav-interval', root)
+        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root);
       if (loopHomeNavIntervalEl) {
-        loopHomeNavIntervalEl.value = String(cfg.copyHotkeyLoopHomeNavInterval || 20);
+        loopHomeNavIntervalEl.value = String(unifiedHomeNavInterval);
       }
 
-      const loopHomeNavUrlEl = qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root);
+      const loopHomeNavUrlEl = qs('#cgpt-setting-unified-continue-home-nav-url', root)
+        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root);
       if (loopHomeNavUrlEl) {
-        loopHomeNavUrlEl.value = cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
+        loopHomeNavUrlEl.value = unifiedHomeNavUrl;
       }
 
       const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
@@ -685,6 +721,9 @@
       const onCompactSettingChange = () => {
         const cfg = readFromUi();
         saveConfig(cfg);
+        ToolboxShell.appendLog(
+          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${cfg.unifiedContinueHomeNavEnabled !== false ? 1 : 0} interval=${cfg.unifiedContinueHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20} url=${cfg.unifiedContinueHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/'}`,
+        );
         render();
       };
 
@@ -736,6 +775,9 @@
         '#cgpt-setting-restore-scroll-after-copy',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-interval',
+        '#cgpt-setting-unified-continue-home-nav-enabled',
+        '#cgpt-setting-unified-continue-home-nav-interval',
+        '#cgpt-setting-unified-continue-home-nav-url',
         '#cgpt-setting-copy-hotkey-loop-home-nav-enabled',
         '#cgpt-setting-copy-hotkey-loop-home-nav-interval',
         '#cgpt-setting-copy-hotkey-loop-home-nav-url',
@@ -1120,19 +1162,22 @@
               <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-auto-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
             </div>
 
+            <div class="cgpt-section-title" style="margin-top: 10px;">无限继续统一回首页</div>
+            <div class="cgpt-hint" style="margin-bottom: 8px;">适用于连续复制+快捷键+继续、闭环继续、自动继续、自动继续直到完成等所有无限继续模式。</div>
+
             <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-copy-hotkey-loop-home-nav-enabled">
-              每隔指定轮数页内跳转到 ChatGPT 主页
+              <input type="checkbox" id="cgpt-setting-unified-continue-home-nav-enabled">
+              启用定期回首页
             </label>
 
             <div class="cgpt-kv">
-              <label for="cgpt-setting-copy-hotkey-loop-home-nav-interval">跳转间隔轮数</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-home-nav-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+              <label for="cgpt-setting-unified-continue-home-nav-interval" title="所有无限继续模式共用此间隔">无限继续每 N 轮回首页</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-unified-continue-home-nav-interval" data-no-wheel-number="1" min="1" max="999" step="1" title="所有无限继续模式共用此间隔">
             </div>
 
             <div class="cgpt-kv">
-              <label for="cgpt-setting-copy-hotkey-loop-home-nav-url" title="默认每 5 轮重新上传一次文件，每 20 轮页内跳转到 https://chatgpt.com/。若同一轮同时命中上传和跳转，优先跳转。">跳转地址</label>
-              <input type="text" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-home-nav-url" title="默认每 5 轮重新上传一次文件，每 20 轮页内跳转到 https://chatgpt.com/。若同一轮同时命中上传和跳转，优先跳转。">
+              <label for="cgpt-setting-unified-continue-home-nav-url" title="默认每 5 轮重新上传一次文件（仅连续复制+快捷键+继续/闭环）。回首页间隔由上方统一参数控制。">回首页地址</label>
+              <input type="text" class="cgpt-input" id="cgpt-setting-unified-continue-home-nav-url" title="默认每 5 轮重新上传一次文件（仅连续复制+快捷键+继续/闭环）。回首页间隔由上方统一参数控制。">
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 10px;">复制+快捷键+继续</div>
