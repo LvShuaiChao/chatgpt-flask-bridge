@@ -980,6 +980,19 @@ const AutoQueueModule = (() => {
           );
         }
 
+        const oldVerifyPrompt = String(rawTaskQueue.verifyAfterDoneSignalPrompt || '');
+        const shouldMigrateVerifyPrompt = (
+          oldVerifyPrompt.includes('当前任务内容：')
+          || oldVerifyPrompt.includes('{{taskContent}}')
+          || oldVerifyPrompt.includes('请根据我刚才上传的代码文件和当前任务要求')
+        );
+        if (shouldMigrateVerifyPrompt) {
+          repairChanged = true;
+          ToolboxShell.appendLog(
+            '[AUTOQ][VERIFY_PROMPT][MIGRATE] reason=avoid-reanswering-full-task',
+          );
+        }
+
         config.taskQueueSettings = {
           ...taskQueueDefaults,
           ...rawTaskQueue,
@@ -1080,11 +1093,13 @@ const AutoQueueModule = (() => {
           enableAutoNewChatWhenRoundLimitReached:
             rawTaskQueue.enableAutoNewChatWhenRoundLimitReached !== false,
 
-          verifyAfterDoneSignalPrompt: String(
-            rawTaskQueue.verifyAfterDoneSignalPrompt
-            || taskQueueDefaults.verifyAfterDoneSignalPrompt
-            || '',
-          ),
+          verifyAfterDoneSignalPrompt: shouldMigrateVerifyPrompt
+            ? taskQueueDefaults.verifyAfterDoneSignalPrompt
+            : String(
+              rawTaskQueue.verifyAfterDoneSignalPrompt
+              || taskQueueDefaults.verifyAfterDoneSignalPrompt
+              || '',
+            ),
 
           showRuntimeStats: rawTaskQueue.showRuntimeStats !== false,
           preserveRuntimeStatsAverage: rawTaskQueue.preserveRuntimeStatsAverage === true,
@@ -4333,15 +4348,50 @@ const AutoQueueModule = (() => {
         ? createDefaultTaskQueueSettings()
         : {};
       return String(defaults.verifyAfterDoneSignalPrompt || '').trim() || [
-        '请根据我刚才上传的代码文件和当前任务要求，检查任务是否已经完整完成。',
+        '这是一次“完成状态确认”，不是重新执行任务。',
+        '',
+        '请不要重新回答题目，不要重新生成代码，不要重新展开原任务内容。',
+        '你只需要根据上一次助手回复，判断它是否已经完成当前任务要求。',
         '',
         '当前任务标题：{{taskTitle}}',
-        '当前任务内容：',
-        '{{taskContent}}',
+        '任务简述：{{taskBrief}}',
         '',
-        '如果确实完成，只回复：{{doneSignal}}',
-        '如果没有完成，请继续输出剩余内容，不要回复终止信号。',
+        '上一次助手回复：',
+        '{{lastReply}}',
+        '',
+        '判断要求：',
+        '1. 如果上一次助手回复已经完整完成任务，并且没有明显遗漏，只回复：{{doneSignal}}',
+        '2. 如果上一次助手回复还没有完成，请只继续输出缺失的剩余内容。',
+        '3. 不要重复已经回答过的内容。',
+        '4. 不要从头重新回答整个任务。',
+        '5. 不要把原始题目重新列出来。',
       ].join('\n');
+    }
+
+    function buildTaskBriefForDoneVerify(task) {
+      const raw = String(
+        (task && (task.title || task.name)) || '',
+      ).trim();
+
+      if (raw) {
+        return raw.slice(0, 120);
+      }
+
+      const content = String(
+        (task && (task.content || task.prompt || task.initialPrompt)) || '',
+      ).trim();
+
+      if (!content) {
+        return '当前批量任务';
+      }
+
+      const oneLine = content
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      return oneLine.length > 120
+        ? `${oneLine.slice(0, 120)}...`
+        : oneLine;
     }
 
     function buildVerifyAfterDoneSignalPrompt(task, resolved, replyText) {
@@ -4349,16 +4399,15 @@ const AutoQueueModule = (() => {
       const doneSignal = resolved && resolved.actualDoneSignal
         ? resolved.actualDoneSignal
         : TASK_DONE_SIGNAL;
-      const taskContent = String(
-        task.content || task.prompt || task.initialPrompt || '',
-      );
+      const taskBrief = buildTaskBriefForDoneVerify(task);
       const template = String(
         settings.verifyAfterDoneSignalPrompt || getDefaultVerifyAfterDoneSignalPrompt(),
       );
 
       return template
         .replace(/\{\{taskTitle\}\}/g, String(task.title || ''))
-        .replace(/\{\{taskContent\}\}/g, taskContent)
+        .replace(/\{\{taskBrief\}\}/g, taskBrief)
+        .replace(/\{\{taskContent\}\}/g, taskBrief)
         .replace(/\{\{doneSignal\}\}/g, String(doneSignal || TASK_DONE_SIGNAL))
         .replace(/\{\{lastReply\}\}/g, String(replyText || ''));
     }
