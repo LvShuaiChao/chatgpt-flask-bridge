@@ -3228,14 +3228,96 @@
       return [...new Set(pieces)].join('\n').slice(0, 20000);
     }
 
-    function hasVisibleComposerAttachmentPayload() {
+    function looksLikeVisibleComposerAttachmentNode(node) {
+      if (!(node instanceof HTMLElement)) {
+        return false;
+      }
+      if (isInToolbox(node)) {
+        return false;
+      }
+      if (!isElementVisible(node)) {
+        return false;
+      }
+
+      if (isComposerAttachmentChipElement(node)) {
+        return true;
+      }
+
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return false;
+      }
+
+      const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+      const aria = String(node.getAttribute('aria-label') || '').trim();
+      const testId = String(node.getAttribute('data-testid') || '').trim();
+      const probe = `${text} ${aria} ${testId}`;
+
+      return (
+        /\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv)\b/i.test(probe)
+        || /\b\d+\s*(KB|MB|GB)\b/i.test(probe)
+        || /压缩归档|附件|文件|remove file|移除文件|remove file|attached/i.test(probe)
+      );
+    }
+
+    function hasComposerAttachmentUnified() {
       if (countAttachmentChips() > 0) {
         return true;
       }
 
-      const text = collectVisibleComposerPayloadText();
+      const composer = getComposer();
+      const composerRoot = getComposerRoot();
+      const composerEl = qs('[data-testid="composer"]');
+      const composerForm = composer instanceof HTMLElement ? composer.closest('form') : null;
 
-      return /(\.zip|\.txt|\.py|\.js|\.json|\.md|\.csv|\.xlsx|\.docx|\.pdf|附件|文件|上传|上传中|处理中|压缩|归档|压缩归档|正在上传|正在处理|已上传|已添加|attached|attachment|file|uploaded|uploading|processing|compress|compressing|archive|progress|spinner|loading|remove|delete|删除|移除)/i.test(text);
+      const composerScope = (
+        (composerForm instanceof HTMLElement && composerForm)
+        || (composerEl instanceof HTMLElement && composerEl)
+        || (composerRoot instanceof HTMLElement && composerRoot)
+        || document.querySelector('form[data-type="unified-composer"]')
+        || document.querySelector('form')
+        || document.body
+      );
+
+      const selectors = [
+        '[data-testid*="attachment"]',
+        '[data-testid*="file"]',
+        '[data-testid*="composer-file"]',
+        '[data-testid*="file-chip"]',
+        '[data-testid*="file-preview"]',
+        '[aria-label*="附件"]',
+        '[aria-label*="文件"]',
+        '[aria-label*="Remove file"]',
+        '[aria-label*="移除文件"]',
+        'button[aria-label*="移除"]',
+        'button[aria-label*="Remove"]',
+        '[class*="attachment"]',
+        '[class*="file-chip"]',
+      ];
+
+      for (let i = 0; i < selectors.length; i += 1) {
+        const selector = selectors[i];
+        const nodes = Array.from(composerScope.querySelectorAll(selector));
+        const visibleNodes = nodes.filter(looksLikeVisibleComposerAttachmentNode);
+
+        if (visibleNodes.length > 0) {
+          const sample = String(
+            visibleNodes[0].innerText || visibleNodes[0].textContent || '',
+          ).replace(/\s+/g, ' ').trim().slice(0, 120);
+
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_FOUND] selector=${selector} count=${visibleNodes.length} sample=${sample || '-'}`,
+          );
+          return true;
+        }
+      }
+
+      const text = collectVisibleComposerPayloadText();
+      return /(\.zip|\.txt|\.py|\.js|\.json|\.md|\.csv|\.xlsx|\.docx|\.pdf|附件|文件|压缩归档|attached|attachment|uploaded)/i.test(text);
+    }
+
+    function hasVisibleComposerAttachmentPayload() {
+      return hasComposerAttachmentUnified();
     }
 
     function getExistingComposerPayloadSnapshot() {
@@ -4167,6 +4249,7 @@
       collectAttachmentChipText,
       countAttachmentChips,
       hasComposerDraftPayload,
+      hasComposerAttachmentUnified,
       hasVisibleComposerAttachmentPayload,
       getExistingComposerPayloadSnapshot,
       waitExistingComposerPayloadReadyForSend,
@@ -4298,13 +4381,17 @@
 
     if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
       const composerText = ComposerApi.getComposerText();
-      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-        ? ComposerApi.countAttachmentChips()
-        : 0;
-      const hasAttachmentPayload = attachmentCount > 0
+    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+      ? ComposerApi.countAttachmentChips()
+      : 0;
+    const hasAttachmentPayload = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+      ? ComposerApi.hasComposerAttachmentUnified()
+      : (
+        attachmentCount > 0
         || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
         || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-          && ComposerApi.hasVisibleComposerAttachmentPayload());
+          && ComposerApi.hasVisibleComposerAttachmentPayload())
+      );
 
       return {
         is_responding: false,
@@ -4328,9 +4415,14 @@
     const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
       ? ComposerApi.countAttachmentChips()
       : 0;
-    const hasAttachmentPayload = attachmentCount > 0
-      || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
-      || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function' && ComposerApi.hasVisibleComposerAttachmentPayload());
+    const hasAttachmentPayload = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+      ? ComposerApi.hasComposerAttachmentUnified()
+      : (
+        attachmentCount > 0
+        || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
+        || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+          && ComposerApi.hasVisibleComposerAttachmentPayload())
+      );
     const composerTextTrimmed = String(composerText || '').trim();
     const hasText = composerTextTrimmed.length > 0;
     const hasRealText = typeof ComposerApi.hasRealComposerText === 'function'
@@ -4341,11 +4433,25 @@
       : false;
     const sendButton = ComposerApi.findSendButton({ silent: true });
     const canAcceptInput = composerAvailable && !isResponding;
-    const hasPayload = hasRealText || hasAttachmentPayload;
+    const realSendButtonEnabled = !!(
+      sendButton
+      && hasRealBtn
+      && (
+        typeof ComposerApi.isSendButtonReady === 'function'
+          ? ComposerApi.isSendButtonReady(sendButton)
+          : true
+      )
+    );
+    const sendable = hasRealText || hasAttachmentPayload || realSendButtonEnabled;
+    const hasPayload = sendable;
     const canSendNow = composerAvailable
       && !isResponding
-      && hasPayload
-      && hasRealBtn;
+      && sendable
+      && (
+        hasRealText
+          ? hasRealBtn
+          : ((hasAttachmentPayload || realSendButtonEnabled) && hasRealBtn)
+      );
 
     if (isResponding) {
       return {
@@ -4385,10 +4491,39 @@
     }
 
     if (!hasRealText && hasAttachmentPayload) {
+      const stillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+
+      if (stillUploading && !realSendButtonEnabled) {
+        return {
+          is_responding: false,
+          response_state: 'attachment_processing',
+          response_state_reason: 'attachment_processing',
+          can_accept_input: canAcceptInput,
+          can_send_now: false,
+          attachment_count: attachmentCount,
+          has_composer_payload: true,
+          response_state_at: Date.now(),
+        };
+      }
+
+      if (realSendButtonEnabled) {
+        return {
+          is_responding: false,
+          response_state: 'ready',
+          response_state_reason: 'attachment_only_send',
+          can_accept_input: canAcceptInput,
+          can_send_now: true,
+          attachment_count: attachmentCount,
+          has_composer_payload: true,
+          response_state_at: Date.now(),
+        };
+      }
+
       return {
         is_responding: false,
         response_state: 'attachment_processing',
-        response_state_reason: 'attachment_ready_waiting_text',
+        response_state_reason: 'attachment_ready_but_send_button_missing',
         can_accept_input: canAcceptInput,
         can_send_now: false,
         attachment_count: attachmentCount,
@@ -4422,6 +4557,55 @@
     };
   }
 
+  function isRealSendButtonEnabled(sendButton) {
+    if (!(sendButton instanceof HTMLButtonElement)) {
+      return false;
+    }
+
+    if (typeof ComposerApi.isSendButtonReady === 'function') {
+      return ComposerApi.isSendButtonReady(sendButton);
+    }
+
+    return !isSendButtonDisabled(sendButton);
+  }
+
+  function evaluateComposerSendability(sendButtonInput) {
+    const composerText = typeof ComposerApi.getComposerText === 'function'
+      ? String(ComposerApi.getComposerText() || '')
+      : '';
+    const textLen = composerText.trim().length;
+    const hasAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+      ? ComposerApi.hasComposerAttachmentUnified()
+      : hasComposerAttachment();
+
+    const sendButton = sendButtonInput instanceof HTMLButtonElement
+      ? sendButtonInput
+      : findChatGPTSendButton();
+    const realSendButtonEnabled = isRealSendButtonEnabled(sendButton);
+    const sendable = textLen > 0 || hasAttachment || realSendButtonEnabled;
+    const responseState = detectComposerResponseState();
+
+    let sendModeReason = '';
+    if (textLen > 0) {
+      sendModeReason = 'text_send';
+    } else if (hasAttachment) {
+      sendModeReason = 'attachment_only_send';
+    } else if (realSendButtonEnabled) {
+      sendModeReason = 'native_send_button_enabled_without_text';
+    }
+
+    return {
+      textLen,
+      hasAttachment,
+      realSendButtonEnabled,
+      sendable,
+      sendModeReason,
+      response_state: String(responseState.response_state || 'unknown'),
+      response_state_reason: String(responseState.response_state_reason || '-'),
+      sendButton,
+    };
+  }
+
   const ReplyDoneTitleFlashWatcher = (() => {
     let started = false;
     let timer = 0;
@@ -4447,12 +4631,12 @@
 
       if (busy) {
         if (!wasBusy && typeof TitlePrefixModule.stopReplyDoneFlash === 'function') {
-          TitlePrefixModule.stopReplyDoneFlash(`assistant-start:${reason || '-'}`);
+          TitlePrefixModule.stopReplyDoneFlash('assistant-started');
         }
         if (!wasBusy
           && typeof ToolboxShell !== 'undefined'
           && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
-          ToolboxShell.stopHeaderTitleFlash(`assistant-start:${reason || '-'}`);
+          ToolboxShell.stopHeaderTitleFlash('assistant-started');
         }
         if (!wasBusy) {
           ChatInputStateRuntime.waitingForReply = false;
@@ -4473,16 +4657,13 @@
         }
 
         lastFlashAt = now;
-        TitlePrefixModule.startReplyDoneFlash(`assistant-finished:${reason || '-'}`);
+        const titleFlashReason = `assistant-finished:${reason || '-'}`;
+        const titleFlashOptions = { intervalMs: 600, autoStopMs: 0 };
+        TitlePrefixModule.startReplyDoneFlash(titleFlashReason, titleFlashOptions);
 
-        if (
-          typeof ToolboxShell !== 'undefined'
-          && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
-        ) {
-          ToolboxShell.flashHeaderTitleOnce('回复完成', {
-            intervalMs: 450,
-            autoStopMs: 2400,
-          });
+        if (typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.flashHeaderTitleOnce === 'function') {
+          ToolboxShell.flashHeaderTitleOnce('回复完成', titleFlashOptions);
         }
 
         refreshToolboxPageStatusDisplay(`assistant-finished:${reason || '-'}`);
@@ -5286,9 +5467,7 @@
         } else if (typeof UploadModule.renderAllButtonStates === 'function') {
           UploadModule.renderAllButtonStates({ heavy: false });
         } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
-          UploadModule.renderUploadButtonsOnly({ heavy: true });
-        } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
-          UploadModule.renderUploadButtonsOnly({ heavy: false });
+          UploadModule.renderUploadButtonsOnly({ heavy: modeToRun === 'heavy' });
         }
       }
 
@@ -5306,36 +5485,49 @@
     }, 300);
   }
 
-  function bindConversationTurnCountObserver() {
-    if (ChatMessageRuntime.conversationObserver) {
-      return;
-    }
-
-    const target = document.querySelector('main') || document.body;
+  function observeConversationTarget(target, reason) {
     if (!(target instanceof HTMLElement)) {
-      console.warn('[TOOLBOX][turn_count_observer][failed] reason=target_missing');
+      console.warn('[TOOLBOX][turn_count_observer][failed] reason=target_missing detail=' + (reason || '-'));
       return;
     }
 
-    ChatMessageRuntime.lastMainNode = target;
-    ChatMessageRuntime.conversationObserverTarget = target;
+    let observer = ChatMessageRuntime.conversationObserver;
+    const oldTarget = ChatMessageRuntime.conversationObserverTarget;
 
-    const observer = new MutationObserver((mutations) => {
-      markLatestAssistantMessageCacheDirty();
-
-      const mainNow = document.querySelector('main');
-      if (mainNow && mainNow !== ChatMessageRuntime.lastMainNode) {
-        ChatMessageRuntime.lastMainNode = mainNow;
-        cleanupChatMessageCaches('main-dom-replaced');
+    if (observer && oldTarget && oldTarget !== target) {
+      observer.disconnect();
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[TURN_OBSERVER][DISCONNECT_OLD] reason=${reason || '-'}`);
       }
+    }
 
-      const onlyCharacterData = mutations.length > 0
-        && mutations.every((mutation) => mutation.type === 'characterData');
-      scheduleToolboxTurnStatusRefresh(
-        onlyCharacterData ? 'conversation-character-data' : 'conversation-dom-mutated',
-        'light',
-      );
-    });
+    if (!observer) {
+      observer = new MutationObserver((mutations) => {
+        markLatestAssistantMessageCacheDirty();
+
+        const mainNow = document.querySelector('main');
+        if (mainNow && mainNow !== ChatMessageRuntime.lastMainNode) {
+          ChatMessageRuntime.lastMainNode = mainNow;
+          cleanupChatMessageCaches('main-dom-replaced');
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog('[TURN_OBSERVER][REBOUND_MAIN]');
+          }
+          observeConversationTarget(mainNow, 'main-dom-replaced');
+          return;
+        }
+
+        const onlyCharacterData = mutations.length > 0
+          && mutations.every((mutation) => mutation.type === 'characterData');
+        scheduleToolboxTurnStatusRefresh(
+          onlyCharacterData ? 'conversation-character-data' : 'conversation-dom-mutated',
+          'light',
+        );
+      });
+
+      ChatMessageRuntime.conversationObserver = observer;
+      window.__cgptTurnCountObserver = observer;
+      window.__cgptTurnCountObserverBound = true;
+    }
 
     observer.observe(target, {
       childList: true,
@@ -5343,10 +5535,23 @@
       characterData: false,
     });
 
-    ChatMessageRuntime.conversationObserver = observer;
-    window.__cgptTurnCountObserver = observer;
-    window.__cgptTurnCountObserverBound = true;
+    ChatMessageRuntime.conversationObserverTarget = target;
+    if (target.tagName === 'MAIN') {
+      ChatMessageRuntime.lastMainNode = target;
+    }
 
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[TURN_OBSERVER][BIND] reason=${reason || '-'}`);
+    }
+  }
+
+  function bindConversationTurnCountObserver() {
+    if (ChatMessageRuntime.conversationObserver) {
+      return;
+    }
+
+    const target = document.querySelector('main') || document.body;
+    observeConversationTarget(target, 'initial-bind');
     scheduleToolboxTurnStatusRefresh('observer-bound', 'heavy');
   }
 
@@ -6022,21 +6227,20 @@
   }
 
   function getComposerSendDiagnostics() {
-    const composerText = typeof ComposerApi.getComposerText === 'function'
-      ? String(ComposerApi.getComposerText() || '')
-      : '';
-    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-      ? ComposerApi.countAttachmentChips()
-      : 0;
-    const sendButton = findChatGPTSendButton();
+    const sendability = evaluateComposerSendability();
+    const sendButton = sendability.sendButton;
 
     return {
-      hasText: hasRealComposerText() ? 1 : 0,
-      textLength: composerText.length,
-      hasAttachment: attachmentCount > 0 ? 1 : 0,
+      hasText: sendability.textLen > 0 ? 1 : 0,
+      textLength: sendability.textLen,
+      hasAttachment: sendability.hasAttachment ? 1 : 0,
+      real_send_button_enabled: sendability.realSendButtonEnabled ? 1 : 0,
+      sendable: sendability.sendable ? 1 : 0,
+      response_state: sendability.response_state,
+      response_state_reason: sendability.response_state_reason,
       buttonId: sendButton ? String(sendButton.id || '-') : '-',
       buttonAria: sendButton ? String(sendButton.getAttribute('aria-label') || '-') : '-',
-      buttonDisabled: sendButton && sendButton.disabled ? 1 : 0,
+      buttonDisabled: sendability.realSendButtonEnabled ? 0 : 1,
     };
   }
 
@@ -6070,22 +6274,19 @@
 
   function getSendLogContext(extra = {}) {
     const cap = typeof getPageCapability === 'function' ? getPageCapability('send-log') : {};
-    const composerText = typeof ComposerApi.getComposerText === 'function'
-      ? ComposerApi.getComposerText()
-      : '';
-    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-      ? ComposerApi.countAttachmentChips()
-      : 0;
+    const sendability = evaluateComposerSendability();
 
     return {
       page_display_id: String(BRIDGE_STATE.page_display_id || '').trim() || '-',
       client_id: String(cap.client_id || '').trim() || '-',
       conversation_id: String(cap.conversation_id || '').trim() || '-',
       inputable: cap.can_accept_input ? 1 : 0,
-      sendable: cap.can_send_now ? 1 : 0,
-      response_state: String(cap.response_state || 'unknown'),
-      has_attachment: attachmentCount > 0 ? 1 : 0,
-      text_len: String(composerText || '').length,
+      sendable: sendability.sendable ? 1 : 0,
+      response_state: sendability.response_state || String(cap.response_state || 'unknown'),
+      response_state_reason: sendability.response_state_reason || String(cap.response_state_reason || '-'),
+      has_attachment: sendability.hasAttachment ? 1 : 0,
+      text_len: sendability.textLen,
+      real_send_button_enabled: sendability.realSendButtonEnabled ? 1 : 0,
       ...extra,
     };
   }
@@ -6155,6 +6356,10 @@
   }
 
   function hasComposerAttachment() {
+    if (typeof ComposerApi.hasComposerAttachmentUnified === 'function') {
+      return ComposerApi.hasComposerAttachmentUnified();
+    }
+
     const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
       ? ComposerApi.countAttachmentChips()
       : 0;
@@ -6165,10 +6370,6 @@
 
     if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
       return ComposerApi.hasVisibleComposerAttachmentPayload();
-    }
-
-    if (typeof ComposerApi.hasComposerDraftPayload === 'function') {
-      return ComposerApi.hasComposerDraftPayload();
     }
 
     return false;
@@ -6631,36 +6832,6 @@
     return { ok, reason, snapshot };
   }
 
-  const STABLE_SEND_RETRYABLE_REASONS = new Set([
-    'composer_text_not_ready',
-    'composer_text_not_synced',
-    'send_button_not_ready_after_text',
-    'send_button_not_found',
-    'send_button_disabled',
-    'button_disabled',
-    'send_button_wait_timeout',
-    'voice_button_only',
-    'attachment_ready_but_send_button_missing',
-    'attachment_ready_waiting_text',
-    'payload_ready_but_send_button_missing',
-    'composer_text_lost',
-    'composer_text_lost_after_attachment',
-    'composer_text_lost_after_rewrite',
-    'attachment_not_ready',
-    'attachment_processing',
-    'send_click_not_confirmed',
-    'send_not_confirmed',
-    'input_not_cleared',
-    'no_user_bubble_after_click',
-    'no_send_progress_after_actions',
-    'no_progress',
-    'composer_not_ready',
-    'assistant_busy',
-    'send_button_not_found_enter_fallback_failed',
-    'enter_fallback_failed',
-    'stable_send_timeout',
-  ]);
-
   function applyStableSendRetryableFlags(result) {
     if (!result || typeof result !== 'object') {
       return result;
@@ -6673,8 +6844,8 @@
     }
 
     if (
-      STABLE_SEND_RETRYABLE_REASONS.has(reason)
-      || reason.startsWith('send_not_confirmed:')
+      typeof sendPipelineIsRetryableReason === 'function'
+      && sendPipelineIsRetryableReason(reason)
     ) {
       result.retryable = true;
       if (result.wait !== false) {
@@ -6709,8 +6880,6 @@
       source,
     };
 
-    appendSendLogFields('[SEND][CLICK]', getSendLogContext({ source }));
-
     if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
       result.reason = 'page_navigating';
       appendSendLogFields('[SEND][FAILED]', { reason: result.reason, attempts: 0, last_error: '-' });
@@ -6737,20 +6906,36 @@
       return applyStableSendRetryableFlags(result);
     }
 
-    const precheckReason = String(responseState.response_state_reason || '').trim();
-    if (precheckReason === 'attachment_ready_waiting_text') {
-      result.reason = 'composer_text_not_ready';
-      appendSendLogFields('[SEND][FAILED]', {
+    const precheckSendability = evaluateComposerSendability(findChatGPTSendButton());
+    appendSendLogFields('[SEND][CHECK]', {
+      ...getSendLogContext({ source }),
+      attempt: 0,
+      send_mode_reason: precheckSendability.sendModeReason || '-',
+    });
+
+    if (
+      precheckSendability.textLen <= 0
+      && !precheckSendability.hasAttachment
+      && !precheckSendability.realSendButtonEnabled
+    ) {
+      result.reason = 'empty_text_and_no_attachment';
+      appendSendLogFields('[SEND][SKIP_EMPTY_NO_ATTACHMENT]', {
         reason: result.reason,
         attempts: 0,
-        last_error: precheckReason,
+        ...getComposerSendDiagnostics(),
       });
-      return applyStableSendRetryableFlags(result);
+      return result;
     }
+
+    const precheckReason = String(responseState.response_state_reason || '').trim();
     if (
       precheckReason === 'payload_ready_but_send_button_missing'
       || precheckReason === 'attachment_ready_but_send_button_missing'
-      || precheckReason === 'attachment_processing'
+      || (
+        precheckReason === 'attachment_processing'
+        && !precheckSendability.hasAttachment
+        && !precheckSendability.realSendButtonEnabled
+      )
     ) {
       result.reason = precheckReason === 'attachment_processing'
         ? 'payload_ready_but_send_button_missing'
@@ -6871,14 +7056,41 @@
         focusComposer(composer);
         await sleep(80);
 
-        const mustHaveText = !!text || sendExistingComposer;
-
         if (text && !sendExistingComposer) {
           setComposerText(composer, text);
           await sleep(80);
         }
 
-        if (mustHaveText) {
+        let sendability = evaluateComposerSendability(sendButton);
+        appendSendLogFields('[SEND][CHECK]', {
+          ...getSendLogContext({ source }),
+          attempt,
+          send_mode_reason: sendability.sendModeReason || '-',
+        });
+
+        if (
+          sendability.textLen <= 0
+          && !sendability.hasAttachment
+          && !sendability.realSendButtonEnabled
+        ) {
+          result.reason = 'empty_text_and_no_attachment';
+          appendSendLogFields('[SEND][SKIP_EMPTY_NO_ATTACHMENT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            ...getComposerSendDiagnostics(),
+            composer_type: composerType,
+          });
+          break;
+        }
+
+        const requireInjectedText = !!text && !sendExistingComposer;
+        const attachmentOnlyPath = sendability.textLen <= 0 && sendability.hasAttachment;
+        const nativeButtonOnlyPath = sendability.textLen <= 0
+          && !sendability.hasAttachment
+          && sendability.realSendButtonEnabled;
+
+        if (requireInjectedText && !attachmentOnlyPath && !nativeButtonOnlyPath) {
           const textReady = await waitUntilPredicate(
             () => hasRealComposerText(),
             SEND_TEXT_BUTTON_WAIT_MS,
@@ -6902,27 +7114,52 @@
           appendSendLogFields('[COMPOSER][TEXT_READY]', getComposerSendDiagnostics());
         }
 
-        const currentText = getComposerTextFromElement(composer);
-        const currentTextTrimmed = String(currentText || '').trim();
-
-        if (!currentTextTrimmed) {
-          result.reason = hasComposerAttachment()
-            ? 'composer_text_not_ready'
-            : 'composer_empty';
-          appendSendLogFields('[SEND][ATTEMPT]', {
+        sendability = evaluateComposerSendability(sendButton);
+        if (
+          sendability.textLen <= 0
+          && !sendability.hasAttachment
+          && !sendability.realSendButtonEnabled
+        ) {
+          result.reason = 'empty_text_and_no_attachment';
+          appendSendLogFields('[SEND][SKIP_EMPTY_NO_ATTACHMENT]', {
             attempt,
             max_attempts: maxAttempts,
             reason: result.reason,
             ...getComposerSendDiagnostics(),
             composer_type: composerType,
           });
-          await sleep(intervalMs);
-          continue;
+          break;
+        }
+
+        if (attachmentOnlyPath) {
+          result.sendModeReason = 'attachment_only_send';
+        } else if (nativeButtonOnlyPath) {
+          result.sendModeReason = 'native_send_button_enabled_without_text';
+        }
+
+        const currentText = getComposerTextFromElement(composer);
+        const currentTextTrimmed = String(currentText || '').trim();
+        const hasPayloadToSend = !!(
+          currentTextTrimmed
+          || sendability.hasAttachment
+          || sendability.realSendButtonEnabled
+        );
+
+        if (!hasPayloadToSend) {
+          result.reason = 'empty_text_and_no_attachment';
+          appendSendLogFields('[SEND][SKIP_EMPTY_NO_ATTACHMENT]', {
+            attempt,
+            max_attempts: maxAttempts,
+            reason: result.reason,
+            ...getComposerSendDiagnostics(),
+            composer_type: composerType,
+          });
+          break;
         }
 
         appendSendLogFields('[COMPOSER][SEND_BUTTON_WAIT]', getComposerSendDiagnostics());
         const buttonReady = await waitUntilPredicate(
-          () => hasRealSubmitButton(),
+          () => evaluateComposerSendability(findChatGPTSendButton()).realSendButtonEnabled,
           SEND_TEXT_BUTTON_WAIT_MS,
           SEND_TEXT_BUTTON_POLL_MS,
           shouldStop,
@@ -6950,7 +7187,11 @@
         sendButtonDisabled = isSendButtonDisabled(sendButton);
 
         if (!(sendButton instanceof HTMLButtonElement)) {
-          const hasPayload = !!currentTextTrimmed;
+          const hasPayload = !!(
+            currentTextTrimmed
+            || sendability.hasAttachment
+            || sendability.realSendButtonEnabled
+          );
           const voiceOnly = hasVoiceComposerButtonOnly();
 
           appendSendLogFields('[SEND][ATTEMPT]', {
@@ -7146,6 +7387,11 @@
           await sleep(intervalMs);
           continue;
         }
+        appendSendLogFields('[SEND][CLICK]', {
+          ...getSendLogContext({ source }),
+          attempt,
+          click_result: clickResult.reason || 'clicked',
+        });
 
         const verifiedClick = await verifySendStarted(confirmCtx, {
           shouldStop,
@@ -7154,12 +7400,18 @@
         });
         if (verifiedClick.ok) {
           result.ok = true;
-          result.reason = 'sent_by_click';
+          result.reason = result.sendModeReason === 'attachment_only_send'
+            ? 'attachment_only_send'
+            : (
+              result.sendModeReason === 'native_send_button_enabled_without_text'
+                ? 'native_send_button_enabled_without_text'
+                : 'sent_by_click'
+            );
           ChatInputStateRuntime.waitingForReply = true;
           return result;
         }
 
-        if (mustHaveText) {
+        if (currentTextTrimmed.length > 0) {
           result.reason = verifiedClick.reason || 'send_click_not_confirmed';
           await sleep(intervalMs);
           continue;

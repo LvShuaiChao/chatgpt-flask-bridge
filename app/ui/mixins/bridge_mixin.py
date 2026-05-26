@@ -650,7 +650,13 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="send_queued")
         self._refresh_session_list(select_session_id=session.session_id)
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "chat_send_enqueued",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason="chat_send_enqueued",
@@ -1323,13 +1329,18 @@ class BridgeMixin(AssistantReplyUpsertMixin):
                 f"request_id={bridge_id or '-'}",
                 echo=True,
             )
-        if session.session_id == self._current_session_id and hasattr(
-            self, "_render_current_chat_messages"
-        ):
-            self._render_current_chat_messages(
-                force_bottom=True,
-                reason="send_success",
-            )
+        if session.session_id == self._current_session_id:
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "send_success",
+                    delay_ms=0,
+                    force_bottom=True,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="send_success",
+                )
 
     def _handle_assistant_message_event(
         self, item, payload, session, turn_id, bridge_id
@@ -1408,13 +1419,18 @@ class BridgeMixin(AssistantReplyUpsertMixin):
                     else f"发送失败({detail_text or 'unknown'})"
                 )
         if self._is_finalized(bridge_id):
-            if session.session_id == self._current_session_id and hasattr(
-                self, "_render_current_chat_messages"
-            ):
-                self._render_current_chat_messages(
-                    force_bottom=True,
-                    reason="ack_finalized",
-                )
+            if session.session_id == self._current_session_id:
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "ack_finalized",
+                        delay_ms=0,
+                        force_bottom=True,
+                    )
+                elif hasattr(self, "_render_current_chat_messages"):
+                    self._render_current_chat_messages(
+                        force_bottom=True,
+                        reason="ack_finalized",
+                    )
             return
         if success:
             if self._has_assistant_for_turn(session, turn_id):
@@ -1479,13 +1495,18 @@ class BridgeMixin(AssistantReplyUpsertMixin):
                         "发送失败",
                     )
                 self._finalize_bridge(bridge_id)
-        if session.session_id == self._current_session_id and hasattr(
-            self, "_render_current_chat_messages"
-        ):
-            self._render_current_chat_messages(
-                force_bottom=True,
-                reason="ack",
-            )
+        if session.session_id == self._current_session_id:
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "ack",
+                    delay_ms=0,
+                    force_bottom=True,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason="ack",
+                )
 
     def _handle_send_failed_event(self, item, payload, session, turn_id, bridge_id):
         if not self._has_assistant_for_turn(
@@ -2240,7 +2261,13 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         self._set_tm_action_hint(
             f"当前对话正在处理上一条消息，已加入队列：{len(queue)} 条等待发送。"
         )
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "queue_enqueue",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason="queue_enqueue",
@@ -2575,46 +2602,39 @@ class BridgeMixin(AssistantReplyUpsertMixin):
     def _handle_external_gui_dispatch(self, action_id, action, payload):
         from app.server.runtime_state import complete_gui_dispatch
         if action == "system_hotkey":
-            from app.constants import DEFAULT_SYSTEM_HOTKEY_COMBO
+            from app.server.system_hotkey import execute_system_hotkey
 
-            combo = str((payload or {}).get("combo") or "").strip().lower()
-            if combo != DEFAULT_SYSTEM_HOTKEY_COMBO:
+            combo = str((payload or {}).get("combo") or "").strip()
+            if not combo:
                 result = {
                     "ok": False,
-                    "error": f"不允许的快捷键: {combo}",
+                    "error": "快捷键不能为空",
                     "code": "INVALID_HOTKEY",
                 }
             else:
-                try:
-                    import pyautogui
+                self._append_log(
+                    f"[SYSTEM_HOTKEY][EXEC] combo={combo}",
+                    echo=True,
+                )
+                result = execute_system_hotkey(
+                    combo,
+                    source="gui_dispatch",
+                )
+                if result.get("ok"):
                     self._append_log(
-                        f"[SYSTEM_HOTKEY][EXEC] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+                        "[SYSTEM_HOTKEY][DONE] "
+                        f"combo={result.get('hotkey') or combo} "
+                        f"keys={result.get('keys')}",
                         echo=True,
                     )
-                    keys = [
-                        part.strip()
-                        for part in DEFAULT_SYSTEM_HOTKEY_COMBO.split("+")
-                        if part.strip()
-                    ]
-                    pyautogui.hotkey(*keys, interval=0.04)
+                else:
                     self._append_log(
-                        f"[SYSTEM_HOTKEY][DONE] combo={DEFAULT_SYSTEM_HOTKEY_COMBO}",
+                        "[SYSTEM_HOTKEY][FAILED] "
+                        f"combo={combo} "
+                        f"code={result.get('code') or '-'} "
+                        f"error={result.get('error') or '-'}",
                         echo=True,
                     )
-                    result = {
-                        "ok": True,
-                        "combo": DEFAULT_SYSTEM_HOTKEY_COMBO,
-                        "keys": keys,
-                    }
-                except Exception as error:
-                    import traceback
-                    detail = f"{error}\n{traceback.format_exc()}"
-                    self._append_log(f"[SYSTEM_HOTKEY][ERROR] {detail}", echo=True)
-                    result = {
-                        "ok": False,
-                        "error": str(error),
-                        "code": "INTERNAL_ERROR",
-                    }
             complete_gui_dispatch(action_id, result)
             return
         complete_gui_dispatch(

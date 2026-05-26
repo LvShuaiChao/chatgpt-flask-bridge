@@ -21,7 +21,7 @@ from app.utils.bridge_payload import (
 )
 from app.constants import is_invalid_assistant_reply_text
 from app.utils.legacy_cleanup import assert_no_legacy_fields
-from app.utils.page_status import page_url_from
+from app.utils.page_status import build_page_key, page_url_from
 from app.server.runtime_state import (
     _format_time,
     _log,
@@ -662,7 +662,7 @@ def _strict_target_control_commands():
 
 
 def _targeted_control_matches(msg, body):
-    """定向控制命令：优先 client_id+page_instance_id，再 client_id+conversation_id，再 conversation_id。"""
+    """定向控制命令：canonical 字段 client_id / page_instance_id / conversation_id 严格匹配。"""
     try:
         return _targeted_control_matches_impl(msg, body)
     except Exception as exc:
@@ -680,61 +680,74 @@ def _targeted_control_matches_impl(msg, body):
     if not isinstance(body, dict):
         body = {}
 
-    client_id = (body.get("client_id") or "").strip()
+    body_client_id = (body.get("client_id") or "").strip()
     command = (msg.get("command") or msg.get("type") or "").strip()
     if command not in _strict_target_control_commands():
         return False
 
-    message_client_id = _message_message_client_id(msg)
-    message_page_instance_id = read_bridge_page_instance_id(msg)
-    message_conversation_id = (msg.get("conversation_id") or "").strip()
+    msg_client_id = _message_message_client_id(msg)
+    msg_page_instance_id = read_bridge_page_instance_id(msg)
+    msg_conversation_id = (msg.get("conversation_id") or "").strip()
     body_page_instance_id = (body.get("page_instance_id") or "").strip()
     body_conversation_id = (body.get("conversation_id") or "").strip()
-    target_client_id = (msg.get("target_client_id") or "").strip()
-    target_conversation_id = (msg.get("target_conversation_id") or "").strip()
-    strict_target = command in _strict_target_control_commands()
-
-    if strict_target:
-        if target_client_id and target_client_id != client_id:
-            return False
-        if target_conversation_id and target_conversation_id != body_conversation_id:
-            return False
-        if not target_client_id and not target_conversation_id:
-            if command == "sync_conversation":
-                pass
-            else:
-                _log(
-                    "[BRIDGE][STRICT_CONTROL_MISSING_TARGET] "
-                    f"command={command} client_id={client_id or '-'} "
-                    f"conversation_id={body_conversation_id or '-'}"
-                )
-                return False
 
     if command == "sync_conversation":
         matched, mismatch_reason = _sync_conversation_strict_match(msg, body)
+        _log(
+            "[CONTROL_MATCH][STRICT_CANONICAL] "
+            f"command={command or '-'} "
+            f"msg_client_id={msg_client_id or '-'} "
+            f"body_client_id={body_client_id or '-'} "
+            f"msg_page_instance_id={msg_page_instance_id or '-'} "
+            f"body_page_instance_id={body_page_instance_id or '-'} "
+            f"msg_conversation_id={msg_conversation_id or '-'} "
+            f"body_conversation_id={body_conversation_id or '-'} "
+            f"matched={matched} reason={mismatch_reason or 'matched'}"
+        )
         if matched:
             return True
         if mismatch_reason == "home_bootstrap_only":
             _log(
                 "[BRIDGE][CONTROL][SKIP] "
                 f"command=sync_conversation reason=home_bootstrap_only "
-                f"client_id={client_id or '-'} "
+                f"client_id={body_client_id or '-'} "
                 f"conversation_id={body_conversation_id or '-'}"
             )
         return False
 
-    if target_client_id and target_client_id != client_id:
-        return False
-    if target_conversation_id and target_conversation_id != body_conversation_id:
-        return False
+    matched = True
+    reason = "matched"
+    if not msg_client_id:
+        matched = False
+        reason = "missing_msg_client_id"
+    elif msg_client_id != body_client_id:
+        matched = False
+        reason = "client_id_mismatch"
+    elif msg_page_instance_id and msg_page_instance_id != body_page_instance_id:
+        matched = False
+        reason = "page_instance_id_mismatch"
+    elif msg_conversation_id and msg_conversation_id != body_conversation_id:
+        matched = False
+        reason = "conversation_id_mismatch"
 
-    if not _message_matches_client(msg, client_id):
-        return False
-
-    if message_page_instance_id and message_page_instance_id != body_page_instance_id:
-        return False
-
-    if message_conversation_id and message_conversation_id != body_conversation_id:
+    _log(
+        "[CONTROL_MATCH][STRICT_CANONICAL] "
+        f"command={command or '-'} "
+        f"msg_client_id={msg_client_id or '-'} "
+        f"body_client_id={body_client_id or '-'} "
+        f"msg_page_instance_id={msg_page_instance_id or '-'} "
+        f"body_page_instance_id={body_page_instance_id or '-'} "
+        f"msg_conversation_id={msg_conversation_id or '-'} "
+        f"body_conversation_id={body_conversation_id or '-'} "
+        f"matched={matched} reason={reason}"
+    )
+    if not matched:
+        if reason == "missing_msg_client_id":
+            _log(
+                "[BRIDGE][STRICT_CONTROL_MISSING_CLIENT_ID] "
+                f"command={command} client_id={body_client_id or '-'} "
+                f"conversation_id={body_conversation_id or '-'}"
+            )
         return False
 
     return True
@@ -1042,6 +1055,9 @@ def _claim_message(msg, client_id_or_body):
         msg["delivered_client_id"] = client_id
         msg["delivered_page_instance_id"] = page_instance_id
         msg["delivered_conversation_id"] = (body.get("conversation_id") or "").strip()
+        page_key = build_page_key(client_id, page_instance_id)
+        if page_key:
+            msg["delivered_page_key"] = page_key
     if conversation_id:
         msg["delivered_conversation_id"] = conversation_id
     ext._update_external_status_for_bridge(get_bridge_message_id(msg), "sent")

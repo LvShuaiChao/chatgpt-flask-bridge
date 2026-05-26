@@ -98,8 +98,8 @@
         return { ok: false, reason: 'empty_clipboard_text' };
       }
 
-      if (typeof copyTextToClipboard !== 'function') {
-        const missingErr = new Error('copyTextToClipboard-missing');
+      if (typeof copyTextUnified !== 'function') {
+        const missingErr = new Error('copyTextUnified-missing');
         console.error(`[CLIPBOARD][WRITE_FAIL] label=${label}`, missingErr);
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(`[CLIPBOARD][WRITE_FAIL] label=${label} error=${missingErr.message}`);
@@ -107,15 +107,14 @@
         return { ok: false, reason: 'clipboard_write_failed', error: missingErr };
       }
 
-      try {
-        await copyTextToClipboard(rawText);
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error(`[CLIPBOARD][WRITE_FAIL] label=${label}`, err);
+      const copied = await copyTextUnified(rawText, `clipboard:${label}`);
+      if (!copied) {
+        const writeErr = new Error('copyTextUnified-returned-false');
+        console.error(`[CLIPBOARD][WRITE_FAIL] label=${label}`, writeErr);
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(`[CLIPBOARD][WRITE_FAIL] label=${label} error=${errText}`);
+          ToolboxShell.appendLog(`[CLIPBOARD][WRITE_FAIL] label=${label} error=${writeErr.message}`);
         }
-        return { ok: false, reason: 'clipboard_write_failed', error: err };
+        return { ok: false, reason: 'clipboard_write_failed', error: writeErr };
       }
 
       const canReadClipboard = !!(
@@ -160,3 +159,80 @@
       normalizeClipboardTextForCompare,
     };
   })();
+
+  function getLastAssistantReplyTextUnified() {
+    if (typeof CopyPipeline !== 'undefined' && typeof CopyPipeline.getLatestAssistantReplyText === 'function') {
+      const picked = CopyPipeline.getLatestAssistantReplyText({
+        label: 'getLastAssistantReplyTextUnified',
+        forceRefresh: true,
+      });
+      if (picked && picked.ok && picked.text) {
+        const pipelineText = String(picked.text).trim();
+        if (pipelineText) {
+          console.log('[GET_LAST_REPLY][OK]', {
+            textLength: pipelineText.length,
+            source: 'CopyPipeline',
+          });
+          return pipelineText;
+        }
+      }
+    }
+
+    const candidates = [
+      '[data-message-author-role="assistant"]',
+      '[data-testid^="conversation-turn-"]',
+      '.markdown',
+    ];
+
+    let assistantNodes = [];
+
+    for (const selector of candidates) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      if (nodes.length > 0) {
+        assistantNodes = nodes;
+        break;
+      }
+    }
+
+    if (!assistantNodes.length) {
+      console.warn('[GET_LAST_REPLY][NOT_FOUND]', {
+        url: location.href,
+      });
+      return '';
+    }
+
+    for (let i = assistantNodes.length - 1; i >= 0; i -= 1) {
+      const node = assistantNodes[i];
+      const text = String(node.innerText || node.textContent || '').trim();
+
+      if (text) {
+        console.log('[GET_LAST_REPLY][OK]', {
+          textLength: text.length,
+          selectorIndex: i,
+        });
+        return text;
+      }
+    }
+
+    console.warn('[GET_LAST_REPLY][EMPTY]', {
+      nodeCount: assistantNodes.length,
+      url: location.href,
+    });
+
+    return '';
+  }
+
+  async function copyLastAssistantReplyUnified(reason = 'copy-last-assistant-reply', options = {}) {
+    const prefilled = options && options.text != null ? String(options.text).trim() : '';
+    const text = prefilled || getLastAssistantReplyTextUnified();
+
+    if (!text || !String(text).trim()) {
+      console.warn('[COPY_LAST_REPLY][SKIP_EMPTY]', {
+        reason,
+        url: location.href,
+      });
+      return false;
+    }
+
+    return copyTextUnified(text, reason);
+  }

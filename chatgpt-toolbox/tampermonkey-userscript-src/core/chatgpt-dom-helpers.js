@@ -13,37 +13,134 @@ function isChatGPTHomeNewChatPage() {
   return pathname === '/' || pathname === '';
 }
 
-function hasRealChatGPTStopGeneratingButton() {
-  const selectors = [
-    'button[data-testid="stop-button"]',
-    'button[data-testid="composer-stop-button"]',
-    'button[aria-label="停止生成"]',
-    'button[aria-label="Stop generating"]',
-    'button[aria-label*="Stop generating"]',
-  ];
+const CHATGPT_STOP_BUTTON_SELECTORS = [
+  'button[data-testid="stop-button"]',
+  'button[data-testid="composer-stop-button"]',
+  'button[aria-label="停止生成"]',
+  'button[aria-label="Stop generating"]',
+  'button[aria-label*="Stop generating"]',
+];
 
-  for (const selector of selectors) {
+function isVisibleChatGPTStopButton(btn) {
+  if (!btn || isInsideToolbox(btn)) {
+    return false;
+  }
+
+  const rect = btn.getBoundingClientRect();
+  const style = window.getComputedStyle(btn);
+
+  return !!(
+    rect.width > 0
+    && rect.height > 0
+    && style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && !btn.disabled
+  );
+}
+
+function findRealChatGPTStopGeneratingButton() {
+  for (const selector of CHATGPT_STOP_BUTTON_SELECTORS) {
     const buttons = Array.from(document.querySelectorAll(selector));
 
     for (const btn of buttons) {
-      if (!btn || isInsideToolbox(btn)) continue;
-
-      const rect = btn.getBoundingClientRect();
-      const style = window.getComputedStyle(btn);
-
-      if (
-        rect.width > 0
-        && rect.height > 0
-        && style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && !btn.disabled
-      ) {
-        return true;
+      if (isVisibleChatGPTStopButton(btn)) {
+        return btn;
       }
     }
   }
 
-  return false;
+  return null;
+}
+
+function hasRealChatGPTStopGeneratingButton() {
+  return !!findRealChatGPTStopGeneratingButton();
+}
+
+function clickRealChatGPTStopGeneratingButton(source) {
+  const sourceText = String(source || 'unknown').trim() || 'unknown';
+  const btn = findRealChatGPTStopGeneratingButton();
+
+  if (!btn) {
+    return { clicked: false, selector: '', source: sourceText };
+  }
+
+  let selector = '';
+  for (const candidate of CHATGPT_STOP_BUTTON_SELECTORS) {
+    if (btn.matches && btn.matches(candidate)) {
+      selector = candidate;
+      break;
+    }
+  }
+
+  try {
+    if (typeof clickElementWithFallback === 'function') {
+      const clickResult = clickElementWithFallback(btn, { source: `stop-generating:${sourceText}` });
+      return {
+        clicked: !!(clickResult && clickResult.ok),
+        selector: selector || '-',
+        source: sourceText,
+        method: clickResult && clickResult.method ? clickResult.method : '',
+      };
+    }
+
+    btn.click();
+    return { clicked: true, selector: selector || '-', source: sourceText, method: 'native_click' };
+  } catch (err) {
+    console.error('[ChatGPT toolbox] clickRealChatGPTStopGeneratingButton failed', err);
+    if (err && err.stack) {
+      console.error(err.stack);
+    }
+    return { clicked: false, selector: selector || '-', source: sourceText, reason: 'click_failed' };
+  }
+}
+
+function shouldLetNativeChatGptHandleDrop(e, options = {}) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const includeFileInput = opts.includeFileInput !== false;
+  const includeForm = opts.includeForm !== false;
+
+  if (!e || !e.target) {
+    return false;
+  }
+
+  if (typeof opts.isInToolbox === 'function' && opts.isInToolbox(e)) {
+    return false;
+  }
+
+  const target = e.target instanceof Element ? e.target : null;
+  if (!target) {
+    return false;
+  }
+
+  if (typeof isInsideToolbox === 'function' && isInsideToolbox(target)) {
+    return false;
+  }
+
+  if (typeof isInToolbox === 'function' && isInToolbox(target)) {
+    return false;
+  }
+
+  const selectors = [
+    '[data-testid="composer-root"]',
+    '[data-testid="composer"]',
+    '#prompt-textarea',
+    'textarea[name="prompt-textarea"]',
+    '[data-testid="composer-textarea"]',
+    '[contenteditable="true"][data-lexical-editor="true"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'textarea',
+    '[contenteditable="true"]',
+  ];
+
+  if (includeForm) {
+    selectors.push('form');
+  }
+
+  if (includeFileInput) {
+    selectors.push('input[type="file"]');
+  }
+
+  return !!target.closest(selectors.join(','));
 }
 
 function findRealChatGPTSendButton() {

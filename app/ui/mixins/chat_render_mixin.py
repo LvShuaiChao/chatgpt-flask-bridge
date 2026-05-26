@@ -474,6 +474,53 @@ class ChatRenderMixin:
             echo=False,
         )
 
+    def _schedule_current_chat_render(self, reason="", *, delay_ms=0, force_bottom=False):
+        """合并短时间内的重复聊天区渲染请求。"""
+        pending = getattr(self, "_chat_render_schedule_pending", None)
+        if pending is not None:
+            if force_bottom:
+                pending["force_bottom"] = True
+            self._append_log(
+                "[CHAT_RENDER][SKIP_PENDING] "
+                f"reason={reason or '-'} "
+                f"pending_reason={pending.get('reason') or '-'}",
+                echo=False,
+            )
+            return
+
+        self._append_log(
+            "[CHAT_RENDER][SCHEDULE] "
+            f"reason={reason or '-'} "
+            f"delay_ms={delay_ms} "
+            f"force_bottom={force_bottom}",
+            echo=False,
+        )
+        self._chat_render_schedule_pending = {
+            "reason": reason or "",
+            "force_bottom": bool(force_bottom),
+        }
+
+        def _execute_scheduled_chat_render():
+            slot = getattr(self, "_chat_render_schedule_pending", None)
+            self._chat_render_schedule_pending = None
+            if not slot:
+                return
+            exec_reason = slot.get("reason") or reason or ""
+            exec_force = bool(slot.get("force_bottom"))
+            self._append_log(
+                "[CHAT_RENDER][EXECUTE] "
+                f"reason={exec_reason or '-'} "
+                f"force_bottom={exec_force}",
+                echo=False,
+            )
+            if hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=exec_force,
+                    reason=exec_reason,
+                )
+
+        QTimer.singleShot(max(0, int(delay_ms)), _execute_scheduled_chat_render)
+
     def _flush_pending_chat_render(self):
         pending = getattr(self._bridge_msg, "pending_chat_render", None) or {}
         session_id = (pending.get("session_id") or "").strip()

@@ -1298,6 +1298,12 @@
           height: 30px;
         }
 
+        .cgpt-shortcut-row-target .cgpt-shortcut-row-label {
+          font-size: 12px;
+          color: #cbd5e1;
+          line-height: 1.35;
+        }
+
         .cgpt-upload-quick-prompts {
           margin-top: 12px;
           border: 1px solid #2f3542;
@@ -1570,11 +1576,45 @@
           color: #f8fafc;
         }
 
+        #cgpt-settings-module {
+          padding-top: 6px !important;
+        }
+
+        #cgpt-settings-module .cgpt-settings-subtabs {
+          margin-top: 0 !important;
+          padding-top: 0 !important;
+          margin-bottom: 6px;
+        }
+
+        #cgpt-settings-module .cgpt-settings-panel {
+          margin-top: 6px !important;
+          padding-top: 8px !important;
+        }
+
+        #cgpt-setting-beep-status {
+          color: #94a3b8;
+          font-size: 12px;
+        }
+
+        #cgpt-settings-module .cgpt-hint:not(#cgpt-setting-beep-status),
+        #cgpt-settings-module .cgpt-help-text,
+        #cgpt-settings-module .cgpt-desc,
+        #cgpt-settings-module .cgpt-description,
+        #cgpt-settings-module .cgpt-setting-desc,
+        #cgpt-settings-module .cgpt-muted-text,
+        .cgpt-settings-module .cgpt-help-text,
+        .cgpt-settings-module .cgpt-desc,
+        .cgpt-settings-module .cgpt-description,
+        .cgpt-settings-module .cgpt-setting-desc,
+        .cgpt-settings-module .cgpt-muted-text {
+          display: none !important;
+        }
+
         .cgpt-settings-subtabs {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
-          margin: 8px 0 10px;
+          margin: 0 0 6px;
           padding: 4px;
           min-width: 0;
           max-width: 100%;
@@ -1608,7 +1648,7 @@
         }
 
         .cgpt-settings-panel {
-          margin-top: 8px;
+          margin-top: 6px;
         }
 
         .cgpt-settings-panel .cgpt-section-title {
@@ -1868,6 +1908,15 @@
           color: #ffffff;
         }
 
+        #cgpt-autoq-start-upload.cgpt-btn-danger,
+        #cgpt-autoq-start-upload.cgpt-btn-running,
+        #cgpt-autoq-start-upload[aria-busy="true"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+        }
+
         #cgpt-upload-start {
           background: #166534 !important;
           border-color: #22c55e !important;
@@ -1881,6 +1930,28 @@
         #cgpt-upload-start:disabled {
           opacity: 0.55;
           cursor: not-allowed;
+        }
+
+        #cgpt-upload-start[data-upload-state="uploading"],
+        #cgpt-upload-start.cgpt-btn-danger,
+        #cgpt-upload-start.cgpt-btn-running,
+        #cgpt-upload-start.cgpt-btn-uploading,
+        #cgpt-upload-start[aria-busy="true"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+          cursor: pointer !important;
+        }
+
+        #cgpt-upload-start[data-upload-state="uploading"]:hover,
+        #cgpt-upload-start.cgpt-btn-danger:hover,
+        #cgpt-upload-start.cgpt-btn-running:hover,
+        #cgpt-upload-start.cgpt-btn-uploading:hover,
+        #cgpt-upload-start[aria-busy="true"]:hover {
+          background: #b91c1c !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
         }
 
         .cgpt-upload-action-toolbar {
@@ -2524,15 +2595,34 @@
           margin-top: 6px;
         }
 
+        #cgpt-autoq-module .cgpt-autoq-section {
+          padding-top: 8px !important;
+        }
+
+        #cgpt-autoq-module .cgpt-autoq-mode-tabs {
+          margin-top: 0 !important;
+        }
+
         .cgpt-autoq-mode-tabs {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 8px;
+          display: flex;
+          flex-wrap: nowrap;
+          gap: 6px;
+          align-items: center;
           margin-bottom: 8px;
         }
 
         .cgpt-autoq-mode-tab {
-          height: 32px;
+          flex: 0 0 auto;
+          min-width: 58px;
+          width: auto;
+          padding: 0 8px;
+          height: 28px;
+          min-height: 28px;
+          font-size: 12px;
+          line-height: 1.2;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
           border: 1px solid #475569;
           border-radius: 9px;
           background: #1f2937;
@@ -2665,10 +2755,93 @@
 
         .cgpt-autoq-status-grid {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 6px 10px;
-          color: #cbd5e1;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 3px 6px;
+          color: #e5e7eb;
+          font-size: 11px;
+          line-height: 1.2;
+          align-items: center;
+        }
+
+        .cgpt-autoq-status-panel {
+          border: 1px solid #2f3542;
+          background: #111827;
+          border-radius: 8px;
+          padding: 6px 8px;
+          color: #e5e7eb;
+          font-size: 11px;
+          line-height: 1.2;
+        }
+
+        .cgpt-autoq-status-section {
+          padding: 0;
+          border-bottom: 0;
+        }
+
+        .cgpt-autoq-status-section-title {
+          display: none;
+        }
+
+        .cgpt-autoq-status-item {
+          min-width: 0;
+          min-height: 18px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          overflow: hidden;
+          white-space: nowrap;
+        }
+
+        .cgpt-autoq-status-item.wide {
+          grid-column: span 2;
+        }
+
+        .cgpt-autoq-status-item.full {
+          grid-column: 1 / -1;
+        }
+
+        .cgpt-autoq-status-label {
+          flex: 0 0 auto;
+          color: #e5e7eb;
+          font-weight: 650;
+          white-space: nowrap;
+        }
+
+        .cgpt-autoq-status-label::after {
+          content: "：";
+          color: #e5e7eb;
+        }
+
+        .cgpt-autoq-status-value {
+          min-width: 0;
+          color: #ffffff;
+          font-weight: 650;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .cgpt-autoq-status-value.is-ok {
+          color: #22c55e;
+        }
+
+        .cgpt-autoq-status-value.is-warn {
+          color: #f59e0b;
+        }
+
+        .cgpt-autoq-status-value.is-error {
+          color: #ef4444;
+        }
+
+        .cgpt-autoq-status-value.is-muted {
+          color: #94a3b8;
+          font-weight: 500;
+        }
+
+        .cgpt-autoq-status-note {
+          color: #94a3b8;
           font-size: 12px;
+          line-height: 1.45;
         }
 
         .cgpt-autoq-status-recent {
@@ -2699,8 +2872,14 @@
             grid-template-columns: 1fr;
           }
 
-          .cgpt-autoq-status-grid {
-            grid-template-columns: 1fr;
+          .cgpt-autoq-status-grid,
+          .cgpt-autoq-main-lite-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .cgpt-autoq-status-item.wide,
+          .cgpt-autoq-status-item.full {
+            grid-column: 1 / -1;
           }
         }
 
@@ -2742,26 +2921,48 @@
         }
 
         .cgpt-autoq-main-lite {
-          margin: 8px 0 10px;
-          padding: 10px 12px;
+          margin: 5px 0 6px;
+          padding: 6px 8px;
           border: 1px solid #2f3542;
-          border-radius: 10px;
+          border-radius: 8px;
           background: #111827;
         }
 
+        .cgpt-autoq-main-lite > .cgpt-autoq-status-panel {
+          margin: 0;
+          padding: 0;
+          border: 0;
+          background: transparent;
+        }
+
+        .cgpt-autoq-main-lite > .cgpt-autoq-status-grid {
+          margin: 0;
+          padding: 0;
+        }
+
         .cgpt-autoq-main-lite-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
         }
 
         .cgpt-autoq-runtime-stats-line {
-          margin-top: 8px;
-          padding-top: 6px;
-          border-top: 1px dashed #334155;
+          margin-top: 3px;
+          padding-top: 3px;
+          border-top: 1px dashed rgba(51, 65, 85, 0.65);
           font-size: 11px;
-          line-height: 1.45;
-          color: #94a3b8;
+          line-height: 1.2;
+          color: #e5e7eb;
           word-break: break-word;
           white-space: normal;
+        }
+
+        .cgpt-autoq-runtime-stats-line + .cgpt-autoq-runtime-stats-line {
+          margin-top: 2px;
+          padding-top: 0;
+          border-top: 0;
+        }
+
+        .cgpt-autoq-runtime-stats-phase {
+          display: none !important;
         }
 
         .cgpt-autoq-task-panel {
@@ -2769,25 +2970,36 @@
         }
 
         .cgpt-autoq-batch-subtabs {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 8px;
-          margin: 8px 0;
-          padding: 4px;
+          display: inline-flex;
+          width: fit-content;
+          max-width: 100%;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 6px;
+          margin: 6px 0;
+          padding: 3px;
           border: 1px solid #2f3542;
           background: #111827;
-          border-radius: 10px;
+          border-radius: 9px;
         }
 
         .cgpt-autoq-batch-subtab {
-          height: 32px;
-          min-height: 32px;
+          flex: 0 0 auto;
+          width: auto;
+          min-width: 72px;
+          height: 28px;
+          min-height: 28px;
+          padding: 0 12px;
           border: 1px solid #334155;
           background: #171b22;
           color: #cbd5e1;
-          border-radius: 8px;
+          border-radius: 7px;
           cursor: pointer;
           font-size: 12px;
+          line-height: 26px;
+          white-space: nowrap;
+          text-align: center;
         }
 
         .cgpt-autoq-batch-subtab:hover {
@@ -3103,24 +3315,32 @@
         }
 
         .cgpt-prompt-subtabs {
-          display: flex;
-          gap: 6px;
-          margin-top: 10px;
-          padding: 4px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 4px;
+          width: auto;
+          max-width: 100%;
+          margin-top: 8px;
+          padding: 3px;
           border: 1px solid #2f3542;
           background: #111827;
-          border-radius: 10px;
+          border-radius: 9px;
         }
 
         .cgpt-prompt-subtab {
-          flex: 1;
-          height: 30px;
+          flex: 0 0 auto;
+          min-width: 64px;
+          width: auto;
+          height: 26px;
+          padding: 0 8px;
           border: 1px solid #334155;
           background: #171b22;
           color: #cbd5e1;
-          border-radius: 8px;
+          border-radius: 7px;
           cursor: pointer;
           font-size: 12px;
+          white-space: nowrap;
         }
 
         .cgpt-prompt-subtab.active {
@@ -3139,6 +3359,29 @@
 
         #cgpt-prompt-manage-panel {
           padding-top: 6px !important;
+        }
+
+        #cgpt-prompt-manage-tools {
+          display: flex !important;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 6px !important;
+          margin-top: 6px !important;
+        }
+
+        #cgpt-prompt-manage-tools .cgpt-btn {
+          flex: 0 0 auto !important;
+          width: auto !important;
+          min-width: 48px !important;
+          height: 28px !important;
+          padding: 0 9px !important;
+          font-size: 12px !important;
+          border-radius: 7px !important;
+        }
+
+        #cgpt-prompt-new-quick-btn {
+          min-width: 92px !important;
         }
 
         .cgpt-prompt-display-row {
@@ -3249,8 +3492,9 @@
           display: inline-flex;
           align-items: center;
           gap: 2px;
-          height: 28px;
-          padding: 0 10px;
+          height: 26px;
+          padding: 0 8px;
+          max-width: 112px;
           border: 1px solid #475569;
           background: #171b22;
           color: #d1d5db;
@@ -3352,12 +3596,12 @@
 
         .cgpt-prompt-actions-compact .cgpt-btn,
         .cgpt-prompt-actions .cgpt-btn {
-          min-width: 58px !important;
+          min-width: 44px !important;
           width: auto !important;
-          height: 28px !important;
-          padding: 0 10px !important;
+          height: 26px !important;
+          padding: 0 7px !important;
           font-size: 12px !important;
-          line-height: 26px !important;
+          line-height: 24px !important;
           border-radius: 7px !important;
           flex: 0 0 auto !important;
           white-space: nowrap !important;
@@ -3365,8 +3609,8 @@
 
         .cgpt-prompt-actions-compact .cgpt-prompt-order-btn,
         .cgpt-prompt-actions .cgpt-prompt-order-btn {
-          min-width: 38px !important;
-          width: 38px !important;
+          min-width: 30px !important;
+          width: 30px !important;
           padding: 0 !important;
           text-align: center !important;
         }
@@ -3374,13 +3618,15 @@
         .cgpt-prompt-batch-check {
           display: inline-flex !important;
           align-items: center !important;
-          gap: 4px !important;
-          min-width: 110px !important;
-          max-width: 120px !important;
+          gap: 3px !important;
+          min-width: 84px !important;
+          max-width: 96px !important;
           margin: 0 !important;
           font-size: 12px !important;
           line-height: 1.2 !important;
           white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
           flex: 0 0 auto !important;
           color: #94a3b8;
         }
@@ -3557,7 +3803,48 @@
         #${APP.panelId} *::after {
           box-sizing: border-box;
         }
-      
+
+        /* ===== 工具箱文字统一增强：禁止灰暗 / 淡色说明文字 ===== */
+        #${APP.panelId} .cgpt-empty-state,
+        #${APP.panelId} .cgpt-log-empty,
+        #${APP.panelId} .cgpt-hint,
+        #${APP.panelId} .cgpt-upload-meta,
+        #${APP.panelId} .cgpt-upload-manage-subtitle,
+        #${APP.panelId} .cgpt-upload-manage-empty,
+        #${APP.panelId} .cgpt-autoq-status-grid,
+        #${APP.panelId} .cgpt-autoq-status-recent,
+        #${APP.panelId} .cgpt-autoq-runtime-stats-line,
+        #${APP.panelId} .cgpt-autoq-task-item-meta,
+        #${APP.panelId} .cgpt-autoq-task-item-source,
+        #${APP.panelId} .cgpt-autoq-task-item-category,
+        #${APP.panelId} .cgpt-prompt-batch-task-check,
+        #${APP.panelId} .cgpt-autoq-prompt-picker-item-meta,
+        #${APP.panelId} .cgpt-prompt-display-main small,
+        #${APP.panelId} .cgpt-prompt-meta,
+        #${APP.panelId} .cgpt-prompt-category-manage-meta,
+        #${APP.panelId} .cgpt-prompt-batch-check,
+        #${APP.panelId} .cgpt-kv label,
+        #${APP.panelId} .cgpt-checkbox-line,
+        #${APP.panelId} .cgpt-autoq-label,
+        #${APP.panelId} .cgpt-autoq-continue-preview,
+        #${APP.panelId} .cgpt-modal-field label {
+          color: #f8fafc !important;
+          opacity: 1 !important;
+        }
+
+        /* 覆盖少量内联淡色 style，避免日志/提示仍然发灰 */
+        #${APP.panelId} [style*="color:#94a3b8"],
+        #${APP.panelId} [style*="color: #94a3b8"],
+        #${APP.panelId} [style*="color:#9ca3af"],
+        #${APP.panelId} [style*="color: #9ca3af"],
+        #${APP.panelId} [style*="color:#cbd5e1"],
+        #${APP.panelId} [style*="color: #cbd5e1"],
+        #${APP.panelId} [style*="color:#d1d5db"],
+        #${APP.panelId} [style*="color: #d1d5db"] {
+          color: #f8fafc !important;
+          opacity: 1 !important;
+        }
+
     `;
 
     function injectStyle() {
@@ -3969,8 +4256,8 @@
       headerTitleFlashBaseText = baseText;
       headerTitleFlashOn = false;
 
-      const intervalMs = Number(options.intervalMs || 450);
-      const autoStopMs = Number(options.autoStopMs || 2400);
+      const intervalMs = Number(options.intervalMs || 600);
+      const autoStopMs = Number(options.autoStopMs || 0);
 
       const tick = () => {
         headerTitleFlashOn = !headerTitleFlashOn;
@@ -3988,11 +4275,22 @@
 
       headerTitleFlashTimer = window.setInterval(tick, intervalMs);
 
-      headerTitleFlashStopTimer = window.setTimeout(() => {
-        stopHeaderTitleFlash(`auto-stop:${message || '-'}`);
-      }, autoStopMs);
+      if (headerTitleFlashStopTimer) {
+        window.clearTimeout(headerTitleFlashStopTimer);
+        headerTitleFlashStopTimer = 0;
+      }
 
-      appendLog(`[TITLE_FLASH][header-start] message=${message || '-'} intervalMs=${intervalMs} autoStopMs=${autoStopMs}`);
+      if (autoStopMs > 0) {
+        headerTitleFlashStopTimer = window.setTimeout(() => {
+          stopHeaderTitleFlash(`auto-stop:${message || '-'}`);
+        }, autoStopMs);
+      }
+
+      const flashMode = autoStopMs > 0 ? 'timed' : 'until-user-action';
+      appendLog(
+        `[TITLE_FLASH][header-start] message=${message || '-'} intervalMs=${intervalMs} `
+        + `autoStopMs=${autoStopMs} mode=${flashMode}`,
+      );
       return true;
     }
 

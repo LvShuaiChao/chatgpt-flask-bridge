@@ -3,6 +3,7 @@
 from app.utils.target_sources import (
     TARGET_SOURCE_BOUND_PAGE,
     TARGET_SOURCE_NO_SESSION,
+    TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID,
     canonical_target_source,
     target_source_from,
 )
@@ -27,6 +28,19 @@ def test_canonical_target_source_rejects_legacy_conversation_fallbacks():
 def test_canonical_target_source_canonical_passthrough():
     assert canonical_target_source(TARGET_SOURCE_BOUND_PAGE) == TARGET_SOURCE_BOUND_PAGE
     assert canonical_target_source(TARGET_SOURCE_NO_SESSION) == TARGET_SOURCE_NO_SESSION
+    assert (
+        canonical_target_source(TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID)
+        == TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID
+    )
+
+
+def test_target_source_from_temp_home_page_display_id():
+    assert target_source_from(
+        {"target_source": TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID}
+    ) == TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID
+    assert canonical_target_source(TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID) == (
+        TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID
+    )
 
 
 def test_target_source_from_rejects_legacy_bound_client():

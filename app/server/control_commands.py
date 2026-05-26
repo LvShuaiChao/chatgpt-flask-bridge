@@ -21,7 +21,19 @@ from app.utils.bridge_payload import (
 from app.utils.legacy_cleanup import assert_no_legacy_fields
 from app.utils.page_status import page_url_from
 
-# Poll 定向投递：必须带 target_client_id / target_conversation_id（sync_conversation 除外）
+
+def _normalize_control_command_payload(payload):
+    """出站控制命令 payload：request_id 迁移为 sync_request_id，避免 legacy 拦截。"""
+    if not isinstance(payload, dict):
+        return {}
+    out = dict(payload)
+    legacy_request_id = (out.pop("request_id", None) or "").strip()
+    if legacy_request_id and not (out.get("sync_request_id") or "").strip():
+        out["sync_request_id"] = legacy_request_id
+    return out
+
+
+# Poll 定向投递：使用 canonical client_id / page_instance_id / conversation_id（sync_conversation 另有专用匹配）
 STRICT_TARGET_CONTROL_COMMANDS = frozenset({
     "cancel_job",
     "cancel_run",
@@ -283,7 +295,7 @@ def enqueue_control_command(
         client_id=client_id,
         page_instance_id=page_instance_id or None,
         conversation_id=conversation_id or None,
-        payload=dict(payload or {}),
+        payload=_normalize_control_command_payload(payload),
     )
     if not isinstance(msg, dict):
         return fail("queue_control_message_failed")

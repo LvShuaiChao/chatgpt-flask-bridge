@@ -135,6 +135,20 @@
     });
   }
 
+  function warnStoppingButtonTextLeak(button) {
+    if (!button) {
+      return;
+    }
+    const text = String(button.textContent || '');
+    if (text.includes('正在停止') || text.includes('停止中')) {
+      console.warn('[BUTTON_TEXT][STOPPING_TEXT_LEAK]', {
+        id: button.id,
+        text: button.textContent,
+        phase: button.dataset.cgptTaskPhase,
+      });
+    }
+  }
+
   function setToolboxButtonState(button, options = {}) {
     if (!button) {
       return false;
@@ -149,6 +163,11 @@
       reason = '',
       ariaBusy = null,
     } = options;
+
+    const finish = (result) => {
+      warnStoppingButtonTextLeak(button);
+      return result;
+    };
 
     const oldPhase = button.dataset.cgptButtonPhase || '-';
     const nextText = text != null ? String(text) : '';
@@ -191,7 +210,7 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.WAITING) {
@@ -200,7 +219,7 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.RUNNING) {
@@ -209,7 +228,7 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (
@@ -225,13 +244,13 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.COMPLETED) {
       button.classList.add('cgpt-btn-success');
       button.disabled = Boolean(disabled);
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.SENDING) {
@@ -240,19 +259,19 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.SUCCESS) {
       button.classList.add('cgpt-btn-success');
       button.disabled = Boolean(disabled);
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.FAILED) {
       button.classList.add('cgpt-btn-failed');
       button.disabled = Boolean(disabled);
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.DANGER) {
@@ -261,22 +280,22 @@
       if (!button.disabled) {
         button.removeAttribute('disabled');
       }
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.CANCELLED) {
       button.classList.add('cgpt-btn-cancelled');
       button.disabled = Boolean(disabled);
-      return true;
+      return finish(true);
     }
 
     if (phase === ButtonPhase.DISABLED) {
       button.classList.add('cgpt-btn-disabled');
       button.disabled = true;
-      return true;
+      return finish(true);
     }
 
-    return true;
+    return finish(true);
   }
 
   function setButtonIdle(button, text = '开始', extra = {}) {
@@ -373,16 +392,71 @@
     });
   }
 
-  function flashButtonThenIdle(button, flashFn, flashText, idleText, delayMs = 1200) {
+  const FLASH_RESTORE_TERMINAL_PHASES = new Set([
+    ButtonPhase.SUCCESS,
+    ButtonPhase.FAILED,
+    ButtonPhase.CANCELLED,
+    ButtonPhase.COMPLETED,
+    'success',
+    'failed',
+    'cancelled',
+    'completed',
+  ]);
+
+  function logFlashRestoreSkip(button, reason, extra = {}) {
+    const action = getButtonActionId(button);
+    const parts = Object.entries(extra)
+      .map(([key, value]) => `${key}=${value == null ? '-' : value}`)
+      .join(' ');
+    const line = `[BUTTON_STATE][FLASH_RESTORE_SKIP] reason=${reason || 'guard-failed'} action=${action}${parts ? ` ${parts}` : ''}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function flashButtonThenIdle(button, flashFn, flashText, idleText, delayMs = 1200, options = {}) {
     if (!button || typeof flashFn !== 'function') {
       return;
     }
+
+    const guard = options && typeof options === 'object' ? options : {};
+    const expectedRunId = guard.expectedRunId != null ? String(guard.expectedRunId) : '';
+    const getCurrentRunId = typeof guard.getCurrentRunId === 'function' ? guard.getCurrentRunId : null;
+    const getCurrentPhase = typeof guard.getCurrentPhase === 'function' ? guard.getCurrentPhase : null;
+    const flashAt = Date.now();
+
     flashFn(button, flashText, { reason: 'flash' });
     window.setTimeout(() => {
-      if (button && button.isConnected) {
-        setButtonIdle(button, idleText, { reason: 'flash-restore' });
-        logButtonStateRestore(button, '', ButtonPhase.IDLE);
+      if (!button || !button.isConnected) {
+        logFlashRestoreSkip(button, 'guard-failed', { detail: 'not-connected' });
+        return;
       }
+
+      if (expectedRunId && getCurrentRunId) {
+        const currentRunId = String(getCurrentRunId() || '').trim();
+        if (currentRunId && currentRunId !== expectedRunId) {
+          logFlashRestoreSkip(button, 'guard-failed', {
+            expectedRunId,
+            currentRunId,
+          });
+          return;
+        }
+      }
+
+      if (getCurrentPhase) {
+        const currentPhase = String(getCurrentPhase() || '').trim().toLowerCase();
+        if (currentPhase && !FLASH_RESTORE_TERMINAL_PHASES.has(currentPhase)) {
+          logFlashRestoreSkip(button, 'guard-failed', {
+            currentPhase,
+            flashAgeMs: Date.now() - flashAt,
+          });
+          return;
+        }
+      }
+
+      setButtonIdle(button, idleText, { reason: 'flash-restore' });
+      logButtonStateRestore(button, expectedRunId || '', ButtonPhase.IDLE);
     }, delayMs);
   }
 

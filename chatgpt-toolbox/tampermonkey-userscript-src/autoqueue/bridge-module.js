@@ -3718,8 +3718,11 @@
       }
     }
 
-    async function sendSystemHotkey(combo = DEFAULT_SYSTEM_HOTKEY_COMBO) {
-      const normalizedCombo = String(combo || '').trim().toLowerCase() || DEFAULT_SYSTEM_HOTKEY_COMBO;
+    async function sendSystemHotkey(combo) {
+      const normalizedCombo = String(combo || '').trim().toLowerCase();
+      if (!normalizedCombo) {
+        throw new Error('目标快捷键未设置');
+      }
       const result = await apiRequest({
         action: 'system_hotkey',
         combo: normalizedCombo,

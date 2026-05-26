@@ -360,18 +360,183 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      let gridEl = qs('#cgpt-autoq-main-lite-grid', mainLiteEl);
-      if (!gridEl) {
+      let panelRoot = qs('#cgpt-autoq-status-panel-content', mainLiteEl);
+      if (!panelRoot) {
         mainLiteEl.innerHTML = `
-          <div id="cgpt-autoq-main-lite-grid" class="cgpt-autoq-status-grid cgpt-autoq-main-lite-grid"></div>
-          <div id="cgpt-autoq-runtime-stats-line-1" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden"></div>
-          <div id="cgpt-autoq-runtime-stats-line-2" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden"></div>
-          <div id="cgpt-autoq-runtime-phase-line" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden"></div>
+          <div class="cgpt-autoq-status-grid cgpt-autoq-main-lite-grid" id="cgpt-autoq-status-panel-content"></div>
+          <div id="cgpt-autoq-runtime-stats-line-1" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden" aria-hidden="true"></div>
+          <div id="cgpt-autoq-runtime-stats-line-2" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden" aria-hidden="true"></div>
+          <div id="cgpt-autoq-runtime-phase-line" class="cgpt-autoq-runtime-stats-line cgpt-autoq-runtime-stats-phase cgpt-toolbox-hidden" aria-hidden="true"></div>
         `;
         if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.bindDom === 'function') {
           RuntimeStatsModule.bindDom(mainLiteEl);
         }
       }
+    }
+
+    function formatStatusFraction(numerator, denominator) {
+      if (denominator == null || denominator === '' || Number.isNaN(Number(denominator))) {
+        return '-';
+      }
+      return `${Number(numerator) || 0} / ${Number(denominator) || 0}`;
+    }
+
+    function formatQuotaDisplayText(display) {
+      if (!display || display === '-') {
+        return '-';
+      }
+      return String(display).replace(/(\d+)\s*\/\s*(\d+)/, '$1 / $2');
+    }
+
+    function resolveAutoqStatusValueTone(value, options = {}) {
+      if (options.tone) {
+        return options.tone;
+      }
+      if (options.muted) {
+        return 'is-muted';
+      }
+
+      const text = String(value || '');
+      const lower = text.toLowerCase();
+
+      if (!text || text === '-') {
+        return '';
+      }
+      if (/可发送|可上传|已完成|成功/.test(text)) {
+        return 'is-ok';
+      }
+      if (/failed|失败|clipboard_read_verify_failed|missing|error|blocked|no-more-content/.test(lower)) {
+        return 'is-error';
+      }
+      if (/等待发送|运行中|等待回复|发送中|上传中|回答中|复核中|发送重试|等待终止|已发送等待/.test(text)) {
+        return 'is-warn';
+      }
+      if (/已停止|停止/.test(text) && options.allowStopWarn) {
+        return 'is-warn';
+      }
+      return '';
+    }
+
+    function renderAutoqStatusItem(label, value, options = {}) {
+      const safeLabel = escapeHtml(label);
+      const safeValue = escapeHtml(value == null || value === '' ? '-' : String(value));
+      const rawValue = value == null || value === '' ? '-' : String(value);
+      const tone = resolveAutoqStatusValueTone(rawValue, options);
+      const valueClass = tone
+        ? `cgpt-autoq-status-value ${tone}`
+        : 'cgpt-autoq-status-value';
+      const valueId = options.id ? ` id="${options.id}"` : '';
+      const extraClass = options.className || options.extraClass || '';
+      const itemClass = extraClass
+        ? `cgpt-autoq-status-item ${extraClass}`
+        : 'cgpt-autoq-status-item';
+
+      return `
+        <div class="${itemClass}" title="${safeLabel}：${safeValue}">
+          <span class="cgpt-autoq-status-label">${safeLabel}</span>
+          <span class="${valueClass}"${valueId}>${safeValue}</span>
+        </div>`;
+    }
+
+    function renderAutoqStatusItems(items) {
+      return items.map((item) => renderAutoqStatusItem(
+        item.label,
+        item.value,
+        {
+          className: item.className || '',
+          tone: item.tone,
+          muted: item.muted,
+          allowStopWarn: item.allowStopWarn,
+          id: item.id,
+        },
+      )).join('');
+    }
+
+    function buildBatchTaskStatusPanelHtml(options) {
+      const {
+        taskProgress,
+        pageTurnText,
+        taskSentDialogueDisplay,
+        runStateText,
+        continueDisplay,
+        replyClassifyStatus,
+        replyClassifyReason,
+        uploadStatusText,
+        taskStepText,
+        lastStopReasonText,
+        lastStopClassifyHint,
+        rateLimitDisplay,
+        uploadRateLimitDisplay,
+        progressSnapshot,
+        taskName,
+      } = options;
+
+      const strategy = progressSnapshot.autoUploadStrategy;
+      const autoUploadText = strategy && strategy.enabled
+        ? `已计入 ${progressSnapshot.autoUploadDialogueCount} 次，下次第 ${progressSnapshot.taskAutoUploadNextAt} 次；${strategy.summary}`
+        : (strategy ? strategy.summary : '未启用');
+
+      const rotationSettings = progressSnapshot.rotationSettings;
+      const rotationText = rotationSettings && rotationSettings.enabled
+        ? `当前页 ${progressSnapshot.currentPageDialogueCount}/${rotationSettings.threshold}，已切换 ${progressSnapshot.rotationCount} 次`
+        : '未启用';
+
+      const replyClassifyText = replyClassifyReason && replyClassifyReason !== '-'
+        ? `${replyClassifyStatus}（${replyClassifyReason}）`
+        : replyClassifyStatus;
+
+      const stopReasonValue = lastStopReasonText !== '-'
+        ? `${lastStopReasonText}${lastStopClassifyHint || ''}`
+        : '-';
+
+      return renderAutoqStatusItems([
+        { label: '任务进度', value: taskProgress },
+        { label: '页面轮次', value: pageTurnText },
+        { label: '状态', value: runStateText, allowStopWarn: true },
+        { label: '已发送', value: taskSentDialogueDisplay },
+
+        { label: '发送额度', value: formatQuotaDisplayText(rateLimitDisplay), className: 'wide' },
+        { label: '上传额度', value: formatQuotaDisplayText(uploadRateLimitDisplay), className: 'wide' },
+
+        { label: '任务', value: taskName, className: 'wide' },
+        { label: '上传', value: uploadStatusText },
+        { label: '追问', value: continueDisplay },
+
+        { label: '当前步骤', value: taskStepText, className: 'wide' },
+        {
+          label: '终态识别',
+          value: replyClassifyText,
+          className: 'wide',
+          tone: replyClassifyText !== '-' ? resolveAutoqStatusValueTone(replyClassifyText) : '',
+        },
+
+        { label: '自动上传', value: autoUploadText, className: 'full' },
+        { label: '自动换页', value: rotationText, className: 'full' },
+        {
+          label: '停止原因',
+          value: stopReasonValue,
+          className: 'full',
+          tone: stopReasonValue !== '-' ? 'is-error' : '',
+        },
+      ]);
+    }
+
+    function buildLiteStatusPanelHtml(options) {
+      const {
+        modeText,
+        pageTurnText,
+        listName,
+        running,
+      } = options;
+
+      return renderAutoqStatusItems([
+        { label: '模式', value: modeText },
+        { label: '页面轮次', value: pageTurnText },
+        { label: '列表', value: listName || '-' },
+        { label: '状态', value: running ? '运行中' : '已停止', allowStopWarn: true },
+        { label: '追问', value: '-' },
+        { label: '当前步骤', value: '-' },
+      ]);
     }
 
     function createTaskId() {
@@ -1147,7 +1312,7 @@ const AutoQueueModule = (() => {
       if (normalizedNext === 'list') {
         ToolboxShell.setStatus('已切换到列表模式');
       } else if (normalizedNext === 'task') {
-        ToolboxShell.setStatus('已切换到批量任务组模式');
+        ToolboxShell.setStatus('已切换到批量任务');
       } else {
         ToolboxShell.setStatus('已切换到继续模式');
       }
@@ -3071,7 +3236,7 @@ const AutoQueueModule = (() => {
       const m = normalizeAutoMode(mode);
 
       if (m === 'list') return '列表模式';
-      if (m === 'task') return '批量任务组模式';
+      if (m === 'task') return '批量任务';
       return '继续模式';
     }
 
@@ -3132,47 +3297,39 @@ const AutoQueueModule = (() => {
     }
 
     function getLastAssistantReplyText() {
-      try {
-        if (
-          typeof ChatMessageExtractor !== 'undefined'
-          && ChatMessageExtractor
-          && typeof ChatMessageExtractor.buildRecords === 'function'
-          && typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser === 'function'
-        ) {
-          const records = ChatMessageExtractor.buildRecords({ includeEmpty: false });
-          const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
-
-          if (picked && picked.ok && picked.record) {
-            const recordText = String(picked.record.text || '').trim();
-
-            if (recordText) {
-              return recordText;
-            }
-          }
-        }
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] getLastAssistantReplyText extractor failed', err);
-        log(`读取回复失败：${errText}`);
+      if (
+        typeof CopyPipeline !== 'undefined'
+        && typeof CopyPipeline.getLatestAssistantReplyText === 'function'
+      ) {
+        const picked = CopyPipeline.getLatestAssistantReplyText({
+          label: 'autoqueue-get-last-assistant',
+          forceRefresh: true,
+        });
+        return picked && picked.ok ? String(picked.text || '').trim() : '';
       }
 
-      const assistantNodes = Array.from(
-        document.querySelectorAll('[data-message-author-role="assistant"]'),
-      );
-      const lastNode = assistantNodes.length > 0
-        ? assistantNodes[assistantNodes.length - 1]
-        : null;
-
-      if (!lastNode) {
-        return '';
-      }
-
-      return String(lastNode.innerText || lastNode.textContent || '').trim();
+      console.error('[ChatGPT toolbox] getLastAssistantReplyText: CopyPipeline missing');
+      return '';
     }
 
     function isTaskDoneSignalMatched(replyText, doneSignal) {
+      const signal = String(doneSignal || TASK_DONE_SIGNAL).trim();
+
+      if (typeof analyzeAssistantDoneSignalText === 'function') {
+        const analysis = analyzeAssistantDoneSignalText(replyText, { doneSignal: signal });
+        if (analysis.corrupted) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_SIGNAL][CORRUPTED_ASSISTANT_SIGNAL] length=${String(replyText || '').length}`,
+          );
+        }
+        return {
+          matched: !!analysis.matched,
+          corrupted: !!analysis.corrupted,
+        };
+      }
+
       if (typeof analyzeDoneSignalText === 'function') {
-        const result = analyzeDoneSignalText(replyText, { doneSignal });
+        const result = analyzeDoneSignalText(replyText, { doneSignal: signal });
         if (result.corrupted) {
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_SIGNAL][CORRUPTED_ASSISTANT_SIGNAL] length=${String(replyText || '').length}`,
@@ -3184,13 +3341,6 @@ const AutoQueueModule = (() => {
         };
       }
 
-      const signal = String(doneSignal || TASK_DONE_SIGNAL).trim();
-      if (typeof hasAssistantDoneSignalInText === 'function') {
-        return {
-          matched: hasAssistantDoneSignalInText(replyText, { doneSignal: signal }),
-          corrupted: false,
-        };
-      }
       const checked = String(replyText || '').replace(/\r\n/g, '\n').trim();
       const lines = checked
         .split('\n')
@@ -3417,229 +3567,26 @@ const AutoQueueModule = (() => {
       return profile.tasks.find((item) => item && item.id === taskId) || null;
     }
 
-    function findChatGPTNewChatButton() {
-      const candidates = [];
-
-      const selectors = [
-        'a[href="/"]',
-        'a[href="/?"]',
-        'a[href^="/?"]',
-        'a[aria-label*="新聊天"]',
-        'button[aria-label*="新聊天"]',
-        'a[aria-label*="New chat"]',
-        'button[aria-label*="New chat"]',
-        '[data-testid*="new-chat"]',
-        '[data-testid*="new-chat-button"]',
-        'a[data-testid="create-new-chat-button"]',
-        '[data-testid="create-new-chat-button"]',
-        '[data-sidebar-action="new-chat"]',
-      ];
-
-      for (const selector of selectors) {
-        document.querySelectorAll(selector).forEach((el) => candidates.push(el));
-      }
-
-      document.querySelectorAll('a, button, [role="button"]').forEach((el) => {
-        const text = String(el.textContent || '').trim();
-        const aria = String(el.getAttribute('aria-label') || '').trim();
-        const title = String(el.getAttribute('title') || '').trim();
-        const merged = `${text} ${aria} ${title}`;
-
-        if (
-          merged.includes('新聊天')
-          || merged.includes('New chat')
-        ) {
-          candidates.push(el);
-        }
-      });
-
-      const unique = Array.from(new Set(candidates));
-
-      for (const el of unique) {
-        if (!el) continue;
-        if (el.closest('#cgpt-toolbox-root')) continue;
-        if (el.closest('[id*="cgpt"]')) continue;
-        if (el.closest('[class*="toolbox"]')) continue;
-        if (el.id === 'cgpt-open-chatgpt-home') continue;
-
-        const text = String(el.textContent || '').trim();
-        const aria = String(el.getAttribute('aria-label') || '').trim();
-        const title = String(el.getAttribute('title') || '').trim();
-        const merged = `${text} ${aria} ${title}`;
-        if (text === '回到首页' || merged.includes('回到首页')) continue;
-
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-
-        if (style.display === 'none' || style.visibility === 'hidden') continue;
-        if (rect.width <= 0 || rect.height <= 0) continue;
-
-        return el;
-      }
-
-      return null;
-    }
-
     function getCurrentConversationKey() {
-      const url = new URL(window.location.href);
-      const match = url.pathname.match(/\/c\/([^/]+)/);
-      if (match) {
-        return `conversation:${match[1]}`;
+      if (typeof getCurrentConversationKeyUnified === 'function') {
+        return getCurrentConversationKeyUnified();
       }
-      return `path:${url.pathname}${url.search}`;
-    }
-
-    function clickElementLikeUserForAutoQueue(el, reasonText) {
-      if (!(el instanceof HTMLElement)) {
-        throw new Error('new_chat_click_target_not_html_element');
-      }
-
-      const rect = el.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {
-        throw new Error('new_chat_click_target_not_visible');
-      }
-
-      el.scrollIntoView({
-        block: 'center',
-        inline: 'center',
-        behavior: 'instant',
-      });
-
-      if (typeof el.focus === 'function') {
-        el.focus({ preventScroll: true });
-      }
-
-      try {
-        if (typeof el.click === 'function') {
-          el.click();
-          return {
-            ok: true,
-            method: 'native_click',
-          };
-        }
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] auto queue native new chat click failed', err);
-        ToolboxShell.appendLog(
-          `[AUTOQ][NEW_CHAT][NATIVE_CLICK_FAILED] reason=${reasonText || '-'} error=${errText}`,
-        );
-      }
-
-      const nextRect = el.getBoundingClientRect();
-      const x = nextRect.left + nextRect.width / 2;
-      const y = nextRect.top + nextRect.height / 2;
-
-      const common = {
-        bubbles: true,
-        cancelable: true,
-        clientX: x,
-        clientY: y,
-        button: 0,
-        buttons: 1,
-      };
-
-      const eventWindow = el.ownerDocument && el.ownerDocument.defaultView
-        ? el.ownerDocument.defaultView
-        : window;
-
-      if (eventWindow.PointerEvent) {
-        el.dispatchEvent(new eventWindow.PointerEvent('pointerdown', common));
-        el.dispatchEvent(new eventWindow.PointerEvent('pointerup', common));
-      }
-
-      el.dispatchEvent(new eventWindow.MouseEvent('mousedown', common));
-      el.dispatchEvent(new eventWindow.MouseEvent('mouseup', common));
-      el.dispatchEvent(new eventWindow.MouseEvent('click', common));
-
-      return {
-        ok: true,
-        method: 'mouse_events',
-      };
+      return '';
     }
 
     async function clickChatGPTNewChatInPage(reason) {
       const reasonText = reason || 'autoq-next-task';
-      const beforeKey = getCurrentConversationKey();
 
-      ToolboxShell.appendLog(`[AUTOQ][NEW_CHAT][START] reason=${reasonText} before=${beforeKey}`);
-
-      const startedAt = Date.now();
-      let lastKey = beforeKey;
-      let lastClickAt = 0;
-      let clickAttempt = 0;
-      let lastClickError = '';
-
-      while (Date.now() - startedAt < 15000) {
-        const currentKey = getCurrentConversationKey();
-        lastKey = currentKey;
-
-        const capability = typeof getPageCapability === 'function'
-          ? getPageCapability(`new-chat-wait:${reasonText}`)
-          : null;
-
-        const responseState = capability && capability.response_state
-          ? capability.response_state
-          : '';
-
-        const inputable = capability && capability.can_accept_input ? true : false;
-        const sendable = capability && capability.can_send_now ? true : false;
-        const leftOldConversation = currentKey !== beforeKey;
-
-        if (leftOldConversation && inputable && responseState !== 'generating') {
-          ToolboxShell.appendLog(
-            `[AUTOQ][NEW_CHAT][READY] reason=${reasonText} before=${beforeKey} after=${currentKey} inputable=${inputable} sendable=${sendable} response_state=${responseState}`,
-          );
-
-          ToolboxShell.setStatus('新聊天已就绪，准备发送下一个任务');
-
-          return {
-            ok: true,
-            beforeKey,
-            afterKey: currentKey,
-          };
-        }
-
-        if (!leftOldConversation && Date.now() - lastClickAt >= 1200) {
-          lastClickAt = Date.now();
-          clickAttempt += 1;
-
-          const btn = findChatGPTNewChatButton();
-
-          if (!btn) {
-            ToolboxShell.appendLog(
-              `[AUTOQ][NEW_CHAT][BUTTON_NOT_FOUND_RETRY] reason=${reasonText} attempt=${clickAttempt}`,
-            );
-          } else {
-            try {
-              const clickResult = clickElementLikeUserForAutoQueue(btn, reasonText);
-              ToolboxShell.appendLog(
-                `[AUTOQ][NEW_CHAT][CLICKED] reason=${reasonText} attempt=${clickAttempt} method=${clickResult && clickResult.method ? clickResult.method : '-'}`,
-              );
-            } catch (err) {
-              const errText = err && err.message ? err.message : String(err);
-              lastClickError = errText;
-              console.error('[ChatGPT toolbox] click new chat failed', err);
-              ToolboxShell.appendLog(
-                `[AUTOQ][NEW_CHAT][CLICK_FAILED_RETRY] reason=${reasonText} attempt=${clickAttempt} error=${errText}`,
-              );
-            }
-          }
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 250));
+      if (typeof switchToNewChatUnified === 'function') {
+        return switchToNewChatUnified(reasonText, {
+          statusOnReady: '新聊天已就绪，准备发送下一个任务',
+          statusOnTimeout: '切换新聊天超时，已停止批量任务组',
+        });
       }
-
-      ToolboxShell.appendLog(
-        `[AUTOQ][NEW_CHAT][TIMEOUT] reason=${reasonText} before=${beforeKey} last=${lastKey} attempts=${clickAttempt} last_error=${lastClickError || '-'}`,
-      );
-      ToolboxShell.setStatus('切换新聊天超时，已停止批量任务组');
 
       return {
         ok: false,
-        reason: lastClickError ? 'new-chat-click-timeout-after-error' : 'new-chat-timeout',
-        beforeKey,
-        afterKey: lastKey,
-        error: lastClickError,
+        reason: 'new-chat-switch-unified-unavailable',
       };
     }
 
@@ -3852,39 +3799,10 @@ const AutoQueueModule = (() => {
       );
     }
 
-    const RETRYABLE_SEND_FAILURE_REASONS = new Set([
-      'composer_text_not_ready',
-      'composer_text_not_synced',
-      'send_button_not_ready_after_text',
-      'send_button_not_found',
-      'send_button_disabled',
-      'button_disabled',
-      'send_button_wait_timeout',
-      'voice_button_only',
-      'voice_button',
-      'attachment_ready_but_send_button_missing',
-      'attachment_ready_waiting_text',
-      'payload_ready_but_send_button_missing',
-      'composer_text_lost',
-      'composer_text_lost_after_attachment',
-      'composer_text_lost_after_rewrite',
-      'attachment_not_ready',
-      'attachment_processing',
-      'send_click_not_confirmed',
-      'send_not_confirmed',
-      'input_not_cleared',
-      'no_user_bubble_after_click',
-      'no_send_progress_after_actions',
-      'no_progress',
-      'composer_not_ready',
-      'assistant_busy',
-      'background-throttled',
-      'send_button_not_found_enter_fallback_failed',
-      'enter_fallback_failed',
-      'stable_send_timeout',
-    ]);
-
     function normalizeSendFailureReason(reason) {
+      if (typeof sendPipelineNormalizeFailureReason === 'function') {
+        return sendPipelineNormalizeFailureReason(reason);
+      }
       const raw = String(reason || '').trim();
       if (!raw) {
         return { raw: '', normalized: '' };
@@ -3901,11 +3819,13 @@ const AutoQueueModule = (() => {
 
     function isRetryableSendFailureReason(reason) {
       const { raw, normalized } = normalizeSendFailureReason(reason);
-      const retryable = (
-        RETRYABLE_SEND_FAILURE_REASONS.has(normalized)
-        || RETRYABLE_SEND_FAILURE_REASONS.has(raw)
-        || raw.startsWith('send_not_confirmed:')
-      );
+      let retryable = false;
+
+      if (typeof sendPipelineIsRetryableReason === 'function') {
+        retryable = sendPipelineIsRetryableReason(normalized) || sendPipelineIsRetryableReason(raw);
+      } else {
+        console.error('[ChatGPT toolbox] isRetryableSendFailureReason: sendPipelineIsRetryableReason missing');
+      }
 
       ToolboxShell.appendLog(
         `[AUTOQ][RETRYABLE_REASON_CHECK] rawReason=${raw || '-'} normalizedReason=${normalized || '-'} retryable=${retryable ? 1 : 0}`,
@@ -7108,8 +7028,8 @@ const AutoQueueModule = (() => {
 
       if (state.uploadingFromAutoQueue) {
         const reason = 'already-uploading';
-        ToolboxShell.appendLog(`[AUTOQ][UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
-        log(`[AUTOQ][UPLOAD][CLICK_IGNORED] reason=${reason}`);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason}`);
         state.autoQueueUploadStatus = 'uploading';
         updateStatus('start-upload-click-already-uploading');
         return;
@@ -7117,8 +7037,8 @@ const AutoQueueModule = (() => {
 
       if (state.running && config.promptMode === 'task') {
         const reason = 'batch-task-running';
-        ToolboxShell.appendLog(`[AUTOQ][UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
-        log(`[AUTOQ][UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
 
         state.autoQueueUploadStatus = 'blocked';
         state.autoQueueUploadStats = {
@@ -7134,12 +7054,12 @@ const AutoQueueModule = (() => {
 
       if (
         typeof UploadModule === 'undefined'
-        || typeof UploadModule.startUploadFromCurrentQueue !== 'function'
+        || typeof UploadModule.startManualUploadOnlyFlow !== 'function'
       ) {
-        const reason = 'UploadModule.startUploadFromCurrentQueue 不存在';
-        console.error('[AUTOQ][UPLOAD][FAILED]', reason);
-        ToolboxShell.appendLog(`[AUTOQ][UPLOAD][FAILED] reason=${reason}`);
-        log(`[AUTOQ][UPLOAD][FAILED] reason=${reason}`);
+        const reason = 'UploadModule.startManualUploadOnlyFlow 不存在';
+        console.error('[AUTOQ][MANUAL_UPLOAD][FAILED]', reason);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${reason}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${reason}`);
         state.autoQueueUploadStatus = 'failed';
         state.autoQueueUploadStats = {
           uploaded: 0,
@@ -7152,17 +7072,15 @@ const AutoQueueModule = (() => {
       }
 
       state.uploadingFromAutoQueue = true;
-      setAutoQueuePhase('uploading', 'upload-start');
       state.autoQueueUploadStatus = 'uploading';
       updateStatus();
-      ToolboxShell.appendLog('[AUTOQ][UPLOAD][START]');
-      log('[AUTOQ][UPLOAD][START]');
+      ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][START] phase=${phase}`);
+      log(`[AUTOQ][MANUAL_UPLOAD][START] phase=${phase}`);
 
       try {
-        const result = await startUploadFromCurrentQueueWithTaskUploadRateLimit({
+        const result = await UploadModule.startManualUploadOnlyFlow({
           source: 'autoqueue-start-upload-button',
-          kind: 'manual-start-upload',
-          shouldStop: () => !state.running && !state.uploadingFromAutoQueue,
+          shouldStop: () => !state.uploadingFromAutoQueue,
         });
 
         const uploadedCount = Number(result && result.uploadedCount) || 0;
@@ -7178,23 +7096,27 @@ const AutoQueueModule = (() => {
         };
 
         if (reason === 'no-files') {
-          log('[AUTOQ][UPLOAD][NO_FILES]');
+          log('[AUTOQ][MANUAL_UPLOAD][NO_FILES]');
           state.autoQueueUploadStatus = 'no-files';
         } else if (reason === 'cancelled' || (result && result.cancelled)) {
-          log('[AUTOQ][UPLOAD][CANCELLED]');
+          log('[AUTOQ][MANUAL_UPLOAD][CANCELLED]');
           state.autoQueueUploadStatus = 'idle';
         } else if (result && result.ok) {
-          log(`[AUTOQ][UPLOAD][DONE] uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount}`);
+          log(`[AUTOQ][MANUAL_UPLOAD][DONE] uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount}`);
+          ToolboxShell.appendLog(
+            `[AUTOQ][MANUAL_UPLOAD][DONE] uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount}`,
+          );
           state.autoQueueUploadStatus = 'done';
         } else {
-          log(`[AUTOQ][UPLOAD][FAILED] reason=${reason || 'upload-failed'}`);
+          log(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${reason || 'upload-failed'}`);
+          ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${reason || 'upload-failed'}`);
           state.autoQueueUploadStatus = 'failed';
         }
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
-        console.error('[AUTOQ][UPLOAD][FAILED]', error);
-        ToolboxShell.appendLog(`[AUTOQ][UPLOAD][FAILED] reason=${errText}`);
-        log(`[AUTOQ][UPLOAD][FAILED] reason=${errText}`);
+        console.error('[AUTOQ][MANUAL_UPLOAD][FAILED]', error);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${errText}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][FAILED] reason=${errText}`);
         state.autoQueueUploadStatus = 'failed';
         state.autoQueueUploadStats = {
           uploaded: 0,
@@ -7204,6 +7126,9 @@ const AutoQueueModule = (() => {
         };
       } finally {
         state.uploadingFromAutoQueue = false;
+        const phaseAfter = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][PHASE_UNCHANGED] phase=${phaseAfter}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][PHASE_UNCHANGED] phase=${phaseAfter}`);
         updateStatus();
       }
     }
@@ -7414,11 +7339,12 @@ const AutoQueueModule = (() => {
       logAutoqProgressStatusIfChanged(progressSnapshot, refreshReason);
 
       const taskInfo = progressSnapshot.taskInfo;
-      const taskProgress = progressSnapshot.taskProgress;
+      const taskProgressRaw = progressSnapshot.taskProgress;
       const pageTurnText = progressSnapshot.pageTurnText;
-      const continueDisplay = progressSnapshot.continueStatus.display;
-      const replyClassifyStatus = progressSnapshot.continueStatus.classifyStatus || '-';
-      const replyClassifyReason = progressSnapshot.continueStatus.classifyReason || '-';
+      const continueStatus = progressSnapshot.continueStatus;
+      const continueDisplay = formatStatusFraction(continueStatus.continueCount, continueStatus.maxText);
+      const replyClassifyStatus = continueStatus.classifyStatus || '-';
+      const replyClassifyReason = continueStatus.classifyReason || '-';
       const lastStopReasonText = state.lastTaskBatchStopReason
         ? String(state.lastTaskBatchStopReason.reason || '-')
         : '-';
@@ -7428,9 +7354,6 @@ const AutoQueueModule = (() => {
       )
         ? `（终态 ${replyClassifyStatus}）`
         : '';
-      const taskName = taskInfo && taskInfo.currentTask
-        ? taskInfo.currentTask.title
-        : (taskInfo && taskInfo.total ? '（等待）' : '-');
       const taskStepText = progressSnapshot.taskStepText;
       const messageRateLimit = progressSnapshot.messageRateLimitStatus
         || progressSnapshot.rateLimitStatus;
@@ -7459,66 +7382,80 @@ const AutoQueueModule = (() => {
         runStateText = '发送中';
       } else if (running) {
         if (inSendRetry) {
-          const retryReason = state.taskRun
-            ? String(state.taskRun.lastSendRetryReason || '-')
-            : '-';
-          runStateText = `发送暂不可用，正在重试：${retryReason}`;
+          runStateText = '发送重试中';
         } else if (state.waitingReply) {
           runStateText = '等待回复';
         } else {
-          runStateText = '发送中';
+          runStateText = '运行中';
         }
-      } else if (taskStepKeyForStatus === 'stopped') {
-        runStateText = lastStopReasonText !== '-'
-          ? `已停止：${lastStopReasonText}`
-          : '已停止';
       } else {
         runStateText = '已停止';
       }
+
+      let taskProgress = '-';
+      if (taskInfo && taskInfo.total) {
+        const taskTotal = Math.max(0, Number(taskInfo.total) || 0);
+        const taskDoneCount = Math.min(
+          taskTotal,
+          Math.max(0, Number(taskInfo.doneCount) || 0),
+        );
+        if (running) {
+          const taskCurrentIndex = Math.min(
+            taskTotal,
+            Math.max(1, Number(taskInfo.progressIndex) || taskDoneCount + 1),
+          );
+          taskProgress = formatStatusFraction(taskCurrentIndex, taskTotal);
+        } else {
+          taskProgress = formatStatusFraction(taskDoneCount, taskTotal);
+        }
+      } else if (taskProgressRaw && taskProgressRaw !== '-') {
+        taskProgress = formatQuotaDisplayText(taskProgressRaw);
+      }
+
       const uploadStatusText = getAutoQueueUploadStatusText();
       const uploading = !!state.uploadingFromAutoQueue;
+      const currentTask = typeof getCurrentRunningTask === 'function'
+        ? getCurrentRunningTask()
+        : null;
+      const taskName = currentTask ? String(currentTask.title || '-') : '-';
 
       ensureMainLiteStructure();
-      const gridEl = mainLiteEl ? qs('#cgpt-autoq-main-lite-grid', mainLiteEl) : null;
+      const panelContentEl = mainLiteEl ? qs('#cgpt-autoq-status-panel-content', mainLiteEl) : null;
 
-      const liteHtml = config.promptMode === 'task'
-        ? `
-      <div>模式：${escapeHtml(modeText)}</div>
-      <div>任务进度：${escapeHtml(taskProgress)}</div>
-      <div>任务：${escapeHtml(taskName)}</div>
-      <div>页面轮次：${escapeHtml(pageTurnText)}</div>
-      <div>状态：${escapeHtml(runStateText)}</div>
-      <div>当前任务追问轮次：${escapeHtml(continueDisplay)}</div>
-      <div>终态识别：${escapeHtml(replyClassifyStatus)}（${escapeHtml(replyClassifyReason)}）</div>
-      <div>当前累计发送对话：${escapeHtml(taskSentDialogueDisplay)}</div>
-      <div>上传状态：${escapeHtml(uploadStatusText)}</div>
-      <div>当前步骤：${escapeHtml(taskStepText)}</div>
-      <div>最近停止原因：${escapeHtml(lastStopReasonText)}${escapeHtml(lastStopClassifyHint)}</div>
-      <div>发送限速：${escapeHtml(rateLimitDisplay)}</div>
-      <div>上传限速：${escapeHtml(uploadRateLimitDisplay)}</div>
-      <div>自动上传节奏：${escapeHtml(
-    progressSnapshot.autoUploadStrategy && progressSnapshot.autoUploadStrategy.enabled
-      ? `已计入 ${progressSnapshot.autoUploadDialogueCount} 次对话，下次第 ${progressSnapshot.taskAutoUploadNextAt} 次触发上传；${progressSnapshot.autoUploadStrategy.summary}`
-      : (progressSnapshot.autoUploadStrategy ? progressSnapshot.autoUploadStrategy.summary : '未启用')
-  )}</div>
-      <div>自动换新聊天：${escapeHtml(
-    progressSnapshot.rotationSettings && progressSnapshot.rotationSettings.enabled
-      ? `当前页 ${progressSnapshot.currentPageDialogueCount}/${progressSnapshot.rotationSettings.threshold}，已切换 ${progressSnapshot.rotationCount} 次`
-      : '未启用'
-  )}</div>`
-        : `
-      <div>模式：${escapeHtml(modeText)}</div>
-      <div>页面轮次：${escapeHtml(pageTurnText)}</div>
-      <div>列表：${escapeHtml(listName || '-')}</div>
-      <div>当前任务追问轮次：-</div>
-      <div>状态：${escapeHtml(running ? '运行中' : '已停止')}</div>
-      <div>当前步骤：-</div>`;
+      const panelHtml = config.promptMode === 'task'
+        ? buildBatchTaskStatusPanelHtml({
+          taskProgress,
+          pageTurnText,
+          taskSentDialogueDisplay,
+          runStateText,
+          continueDisplay,
+          replyClassifyStatus,
+          replyClassifyReason,
+          uploadStatusText,
+          taskStepText,
+          lastStopReasonText,
+          lastStopClassifyHint,
+          rateLimitDisplay,
+          uploadRateLimitDisplay,
+          progressSnapshot,
+          taskName,
+        })
+        : buildLiteStatusPanelHtml({
+          modeText,
+          pageTurnText,
+          listName,
+          running,
+        });
 
-      if (gridEl) {
-        gridEl.innerHTML = liteHtml;
+      if (panelContentEl) {
+        panelContentEl.innerHTML = panelHtml;
       } else if (mainLiteEl) {
-        mainLiteEl.innerHTML = `<div class="cgpt-autoq-status-grid cgpt-autoq-main-lite-grid">${liteHtml}</div>`;
+        mainLiteEl.innerHTML = '';
         ensureMainLiteStructure();
+        const contentEl = qs('#cgpt-autoq-status-panel-content', mainLiteEl);
+        if (contentEl) {
+          contentEl.innerHTML = panelHtml;
+        }
       }
 
       syncRuntimeTaskPhase();
@@ -7737,15 +7674,26 @@ const AutoQueueModule = (() => {
 
     function flashSendOnceThenIdle(flashPhase, flashText, delayMs = 1200) {
       setSendOnceTaskPhase(flashPhase);
+      const flashRunId = state.sendOnceTask ? String(state.sendOnceTask.runId || '') : '';
       const sendOnceBtn = root ? qs('#cgpt-autoq-send-once', root) : null;
       if (sendOnceBtn && typeof ButtonState !== 'undefined' && typeof ButtonState.flashButtonThenIdle === 'function') {
         const idleText = sendOnceBtn.dataset.cgptIdleText
           || (config.promptMode === 'task' ? '只发送初始指令一次' : '发送一次');
         const flashFn = flashPhase === 'success' ? setButtonSuccess : setButtonFailed;
-        ButtonState.flashButtonThenIdle(sendOnceBtn, flashFn, flashText, idleText, delayMs);
+        ButtonState.flashButtonThenIdle(sendOnceBtn, flashFn, flashText, idleText, delayMs, {
+          expectedRunId: flashRunId,
+          getCurrentRunId: () => (state.sendOnceTask && state.sendOnceTask.runId) || '',
+          getCurrentPhase: () => (state.sendOnceTask && state.sendOnceTask.phase) || 'idle',
+        });
       }
       window.setTimeout(() => {
-        setSendOnceTaskPhase('idle');
+        const currentPhase = String(state.sendOnceTask && state.sendOnceTask.phase || 'idle')
+          .trim()
+          .toLowerCase();
+        const flashNormalized = String(flashPhase || '').trim().toLowerCase();
+        if (currentPhase === flashNormalized || currentPhase === 'success' || currentPhase === 'failed') {
+          setSendOnceTaskPhase('idle');
+        }
       }, delayMs);
     }
 
@@ -7783,8 +7731,8 @@ const AutoQueueModule = (() => {
       showAutoQueueStopButton();
 
       if (stopRequested || phase === AUTO_QUEUE_PHASES.CANCELLED) {
-        setButtonCancelled(stopBtn, '正在停止...', {
-          title: '正在停止队列',
+        setButtonCancelled(stopBtn, '停止任务', {
+          title: '停止请求已提交，正在等待队列退出',
           allowCancel: false,
           disabled: true,
           reason,
@@ -7885,6 +7833,9 @@ const AutoQueueModule = (() => {
                 '已完成',
                 idleStartText,
                 900,
+                {
+                  getCurrentPhase: () => String(state.phase || AUTO_QUEUE_PHASES.IDLE).trim().toLowerCase(),
+                },
               );
             } else {
               setButtonIdle(startBtn, idleStartText, { title: '已完成', reason });
@@ -7908,8 +7859,8 @@ const AutoQueueModule = (() => {
           hideAutoQueueStopButton();
 
           if (stopRequested || phase === AUTO_QUEUE_PHASES.CANCELLED) {
-            setButtonCancelled(startBtn, '正在停止...', {
-              title: '正在停止队列',
+            setButtonCancelled(startBtn, idleStartText, {
+              title: '停止请求已提交，正在等待队列退出',
               allowCancel: false,
               disabled: true,
               reason,
@@ -7977,10 +7928,11 @@ const AutoQueueModule = (() => {
         } else if (state.uploadingFromAutoQueue && typeof setToolboxButtonState === 'function') {
           startUploadBtn.classList.remove('cgpt-task-running-indicator');
           setToolboxButtonState(startUploadBtn, {
-            phase: 'disabled',
+            phase: ButtonState.Phase.DANGER,
             text: '上传中',
             title: '正在上传文件，请等待上传结束',
             disabled: true,
+            allowCancel: false,
             reason: `autoq:${reason || 'uploading'}`,
           });
         } else if (
@@ -8034,6 +7986,13 @@ const AutoQueueModule = (() => {
       if (state.running) return;
       if (state.uploadingFromAutoQueue) return;
 
+      if (AUTO_QUEUE_TERMINAL_PHASES.has(state.phase)) {
+        ToolboxShell.appendLog(
+          `[AUTO_QUEUE][RESET_TERMINAL_BEFORE_START] from=${state.phase || '-'}`,
+        );
+        transitionAutoQueuePhase(AUTO_QUEUE_PHASES.IDLE, 'reset-before-start', { force: true });
+      }
+
       const frozenGroupId = config.promptMode === 'task' ? resolveRunGroupIdBeforeStart() : '';
       if (config.promptMode === 'task' && !frozenGroupId) {
         transitionAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, 'active upload group missing', { force: true });
@@ -8073,7 +8032,7 @@ const AutoQueueModule = (() => {
           `[AUTO_QUEUE][BATCH_START_CLICK] mode=task group_id=${profile ? profile.id : '-'} `
           + `task_id=${task ? task.id : '-'} task_title=${task ? task.title : '-'}`,
         );
-        ToolboxShell.setStatus('批量任务组模式已启动');
+        ToolboxShell.setStatus('批量任务已启动');
       } else {
         log(`开始运行，队列 ${state.queue.length} 条`);
         ToolboxShell.setStatus('自动指令队列已开启');
@@ -10616,12 +10575,10 @@ const AutoQueueModule = (() => {
       root.id = 'cgpt-autoq-module';
       root.innerHTML = `
         <div class="cgpt-section cgpt-autoq-section">
-          <div class="cgpt-section-title">自动指令队列</div>
-
           <div class="cgpt-autoq-mode-tabs">
             <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'continue' ? ' active' : ''}" data-autoq-mode="continue">继续模式</button>
             <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'list' ? ' active' : ''}" data-autoq-mode="list">列表模式</button>
-            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'task' ? ' active' : ''}" data-autoq-mode="task">批量任务组模式</button>
+            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'task' ? ' active' : ''}" data-autoq-mode="task">批量任务</button>
           </div>
 
           <div class="cgpt-autoq-main-lite" id="cgpt-autoq-main-lite"></div>

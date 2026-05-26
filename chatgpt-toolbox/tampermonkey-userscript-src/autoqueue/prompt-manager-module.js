@@ -825,6 +825,7 @@
 
       const managePanel = qs('#cgpt-prompt-manage-panel', root);
       const displayPanel = qs('#cgpt-prompt-display-panel', root);
+      const manageTools = qs('#cgpt-prompt-manage-tools', root);
 
       if (managePanel) {
         managePanel.style.display = normalized === 'manage' ? '' : 'none';
@@ -832,6 +833,10 @@
 
       if (displayPanel) {
         displayPanel.style.display = normalized === 'display' ? '' : 'none';
+      }
+
+      if (manageTools) {
+        manageTools.style.display = normalized === 'manage' ? '' : 'none';
       }
     }
 
@@ -951,7 +956,7 @@
         const copyBtn = createActionButton('复制');
         copyBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          const ok = await copyTextToClipboard(item.content);
+          const ok = await copyTextUnified(item.content, 'prompt-manager:copy-item');
           if (ok) {
             setStatus(`已复制：${item.title}`);
           } else {
@@ -2086,6 +2091,14 @@
     }
 
     function bindEvents() {
+      if (!root) return;
+      if (root.dataset.promptManagerEventsBound === '1') {
+        ToolboxShell.appendLog('[PROMPT_MANAGER][BIND_EVENTS_SKIP_DUPLICATE]');
+        return;
+      }
+      root.dataset.promptManagerEventsBound = '1';
+      ToolboxShell.appendLog('[PROMPT_MANAGER][BIND_EVENTS_ONCE]');
+
       bindClick(root, '#cgpt-prompt-new-quick-btn', () => openEditor(null), {
         moduleName: 'PromptManagerModule',
         bindMissingLog: '[PROMPT][bind-missing] #cgpt-prompt-new-quick-btn',
@@ -2143,7 +2156,7 @@
       const categoryAddBtn = qs('#cgpt-prompt-category-add', root);
 
       if (categoryAddBtn) {
-        categoryAddBtn.addEventListener('click', () => {
+        bindOnce(categoryAddBtn, 'click', () => {
           addPromptCategory();
         });
       }
@@ -2151,7 +2164,7 @@
       const categoryNameInput = qs('#cgpt-prompt-category-name', root);
 
       if (categoryNameInput) {
-        categoryNameInput.addEventListener('keydown', (e) => {
+        bindOnce(categoryNameInput, 'keydown', (e) => {
           if (e.key !== 'Enter') return;
 
           e.preventDefault();
@@ -2162,7 +2175,7 @@
       const categoryManageList = qs('#cgpt-prompt-category-manage-list', root);
 
       if (categoryManageList) {
-        categoryManageList.addEventListener('click', (e) => {
+        DomUtil.bindOnce(categoryManageList, 'click', (e) => {
           const target = e.target instanceof HTMLElement ? e.target : null;
 
           if (!target) return;
@@ -2183,12 +2196,12 @@
             e.stopPropagation();
             deletePromptCategory(deleteBtn.getAttribute('data-category-delete'));
           }
-        });
+        }, 'bound_prompt_category_manage_list_click');
       }
 
       const subtabBar = qs('#cgpt-prompt-subtabs', root);
       if (subtabBar) {
-        subtabBar.addEventListener('click', (e) => {
+        DomUtil.bindOnce(subtabBar, 'click', (e) => {
           const btn = e.target instanceof HTMLElement
             ? e.target.closest('[data-prompt-subtab]')
             : null;
@@ -2206,7 +2219,7 @@
           );
 
           render();
-        });
+        }, 'bound_prompt_subtab_bar_click');
       }
 
       [
@@ -2217,7 +2230,7 @@
         const btn = qs(selector, root);
         if (!btn) return;
 
-        btn.addEventListener('click', () => {
+        bindOnce(btn, 'click', () => {
           applyPromptDisplaySelection(mode);
         });
       });
@@ -2231,7 +2244,7 @@
         const el = qs(selector, root);
         if (!el) return;
 
-        el.addEventListener('change', () => {
+        bindOnce(el, 'change', () => {
           const cfg = readPromptDisplayConfigFromUi();
           savePromptDisplayConfig(cfg, 'display-option-change');
           renderPromptDisplayPanel();
@@ -2240,7 +2253,7 @@
 
       const promptDisplayList = qs('#cgpt-prompt-display-list', root);
       if (promptDisplayList) {
-        promptDisplayList.addEventListener('change', (e) => {
+        DomUtil.bindOnce(promptDisplayList, 'change', (e) => {
           const target = e.target;
           if (!(target instanceof HTMLInputElement)) return;
           if (!target.matches('[data-prompt-display-id]')) return;
@@ -2248,26 +2261,25 @@
           const cfg = readPromptDisplayConfigFromUi();
           savePromptDisplayConfig(cfg, 'display-prompt-check-change');
           renderPromptDisplayPanel();
-        });
+        }, 'bound_prompt_display_list_change');
       }
     }
 
     const PROMPT_MODULE_HTML = `
         <div class="cgpt-section">
-          <div class="cgpt-section-title">Prompt 管理</div>
-          <div id="cgpt-prompt-manage-tools" class="cgpt-grid-4" style="margin-top:8px;">
-            <button type="button" class="cgpt-btn primary" id="cgpt-prompt-new-quick-btn">+ 新建 Prompt</button>
-            <button type="button" class="cgpt-btn" id="cgpt-prompt-export-btn">导出</button>
-            <button type="button" class="cgpt-btn" id="cgpt-prompt-import-btn">导入</button>
-            <button type="button" class="cgpt-btn danger" id="cgpt-prompt-reset-btn">重置</button>
-          </div>
-
           <div id="cgpt-prompt-subtabs" class="cgpt-prompt-subtabs">
             <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="manage">Prompt 管理</button>
             <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="display">Prompt 展示</button>
           </div>
 
           <div id="cgpt-prompt-manage-panel" class="cgpt-prompt-panel">
+            <div id="cgpt-prompt-manage-tools" class="cgpt-grid-4" style="margin-top:8px;">
+              <button type="button" class="cgpt-btn primary" id="cgpt-prompt-new-quick-btn">+ 新建 Prompt</button>
+              <button type="button" class="cgpt-btn" id="cgpt-prompt-export-btn">导出</button>
+              <button type="button" class="cgpt-btn" id="cgpt-prompt-import-btn">导入</button>
+              <button type="button" class="cgpt-btn danger" id="cgpt-prompt-reset-btn">重置</button>
+            </div>
+
             <div id="cgpt-prompt-category-bar" class="cgpt-prompt-category-bar"></div>
             <input id="cgpt-prompt-search" class="cgpt-input" placeholder="搜索标题、分类或内容...">
             <div id="cgpt-prompt-list" class="cgpt-prompt-list"></div>

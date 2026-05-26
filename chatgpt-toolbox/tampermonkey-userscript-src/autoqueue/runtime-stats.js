@@ -89,6 +89,25 @@
       }
     }
 
+    const CGPT_TIME_EMPTY_PLACEHOLDER = '\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0';
+
+    function formatTimeTextForUi(value) {
+      if (value === null || value === undefined) {
+        return CGPT_TIME_EMPTY_PLACEHOLDER;
+      }
+      const text = String(value).trim();
+      if (!text) {
+        return CGPT_TIME_EMPTY_PLACEHOLDER;
+      }
+      if (text === '-' || text === '--' || text === '--:--' || text === '--:--:--') {
+        return CGPT_TIME_EMPTY_PLACEHOLDER;
+      }
+      if (text === 'null' || text === 'undefined' || text === 'NaN' || text === 'NaN:NaN:NaN') {
+        return CGPT_TIME_EMPTY_PLACEHOLDER;
+      }
+      return text;
+    }
+
     function formatDurationMs(ms) {
       const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
       const minutes = Math.floor(totalSeconds / 60);
@@ -114,11 +133,8 @@
     }
 
     function formatDurationDisplay(ms, options = {}) {
-      if (options.notStarted) {
-        return '--:--:--';
-      }
-      if (options.pending) {
-        return '--:--:--';
+      if (options.notStarted || options.pending) {
+        return '';
       }
       return formatDuration(ms);
     }
@@ -257,8 +273,8 @@
       const avgMs = getAverageDurationMs();
       const etaMs = getEstimatedRemainingMs();
 
-      const line1 = `计时：运行 ${formatDuration(appMs)}｜批量 ${formatDurationDisplay(batchMs, { notStarted: !runtimeStats.batchStartedAt })}｜当前 ${formatDurationDisplay(currentMs, { pending: !runtimeStats.currentTaskStartedAt })}`;
-      const line2 = `耗时：上次 ${formatDurationDisplay(runtimeStats.lastTaskDurationMs, { pending: !runtimeStats.lastTaskDurationMs })}｜平均 ${formatDurationDisplay(avgMs, { pending: !runtimeStats.completedTaskCount })}｜预计剩余 ${formatDurationDisplay(etaMs, { pending: !runtimeStats.completedTaskCount })}｜完成 ${runtimeStats.completedTaskCount}/${runtimeStats.totalTaskCount || 0}`;
+      const line1 = `计时：运行 ${formatTimeTextForUi(formatDuration(appMs))}｜批量 ${formatTimeTextForUi(formatDurationDisplay(batchMs, { notStarted: !runtimeStats.batchStartedAt }))}｜当前 ${formatTimeTextForUi(formatDurationDisplay(currentMs, { pending: !runtimeStats.currentTaskStartedAt }))}`;
+      const line2 = `耗时：上次 ${formatTimeTextForUi(formatDurationDisplay(runtimeStats.lastTaskDurationMs, { pending: !runtimeStats.lastTaskDurationMs }))}｜平均 ${formatTimeTextForUi(formatDurationDisplay(avgMs, { pending: !runtimeStats.completedTaskCount }))}｜预计剩余 ${formatTimeTextForUi(formatDurationDisplay(etaMs, { pending: !runtimeStats.completedTaskCount }))}｜完成 ${runtimeStats.completedTaskCount}/${runtimeStats.totalTaskCount || 0}`;
       const phaseLine = `当前任务阶段：${runtimeStats.currentPhase || '等待发送'}`;
 
       if (statsLine1El) {
@@ -474,6 +490,7 @@
       getStats: () => Object.assign({}, runtimeStats, {
         completedTaskDurationsMs: runtimeStats.completedTaskDurationsMs.slice(),
       }),
+      formatTimeTextForUi,
       formatDuration,
       formatDurationMs,
       formatDurationDisplay,

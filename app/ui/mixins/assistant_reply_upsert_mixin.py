@@ -104,13 +104,18 @@ class AssistantReplyUpsertMixin:
                 reason=render_reason or "assistant_reply_recv",
             )
 
-        if session.session_id == self._current_session_id and hasattr(
-            self, "_render_current_chat_messages"
-        ):
-            self._render_current_chat_messages(
-                force_bottom=True,
-                reason=render_reason or "assistant_reply_recv",
-            )
+        if session.session_id == self._current_session_id:
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    render_reason or "assistant_reply_recv",
+                    delay_ms=0,
+                    force_bottom=True,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
+                self._render_current_chat_messages(
+                    force_bottom=True,
+                    reason=render_reason or "assistant_reply_recv",
+                )
         elif session.session_id == self._current_session_id:
             self._render_session_chat(session, force_bottom=True)
         self._schedule_save_sessions_to_disk()

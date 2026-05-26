@@ -206,13 +206,11 @@ class SessionMixin:
             if session is not None:
                 if hasattr(self, "_render_chat_transcript"):
                     self._render_chat_transcript(session, force_bottom=True)
-                if hasattr(self, "_render_current_chat_messages"):
-                    QTimer.singleShot(
-                        0,
-                        lambda: self._render_current_chat_messages(
-                            force_bottom=True,
-                            reason="select_same_session",
-                        ),
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "select_same_session",
+                        delay_ms=0,
+                        force_bottom=True,
                     )
             self._focus_message_input_later()
             if hasattr(self, "_append_log") and getattr(self, "_debug_mode", False):
@@ -988,10 +986,11 @@ class SessionMixin:
         if session.session_id == getattr(self, "_current_session_id", None):
             if hasattr(self, "_render_session_chat"):
                 self._render_session_chat(session, force_bottom=True)
-            elif hasattr(self, "_render_current_chat_messages"):
-                self._render_current_chat_messages(
+            elif hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "stale_pending_clear",
+                    delay_ms=0,
                     force_bottom=True,
-                    reason="stale_pending_clear",
                 )
 
         if hasattr(self, "_refresh_session_list"):
@@ -1959,10 +1958,11 @@ class SessionMixin:
                     self._bridge_msg.ack_success_message_ids.discard(bridge_id)
             self._schedule_save_sessions_to_disk()
             if session.session_id == getattr(self, "_current_session_id", ""):
-                if hasattr(self, "_render_current_chat_messages"):
-                    self._render_current_chat_messages(
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "tm_assistant_reply",
+                        delay_ms=0,
                         force_bottom=True,
-                        reason="tm_assistant_reply",
                     )
                 elif hasattr(self, "_render_session_chat"):
                     self._render_session_chat(session, force_bottom=True)
@@ -2007,10 +2007,11 @@ class SessionMixin:
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
         if session.session_id == getattr(self, "_current_session_id", ""):
-            if hasattr(self, "_render_current_chat_messages"):
-                self._render_current_chat_messages(
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "tm_assistant_reply",
+                    delay_ms=0,
                     force_bottom=True,
-                    reason="tm_assistant_reply",
                 )
         if hasattr(self, "_refresh_session_list"):
             self._refresh_session_list()

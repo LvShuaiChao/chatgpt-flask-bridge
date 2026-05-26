@@ -2,30 +2,49 @@
    * UploadButtonVm：上传区按钮状态判定矩阵（文字 / phase / disabled / action）
    ********************************************************************/
 
-  const TaskPhase = Object.freeze({
-    IDLE: 'idle',
-    UPLOADING: 'uploading',
-    WAITING_SEND: 'waiting_send',
-    SENDING: 'sending',
-    WAITING_REPLY: 'waiting_reply',
-    COPYING: 'copying',
-    RUNNING: 'running',
-    CANCELLING: 'cancelling',
-    CANCELLED: 'cancelled',
-    SUCCESS: 'success',
-    FAILED: 'failed',
-  });
+  function buildTaskPhaseEnum() {
+    const phases = typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.Phases)
+      ? ButtonTasks.Phases
+      : [
+        'idle',
+        'uploading',
+        'waiting_send',
+        'sending',
+        'waiting_reply',
+        'copying',
+        'running',
+        'cancelling',
+        'cancelled',
+        'success',
+        'failed',
+      ];
+    const out = {};
+    for (const phase of phases) {
+      const key = String(phase || '').trim().toUpperCase().replace(/-/g, '_');
+      if (key) {
+        out[key] = phase;
+      }
+    }
+    return Object.freeze(out);
+  }
 
-  const CANCELLABLE_TASK_PHASES = new Set([
-    TaskPhase.UPLOADING,
-    TaskPhase.WAITING_SEND,
-    TaskPhase.SENDING,
-    TaskPhase.WAITING_REPLY,
-    TaskPhase.RUNNING,
-    TaskPhase.COPYING,
-  ]);
+  const TaskPhase = buildTaskPhaseEnum();
+
+  const CANCELLABLE_TASK_PHASES = typeof ButtonTasks !== 'undefined' && ButtonTasks.CancellablePhases
+    ? ButtonTasks.CancellablePhases
+    : new Set([
+      TaskPhase.UPLOADING,
+      TaskPhase.WAITING_SEND,
+      TaskPhase.SENDING,
+      TaskPhase.WAITING_REPLY,
+      TaskPhase.RUNNING,
+      TaskPhase.COPYING,
+    ]);
 
   function createRunId(prefix = 'task') {
+    if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.createTaskRunId === 'function') {
+      return ButtonTasks.createTaskRunId(prefix);
+    }
     return `${String(prefix || 'task')}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
@@ -34,13 +53,82 @@
     return Object.values(TaskPhase).includes(value) ? value : TaskPhase.IDLE;
   }
 
+  function isCopyHotkeyLoopPhaseActive(phase) {
+    const normalized = String(phase || TaskPhase.IDLE).trim().toLowerCase();
+    return normalized !== TaskPhase.IDLE
+      && normalized !== 'stopped'
+      && normalized !== TaskPhase.SUCCESS
+      && normalized !== TaskPhase.FAILED
+      && normalized !== TaskPhase.CANCELLED;
+  }
+
+  function resolveSnapshotLoopActive(snapshot, taskKey, activeFlagKey) {
+    if (snapshot[activeFlagKey] != null) {
+      return !!snapshot[activeFlagKey];
+    }
+    const task = snapshot[taskKey] && typeof snapshot[taskKey] === 'object'
+      ? snapshot[taskKey]
+      : {};
+    return isCopyHotkeyLoopPhaseActive(task.phase);
+  }
+
+  function resolveSnapshotTaskActive(snapshot, taskKey, activeFlagKey) {
+    if (snapshot[activeFlagKey] != null) {
+      return !!snapshot[activeFlagKey];
+    }
+    const task = snapshot[taskKey] && typeof snapshot[taskKey] === 'object'
+      ? snapshot[taskKey]
+      : {};
+    const phase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+    return phase !== TaskPhase.IDLE
+      && phase !== TaskPhase.SUCCESS
+      && phase !== TaskPhase.FAILED
+      && phase !== TaskPhase.CANCELLED;
+  }
+
+  function getCopyHotkeyMutualBlockView(blockedBy) {
+    if (blockedBy === 'uploadVerify') {
+      return {
+        phase: TaskPhase.RUNNING,
+        text: '闭环继续运行中',
+        title: '闭环继续+每5轮上传正在运行；请先停止该任务后再使用此按钮',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'disabled',
+      };
+    }
+
+    if (blockedBy === 'loop') {
+      return {
+        phase: TaskPhase.RUNNING,
+        text: '连续复制运行中',
+        title: '连续复制+快捷键+继续正在运行；请先停止该任务后再使用此按钮',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'disabled',
+      };
+    }
+
+    return {
+      phase: TaskPhase.RUNNING,
+      text: '复制流程运行中',
+      title: '另一复制快捷键任务正在运行；请先停止后再使用此按钮',
+      disabled: true,
+      allowCancel: false,
+      action: 'none',
+      buttonPhase: 'disabled',
+    };
+  }
+
   function getUploadButtonViewState(snapshot = {}) {
     // 仅依据 uploadTask / uploadRunning / activeFilesCount，禁止读取 waitingSend / waitingReply / messageSending。
     const task = snapshot.uploadTask && typeof snapshot.uploadTask === 'object'
       ? snapshot.uploadTask
       : {};
     const phase = normalizeTaskPhase(task.phase);
-    const uploadRunning = phase === TaskPhase.UPLOADING || !!snapshot.uploadRunning;
+    const uploadRunning = phase === TaskPhase.UPLOADING || phase === TaskPhase.CANCELLING;
 
     if (task.cancelRequested || phase === TaskPhase.CANCELLING) {
       return {
@@ -133,7 +221,10 @@
       ? snapshot.copyTask
       : {};
     const phase = normalizeTaskPhase(task.phase || snapshot.copyStatus || TaskPhase.IDLE);
-    const running = !!snapshot.copyRunning;
+    const running = phase !== TaskPhase.IDLE
+      && phase !== TaskPhase.SUCCESS
+      && phase !== TaskPhase.FAILED
+      && phase !== TaskPhase.CANCELLED;
 
     if (phase === TaskPhase.SUCCESS || snapshot.copyStatus === 'success') {
       return {
@@ -207,27 +298,44 @@
   }
 
   function getCopyHotkeyOnceButtonViewState(snapshot = {}) {
-    const onceRunning = !!snapshot.copyHotkeyOnceRunning;
-    const continueRunning = !!snapshot.copyHotkeyContinueRunning;
-    const loopRunning = !!snapshot.copyHotkeyContinueLoopRunning;
+    const onceRunning = resolveSnapshotTaskActive(
+      snapshot,
+      'copyHotkeyOnceTask',
+      'copyHotkeyOnceActive',
+    );
+    const continueRunning = resolveSnapshotTaskActive(
+      snapshot,
+      'copyHotkeyContinueTask',
+      'copyHotkeyContinueActive',
+    );
+    const loopRunning = resolveSnapshotLoopActive(
+      snapshot,
+      'copyHotkeyContinueLoopTask',
+      'copyHotkeyLoopActive',
+    );
+    const uploadVerifyRunning = resolveSnapshotLoopActive(
+      snapshot,
+      'copyHotkeyUploadVerifyLoopTask',
+      'copyHotkeyUploadVerifyLoopActive',
+    );
 
-    if (loopRunning) {
-      return {
-        phase: TaskPhase.RUNNING,
-        text: '连续复制运行中',
-        title: '连续复制+快捷键+继续正在运行',
-        disabled: true,
-        allowCancel: false,
-        action: 'none',
-        buttonPhase: 'disabled',
-      };
+    if (uploadVerifyRunning) {
+      return getCopyHotkeyMutualBlockView('uploadVerify');
     }
 
-    if (onceRunning || continueRunning) {
+    if (loopRunning) {
+      return getCopyHotkeyMutualBlockView('loop');
+    }
+
+    if (continueRunning) {
+      return getCopyHotkeyMutualBlockView('continue');
+    }
+
+    if (onceRunning) {
       return {
         phase: TaskPhase.RUNNING,
         text: '处理中...',
-        title: '复制快捷键流程进行中',
+        title: '复制+快捷键流程进行中',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -238,7 +346,7 @@
     return {
       phase: TaskPhase.IDLE,
       text: snapshot.onceLabel || '复制+快捷键',
-      title: snapshot.onceTitle || '等待回答完成 -> 复制最后回复 -> 目标快捷键',
+      title: snapshot.onceTitle || '复制 ChatGPT 最后一条回复，然后触发内部目标快捷键。',
       disabled: false,
       allowCancel: false,
       action: 'start',
@@ -257,7 +365,7 @@
       return {
         phase: 'sending_hotkey',
         text: '发送中...',
-        title: '正在请求 GUI 发送 Ctrl+Alt+I',
+        title: '正在请求 GUI 发送目标快捷键',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -283,7 +391,7 @@
         text: '发送失败',
         title: task.lastError
           ? `发送失败：${task.lastError}`
-          : '发送 Ctrl+Alt+I 失败，可重试',
+          : '发送目标快捷键失败，可重试',
         disabled: false,
         allowCancel: false,
         action: 'start',
@@ -293,7 +401,7 @@
 
     return {
       phase: TaskPhase.IDLE,
-      text: snapshot.sendHotkeyLabel || '发送 Ctrl+Alt+I',
+      text: snapshot.sendHotkeyLabel || '发送快捷键',
       title: snapshot.sendHotkeyTitle || '发送配置的快捷键',
       disabled: false,
       allowCancel: false,
@@ -306,22 +414,27 @@
     const task = snapshot.copyHotkeyContinueTask && typeof snapshot.copyHotkeyContinueTask === 'object'
       ? snapshot.copyHotkeyContinueTask
       : {};
-    const loopRunning = !!snapshot.copyHotkeyContinueLoopRunning;
+    const loopRunning = resolveSnapshotLoopActive(
+      snapshot,
+      'copyHotkeyContinueLoopTask',
+      'copyHotkeyLoopActive',
+    );
+    const uploadVerifyRunning = resolveSnapshotLoopActive(
+      snapshot,
+      'copyHotkeyUploadVerifyLoopTask',
+      'copyHotkeyUploadVerifyLoopActive',
+    );
     const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
     const phase = rawPhase === 'sending_hotkey' || rawPhase === 'sending_continue'
       ? rawPhase
       : normalizeTaskPhase(rawPhase);
 
+    if (uploadVerifyRunning) {
+      return getCopyHotkeyMutualBlockView('uploadVerify');
+    }
+
     if (loopRunning) {
-      return {
-        phase: TaskPhase.RUNNING,
-        text: '连续复制运行中',
-        title: '连续复制+快捷键+继续正在运行',
-        disabled: true,
-        allowCancel: false,
-        action: 'none',
-        buttonPhase: 'disabled',
-      };
+      return getCopyHotkeyMutualBlockView('loop');
     }
 
     if (phase === TaskPhase.CANCELLING || task.cancelRequested) {
@@ -402,7 +515,7 @@
       return {
         phase: 'sending_hotkey',
         text: '发送快捷键，点击取消',
-        title: '正在发送 Ctrl+Alt+I，再次点击可取消',
+        title: '正在发送目标快捷键，再次点击可取消',
         disabled: false,
         allowCancel: true,
         action: 'cancel',
@@ -446,14 +559,26 @@
       };
     }
 
-    const cancelling = !!(autoState.cancelling || autoState.stopRequested);
-    const failed = !!(autoState.failed || autoState.phase === TaskPhase.FAILED);
+    const phase = String(autoState.phase || TaskPhase.IDLE).trim().toLowerCase();
+    const stopRequested = !!autoState.stopRequested;
+    const activePhases = new Set([
+      'preparing',
+      'uploading',
+      'upload_attached',
+      'sending',
+      'sent',
+      'waiting_reply',
+      'reply_ready',
+      'running',
+    ]);
+    const cancelling = !!(autoState.cancelling || (stopRequested && activePhases.has(phase)));
+    const failed = phase === TaskPhase.FAILED || !!autoState.failed;
 
     if (cancelling) {
       return {
         phase: TaskPhase.CANCELLING,
-        text: '正在停止',
-        title: '正在停止自动继续',
+        text: '自动继续',
+        title: '停止请求已提交，正在等待自动继续任务退出',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -461,7 +586,7 @@
       };
     }
 
-    if (failed && !autoState.running && !autoState.waitingReply) {
+    if (failed && phase === TaskPhase.FAILED) {
       return {
         phase: TaskPhase.FAILED,
         text: '继续失败',
@@ -475,7 +600,7 @@
       };
     }
 
-    if (autoState.waitingReply) {
+    if (phase === 'waiting_reply' || autoState.waitingReply) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '等待回复，点击停止',
@@ -487,7 +612,7 @@
       };
     }
 
-    if (autoState.running) {
+    if (activePhases.has(phase) || autoState.running) {
       return {
         phase: TaskPhase.RUNNING,
         text: '停止继续',
@@ -510,6 +635,180 @@
     };
   }
 
+  function getAutoContinueUntilDoneButtonViewState(autoState) {
+    const shared = getAutoContinueButtonViewState(autoState);
+    const autoQueueSharedHint = '（与「自动继续」共用 AutoQueue 运行态）';
+    const running = shared.phase !== TaskPhase.IDLE
+      && shared.phase !== TaskPhase.SUCCESS
+      && shared.phase !== TaskPhase.FAILED
+      && shared.phase !== TaskPhase.CANCELLED;
+
+    if (running) {
+      return {
+        ...shared,
+        text: shared.action === 'stop' ? '停止智能继续' : shared.text,
+        title: shared.title
+          ? `${shared.title}${autoQueueSharedHint}`
+          : `当前自动继续任务正在运行${autoQueueSharedHint}`,
+        buttonPhase: shared.buttonPhase === 'idle' ? 'danger' : shared.buttonPhase,
+      };
+    }
+
+    return {
+      phase: TaskPhase.IDLE,
+      text: '自动继续直到完成',
+      title: '循环发送强约束继续指令；只有检测到严格完成信号才停止',
+      disabled: false,
+      allowCancel: false,
+      action: 'start',
+      buttonPhase: 'idle',
+    };
+  }
+
+  function getActionPhaseFromSnapshot(action, snapshot = {}) {
+    const normalized = String(action || '').trim();
+
+    if (normalized === 'send-message') {
+      const send = snapshot.sendTask && typeof snapshot.sendTask === 'object'
+        ? snapshot.sendTask
+        : {};
+      return normalizeTaskPhase(send.phase);
+    }
+
+    if (normalized === 'send-hotkey') {
+      const task = snapshot.sendHotkeyTask && typeof snapshot.sendHotkeyTask === 'object'
+        ? snapshot.sendHotkeyTask
+        : {};
+      return String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+    }
+
+    if (normalized === 'copy-only' || normalized === 'copy-last-reply') {
+      const copy = snapshot.copyTask && typeof snapshot.copyTask === 'object'
+        ? snapshot.copyTask
+        : {};
+      return normalizeTaskPhase(copy.phase || snapshot.copyStatus);
+    }
+
+    if (normalized === 'copy-and-continue' || normalized === 'copy-continue') {
+      const task = snapshot.copyContinueTask && typeof snapshot.copyContinueTask === 'object'
+        ? snapshot.copyContinueTask
+        : {};
+      const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+      return rawPhase === 'sending_continue'
+        ? rawPhase
+        : normalizeTaskPhase(rawPhase);
+    }
+
+    if (normalized === 'copy-hotkey-once' || normalized === 'copy-and-hotkey') {
+      const task = snapshot.copyHotkeyOnceTask && typeof snapshot.copyHotkeyOnceTask === 'object'
+        ? snapshot.copyHotkeyOnceTask
+        : {};
+      if (resolveSnapshotTaskActive(snapshot, 'copyHotkeyOnceTask', 'copyHotkeyOnceActive')) {
+        return String(task.phase || TaskPhase.RUNNING).trim().toLowerCase();
+      }
+      return String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+    }
+
+    if (normalized === 'copy-hotkey-continue') {
+      const task = snapshot.copyHotkeyContinueTask && typeof snapshot.copyHotkeyContinueTask === 'object'
+        ? snapshot.copyHotkeyContinueTask
+        : {};
+      const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+      return rawPhase === 'sending_hotkey' || rawPhase === 'sending_continue'
+        ? rawPhase
+        : normalizeTaskPhase(rawPhase);
+    }
+
+    return TaskPhase.IDLE;
+  }
+
+  function getPageReplyStatus(snapshot = {}) {
+    if (snapshot.waitingReply) {
+      return 'waiting_reply';
+    }
+    if (snapshot.messageSending) {
+      return 'sending';
+    }
+    if (snapshot.assistantBusy) {
+      return 'answering';
+    }
+    return 'idle';
+  }
+
+  function computeUploadActionDisabled(action, snapshot = {}) {
+    const normalized = String(action || '').trim();
+    const sendPhase = getActionPhaseFromSnapshot('send-message', snapshot);
+    const sendHotkeyPhase = getActionPhaseFromSnapshot('send-hotkey', snapshot);
+    const copyPhase = getActionPhaseFromSnapshot('copy-only', snapshot);
+    const copyHotkeyPhase = getActionPhaseFromSnapshot('copy-hotkey-continue', snapshot);
+    const waitContinuePhase = getActionPhaseFromSnapshot('copy-and-continue', snapshot);
+
+    let disabled = false;
+    let reason = 'ok';
+
+    if (normalized === 'send-message') {
+      disabled = sendPhase === TaskPhase.SENDING;
+      reason = disabled ? `send-message-${sendPhase}` : 'ok';
+    } else if (normalized === 'send-hotkey') {
+      disabled = sendHotkeyPhase === 'sending_hotkey';
+      reason = disabled ? `send-hotkey-${sendHotkeyPhase}` : 'ok';
+    } else if (normalized === 'copy-only' || normalized === 'copy-last-reply') {
+      disabled = copyPhase === TaskPhase.COPYING;
+      reason = disabled ? `copy-last-reply-${copyPhase}` : 'ok';
+    } else if (normalized === 'copy-hotkey-continue') {
+      disabled = copyHotkeyPhase === TaskPhase.COPYING;
+      reason = disabled ? `copy-hotkey-continue-${copyHotkeyPhase}` : 'ok';
+    } else if (normalized === 'copy-and-continue' || normalized === 'copy-continue') {
+      if (
+        waitContinuePhase === TaskPhase.COPYING
+        || waitContinuePhase === 'sending_continue'
+        || waitContinuePhase === TaskPhase.CANCELLING
+      ) {
+        disabled = true;
+        reason = `wait-reply-continue-self-${waitContinuePhase}`;
+      } else {
+        disabled = false;
+        reason = 'ok';
+      }
+    }
+
+    return {
+      disabled,
+      reason,
+      sendPhase,
+      sendHotkeyPhase,
+      copyPhase,
+      copyHotkeyPhase,
+      waitContinuePhase,
+      pageReplyStatus: getPageReplyStatus(snapshot),
+    };
+  }
+
+  function logButtonDisabledDecide(action, decide = {}, extra = {}) {
+    const normalized = String(action || '-').trim() || '-';
+    const payload = {
+      action: normalized,
+      disabled: decide.disabled ? 1 : 0,
+      reason: decide.reason || '-',
+      sendPhase: decide.sendPhase || '-',
+      sendHotkeyPhase: decide.sendHotkeyPhase || '-',
+      copyPhase: decide.copyPhase || '-',
+      copyHotkeyPhase: decide.copyHotkeyPhase || '-',
+      waitContinuePhase: decide.waitContinuePhase || '-',
+      pageReplyStatus: decide.pageReplyStatus || '-',
+      viewDisabled: extra.viewDisabled != null ? (extra.viewDisabled ? 1 : 0) : '-',
+    };
+    const line = `[BUTTON_DISABLED][DECIDE] action=${payload.action} disabled=${payload.disabled}`
+      + ` reason=${payload.reason} sendPhase=${payload.sendPhase} sendHotkeyPhase=${payload.sendHotkeyPhase}`
+      + ` copyPhase=${payload.copyPhase} copyHotkeyPhase=${payload.copyHotkeyPhase}`
+      + ` waitContinuePhase=${payload.waitContinuePhase} pageReplyStatus=${payload.pageReplyStatus}`
+      + ` viewDisabled=${payload.viewDisabled}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
   function getCopyContinueButtonViewState(snapshot = {}) {
     const task = snapshot.copyContinueTask && typeof snapshot.copyContinueTask === 'object'
       ? snapshot.copyContinueTask
@@ -523,8 +822,8 @@
     if (phase === TaskPhase.CANCELLING || task.cancelRequested || task.stopRequested) {
       return {
         phase: TaskPhase.CANCELLING,
-        text: '正在停止',
-        title: '正在停止复制并继续',
+        text: '复制并继续',
+        title: '停止请求已提交，正在等待复制并继续任务退出',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -605,15 +904,24 @@
     }
 
     if (assistantBusy) {
-      return {
-        phase: TaskPhase.IDLE,
+      const busyView = {
+        phase: TaskPhase.WAITING_REPLY,
         text: '等待回复后继续',
-        title: '助手正在回复，暂不可执行复制并继续',
-        disabled: true,
+        title: '助手正在回复，点击后等待回复完成再复制并继续',
+        disabled: false,
         allowCancel: false,
-        action: 'none',
-        buttonPhase: 'disabled',
+        action: 'start',
+        buttonPhase: 'waiting',
       };
+      const busyLine = `[COPY_CONTINUE_BUTTON][ASSISTANT_BUSY_CLICKABLE] assistantBusy=${assistantBusy ? 1 : 0}`
+        + ` disabled=${busyView.disabled ? 1 : 0}`
+        + ` action=${busyView.action}`
+        + ` buttonPhase=${busyView.buttonPhase}`;
+      console.log(busyLine);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(busyLine);
+      }
+      return busyView;
     }
 
     return {
@@ -687,13 +995,17 @@
       ? snapshot.copyHotkeyContinueLoopTask
       : {};
     const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
-    const loopRunning = !!snapshot.copyHotkeyContinueLoopRunning;
+    const loopActive = rawPhase !== TaskPhase.IDLE
+      && rawPhase !== 'stopped'
+      && rawPhase !== TaskPhase.SUCCESS
+      && rawPhase !== TaskPhase.FAILED
+      && rawPhase !== TaskPhase.CANCELLED;
 
     if (rawPhase === 'stopping') {
       return {
         phase: 'stopping',
         text: '停止中',
-        title: '正在停止连续复制',
+        title: '停止请求已提交，正在等待连续复制任务退出',
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -737,7 +1049,7 @@
       };
     }
 
-    if (loopRunning || CANCELLABLE_TASK_PHASES.has(rawPhase) || rawPhase === 'waiting_next_reply' || rawPhase === 'auto_uploading' || rawPhase === 'home_navigation') {
+    if (loopActive || CANCELLABLE_TASK_PHASES.has(rawPhase) || rawPhase === 'waiting_next_reply' || rawPhase === 'auto_uploading' || rawPhase === 'home_navigation') {
       const phaseLabels = {
         waiting_reply: '等待回复，点击停止',
         copying: '复制中，点击停止',
@@ -820,19 +1132,84 @@
     };
   }
 
-  function applyUploadButtonViewState(button, view, reason = '') {
+  function captureButtonRenderSnapshot(button) {
+    if (!button) {
+      return { phase: '-', text: '-' };
+    }
+    return {
+      phase: String(button.dataset.cgptButtonPhase || button.dataset.cgptTaskPhase || '-').trim() || '-',
+      text: String(button.textContent || '').trim() || '-',
+    };
+  }
+
+  function logButtonRenderChange(button, before, reason, buttonName = '') {
+    if (!button) {
+      return;
+    }
+    const after = captureButtonRenderSnapshot(button);
+    const name = String(buttonName || button.dataset.action || button.id || '-').trim() || '-';
+    if (before.phase === after.phase && before.text === after.text) {
+      return;
+    }
+    const line = `[BUTTON_RENDER][CHANGE] button=${name} oldPhase=${before.phase} newPhase=${after.phase}`
+      + ` oldText=${before.text} newText=${after.text} reason=${reason || '-'}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function applyUploadButtonViewState(button, view, reason = '', applyOptions = {}) {
     if (!button || !view || typeof ButtonState === 'undefined') {
       return false;
     }
 
-    const options = mapViewStateToToolboxOptions(view, reason);
-    button.dataset.cgptTaskPhase = view.phase || TaskPhase.IDLE;
-    button.dataset.cgptButtonAction = view.action || '';
+    const beforeRender = captureButtonRenderSnapshot(button);
+    const snapshot = applyOptions.snapshot && typeof applyOptions.snapshot === 'object'
+      ? applyOptions.snapshot
+      : {};
+    const action = String(button.dataset.action || button.id || '').trim();
+    let resolvedView = view;
+
+    if (action) {
+      const decide = computeUploadActionDisabled(action, snapshot);
+      const viewDisabled = !!view.disabled;
+
+      if (action === 'copy-and-continue' || action === 'copy-continue') {
+        if (decide.disabled !== viewDisabled) {
+          resolvedView = {
+            ...view,
+            disabled: decide.disabled,
+            buttonPhase: decide.disabled
+              ? (view.buttonPhase === 'waiting' ? view.buttonPhase : 'running')
+              : (view.buttonPhase === 'disabled' ? 'idle' : view.buttonPhase),
+          };
+        }
+      }
+
+      if (
+        action === 'copy-and-continue'
+        || action === 'copy-continue'
+        || decide.disabled
+      ) {
+        logButtonDisabledDecide(action, decide, { viewDisabled: !!resolvedView.disabled });
+      }
+    }
+
+    const options = mapViewStateToToolboxOptions(resolvedView, reason);
+    button.dataset.cgptTaskPhase = resolvedView.phase || TaskPhase.IDLE;
+    button.dataset.cgptButtonAction = resolvedView.action || '';
 
     const changed = ButtonState.setToolboxButtonState(button, options);
     if (typeof ButtonState.assertCancellableButtonConsistency === 'function') {
-      ButtonState.assertCancellableButtonConsistency(button, view, reason);
+      ButtonState.assertCancellableButtonConsistency(button, resolvedView, reason);
     }
+    logButtonRenderChange(
+      button,
+      beforeRender,
+      reason,
+      applyOptions.buttonName || action,
+    );
     return changed;
   }
 
@@ -848,8 +1225,12 @@
     getCopyHotkeyContinueOnceButtonViewState,
     getCopyHotkeyLoopButtonViewState,
     getAutoContinueButtonViewState,
+    getAutoContinueUntilDoneButtonViewState,
     getHomeButtonViewState,
     getCopyContinueButtonViewState,
+    getActionPhaseFromSnapshot,
+    computeUploadActionDisabled,
+    logButtonDisabledDecide,
     mapViewStateToToolboxOptions,
     applyUploadButtonViewState,
   });

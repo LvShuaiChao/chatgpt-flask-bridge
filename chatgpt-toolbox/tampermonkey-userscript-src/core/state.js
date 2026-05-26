@@ -234,7 +234,8 @@
     legacyStartSendBtn: '#cgpt-upload-start-send',
 
     copyContinueBtn: '#cgpt-upload-continue-once',
-    sendHotkeyBtn: '#cgpt-send-hotkey-once',
+    // @deprecated 独立“发送快捷键”按钮已移除，仅用于历史 DOM 清理。
+    legacySendHotkeyBtn: '#cgpt-send-hotkey-once',
     autoContinueBtn: '#cgpt-auto-continue-once',
     autoContinueUntilDoneBtn: '#cgpt-auto-continue-until-done',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
@@ -253,7 +254,6 @@
   const UploadCoreActionSelectors = Object.freeze([
     UploadSelectors.startBtn,
     UploadSelectors.copyContinueBtn,
-    UploadSelectors.sendHotkeyBtn,
     UploadSelectors.autoContinueBtn,
     UploadSelectors.autoContinueUntilDoneBtn,
     UploadSelectors.copyLastMessageBtn,

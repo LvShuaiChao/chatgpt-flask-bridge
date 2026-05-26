@@ -15,6 +15,7 @@ from app.constants import (
     SETTINGS_APP,
     SETTINGS_ORG,
 )
+from app.ui.tab_wheel_blocker import disable_all_tab_wheel_switch
 from app.ui.widgets.bridge_notifier import BridgeNotifier
 from PyQt5.QtCore import QSettings, Qt, QTimer
 from PyQt5.QtGui import QKeySequence
@@ -138,34 +139,31 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         self._status_timer.timeout.connect(self._refresh_status_tick)
         self._status_timer.start(1000)
         QTimer.singleShot(0, self._refresh_cursor_bridge_status)
-        QTimer.singleShot(
-            0,
-            lambda: self._render_current_chat_messages(
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "startup_initial",
+                delay_ms=0,
                 force_bottom=True,
-                reason="startup_initial",
-            ),
-        )
-        QTimer.singleShot(
-            120,
-            lambda: self._render_current_chat_messages(
+            )
+            self._schedule_current_chat_render(
+                "startup_after_show",
+                delay_ms=120,
                 force_bottom=True,
-                reason="startup_after_show",
-            ),
-        )
+            )
         if self._auto_start_server and not is_server_running():
             QTimer.singleShot(300, self._start_server)
+
+        disable_all_tab_wheel_switch(self)
 
     def showEvent(self, event):
         super().showEvent(event)
         if hasattr(self, "_flush_pending_chat_render"):
             QTimer.singleShot(0, self._flush_pending_chat_render)
-        if hasattr(self, "_render_current_chat_messages"):
-            QTimer.singleShot(
-                50,
-                lambda: self._render_current_chat_messages(
-                    force_bottom=True,
-                    reason="show_event",
-                ),
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "show_event",
+                delay_ms=50,
+                force_bottom=True,
             )
 
     def closeEvent(self, event):

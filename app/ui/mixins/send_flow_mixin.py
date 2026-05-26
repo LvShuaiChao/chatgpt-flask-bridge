@@ -136,7 +136,13 @@ class SendFlowMixin:
         if not changed:
             return False
         if force_render or session.session_id == getattr(self, "_current_session_id", ""):
-            if hasattr(self, "_render_current_chat_messages"):
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "bootstrap_waiting_display_sync",
+                    delay_ms=0,
+                    force_bottom=False,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
                 self._render_current_chat_messages(
                     force_bottom=False,
                     reason="bootstrap_waiting_display_sync",
@@ -245,7 +251,13 @@ class SendFlowMixin:
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
 
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "send_click_local_append",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason="send_click_local_append",
@@ -305,7 +317,13 @@ class SendFlowMixin:
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
 
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                "queue_enqueue_local",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason="queue_enqueue_local",
@@ -507,7 +525,13 @@ class SendFlowMixin:
                             "等待发送",
                             detail=bind_reason,
                         )
-                        if hasattr(self, "_render_current_chat_messages"):
+                        if hasattr(self, "_schedule_current_chat_render"):
+                            self._schedule_current_chat_render(
+                                "send_first_bind_waiting_home",
+                                delay_ms=0,
+                                force_bottom=True,
+                            )
+                        elif hasattr(self, "_render_current_chat_messages"):
                             self._render_current_chat_messages(
                                 force_bottom=True,
                                 reason="send_first_bind_waiting_home",
@@ -769,7 +793,13 @@ class SendFlowMixin:
                     "等待发送",
                     detail="reopen_bind_page_failed",
                 )
-                if hasattr(self, "_render_current_chat_messages"):
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "send_reopen_failed_keep_local_message",
+                        delay_ms=0,
+                        force_bottom=True,
+                    )
+                elif hasattr(self, "_render_current_chat_messages"):
                     self._render_current_chat_messages(
                         force_bottom=True,
                         reason="send_reopen_failed_keep_local_message",
@@ -805,7 +835,13 @@ class SendFlowMixin:
             )
             if reopen_result is False:
                 self._refresh_session_list(select_session_id=session.session_id)
-                if hasattr(self, "_render_current_chat_messages"):
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "send_wait_bind_page_failed",
+                        delay_ms=0,
+                        force_bottom=True,
+                    )
+                elif hasattr(self, "_render_current_chat_messages"):
                     self._render_current_chat_messages(
                         force_bottom=True,
                         reason="send_wait_bind_page_failed",
@@ -828,7 +864,13 @@ class SendFlowMixin:
                 "等待发送",
                 detail="reopen_bind_page_failed",
             )
-            if hasattr(self, "_render_current_chat_messages"):
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    "send_reopen_failed_keep_local_message",
+                    delay_ms=0,
+                    force_bottom=True,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
                 self._render_current_chat_messages(
                     force_bottom=True,
                     reason="send_reopen_failed_keep_local_message",
@@ -948,7 +990,13 @@ class SendFlowMixin:
                 plan.content,
                 reuse_message_id=turn.user_message_id,
             )
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                plan.render_reason or "send_plan_render",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason=plan.render_reason,
@@ -1067,7 +1115,13 @@ class SendFlowMixin:
             )
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
-        if hasattr(self, "_render_current_chat_messages"):
+        if hasattr(self, "_schedule_current_chat_render"):
+            self._schedule_current_chat_render(
+                f"send_failed_{stage}",
+                delay_ms=0,
+                force_bottom=True,
+            )
+        elif hasattr(self, "_render_current_chat_messages"):
             self._render_current_chat_messages(
                 force_bottom=True,
                 reason=f"send_failed_{stage}",

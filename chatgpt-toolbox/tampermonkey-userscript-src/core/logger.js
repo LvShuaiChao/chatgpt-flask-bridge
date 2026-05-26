@@ -1070,7 +1070,7 @@
     }
 
     try {
-      await copyTextToClipboard(content);
+      await copyTextUnified(content, `${resolvedLogPrefix}:copyWithStatus`);
       ToolboxShell.setStatus(resolvedSuccessStatus, 'success');
       ToolboxShell.appendLog(`[${resolvedLogPrefix}][ok] chars=${content.length} ${resolvedSuccessLog}`);
 
@@ -2326,6 +2326,32 @@
     return cfg;
   }
 
+  const CompactUiConfigStore = (() => {
+    function readRaw() {
+      return MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {};
+    }
+
+    function get() {
+      return normalizeCompactUiConfig(readRaw());
+    }
+
+    function save(next) {
+      const normalized = normalizeCompactUiConfig(next || {});
+      MemoryManager.set(MemoryManager.KEYS.compactUiConfig, normalized);
+      return normalized;
+    }
+
+    function patch(patch) {
+      return save(Object.assign({}, get(), patch || {}));
+    }
+
+    return Object.freeze({
+      get,
+      save,
+      patch,
+    });
+  })();
+
   function getUploadQuotaLimit() {
     const cfg = normalizeCompactUiConfig(
       MemoryManager.get(MemoryManager.KEYS.compactUiConfig, null) || {},
@@ -2369,19 +2395,19 @@
   const DEFAULT_SHORTCUT_CONFIG = Object.freeze({
     sendMessage: {
       enabled: true,
-      label: 'Ctrl+Enter',
-      key: 'Enter',
-      code: 'Enter',
+      label: 'Ctrl+Alt+S',
+      key: 's',
+      code: 'KeyS',
       ctrl: true,
-      alt: false,
+      alt: true,
       shift: false,
       meta: false,
     },
     copyLastMessage: {
-      enabled: true,
-      label: 'F8',
-      key: 'F8',
-      code: 'F8',
+      enabled: false,
+      label: '',
+      key: '',
+      code: '',
       ctrl: false,
       alt: false,
       shift: false,
@@ -2389,12 +2415,12 @@
     },
     copyAndHotkeyOnce: {
       enabled: true,
-      label: 'Ctrl+Shift+K',
+      label: 'Ctrl+Alt+K',
       key: 'k',
       code: 'KeyK',
       ctrl: true,
-      alt: false,
-      shift: true,
+      alt: true,
+      shift: false,
       meta: false,
     },
     copyThenShortcutTargetHotkey: {
@@ -2408,11 +2434,11 @@
       meta: false,
     },
     startUpload: {
-      enabled: false,
-      label: '',
-      key: '',
-      code: '',
-      ctrl: false,
+      enabled: true,
+      label: 'Ctrl+I',
+      key: 'i',
+      code: 'KeyI',
+      ctrl: true,
       alt: false,
       shift: false,
       meta: false,
@@ -2434,7 +2460,7 @@
     };
   }
 
-  function isUnsafePlainEnterSendShortcut(item) {
+  function isPlainEnterShortcutItem(item) {
     if (!item || typeof item !== 'object') return false;
 
     const key = String(item.key || '').toLowerCase();
@@ -2450,18 +2476,79 @@
       && !item.meta;
   }
 
+  function isUnsafePlainEnterSendShortcut(item) {
+    return isPlainEnterShortcutItem(item);
+  }
+
   function migrateUnsafePlainEnterSendShortcut(sendMessage) {
-    if (!isUnsafePlainEnterSendShortcut(sendMessage)) {
+    if (!isPlainEnterShortcutItem(sendMessage)) {
       return false;
     }
 
-    sendMessage.label = 'Ctrl+Enter';
-    sendMessage.key = 'Enter';
-    sendMessage.code = 'Enter';
+    sendMessage.label = 'Ctrl+Alt+S';
+    sendMessage.key = 's';
+    sendMessage.code = 'KeyS';
     sendMessage.ctrl = true;
-    sendMessage.alt = false;
+    sendMessage.alt = true;
     sendMessage.shift = false;
     sendMessage.meta = false;
+    return true;
+  }
+
+  const LEGACY_DEFAULT_SENDMESSAGE_CTRL_ENTER = Object.freeze({
+    enabled: true,
+    label: 'Ctrl+Enter',
+    key: 'Enter',
+    code: 'Enter',
+    ctrl: true,
+    alt: false,
+    shift: false,
+    meta: false,
+  });
+
+  function isShortcutItemSame(a, b) {
+    const x = a && typeof a === 'object' ? a : {};
+    const y = b && typeof b === 'object' ? b : {};
+    return String(x.label || '') === String(y.label || '')
+      && String(x.key || '') === String(y.key || '')
+      && String(x.code || '') === String(y.code || '')
+      && !!x.ctrl === !!y.ctrl
+      && !!x.alt === !!y.alt
+      && !!x.shift === !!y.shift
+      && !!x.meta === !!y.meta;
+  }
+
+  function migrateLegacyCtrlEnterDefaultSendShortcut(sendMessage, rawConfig) {
+    if (!rawConfig || typeof rawConfig !== 'object') {
+      return false;
+    }
+
+    const rawSend = rawConfig.sendMessage;
+    if (!isShortcutItemSame(rawSend, LEGACY_DEFAULT_SENDMESSAGE_CTRL_ENTER)) {
+      return false;
+    }
+
+    const rawCopyLast = rawConfig.copyLastMessage;
+    const rawCopyOnce = rawConfig.copyAndHotkeyOnce;
+    const rawCopyThen = rawConfig.copyThenShortcutTargetHotkey;
+    const rawStartUpload = rawConfig.startUpload;
+
+    const otherLooksDefault = (!rawCopyLast || isShortcutItemSame(rawCopyLast, DEFAULT_SHORTCUT_CONFIG.copyLastMessage))
+      && (!rawCopyOnce || isShortcutItemSame(rawCopyOnce, DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce))
+      && (!rawCopyThen || isShortcutItemSame(rawCopyThen, DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey))
+      && (!rawStartUpload || isShortcutItemSame(rawStartUpload, DEFAULT_SHORTCUT_CONFIG.startUpload));
+
+    if (!otherLooksDefault) {
+      return false;
+    }
+
+    sendMessage.label = DEFAULT_SHORTCUT_CONFIG.sendMessage.label;
+    sendMessage.key = DEFAULT_SHORTCUT_CONFIG.sendMessage.key;
+    sendMessage.code = DEFAULT_SHORTCUT_CONFIG.sendMessage.code;
+    sendMessage.ctrl = DEFAULT_SHORTCUT_CONFIG.sendMessage.ctrl;
+    sendMessage.alt = DEFAULT_SHORTCUT_CONFIG.sendMessage.alt;
+    sendMessage.shift = DEFAULT_SHORTCUT_CONFIG.sendMessage.shift;
+    sendMessage.meta = DEFAULT_SHORTCUT_CONFIG.sendMessage.meta;
     return true;
   }
 
@@ -2494,7 +2581,8 @@
     );
 
     const migratedUnsafeEnter = migrateUnsafePlainEnterSendShortcut(sendMessage);
-    if (migratedUnsafeEnter && raw) {
+    const migratedLegacyCtrlEnter = migrateLegacyCtrlEnterDefaultSendShortcut(sendMessage, raw);
+    if ((migratedUnsafeEnter || migratedLegacyCtrlEnter) && raw) {
       saveShortcutConfig({
         sendMessage,
         copyLastMessage,
@@ -2576,6 +2664,23 @@
       return '';
     }
 
+    if (item.enabled === false) {
+      return '';
+    }
+
+    const labelText = String(item.label || '').trim();
+    if (
+      !labelText
+      && !item.ctrl
+      && !item.alt
+      && !item.shift
+      && !item.meta
+      && !item.key
+      && !item.code
+    ) {
+      return '';
+    }
+
     if (item.label) {
       return normalizeShortcutText(item.label);
     }
@@ -2609,13 +2714,15 @@
 
   function getCopyThenShortcutTargetLabel() {
     const item = getCopyThenShortcutTargetConfig();
+    if (!item || item.enabled === false) {
+      return '';
+    }
     return String(item.label || '').trim();
   }
 
   function getCopyThenShortcutTargetCombo() {
     const item = getCopyThenShortcutTargetConfig();
-    const combo = shortcutItemToSystemCombo(item);
-    return combo || 'ctrl+alt+i';
+    return shortcutItemToSystemCombo(item);
   }
 
   function logShortcutTargetWarnings(cfg) {
@@ -2644,15 +2751,16 @@
 
   function getCopyAndHotkeyButtonTitle() {
     const label = getCopyThenShortcutTargetLabel();
-    if (!label) {
-      return '复制最后回复，然后触发目标快捷键（未设置）';
-    }
-    return `复制最后回复，然后触发 ${label}`;
+    const combo = getCopyThenShortcutTargetCombo();
+    const resolved = label || combo || '未设置';
+    return `复制 ChatGPT 最后一条回复，然后触发内部目标快捷键 ${resolved}。`;
   }
 
   function getCopyHotkeyContinueFlowTitle() {
-    const label = getCopyThenShortcutTargetLabel() || '目标快捷键';
-    return `等待回答完成 -> 检查终止信号 -> 复制最后回复 -> ${label} -> 发送继续指令`;
+    const label = getCopyThenShortcutTargetLabel();
+    const combo = getCopyThenShortcutTargetCombo();
+    const resolved = label || combo || '未设置';
+    return `等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 内部目标快捷键 ${resolved} -> 发送继续指令`;
   }
 
   function isPureModifierKeyEvent(e) {
@@ -2827,7 +2935,10 @@
   }
 
   function findShortcutConflict(config, currentAction) {
-    if (currentAction === 'copyThenShortcutTargetHotkey') {
+    if (
+      currentAction === 'copyThenShortcutTargetHotkey'
+      || currentAction === 'copyLastMessage'
+    ) {
       return '';
     }
 
@@ -2838,9 +2949,14 @@
       return '';
     }
 
+    const hiddenShortcutActions = new Set([
+      'copyThenShortcutTargetHotkey',
+      'copyLastMessage',
+    ]);
+
     return Object.keys(config).find((key) => {
       if (key === currentAction) return false;
-      if (key === 'copyThenShortcutTargetHotkey') return false;
+      if (hiddenShortcutActions.has(key)) return false;
       return shortcutSignature(config[key]) === sig;
     }) || '';
   }
@@ -2878,7 +2994,7 @@
         } else if (copyPhase === 'copying' || copyPhase === 'sending_continue' || copyPhase === 'running') {
           copyTitle = '复制并继续任务进行中，再次点击可取消';
         } else if (copyPhase === 'cancelling') {
-          copyTitle = '正在停止复制并继续';
+          copyTitle = '停止请求已提交，正在等待复制并继续任务退出';
         }
       }
       copyContinueBtn.title = copyTitle;
@@ -2886,7 +3002,7 @@
 
     const copyLastMessageBtn = qs(UploadSelectors.copyLastMessageBtn, scope) ;
     if (copyLastMessageBtn) {
-      copyLastMessageBtn.title = `复制最后回复快捷键：${shortcutCfg.copyLastMessage.label || '未设置'}`;
+      copyLastMessageBtn.title = '复制 ChatGPT 最后一条回复到剪贴板';
     }
 
     const uploadStartBtn = qs(UploadSelectors.startBtn, scope);
@@ -2905,9 +3021,10 @@
       uploadStartBtn.title = uploadTitle;
     }
 
-    const sendHotkeyBtn = qs(UploadSelectors.sendHotkeyBtn, scope);
-    if (sendHotkeyBtn) {
-      sendHotkeyBtn.title = `发送 ${DEFAULT_SYSTEM_HOTKEY_LABEL}：${shortcutCfg.sendMessage.label || '未设置'}`;
+    const copyHotkeyOnceBtn = qs(UploadSelectors.copyHotkeyOnceBtn, scope);
+    if (copyHotkeyOnceBtn) {
+      copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
+      copyHotkeyOnceBtn.textContent = getCopyAndHotkeyButtonLabel();
     }
 
     const autoContinueBtn = (
@@ -2937,12 +3054,6 @@
         }
       }
       autoContinueBtn.title = autoTitle;
-    }
-
-    const copyHotkeyOnceBtn = qs(UploadSelectors.copyHotkeyOnceBtn, scope);
-    if (copyHotkeyOnceBtn) {
-      copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
-      copyHotkeyOnceBtn.textContent = getCopyAndHotkeyButtonLabel();
     }
 
     const continueFlowTitle = getCopyHotkeyContinueFlowTitle();
@@ -3156,6 +3267,13 @@
   }
 
   function isChatGptNativeComposerTarget(target) {
+    if (typeof shouldLetNativeChatGptHandleDrop === 'function') {
+      return shouldLetNativeChatGptHandleDrop(
+        { target },
+        { includeFileInput: false, includeForm: true },
+      );
+    }
+
     const el = target instanceof Element ? target : null;
     if (!el) return false;
 
@@ -3175,11 +3293,6 @@
     ].join(','));
   }
 
-  function shouldLetNativeChatGptHandleDrop(e) {
-    if (!e || !e.target) return false;
-    return isChatGptNativeComposerTarget(e.target);
-  }
-
   function escapeHtml(s) {
     return String(s || '')
       .replaceAll('&', '&amp;')
@@ -3193,112 +3306,115 @@
     return `<div class="${className}">${escapeHtml(text || '暂无数据')}</div>`;
   }
 
-  function copyTextToClipboardByTextarea(text) {
-    return new Promise((resolve, reject) => {
-      const value = String(text || '');
-      let ta = null;
+  /** 全脚本唯一剪贴板写入入口；禁止在其他位置调用 clipboard API。 */
+  async function copyTextUnified(text, reason = '') {
+    const value = String(text || '').trim();
 
-      try {
-        if (typeof window.focus === 'function') {
-          window.focus();
-        }
+    if (!value) {
+      console.warn('[COPY][SKIP_EMPTY]', {
+        reason,
+        textLength: 0,
+        url: location.href,
+      });
+      return false;
+    }
 
-        ta = document.createElement('textarea');
-        ta.value = value;
-        ta.setAttribute('readonly', 'readonly');
-        ta.style.position = 'fixed';
-        ta.style.left = '12px';
-        ta.style.top = '12px';
-        ta.style.width = '1px';
-        ta.style.height = '1px';
-        ta.style.opacity = '0';
-        ta.style.zIndex = '2147483647';
-
-        document.body.appendChild(ta);
-
-        ta.focus();
-        ta.select();
-        ta.setSelectionRange(0, value.length);
-
-        const ok = document.execCommand('copy');
-
-        if (!ok) {
-          reject(new Error('document.execCommand("copy") returned false'));
-          return;
-        }
-
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(`[CLIPBOARD][textarea-copy-ok] chars=${value.length}`);
-        }
-
-        resolve(true);
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.warn('[ChatGPT toolbox] textarea fallback copy failed', err);
-        console.error('[ChatGPT toolbox] textarea fallback copy failed', err);
-
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(`[CLIPBOARD][textarea-copy-failed] error=${errText}`);
-        }
-
-        reject(err);
-      } finally {
-        if (ta && ta.parentNode) {
-          ta.parentNode.removeChild(ta);
-        }
-      }
+    console.log('[COPY][START]', {
+      reason,
+      textLength: value.length,
+      url: location.href,
     });
-  }
 
-  function copyTextToClipboard(text) {
-    const value = String(text || '');
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(value);
+        console.log('[COPY][OK]', {
+          reason,
+          method: 'navigator.clipboard.writeText',
+          textLength: value.length,
+        });
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(`[COPY][OK] reason=${reason || '-'} method=navigator chars=${value.length}`);
+        }
+        return true;
+      } catch (error) {
+        console.error('[COPY][NAVIGATOR_FAILED]', {
+          reason,
+          error,
+          stack: error && error.stack,
+        });
+      }
+    }
 
     if (typeof GM_setClipboard === 'function') {
       try {
         GM_setClipboard(value, 'text');
-
+        console.log('[COPY][OK]', {
+          reason,
+          method: 'GM_setClipboard',
+          textLength: value.length,
+        });
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(`[CLIPBOARD][gm-set-ok] chars=${value.length}`);
+          ToolboxShell.appendLog(`[COPY][OK] reason=${reason || '-'} method=GM_setClipboard chars=${value.length}`);
         }
-
-        return Promise.resolve(true);
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.warn('[ChatGPT toolbox] GM_setClipboard failed, fallback to browser clipboard', err);
-        console.error('[ChatGPT toolbox] GM_setClipboard failed', err);
-
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(`[CLIPBOARD][gm-set-failed] error=${errText}`);
-        }
+        return true;
+      } catch (error) {
+        console.error('[COPY][GM_SET_CLIPBOARD_FAILED]', {
+          reason,
+          error,
+          stack: error && error.stack,
+        });
       }
     }
 
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      return navigator.clipboard.writeText(value).then(
-        () => {
-          if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog(`[CLIPBOARD][navigator-write-ok] chars=${value.length}`);
-          }
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.setAttribute('readonly', 'readonly');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '-9999px';
+      textarea.style.opacity = '0';
 
-          return true;
-        },
-        (err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.warn('[ChatGPT toolbox] navigator.clipboard.writeText failed, fallback to execCommand', err);
-          console.error('[ChatGPT toolbox] navigator.clipboard.writeText failed', err);
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
 
-          if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog(
-              `[CLIPBOARD][navigator-write-failed] error=${errText} focused=${document.hasFocus ? document.hasFocus() : '-'}`
-            );
-          }
+      const ok = document.execCommand('copy');
 
-          return copyTextToClipboardByTextarea(value);
-        },
-      );
+      document.body.removeChild(textarea);
+
+      if (ok) {
+        console.log('[COPY][OK]', {
+          reason,
+          method: 'document.execCommand',
+          textLength: value.length,
+        });
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(`[COPY][OK] reason=${reason || '-'} method=execCommand chars=${value.length}`);
+        }
+        return true;
+      }
+
+      console.error('[COPY][EXEC_COMMAND_RETURN_FALSE]', {
+        reason,
+        textLength: value.length,
+      });
+      return false;
+    } catch (error) {
+      console.error('[COPY][EXEC_COMMAND_FAILED]', {
+        reason,
+        error,
+        stack: error && error.stack,
+      });
+      return false;
     }
+  }
 
-    return copyTextToClipboardByTextarea(value);
+  /** @deprecated 请使用 copyTextUnified；保留兼容旧调用。 */
+  async function copyTextToClipboard(text) {
+    return copyTextUnified(text, 'copyTextToClipboard-legacy');
   }
 
   const DEFAULT_BEEP_CONFIG = Object.freeze({
@@ -3907,18 +4023,26 @@
         fixTitle();
       }, 1000);
 
+      function stopReplyDoneFlashWithHeader(reason = '') {
+        stopReplyDoneFlash(reason);
+        if (typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
+          ToolboxShell.stopHeaderTitleFlash(reason);
+        }
+      }
+
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
-          stopReplyDoneFlash('visibility-visible');
+          stopReplyDoneFlashWithHeader('visibility-visible');
         }
       }, true);
 
       document.addEventListener('pointerdown', () => {
-        stopReplyDoneFlash('pointerdown');
+        stopReplyDoneFlashWithHeader('pointerdown');
       }, true);
 
       document.addEventListener('keydown', () => {
-        stopReplyDoneFlash('keydown');
+        stopReplyDoneFlashWithHeader('keydown');
       }, true);
     }
 
@@ -3970,8 +4094,8 @@
       replyDoneFlashBaseTitle = cleanBase;
       replyDoneFlashOn = false;
 
-      const intervalMs = Number(options.intervalMs || 450);
-      const autoStopMs = Number(options.autoStopMs || 2400);
+      const intervalMs = Number(options.intervalMs || 600);
+      const autoStopMs = Number(options.autoStopMs || 0);
 
       const tick = () => {
         replyDoneFlashOn = !replyDoneFlashOn;
@@ -3983,14 +4107,22 @@
       tick();
       replyDoneFlashTimer = window.setInterval(tick, intervalMs);
 
-      replyDoneFlashStopTimer = window.setTimeout(() => {
-        stopReplyDoneFlash(`auto-stop:${reason || '-'}`);
-      }, autoStopMs);
+      if (replyDoneFlashStopTimer) {
+        window.clearTimeout(replyDoneFlashStopTimer);
+        replyDoneFlashStopTimer = 0;
+      }
+
+      if (autoStopMs > 0) {
+        replyDoneFlashStopTimer = window.setTimeout(() => {
+          stopReplyDoneFlash(`auto-stop:${reason || 'reply-done'}`);
+        }, autoStopMs);
+      }
 
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        const flashMode = autoStopMs > 0 ? 'timed' : 'until-user-action';
         ToolboxShell.appendLog(
-          `[TITLE_FLASH][start] reason=${reason || '-'} base=${replyDoneFlashBaseTitle} `
-          + `intervalMs=${intervalMs} autoStopMs=${autoStopMs}`,
+          `[TITLE_FLASH][start] reason=${reason || 'reply-done'} intervalMs=${intervalMs} `
+          + `autoStopMs=${autoStopMs} mode=${flashMode}`,
         );
       }
     }

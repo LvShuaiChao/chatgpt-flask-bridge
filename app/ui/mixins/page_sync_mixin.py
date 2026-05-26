@@ -976,7 +976,13 @@ class PageSyncMixin:
                 text="同步完成（网页内容无变化）",
             )
             if session.session_id == self._current_session_id:
-                if hasattr(self, "_render_current_chat_messages"):
+                if hasattr(self, "_schedule_current_chat_render"):
+                    self._schedule_current_chat_render(
+                        "snapshot_unchanged_refresh",
+                        delay_ms=0,
+                        force_bottom=True,
+                    )
+                elif hasattr(self, "_render_current_chat_messages"):
                     self._render_current_chat_messages(
                         force_bottom=True,
                         reason="snapshot_unchanged_refresh",
@@ -2600,7 +2606,13 @@ class PageSyncMixin:
 
         is_current = session.session_id == self._current_session_id
         if is_current:
-            if hasattr(self, "_render_current_chat_messages"):
+            if hasattr(self, "_schedule_current_chat_render"):
+                self._schedule_current_chat_render(
+                    reason or "sync_refresh",
+                    delay_ms=0,
+                    force_bottom=force_bottom,
+                )
+            elif hasattr(self, "_render_current_chat_messages"):
                 self._render_current_chat_messages(
                     force_bottom=force_bottom,
                     reason=reason or "sync_refresh",

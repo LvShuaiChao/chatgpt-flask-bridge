@@ -6,10 +6,12 @@ from typing import Any, Tuple
 
 TARGET_SOURCE_BOUND_PAGE = "bound_page"
 TARGET_SOURCE_NO_SESSION = "no_session"
+TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID = "temp_home_page_display_id"
 
 TARGET_SOURCES: Tuple[str, ...] = (
     TARGET_SOURCE_BOUND_PAGE,
     TARGET_SOURCE_NO_SESSION,
+    TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID,
 )
 
 
@@ -31,6 +33,8 @@ def target_source_label(value: Any) -> str:
         return "已绑定页"
     if resolved == TARGET_SOURCE_NO_SESSION:
         return "无会话目标"
+    if resolved == TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID:
+        return "临时首页"
     if resolved:
         return resolved
     return "未知来源"
@@ -40,6 +44,7 @@ __all__ = [
     "TARGET_SOURCES",
     "TARGET_SOURCE_BOUND_PAGE",
     "TARGET_SOURCE_NO_SESSION",
+    "TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID",
     "target_source_from",
     "canonical_target_source",
     "target_source_label",
