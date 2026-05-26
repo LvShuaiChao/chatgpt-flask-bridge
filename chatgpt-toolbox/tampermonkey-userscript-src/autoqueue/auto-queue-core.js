@@ -1,4 +1,4 @@
-  /********************************************************************
+﻿  /********************************************************************
    * 4. AutoQueueModule：自动指令队列模块
    ********************************************************************/
 
@@ -7480,22 +7480,22 @@ const AutoQueueModule = (() => {
         return 'uploading';
       }
 
+      const status = String(state.autoQueueUploadStatus || 'idle').trim().toLowerCase();
+      if (status === 'uploading' || status === 'cancelling') {
+        return status;
+      }
+      if (status === 'failed') {
+        return 'failed';
+      }
+
       if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.getButtonTask === 'function') {
         const uploadTask = ButtonTasks.getButtonTask('upload');
         if (uploadTask && uploadTask.phase) {
           const taskPhase = String(uploadTask.phase || 'idle').trim().toLowerCase();
-          if (taskPhase === 'uploading' || taskPhase === 'cancelling') {
-            return taskPhase;
-          }
           if (taskPhase === 'failed') {
             return 'failed';
           }
         }
-      }
-
-      const status = String(state.autoQueueUploadStatus || 'idle').trim().toLowerCase();
-      if (status === 'failed') {
-        return 'failed';
       }
 
       return 'idle';
@@ -7506,6 +7506,46 @@ const AutoQueueModule = (() => {
         return UploadGroupAppState.uploadItems.filter(Boolean).length;
       }
       return null;
+    }
+
+    function logUploadBatchState(reason = '') {
+      const safeReason = String(reason || '-');
+
+      try {
+        const activeFiles = resolveActiveUploadFileCountForLog();
+
+        const phase = String(state.phase || '-');
+        const uploadStatus = String(state.autoQueueUploadStatus || '-');
+
+        const stats = state.autoQueueUploadStats && typeof state.autoQueueUploadStats === 'object'
+          ? state.autoQueueUploadStats
+          : {};
+
+        const uploaded = Number(stats.uploaded || 0);
+        const failed = Number(stats.failed || 0);
+        const skipped = Number(stats.skipped || 0);
+        const statReason = String(stats.reason || '-');
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_BATCH_STATE] reason=${safeReason} `
+          + `phase=${phase} `
+          + `running=${state.running ? 1 : 0} `
+          + `manualUploadRunning=${state.manualUploadRunning ? 1 : 0} `
+          + `uploadingFromAutoQueue=${state.uploadingFromAutoQueue ? 1 : 0} `
+          + `batchTaskRunning=${state.batchTaskRunning ? 1 : 0} `
+          + `batchAutoUploading=${state.batchAutoUploading ? 1 : 0} `
+          + `uploadStatus=${uploadStatus} `
+          + `activeFiles=${activeFiles == null ? '-' : activeFiles} `
+          + `uploaded=${uploaded} failed=${failed} skipped=${skipped} `
+          + `statReason=${statReason}`,
+        );
+      } catch (error) {
+        const message = error && error.stack ? error.stack : String(error);
+        console.error('[AUTOQ][UPLOAD_BATCH_STATE][ERROR]', error);
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_BATCH_STATE][ERROR] reason=${safeReason} error=${message}`,
+        );
+      }
     }
 
     async function handleAutoQueueStartUpload() {
@@ -7562,22 +7602,23 @@ const AutoQueueModule = (() => {
       }
 
       if (state.running && config.promptMode === 'task') {
-        const reason = 'batch-task-running';
-        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][BLOCKED] reason=${reason} phase=${phase}`);
-        log(`[AUTOQ][MANUAL_UPLOAD][BLOCKED] reason=${reason} phase=${phase}`);
-
-        if (typeof ToolboxShell.showToast === 'function') {
-          ToolboxShell.showToast('批量任务运行中，暂不建议手动上传', 'warn', 2600);
-        }
-
-        updateStatus('start-upload-click-blocked-running-task');
-        return;
+        ToolboxShell.appendLog(
+          `[AUTOQ][MANUAL_UPLOAD][CONTINUE] reason=batch-task-running-but-manual-upload-allowed phase=${phase}`,
+        );
+        log(`[AUTOQ][MANUAL_UPLOAD][CONTINUE] reason=batch-task-running-but-manual-upload-allowed phase=${phase}`);
       }
 
-      if (
-        typeof UploadModule === 'undefined'
-        || typeof UploadModule.startManualUploadOnlyFlow !== 'function'
-      ) {
+      const hasForceAutoQueueUpload = (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.startUploadForAutoQueue === 'function'
+      );
+
+      const hasManualUpload = (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.startManualUploadOnlyFlow === 'function'
+      );
+
+      if (!hasForceAutoQueueUpload && !hasManualUpload) {
         const reason = 'upload-module-missing';
         console.error('[AUTOQ][MANUAL_UPLOAD][BLOCKED]', reason);
         ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][BLOCKED] reason=${reason}`);
@@ -7605,10 +7646,22 @@ const AutoQueueModule = (() => {
       log(`[AUTOQ][MANUAL_UPLOAD][START] phase=${phase}`);
 
       try {
-        const result = await UploadModule.startManualUploadOnlyFlow({
-          source: 'autoqueue-start-upload-button',
-          shouldStop: () => !state.uploadingFromAutoQueue,
-        });
+        let result;
+
+        if (hasForceAutoQueueUpload) {
+          ToolboxShell.appendLog('[AUTOQ][MANUAL_UPLOAD][CALL] api=startUploadForAutoQueue forceReupload=1');
+          result = await UploadModule.startUploadForAutoQueue({
+            source: 'autoqueue-start-upload-button',
+            forceReupload: true,
+            shouldStop: () => !state.manualUploadRunning,
+          });
+        } else {
+          ToolboxShell.appendLog('[AUTOQ][MANUAL_UPLOAD][CALL] api=startManualUploadOnlyFlow fallback=1');
+          result = await UploadModule.startManualUploadOnlyFlow({
+            source: 'autoqueue-start-upload-button',
+            shouldStop: () => !state.manualUploadRunning,
+          });
+        }
 
         const uploadedCount = Number(result && result.uploadedCount) || 0;
         const failedCount = Number(result && result.failedCount) || 0;
@@ -10985,21 +11038,31 @@ const AutoQueueModule = (() => {
     }
 
     function handleAutoQueueStartBatchButtonClick(source = 'unknown') {
-      syncLegacyRunFlagsFromPhase();
+      try {
+        syncLegacyRunFlagsFromPhase();
 
-      const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
-      const active = state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase);
+        const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
+        const active = state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase);
 
-      if (active) {
-        ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop`);
-        state.batchTask.stopRequested = true;
-        stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
-        return;
+        if (active) {
+          ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop`);
+          state.batchTask.stopRequested = true;
+          stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
+          return;
+        }
+
+        ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=start`);
+        logUploadBatchState(`batch-task-click-start-${source}`);
+        callBatchTaskStartFromButton(source);
+      } catch (error) {
+        const message = error && error.stack ? error.stack : String(error);
+        console.error('[BATCH_TASK_BUTTON][CLICK_HANDLER_ERROR]', error);
+        ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_HANDLER_ERROR] source=${source || '-'} error=${message}`);
+        if (typeof ToolboxShell.setStatus === 'function') {
+          ToolboxShell.setStatus('启动批量任务失败，请查看日志', 'error');
+        }
+        updateStatus('batch-task-click-handler-error');
       }
-
-      ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=start`);
-      logUploadBatchState(`batch-task-click-start-${source}`);
-      callBatchTaskStartFromButton(source);
     }
 
     function bindDirectAutoQueueActionButtons(reason = '') {
@@ -11043,7 +11106,15 @@ const AutoQueueModule = (() => {
 
       bindDirect(startUploadBtn, 'start-upload', () => {
         ToolboxShell.appendLog('[UPLOAD_BUTTON][CLICK_DIRECT]');
-        void handleAutoQueueStartUpload();
+        void handleAutoQueueStartUpload().catch((error) => {
+          const message = error && error.stack ? error.stack : String(error);
+          console.error('[UPLOAD_BUTTON][CLICK_HANDLER_ERROR]', error);
+          ToolboxShell.appendLog(`[UPLOAD_BUTTON][CLICK_HANDLER_ERROR] ${message}`);
+          state.manualUploadRunning = false;
+          state.uploadingFromAutoQueue = false;
+          state.autoQueueUploadStatus = 'failed';
+          updateStatus('start-upload-click-handler-error');
+        });
       });
 
       bindDirect(startBtn, 'start-batch', () => {
@@ -11078,12 +11149,28 @@ const AutoQueueModule = (() => {
         event.stopPropagation();
 
         ToolboxShell.appendLog(
-          `[UPLOAD_BUTTON][CLICK_DELEGATED] `
+          `[UPLOAD_BUTTON][CLICK_DELEGATED] source=autoqueue-start-upload `
+          + `disabled=${uploadBtn.disabled ? 1 : 0} `
           + `manualUploadRunning=${state.manualUploadRunning ? 1 : 0} `
           + `batchTaskRunning=${state.batchTaskRunning ? 1 : 0} `
           + `batchAutoUploading=${state.batchAutoUploading ? 1 : 0}`,
         );
-        void handleAutoQueueStartUpload();
+
+        if (uploadBtn.disabled) {
+          ToolboxShell.appendLog('[UPLOAD_BUTTON][CLICK_BLOCKED] source=autoqueue-start-upload reason=disabled');
+          log('[UPLOAD_BUTTON][CLICK_BLOCKED] source=autoqueue-start-upload reason=disabled');
+          return;
+        }
+
+        void handleAutoQueueStartUpload().catch((error) => {
+          const message = error && error.stack ? error.stack : String(error);
+          console.error('[UPLOAD_BUTTON][CLICK_HANDLER_ERROR]', error);
+          ToolboxShell.appendLog(`[UPLOAD_BUTTON][CLICK_HANDLER_ERROR] ${message}`);
+          state.manualUploadRunning = false;
+          state.uploadingFromAutoQueue = false;
+          state.autoQueueUploadStatus = 'failed';
+          updateStatus('start-upload-click-handler-error');
+        });
         return;
       }
 
@@ -11275,6 +11362,8 @@ const AutoQueueModule = (() => {
 
       let btn = qs('#cgpt-autoq-start-upload', root);
       if (btn) {
+        btn.dataset.action = 'autoq-start-upload';
+        btn.dataset.buttonRole = 'autoq-start-upload';
         return btn;
       }
 
@@ -11288,6 +11377,8 @@ const AutoQueueModule = (() => {
       btn.type = 'button';
       btn.className = 'cgpt-btn cgpt-btn-idle';
       btn.id = 'cgpt-autoq-start-upload';
+      btn.dataset.action = 'autoq-start-upload';
+      btn.dataset.buttonRole = 'autoq-start-upload';
       btn.textContent = '开始上传';
       actionsEl.insertBefore(btn, batchStartBtn);
       return btn;
@@ -11377,7 +11468,7 @@ const AutoQueueModule = (() => {
           </div>
 
           <div class="cgpt-autoq-actions">
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload">开始上传</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="autoq-start-upload" data-button-role="autoq-start-upload">开始上传</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">开始</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">发送一次</button>
           </div>
