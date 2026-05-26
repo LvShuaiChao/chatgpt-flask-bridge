@@ -242,9 +242,10 @@
     copyHotkeyOnceBtn: '#cgpt-copy-hotkey-once',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
     copyHotkeyContinueLoopBtn: '#cgpt-copy-hotkey-continue-loop',
+    closedLoopUploadEvery5HotkeyBtn: '#cgpt-closed-loop-upload-every5-hotkey-btn',
     closedLoopUploadEvery5Btn: '#cgpt-closed-loop-upload-every5-btn',
-    /** @deprecated 旧 ID，迁移后指向 closedLoopUploadEvery5Btn */
-    copyHotkeyContinueLoopUploadVerifyBtn: '#cgpt-closed-loop-upload-every5-btn',
+    /** @deprecated 旧 ID，迁移后指向 closedLoopUploadEvery5HotkeyBtn */
+    copyHotkeyContinueLoopUploadVerifyBtn: '#cgpt-closed-loop-upload-every5-hotkey-btn',
     groupList: '#cgpt-upload-group-list',
     managePanel: '#cgpt-upload-manage-panel',
     manageGroupList: '#cgpt-upload-manage-group-list',
@@ -262,6 +263,7 @@
     UploadSelectors.copyHotkeyOnceBtn,
     UploadSelectors.copyHotkeyContinueOnceBtn,
     UploadSelectors.copyHotkeyContinueLoopBtn,
+    UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
     UploadSelectors.closedLoopUploadEvery5Btn,
   ]);
 

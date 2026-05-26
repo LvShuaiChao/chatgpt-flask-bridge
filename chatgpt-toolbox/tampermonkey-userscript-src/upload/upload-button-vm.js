@@ -957,17 +957,21 @@
     };
   }
 
-  function getClosedLoopContinueButtonViewState(snapshot = {}) {
+  function getClosedLoopContinueButtonViewState(snapshot = {}, mode = 'with_hotkey') {
     const running = !!snapshot.closedLoopContinueRunning;
     const stopping = !!snapshot.closedLoopContinueStopping;
+    const activeMode = String(snapshot.closedLoopContinueMode || 'with_hotkey');
+    const isHotkeyMode = mode !== 'without_hotkey';
+    const label = isHotkeyMode ? '闭环继续+快捷键+每5轮上传' : '闭环继续+每5轮上传';
+    const isActiveMode = running && activeMode === (isHotkeyMode ? 'with_hotkey' : 'without_hotkey');
 
-    if (running) {
+    if (isActiveMode) {
       return {
         phase: stopping ? 'stopping' : TaskPhase.RUNNING,
         text: stopping ? '正在停止闭环继续' : '停止闭环继续',
         title: stopping
           ? '正在停止闭环继续任务'
-          : '闭环继续+每5轮上传运行中，再次点击停止',
+          : `${label}运行中，再次点击停止`,
         disabled: false,
         allowCancel: true,
         action: 'stop',
@@ -977,10 +981,12 @@
 
     return {
       phase: TaskPhase.IDLE,
-      text: snapshot.closedLoopLabel || '闭环继续+每5轮上传',
+      text: snapshot.closedLoopLabel || label,
       title: snapshot.closedLoopTitle
-        || '等待回复完成 -> 复制 -> 快捷键 -> 继续；第 1 轮与每 5 轮自动上传代码',
-      disabled: false,
+        || (isHotkeyMode
+          ? '等待回复完成 -> 复制 -> 快捷键 -> 继续；第 1 轮与每 5 轮自动上传代码'
+          : '等待回复完成 -> 复制 -> 继续；第 1 轮与每 5 轮自动上传代码'),
+      disabled: running,
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',

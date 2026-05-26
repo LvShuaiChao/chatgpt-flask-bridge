@@ -203,6 +203,16 @@
     let copyHotkeyContinueLoopRunGeneration = 0;
     let copyHotkeyUploadVerifyLoopRunGeneration = 0;
 
+    const CLOSED_LOOP_CONTINUE_MODES = {
+      WITH_HOTKEY: 'with_hotkey',
+      WITHOUT_HOTKEY: 'without_hotkey',
+    };
+
+    const CLOSED_LOOP_CONTINUE_MODE_LABELS = {
+      [CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY]: '闭环继续+快捷键+每5轮上传',
+      [CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY]: '闭环继续+每5轮上传',
+    };
+
     const closedLoopContinueState = {
       running: false,
       stopping: false,
@@ -211,6 +221,10 @@
       currentRound: 0,
       uploadEveryRounds: 5,
       lastReason: '',
+      mode: CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY,
+      doneVerificationRunning: false,
+      doneVerificationSent: false,
+      doneVerificationRound: 0,
     };
 
     const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
@@ -832,41 +846,75 @@
       );
     }
 
+    function getClosedLoopContinueButtonElement(mode) {
+      const isHotkey = mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+      const primaryId = isHotkey
+        ? 'cgpt-closed-loop-upload-every5-hotkey-btn'
+        : 'cgpt-closed-loop-upload-every5-btn';
+      const selector = isHotkey
+        ? UploadSelectors.closedLoopUploadEvery5HotkeyBtn
+        : UploadSelectors.closedLoopUploadEvery5Btn;
+
+      return document.getElementById(primaryId)
+        || (rootElRef ? qs(selector, rootElRef) : null);
+    }
+
+    function renderClosedLoopContinueButtons() {
+      const hotkeyBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
+      const plainBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
+      let changed = 0;
+
+      const renderOne = (btn, mode) => {
+        if (!btn) {
+          return false;
+        }
+
+        const isRunning = !!closedLoopContinueState.running;
+        const isActiveMode = isRunning && closedLoopContinueState.mode === mode;
+        const label = CLOSED_LOOP_CONTINUE_MODE_LABELS[mode] || '闭环继续';
+        const hotkeyTitle = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码';
+        const plainTitle = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码';
+        const idleTitle = mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY ? hotkeyTitle : plainTitle;
+
+        let applied = false;
+        if (isActiveMode) {
+          applied = setButtonDanger(
+            btn,
+            closedLoopContinueState.stopping ? '正在停止闭环继续' : '停止闭环继续',
+            {
+              reason: 'closed-loop-running',
+              title: closedLoopContinueState.stopping
+                ? '正在停止闭环继续任务'
+                : `${label}运行中，再次点击停止`,
+              disabled: false,
+            },
+          );
+        } else if (setButtonIdle(btn, label, {
+          reason: 'closed-loop-idle',
+          title: idleTitle,
+          disabled: isRunning,
+        })) {
+          applied = true;
+        }
+
+        if (applied) {
+          btn.setAttribute('aria-disabled', isRunning && !isActiveMode ? 'true' : 'false');
+        }
+        return applied;
+      };
+
+      if (renderOne(hotkeyBtn, CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)) {
+        changed += 1;
+      }
+      if (renderOne(plainBtn, CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)) {
+        changed += 1;
+      }
+      logClosedLoopButtonHitTest('after-render-closed-loop-buttons');
+      return changed > 0;
+    }
+
     function renderClosedLoopContinueButton() {
-      const btn = document.getElementById('cgpt-closed-loop-upload-every5-btn')
-        || (rootElRef ? qs(UploadSelectors.closedLoopUploadEvery5Btn, rootElRef) : null);
-      if (!btn) {
-        return false;
-      }
-
-      let applied = false;
-      if (typeof UploadButtonVm !== 'undefined'
-        && typeof UploadButtonVm.getClosedLoopContinueButtonViewState === 'function'
-        && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-        const snapshot = buildUploadButtonRenderSnapshot();
-        const view = UploadButtonVm.getClosedLoopContinueButtonViewState(snapshot);
-        applied = UploadButtonVm.applyUploadButtonViewState(
-          btn,
-          view,
-          'renderClosedLoopContinueButton',
-        );
-      } else if (closedLoopContinueState.running) {
-        applied = setButtonDanger(
-          btn,
-          closedLoopContinueState.stopping ? '正在停止闭环继续' : '停止闭环继续',
-          { reason: 'closed-loop-running' },
-        );
-      } else if (setButtonIdle(btn, '闭环继续+每5轮上传', {
-        reason: 'closed-loop-idle',
-        title: '第 1 轮与每 5 轮自动上传代码，检测到终止信号后停止',
-      })) {
-        applied = true;
-      }
-
-      if (applied) {
-        btn.setAttribute('aria-disabled', 'false');
-      }
-      return applied;
+      return renderClosedLoopContinueButtons();
     }
 
     function stopClosedLoopContinue(reason = 'unknown') {
@@ -898,6 +946,9 @@
 
       closedLoopContinueState.running = false;
       closedLoopContinueState.stopping = false;
+      closedLoopContinueState.doneVerificationRunning = false;
+      closedLoopContinueState.doneVerificationSent = false;
+      closedLoopContinueState.doneVerificationRound = 0;
       copyHotkeyUploadVerifyLoopRunning = false;
       copyHotkeyUploadVerifyLoopStopRequested = false;
       loopTask.stopRequested = false;
@@ -906,7 +957,7 @@
         cycleIndex: closedLoopContinueState.currentRound,
       });
 
-      renderClosedLoopContinueButton();
+      renderClosedLoopContinueButtons();
       releaseUploadActionLock('copy-hotkey-upload-verify-loop');
 
       window.setTimeout(() => {
@@ -1149,24 +1200,39 @@
       };
     }
 
-    async function handleClosedLoopContinueClick() {
-      ToolboxShell.appendLog('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][click]');
+    async function handleClosedLoopContinueModeClick(mode, source = 'button') {
+      const normalizedMode = mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+        ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+        : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][CLICK] running=${closedLoopContinueState.running ? 1 : 0}`
-        + ` stopping=${closedLoopContinueState.stopping ? 1 : 0}`
-        + ` runId=${closedLoopContinueState.runId}`,
+        `[CLOSED_LOOP][MODE_CLICK] mode=${normalizedMode} running=${closedLoopContinueState.running ? 1 : 0} activeMode=${closedLoopContinueState.mode || '-'}`,
       );
+      ToolboxShell.appendLog('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][click]');
 
       if (closedLoopContinueState.running) {
-        stopClosedLoopContinue('button-toggle');
+        stopClosedLoopContinue(`button-toggle:${normalizedMode}`);
         return;
       }
 
-      await startClosedLoopContinue('button-toggle');
+      await startClosedLoopContinue({
+        reason: source,
+        mode: normalizedMode,
+      });
     }
 
-    async function startClosedLoopContinue(reason = 'unknown') {
+    async function handleClosedLoopContinueClick(mode = CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY) {
+      return handleClosedLoopContinueModeClick(mode, 'button-toggle');
+    }
+
+    async function startClosedLoopContinue(options = {}) {
+      const reason = typeof options === 'string'
+        ? options
+        : String(options.reason || 'unknown');
       const src = String(reason || 'unknown').trim() || 'unknown';
+      const mode = typeof options === 'object' && options.mode
+        ? options.mode
+        : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
 
       if (closedLoopContinueState.running) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][START_SKIP] reason=${src} alreadyRunning=1`);
@@ -1188,6 +1254,10 @@
       closedLoopContinueState.runId += 1;
       closedLoopContinueState.currentRound = 0;
       closedLoopContinueState.lastReason = src;
+      closedLoopContinueState.mode = mode;
+      closedLoopContinueState.doneVerificationRunning = false;
+      closedLoopContinueState.doneVerificationSent = false;
+      closedLoopContinueState.doneVerificationRound = 0;
       copyHotkeyUploadVerifyLoopStopRequested = false;
 
       const runId = closedLoopContinueState.runId;
@@ -1197,10 +1267,11 @@
       loopTask.lastError = null;
 
       setCopyHotkeyUploadVerifyLoopPhase('running', src, { cycleIndex: 0 });
-      setStatus('闭环继续已启动：第 1 轮与每 5 轮自动上传代码', 'running');
+      const modeLabel = CLOSED_LOOP_CONTINUE_MODE_LABELS[mode] || mode;
+      setStatus(`${modeLabel}已启动：第 1 轮与每 5 轮自动上传代码`, 'running');
       ToolboxShell.appendLog('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][start]');
-      ToolboxShell.appendLog(`[CLOSED_LOOP][START] reason=${src} runId=${runId}`);
-      renderClosedLoopContinueButton();
+      ToolboxShell.appendLog(`[CLOSED_LOOP][START] reason=${src} mode=${mode} runId=${runId}`);
+      renderClosedLoopContinueButtons();
 
       try {
         await runClosedLoopContinueStep(runId);
@@ -1210,6 +1281,202 @@
         ToolboxShell.appendLog(`[CLOSED_LOOP][START_FAILED] runId=${runId} error=${errText}`);
         setStatus(`闭环继续失败：${errText}`, 'error');
         stopClosedLoopContinue(`exception:${errText}`);
+      }
+    }
+
+    function buildClosedLoopDoneVerificationPrompt() {
+      const doneSignal = typeof DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL === 'string'
+        ? DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL
+        : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+
+      const blockedSignal = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+      const noMoreSignal = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
+
+      return [
+        '请根据刚才上传的代码文件和当前任务要求，检查任务是否已经完整完成。',
+        '',
+        '重点是检查上一轮是否真的已经完成任务，不要重新回答整个任务。',
+        '',
+        '如果还缺少源码、日志、构建结果、测试结果、用户确认等外部材料，无法判断任务是否真实完成，只输出：',
+        blockedSignal,
+        '',
+        '如果你非常确定任务已经完整完成，并且没有任何剩余内容，只输出：',
+        doneSignal,
+        '',
+        '如果你确定当前回复内容已经输出完，但不能证明工程任务真实完成，只输出：',
+        noMoreSignal,
+        '',
+        '不要重复之前已经输出过的内容。',
+        '不要重新开始整个任务。',
+        '不要扩展到新任务。',
+      ].join('\n');
+    }
+
+    async function runClosedLoopDoneVerification(runId, round, triggerReason = 'done-signal') {
+      if (!isClosedLoopRunActive(runId)) {
+        ToolboxShell.appendLog(`[CLOSED_LOOP][DONE_VERIFY_SKIP] reason=inactive runId=${runId} round=${round}`);
+        return {
+          ok: false,
+          reason: 'inactive',
+        };
+      }
+
+      if (closedLoopContinueState.doneVerificationRunning) {
+        ToolboxShell.appendLog(`[CLOSED_LOOP][DONE_VERIFY_SKIP] reason=already-running runId=${runId} round=${round}`);
+        return {
+          ok: false,
+          reason: 'already-running',
+        };
+      }
+
+      if (closedLoopContinueState.doneVerificationSent) {
+        ToolboxShell.appendLog(`[CLOSED_LOOP][DONE_VERIFY_SKIP] reason=already-sent runId=${runId} round=${round}`);
+        return {
+          ok: false,
+          reason: 'already-sent',
+        };
+      }
+
+      closedLoopContinueState.doneVerificationRunning = true;
+      closedLoopContinueState.doneVerificationRound = round;
+
+      const shouldStop = () => !isClosedLoopRunActive(runId);
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][DONE_VERIFY_START] runId=${runId} round=${round} trigger=${triggerReason}`,
+      );
+
+      try {
+        setCopyHotkeyUploadVerifyLoopPhase('auto_uploading', `done-verify-upload-${round}`, {
+          cycleIndex: round,
+          currentSubtask: 'done_verify_upload',
+        });
+        renderClosedLoopContinueButton();
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_START] runId=${runId} round=${round}`,
+        );
+
+        const uploadResult = await uploadFromCurrentQueueShared({
+          source: `closed-loop-final-verify-upload-${round}`,
+          parentTask: 'closedLoopDoneVerification',
+          cycleIndex: round,
+          shouldStop,
+        });
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_DONE] runId=${runId} round=${round} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadResult && uploadResult.uploadedCount != null ? uploadResult.uploadedCount : '-'} failed=${uploadResult && uploadResult.failedCount != null ? uploadResult.failedCount : '-'} skipped=${uploadResult && uploadResult.skippedCount != null ? uploadResult.skippedCount : '-'} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'}`,
+        );
+
+        if (!isClosedLoopRunActive(runId)) {
+          return {
+            ok: false,
+            reason: 'inactive-after-upload',
+          };
+        }
+
+        setCopyHotkeyUploadVerifyLoopPhase('sending_continue', `done-verify-send-${round}`, {
+          cycleIndex: round,
+          currentSubtask: 'done_verify_send',
+        });
+        renderClosedLoopContinueButton();
+
+        const previousKey = getLastAssistantMessageKeySafe();
+        const verifyPrompt = buildClosedLoopDoneVerificationPrompt();
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_SEND_START] runId=${runId} round=${round} promptLen=${verifyPrompt.length}`,
+        );
+
+        const sendResult = await sendContinuePromptFromUnifiedPipeline(
+          `closed-loop-final-verify-${round}`,
+          {
+            continuePrompt: verifyPrompt,
+            shouldStop,
+            doneSignal: DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+            strictDoneSignal: true,
+            disableBatchTextTerminalStop: true,
+            skipDoneSignalBeforeSendCheck: true,
+            allowSendAfterDoneSignal: true,
+          },
+        );
+
+        if (!sendResult || !sendResult.ok) {
+          const reason = sendResult && sendResult.reason ? sendResult.reason : 'verify-send-failed';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DONE_VERIFY_SEND_FAILED] runId=${runId} round=${round} reason=${reason}`,
+          );
+          return {
+            ok: false,
+            reason,
+          };
+        }
+
+        closedLoopContinueState.doneVerificationSent = true;
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_SEND_DONE] runId=${runId} round=${round}`,
+        );
+
+        setCopyHotkeyUploadVerifyLoopPhase('waiting_next_reply', `done-verify-wait-${round}`, {
+          cycleIndex: round,
+          currentSubtask: 'done_verify_wait',
+        });
+        renderClosedLoopContinueButton();
+
+        const waited = await waitAssistantCycleAfterContinue(
+          `closed-loop-final-verify-${round}`,
+          previousKey,
+          { shouldStop },
+        );
+
+        if (!waited) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DONE_VERIFY_WAIT_FAILED] runId=${runId} round=${round}`,
+          );
+          return {
+            ok: false,
+            reason: 'verify-wait-failed',
+          };
+        }
+
+        if (!isClosedLoopRunActive(runId)) {
+          return {
+            ok: false,
+            reason: 'inactive-after-verify-wait',
+          };
+        }
+
+        const verifyStopSignal = detectCopyHotkeyLoopStopSignal(round);
+        const matched = !!(verifyStopSignal && verifyStopSignal.matched);
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_REPLY_CHECK] runId=${runId} round=${round} matched=${matched ? 1 : 0} reason=${verifyStopSignal && verifyStopSignal.reason ? verifyStopSignal.reason : '-'}`,
+        );
+
+        if (matched) {
+          return {
+            ok: true,
+            reason: 'verified-done',
+          };
+        }
+
+        return {
+          ok: false,
+          reason: 'verify-reply-not-done',
+        };
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[CLOSED_LOOP][DONE_VERIFY_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DONE_VERIFY_FAILED] runId=${runId} round=${round} error=${errText}`,
+        );
+        return {
+          ok: false,
+          reason: errText,
+        };
+      } finally {
+        closedLoopContinueState.doneVerificationRunning = false;
       }
     }
 
@@ -1255,7 +1522,7 @@
         renderClosedLoopContinueButton();
 
         try {
-          await startUploadFromCurrentQueue({
+          await uploadFromCurrentQueueShared({
             source: round === 1
               ? 'copy-hotkey-upload-verify-loop-initial-upload'
               : `closed-loop-every5-${round}`,
@@ -1283,12 +1550,15 @@
       }
 
       const previousKeyBeforeStep = getLastAssistantMessageKeySafe();
-      const copyHotkeyFlowOptions = {
+      const useHotkey = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
+      const closedLoopFlowOptions = {
         isolated: true,
         shouldStop,
         doneSignal: DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
         strictDoneSignal: true,
         disableBatchTextTerminalStop: true,
+        useHotkey,
+        sourceMode: closedLoopContinueState.mode,
       };
 
       let result = null;
@@ -1309,20 +1579,20 @@
 
         if (result && result.reason === 'no-composer-payload') {
           ToolboxShell.appendLog(
-            `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-send-fallback] reason=no-composer-payload action=copy-hotkey-continue`,
+            `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-send-fallback] reason=no-composer-payload action=copy-continue`,
           );
           setCopyHotkeyUploadVerifyLoopPhase('copying', `round-${round}-copy-fallback`, {
             cycleIndex: round,
-            currentSubtask: 'copy_hotkey_continue',
+            currentSubtask: useHotkey ? 'copy_hotkey_continue' : 'copy_continue',
           });
-          result = await copyHotkeyAndContinueOnce(`closed-loop-every5-${round}`, copyHotkeyFlowOptions);
+          result = await runClosedLoopContinueOnce(`closed-loop-every5-${round}`, closedLoopFlowOptions);
         }
       } else {
         setCopyHotkeyUploadVerifyLoopPhase('copying', `round-${round}-copy`, {
           cycleIndex: round,
-          currentSubtask: 'copy_hotkey_continue',
+          currentSubtask: useHotkey ? 'copy_hotkey_continue' : 'copy_continue',
         });
-        result = await copyHotkeyAndContinueOnce(`closed-loop-every5-${round}`, copyHotkeyFlowOptions);
+        result = await runClosedLoopContinueOnce(`closed-loop-every5-${round}`, closedLoopFlowOptions);
       }
 
       if (!isClosedLoopRunActive(runId)) {
@@ -1344,13 +1614,26 @@
         )
       ) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_DONE] reason=assistant-done-signal runId=${runId} round=${round}`,
+          `[CLOSED_LOOP][STEP_DONE_SIGNAL] source=before-send-check runId=${runId} round=${round} reason=${result.reason || 'assistant-done-signal'}`,
         );
         ToolboxShell.appendLog(
           `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][done-signal] round=${round} reason=${result.reason || 'assistant-done-signal'}`,
         );
-        stopClosedLoopContinue('assistant-done-signal');
-        setStatus(`检测到终止信号，闭环继续已结束，共执行 ${round} 轮`, 'success');
+
+        const verifyResult = await runClosedLoopDoneVerification(
+          runId,
+          round,
+          result.reason || 'assistant-done-signal',
+        );
+
+        if (verifyResult && verifyResult.ok) {
+          stopClosedLoopContinue('assistant-done-signal-verified');
+          setStatus(`终止信号已二次确认，闭环继续已结束，共执行 ${round} 轮`, 'success');
+          return;
+        }
+
+        stopClosedLoopContinue(`done-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`);
+        setStatus(`检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`, 'warn');
         return;
       }
 
@@ -1404,10 +1687,23 @@
       const stopSignalResult = detectCopyHotkeyLoopStopSignal(round);
       if (stopSignalResult && stopSignalResult.matched) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_DONE] reason=${stopSignalResult.reason || 'stop-signal'} runId=${runId} round=${round}`,
+          `[CLOSED_LOOP][STEP_DONE_SIGNAL] source=after-wait-check runId=${runId} round=${round} reason=${stopSignalResult.reason || 'stop-signal'}`,
         );
-        stopClosedLoopContinue(stopSignalResult.reason || 'stop-signal');
-        setStatus(`检测到终止信号，闭环继续已结束，共执行 ${round} 轮`, 'success');
+
+        const verifyResult = await runClosedLoopDoneVerification(
+          runId,
+          round,
+          stopSignalResult.reason || 'stop-signal',
+        );
+
+        if (verifyResult && verifyResult.ok) {
+          stopClosedLoopContinue('assistant-done-signal-verified');
+          setStatus(`终止信号已二次确认，闭环继续已结束，共执行 ${round} 轮`, 'success');
+          return;
+        }
+
+        stopClosedLoopContinue(`done-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`);
+        setStatus(`检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`, 'warn');
         return;
       }
 
@@ -1433,26 +1729,171 @@
       }, 1200);
     }
 
-    function bindClosedLoopContinueButton(rootEl) {
-      const scope = rootEl instanceof HTMLElement ? rootEl : document;
-      let btn = scope.querySelector('#cgpt-closed-loop-upload-every5-btn');
-      if (!btn) {
-        btn = scope.querySelector('#cgpt-copy-hotkey-continue-loop-upload-verify');
-        if (btn) {
-          btn.id = 'cgpt-closed-loop-upload-every5-btn';
-        }
-      }
-      if (!btn || btn.dataset.closedLoopBound === '1') {
+    function migrateLegacyClosedLoopHotkeyButton(scope) {
+      if (!(scope instanceof HTMLElement || scope === document)) {
         return;
       }
 
-      btn.dataset.closedLoopBound = '1';
-      btn.dataset.action = 'closed-loop-upload-every5';
-      btn.addEventListener('click', (event) => {
+      if (scope.querySelector('#cgpt-closed-loop-upload-every5-hotkey-btn')) {
+        return;
+      }
+
+      const legacyBtn = scope.querySelector('#cgpt-closed-loop-upload-every5-btn:not([data-closed-loop-mode])');
+      if (!legacyBtn) {
+        return;
+      }
+
+      legacyBtn.id = 'cgpt-closed-loop-upload-every5-hotkey-btn';
+      legacyBtn.dataset.action = 'closed-loop-upload-every5-hotkey';
+      legacyBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY];
+      ToolboxShell.appendLog('[CLOSED_LOOP][MIGRATE] legacy closed-loop button id -> hotkey btn');
+    }
+
+    function logClosedLoopButtonHitTest(reason = '') {
+      const ids = [
+        'cgpt-closed-loop-upload-every5-hotkey-btn',
+        'cgpt-closed-loop-upload-every5-btn',
+      ];
+      ids.forEach((id) => {
+        const btn = document.getElementById(id);
+        if (!btn) {
+          ToolboxShell.appendLog(`[CLOSED_LOOP][HIT_TEST] id=${id} found=0 reason=${reason || '-'}`);
+          return;
+        }
+        const rect = btn.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const topEl = document.elementFromPoint(x, y);
+        const blocked = topEl && topEl !== btn && !btn.contains(topEl);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][HIT_TEST] id=${id} found=1 disabled=${btn.disabled ? 1 : 0} pointerEvents=${getComputedStyle(btn).pointerEvents} rect=${Math.round(rect.left)}/${Math.round(rect.top)}/${Math.round(rect.width)}/${Math.round(rect.height)} blocked=${blocked ? 1 : 0} topId=${topEl && topEl.id ? topEl.id : '-'} topTag=${topEl && topEl.tagName ? topEl.tagName : '-'} topClass=${topEl && topEl.className ? String(topEl.className).slice(0, 120) : '-'} reason=${reason || '-'}`,
+        );
+      });
+    }
+
+    function bindClosedLoopContinueButtons(rootEl, reason = '') {
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][BIND_ENTER] reason=${reason || '-'} root=${rootEl && rootEl.id ? rootEl.id : '-'}`,
+      );
+
+      const scope = rootEl instanceof HTMLElement ? rootEl : document;
+      migrateLegacyClosedLoopHotkeyButton(scope);
+
+      let hotkeyBtn = scope.querySelector('#cgpt-closed-loop-upload-every5-hotkey-btn');
+      if (!hotkeyBtn) {
+        hotkeyBtn = scope.querySelector('#cgpt-copy-hotkey-continue-loop-upload-verify');
+        if (hotkeyBtn) {
+          hotkeyBtn.id = 'cgpt-closed-loop-upload-every5-hotkey-btn';
+          hotkeyBtn.dataset.action = 'closed-loop-upload-every5-hotkey';
+        }
+      }
+
+      const plainBtn = scope.querySelector('#cgpt-closed-loop-upload-every5-btn');
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][BIND_STATE] reason=${reason || '-'} hotkey=${hotkeyBtn ? 1 : 0} plain=${plainBtn ? 1 : 0}`,
+      );
+
+      const bindOne = (btn, mode) => {
+        if (!btn) {
+          return;
+        }
+        const bindKey = `closedLoopModeBound_${mode}`;
+        if (btn.dataset[bindKey] === '1') {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][BIND_SKIP] mode=${mode} id=${btn.id || '-'} reason=already-bound`,
+          );
+          return;
+        }
+
+        btn.dataset[bindKey] = '1';
+
+        btn.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_CLICK] mode=${mode} id=${btn.id || '-'} action=${btn.dataset.action || '-'} disabled=${btn.disabled ? 1 : 0}`,
+          );
+          if (btn.disabled) {
+            ToolboxShell.appendLog(`[CLOSED_LOOP][DIRECT_CLICK_BLOCKED] mode=${mode} reason=disabled`);
+            return;
+          }
+          void handleClosedLoopContinueModeClick(mode, `direct:${reason || btn.id || mode}`).catch((error) => {
+            const errText = formatToolboxError(error);
+            console.error('[ChatGPT toolbox] [CLOSED_LOOP][MODE_CLICK_FAILED]', error);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][MODE_CLICK_FAILED] mode=${mode} reason=${errText}`);
+            setStatus(`闭环继续启动失败：${errText}`, 'error');
+          });
+        }, true);
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][BIND_ONE] mode=${mode} id=${btn.id || '-'} action=${btn.dataset.action || '-'}`,
+        );
+      };
+
+      bindOne(hotkeyBtn, CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
+      bindOne(plainBtn, CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
+    }
+
+    function bindClosedLoopDocumentClickFallback(reason = '') {
+      if (document.documentElement.dataset.closedLoopDocumentFallbackBound === '1') {
+        return;
+      }
+      document.documentElement.dataset.closedLoopDocumentFallbackBound = '1';
+      document.addEventListener('click', (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) {
+          return;
+        }
+        const btn = target.closest(
+          '#cgpt-closed-loop-upload-every5-hotkey-btn, #cgpt-closed-loop-upload-every5-btn, [data-action="closed-loop-upload-every5-hotkey"], [data-action="closed-loop-upload-every5"]',
+        );
+        if (!(btn instanceof HTMLElement)) {
+          return;
+        }
+        const action = String(btn.dataset.action || '').trim();
+        if (
+          action !== 'closed-loop-upload-every5-hotkey'
+          && action !== 'closed-loop-upload-every5'
+          && btn.id !== 'cgpt-closed-loop-upload-every5-hotkey-btn'
+          && btn.id !== 'cgpt-closed-loop-upload-every5-btn'
+        ) {
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
-        void handleClosedLoopContinueClick();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+        const mode = action === 'closed-loop-upload-every5'
+          || btn.id === 'cgpt-closed-loop-upload-every5-btn'
+          ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+          : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DOCUMENT_CLICK] mode=${mode} id=${btn.id || '-'} action=${action || '-'} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
+        );
+        if (btn.disabled) {
+          ToolboxShell.appendLog(`[CLOSED_LOOP][DOCUMENT_CLICK_BLOCKED] mode=${mode} reason=disabled`);
+          return;
+        }
+        void handleClosedLoopContinueModeClick(mode, `document:${reason || action || btn.id || mode}`).catch((error) => {
+          const errText = formatToolboxError(error);
+          console.error('[ChatGPT toolbox] [CLOSED_LOOP][DOCUMENT_CLICK_FAILED]', error);
+          ToolboxShell.appendLog(`[CLOSED_LOOP][DOCUMENT_CLICK_FAILED] mode=${mode} reason=${errText}`);
+          setStatus(`闭环继续启动失败：${errText}`, 'error');
+        });
       }, true);
+      ToolboxShell.appendLog(`[CLOSED_LOOP][DOCUMENT_FALLBACK_BOUND] reason=${reason || '-'}`);
+    }
+
+    function rebindClosedLoopContinueUi(rootEl, reason = 'after-render') {
+      bindClosedLoopContinueButtons(rootEl || rootElRef || document, reason);
+      bindClosedLoopDocumentClickFallback(reason);
+      renderClosedLoopContinueButtons();
+    }
+
+    function bindClosedLoopContinueButton(rootEl) {
+      bindClosedLoopContinueButtons(rootEl, 'legacy-bind');
     }
 
     function ensureCopyHotkeyContinueTask() {
@@ -1926,6 +2367,7 @@
       }
 
       if (normalized === 'loop-copy-hotkey-continue-upload-verify'
+        || normalized === 'closed-loop-upload-every5-hotkey'
         || normalized === 'closed-loop-upload-every5') {
         return 'copy-hotkey-upload-verify-loop';
       }
@@ -2560,7 +3002,10 @@
         q &&
         (
           isFileLike(q.file) ||
-          isBlobLike(q.blob)
+          isFileLike(q.sourceFile) ||
+          isFileLike(q.originalFile) ||
+          isBlobLike(q.blob) ||
+          isBlobLike(q.sourceBlob)
         )
       );
     }
@@ -2570,12 +3015,167 @@
         q &&
         (
           isFileLike(q.file) ||
+          isFileLike(q.sourceFile) ||
+          isFileLike(q.originalFile) ||
           isBlobLike(q.blob) ||
+          isBlobLike(q.sourceBlob) ||
           (
             q.fileHandle &&
             typeof q.fileHandle.getFile === 'function'
           )
         )
+      );
+    }
+
+    function reconcileUploadPhase(reason = '') {
+      const uploadTaskPhase = state.uploadTask && state.uploadTask.phase
+        ? String(state.uploadTask.phase)
+        : '';
+      const loopTaskPhase = state.copyHotkeyUploadVerifyLoopTask && state.copyHotkeyUploadVerifyLoopTask.phase
+        ? String(state.copyHotkeyUploadVerifyLoopTask.phase)
+        : '';
+      const phase = String(state.uploadPhase || uploadTaskPhase || loopTaskPhase || '');
+      const uploadRunning = !!state.running;
+
+      if ((phase === 'uploading' || uploadTaskPhase === 'uploading') && !uploadRunning) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][PHASE_RECONCILE] from=uploading to=idle reason=${reason || '-'}`,
+        );
+        state.uploadPhase = 'idle';
+        if (state.uploadTask && state.uploadTask.phase === 'uploading') {
+          state.uploadTask.phase = 'idle';
+        }
+        if (
+          state.copyHotkeyUploadVerifyLoopTask
+          && state.copyHotkeyUploadVerifyLoopTask.phase === 'uploading'
+        ) {
+          state.copyHotkeyUploadVerifyLoopTask.phase = 'idle';
+        }
+      }
+    }
+
+    async function ensureReusableFileForUploadItem(item, source = '') {
+      if (!item) {
+        return false;
+      }
+
+      if (isFileLike(item.file) || isFileLike(item.sourceFile) || isFileLike(item.originalFile)) {
+        if (!isFileLike(item.file)) {
+          item.file = item.sourceFile || item.originalFile;
+        }
+        if (!isFileLike(item.sourceFile)) {
+          item.sourceFile = item.file;
+        }
+        if (!isFileLike(item.originalFile)) {
+          item.originalFile = item.file;
+        }
+        return true;
+      }
+
+      if (isBlobLike(item.blob) || isBlobLike(item.sourceBlob)) {
+        if (!isBlobLike(item.blob)) {
+          item.blob = item.sourceBlob;
+        }
+        if (!isBlobLike(item.sourceBlob)) {
+          item.sourceBlob = item.blob;
+        }
+        return true;
+      }
+
+      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
+        try {
+          const file = await item.fileHandle.getFile();
+          if (isFileLike(file)) {
+            item.file = file;
+            item.sourceFile = file;
+            item.originalFile = file;
+            item.name = item.name || file.name;
+            item.size = item.size || file.size;
+            item.type = item.type || file.type;
+            ToolboxShell.appendLog(
+              `[UPLOAD][FILE_HANDLE_RELOAD_OK] source=${source || '-'} name=${file.name || '-'} size=${file.size || 0}`,
+            );
+            return true;
+          }
+        } catch (e) {
+          console.error('[ChatGPT toolbox] ensureReusableFileForUploadItem: fileHandle.getFile failed', e);
+          const errText = e && e.message ? e.message : String(e);
+          ToolboxShell.appendLog(
+            `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=getFile-error error=${errText}`,
+          );
+          return false;
+        }
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=no-readable-source`,
+      );
+      return false;
+    }
+
+    async function getPendingUploadItemsForStart(source = '') {
+      const items = [];
+      const seen = new Set();
+
+      const pushItem = (item, itemSource) => {
+        if (!item) return;
+        const key = [
+          itemSource,
+          item.id || item.file_id || '',
+          item.name || item.filename || '',
+          item.download_url || '',
+        ].join('|');
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({
+          ...item,
+          source: itemSource || item.source || 'browser_file',
+        });
+      };
+
+      for (const item of state.queue || []) {
+        if (!item) continue;
+
+        const reusable = await ensureReusableFileForUploadItem(item, source);
+        if (!reusable) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_SKIP] source=${source || '-'} name=${item.name || item.filename || '-'} reason=no-reusable-source state=${item.state || '-'} status=${item.status || '-'}`,
+          );
+          continue;
+        }
+
+        if (
+          item.state === UploadState.ATTACHED
+          || item.status === 'uploaded'
+          || item.status === 'attached'
+        ) {
+          continue;
+        }
+
+        if (isQueueItemAlreadyUploaded(item)) {
+          continue;
+        }
+
+        pushItem(item, item.source || 'browser_file');
+      }
+
+      for (const item of state.flaskFiles || []) {
+        if (!item) continue;
+        if (item.status === 'uploaded') continue;
+        if (!isFlaskLocalDirectItem(item)) continue;
+        pushItem(item, 'flask_local_direct');
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][PENDING_FOR_START] source=${source || '-'} count=${items.length}`,
+      );
+      return items;
+    }
+
+    function logUploadSourceCheck(item, stage = '') {
+      if (!item) return;
+      ToolboxShell.appendLog(
+        `[UPLOAD][SOURCE_CHECK] stage=${stage || '-'} name=${item.name || item.filename || '-'} file=${isFileLike(item.file) ? 1 : 0} sourceFile=${isFileLike(item.sourceFile) ? 1 : 0} originalFile=${isFileLike(item.originalFile) ? 1 : 0} blob=${isBlobLike(item.blob) ? 1 : 0} handle=${item.fileHandle && typeof item.fileHandle.getFile === 'function' ? 1 : 0}`,
       );
     }
 
@@ -2591,8 +3191,11 @@
       return !!(
         q &&
         (
-          q.file ||
-          q.blob ||
+          isFileLike(q.file) ||
+          isFileLike(q.sourceFile) ||
+          isFileLike(q.originalFile) ||
+          isBlobLike(q.blob) ||
+          isBlobLike(q.sourceBlob) ||
           (
             q.fileHandle &&
             typeof q.fileHandle.getFile === 'function'
@@ -2656,39 +3259,70 @@
       let changed = false;
       let resetCount = 0;
 
+      const finalStates = new Set([
+        UploadState.ATTACHED,
+        'UPLOADED',
+        'DONE',
+      ]);
+      const finalStatuses = new Set(['uploaded', 'attached', 'done']);
+
       state.queue.forEach((q) => {
         if (!q) return;
 
-        // 不要重置已经无法读取的记录（例如文件被删除）
-        // 注意：对「强制重传」来说，readable 是必要条件，否则会造成无意义的循环重试
-        const reusable = typeof hasActuallyReusableUploadSource === 'function'
-          ? hasActuallyReusableUploadSource(q)
-          : hasAttemptableUploadSource(q);
-        if (!forceAll && !reusable) {
+        const oldState = q.state;
+        const oldStatus = q.status;
+        const normalizedStatus = String(q.status || '').trim().toLowerCase();
+        const isFinalState = finalStates.has(q.state) || finalStatuses.has(normalizedStatus);
+
+        if (!forceAll && !isFinalState) {
           return;
         }
 
-        const isAttached = q.state === UploadState.ATTACHED;
-
-        if (isAttached && preserveAttached && !forceResetAttached && !forceResetUploaded && !forceResetDone) {
+        if (
+          isFinalState
+          && preserveAttached
+          && !forceResetAttached
+          && !forceResetUploaded
+          && !forceResetDone
+        ) {
           return;
         }
 
-        if (isAttached && q.attachedInSession && !forceResetAttached && !forceResetUploaded && !forceResetDone) {
+        if (
+          isFinalState
+          && q.attachedInSession
+          && preserveAttached
+          && !forceResetAttached
+          && !forceResetUploaded
+          && !forceResetDone
+        ) {
           return;
         }
 
-        // 统一重置为可再次上传的 idle 状态（后续 getPendingUploadItems 会重新判断并进入队列）
-        if (forceAll || forceResetAttached || forceResetUploaded || forceResetDone || hasAttemptableUploadSource(q)) {
-          q.state = UploadState.IDLE;
-          q.message = '';
-          q.uploadName = '';
-          q.persistedAttached = false;
-          q.attachedInSession = false;
-          q.updatedAt = Date.now();
-          changed = true;
-          resetCount += 1;
+        if (!hasReusableUploadSourceForReset(q)) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][RESET_QUEUE_SKIP] name=${q.name || q.filename || '-'} state=${oldState || '-'} status=${oldStatus || '-'} reason=no-reusable-source file=${q.file ? 1 : 0} sourceFile=${q.sourceFile ? 1 : 0} blob=${q.blob ? 1 : 0} handle=${q.fileHandle && typeof q.fileHandle.getFile === 'function' ? 1 : 0}`,
+          );
+          return;
         }
+
+        q.state = UploadState.IDLE;
+        q.status = 'pending';
+        q.error = '';
+        q.uploadedAt = '';
+        q.boundAt = '';
+        q.progress = 0;
+        q.message = '';
+        q.uploadName = '';
+        q.persistedAttached = false;
+        q.attachedInSession = false;
+        q.updatedAt = Date.now();
+        changed = true;
+        resetCount += 1;
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][RESET_QUEUE_ITEM] name=${q.name || q.filename || '-'} fromState=${oldState || '-'} fromStatus=${oldStatus || '-'} toState=${q.state || '-'} toStatus=${q.status || '-'} source=file:${q.file ? 1 : 0},sourceFile:${q.sourceFile ? 1 : 0},blob:${q.blob ? 1 : 0},handle:${q.fileHandle && typeof q.fileHandle.getFile === 'function' ? 1 : 0}`,
+        );
       });
 
       if (changed) {
@@ -7042,6 +7676,7 @@
       'copy-continue': '#cgpt-upload-continue-once',
       'copy-hotkey-continue': '#cgpt-copy-hotkey-continue-once',
       'continuous-copy-hotkey-continue': '#cgpt-copy-hotkey-continue-loop',
+      'closed-loop-upload-continue-hotkey': '#cgpt-closed-loop-upload-every5-hotkey-btn',
       'closed-loop-upload-continue': '#cgpt-closed-loop-upload-every5-btn',
     });
 
@@ -7051,7 +7686,8 @@
       'copy-and-hotkey': 'copy-hotkey',
       'copy-and-continue': 'copy-continue',
       'loop-copy-hotkey-continue': 'continuous-copy-hotkey-continue',
-      'loop-copy-hotkey-continue-upload-verify': 'closed-loop-upload-continue',
+      'loop-copy-hotkey-continue-upload-verify': 'closed-loop-upload-continue-hotkey',
+      'closed-loop-upload-every5-hotkey': 'closed-loop-upload-continue-hotkey',
       'closed-loop-upload-every5': 'closed-loop-upload-continue',
     });
 
@@ -7234,8 +7870,12 @@
         return runCopyHotkeyContinueLoop(source);
       }
 
-      if (type === 'loop-copy-hotkey-continue-upload-verify' || type === 'closed-loop-upload-every5') {
-        return handleClosedLoopContinueClick();
+      if (type === 'loop-copy-hotkey-continue-upload-verify' || type === 'closed-loop-upload-every5-hotkey') {
+        return handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY, source);
+      }
+
+      if (type === 'closed-loop-upload-every5') {
+        return handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY, source);
       }
 
       ToolboxShell.appendLog(`[COPY_ACTION][UNKNOWN_TYPE] type=${type}`);
@@ -7677,31 +8317,44 @@
       safeAppendLog(`[UPLOAD_CONTINUE][SEND_START] source=${sourceText}`);
       console.warn('[UPLOAD_CONTINUE][SEND_START]', { source: sourceText });
 
-      const assistantRawBeforeSend = getLastAssistantMessageTextForStopSignal();
-      const doneBeforeSend = checkUploadDoneSignalWithLog(
-        assistantRawBeforeSend,
-        'UPLOAD_CONTINUE',
-        'before-send',
-        `source=${sourceText}`,
-        options,
+      const skipDoneBeforeSendCheck = (
+        options.skipDoneSignalBeforeSendCheck === true
+        || options.allowSendAfterDoneSignal === true
       );
-      if (doneBeforeSend) {
-        const preview = formatDoneSignalPreview(assistantRawBeforeSend);
-        const skipLine = `[UPLOAD_CONTINUE][skip] reason=assistant-done-signal-before-send source=${sourceText} preview=${preview}`;
-        safeAppendLog(skipLine);
-        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(skipLine);
+
+      if (!skipDoneBeforeSendCheck) {
+        const assistantRawBeforeSend = getLastAssistantMessageTextForStopSignal();
+        const doneBeforeSend = checkUploadDoneSignalWithLog(
+          assistantRawBeforeSend,
+          'UPLOAD_CONTINUE',
+          'before-send',
+          `source=${sourceText}`,
+          options,
+        );
+
+        if (doneBeforeSend) {
+          const preview = formatDoneSignalPreview(assistantRawBeforeSend);
+          const skipLine = `[UPLOAD_CONTINUE][skip] reason=assistant-done-signal-before-send source=${sourceText} preview=${preview}`;
+          safeAppendLog(skipLine);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(skipLine);
+          }
+          console.warn('[UPLOAD_CONTINUE][skip]', {
+            source: sourceText,
+            reason: 'assistant-done-signal-before-send',
+            preview,
+          });
+          return {
+            ok: false,
+            reason: 'assistant-done-signal-before-send',
+            assistantDoneSignal: true,
+          };
         }
-        console.warn('[UPLOAD_CONTINUE][skip]', {
-          source: sourceText,
-          reason: 'assistant-done-signal-before-send',
-          preview,
-        });
-        return {
-          ok: false,
-          reason: 'assistant-done-signal-before-send',
-          assistantDoneSignal: true,
-        };
+      } else {
+        safeAppendLog(`[UPLOAD_CONTINUE][before-send-done-check-skip] source=${sourceText} reason=allow-send-after-done-signal`);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(`[UPLOAD_CONTINUE][before-send-done-check-skip] source=${sourceText} reason=allow-send-after-done-signal`);
+        }
       }
 
       if (isWaitingSendActive()) {
@@ -8527,7 +9180,21 @@
       }
     }
 
-    async function copyHotkeyAndContinueOnce(source = 'button', options = {}) {
+    async function runClosedLoopContinueOnce(source, options = {}) {
+      const useHotkey = options.useHotkey !== false;
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][RUN_ONCE] source=${source} useHotkey=${useHotkey ? 1 : 0} mode=${options.sourceMode || '-'}`,
+      );
+
+      if (useHotkey) {
+        return copyHotkeyAndContinueOnce(source, options);
+      }
+
+      return copyAndContinueOnceWithoutHotkey(source, options);
+    }
+
+    function buildCopyHotkeyContinueContext(source, options = {}) {
       const sourceText = String(source || '');
       const flowOptions = options && typeof options === 'object' ? options : {};
       const managedPhase = flowOptions.managedPhase === true;
@@ -8556,9 +9223,6 @@
               : copyHotkeyContinueLoopCount)),
         ) || 0
         : 0;
-      const btn = managedPhase || isLoopMode
-        ? null
-        : (rootElRef ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef) : null);
 
       const syncLoopPhase = (phase, subtask = '') => {
         if (!isLoopMode || isClosedLoopIsolated) {
@@ -8576,6 +9240,601 @@
           currentSubtask: subtask || phase,
         });
       };
+
+      return {
+        sourceText,
+        flowOptions,
+        managedPhase,
+        flowRunId,
+        shouldStop,
+        isClosedLoopIsolated,
+        isUploadVerifyLoopMode,
+        isLegacyLoopMode,
+        isLoopMode,
+        loopCycleIndex,
+        syncLoopPhase,
+      };
+    }
+
+    async function copyLastAssistantReplyForContinue(source, options = {}, ctx = null) {
+      const context = ctx || buildCopyHotkeyContinueContext(source, options);
+      const {
+        sourceText,
+        flowOptions,
+        managedPhase,
+        shouldStop,
+        isLoopMode,
+        syncLoopPhase,
+      } = context;
+
+      if (managedPhase && !isLoopMode) {
+        setCopyHotkeyContinuePhase('copying', `${sourceText}:copying`);
+      }
+      if (isLoopMode) {
+        syncLoopPhase('copying', 'copying');
+      }
+
+      const waitCopyResult = await waitAndCopyLatestAssistant({
+        source,
+        reason: `copy-hotkey-continue:${sourceText || '-'}`,
+        shouldStop,
+      });
+
+      if (!waitCopyResult.ok) {
+        const reason = waitCopyResult.reason || 'wait-assistant-failed';
+        const errText = waitCopyResult.detail || reason;
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE][abort] reason=${reason} detail=${errText || '-'}`,
+        );
+        if (!isLoopMode) {
+          const statusMsg = reason === 'empty-assistant-text'
+            ? '复制+快捷键+继续失败：最后回复为空'
+            : `复制+快捷键+继续失败：${reason}`;
+          setStatus(statusMsg, 'warn');
+        }
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: reason || 'wait-assistant-failed',
+          detail: errText,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!waitCopyResult.copied,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: '',
+        };
+      }
+
+      const waitResult = waitCopyResult.waitResult || null;
+      const assistantMessageKey = buildAssistantMessageKeyFromRecord(
+        waitResult && waitResult.record,
+        waitCopyResult.text || (waitResult && waitResult.text),
+      ) || getLastAssistantMessageKeySafe();
+
+      const assistantRawText = String(waitCopyResult.text || (waitResult && waitResult.text) || '').trim();
+
+      if (
+        flowOptions.disableBatchTextTerminalStop !== true
+        && typeof classifyBatchReply === 'function'
+      ) {
+        const replyClassify = classifyBatchReply(assistantRawText);
+        ToolboxShell.appendLog(
+          `[BATCH][REPLY_CLASSIFY] shouldStop=${replyClassify.shouldStop ? 1 : 0} `
+          + `status=${replyClassify.status} reason=${replyClassify.reason} source=${sourceText || '-'}`,
+        );
+        if (
+          replyClassify.shouldStop
+          && replyClassify.status !== 'done'
+          && replyClassify.status !== 'empty'
+        ) {
+          const terminalLine = `[COPY_HOTKEY_CONTINUE][batch-terminal-stop] status=${replyClassify.status} reason=${replyClassify.reason} source=${sourceText || '-'}`;
+          safeAppendLog(terminalLine);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(terminalLine);
+          }
+          setStatus(
+            replyClassify.status === 'no_more_content'
+              ? '检测到无更多内容终态，已停止自动继续'
+              : '检测到阻塞终态，已停止自动继续',
+            'warn',
+          );
+          return {
+            ok: true,
+            assistantDoneSignal: false,
+            assistantBatchTerminalStop: true,
+            batchReplyClassifyStatus: replyClassify.status,
+            batchReplyClassifyReason: replyClassify.reason,
+            reason: `batch-reply-${replyClassify.status}`,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: !!waitCopyResult.copied,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey,
+            waitCopyResult,
+          };
+        }
+      }
+
+      const assistantDoneSignalMatched = checkUploadDoneSignalWithLog(
+        assistantRawText,
+        'COPY_HOTKEY_CONTINUE',
+        'after-wait',
+        `source=${sourceText || '-'}`,
+        flowOptions,
+      );
+
+      if (assistantDoneSignalMatched) {
+        const doneSignalLine = `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} key=${assistantMessageKey || '-'}`;
+        safeAppendLog(doneSignalLine);
+        console.warn('[COPY_HOTKEY_CONTINUE][assistant-done-signal]', {
+          source: sourceText || '-',
+          key: assistantMessageKey || '-',
+          preview: formatDoneSignalPreview(assistantRawText),
+        });
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(doneSignalLine);
+        }
+
+        setStatus('检测到终止信号，任务已完成，不再继续', 'success');
+
+        return {
+          ok: true,
+          assistantDoneSignal: true,
+          reason: 'assistant-done-signal',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!waitCopyResult.copied,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey,
+          waitCopyResult,
+        };
+      }
+
+      if (shouldStop()) {
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'cancelled',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!waitCopyResult.copied,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey,
+          waitCopyResult,
+        };
+      }
+
+      logCopyHotkeyContinueStep(sourceText, 'copy-last-reply');
+
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE][copied] chars=${waitCopyResult.chars || 0}`,
+      );
+
+      if (typeof playCopySuccessBeepSafe === 'function') {
+        void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyContinue');
+      }
+
+      return {
+        ok: true,
+        assistantDoneSignal: false,
+        reason: 'copy-ok',
+        source: sourceText,
+        loopMode: isLoopMode,
+        copied: true,
+        hotkeySent: false,
+        continueSent: false,
+        assistantMessageKey,
+        waitCopyResult,
+      };
+    }
+
+    async function triggerContinueHotkeyForContinue(source, options = {}, ctx = null, copyStage = null) {
+      const context = ctx || buildCopyHotkeyContinueContext(source, options);
+      const {
+        sourceText,
+        managedPhase,
+        shouldStop,
+        isLoopMode,
+        syncLoopPhase,
+      } = context;
+      const waitCopyResult = copyStage && copyStage.waitCopyResult
+        ? copyStage.waitCopyResult
+        : null;
+
+      if (!waitCopyResult) {
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'missing-copy-result',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: false,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: copyStage && copyStage.assistantMessageKey ? copyStage.assistantMessageKey : '',
+        };
+      }
+
+      if (shouldStop()) {
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'cancelled',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: true,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: copyStage.assistantMessageKey || '',
+        };
+      }
+
+      logCopyHotkeyContinueStep(sourceText, 'send-hotkey');
+      if (managedPhase && !isLoopMode) {
+        setCopyHotkeyContinuePhase('sending_hotkey', `${sourceText}:send-hotkey`);
+      }
+      if (isLoopMode) {
+        syncLoopPhase('sending_hotkey', 'send-hotkey');
+      }
+
+      const hotkeyFlow = await sendHotkeyAfterCopy({
+        copiedText: waitCopyResult.text,
+        reason: 'copy-hotkey-continue',
+        shouldStop,
+      });
+
+      if (!hotkeyFlow.ok) {
+        const failReason = hotkeyFlow.reason || 'hotkey-failed';
+        const errText = hotkeyFlow.detail || failReason;
+        ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=${failReason} detail=${errText}`);
+        if (!isLoopMode) {
+          const targetLabelContinue = typeof getCopyThenShortcutTargetLabel === 'function'
+            ? getCopyThenShortcutTargetLabel()
+            : 'Ctrl+Alt+I';
+          setStatus(
+            hotkeyFlow.reason === 'clipboard-not-ready'
+              ? `复制+快捷键+继续失败：剪贴板未就绪：${errText}`
+              : `复制成功，但 ${targetLabelContinue || '目标快捷键'} 执行失败`,
+            'error',
+          );
+        }
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: failReason,
+          detail: errText,
+          clipboardReadyReason: failReason,
+          continueReason: '',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: true,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: copyStage.assistantMessageKey || '',
+        };
+      }
+
+      await sleep(300);
+
+      return {
+        ok: true,
+        hotkeySent: true,
+        assistantMessageKey: copyStage.assistantMessageKey || '',
+        clipboardReadyReason: hotkeyFlow && hotkeyFlow.reason ? hotkeyFlow.reason : 'ok',
+        waitCopyResult,
+      };
+    }
+
+    async function sendContinueForContinue(source, options = {}, ctx = null, prior = {}) {
+      const context = ctx || buildCopyHotkeyContinueContext(source, options);
+      const {
+        sourceText,
+        flowOptions,
+        managedPhase,
+        shouldStop,
+        isLoopMode,
+        syncLoopPhase,
+      } = context;
+      const hotkeySent = !!prior.hotkeySent;
+      const assistantMessageKey = prior.assistantMessageKey || '';
+      const waitCopyResult = prior.waitCopyResult || null;
+      const copiedText = waitCopyResult && waitCopyResult.text
+        ? String(waitCopyResult.text)
+        : '';
+
+      if (shouldStop()) {
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'cancelled',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!copiedText,
+          hotkeySent,
+          continueSent: false,
+          assistantMessageKey,
+        };
+      }
+
+      logCopyHotkeyContinueStep(sourceText, 'send-continue');
+      if (managedPhase && !isLoopMode) {
+        setCopyHotkeyContinuePhase('sending_continue', `${sourceText}:send-continue`);
+      }
+      if (isLoopMode) {
+        syncLoopPhase('sending_continue', 'send-continue');
+      }
+
+      const continueSource = sourceText || 'copy-hotkey-continue-once';
+      const loopContinuePromptTxt = getCopyHotkeyContinuePromptText(flowOptions);
+      safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
+      const continueResult = await sendContinuePromptFromUnifiedPipeline(continueSource, flowOptions);
+
+      if (!continueResult || !continueResult.ok) {
+        const detail = continueResult && continueResult.reason ? continueResult.reason : '';
+        if (
+          detail === 'assistant-done-signal-before-send'
+          || (continueResult && continueResult.assistantDoneSignal === true)
+        ) {
+          safeAppendLog(
+            `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} reason=${detail || 'assistant-done-signal-before-send'}`,
+          );
+          setStatus('检测到终止信号，任务已完成，不再继续', 'success');
+          return {
+            ok: true,
+            assistantDoneSignal: true,
+            reason: detail || 'assistant-done-signal-before-send',
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: !!copiedText,
+            hotkeySent,
+            continueSent: false,
+            assistantMessageKey,
+          };
+        }
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE][failed] reason=continue-send-failed detail=${detail || '-'}`,
+        );
+        if (!isLoopMode) {
+          setStatus('复制和快捷键已完成，但发送继续指令失败', 'error');
+        }
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'continue-send-failed',
+          detail,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!copiedText,
+          hotkeySent,
+          continueSent: false,
+          assistantMessageKey,
+        };
+      }
+
+      return {
+        ok: true,
+        assistantDoneSignal: false,
+        reason: 'ok',
+        source: sourceText,
+        loopMode: isLoopMode,
+        copied_text: copiedText,
+        assistantMessageKey,
+        continueSent: true,
+        continueReason: continueResult && continueResult.reason ? continueResult.reason : 'ok',
+        clipboardReadyReason: prior.clipboardReadyReason || (hotkeySent ? 'ok' : ''),
+        hotkeySent,
+        copied: !!copiedText,
+      };
+    }
+
+    async function copyAndContinueOnceWithoutHotkey(source = 'closed-loop-no-hotkey', options = {}) {
+      const context = buildCopyHotkeyContinueContext(source, options);
+      const {
+        sourceText,
+        flowOptions,
+        managedPhase,
+        shouldStop,
+        isClosedLoopIsolated,
+        isLoopMode,
+        syncLoopPhase,
+      } = context;
+
+      const btn = managedPhase || isLoopMode
+        ? null
+        : (rootElRef ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef) : null);
+
+      ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_ONCE_ENTER] source=${sourceText}`);
+
+      const continueLock = claimUploadActionLock('copy-hotkey-continue', {
+        forceRelease: isLoopMode,
+      });
+      if (!continueLock.ok) {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE][skip] reason=${continueLock.reason} runningMs=${continueLock.runningMs || 0}`,
+        );
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: continueLock.reason || 'task-running',
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: false,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: '',
+        };
+      }
+
+      try {
+        if (shouldStop()) {
+          return {
+            ok: false,
+            reason: 'cancelled',
+            assistantDoneSignal: false,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: false,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey: '',
+          };
+        }
+
+        const assistantRawBeforeSend = getLastAssistantMessageTextForStopSignal();
+        const doneBeforeSend = checkUploadDoneSignalWithLog(
+          assistantRawBeforeSend,
+          'CLOSED_LOOP_NO_HOTKEY',
+          'before-send',
+          `source=${sourceText}`,
+          flowOptions,
+        );
+
+        if (doneBeforeSend) {
+          ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_ONCE_SKIP] source=${sourceText} reason=assistant-done-signal-before-send`);
+          return {
+            ok: false,
+            reason: 'assistant-done-signal-before-send',
+            assistantDoneSignal: true,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: false,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey: '',
+          };
+        }
+
+        if (managedPhase && !isLoopMode) {
+          setCopyHotkeyContinuePhase('waiting_reply', `${sourceText}:wait-reply`);
+        }
+        if (isLoopMode && !isClosedLoopIsolated) {
+          syncLoopPhase('waiting_reply', 'wait-reply');
+        }
+
+        const copyResult = await copyLastAssistantReplyForContinue(source, options, context);
+        if (!copyResult || copyResult.ok === false) {
+          const reason = copyResult && copyResult.reason ? copyResult.reason : 'copy-failed';
+          ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_COPY_FAILED] source=${sourceText} reason=${reason}`);
+          return copyResult || {
+            ok: false,
+            reason,
+            assistantDoneSignal: false,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: false,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey: '',
+          };
+        }
+
+        if (copyResult.assistantDoneSignal === true) {
+          return copyResult;
+        }
+
+        if (shouldStop()) {
+          return {
+            ok: false,
+            reason: 'cancelled',
+            assistantDoneSignal: false,
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: !!copyResult.copied,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey: copyResult.assistantMessageKey || '',
+          };
+        }
+
+        ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_SKIP_HOTKEY] source=${sourceText}`);
+
+        const sendResult = await sendContinueForContinue(source, options, context, {
+          hotkeySent: false,
+          assistantMessageKey: copyResult.assistantMessageKey || '',
+          waitCopyResult: copyResult.waitCopyResult || null,
+        });
+
+        if (!sendResult || !sendResult.ok) {
+          const reason = sendResult && sendResult.reason ? sendResult.reason : 'continue-send-failed';
+          ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_SEND_FAILED] source=${sourceText} reason=${reason}`);
+          return sendResult || {
+            ok: false,
+            reason,
+            assistantDoneSignal: !!(sendResult && sendResult.assistantDoneSignal),
+            source: sourceText,
+            loopMode: isLoopMode,
+            copied: !!copyResult.copied,
+            hotkeySent: false,
+            continueSent: false,
+            assistantMessageKey: copyResult.assistantMessageKey || '',
+          };
+        }
+
+        ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_ONCE_DONE] source=${sourceText}`);
+
+        return {
+          ok: true,
+          reason: 'no-hotkey-continue-sent',
+          assistantDoneSignal: false,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: true,
+          hotkeySent: false,
+          continueSent: true,
+          assistantMessageKey: copyResult.assistantMessageKey || '',
+          copied_text: sendResult.copied_text || '',
+        };
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[CLOSED_LOOP][NO_HOTKEY_ONCE_FAILED]', error);
+        ToolboxShell.appendLog(`[CLOSED_LOOP][NO_HOTKEY_ONCE_FAILED] source=${sourceText} error=${errText}`);
+        return {
+          ok: false,
+          assistantDoneSignal: false,
+          reason: 'exception',
+          detail: errText,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: false,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey: '',
+        };
+      } finally {
+        if (!managedPhase) {
+          releaseUploadActionLock('copy-hotkey-continue');
+        }
+        if (btn) {
+          btn.dataset.busy = '0';
+        }
+        if (isClosedLoopIsolated) {
+          renderClosedLoopContinueButtons();
+        } else if (!isLoopMode && !managedPhase) {
+          renderUploadButtonsOnly();
+        }
+      }
+    }
+
+    async function copyHotkeyAndContinueOnce(source = 'button', options = {}) {
+      const context = buildCopyHotkeyContinueContext(source, options);
+      const {
+        sourceText,
+        flowOptions,
+        managedPhase,
+        flowRunId,
+        shouldStop,
+        isClosedLoopIsolated,
+        isLoopMode,
+        syncLoopPhase,
+      } = context;
+      const btn = managedPhase || isLoopMode
+        ? null
+        : (rootElRef ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef) : null);
+
       const continueLock = claimUploadActionLock('copy-hotkey-continue', {
         forceRelease: isLoopMode,
       });
@@ -8632,214 +9891,33 @@
           };
         }
 
-        if (managedPhase && !isLoopMode) {
-          setCopyHotkeyContinuePhase('copying', `${sourceText}:copying`);
+        const copyStage = await copyLastAssistantReplyForContinue(source, options, context);
+        if (!copyStage || copyStage.ok === false) {
+          return copyStage;
         }
-        if (isLoopMode) {
-          syncLoopPhase('copying', 'copying');
+        if (copyStage.assistantDoneSignal === true || copyStage.assistantBatchTerminalStop === true) {
+          return copyStage;
         }
 
-        const waitCopyResult = await waitAndCopyLatestAssistant({
-          source,
-          reason: `copy-hotkey-continue:${sourceText || '-'}`,
-          shouldStop,
-        });
-
-        if (!waitCopyResult.ok) {
-          const reason = waitCopyResult.reason || 'wait-assistant-failed';
-          const errText = waitCopyResult.detail || reason;
-          ToolboxShell.appendLog(
-            `[COPY_HOTKEY_CONTINUE][abort] reason=${reason} detail=${errText || '-'}`,
-          );
-          if (!isLoopMode) {
-            const statusMsg = reason === 'empty-assistant-text'
-              ? '复制+快捷键+继续失败：最后回复为空'
-              : `复制+快捷键+继续失败：${reason}`;
-            setStatus(statusMsg, 'warn');
-          }
+        const hotkeyStage = await triggerContinueHotkeyForContinue(source, options, context, copyStage);
+        if (!hotkeyStage || hotkeyStage.ok === false) {
           return {
             ok: false,
             assistantDoneSignal: false,
-            reason: reason || 'wait-assistant-failed',
-            detail: errText,
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: !!waitCopyResult.copied,
-            hotkeySent: false,
-            continueSent: false,
-            assistantMessageKey: '',
-          };
-        }
-
-        const waitResult = waitCopyResult.waitResult || null;
-        const assistantMessageKey = buildAssistantMessageKeyFromRecord(
-          waitResult && waitResult.record,
-          waitCopyResult.text || (waitResult && waitResult.text),
-        ) || getLastAssistantMessageKeySafe();
-
-        const assistantRawText = String(waitCopyResult.text || (waitResult && waitResult.text) || '').trim();
-
-        if (
-          flowOptions.disableBatchTextTerminalStop !== true
-          && typeof classifyBatchReply === 'function'
-        ) {
-          const replyClassify = classifyBatchReply(assistantRawText);
-          ToolboxShell.appendLog(
-            `[BATCH][REPLY_CLASSIFY] shouldStop=${replyClassify.shouldStop ? 1 : 0} `
-            + `status=${replyClassify.status} reason=${replyClassify.reason} source=${sourceText || '-'}`,
-          );
-          if (
-            replyClassify.shouldStop
-            && replyClassify.status !== 'done'
-            && replyClassify.status !== 'empty'
-          ) {
-            const terminalLine = `[COPY_HOTKEY_CONTINUE][batch-terminal-stop] status=${replyClassify.status} reason=${replyClassify.reason} source=${sourceText || '-'}`;
-            safeAppendLog(terminalLine);
-            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-              ToolboxShell.appendLog(terminalLine);
-            }
-            setStatus(
-              replyClassify.status === 'no_more_content'
-                ? '检测到无更多内容终态，已停止自动继续'
-                : '检测到阻塞终态，已停止自动继续',
-              'warn',
-            );
-            return {
-              ok: true,
-              assistantDoneSignal: false,
-              assistantBatchTerminalStop: true,
-              batchReplyClassifyStatus: replyClassify.status,
-              batchReplyClassifyReason: replyClassify.reason,
-              reason: `batch-reply-${replyClassify.status}`,
-              source: sourceText,
-              loopMode: isLoopMode,
-              copied: !!waitCopyResult.copied,
-              hotkeySent: false,
-              continueSent: false,
-              assistantMessageKey,
-            };
-          }
-        }
-
-        const assistantDoneSignalMatched = checkUploadDoneSignalWithLog(
-          assistantRawText,
-          'COPY_HOTKEY_CONTINUE',
-          'after-wait',
-          `source=${sourceText || '-'}`,
-          flowOptions,
-        );
-
-        if (assistantDoneSignalMatched) {
-          const doneSignalLine = `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} key=${assistantMessageKey || '-'}`;
-          safeAppendLog(doneSignalLine);
-          console.warn('[COPY_HOTKEY_CONTINUE][assistant-done-signal]', {
-            source: sourceText || '-',
-            key: assistantMessageKey || '-',
-            preview: formatDoneSignalPreview(assistantRawText),
-          });
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(doneSignalLine);
-          }
-
-          setStatus('检测到终止信号，任务已完成，不再继续', 'success');
-
-          return {
-            ok: true,
-            assistantDoneSignal: true,
-            reason: 'assistant-done-signal',
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: !!waitCopyResult.copied,
-            hotkeySent: false,
-            continueSent: false,
-            assistantMessageKey,
-          };
-        }
-
-        if (shouldStop()) {
-          return {
-            ok: false,
-            assistantDoneSignal: false,
-            reason: 'cancelled',
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: !!waitCopyResult.copied,
-            hotkeySent: false,
-            continueSent: false,
-            assistantMessageKey,
-          };
-        }
-
-        logCopyHotkeyContinueStep(sourceText, 'copy-last-reply');
-
-        ToolboxShell.appendLog(
-          `[COPY_HOTKEY_CONTINUE][copied] chars=${waitCopyResult.chars || 0}`,
-        );
-
-        if (typeof playCopySuccessBeepSafe === 'function') {
-          void playCopySuccessBeepSafe(sourceText || '-', 'copyHotkeyContinue');
-        }
-
-        if (shouldStop()) {
-          return {
-            ok: false,
-            assistantDoneSignal: false,
-            reason: 'cancelled',
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: true,
-            hotkeySent: false,
-            continueSent: false,
-            assistantMessageKey,
-          };
-        }
-
-        logCopyHotkeyContinueStep(sourceText, 'send-hotkey');
-        if (managedPhase && !isLoopMode) {
-          setCopyHotkeyContinuePhase('sending_hotkey', `${sourceText}:send-hotkey`);
-        }
-        if (isLoopMode) {
-          syncLoopPhase('sending_hotkey', 'send-hotkey');
-        }
-
-        const hotkeyFlow = await sendHotkeyAfterCopy({
-          copiedText: waitCopyResult.text,
-          reason: 'copy-hotkey-continue',
-          shouldStop,
-        });
-
-        if (!hotkeyFlow.ok) {
-          const failReason = hotkeyFlow.reason || 'hotkey-failed';
-          const errText = hotkeyFlow.detail || failReason;
-          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][failed] reason=${failReason} detail=${errText}`);
-          if (!isLoopMode) {
-            const targetLabelContinue = typeof getCopyThenShortcutTargetLabel === 'function'
-              ? getCopyThenShortcutTargetLabel()
-              : 'Ctrl+Alt+I';
-            setStatus(
-              hotkeyFlow.reason === 'clipboard-not-ready'
-                ? `复制+快捷键+继续失败：剪贴板未就绪：${errText}`
-                : `复制成功，但 ${targetLabelContinue || '目标快捷键'} 执行失败`,
-              'error',
-            );
-          }
-          return {
-            ok: false,
-            assistantDoneSignal: false,
-            reason: failReason,
-            detail: errText,
-            clipboardReadyReason: failReason,
+            reason: hotkeyStage && hotkeyStage.reason ? hotkeyStage.reason : 'hotkey-failed',
+            detail: hotkeyStage && hotkeyStage.detail ? hotkeyStage.detail : '',
+            clipboardReadyReason: hotkeyStage && hotkeyStage.clipboardReadyReason
+              ? hotkeyStage.clipboardReadyReason
+              : '',
             continueReason: '',
             source: sourceText,
             loopMode: isLoopMode,
             copied: true,
             hotkeySent: false,
             continueSent: false,
-            assistantMessageKey,
+            assistantMessageKey: copyStage.assistantMessageKey || '',
           };
         }
-
-        await sleep(300);
 
         if (shouldStop()) {
           return {
@@ -8851,62 +9929,21 @@
             copied: true,
             hotkeySent: true,
             continueSent: false,
-            assistantMessageKey,
+            assistantMessageKey: copyStage.assistantMessageKey || '',
           };
         }
 
-        logCopyHotkeyContinueStep(sourceText, 'send-continue');
-        if (managedPhase && !isLoopMode) {
-          setCopyHotkeyContinuePhase('sending_continue', `${sourceText}:send-continue`);
+        const sendStage = await sendContinueForContinue(source, options, context, {
+          hotkeySent: true,
+          assistantMessageKey: copyStage.assistantMessageKey || '',
+          waitCopyResult: copyStage.waitCopyResult || null,
+          clipboardReadyReason: hotkeyStage.clipboardReadyReason || 'ok',
+        });
+
+        if (!sendStage || sendStage.ok === false) {
+          return sendStage;
         }
-        if (isLoopMode) {
-          syncLoopPhase('sending_continue', 'send-continue');
-        }
-        const continueSource = sourceText || 'copy-hotkey-continue-once';
-        const loopContinuePromptTxt = getCopyHotkeyContinuePromptText(flowOptions);
-        safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
-        const continueResult = await sendContinuePromptFromUnifiedPipeline(continueSource, flowOptions);
-        if (!continueResult || !continueResult.ok) {
-          const detail = continueResult && continueResult.reason ? continueResult.reason : '';
-          if (
-            detail === 'assistant-done-signal-before-send'
-            || (continueResult && continueResult.assistantDoneSignal === true)
-          ) {
-            safeAppendLog(
-              `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} reason=${detail || 'assistant-done-signal-before-send'}`,
-            );
-            setStatus('检测到终止信号，任务已完成，不再继续', 'success');
-            return {
-              ok: true,
-              assistantDoneSignal: true,
-              reason: detail || 'assistant-done-signal-before-send',
-              source: sourceText,
-              loopMode: isLoopMode,
-              copied: true,
-              hotkeySent: true,
-              continueSent: false,
-              assistantMessageKey,
-            };
-          }
-          ToolboxShell.appendLog(
-            `[COPY_HOTKEY_CONTINUE][failed] reason=continue-send-failed detail=${detail || '-'}`,
-          );
-          if (!isLoopMode) {
-            setStatus('复制和快捷键已完成，但发送继续指令失败', 'error');
-          }
-          return {
-            ok: false,
-            assistantDoneSignal: false,
-            reason: 'continue-send-failed',
-            detail,
-            source: sourceText,
-            loopMode: isLoopMode,
-            copied: true,
-            hotkeySent: true,
-            continueSent: false,
-            assistantMessageKey,
-          };
-        }
+
         ToolboxShell.appendLog('[COPY_HOTKEY_CONTINUE][done] copied=1 hotkey=1 continue=1');
         if (!isLoopMode) {
           const targetLabelSuccess = typeof getCopyThenShortcutTargetLabel === 'function'
@@ -8917,20 +9954,7 @@
             'success',
           );
         }
-        return {
-          ok: true,
-          assistantDoneSignal: false,
-          reason: 'ok',
-          source: sourceText,
-          loopMode: isLoopMode,
-          copied_text: String(waitCopyResult.text || ''),
-          assistantMessageKey,
-          continueSent: true,
-          continueReason: continueResult && continueResult.reason ? continueResult.reason : 'ok',
-          clipboardReadyReason: hotkeyFlow && hotkeyFlow.reason ? hotkeyFlow.reason : 'ok',
-          hotkeySent: true,
-          copied: true,
-        };
+        return sendStage;
       } catch (error) {
         const errText = formatToolboxError(error);
         console.error('[COPY_HOTKEY_CONTINUE][ERROR]', {
@@ -8971,7 +9995,7 @@
         if (!isLoopMode && !managedPhase) {
           renderUploadButtonsOnly();
         } else if (isClosedLoopIsolated) {
-          renderClosedLoopContinueButton();
+          renderClosedLoopContinueButtons();
         } else if (isLoopMode) {
           safeAppendLog(`[COPY_HOTKEY_CONTINUE][KEEP_LOOP_STATE] source=${sourceText}`);
           console.warn('[COPY_HOTKEY_CONTINUE][KEEP_LOOP_STATE]', {
@@ -10350,11 +11374,15 @@
           type: file.type || 'application/octet-stream',
           lastModified: file.lastModified || Date.now(),
           file,
+          sourceFile: file,
+          originalFile: file,
           blob: file,
+          sourceBlob: file,
           fileHandle: hasHandle ? handle : null,
           sourceKind: hasHandle ? 'local-handle' : 'session-file',
           readMode: hasHandle ? 'handle' : 'snapshot',
           state: UploadState.IDLE,
+          status: 'pending',
           message: '',
           uploadName: '',
           persistedAttached: false,
@@ -10623,7 +11651,10 @@
         q.type = file.type || q.type || 'application/octet-stream';
         q.lastModified = file.lastModified || Date.now();
         q.file = file;
+        q.sourceFile = file;
+        q.originalFile = file;
         q.blob = file;
+        q.sourceBlob = file;
 
         if (hasHandle) {
           q.fileHandle = handle;
@@ -10900,11 +11931,12 @@
           const file = await item.fileHandle.getFile();
 
           item.file = file;
+          item.sourceFile = file;
+          item.originalFile = file;
           item.name = file.name || item.name;
           item.size = Number(file.size) || item.size;
           item.lastModified = Number(file.lastModified) || item.lastModified;
           item.type = file.type || item.type || 'application/octet-stream';
-          item.blob = null;
           item.readMode = 'file-handle-live';
 
           ToolboxShell.appendLog(
@@ -11044,11 +12076,12 @@
 
         if (result.ok) {
           q.state = UploadState.ATTACHED;
+          q.status = 'attached';
           q.message = '';
           q.attachedInSession = true;
           q.persistedAttached = true;
           q.updatedAt = Date.now();
-          releaseUploadPayload(q, 'attach-ok');
+          logUploadSourceCheck(q, 'attach-ok');
 
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][uploadOne:final] name=${q.name || '-'} state=${q.state} groupId=${q.groupId || '-'} sourceKind=${q.sourceKind || '-'} size=${q.size || 0} err=`
@@ -11070,11 +12103,12 @@
 
         if (postEvidence && postEvidence.ok) {
           q.state = UploadState.ATTACHED;
+          q.status = 'attached';
           q.message = '';
           q.attachedInSession = true;
           q.persistedAttached = true;
           q.updatedAt = Date.now();
-          releaseUploadPayload(q, 'post-evidence-attached');
+          logUploadSourceCheck(q, 'post-evidence-attached');
 
           ToolboxShell.appendLog(
             `[UPLOAD_DIAG][uploadOne:post-evidence-attached] name=${q.name || '-'} uploadName=${uploadFile.name || '-'} reason=${postEvidence.reason || '-'} chipCount=${postChipCount}`
@@ -11567,6 +12601,7 @@
         copyHotkeyUploadVerifyLoopActive: isCopyHotkeyUploadVerifyLoopActive(),
         closedLoopContinueRunning: closedLoopContinueState.running,
         closedLoopContinueStopping: closedLoopContinueState.stopping,
+        closedLoopContinueMode: closedLoopContinueState.mode,
         copyContinueTask: state.copyContinueTask,
         sendHotkeyTask: state.sendHotkeyTask,
         copyHotkeyContinueTask: state.copyHotkeyContinueTask,
@@ -12489,6 +13524,7 @@
       const useHeavy = options && options.heavy === true;
       const skipCapabilityScan = !!(options && options.skipCapabilityScan);
 
+      reconcileUploadPhase(options.buttonTasksReason || 'renderUploadButtonsOnly');
       healStaleUploadRunningLockIfNeeded('renderUploadButtonsOnly');
       healStaleSendUiStateIfNeeded('renderUploadButtonsOnly');
       healStaleWaitingReplyStateIfNeeded('renderUploadButtonsOnly');
@@ -12735,6 +13771,8 @@
       });
 
       assertRenderedUploadButtonConsistency();
+
+      rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
 
       if (typeof logPerfThrottled === 'function') {
         const costMs = Math.round(
@@ -13835,7 +14873,10 @@
           cycleIndex: opts.cycleIndex,
         };
 
-        const uploadResult = await startUploadFromCurrentQueue(uploadOpts);
+        const uploadResult = await uploadFromCurrentQueueShared({
+          ...uploadOpts,
+          source: source === 'button' ? 'manual-start-upload' : `manual-start-upload:${source}`,
+        });
 
         const result = uploadResult && typeof uploadResult === 'object'
           ? uploadResult
@@ -14275,7 +15316,7 @@
 
         const releaseItemRefs = (item) => {
           if (!item) return;
-          releaseUploadPayload(item, `nav-cleanup:${source || '-'}`);
+          releaseUploadPayload(item, `nav-cleanup:${source || '-'}`, { clearFileRefs: true });
           if (item.rawFile) {
             item.rawFile = null;
           }
@@ -15899,6 +16940,16 @@
         return item.file;
       }
 
+      if (item.sourceFile instanceof File) {
+        item.file = item.sourceFile;
+        return item.sourceFile;
+      }
+
+      if (item.originalFile instanceof File) {
+        item.file = item.originalFile;
+        return item.originalFile;
+      }
+
       if (item.blob instanceof Blob) {
         return new File(
           [item.blob],
@@ -16037,20 +17088,43 @@
       return true;
     }
 
-    function releaseUploadPayload(item, reason) {
+    function releaseUploadPayload(item, reason, options = {}) {
       if (!item) return;
+      const opts = options && typeof options === 'object' ? options : {};
+      const clearFileRefs = opts.clearFileRefs === true;
       const name = item.name || '-';
-      const id = item.id || item.file_id || '-';
       let released = false;
 
-      if (item.file) {
-        item.file = null;
-        released = true;
-      }
+      if (clearFileRefs) {
+        if (item.file) {
+          item.file = null;
+          released = true;
+        }
 
-      if (item.blob) {
-        item.blob = null;
-        released = true;
+        if (item.sourceFile) {
+          item.sourceFile = null;
+          released = true;
+        }
+
+        if (item.originalFile) {
+          item.originalFile = null;
+          released = true;
+        }
+
+        if (item.blob) {
+          item.blob = null;
+          released = true;
+        }
+
+        if (item.sourceBlob) {
+          item.sourceBlob = null;
+          released = true;
+        }
+
+        if (item.fileHandle) {
+          item.fileHandle = null;
+          released = true;
+        }
       }
 
       if (item.arrayBuffer) {
@@ -16095,9 +17169,11 @@
         if (item.id) {
           updateItem(item.id, {
             state: UploadState.ATTACHED,
+            status: 'attached',
             message: '已绑定到输入框',
           });
-          releaseUploadPayload(item, 'attached-to-input');
+          const queueItem = (state.queue || []).find((q) => q && q.id === item.id) || item;
+          logUploadSourceCheck(queueItem, 'attached-to-input');
         }
       }
 
@@ -16242,17 +17318,50 @@
       });
     }
 
+    async function uploadFromCurrentQueueShared(options = {}) {
+      const source = String(options.source || 'shared-upload');
+      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source}`);
+      reconcileUploadPhase(`shared-enter:${source}`);
+
+      const resetCount = resetQueueItemsForUpload({
+        forceResetAttached: true,
+        forceResetUploaded: true,
+        forceResetDone: true,
+        preserveAttached: false,
+        reason: `uploadFromCurrentQueueShared:${source}`,
+      });
+      ToolboxShell.appendLog(`[UPLOAD_SHARED][RESET_DONE] source=${source} resetCount=${resetCount}`);
+
+      const result = await startUploadFromCurrentQueue({
+        ...options,
+        source,
+        skipPreReset: true,
+        forceResetAttached: true,
+        forceResetUploaded: true,
+        forceResetDone: true,
+      });
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_SHARED][DONE] source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+      );
+      reconcileUploadPhase(`shared-done:${source}`);
+      return result;
+    }
+
     async function startUploadFromCurrentQueue(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const uploadSource = String(opts.source || 'button').trim() || 'button';
       const parentTask = String(opts.parentTask || '').trim();
       const cycleIndex = Number(opts.cycleIndex) || 0;
       const isChildUpload = parentTask.length > 0;
+      const skipPreReset = opts.skipPreReset === true;
       const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : null;
       const maxFilesRaw = Number(opts.maxFiles);
       const maxFiles = Number.isFinite(maxFilesRaw) && maxFilesRaw > 0
         ? Math.floor(maxFilesRaw)
         : 0;
+
+      reconcileUploadPhase(`start-enter:${uploadSource}`);
 
       const checkShouldStop = () => {
         if (shouldStop && shouldStop()) {
@@ -16345,11 +17454,18 @@
         });
       }
 
-      // 重置已绑定的文件，允许再次上传
-      resetQueueItemsForUpload({ forceResetAttached: true });
+      if (!skipPreReset) {
+        resetQueueItemsForUpload({
+          forceResetAttached: opts.forceResetAttached === true,
+          forceResetUploaded: opts.forceResetUploaded === true,
+          forceResetDone: opts.forceResetDone === true,
+          preserveAttached: opts.preserveAttached,
+          reason: uploadSource,
+        });
+      }
       resetFlaskFilesForUpload(`startUploadFromCurrentQueue:${uploadSource}`);
 
-      const allPendingItems = getPendingUploadItems();
+      const allPendingItems = await getPendingUploadItemsForStart(uploadSource);
       const pendingItems = maxFiles > 0
         ? allPendingItems.slice(0, maxFiles)
         : allPendingItems;
@@ -16357,6 +17473,7 @@
       const skippedByMaxFiles = Math.max(0, allPendingItems.length - pendingItems.length);
 
       if (!pendingItems.length) {
+        reconcileUploadPhase(`no-files:${uploadSource}`);
         const stats = getUploadCountStats();
         const hint = '没有待上传文件：当前油猴上传队列为空，且没有可下载的 Flask 本地文件。';
         ToolboxShell.showToast(hint, 'warn', 2600);
@@ -16436,6 +17553,9 @@
           isCancelled: () => checkShouldStop(),
         });
         markPendingItemsUploaded(pendingItems);
+        pendingItems.forEach((item) => {
+          logUploadSourceCheck(item, `after-upload:${uploadSource}`);
+        });
 
         if (!isChildUpload) {
           scheduleRenderUpload('startUploadFromCurrentQueue:done');
@@ -16515,6 +17635,7 @@
           reason: errText,
         });
       } finally {
+        reconcileUploadPhase(`start-finally:${uploadSource}`);
         if (isChildUpload) {
           if (state.uploadTask && state.uploadTask.runId === childUploadRunId) {
             state.uploadTask.phase = 'idle';
@@ -16770,6 +17891,7 @@
         )
       ) || (
         (normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
+          || normalizedAction === 'closed-loop-upload-every5-hotkey'
           || normalizedAction === 'closed-loop-upload-every5')
         && closedLoopContinueState.running
       );
@@ -16910,8 +18032,13 @@
       }
 
       if (normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
-        || normalizedAction === 'closed-loop-upload-every5') {
-        void handleClosedLoopContinueClick();
+        || normalizedAction === 'closed-loop-upload-every5-hotkey') {
+        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY, src);
+        return true;
+      }
+
+      if (normalizedAction === 'closed-loop-upload-every5') {
+        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY, src);
         return true;
       }
 
@@ -17145,9 +18272,14 @@
         label: '连续复制+快捷键+继续',
       },
       {
+        selector: UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
+        action: 'closed-loop-upload-every5-hotkey',
+        label: CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY],
+      },
+      {
         selector: UploadSelectors.closedLoopUploadEvery5Btn,
         action: 'closed-loop-upload-every5',
-        label: '闭环继续+每5轮上传',
+        label: CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY],
       },
       {
         selector: '#cgpt-upload-group-manage',
@@ -17218,6 +18350,13 @@
       const target = event && event.target;
       if (!(target instanceof Element)) {
         return;
+      }
+
+      const debugActionBtn = target.closest('[data-action]');
+      if (debugActionBtn instanceof HTMLElement) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_UI_ACTION][click-detected] id=${debugActionBtn.id || '-'} action=${debugActionBtn.dataset.action || '-'} disabled=${debugActionBtn.disabled ? 1 : 0}`,
+        );
       }
 
       try {
@@ -17301,6 +18440,7 @@
       }
 
       if (rootEl.dataset.uploadDelegatedClickBound === '1') {
+        ToolboxShell.appendLog('[UPLOAD_UI_ACTION][BIND_SKIP] reason=already-bound');
         return;
       }
 
@@ -17311,6 +18451,7 @@
         moduleName: 'UploadModule',
         listenerOptions: true,
       });
+      ToolboxShell.appendLog('[UPLOAD_UI_ACTION][BIND_OK] source=root-delegated-click');
     }
 
     function requireUploadElement(rootEl, selector, name) {
@@ -17375,6 +18516,8 @@
         return;
       }
 
+      bindClosedLoopDocumentClickFallback('bind-events');
+
       if (rootEl.dataset.uploadEventsBound === '1') {
         ensureUploadActionButtons(rootEl);
         ensureUploadManageActionButtons(rootEl);
@@ -17392,7 +18535,7 @@
         bindCopyAndHotkeyShortcut();
         bindUploadDelegatedClick(rootEl);
         bindUploadCompactActionButtons(rootEl);
-        bindClosedLoopContinueButton(rootEl);
+        rebindClosedLoopContinueUi(rootEl, 'render-upload-actions');
         applyUploadShortcutButtonTitles(rootEl);
         return;
       }
@@ -17602,7 +18745,7 @@
       bindCopyAndHotkeyShortcut();
       bindUploadDelegatedClick(rootEl);
       bindUploadCompactActionButtons(rootEl);
-      bindClosedLoopContinueButton(rootEl);
+      rebindClosedLoopContinueUi(rootEl, 'mount-upload-module');
       applyUploadShortcutButtonTitles(rootEl);
     }
 
@@ -17638,7 +18781,8 @@
             <button type="button" class="cgpt-btn" id="cgpt-copy-last-message-scroll-bottom" data-action="copy-only">复制最后回复</button>
             <button type="button" class="cgpt-btn purple" id="cgpt-copy-hotkey-continue-once" data-action="copy-hotkey-continue" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令">复制+快捷键+继续</button>
             <button type="button" class="cgpt-btn cyan" id="cgpt-copy-hotkey-continue-loop" data-action="loop-copy-hotkey-continue" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令">连续复制+快捷键+继续</button>
-            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-upload-every5" title="等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码">闭环继续+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-upload-every5-hotkey" title="等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码">闭环继续+快捷键+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-upload-every5" data-closed-loop-mode="without_hotkey" title="等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码">闭环继续+每5轮上传</button>
           </div>
       `;
     }
@@ -17701,6 +18845,7 @@
         UploadSelectors.copyHotkeyOnceBtn,
         UploadSelectors.copyHotkeyContinueOnceBtn,
         UploadSelectors.copyHotkeyContinueLoopBtn,
+        UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
         UploadSelectors.closedLoopUploadEvery5Btn,
       ];
 
@@ -17726,6 +18871,7 @@
       toolbar.innerHTML = buildUploadActionToolbarInnerHtml();
       ToolboxShell.appendLog('[UPLOAD_UI][ACTION_TOOLBAR_MIGRATED] all-actions-wrap-row');
       logUploadActionRowLayout(rootEl, 'migrate-upload-action-toolbar');
+      rebindClosedLoopContinueUi(rootEl, 'after-migrate-toolbar');
     }
 
     function buildUploadActionToolbarHtml() {
@@ -18056,18 +19202,38 @@
         copyHotkeyContinueLoopBtn.dataset.action = 'loop-copy-hotkey-continue';
       }
 
-      let copyHotkeyUploadVerifyLoopBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, actionRow);
-      if (!copyHotkeyUploadVerifyLoopBtn) {
-        copyHotkeyUploadVerifyLoopBtn = document.createElement('button');
-        copyHotkeyUploadVerifyLoopBtn.type = 'button';
-        copyHotkeyUploadVerifyLoopBtn.className = 'cgpt-btn cyan';
-        copyHotkeyUploadVerifyLoopBtn.id = 'cgpt-closed-loop-upload-every5-btn';
-        copyHotkeyUploadVerifyLoopBtn.dataset.action = 'closed-loop-upload-every5';
-        copyHotkeyUploadVerifyLoopBtn.textContent = '闭环继续+每5轮上传';
-        copyHotkeyUploadVerifyLoopBtn.title = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> Ctrl+Alt+I -> 发送继续指令；第 1 轮与每 5 轮自动上传代码';
+      migrateLegacyClosedLoopHotkeyButton(actionRow);
+
+      let closedLoopHotkeyBtn = qs(UploadSelectors.closedLoopUploadEvery5HotkeyBtn, actionRow);
+      if (!closedLoopHotkeyBtn) {
+        closedLoopHotkeyBtn = document.createElement('button');
+        closedLoopHotkeyBtn.type = 'button';
+        closedLoopHotkeyBtn.className = 'cgpt-btn cyan';
+        closedLoopHotkeyBtn.id = 'cgpt-closed-loop-upload-every5-hotkey-btn';
+        closedLoopHotkeyBtn.dataset.action = 'closed-loop-upload-every5-hotkey';
+        closedLoopHotkeyBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY];
+        closedLoopHotkeyBtn.title = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> Ctrl+Alt+I -> 发送继续指令；第 1 轮与每 5 轮自动上传代码';
       } else {
-        copyHotkeyUploadVerifyLoopBtn.id = 'cgpt-closed-loop-upload-every5-btn';
-        copyHotkeyUploadVerifyLoopBtn.dataset.action = 'closed-loop-upload-every5';
+        closedLoopHotkeyBtn.id = 'cgpt-closed-loop-upload-every5-hotkey-btn';
+        closedLoopHotkeyBtn.dataset.action = 'closed-loop-upload-every5-hotkey';
+        closedLoopHotkeyBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY];
+      }
+
+      let closedLoopPlainBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, actionRow);
+      if (!closedLoopPlainBtn) {
+        closedLoopPlainBtn = document.createElement('button');
+        closedLoopPlainBtn.type = 'button';
+        closedLoopPlainBtn.className = 'cgpt-btn cyan';
+        closedLoopPlainBtn.id = 'cgpt-closed-loop-upload-every5-btn';
+        closedLoopPlainBtn.dataset.action = 'closed-loop-upload-every5';
+        closedLoopPlainBtn.dataset.closedLoopMode = 'without_hotkey';
+        closedLoopPlainBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY];
+        closedLoopPlainBtn.title = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；第 1 轮与每 5 轮自动上传代码';
+      } else {
+        closedLoopPlainBtn.id = 'cgpt-closed-loop-upload-every5-btn';
+        closedLoopPlainBtn.dataset.action = 'closed-loop-upload-every5';
+        closedLoopPlainBtn.dataset.closedLoopMode = 'without_hotkey';
+        closedLoopPlainBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY];
       }
 
       const orderedButtons = [
@@ -18081,7 +19247,8 @@
         copyLastBtn,
         copyHotkeyContinueOnceBtn,
         copyHotkeyContinueLoopBtn,
-        copyHotkeyUploadVerifyLoopBtn,
+        closedLoopHotkeyBtn,
+        closedLoopPlainBtn,
       ].filter(Boolean);
 
       orderedButtons.forEach((btn) => {
@@ -18089,6 +19256,7 @@
       });
 
       logUploadActionRowLayout(rootEl, 'ensure-upload-action-buttons');
+      rebindClosedLoopContinueUi(rootEl, 'after-ensure-upload-action-buttons');
     }
 
     function bindUploadCompactActionButtons(rootEl) {
@@ -18329,6 +19497,11 @@
         },
         {
           type: 'required',
+          selector: '#cgpt-closed-loop-upload-every5-hotkey-btn',
+          missingLog: '[UPLOAD_DOM][missing] #cgpt-closed-loop-upload-every5-hotkey-btn',
+        },
+        {
+          type: 'required',
           selector: '#cgpt-closed-loop-upload-every5-btn',
           missingLog: '[UPLOAD_DOM][missing] #cgpt-closed-loop-upload-every5-btn',
         },
@@ -18347,8 +19520,14 @@
         {
           type: 'order',
           before: '#cgpt-copy-hotkey-continue-loop',
+          after: '#cgpt-closed-loop-upload-every5-hotkey-btn',
+          message: '闭环继续+快捷键按钮应位于连续复制+快捷键+继续按钮之后',
+        },
+        {
+          type: 'order',
+          before: '#cgpt-closed-loop-upload-every5-hotkey-btn',
           after: '#cgpt-closed-loop-upload-every5-btn',
-          message: '闭环继续按钮应位于连续复制+快捷键+继续按钮之后',
+          message: '闭环继续（无快捷键）按钮应位于闭环继续+快捷键按钮之后',
         },
         {
           type: 'notContains',
@@ -19052,6 +20231,9 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       },
       startUploadFromBridge,
       startUploadFromCurrentQueue,
+      uploadFromCurrentQueueShared,
+      getPendingUploadItemsForStart,
+      reconcileUploadPhase,
       startUploadForAutoQueue,
       detectComposerHasUploadPayload,
       triggerStartUpload,
