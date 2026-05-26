@@ -545,6 +545,8 @@
           resize: none;
           box-shadow: 0 14px 36px rgba(0,0,0,0.42);
           pointer-events: auto;
+          z-index: 2147483647;
+          isolation: isolate;
         }
 
         .cgpt-resize-handle {

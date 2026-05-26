@@ -129,7 +129,6 @@
       : {};
     const phase = normalizeTaskPhase(task.phase);
     const uploadRunning = phase === TaskPhase.UPLOADING || phase === TaskPhase.CANCELLING;
-    const noFiles = Number(snapshot.activeFilesCount || 0) <= 0;
 
     if (task.cancelRequested || phase === TaskPhase.CANCELLING) {
       return {
@@ -160,7 +159,7 @@
         phase: TaskPhase.IDLE,
         text: '开始上传',
         title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
-        disabled: noFiles,
+        disabled: false,
         allowCancel: false,
         action: 'start',
         buttonPhase: 'idle',
@@ -208,7 +207,7 @@
       phase: TaskPhase.IDLE,
       text: '开始上传',
       title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
-      disabled: noFiles,
+      disabled: false,
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',

@@ -7557,9 +7557,8 @@ const AutoQueueModule = (() => {
       }
 
       if (activeFilesForLog === 0) {
-        ToolboxShell.appendLog('[AUTOQ][MANUAL_UPLOAD][BLOCKED] reason=no-active-files');
-        updateStatus('start-upload-blocked-no-files');
-        return;
+        ToolboxShell.appendLog('[AUTOQ][MANUAL_UPLOAD][CONTINUE] reason=active-files-zero-but-upload-allowed');
+        log('[AUTOQ][MANUAL_UPLOAD][CONTINUE] reason=active-files-zero-but-upload-allowed');
       }
 
       if (state.running && config.promptMode === 'task') {
@@ -8477,6 +8476,7 @@ const AutoQueueModule = (() => {
       }
 
       bindAutoQueueDelegatedActions('renderQueueActionButtons');
+      bindDirectAutoQueueActionButtons('renderQueueActionButtons');
       logButtonHitTestState('after-renderQueueActionButtons');
       logAutoQueueActionButtonDomState('renderQueueActionButtons');
     }
@@ -10915,15 +10915,26 @@ const AutoQueueModule = (() => {
         const x = Math.floor(rect.left + rect.width / 2);
         const y = Math.floor(rect.top + rect.height / 2);
         const topEl = document.elementFromPoint(x, y);
+        const zeroRect = rect.width <= 0 || rect.height <= 0;
 
         ToolboxShell.appendLog(
           `[AUTOQ][HIT_TEST] reason=${reason || '-'} id=${id} found=1 `
           + `disabled=${btn.disabled ? 1 : 0} `
           + `pointerEvents=${getComputedStyle(btn).pointerEvents} `
+          + `rect=${Math.floor(rect.left)}/${Math.floor(rect.top)}/${Math.floor(rect.width)}/${Math.floor(rect.height)} `
+          + `visible=${zeroRect ? 0 : 1} `
+          + `${zeroRect ? 'reason=zero-rect ' : ''}`
           + `topId=${topEl ? topEl.id || '-' : '-'} `
           + `topTag=${topEl ? topEl.tagName : '-'} `
           + `topClass=${topEl ? String(topEl.className || '').slice(0, 80) : '-'}`,
         );
+
+        const blocked = topEl && topEl !== btn && !btn.contains(topEl);
+        if (blocked) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][HIT_TEST_BLOCKED] id=${id} topId=${topEl.id || '-'} topTag=${topEl.tagName || '-'} topClass=${String(topEl.className || '').slice(0, 120)}`,
+          );
+        }
       });
     }
 
@@ -10973,6 +10984,78 @@ const AutoQueueModule = (() => {
       }
     }
 
+    function handleAutoQueueStartBatchButtonClick(source = 'unknown') {
+      syncLegacyRunFlagsFromPhase();
+
+      const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
+      const active = state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase);
+
+      if (active) {
+        ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop`);
+        state.batchTask.stopRequested = true;
+        stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
+        return;
+      }
+
+      ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=start`);
+      logUploadBatchState(`batch-task-click-start-${source}`);
+      callBatchTaskStartFromButton(source);
+    }
+
+    function bindDirectAutoQueueActionButtons(reason = '') {
+      refreshAutoQueueActionButtonRefs();
+
+      const sendOnceBtn = root ? qs('#cgpt-autoq-send-once', root) : null;
+
+      const bindDirect = (btn, action, handler) => {
+        if (!btn) return;
+
+        const bindKey = `autoqDirectBound${action.replace(/[^a-zA-Z0-9]/g, '')}`;
+        if (btn.dataset[bindKey] === '1') {
+          return;
+        }
+
+        btn.dataset[bindKey] = '1';
+
+        btn.addEventListener('click', (event) => {
+          if (event && event.autoqDelegatedHandled) {
+            return;
+          }
+
+          if (event) {
+            event.autoqDirectHandled = true;
+            event.preventDefault();
+            event.stopPropagation();
+          }
+
+          ToolboxShell.appendLog(
+            `[AUTOQ][DIRECT_CLICK] action=${action} id=${btn.id || '-'} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
+          );
+
+          if (btn.disabled) {
+            ToolboxShell.appendLog(`[AUTOQ][DIRECT_CLICK_BLOCKED] action=${action} reason=disabled`);
+            return;
+          }
+
+          handler();
+        }, true);
+      };
+
+      bindDirect(startUploadBtn, 'start-upload', () => {
+        ToolboxShell.appendLog('[UPLOAD_BUTTON][CLICK_DIRECT]');
+        void handleAutoQueueStartUpload();
+      });
+
+      bindDirect(startBtn, 'start-batch', () => {
+        handleAutoQueueStartBatchButtonClick('direct');
+      });
+
+      bindDirect(sendOnceBtn, 'send-once', () => {
+        ToolboxShell.appendLog('[AUTOQ][SEND_ONCE][CLICK_DIRECT]');
+        void triggerContinueOnce();
+      });
+    }
+
     function handleAutoQueueDelegatedClick(event) {
       if (event && event.autoqDelegatedHandled) {
         return;
@@ -11010,20 +11093,7 @@ const AutoQueueModule = (() => {
         event.preventDefault();
         event.stopPropagation();
 
-        syncLegacyRunFlagsFromPhase();
-        const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
-        const active = state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase);
-
-        if (active) {
-          ToolboxShell.appendLog('[BATCH_TASK_BUTTON][CLICK_DELEGATED] action=stop');
-          state.batchTask.stopRequested = true;
-          stop({ reason: 'start-button-toggle', finalStep: 'stopped', logStop: true });
-          return;
-        }
-
-        ToolboxShell.appendLog('[BATCH_TASK_BUTTON][CLICK_DELEGATED] action=start');
-        logUploadBatchState('batch-task-click-start-delegated');
-        callBatchTaskStartFromButton('delegated');
+        handleAutoQueueStartBatchButtonClick('delegated');
         return;
       }
 
@@ -11049,7 +11119,9 @@ const AutoQueueModule = (() => {
       const btn = target.closest('#cgpt-autoq-start-upload, #cgpt-autoq-start, #cgpt-autoq-send-once');
       if (!btn) return;
 
-      const toolboxRoot = btn.closest('#xz-chatgpt-toolbox-root, .xz-toolbox-root, .cgpt-toolbox-root');
+      const toolboxRoot = btn.closest(
+        '#cgpt-toolbox-root, #xz-chatgpt-toolbox-root, .xz-toolbox-root, .cgpt-toolbox-root, [data-cgpt-toolbox-root="1"]',
+      );
       if (!toolboxRoot) return;
 
       ToolboxShell.appendLog(
@@ -11072,6 +11144,8 @@ const AutoQueueModule = (() => {
 
       document.removeEventListener('click', handleAutoQueueDocumentClick, true);
       document.addEventListener('click', handleAutoQueueDocumentClick, true);
+
+      bindDirectAutoQueueActionButtons(reason || 'bind-delegated');
 
       ToolboxShell.appendLog(
         `[AUTOQ][DELEGATED_BIND_OK] reason=${reason || '-'} `

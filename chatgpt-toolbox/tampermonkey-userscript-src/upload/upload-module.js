@@ -11598,18 +11598,15 @@
       }
 
       if (!hasFiles) {
-        setUploadButtonState('idle', reason);
-        return setToolboxButtonState(button, {
-          phase: ButtonPhase.DISABLED,
-          text: '开始上传',
-          title: '当前项目没有可上传文件',
-          disabled: true,
-          reason,
-        });
+        ToolboxShell.appendLog(
+          `[UPLOAD_BUTTON][ENABLE_EMPTY_GROUP] reason=${reason} activeFiles=0 uploadAllowed=1`,
+        );
       }
 
       const idleUploadResult = setButtonIdle(button, '开始上传', {
-        title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
+        title: hasFiles
+          ? '只上传/绑定文件到 ChatGPT 输入框，不自动发送'
+          : '当前页面文件数为 0，仍允许尝试上传/重新绑定',
         reason,
       });
       setUploadButtonState('idle', reason);
