@@ -941,6 +941,10 @@
       ToolboxShell.appendLog(`[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][stop-requested] reason=${src}`);
 
       copyHotkeyUploadVerifyLoopStopRequested = true;
+      state.cancelWaitingSend = true;
+      state.messageSendCancelRequested = true;
+      cancelCurrentUploadSend(`closed-loop-stop:${src}`);
+      cancelWaitingSend(`closed-loop-stop:${src}`);
       const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
       loopTask.stopRequested = true;
 
@@ -1028,59 +1032,236 @@
       }
     }
 
-    async function sendCurrentComposerMessage(options = {}) {
-      const source = String(options.source || 'send-current-composer');
+    async function sendExistingComposerBySendMessageButtonCore(options = {}) {
+      const source = String(options.source || 'shared-send-message').trim() || 'shared-send-message';
       const shouldStop = typeof options.shouldStop === 'function'
         ? options.shouldStop
         : () => false;
-      const timeoutMs = Number(options.timeoutMs) || SEND_WAIT_TIMEOUT_MS;
+      const timeoutMs = Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000);
 
-      ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][ENTER] source=${source}`);
+      ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][ENTER] source=${source}`);
 
-      const startedAt = Date.now();
+      if (shouldStop()) {
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-before-start`);
+        return {
+          ok: false,
+          reason: 'cancelled',
+        };
+      }
 
-      while (
-        typeof ComposerApi !== 'undefined'
-        && ComposerApi
-        && typeof ComposerApi.canSendNow === 'function'
-        && !ComposerApi.canSendNow()
-      ) {
+      const sendLock = claimUploadActionLock('send-message', {
+        timeoutMs,
+      });
+
+      if (!sendLock.ok) {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=send-action-lock detail=${sendLock.reason || '-'}`,
+        );
+        return {
+          ok: false,
+          reason: `send-action-lock:${sendLock.reason || 'locked'}`,
+        };
+      }
+
+      const flowRun = createUploadSendRun(source);
+      if (!flowRun) {
+        releaseUploadActionLock('send-message');
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=upload-send-flow-locked`);
+        return {
+          ok: false,
+          reason: 'upload-send-flow-locked',
+        };
+      }
+
+      const runId = claimWaitingSendRun(
+        source,
+        typeof options.runId !== 'undefined' ? options.runId : Date.now(),
+      );
+
+      try {
         if (shouldStop()) {
-          ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][FAILED] source=${source} reason=cancelled`);
-          return { ok: false, reason: 'cancelled' };
+          cancelCurrentUploadSend(`shared-send-cancelled:${source}`);
+          ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-claim`);
+          return {
+            ok: false,
+            reason: 'cancelled',
+          };
         }
 
-        if (Date.now() - startedAt >= timeoutMs) {
-          ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][FAILED] source=${source} reason=send-button-wait-timeout`);
-          return { ok: false, reason: 'send-button-wait-timeout' };
+        const ok = await sendCurrentMessageFromUploadPanel(source, runId, flowRun);
+
+        if (shouldStop()) {
+          ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-send`);
+          return {
+            ok: false,
+            reason: 'cancelled',
+          };
         }
 
-        await sleep(250);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][DONE] source=${source} ok=${ok ? 1 : 0}`,
+        );
+
+        return {
+          ok: ok === true,
+          reason: ok === true ? 'send-message-button-core' : 'send-message-button-core-failed',
+        };
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] shared send message core failed', err);
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} error=${errText}`);
+        setStatus(`发送消息失败：${errText}`, 'error');
+        return {
+          ok: false,
+          reason: errText,
+        };
+      } finally {
+        finishUploadSendRun(flowRun, `shared-send-message-finally:${source}`);
+        releaseUploadActionLock('send-message');
+        scheduleRenderUpload(`shared-send-message-finally:${source}`);
+      }
+    }
+
+    async function sendTextBySendMessageButtonCore(text, options = {}) {
+      const source = String(options.source || 'shared-send-text').trim() || 'shared-send-text';
+      const content = String(text || '');
+      const shouldStop = typeof options.shouldStop === 'function'
+        ? options.shouldStop
+        : () => false;
+      const allowReplaceDraft = options.allowReplaceDraft !== false;
+
+      ToolboxShell.appendLog(
+        `[SEND_MESSAGE_SHARED][TEXT_ENTER] source=${source} chars=${content.length}`,
+      );
+
+      if (shouldStop()) {
+        return {
+          ok: false,
+          reason: 'cancelled',
+        };
+      }
+
+      if (!content.trim()) {
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=empty-content`);
+        return {
+          ok: false,
+          reason: 'empty-content',
+        };
       }
 
       if (
         typeof ComposerApi === 'undefined'
         || !ComposerApi
-        || typeof ComposerApi.clickSend !== 'function'
+        || typeof ComposerApi.getComposerText !== 'function'
+        || typeof ComposerApi.setComposerValue !== 'function'
       ) {
-        ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][FAILED] source=${source} reason=send-api-missing`);
-        return { ok: false, reason: 'send-api-missing' };
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=composer-api-missing`);
+        return {
+          ok: false,
+          reason: 'composer-api-missing',
+        };
+      }
+
+      const existingText = String(ComposerApi.getComposerText() || '').trim();
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+
+      if (existingText && existingText !== content.trim()) {
+        if (!allowReplaceDraft) {
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=composer-has-existing-text existingChars=${existingText.length}`,
+          );
+          return {
+            ok: false,
+            reason: 'composer-has-existing-text',
+          };
+        }
+
+        if (cfg.confirmPromptDraftOverwrite === true) {
+          const okReplace = window.confirm(
+            `ChatGPT 输入框已有 ${existingText.length} 个字符，是否覆盖并继续发送？`,
+          );
+
+          if (!okReplace) {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=user-refused-overwrite existingChars=${existingText.length}`,
+            );
+            return {
+              ok: false,
+              reason: 'user-refused-overwrite',
+            };
+          }
+        }
+
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][TEXT_OVERWRITE] source=${source} existingChars=${existingText.length} newChars=${content.length}`,
+        );
+      }
+
+      const okSet = ComposerApi.setComposerValue(content);
+      if (!okSet) {
+        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=composer-set-failed`);
+        return {
+          ok: false,
+          reason: 'composer-set-failed',
+        };
+      }
+
+      if (typeof ComposerApi.waitForComposerTextSynced === 'function') {
+        const synced = await ComposerApi.waitForComposerTextSynced(
+          content,
+          typeof SEND_TEXT_SYNC_TIMEOUT_MS === 'number' ? SEND_TEXT_SYNC_TIMEOUT_MS : 10000,
+          { shouldStop },
+        );
+
+        if (!synced || !synced.ok) {
+          const reason = synced && synced.reason ? synced.reason : 'composer-text-not-synced';
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=${reason}`,
+          );
+          return {
+            ok: false,
+            reason,
+          };
+        }
+      } else {
+        await sleep(300);
       }
 
       if (shouldStop()) {
-        ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][FAILED] source=${source} reason=cancelled`);
-        return { ok: false, reason: 'cancelled' };
+        return {
+          ok: false,
+          reason: 'cancelled',
+        };
       }
 
-      const clicked = ComposerApi.clickSend();
+      return sendExistingComposerBySendMessageButtonCore({
+        source,
+        shouldStop,
+        timeoutMs: Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000),
+      });
+    }
 
-      if (!clicked) {
-        ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][FAILED] source=${source} reason=click-send-failed`);
-        return { ok: false, reason: 'click-send-failed' };
-      }
+    async function sendCurrentComposerMessage(options = {}) {
+      const source = String(options.source || 'send-current-composer');
+      const shouldStop = typeof options.shouldStop === 'function'
+        ? options.shouldStop
+        : () => false;
 
-      ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][OK] source=${source}`);
-      return { ok: true, reason: 'composer-click-send' };
+      ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][DELEGATE_TO_SEND_BUTTON_CORE] source=${source}`);
+
+      const result = await sendExistingComposerBySendMessageButtonCore({
+        source,
+        shouldStop,
+        timeoutMs: Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000),
+      });
+
+      ToolboxShell.appendLog(
+        `[COMPOSER_SEND_CURRENT][DONE] source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+      );
+
+      return result;
     }
 
     async function runUploadVerifyLoopInitialSend(options = {}) {
@@ -1293,9 +1474,9 @@
       const noMoreSignal = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
 
       return [
-        '请根据刚才上传的代码文件和当前任务要求，检查任务是否已经完整完成。',
+        '请根据刚才重新上传的代码文件、当前任务要求和上一轮回复，判断闭环任务是否已经进入可停止状态。',
         '',
-        '重点是检查上一轮是否真的已经完成任务，不要重新回答整个任务。',
+        '重点：这不是让你重新回答任务，而是验证上一轮终止信号是否成立。',
         '',
         '如果还缺少源码、日志、构建结果、测试结果、用户确认等外部材料，无法判断任务是否真实完成，只输出：',
         blockedSignal,
@@ -1312,7 +1493,7 @@
       ].join('\n');
     }
 
-    async function runClosedLoopDoneVerification(runId, round, triggerReason = 'done-signal') {
+    async function runClosedLoopDoneVerification(runId, round, triggerReason = 'done-signal', expectedStatus = 'done') {
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][DONE_VERIFY_SKIP] reason=inactive runId=${runId} round=${round}`);
         return {
@@ -1343,7 +1524,7 @@
       const shouldStop = () => !isClosedLoopRunActive(runId);
 
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][DONE_VERIFY_START] runId=${runId} round=${round} trigger=${triggerReason}`,
+        `[CLOSED_LOOP][DONE_VERIFY_START] runId=${runId} round=${round} trigger=${triggerReason} expectedStatus=${expectedStatus || '-'}`,
       );
 
       try {
@@ -1357,8 +1538,14 @@
           `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_START] runId=${runId} round=${round}`,
         );
 
-        const uploadResult = await uploadFromCurrentQueueShared({
-          source: `closed-loop-final-verify-upload-${round}`,
+        const useHotkeyForVerify = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
+        const verifyUploadSource = useHotkeyForVerify
+          ? 'closed-loop-hotkey-final-verify-upload'
+          : 'closed-loop-final-verify-upload';
+
+        const uploadResult = await runStartUploadButtonCore({
+          source: verifyUploadSource,
+          reason: 'closed-loop-done-verification',
           parentTask: 'closedLoopDoneVerification',
           cycleIndex: round,
           shouldStop,
@@ -1367,6 +1554,18 @@
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_DONE] runId=${runId} round=${round} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadResult && uploadResult.uploadedCount != null ? uploadResult.uploadedCount : '-'} failed=${uploadResult && uploadResult.failedCount != null ? uploadResult.failedCount : '-'} skipped=${uploadResult && uploadResult.skippedCount != null ? uploadResult.skippedCount : '-'} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'}`,
         );
+
+        if (!uploadResult || uploadResult.ok !== true) {
+          const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][UPLOAD_FAILED] source=${verifyUploadSource} runId=${runId} round=${round} reason=${reason}`,
+          );
+          setStatus(`闭环上传失败：${reason}`, 'error');
+          return {
+            ok: false,
+            reason: `upload-failed:${reason}`,
+          };
+        }
 
         if (!isClosedLoopRunActive(runId)) {
           return {
@@ -1449,21 +1648,29 @@
 
         const verifyStopSignal = detectCopyHotkeyLoopStopSignal(round);
         const matched = !!(verifyStopSignal && verifyStopSignal.matched);
+        const verifyStatus = verifyStopSignal && verifyStopSignal.status
+          ? String(verifyStopSignal.status)
+          : 'continue';
 
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][DONE_VERIFY_REPLY_CHECK] runId=${runId} round=${round} matched=${matched ? 1 : 0} reason=${verifyStopSignal && verifyStopSignal.reason ? verifyStopSignal.reason : '-'}`,
+          `[CLOSED_LOOP][DONE_VERIFY_REPLY_CHECK] runId=${runId} round=${round} `
+          + `matched=${matched ? 1 : 0} status=${verifyStatus} `
+          + `expectedStatus=${expectedStatus || '-'} `
+          + `reason=${verifyStopSignal && verifyStopSignal.reason ? verifyStopSignal.reason : '-'}`,
         );
 
         if (matched) {
           return {
             ok: true,
-            reason: 'verified-done',
+            reason: `verified-${verifyStatus}`,
+            status: verifyStatus,
           };
         }
 
         return {
           ok: false,
-          reason: 'verify-reply-not-done',
+          reason: 'verify-reply-not-terminal',
+          status: verifyStatus,
         };
       } catch (error) {
         const errText = formatToolboxError(error);
@@ -1478,6 +1685,35 @@
       } finally {
         closedLoopContinueState.doneVerificationRunning = false;
       }
+    }
+
+    async function runClosedLoopSharedUpload(round, runId, options = {}) {
+      const useHotkey = options.useHotkey === true;
+      const shouldStop = typeof options.shouldStop === 'function'
+        ? options.shouldStop
+        : () => false;
+
+      const source = useHotkey
+        ? (round === 1 ? 'closed-loop-hotkey-initial-upload' : 'closed-loop-hotkey-every5-upload')
+        : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][SHARED_UPLOAD_ENTER] runId=${runId || '-'} round=${round} source=${source}`,
+      );
+
+      const result = await runStartUploadButtonCore({
+        source,
+        reason: round === 1 ? 'closed-loop-initial' : 'closed-loop-every5',
+        parentTask: 'closedLoopContinue',
+        cycleIndex: round,
+        shouldStop,
+      });
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][SHARED_UPLOAD_DONE] runId=${runId || '-'} round=${round} source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+      );
+
+      return result;
     }
 
     async function runClosedLoopContinueStep(runId) {
@@ -1499,6 +1735,7 @@
 
       const shouldStop = () => !isClosedLoopRunActive(runId);
       const composerPayload = getComposerPayloadStateForInitialSend();
+      const useHotkey = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
 
       let needUpload = false;
       if (round === 1) {
@@ -1521,19 +1758,22 @@
         });
         renderClosedLoopContinueButton();
 
-        try {
-          await uploadFromCurrentQueueShared({
-            source: round === 1
-              ? 'copy-hotkey-upload-verify-loop-initial-upload'
-              : `closed-loop-every5-${round}`,
-            parentTask: 'closedLoopContinue',
-            cycleIndex: round,
-            shouldStop,
-          });
-        } catch (error) {
-          const errText = formatToolboxError(error);
-          console.error('[CLOSED_LOOP][UPLOAD_FAILED]', error);
-          ToolboxShell.appendLog(`[CLOSED_LOOP][UPLOAD_FAILED] runId=${runId} round=${round} error=${errText}`);
+        const uploadResult = await runClosedLoopSharedUpload(round, runId, {
+          useHotkey,
+          shouldStop,
+        });
+
+        if (!uploadResult || uploadResult.ok !== true) {
+          const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
+          const uploadSharedSource = useHotkey
+            ? (round === 1 ? 'closed-loop-hotkey-initial-upload' : 'closed-loop-hotkey-every5-upload')
+            : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][UPLOAD_FAILED] source=${uploadSharedSource} runId=${runId} round=${round} reason=${reason}`,
+          );
+          setStatus(`闭环上传失败：${reason}`, 'error');
+          stopClosedLoopContinue(`upload-failed:${reason}`);
+          return;
         }
 
         if (!isClosedLoopRunActive(runId)) {
@@ -1550,7 +1790,6 @@
       }
 
       const previousKeyBeforeStep = getLastAssistantMessageKeySafe();
-      const useHotkey = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
       const closedLoopFlowOptions = {
         isolated: true,
         shouldStop,
@@ -1604,36 +1843,54 @@
 
       const isInitialSendRound = !!(result && result.initialSent === true);
 
-      if (
+      const terminalBeforeSend = !!(
         !isInitialSendRound
         && result
         && (
           result.assistantDoneSignal === true
+          || result.assistantBatchTerminalStop === true
           || result.reason === 'assistant-done-signal'
           || result.reason === 'assistant-done-signal-before-send'
+          || String(result.reason || '').startsWith('batch-reply-')
         )
-      ) {
+      );
+
+      if (terminalBeforeSend) {
+        const terminalStatus = String(
+          result.batchReplyClassifyStatus
+          || (result.assistantDoneSignal === true ? 'done' : 'blocked'),
+        );
+
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_DONE_SIGNAL] source=before-send-check runId=${runId} round=${round} reason=${result.reason || 'assistant-done-signal'}`,
+          `[CLOSED_LOOP][STEP_TERMINAL_SIGNAL] source=before-send-check runId=${runId} round=${round} status=${terminalStatus} reason=${result.reason || 'assistant-terminal-signal'}`,
         );
         ToolboxShell.appendLog(
-          `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][done-signal] round=${round} reason=${result.reason || 'assistant-done-signal'}`,
+          `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][terminal-signal] round=${round} status=${terminalStatus} reason=${result.reason || 'assistant-terminal-signal'}`,
         );
 
         const verifyResult = await runClosedLoopDoneVerification(
           runId,
           round,
-          result.reason || 'assistant-done-signal',
+          result.reason || 'assistant-terminal-signal',
+          terminalStatus,
         );
 
         if (verifyResult && verifyResult.ok) {
-          stopClosedLoopContinue('assistant-done-signal-verified');
-          setStatus(`终止信号已二次确认，闭环继续已结束，共执行 ${round} 轮`, 'success');
+          const finalStatus = verifyResult.status || terminalStatus || 'done';
+          stopClosedLoopContinue(`assistant-terminal-signal-verified:${finalStatus}`);
+          setStatus(
+            buildClosedLoopTerminalStopMessage(finalStatus, round),
+            getClosedLoopTerminalStopStatusLevel(finalStatus),
+          );
           return;
         }
-
-        stopClosedLoopContinue(`done-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`);
-        setStatus(`检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`, 'warn');
+        stopClosedLoopContinue(
+          `terminal-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
+        );
+        setStatus(
+          `检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
+          'warn',
+        );
         return;
       }
 
@@ -1686,24 +1943,32 @@
 
       const stopSignalResult = detectCopyHotkeyLoopStopSignal(round);
       if (stopSignalResult && stopSignalResult.matched) {
+        const terminalStatus = stopSignalResult.status || 'done';
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_DONE_SIGNAL] source=after-wait-check runId=${runId} round=${round} reason=${stopSignalResult.reason || 'stop-signal'}`,
+          `[CLOSED_LOOP][STEP_TERMINAL_SIGNAL] source=after-wait-check runId=${runId} round=${round} status=${terminalStatus} reason=${stopSignalResult.reason || 'terminal-signal'}`,
         );
-
         const verifyResult = await runClosedLoopDoneVerification(
           runId,
           round,
-          stopSignalResult.reason || 'stop-signal',
+          stopSignalResult.reason || 'terminal-signal',
+          terminalStatus,
         );
-
         if (verifyResult && verifyResult.ok) {
-          stopClosedLoopContinue('assistant-done-signal-verified');
-          setStatus(`终止信号已二次确认，闭环继续已结束，共执行 ${round} 轮`, 'success');
+          const finalStatus = verifyResult.status || terminalStatus || 'done';
+          stopClosedLoopContinue(`assistant-terminal-signal-verified:${finalStatus}`);
+          setStatus(
+            buildClosedLoopTerminalStopMessage(finalStatus, round),
+            getClosedLoopTerminalStopStatusLevel(finalStatus),
+          );
           return;
         }
-
-        stopClosedLoopContinue(`done-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`);
-        setStatus(`检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`, 'warn');
+        stopClosedLoopContinue(
+          `terminal-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
+        );
+        setStatus(
+          `检测到终止信号，但二次确认失败：${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
+          'warn',
+        );
         return;
       }
 
@@ -2244,96 +2509,6 @@
       return stopClosedLoopContinue(source);
     }
 
-    function shouldUploadOnVerifyLoopCycle(cycleIndex) {
-      const index = Number(cycleIndex) || 0;
-      return index > 0 && index % 5 === 0;
-    }
-
-    async function runCopyHotkeyUploadVerifyPostCycleActions(cycleIndex) {
-      if (!shouldUploadOnVerifyLoopCycle(cycleIndex)) {
-        return {
-          stop: false,
-          reason: 'no-upload',
-        };
-      }
-
-      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
-      if (copyHotkeyUploadVerifyLoopStopRequested || loopTask.stopRequested) {
-        logClosedLoopUploadVerifyState('NEXT_SKIP', {
-          checkpoint: 'before-auto-upload',
-          cycleIndex,
-        });
-        return {
-          stop: true,
-          reason: 'user-stop',
-        };
-      }
-
-      ToolboxShell.appendLog(
-        `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][post-cycle] action=auto-upload index=${cycleIndex} interval=5`,
-      );
-
-      setStatus(`闭环继续第 ${cycleIndex} 轮：正在上传代码...`, 'running');
-
-      setCopyHotkeyUploadVerifyLoopPhase('auto_uploading', `cycle-${cycleIndex}-auto-upload`, {
-        cycleIndex,
-        currentSubtask: 'auto_upload',
-      });
-
-      try {
-        const uploadResult = await startUploadFromCurrentQueue({
-          source: `copy-hotkey-upload-verify-loop-auto-upload-${cycleIndex}`,
-          parentTask: 'copyHotkeyUploadVerifyLoop',
-          cycleIndex,
-          shouldStop: () => !!(
-            copyHotkeyUploadVerifyLoopStopRequested
-            || loopTask.stopRequested
-          ),
-        });
-
-        ToolboxShell.appendLog(
-          `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][auto-upload-done] index=${cycleIndex} ok=${uploadResult && uploadResult.ok ? '1' : '0'} uploaded=${uploadResult && uploadResult.uploadedCount != null ? uploadResult.uploadedCount : '-'} failed=${uploadResult && uploadResult.failedCount != null ? uploadResult.failedCount : '-'} skipped=${uploadResult && uploadResult.skippedCount != null ? uploadResult.skippedCount : '-'} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'}`,
-        );
-
-        return {
-          stop: false,
-          reason: 'auto-upload-done',
-          uploadResult,
-        };
-      } catch (error) {
-        const errText = formatToolboxError(error);
-
-        console.error('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][auto-upload-failed]', {
-          cycleIndex,
-          error_type: error && error.name,
-          error: errText,
-          stack: error && error.stack,
-        });
-
-        ToolboxShell.appendLog(
-          `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][auto-upload-failed] index=${cycleIndex} error=${errText}`,
-        );
-
-        setStatus(`闭环继续第 ${cycleIndex} 轮自动上传失败：${errText}`, 'error');
-
-        return {
-          stop: false,
-          reason: 'auto-upload-failed',
-          error: errText,
-        };
-      } finally {
-        if (
-          copyHotkeyUploadVerifyLoopRunning
-          && !copyHotkeyUploadVerifyLoopStopRequested
-          && loopTask.phase === 'auto_uploading'
-        ) {
-          setCopyHotkeyUploadVerifyLoopPhase('running', `cycle-${cycleIndex}-auto-upload-done`, {
-            cycleIndex,
-          });
-        }
-      }
-    }
-
     async function handleCopyHotkeyUploadVerifyLoopClick() {
       return handleClosedLoopContinueClick();
     }
@@ -2567,6 +2742,101 @@
         allowedSignals: configuredStopSignal ? [configuredStopSignal] : [],
         reason: 'analyzeAssistantDoneSignalText-missing',
       };
+    }
+
+    function analyzeClosedLoopTerminalSignalText(text, options = {}) {
+      const configuredDoneSignal = getCopyHotkeyContinueStopSignal(options);
+      const defaultDoneSignal = DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL;
+      const blockedSignal = typeof DEFAULT_BATCH_BLOCKED_SIGNAL !== 'undefined'
+        ? DEFAULT_BATCH_BLOCKED_SIGNAL
+        : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+      const noMoreSignal = typeof DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL !== 'undefined'
+        ? DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL
+        : '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
+      const checked = (
+        typeof cleanAssistantTextForDoneSignal === 'function'
+          ? cleanAssistantTextForDoneSignal(text)
+          : String(text || '')
+      )
+        .replace(/\r\n/g, '\n')
+        .trim();
+      const lines = checked
+        .split('\n')
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+      if (lines.length !== 1) {
+        return {
+          matched: false,
+          status: lines.length === 0 ? 'empty' : 'continue',
+          reason: lines.length === 0 ? 'empty' : 'not-single-line-terminal-signal',
+          lineCount: lines.length,
+          line: '',
+        };
+      }
+      const line = lines[0];
+      if (line === configuredDoneSignal || line === defaultDoneSignal) {
+        return {
+          matched: true,
+          status: 'done',
+          reason: 'done-marker-detected',
+          lineCount: 1,
+          line,
+        };
+      }
+      if (line === blockedSignal) {
+        return {
+          matched: true,
+          status: 'blocked',
+          reason: 'blocked-marker-detected',
+          lineCount: 1,
+          line,
+        };
+      }
+      if (line === noMoreSignal) {
+        return {
+          matched: true,
+          status: 'no_more_content',
+          reason: 'no-more-content-marker-detected',
+          lineCount: 1,
+          line,
+        };
+      }
+      return {
+        matched: false,
+        status: 'continue',
+        reason: 'unknown-single-line',
+        lineCount: 1,
+        line,
+      };
+    }
+
+    function checkClosedLoopTerminalSignalWithLog(text, logPrefix, phase, extraFields = '', options = {}) {
+      const result = analyzeClosedLoopTerminalSignalText(text, options);
+      const preview = formatDoneSignalPreview(
+        String(text || '').replace(/\r\n/g, '\n').trim(),
+      );
+      ToolboxShell.appendLog(
+        `[${logPrefix}][TERMINAL_SIGNAL_CHECK] matched=${result.matched ? 1 : 0} `
+        + `status=${result.status || '-'} phase=${phase || '-'} `
+        + `reason=${result.reason || '-'} lineCount=${result.lineCount || 0} `
+        + `${extraFields || ''} preview=${preview}`,
+      );
+      return result;
+    }
+
+    function getClosedLoopTerminalStopStatusLevel(status) {
+      return String(status || '') === 'done' ? 'success' : 'warn';
+    }
+
+    function buildClosedLoopTerminalStopMessage(status, round) {
+      const normalized = String(status || 'done');
+      if (normalized === 'blocked') {
+        return `阻塞终止信号已二次确认，闭环继续已停止，共执行 ${round} 轮`;
+      }
+      if (normalized === 'no_more_content') {
+        return `无更多内容终止信号已二次确认，闭环继续已停止，共执行 ${round} 轮`;
+      }
+      return `完成终止信号已二次确认，闭环继续已结束，共执行 ${round} 轮`;
     }
 
     function formatDoneSignalPreview(text) {
@@ -7070,6 +7340,50 @@
       };
     }
 
+    async function writeComposerDraftCore(text, options = {}) {
+      const source = String(options.source || 'write-composer-draft').trim() || 'write-composer-draft';
+      const content = String(text ?? '');
+      const shouldStop = typeof options.shouldStop === 'function'
+        ? options.shouldStop
+        : () => false;
+
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      if (
+        typeof ComposerApi === 'undefined'
+        || !ComposerApi
+        || typeof ComposerApi.setComposerValue !== 'function'
+      ) {
+        return { ok: false, reason: 'composer-api-missing' };
+      }
+
+      const ok = ComposerApi.setComposerValue(content);
+      if (!ok) {
+        ToolboxShell.appendLog(`[COMPOSER_DRAFT][WRITE_FAILED] source=${source} reason=composer_set_failed`);
+        return { ok: false, reason: 'composer-set-failed' };
+      }
+
+      if (typeof ComposerApi.waitForComposerTextSynced === 'function') {
+        const synced = await ComposerApi.waitForComposerTextSynced(
+          content,
+          typeof SEND_TEXT_SYNC_TIMEOUT_MS === 'number' ? SEND_TEXT_SYNC_TIMEOUT_MS : 10000,
+          { shouldStop },
+        );
+        if (!synced || !synced.ok) {
+          const reason = synced && synced.reason ? synced.reason : 'composer-text-not-synced';
+          ToolboxShell.appendLog(`[COMPOSER_DRAFT][SYNC_FAILED] source=${source} reason=${reason}`);
+          return { ok: false, reason };
+        }
+      } else {
+        await sleep(300);
+      }
+
+      ToolboxShell.appendLog(`[COMPOSER_DRAFT][WRITE_OK] source=${source} chars=${content.length}`);
+      return { ok: true, reason: 'ok' };
+    }
+
     async function sendOrFillQuickPrompt(prompt, options = {}) {
       const cfg = getCompactUiConfig();
       const source = String(options.source || 'quick-prompt-click').trim() || 'quick-prompt-click';
@@ -7129,93 +7443,45 @@
       if (!shouldSend) {
         setStatus('正在写入 Prompt...', 'running');
 
-        const ok = ComposerApi.setComposerValue(rawText);
-
-        if (!ok) {
-          console.warn('[ChatGPT toolbox] quick prompt: composer not found', prompt);
+        const draft = await writeComposerDraftCore(rawText, { source });
+        if (!draft.ok) {
+          console.warn('[ChatGPT toolbox] quick prompt: write draft failed', { prompt, draft });
           setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
-          ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=composer_not_found`);
+          ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=${draft.reason || 'composer_not_found'}`);
           return {
             ok: false,
-            reason: 'composer_not_found',
+            reason: draft.reason || 'composer_not_found',
             sent: false,
           };
         }
 
-        ToolboxShell.appendLog(
-          `[PROMPT][FILL] id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length} send=0`,
-        );
+        ToolboxShell.appendLog(`[PROMPT][FILL] id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length} send=0`);
         setStatus(`已填入 Prompt：${title}`, 'success');
-        return {
-          ok: true,
-          reason: 'filled',
-          sent: false,
-        };
+        return { ok: true, reason: 'filled', sent: false };
       }
 
       setStatus(`正在写入并发送 Prompt：${title}`, 'running');
 
-      const ok = ComposerApi.setComposerValue(rawText);
+      ToolboxShell.appendLog(`[PROMPT][SEND_VIA_SEND_TEXT_CORE] source=${source} title=${title} chars=${rawText.length}`);
 
-      if (!ok) {
-        console.warn('[ChatGPT toolbox] quick prompt: composer not found', prompt);
-        setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
-        ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=composer_not_found`);
-        return {
-          ok: false,
-          reason: 'composer_not_found',
-          sent: false,
-        };
-      }
+      const result = await sendTextBySendMessageButtonCore(rawText, {
+        source,
+        allowReplaceDraft: true,
+        shouldStop: () => isWaitingSendActive(),
+      });
 
+      const sentOk = !!(result && result.ok);
       ToolboxShell.appendLog(
-        `[PROMPT][WRITE_OK] source=${source} id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length}`,
-      );
-
-      const textSynced = typeof ComposerApi.waitForComposerTextSynced === 'function'
-        ? await ComposerApi.waitForComposerTextSynced(rawText, 8000, {
-            shouldStop: () => isWaitingSendActive(),
-          })
-        : { ok: true, reason: 'sync-check-unavailable' };
-
-      if (!textSynced.ok) {
-        const syncReason = textSynced.reason || 'composer_text_not_synced';
-        setStatus(`Prompt 写入后未同步：${syncReason}`, 'warn');
-        ToolboxShell.appendLog(`[PROMPT][SEND_SKIP] source=${source} reason=${syncReason}`);
-        return {
-          ok: false,
-          reason: syncReason,
-          sent: false,
-        };
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      ToolboxShell.appendLog(`[PROMPT][SEND_TRIGGER] source=${source} title=${title}`);
-
-      const sentOk = typeof triggerSendFromToolbox === 'function'
-        ? await triggerSendFromToolbox('quick-prompt-click')
-        : false;
-
-      ToolboxShell.appendLog(
-        `[PROMPT][SEND_RESULT] ok=${sentOk ? '1' : '0'} reason=${sentOk ? 'trigger_send_ok' : 'trigger_send_failed'}`,
+        `[PROMPT][SEND_RESULT] ok=${sentOk ? '1' : '0'} reason=${result && result.reason ? result.reason : '-'}`,
       );
 
       if (sentOk) {
         setStatus(`Prompt 已发送：${title}`, 'success');
-        return {
-          ok: true,
-          reason: 'sent_by_trigger_send',
-          sent: true,
-        };
+        return { ok: true, reason: 'sent_by_send_text_core', sent: true };
       }
 
       setStatus('Prompt 已写入，但发送失败：发送按钮不可用', 'warn');
-      return {
-        ok: false,
-        reason: 'trigger_send_failed',
-        sent: false,
-      };
+      return { ok: false, reason: (result && result.reason) || 'send_text_core_failed', sent: false };
     }
 
     async function scrollChatToBottom(reason) {
@@ -8461,129 +8727,78 @@
 
     async function sendContinueMessageOnceOnly(source, options = {}) {
       const sourceText = String(source || '');
-      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const shouldStop = typeof options.shouldStop === 'function'
+        ? options.shouldStop
+        : () => false;
       const text = getCopyHotkeyContinuePromptText(options);
       const stopSignal = getCopyHotkeyContinueStopSignal(options);
 
       if (shouldStop()) {
-        return { ok: false, reason: 'cancelled' };
+        return {
+          ok: false,
+          reason: 'cancelled',
+        };
       }
 
-      if (typeof sendContentViaComposer === 'function') {
-        try {
-          if (shouldStop()) {
-            return { ok: false, reason: 'cancelled' };
-          }
-          const result = await sendContentViaComposer({
-            source,
-            content: text,
-            allowReplaceDraft: true,
-            waitUntilSendable: true,
-            blockWhenResponding: false,
-            timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 60000,
-            shouldStop,
-          });
-          if (shouldStop()) {
-            return { ok: false, reason: 'cancelled' };
-          }
-          if (!result || !result.ok) {
-            const reason = result && result.reason ? result.reason : 'unknown';
-            setStatus(`\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a${reason}`, 'warn');
-            console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason, result });
-            safeAppendLog(`[UPLOAD_CONTINUE][send-failed] reason=${reason}`);
-            safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${reason}`);
-            return { ok: false, reason };
-          }
-
-          setStatus('已发送继续指令', 'success');
-          console.warn('[UPLOAD_CONTINUE][SEND_OK]', { source, reason: result && result.reason });
-          safeAppendLog(`[UPLOAD_CONTINUE][sent] chars=${text.length} stopSignal=${stopSignal}`);
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=${result && result.reason ? result.reason : '-'}`);
-          return { ok: true, reason: result.reason || 'composer-send' };
-        } catch (err) {
-          const errText = formatToolboxError(err);
-          console.error('[ChatGPT toolbox] send continue message failed', err);
-          setStatus(`\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a${errText}`, 'error');
-          safeAppendLog(`[UPLOAD_CONTINUE][send-failed] error=${errText}`);
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${errText}`);
-          return { ok: false, reason: errText };
-        }
-      }
-
-      const existingText = typeof ComposerApi.getComposerText === 'function'
-        ? String(ComposerApi.getComposerText() || '').trim()
-        : '';
-      const cfg = typeof getCompactUiConfig === 'function'
-        ? getCompactUiConfig()
-        : {};
-      if (existingText && existingText !== text && cfg.confirmPromptDraftOverwrite === true) {
-        const okReplace = window.confirm(`ChatGPT \u8f93\u5165\u6846\u5df2\u6709${existingText.length} \u4e2a\u5b57\u7b26\uff0c\u662f\u5426\u8986\u76d6\u5e76\u53d1\u9001\u201c\u7ee7\u7eed\u201d\uff1f`);
-        if (!okReplace) {
-          setStatus('\u5df2\u53d6\u6d88\u53d1\u9001\u7ee7\u7eed\uff1a\u672a\u8986\u76d6\u8f93\u5165\u6846\u8349\u7a3f', 'warn');
-          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason: 'user-refused-overwrite' });
-          safeAppendLog(`[UPLOAD_CONTINUE][send-cancel] reason=user-refused-overwrite existingChars=${existingText.length}`);
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=user-refused-overwrite`);
-          return { ok: false, reason: 'user-refused-overwrite' };
-        }
-      } else if (existingText && existingText !== text) {
-        safeAppendLog(`[UPLOAD_CONTINUE][auto-overwrite-draft] existingChars=${existingText.length} newChars=${text.length}`);
-      }
+      ToolboxShell.appendLog(
+        `[UPLOAD_CONTINUE][SEND_VIA_SEND_BUTTON_CORE] source=${sourceText} chars=${text.length}`,
+      );
 
       try {
-        const okSet = typeof ComposerApi.setComposerValue === 'function'
-          && ComposerApi.setComposerValue(text);
-        if (!okSet) {
-          setStatus('\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a\u672a\u627e\u5230\u8f93\u5165\u6846', 'warn');
-          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason: 'composer-not-found' });
-          safeAppendLog('[UPLOAD_CONTINUE][send-failed] reason=composer-not-found');
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=composer-not-found`);
-          return { ok: false, reason: 'composer-not-found' };
-        }
-        await sleep(300);
-        const sendWaitStartedAt = Date.now();
-        while (typeof ComposerApi.canSendNow === 'function' && !ComposerApi.canSendNow()) {
-          if (shouldStop()) {
-            return { ok: false, reason: 'cancelled' };
-          }
-          if (Date.now() - sendWaitStartedAt >= 60000) {
-            setStatus('\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a\u53d1\u9001\u6309\u94ae\u7b49\u5f85\u8d85\u65f6', 'warn');
-            console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason: 'send-button-wait-timeout' });
-            safeAppendLog('[UPLOAD_CONTINUE][send-failed] reason=send-button-wait-timeout');
-            safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=send-button-wait-timeout`);
-            return { ok: false, reason: 'send-button-wait-timeout' };
-          }
-          await sleep(250);
-        }
-        if (typeof ComposerApi.clickSend !== 'function') {
-          setStatus('\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a\u53d1\u9001 API \u4e0d\u53ef\u7528', 'warn');
-          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason: 'send-api-missing' });
-          safeAppendLog('[UPLOAD_CONTINUE][send-failed] reason=send-api-missing');
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=send-api-missing`);
-          return { ok: false, reason: 'send-api-missing' };
-        }
+        const result = await sendTextBySendMessageButtonCore(text, {
+          source: sourceText || 'copy-continue',
+          allowReplaceDraft: true,
+          shouldStop,
+          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+        });
+
         if (shouldStop()) {
-          return { ok: false, reason: 'cancelled' };
+          return {
+            ok: false,
+            reason: 'cancelled',
+          };
         }
-        const clicked = ComposerApi.clickSend();
-        if (!clicked) {
-          setStatus('\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a\u70b9\u51fb\u53d1\u9001\u5931\u8d25', 'warn');
-          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', { source, reason: 'click-send-failed' });
-          safeAppendLog('[UPLOAD_CONTINUE][send-failed] reason=click-send-failed');
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=click-send-failed`);
-          return { ok: false, reason: 'click-send-failed' };
+
+        if (!result || !result.ok) {
+          const reason = result && result.reason ? result.reason : 'send-message-button-core-failed';
+          setStatus(`发送继续失败：${reason}`, 'warn');
+          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', {
+            source: sourceText,
+            reason,
+            result,
+          });
+          safeAppendLog(`[UPLOAD_CONTINUE][send-failed] reason=${reason}`);
+          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${reason}`);
+          return {
+            ok: false,
+            reason,
+          };
         }
+
         setStatus('已发送继续指令', 'success');
-        console.warn('[UPLOAD_CONTINUE][SEND_OK]', { source, reason: 'composer-click-send' });
+        console.warn('[UPLOAD_CONTINUE][SEND_OK]', {
+          source: sourceText,
+          reason: result.reason,
+        });
         safeAppendLog(`[UPLOAD_CONTINUE][sent] chars=${text.length} stopSignal=${stopSignal}`);
-        safeAppendLog(`[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=composer-click-send`);
-        return { ok: true, reason: 'composer-click-send' };
+        safeAppendLog(
+          `[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=${result.reason || '-'}`,
+        );
+
+        return {
+          ok: true,
+          reason: result.reason || 'send-message-button-core',
+        };
       } catch (err) {
         const errText = formatToolboxError(err);
-        console.error('[ChatGPT toolbox] send continue message failed', err);
-          setStatus(`\u53d1\u9001\u7ee7\u7eed\u5931\u8d25\uff1a${errText}`, 'error');
+        console.error('[ChatGPT toolbox] send continue via send button core failed', err);
+        setStatus(`发送继续失败：${errText}`, 'error');
         safeAppendLog(`[UPLOAD_CONTINUE][send-failed] error=${errText}`);
         safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${errText}`);
-        return { ok: false, reason: errText };
+        return {
+          ok: false,
+          reason: errText,
+        };
       }
     }
 
@@ -8651,22 +8866,27 @@
 
       for (let i = 0; i < candidates.length; i += 1) {
         const candidate = candidates[i];
-        const matched = checkUploadDoneSignalWithLog(
+        const terminal = checkClosedLoopTerminalSignalWithLog(
           candidate.text,
           'COPY_HOTKEY_CONTINUE_LOOP',
           'loop-detect',
           `index=${indexText} source=${candidate.source}`,
         );
-        if (matched) {
+        if (terminal.matched) {
           const preview = formatDoneSignalPreview(candidate.text);
-          const hitLine = `[COPY_HOTKEY_CONTINUE_LOOP][assistant-done-signal] index=${indexText} source=${candidate.source} preview=${preview}`;
+          const hitLine =
+            `[COPY_HOTKEY_CONTINUE_LOOP][assistant-terminal-signal] `
+            + `index=${indexText} status=${terminal.status || '-'} `
+            + `source=${candidate.source} reason=${terminal.reason || '-'} `
+            + `preview=${preview}`;
           safeAppendLog(hitLine);
           if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
             ToolboxShell.appendLog(hitLine);
           }
           return {
             matched: true,
-            reason: 'assistant-done-signal',
+            reason: terminal.reason || 'assistant-terminal-signal',
+            status: terminal.status || 'done',
             source: candidate.source,
           };
         }
@@ -8675,6 +8895,7 @@
       return {
         matched: false,
         reason: 'not-matched',
+        status: 'continue',
       };
     }
 
@@ -9313,6 +9534,47 @@
       ) || getLastAssistantMessageKeySafe();
 
       const assistantRawText = String(waitCopyResult.text || (waitResult && waitResult.text) || '').trim();
+
+      const strictTerminal = checkClosedLoopTerminalSignalWithLog(
+        assistantRawText,
+        'COPY_HOTKEY_CONTINUE',
+        'after-wait-strict-terminal',
+        `source=${sourceText || '-'}`,
+        flowOptions,
+      );
+
+      if (strictTerminal.matched) {
+        const isDone = strictTerminal.status === 'done';
+        const terminalLine =
+          `[COPY_HOTKEY_CONTINUE][assistant-terminal-signal] `
+          + `source=${sourceText || '-'} status=${strictTerminal.status || '-'} `
+          + `reason=${strictTerminal.reason || '-'} key=${assistantMessageKey || '-'}`;
+        safeAppendLog(terminalLine);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(terminalLine);
+        }
+        setStatus(
+          isDone
+            ? '检测到完成终止信号，准备进入闭环二次确认'
+            : '检测到阻塞/无更多内容终止信号，准备进入闭环二次确认',
+          isDone ? 'success' : 'warn',
+        );
+        return {
+          ok: true,
+          assistantDoneSignal: isDone,
+          assistantBatchTerminalStop: !isDone,
+          batchReplyClassifyStatus: strictTerminal.status || 'done',
+          batchReplyClassifyReason: strictTerminal.reason || 'terminal-signal-detected',
+          reason: isDone ? 'assistant-done-signal' : `batch-reply-${strictTerminal.status || 'blocked'}`,
+          source: sourceText,
+          loopMode: isLoopMode,
+          copied: !!waitCopyResult.copied,
+          hotkeySent: false,
+          continueSent: false,
+          assistantMessageKey,
+          waitCopyResult,
+        };
+      }
 
       if (
         flowOptions.disableBatchTextTerminalStop !== true
@@ -10243,8 +10505,9 @@
       });
 
       try {
-        const uploadResult = await startUploadFromCurrentQueue({
-          source: `copy-hotkey-loop-auto-upload-${cycleIndex}`,
+        const uploadResult = await runStartUploadButtonCore({
+          source: 'closed-loop-hotkey-every5-upload',
+          reason: 'closed-loop-hotkey-every5',
           parentTask: 'copyHotkeyContinueLoop',
           cycleIndex,
           shouldStop: () => !!(
@@ -14875,7 +15138,7 @@
 
         const uploadResult = await uploadFromCurrentQueueShared({
           ...uploadOpts,
-          source: source === 'button' ? 'manual-start-upload' : `manual-start-upload:${source}`,
+          source,
         });
 
         const result = uploadResult && typeof uploadResult === 'object'
@@ -14931,8 +15194,39 @@
       }
     }
 
+    async function runStartUploadButtonCore(options = {}) {
+      const source = String(options.source || 'manual-start-upload').trim() || 'manual-start-upload';
+
+      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source}`);
+
+      try {
+        const result = await startManualUploadOnlyFlow({
+          ...options,
+          source,
+        });
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_SHARED][DONE] source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+        );
+
+        return result;
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] shared start upload failed', err);
+        ToolboxShell.appendLog(`[UPLOAD_SHARED][FAILED] source=${source} error=${errText}`);
+        setStatus(`上传失败：${errText}`, 'error');
+        return {
+          ok: false,
+          reason: errText,
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+    }
+
     async function startUploadOnlyFlow(options = {}) {
-      const result = await startManualUploadOnlyFlow(options);
+      const result = await runStartUploadButtonCore(options);
 
       if (result && result.cancelled) {
         return false;
@@ -14955,6 +15249,7 @@
 
       syncSendTaskPhase();
       const sendPhase = getSendTaskPhase();
+
       if (sendPhase !== 'idle') {
         ToolboxShell.appendLog(
           `[UPLOAD][TRIGGER_SEND][SKIP] reason=send-task-active phase=${sendPhase} source=${src}`,
@@ -14967,12 +15262,15 @@
           state.pendingSendAfterReply = true;
           state.pendingSendAfterReplySource = src;
           state.pendingSendRetrying = false;
+
           setStatus('助手正在回复，已加入等待发送', 'running');
           startWaitingReplyCheck(state.autoSendRunId || Date.now(), Date.now());
           scheduleRenderUpload('send-message:queued-after-reply');
+
           ToolboxShell.appendLog(
             `[UPLOAD][TRIGGER_SEND][QUEUE] reason=waiting-reply source=${src}`,
           );
+
           return true;
         }
 
@@ -14980,45 +15278,43 @@
         ToolboxShell.appendLog(
           `[UPLOAD][TRIGGER_SEND][SKIP] reason=waiting-reply-no-payload source=${src}`,
         );
+
         return false;
       }
 
       if (isWaitingSendActive()) {
-        ToolboxShell.appendLog(`[UPLOAD][TRIGGER_SEND][SKIP] reason=already-waiting-send source=${src}`);
-        return false;
-      }
-
-      const sendLock = claimUploadActionLock('send-message', { timeoutMs: 120000 });
-      if (!sendLock.ok) {
         ToolboxShell.appendLog(
-          `[UPLOAD][TRIGGER_SEND][SKIP] reason=send-action-lock source=${src} detail=${sendLock.reason || '-'}`,
+          `[UPLOAD][TRIGGER_SEND][SKIP] reason=already-waiting-send source=${src}`,
         );
+
         return false;
       }
 
-      const flowRun = createUploadSendRun(src);
-      if (!flowRun) {
-        releaseUploadActionLock('send-message');
-        ToolboxShell.appendLog(`[UPLOAD][TRIGGER_SEND][SKIP] reason=upload-send-flow-locked source=${src}`);
-        return false;
-      }
-
-      ToolboxShell.appendLog(`[UPLOAD][TRIGGER_SEND] source=${src} flowId=${flowRun.id}`);
-      const runId = claimWaitingSendRun(src, Date.now());
+      ToolboxShell.appendLog(
+        `[UPLOAD][TRIGGER_SEND][DELEGATE_SHARED_CORE] source=${src}`,
+      );
 
       try {
-        return await sendCurrentMessageFromUploadPanel(src, runId, flowRun);
+        const result = await sendExistingComposerBySendMessageButtonCore({
+          source: src || 'manual-send-message-button',
+          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+        });
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][TRIGGER_SEND][DONE] source=${src} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+        );
+
+        return !!(result && result.ok);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] triggerSendFromToolbox failed', err);
-        ToolboxShell.appendLog(`[UPLOAD][TRIGGER_SEND][FAILED] source=${src} error=${errText}`);
+
+        console.error('[ChatGPT toolbox] triggerSendFromToolbox delegated send failed', err);
+        ToolboxShell.appendLog(
+          `[UPLOAD][TRIGGER_SEND][FAILED] source=${src} error=${errText}`,
+        );
         setStatus(`发送消息失败：${errText}`, 'error');
-        resetUploadSendUiState('trigger-send-error', runId);
+
         return false;
-      } finally {
-        finishUploadSendRun(flowRun, 'trigger-send-finally');
-        releaseUploadActionLock('send-message');
-        scheduleRenderUpload(`trigger-send-finally:${src}`);
       }
     }
 
@@ -16509,7 +16805,7 @@
 
       ToolboxShell.appendLog('[SHORTCUT][UPLOAD_START_TRIGGER]');
 
-      void startUploadFromCurrentQueue({ source: 'shortcut' }).catch((err) => {
+      void runStartUploadButtonCore({ source: 'shortcut-start-upload' }).catch((err) => {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] upload start shortcut failed', err);
         ToolboxShell.appendLog(`[SHORTCUT][UPLOAD_START_FAILED] error=${errText}`);
@@ -17320,7 +17616,6 @@
 
     async function uploadFromCurrentQueueShared(options = {}) {
       const source = String(options.source || 'shared-upload');
-      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source}`);
       reconcileUploadPhase(`shared-enter:${source}`);
 
       const resetCount = resetQueueItemsForUpload({
@@ -17341,9 +17636,6 @@
         forceResetDone: true,
       });
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_SHARED][DONE] source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
-      );
       reconcileUploadPhase(`shared-done:${source}`);
       return result;
     }
@@ -17659,7 +17951,9 @@
     }
 
     async function handleStartUploadClick(source = 'button') {
-      const queueResult = await startUploadFromCurrentQueue({ source });
+      const queueResult = await runStartUploadButtonCore({
+        source: source || 'handle-start-upload',
+      });
       return toLegacyUploadResult(queueResult);
     }
 
@@ -18095,7 +18389,7 @@
           ButtonTasks.logButtonTaskClick('start-upload', 'upload', uploadTask.phase, uploadTask.runId);
         }
         ToolboxShell.appendLog('[UPLOAD][START_CLICK]');
-        void startUploadOnlyFlow({ source: 'upload-tab' }).catch((err) => {
+        void runStartUploadButtonCore({ source: 'manual-start-upload-button' }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] start upload UI action failed', err);
           setStatus(`上传失败：${errText}`, 'error');
@@ -19868,10 +20162,11 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       stopWaitingReplyCheck();
 
       try {
-        await sendCurrentMessageFromUploadPanel(
-          state.pendingSendAfterReplySource || 'retry-after-reply',
+        await sendExistingComposerBySendMessageButtonCore({
+          source: state.pendingSendAfterReplySource || 'retry-after-reply',
           runId,
-        );
+          shouldStop: () => shouldStopForeverSend(runId),
+        });
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] pending send after reply failed', err);
@@ -20090,7 +20385,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
 
     async function startUploadFromBridge(payload = {}) {
       const source = String(payload.source || 'bridge_command').trim() || 'bridge_command';
-      const queueResult = await startUploadFromCurrentQueue({ source });
+      const queueResult = await runStartUploadButtonCore({ source });
       const result = toLegacyUploadResult(queueResult);
       const status = getUploadStatus();
       const finalResult = {
@@ -20231,6 +20526,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       },
       startUploadFromBridge,
       startUploadFromCurrentQueue,
+      runStartUploadButtonCore,
       uploadFromCurrentQueueShared,
       getPendingUploadItemsForStart,
       reconcileUploadPhase,
