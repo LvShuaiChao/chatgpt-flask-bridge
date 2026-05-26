@@ -167,10 +167,6 @@
     const WAIT_REAL_SEND_BUTTON_LOG_INTERVAL_MS = 2000;
     let waitingReplyIdleStreak = 0;
     let uploadShortcutDebugLastAt = 0;
-    let copyLastMessageShortcutBound = false;
-    let copyLastMessageShortcutLastAt = 0;
-    let copyLastMessageShortcutRunning = false;
-    let shortcutWindowFallbackBound = false;
     let shortcutDebugLastAt = 0;
     // deprecated: only used for compatibility, do not use as render source
     let copyLastMessageTaskRunning = false;
@@ -825,28 +821,6 @@
         }
         throw error;
       }
-    }
-
-    async function handleCopyHotkeyContinueOnceClick(source = 'unknown') {
-      const src = String(source || 'unknown').trim() || 'unknown';
-      const task = ensureCopyHotkeyContinueTask();
-
-      if (COPY_HOTKEY_CONTINUE_CANCELLABLE_PHASES.has(task.phase)) {
-        return cancelCopyHotkeyContinue(src);
-      }
-
-      if (task.phase === 'cancelling') {
-        ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][click-ignore] source=${src} phase=cancelling`);
-        return false;
-      }
-
-      void runCopyHotkeyContinueOnce(src).catch((err) => {
-        const errText = formatToolboxError(err);
-        console.error('[ChatGPT toolbox] copy hotkey continue once failed', err);
-        setStatus(`复制+快捷键+继续失败：${errText}`, 'error');
-        ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][FAILED] source=${src} error=${errText}`);
-      });
-      return true;
     }
 
     function ensureCopyHotkeyContinueLoopTask() {
@@ -5565,41 +5539,6 @@
       return actual.length >= Math.min(expected.length, 32);
     }
 
-    async function waitQuickPromptComposerReadyForSend(expectedText, timeoutMs = 8000) {
-      const startedAt = Date.now();
-      let lastComposerText = '';
-
-      while (Date.now() - startedAt < timeoutMs) {
-        lastComposerText = typeof ComposerApi.getComposerText === 'function'
-          ? String(ComposerApi.getComposerText() || '')
-          : '';
-
-        if (isQuickPromptComposerReadyForSend(expectedText, lastComposerText)) {
-          return {
-            ok: true,
-            composerText: lastComposerText,
-            reason: isQuickPromptNativeSendReady() ? 'native_send_ready' : 'composer_ready',
-            nativeSendReady: isQuickPromptNativeSendReady(),
-          };
-        }
-
-        await sleep(100);
-      }
-
-      lastComposerText = typeof ComposerApi.getComposerText === 'function'
-        ? String(ComposerApi.getComposerText() || '')
-        : '';
-      const nativeSendReady = isQuickPromptNativeSendReady();
-      const composerReady = isQuickPromptComposerReadyForSend(expectedText, lastComposerText);
-
-      return {
-        ok: nativeSendReady || composerReady,
-        composerText: lastComposerText,
-        reason: nativeSendReady ? 'native_send_ready' : (composerReady ? 'composer_ready' : 'composer_not_ready'),
-        nativeSendReady,
-      };
-    }
-
     function normalizePromptPayload(prompt) {
       const rawText = String(prompt && prompt.content != null ? prompt.content : '');
 
@@ -6192,10 +6131,6 @@
       });
     }
 
-    async function startLoopCopyHotkeyContinueFlow(source = 'button') {
-      return runCopyHotkeyContinueLoop(source);
-    }
-
     const COPY_TOOLBAR_BUTTON_SELECTORS = Object.freeze({
       'copy-last-reply': '#cgpt-copy-last-message-scroll-bottom',
       'copy-hotkey': '#cgpt-copy-hotkey-once',
@@ -6351,18 +6286,6 @@
       'copy-hotkey-continue': handleCopyHotkeyContinueClick,
       'continuous-copy-hotkey-continue': handleContinuousCopyHotkeyContinueClick,
     });
-
-    async function handleToolbarAction(action) {
-      const normalized = normalizeToolbarCopyAction(action);
-      const handler = copyToolbarButtonHandlers[normalized];
-
-      if (!handler) {
-        console.warn('[TOOLBAR_ACTION][NO_HANDLER]', { action: normalized });
-        return false;
-      }
-
-      return handler();
-    }
 
     async function runCopyAction(actionType, options = {}) {
       const type = String(actionType || 'copy-only').trim() || 'copy-only';
@@ -11054,22 +10977,6 @@
       return true;
     }
 
-    function clearWaitingSendTimersForCancel() {
-      if (state.waitingSendTimer) {
-        clearTimeout(state.waitingSendTimer);
-        state.waitingSendTimer = null;
-      }
-
-      if (state.waitingSendInterval) {
-        clearInterval(state.waitingSendInterval);
-        state.waitingSendInterval = null;
-      }
-
-      setWaitingSendActive(false);
-      state.pendingSendAfterReply = false;
-      state.pendingSendAfterReplySource = '';
-    }
-
     function buildUploadListHtml() {
       const files = getActiveGroupFiles();
       const selectedFileId = getSelectedFileIdForActiveGroup();
@@ -14383,11 +14290,6 @@
       );
     }
 
-    function isCopyLastMessageShortcutEvent(e) {
-      const cfg = getShortcutConfig();
-      return isShortcutEventMatched(e, cfg.copyLastMessage);
-    }
-
     function isUploadSendShortcutEvent(e) {
       const cfg = getShortcutConfig();
       return isShortcutEventMatched(e, cfg.sendMessage);
@@ -15729,81 +15631,6 @@
       }
 
       return false;
-    }
-
-    function bindCopyLastMessageShortcut() {
-      if (copyLastMessageShortcutBound) {
-        return;
-      }
-      copyLastMessageShortcutBound = true;
-      document.addEventListener('keydown', (e) => {
-        if (!isCopyLastMessageShortcutEvent(e)) {
-          return;
-        }
-        logShortcutDebug(e, 'copy-match');
-        if (e.repeat) {
-          logShortcutDebug(e, 'copy-ignore', 'repeat');
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-        if (shouldIgnoreToolboxShortcutTarget(e.target)) {
-          logShortcutDebug(e, 'copy-ignore', 'target-in-toolbox-editable');
-          return;
-        }
-        if (shouldSkipGlobalShortcutForToolboxTarget(e.target)) {
-          logShortcutDebug(e, 'copy-ignore', 'target-in-toolbox-non-editable');
-          return;
-        }
-        const now = Date.now();
-        if (now - copyLastMessageShortcutLastAt < 800) {
-          logShortcutDebug(e, 'copy-ignore', 'too-fast');
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-        copyLastMessageShortcutLastAt = now;
-        e.preventDefault();
-        e.stopPropagation();
-        if (copyLastReplyTaskRunning || copyLastMessageTaskRunning || copyLastMessageShortcutRunning) {
-          ToolboxShell.setStatus(
-            '正在复制最后回复，请不要重复触发',
-            'running',
-            {
-              persist: true,
-              shortText: copyLastMessageWaiting ? '等回复' : '复制中',
-            },
-          );
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message-shortcut:ignored] reason=running');
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:beep-skip] reason=running-or-ignored');
-          return;
-        }
-        copyLastMessageShortcutRunning = true;
-        ToolboxShell.appendLog(
-          `[CHAT_PAGE][copy-last-message-shortcut:trigger] key=${e.key || '-'} code=${e.code || '-'}`
-        );
-        runUploadActionPromise(
-          runCopyAction('copy-only', { source: 'shortcut' }),
-          '复制最后回复',
-        );
-        window.setTimeout(() => {
-          copyLastMessageShortcutRunning = false;
-        }, 1200);
-      }, true);
-      ToolboxShell.appendLog('[SHORTCUT][bind] copy=configurable');
-    }
-
-    function bindShortcutWindowFallback() {
-      if (shortcutWindowFallbackBound) {
-        return;
-      }
-      shortcutWindowFallbackBound = true;
-      window.addEventListener('keydown', (e) => {
-        if (!isCopyLastMessageShortcutEvent(e)) {
-          return;
-        }
-        logShortcutDebug(e, 'window-seen');
-      }, true);
     }
 
     function normalizeUploadUiAction(action) {
