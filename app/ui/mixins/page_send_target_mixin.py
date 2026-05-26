@@ -178,18 +178,6 @@ class PageSendTargetMixin:
             return None
         return self._find_tm_client_by_client_id(bound_client_id, status=status)
 
-    def _bound_page_usable_for_action(self, item, remote):
-        """@deprecated 已由 evaluate_page_capability() / resolve_page_action() 替代；下一版确认无调用后删除。"""
-        if not isinstance(item, dict) or not self._page_matches_bound_identity(item, remote):
-            return False, "identity_mismatch"
-        if not self._tm_page_is_online_simple(item):
-            return False, "bound_page_offline"
-        if self._is_prebound_home_page(item):
-            return False, "prebound_home"
-        if not (conversation_syncable_from(item) or can_sync_conversation(item)):
-            return False, "not_conversation_syncable"
-        return True, ""
-
     MANUAL_SET_BOUND_PAGE_REASONS = frozenset(
         {
             "manual_bind",
@@ -309,47 +297,6 @@ class PageSendTargetMixin:
         if hasattr(self, "_set_tm_action_hint"):
             self._set_tm_action_hint(hint)
 
-    def _explain_page_decision_for_session(self, session, page, action="sync"):
-        """@deprecated 已由 PageActionPlan / evaluate_page_capability() 直接生成；下一版确认无调用后删除。"""
-        remote = normalize_remote_chatgpt(session.remote_chatgpt if session else None)
-        identity = self._session_bound_identity(remote)
-        expected_client_id = identity["client_id"]
-        expected_page_instance_id = identity["page_instance_id"]
-        expected_conversation_id = identity["conversation_id"]
-        bound = False
-        if isinstance(page, dict) and expected_client_id:
-            bound = self._page_matches_bound_identity(page, remote)
-        cap = evaluate_page_capability(
-            page,
-            action=action,
-            bound=bound,
-            expected_client_id=expected_client_id,
-            expected_page_instance_id=expected_page_instance_id,
-            expected_conversation_id=expected_conversation_id,
-        )
-        detail = cap.to_dict()
-        if isinstance(page, dict):
-            norm_page = page
-            if hasattr(self, "_normalize_tm_page_for_binding"):
-                norm_page = self._normalize_tm_page_for_binding(page)
-            detail["response_state"] = norm_page.get("response_state") or "unknown"
-        return detail
-
-    def _log_action_target_bound_check(self, session, remote, *, action="sync"):
-        """@deprecated 无调用；下一版确认无依赖后删除。"""
-        identity = self._session_bound_identity(remote)
-        session_id = session.session_id if session else "-"
-        self._append_log(
-            "[SYNC][BOUND_TARGET_CHECK] "
-            f"action={action} "
-            f"session_id={session_id} "
-            f"bound_client_id={identity['client_id'] or '-'} "
-            f"bound_page_instance_id={identity['page_instance_id'] or '-'} "
-            f"bound_conversation_id={identity['conversation_id'] or '-'} "
-            f"bound_url={identity['url'] or '-'}",
-            echo=True,
-        )
-
     def _log_action_target_selected(self, session, target, *, action="sync", force=False):
         if not isinstance(target, dict):
             return
@@ -382,69 +329,6 @@ class PageSendTargetMixin:
             f"conversation_syncable={'true' if target.get('conversation_syncable') else 'false'}",
             echo=True,
         )
-
-    def _log_action_target_mismatch(self, session, remote, target):
-        """@deprecated 无调用；下一版确认无依赖后删除。"""
-        if not isinstance(target, dict):
-            return
-        identity = self._session_bound_identity(remote)
-        bound_client = identity["client_id"]
-        bound_instance = identity["page_instance_id"]
-        target_client = (target.get("client_id") or "").strip()
-        target_instance = (target.get("page_instance_id") or "").strip()
-        same_conv = bool(
-            identity["conversation_id"]
-            and (target.get("conversation_id") or "").strip() == identity["conversation_id"]
-        )
-        if bound_client and target_client == bound_client:
-            if bound_instance and target_instance and bound_instance != target_instance:
-                mismatch_type = "page_instance_id"
-            else:
-                return
-        elif same_conv:
-            mismatch_type = "same_conversation_different_page"
-        elif bound_client and target_client != bound_client:
-            mismatch_type = "client_id"
-        else:
-            return
-        session_id = session.session_id if session else "-"
-        self._append_log(
-            "[SYNC][TARGET_MISMATCH] "
-            f"session_id={session_id} "
-            f"mismatch_type={mismatch_type} "
-            f"bound_client_id={bound_client or '-'} "
-            f"target_client_id={target_client or '-'} "
-            f"bound_page_instance_id={bound_instance or '-'} "
-            f"target_page_instance_id={target_instance or '-'} "
-            f"conversation_id={identity['conversation_id'] or '-'} "
-            f"source={target.get('source') or '-'}",
-            echo=True,
-        )
-
-    def _log_action_target_fallback(self, session, remote, target, *, reason=""):
-        """@deprecated 无调用；下一版确认无依赖后删除。"""
-        if not isinstance(target, dict):
-            return
-        identity = self._session_bound_identity(remote)
-        session_id = session.session_id if session else "-"
-        self._append_log(
-            "[SYNC][TARGET_FALLBACK] "
-            f"session_id={session_id} "
-            f"bound_client_id={identity['client_id'] or '-'} "
-            f"bound_page_instance_id={identity['page_instance_id'] or '-'} "
-            f"bound_conversation_id={identity['conversation_id'] or '-'} "
-            f"fallback_client_id={target.get('client_id') or '-'} "
-            f"fallback_page_instance_id={target.get('page_instance_id') or '-'} "
-            f"fallback_conversation_id={target.get('conversation_id') or '-'} "
-            f"reason={reason or 'bound_page_missing_or_offline'}",
-            echo=True,
-        )
-        hint = (
-            "绑定页未在线，已临时使用同一对话的其他在线页面同步；"
-            "如需固定该页面，请点击绑定所选页面。"
-        )
-        if hasattr(self, "_set_tm_action_hint"):
-            self._set_tm_action_hint(hint)
 
     def _bound_session_page_key(self, remote):
         remote = normalize_remote_chatgpt(remote)
@@ -1000,15 +884,6 @@ class PageSendTargetMixin:
     def _send_target_blocked(self, reason):
         return self._send_target_result("", "", False, reason)
 
-    def _is_sendable_chatgpt_client(self, client_info, expected_conversation_id=""):
-        """@deprecated 已由 _is_queueable_chatgpt_client() / evaluate_send_page() 替代；下一版确认无调用后删除。"""
-        if not isinstance(client_info, dict):
-            return False
-        decision, _reason = evaluate_send_page(
-            client_info, expected_conversation_id=expected_conversation_id
-        )
-        return decision == "allowed"
-
     def _is_queueable_chatgpt_client(self, client_info, expected_conversation_id=""):
         if not isinstance(client_info, dict):
             return False
@@ -1141,20 +1016,6 @@ class PageSendTargetMixin:
             return False
         expected = self._remote_conversation_id(remote)
         return self._is_queueable_chatgpt_client(candidate, expected)
-    def _session_bound_page_online(self, session, bridge_status=None):
-        """@deprecated 无调用；下一版确认无依赖后删除。"""
-        if session is None:
-            return False
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        if not remote_binding_enabled(remote):
-            return False
-        conversation_id = self._remote_conversation_id(remote)
-        if not conversation_id:
-            return False
-        candidate = self._find_online_client_for_remote(remote, bridge_status=bridge_status)
-        if not candidate:
-            return False
-        return is_page_online(candidate)
     def _session_bound_page_has_mismatch(self, session, bridge_status=None):
         if session is None:
             return False
@@ -1358,25 +1219,6 @@ class PageSendTargetMixin:
             self._schedule_save_sessions_to_disk()
 
         return ok
-    def _preferred_open_url_for_session(self, session):
-        """@deprecated 打开流程不再调用；下一版确认无依赖后删除。"""
-        remote = normalize_remote_chatgpt(
-            session.remote_chatgpt if session else None
-        )
-
-        history_url = self._chatgpt_url_from_remote(remote)
-        if self._is_bindable_chatgpt_url(history_url):
-            return history_url
-
-        saved = (self._saved_page_url or "").strip()
-        if self._is_bindable_chatgpt_url(saved):
-            return saved
-
-        live = self._live_openable_chatgpt_url()
-        if self._is_bindable_chatgpt_url(live):
-            return live
-
-        return CHATGPT_HOME_URL
     def _resolve_target_page_for_session(self, session):
         session_id = (session.session_id if session else "") or ""
         remote_early = normalize_remote_chatgpt(
@@ -1497,61 +1339,6 @@ class PageSendTargetMixin:
         return self._send_target_blocked(
             "绑定页面未在线，请先打开当前对话绑定页面，或重新绑定所选页面。"
         )
-    def _binding_status_details(self, session=None):
-        """@deprecated 绑定状态展示已由 page_binding_display_mixin / ui_status_compact_mixin 处理；下一版确认无调用后删除。"""
-        session = session or self._current_session()
-        status = self._bridge_ui.last_bridge_status or {}
-        remote = normalize_remote_chatgpt(
-            session.remote_chatgpt if session else None
-        )
-        bound_client_id = (remote.get("client_id") or "").strip() or "-"
-        bound_conv_id = self._remote_conversation_id(remote) or "-"
-
-        online_client_id = "-"
-        online_conv_id = "-"
-        live_client = None
-        if bound_client_id and bound_client_id != "-":
-            for item in status.get("pages") or []:
-                if (item.get("client_id") or "").strip() != bound_client_id:
-                    continue
-                live_client = item
-                if self._tm_page_is_online_simple(item):
-                    online_client_id = bound_client_id
-                    online_conv_id = self._client_conversation_id(item) or "-"
-                break
-
-        bind_state = self._remote_bind_state(remote)
-        is_prebound_home = bind_state in (
-            BIND_STATE_PREBOUND_HOME,
-            BIND_STATE_WAITING_HOME,
-            BIND_STATE_WAITING_CONVERSATION_CREATED,
-        )
-        if not remote_binding_enabled(remote):
-            match = "未绑定"
-        elif is_prebound_home or bound_conv_id in ("", "-"):
-            match = "预绑定首页"
-        elif bound_client_id == "-" or online_client_id == "-":
-            match = "无法比对"
-        elif (
-            bound_client_id == online_client_id
-            and bound_conv_id == online_conv_id
-        ):
-            match = "一致"
-        else:
-            match = "不一致"
-
-        return {
-            "bound": {
-                "client_id": bound_client_id,
-                "conversation_id": bound_conv_id,
-            },
-            "online": {
-                "client_id": online_client_id,
-                "conversation_id": online_conv_id,
-            },
-            "match": match,
-            "live_client": live_client,
-        }
     def _verify_send_target_binding(
         self,
         session,
@@ -1584,10 +1371,6 @@ class PageSendTargetMixin:
         """强绑定模式：禁止同 conversation / 其它页面 fallback。"""
         del action, session
         return False
-
-    def _same_conversation_fallback_enabled(self, action="", session=None):
-        """@deprecated 请使用 is_same_conversation_fallback_enabled()；下一版确认无调用后删除。"""
-        return self.is_same_conversation_fallback_enabled(action, session=session)
 
     def _send_binding_verify_blocked_reason(
         self,
