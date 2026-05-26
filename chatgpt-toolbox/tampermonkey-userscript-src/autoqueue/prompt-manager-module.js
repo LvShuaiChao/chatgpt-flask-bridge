@@ -305,14 +305,42 @@
       return cleanName;
     }
 
-    function renderCategoryDatalist() {
-      const list = document.getElementById('cgpt-prompt-category-options');
+    function getDefaultPromptEditorCategory() {
+      const current = normalizePromptCategoryName(activeCategory || '');
 
-      if (!list) return;
+      if (current && current !== '全部') {
+        return current;
+      }
 
-      list.innerHTML = categories.map((cat) => `
-        <option value="${escapeHtml(cat.name)}"></option>
+      return '默认';
+    }
+
+    function renderEditorCategoryOptions(selectedName = '') {
+      const select = modalOverlay
+        ? qs('#cgpt-prompt-edit-category', modalOverlay)
+        : null;
+
+      if (!(select instanceof HTMLSelectElement)) {
+        return;
+      }
+
+      const selected = normalizePromptCategoryName(selectedName || '默认');
+
+      const names = categories
+        .map((cat) => normalizePromptCategoryName(cat.name))
+        .filter(Boolean);
+
+      if (!names.includes('默认')) {
+        names.unshift('默认');
+      }
+
+      const uniqueNames = Array.from(new Set(names));
+
+      select.innerHTML = uniqueNames.map((name) => `
+        <option value="${escapeHtml(name)}">${escapeHtml(name)}</option>
       `).join('');
+
+      select.value = uniqueNames.includes(selected) ? selected : '默认';
     }
 
     function renderCategoryManager() {
@@ -330,24 +358,24 @@
         const locked = cat.name === '默认';
 
         return `
-      <div class="cgpt-prompt-category-manage-item" data-category-id="${escapeHtml(cat.id)}">
+      <div class="cgpt-category-item cgpt-prompt-category-manage-item" data-category-id="${escapeHtml(cat.id)}">
         <div class="cgpt-prompt-category-manage-main">
-          <div class="cgpt-prompt-category-manage-name">${escapeHtml(cat.name)}</div>
-          <div class="cgpt-prompt-category-manage-meta">${count} Prompt</div>
+          <div class="cgpt-category-name cgpt-prompt-category-manage-name">${escapeHtml(cat.name)}</div>
+          <div class="cgpt-category-count cgpt-prompt-category-manage-meta">${count} Prompt</div>
         </div>
-
-        <button type="button"
-          class="cgpt-toolbox-small-btn"
-          data-category-rename="${escapeHtml(cat.id)}">
-          重命名
-        </button>
-
-        <button type="button"
-          class="cgpt-toolbox-small-btn"
-          data-category-delete="${escapeHtml(cat.id)}"
-          ${locked ? 'disabled' : ''}>
-          删除
-        </button>
+        <div class="cgpt-category-actions">
+          <button type="button"
+            class="cgpt-toolbox-small-btn"
+            data-category-rename="${escapeHtml(cat.id)}">
+            重命名
+          </button>
+          <button type="button"
+            class="cgpt-toolbox-small-btn"
+            data-category-delete="${escapeHtml(cat.id)}"
+            ${locked ? 'disabled' : ''}>
+            删除
+          </button>
+        </div>
       </div>
     `;
       }).join('');
@@ -859,17 +887,21 @@
 
       renderCategoryBar();
       renderCategoryManager();
-      renderCategoryDatalist();
 
       const items = filteredPrompts();
       listEl.innerHTML = '';
 
       if (!items.length) {
         const empty = document.createElement('div');
-        empty.className = 'cgpt-hint';
+        empty.className = 'cgpt-hint cgpt-prompt-list-empty';
         empty.style.padding = '16px 8px';
         empty.style.textAlign = 'center';
-        empty.textContent = '没有匹配Prompt';
+        const hasFilter = searchKeyword.trim() || activeCategory !== '全部';
+        if (hasFilter) {
+          empty.textContent = '没有匹配 Prompt';
+        } else {
+          empty.innerHTML = '当前分类没有 Prompt<br>可以点击左上角「+ 新增 Prompt」创建';
+        }
         listEl.appendChild(empty);
         clearPromptStatus();
 
@@ -1182,7 +1214,7 @@
 
       return {
         title: '',
-        category: '默认',
+        category: getDefaultPromptEditorCategory(),
         content: '',
       };
     }
@@ -1301,17 +1333,26 @@
             }
           }
 
-          if (field.id === 'cgpt-prompt-edit-category' && editingPromptId) {
+        });
+      });
+
+      const categoryField = qs('#cgpt-prompt-edit-category', modalOverlay);
+
+      if (categoryField) {
+        bindOnce(categoryField, 'change', () => {
+          savePromptEditorDraftDebounced();
+
+          if (editingPromptId) {
             const item = prompts.find((prompt) => prompt.id === editingPromptId);
 
             if (item) {
-              item.category = String(event.target.value || '') || '默认';
+              item.category = String(categoryField.value || '') || '默认';
               item.updatedAt = Date.now();
-              schedulePromptAutoSave('category-input');
+              schedulePromptAutoSave('category-change');
             }
           }
         });
-      });
+      }
     }
 
     function ensurePromptEditorCloseConfirmOverlay() {
@@ -1383,14 +1424,22 @@
       if (item) {
         modalTitle.textContent = '编辑 Prompt';
         titleInput.value = item.title;
-        categoryInput.value = item.category || '默认';
+
+        const itemCategory = item.category || '默认';
+        renderEditorCategoryOptions(itemCategory);
+        categoryInput.value = itemCategory;
+
         setPromptTextareaValueAndUpdateCount(contentInput, item.content, 'open-editor');
         deleteBtn.style.display = '';
         duplicateBtn.style.display = '';
       } else {
         modalTitle.textContent = '新建 Prompt';
         titleInput.value = '';
-        categoryInput.value = '默认';
+
+        const defaultCategory = getDefaultPromptEditorCategory();
+        renderEditorCategoryOptions(defaultCategory);
+        categoryInput.value = defaultCategory;
+
         contentInput.value = '';
         deleteBtn.style.display = 'none';
         duplicateBtn.style.display = 'none';
@@ -1400,7 +1449,11 @@
 
       if (draftHasMeaningfulContent(draft)) {
         titleInput.value = String(draft.title || '');
-        categoryInput.value = String(draft.category || '') || '默认';
+
+        const draftCategory = String(draft.category || '') || getDefaultPromptEditorCategory();
+        renderEditorCategoryOptions(draftCategory);
+        categoryInput.value = draftCategory;
+
         contentInput.value = String(draft.content || '');
         console.log('[PROMPT_DRAFT][RESTORE]', {
           key: getPromptEditorDraftKey(),
@@ -1409,7 +1462,6 @@
         setStatus('已恢复未保存草稿');
       }
 
-      renderCategoryDatalist();
       modalOverlay.style.display = 'flex';
 
       const modal = modalOverlay.querySelector('.cgpt-modal');
@@ -1472,7 +1524,10 @@
         const contentInput = qs('#cgpt-prompt-edit-content', modalOverlay);
 
         const title = String(titleInput.value || '').trim();
-        const category = ensureCategoryExists(categoryInput.value);
+        const rawCategory = categoryInput instanceof HTMLSelectElement
+          ? categoryInput.value
+          : categoryInput.value;
+        const category = ensureCategoryExists(rawCategory || '默认');
         const content = String(contentInput.value || '');
 
         if (!title) {
@@ -1943,22 +1998,25 @@
     function repairPromptEditorCategoryField(editorRoot) {
       if (!editorRoot) return;
 
-      const categoryInput = qs('#cgpt-prompt-edit-category', editorRoot);
-      if (!(categoryInput instanceof HTMLInputElement)) return;
+      let categoryField = qs('#cgpt-prompt-edit-category', editorRoot);
 
-      const brokenPlaceholder = String(categoryInput.getAttribute('placeholder') || '');
-      if (!brokenPlaceholder.includes('论>') && categoryInput.list === 'cgpt-prompt-category-options') {
-        return;
+      if (categoryField instanceof HTMLInputElement) {
+        const currentValue = categoryField.value || getDefaultPromptEditorCategory();
+        const datalist = qs('#cgpt-prompt-category-options', editorRoot);
+        if (datalist) {
+          datalist.remove();
+        }
+
+        const select = document.createElement('select');
+        select.className = 'cgpt-select cgpt-prompt-category-select';
+        select.id = 'cgpt-prompt-edit-category';
+        categoryField.replaceWith(select);
+        categoryField = select;
+        renderEditorCategoryOptions(currentValue);
       }
 
-      categoryInput.setAttribute('placeholder', '例如：代码、Cursor、论文');
-      categoryInput.setAttribute('list', 'cgpt-prompt-category-options');
-
-      let datalist = qs('#cgpt-prompt-category-options', editorRoot);
-      if (!datalist) {
-        datalist = document.createElement('datalist');
-        datalist.id = 'cgpt-prompt-category-options';
-        categoryInput.insertAdjacentElement('afterend', datalist);
+      if (categoryField instanceof HTMLSelectElement) {
+        renderEditorCategoryOptions(categoryField.value || getDefaultPromptEditorCategory());
       }
     }
 
@@ -2047,8 +2105,7 @@
 
             <div class="cgpt-modal-field">
               <label for="cgpt-prompt-edit-category">分类</label>
-              <input class="cgpt-input" id="cgpt-prompt-edit-category" list="cgpt-prompt-category-options" placeholder="例如：代码、Cursor、论文">
-              <datalist id="cgpt-prompt-category-options"></datalist>
+              <select class="cgpt-select cgpt-prompt-category-select" id="cgpt-prompt-edit-category"></select>
             </div>
 
             <div class="cgpt-modal-field">
@@ -2071,6 +2128,7 @@
       `;
 
       document.body.appendChild(modalOverlay);
+      renderEditorCategoryOptions(getDefaultPromptEditorCategory());
 
       const modal = modalOverlay.querySelector('.cgpt-modal');
       restorePromptEditorModalPosition(modal, 'create-editor-modal');
@@ -2266,31 +2324,35 @@
     }
 
     const PROMPT_MODULE_HTML = `
-        <div class="cgpt-section">
+        <div class="cgpt-section cgpt-prompt-page">
           <div id="cgpt-prompt-subtabs" class="cgpt-prompt-subtabs">
-            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="manage">Prompt 管理</button>
-            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="display">Prompt 展示</button>
+            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="manage">Prompt 列表</button>
+            <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="display">展示预览</button>
           </div>
 
           <div id="cgpt-prompt-manage-panel" class="cgpt-prompt-panel">
-            <div id="cgpt-prompt-manage-tools" class="cgpt-grid-4" style="margin-top:8px;">
-              <button type="button" class="cgpt-btn primary" id="cgpt-prompt-new-quick-btn">+ 新建 Prompt</button>
+            <div id="cgpt-prompt-manage-tools" class="cgpt-prompt-toolbar">
+              <button type="button" class="cgpt-btn primary" id="cgpt-prompt-new-quick-btn">+ 新增 Prompt</button>
               <button type="button" class="cgpt-btn" id="cgpt-prompt-export-btn">导出</button>
               <button type="button" class="cgpt-btn" id="cgpt-prompt-import-btn">导入</button>
               <button type="button" class="cgpt-btn danger" id="cgpt-prompt-reset-btn">重置</button>
             </div>
 
-            <div id="cgpt-prompt-category-bar" class="cgpt-prompt-category-bar"></div>
-            <input id="cgpt-prompt-search" class="cgpt-input" placeholder="搜索标题、分类或内容...">
-            <div id="cgpt-prompt-list" class="cgpt-prompt-list"></div>
+            <div class="cgpt-prompt-body">
+              <aside class="cgpt-prompt-category-panel" id="cgpt-prompt-category-manager">
+                <div class="cgpt-panel-title">类别管理</div>
+                <div class="cgpt-category-create-row cgpt-prompt-category-edit-row">
+                  <input class="cgpt-input" id="cgpt-prompt-category-name" placeholder="输入类别名称">
+                  <button type="button" class="cgpt-btn primary" id="cgpt-prompt-category-add">新建</button>
+                </div>
+                <div id="cgpt-prompt-category-manage-list" class="cgpt-category-list cgpt-prompt-category-manage-list"></div>
+              </aside>
 
-            <div class="cgpt-section" id="cgpt-prompt-category-manager" style="margin-top:10px; padding:10px; border:1px solid #2f3542; border-radius:10px;">
-              <div class="cgpt-section-title">类别管理</div>
-              <div class="cgpt-prompt-category-edit-row">
-                <input class="cgpt-input" id="cgpt-prompt-category-name" placeholder="输入类别名称，例如：论文">
-                <button type="button" class="cgpt-btn primary" id="cgpt-prompt-category-add">新建类别</button>
-              </div>
-              <div id="cgpt-prompt-category-manage-list" class="cgpt-prompt-category-manage-list"></div>
+              <main class="cgpt-prompt-list-panel">
+                <div id="cgpt-prompt-category-bar" class="cgpt-prompt-filter-row cgpt-prompt-category-bar"></div>
+                <input id="cgpt-prompt-search" class="cgpt-prompt-search cgpt-input" placeholder="搜索标题、分类或内容...">
+                <div id="cgpt-prompt-list" class="cgpt-prompt-list"></div>
+              </main>
             </div>
 
             <div id="cgpt-prompt-status" class="cgpt-hint" style="margin-top:8px; display:none;"></div>

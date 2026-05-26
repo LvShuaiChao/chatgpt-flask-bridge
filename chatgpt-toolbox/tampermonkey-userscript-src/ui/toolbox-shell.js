@@ -1279,29 +1279,99 @@
         .cgpt-shortcut-settings {
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: 0;
           margin-top: 8px;
         }
 
-        .cgpt-shortcut-row {
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-row {
           display: grid;
-          grid-template-columns: minmax(150px, 1.2fr) minmax(120px, 1fr) auto auto;
-          gap: 8px;
+          grid-template-columns: 210px 1fr 48px 48px;
           align-items: center;
+          gap: 8px;
+          min-height: 36px;
+          margin: 6px 0;
         }
 
-        #cgpt-toolbox-panel.cgpt-toolbox-compact .cgpt-shortcut-row {
+        #cgpt-toolbox-panel.cgpt-toolbox-compact .cgpt-shortcut-settings .cgpt-hotkey-setting-row {
           grid-template-columns: 1fr;
         }
 
-        .cgpt-shortcut-row .cgpt-input {
-          height: 30px;
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-label {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          margin: 0;
+          color: #f8fafc;
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 32px;
+          opacity: 1;
+          cursor: default;
         }
 
-        .cgpt-shortcut-row-target .cgpt-shortcut-row-label {
-          font-size: 12px;
-          color: #cbd5e1;
-          line-height: 1.35;
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-label:has(.cgpt-hotkey-setting-checkbox) {
+          cursor: pointer;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-label-text {
+          color: #f8fafc;
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 32px;
+          white-space: nowrap;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-checkbox {
+          width: 14px;
+          height: 14px;
+          flex: 0 0 14px;
+          margin: 0;
+          accent-color: #60a5fa;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-checkbox-placeholder {
+          width: 14px;
+          height: 14px;
+          flex: 0 0 14px;
+          display: inline-block;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-input {
+          box-sizing: border-box;
+          width: 100%;
+          height: 32px;
+          min-width: 0;
+          margin: 0;
+          padding: 0 8px;
+          color: #f8fafc;
+          font-size: 15px;
+          font-weight: 600;
+          line-height: 32px;
+          background: #0f1115;
+          border: 1px solid #374151;
+          border-radius: 9px;
+          outline: none;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-btn {
+          box-sizing: border-box;
+          height: 32px;
+          min-width: 48px;
+          padding: 0 8px;
+          font-size: 13px;
+          font-weight: 600;
+          border: 1px solid #475569;
+          background: #1f2937;
+          color: #f8fafc;
+          border-radius: 9px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .cgpt-shortcut-settings .cgpt-hotkey-setting-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
         .cgpt-upload-quick-prompts {
@@ -3301,17 +3371,149 @@
           margin-top: 8px;
         }
 
+        .cgpt-prompt-page {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          height: 100%;
+          min-height: 0;
+        }
+
+        .cgpt-prompt-toolbar,
+        #cgpt-prompt-manage-tools.cgpt-prompt-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex: 0 0 auto;
+          flex-wrap: wrap;
+          margin-top: 0 !important;
+        }
+
+        .cgpt-prompt-body {
+          display: grid;
+          grid-template-columns: 240px minmax(0, 1fr);
+          gap: 12px;
+          min-height: 0;
+          flex: 1 1 auto;
+        }
+
+        .cgpt-prompt-category-panel,
+        .cgpt-prompt-list-panel {
+          border: 1px solid rgba(148, 163, 184, 0.28);
+          border-radius: 10px;
+          background: rgba(15, 23, 42, 0.72);
+          padding: 10px;
+          min-height: 0;
+        }
+
+        .cgpt-prompt-category-panel {
+          overflow: auto;
+        }
+
+        #cgpt-prompt-category-manager.cgpt-prompt-category-panel {
+          margin-top: 0 !important;
+        }
+
+        .cgpt-prompt-list-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          overflow: hidden;
+        }
+
+        .cgpt-panel-title {
+          font-size: 13px;
+          font-weight: 700;
+          color: #e5e7eb;
+          margin: 0 0 10px;
+        }
+
+        .cgpt-category-create-row,
+        .cgpt-prompt-category-edit-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px;
+          align-items: center;
+          margin-bottom: 0;
+        }
+
+        .cgpt-category-list,
+        .cgpt-prompt-category-manage-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 10px;
+          max-height: none;
+          overflow: visible;
+        }
+
+        .cgpt-category-item,
+        .cgpt-prompt-category-manage-item {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px;
+          align-items: center;
+          padding: 8px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          border-radius: 8px;
+          background: rgba(15, 23, 42, 0.56);
+        }
+
+        .cgpt-category-actions {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .cgpt-prompt-filter-row.cgpt-prompt-category-bar {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          align-items: center;
+          margin: 0 !important;
+          padding: 0;
+        }
+
+        .cgpt-prompt-search,
+        #cgpt-prompt-search.cgpt-prompt-search {
+          width: 100%;
+          height: 34px !important;
+          margin: 0 !important;
+          padding: 0 10px !important;
+        }
+
         .cgpt-prompt-list {
           gap: 0 !important;
-          max-height: 360px;
-          overflow-y: auto;
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow: auto;
           border: 1px solid #2f3542;
           border-radius: 12px;
           background: #0f1115;
         }
 
         #cgpt-prompt-list {
-          margin-top: 6px !important;
+          margin-top: 0 !important;
+        }
+
+        #cgpt-prompt-manage-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          min-height: 0;
+          flex: 1 1 auto;
+        }
+
+        @media (max-width: 760px) {
+          .cgpt-prompt-body {
+            grid-template-columns: 1fr;
+          }
+
+          .cgpt-prompt-category-panel {
+            max-height: 220px;
+          }
         }
 
         .cgpt-prompt-subtabs {
@@ -3357,19 +3559,11 @@
           margin-top: 8px;
         }
 
-        #cgpt-prompt-manage-panel {
+        #cgpt-prompt-manage-panel.cgpt-prompt-panel {
           padding-top: 6px !important;
         }
 
-        #cgpt-prompt-manage-tools {
-          display: flex !important;
-          flex-wrap: wrap;
-          align-items: center;
-          justify-content: flex-start;
-          gap: 6px !important;
-          margin-top: 6px !important;
-        }
-
+        .cgpt-prompt-toolbar .cgpt-btn,
         #cgpt-prompt-manage-tools .cgpt-btn {
           flex: 0 0 auto !important;
           width: auto !important;
@@ -3382,6 +3576,22 @@
 
         #cgpt-prompt-new-quick-btn {
           min-width: 92px !important;
+        }
+
+        .cgpt-prompt-category-select {
+          width: 100%;
+          min-height: 38px;
+          background: rgba(15, 23, 42, 0.88);
+          color: #e5e7eb;
+          border: 1px solid rgba(96, 165, 250, 0.55);
+          border-radius: 8px;
+          padding: 6px 10px;
+          outline: none;
+        }
+
+        .cgpt-prompt-category-select:focus {
+          border-color: rgba(59, 130, 246, 0.95);
+          box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.38);
         }
 
         .cgpt-prompt-display-row {
@@ -3415,10 +3625,6 @@
         .cgpt-prompt-display-main small {
           color: #9ca3af;
           font-size: 12px;
-        }
-
-        #cgpt-prompt-category-manager {
-          margin-top: 0 !important;
         }
 
         .cgpt-prompt-item {
@@ -3464,19 +3670,6 @@
           overflow-x: hidden !important;
         }
 
-        .cgpt-prompt-category-bar {
-          margin: 6px 0 !important;
-          gap: 6px !important;
-          padding: 0;
-        }
-
-        #cgpt-prompt-search {
-          height: 34px !important;
-          margin-top: 6px !important;
-          margin-bottom: 6px !important;
-          padding: 0 10px !important;
-        }
-
         .cgpt-prompt-category-chip,
         .cgpt-upload-quick-prompt-group,
         .cgpt-upload-quick-prompt-chip {
@@ -3514,55 +3707,32 @@
           font-weight: 650;
         }
 
-        .cgpt-prompt-category-edit-row {
-          display: grid;
-          grid-template-columns: 1fr auto;
-          gap: 8px;
-          align-items: center;
-          margin-bottom: 10px;
-        }
-
-        .cgpt-prompt-category-manage-list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          max-height: 300px;
-          overflow-y: auto;
-        }
-
-        .cgpt-prompt-category-manage-item {
-          display: grid;
-          grid-template-columns: 1fr auto auto;
-          gap: 8px;
-          align-items: center;
-          border: 1px solid #2f3542;
-          background: #0f1115;
-          border-radius: 10px;
-          padding: 8px;
-        }
-
-        .cgpt-prompt-category-manage-name {
+        .cgpt-prompt-category-manage-name,
+        .cgpt-category-name {
           font-weight: 700;
           color: #f8fafc;
         }
 
-        .cgpt-prompt-category-manage-meta {
+        .cgpt-prompt-category-manage-meta,
+        .cgpt-category-count {
           color: #94a3b8;
           font-size: 11px;
           margin-top: 2px;
         }
 
-        .cgpt-prompt-category-manage-item button {
+        .cgpt-category-actions .cgpt-toolbox-small-btn {
           white-space: nowrap;
         }
 
         @media (max-width: 620px) {
+          .cgpt-category-create-row,
           .cgpt-prompt-category-edit-row {
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 1fr) auto;
           }
 
+          .cgpt-category-item,
           .cgpt-prompt-category-manage-item {
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 1fr) auto;
           }
         }
 

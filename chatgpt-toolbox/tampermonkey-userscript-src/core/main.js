@@ -3251,13 +3251,27 @@
       const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
       const aria = String(node.getAttribute('aria-label') || '').trim();
       const testId = String(node.getAttribute('data-testid') || '').trim();
-      const probe = `${text} ${aria} ${testId}`;
+      const className = String(node.getAttribute('class') || '').trim();
+      const probe = `${text} ${aria} ${testId} ${className}`;
 
-      return (
-        /\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv)\b/i.test(probe)
-        || /\b\d+\s*(KB|MB|GB)\b/i.test(probe)
-        || /压缩归档|附件|文件|remove file|移除文件|remove file|attached/i.test(probe)
+      const hasFileName = /\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv)\b/i.test(probe);
+      const hasFileSize = /\b\d+(?:\.\d+)?\s*(KB|MB|GB)\b/i.test(probe);
+      const hasRemoveSignal = /remove file|移除文件|删除文件|移除附件|删除附件/i.test(probe);
+      const hasChipSignal = /file-chip|file-preview|composer-file|attachment-chip|attachment-item|attachment-preview/i.test(probe);
+
+      const looksLikeUploadEntry = (
+        /添加|上传|选择|附加|attach|upload|add file|browse/i.test(probe)
+        && !hasFileName
+        && !hasFileSize
+        && !hasRemoveSignal
+        && !hasChipSignal
       );
+
+      if (looksLikeUploadEntry) {
+        return false;
+      }
+
+      return hasFileName || hasFileSize || hasRemoveSignal || hasChipSignal;
     }
 
     function hasComposerAttachmentUnified() {
@@ -3280,19 +3294,19 @@
       );
 
       const selectors = [
-        '[data-testid*="attachment"]',
-        '[data-testid*="file"]',
-        '[data-testid*="composer-file"]',
         '[data-testid*="file-chip"]',
         '[data-testid*="file-preview"]',
-        '[aria-label*="附件"]',
-        '[aria-label*="文件"]',
+        '[data-testid*="composer-file"]',
         '[aria-label*="Remove file"]',
         '[aria-label*="移除文件"]',
-        'button[aria-label*="移除"]',
-        'button[aria-label*="Remove"]',
-        '[class*="attachment"]',
+        '[aria-label*="删除文件"]',
+        'button[aria-label*="移除文件"]',
+        'button[aria-label*="删除文件"]',
         '[class*="file-chip"]',
+        '[class*="file-preview"]',
+        '[class*="attachment-chip"]',
+        '[class*="attachment-item"]',
+        '[class*="attachment-preview"]',
       ];
 
       for (let i = 0; i < selectors.length; i += 1) {
@@ -3313,7 +3327,7 @@
       }
 
       const text = collectVisibleComposerPayloadText();
-      return /(\.zip|\.txt|\.py|\.js|\.json|\.md|\.csv|\.xlsx|\.docx|\.pdf|附件|文件|压缩归档|attached|attachment|uploaded)/i.test(text);
+      return /(\.(zip|txt|py|js|json|md|csv|xlsx|docx|pdf)\b|\b\d+(?:\.\d+)?\s*(KB|MB|GB)\b|remove file|移除文件|删除文件|uploaded|attached|已上传|上传完成)/i.test(text);
     }
 
     function hasVisibleComposerAttachmentPayload() {

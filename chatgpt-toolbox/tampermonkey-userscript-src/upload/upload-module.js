@@ -11509,6 +11509,7 @@
       }
 
       const reason = String(options.reason || 'render');
+      const ignoreAutoQueueRunning = !!options.ignoreAutoQueueRunning;
 
       if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
         const uploadSnapshot = buildUploadOnlyButtonSnapshot();
@@ -11519,7 +11520,8 @@
         const activeFiles = Number(uploadSnapshot.activeFilesCount || 0);
         ToolboxShell.appendLog(
           `[BUTTON_DECOUPLE][UPLOAD_START] uploadPhase=${uploadPhase} uploadRunning=${uploadSnapshot.uploadRunning ? 1 : 0} `
-          + `activeFiles=${activeFiles} ignoredSendBusy=${sendBusy ? 1 : 0}`,
+          + `activeFiles=${activeFiles} ignoredSendBusy=${sendBusy ? 1 : 0} `
+          + `ignoreAutoQueueRunning=${ignoreAutoQueueRunning ? 1 : 0}`,
         );
         const view = UploadButtonVm.getUploadButtonViewState(uploadSnapshot);
         return UploadButtonVm.applyUploadButtonViewState(button, view, reason);
@@ -12769,6 +12771,10 @@
       }
 
       return null;
+    }
+
+    function findUploadComposerSendButton() {
+      return findRealComposerSendButton();
     }
 
     function hasVoiceOrDictationButtonOnly() {
@@ -14424,6 +14430,38 @@
       logSendHotkey('SKIP', `reason=${reason} key=${key} target=${target}`);
     }
 
+    function dispatchSendMessageShortcut(shortcutSource, event) {
+      const src = `shortcut:${String(shortcutSource || 'document').trim() || 'document'}`;
+
+      ToolboxShell.appendLog(`[SEND_HOTKEY][TRIGGER_SEND] source=${src}`);
+
+      const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
+
+      if (sendBtn) {
+        runUploadUiAction('send-message', sendBtn, src, event);
+        return true;
+      }
+
+      void triggerSendFromToolbox(src)
+        .then((ok) => {
+          if (ok) {
+            logSendHotkey('DISPATCH_OK', `source=${src}`);
+          } else {
+            logSendHotkey('DISPATCH_BLOCKED', `reason=send-flow-returned-false source=${src}`);
+          }
+        })
+        .catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] shortcut trigger send failed', err);
+          ToolboxShell.appendLog(`[UPLOAD_DIAG][send-shortcut:failed] source=${src} error=${errText}`);
+          setStatus(`快捷键发送失败：${errText}`, 'error');
+          resetUploadSendShortcutState('shortcut-catch', state.autoSendRunId);
+          logSendHotkey('DISPATCH_BLOCKED', `reason=exception source=${src} detail=${errText}`);
+        });
+
+      return true;
+    }
+
     function handleUploadSendShortcutKeydown(e, source) {
       if (!isUploadSendShortcutEvent(e)) {
         return false;
@@ -14444,6 +14482,10 @@
         return true;
       }
 
+      if (shouldIgnoreSendShortcutTarget(e)) {
+        return false;
+      }
+
       if (shouldIgnoreDuplicateShortcutEvent(e)) {
         e.preventDefault();
         e.stopPropagation();
@@ -14451,10 +14493,6 @@
           '[UPLOAD_DIAG][send-shortcut:ignored] reason=duplicate-keydown-event',
         );
         return true;
-      }
-
-      if (shouldIgnoreSendShortcutTarget(e)) {
-        return false;
       }
 
       if (isPlainEnterSendEvent(e)) {
@@ -14521,10 +14559,12 @@
         }
       }
 
-      const blockReason = getSendHotkeyPreDispatchBlockReason();
-      if (blockReason) {
-        logSendHotkey('DISPATCH_BLOCKED', `reason=${blockReason} key=${formatSendHotkeyKey(e)}`);
-        return false;
+      if (isPlainEnterSendEvent(e)) {
+        const blockReason = getSendHotkeyPreDispatchBlockReason();
+        if (blockReason) {
+          logSendHotkey('DISPATCH_BLOCKED', `reason=${blockReason} key=${formatSendHotkeyKey(e)}`);
+          return false;
+        }
       }
 
       uploadSendShortcutLastAt = now;
@@ -14584,33 +14624,8 @@
       }
 
       logSendHotkey('TRIGGER', `key=${formatSendHotkeyKey(e)} scope=global source=${shortcutSource}`);
-      ToolboxShell.appendLog(`[SEND_HOTKEY][TRIGGER_SEND] source=${shortcutSource}`);
 
-      if (shouldSkipAction('send-message', 300)) {
-        ToolboxShell.appendLog(
-          `[TOOLBOX_HOTKEY][send-skip] reason=action-debounce source=${shortcutSource}`,
-        );
-        return true;
-      }
-
-      void triggerSendFromToolbox(`shortcut:${shortcutSource}`)
-        .then((ok) => {
-          if (ok) {
-            logSendHotkey('DISPATCH_OK', `source=shortcut:${shortcutSource}`);
-          } else {
-            logSendHotkey('DISPATCH_BLOCKED', `reason=send-flow-returned-false key=${formatSendHotkeyKey(e)}`);
-          }
-        })
-        .catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] shortcut trigger send failed', err);
-          ToolboxShell.appendLog(`[UPLOAD_DIAG][send-shortcut:failed] error=${errText}`);
-          setStatus(`快捷键发送失败：${errText}`, 'error');
-          resetUploadSendShortcutState('shortcut-catch', state.autoSendRunId);
-          logSendHotkey('DISPATCH_BLOCKED', `reason=exception detail=${errText}`);
-        });
-
-      return true;
+      return dispatchSendMessageShortcut(shortcutSource, e);
     }
 
     async function triggerSendHotkeyOnce() {

@@ -1159,6 +1159,32 @@
     }
   }
 
+  const UPLOAD_BUTTON_INDICATOR_CLASSES = [
+    'cgpt-upload-idle',
+    'cgpt-upload-running',
+    'cgpt-upload-stopping',
+    'cgpt-upload-failed',
+  ];
+
+  function syncUploadButtonIndicatorClasses(button, view) {
+    if (!button) {
+      return;
+    }
+    button.classList.remove('cgpt-task-running-indicator');
+    UPLOAD_BUTTON_INDICATOR_CLASSES.forEach((cls) => button.classList.remove(cls));
+
+    const phase = normalizeTaskPhase(view && view.phase);
+    if (phase === TaskPhase.FAILED) {
+      button.classList.add('cgpt-upload-failed');
+    } else if (phase === TaskPhase.CANCELLING) {
+      button.classList.add('cgpt-upload-stopping');
+    } else if (phase === TaskPhase.UPLOADING) {
+      button.classList.add('cgpt-upload-running');
+    } else {
+      button.classList.add('cgpt-upload-idle');
+    }
+  }
+
   function applyUploadButtonViewState(button, view, reason = '', applyOptions = {}) {
     if (!button || !view || typeof ButtonState === 'undefined') {
       return false;
@@ -1199,6 +1225,8 @@
     const options = mapViewStateToToolboxOptions(resolvedView, reason);
     button.dataset.cgptTaskPhase = resolvedView.phase || TaskPhase.IDLE;
     button.dataset.cgptButtonAction = resolvedView.action || '';
+
+    syncUploadButtonIndicatorClasses(button, resolvedView);
 
     const changed = ButtonState.setToolboxButtonState(button, options);
     if (typeof ButtonState.assertCancellableButtonConsistency === 'function') {

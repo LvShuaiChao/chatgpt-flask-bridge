@@ -1089,41 +1089,44 @@
 
           <div class="cgpt-settings-panel" data-settings-panel="shortcut">
             <div class="cgpt-shortcut-settings">
-              <div class="cgpt-shortcut-row" data-shortcut-action="sendMessage">
-                <label class="cgpt-checkbox-line" title="发送信息快捷键用于直接发送消息。建议使用 Ctrl+Alt+S 等组合键；普通 Enter 仅在 ChatGPT 输入框内由页面原生处理。">
-                  <input type="checkbox" id="cgpt-shortcut-send-enabled">
-                  启用发送信息快捷键
+              <div class="cgpt-hotkey-setting-row" data-shortcut-action="sendMessage">
+                <label class="cgpt-hotkey-setting-label" title="发送信息快捷键用于直接发送消息。建议使用 Ctrl+Alt+S 等组合键；普通 Enter 仅在 ChatGPT 输入框内由页面原生处理。">
+                  <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-send-enabled">
+                  <span class="cgpt-hotkey-setting-label-text">启用发送信息快捷键</span>
                 </label>
-                <input id="cgpt-shortcut-send-label" class="cgpt-input" readonly>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-send-record" title="点击录制后按下完整快捷键，例如 Ctrl+Alt+S。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-send-clear">清空</button>
+                <input id="cgpt-shortcut-send-label" class="cgpt-hotkey-setting-input" readonly>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-record" title="点击录制后按下完整快捷键，例如 Ctrl+Alt+S。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-clear">清空</button>
               </div>
 
-              <div class="cgpt-shortcut-row" data-shortcut-action="copyAndHotkeyOnce">
-                <label class="cgpt-checkbox-line" title="按下该快捷键后，会先复制最后一条回复，再触发下方配置的目标快捷键。">
-                  <input type="checkbox" id="cgpt-shortcut-copy-hotkey-enabled">
-                  启用复制并触发快捷键
+              <div class="cgpt-hotkey-setting-row" data-shortcut-action="copyAndHotkeyOnce">
+                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后，会先复制最后一条回复，再触发下方配置的目标快捷键。">
+                  <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-copy-hotkey-enabled">
+                  <span class="cgpt-hotkey-setting-label-text">启用复制并触发快捷键</span>
                 </label>
-                <input id="cgpt-shortcut-copy-hotkey-label" class="cgpt-input" readonly>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-hotkey-clear">清空</button>
+                <input id="cgpt-shortcut-copy-hotkey-label" class="cgpt-hotkey-setting-input" readonly>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-hotkey-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-hotkey-clear">清空</button>
               </div>
 
-              <div class="cgpt-shortcut-row cgpt-shortcut-row-target" data-shortcut-action="copyThenShortcutTargetHotkey">
-                <span class="cgpt-shortcut-row-label" title="复制完成后由 GUI 发送的系统快捷键，不是页面内快捷键。">复制后触发的目标快捷键</span>
-                <input id="cgpt-shortcut-copy-then-target-label" class="cgpt-input" readonly>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-then-target-record" title="录制后由 GUI 执行的组合键，例如 Ctrl+Alt+I。按 Esc 可取消。">录制</button>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-copy-then-target-clear">清空</button>
+              <div class="cgpt-hotkey-setting-row" data-shortcut-action="copyThenShortcutTargetHotkey">
+                <label class="cgpt-hotkey-setting-label" title="复制完成后由 GUI 发送的系统快捷键，不是页面内快捷键。">
+                  <span class="cgpt-hotkey-setting-checkbox-placeholder" aria-hidden="true"></span>
+                  <span class="cgpt-hotkey-setting-label-text">复制后触发的目标快捷键</span>
+                </label>
+                <input id="cgpt-shortcut-copy-then-target-label" class="cgpt-hotkey-setting-input" readonly>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-then-target-record" title="录制后由 GUI 执行的组合键，例如 Ctrl+Alt+I。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-copy-then-target-clear">清空</button>
               </div>
 
-              <div class="cgpt-shortcut-row" data-shortcut-action="startUpload">
-                <label class="cgpt-checkbox-line" title="开始上传快捷键用于触发当前队列上传。">
-                  <input type="checkbox" id="cgpt-shortcut-upload-enabled">
-                  启用开始上传快捷键
+              <div class="cgpt-hotkey-setting-row" data-shortcut-action="startUpload">
+                <label class="cgpt-hotkey-setting-label" title="开始上传快捷键用于触发当前队列上传。">
+                  <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-upload-enabled">
+                  <span class="cgpt-hotkey-setting-label-text">启用开始上传快捷键</span>
                 </label>
-                <input id="cgpt-shortcut-upload-label" class="cgpt-input" readonly>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-upload-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
-                <button type="button" class="cgpt-btn" id="cgpt-shortcut-upload-clear">清空</button>
+                <input id="cgpt-shortcut-upload-label" class="cgpt-hotkey-setting-input" readonly>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-upload-record" title="点击录制后按下完整快捷键。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-upload-clear">清空</button>
               </div>
 
               <div class="cgpt-row">

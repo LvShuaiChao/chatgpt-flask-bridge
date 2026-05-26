@@ -7037,16 +7037,12 @@ const AutoQueueModule = (() => {
 
       if (state.running && config.promptMode === 'task') {
         const reason = 'batch-task-running';
-        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
-        log(`[AUTOQ][MANUAL_UPLOAD][CLICK_IGNORED] reason=${reason} phase=${phase}`);
+        ToolboxShell.appendLog(`[AUTOQ][MANUAL_UPLOAD][CLICK_BLOCKED] reason=${reason} phase=${phase}`);
+        log(`[AUTOQ][MANUAL_UPLOAD][CLICK_BLOCKED] reason=${reason} phase=${phase}`);
 
-        state.autoQueueUploadStatus = 'blocked';
-        state.autoQueueUploadStats = {
-          uploaded: 0,
-          failed: 0,
-          skipped: 0,
-          reason: '批量任务运行中，不能手动开始上传',
-        };
+        if (typeof ToolboxShell.showToast === 'function') {
+          ToolboxShell.showToast('批量任务运行中，暂不建议手动上传', 'warn', 2600);
+        }
 
         updateStatus('start-upload-click-blocked-running-task');
         return;
@@ -7911,43 +7907,37 @@ const AutoQueueModule = (() => {
 
       if (startUploadBtn) {
         startUploadBtn.classList.toggle('cgpt-toolbox-hidden', config.promptMode !== 'task');
+        startUploadBtn.classList.remove('cgpt-task-running-indicator');
 
-        const taskModeRunning = config.promptMode === 'task'
-          && (state.running || AUTO_QUEUE_ACTIVE_PHASES.has(phase))
-          && !state.uploadingFromAutoQueue;
-
-        if (taskModeRunning && typeof setToolboxButtonState === 'function') {
-          setToolboxButtonState(startUploadBtn, {
-            phase: 'disabled',
-            text: '批量任务运行中',
-            title: '批量任务正在运行，不能重复启动；需要停止请点击右侧停止按钮',
-            disabled: true,
-            reason: `autoq:${reason || 'task-running'}`,
-          });
-          startUploadBtn.classList.add('cgpt-task-running-indicator');
-        } else if (state.uploadingFromAutoQueue && typeof setToolboxButtonState === 'function') {
-          startUploadBtn.classList.remove('cgpt-task-running-indicator');
-          setToolboxButtonState(startUploadBtn, {
-            phase: ButtonState.Phase.DANGER,
-            text: '上传中',
-            title: '正在上传文件，请等待上传结束',
-            disabled: true,
-            allowCancel: false,
-            reason: `autoq:${reason || 'uploading'}`,
-          });
-        } else if (
+        if (
           typeof UploadModule !== 'undefined'
           && typeof UploadModule.applyStartUploadButtonState === 'function'
         ) {
-          startUploadBtn.classList.remove('cgpt-task-running-indicator');
-          UploadModule.applyStartUploadButtonState(startUploadBtn, { reason: `autoq:${reason}` });
+          UploadModule.applyStartUploadButtonState(startUploadBtn, {
+            reason: `autoq-upload-button:${reason}`,
+            ignoreAutoQueueRunning: true,
+          });
         } else {
-          startUploadBtn.classList.remove('cgpt-task-running-indicator');
           setButtonIdle(startUploadBtn, '开始上传', {
             title: '只上传/绑定文件，不自动发送',
             reason,
           });
         }
+      }
+
+      const uploadBtnText = startUploadBtn ? String(startUploadBtn.textContent || '').trim() : '';
+      const batchBtnText = startBtn ? String(startBtn.textContent || '').trim() : '';
+      if (startUploadBtn && uploadBtnText.includes('批量任务运行中')) {
+        console.error('[BUTTON_COUPLING][UPLOAD_TEXT_POLLUTED]', {
+          uploadBtnText,
+          batchBtnText,
+          phase,
+          running: !!state.running,
+          reason,
+        });
+        ToolboxShell.appendLog(
+          `[BUTTON_COUPLING][UPLOAD_TEXT_POLLUTED] uploadText=${uploadBtnText} batchText=${batchBtnText} phase=${phase} running=${state.running ? 1 : 0}`,
+        );
       }
 
       renderSendOnceButton(context);
@@ -9216,7 +9206,7 @@ const AutoQueueModule = (() => {
         };
       }
 
-      if (allowDisabledWithText && finalHasText) {
+      if (allowDisabledWithText && finalHasText && !finalHasAttachment) {
         return {
           ok: true,
           reason: 'send_button_missing_use_enter_fallback',
@@ -9231,7 +9221,10 @@ const AutoQueueModule = (() => {
       if (typeof detectComposerResponseState === 'function') {
         const responseState = detectComposerResponseState();
         const responseReason = String(responseState.response_state_reason || '').trim();
-        if (responseReason === 'payload_ready_but_send_button_missing') {
+        if (
+          responseReason === 'payload_ready_but_send_button_missing'
+          || responseReason === 'attachment_ready_but_send_button_missing'
+        ) {
           return {
             ok: false,
             reason: responseReason,

@@ -93,6 +93,7 @@
     async function writeClipboardAndVerify(text, options = {}) {
       const rawText = String(text ?? '');
       const label = String(options.label || 'clipboard').trim() || 'clipboard';
+      const strictReadVerify = options.strictReadVerify === true;
 
       if (!rawText.trim()) {
         return { ok: false, reason: 'empty_clipboard_text' };
@@ -126,7 +127,7 @@
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(`[CLIPBOARD][VERIFY_SKIP] label=${label} reason=readText-unavailable chars=${rawText.length}`);
         }
-        return { ok: true, reason: 'ok', verified: false };
+        return { ok: true, reason: 'clipboard_read_verify_unavailable', verified: false };
       }
 
       let current = '';
@@ -136,9 +137,21 @@
         const errText = err && err.message ? err.message : String(err);
         console.error(`[CLIPBOARD][READ_VERIFY_FAIL] label=${label}`, err);
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(`[CLIPBOARD][READ_VERIFY_FAIL] label=${label} error=${errText}`);
+          ToolboxShell.appendLog(
+            `[CLIPBOARD][READ_VERIFY_FAIL] label=${label} error=${errText} strict=${strictReadVerify ? 1 : 0}`,
+          );
         }
-        return { ok: false, reason: 'clipboard_read_verify_failed', error: err };
+
+        if (strictReadVerify) {
+          return { ok: false, reason: 'clipboard_read_verify_failed', error: err };
+        }
+
+        return {
+          ok: true,
+          reason: 'clipboard_read_verify_skipped',
+          verified: false,
+          warning: errText,
+        };
       }
 
       if (normalizeClipboardTextForCompare(current) !== normalizeClipboardTextForCompare(rawText)) {
