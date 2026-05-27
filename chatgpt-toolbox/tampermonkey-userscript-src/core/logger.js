@@ -343,6 +343,27 @@
     }
   }
 
+  function logPerfIfSlow(tag, message, costMs, thresholdMs = 80) {
+    const cost = Number(costMs);
+    const threshold = Number(thresholdMs);
+    if (!Number.isFinite(cost) || !Number.isFinite(threshold) || cost <= threshold) {
+      return;
+    }
+
+    const key = String(tag || 'default');
+    const now = Date.now();
+    const lastAt = Number(perfLogThrottleAt[key] || 0);
+    if (now - lastAt < 2000) {
+      return;
+    }
+
+    perfLogThrottleAt[key] = now;
+    console.log(message);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(message);
+    }
+  }
+
   function isWaitingAnswerVisualState(options = {}) {
     const text = String(options.text || options.buttonText || '').trim();
     const state = String(options.state || '').trim().toLowerCase();

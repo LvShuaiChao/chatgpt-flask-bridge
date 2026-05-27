@@ -1826,10 +1826,10 @@
       );
 
       const perfLine = `[PERF][conversation_snapshot] source=${snapshotSource} messages=${messageCount} total_chars=${totalChars} cost_ms=${costMs}`;
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      if (costMs > 300 && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
         ToolboxShell.appendLog(perfLine);
       }
-      if (costMs > 500) {
+      if (costMs > 300) {
         const slowLine = `[PERF][conversation_snapshot_slow] source=${snapshotSource} messages=${messageCount} total_chars=${totalChars} cost_ms=${costMs}`;
         console.warn(slowLine);
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
@@ -2540,8 +2540,15 @@
         scopes.push(composer);
       }
 
+      // 避免 normal 路径下 scan 整个 main 的高成本按钮集合。
+      // 仅在 composer debug 模式下，才允许把 main 当作最后兜底 scope。
+      const allowMainElFallback = isComposerDebugEnabled();
       const mainEl = qs('main');
-      if (mainEl instanceof HTMLElement && !scopes.includes(mainEl)) {
+      if (
+        allowMainElFallback
+        && mainEl instanceof HTMLElement
+        && !scopes.includes(mainEl)
+      ) {
         scopes.push(mainEl);
       }
 
@@ -2728,7 +2735,9 @@
           }
         }
       }
-      const allButtons = Array.from(document.querySelectorAll('button'));
+      const allButtons = (!silent && (options.debug === true || isComposerDebugEnabled()))
+        ? Array.from(document.querySelectorAll('button'))
+        : [];
       const totalScanned = allButtons.length;
       const previewButtons = allButtons.filter((btn) => !isInToolbox(btn)).slice(0, 12);
 
@@ -2856,7 +2865,7 @@
         return lastVisibleHit;
       }
 
-      const preview = buildSendButtonPreview(previewButtons);
+      const preview = previewButtons.length > 0 ? buildSendButtonPreview(previewButtons) : [];
       logSendButtonScan(totalScanned, 0, 'no-match', silent);
       logSendButtonNotFound(composer, totalScanned, preview, silent);
       if (!silent) {
@@ -3943,7 +3952,14 @@
           : Date.now()) - startedAt,
       );
 
-      if (typeof logPerfThrottled === 'function') {
+      if (typeof logPerfIfSlow === 'function') {
+        logPerfIfSlow(
+          'countAttachmentChips',
+          `[PERF][countAttachmentChips] cost=${costMs}ms count=${count} roots=${roots.length} scanned=${scanned}`,
+          costMs,
+          50,
+        );
+      } else if (typeof logPerfThrottled === 'function') {
         logPerfThrottled(
           'countAttachmentChips',
           `[PERF][countAttachmentChips] cost=${costMs}ms count=${count} roots=${roots.length} scanned=${scanned}`,
@@ -3999,7 +4015,31 @@
       return [...new Set(names)].slice(0, 8);
     }
 
-    function collectVisibleComposerPayloadText() {
+    function shouldAllowHeavyComposerPayloadTextScan() {
+      if (isComposerDebugEnabled()) {
+        return true;
+      }
+
+      if (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true) {
+        return true;
+      }
+
+      const startedAt = typeof window !== 'undefined'
+        ? Number(window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ || 0)
+        : 0;
+      if (startedAt > 0 && Date.now() - startedAt < 30000) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function collectVisibleComposerPayloadText(options = {}) {
+      const allowHeavy = options.force === true || shouldAllowHeavyComposerPayloadTextScan();
+      if (!allowHeavy) {
+        return '';
+      }
+
       const roots = collectComposerAttachmentRoots();
       const seen = new Set();
       const pieces = [];
@@ -4301,8 +4341,9 @@
     function getComposerAttachmentSnapshot(reason = '') {
       const reasonText = String(reason || '').slice(0, 240);
       const cards = findAttachmentCardsInComposer();
+      const uploadingFlags = cards.map((c) => isAttachmentCardUploading(c));
       const fileCount = Math.max(countAttachmentChips(), cards.length);
-      const uploadingCount = cards.filter((c) => isAttachmentCardUploading(c)).length;
+      const uploadingCount = uploadingFlags.filter(Boolean).length;
       const readyCount = Math.max(0, fileCount - uploadingCount);
       const filenames = collectComposerAttachmentFilenames();
       const hasAnyAttachment = fileCount > 0;
@@ -4325,6 +4366,7 @@
           name: it.name,
           text: it.text,
           index: it.index,
+          uploading: typeof it.index === 'number' && uploadingFlags[it.index] === true ? true : false,
         })),
       };
 
@@ -4335,6 +4377,27 @@
       }
 
       return snapshot;
+    }
+
+    function getComposerAttachmentSnapshotFast(reason = '') {
+      // fast：仅统计 attachment 数量与 uploading/ready 状态，避免 filenames/items detailed 扫描
+      void reason;
+
+      const cards = findAttachmentCardsInComposer();
+      // 使用 countAttachmentChipsFast 避免附带大范围节点探测开销
+      const fileCount = Math.max(countAttachmentChipsFast(), cards.length);
+      const uploadingCount = cards.filter((c) => isAttachmentCardUploading(c)).length;
+      const readyCount = Math.max(0, fileCount - uploadingCount);
+
+      return {
+        fileCount,
+        uploadingCount,
+        readyCount,
+        hasAnyAttachment: fileCount > 0,
+        hasUploadingAttachment: uploadingCount > 0,
+        hasReadyAttachment: readyCount > 0,
+        count: fileCount,
+      };
     }
 
     function getExistingComposerPayloadSnapshot() {
@@ -4908,8 +4971,27 @@
         .join('\n');
     }
 
+    let attachmentUploadingCache = null;
+
     function isAttachmentStillUploading(options = {}) {
       const composerRoot = findComposerRoot();
+      const expectedNames = (options.expectedNames || [])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean);
+      const cacheKey = [
+        composerRoot instanceof HTMLElement ? composerRoot : 'no-root',
+        String(options.activeUploadRunId || ''),
+        expectedNames.join('|'),
+      ].join('::');
+      const now = Date.now();
+      if (
+        attachmentUploadingCache
+        && attachmentUploadingCache.key === cacheKey
+        && now - Number(attachmentUploadingCache.at || 0) < 300
+      ) {
+        return !!attachmentUploadingCache.value;
+      }
+
       const cards = findAttachmentCardsInComposer();
 
       appendComposerPollLogThrottled(
@@ -4918,17 +5000,16 @@
       );
 
       if (!composerRoot && !cards.length) {
+        attachmentUploadingCache = { key: cacheKey, at: now, value: false };
         return false;
       }
 
       if (typeof hasRealSubmitButton === 'function' && hasRealSubmitButton()) {
+        attachmentUploadingCache = { key: cacheKey, at: now, value: false };
         return false;
       }
 
       if (cards.length > 0) {
-        const expectedNames = (options.expectedNames || [])
-          .map((name) => String(name || '').trim())
-          .filter(Boolean);
         const scopedCards = expectedNames.length > 0
           ? cards.filter((card) => {
             const haystack = collectAttachmentCardStatusText(card);
@@ -4938,6 +5019,8 @@
 
         const cardsToCheck = scopedCards.length > 0 ? scopedCards : cards;
         const anyUploading = cardsToCheck.some((card) => isAttachmentCardUploading(card));
+        const result = !!anyUploading;
+        attachmentUploadingCache = { key: cacheKey, at: now, value: result };
         if (!anyUploading) {
           return false;
         }
@@ -4949,7 +5032,9 @@
         .flatMap((root) => qsa(ATTACHMENT_CARD_BUSY_SELECTOR, root))
         .find(isDomNodeVisiblyBusy);
 
-      return !!busyNode;
+      const result = !!busyNode;
+      attachmentUploadingCache = { key: cacheKey, at: now, value: result };
+      return result;
     }
 
     function isAttachmentUploadingInComposer(options = {}) {
@@ -6298,6 +6383,7 @@
       hasComposerDraftPayload,
       hasComposerAttachmentUnified,
       getComposerAttachmentSnapshot,
+      getComposerAttachmentSnapshotFast,
       hasVisibleComposerAttachmentPayload,
       getExistingComposerPayloadSnapshot,
       waitExistingComposerPayloadReadyForSend,
@@ -7400,6 +7486,8 @@
   }
 
   function refreshToolboxPageStatusDisplay(reason = '') {
+    invalidateConversationStatsCache(reason || 'toolbox-page-status');
+
     if (
       typeof UploadModule !== 'undefined'
       && typeof UploadModule.refreshToolboxTopStatus === 'function'
@@ -7461,6 +7549,57 @@
   let toolboxTurnStatusRefreshTimer = 0;
   let toolboxTurnStatusRefreshPendingMode = 'light';
   let lastLoggedConversationTurnCount = null;
+  let lastToolboxLightRefreshAt = 0;
+  let conversationStatsCache = null;
+  let conversationStatsDirty = false;
+  let conversationStatsMutationVersion = 0;
+
+  const TOOLBOX_HEAVY_REFRESH_REASONS = new Set([
+    'route-change',
+    'message-sent',
+    'assistant-finished',
+    'manual-refresh',
+    'bridge-sync-conversation',
+    'observer-bound',
+  ]);
+  const TOOLBOX_LIGHT_REFRESH_MIN_MS = 1500;
+
+  function invalidateConversationStatsCache(reason = '') {
+    conversationStatsCache = null;
+    conversationStatsDirty = true;
+    void reason;
+  }
+
+  function markConversationStatsDirty() {
+    conversationStatsDirty = true;
+    conversationStatsMutationVersion += 1;
+  }
+
+  function isToolboxHeavyRefreshReason(reason = '') {
+    const safeReason = String(reason || '').trim().toLowerCase();
+    if (!safeReason) {
+      return false;
+    }
+
+    if (TOOLBOX_HEAVY_REFRESH_REASONS.has(safeReason)) {
+      return true;
+    }
+
+    for (const allowed of TOOLBOX_HEAVY_REFRESH_REASONS) {
+      if (safeReason.startsWith(`${allowed}:`) || safeReason.includes(`${allowed}:`)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function getConversationStatsCacheTtlMs() {
+    const isResponding = typeof ComposerApi !== 'undefined'
+      && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+      && ComposerApi.isAssistantLikelyBusy();
+    return isResponding ? 5000 : 3000;
+  }
 
   function getConversationDomScanRoot() {
     const main = document.querySelector('main');
@@ -7471,7 +7610,7 @@
     return document.body instanceof HTMLElement ? document.body : null;
   }
 
-  function getLightConversationStatsForHeader() {
+  function computeLightConversationStatsFromDom() {
     const root = getConversationDomScanRoot();
     if (!(root instanceof HTMLElement)) {
       return {
@@ -7546,6 +7685,59 @@
       user_count: userCount,
       assistant_count: assistantCount,
     };
+  }
+
+  function getLightConversationStatsForHeader(options = {}) {
+    const force = options.force === true;
+    const now = Date.now();
+    const url = String(typeof location !== 'undefined' && location.href ? location.href : '');
+
+    if (!force && conversationStatsCache) {
+      const age = now - Number(conversationStatsCache.at || 0);
+      const ttl = getConversationStatsCacheTtlMs();
+      const urlMatch = conversationStatsCache.url === url;
+      if (urlMatch && !conversationStatsDirty && age < ttl) {
+        return {
+          total_count: conversationStatsCache.totalCount,
+          round_count: conversationStatsCache.roundCount,
+          dom_estimated_round_count: conversationStatsCache.roundCount,
+          user_count: conversationStatsCache.userCount,
+          assistant_count: conversationStatsCache.assistantCount,
+        };
+      }
+    }
+
+    const startedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const stats = computeLightConversationStatsFromDom();
+    const costMs = Math.round(
+      ((typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now()) - startedAt,
+    );
+
+    conversationStatsCache = {
+      at: now,
+      url,
+      mutationVersion: conversationStatsMutationVersion,
+      roundCount: Number(stats.dom_estimated_round_count) || 0,
+      userCount: Number(stats.user_count) || 0,
+      assistantCount: Number(stats.assistant_count) || 0,
+      totalCount: Number(stats.total_count) || 0,
+    };
+    conversationStatsDirty = false;
+
+    if (typeof logPerfIfSlow === 'function') {
+      logPerfIfSlow(
+        'getLightConversationStatsForHeader',
+        `[PERF][getLightConversationStatsForHeader] cost=${costMs}ms turns=${stats.total_count}`,
+        costMs,
+        80,
+      );
+    }
+
+    return stats;
   }
 
   function countTurnsFromDomDirect(role) {
@@ -7828,17 +8020,81 @@
     lastLoggedConversationTurnCount = count;
   }
 
-  function scheduleToolboxTurnStatusRefresh(reason = 'dom-change', mode = 'auto') {
+  function executeToolboxTurnStatusRefresh(reason = 'dom-change', modeToRun = 'light') {
     const startedAt = (typeof performance !== 'undefined' && performance.now)
       ? performance.now()
       : Date.now();
     const isResponding = typeof ComposerApi !== 'undefined'
       && typeof ComposerApi.isAssistantLikelyBusy === 'function'
       && ComposerApi.isAssistantLikelyBusy();
-    void isResponding;
+
+    if (modeToRun === 'heavy') {
+      invalidateConversationStatsCache(reason);
+    } else {
+      lastToolboxLightRefreshAt = Date.now();
+    }
+
+    const refreshOptions = {
+      skipTurnCount: isResponding && modeToRun !== 'heavy',
+    };
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && typeof UploadModule.refreshToolboxTurnStatus === 'function'
+    ) {
+      UploadModule.refreshToolboxTurnStatus(reason, modeToRun, refreshOptions);
+    } else if (
+      typeof UploadModule !== 'undefined'
+      && typeof UploadModule.refreshToolboxTopStatus === 'function'
+    ) {
+      if (modeToRun === 'heavy') {
+        UploadModule.refreshToolboxTopStatus(reason);
+      } else if (!refreshOptions.skipTurnCount) {
+        UploadModule.refreshToolboxTopStatus(reason, 'light');
+      } else if (typeof updateChatInputStateBadge === 'function') {
+        updateChatInputStateBadge();
+      }
+
+      if (
+        modeToRun === 'heavy'
+        && typeof UploadModule.renderAllButtonStates === 'function'
+      ) {
+        UploadModule.renderAllButtonStates({ heavy: true });
+      } else if (modeToRun === 'heavy' && typeof UploadModule.renderUploadButtonsOnly === 'function') {
+        UploadModule.renderUploadButtonsOnly({ heavy: true });
+      }
+    } else if (typeof updateChatInputStateBadge === 'function') {
+      updateChatInputStateBadge();
+    }
+
+    const costMs = Math.round(
+      ((typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now()) - startedAt,
+    );
+    if (typeof logPerfIfSlow === 'function') {
+      logPerfIfSlow(
+        'toolboxTurnStatusRefresh',
+        `[PERF][toolboxTurnStatusRefresh] cost=${costMs}ms mode=${modeToRun} reason=${reason}`,
+        costMs,
+        80,
+      );
+    }
+  }
+
+  function scheduleToolboxTurnStatusRefresh(reason = 'dom-change', mode = 'auto') {
+    const safeReason = String(reason || 'dom-change').trim() || 'dom-change';
+
+    if (safeReason === 'conversation-character-data') {
+      return;
+    }
 
     let resolvedMode = mode;
     if (mode === 'auto') {
+      resolvedMode = isToolboxHeavyRefreshReason(safeReason) ? 'heavy' : 'light';
+    }
+
+    if (resolvedMode === 'heavy' && !isToolboxHeavyRefreshReason(safeReason)) {
       resolvedMode = 'light';
     }
 
@@ -7848,49 +8104,37 @@
       toolboxTurnStatusRefreshPendingMode = 'light';
     }
 
+    const now = Date.now();
+    const pendingHeavy = toolboxTurnStatusRefreshPendingMode === 'heavy';
+    if (!pendingHeavy) {
+      const elapsed = now - lastToolboxLightRefreshAt;
+      if (elapsed < TOOLBOX_LIGHT_REFRESH_MIN_MS) {
+        if (toolboxTurnStatusRefreshTimer) {
+          return;
+        }
+
+        const delayMs = TOOLBOX_LIGHT_REFRESH_MIN_MS - elapsed;
+        toolboxTurnStatusRefreshTimer = window.setTimeout(() => {
+          toolboxTurnStatusRefreshTimer = 0;
+          const modeToRun = toolboxTurnStatusRefreshPendingMode;
+          toolboxTurnStatusRefreshPendingMode = 'light';
+          executeToolboxTurnStatusRefresh(safeReason, modeToRun);
+        }, delayMs);
+        return;
+      }
+    }
+
     if (toolboxTurnStatusRefreshTimer) {
       window.clearTimeout(toolboxTurnStatusRefreshTimer);
     }
 
+    const delayMs = pendingHeavy ? 100 : 300;
     toolboxTurnStatusRefreshTimer = window.setTimeout(() => {
       toolboxTurnStatusRefreshTimer = 0;
       const modeToRun = toolboxTurnStatusRefreshPendingMode;
       toolboxTurnStatusRefreshPendingMode = 'light';
-
-      if (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.refreshToolboxTurnStatus === 'function'
-      ) {
-        UploadModule.refreshToolboxTurnStatus(reason, modeToRun);
-      } else if (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.refreshToolboxTopStatus === 'function'
-      ) {
-        UploadModule.refreshToolboxTopStatus(reason);
-        if (
-          modeToRun === 'heavy'
-          && typeof UploadModule.renderAllButtonStates === 'function'
-        ) {
-          UploadModule.renderAllButtonStates({ heavy: true });
-        } else if (typeof UploadModule.renderAllButtonStates === 'function') {
-          UploadModule.renderAllButtonStates({ heavy: false });
-        } else if (typeof UploadModule.renderUploadButtonsOnly === 'function') {
-          UploadModule.renderUploadButtonsOnly({ heavy: modeToRun === 'heavy' });
-        }
-      }
-
-      const costMs = Math.round(
-        ((typeof performance !== 'undefined' && performance.now)
-          ? performance.now()
-          : Date.now()) - startedAt,
-      );
-      if (typeof logPerfThrottled === 'function') {
-        logPerfThrottled(
-          'toolboxTurnStatusRefresh',
-          `[PERF][toolboxTurnStatusRefresh] cost=${costMs}ms mode=${modeToRun} reason=${reason}`,
-        );
-      }
-    }, 300);
+      executeToolboxTurnStatusRefresh(safeReason, modeToRun);
+    }, delayMs);
   }
 
   function observeConversationTarget(target, reason) {
@@ -7899,12 +8143,18 @@
       return;
     }
 
+    const uploadCriticalNow = (
+      typeof window !== 'undefined'
+      && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true
+      && window.__CGPT_TOOLBOX_ENABLE_UPLOAD_CRITICAL_LIGHT_MODE__ !== false
+    );
+
     let observer = ChatMessageRuntime.conversationObserver;
     const oldTarget = ChatMessageRuntime.conversationObserverTarget;
 
     if (observer && oldTarget && oldTarget !== target) {
       observer.disconnect();
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      if (!uploadCriticalNow && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(`[TURN_OBSERVER][DISCONNECT_OLD] reason=${reason || '-'}`);
       }
     }
@@ -7912,24 +8162,43 @@
     if (!observer) {
       observer = new MutationObserver((mutations) => {
         markLatestAssistantMessageCacheDirty();
+        markConversationStatsDirty();
+
+        const uploadCriticalNow = (
+          typeof window !== 'undefined'
+          && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true
+          && window.__CGPT_TOOLBOX_ENABLE_UPLOAD_CRITICAL_LIGHT_MODE__ !== false
+        );
 
         const mainNow = document.querySelector('main');
         if (mainNow && mainNow !== ChatMessageRuntime.lastMainNode) {
           ChatMessageRuntime.lastMainNode = mainNow;
           cleanupChatMessageCaches('main-dom-replaced');
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog('[TURN_OBSERVER][REBOUND_MAIN]');
+          invalidateConversationStatsCache('main-dom-replaced');
+          if (!uploadCriticalNow) {
+            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+              ToolboxShell.appendLog('[TURN_OBSERVER][REBOUND_MAIN]');
+            }
           }
           observeConversationTarget(mainNow, 'main-dom-replaced');
+          if (!uploadCriticalNow) {
+            scheduleToolboxTurnStatusRefresh('route-change', 'heavy');
+          }
           return;
         }
 
         const onlyCharacterData = mutations.length > 0
           && mutations.every((mutation) => mutation.type === 'characterData');
-        scheduleToolboxTurnStatusRefresh(
-          onlyCharacterData ? 'conversation-character-data' : 'conversation-dom-mutated',
-          'light',
-        );
+        if (onlyCharacterData) {
+          return;
+        }
+
+        if (uploadCriticalNow) {
+          // 上传 critical 期间：仅标记 dirty，暂停触发“轮数统计/顶部重算/按钮重刷新”
+          return;
+        }
+
+        scheduleToolboxTurnStatusRefresh('conversation-dom-mutated', 'light');
       });
 
       ChatMessageRuntime.conversationObserver = observer;
@@ -7948,7 +8217,7 @@
       ChatMessageRuntime.lastMainNode = target;
     }
 
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    if (!uploadCriticalNow && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(`[TURN_OBSERVER][BIND] reason=${reason || '-'}`);
     }
   }

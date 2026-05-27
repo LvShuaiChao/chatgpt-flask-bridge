@@ -1398,6 +1398,7 @@ const AutoQueueModule = (() => {
       nextSendAt: 0,
       completedLoops: 0,
       tickTimer: null,
+      tickIntervalMs: 0,
       tickerStartedAt: 0,
       replyBecameBusy: false,
       idleSince: 0,
@@ -1851,6 +1852,7 @@ const AutoQueueModule = (() => {
       if (state.tickTimer) {
         window.clearInterval(state.tickTimer);
         state.tickTimer = null;
+        state.tickIntervalMs = 0;
       }
     }
 
@@ -9245,6 +9247,7 @@ const AutoQueueModule = (() => {
     }
 
     function updateStatus(refreshReason = '') {
+      ensureTicker();
       syncLegacyRunFlagsFromPhase();
       const running = !!state.running;
       const phase = String(state.phase || 'idle');
@@ -9255,6 +9258,12 @@ const AutoQueueModule = (() => {
 
       const now = Date.now();
       const renderKey = buildStatusRenderKey(progressSnapshot, refreshReason);
+      const activeNow = !!(
+        running
+        || state.waitingReply
+        || state.uploadingFromAutoQueue
+        || state.batchAutoUploading
+      );
       const forceRenderReasons = new Set([
         'batch-start',
         'batch-stop',
@@ -9270,7 +9279,7 @@ const AutoQueueModule = (() => {
         || now - lastStatusRenderAt >= 1500;
 
       if (!shouldRenderStatus) {
-        if (!shouldSkipAutoqUnrelatedButtonRefresh(refreshReason)) {
+        if (activeNow && !shouldSkipAutoqUnrelatedButtonRefresh(refreshReason)) {
           if (
             typeof UploadModule !== 'undefined'
             && typeof UploadModule.refreshUploadAutoContinueButton === 'function'
@@ -9983,7 +9992,7 @@ const AutoQueueModule = (() => {
 
       renderSendOnceButton(context);
 
-      if (root) {
+      if (root && debugEnabled) {
         const uploadButtons = root.querySelectorAll('#cgpt-autoq-start-upload');
         if (uploadButtons.length !== 1) {
           console.error('[UPLOAD_BUTTON][DUPLICATED_DOM]', {
@@ -10393,6 +10402,7 @@ const AutoQueueModule = (() => {
       if (state.tickTimer) {
         window.clearInterval(state.tickTimer);
         state.tickTimer = null;
+        state.tickIntervalMs = 0;
       }
 
       if (logStop) {
@@ -12746,7 +12756,13 @@ const AutoQueueModule = (() => {
           return;
         }
 
-        if (!state.running && !state.waitingReply) {
+        if (
+          !state.running
+          && !state.waitingReply
+          && !state.uploadingFromAutoQueue
+          && !state.batchAutoUploading
+        ) {
+          ensureTicker();
           return;
         }
 
@@ -12783,11 +12799,42 @@ const AutoQueueModule = (() => {
       }
     }
 
+    function resolveTickerIntervalMs() {
+      const active = !!(
+        state.running
+        || state.waitingReply
+        || state.uploadingFromAutoQueue
+        || state.batchAutoUploading
+      );
+      if (!active) {
+        return 0;
+      }
+      return document.hidden ? 3000 : 1000;
+    }
+
     function ensureTicker() {
-      if (state.tickTimer) return;
+      const nextIntervalMs = resolveTickerIntervalMs();
+      if (nextIntervalMs <= 0) {
+        if (state.tickTimer) {
+          window.clearInterval(state.tickTimer);
+          state.tickTimer = null;
+          state.tickIntervalMs = 0;
+        }
+        return;
+      }
+
+      if (state.tickTimer && Number(state.tickIntervalMs || 0) === nextIntervalMs) {
+        return;
+      }
+
+      if (state.tickTimer) {
+        window.clearInterval(state.tickTimer);
+        state.tickTimer = null;
+      }
 
       state.tickerStartedAt = Date.now();
-      state.tickTimer = window.setInterval(tick, 500);
+      state.tickIntervalMs = nextIntervalMs;
+      state.tickTimer = window.setInterval(tick, nextIntervalMs);
     }
 
     async function sendTaskInitialOnce() {

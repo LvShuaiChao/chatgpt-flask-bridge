@@ -4661,6 +4661,10 @@
       return false;
     }
 
+    function isUploadDebugEnabled() {
+      return isUploadListDebugEnabled();
+    }
+
     function isFlaskLocalDirectSource(q) {
       return !!(
         q
@@ -8564,9 +8568,12 @@
       const stableMs = Number(options.stableMs) || 1500;
       const deadline = Date.now() + timeoutMs;
 
-      ToolboxShell.appendLog(
-        `[FINAL_UPLOAD][WAIT_COMPOSER_READY] timeoutMs=${timeoutMs} stableMs=${stableMs} pollMs=${pollMs}`,
-      );
+      const debugEnabled = isUploadDebugEnabled();
+      if (debugEnabled) {
+        ToolboxShell.appendLog(
+          `[FINAL_UPLOAD][WAIT_COMPOSER_READY] timeoutMs=${timeoutMs} stableMs=${stableMs} pollMs=${pollMs}`,
+        );
+      }
 
       let lastBusyLogAt = 0;
 
@@ -8602,12 +8609,32 @@
           ? !!ComposerApi.isAttachmentStillUploading()
           : false;
 
-        const fileInput = document.querySelector('input[type="file"]');
+        const composerRoot = typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.getComposerRoot === 'function'
+          ? ComposerApi.getComposerRoot()
+          : null;
+
+        const composer = typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.getComposer === 'function'
+          ? ComposerApi.getComposer()
+          : null;
+
+        const composerForm = composer instanceof HTMLElement ? composer.closest('form') : null;
+        const composerScope = composerForm instanceof HTMLElement
+          ? composerForm
+          : (composerRoot instanceof HTMLElement ? composerRoot : null);
+
+        // 找不到 composer scope：直接返回 not ready，避免全页面扫描 button。
+        if (!(composerScope instanceof HTMLElement)) {
+          return false;
+        }
+
+        const fileInput = composerScope.querySelector('input[type="file"]');
         const fileInputUsable = isElementUsable(fileInput);
 
         let attachmentEntryUsable = false;
         if (!fileInputUsable) {
-          const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+          const candidates = Array.from(composerScope.querySelectorAll('button, [role="button"]'));
           attachmentEntryUsable = candidates.some((el) => {
             if (!isElementUsable(el)) return false;
             const text = (el.innerText || el.textContent || '').trim();
@@ -8676,11 +8703,13 @@
                 && typeof ComposerApi.isAttachmentStillUploading === 'function'
                 ? !!ComposerApi.isAttachmentStillUploading()
                 : false;
-              ToolboxShell.appendLog(
-                `[FINAL_UPLOAD][COMPOSER_BUSY] response_state=${busy.response_state || '-'} response_state_reason=${
-                  busy.response_state_reason || '-'
-                } stopBtn=${busy.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading ? 1 : 0}`,
-              );
+              if (debugEnabled) {
+                ToolboxShell.appendLog(
+                  `[FINAL_UPLOAD][COMPOSER_BUSY] response_state=${busy.response_state || '-'} response_state_reason=${
+                    busy.response_state_reason || '-'
+                  } stopBtn=${busy.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading ? 1 : 0}`,
+                );
+              }
             }
 
             await sleep(pollMs);
@@ -8705,11 +8734,13 @@
               && typeof ComposerApi.isAttachmentStillUploading === 'function'
               ? !!ComposerApi.isAttachmentStillUploading()
               : false;
-            ToolboxShell.appendLog(
-              `[FINAL_UPLOAD][COMPOSER_READY] response_state=${busy2.response_state || '-'} response_state_reason=${
-                busy2.response_state_reason || '-'
-              } stopBtn=${busy2.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading2 ? 1 : 0} reason=composer-ready-for-upload`,
-            );
+            if (debugEnabled) {
+              ToolboxShell.appendLog(
+                `[FINAL_UPLOAD][COMPOSER_READY] response_state=${busy2.response_state || '-'} response_state_reason=${
+                  busy2.response_state_reason || '-'
+                } stopBtn=${busy2.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading2 ? 1 : 0} reason=composer-ready-for-upload`,
+              );
+            }
             return {
               ok: true,
               reason: 'composer-ready-for-upload',
@@ -8724,9 +8755,11 @@
         await sleep(pollMs);
       }
 
-      ToolboxShell.appendLog(
-        `[FINAL_UPLOAD][COMPOSER_READY_TIMEOUT] timeoutMs=${timeoutMs} reason=final-upload-blocked-composer-not-ready`,
-      );
+      if (debugEnabled) {
+        ToolboxShell.appendLog(
+          `[FINAL_UPLOAD][COMPOSER_READY_TIMEOUT] timeoutMs=${timeoutMs} reason=final-upload-blocked-composer-not-ready`,
+        );
+      }
       return {
         ok: false,
         reason: 'final-upload-blocked-composer-not-ready',
@@ -14779,7 +14812,23 @@
           `[COMPOSER][ATTACHMENT_SNAPSHOT_AFTER] runId=${runId || '-'} count=${afterCount} names=${afterItems.map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
         );
 
-        const newItems = afterItems.filter((it) => it && it.key && !beforeKeys.has(String(it.key)));
+        let newItems = [];
+        if (beforeKeys.size > 0) {
+          newItems = afterItems.filter((it) => it && it.key && !beforeKeys.has(String(it.key)));
+        } else {
+          // fast beforeSnapshot 没有 items/key 时：宁可只清理“当前仍在 uploading 的附件”，避免误删旧附件。
+          const uploadingItems = afterItems.filter((it) => it && it.key && it.uploading === true);
+          if (uploadingItems.length > 0) {
+            newItems = uploadingItems;
+          } else {
+            return {
+              ok: true,
+              skipped: true,
+              reason: 'no-before-keys-and-no-uploading-items',
+            };
+          }
+        }
+
         const newKeys = newItems.map((it) => String(it.key));
 
         ToolboxShell.appendLog(
@@ -16030,8 +16079,38 @@
       }
     }
 
+    function isSendRelatedUploadRenderReason(reason = '') {
+      const text = String(reason || '').trim().toLowerCase();
+      if (!text) {
+        return false;
+      }
+      return (
+        text.includes('send-message')
+        || text.includes('wait-send')
+        || text.includes('send-task')
+        || text.includes('send-state')
+        || text.includes('send_state')
+        || text.includes('shared-send')
+        || text.includes('pending-send')
+        || text.includes('auto-send')
+        || text.includes('message-send')
+        || text.includes('send-shortcut')
+      );
+    }
+
+    let pendingUploadRenderReasonText = '';
+    let pendingUploadRenderNeedsSend = false;
+
     function scheduleRenderUpload(reason = '') {
       const reasonText = String(reason || '').trim();
+      const reasonNeedsSend = isSendRelatedUploadRenderReason(reasonText);
+
+      if (reasonText) {
+        pendingUploadRenderReasonText = reasonText;
+      }
+      if (reasonNeedsSend) {
+        pendingUploadRenderNeedsSend = true;
+      }
 
       if (uploadTimers.has('upload-render', 'raf')) {
         return;
@@ -16049,21 +16128,34 @@
       }
 
       uploadTimers.raf('upload-render', () => {
-        const critical = typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+        const renderReason = pendingUploadRenderReasonText || reasonText;
+        const renderNeedsSend = pendingUploadRenderNeedsSend
+          || isSendRelatedUploadRenderReason(renderReason);
+
+        pendingUploadRenderReasonText = '';
+        pendingUploadRenderNeedsSend = false;
+
+        const critical = typeof window !== 'undefined'
+          && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
 
         if (critical) {
           renderUploadButtonsOnly({
             heavy: false,
-            buttonTasksReason: `light:${reasonText}`,
+            buttonTasksReason: `light:${renderReason}`,
             skipCapabilityScan: true,
-            scope: 'upload-only',
+            scope: renderNeedsSend ? 'all' : 'upload-only',
           });
           return;
         }
 
-        const scope = resolveUploadButtonRenderScope({ buttonTasksReason: reasonText });
+        const scope = resolveUploadButtonRenderScope({
+          buttonTasksReason: renderReason,
+        });
         renderUploadListOnly();
-        renderAllButtonStates({ buttonTasksReason: reasonText, scope });
+        renderAllButtonStates({
+          buttonTasksReason: renderReason,
+          scope,
+        });
       });
     }
 
@@ -16902,9 +16994,11 @@
       const skipSendForUploadOnly = scopeUploadOnly;
       const critical = typeof window !== 'undefined'
         && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+      const debugEnabled = isUploadDebugEnabled();
 
       if (
         !critical
+        && debugEnabled
         && typeof ToolboxShell !== 'undefined'
         && typeof ToolboxShell.appendLog === 'function'
       ) {
@@ -16928,9 +17022,10 @@
         response_state: 'unknown',
       };
 
-      const capability = skipCapabilityScan
+      const capability = (skipCapabilityScan || critical)
         ? fallbackCapability
-        : (getUploadPageCapability({ heavy: useHeavy }) || fallbackCapability);
+        : (getUploadPageCapability({ heavy: useHeavy && !skipCapabilityScan }) || fallbackCapability);
+      const renderSnapshot = buildUploadButtonRenderSnapshot();
 
       const currentStartBtn = rootElRef
         ? qs(UploadSelectors.startBtn, rootElRef)
@@ -16940,7 +17035,7 @@
         startBtn = currentStartBtn;
       }
 
-      if (critical && scopeUploadOnly) {
+      if (critical) {
         if (currentStartBtn) {
           applyStartUploadButtonState(currentStartBtn, {
             reason: 'renderUploadButtonsOnly:critical-upload-only',
@@ -16999,7 +17094,7 @@
           && typeof UploadButtonVm.getSendMessageButtonViewState === 'function';
 
         if (vmAvailable) {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const sendCapability = snapshot.capability && typeof snapshot.capability === 'object'
             ? snapshot.capability
             : capability;
@@ -17060,7 +17155,7 @@
         let applied = false;
         let copyContinueView = null;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           copyContinueView = UploadButtonVm.getCopyContinueButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             copyContinueBtn,
@@ -17109,7 +17204,7 @@
       } else if (copyLastMessageBtn && !isCopyLastButtonManagedLocally(copyLastMessageBtn)) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const view = UploadButtonVm.getCopyLastReplyButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             copyLastMessageBtn,
@@ -17136,7 +17231,7 @@
       } else if (copyHotkeyOnceBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const view = UploadButtonVm.getCopyHotkeyOnceButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             copyHotkeyOnceBtn,
@@ -17166,7 +17261,7 @@
       } else if (copyHotkeyContinueOnceBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const view = UploadButtonVm.getCopyHotkeyContinueOnceButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             copyHotkeyContinueOnceBtn,
@@ -17189,7 +17284,7 @@
       } else if (copyHotkeyContinueLoopBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const view = UploadButtonVm.getCopyHotkeyLoopButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             copyHotkeyContinueLoopBtn,
@@ -17197,7 +17292,7 @@
             'renderUploadButtonsOnly:copy-hotkey-loop',
           );
         } else {
-          const loopSnapshot = buildUploadButtonRenderSnapshot();
+          const loopSnapshot = renderSnapshot;
           const loopTask = loopSnapshot.copyHotkeyContinueLoopTask || {};
           const loopPhase = String(loopTask.phase || '').trim().toLowerCase();
           const loopActive = loopPhase !== 'idle'
@@ -17240,7 +17335,7 @@
       } else if (homeBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
-          const snapshot = buildUploadButtonRenderSnapshot();
+          const snapshot = renderSnapshot;
           const view = UploadButtonVm.getHomeButtonViewState(snapshot);
           applied = UploadButtonVm.applyUploadButtonViewState(
             homeBtn,
@@ -17290,7 +17385,7 @@
         batchAutoUploading = !!autoqState.batchAutoUploading;
       }
       const uploadTask = state.uploadTask || {};
-      if (!critical) {
+      if (!critical && debugEnabled) {
         ToolboxShell.appendLog(
           `[BUTTON_STATE_FINAL] uploadBtnText=${uploadFinal.text} uploadBtnPhase=${uploadFinal.phase} uploadBtnDisabled=${uploadFinal.disabled} uploadBtnAriaBusy=${uploadFinal.ariaBusy} uploadTaskPhase=${String(uploadTask.phase || 'idle')} uploadTaskOwner=${String(uploadTask.owner || '-')}` +
           ` batchBtnText=${batchFinal.text} batchBtnPhase=${batchFinal.phase} batchTaskRunning=${batchTaskRunning ? 1 : 0} batchAutoUploading=${batchAutoUploading ? 1 : 0}` +
@@ -17303,16 +17398,22 @@
         if (typeof ButtonState !== 'undefined' && typeof ButtonState.auditHomePageButtonColors === 'function') {
           ButtonState.auditHomePageButtonColors(rootElRef || document);
         }
-
-        rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
       }
+      rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
 
-      if (typeof logPerfThrottled === 'function') {
-        const costMs = Math.round(
-          ((typeof performance !== 'undefined' && performance.now)
-            ? performance.now()
-            : Date.now()) - startedAt,
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+      if (typeof logPerfIfSlow === 'function') {
+        logPerfIfSlow(
+          'renderUploadButtonsOnly',
+          `[PERF][renderUploadButtonsOnly] cost=${costMs}ms changedButtons=${changedButtons} heavy=${useHeavy ? 1 : 0}`,
+          costMs,
+          80,
         );
+      } else if (typeof logPerfThrottled === 'function') {
         logPerfThrottled(
           'renderUploadButtonsOnly',
           `[PERF][renderUploadButtonsOnly] cost=${costMs}ms changedButtons=${changedButtons} heavy=${useHeavy ? 1 : 0}`,
@@ -22289,9 +22390,10 @@
         );
       }
 
+      const isManualUpload = !isChildUpload && String(uploadSource || '').startsWith('upload-manual:');
       const composerReady = await waitChatGPTComposerReadyForUpload({
         timeoutMs: 120000,
-        pollMs: 500,
+        pollMs: isManualUpload ? 800 : 500,
         stableMs: 1500,
         mode,
       });
@@ -22353,6 +22455,18 @@
       const currentRunId = isChildUpload
         ? childUploadRunId
         : (state.uploadTask && state.uploadTask.runId ? String(state.uploadTask.runId) : '');
+      const attachmentSnapshotDebugEnabled = isUploadDebugEnabled();
+      const canUseFastAttachmentSnapshot = (
+        !attachmentSnapshotDebugEnabled
+        && typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function'
+      );
+      const canUseDetailedAttachmentSnapshot = (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+      );
       let composerBeforeSnapshot = null;
 
       try {
@@ -22396,9 +22510,15 @@
 
         composerBeforeSnapshot = (typeof ComposerApi !== 'undefined'
           && ComposerApi
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function')
-          ? ComposerApi.getComposerAttachmentSnapshot(`upload:before:${uploadSource}`)
-          : null;
+          && canUseFastAttachmentSnapshot
+          && typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function')
+          ? ComposerApi.getComposerAttachmentSnapshotFast(`upload:before:${uploadSource}`)
+          : ((typeof ComposerApi !== 'undefined'
+            && ComposerApi
+            && canUseDetailedAttachmentSnapshot
+            && typeof ComposerApi.getComposerAttachmentSnapshot === 'function')
+            ? ComposerApi.getComposerAttachmentSnapshot(`upload:before:${uploadSource}`)
+            : null);
 
         if (composerBeforeSnapshot) {
           ToolboxShell.appendLog(
@@ -22426,20 +22546,54 @@
           composerBeforeSnapshot
           && typeof ComposerApi !== 'undefined'
           && ComposerApi
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+          && (
+            typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function'
+            || typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+          )
         );
 
         if (canCompareReadyDiff) {
-          composerAfterSnapshot = ComposerApi.getComposerAttachmentSnapshot(`upload:after:${uploadSource}`);
           const beforeReady = Number(
             composerBeforeSnapshot.readyCount != null
               ? composerBeforeSnapshot.readyCount
               : (composerBeforeSnapshot.fileCount - composerBeforeSnapshot.uploadingCount),
           ) || 0;
-          const afterReady = Number(
-            composerAfterSnapshot.readyCount != null
+          let afterReady = 0;
+          const canUseFastAfter = (
+            typeof ComposerApi !== 'undefined'
+            && ComposerApi
+            && typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function'
+          );
+
+          // fast 成功：直接用 fast；fast 不确定/失败：走 detailed 二次确认。
+          if (canUseFastAfter) {
+            const composerAfterSnapshotFast = ComposerApi.getComposerAttachmentSnapshotFast(`upload:after:${uploadSource}`);
+            const afterReadyFast = Number(
+              composerAfterSnapshotFast.readyCount != null
+                ? composerAfterSnapshotFast.readyCount
+                : (composerAfterSnapshotFast.fileCount - composerAfterSnapshotFast.uploadingCount),
+            ) || 0;
+
+            const readyDiffFast = afterReadyFast - beforeReady;
+            if (attachmentSnapshotDebugEnabled || !(readyDiffFast > 0)) {
+              composerAfterSnapshot = canUseDetailedAttachmentSnapshot
+                ? ComposerApi.getComposerAttachmentSnapshot(`upload:after:${uploadSource}`)
+                : composerAfterSnapshotFast;
+            } else {
+              composerAfterSnapshot = composerAfterSnapshotFast;
+            }
+          } else {
+            composerAfterSnapshot = canUseDetailedAttachmentSnapshot
+              ? ComposerApi.getComposerAttachmentSnapshot(`upload:after:${uploadSource}`)
+              : null;
+          }
+
+          afterReady = Number(
+            composerAfterSnapshot && composerAfterSnapshot.readyCount != null
               ? composerAfterSnapshot.readyCount
-              : (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount),
+              : (composerAfterSnapshot && composerAfterSnapshot.fileCount != null
+                ? (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount)
+                : 0),
           ) || 0;
 
           readyDiff = afterReady - beforeReady;
@@ -22639,7 +22793,10 @@
             composerBeforeSnapshot
             && typeof ComposerApi !== 'undefined'
             && ComposerApi
-            && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+            && (
+              typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function'
+              || typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+            )
           );
           if (canCompareReadyDiffOnFail) {
             const beforeReady = Number(
@@ -22647,13 +22804,41 @@
                 ? composerBeforeSnapshot.readyCount
                 : (composerBeforeSnapshot.fileCount - composerBeforeSnapshot.uploadingCount),
             ) || 0;
-            const composerAfterSnapshot = ComposerApi.getComposerAttachmentSnapshot(`native-fail:after:${uploadSource}`);
-            const afterReady = Number(
-              composerAfterSnapshot.readyCount != null
-                ? composerAfterSnapshot.readyCount
-                : (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount),
-            ) || 0;
-            const diff = afterReady - beforeReady;
+            let composerAfterSnapshot = null;
+            let afterReady = 0;
+            let diff = 0;
+
+            const canUseFastAfter = typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function';
+            if (canUseFastAfter) {
+              const afterFast = ComposerApi.getComposerAttachmentSnapshotFast(`native-fail:after:${uploadSource}`);
+              const afterReadyFast = Number(
+                afterFast.readyCount != null
+                  ? afterFast.readyCount
+                  : (afterFast.fileCount - afterFast.uploadingCount),
+              ) || 0;
+              const diffFast = afterReadyFast - beforeReady;
+
+              if (attachmentSnapshotDebugEnabled || !(diffFast > 0)) {
+                composerAfterSnapshot = canUseDetailedAttachmentSnapshot
+                  ? ComposerApi.getComposerAttachmentSnapshot(`native-fail:after:${uploadSource}`)
+                  : afterFast;
+              } else {
+                composerAfterSnapshot = afterFast;
+              }
+            } else {
+              composerAfterSnapshot = canUseDetailedAttachmentSnapshot
+                ? ComposerApi.getComposerAttachmentSnapshot(`native-fail:after:${uploadSource}`)
+                : null;
+            }
+
+            if (composerAfterSnapshot) {
+              afterReady = Number(
+                composerAfterSnapshot.readyCount != null
+                  ? composerAfterSnapshot.readyCount
+                  : (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount),
+              ) || 0;
+              diff = afterReady - beforeReady;
+            }
 
             ToolboxShell.appendLog(
               `[COMPOSER][ATTACHMENT_SNAPSHOT_AFTER] runId=${currentRunId || '-'} count=${Number(composerAfterSnapshot.count != null ? composerAfterSnapshot.count : composerAfterSnapshot.fileCount) || 0} names=${(composerAfterSnapshot.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
@@ -22808,12 +22993,25 @@
           });
           logUploadFinalizeState(uploadSource);
           uploadTimers.timeout('upload-finally-full-render', () => {
+            try {
+              if (typeof renderToolboxTopStatus === 'function') {
+                renderToolboxTopStatus({ heavy: false });
+              }
+              if (typeof renderToolboxPageStatusRow === 'function') {
+                renderToolboxPageStatusRow();
+              }
+              if (typeof updateChatInputStateBadge === 'function') {
+                updateChatInputStateBadge();
+              }
+            } catch (err) {
+              console.error('[ChatGPT toolbox] upload-finally light refresh failed', err);
+            }
             renderUploadListOnly();
             renderAllButtonStates({
               heavy: false,
               buttonTasksReason: `upload-finally-full:${uploadSource}`,
             });
-          }, 600);
+          }, 800);
         }
 
         if (didSetUploadCriticalFlag) {
@@ -25606,9 +25804,10 @@
             runRefresh();
           });
       },
-      refreshToolboxTurnStatus: (reason = '', mode = 'light') => {
+      refreshToolboxTurnStatus: (reason = '', mode = 'light', options = {}) => {
         const runRefresh = () => {
           const heavy = mode === 'heavy';
+          const skipTurnCount = options && options.skipTurnCount === true;
           if (heavy) {
             ensureActiveUploadGroupIdValid('refreshToolboxTurnStatus');
             renderToolboxTopStatus({ heavy: true });
@@ -25617,7 +25816,9 @@
             return;
           }
 
-          renderToolboxPageStatusRow();
+          if (!skipTurnCount) {
+            renderToolboxPageStatusRow();
+          }
           updateChatInputStateBadge();
         };
 
