@@ -3567,7 +3567,10 @@
       return base;
     }
 
-    function findAttachmentCardsInComposer() {
+    function findAttachmentCardsInComposer(options = {}) {
+      const critical = typeof window !== 'undefined'
+        && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+      const allowFallbackScan = options.allowFallbackScan === true && !critical;
       const roots = collectComposerAttachmentRoots();
       const chipSelectors = [
         '[data-testid*="attachment"]',
@@ -3593,7 +3596,7 @@
         });
       });
 
-      if (!cards.length) {
+      if (!cards.length && allowFallbackScan) {
         forEachLikelyAttachmentElement((el) => {
           if (!(el instanceof HTMLElement)) return;
           if (!isComposerAttachmentChipElement(el)) return;
@@ -3621,11 +3624,14 @@
 
       const parts = [];
 
+      const critical = typeof window !== 'undefined'
+        && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+
       nodes.forEach((node) => {
         if (isInToolbox(node)) return;
         parts.push(
           [
-            node.innerText || '',
+            critical ? '' : (node.innerText || ''),
             node.textContent || '',
             node.getAttribute('aria-label') || '',
             node.getAttribute('title') || '',
@@ -4109,7 +4115,7 @@
       const uploading = typeof isAttachmentStillUploading === 'function'
         ? isAttachmentStillUploading()
         : false;
-      const cards = useHeavy ? findAttachmentCardsInComposer() : [];
+      const cards = useHeavy ? findAttachmentCardsInComposer({ allowFallbackScan: true }) : [];
       // 有附件卡片且不在上传中 → ready；非 heavy 模式时 cards 为空，ready 从 chipCount 推断
       const readyFromCards = cards.length > 0 && !uploading;
       const readyFallback = !uploading && (chipCount > 0);
@@ -4801,6 +4807,9 @@
       const extraNames = cleanFiles.map((item) => item && item.name).filter(Boolean);
       const deadline = Date.now() + timeoutMs;
       let lastTextPreview = '';
+      let lastHeavyScanAt = 0;
+      let lastHeavyText = '';
+      let lastHeavyCount = Number.isFinite(Number(chipCountBefore)) ? Number(chipCountBefore) : 0;
 
       while (Date.now() < deadline) {
         if (isCancelled()) {
@@ -4812,56 +4821,78 @@
           };
         }
 
-        const text = collectAttachmentChipText();
-        lastTextPreview = text.slice(0, 500);
-
-        const allNamed = cleanFiles.length > 0 && cleanFiles.every((f) => {
-          const names = buildUploadEvidenceNames(f, extraNames);
-          return fileNameEvidenceAny(names, text);
-        });
-
-        if (allNamed) {
-          return {
-            ok: true,
-            level: 'name',
-            reason: `附件区域识别到文件名：${cleanFiles.map((f) => f.name).join('|')}`,
-          };
+        const now = Date.now();
+        let fastCount = 0;
+        if (typeof countAttachmentChipsFast === 'function') {
+          fastCount = Number(countAttachmentChipsFast()) || 0;
         }
-
-        const nowCount = countAttachmentChips();
-        if (chipCountBefore >= 0 && nowCount > chipCountBefore) {
+        if (chipCountBefore >= 0 && fastCount > chipCountBefore) {
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][file-input:chip-count-ok] batch count=${chipCountBefore}->${nowCount}`
+            `[UPLOAD_DIAG][file-input:chip-fast-count-ok] batch count=${chipCountBefore}->${fastCount}`
           );
-
           return {
             ok: true,
-            level: 'count',
-            reason: `附件数量增加：${chipCountBefore} -> ${nowCount}`,
+            level: 'count-fast',
+            reason: `附件数量增加：${chipCountBefore} -> ${fastCount}`,
           };
         }
 
-        await sleep(250);
+        const needHeavyScan = now - lastHeavyScanAt >= 1200;
+        if (needHeavyScan) {
+          lastHeavyScanAt = now;
+          if (typeof collectAttachmentChipText === 'function') {
+            lastHeavyText = collectAttachmentChipText();
+            lastTextPreview = String(lastHeavyText || '').slice(0, 500);
+          }
+          const allNamed = cleanFiles.length > 0 && cleanFiles.every((f) => {
+            const names = buildUploadEvidenceNames(f, extraNames);
+            return fileNameEvidenceAny(names, lastHeavyText);
+          });
+          if (allNamed) {
+            return {
+              ok: true,
+              level: 'name',
+              reason: `附件区域识别到文件名：${cleanFiles.map((f) => f.name).join('|')}`,
+            };
+          }
+          if (typeof countAttachmentChips === 'function') {
+            lastHeavyCount = Number(countAttachmentChips()) || 0;
+            if (chipCountBefore >= 0 && lastHeavyCount > chipCountBefore) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_DIAG][file-input:chip-heavy-count-ok] batch count=${chipCountBefore}->${lastHeavyCount}`
+              );
+              return {
+                ok: true,
+                level: 'count-heavy',
+                reason: `附件数量增加：${chipCountBefore} -> ${lastHeavyCount}`,
+              };
+            }
+          }
+        }
+
+        await sleep(350);
       }
 
-      const chipAfter = countAttachmentChips();
+      const chipAfter = typeof countAttachmentChipsFast === 'function'
+        ? Number(countAttachmentChipsFast()) || 0
+        : lastHeavyCount;
 
       console.debug('[ChatGPT toolbox] attachment evidence timeout', {
         expectedFiles: cleanFiles.map((f) => f.name),
         chipCountBefore,
         chipCountAfter: chipAfter,
-        chipText: collectAttachmentChipText(),
+        chipTextPreview: lastTextPreview,
       });
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][file-input:settled-timeout] batch uploadNames=${cleanFiles.map((f) => f.name).join('|')} chipBefore=${chipCountBefore} chipAfter=${chipAfter} textPreview=${lastTextPreview || collectAttachmentChipText().slice(0, 500)}`
+        `[UPLOAD_DIAG][file-input:settled-timeout] batch uploadNames=${cleanFiles.map((f) => f.name).join('|')} chipBefore=${chipCountBefore} chipAfter=${chipAfter} textPreview=${lastTextPreview || '-'}`
       );
 
       return {
         ok: false,
         level: 'none',
         reason: '超时未检测到附件 chip',
-        textPreview: lastTextPreview || collectAttachmentChipText().slice(0, 500),
+        textPreview: lastTextPreview || '',
       };
     }
 
@@ -4939,8 +4970,25 @@
     const nativeUploadErrorSeenAt = new WeakMap();
     let nativeUploadErrorObserver = null;
 
+    function clearUploadCriticalMode(reason = '') {
+      if (typeof window !== 'undefined') {
+        window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = false;
+        window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
+      }
+      if (nativeUploadErrorObserver) {
+        nativeUploadErrorObserver.disconnect();
+        nativeUploadErrorObserver = null;
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[UPLOAD_CRITICAL][OFF] reason=${reason || '-'}`);
+      }
+    }
+
     function ensureNativeUploadErrorObserver(selectors) {
       if (!selectors) return;
+      if (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true) {
+        return;
+      }
       if (nativeUploadErrorObserver) return;
       if (typeof MutationObserver === 'undefined') return;
 
@@ -5005,9 +5053,8 @@
           : 0;
 
         const criticalNow = typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
-        if (criticalNow) {
-          ensureNativeUploadErrorObserver(NATIVE_UPLOAD_ERROR_SELECTORS);
-        }
+        const debugNativeUpload = typeof isComposerDebugEnabled === 'function'
+          && isComposerDebugEnabled();
 
         const composerRoot = typeof getComposerRoot === 'function' ? getComposerRoot() : null;
 
@@ -5101,12 +5148,19 @@
           const dataTestId = String(el.getAttribute('data-testid') || '').trim();
           const className = String(el.className || '').trim();
           const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-          const text = [
-            el.innerText || '',
-            el.textContent || '',
-            el.getAttribute('aria-label') || '',
-            el.getAttribute('title') || '',
-          ].join(' ').replace(/\s+/g, ' ').trim();
+          const text = criticalNow
+            ? [
+              el.textContent || '',
+              el.getAttribute('aria-label') || '',
+              el.getAttribute('title') || '',
+              el.getAttribute('data-testid') || '',
+            ].join(' ').replace(/\s+/g, ' ').trim()
+            : [
+              el.innerText || '',
+              el.textContent || '',
+              el.getAttribute('aria-label') || '',
+              el.getAttribute('title') || '',
+            ].join(' ').replace(/\s+/g, ' ').trim();
 
           const textPreview = text.slice(0, 120);
 
@@ -5114,16 +5168,18 @@
           const isToolbox = isToolboxEl(el);
           const isConversationHistory = isInsideConversationHistory(el);
 
-          ToolboxShell.appendLog(
-            `[UPLOAD_NATIVE][CANDIDATE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-            + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
-              rect
-                ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                : '-'
-            } textPreview=${textPreview || '-'} `
-            + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${isConversationHistory ? 1 : 0} `
-            + `acceptedReason=- rejectedReason=-`,
-          );
+          if (debugNativeUpload) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][CANDIDATE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
+              + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
+                rect
+                  ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
+                  : '-'
+              } textPreview=${textPreview || '-'} `
+              + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${isConversationHistory ? 1 : 0} `
+              + `acceptedReason=- rejectedReason=-`,
+            );
+          }
 
           if (!text) {
             continue;
@@ -5151,18 +5207,20 @@
           ) && !containsOai;
 
           if (isKnownFalsePositiveText) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-              + `dataTestId=${dataTestId || '-'} className=${className || '-'} `
-              + `rect=${
-                rect
-                  ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                  : '-'
-              } textPreview=${textPreview || '-'} `
-              + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
-                isConversationHistory ? 1 : 0
-              } acceptedReason=- rejectedReason=known-false-positive-text`,
-            );
+            if (debugNativeUpload) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
+                + `dataTestId=${dataTestId || '-'} className=${className || '-'} `
+                + `rect=${
+                  rect
+                    ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
+                    : '-'
+                } textPreview=${textPreview || '-'} `
+                + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
+                  isConversationHistory ? 1 : 0
+                } acceptedReason=- rejectedReason=known-false-positive-text`,
+              );
+            }
             continue;
           }
 
@@ -5172,17 +5230,19 @@
 
           const isToastLike = isToastLikeErrorEl(el, text, dataTestId, className);
           if (!isToastLike) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-              + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
-                rect
-                  ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                  : '-'
-              } textPreview=${textPreview || '-'} `
-              + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
-                isConversationHistory ? 1 : 0
-              } acceptedReason=- rejectedReason=not-toast-like`,
-            );
+            if (debugNativeUpload) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
+                + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
+                  rect
+                    ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
+                    : '-'
+                } textPreview=${textPreview || '-'} `
+                + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
+                  isConversationHistory ? 1 : 0
+                } acceptedReason=- rejectedReason=not-toast-like`,
+              );
+            }
             continue;
           }
 
@@ -5217,6 +5277,104 @@
         ToolboxShell.appendLog(`[UPLOAD_NATIVE][DETECT_ERROR] error=${errText}`);
         return null;
       }
+    }
+
+    function getComposerUploadSnapshot(snapshotOptions = {}) {
+      const startedAt = typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now();
+      const snapExpectedNames = Array.isArray(snapshotOptions.expectedNames)
+        ? snapshotOptions.expectedNames.map((name) => String(name || '').trim()).filter(Boolean)
+        : [];
+      const snapRequireSendReady = snapshotOptions.requireSendReady === true;
+      let composerRoot = null;
+      let cards = [];
+      let hasCards = false;
+      let hasChip = false;
+      let stillUploading = false;
+      let attachmentReady = false;
+      let sendReady = false;
+      let filenames = [];
+      const critical = typeof window !== 'undefined'
+        && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+      try {
+        composerRoot = typeof findComposerRoot === 'function'
+          ? findComposerRoot()
+          : null;
+        cards = typeof findAttachmentCardsInComposer === 'function'
+          ? findAttachmentCardsInComposer({ allowFallbackScan: !critical })
+          : [];
+        hasCards = Array.isArray(cards) && cards.length > 0;
+        if (hasCards) {
+          const cardStatusText = (card) => {
+            if (critical) {
+              return [
+                card.textContent || '',
+                card.getAttribute('aria-label') || '',
+                card.getAttribute('title') || '',
+                card.getAttribute('data-testid') || '',
+              ].join(' ').replace(/\s+/g, ' ').trim();
+            }
+            return collectAttachmentCardStatusText(card);
+          };
+          const matchedCards = snapExpectedNames.length > 0
+            ? cards.filter((card) => {
+              const text = cardStatusText(card);
+              return snapExpectedNames.some((name) => fileNameEvidence(name, text));
+            })
+            : cards;
+          const cardsToCheck = matchedCards.length > 0 ? matchedCards : cards;
+          stillUploading = cardsToCheck.some((card) => isAttachmentCardUploading(card));
+          attachmentReady = !stillUploading;
+          filenames = cardsToCheck
+            .map((card) => {
+              const text = cardStatusText(card).replace(/\s+/g, ' ').trim();
+              const match = text.match(/[\w.-]+\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv|png|jpg|jpeg|webp|gif)\b/i);
+              return match && match[0] ? match[0] : '';
+            })
+            .filter(Boolean);
+        } else if (typeof countAttachmentChipsFast === 'function') {
+          hasChip = countAttachmentChipsFast() > 0;
+          attachmentReady = hasChip;
+          stillUploading = false;
+        }
+        if (!hasChip) {
+          hasChip = hasCards || attachmentReady;
+        }
+        if (snapRequireSendReady) {
+          sendReady = typeof isNativeSendReadyForUpload === 'function'
+            ? isNativeSendReadyForUpload()
+            : false;
+        } else {
+          sendReady = true;
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] getComposerUploadSnapshot failed', error);
+        ToolboxShell.appendLog(`[UPLOAD_NATIVE][SNAPSHOT_FAILED] error=${errText}`);
+      }
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+      if (typeof logPerfThrottled === 'function') {
+        logPerfThrottled(
+          'getComposerUploadSnapshot',
+          `[PERF][getComposerUploadSnapshot] cost=${costMs}ms cards=${cards.length} hasChip=${hasChip ? 1 : 0} uploading=${stillUploading ? 1 : 0} ready=${attachmentReady ? 1 : 0}`,
+        );
+      }
+      return {
+        composerRoot,
+        cards,
+        hasCards,
+        hasChip,
+        hasAttachmentChip: hasChip,
+        stillUploading,
+        attachmentReady,
+        sendReady,
+        filenames,
+      };
     }
 
     async function waitChatGPTNativeUploadSettled(files, options = {}) {
@@ -5269,29 +5427,6 @@
         return (Date.now() - stageStartedAt) >= timeoutForStage;
       }
 
-      function getHasAttachmentChipQuick() {
-        try {
-          if (typeof countAttachmentChips === 'function') {
-            return countAttachmentChips() > 0;
-          }
-        } catch (_e) {
-          console.error('[ChatGPT toolbox] getHasAttachmentChipQuick failed', _e);
-        }
-        return false;
-      }
-
-      function getHasAttachmentCards() {
-        try {
-          if (typeof findAttachmentCardsInComposer === 'function') {
-            const cards = findAttachmentCardsInComposer();
-            return Array.isArray(cards) && cards.length > 0;
-          }
-        } catch (_e) {
-          console.error('[ChatGPT toolbox] getHasAttachmentCards failed', _e);
-        }
-        return false;
-      }
-
       function advanceStage(nextStage) {
         stage = nextStage;
         stageIndex += 1;
@@ -5306,12 +5441,31 @@
         `[UPLOAD_NATIVE][STAGE] runId=${runId || '-'} stage=${stage} elapsed=0 timeout=${stageTimeoutMs[stage] || timeoutMs}`,
       );
 
+      let lastNativeErrorScanAt = 0;
+      const nativeErrorScanIntervalMs = 1200;
+
+      function getAdaptiveUploadPollMs() {
+        const elapsed = Date.now() - waitStartedAt;
+        if (elapsed < 2500) {
+          return Math.max(180, Math.min(300, Number(options.pollMs) || 220));
+        }
+        if (stage === 'waitUploadingStarted' || stage === 'waitReadyAttachment') {
+          return 500;
+        }
+        return 800;
+      }
+
       while (Date.now() < deadline) {
         if (isCancelled()) {
           return { ok: false, cancelled: true, reason: 'cancelled' };
         }
 
-        const nativeErr = detectChatGPTNativeUploadError();
+        let nativeErr = null;
+        const nowForNativeError = Date.now();
+        if (nowForNativeError - lastNativeErrorScanAt >= nativeErrorScanIntervalMs) {
+          lastNativeErrorScanAt = nowForNativeError;
+          nativeErr = detectChatGPTNativeUploadError();
+        }
         if (nativeErr) {
           ToolboxShell.appendLog(
             `[UPLOAD_NATIVE][FAILED] names=${fileNames || '-'} message=${nativeErr.message || '-'}`,
@@ -5319,22 +5473,15 @@
           return nativeErr;
         }
 
-        const stillUploading = typeof isAttachmentStillUploading === 'function'
-          && isAttachmentStillUploading({ expectedNames });
-        const sendReady = isNativeSendReadyForUpload();
-        const attachmentReady = typeof isAttachmentReadyInComposer === 'function'
-          && isAttachmentReadyInComposer({
-            expectedNames,
-            requireSendReady: false,
-          });
-
-        const hasAttachmentChip = !requireSendReady
-          ? (
-            attachmentReady
-            || getHasAttachmentChipQuick()
-          )
-          : true;
-        const hasCards = getHasAttachmentCards();
+        const snap = getComposerUploadSnapshot({
+          expectedNames,
+          requireSendReady,
+        });
+        const stillUploading = snap.stillUploading;
+        const sendReady = snap.sendReady;
+        const attachmentReady = snap.attachmentReady;
+        const hasAttachmentChip = requireSendReady ? true : snap.hasAttachmentChip;
+        const hasCards = snap.hasCards;
 
         const elapsed = Date.now() - waitStartedAt;
         if (elapsed - lastStageLogAt >= 2500) {
@@ -5362,10 +5509,20 @@
         } else if (stage === 'waitAttachmentCardCreated') {
           if (hasCards) {
             advanceStage(stageOrder[stageIndex + 1] || stage);
+          } else if (attachmentReady || hasAttachmentChip) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][STAGE_SKIP_CARD_CREATED] runId=${runId || '-'} reason=chip-ready-without-card file=${fileNames || '-'} attachmentReady=${attachmentReady ? 1 : 0} hasChip=${hasAttachmentChip ? 1 : 0}`,
+            );
+            advanceStage('waitReadyAttachment');
           }
         } else if (stage === 'waitUploadingStarted') {
           if (stillUploading) {
             advanceStage(stageOrder[stageIndex + 1] || stage);
+          } else if (attachmentReady || hasAttachmentChip) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][STAGE_SKIP_UPLOAD_START] runId=${runId || '-'} reason=already-ready file=${fileNames || '-'} attachmentReady=${attachmentReady ? 1 : 0} hasChip=${hasAttachmentChip ? 1 : 0}`,
+            );
+            advanceStage('waitReadyAttachment');
           }
         } else if (stage === 'waitUploadingSettled') {
           if (!stillUploading && hasAttachmentChip && (requireSendReady ? sendReady : true)) {
@@ -5375,6 +5532,7 @@
               return { ok: false, cancelled: true, reason: 'cancelled' };
             }
 
+            lastNativeErrorScanAt = 0;
             const nativeErrAfterStable = detectChatGPTNativeUploadError();
             if (nativeErrAfterStable) {
               ToolboxShell.appendLog(
@@ -5383,20 +5541,15 @@
               return nativeErrAfterStable;
             }
 
-            const stillUploadingAfterStable = typeof isAttachmentStillUploading === 'function'
-              && isAttachmentStillUploading({ expectedNames });
-            const sendReadyAfterStable = isNativeSendReadyForUpload();
-            const attachmentReadyAfterStable = typeof isAttachmentReadyInComposer === 'function'
-              && isAttachmentReadyInComposer({
-                expectedNames,
-                requireSendReady: false,
-              });
-            const hasAttachmentChipAfterStable = !requireSendReady
-              ? (
-                attachmentReadyAfterStable
-                || getHasAttachmentChipQuick()
-              )
-              : true;
+            const snapAfterStable = getComposerUploadSnapshot({
+              expectedNames,
+              requireSendReady,
+            });
+            const stillUploadingAfterStable = snapAfterStable.stillUploading;
+            const sendReadyAfterStable = snapAfterStable.sendReady;
+            const hasAttachmentChipAfterStable = requireSendReady
+              ? true
+              : snapAfterStable.hasAttachmentChip;
 
             // stage4 通过后，进入 stage5 做最终“ready”确认
             if (!stillUploadingAfterStable && hasAttachmentChipAfterStable && (requireSendReady ? sendReadyAfterStable : true)) {
@@ -5407,7 +5560,7 @@
           // 注意：requireSendReady=false 时，只要求 composer attachment 已 ready（或 chip 已出现）
           const readyOk = requireSendReady
             ? (attachmentReady && sendReady)
-            : (attachmentReady || getHasAttachmentChipQuick());
+            : (attachmentReady || hasAttachmentChip);
           if (readyOk) {
             ToolboxShell.appendLog(
               requireSendReady
@@ -5423,15 +5576,15 @@
           }
         }
 
-        await sleep(pollMs);
+        await sleep(getAdaptiveUploadPollMs());
       }
 
       const elapsedFinal = Date.now() - waitStartedAt;
-      const attachmentReadyAtTimeout = typeof isAttachmentReadyInComposer === 'function'
-        && isAttachmentReadyInComposer({
-          expectedNames,
-          requireSendReady: false,
-        });
+      const timeoutSnap = getComposerUploadSnapshot({
+        expectedNames,
+        requireSendReady: false,
+      });
+      const attachmentReadyAtTimeout = timeoutSnap.attachmentReady;
 
       if (attachmentReadyAtTimeout) {
         ToolboxShell.appendLog(
@@ -5827,7 +5980,9 @@
             })),
           });
 
-          const chipCountBefore = countAttachmentChips();
+          const chipCountBefore = typeof countAttachmentChipsFast === 'function'
+            ? countAttachmentChipsFast()
+            : countAttachmentChips();
 
           dispatchFilesToInputLegacy(input, cleanFiles);
 
@@ -6130,6 +6285,8 @@
       isAssistantLikelyBusy,
       attachFilesByFileInput,
       detectChatGPTNativeUploadError,
+      clearUploadCriticalMode,
+      getComposerUploadSnapshot,
       waitChatGPTNativeUploadSettled,
       clearAttachments,
       clearAttachmentsByKeys,
@@ -7263,7 +7420,42 @@
 
   function getBridgePageDisplayIdText() {
     const raw = String(BRIDGE_STATE.page_display_id || '').trim();
-    return raw || '-';
+    if (raw) {
+      return raw;
+    }
+
+    const pathname = String(location && location.pathname ? location.pathname : '');
+    let conversationId = '';
+
+    if (typeof parseConversationIdFromPath === 'function') {
+      try {
+        conversationId = String(parseConversationIdFromPath(pathname) || '');
+      } catch (err) {
+        console.error('[ChatGPT toolbox] parseConversationIdFromPath failed', err);
+      }
+    }
+
+    if (!conversationId) {
+      const match = pathname.match(/\/c\/([^/?#]+)/);
+      conversationId = match && match[1] ? String(match[1]) : '';
+    }
+
+    if (conversationId) {
+      const display = String(conversationId).slice(0, 8);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BRIDGE_STATE][page_display_id_fallback] conversation_id=${conversationId} display=${display}`,
+        );
+      } else {
+        console.log(
+          `[BRIDGE_STATE][page_display_id_fallback] conversation_id=${conversationId} display=${display}`,
+        );
+      }
+
+      return display;
+    }
+
+    return '-';
   }
 
   let toolboxTurnStatusRefreshTimer = 0;
@@ -9209,23 +9401,39 @@
       && !precheckSendability.realSendButtonEnabled
     ) {
       const payload = composerHasPayloadInInput();
-      const blocked = buildSendButtonWaitBlockedResult(source);
-      result.reason = blocked.reason;
-      result.retryable = blocked.retryable;
-      result.wait_send = blocked.wait_send === true;
-      result.wait_reply = blocked.wait_reply === true;
-      appendSendLogFields('[SEND][BLOCKED_WAIT_BUTTON]', {
-        reason: blocked.reason,
-        source,
-        attachmentUploading: payload.attachmentUploading ? 1 : 0,
-        ...getComposerSendDiagnostics(),
-      });
-      appendSendLogFields('[SEND][FAILED]', {
-        reason: result.reason,
-        attempts: 0,
-        last_error: responseState.response_state_reason || blocked.reason,
-      });
-      return applyStableSendRetryableFlags(result);
+      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+        ? getComposerSendButtonSnapshot({ silent: true })
+        : { ready: false };
+      const nativeReadyNow = sendSnap.ready === true && !payload.attachmentUploading;
+
+      if (nativeReadyNow) {
+        appendSendLogFields('[SEND][NATIVE_READY_OVERRIDE]', {
+          source,
+          reason: 'precheck_skip_wait_blocked',
+          hasAttachment: payload.hasAttachment ? 1 : 0,
+          attachmentUploading: payload.attachmentUploading ? 1 : 0,
+          sendButtonReady: sendSnap.ready ? 1 : 0,
+          nativeDisabled: sendSnap.ready ? 0 : 1,
+        });
+      } else {
+        const blocked = buildSendButtonWaitBlockedResult(source);
+        result.reason = blocked.reason;
+        result.retryable = blocked.retryable;
+        result.wait_send = blocked.wait_send === true;
+        result.wait_reply = blocked.wait_reply === true;
+        appendSendLogFields('[SEND][BLOCKED_WAIT_BUTTON]', {
+          reason: blocked.reason,
+          source,
+          attachmentUploading: payload.attachmentUploading ? 1 : 0,
+          ...getComposerSendDiagnostics(),
+        });
+        appendSendLogFields('[SEND][FAILED]', {
+          reason: result.reason,
+          attempts: 0,
+          last_error: responseState.response_state_reason || blocked.reason,
+        });
+        return applyStableSendRetryableFlags(result);
+      }
     }
 
     if (
@@ -9474,7 +9682,20 @@
 
         appendSendLogFields('[COMPOSER][SEND_BUTTON_WAIT]', getComposerSendDiagnostics());
         const buttonReady = await waitUntilPredicate(
-          () => evaluateComposerSendability(findChatGPTSendButton()).realSendButtonEnabled,
+          () => {
+            const attachmentUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+              && ComposerApi.isAttachmentStillUploading();
+            if (attachmentUploading) {
+              return false;
+            }
+            const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+              ? getComposerSendButtonSnapshot({ silent: true })
+              : { ready: false };
+            if (sendSnap.ready === true) {
+              return true;
+            }
+            return evaluateComposerSendability(findChatGPTSendButton()).realSendButtonEnabled;
+          },
           SEND_TEXT_BUTTON_WAIT_MS,
           SEND_TEXT_BUTTON_POLL_MS,
           shouldStop,

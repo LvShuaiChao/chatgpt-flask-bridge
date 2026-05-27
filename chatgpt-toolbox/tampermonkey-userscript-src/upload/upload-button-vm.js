@@ -622,13 +622,37 @@
       });
     }
 
+    if (failureHint) {
+      return finish({
+        phase: TaskPhase.FAILED,
+        text: '发送失败',
+        title: failureHint,
+        disabled: false,
+        allowCancel: false,
+        action: 'send-message',
+        buttonPhase: 'failed',
+      });
+    }
+
     const canSend = hasComposer || pendingAttachmentWaitSend || !!failureHint || !!successHint;
     if (!canSend || !hasComposer) {
       const hint = failureHint
         || (isResponding ? '助手正在回复，暂不可发送' : '当前页面未检测到可用输入框或发送按钮')
         || (successHint ? '消息已发送' : '');
 
-      if (failureHint || successHint) {
+      if (failureHint) {
+        return finish({
+          phase: TaskPhase.FAILED,
+          text: '发送失败',
+          title: hint || '发送失败',
+          disabled: false,
+          allowCancel: false,
+          action: 'send-message',
+          buttonPhase: 'failed',
+        });
+      }
+
+      if (successHint) {
         return finish({
           phase: TaskPhase.IDLE,
           text: '发送消息',
@@ -2071,6 +2095,34 @@
     const isSendBtn = typeof ButtonState !== 'undefined'
       && typeof ButtonState.isSendMessageToolboxButton === 'function'
       && ButtonState.isSendMessageToolboxButton(button);
+
+    // Auto-heal: avoid "clickable green send button but runtimeAction=none".
+    const resolvedPhase = normalizeTaskPhase(resolvedView.phase);
+    const resolvedRuntimeAction = String(resolvedView.action || '').trim();
+    if (
+      isSendBtn
+      && resolvedPhase === TaskPhase.IDLE
+      && resolvedRuntimeAction === 'none'
+      && resolvedView.disabled !== true
+    ) {
+      resolvedView = {
+        ...resolvedView,
+        action: 'send-message',
+        buttonPhase: 'idle',
+        preserveBaseColorWhenDisabled: false,
+      };
+
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][NONE_ACTION_AUTO_RECOVER] id=${button.id || '-'} reason=${reason || '-'}`
+        );
+      } else {
+        console.warn('[SEND_MESSAGE][NONE_ACTION_AUTO_RECOVER]', {
+          id: button.id || '-',
+          reason: reason || '-',
+        });
+      }
+    }
     const options = isSendBtn
       ? mapSendMessageViewStateToToolboxOptions(resolvedView, reason)
       : mapViewStateToToolboxOptions(resolvedView, reason);

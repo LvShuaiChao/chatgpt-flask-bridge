@@ -1546,6 +1546,7 @@
       panelSizeFull: 'panelSizeFull',
       panelSizeCompact: 'panelSizeCompact',
       compactMode: 'compactMode',
+      globalUploadActiveGroupId: 'globalUploadActiveGroupId',
       uploadLastActiveGroupId: 'uploadLastActiveGroupId',
       lastManualUploadGroupId: 'lastManualUploadGroupId',
       uploadBlobPersistEnabled: 'uploadBlobPersistEnabled',
@@ -1685,7 +1686,6 @@
 
   const TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS = Object.freeze([
     'activeTab',
-    'uploadActiveGroupId',
     'quickPromptCategory',
     'toolboxRouteKey',
     'page_instance_id',
@@ -1744,18 +1744,13 @@
       out.activeTab = activeTab;
     }
 
-    const uploadActiveGroupId = readToolboxStateField(input, 'uploadActiveGroupId', '');
-    if (uploadActiveGroupId) {
-      out.uploadActiveGroupId = uploadActiveGroupId;
-    }
-
     const quickPromptCategory = readToolboxStateField(input, 'quickPromptCategory', '');
     if (quickPromptCategory) {
       out.quickPromptCategory = quickPromptCategory;
     }
 
     TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS.forEach((key) => {
-      if (key === 'activeTab' || key === 'uploadActiveGroupId' || key === 'quickPromptCategory') {
+      if (key === 'activeTab' || key === 'quickPromptCategory') {
         return;
       }
       if (!Object.prototype.hasOwnProperty.call(input, key)) {
@@ -1973,11 +1968,6 @@
 
     writeAllToolboxPageStates(states);
     const activeTab = readToolboxStateField(states[toolboxRouteKey], 'activeTab', '');
-    const uploadActiveGroupId = readToolboxStateField(
-      states[toolboxRouteKey],
-      'uploadActiveGroupId',
-      '',
-    );
     let compactModeFlag = false;
     try {
       if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
@@ -1990,7 +1980,7 @@
     }
     toolboxPageStateAppendLog(
       `[TOOLBOX_TAB][SAVE] reason=${reason || '-'} toolboxRouteKey=${toolboxRouteKey} activeTab=${activeTab || '-'} `
-      + `uploadActiveGroupId=${uploadActiveGroupId || '-'} compactMode=${compactModeFlag ? 'true' : 'false'} `
+      + `compactMode=${compactModeFlag ? 'true' : 'false'} `
       + `isApplyingToolboxPageState=${isApplyingToolboxPageState ? 'true' : 'false'} `
       + `fields=${Object.keys(patch || {}).join(',')}`,
     );
@@ -2054,14 +2044,6 @@
 
   function collectCurrentToolboxPageState() {
     const state = {};
-
-    if (typeof UploadModule !== 'undefined' && typeof UploadModule.getStatus === 'function') {
-      const status = UploadModule.getStatus();
-      const groupId = String(status.activeGroupId || '').trim();
-      if (groupId) {
-        state.uploadActiveGroupId = groupId;
-      }
-    }
 
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.getActiveTab === 'function') {
       state.activeTab = ToolboxShell.getActiveTab();

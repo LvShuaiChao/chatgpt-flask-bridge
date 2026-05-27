@@ -8503,13 +8503,60 @@ const AutoQueueModule = (() => {
       return '未上传';
     }
 
+    function resolveAutoQueueUploadTaskState() {
+      if (typeof UploadModule === 'undefined') {
+        return null;
+      }
+
+      if (typeof UploadModule.getUploadTaskState === 'function') {
+        const task = UploadModule.getUploadTaskState();
+        if (task && typeof task === 'object') {
+          return task;
+        }
+      }
+
+      if (typeof UploadModule.getUnifiedRuntimeStatus === 'function') {
+        const runtime = UploadModule.getUnifiedRuntimeStatus('autoq:upload-task-state');
+        if (runtime && runtime.uploadTask && typeof runtime.uploadTask === 'object') {
+          return runtime.uploadTask;
+        }
+      }
+
+      return null;
+    }
+
+    function logUploadEntry(tag, details = {}) {
+      const safeTag = String(tag || 'UNKNOWN').trim() || 'UNKNOWN';
+      const safeSource = String(details.source || '-').trim() || '-';
+      const buttonId = String(details.buttonId || 'cgpt-autoq-start-upload').trim() || 'cgpt-autoq-start-upload';
+      const phase = resolveAutoQueueUploadButtonPhase();
+      const extraReason = details.reason ? ` reason=${String(details.reason)}` : '';
+      const extraRoute = details.route ? ` route=${String(details.route)}` : '';
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_ENTRY][${safeTag}] source=${safeSource} buttonId=${buttonId} phase=${phase}`
+        + ` manualUploadRunning=${state.manualUploadRunning ? 1 : 0}`
+        + ` uploadingFromAutoQueue=${state.uploadingFromAutoQueue ? 1 : 0}`
+        + ` autoQueueUploadStatus=${String(state.autoQueueUploadStatus || '-')}`
+        + extraReason
+        + extraRoute,
+      );
+    }
+
+    function restoreAutoQueueUploadIdleAfterBlocked(source, blockReason) {
+      const safeSource = String(source || 'unknown').trim() || 'unknown';
+      const safeReason = String(blockReason || 'blocked').trim() || 'blocked';
+
+      state.manualUploadRunning = false;
+      state.uploadingFromAutoQueue = false;
+      state.autoQueueUploadCancelRequested = false;
+      state.autoQueueUploadStatus = 'idle';
+      logUploadEntry('RESTORE_IDLE', { source: safeSource, reason: safeReason });
+      updateStatus(`start-upload-blocked-${safeReason}`);
+    }
+
     function resolveAutoQueueUploadButtonPhase() {
-      const uploadTask = (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.getUploadTaskState === 'function'
-      )
-        ? (UploadModule.getUploadTaskState() || null)
-        : null;
+      const uploadTask = resolveAutoQueueUploadTaskState();
       const taskPhase = uploadTask && uploadTask.phase
         ? String(uploadTask.phase || 'idle').trim().toLowerCase()
         : '';
@@ -8614,6 +8661,7 @@ const AutoQueueModule = (() => {
         }
       }
 
+      logUploadEntry('CLICK', { source: safeSource, buttonId: 'cgpt-autoq-start-upload' });
       ToolboxShell.appendLog(
         `[AUTOQUEUE][START_UPLOAD][CLICK] source=${safeSource} action=${normalizedAction}`,
       );
@@ -8645,17 +8693,36 @@ const AutoQueueModule = (() => {
         startUploadBtn = uploadBtn;
       }
 
-      try {
-        const uploadButtonPhase = resolveAutoQueueUploadButtonPhase();
-        if (uploadButtonPhase === 'cancelling' || uploadButtonPhase === 'uploading') {
-          ToolboxShell.appendLog(
-            `[AUTOQUEUE][START_UPLOAD][SKIP] reason=upload-phase phase=${uploadButtonPhase}`,
-          );
-          return;
-        }
+      const uploadTaskBeforeClick = resolveAutoQueueUploadTaskState();
+      const moduleUploadPhase = uploadTaskBeforeClick
+        ? String(uploadTaskBeforeClick.phase || 'idle').trim().toLowerCase()
+        : '';
+      if (moduleUploadPhase === 'cancelling' || moduleUploadPhase === 'uploading') {
+        ToolboxShell.appendLog(
+          `[AUTOQUEUE][START_UPLOAD][SKIP] reason=upload-phase phase=${moduleUploadPhase}`,
+        );
+        return;
+      }
 
+      const wasUploadingFromAutoQueue = !!state.uploadingFromAutoQueue;
+      state.autoQueueUploadCancelRequested = false;
+      state.manualUploadRunning = true;
+      state.uploadingFromAutoQueue = true;
+      state.autoQueueUploadStatus = 'uploading';
+      logUploadEntry('IMMEDIATE_BUSY', { source: safeSource, buttonId: 'cgpt-autoq-start-upload' });
+      if (uploadBtn && typeof setButtonDanger === 'function') {
+        setButtonDanger(uploadBtn, '上传中', {
+          title: '上传中',
+          allowCancel: true,
+          reason: 'manual-upload-click-immediate',
+        });
+      }
+      updateStatus('manual-upload-click-immediate');
+
+      try {
         if (isAutoQueueStartUploadButtonDisabled(uploadBtn)) {
           ToolboxShell.appendLog('[AUTOQUEUE][START_UPLOAD][SKIP] reason=button-disabled');
+          restoreAutoQueueUploadIdleAfterBlocked(safeSource, 'button-disabled');
           return;
         }
 
@@ -8681,9 +8748,9 @@ const AutoQueueModule = (() => {
           return;
         }
 
-        if (state.uploadingFromAutoQueue) {
+        if (wasUploadingFromAutoQueue) {
           ToolboxShell.appendLog('[AUTOQUEUE][START_UPLOAD][SKIP] reason=uploading-from-autoqueue');
-          updateStatus('start-blocked-uploading-from-autoqueue');
+          restoreAutoQueueUploadIdleAfterBlocked(safeSource, 'uploading-from-autoqueue');
           return;
         }
 
@@ -8713,14 +8780,14 @@ const AutoQueueModule = (() => {
           return;
         }
 
-        state.autoQueueUploadCancelRequested = false;
-        state.manualUploadRunning = true;
-        state.uploadingFromAutoQueue = true;
-        state.autoQueueUploadStatus = 'uploading';
         logUploadBatchState('manual-upload-start');
-        updateStatus();
 
         const uploadRoute = 'UploadModule.startManualUploadOnlyFlow';
+        logUploadEntry('ROUTE', {
+          source: safeSource,
+          buttonId: 'cgpt-autoq-start-upload',
+          route: uploadRoute,
+        });
         ToolboxShell.appendLog(`[AUTOQUEUE][START_UPLOAD][ROUTE] target=${uploadRoute}`);
 
         const result = await UploadModule.startManualUploadOnlyFlow({
@@ -8761,6 +8828,11 @@ const AutoQueueModule = (() => {
           state.autoQueueUploadStatus = 'failed';
         }
 
+        logUploadEntry('DONE', {
+          source: safeSource,
+          buttonId: 'cgpt-autoq-start-upload',
+          reason: reason || (result && result.ok ? 'ok' : 'failed'),
+        });
         ToolboxShell.appendLog('[AUTOQUEUE][START_UPLOAD][DONE]');
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
@@ -9687,12 +9759,7 @@ const AutoQueueModule = (() => {
       const phase = String(state.phase || AUTO_QUEUE_PHASES.IDLE);
       const phaseStatusText = String(state.phaseReason || context.phase || phase || '').trim()
         || phase;
-      const uploadTask = (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.getUploadTaskState === 'function'
-      )
-        ? (UploadModule.getUploadTaskState() || {})
-        : {};
+      const uploadTask = resolveAutoQueueUploadTaskState() || {};
       const uploadTaskPhase = String(uploadTask.phase || 'idle').trim().toLowerCase();
       const uploading = !!context.uploading
         || uploadTaskPhase === 'uploading'
@@ -12070,7 +12137,11 @@ const AutoQueueModule = (() => {
         ok: sendUnifiedResult && sendUnifiedResult.ok === true,
         reason: String((sendUnifiedResult && sendUnifiedResult.reason) || 'unknown'),
         retryable: sendUnifiedResult && sendUnifiedResult.retryable === true,
-        wait: sendUnifiedResult && sendUnifiedResult.wait_reply === true,
+        wait: sendUnifiedResult && (
+          sendUnifiedResult.wait_reply === true
+          || sendUnifiedResult.wait_send === true
+        ),
+        wait_send: sendUnifiedResult && sendUnifiedResult.wait_send === true,
         wait_reply: sendUnifiedResult && sendUnifiedResult.wait_reply === true,
       };
 

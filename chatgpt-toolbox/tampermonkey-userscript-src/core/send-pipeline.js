@@ -242,6 +242,19 @@
     return check;
   }
 
+  function sendPipelineNativeSendReadyNow() {
+    const payload = typeof composerHasPayloadInInput === 'function'
+      ? composerHasPayloadInInput()
+      : { attachmentUploading: false };
+    if (payload.attachmentUploading) {
+      return false;
+    }
+    const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+      ? getComposerSendButtonSnapshot({ silent: true })
+      : { ready: false };
+    return sendSnap.ready === true;
+  }
+
   function sendPipelineIsNativeSendButtonReady(sendSnap, capability) {
     if (!sendSnap || sendSnap.found !== true || sendSnap.ready !== true) {
       return false;
@@ -367,12 +380,29 @@
           || capability.responseStateReason
           || '-';
 
+        const locationPathname = String(location && location.pathname ? location.pathname : '');
+        const pageId = typeof getBridgePageDisplayIdText === 'function'
+          ? getBridgePageDisplayIdText()
+          : '-';
+
+        let conversationId = '';
+        if (typeof parseConversationIdFromPath === 'function') {
+          conversationId = String(parseConversationIdFromPath(locationPathname) || '');
+        }
+        if (!conversationId) {
+          const match = locationPathname.match(/\/c\/([^/?#]+)/);
+          conversationId = match && match[1] ? String(match[1]) : '';
+        }
+
         const line = [
           '[SEND_READY][CHECK]',
           `source=${String(ctx.source || '-')}`,
           `mode=${String(ctx.mode || '-')}`,
+          `page_id=${String(pageId || '-')}`,
+          `conversation_id=${String(conversationId || '-')}`,
           `input_found=${capability.has_composer || capability.hasComposer ? 1 : 0}`,
           `input_text_len=${composerText.trim().length}`,
+          `location_pathname=${locationPathname}`,
           `native_send_button_found=${nativeButtonFound ? 1 : 0}`,
           `native_send_button_disabled=${nativeButtonDisabled ? 1 : 0}`,
           `native_send_button_visible=${nativeButtonVisible ? 1 : 0}`,
@@ -835,13 +865,19 @@
             { source },
           );
           if (!attachWait || attachWait.ok !== true) {
-            result.reason = manualSend
-              ? 'attachment_still_uploading'
-              : ((attachWait && attachWait.reason) || 'attachment_not_ready');
-            result.retryable = manualSend
-              ? false
-              : sendPipelineIsRetryableReason(result.reason);
-            result.wait_send = manualSend ? false : result.retryable;
+            if (manualSend) {
+              result.reason = 'waiting_attachment_upload_done';
+              result.retryable = true;
+              result.wait_send = true;
+              result.wait_reply = false;
+              sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+                reason: result.reason,
+              });
+              return result;
+            }
+            result.reason = (attachWait && attachWait.reason) || 'attachment_not_ready';
+            result.retryable = sendPipelineIsRetryableReason(result.reason);
+            result.wait_send = result.retryable;
             sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
               reason: result.reason,
               retryable: result.retryable,
@@ -1033,23 +1069,15 @@
         }
 
         if (attachmentUploading) {
-          if (manualSend && typeof waitAttachmentsStableForSend === 'function') {
-            const manualAttachWaitMs = attachmentWaitTimeoutMs > 0
-              ? attachmentWaitTimeoutMs
-              : SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS;
-            const attachWait = await waitAttachmentsStableForSend(
-              manualAttachWaitMs,
-              shouldStop,
-              { source },
-            );
-            if (!attachWait || attachWait.ok !== true) {
-              result.reason = 'attachment_still_uploading';
-              result.retryable = false;
-              result.wait_send = false;
-              result.wait_reply = false;
-              sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
-              return result;
-            }
+          if (manualSend) {
+            result.reason = 'waiting_attachment_upload_done';
+            result.retryable = true;
+            result.wait_send = true;
+            result.wait_reply = false;
+            sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+              reason: result.reason,
+            });
+            return result;
           } else if (!allowWaitPayload) {
             result.reason = 'attachment_still_uploading';
             result.retryable = false;
@@ -1129,6 +1157,20 @@
         buttonWait = await sendPipelineWaitSendButtonReady(ctx, buttonWaitOptions);
       }
 
+      if (!buttonWait.ok && sendPipelineNativeSendReadyNow()) {
+        sendPipelineLog('[SEND_PIPELINE][NATIVE_READY_OVERRIDE]', {
+          source: ctx.source,
+          mode: ctx.mode,
+          reason: 'native_send_button_ready_skip_button_wait_failure',
+          prior_reason: String(buttonWait.reason || '-'),
+        });
+        buttonWait = {
+          ok: true,
+          reason: 'send_button_ready',
+          useEnterFallback: false,
+        };
+      }
+
       if (!buttonWait.ok) {
         result.reason = String(buttonWait.reason || 'send_button_not_found');
         if (buttonWait.wait_reply) {
@@ -1181,7 +1223,7 @@
         && typeof shouldBlockEnterFallbackForComposer === 'function'
         && shouldBlockEnterFallbackForComposer();
 
-      if (blockEnterForSend) {
+      if (blockEnterForSend && !sendPipelineNativeSendReadyNow()) {
         if (typeof logSendPreSendGate === 'function') {
           logSendPreSendGate({ source, mode });
         }
@@ -1196,6 +1238,13 @@
           wait_reply: result.wait_reply,
         }));
         return result;
+      }
+
+      if (blockEnterForSend && sendPipelineNativeSendReadyNow()) {
+        sendPipelineLog('[SEND_PIPELINE][NATIVE_READY_OVERRIDE]', Object.assign({}, ctx, {
+          reason: 'native_send_button_ready_skip_enter_fallback_block',
+        }));
+        useEnterFallback = false;
       }
 
       if (typeof logSendPreSendGate === 'function') {

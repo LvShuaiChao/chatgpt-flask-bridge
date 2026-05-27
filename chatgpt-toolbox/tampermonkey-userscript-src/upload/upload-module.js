@@ -19,10 +19,12 @@
     const SEND_STABLE_RETRY_LIMIT = 30;
     const SEND_STABLE_RETRY_INTERVAL_MS = 300;
     const SEND_WAIT_TIMEOUT_MS = 60 * 1000;
+    const SEND_WAIT_REPLY_TIMEOUT_MS = 10 * 60 * 1000;
+    const PENDING_SEND_AFTER_REPLY_TIMEOUT_MS = 5 * 60 * 1000;
     /** 手动点击「发送消息」：总等待上限（含重试），超时即失败。 */
-    const MANUAL_SEND_TIMEOUT_MS = 5000;
+    const MANUAL_SEND_TIMEOUT_MS = 30000;
     /** 手动发送时 composer 附件仍在上传的最大等待。 */
-    const MANUAL_SEND_ATTACHMENT_WAIT_MS = 10000;
+    const MANUAL_SEND_ATTACHMENT_WAIT_MS = 20000;
     const MANUAL_SEND_RETRY_INTERVAL_MS = 400;
     const MANUAL_SEND_FAILURE_HINT_CLEAR_MS = 1200;
     const PRE_SEND_OPPORTUNITY_POLL_MS = 1000;
@@ -68,6 +70,7 @@
       waitingReplyTimer: null,
       pendingSendAfterReply: false,
       pendingSendAfterReplySource: '',
+      pendingSendAfterReplyStartedAt: 0,
       pendingSendRetrying: false,
       replyWaitSawBusy: false,
       replyWaitAssistantCountBefore: 0,
@@ -163,6 +166,10 @@
     let persistQueuePromise = Promise.resolve();
     let uploadModuleInitPromise = Promise.resolve();
     let uploadGroupsInitResolved = false;
+    const UPLOAD_GLOBAL_SYNC_KEY = 'cgpt_toolbox_upload_global_sync_v1';
+    let uploadBroadcastChannel = null;
+    let uploadGlobalSyncInitialized = false;
+    let pendingUploadGlobalSyncMessage = null;
     const uploadTimers = createTimerRegistry('UPLOAD');
     let quickPromptRenderSignature = '';
     let persistQueueThrottleTimer = 0;
@@ -1484,7 +1491,27 @@
 
     function isManualSendMessageSource(source) {
       const src = String(source || '').trim();
-      return /^(button|shortcut|send-message|manual-send-message)/i.test(src);
+      return /^(button|shortcut|send-message|manual-send-message|enter-hotkey)/i.test(src);
+    }
+
+    function normalizeSendMessageSource(source, normalizedAction = 'send-message') {
+      const rawSource = String(source || '').trim() || 'unknown';
+      if (normalizedAction === 'send-message') {
+        if (
+          rawSource === 'delegated-click'
+          || rawSource === 'root-delegated-click'
+          || rawSource === 'button'
+          || rawSource === 'unknown'
+          || /^document:/i.test(rawSource)
+        ) {
+          return 'manual-send-message-button';
+        }
+      }
+      return rawSource;
+    }
+
+    function getManualSendTimeoutSeconds() {
+      return Math.ceil(Number(MANUAL_SEND_TIMEOUT_MS || 0) / 1000);
     }
 
     function getUnreadableLocalQueueItems() {
@@ -1672,6 +1699,7 @@
 
         const ok = await sendCurrentMessageFromUploadPanel(source, runId, flowRun, {
           text: unifiedText,
+          rawSource: options.rawSource || source,
           manualSend: isManualSend,
           sendDeadlineMs: Date.now() + timeoutMs,
         });
@@ -1687,6 +1715,11 @@
         ToolboxShell.appendLog(
           `[SEND_MESSAGE_SHARED][DONE] source=${source} ok=${ok ? 1 : 0}`,
         );
+
+        if (ok === true) {
+          // 当发送按钮已经点击且消息进入发送流，上传流程的“忙碌态”不应继续悬挂。
+          clearUploadBusyAfterMessageSent('send-message-shared-ok');
+        }
 
         if (ok !== true) {
           const panelReason = String(lastUploadSendPanelFailReason || 'send-message-button-core-failed').trim()
@@ -4966,7 +4999,7 @@
           q.uploadName = '';
           if (!q.message) {
             q.message = q.persistedAttached
-              ? '上次已上传，刷新后请点击上传'
+              ? '全局文件已绑定，可在当前页上传'
               : '页面附件区未检测到，请再次点击上传';
           }
           changed = true;
@@ -5258,6 +5291,9 @@
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][clear-persisted-blob:done] changed=${changed}`,
       );
+      if (changed > 0) {
+        broadcastUploadGlobalStateChanged('clear-persisted-blob', { changed });
+      }
     }
 
     function isProtectedUploadGroup(group, activeGroupId) {
@@ -5972,7 +6008,8 @@
             `[UPLOAD_GROUP][CREATE_DEFAULT_GROUP] store=${APP.uploadGroupStore} activeGroupId=${state.activeGroupId || '-'}`,
           );
           await persistGroups();
-          saveCurrentToolboxBaseState('upload-default-group-created');
+          saveGlobalUploadActiveGroupId(state.activeGroupId, 'upload-default-group-created');
+          saveUploadLastActiveGroupId(state.activeGroupId, 'upload-default-group-created');
           ensureActiveUploadGroupIdValid('load-groups-default-created');
           syncUploadGroupAppState();
           appendUploadGroupLog('INIT', { stage: 'loadGroups:created-default' });
@@ -5989,9 +6026,13 @@
           reason: 'load-groups',
         });
         state.activeGroupId = resolved.resolvedGroupId || '';
+        if (state.activeGroupId) {
+          saveGlobalUploadActiveGroupId(state.activeGroupId, 'load-groups');
+          saveUploadLastActiveGroupId(state.activeGroupId, 'load-groups');
+        }
 
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][active-resolve] pageGroup=${resolved.pageGroupId || '-'} globalGroup=${resolved.uploadLastActiveGroupId || '-'} active=${state.activeGroupId || '-'} source=${resolved.reason || '-'}`,
+          `[UPLOAD_GROUP][active-resolve] pageGroup=${resolved.pageGroupId || '-'} globalGroup=${resolved.globalUploadActiveGroupId || resolved.uploadLastActiveGroupId || '-'} active=${state.activeGroupId || '-'} source=${resolved.reason || '-'}`,
         );
 
         ensureActiveUploadGroupIdValid('load-groups');
@@ -6107,7 +6148,7 @@
         } else {
           item.persistedAttached = true;
           item.state = UploadState.IDLE;
-          item.message = '上次已上传，刷新后请点击上传';
+          item.message = '全局文件已绑定，可在当前页上传';
           item.uploadName = '';
         }
       } else {
@@ -6522,6 +6563,7 @@
 
       const pageGroupId = String(readToolboxStateField(pageState, 'uploadActiveGroupId', '')).trim();
       const lastManualGroupId = getLastManualUploadGroupId();
+      const globalUploadActiveGroupId = getGlobalUploadActiveGroupId();
       const uploadLastActiveGroupId = getUploadLastActiveGroupId();
       const stateActiveGroupId = String(state.activeGroupId || '').trim();
       const firstGroupId = groups[0] && groups[0].id
@@ -6567,10 +6609,11 @@
 
       if (!resolvedGroupId) {
         const fallthroughCandidates = [
-          { id: pageGroupId, reason: 'page-state' },
-          { id: lastManualGroupId, reason: 'last-manual' },
+          { id: globalUploadActiveGroupId, reason: 'global-upload-active' },
           { id: uploadLastActiveGroupId, reason: 'upload-last-active' },
+          { id: lastManualGroupId, reason: 'last-manual' },
           { id: stateActiveGroupId, reason: 'state-active' },
+          { id: pageGroupId, reason: 'page-state-legacy' },
           { id: firstGroupId, reason: 'first-group' },
         ];
 
@@ -6611,6 +6654,7 @@
         reason,
         savedProjectKey,
         pageGroupId,
+        globalUploadActiveGroupId,
         lastManualGroupId,
         uploadLastActiveGroupId,
         stateActiveGroupId,
@@ -6624,7 +6668,8 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
           `[MULTI_UPLOAD][SELECTION][RESOLVE] reason=${reason} savedProjectKey=${savedProjectKey || '-'} `
-          + `pageGroupId=${pageGroupId || '-'} lastManualGroupId=${lastManualGroupId || '-'} `
+          + `pageGroupId=${pageGroupId || '-'} globalUploadActiveGroupId=${globalUploadActiveGroupId || '-'} `
+          + `lastManualGroupId=${lastManualGroupId || '-'} `
           + `uploadLastActiveGroupId=${uploadLastActiveGroupId || '-'} stateActiveGroupId=${stateActiveGroupId || '-'} `
           + `resolvedGroupId=${resolvedGroupId || '-'} resolvedFolderKey=${resolvedFolderKey || '-'}`,
         );
@@ -6680,9 +6725,135 @@
       );
     }
 
+    function saveGlobalUploadActiveGroupId(groupId, reason = '') {
+      const id = String(groupId || '').trim();
+      if (!id) {
+        return;
+      }
+      if (!state.groups.some((g) => g.id === id)) {
+        return;
+      }
+      MemoryManager.set(MemoryManager.KEYS.globalUploadActiveGroupId, id);
+      ToolboxShell.appendLog(
+        `[UPLOAD_PAGE_STATE][save-global-upload-active] reason=${reason || '-'} groupId=${id}`,
+      );
+    }
+
+    function getGlobalUploadActiveGroupId() {
+      const globalId = String(
+        MemoryManager.get(MemoryManager.KEYS.globalUploadActiveGroupId, '') || '',
+      ).trim();
+      if (state.groups.some((g) => g.id === globalId)) {
+        return globalId;
+      }
+      return getUploadLastActiveGroupId();
+    }
+
     function getUploadLastActiveGroupId() {
       const id = String(MemoryManager.get(MemoryManager.KEYS.uploadLastActiveGroupId, '') || '').trim();
       return state.groups.some((g) => g.id === id) ? id : '';
+    }
+
+    function broadcastUploadGlobalStateChanged(reason, payload = {}) {
+      const message = {
+        type: 'upload-global-state-changed',
+        reason: String(reason || '').trim() || 'unknown',
+        activeGroupId: String(state.activeGroupId || '').trim(),
+        updatedAt: Date.now(),
+        payload: payload && typeof payload === 'object' ? payload : {},
+      };
+      ToolboxShell.appendLog(
+        `[UPLOAD_GLOBAL_SYNC][broadcast] reason=${message.reason} activeGroupId=${message.activeGroupId || '-'} running=${state.running ? 1 : 0}`,
+      );
+      try {
+        localStorage.setItem(UPLOAD_GLOBAL_SYNC_KEY, JSON.stringify(message));
+      } catch (error) {
+        console.error('[ChatGPT toolbox] upload global sync localStorage write failed', error);
+      }
+      if (uploadBroadcastChannel) {
+        try {
+          uploadBroadcastChannel.postMessage(message);
+        } catch (error) {
+          console.error('[ChatGPT toolbox] upload global sync postMessage failed', error);
+        }
+      }
+    }
+
+    async function applyUploadGlobalSyncMessage(message, source) {
+      const incomingGroupId = String(message && message.activeGroupId || '').trim();
+      if (incomingGroupId && incomingGroupId !== state.activeGroupId && !state.groups.some((g) => g.id === incomingGroupId)) {
+        await loadGroups();
+      }
+      if (incomingGroupId && incomingGroupId !== state.activeGroupId) {
+        state.activeGroupId = incomingGroupId;
+        saveGlobalUploadActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
+        saveUploadLastActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
+      }
+      await loadGroups();
+      await loadQueueForActiveGroup();
+      await refreshUploadGroupCounts();
+      render();
+      ToolboxShell.appendLog(
+        `[UPLOAD_GLOBAL_SYNC][applied] source=${source || '-'} activeGroupId=${state.activeGroupId || '-'} queue=${getActiveGroupFiles().length}`,
+      );
+    }
+
+    async function handleUploadGlobalSyncMessage(message, source) {
+      if (!message || message.type !== 'upload-global-state-changed') {
+        return;
+      }
+      const incomingGroupId = String(message.activeGroupId || '').trim();
+      ToolboxShell.appendLog(
+        `[UPLOAD_GLOBAL_SYNC][receive] source=${source || '-'} reason=${message.reason || '-'} activeGroupId=${incomingGroupId || '-'} running=${state.running ? 1 : 0}`,
+      );
+      if (state.running) {
+        pendingUploadGlobalSyncMessage = message;
+        ToolboxShell.appendLog(
+          `[UPLOAD_GLOBAL_SYNC][skip-running] source=${source || '-'} reason=${message.reason || '-'} activeGroupId=${incomingGroupId || '-'}`
+        );
+        return;
+      }
+      await applyUploadGlobalSyncMessage(message, source);
+    }
+
+    function flushPendingUploadGlobalSync(reason = '') {
+      if (!pendingUploadGlobalSyncMessage || state.running) {
+        return;
+      }
+      const message = pendingUploadGlobalSyncMessage;
+      pendingUploadGlobalSyncMessage = null;
+      void handleUploadGlobalSyncMessage(message, `pending:${reason || 'unknown'}`).catch((error) => {
+        console.error('[ChatGPT toolbox] flushPendingUploadGlobalSync failed', error);
+      });
+    }
+
+    function initUploadGlobalSync() {
+      if (uploadGlobalSyncInitialized) {
+        return;
+      }
+      uploadGlobalSyncInitialized = true;
+      if ('BroadcastChannel' in window) {
+        uploadBroadcastChannel = new BroadcastChannel(UPLOAD_GLOBAL_SYNC_KEY);
+        uploadBroadcastChannel.onmessage = (event) => {
+          void handleUploadGlobalSyncMessage(event.data, 'broadcast-channel');
+        };
+      }
+      window.addEventListener('storage', (event) => {
+        if (!event || event.key !== UPLOAD_GLOBAL_SYNC_KEY || !event.newValue) {
+          return;
+        }
+        let data = null;
+        try {
+          data = JSON.parse(event.newValue || 'null');
+        } catch (error) {
+          console.error('[ChatGPT toolbox] parse upload global sync storage event failed', error);
+          ToolboxShell.appendLog(
+            `[UPLOAD_GLOBAL_SYNC][parse-failed] error=${error && error.message ? error.message : String(error)}`
+          );
+          return;
+        }
+        void handleUploadGlobalSyncMessage(data, 'storage');
+      });
     }
 
     async function switchGroup(groupId, options = {}) {
@@ -6717,24 +6888,17 @@
         await schedulePersistQueue();
 
         state.activeGroupId = groupId;
-
-        await loadQueueForActiveGroup();
-
-        if (options.saveGlobalFallback === true) {
-          saveUploadLastActiveGroupId(groupId, options.reason || 'switch-group');
-        }
+        saveGlobalUploadActiveGroupId(groupId, options.reason || 'switch-group');
+        saveUploadLastActiveGroupId(groupId, options.reason || 'switch-group');
 
         if (options.saveLastManual !== false) {
           saveLastManualUploadGroupId(groupId, options.reason || 'switch-group');
           lastManualUploadGroupAt = Date.now();
-          saveUploadLastActiveGroupId(groupId, options.reason || 'switch-group');
         }
 
+        await persistGroups();
+        await loadQueueForActiveGroup();
         saveMultiUploadSelectionForActiveGroup();
-
-        if (options.savePageState !== false) {
-          saveCurrentToolboxBaseState(options.reason || 'active-upload-group-change');
-        }
 
         render();
         setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
@@ -6748,6 +6912,9 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][switch:ok] from=${prevActiveGroupId || '-'} to=${groupId || '-'} count=${getActiveGroupFiles().length} selected=${getSelectedFileIdForActiveGroup() || '-'}`,
         );
+        broadcastUploadGlobalStateChanged('switch-group', {
+          sourceReason: options.reason || 'switch-group',
+        });
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
@@ -6826,11 +6993,7 @@
 
         saveLastManualUploadGroupId(group.id, 'create-group-inline');
         saveUploadLastActiveGroupId(group.id, 'create-group-inline');
-
-        saveCurrentToolboxBaseState('create-group-inline');
-        ToolboxShell.appendLog(
-          `[UPLOAD_PAGE_STATE][save-page-active-group] reason=create-group-inline groupId=${group.id}`,
-        );
+        saveGlobalUploadActiveGroupId(group.id, 'create-group-inline');
 
         if (managePanelEl && managePanelEl.classList.contains('cgpt-toolbox-hidden')) {
           managePanelEl.classList.remove('cgpt-toolbox-hidden');
@@ -6849,6 +7012,7 @@
 
         setStatus(`已新建分组：${group.name}`, 'success');
         ToolboxShell.appendLog(`[UPLOAD_GROUP][create-inline:ok] groupId=${group.id} name=${group.name}`);
+        broadcastUploadGlobalStateChanged('create-group', { groupId: group.id });
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
@@ -7035,6 +7199,7 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][rename-inline:ok] groupId=${group.id || '-'} oldName=${prevName || '-'} newName=${group.name || '-'}`,
         );
+        broadcastUploadGlobalStateChanged('rename-group', { groupId: group.id });
 
         return true;
       } catch (e) {
@@ -7167,6 +7332,10 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][clear-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'} removed=${prevQueue.length}`,
         );
+        broadcastUploadGlobalStateChanged('clear-group', {
+          groupId: group.id,
+          removed: prevQueue.length,
+        });
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
@@ -7245,8 +7414,6 @@
         await persistGroups();
         await loadQueueForActiveGroup();
 
-        saveCurrentToolboxBaseState('delete-group-inline');
-
         try {
           await deleteGroupQueue(group.id);
         } catch (cleanupErr) {
@@ -7274,7 +7441,7 @@
         }
         saveLastManualUploadGroupId(state.activeGroupId, 'delete-group-inline');
         saveUploadLastActiveGroupId(state.activeGroupId, 'delete-group-inline');
-        saveCurrentToolboxBaseState('delete-group-inline');
+        saveGlobalUploadActiveGroupId(state.activeGroupId, 'delete-group-inline');
 
         if (!state.groups.some((g) => g.id === state.activeGroupId)) {
           console.warn('[UPLOAD_GROUP][delete-inline:active-invalid-fallback]', {
@@ -7296,6 +7463,10 @@
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][delete-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'}`,
         );
+        broadcastUploadGlobalStateChanged('delete-group', {
+          groupId: group.id,
+          nextActiveGroupId: state.activeGroupId || '',
+        });
         void cleanupUploadDbGarbage('delete-active-group');
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
@@ -7381,6 +7552,10 @@
         ToolboxShell.appendLog(
           `[UPLOAD_DIAG][remove-file:ok] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'}`,
         );
+        broadcastUploadGlobalStateChanged('remove-file', {
+          groupId: activeGroupId || '',
+          fileId,
+        });
 
         return true;
       } catch (e) {
@@ -7577,12 +7752,16 @@
 
         await loadQueueForActiveGroup();
         await refreshUploadGroupCounts();
-
-        saveCurrentToolboxBaseState('import-groups-and-queue');
+        saveGlobalUploadActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
+        saveUploadLastActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][import:ok] groups=${state.groups.length} queue=${incomingQueue.length} activeGroupId=${state.activeGroupId || '-'}`,
         );
+        broadcastUploadGlobalStateChanged('import-groups', {
+          groups: state.groups.length,
+          queue: incomingQueue.length,
+        });
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
@@ -8099,8 +8278,10 @@
       }
 
       const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
-      const pollMs = Number(options.pollMs) || 500;
-      const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
+      // 上传关键期缩短轮询间隔，提高对小文件上传完成的响应速度。
+      const pollMs = Number(options.pollMs) || 200;
+      // 稳定窗口不宜过长，以免在已经 ready 的情况下仍长时间显示“上传中”。
+      const stableMs = Math.max(500, Math.min(900, Number(options.stableMs) || 700));
       const signal = options.signal;
       const isCancelled = typeof options.isCancelled === 'function'
         ? options.isCancelled
@@ -13754,6 +13935,12 @@
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][addFiles:done] count=${addedCount} queue=${getActiveGroupFiles().length} group=${state.activeGroupId || '-'}`,
       );
+      if (addedCount > 0) {
+        broadcastUploadGlobalStateChanged('add-files', {
+          groupId: state.activeGroupId || '',
+          addedCount,
+        });
+      }
       syncUploadGroupAppState();
       appendUploadGroupLog('ADD_FILE', {
         addedCount,
@@ -14170,6 +14357,11 @@
           await schedulePersistQueue();
           await refreshUploadGroupCounts();
           render();
+          broadcastUploadGlobalStateChanged('rebind-file', {
+            id,
+            groupId: state.activeGroupId || '',
+            success: false,
+          });
 
           setStatus('重新绑定失败：未获得本地文件句柄，无法保证从磁盘读取');
           ToolboxShell.appendLog(
@@ -14190,6 +14382,11 @@
         await refreshUploadGroupCounts();
 
         render();
+        broadcastUploadGlobalStateChanged('rebind-file', {
+          id,
+          groupId: state.activeGroupId || '',
+          success: true,
+        });
 
         setStatus(`已重新绑定文件：${q.name}`);
         ToolboxShell.appendLog(
@@ -15070,6 +15267,7 @@
             subphase: task.subphase || '',
           });
         }
+        scheduleRenderUpload(`send-task:${nextPhase}:${reason || '-'}`);
       }
 
       syncLegacySendFlagsFromSendTask(reason);
@@ -15080,19 +15278,65 @@
       const phase = String(state.sendTask && state.sendTask.phase || 'idle').trim().toLowerCase();
       const prevWaitingReply = !!state.waitingReply;
       const prevMessageSending = !!state.messageSending;
+      const prevWaitingSend = !!state.waitingSend;
+      const prevAutoSendWaiting = !!state.autoSendWaiting;
+      const prevWaitingRealSendButton = !!state.waitingRealSendButton;
 
       state.waitingReply = phase === 'waiting_reply';
       state.messageSending = phase === 'sending';
 
+      if (phase === 'waiting_send' || phase === 'waiting_ready') {
+        state.waitingSend = true;
+        state.autoSendWaiting = true;
+        state.waitingRealSendButton = true;
+      } else if (phase === 'sending') {
+        state.waitingSend = false;
+        state.autoSendWaiting = false;
+        state.waitingRealSendButton = false;
+      } else if (phase === 'waiting_reply') {
+        state.waitingSend = false;
+        state.autoSendWaiting = false;
+        state.waitingRealSendButton = false;
+      } else if (phase === 'idle') {
+        state.waitingSend = false;
+        state.autoSendWaiting = false;
+        state.waitingRealSendButton = false;
+      }
+
       if (
-        (prevWaitingReply !== state.waitingReply || prevMessageSending !== state.messageSending)
+        (
+          prevWaitingReply !== state.waitingReply
+          || prevMessageSending !== state.messageSending
+          || prevWaitingSend !== state.waitingSend
+          || prevAutoSendWaiting !== state.autoSendWaiting
+          || prevWaitingRealSendButton !== state.waitingRealSendButton
+        )
         && reason
       ) {
         ToolboxShell.appendLog(
           `[SEND_STATE][LEGACY_FLAGS] phase=${phase} waitingReply=${state.waitingReply ? 1 : 0} `
-          + `messageSending=${state.messageSending ? 1 : 0} reason=${reason}`,
+          + `messageSending=${state.messageSending ? 1 : 0} waitingSend=${state.waitingSend ? 1 : 0} `
+          + `autoSendWaiting=${state.autoSendWaiting ? 1 : 0} `
+          + `waitingRealSendButton=${state.waitingRealSendButton ? 1 : 0} reason=${reason}`,
         );
       }
+    }
+
+    function isUploadNativeSendReadyForSendNow() {
+      const attachmentUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+      if (attachmentUploading) {
+        return false;
+      }
+
+      if (typeof getComposerSendButtonSnapshot === 'function') {
+        const sendSnap = getComposerSendButtonSnapshot({ silent: true });
+        if (sendSnap && sendSnap.ready === true) {
+          return true;
+        }
+      }
+
+      return probeSendMessageNativeReady();
     }
 
     function isWaitingReplyFromSendTask() {
@@ -15576,6 +15820,9 @@
 
       if (sendButtonCgptAction === 'none' && sendMessageBtn && !sendButtonDisabled) {
         warn('none-action-but-clickable');
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][NONE_ACTION_CONFLICT_REPAIR_HINT] id=${sendMessageBtn.id || '-'} sendButtonText=${sendButtonText || '-'} expect auto-recover to send-message (no more clickable runtimeAction=none).`
+        );
       }
 
       if (snapshot.closedLoopContinueRunning) {
@@ -15702,7 +15949,7 @@
         return `
           <div class="cgpt-upload-item empty toolbox-upload-empty-state">
             <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">当前项目没有文件</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-hint">当前全局项目没有文件</div>
               <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">松开鼠标，添加到当前项目</div>
             </div>
           </div>
@@ -15756,37 +16003,65 @@
       return `${flaskHtml}${queueHtml}`;
     }
 
+    function clearUploadCriticalMode(reason = '') {
+      if (
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.clearUploadCriticalMode === 'function'
+      ) {
+        ComposerApi.clearUploadCriticalMode(reason);
+        return;
+      }
+      if (typeof window !== 'undefined') {
+        window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = false;
+        window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[UPLOAD_CRITICAL][OFF] reason=${reason || '-'}`);
+      }
+    }
+
+    function setUploadCriticalModeOn(reason = 'upload-start') {
+      if (typeof window !== 'undefined') {
+        window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = true;
+        window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = Date.now();
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[UPLOAD_CRITICAL][ON] reason=${reason || '-'}`);
+      }
+    }
+
     function scheduleRenderUpload(reason = '') {
       const reasonText = String(reason || '').trim();
-
-      if (reasonText && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[UPLOAD_RENDER][schedule] reason=${reasonText}`);
-      }
 
       if (uploadTimers.has('upload-render', 'raf')) {
         return;
       }
 
-      uploadTimers.raf('upload-render', () => {
-        const reasonText = String(reason || '').trim();
-        const critical = (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true);
-        const lightOnly = critical && /poll|foreground-catch-up|update-status|renderUploadButtonsOnly/i.test(reasonText);
-        const scope = resolveUploadButtonRenderScope({ buttonTasksReason: reasonText });
+      const criticalBeforeSchedule = typeof window !== 'undefined'
+        && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+      if (
+        reasonText
+        && !criticalBeforeSchedule
+        && typeof ToolboxShell !== 'undefined'
+        && ToolboxShell.appendLog
+      ) {
+        ToolboxShell.appendLog(`[UPLOAD_RENDER][schedule] reason=${reasonText}`);
+      }
 
-        if (lightOnly) {
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(`[UPLOAD_CRITICAL][LIGHT_RENDER_ONLY] reason=${reasonText} scope=${scope}`);
-          }
-          // 上传关键期：只刷新按钮/状态，避免 innerHTML 重建上传列表引入时序抖动。
+      uploadTimers.raf('upload-render', () => {
+        const critical = typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
+
+        if (critical) {
           renderUploadButtonsOnly({
             heavy: false,
             buttonTasksReason: `light:${reasonText}`,
             skipCapabilityScan: true,
-            scope,
+            scope: 'upload-only',
           });
           return;
         }
 
+        const scope = resolveUploadButtonRenderScope({ buttonTasksReason: reasonText });
         renderUploadListOnly();
         renderAllButtonStates({ buttonTasksReason: reasonText, scope });
       });
@@ -16179,6 +16454,11 @@
 
     function getSendTaskState() {
       return Object.assign({}, state.sendTask || { phase: 'idle', runId: '', cancelRequested: false });
+    }
+
+    function getUploadTaskState() {
+      const task = syncUploadTaskFromLegacyState();
+      return Object.assign({}, task || { phase: 'idle', runId: '', cancelRequested: false });
     }
 
     function canSendNowForEnterHotkey() {
@@ -16620,8 +16900,14 @@
       const scopeUploadOnly = renderScope === 'upload-only';
       const skipUnrelatedForSend = scopeSendOnly;
       const skipSendForUploadOnly = scopeUploadOnly;
+      const critical = typeof window !== 'undefined'
+        && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true;
 
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      if (
+        !critical
+        && typeof ToolboxShell !== 'undefined'
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
         ToolboxShell.appendLog(`[BUTTON_RENDER][SCOPE] scope=${renderScope} reason=${renderReason}`);
       }
 
@@ -16652,6 +16938,36 @@
 
       if (currentStartBtn) {
         startBtn = currentStartBtn;
+      }
+
+      if (critical && scopeUploadOnly) {
+        if (currentStartBtn) {
+          applyStartUploadButtonState(currentStartBtn, {
+            reason: 'renderUploadButtonsOnly:critical-upload-only',
+          });
+        }
+        const autoqStartUploadBtnCritical = document.querySelector('#cgpt-autoq-start-upload');
+        if (
+          autoqStartUploadBtnCritical
+          && autoqStartUploadBtnCritical !== currentStartBtn
+        ) {
+          applyStartUploadButtonState(autoqStartUploadBtnCritical, {
+            reason: 'renderUploadButtonsOnly:critical-upload-only:autoq-mirror',
+            ignoreAutoQueueRunning: true,
+          });
+        }
+        if (typeof logPerfThrottled === 'function') {
+          const costMs = Math.round(
+            ((typeof performance !== 'undefined' && performance.now)
+              ? performance.now()
+              : Date.now()) - startedAt,
+          );
+          logPerfThrottled(
+            'renderUploadButtonsOnly:critical',
+            `[PERF][renderUploadButtonsOnly:critical] cost=${costMs}ms`,
+          );
+        }
+        return;
       }
 
       if (skipUnrelatedForSend) {
@@ -16974,20 +17290,22 @@
         batchAutoUploading = !!autoqState.batchAutoUploading;
       }
       const uploadTask = state.uploadTask || {};
-      ToolboxShell.appendLog(
-        `[BUTTON_STATE_FINAL] uploadBtnText=${uploadFinal.text} uploadBtnPhase=${uploadFinal.phase} uploadBtnDisabled=${uploadFinal.disabled} uploadBtnAriaBusy=${uploadFinal.ariaBusy} uploadTaskPhase=${String(uploadTask.phase || 'idle')} uploadTaskOwner=${String(uploadTask.owner || '-')}` +
-        ` batchBtnText=${batchFinal.text} batchBtnPhase=${batchFinal.phase} batchTaskRunning=${batchTaskRunning ? 1 : 0} batchAutoUploading=${batchAutoUploading ? 1 : 0}` +
-        ` sendBtnText=${sendFinal.text} sendBtnPhase=${sendFinal.phase}`,
-      );
+      if (!critical) {
+        ToolboxShell.appendLog(
+          `[BUTTON_STATE_FINAL] uploadBtnText=${uploadFinal.text} uploadBtnPhase=${uploadFinal.phase} uploadBtnDisabled=${uploadFinal.disabled} uploadBtnAriaBusy=${uploadFinal.ariaBusy} uploadTaskPhase=${String(uploadTask.phase || 'idle')} uploadTaskOwner=${String(uploadTask.owner || '-')}` +
+          ` batchBtnText=${batchFinal.text} batchBtnPhase=${batchFinal.phase} batchTaskRunning=${batchTaskRunning ? 1 : 0} batchAutoUploading=${batchAutoUploading ? 1 : 0}` +
+          ` sendBtnText=${sendFinal.text} sendBtnPhase=${sendFinal.phase}`,
+        );
 
-      assertRenderedUploadButtonConsistency();
-      logUploadSendStateConflicts(snapshotForConflictCheck(capability), capability, sendMessageBtn);
+        assertRenderedUploadButtonConsistency();
+        logUploadSendStateConflicts(snapshotForConflictCheck(capability), capability, sendMessageBtn);
 
-      if (typeof ButtonState !== 'undefined' && typeof ButtonState.auditHomePageButtonColors === 'function') {
-        ButtonState.auditHomePageButtonColors(rootElRef || document);
+        if (typeof ButtonState !== 'undefined' && typeof ButtonState.auditHomePageButtonColors === 'function') {
+          ButtonState.auditHomePageButtonColors(rootElRef || document);
+        }
+
+        rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
       }
-
-      rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
 
       if (typeof logPerfThrottled === 'function') {
         const costMs = Math.round(
@@ -17195,6 +17513,7 @@
       state.cancelled = false;
       state.activeId = '';
       state.uploadAbortController = null;
+      flushPendingUploadGlobalSync('heal-running-lock');
 
       if (rootElRef) {
         renderUploadButtonsOnly();
@@ -17262,7 +17581,7 @@
       }
 
       if (baseReason === 'manual_send_timeout') {
-        return '发送失败：等待超时（5 秒），请检查输入框与附件后重试。';
+        return `发送失败：等待超时（${getManualSendTimeoutSeconds()} 秒），请检查输入框与附件后重试。`;
       }
 
       if (baseReason === 'attachment_still_uploading') {
@@ -17367,6 +17686,7 @@
       state.waitingReplyTimer = null;
       state.pendingSendAfterReply = false;
       state.pendingSendAfterReplySource = '';
+      state.pendingSendAfterReplyStartedAt = 0;
       state.pendingSendRetrying = false;
 
       if (!String(reason || '').startsWith('send-message-not-sent:')) {
@@ -17757,6 +18077,7 @@
 
       state.running = false;
       state.activeId = '';
+      flushPendingUploadGlobalSync('cancel-upload-run');
     }
 
     function setWaitingSendActive(active) {
@@ -17952,6 +18273,7 @@
       lastWaitRealSendButtonLogAt = 0;
       state.pendingSendAfterReply = false;
       state.pendingSendAfterReplySource = '';
+      state.pendingSendAfterReplyStartedAt = 0;
       state.pendingSendRetrying = false;
 
       syncSendTaskPhase();
@@ -18190,6 +18512,40 @@
       setStatus('正在上传文件...', 'running');
       scheduleRenderUpload(`upload-manual:start:${source}`);
 
+      // 在人工点击“开始上传”并成功获得上传动作锁后，立刻将按钮置为“上传中”/红色，
+      // 避免等待后续队列检测与 composer 就绪检测造成可感知延迟。
+      try {
+        state.uploadCancelRequested = false;
+        state.uploadAbortController = state.uploadAbortController || new AbortController();
+        state.running = true;
+        state.manualUploadImmediateBusy = true;
+        state.manualUploadImmediateBusySource = source;
+        setAuthoritativeUploadTaskState({
+          phase: 'uploading',
+          source,
+          owner: 'manual-upload',
+          parentTask: '',
+          cycleIndex: 0,
+          cancelRequested: false,
+          cancelable: true,
+          runId: createUploadTaskRunId('upload_manual_click'),
+        }, `manual-click-immediate:${source}`);
+        setUploadButtonState('uploading', `manual-click-immediate:${source}`);
+        renderUploadButtonsOnly({
+          heavy: false,
+          skipCapabilityScan: true,
+          scope: 'upload-only',
+          buttonTasksReason: 'manual-click-immediate-uploading',
+        });
+        ToolboxShell.appendLog(
+          `[UPLOAD_BUTTON][IMMEDIATE_BUSY_ON_CLICK] source=${source}`,
+        );
+      } catch (immediateErr) {
+        const errText = immediateErr && immediateErr.message ? immediateErr.message : String(immediateErr);
+        console.error('[ChatGPT toolbox] set immediate upload busy state failed', immediateErr);
+        ToolboxShell.appendLog(`[UPLOAD_MANUAL][IMMEDIATE_BUSY_FAILED] source=${source} error=${errText}`);
+      }
+
       try {
         const uploadOpts = {
           source: `upload-manual:${source}`,
@@ -18364,6 +18720,24 @@
         ToolboxShell.appendLog(`[UPLOAD][FAILED] source=${source} reason=exception stack=${err && err.stack ? String(err.stack).replace(/\s+/g, ' ').slice(0, 500) : '-'}`);
         setStatus(`上传失败：${errText}`, 'error');
 
+        // 如果在主上传流程中抛出异常，恢复按钮与运行状态，避免长时间卡在“上传中”。
+        state.running = false;
+        state.uploadCancelRequested = false;
+        state.uploadAbortController = null;
+        state.manualUploadImmediateBusy = false;
+        state.manualUploadImmediateBusySource = '';
+        setAuthoritativeUploadTaskState({
+          phase: 'idle',
+          owner: '',
+          source: '',
+          parentTask: '',
+          cycleIndex: 0,
+          runId: '',
+          cancelRequested: false,
+          cancelable: false,
+        }, `manual-click-exception-reset:${source}`);
+        setUploadButtonState('idle', `manual-click-exception-reset:${source}`);
+
         return {
           ok: false,
           reason: errText,
@@ -18424,10 +18798,11 @@
       return false;
     }
 
-    async function triggerSendFromToolbox(source) {
-      const src = String(source || 'button').trim() || 'button';
+    async function triggerSendFromToolbox(source, options = {}) {
+      const rawSource = String((options && options.rawSource) || source || 'button').trim() || 'button';
+      const src = normalizeSendMessageSource(source || rawSource, 'send-message');
 
-      ToolboxShell.appendLog(`[SEND_MESSAGE][CLICK] source=${src}`);
+      ToolboxShell.appendLog(`[SEND_MESSAGE][CLICK] source=${src} rawSource=${rawSource}`);
       ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
 
       clearStaleBusySendStateOnHomeReady('trigger-send');
@@ -18439,6 +18814,7 @@
         if (detectPendingComposerPayloadForSend()) {
           state.pendingSendAfterReply = true;
           state.pendingSendAfterReplySource = src;
+          state.pendingSendAfterReplyStartedAt = Date.now();
           state.pendingSendRetrying = false;
 
           setStatus('助手正在回复，已加入等待发送', 'running');
@@ -18509,6 +18885,7 @@
         const isManualSend = isManualSendMessageSource(src);
         const result = await sendExistingComposerBySendMessageButtonCore({
           source: src || 'manual-send-message-button',
+          rawSource,
           manualSend: isManualSend,
           timeoutMs: isManualSend
             ? MANUAL_SEND_TIMEOUT_MS
@@ -18565,14 +18942,6 @@
 
       const cancelRunId = state.autoSendRunId;
       state.cancelWaitingSend = true;
-      setAuthoritativeSendTaskState(
-        {
-          phase: 'cancelling',
-          runId: cancelRunId || (state.sendTask && state.sendTask.runId) || '',
-          cancelRequested: true,
-        },
-        `cancel-send:${reason || 'user-click'}`,
-      );
       state.autoSendRunId += 1;
       resetUploadSendUiState('cancel:' + reason, cancelRunId);
       ToolboxShell.appendLog(`[UPLOAD][WAIT_SEND][CANCEL] reason=${reason}`);
@@ -18580,7 +18949,6 @@
         const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
         logButtonStateCancel(sendBtn, reason, state.sendTask.phase);
       }
-      state.sendTask.cancelRequested = true;
       setStatus('已取消等待发送', 'warning');
       scheduleRenderUpload('wait-send:cancel');
       return true;
@@ -18633,7 +19001,7 @@
         return '发送失败：本地列表有文件但未添加到 ChatGPT 输入框，请先点击开始上传。';
       }
       if (normalized === 'manual_send_timeout') {
-        return '发送失败：等待超时（5 秒），请检查输入框与附件后重试。';
+        return `发送失败：等待超时（${getManualSendTimeoutSeconds()} 秒），请检查输入框与附件后重试。`;
       }
       if (normalized === 'attachment_still_uploading') {
         return '发送失败：附件仍在上传，请稍后再点发送。';
@@ -18706,6 +19074,7 @@
       state.waitingReply = true;
       state.pendingSendAfterReply = true;
       state.pendingSendAfterReplySource = String(source || 'button');
+      state.pendingSendAfterReplyStartedAt = Date.now();
       state.pendingSendRetrying = false;
       setAuthoritativeSendTaskState(
         {
@@ -18899,6 +19268,9 @@
           resetRuntimeStateOnBoot(`trigger-send:stale-heal:${source}`);
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][TRIGGER_STALE_CLEAR] oldPhase=${oldPhase} waitingSend=${oldWaitingSend} shortcut=${oldShortcut} reason=native-ready-before-trigger source=${source}`,
+          );
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][FORCE_CLEAR_STALE_STATE_BEFORE_NATIVE_READY] oldPhase=${oldPhase} waitingSend=${oldWaitingSend} shortcut=${oldShortcut} source=${source} reason=native-ready-before-trigger`,
           );
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][TRIGGER_CONTINUE_AFTER_HEAL] phase=${getSendTaskPhase()}`,
@@ -19194,6 +19566,7 @@
         ? String(payloadOpts.text || '')
         : '';
       const shouldInjectText = !!String(unifiedText || '').trim();
+      const rawSource = String(payloadOpts.rawSource || source || '').trim() || source;
       const isManualSend = payloadOpts.manualSend === true || isManualSendMessageSource(source);
       const sendDeadlineMs = Number(payloadOpts.sendDeadlineMs)
         || (Date.now() + (isManualSend ? MANUAL_SEND_TIMEOUT_MS : SEND_WAIT_TIMEOUT_MS));
@@ -19212,15 +19585,6 @@
       clearStaleBusySendStateOnHomeReady('send-panel-click');
 
       let sendFailureHandled = false;
-
-      if (isManualSend && hasUnreadableLocalQueueForSend()) {
-        return failManualSendEarly(
-          runId,
-          source,
-          'local_file_unreadable',
-          mapForeverSendFailureMessage('local_file_unreadable'),
-        );
-      }
 
       if (isManualSend && hasLocalQueueFilesWithoutComposerAttachment()) {
         const composerStateEarly = logSendMessageComposerState(source, 'reason=local_queue_no_composer_attachment');
@@ -19355,7 +19719,13 @@
           : !!(hasComposerPayloadForSend || realSendButtonEnabled);
 
         if (capability.isResponding && !homeReadyToSend) {
-          // 硬阻断：正在回答中，点击发送无效，不排队，不挂起 pendingSendAfterReply
+          // 页面正在回答：如果当前输入框确实有待发送内容，则进入 pendingSendAfterReply（等待可发送机会后重发）；
+          // 否则硬阻断，不排队。
+          if (hasAnythingToSend) {
+            enterUploadWaitingReplyBlocked(runId, source);
+            sendFailureHandled = true;
+            return true;
+          }
           blockSendBecauseAssistantBusy(runId, source);
           sendFailureHandled = true;
           return false;
@@ -19371,6 +19741,19 @@
           || 0,
         );
         const textLen = composerTextNow.length;
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][SOURCE_NORMALIZED] rawSource=${rawSource} normalizedSource=${source} isManualSend=${isManualSend ? 1 : 0} timeoutMs=${isManualSend ? MANUAL_SEND_TIMEOUT_MS : SEND_WAIT_TIMEOUT_MS} attachmentWaitMs=${isManualSend ? MANUAL_SEND_ATTACHMENT_WAIT_MS : SEND_WAIT_TIMEOUT_MS} textLen=${textLen} attachmentCount=${attachmentCount} nativeReady=${realSendButtonEnabled ? 1 : 0} isResponding=${capability.isResponding && !homeReadyToSend ? 1 : 0}`,
+        );
+
+        if (isManualSend && hasUnreadableLocalQueueForSend() && textLen <= 0 && attachmentCount <= 0 && !hasAttachmentPayloadToWait) {
+          return failManualSendEarly(
+            runId,
+            source,
+            'local_file_unreadable',
+            mapForeverSendFailureMessage('local_file_unreadable'),
+          );
+        }
+
         const sendGate = classifyUploadComposerSendGate({
           triggerSource: source,
           hasAnythingToSend,
@@ -19394,6 +19777,9 @@
               `[SEND][WAIT_PAYLOAD] reason=composer_empty native_send_disabled=1 workflow_can_start=${sendGate.workflow_can_start ? 1 : 0} textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
             );
             enterWaitingPayloadState(runId, source, textLen, attachmentCount);
+            sendFailureHandled = true;
+            lastUploadSendPanelFailReason = 'waiting_payload';
+            return false;
           } else {
             ToolboxShell.appendLog(
               `[SEND_MESSAGE][EMPTY_BUT_NATIVE_SEND] textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=1`,
@@ -19431,6 +19817,9 @@
             `[SEND][WAIT_PAYLOAD] reason=composer_empty native_send_disabled=1 workflow_can_start=${sendGate.workflow_can_start ? 1 : 0} textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
           );
           enterWaitingPayloadState(runId, source, textLen, attachmentCount);
+          sendFailureHandled = true;
+          lastUploadSendPanelFailReason = 'waiting_payload';
+          return false;
         }
 
         const requireUploadDone = hasAttachmentPayloadToWait;
@@ -19450,10 +19839,19 @@
           );
         }
 
-        if (isManualSend) {
-          setAuthoritativeSendTaskState({ phase: 'sending', runId }, 'manual-send-start');
+        if (capability.canSendNow || realSendButtonEnabled) {
+          setWaitingRealSendButton(false);
+          setAuthoritativeSendTaskState(
+            {
+              phase: 'sending',
+              runId,
+              cancelRequested: false,
+              subphase: 'native-send-ready',
+            },
+            'send-message:native-send-ready',
+          );
           setStatus('发送中', 'running');
-        } else if (!capability.canSendNow) {
+        } else {
           setWaitingRealSendButton(true);
           state.waitingSend = true;
           state.autoSendWaiting = true;
@@ -19463,16 +19861,15 @@
               phase: 'waiting_send',
               runId,
               cancelRequested: false,
-              subphase: 'wait-real-send-button',
+              subphase: hasAttachmentPayloadToWait
+                ? 'wait-attachment-or-send-button'
+                : 'wait-real-send-button',
             },
             'send-message:wait-real-send-button',
           );
           const waitStatus = resolveUploadSendWaitStatus(capability);
           setStatus(waitStatus.text, 'running');
           logWaitRealSendButtonIfDue(runId, source, capability);
-        } else {
-          setWaitingRealSendButton(false);
-          setStatus('正在发送...', 'running');
         }
         scheduleRenderUpload('send-message:start');
 
@@ -19489,20 +19886,12 @@
           ToolboxShell.appendLog('[SEND][ATTACHMENT_WAIT_REQUIRED] reason=real-attachment-detected');
           const attachmentWaitMs = isManualSend
             ? MANUAL_SEND_ATTACHMENT_WAIT_MS
-            : 120000;
+            : SEND_WAIT_TIMEOUT_MS;
           const attachmentReady = await waitComposerAttachmentReady({
             timeoutMs: attachmentWaitMs,
           });
 
           if (!attachmentReady.ok) {
-            if (isManualSend) {
-              return failManualSendEarly(
-                runId,
-                source,
-                'attachment_still_uploading',
-                mapForeverSendFailureMessage('attachment_still_uploading'),
-              );
-            }
             ToolboxShell.appendLog(
               `[SEND][WAIT_ATTACHMENT_UPLOAD] reason=${attachmentReady.reason || 'attachment-not-ready'} source=${source}`,
             );
@@ -19545,7 +19934,6 @@
 
         let sendResult = null;
         let outerAttempt = 0;
-        const manualMaxAttempts = 4;
         const manualStableMaxAttempts = 3;
 
         while (state.autoSendRunId === runId && !shouldStopForeverSend(runId)) {
@@ -19576,11 +19964,12 @@
             && isHomeNewChatReadyToSendNow();
           if (capabilityNow.isResponding && !homeReadyNow) {
             // 循环中遇到助手忙：硬阻断，不排队，直接取消本次发送任务
-            ToolboxShell.appendLog(
-              `[SEND][BLOCKED_ASSISTANT_BUSY] source=${source || '-'} runId=${runId} reason=page_is_responding_during_send_loop attempt=${outerAttempt}`,
-            );
-            logUploadSendUiState('send-aborted', 'assistant-busy-during-send-loop', runId);
-            resetUploadSendUiState(`send-message:blocked-assistant-busy-loop`, runId);
+            if (detectPendingComposerPayloadForSend()) {
+              enterUploadWaitingReplyBlocked(runId, source);
+              sendFailureHandled = true;
+              return true;
+            }
+            blockSendBecauseAssistantBusy(runId, source);
             sendFailureHandled = true;
             return false;
           }
@@ -19661,6 +20050,7 @@
           const softWaitReasons = new Set([
             'composer_empty_wait_payload',
             'waiting_payload',
+            'attachment_still_uploading',
             'attachment_uploading',
             'waiting_attachment_upload',
             'waiting_attachment_upload_done',
@@ -19695,37 +20085,37 @@
             }
             if (assistantBusyBeforeSend.has(failReason)) {
               // 页面正在回答，消息尚未发出 → 硬阻断，不排队
-              ToolboxShell.appendLog(
-                `[SEND][BLOCKED_ASSISTANT_BUSY] source=${source || '-'} runId=${runId} reason=${failReason}_during_send_loop attempt=${outerAttempt}`,
-              );
-              logUploadSendUiState('send-aborted', `assistant-busy:${failReason}`, runId);
-              resetUploadSendUiState(`send-message:blocked-assistant-busy-loop`, runId);
+              if (detectPendingComposerPayloadForSend()) {
+                enterUploadWaitingReplyBlocked(runId, source);
+                sendFailureHandled = true;
+                return true;
+              }
+              blockSendBecauseAssistantBusy(runId, source);
               sendFailureHandled = true;
               return false;
             }
           }
 
-          if (isManualSend && softWaitReasons.has(failReason)) {
-            const manualFailReason = failReason === 'waiting_payload'
-              || failReason === 'composer_empty_wait_payload'
-              ? 'empty_text_and_no_attachment'
-              : (
-                failReason === 'waiting_attachment_upload'
-                || failReason === 'waiting_attachment_upload_done'
-                || failReason === 'attachment_uploading'
-                  ? 'attachment_still_uploading'
-                  : failReason
-              );
+          const manualHardFailReasons = new Set([
+            'empty_text_and_no_attachment',
+            'local_file_unreadable',
+            'local_queue_no_composer_attachment',
+            'composer_not_found',
+            'assistant_busy',
+            'cancelled',
+            'page_navigating',
+          ]);
+          if (isManualSend && manualHardFailReasons.has(failReason)) {
             sendResult = {
               ok: false,
-              reason: manualFailReason,
+              reason: failReason,
               retryable: false,
               wait_send: false,
               wait_reply: false,
             };
-            logSendMessageComposerState(source, `reason=${manualFailReason}`);
+            logSendMessageComposerState(source, `reason=${failReason}`);
             ToolboxShell.appendLog(
-              `[SEND_MESSAGE][FAILED] reason=${manualFailReason} source=${source} attempt=${outerAttempt}`,
+              `[SEND_MESSAGE][FAILED] reason=${failReason} source=${source} attempt=${outerAttempt}`,
             );
             break;
           }
@@ -19738,14 +20128,47 @@
           }
 
           const waitSendOnlyReasons = softWaitReasons;
-          if (
+          const shouldSoftWaitSend = (
             (sendResult && sendResult.wait_send)
             || waitSendOnlyReasons.has(failReason)
-          ) {
+          );
+
+          if (shouldSoftWaitSend && isUploadNativeSendReadyForSendNow()) {
+            ToolboxShell.appendLog(
+              `[SEND][NATIVE_READY_OVERRIDE] source=${source} runId=${runId} priorReason=${failReason} `
+              + `attempt=${outerAttempt} action=retry-send`,
+            );
+            setWaitingRealSendButton(false);
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'sending',
+                runId,
+                cancelRequested: false,
+                subphase: 'native-ready-retry',
+              },
+              'send-message:native-ready-retry',
+            );
+            const retried = await sleepWithWaitSendCancel(200, runId);
+            if (!retried) {
+              break;
+            }
+            continue;
+          }
+
+          if (shouldSoftWaitSend) {
             setWaitingRealSendButton(true);
             state.waitingSend = true;
             state.autoSendWaiting = true;
             state.waitingReply = false;
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'waiting_send',
+                runId,
+                cancelRequested: false,
+                subphase: failReason || 'wait_send',
+              },
+              `send-message:wait-send:${failReason || '-'}`,
+            );
             if (failReason === 'waiting_payload' || failReason === 'composer_empty_wait_payload') {
               ToolboxShell.appendLog(`[SEND][WAIT_PAYLOAD] source=${source} runId=${runId} attempt=${outerAttempt}`);
               setStatus('等待输入', 'running');
@@ -19769,17 +20192,6 @@
             break;
           }
 
-          if (isManualSend && outerAttempt >= manualMaxAttempts) {
-            sendResult = {
-              ok: false,
-              reason: 'manual_send_timeout',
-              retryable: false,
-              wait_send: false,
-              wait_reply: false,
-            };
-            break;
-          }
-
           if (outerAttempt % 10 === 0) {
             ToolboxShell.appendLog(
               `[UPLOAD][SEND_FOREVER_STILL_TRYING] run=${runId} attempt=${outerAttempt} reason=${failReason}`,
@@ -19794,6 +20206,15 @@
           state.autoSendWaiting = true;
           uploadSendShortcutRunning = true;
           uploadSendTaskStartedAt = Date.now();
+          setAuthoritativeSendTaskState(
+            {
+              phase: 'waiting_send',
+              runId,
+              cancelRequested: false,
+              subphase: failReason || 'retry-transient',
+            },
+            `send-message:retry-transient:${failReason || '-'}`,
+          );
           scheduleRenderUpload('send-message:retry-transient');
           const retrySleepMs = isManualSend ? MANUAL_SEND_RETRY_INTERVAL_MS : 800;
           const slept = await sleepWithWaitSendCancel(retrySleepMs, runId);
@@ -20335,6 +20756,11 @@
         return true;
       }
 
+      if (e.__cgptSendShortcutHandled) {
+        return true;
+      }
+      e.__cgptSendShortcutHandled = true;
+
       if (isPlainEnterSendEvent(e)) {
         const sendPhase = getSendTaskPhase();
         if (sendPhase !== 'idle') {
@@ -20393,8 +20819,7 @@
         } else {
           e.preventDefault();
           e.stopPropagation();
-          cancelWaitingSend('shortcut-click');
-          logSendHotkey('DISPATCH_OK', 'action=cancel-waiting-send');
+          logSendHotkey('SKIP', `reason=send-pipeline-busy key=${formatSendHotkeyKey(e)}`);
           return true;
         }
       }
@@ -20622,6 +21047,11 @@
       ToolboxShell.appendLog('[SHORTCUT][bind] upload-start=configurable');
     }
 
+    /**
+     * @deprecated Legacy sequential upload path (uploadOne per file).
+     * Current UI buttons must use runStartUploadButtonCore / startManualUploadOnlyFlow /
+     * startUploadFromCurrentQueue instead. Kept for existing callers; do not wire new UI here.
+     */
     async function startUpload(options = {}) {
       const opts = options || {};
       const forceRestart = !!opts.forceRestart;
@@ -20667,7 +21097,7 @@
       appendUploadGroupLog('START_UPLOAD', { phase: 'plan' });
 
       if (!activeFiles.length) {
-        setStatus('当前项目没有文件');
+        setStatus('当前全局项目没有文件');
         ToolboxShell.appendLog('[UPLOAD_DIAG][startUpload:skip-empty-queue]');
         return buildUploadSkipResult('empty-queue');
       }
@@ -20861,6 +21291,7 @@
           state.running = false;
           state.activeId = '';
           state.uploadAbortController = null;
+          flushPendingUploadGlobalSync('upload-finished');
           setUploadButtonState('idle', 'upload-finished-or-reset');
 
           const settledTargets = resolveUploadTargets(uploadableTargets);
@@ -21241,42 +21672,200 @@
       }
     }
 
-    function markPendingItemsUploaded(pendingItems) {
+    function markUploadItemAttachedAfterNativeSuccess(item, reason) {
+      if (!item) return;
+
+      const now = Date.now();
+      const nextState = {
+        state: UploadState.ATTACHED,
+        status: 'attached',
+        message: '已上传到 ChatGPT 输入框并确认完成',
+        attachedInSession: true,
+        persistedAttached: true,
+        boundAt: now,
+        uploadedAt: now,
+        updatedAt: now,
+      };
+
+      if (item.id) {
+        updateItem(item.id, nextState);
+      } else {
+        Object.assign(item, nextState);
+      }
+
+      const queueItem = item.id
+        ? ((state.queue || []).find((q) => q && q.id === item.id) || item)
+        : item;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][MARK_ATTACHED] reason=${reason || '-'} id=${item.id || '-'} fileId=${item.file_id || '-'} name=${item.name || item.filename || '-'}`,
+      );
+      logUploadSourceCheck(queueItem, reason || 'native-upload-settled');
+    }
+
+    function markPendingItemsUploaded(pendingItems, reason = 'native-upload-settled') {
       const flaskIds = [];
 
       for (const item of pendingItems || []) {
         if (!item) continue;
 
-        if (item.source === 'flask_local_direct' || item.file_id) {
-          item.status = 'uploaded';
-          if (item.file_id) {
-            flaskIds.push(item.file_id);
-          }
-          releaseUploadPayload(item, 'flask-uploaded');
-          continue;
+        markUploadItemAttachedAfterNativeSuccess(item, reason);
+
+        if (item.file_id) {
+          flaskIds.push(item.file_id);
         }
 
-        if (item.id) {
-          updateItem(item.id, {
-            state: UploadState.ATTACHED,
-            status: 'attached',
-            message: '已上传到 ChatGPT 输入框并确认完成',
-          });
-          const queueItem = (state.queue || []).find((q) => q && q.id === item.id) || item;
-          logUploadSourceCheck(queueItem, 'native-upload-settled');
+        if (item.source === 'flask_local_direct' || item.file_id) {
+          releaseUploadPayload(item, 'flask-uploaded');
         }
       }
 
       if (flaskIds.length) {
+        const uploadedAt = Date.now();
         state.flaskFiles = (state.flaskFiles || []).map((row) => {
           if (!row || !row.file_id) return row;
           if (!flaskIds.includes(row.file_id)) return row;
           return {
             ...row,
             status: 'uploaded',
+            state: UploadState.ATTACHED,
+            message: '已上传到 ChatGPT 输入框并确认完成',
+            uploadedAt,
+            updatedAt: uploadedAt,
           };
         });
       }
+
+      // 上传记录已标记为 ATTACHED 时，如果这是一次主上传流程且所有待上传项都已成功，
+      // 可以在这里主动把“上传中”状态收口为 idle，避免继续卡在“上传中”直到超时。
+      try {
+        const uploadSource = state.uploadTask && state.uploadTask.source ? state.uploadTask.source : '';
+        const isChildUpload = !!(state.uploadTask && state.uploadTask.parentTask);
+        const allPendingAttached = (pendingItems || []).every((item) => {
+          if (!item) return false;
+          const normalizedStatus = String(item.status || '').trim().toLowerCase();
+          return item.state === UploadState.ATTACHED
+            || normalizedStatus === 'attached'
+            || normalizedStatus === 'uploaded'
+            || normalizedStatus === 'done';
+        });
+
+        if (!isChildUpload && allPendingAttached && state.uploadTask && state.uploadTask.phase === 'uploading') {
+          state.running = false;
+          state.uploadCancelRequested = false;
+          state.uploadAbortController = null;
+          state.manualUploadImmediateBusy = false;
+          state.manualUploadImmediateBusySource = '';
+          setAuthoritativeUploadTaskState({
+            phase: 'idle',
+            owner: '',
+            source: '',
+            parentTask: '',
+            cycleIndex: 0,
+            runId: '',
+            cancelRequested: false,
+            cancelable: false,
+          }, `all-pending-attached:${uploadSource || '-'}`);
+          setUploadButtonState('idle', `all-pending-attached:${uploadSource || '-'}`);
+        }
+      } catch (finalizeErr) {
+        const errText = finalizeErr && finalizeErr.message ? finalizeErr.message : String(finalizeErr);
+        console.error('[ChatGPT toolbox] markPendingItemsUploaded finalize state failed', finalizeErr);
+        ToolboxShell.appendLog(
+          `[UPLOAD_FINALIZE][MARK_ATTACHED_FINALIZE_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+      }
+    }
+
+    function logUploadFinalizeState(uploadSource) {
+      const queue = state.queue || [];
+      const unfinishedItems = queue.filter((item) => {
+        if (!item) return false;
+        const rawState = item.state;
+        const normalizedStatus = String(item.status || '').trim().toLowerCase();
+        return (
+          rawState === UploadState.READING
+          || rawState === UploadState.ATTACHING
+          || isUploadUnfinishedState(rawState)
+          || normalizedStatus === 'reading'
+          || normalizedStatus === 'attaching'
+          || normalizedStatus === 'uploading'
+        );
+      });
+      const attachedQueueCount = queue.filter((item) => (
+        item
+        && (
+          item.state === UploadState.ATTACHED
+          || String(item.status || '').trim().toLowerCase() === 'attached'
+        )
+      )).length;
+      const flaskUploadedCount = (state.flaskFiles || []).filter((row) => (
+        row
+        && (
+          row.status === 'uploaded'
+          || row.state === UploadState.ATTACHED
+        )
+      )).length;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_FINALIZE][STATE] running=${state.running ? 1 : 0} activeId=${state.activeId || '-'} uploadTaskPhase=${state.uploadTask && state.uploadTask.phase ? state.uploadTask.phase : 'idle'} unfinishedQueueCount=${unfinishedItems.length} attachedQueueCount=${attachedQueueCount} flaskUploadedCount=${flaskUploadedCount} source=${uploadSource || '-'}`,
+      );
+
+      unfinishedItems.forEach((item) => {
+        ToolboxShell.appendLog(
+          `[UPLOAD_FINALIZE][UNFINISHED_ITEM] id=${item.id || '-'} name=${item.name || item.filename || '-'} state=${item.state || '-'} status=${item.status || '-'} source=${item.source || item.sourceKind || '-'} file_id=${item.file_id || '-'}`,
+        );
+      });
+    }
+
+    function clearUploadBusyAfterMessageSent(reason = '') {
+      const reasonText = reason || '-';
+      const task = state.uploadTask || null;
+
+      if (!task || task.phase !== 'uploading') {
+        return;
+      }
+
+      const composerHasUploading = !!(
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading()
+      );
+
+      if (composerHasUploading) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_STATE][KEEP_BUSY_AFTER_SEND] reason=${reasonText} composerUploading=1`,
+        );
+        return;
+      }
+
+      state.running = false;
+      state.activeId = '';
+      state.uploadCancelRequested = false;
+      state.uploadAbortController = null;
+      state.manualUploadImmediateBusy = false;
+      state.manualUploadImmediateBusySource = '';
+
+      setAuthoritativeUploadTaskState({
+        phase: 'idle',
+        owner: '',
+        source: '',
+        parentTask: '',
+        cycleIndex: 0,
+        runId: '',
+        cancelRequested: false,
+        cancelable: false,
+      }, `message-sent-clear-upload:${reasonText}`);
+
+      setUploadButtonState('idle', `message-sent-clear-upload:${reasonText}`);
+      renderAllButtonStates({
+        buttonTasksReason: `message-sent-clear-upload:${reasonText}`,
+      });
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_STATE][CLEAR_AFTER_MESSAGE_SENT] reason=${reasonText}`,
+      );
     }
 
     function detectComposerHasUploadPayload() {
@@ -21541,7 +22130,17 @@
         return false;
       };
 
-      if (!isChildUpload && state.running) {
+      const manualImmediateSource = String(state.manualUploadImmediateBusySource || '');
+      const normalizedUploadSource = String(uploadSource || '').replace(/^upload-manual:/, '');
+      const allowImmediateBusyContinue = !!(
+        !isChildUpload
+        && state.running
+        && state.manualUploadImmediateBusy === true
+        && manualImmediateSource
+        && manualImmediateSource === normalizedUploadSource
+      );
+
+      if (!isChildUpload && state.running && !allowImmediateBusyContinue) {
         setStatus('正在上传中，请稍候', 'running');
         ToolboxShell.appendLog(
           `[UPLOAD][FAILED] source=${uploadSource} reason=already-running`,
@@ -21619,6 +22218,7 @@
         if (!isChildUpload) {
           setUploadButtonState('idle', 'cache-source-blocked');
           state.running = false;
+          flushPendingUploadGlobalSync('cache-source-blocked');
         }
         return buildQueueUploadResult({
           ok: false,
@@ -21657,27 +22257,10 @@
         `[UPLOAD][MODE] source=${uploadSource} mode=${mode} uploadOnly=${mode === 'upload_only' ? 1 : 0}`,
       );
 
-      const composerReady = await waitChatGPTComposerReadyForUpload({
-        timeoutMs: 120000,
-        pollMs: 500,
-        stableMs: 1500,
-        mode,
-      });
-      if (!composerReady.ok) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][COMPOSER_BLOCKED] source=${uploadSource} reason=${composerReady.reason || '-'}`,
-        );
-        reconcileUploadPhase(`composer-not-ready:${uploadSource}`);
-        if (!isChildUpload) {
-          setStatus('等待输入框空闲后再上传', 'waiting');
-          setUploadButtonState('idle', 'composer-not-ready');
-        }
-        return buildQueueUploadResult({
-          ok: false,
-          reason: composerReady.reason || 'final-upload-blocked-composer-not-ready',
-        });
-      }
+      let didSetUploadCriticalFlag = false;
 
+      // 关键点：在等待 ChatGPT composer 空闲之前，先把“上传中/红色按钮”立刻写入 authoritative state。
+      // 否则 UI 会等 composerReady 轮询/稳定检查结束后才变红，造成用户可见的停顿。
       if (!isChildUpload) {
         state.uploadCancelRequested = false;
         state.uploadAbortController = new AbortController();
@@ -21691,9 +22274,69 @@
           cancelRequested: false,
           cancelable: true,
           runId: createUploadTaskRunId('upload_manual'),
-        }, `start-main:${uploadSource}`);
-        setUploadButtonState('uploading', 'start-upload');
-        scheduleRenderUpload('startUploadFromCurrentQueue:start');
+        }, `start-main-preflight:${uploadSource}`);
+        setUploadButtonState('uploading', 'start-upload-immediate');
+        setUploadCriticalModeOn('upload-start');
+        didSetUploadCriticalFlag = true;
+        renderUploadButtonsOnly({
+          heavy: false,
+          skipCapabilityScan: true,
+          scope: 'upload-only',
+          buttonTasksReason: 'start-upload:immediate-busy',
+        });
+        ToolboxShell.appendLog(
+          `[UPLOAD_BUTTON][IMMEDIATE_BUSY] source=${uploadSource} reason=before-composer-ready`,
+        );
+      }
+
+      const composerReady = await waitChatGPTComposerReadyForUpload({
+        timeoutMs: 120000,
+        pollMs: 500,
+        stableMs: 1500,
+        mode,
+      });
+      if (!composerReady.ok) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][COMPOSER_BLOCKED] source=${uploadSource} reason=${composerReady.reason || '-'}`,
+        );
+        reconcileUploadPhase(`composer-not-ready:${uploadSource}`);
+        if (!isChildUpload) {
+          setStatus('等待输入框空闲后再上传', 'waiting');
+          // composerReady 前已经把 UI 置为 uploading；这里必须完整回滚，避免按钮残留红色/卡在 uploading。
+          state.running = false;
+          state.uploadCancelRequested = false;
+          state.uploadAbortController = null;
+          setAuthoritativeUploadTaskState({
+            phase: 'idle',
+            source: uploadSource,
+            cancelRequested: false,
+            cancelable: false,
+          }, `composer-not-ready:${uploadSource}`);
+          setUploadButtonState('idle', 'composer-not-ready');
+          clearUploadCriticalMode('composer-not-ready');
+          didSetUploadCriticalFlag = false;
+          renderUploadButtonsOnly({
+            heavy: false,
+            skipCapabilityScan: true,
+            scope: 'upload-only',
+            buttonTasksReason: 'start-upload:composer-not-ready-reset',
+          });
+        }
+        return buildQueueUploadResult({
+          ok: false,
+          reason: composerReady.reason || 'final-upload-blocked-composer-not-ready',
+        });
+      }
+
+      if (!isChildUpload) {
+        setAuthoritativeUploadTaskState({
+          phase: 'uploading',
+          source: uploadSource,
+          owner: resolveUploadOwner(uploadSource, parentTask),
+          cancelRequested: false,
+          cancelable: true,
+        }, `start-main-confirmed:${uploadSource}`);
+        scheduleRenderUpload('startUploadFromCurrentQueue:start-confirmed');
       }
 
       const resolveUploadAbortSignal = () => {
@@ -21711,9 +22354,6 @@
         ? childUploadRunId
         : (state.uploadTask && state.uploadTask.runId ? String(state.uploadTask.runId) : '');
       let composerBeforeSnapshot = null;
-      let prevUploadCriticalFlag = false;
-      let didSetUploadCriticalFlag = false;
-      let uploadRunStartedAt = 0;
 
       try {
         const statusText = isChildUpload && cycleIndex > 0
@@ -21767,10 +22407,12 @@
         }
 
         // 上传关键期：禁止 chat 全页扫描 & 降级工具箱重渲染，降低时序抖动。
-        prevUploadCriticalFlag = !!(window && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true);
-        window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = true;
-        uploadRunStartedAt = Date.now();
-        window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = uploadRunStartedAt;
+        if (!isChildUpload) {
+          setUploadCriticalModeOn('upload-files-start');
+        } else if (typeof window !== 'undefined') {
+          window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = true;
+          window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = Date.now();
+        }
         didSetUploadCriticalFlag = true;
 
         await uploadFilesToChatGPT(files, {
@@ -21808,33 +22450,30 @@
 
           // uploadFilesToChatGPT 已结束：尽快退出 critical，避免后续渲染/状态更新继续触发重型扫描。
           if (didSetUploadCriticalFlag) {
-            if (typeof window !== 'undefined') {
-              window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = prevUploadCriticalFlag ? true : false;
-              window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
-            }
+            clearUploadCriticalMode('upload-files-done');
             didSetUploadCriticalFlag = false;
           }
 
           if (!(readyDiff > 0)) {
             // native upload 流程结束了，但 composer 侧没有确认“新增 ready”
             const hasPayload = detectComposerHasUploadPayload();
-            for (const item of pendingItems || []) {
-              if (!item) continue;
+            if (hasPayload) {
+              markPendingItemsUploaded(pendingItems, 'native-upload-settled-without-send-ready');
+            } else {
               const timeoutMsg = '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中';
-              if (item.id) {
-                updateItem(item.id, {
-                  state: hasPayload ? UploadState.ATTACHED : UploadState.FAILED,
-                  status: hasPayload ? 'attached' : 'failed',
-                  message: hasPayload
-                    ? '已绑定到 ChatGPT 输入框（等待发送就绪）'
-                    : timeoutMsg,
-                });
-              } else {
-                item.status = hasPayload ? 'attached' : 'failed';
-                item.message = hasPayload
-                  ? '已绑定到 ChatGPT 输入框（等待发送就绪）'
-                  : timeoutMsg;
-                item.state = hasPayload ? UploadState.ATTACHED : UploadState.FAILED;
+              for (const item of pendingItems || []) {
+                if (!item) continue;
+                if (item.id) {
+                  updateItem(item.id, {
+                    state: UploadState.FAILED,
+                    status: 'failed',
+                    message: timeoutMsg,
+                  });
+                } else {
+                  item.status = 'failed';
+                  item.message = timeoutMsg;
+                  item.state = UploadState.FAILED;
+                }
               }
             }
 
@@ -21843,10 +22482,17 @@
             );
 
             if (!isChildUpload) {
-              setStatus('上传等待超时：页面较重或状态检测超时，文件可能仍在处理中', 'waiting');
+              setStatus(
+                hasPayload
+                  ? '文件已绑定到输入框'
+                  : '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中',
+                hasPayload ? 'success' : 'waiting',
+              );
               ToolboxShell.showToast(
-                '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中',
-                'warn',
+                hasPayload
+                  ? '文件已绑定到输入框（等待发送就绪）'
+                  : '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中',
+                hasPayload ? 'success' : 'warn',
                 3200,
               );
               scheduleRenderUpload('startUploadFromCurrentQueue:timeout-wait-ready');
@@ -21854,11 +22500,11 @@
             persistQueueThrottled('startUploadFromCurrentQueue:timeout-wait-ready');
 
             return buildQueueUploadResult({
-              ok: false,
+              ok: hasPayload,
               uploadedCount: files.length,
               failedCount: 0,
               skippedCount: skippedByMaxFiles,
-              reason: 'timeout-wait-ready',
+              reason: hasPayload ? 'native-upload-settled-without-send-ready' : 'timeout-wait-ready',
             });
           }
 
@@ -21868,7 +22514,7 @@
         }
 
         // 未能比较 ready diff 时，保留旧逻辑：以 attachFilesByFileInput 的结果作为成功依据
-        markPendingItemsUploaded(pendingItems);
+        markPendingItemsUploaded(pendingItems, 'native-upload-settled');
         pendingItems.forEach((item) => {
           logUploadSourceCheck(item, `after-upload:${uploadSource}`);
         });
@@ -21964,20 +22610,7 @@
             `[UPLOAD][PENDING_CONFIRM] source=${uploadSource} reason=${errText} marked=ATTACHED batch=true`,
           );
 
-          for (const item of pendingItems || []) {
-            if (!item) continue;
-            if (item.id) {
-              updateItem(item.id, {
-                state: UploadState.ATTACHED,
-                status: 'attached',
-                message: '已绑定到 ChatGPT 输入框（等待发送就绪）',
-              });
-            } else {
-              item.status = 'attached';
-              item.message = '已绑定到 ChatGPT 输入框（等待发送就绪）';
-              item.state = UploadState.ATTACHED;
-            }
-          }
+          markPendingItemsUploaded(pendingItems, 'attached-to-composer-without-send-ready');
 
           if (!isChildUpload) {
             setStatus('文件已绑定到输入框', 'success');
@@ -22030,7 +22663,7 @@
               ToolboxShell.appendLog(
                 `[UPLOAD_NATIVE][SUCCESS_BY_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${diff}`,
               );
-              markPendingItemsUploaded(pendingItems);
+              markPendingItemsUploaded(pendingItems, 'success-by-ready-diff');
               pendingItems.forEach((item) => {
                 logUploadSourceCheck(item, `after-native-fail-success:${uploadSource}`);
               });
@@ -22152,26 +22785,40 @@
           scheduleRenderUpload(`startUploadFromCurrentQueue:child-finally:${uploadSource}`);
         } else {
           state.running = false;
+          state.activeId = '';
           state.uploadCancelRequested = false;
-          if (state.uploadAbortController) {
-            state.uploadAbortController = null;
-          }
+          state.uploadAbortController = null;
+          flushPendingUploadGlobalSync('startUploadFromCurrentQueue-main-finally');
           setAuthoritativeUploadTaskState({
             phase: 'idle',
             owner: '',
             source: '',
             parentTask: '',
             cycleIndex: 0,
+            runId: '',
             cancelRequested: false,
             cancelable: false,
           }, `main-reset:${uploadSource}`);
           setUploadButtonState('idle', 'upload-finished-or-reset');
-          scheduleRenderUpload('startUploadFromCurrentQueue:finally');
+          renderUploadButtonsOnly({
+            heavy: false,
+            skipCapabilityScan: true,
+            scope: 'upload-only',
+            buttonTasksReason: `upload-finally-light:${uploadSource}`,
+          });
+          logUploadFinalizeState(uploadSource);
+          uploadTimers.timeout('upload-finally-full-render', () => {
+            renderUploadListOnly();
+            renderAllButtonStates({
+              heavy: false,
+              buttonTasksReason: `upload-finally-full:${uploadSource}`,
+            });
+          }, 600);
         }
 
         if (didSetUploadCriticalFlag) {
-          window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = prevUploadCriticalFlag ? true : false;
-          window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
+          clearUploadCriticalMode('upload-finally');
+          didSetUploadCriticalFlag = false;
         }
       }
     }
@@ -22344,11 +22991,12 @@
       },
       'send-message': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
+        const rawSource = ctx && ctx.rawSource ? ctx.rawSource : src;
         const triggerPhase = getSendTaskPhase();
-        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:trigger] source=${src} phase=${triggerPhase}`);
-        ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_TRIGGER] source=${src}`);
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:trigger] source=${src} rawSource=${rawSource} phase=${triggerPhase}`);
+        ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_TRIGGER] source=${src} rawSource=${rawSource}`);
         ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
-        void triggerSendFromToolbox(src).catch((err) => {
+        void triggerSendFromToolbox(src, { rawSource }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] send message UI action failed', err);
           setStatus(`发送信息失败：${errText}`, 'error');
@@ -22521,7 +23169,7 @@
     }
 
     function runUploadUiAction(action, button, source, event) {
-      const src = source || 'unknown';
+      let src = source || 'unknown';
       const normalizedAction = normalizeUploadUiAction(action);
 
       if (!action || !button) {
@@ -22529,7 +23177,17 @@
       }
 
       if (normalizedAction === 'none') {
-        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][skip] action=none source=${src}`);
+        const buttonId = button && button.id ? button.id : '-';
+        const buttonText = button ? String(button.textContent || '').trim() : '-';
+        const domAction = button ? String(button.dataset.action || '').trim() : '-';
+        const baseAction = button ? String(button.dataset.cgptBaseAction || '').trim() : '-';
+        const runtimeAction = button
+          ? String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || '').trim()
+          : '-';
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_UI_ACTION][skip] action=none source=${src} id=${buttonId} text=${buttonText || '-'} disabled=${button && button.disabled ? 1 : 0} domAction=${domAction || '-'} baseAction=${baseAction || '-'} runtimeAction=${runtimeAction || '-'}`
+        );
         return true;
       }
 
@@ -22646,6 +23304,36 @@
         ToolboxShell.appendLog(
           `[SEND_MESSAGE][BUTTON_HIT] source=${src} action=${btnRawAction} phase=${activeSendPhase} waitingReply=${state.waitingReply ? 1 : 0} waitingSend=${isWaitingSendButton() ? 1 : 0} shortcut=${isShortcutDispatching() ? 1 : 0}`,
         );
+
+        // 规范化 source：UI 按钮点击（delegated-click）统一规范为 manual-send-message-button，
+        // 确保 isManualSendMessageSource() 判断与用户意图一致。
+        const rawSourceBeforeNormalize = src;
+        if (src === 'delegated-click' || src === 'unknown' || src === 'root-delegated-click') {
+          src = 'manual-send-message-button';
+        }
+        const isManualSendForLog = isManualSendMessageSource(src);
+        try {
+          const composerTextLog = typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerText === 'function'
+            ? String(ComposerApi.getComposerText() || '').length
+            : -1;
+          const attachmentCountLog = typeof ComposerApi !== 'undefined' && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+            ? (ComposerApi.hasComposerAttachmentUnified() ? 1 : 0)
+            : -1;
+          const capLog = typeof getUploadPageCapability === 'function' ? getUploadPageCapability({ heavy: false }) : {};
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][SOURCE_NORMALIZED] rawSource=${rawSourceBeforeNormalize} normalizedSource=${src}`
+            + ` isManualSend=${isManualSendForLog ? 1 : 0}`
+            + ` timeoutMs=${isManualSendForLog ? MANUAL_SEND_TIMEOUT_MS : SEND_WAIT_TIMEOUT_MS}`
+            + ` attachmentWaitMs=${isManualSendForLog ? MANUAL_SEND_ATTACHMENT_WAIT_MS : SEND_WAIT_TIMEOUT_MS}`
+            + ` textLen=${composerTextLog}`
+            + ` attachmentCount=${attachmentCountLog}`
+            + ` nativeReady=${capLog.canSendNow ? 1 : 0}`
+            + ` isResponding=${capLog.isResponding ? 1 : 0}`,
+          );
+        } catch (logErr) {
+          console.error('[ChatGPT toolbox] SOURCE_NORMALIZED log failed', logErr);
+          ToolboxShell.appendLog(`[SEND_MESSAGE][SOURCE_NORMALIZED] rawSource=${rawSourceBeforeNormalize} normalizedSource=${src} isManualSend=${isManualSendForLog ? 1 : 0} logErr=${logErr && logErr.message ? logErr.message : String(logErr)}`);
+        }
 
         if (
           activeSendPhase !== 'idle'
@@ -22803,7 +23491,10 @@
 
       const handled = handleUploadActionByMap(normalizedAction, {
         button,
-        source: src,
+        source: normalizedAction === 'send-message'
+          ? normalizeSendMessageSource(src, normalizedAction)
+          : src,
+        rawSource: src,
         event,
       });
       if (handled) {
@@ -23238,10 +23929,37 @@
           );
         }
 
-        const runtimeAction = resolveUploadButtonRuntimeAction(button, def.action);
-        const domAction = String(button.dataset.action || '').trim();
-        const baseAction = String(button.dataset.cgptBaseAction || '').trim();
-        const cgptRuntime = String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || '').trim();
+        let runtimeAction = resolveUploadButtonRuntimeAction(button, def.action);
+        let domAction = String(button.dataset.action || '').trim();
+        let baseAction = String(button.dataset.cgptBaseAction || '').trim();
+        let cgptRuntime = String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || '').trim();
+
+        if (
+          def.action === 'send-message'
+          && runtimeAction === 'none'
+          && button instanceof HTMLButtonElement
+          && !button.disabled
+        ) {
+          const domActionBeforeRecover = String(button.dataset.action || '').trim();
+          const baseActionBeforeRecover = String(button.dataset.cgptBaseAction || '').trim();
+          const runtimeBeforeRecover = String(
+            button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || ''
+          ).trim();
+
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][CLICK_NONE_ACTION_RECOVER] id=${button.id || '-'} domAction=${domActionBeforeRecover || '-'} baseAction=${baseActionBeforeRecover || '-'} runtimeAction=${runtimeBeforeRecover || '-'}`
+          );
+
+          // Ensure both DOM action and internal runtime action are consistent.
+          button.dataset.cgptBaseAction = 'send-message';
+          button.dataset.action = 'send-message';
+          button.dataset.cgptRuntimeAction = 'send-message';
+          button.dataset.cgptButtonAction = 'send-message';
+          runtimeAction = 'send-message';
+          domAction = 'send-message';
+          baseAction = 'send-message';
+          cgptRuntime = 'send-message';
+        }
 
         ToolboxShell.appendLog(
           `[UPLOAD_UI_ACTION][event] source=delegated-click defAction=${def.action} domAction=${domAction}`
@@ -23272,25 +23990,37 @@
       runUploadUiAction(resolvedAction, actionBtn, 'delegated-click', event);
     }
 
+    let uploadDelegatedClickBoundRoot = null;
+    let uploadDelegatedClickBindNonce = 0;
+
     function bindUploadDelegatedClick(rootEl) {
       if (!(rootEl instanceof HTMLElement)) {
         ToolboxShell.appendLog('[UPLOAD_UI_ACTION][bind-skip] reason=root-missing');
         return;
       }
 
-      if (rootEl.dataset.uploadDelegatedClickBound === '1') {
-        ToolboxShell.appendLog('[UPLOAD_UI_ACTION][BIND_SKIP] reason=already-bound');
+      const rootChanged = uploadDelegatedClickBoundRoot !== rootEl;
+      if (!rootChanged && rootEl.dataset.uploadDelegatedClickBound === '1') {
+        ToolboxShell.appendLog('[UPLOAD_UI_ACTION][BIND_SKIP] reason=already-bound-same-root');
         return;
       }
 
-      rootEl.dataset.uploadDelegatedClickBound = '1';
+      uploadDelegatedClickBoundRoot = rootEl;
+      uploadDelegatedClickBindNonce += 1;
+      const bindNonce = uploadDelegatedClickBindNonce;
 
+      rootEl.dataset.uploadDelegatedClickBound = '1';
+      rootEl.dataset.uploadDelegatedClickBindNonce = String(bindNonce);
+
+      const bindKey = `upload-delegated-click:${String(rootEl.id || '')}:${bindNonce}`;
       bindOnce(rootEl, 'click', handleUploadDelegatedActionClick, {
-        key: 'upload-delegated-click',
+        key: bindKey,
         moduleName: 'UploadModule',
         listenerOptions: true,
       });
-      ToolboxShell.appendLog('[UPLOAD_UI_ACTION][BIND_OK] source=root-delegated-click');
+      ToolboxShell.appendLog(
+        `[UPLOAD_UI_ACTION][BIND_OK] source=root-delegated-click rootChanged=${rootChanged ? 1 : 0}`,
+      );
     }
 
     function requireUploadElement(rootEl, selector, name) {
@@ -23430,8 +24160,6 @@
         try {
           await switchGroup(groupId, {
             source: 'user',
-            saveGlobalFallback: true,
-            savePageState: true,
             saveLastManual: true,
             reason: 'user-switch-upload-group',
           });
@@ -23470,8 +24198,6 @@
 
             await switchGroup(groupId, {
               source: 'user',
-              saveGlobalFallback: true,
-              savePageState: true,
               saveLastManual: true,
               reason: 'user-switch-upload-group',
             });
@@ -24233,15 +24959,6 @@
             );
           }
         }
-      } else {
-        targetGroupId = String(readToolboxStateField(pageState, 'uploadActiveGroupId', '')).trim();
-
-        if (targetGroupId && state.groups.some((g) => g.id === targetGroupId)) {
-          source = 'page-state';
-        } else {
-          targetGroupId = '';
-          source = '';
-        }
       }
 
       if (!targetGroupId) {
@@ -24254,9 +24971,7 @@
         );
       } else if (source !== 'manual-newer') {
         await switchGroup(targetGroupId, {
-          savePageState: source !== 'page-state',
           saveLastManual: false,
-          saveGlobalFallback: false,
           reason: `restore-page-state:${source}`,
         });
 
@@ -24313,6 +25028,7 @@
       validateUploadDomStructure(rootEl);
       logUploadActionRowLayout(rootEl, 'init-pipeline');
       bindEvents(rootEl);
+      initUploadGlobalSync();
       logUploadButtonSplitDom();
 
       return Promise.resolve()
@@ -24325,6 +25041,9 @@
           uploadGroupsInitResolved = true;
           ensureActiveUploadGroupIdValid('init-pipeline-complete');
           syncUploadGroupAppState();
+          ToolboxShell.appendLog(
+            `[UPLOAD_GLOBAL_SYNC][init] globalActiveGroupId=${getGlobalUploadActiveGroupId() || '-'} activeGroupId=${state.activeGroupId || '-'} queue=${getActiveGroupFiles().length}`,
+          );
           ToolboxShell.appendLog('[UPLOAD_DIAG][blob-cache-enabled] upload blob persistence enabled');
       appendUploadGroupLog('INIT', { stage: 'pipeline-complete', reason: reason || '-' });
         })
@@ -24503,6 +25222,26 @@
       uploadSendShortcutRunning = true;
       uploadSendTaskStartedAt = Date.now();
 
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'waiting_send',
+          runId,
+          cancelRequested: false,
+          subphase: 'pending-send-after-reply-opportunity',
+        },
+        'pending-send-after-reply:opportunity',
+      );
+
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'sending',
+          runId,
+          cancelRequested: false,
+          subphase: 'pending-send-after-reply-native-ready',
+        },
+        'pending-send-after-reply:native-ready',
+      );
+
       setStatus('检测到可发送，正在自动发送...', 'running');
 
       ToolboxShell.appendLog(
@@ -24563,8 +25302,39 @@
 
             var elapsed = Date.now() - state.waitingReplyCheckedAt;
 
-            if (elapsed > 120000 && !state.pendingSendAfterReply) {
+            if (elapsed > SEND_WAIT_REPLY_TIMEOUT_MS && !state.pendingSendAfterReply) {
+              var latestTextLen = getLatestAssistantTextForCopyCheck ? getLatestAssistantTextForCopyCheck().length : -1;
+              ToolboxShell.appendLog(
+                `[SEND_UI][WAIT_REPLY_TIMEOUT] runId=${runId} elapsed=${elapsed}`
+                + ` pendingSendAfterReply=${state.pendingSendAfterReply ? 1 : 0}`
+                + ` sawBusy=${state.replyWaitSawBusy ? 1 : 0}`
+                + ` assistantCountBefore=${state.replyWaitAssistantCountBefore}`
+                + ` assistantCountNow=${countVisibleAssistantMessagesForReplyWait ? countVisibleAssistantMessagesForReplyWait() : -1}`
+                + ` latestAssistantTextLen=${latestTextLen}`,
+              );
               logUploadSendUiState('timeout', 'waiting-reply', runId);
+              finishWaitingReply('timeout');
+              return;
+            }
+
+            if (state.pendingSendAfterReply && elapsed > PENDING_SEND_AFTER_REPLY_TIMEOUT_MS) {
+              var latestTextLenPending = getLatestAssistantTextForCopyCheck ? getLatestAssistantTextForCopyCheck().length : -1;
+              var assistantCountNowForPending = countVisibleAssistantMessagesForReplyWait
+                ? countVisibleAssistantMessagesForReplyWait()
+                : -1;
+              ToolboxShell.appendLog(
+                `[SEND_UI][WAIT_REPLY_TIMEOUT] runId=${runId} elapsed=${elapsed}`
+                + ` pendingSendAfterReply=1`
+                + ` sawBusy=${state.replyWaitSawBusy ? 1 : 0}`
+                + ` assistantCountBefore=${state.replyWaitAssistantCountBefore}`
+                + ` assistantCountNow=${assistantCountNowForPending}`
+                + ` latestAssistantTextLen=${latestTextLenPending}`
+                + ` timeoutType=pending_send_after_reply`,
+              );
+              state.pendingSendAfterReply = false;
+              state.pendingSendAfterReplySource = '';
+              state.pendingSendRetrying = false;
+              logUploadSendUiState('timeout', 'pending-send-after-reply', runId);
               finishWaitingReply('timeout');
               return;
             }
@@ -24877,6 +25647,7 @@
       setSendButtonState,
       cleanupLegacyCoupledButtons,
       syncUploadTaskPhase,
+      getUploadTaskState,
       syncSendTaskPhase,
       getSendTaskPhase,
       getSendTaskState,

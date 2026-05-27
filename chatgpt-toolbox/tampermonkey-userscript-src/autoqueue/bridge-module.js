@@ -2134,6 +2134,8 @@
       return bytes;
     }
 
+    // Single-file bridge upload: attaches one payload file via ComposerApi only.
+    // Not equivalent to the multi-file UploadModule queue; does not update queue stats or upload task state.
     async function uploadCurrentFileCommand(result) {
       const normalized = normalizeBridgePollMessage(result);
       const messageId = normalized.message_id || normalized.id;
@@ -2275,8 +2277,11 @@
         }
       };
 
-      if (!UploadModule || typeof UploadModule.startUploadFromCurrentQueue !== 'function') {
-        const reason = 'UploadModule.startUploadFromCurrentQueue 不存在，无法执行油猴上传';
+      if (
+        !UploadModule
+        || typeof UploadModule.runStartUploadButtonCore !== 'function'
+      ) {
+        const reason = 'UploadModule.runStartUploadButtonCore 不存在，无法执行油猴上传';
         setUploadBlockOnFailed(reason);
 
         await ack(messageId, false, reason);
@@ -2303,7 +2308,9 @@
           command: 'start_upload',
         }, messageId);
 
-        queueResult = await UploadModule.startUploadFromCurrentQueue({
+        // Unified manual-upload entry (syncs upload task + button state).
+        // For queue-only uploads that must bypass manual UI state, call startUploadFromCurrentQueue directly.
+        queueResult = await UploadModule.runStartUploadButtonCore({
           source: bridgeSource,
         });
         const uploadStatus = UploadModule.getStatus
