@@ -169,6 +169,8 @@ class MainWindow(QMainWindow, *_main_window_bases()):
     def closeEvent(self, event):
         if hasattr(self, "_save_splitter_sizes_now"):
             self._save_splitter_sizes_now()
+        if hasattr(self, "_stash_session_compose_draft") and self._current_session_id:
+            self._stash_session_compose_draft(self._current_session_id)
         if hasattr(self, "_flush_pending_sessions_save"):
             self._flush_pending_sessions_save()
         else:

@@ -114,7 +114,28 @@
       return false;
     }
 
+    let copyPipelineFallbackWarnedOnce = false;
+
     function stripChatGptInstrumentsLabel(text) {
+      if (
+        typeof CopyPipeline !== 'undefined'
+        && CopyPipeline
+        && typeof CopyPipeline.strip === 'function'
+      ) {
+        return CopyPipeline.strip(text);
+      }
+
+      if (!copyPipelineFallbackWarnedOnce) {
+        copyPipelineFallbackWarnedOnce = true;
+        const line = '[COPY_PIPELINE][MISSING] strip fallback used';
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        } else {
+          console.warn(line);
+        }
+      }
+
+      // Minimal fallback: keep only "strip Instruments label + normalize newlines".
       return String(text || '')
         .replace(/ChatGPT\s*Instruments\s*/gi, '\n')
         .replace(/\r\n/g, '\n')
@@ -123,61 +144,26 @@
     }
 
     function collapseInstrumentsCalculatorReply(text) {
-      const value = stripChatGptInstrumentsLabel(text);
-      if (!value) return '';
+      if (
+        typeof CopyPipeline !== 'undefined'
+        && CopyPipeline
+        && typeof CopyPipeline.collapseInstrumentsCalculatorReply === 'function'
+      ) {
+        return CopyPipeline.collapseInstrumentsCalculatorReply(text);
+      }
 
-      const lines = value
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-
-      if (lines.length === 0) return '';
-      if (lines.length === 1) return lines[0];
-
-      const equationLines = [];
-      const exprLines = [];
-
-      for (const line of lines) {
-        if (/^(.+?)=(.+)$/.test(line)) {
-          equationLines.push(line);
+      if (!copyPipelineFallbackWarnedOnce) {
+        copyPipelineFallbackWarnedOnce = true;
+        const line = '[COPY_PIPELINE][MISSING] collapse fallback used';
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
         } else {
-          exprLines.push(line);
+          console.warn(line);
         }
       }
 
-      if (equationLines.length === 1) {
-        const eqLine = equationLines[0];
-        const answerMatch = eqLine.match(/^(.+?)=(.+)$/);
-        if (answerMatch) {
-          const lhs = String(answerMatch[1] || '').replace(/\s+/g, '');
-          for (const exprLine of exprLines) {
-            const exprNorm = String(exprLine).replace(/\s+/g, '');
-            if (lhs && exprNorm && lhs === exprNorm) {
-              return eqLine.trim();
-            }
-          }
-        }
-      }
-
-      if (lines.length === 2) {
-        const [first, second] = lines;
-        for (const [exprLine, answerLine] of [
-          [first, second],
-          [second, first],
-        ]) {
-          const answerMatch = String(answerLine).match(/^(.+?)=(.+)$/);
-          if (!answerMatch) continue;
-
-          const lhs = String(answerMatch[1] || '').replace(/\s+/g, '');
-          const exprNorm = String(exprLine).replace(/\s+/g, '');
-
-          if (lhs && exprNorm && lhs === exprNorm) {
-            return String(answerLine).trim();
-          }
-        }
-      }
-
-      return value;
+      // Minimal fallback: do not re-implement collapse logic; just strip the label.
+      return stripChatGptInstrumentsLabel(text);
     }
 
     function cleanMessageText(text) {
@@ -2001,6 +1987,15 @@
     }
 
     function appendComposerPollLogThrottled(key, text) {
+      if (
+        !isComposerDebugEnabled()
+        && typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+        && UploadCriticalRuntime.isUploadCriticalMode()
+      ) {
+        return;
+      }
       appendComposerLogThrottled(key, text, getComposerPollLogThrottleMs());
     }
 
@@ -2110,13 +2105,13 @@
       ].join(' ').toLowerCase();
 
       return (
-        mark.includes('启动语音功能')
-        || mark.includes('开始听写')
-        || mark.includes('停止听写')
-        || mark.includes('听写')
-        || mark.includes('语音')
-        || mark.includes('麦克风')
-        || mark.includes('录音')
+        mark.includes('\u542f\u52a8\u8bed\u97f3\u529f\u80fd')
+        || mark.includes('\u5f00\u59cb\u542c\u5199')
+        || mark.includes('\u505c\u6b62\u542c\u5199')
+        || mark.includes('\u542c\u5199')
+        || mark.includes('\u8bed\u97f3')
+        || mark.includes('\u9ea6\u514b\u98ce')
+        || mark.includes('\u5f55\u97f3')
         || mark.includes('voice')
         || mark.includes('microphone')
         || mark.includes('dictate')
@@ -2189,7 +2184,7 @@
       return (
         mark.includes('send')
         || mark.includes('submit')
-        || mark.includes('发送')
+        || mark.includes('\u53d1\u9001')
       );
     }
 
@@ -2250,18 +2245,12 @@
     function hasRealSubmitButton() {
       const byId = document.querySelector('#composer-submit-button');
       if (byId instanceof HTMLButtonElement && isRealSendButtonShape(byId)) {
-        if (isSendButtonReady(byId)) {
-          return true;
-        }
-        return hasComposerPayloadForSend();
+        return true;
       }
 
       const btn = findSendButton({ silent: true });
       if (btn instanceof HTMLButtonElement && isRealSendButtonShape(btn)) {
-        if (isSendButtonReady(btn)) {
-          return true;
-        }
-        return hasComposerPayloadForSend();
+        return true;
       }
 
       return false;
@@ -2333,9 +2322,24 @@
         testId === 'send-button',
         testId === 'composer-submit-button',
         id === 'composer-submit-button',
-        ['发送', '发送消息', '发送提示', 'send', 'send message', 'send prompt'].includes(aria),
-        ['发送', '发送消息', 'send', 'send message'].includes(title),
-        ['发送', 'send'].includes(text),
+        [
+          '\u53d1\u9001',
+          '\u53d1\u9001\u6d88\u606f',
+          '\u53d1\u9001\u63d0\u793a',
+          'send',
+          'send message',
+          'send prompt',
+        ].includes(aria),
+        [
+          '\u53d1\u9001',
+          '\u53d1\u9001\u6d88\u606f',
+          'send',
+          'send message',
+        ].includes(title),
+        [
+          '\u53d1\u9001',
+          'send',
+        ].includes(text),
         cls.includes('composer-submit-button'),
         cls.includes('text-submit-btn-text'),
       ];
@@ -2790,7 +2794,21 @@
           }
         }
       }
-      const allButtons = (!silent && (options.debug === true || isComposerDebugEnabled()))
+
+      const allowLegacy = options.debug === true || isComposerDebugEnabled();
+      if (!allowLegacy) {
+        return null;
+      }
+
+      // 兼容：如果 DOM helper 没命中，才使用 legacy 扫描逻辑（debug/诊断模式）。
+      if (!silent) {
+        appendComposerLogThrottled(
+          'send-button-legacy-fallback-used',
+          '[SEND_BUTTON][LEGACY_FALLBACK_USED] reason=dom-helper-miss',
+        );
+      }
+
+      const allButtons = (!silent && allowLegacy)
         ? Array.from(document.querySelectorAll('button'))
         : [];
       const totalScanned = allButtons.length;
@@ -2804,7 +2822,7 @@
         'main button[data-testid="send-button"]',
         'button[data-testid="composer-submit-button"]',
         'button[aria-label*="Send"]',
-        'button[aria-label*="发送"]',
+        'button[aria-label*="\u53d1\u9001"]',
         ...(SELECTORS.sendButton || []),
       ];
 
@@ -4114,18 +4132,7 @@
         && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
         && UploadCriticalRuntime.isUploadCriticalMode()
       ) {
-        return true;
-      }
-
-      const startedAt = (
-        typeof UploadCriticalRuntime !== 'undefined'
-        && UploadCriticalRuntime
-        && typeof UploadCriticalRuntime.getUploadCriticalStartedAt === 'function'
-      )
-        ? UploadCriticalRuntime.getUploadCriticalStartedAt()
-        : 0;
-      if (startedAt > 0 && Date.now() - startedAt < 30000) {
-        return true;
+        return false;
       }
 
       return false;
@@ -4513,6 +4520,91 @@
       };
     }
 
+    const composerAttachmentSnapshotCache = {
+      at: 0,
+      key: '',
+      value: null,
+    };
+
+    function getComposerRootIdentity(root) {
+      if (!(root instanceof HTMLElement)) {
+        return 'none';
+      }
+      if (!root.dataset.cgptComposerRootIdentity) {
+        root.dataset.cgptComposerRootIdentity = `composer_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      }
+      return root.dataset.cgptComposerRootIdentity;
+    }
+
+    function getUniqueComposerAttachmentSnapshot(options = {}) {
+      const useHeavy = options && options.heavy === true;
+      const reason = String(options && options.reason ? options.reason : '').slice(0, 160);
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const uploadCritical = !!(
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+        && UploadCriticalRuntime.isUploadCriticalMode()
+      );
+      const cacheKey = [
+        reason || '-',
+        useHeavy ? 1 : 0,
+        getComposerRootIdentity(getComposerRoot()),
+        uploadCritical ? 1 : 0,
+      ].join('|');
+      const cacheTtlMs = useHeavy ? 800 : (uploadCritical ? 500 : 300);
+      const now = Date.now();
+      if (
+        composerAttachmentSnapshotCache.value
+        && composerAttachmentSnapshotCache.key === cacheKey
+        && now - composerAttachmentSnapshotCache.at < cacheTtlMs
+      ) {
+        return composerAttachmentSnapshotCache.value;
+      }
+
+      const base = useHeavy
+        ? getComposerAttachmentSnapshot(reason || 'unique-heavy')
+        : getComposerAttachmentSnapshotFast(reason || 'unique-fast');
+      const count = Number(base.count != null ? base.count : base.fileCount) || 0;
+      const items = Array.isArray(base.items) ? base.items : [];
+      const names = Array.isArray(base.filenames)
+        ? base.filenames
+        : items.map((item) => item && item.name).filter(Boolean);
+      const snapshot = {
+        ...base,
+        rawCount: count,
+        uniqueCount: count,
+        fileCount: count,
+        count,
+        names,
+        filenames: names,
+        items,
+        cards: useHeavy ? findAttachmentCardsInComposer() : [],
+      };
+
+      composerAttachmentSnapshotCache.at = Date.now();
+      composerAttachmentSnapshotCache.key = cacheKey;
+      composerAttachmentSnapshotCache.value = snapshot;
+
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+      if (costMs > 80) {
+        const line = `[PERF][composerAttachmentSnapshot] cost=${costMs}ms heavy=${useHeavy ? 1 : 0} raw=${snapshot.rawCount} unique=${snapshot.uniqueCount} reason=${reason || '-'}`;
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        } else {
+          console.warn(line);
+        }
+      }
+
+      return snapshot;
+    }
+
     function getExistingComposerPayloadSnapshot() {
       const text = String(getComposerText() || '').trim();
       const attachmentCount = countAttachmentChips();
@@ -4856,6 +4948,7 @@
       );
 
       const ok = fileNameEvidenceAny(names, text);
+      const probe = probeComposerAttachmentEvidence(text);
       const originalName = typeof uploadName === 'object'
         ? String(uploadName.originalName || uploadName.name || '')
         : String(uploadName || '');
@@ -4871,14 +4964,42 @@
         `[UPLOAD_DIAG][attachment-evidence] roots=${roots.length} ok=${ok ? 1 : 0} textPreview=${text.slice(0, 200)}`
       );
 
+      let reason = ok
+        ? `附件区域识别到文件名：${names.join('|')}`
+        : `未识别到附件文件名：${names.join('|')}`;
+
+      if (!ok && probe && probe.hasRemoveSignal && !probe.hasFileName) {
+        ToolboxShell.appendLog('[UPLOAD_ATTACH][REMOVE_BUTTON_WITHOUT_NAME]');
+        reason = '附件存在移除按钮但未识别到文件名';
+      }
+
       return {
         ok,
-        reason: ok
-          ? `附件区域识别到文件名：${names.join('|')}`
-          : `未识别到附件文件名：${names.join('|')}`,
+        reason,
         textPreview: text.slice(0, 500),
         rootsCount: roots.length,
       };
+    }
+
+    function detectUploadPlatformErrorToastLight(source = '') {
+      try {
+        if (
+          typeof UploadCriticalRuntime !== 'undefined'
+          && UploadCriticalRuntime
+          && typeof UploadCriticalRuntime.detectChatGptUploadErrorToast === 'function'
+        ) {
+          const pick = UploadCriticalRuntime.detectChatGptUploadErrorToast({ minIntervalMs: 800 });
+          if (pick && pick.ok) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_PLATFORM_ERROR][DETECTED] domain=files.oaiusercontent.com source=${source || '-'} message=${pick.message || '-'}`,
+            );
+            return pick;
+          }
+        }
+      } catch (err) {
+        console.error('[ChatGPT toolbox] detectUploadPlatformErrorToastLight failed', err);
+      }
+      return null;
     }
 
     async function waitLegacyInputSettled(uploadFile, options = {}) {
@@ -4907,6 +5028,16 @@
             ok: false,
             cancelled: true,
             reason: '用户已停止上传',
+          };
+        }
+
+        const platformErr = detectUploadPlatformErrorToastLight('waitLegacyInputSettled');
+        if (platformErr && platformErr.ok) {
+          return {
+            ok: false,
+            reason: 'files-oaiusercontent-upload-failed',
+            detail: platformErr.message || '',
+            level: 'platform',
           };
         }
 
@@ -4962,6 +5093,11 @@
 
       const chipAfter = countAttachmentChips();
 
+      if (!chipAfter) {
+        ToolboxShell.appendLog('[UPLOAD_ATTACH][NO_CHIP]');
+      }
+      ToolboxShell.appendLog('[UPLOAD_ATTACH][NAME_MATCH_TIMEOUT]');
+
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][file-input:settled-timeout] ${uploadName} reason=${lastReason || '-'} chipBefore=${chipCountBefore} chipAfter=${chipAfter} textPreview=${lastTextPreview || collectAttachmentChipText().slice(0, 500)}`
       );
@@ -4994,6 +5130,16 @@
             cancelled: true,
             level: 'cancelled',
             reason: '用户已停止上传',
+          };
+        }
+
+        const platformErr = detectUploadPlatformErrorToastLight('waitForAttachmentEvidence');
+        if (platformErr && platformErr.ok) {
+          return {
+            ok: false,
+            level: 'platform',
+            reason: 'files-oaiusercontent-upload-failed',
+            detail: platformErr.message || '',
           };
         }
 
@@ -5273,6 +5419,19 @@
     ];
 
     function isNativeSendReadyForUpload() {
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.isAttachmentStillUploading === 'function'
+      ) {
+        try {
+          const uploading = !!ComposerAttachments.isAttachmentStillUploading({ heavy: true });
+          if (uploading) return false;
+        } catch (err) {
+          console.error('[ChatGPT toolbox] isNativeSendReadyForUpload composerAttachments check failed', err);
+        }
+      }
+
       return !!(
         (typeof hasRealSubmitButton === 'function' && hasRealSubmitButton())
         || (typeof canSendNowLight === 'function' && canSendNowLight())
@@ -5281,6 +5440,22 @@
     }
 
     function detectChatGPTNativeUploadError() {
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.detectNativeUploadError === 'function'
+      ) {
+        const pick = ComposerAttachments.detectNativeUploadError();
+        if (pick && pick.hasError) {
+          return {
+            ok: false,
+            reason: 'native-upload-failed',
+            message: String(pick.errorText || '').slice(0, 500),
+          };
+        }
+        return null;
+      }
+
       try {
         const uploadRunStartedAt = (
           typeof UploadCriticalRuntime !== 'undefined'
@@ -5625,6 +5800,65 @@
     }
 
     async function waitChatGPTNativeUploadSettled(files, options = {}) {
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.waitNativeUploadSettled === 'function'
+      ) {
+        const requireSendReady = options.requireSendReady === undefined
+          ? true
+          : options.requireSendReady === true;
+        const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
+        const pollMs = Number(options.pollMs) || 500;
+        const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
+
+        const signal = options.signal;
+        const isCancelled = typeof options.isCancelled === 'function'
+          ? options.isCancelled
+          : () => !!(signal && signal.aborted);
+
+        const settled = await ComposerAttachments.waitNativeUploadSettled({
+          timeoutMs,
+          intervalMs: pollMs,
+          signal,
+          isCancelled,
+        });
+
+        if (settled && settled.cancelled) {
+          return { ok: false, cancelled: true, reason: 'cancelled' };
+        }
+
+        if (!settled || settled.ok !== true) {
+          return { ok: false, reason: 'native-upload-settle-timeout' };
+        }
+
+        if (!requireSendReady) {
+          return { ok: true, reason: 'native-upload-settled-without-send-ready' };
+        }
+
+        if (isCancelled()) {
+          return { ok: false, cancelled: true, reason: 'cancelled' };
+        }
+
+        await sleep(stableMs);
+
+        if (isCancelled()) {
+          return { ok: false, cancelled: true, reason: 'cancelled' };
+        }
+
+        const nativeErrAfterStable = detectChatGPTNativeUploadError();
+        if (nativeErrAfterStable) {
+          return nativeErrAfterStable;
+        }
+
+        const sendReady = isNativeSendReadyForUpload();
+        if (!sendReady) {
+          return { ok: false, reason: 'native-upload-send-not-ready' };
+        }
+
+        return { ok: true, reason: 'native-upload-settled' };
+      }
+
       const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
       const pollMs = Number(options.pollMs) || 500;
       const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
@@ -6158,7 +6392,41 @@
     }
 
     async function attachFilesByFileInput(files, timeoutMs = 120000, options = {}) {
-      ToolboxShell.appendLog('[UPLOAD_PATH] using attachFilesByFileInput');
+      function isHiddenFileInput(input) {
+        if (!(input instanceof HTMLInputElement)) return true;
+        const style = window.getComputedStyle(input);
+        const classText = String(input.className || '').toLowerCase();
+        const inlineStyle = String(input.getAttribute('style') || '').toLowerCase();
+        const clipText = `${style.clip || ''} ${style.clipPath || ''} ${inlineStyle}`;
+        const width = Number(style.width.replace('px', '')) || 0;
+        const height = Number(style.height.replace('px', '')) || 0;
+        const rect = input.getBoundingClientRect();
+        const rectW = rect && Number(rect.width) > 0 ? Number(rect.width) : 0;
+        const rectH = rect && Number(rect.height) > 0 ? Number(rect.height) : 0;
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return true;
+        if (/clip|clip-path/.test(clipText)) return true;
+        if (/sr-only|screen-reader|visually-hidden/.test(classText)) return true;
+        if ((width > 0 && width <= 1) || (height > 0 && height <= 1)) return true;
+        if ((rectW > 0 && rectW <= 1) || (rectH > 0 && rectH <= 1)) return true;
+        return false;
+      }
+      function isUsableAttachButton(el) {
+        if (!(el instanceof HTMLElement)) return false;
+        if (isInToolbox(el)) return false;
+        if (isInsideConversationHistory(el)) return false;
+        if (el.disabled) return false;
+        if (String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const text = [
+          el.innerText || '',
+          el.textContent || '',
+          el.getAttribute('aria-label') || '',
+          el.getAttribute('title') || '',
+          el.getAttribute('data-testid') || '',
+        ].join(' ');
+        return /添加文件|上传文件|附件|添加照片|Attach|Upload|Add files|upload|attach/i.test(text);
+      }
       const signal = options.signal;
       const isCancelled = typeof options.isCancelled === 'function'
         ? options.isCancelled
@@ -6168,6 +6436,19 @@
       const requireSendReady = options.requireSendReady === true
         ? true
         : (options.requireSendReady === false ? false : !uploadOnly);
+      const uploadAttachStrategyRaw = String(options.uploadAttachStrategy || '').trim();
+      const uploadAttachStrategy = (
+        uploadAttachStrategyRaw === 'legacy-input-injection'
+          ? 'legacy-input-injection'
+          : 'official-ui-first'
+      );
+
+      ToolboxShell.appendLog(`[UPLOAD_PATH] strategy=${uploadAttachStrategy}`);
+      if (uploadAttachStrategy === 'legacy-input-injection') {
+        ToolboxShell.appendLog(
+          '[UPLOAD_STRATEGY][WARN] legacy-input-injection uses synthetic input/change events and may be ignored by ChatGPT frontend',
+        );
+      }
 
       const cleanFiles = files
         .map((f, index) => normalizeToNativeFile(f, f && f.name ? f.name : `upload_${index + 1}.bin`))
@@ -6192,7 +6473,115 @@
         };
       }
 
-      const inputs = findFileInputsLegacy();
+      let inputs = [];
+
+      if (uploadAttachStrategy === 'official-ui-first') {
+        try {
+          const composerRoot = getComposerRoot();
+          const roots = [
+            composerRoot,
+            qs('[data-testid="composer"]'),
+            qs('main'),
+          ].filter((el) => el instanceof HTMLElement);
+
+          const attachSelectors = [
+            'button[aria-label*="添加文件"]',
+            'button[aria-label*="上传文件"]',
+            'button[aria-label*="附件"]',
+            'button[aria-label*="添加照片"]',
+            'button[aria-label*="Attach"]',
+            'button[aria-label*="Upload"]',
+            'button[aria-label*="Add files"]',
+            'button[data-testid*="attach"]',
+            'button[data-testid*="upload"]',
+            '[role="button"][aria-label*="添加文件"]',
+            '[role="button"][aria-label*="上传文件"]',
+            '[role="button"][aria-label*="附件"]',
+            '[role="button"][aria-label*="Attach"]',
+            '[role="button"][aria-label*="Upload"]',
+          ].join(', ');
+
+          const beforeInputs = new Set(qsa('input[type="file"]').filter((el) => el instanceof HTMLInputElement));
+          const existingComposerInput = composerRoot instanceof HTMLElement
+            ? qsa('input[type="file"]', composerRoot).find((el) => (
+              el instanceof HTMLInputElement
+              && !el.disabled
+              && String(el.getAttribute('aria-disabled') || '').trim().toLowerCase() !== 'true'
+              && !isInToolbox(el)
+              && !isInsideConversationHistory(el)
+            ))
+            : null;
+          if (existingComposerInput instanceof HTMLInputElement) {
+            if (isElementVisible(existingComposerInput) && !isHiddenFileInput(existingComposerInput)) {
+              ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_FAST_PATH] usable=1');
+              inputs = [existingComposerInput].concat(findFileInputsLegacy().filter((x) => x !== existingComposerInput));
+            } else {
+              ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_SKIP] reason=hidden-input');
+            }
+          }
+
+          const candidates = inputs.length
+            ? []
+            : roots
+              .flatMap((root) => qsa(attachSelectors, root))
+              .filter((el) => isUsableAttachButton(el));
+
+          candidates.forEach((el, index) => {
+            const rect = el.getBoundingClientRect();
+            const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            const aria = String(el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+            const testid = String(el.getAttribute('data-testid') || '').replace(/\s+/g, ' ').trim();
+            ToolboxShell.appendLog(
+              `[UPLOAD_OFFICIAL_UI][ATTACH_BUTTON_CANDIDATE] index=${index} text=${text || '-'} aria=${aria || '-'} testid=${testid || '-'} rect=${rect ? `${Math.round(rect.width)}x${Math.round(rect.height)}@${Math.round(rect.left)},${Math.round(rect.top)}` : '-'}`,
+            );
+          });
+
+          ToolboxShell.appendLog(
+            `[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON] candidates=${candidates.length}`,
+          );
+
+          if (!inputs.length && candidates[0]) {
+            try {
+              candidates[0].click();
+            } catch (clickErr) {
+              const errText = clickErr && clickErr.message ? clickErr.message : String(clickErr);
+              console.error('[ChatGPT toolbox] click official attach button failed', clickErr);
+              ToolboxShell.appendLog(`[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON_FAILED] error=${errText}`);
+            }
+          }
+
+          const deadline = Date.now() + Math.min(2500, Math.max(300, Number(timeoutMs) || 0));
+          let picked = null;
+          while (Date.now() < deadline) {
+            if (isCancelled()) break;
+            const nowInputs = qsa('input[type="file"]').filter((el) => el instanceof HTMLInputElement);
+            const newOnes = nowInputs.filter((el) => !beforeInputs.has(el));
+            const inComposerNew = composerRoot instanceof HTMLElement
+              ? newOnes.find((el) => composerRoot.contains(el))
+              : null;
+            picked = inComposerNew || (newOnes[0] || null);
+            if (picked) {
+              break;
+            }
+            await sleep(120);
+          }
+
+          if (picked) {
+            ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][INPUT_FOUND]');
+            inputs = [picked].concat(findFileInputsLegacy().filter((x) => x !== picked));
+          } else {
+            ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][INPUT_NOT_FOUND_FALLBACK_LEGACY]');
+          }
+        } catch (err) {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] official-ui-first failed', err);
+          ToolboxShell.appendLog(`[UPLOAD_OFFICIAL_UI][ERROR] error=${errText}`);
+        }
+      }
+
+      if (!inputs.length) {
+        inputs = findFileInputsLegacy();
+      }
 
       ToolboxShell.appendLog(`旧版 input 上传：发现 ${inputs.length} 个文input`);
 
@@ -6200,7 +6589,8 @@
         console.warn('[ChatGPT toolbox] legacy input upload failed: no file inputs');
         return {
           ok: false,
-          reason: '旧版 input 上传失败：找不到 ChatGPT 文件 input',
+          reason: 'no-file-input',
+          detail: '找不到 ChatGPT composer 附近可用的 input[type=file]',
         };
       }
 
@@ -6383,7 +6773,8 @@
       return {
         ok: false,
         method: 'file-input',
-        reason: '旧版 input 上传已触发，但未检测到 ChatGPT 附件出现',
+        reason: 'synthetic-change-ignored',
+        detail: 'ChatGPT 未接受脚本模拟的 input/change 文件注入，请使用官方 + 手动选择文件，或改用浏览器扩展/CDP 上传通道',
       };
     }
 
@@ -6540,6 +6931,7 @@
       collectAttachmentChipText,
       countAttachmentChips,
       countAttachmentChipsFast,
+      getUniqueComposerAttachmentSnapshot,
       getComposerRuntimeSnapshotLight,
       buildComposerRuntimeSnapshotLight,
       hasComposerDraftPayload,
@@ -6847,66 +7239,152 @@
     return true;
   }
 
-  function detectComposerResponseStateLight() {
-    const snapshot = typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
-      ? ComposerApi.getComposerRuntimeSnapshotLight(500)
-      : null;
-    const now = snapshot && snapshot.at ? snapshot.at : Date.now();
+  const LIGHT_COMPOSER_NOT_FOUND_GRACE_MS = 3000;
+  const LIGHT_COMPOSER_NOT_FOUND_STREAK_THRESHOLD = 3;
+  let lightComposerDetectStartedAt = 0;
+  let lightComposerNotFoundStreak = 0;
+  let lightComposerEverFound = false;
 
-    const composerTextTrimmed = snapshot
-      ? snapshot.composerTextTrimmed
-      : String(ComposerApi.getComposerText() || '').trim();
+  function detectComposerResponseStateLight() {
+    const now = Date.now();
+    if (!(lightComposerDetectStartedAt > 0)) {
+      lightComposerDetectStartedAt = now;
+    }
+
+    let isResponding = false;
+    let hasComposer = false;
+    let composerText = '';
+    let sendButton = null;
+    let sendButtonReady = false;
+    let attachmentCount = 0;
+    let hasAttachmentPayload = false;
+
+    const hasComposerApi = typeof ComposerApi !== 'undefined';
+
+    if (hasComposerApi) {
+      try {
+        const composer = typeof ComposerApi.getComposer === 'function' ? ComposerApi.getComposer() : null;
+        const composerRoot = typeof ComposerApi.getComposerRoot === 'function' ? ComposerApi.getComposerRoot() : null;
+        sendButton = typeof ComposerApi.findSendButton === 'function'
+          ? ComposerApi.findSendButton({ silent: true })
+          : null;
+        isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          ? !!ComposerApi.isAssistantLikelyBusy()
+          : false;
+        composerText = typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '')
+          : '';
+        attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+          ? Number(ComposerApi.countAttachmentChips() || 0)
+          : 0;
+        hasAttachmentPayload = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          ? !!ComposerApi.hasComposerAttachmentUnified()
+          : false;
+
+        hasComposer = !!(composer || composerRoot || composerText);
+
+        if (sendButton instanceof HTMLButtonElement) {
+          sendButtonReady = typeof ComposerApi.isSendButtonReady === 'function'
+            ? !!ComposerApi.isSendButtonReady(sendButton)
+            : !sendButton.disabled;
+          if (typeof ComposerApi.isRealSendButton === 'function' && !ComposerApi.isRealSendButton(sendButton)) {
+            sendButtonReady = false;
+          }
+        }
+      } catch (error) {
+        console.error('[COMPOSER][LIGHT_DETECT][COMPOSER_API_FAILED]', error);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COMPOSER][LIGHT_DETECT][COMPOSER_API_FAILED] type=${error && error.name ? error.name : 'Error'} error=${error && error.message ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
+    function fallbackQueryComposer() {
+      const sels = [
+        '#prompt-textarea',
+        'textarea[name="prompt-textarea"]',
+        '[data-testid="composer-textarea"]',
+        '[data-testid="composer"]',
+        '[data-testid="composer"] textarea',
+        '[data-testid="composer"] [contenteditable="true"]',
+        '[contenteditable="true"][data-lexical-editor="true"]',
+        'div[contenteditable="true"][role="textbox"]',
+        'form div[contenteditable="true"]',
+        'main form textarea',
+        'main form [contenteditable="true"]',
+      ];
+      for (const sel of sels) {
+        const el = document.querySelector(sel);
+        if (el && !isInsideToolbox(el)) {
+          return el;
+        }
+      }
+      return null;
+    }
+
+    if (!hasComposer) {
+      const fallback = fallbackQueryComposer();
+      if (fallback) {
+        hasComposer = true;
+        if (typeof fallback.value === 'string') {
+          composerText = String(fallback.value || '');
+        } else if (fallback && typeof fallback.textContent === 'string') {
+          composerText = String(fallback.textContent || '');
+        }
+      }
+
+      if (!(sendButton instanceof HTMLButtonElement)) {
+        sendButton = document.querySelector('#composer-submit-button, button[data-testid="send-button"]');
+        if (sendButton instanceof HTMLButtonElement) {
+          sendButtonReady = !sendButton.disabled;
+        }
+      }
+
+      if (!isResponding) {
+        const stopButton = document.querySelector('button[data-testid="stop-button"]');
+        isResponding = stopButton instanceof HTMLButtonElement
+          && isElementVisible(stopButton)
+          && !stopButton.disabled;
+      }
+    }
+
+    if (hasComposer) {
+      lightComposerEverFound = true;
+      lightComposerNotFoundStreak = 0;
+    } else {
+      lightComposerNotFoundStreak += 1;
+    }
+
+    const composerTextTrimmed = String(composerText || '').trim();
     const composerTextHasPayload = composerTextTrimmed.length > 0;
-    const attachmentCount = snapshot
-      ? Number(snapshot.attachmentCount || 0)
-      : 0;
-    const hasAttachmentPayload = attachmentCount > 0;
-    const hasComposerPayload = snapshot
-      ? snapshot.hasComposerPayload === true
-      : (composerTextHasPayload || hasAttachmentPayload);
-    const sendButton = snapshot ? snapshot.sendButton : null;
-    const realSendButtonEnabled = snapshot
-      ? snapshot.realSendButtonEnabled === true
-      : false;
+    const hasComposerPayload = composerTextHasPayload || !!hasAttachmentPayload;
+
+    const realSendButtonEnabled = !!(sendButtonReady && (sendButton instanceof HTMLButtonElement));
 
     if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
-      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
-        ? getComposerSendButtonSnapshot({ silent: true })
-        : { found: false, ready: false };
       return {
         is_responding: false,
-        response_state: sendSnap.ready ? 'ready' : 'not_ready',
-        response_state_reason: sendSnap.ready
+        response_state: realSendButtonEnabled ? 'ready' : 'not_ready',
+        response_state_reason: realSendButtonEnabled
           ? 'home_new_chat_composer_ready_override'
           : 'home_new_chat_payload_but_send_button_missing',
         can_accept_input: true,
-        can_send_now: !!sendSnap.ready,
+        can_send_now: realSendButtonEnabled,
+        has_composer: true,
         has_composer_payload: hasComposerPayload,
         attachment_count: attachmentCount,
         response_state_at: now,
       };
     }
 
-    const isResponding = snapshot
-      ? snapshot.isAssistantBusy === true
-      : ComposerApi.isAssistantLikelyBusy();
-    const composerAvailable = snapshot
-      ? snapshot.composerAvailable === true
-      : (
-        typeof ComposerApi.canAcceptInput === 'function'
-          ? ComposerApi.canAcceptInput()
-          : (typeof ComposerApi.hasComposer === 'function'
-            ? ComposerApi.hasComposer()
-            : !!ComposerApi.getComposerText())
-      );
+    const composerAvailable = hasComposer;
     const canAcceptInput = composerAvailable && !isResponding;
     const canSendNowValue = composerAvailable
       && !isResponding
-      && (
-        (composerTextHasPayload || hasAttachmentPayload)
-          ? realSendButtonEnabled
-          : realSendButtonEnabled
-      );
+      && realSendButtonEnabled
+      && hasComposerPayload;
 
     if (isResponding) {
       return {
@@ -6915,6 +7393,7 @@
         response_state_reason: 'assistant_busy',
         can_accept_input: false,
         can_send_now: false,
+        has_composer: composerAvailable,
         has_composer_payload: hasComposerPayload,
         attachment_count: attachmentCount,
         response_state_at: now,
@@ -6922,22 +7401,22 @@
     }
 
     if (!composerAvailable) {
+      const withinGrace = now - lightComposerDetectStartedAt < LIGHT_COMPOSER_NOT_FOUND_GRACE_MS;
+      const withinStreak = lightComposerNotFoundStreak < LIGHT_COMPOSER_NOT_FOUND_STREAK_THRESHOLD;
+      const waiting = withinGrace || withinStreak;
+      const reason = waiting ? 'composer_waiting' : 'composer_not_found';
       return {
         is_responding: false,
         response_state: 'no_composer',
-        response_state_reason: 'composer_not_found',
+        response_state_reason: reason,
         can_accept_input: false,
         can_send_now: false,
+        has_composer: false,
         has_composer_payload: hasComposerPayload,
         attachment_count: attachmentCount,
         response_state_at: now,
       };
     }
-
-    const sendButtonDisabled = !!(
-      sendButton instanceof HTMLButtonElement
-      && sendButton.disabled
-    );
 
     if (!hasComposerPayload) {
       return {
@@ -6946,6 +7425,7 @@
         response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
         can_accept_input: canAcceptInput,
         can_send_now: false,
+        has_composer: true,
         has_composer_payload: false,
         attachment_count: attachmentCount,
         response_state_at: now,
@@ -6959,12 +7439,14 @@
         response_state_reason: composerTextHasPayload ? 'payload_ready' : 'attachment_only_send',
         can_accept_input: canAcceptInput,
         can_send_now: true,
+        has_composer: true,
         has_composer_payload: true,
         attachment_count: attachmentCount,
         response_state_at: now,
       };
     }
 
+    const sendButtonDisabled = !!(sendButton instanceof HTMLButtonElement && sendButton.disabled);
     if (!sendButton) {
       return {
         is_responding: false,
@@ -6974,6 +7456,7 @@
           : 'payload_ready_but_send_button_missing',
         can_accept_input: canAcceptInput,
         can_send_now: false,
+        has_composer: true,
         has_composer_payload: true,
         attachment_count: attachmentCount,
         response_state_at: now,
@@ -6987,6 +7470,7 @@
         response_state_reason: 'send_button_disabled_with_payload',
         can_accept_input: canAcceptInput,
         can_send_now: false,
+        has_composer: true,
         has_composer_payload: true,
         attachment_count: attachmentCount,
         response_state_at: now,
@@ -7001,6 +7485,7 @@
         : 'send_button_not_ready',
       can_accept_input: canAcceptInput,
       can_send_now: canSendNowValue,
+      has_composer: true,
       has_composer_payload: true,
       attachment_count: attachmentCount,
       response_state_at: now,
@@ -7011,6 +7496,11 @@
   const MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH = 6;
 
   function detectComposerResponseState(options = {}) {
+    const perfStartedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const lightMode = options && options.light === true;
+    const reasonText = String(options && options.reason ? options.reason : '').slice(0, 120) || '-';
     if (detectComposerResponseStateDepth >= MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH) {
       const line = `[COMPOSER][RECURSION_GUARD] scope=detectComposerResponseState depth=${detectComposerResponseStateDepth} max=${MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH}`;
       console.error('[ChatGPT toolbox] detectComposerResponseState recursion guard triggered', {
@@ -7251,6 +7741,19 @@
       return detectComposerResponseStateLight();
     } finally {
       detectComposerResponseStateDepth = Math.max(0, detectComposerResponseStateDepth - 1);
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - perfStartedAt,
+      );
+      if (costMs > 80) {
+        const line = `[PERF][detectComposerResponseState] cost=${costMs}ms light=${lightMode ? 1 : 0} reason=${reasonText}`;
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        } else {
+          console.warn(line);
+        }
+      }
     }
   }
 
@@ -7266,21 +7769,30 @@
     return !isSendButtonDisabled(sendButton);
   }
 
-  function evaluateComposerSendability(sendButtonInput) {
-    const composerText = typeof ComposerApi.getComposerText === 'function'
+  function evaluateComposerSendability(sendButtonInput, precomputed = {}) {
+    const opts = precomputed && typeof precomputed === 'object' ? precomputed : {};
+    const composerText = opts.composerText != null
+      ? String(opts.composerText || '')
+      : (typeof ComposerApi.getComposerText === 'function'
       ? String(ComposerApi.getComposerText() || '')
-      : '';
+      : '');
     const textLen = composerText.trim().length;
-    const hasAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+    const hasAttachment = opts.attachmentState && typeof opts.attachmentState === 'object'
+      ? !!(opts.attachmentState.hasAny || opts.attachmentState.hasAttachment || opts.attachmentState.hasComposerPayload)
+      : (typeof ComposerApi.hasComposerAttachmentUnified === 'function'
       ? ComposerApi.hasComposerAttachmentUnified()
-      : hasComposerAttachment();
+      : hasComposerAttachment());
 
-    const sendButton = sendButtonInput instanceof HTMLButtonElement
+    const sendButton = opts.sendButton instanceof HTMLButtonElement
+      ? opts.sendButton
+      : (sendButtonInput instanceof HTMLButtonElement
       ? sendButtonInput
-      : findChatGPTSendButton();
+      : findChatGPTSendButton());
     const realSendButtonEnabled = isRealSendButtonEnabled(sendButton);
     const sendable = textLen > 0 || hasAttachment || realSendButtonEnabled;
-    const responseState = detectComposerResponseState();
+    const responseState = opts.responseState && typeof opts.responseState === 'object'
+      ? opts.responseState
+      : detectComposerResponseState({ reason: 'evaluateComposerSendability' });
 
     let sendModeReason = '';
     if (textLen > 0) {
@@ -7537,15 +8049,44 @@
       .map((e) => e.message_id);
 
     const decision = activeCount > 0 ? 'wait' : 'process';
-    ToolboxShell.appendLog(
+    try {
+      const perfInc = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__CGPT_TOOLBOX_PERF_INC__;
+      if (typeof perfInc === 'function') {
+        perfInc('chatQueue.pendingCheck', 1);
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    const logLine =
       `[CHAT_QUEUE][PENDING_CHECK]`
       + ` session_id=${sessionId || '-'}`
       + ` queue_size=${CHAT_QUEUE.length}`
       + ` active_pending_count=${activeCount}`
       + ` ignored_queued_count=${ignoredQueued}`
       + ` pending_message_ids=${pendingIds.join(',') || '-'}`
-      + ` decision=${decision}`
-    );
+      + ` decision=${decision}`;
+
+    // 空队列 + 无 pending：不应持续刷屏；仅状态变化时输出，或每 5s 至多一次（便于诊断）
+    const isIdle = CHAT_QUEUE.length === 0 && activeCount === 0;
+    const stateKey = `${sessionId || '-'}|q=${CHAT_QUEUE.length}|p=${activeCount}|iq=${ignoredQueued}|ids=${pendingIds.join(',') || '-'}`;
+    if (isIdle && typeof ToolboxShell.appendLogIfChanged === 'function') {
+      ToolboxShell.appendLogIfChanged(
+        'CHAT_QUEUE:PENDING_CHECK:idle-state',
+        stateKey,
+        logLine,
+        5000,
+      );
+    } else if (typeof ToolboxShell.appendLogThrottled === 'function') {
+      // 非空闲：仍可能较频繁，默认 2s 节流
+      ToolboxShell.appendLogThrottled(
+        'CHAT_QUEUE:PENDING_CHECK:active',
+        logLine,
+        2000,
+      );
+    } else {
+      ToolboxShell.appendLog(logLine);
+    }
 
     return activeCount > 0;
   }
@@ -8697,7 +9238,7 @@
     const sendSelectors = [
       'button[data-testid="send-button"]',
       'button[aria-label*="Send"]',
-      'button[aria-label*="发送"]',
+      'button[aria-label*="\u53d1\u9001"]',
     ];
 
     let sendBtn = null;
@@ -8940,12 +9481,12 @@
     }
 
     return {
-      text: '不可发送',
+      text: '\u4e0d\u53ef\u53d1\u9001',
       cls: 'cgpt-state-blocked',
       type: 'blocked',
       title: domState && domState.title
         ? domState.title
-        : '当前页面无法发送',
+        : '\u5f53\u524d\u9875\u9762\u65e0\u6cd5\u53d1\u9001',
       reason: 'blocked',
       ...internal,
     };
@@ -9152,13 +9693,13 @@
     ].join(' ').toLowerCase();
 
     return (
-      probe.includes('启动语音功能')
-      || probe.includes('开始听写')
-      || probe.includes('停止听写')
-      || probe.includes('语音')
-      || probe.includes('听写')
-      || probe.includes('麦克风')
-      || probe.includes('录音')
+      probe.includes('\u542f\u52a8\u8bed\u97f3\u529f\u80fd')
+      || probe.includes('\u5f00\u59cb\u542c\u5199')
+      || probe.includes('\u505c\u6b62\u542c\u5199')
+      || probe.includes('\u8bed\u97f3')
+      || probe.includes('\u542c\u5199')
+      || probe.includes('\u9ea6\u514b\u98ce')
+      || probe.includes('\u5f55\u97f3')
       || probe.includes('voice')
       || probe.includes('microphone')
       || probe.includes('dictate')
@@ -9254,17 +9795,21 @@
       return ComposerApi.hasRealSubmitButton();
     }
 
-    const btn = document.querySelector('#composer-submit-button');
+    const byId = document.querySelector('#composer-submit-button');
+    if (byId instanceof HTMLButtonElement && !isVoiceComposerButton(byId)) {
+      return typeof ComposerApi.isRealSendButton === 'function'
+        ? ComposerApi.isRealSendButton(byId)
+        : true;
+    }
+
+    const btn = document.querySelector('button[data-testid="send-button"]');
     if (!(btn instanceof HTMLButtonElement) || isVoiceComposerButton(btn)) {
       return false;
     }
 
-    if (btn.disabled) {
-      return false;
-    }
-
-    const rect = btn.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return typeof ComposerApi.isRealSendButton === 'function'
+      ? ComposerApi.isRealSendButton(btn)
+      : true;
   }
 
   function getComposerSendDiagnostics() {

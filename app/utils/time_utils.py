@@ -1,3 +1,8 @@
+"""Shared time formatting helpers."""
+
+from __future__ import annotations
+
+import time
 from typing import Any
 
 
@@ -27,3 +32,7 @@ def float_ts(
                 f"error={error}"
             )
         return default
+
+
+def now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())

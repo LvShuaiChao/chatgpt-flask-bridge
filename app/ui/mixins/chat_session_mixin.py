@@ -22,7 +22,7 @@ from app.models import (
 
 )
 
-from app.utils.legacy_cleanup import assert_no_legacy_fields
+from app.utils.legacy_cleanup import assert_no_remote_chatgpt_invalid_fields
 
 
 
@@ -170,7 +170,10 @@ class ChatSessionMixin:
 
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
 
-        assert_no_legacy_fields(remote, owner="GUI save session.remote_chatgpt")
+        assert_no_remote_chatgpt_invalid_fields(
+            remote,
+            owner="GUI save session.remote_chatgpt",
+        )
 
         message_to_dict = getattr(self, "_message_to_dict", None)
 
@@ -226,6 +229,11 @@ class ChatSessionMixin:
 
             messages_out.append(cleaned)
 
+        compose_draft = ""
+        drafts_map = getattr(self, "_session_compose_drafts", None) or {}
+        raw_draft = drafts_map.get(session.session_id, "")
+        if isinstance(raw_draft, str) and raw_draft.strip():
+            compose_draft = raw_draft
         return {
 
             "session_id": session.session_id,
@@ -247,7 +255,7 @@ class ChatSessionMixin:
             "remote_chatgpt": dict(remote),
 
             "reply_waiting_since": 0,
-
+            "compose_draft": compose_draft,
             "messages": messages_out,
 
         }

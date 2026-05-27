@@ -1,8 +1,24 @@
+import os
 import re
 from pathlib import Path
 
-RUNTIME_DIR = Path(__file__).resolve().parent.parent / "runtime"
-SESSIONS_FILE = RUNTIME_DIR / "chat_sessions.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
+
+
+def _default_user_data_dir():
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "ChatGPTFlaskBridge"
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / "chatgpt-flask-bridge"
+    return Path.home() / ".chatgpt-flask-bridge"
+
+
+CHAT_SESSIONS_DIR = _default_user_data_dir()
+SESSIONS_FILE = CHAT_SESSIONS_DIR / "chat_sessions.json"
+LEGACY_PROJECT_SESSIONS_FILE = RUNTIME_DIR / "chat_sessions.json"
 SESSIONS_JSON_VERSION = 2
 ASSISTANT_WAIT_TEXT = "等待回复…"
 INVALID_ASSISTANT_REPLY_TEXTS = frozenset(
@@ -268,7 +284,7 @@ DEFAULT_APP_SETTINGS = {
     "auto_name_new_chat": True,
     "show_timestamp": True,
     "show_assistant_placeholder": True,
-    "chat_sessions_path": str(RUNTIME_DIR),
+    "chat_sessions_path": str(CHAT_SESSIONS_DIR),
     "save_chat_history": True,
     "debug_mode": False,
     "show_raw_payload": True,

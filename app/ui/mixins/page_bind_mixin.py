@@ -17,7 +17,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.page_status import PageRegistry
+from app.utils.page_snapshot import PageRegistry
 from app.utils.page_status import (
     evaluate_page_capability,
     explain_page_decision,
@@ -225,7 +225,7 @@ class PageBindMixin(
 
     def _resolve_bound_page_info_impl(self, status=None, snapshot=None):
         from app.utils.page_command import resolve_bound_page_in_registry
-        from app.utils.page_status import PageRegistry, binding_from_session
+        from app.utils.page_snapshot import PageRegistry, binding_from_session
 
         status = status or self._bridge_ui.last_bridge_status or {}
         session = self._current_session()

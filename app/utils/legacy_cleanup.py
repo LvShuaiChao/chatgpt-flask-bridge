@@ -1,16 +1,36 @@
-"""入站/保存边界：禁止携带旧字段（不再做 id/status 等入口迁移）。"""
+"""入站/保存边界：仅允许标准字段（白名单硬切）。"""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.utils.legacy_fields import (
-    LEGACY_ASSERT_FIELD_NAMES,
-    LEGACY_CLEANUP_FIELD_NAMES,
+ALLOWED_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "message_id",
+        "turn_id",
+        "role",
+        "content",
+        "ui_status",
+        "message_source",
+        "client_id",
+        "page_instance_id",
+        "page_display_id",
+        "conversation_id",
+        "url",
+        "bind_state",
+        "target_source",
+        "payload",
+        "action",
+        "created_at",
+        "updated_at",
+        "source",
+        "status",
+        "request_id",
+        "session_id",
+        "tool",
+        "data",
+    }
 )
-
-# reject_legacy_fields：API 入站（URL + 绑定别名 + 部分消息旧字段）。
-LEGACY_FIELD_NAMES = LEGACY_CLEANUP_FIELD_NAMES
 
 _LEGACY_TARGET_SOURCE_VALUES = frozenset(
     {
@@ -22,33 +42,79 @@ _LEGACY_TARGET_SOURCE_VALUES = frozenset(
     }
 )
 
-_REPLACEMENT_HINT = (
-    "message_id/message_status/client_id/page_instance_id/"
-    "conversation_id/url/bind_state"
+_REPLACEMENT_HINT = "canonical schema fields only"
+
+REMOTE_CHATGPT_COMPAT_FIELDS = frozenset(
+    {
+        "bind_state",
+        "client_id",
+        "page_instance_id",
+        "conversation_id",
+        "url",
+        "page_display_id",
+        # 当前仍有运行路径依赖，暂时不能 hard-block
+        "page_no",
+        "temp_page_id",
+        "page_type",
+        "page_title",
+        "last_seen",
+        "last_poll_at",
+        "bind_mode",
+        "bind_request_id",
+        "bind_started_at",
+        "pending_bootstrap_content",
+        "pending_send_content",
+        "pending_send_message_id",
+        "reopen_started_at",
+    }
+)
+
+REMOTE_CHATGPT_REMOVED_FIELDS = frozenset(
+    {
+        "binding",
+        "enabled",
+        "canonical_url",
+        "last_reported_url",
+        "prebound_home_client_id",
+        "prebound_home_page_instance_id",
+        "reserved_client_id",
+        "reserved_page_instance_id",
+        "reserved_at",
+        "created_from_home",
+        "opened_home_at",
+        "bound_at",
+        "reopen_request_id",
+        "reopen_target_url",
+        "pending_bootstrap_created_at",
+        "pending_send_created_at",
+        "bootstrap_message_id",
+        "bootstrap_started_at",
+        "bootstrap_in_progress",
+    }
 )
 
 
-def _collect_legacy_fields(obj: Any, *, path: str = "") -> List[str]:
+def _collect_invalid_fields(obj: Any, *, path: str = "") -> List[str]:
     found: List[str] = []
     if isinstance(obj, dict):
         for key, value in obj.items():
             sub = f"{path}.{key}" if path else key
-            if key in LEGACY_ASSERT_FIELD_NAMES:
+            if not path and key not in ALLOWED_TOP_LEVEL_FIELDS:
                 found.append(sub)
             elif key == "target_source" and value in _LEGACY_TARGET_SOURCE_VALUES:
                 found.append(f"{sub}={value!r}")
             elif isinstance(value, (dict, list)):
-                found.extend(_collect_legacy_fields(value, path=sub))
+                found.extend(_collect_invalid_fields(value, path=sub))
     elif isinstance(obj, list):
         for index, item in enumerate(obj):
             sub = f"{path}[{index}]" if path else f"[{index}]"
             if isinstance(item, (dict, list)):
-                found.extend(_collect_legacy_fields(item, path=sub))
+                found.extend(_collect_invalid_fields(item, path=sub))
     return found
 
 
 def assert_no_legacy_fields(obj: Any, *, owner: str = "-") -> None:
-    found = _collect_legacy_fields(obj)
+    found = _collect_invalid_fields(obj)
     if not found:
         return
     print(
@@ -58,7 +124,36 @@ def assert_no_legacy_fields(obj: Any, *, owner: str = "-") -> None:
         f"replacement={_REPLACEMENT_HINT}"
     )
     raise ValueError(
-        f"legacy fields still exist before save: owner={owner}, fields={found}"
+        f"invalid fields still exist before save: owner={owner}, fields={found}"
+    )
+
+
+def assert_no_remote_chatgpt_invalid_fields(obj: Any, *, owner: str = "-") -> None:
+    if not isinstance(obj, dict):
+        return
+
+    invalid = []
+    removed = []
+
+    for key in obj.keys():
+        if key in REMOTE_CHATGPT_REMOVED_FIELDS:
+            removed.append(key)
+        elif key not in REMOTE_CHATGPT_COMPAT_FIELDS:
+            invalid.append(key)
+
+    if not invalid and not removed:
+        return
+
+    print(
+        "[REMOTE_FIELD][INVALID_BLOCKED]\n"
+        f"owner={owner}\n"
+        f"invalid={invalid}\n"
+        f"removed={removed}\n"
+        "replacement=canonical remote_chatgpt fields / BindSessionRuntime"
+    )
+
+    raise ValueError(
+        f"invalid remote_chatgpt fields: owner={owner}, invalid={invalid}, removed={removed}"
     )
 
 
@@ -75,14 +170,14 @@ def reject_legacy_fields(
         raise ValueError(
             "legacy field migration is disabled; use canonical fields only"
         )
-    legacy = sorted(set(payload.keys()) & LEGACY_FIELD_NAMES)
-    if legacy:
+    invalid = sorted(set(payload.keys()) - ALLOWED_TOP_LEVEL_FIELDS)
+    if invalid:
         return (
             {
                 "ok": False,
-                "error": "legacy_fields_not_allowed",
+                "error": "unknown_fields_not_allowed",
                 "context": context,
-                "legacy_fields": legacy,
+                "unknown_fields": invalid,
             },
             400,
         )
@@ -91,9 +186,9 @@ def reject_legacy_fields(
         return (
             {
                 "ok": False,
-                "error": "legacy_fields_not_allowed",
+                "error": "unknown_fields_not_allowed",
                 "context": context,
-                "legacy_fields": [f"target_source={target_source}"],
+                "unknown_fields": [f"target_source={target_source}"],
             },
             400,
         )
@@ -101,9 +196,8 @@ def reject_legacy_fields(
 
 
 __all__ = [
-    "LEGACY_FIELD_NAMES",
-    "LEGACY_CLEANUP_FIELD_NAMES",
-    "LEGACY_ASSERT_FIELD_NAMES",
+    "ALLOWED_TOP_LEVEL_FIELDS",
     "assert_no_legacy_fields",
+    "assert_no_remote_chatgpt_invalid_fields",
     "reject_legacy_fields",
 ]

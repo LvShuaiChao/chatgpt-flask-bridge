@@ -12,6 +12,8 @@
     const state = {
       root: null,
       timerId: 0,
+      mountedAt: Date.now(),
+      everHadComposer: false,
       bridgePollFailCount: 0,
       bridgePollTimer: 0,
       bridgePollLoopActive: false,
@@ -47,9 +49,20 @@
 
     const bridgeStatus = createModuleStatus('BRIDGE', {
       getLocalEl: () => (state.root ? qs('#cgpt-bridge-status', state.root) : null),
+      owner: 'bridge',
       useGlobal: false,
       useLog: false,
     });
+
+    function setBridgeStatus(text, type, options = {}) {
+      if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
+        return;
+      }
+      ToolboxShell.setStatus(text, type, {
+        ...options,
+        owner: options.owner || 'bridge',
+      });
+    }
 
     const CLIENT_ID = (() => {
       try {
@@ -127,6 +140,61 @@
       return `${cfg.bridgeBaseUrl}${cfg.bridgePath}`;
     }
 
+    function summarizeBridgeError(error) {
+      if (!error) {
+        return {
+          name: 'Error',
+          message: '',
+          detail: '',
+        };
+      }
+
+      const name = error && error.name ? String(error.name) : 'Error';
+      const primaryMessage = error && error.message ? String(error.message).trim() : '';
+      const detailParts = [];
+
+      if (primaryMessage) {
+        detailParts.push(primaryMessage);
+      }
+
+      [
+        ['status', error.status],
+        ['statusText', error.statusText],
+        ['readyState', error.readyState],
+        ['responseText', error.responseText],
+        ['finalUrl', error.finalUrl],
+        ['details', error.details],
+      ].forEach(([key, value]) => {
+        if (value == null || value === '') {
+          return;
+        }
+        const text = typeof value === 'string'
+          ? value.replace(/\s+/g, ' ').trim()
+          : stringifyFullBridgeJsonForLog(value);
+        if (!text) {
+          return;
+        }
+        const clipped = text.length > 300 ? `${text.slice(0, 300)}...` : text;
+        detailParts.push(`${key}=${clipped}`);
+      });
+
+      if (!detailParts.length) {
+        const fallback = typeof error === 'string'
+          ? error
+          : stringifyFullBridgeJsonForLog(error);
+        if (fallback) {
+          detailParts.push(fallback);
+        }
+      }
+
+      const detail = detailParts.join(' | ').trim();
+      return {
+        name,
+        message: primaryMessage || detail || String(error),
+        detail,
+      };
+    }
+
     function logBridgeError(message, error) {
       const text = String(message || error || 'unknown');
       const now = Date.now();
@@ -139,10 +207,11 @@
       state.lastErrorLogAt = now;
       state.lastErrorText = text;
 
+      const summary = summarizeBridgeError(error);
       console.error('[BRIDGE][ERROR]', text, error || '');
 
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        const errText = error && error.message ? error.message : String(error || '');
+        const errText = summary.detail || summary.message || '';
         ToolboxShell.appendLog(
           `[BRIDGE][ERROR] ${text}${errText && errText !== text ? ` error=${errText}` : ''}`,
         );
@@ -742,7 +811,8 @@
             }
           },
           onerror(error) {
-            logBridgeError(`请求失败: ${error && error.message ? error.message : String(error)}`, error);
+            const summary = summarizeBridgeError(error);
+            logBridgeError(`请求失败: ${summary.message || 'unknown'}`, error);
             reject(error);
           },
           ontimeout() {
@@ -932,6 +1002,16 @@
       }
       const triggerWatch = () => {
         state.lastDomMutationAt = Date.now();
+        if (
+          typeof UploadModule !== 'undefined'
+          && UploadModule
+          && typeof UploadModule.getStatus === 'function'
+        ) {
+          const uploadStatus = UploadModule.getStatus() || {};
+          if (uploadStatus.waitingReply || uploadStatus.waitingSend) {
+            return;
+          }
+        }
         if (state.pendingReplyDomObserverTimer) {
           window.clearTimeout(state.pendingReplyDomObserverTimer);
         }
@@ -1534,7 +1614,7 @@
           + ` turn_id=${ctx.turn_id || '-'}`);
 
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
-          ToolboxShell.setStatus('回复已回传 GUI', 'ok');
+          setBridgeStatus('回复已回传 GUI', 'ok');
         }
 
         return true;
@@ -2810,7 +2890,14 @@
       const capability = getPageCapability('bridge-poll');
       logPageCapability(capability, '[BRIDGE][POLL]');
 
-      const reasonSuffix = formatBridgeStatusReasonSuffix(capability);
+      const reasonText = String(
+        capability && capability.response_state_reason ? capability.response_state_reason : '',
+      ).trim();
+      const reasonSuffix = reasonText ? ` (${reasonText})` : '';
+
+      if (capability && (capability.has_composer || capability.can_accept_input || capability.can_send_now)) {
+        state.everHadComposer = true;
+      }
 
       if (!capability.bridge_connected) {
         const pollError = capability.last_poll_error || 'bridge_unreachable';
@@ -2842,6 +2929,31 @@
           text: `Bridge 已连接 · 待输入${reasonSuffix}`,
           type: 'online',
           shortText: '待输入',
+        };
+      }
+
+      if (reasonText === 'composer_waiting') {
+        return {
+          text: 'Bridge 已连接 · 等待输入框',
+          type: 'running',
+          shortText: '等待输入框',
+        };
+      }
+
+      if (reasonText === 'composer_not_found') {
+        const now = Date.now();
+        const shortSinceMount = now - Number(state.mountedAt || now) < 3000;
+        if (shortSinceMount || state.everHadComposer) {
+          return {
+            text: 'Bridge 已连接 · 等待输入框',
+            type: 'running',
+            shortText: '等待输入框',
+          };
+        }
+        return {
+          text: 'Bridge 已连接 · 未找到输入框',
+          type: 'warn',
+          shortText: '未找到输入框',
         };
       }
 
@@ -2913,31 +3025,35 @@
           if (!handled || handled.handled !== true || handled.ok === true) {
             const pres = getBridgePollStatusPresentation();
             updateStatus(pres.text);
-            ToolboxShell.setStatus(pres.text, pres.type, {
+            setBridgeStatus(pres.text, pres.type, {
               persist: true,
               shortText: pres.shortText,
+              ttlMs: 4000,
             });
             renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
             updateChatInputStateBadge();
           } else {
             const failReason = handled.reason || '-';
             updateStatus(`消息处理失败：${failReason}`);
-            ToolboxShell.setStatus(`消息处理失败：${failReason}`, 'error', { persist: true });
+            setBridgeStatus(`消息处理失败：${failReason}`, 'error', { persist: true });
             updateChatInputStateBadge();
           }
         }
         return true;
       } catch (error) {
-        const errName = error && error.name ? error.name : 'Error';
-        const errText = error && error.message ? error.message : String(error);
+        const summary = summarizeBridgeError(error);
+        const errName = summary.name || 'Error';
+        const errText = summary.message || String(error);
         const bridgeUrl = getBridgeUrl();
 
         markBridgePollFailure(errText);
         const pres = getBridgePollStatusPresentation();
         updateStatus(pres.text);
-        ToolboxShell.setStatus(pres.text, pres.type, {
+        setBridgeStatus(pres.text, pres.type, {
+          owner: 'bridge',
           persist: true,
           shortText: pres.shortText,
+          ttlMs: 4000,
         });
         renderBridgeCapabilityPanel(getPageCapability('bridge-poll-offline'));
         updateChatInputStateBadge();
@@ -3212,7 +3328,7 @@
         markBridgePollSuccess();
         const pres = getBridgePollStatusPresentation();
         updateStatus(`连接测试成功 · ${pres.shortText}`);
-        ToolboxShell.setStatus(`连接测试成功 · ${pres.text}`, pres.type, {
+        setBridgeStatus(`连接测试成功 · ${pres.text}`, pres.type, {
           persist: true,
           shortText: pres.shortText,
         });
@@ -3223,7 +3339,7 @@
         markBridgePollFailure(text);
         const pres = getBridgePollStatusPresentation();
         updateStatus(pres.text);
-        ToolboxShell.setStatus(pres.text, pres.type, {
+        setBridgeStatus(pres.text, pres.type, {
           persist: true,
           shortText: pres.shortText,
         });
@@ -3641,6 +3757,7 @@
           successText: '已复制 Bridge 地址',
           failedPrefix: '复制 Bridge 地址失败',
           logPrefix: 'BRIDGE_COPY_URL',
+          statusOwner: 'bridge',
         });
       }, 'BRIDGE');
       DomUtil.bindClick(mountRoot, '#cgpt-bridge-toggle-advanced', () => {
@@ -3656,6 +3773,7 @@
           successText: '已复制诊断信息',
           failedPrefix: '复制诊断信息失败',
           logPrefix: 'BRIDGE_COPY_DIAG',
+          statusOwner: 'bridge',
         }).catch((error) => {
           console.error('[BridgeModule] 复制诊断信息失败', error);
         });

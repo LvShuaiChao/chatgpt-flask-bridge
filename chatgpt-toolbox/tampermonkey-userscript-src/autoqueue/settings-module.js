@@ -8,6 +8,16 @@
     let activeSettingsSubtab = 'basic';
     let continuePromptMigrationChecked = false;
 
+    function setSettingsStatus(text, type, options = {}) {
+      if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
+        return;
+      }
+      ToolboxShell.setStatus(text, type, {
+        ...options,
+        owner: options.owner || 'settings',
+      });
+    }
+
     function migrateCompactContinuePromptIfNeeded(cfg, options = {}) {
       if (!cfg || typeof cfg !== 'object') {
         return cfg;
@@ -169,7 +179,7 @@
         parseQuotaLimitInput(uploadEl && uploadEl.value) == null
         || parseQuotaLimitInput(messageEl && messageEl.value) == null
       ) {
-        ToolboxShell.setStatus('额度上限必须是大于 0 的整数', 'warn');
+        setSettingsStatus('额度上限必须是大于 0 的整数', 'warn');
         return false;
       }
 
@@ -181,7 +191,7 @@
       ToolboxShell.appendLog(
         `[SETTINGS][QUOTA_SAVE] uploadLimit=${limits.uploadQuotaMaxFiles} messageLimit=${limits.messageQuotaMaxMessages}`,
       );
-      ToolboxShell.setStatus('额度设置已保存', 'ok');
+      setSettingsStatus('额度设置已保存', 'ok');
       return true;
     }
 
@@ -222,7 +232,7 @@
       ToolboxShell.appendLog(
         `[SETTINGS][QUOTA_RESET] uploadUsedBefore=${uploadBefore.used} messageUsedBefore=${messageBefore.used}`,
       );
-      ToolboxShell.setStatus('今日额度统计已重置', 'ok');
+      setSettingsStatus('今日额度统计已重置', 'ok');
     }
 
     function readFromUi() {
@@ -523,7 +533,7 @@
           ToolboxShell.appendLog(
             `[SETTINGS][shortcut-conflict-blocked] action=${action} conflict=${conflict}`,
           );
-          ToolboxShell.setStatus(
+          setSettingsStatus(
             `快捷键冲突，已取消保存：${oldActionConfig.label || cfg[action].label || ''}`,
             'warn',
             {
@@ -738,7 +748,7 @@
             RuntimeStatsModule.resetUserStats();
           }
           ToolboxShell.appendLog('[SETTINGS][runtime-stats-reset]');
-          ToolboxShell.setStatus('已重置批量任务计时统计（程序运行时长保留）');
+          setSettingsStatus('已重置批量任务计时统计（程序运行时长保留）');
         });
       }
 

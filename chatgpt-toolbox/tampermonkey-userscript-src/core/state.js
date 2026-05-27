@@ -35,6 +35,11 @@
     restoreHotzoneId: 'cgpt-toolbox-restore-hotzone',
     restoreHandleId: 'cgpt-toolbox-restore-handle',
     storagePrefix: 'cgpt_toolbox_tabs_v32:',
+    DATA_STORAGE_PREFIX: 'cgpt_toolbox_data:',
+    storageLegacyPrefixes: Array.from(
+      { length: 31 },
+      (_, index) => `cgpt_toolbox_tabs_v${31 - index}:`,
+    ),
     uploadDbName: 'cgpt-toolbox-upload-db-v32',
     uploadDbVersion: 1,
     uploadBlobMaxBytes: 20 * 1024 * 1024,
@@ -51,6 +56,31 @@
     CANCELLED: 'CANCELLED',
     MISSING_FILE: 'MISSING_FILE',
   });
+
+  const UploadStateLegacyAliases = Object.freeze({
+    READY: UploadState.IDLE,
+    DONE: UploadState.ATTACHED,
+    UPLOADED: UploadState.ATTACHED,
+    PENDING_CONFIRM: UploadState.ATTACHING,
+  });
+
+  function normalizeUploadStateValue(value, fallback = UploadState.IDLE) {
+    const text = String(value || '').trim();
+    if (!text) {
+      return fallback;
+    }
+    if (Object.prototype.hasOwnProperty.call(UploadState, text)) {
+      return UploadState[text];
+    }
+    const canonicalValues = Object.values(UploadState);
+    if (canonicalValues.includes(text)) {
+      return text;
+    }
+    if (Object.prototype.hasOwnProperty.call(UploadStateLegacyAliases, text)) {
+      return UploadStateLegacyAliases[text];
+    }
+    return fallback;
+  }
 
   const UploadStateMeta = (() => {
     const RUNNING = new Set([
@@ -69,7 +99,7 @@
     ]);
 
     function normalize(state) {
-      return String(state || '').trim();
+      return normalizeUploadStateValue(state, '');
     }
 
     function isRunning(state) {
@@ -153,6 +183,9 @@
   }
 
   const UploadStateUtils = Object.freeze({
+    normalize: normalizeUploadStateValue,
+    isRunning: UploadStateMeta.isRunning,
+    isUnfinished: UploadStateMeta.isUnfinished,
     isFinal: UploadStateMeta.isFinal,
     isSuccess: UploadStateMeta.isSuccess,
     isFailed: UploadStateMeta.isFailed,
@@ -925,6 +958,21 @@
 3. 给出重构方案。
 4. 如果代码不长，直接给出修改后的完整代码。
 5. 不要破坏原有功能和调用方式。`,
+    },
+    {
+      title: '数字计算',
+      category: '默认',
+      content: `math_once_one_by_one
+
+请严格按顺序逐题计算（不要合并题目、不要跳步），每一题都必须给出清晰的中间步骤与最终答案。
+
+要求：
+1. 一次只计算一题，完成后再进入下一题。
+2. 每题输出格式：
+   - 题目：
+   - 过程：
+   - 答案：
+3. 若题目存在歧义，先列出你做的合理假设再计算。`,
     },
   ];
   }

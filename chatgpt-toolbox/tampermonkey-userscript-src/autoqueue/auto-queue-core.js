@@ -224,6 +224,7 @@ const AutoQueueModule = (() => {
       'initial-reply-done': '初始回复完成',
       'wait-current-reply': '等待当前回复结束',
       'wait-reply': '等待回复完成',
+      'wait-task-verify': '等待答案验证',
       'check-done-signal': '检查终止信号',
       'copy-last-reply': '复制最后回复',
       'send-hotkey': '发送 Ctrl+Alt+I',
@@ -1057,7 +1058,7 @@ const AutoQueueModule = (() => {
             rawTaskQueue.taskAutoUploadCountContinuePrompt !== false,
 
           taskAutoUploadCountVerifyPrompt:
-            rawTaskQueue.taskAutoUploadCountVerifyPrompt !== false,
+            rawTaskQueue.taskAutoUploadCountVerifyPrompt === true,
 
           taskAutoUploadCountMode:
             normalizeTaskAutoUploadCountMode(
@@ -1423,6 +1424,28 @@ const AutoQueueModule = (() => {
         lastPendingSendKindBeforeProcessing: null,
         doneSignalVerificationRunning: false,
         currentStep: 'idle',
+        currentQuestionText: '',
+        currentExpectedAnswer: '',
+        currentReplyText: '',
+        currentReplyStable: false,
+        currentAnswerVerified: false,
+        currentVerifyError: '',
+        currentVerifyAttempt: 0,
+        currentTaskQuestion: '',
+        currentTaskQuestionText: '',
+        currentTaskExpectedAnswer: '',
+        currentTaskReplyText: '',
+        currentTaskReplyStable: false,
+        currentTaskAnswerVerified: false,
+        currentTaskVerifyError: '',
+        currentTaskVerifyAttempt: 0,
+        lastVerifiedTaskIndex: -1,
+        lastCompletedAnswerTaskIndex: -1,
+        currentTaskRetryCount: 0,
+        currentTaskReplyHash: '',
+        currentTaskReplyHashStableCount: 0,
+        currentTaskReplyMessageId: '',
+        verifyReplyTextForResend: '',
       },
       taskBatchStepRunning: false,
       batchInitialWaitLoggedAt: 0,
@@ -1437,6 +1460,7 @@ const AutoQueueModule = (() => {
         displayState: 'idle',
         lastActiveAt: 0,
         watchdogRecoverStreak: 0,
+        watchdogRecoverStreakPerTaskIndex: {},
         scheduledTimerId: null,
         scheduledTimerAction: '',
         scheduledTimerRunId: '',
@@ -1488,6 +1512,7 @@ const AutoQueueModule = (() => {
     const BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES = 3;
     const BATCH_TASK_GROUP_MAX_WATCHDOG_RECOVER_STREAK = 3;
     const BATCH_TASK_STARTUP_GUARD_MS = 1200;
+    const TASK_REPLY_STABLE_HASH_ROUNDS = 2;
 
     const BATCH_TASK_GROUP_DISPLAY_STATE_LABELS = Object.freeze({
       starting_upload: '启动中（自动上传初始附件）',
@@ -3370,6 +3395,28 @@ const AutoQueueModule = (() => {
         pendingReplyKind: null,
         doneSignalVerificationRunning: false,
         currentStep: 'idle',
+        currentQuestionText: '',
+        currentExpectedAnswer: '',
+        currentReplyText: '',
+        currentReplyStable: false,
+        currentAnswerVerified: false,
+        currentVerifyError: '',
+        currentVerifyAttempt: 0,
+        currentTaskQuestion: '',
+        currentTaskQuestionText: '',
+        currentTaskExpectedAnswer: '',
+        currentTaskReplyText: '',
+        currentTaskReplyStable: false,
+        currentTaskAnswerVerified: false,
+        currentTaskVerifyError: '',
+        currentTaskVerifyAttempt: 0,
+        lastVerifiedTaskIndex: -1,
+        lastCompletedAnswerTaskIndex: -1,
+        currentTaskRetryCount: 0,
+        currentTaskReplyHash: '',
+        currentTaskReplyHashStableCount: 0,
+        currentTaskReplyMessageId: '',
+        verifyReplyTextForResend: '',
 
         // 当前批量任务组本次运行中，实际成功发送到 ChatGPT 的总对话次数。
         totalSentDialogueCount: 0,
@@ -3388,7 +3435,200 @@ const AutoQueueModule = (() => {
         lastRotatedConversationKey: '',
         visibleDoneSignalText: '',
         visibleDoneSignalSeenAt: 0,
+        currentTaskFailCount: 0,
       };
+    }
+
+    function formatTaskRunErrorContext(run, task) {
+      return `taskIndex=${Number(run && run.currentIndex) + 1} `
+        + `taskId=${task && task.id ? task.id : '-'} `
+        + `batchRunId=${getBatchTaskGroupRunId() || '-'}`;
+    }
+
+    function logTaskRunError(scope, error, taskOverride = null) {
+      const run = state.taskRun || {};
+      const task = taskOverride || getCurrentRunningTask();
+      const name = error && error.name ? String(error.name) : 'Error';
+      const message = error && error.message ? String(error.message) : String(error);
+      const stack = error && error.stack ? String(error.stack) : '';
+      const context = formatTaskRunErrorContext(run, task);
+      console.error(scope, {
+        error_type: name,
+        error: message,
+        stack,
+        taskIndex: Number(run.currentIndex) + 1,
+        taskId: task && task.id ? task.id : '-',
+        batchRunId: getBatchTaskGroupRunId() || '-',
+      });
+      ToolboxShell.appendLog(
+        `${scope} error.name=${name} error.message=${message} error.stack=${stack || '-'} ${context}`,
+      );
+    }
+
+    function ensureTaskRunVerificationFields(run) {
+      const target = run && typeof run === 'object'
+        ? run
+        : (state.taskRun && typeof state.taskRun === 'object' ? state.taskRun : {});
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskQuestion')) target.currentTaskQuestion = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskQuestionText')) target.currentTaskQuestionText = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskExpectedAnswer')) target.currentTaskExpectedAnswer = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyText')) target.currentTaskReplyText = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyStable')) target.currentTaskReplyStable = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskAnswerVerified')) target.currentTaskAnswerVerified = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskVerifyError')) target.currentTaskVerifyError = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskVerifyAttempt')) target.currentTaskVerifyAttempt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastVerifiedTaskIndex')) target.lastVerifiedTaskIndex = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastCompletedAnswerTaskIndex')) target.lastCompletedAnswerTaskIndex = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskRetryCount')) target.currentTaskRetryCount = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyHash')) target.currentTaskReplyHash = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyHashStableCount')) target.currentTaskReplyHashStableCount = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyMessageId')) target.currentTaskReplyMessageId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyReplyTextForResend')) target.verifyReplyTextForResend = '';
+      return target;
+    }
+
+    function resetCurrentTaskVerificationState(run, options = {}) {
+      const target = ensureTaskRunVerificationFields(run);
+      target.currentTaskQuestionText = '';
+      target.currentTaskExpectedAnswer = '';
+      target.currentTaskReplyText = '';
+      target.currentTaskReplyStable = false;
+      target.currentTaskAnswerVerified = false;
+      target.currentTaskVerifyError = '';
+      target.currentTaskVerifyAttempt = 0;
+      target.currentTaskReplyHash = '';
+      target.currentTaskReplyHashStableCount = 0;
+      target.currentTaskReplyMessageId = '';
+      target.verifyReplyTextForResend = '';
+      if (options.keepRetryCount === true) {
+        target.currentTaskRetryCount = Math.max(0, Number(target.currentTaskRetryCount) || 0);
+      } else {
+        target.currentTaskRetryCount = 0;
+      }
+      return target;
+    }
+
+    function getTaskQuestionText(task) {
+      const resolvedInitial = resolveTaskInitialPrompt(task, { log: false });
+      return String(
+        resolvedInitial && resolvedInitial.initialPrompt
+          ? resolvedInitial.initialPrompt
+          : (
+            task && (task.prompt || task.content || task.initialPrompt || task.title || '')
+          ),
+      ).trim();
+    }
+
+    function normalizeTaskQuestionForVerify(question) {
+      return String(question || '')
+        .replace(/\s+/g, '')
+        .trim();
+    }
+
+    function computeSimpleTextHash(text) {
+      const input = String(text || '');
+      let hash = 2166136261;
+      for (let i = 0; i < input.length; i += 1) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return (hash >>> 0).toString(16);
+    }
+
+    function deriveMathExpectedAnswerFromQuestion(question) {
+      const compact = normalizeTaskQuestionForVerify(question);
+      const match = compact.match(/(-?\d+(?:\.\d+)?)\+(-?\d+(?:\.\d+)?)=/);
+      if (!match) {
+        return {
+          supported: false,
+          expected: '',
+          reason: 'unsupported_question_pattern',
+        };
+      }
+      const left = Number(match[1]);
+      const right = Number(match[2]);
+      if (!Number.isFinite(left) || !Number.isFinite(right)) {
+        return {
+          supported: false,
+          expected: '',
+          reason: 'invalid_math_operands',
+        };
+      }
+      const expectedValue = left + right;
+      return {
+        supported: true,
+        expected: String(expectedValue),
+        reason: 'math_sum',
+      };
+    }
+
+    function extractNumbersFromAssistantReply(text) {
+      const matches = String(text || '').match(/-?\d+(?:\.\d+)?/g);
+      return Array.isArray(matches) ? matches : [];
+    }
+
+    function verifyCurrentTaskAnswer(question, replyText, expectedAnswer) {
+      const expectedText = String(expectedAnswer || '').trim();
+      const actualText = String(replyText || '').trim();
+      if (!actualText) {
+        return {
+          ok: false,
+          reason: 'reply_empty',
+          actualText,
+          expected: expectedText,
+          supported: true,
+        };
+      }
+      const derived = deriveMathExpectedAnswerFromQuestion(question);
+      if (!expectedText && !derived.supported) {
+        return {
+          ok: true,
+          reason: 'no_verifier_available',
+          actualText,
+          expected: '',
+          supported: false,
+        };
+      }
+      const finalExpected = expectedText || String(derived.expected || '').trim();
+      if (!finalExpected) {
+        return {
+          ok: false,
+          reason: 'expected_answer_empty',
+          actualText,
+          expected: '',
+          supported: derived.supported,
+        };
+      }
+      const numbers = extractNumbersFromAssistantReply(actualText);
+      const passed = numbers.includes(finalExpected)
+        || actualText.includes(finalExpected);
+      return {
+        ok: passed,
+        reason: passed ? 'answer_match' : 'answer_mismatch',
+        actualText,
+        expected: finalExpected,
+        supported: true,
+      };
+    }
+
+    function syncCurrentTaskVerificationContext(task, options = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const question = getTaskQuestionText(task);
+      const expected = deriveMathExpectedAnswerFromQuestion(question);
+      const previousQuestion = String(run.currentTaskQuestion || '');
+      const questionChanged = previousQuestion !== question;
+      run.currentTaskQuestion = question;
+      run.currentTaskQuestionText = question;
+      run.currentTaskExpectedAnswer = expected.supported ? String(expected.expected || '').trim() : '';
+      if (questionChanged || options.resetState === true) {
+        resetCurrentTaskVerificationState(run, {
+          keepRetryCount: options.keepRetryCount === true,
+        });
+        run.currentTaskQuestionText = question;
+        run.currentTaskExpectedAnswer = expected.supported ? String(expected.expected || '').trim() : '';
+      }
+      state.taskRun = run;
+      return run;
     }
 
     const VISIBLE_DONE_SIGNAL_STABLE_MS = 1200;
@@ -3565,6 +3805,21 @@ const AutoQueueModule = (() => {
 
       if (!reasonBlocks) {
         return false;
+      }
+
+      // When send_button_not_found but input is still available (can_accept_input=1),
+      // do not block the task group. The send pipeline will fill text and re-check.
+      // This prevents background-tab zero-rect button checks from stalling the batch.
+      if (reason === 'send_button_not_found' || reason === 'send_button_disabled') {
+        const canInput = typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.canAcceptInput === 'function'
+          && ComposerApi.canAcceptInput();
+        const assistantNotBusy = !isChatGPTActuallyBusyForTaskQueue();
+        if (canInput && assistantNotBusy) {
+          // NOTE: actual sendable re-check happens after we write the next prompt into composer
+          // (see writeAndVerifyComposerForBatch). Do not block here.
+          return false;
+        }
       }
 
       const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
@@ -3836,6 +4091,508 @@ const AutoQueueModule = (() => {
 
       console.error('[ChatGPT toolbox] getLastAssistantReplyText: CopyPipeline missing');
       return '';
+    }
+
+    function escapeRegExpForTaskVerify(text) {
+      return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function getTaskQuestionTextForVerify(task) {
+      if (!task) {
+        return '';
+      }
+
+      try {
+        if (typeof resolveTaskInitialPrompt === 'function') {
+          const resolved = resolveTaskInitialPrompt(task, { log: false });
+          if (resolved && String(resolved.initialPrompt || '').trim()) {
+            return String(resolved.initialPrompt || '').trim();
+          }
+        }
+      } catch (error) {
+        logTaskRunError('[TASK_VERIFY][QUESTION_RESOLVE_ERROR]', error, task);
+      }
+
+      return String(
+        task.initialPrompt
+        || task.prompt
+        || task.content
+        || task.title
+        || ''
+      ).trim();
+    }
+
+    function extractMathExpectationsFromText(text) {
+      const source = String(text || '');
+      const results = [];
+      const re = /(^|[\n\r\s])(-?\d+)\s*\+\s*(-?\d+)\s*=/g;
+      let match = null;
+
+      while ((match = re.exec(source)) !== null) {
+        const left = Number(match[2]);
+        const right = Number(match[3]);
+
+        if (!Number.isFinite(left) || !Number.isFinite(right)) {
+          continue;
+        }
+
+        const expected = left + right;
+        results.push({
+          expression: `${match[2]}+${match[3]}=`,
+          expected,
+          expectedText: String(expected),
+          left,
+          right,
+        });
+      }
+
+      return results;
+    }
+
+    function extractNumberTokensForTaskVerify(text) {
+      const source = String(text || '');
+      const matches = source.match(/-?\d+(?:\.\d+)?/g);
+      return Array.isArray(matches) ? matches : [];
+    }
+
+    function verifyMathAnswerForTask(task, replyText) {
+      const questionText = getTaskQuestionTextForVerify(task);
+      return verifyMathAnswer(questionText, replyText);
+    }
+
+    function verifyMathAnswer(questionText, replyText) {
+      const normalizedQuestionText = String(questionText || '').trim();
+      const expectations = extractMathExpectationsFromText(normalizedQuestionText);
+      const reply = String(replyText || '').trim();
+
+      if (!expectations.length) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'no-math-expectation',
+          questionText: normalizedQuestionText,
+          expected: '',
+          actual: '',
+          replyText: reply,
+        };
+      }
+
+      if (expectations.length > 1) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][MULTI_MATH_WARN] count=${expectations.length} `
+          + 'reason=multiple-equations-in-one-task-only-first-is-verified',
+        );
+      }
+
+      const target = expectations[0];
+      const numbers = extractNumberTokensForTaskVerify(reply);
+      const expectedNumber = Number(target.expected);
+
+      const numberMatched = numbers.some((item) => {
+        const n = Number(item);
+        return Number.isFinite(n) && n === expectedNumber;
+      });
+
+      const boundaryRe = new RegExp(
+        `(^|[^0-9.-])${escapeRegExpForTaskVerify(target.expectedText)}([^0-9.]|$)`,
+      );
+      const textMatched = boundaryRe.test(reply);
+
+      const ok = numberMatched || textMatched;
+
+      return {
+        ok,
+        skipped: false,
+        reason: ok ? 'math-answer-ok' : 'answer-mismatch',
+        questionText: normalizedQuestionText,
+        expression: target.expression,
+        expected: target.expectedText,
+        actual: numbers.join(','),
+        replyText: reply,
+      };
+    }
+
+    function getCurrentTaskReplyTextForVerify(task, replyText, options = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const directReply = String(replyText || '').trim();
+      const savedOriginalReply = String(run.verifyReplyTextForResend || '').trim();
+
+      if (options.preferOriginalTaskReply === true && savedOriginalReply) {
+        return savedOriginalReply;
+      }
+
+      if (run.doneSignalVerificationRunning && savedOriginalReply) {
+        return savedOriginalReply;
+      }
+
+      if (directReply) {
+        return directReply;
+      }
+
+      if (String(run.currentTaskReplyText || '').trim()) {
+        return String(run.currentTaskReplyText || '').trim();
+      }
+
+      return String(getLastAssistantReplyText() || '').trim();
+    }
+
+    function updateCurrentTaskReplyStableState(replyText) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const reply = String(replyText || '').trim();
+
+      if (!reply) {
+        run.currentTaskReplyHash = '';
+        run.currentTaskReplyHashStableCount = 0;
+        run.currentTaskReplyStable = false;
+        run.currentReplyStable = false;
+        state.taskRun = run;
+        return {
+          stable: false,
+          stableCount: 0,
+          required: Math.max(1, Number(TASK_REPLY_STABLE_HASH_ROUNDS) || 2),
+          reason: 'empty-reply',
+        };
+      }
+
+      const replyHash = computeSimpleTextHash(reply);
+
+      if (run.currentTaskReplyHash === replyHash) {
+        run.currentTaskReplyHashStableCount = Math.max(
+          1,
+          Number(run.currentTaskReplyHashStableCount) || 0,
+        ) + 1;
+      } else {
+        run.currentTaskReplyHash = replyHash;
+        run.currentTaskReplyHashStableCount = 1;
+      }
+
+      const stableCount = Number(run.currentTaskReplyHashStableCount) || 0;
+      const required = Math.max(1, Number(TASK_REPLY_STABLE_HASH_ROUNDS) || 2);
+
+      run.currentTaskReplyStable = stableCount >= required;
+      run.currentTaskReplyText = reply;
+      run.currentReplyText = reply;
+      run.currentReplyStable = run.currentTaskReplyStable;
+      state.taskRun = run;
+
+      return {
+        stable: run.currentTaskReplyStable,
+        stableCount,
+        required,
+        reason: run.currentTaskReplyStable ? 'reply-stable' : 'reply-not-stable',
+      };
+    }
+
+    function verifyCurrentTaskAnswerBeforeAdvance(task, replyText, meta = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const taskIndex = Number(run.currentIndex || 0);
+      const source = String(meta && meta.source ? meta.source : '-');
+      const reply = getCurrentTaskReplyTextForVerify(task, replyText);
+      const questionText = String(run.currentTaskQuestionText || getTaskQuestionTextForVerify(task) || '').trim();
+      const responseState = typeof detectComposerResponseState === 'function'
+        ? detectComposerResponseState({ light: true })
+        : null;
+      const responseStateText = String(
+        responseState && responseState.response_state ? responseState.response_state : '',
+      ).trim().toLowerCase();
+
+      run.currentTaskVerifyAttempt = Math.max(0, Number(run.currentTaskVerifyAttempt) || 0) + 1;
+      run.currentTaskReplyText = reply;
+      run.currentReplyText = reply;
+      run.currentQuestionText = questionText;
+      run.currentExpectedAnswer = String(run.currentTaskExpectedAnswer || '').trim();
+      run.currentReplyStable = !!run.currentTaskReplyStable;
+      run.currentVerifyAttempt = run.currentTaskVerifyAttempt;
+      run.currentAnswerVerified = !!run.currentTaskAnswerVerified;
+      run.currentVerifyError = String(run.currentTaskVerifyError || '').trim();
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][START] taskIndex=${taskIndex + 1} question=${JSON.stringify(questionText)}`,
+      );
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][REPLY_STATE] generating=${responseStateText === 'generating' ? 1 : 0} `
+        + `waitingReply=${state.waitingReply ? 1 : 0} stable=${run.currentTaskReplyStable ? 1 : 0} `
+        + `textLen=${reply.length}`,
+      );
+
+      if (!reply) {
+        run.currentTaskQuestionText = questionText;
+        run.currentTaskExpectedAnswer = '';
+        run.currentTaskAnswerVerified = false;
+        run.currentTaskVerifyError = 'empty-reply';
+        run.currentExpectedAnswer = '';
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'empty-reply';
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][EXPECTED] expected=-`,
+        );
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][ACTUAL] actual=- replyText=${JSON.stringify(reply)}`,
+        );
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][FAIL] taskIndex=${taskIndex + 1} reason=empty-reply`,
+        );
+        return {
+          ok: false,
+          reason: 'empty-reply',
+        };
+      }
+
+      const result = verifyMathAnswerForTask(task, reply);
+
+      run.currentTaskQuestion = String(result.questionText || '');
+      run.currentTaskQuestionText = String(result.questionText || '');
+      run.currentTaskExpectedAnswer = String(result.expected || '');
+      run.currentTaskReplyText = reply;
+      run.currentQuestionText = String(result.questionText || '');
+      run.currentExpectedAnswer = String(result.expected || '');
+      run.currentReplyText = reply;
+
+      if (result.skipped) {
+        const strictVerifyEnabled = !!(
+          config.taskQueueSettings
+          && config.taskQueueSettings.requireAnswerVerification === true
+        );
+
+        if (strictVerifyEnabled) {
+          run.currentTaskAnswerVerified = false;
+          run.currentTaskVerifyError = result.reason || 'no-verifier';
+          run.currentAnswerVerified = false;
+          run.currentVerifyError = result.reason || 'no-verifier';
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY][EXPECTED] expected=-`,
+          );
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY][ACTUAL] actual=- replyText=${JSON.stringify(reply)}`,
+          );
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY][FAIL] taskIndex=${taskIndex + 1} reason=${result.reason || 'no-verifier'} strict=1`,
+          );
+          return {
+            ok: false,
+            reason: result.reason || 'no-verifier',
+          };
+        }
+
+        run.currentTaskAnswerVerified = true;
+        run.currentTaskVerifyError = '';
+        run.lastVerifiedTaskIndex = taskIndex;
+        run.currentAnswerVerified = true;
+        run.currentVerifyError = '';
+
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][EXPECTED] expected=-`,
+        );
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][ACTUAL] actual=- replyText=${JSON.stringify(reply)}`,
+        );
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][SKIP] taskIndex=${taskIndex + 1} reason=${result.reason || 'no-verifier'} strict=0`,
+        );
+
+        return {
+          ok: true,
+          skipped: true,
+          reason: result.reason || 'no-verifier',
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][EXPECTED] expected=${result.expected || '-'}`,
+      );
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][ACTUAL] actual=${result.actual || '-'} replyText=${JSON.stringify(reply)}`,
+      );
+
+      if (!result.ok) {
+        run.currentTaskAnswerVerified = false;
+        run.currentTaskVerifyError = result.reason || 'answer-mismatch';
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = result.reason || 'answer-mismatch';
+
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][FAIL] taskIndex=${taskIndex + 1} reason=${result.reason || 'answer-mismatch'} `
+          + `expected=${result.expected || '-'} actual=${result.actual || '-'}`,
+        );
+
+        return {
+          ok: false,
+          reason: result.reason || 'answer-mismatch',
+          expected: result.expected,
+          actual: result.actual,
+        };
+      }
+
+      run.currentTaskAnswerVerified = true;
+      run.currentTaskVerifyError = '';
+      run.lastVerifiedTaskIndex = taskIndex;
+      run.currentAnswerVerified = true;
+      run.currentVerifyError = '';
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][PASS] taskIndex=${taskIndex + 1} expected=${result.expected || '-'} actual=${result.actual || '-'}`,
+      );
+
+      return {
+        ok: true,
+        reason: 'verified',
+        expected: result.expected,
+        actual: result.actual,
+      };
+    }
+
+    function canAdvanceToNextTaskAfterVerify(task, replyText, meta = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const source = String(meta && meta.source ? meta.source : '-');
+      const taskIndex = Number(run.currentIndex || 0);
+      const ctx = meta && typeof meta === 'object' ? meta : {};
+      const responseStateText = String(
+        ctx.responseState != null
+          ? ctx.responseState
+          : (
+            typeof detectComposerResponseState === 'function'
+              ? ((detectComposerResponseState({ light: true }) || {}).response_state || '')
+              : ''
+          ),
+      ).trim().toLowerCase();
+      const running = ctx.running != null ? !!ctx.running : !!state.running;
+      const waitingReply = ctx.waitingReply != null ? !!ctx.waitingReply : !!state.waitingReply;
+      const finalReplyText = getCurrentTaskReplyTextForVerify(task, replyText, {
+        preferOriginalTaskReply: ctx.preferOriginalTaskReply === true,
+      });
+      const stableState = updateCurrentTaskReplyStableState(finalReplyText);
+
+      run.currentReplyText = finalReplyText;
+      run.currentReplyStable = !!stableState.stable;
+      run.currentQuestionText = String(run.currentTaskQuestionText || getTaskQuestionTextForVerify(task) || '').trim();
+      run.currentExpectedAnswer = String(run.currentTaskExpectedAnswer || '').trim();
+      run.currentVerifyAttempt = Math.max(
+        Number(run.currentVerifyAttempt) || 0,
+        Number(run.currentTaskVerifyAttempt) || 0,
+      );
+
+      if (!running) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'not-running';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=not-running source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'not-running',
+        };
+      }
+
+      if (waitingReply) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'waiting-reply';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=waiting-reply source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'waiting-reply',
+        };
+      }
+
+      if (responseStateText === 'generating') {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'assistant-still-busy';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=assistant-still-busy source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'assistant-still-busy',
+        };
+      }
+
+      if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'assistant-still-busy';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=assistant-still-busy source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'assistant-still-busy',
+        };
+      }
+
+      if (!finalReplyText) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'empty-reply';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=empty-reply source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'empty-reply',
+        };
+      }
+
+      if (!stableState.stable) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = 'reply-not-stable';
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=reply-not-stable `
+          + `stableCount=${stableState.stableCount}/${stableState.required || TASK_REPLY_STABLE_HASH_ROUNDS} source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'reply-not-stable',
+        };
+      }
+
+      const verify = verifyCurrentTaskAnswerBeforeAdvance(task, finalReplyText, {
+        source,
+      });
+
+      if (!verify.ok) {
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = String(verify.reason || 'not-verified');
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex + 1} reason=${verify.reason || 'not-verified'} source=${source}`,
+        );
+        return verify;
+      }
+
+      run.currentAnswerVerified = true;
+      run.currentVerifyError = '';
+      ToolboxShell.appendLog(
+        `[TASK_ADVANCE][ALLOW] taskIndex=${taskIndex + 1} reason=answer-verified source=${source}`,
+      );
+
+      return {
+        ok: true,
+        reason: 'answer-verified',
+      };
+    }
+
+    function recordCurrentTaskAnswerCompletedOnce(task, source = '-') {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const taskIndex = Number(run.currentIndex || 0);
+
+      if (Number(run.lastCompletedAnswerTaskIndex) === taskIndex) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][ANSWER_COUNT_SKIP] taskIndex=${taskIndex + 1} reason=already-counted source=${source}`,
+        );
+        return;
+      }
+
+      run.completedAnswerCount = Math.max(
+        0,
+        Number(run.completedAnswerCount) || 0,
+      ) + 1;
+
+      run.lastCompletedAnswerTaskIndex = taskIndex;
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][ANSWER_COUNT] taskIndex=${taskIndex + 1} completedAnswerCount=${run.completedAnswerCount} `
+        + `task=${task && task.title ? task.title : '-'} source=${source}`,
+      );
     }
 
     function isTaskDoneSignalMatched(replyText, doneSignal) {
@@ -4168,6 +4925,27 @@ const AutoQueueModule = (() => {
         pendingReplyKind: null,
         doneSignalVerificationRunning: false,
         currentStep: 'send-initial',
+        currentQuestionText: '',
+        currentExpectedAnswer: '',
+        currentReplyText: '',
+        currentReplyStable: false,
+        currentAnswerVerified: false,
+        currentVerifyError: '',
+        currentVerifyAttempt: 0,
+        currentTaskQuestion: '',
+        currentTaskQuestionText: '',
+        currentTaskExpectedAnswer: '',
+        currentTaskReplyText: '',
+        currentTaskReplyStable: false,
+        currentTaskAnswerVerified: false,
+        currentTaskVerifyError: '',
+        currentTaskVerifyAttempt: 0,
+        lastVerifiedTaskIndex: -1,
+        lastCompletedAnswerTaskIndex: -1,
+        currentTaskRetryCount: 0,
+        currentTaskReplyHash: '',
+        currentTaskReplyHashStableCount: 0,
+        currentTaskReplyMessageId: '',
 
         // 当前批量任务组本次运行中，实际成功发送到 ChatGPT 的总对话次数。
         totalSentDialogueCount: 0,
@@ -4202,6 +4980,7 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
       ToolboxShell.appendLog(`[AUTOQ][TASK][START] profile=${profile ? profile.name : '-'} tasks=${runnable.length}`);
       log(`批量任务组任务开始，共 ${runnable.length} 个任务`);
+      syncCurrentTaskVerificationContext(runnable[0] || null, { resetState: true });
       setTaskBatchStep('send-initial', runnable[0] || null);
       touchBatchTaskGroupActivity('prepare-queue');
       setBatchTaskGroupDisplayState('running', 'prepare-queue');
@@ -4209,7 +4988,14 @@ const AutoQueueModule = (() => {
       return true;
     }
 
-    async function moveToNextTask() {
+    async function moveToNextTask(reason = 'move-to-next-task', options = {}) {
+      if (options.skipGate !== true) {
+        const advanceResult = await maybeAdvanceToNextTask(reason, {
+          task: getCurrentRunningTask(),
+        });
+        return !!(advanceResult && advanceResult.advanced);
+      }
+
       if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
         repairWaitingReplyForAssistantBusy('move-next-blocked-assistant-busy');
         return false;
@@ -4217,9 +5003,16 @@ const AutoQueueModule = (() => {
 
       const run = state.taskRun || {};
       const nextIndex = Number(run.currentIndex) + 1;
+      const fromReason = String(reason || 'move-to-next-task');
+
+      ToolboxShell.appendLog(
+        `[BATCH_TASK_GROUP][TASK_ADVANCE] from=${Number(run.currentIndex || 0)} to=${nextIndex} `
+        + `reason=${fromReason} total=${Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0}`,
+      );
 
       if (!Array.isArray(run.enabledTaskIds) || nextIndex >= run.enabledTaskIds.length) {
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][ALL_DONE]');
+        ToolboxShell.appendLog('[BATCH_TASK_GROUP][DONE] reason=all-tasks-finished');
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][STEP] task=- step=all-done');
         ToolboxShell.appendLog('[AUTOQ][TASK][ALL_DONE]');
         log('全部任务完成');
@@ -4280,8 +5073,28 @@ const AutoQueueModule = (() => {
 
       clearVisibleDoneSignalTracking();
 
+      // Reset per-task recovery tracking when advancing to a new task
+      if (state.batchTask && state.batchTask.watchdogRecoverStreakPerTaskIndex) {
+        state.batchTask.watchdogRecoverStreakPerTaskIndex = {};
+      }
+      syncCurrentTaskVerificationContext(nextTask, { resetState: true });
       run.currentIndex = nextIndex;
       run.currentTaskFailCount = 0;
+      run.currentQuestionText = '';
+      run.currentExpectedAnswer = '';
+      run.currentReplyText = '';
+      run.currentReplyStable = false;
+      run.currentAnswerVerified = false;
+      run.currentVerifyError = '';
+      run.currentVerifyAttempt = 0;
+      run.currentTaskQuestionText = '';
+      run.currentTaskExpectedAnswer = '';
+      run.currentTaskReplyText = '';
+      run.currentTaskReplyStable = false;
+      run.currentTaskAnswerVerified = false;
+      run.currentTaskVerifyError = '';
+      run.currentTaskVerifyAttempt = 0;
+      run.verifyReplyTextForResend = '';
       run.pendingSendKind = 'initial';
       run.pendingReplyKind = null;
       state.waitingReply = false;
@@ -4715,6 +5528,88 @@ const AutoQueueModule = (() => {
 
       ensureTicker();
 
+      if (action === 'wait-reply-recover') {
+        const currentTask = getCurrentRunningTask();
+        if (meta.fromWatchdog === true && state.waitingReply) {
+          ToolboxShell.appendLog(
+            `[TASK_ADVANCE][BLOCKED] reason=watchdog-recover-not-verified waitingReply=${state.waitingReply ? 1 : 0}`,
+          );
+          setBatchTaskGroupDisplayState('recovering', 'wait-reply-recover-pending');
+          logBatchTaskGroupStepEnd(
+            'pending',
+            'wait-reply-recover',
+            0,
+            {
+              reason: 'watchdog-recover-not-verified',
+              fromWatchdog: true,
+              clearWaiting: false,
+              advanceTask: false,
+            },
+          );
+          updateStatus('batch-wait-reply-recover-pending');
+          return;
+        }
+        const evaluation = evaluateCurrentTaskAdvanceState({
+          task: currentTask,
+          source: meta.fromWatchdog === true ? 'watchdog-wait-reply-recover' : 'wait-reply-recover',
+        });
+        logTaskVerifyState(currentTask, evaluation);
+        if (state.waitingReply || evaluation.generating || !evaluation.stable) {
+          const blockedReason = evaluation.generating ? 'still-generating' : (evaluation.blockedReason || 'wait-reply-recover');
+          if (evaluation.generating) {
+            ToolboxShell.appendLog('[TASK_ADVANCE][BLOCKED] reason=still-generating action=wait-reply-recover');
+          }
+          setBatchTaskGroupDisplayState('recovering', 'wait-reply-recover-pending');
+          logBatchTaskGroupStepEnd(
+            'pending',
+            'wait-reply-recover',
+            0,
+            {
+              reason: blockedReason,
+              fromWatchdog: meta.fromWatchdog === true,
+              clearWaiting: false,
+              advanceTask: false,
+            },
+          );
+          updateStatus('batch-wait-reply-recover-pending');
+          return;
+        }
+        if (evaluation.answerVerified) {
+          void handleTaskReplyReady().catch((error) => {
+            logTaskRunError('[AUTOQ][WAIT_REPLY_RECOVER][HANDLE_REPLY_READY_FAILED]', error, currentTask);
+            recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'wait-reply-recover-handle-failed', {
+              action: 'wait-reply-recover',
+              clearStepRunning: true,
+            });
+          });
+          logBatchTaskGroupStepEnd('recovering', 'wait-reply-recover', 0, {
+            reason: 'reply-ready-detected',
+            fromWatchdog: meta.fromWatchdog === true,
+            clearWaiting: false,
+            advanceTask: false,
+          });
+          updateStatus('batch-wait-reply-recover-detected');
+          return;
+        }
+        setBatchTaskGroupDisplayState('recovering', 'wait-reply-recover-answer-mismatch');
+        if (meta.fromWatchdog === true) {
+          ToolboxShell.appendLog('[TASK_ADVANCE][BLOCKED] reason=watchdog-recover-not-verified');
+        }
+        logBatchTaskGroupStepEnd(
+          'pending',
+          'wait-reply-recover',
+          0,
+          {
+            reason: evaluation.blockedReason || 'not_verified',
+            fromWatchdog: meta.fromWatchdog === true,
+            clearWaiting: false,
+            advanceTask: false,
+          },
+        );
+        updateStatus('batch-wait-reply-recover-blocked');
+        return;
+      }
+
       let progressed = false;
       if (maybeResumeRelentlessSendRetry()) {
         progressed = true;
@@ -4736,7 +5631,24 @@ const AutoQueueModule = (() => {
         );
       }
 
-      logBatchTaskGroupStepEnd(progressed ? 'ok' : 'noop', action, 0, meta);
+      if (meta.fromWatchdog === true && state.waitingReply) {
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] reason=watchdog-recover-not-verified waitingReply=${state.waitingReply ? 1 : 0}`,
+        );
+        logBatchTaskGroupStepEnd('pending', action, 0, Object.assign({}, meta, {
+          clearWaiting: false,
+          advanceTask: false,
+          reason: 'watchdog-recover-not-verified',
+        }));
+      } else if (action === 'wait-reply-recover') {
+        logBatchTaskGroupStepEnd('pending', action, 0, Object.assign({}, meta, {
+          clearWaiting: false,
+          advanceTask: false,
+          reason: 'wait-reply-recover-pending',
+        }));
+      } else {
+        logBatchTaskGroupStepEnd(progressed ? 'ok' : 'noop', action, 0, meta);
+      }
       updateStatus(`batch-timer-${action}`);
     }
 
@@ -4788,6 +5700,72 @@ const AutoQueueModule = (() => {
       }, safeDelayMs);
 
       return true;
+    }
+
+    function finishCurrentTaskAndAdvance(reason) {
+      const run = state.taskRun || {};
+      const from = Number(run.currentIndex || 0);
+      const to = from + 1;
+      const total = Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0;
+      const reasonText = String(reason || '-') || '-';
+
+      ToolboxShell.appendLog(
+        `[BATCH_TASK_GROUP][TASK_ADVANCE] from=${from} to=${to} reason=${reasonText} total=${total}`,
+      );
+
+      const task = getCurrentRunningTask();
+      const replyText = getCurrentTaskReplyTextForVerify(task, getLastAssistantReplyText(), {
+        preferOriginalTaskReply: true,
+      });
+      const advanceGate = canAdvanceToNextTaskAfterVerify(task, replyText, {
+        source: `finish-current:${reasonText}`,
+        preferOriginalTaskReply: true,
+      });
+
+      if (!advanceGate.ok) {
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] from=${from} to=${to} reason=${advanceGate.reason || 'not-verified'} source=finishCurrentTaskAndAdvance`,
+        );
+
+        if (advanceGate.reason === 'answer-mismatch') {
+          failCurrentTask('answer-mismatch', {
+            stopEntireBatch: true,
+          });
+          return;
+        }
+
+        recoverBatchTaskGroup(getBatchTaskGroupRunId(), advanceGate.reason || 'not-verified', {
+          action: 'wait-reply-recover',
+          clearStepRunning: true,
+          clearWaiting: false,
+        });
+        return;
+      }
+
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.idleSince = 0;
+      state.waitingStartedAt = 0;
+      state.taskBatchStepRunning = false;
+
+      recordCurrentTaskAnswerCompletedOnce(task, `finish-current:${reasonText}`);
+
+      if (task) {
+        markTaskStatus(task, 'completed');
+        notifyRuntimeTaskComplete(task);
+      }
+
+      setTaskBatchStep('next-task', task, { log: false });
+
+      void moveToNextTask(reasonText, {
+        skipGate: true,
+      }).then((moved) => {
+        if (!moved) {
+          setBatchTaskGroupDisplayState('completed', 'all-tasks-done');
+          return;
+        }
+        touchBatchTaskGroupActivity('moved-to-next-after-finish');
+      }).catch(handleMoveToNextTaskError);
     }
 
     function shouldStopEntireBatchForReason(reason, options = {}) {
@@ -4880,7 +5858,7 @@ const AutoQueueModule = (() => {
 
       logBatchTaskGroupStepEnd('skip-task', 'move-next', 0, { reason: reasonText });
 
-      void moveToNextTask().then((moved) => {
+      void moveToNextTask(reasonText, { skipGate: true }).then((moved) => {
         if (!moved) {
           setBatchTaskGroupDisplayState('completed', 'all-tasks-done');
           return;
@@ -4920,7 +5898,12 @@ const AutoQueueModule = (() => {
       const run = state.taskRun || {};
       const task = getCurrentRunningTask();
       const fromWatchdog = options.fromWatchdog === true;
+      const reasonText = String(reason || '').trim();
+      const watchdogReason = fromWatchdog || reasonText.includes('watchdog-stall');
       const delayMs = Math.max(0, Number(options.delayMs) || BATCH_TASK_GROUP_RECOVER_DELAY_MS);
+      ensureTaskRunVerificationFields(run);
+      run.currentTaskRetryCount = Math.max(0, Number(run.currentTaskRetryCount) || 0) + 1;
+      state.taskRun = run;
 
       state.batchTask.watchdogRecoverStreak = Math.max(
         0,
@@ -4932,11 +5915,36 @@ const AutoQueueModule = (() => {
         && state.batchTask.watchdogRecoverStreak > BATCH_TASK_GROUP_MAX_WATCHDOG_RECOVER_STREAK
       ) {
         ToolboxShell.appendLog(
-          `[BATCH_TASK_GROUP][RECOVER_SCHEDULE] watchdog-streak-exceeded `
-          + `streak=${state.batchTask.watchdogRecoverStreak} -> skip task`,
+          `[BATCH_TASK_GROUP][RECOVER_LIMIT_REACHED] taskIndex=${Number(run.currentIndex || 0)} `
+          + `action=stop-batch reason=${reason || 'watchdog-stall'} streak=${state.batchTask.watchdogRecoverStreak}`,
         );
         state.batchTask.watchdogRecoverStreak = 0;
-        skipCurrentTaskWithFailure(`watchdog-stall:${reason || 'unknown'}`);
+        state.taskBatchStepRunning = false;
+        failCurrentTask(`recover-limit-reached:${reason || 'watchdog-stall'}`, {
+          stopEntireBatch: true,
+        });
+        return true;
+      }
+
+      // Per-taskIndex recovery limit: track recovery count per task and force-advance
+      // when the same taskIndex exceeds BATCH_TASK_GROUP_MAX_WATCHDOG_RECOVER_STREAK.
+      const runForRecover = state.taskRun || {};
+      const recoverTaskIndex = Number(runForRecover.currentIndex || 0);
+      if (!state.batchTask.watchdogRecoverStreakPerTaskIndex) {
+        state.batchTask.watchdogRecoverStreakPerTaskIndex = {};
+      }
+      const perTaskCount = Math.max(0, Number(state.batchTask.watchdogRecoverStreakPerTaskIndex[recoverTaskIndex]) || 0) + 1;
+      state.batchTask.watchdogRecoverStreakPerTaskIndex[recoverTaskIndex] = perTaskCount;
+      if (perTaskCount > BATCH_TASK_GROUP_MAX_WATCHDOG_RECOVER_STREAK) {
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][RECOVER_LIMIT_REACHED] taskIndex=${recoverTaskIndex} action=stop-batch reason=${reason || 'recover'}`,
+        );
+        state.batchTask.watchdogRecoverStreakPerTaskIndex = {};
+        state.batchTask.watchdogRecoverStreak = 0;
+        state.taskBatchStepRunning = false;
+        failCurrentTask(`recover-limit-reached:${reason || 'recover'}`, {
+          stopEntireBatch: true,
+        });
         return true;
       }
 
@@ -4955,11 +5963,25 @@ const AutoQueueModule = (() => {
         state.taskBatchStepRunning = false;
       }
 
+      if (watchdogReason && state.waitingReply) {
+        ToolboxShell.appendLog(
+          `[TASK_ADVANCE][BLOCKED] reason=watchdog-recover-not-verified waitingReply=${state.waitingReply ? 1 : 0}`,
+        );
+        scheduleNextBatchTaskStep('wait-reply-recover', delayMs, {
+          reason: reasonText || 'watchdog-recover-not-verified',
+          clearWaiting: false,
+          fromWatchdog: true,
+        });
+        ensureTicker();
+        updateStatus('batch-recover-scheduled');
+        return true;
+      }
+
       ToolboxShell.appendLog(
         `[BATCH_TASK_GROUP][RECOVER_SCHEDULE] runId=${currentRunId || '-'} reason=${reason || '-'} `
         + `taskIndex=${Number(run.currentIndex) + 1} taskId=${task ? task.id : '-'} `
         + `round=${Number(task && task.continueCount) || 0} delayMs=${delayMs} `
-        + `watchdogStreak=${state.batchTask.watchdogRecoverStreak}`,
+        + `watchdogStreak=${state.batchTask.watchdogRecoverStreak} retryCount=${run.currentTaskRetryCount}`,
       );
 
       const timerAction = String(options.action || (
@@ -4967,9 +5989,9 @@ const AutoQueueModule = (() => {
       ));
 
       scheduleNextBatchTaskStep(timerAction, delayMs, {
-        reason: String(reason || 'recover'),
-        clearWaiting: options.clearWaiting === true,
-        fromWatchdog,
+        reason: reasonText || 'recover',
+        clearWaiting: watchdogReason ? false : (options.clearWaiting === true),
+        fromWatchdog: watchdogReason,
       });
 
       ensureTicker();
@@ -5022,6 +6044,77 @@ const AutoQueueModule = (() => {
         `[BATCH_TASK_GROUP][WATCHDOG] stallMs=${stallMs} step=${state.taskRun && state.taskRun.currentStep ? state.taskRun.currentStep : '-'} `
         + `waitingReply=${state.waitingReply ? 1 : 0} taskBatchStepRunning=${state.taskBatchStepRunning ? 1 : 0}`,
       );
+
+      if (
+        currentStep === 'wait-initial-reply'
+        && state.waitingReply === true
+        && isChatGPTActuallyBusyForTaskQueue()
+      ) {
+        ToolboxShell.appendLog('[TASK_ADVANCE][BLOCKED] reason=watchdog-recover-not-verified');
+        return recoverBatchTaskGroup(getBatchTaskGroupRunId(), `watchdog-stall-${Math.round(stallMs / 1000)}s`, {
+          fromWatchdog: true,
+          clearStepRunning: true,
+          clearWaiting: false,
+          delayMs: BATCH_TASK_GROUP_RECOVER_DELAY_MS,
+          action: 'wait-reply-recover',
+        });
+      }
+
+      // Force-advance when copy-last-reply is stalled (step set but no async operation running,
+      // no reply being waited for). This prevents the common infinite-loop scenario where
+      // the batch stays on the same taskIndex forever.
+      if (
+        currentStep === 'copy-last-reply'
+        && !state.waitingReply
+        && !state.taskBatchStepRunning
+      ) {
+        if (stallMs < 15000) {
+          return false;
+        }
+        const task = getCurrentRunningTask();
+        const runRef = state.taskRun || {};
+        const currentIdx = Number(runRef.currentIndex || 0);
+        const nextIdx = currentIdx + 1;
+        const replyText = getCurrentTaskReplyTextForVerify(task, getLastAssistantReplyText());
+
+        const advanceGate = canAdvanceToNextTaskAfterVerify(task, replyText, {
+          source: 'watchdog-copy-last-reply-stall',
+        });
+
+        if (!advanceGate.ok) {
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][WATCHDOG_ADVANCE_BLOCKED] reason=${advanceGate.reason || 'not-verified'} `
+            + `taskIndex=${currentIdx + 1} nextIndex=${nextIdx}`,
+          );
+
+          return recoverBatchTaskGroup(
+            getBatchTaskGroupRunId(),
+            advanceGate.reason || 'watchdog-not-verified',
+            {
+              fromWatchdog: true,
+              clearStepRunning: true,
+              clearWaiting: false,
+              delayMs: BATCH_TASK_GROUP_RECOVER_DELAY_MS,
+              action: 'wait-reply-recover',
+            },
+          );
+        }
+
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][WATCHDOG_ADVANCE_BLOCKED] reason=watchdog-recover-not-verified taskIndex=${currentIdx + 1} nextIndex=${nextIdx + 1}`,
+        );
+        return recoverBatchTaskGroup(
+          getBatchTaskGroupRunId(),
+          'watchdog-recover-not-verified',
+          {
+            fromWatchdog: true,
+            clearStepRunning: true,
+            clearWaiting: false,
+            delayMs: BATCH_TASK_GROUP_RECOVER_DELAY_MS,
+            action: 'wait-reply-recover',
+          },
+        );
+      }
 
       return recoverBatchTaskGroup(getBatchTaskGroupRunId(), `watchdog-stall-${Math.round(stallMs / 1000)}s`, {
         fromWatchdog: true,
@@ -5180,6 +6273,155 @@ const AutoQueueModule = (() => {
         .replace(/\{\{lastReply\}\}/g, String(replyText || ''));
     }
 
+    function evaluateCurrentTaskAdvanceState(options = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const task = options.task || getCurrentRunningTask();
+      const snapshot = options.replySnapshot && typeof options.replySnapshot === 'object'
+        ? options.replySnapshot
+        : buildAssistantReplySnapshot();
+      const replyText = getCurrentTaskReplyTextForVerify(
+        task,
+        options.replyText != null ? options.replyText : (snapshot && snapshot.text ? snapshot.text : ''),
+        {
+          preferOriginalTaskReply: options.preferOriginalTaskReply === true,
+        },
+      );
+      const messageId = String(snapshot && snapshot.messageId ? snapshot.messageId : '').trim();
+      const busy = isChatGPTActuallyBusyForTaskQueue();
+      const waitingReply = !!state.waitingReply;
+
+      run.currentTaskReplyMessageId = messageId;
+      run.currentTaskReplyText = replyText;
+      state.taskRun = run;
+
+      const gate = canAdvanceToNextTaskAfterVerify(task, replyText, {
+        source: String(options.source || 'evaluate-current-task'),
+        preferOriginalTaskReply: options.preferOriginalTaskReply === true,
+      });
+      const verifyResult = {
+        ok: !!gate.ok,
+        reason: gate.reason || (gate.ok ? 'verified' : 'not-verified'),
+      };
+      const hasReply = !!replyText;
+      const canAdvance = !!gate.ok;
+      const blockedReason = gate.ok
+        ? ''
+        : (
+          busy
+            ? 'assistant-still-busy'
+            : (
+              waitingReply
+                ? 'waiting-reply'
+                : (gate.reason || 'not-verified')
+            )
+        );
+
+      return {
+        canAdvance,
+        blockedReason,
+        generating: busy,
+        waitingReply,
+        hasReply,
+        stable: !!run.currentTaskReplyStable,
+        answerVerified: !!run.currentTaskAnswerVerified,
+        verifyResult,
+        replyText,
+        replyHash: computeSimpleTextHash(replyText),
+        replyHashStableCount: Number(run.currentTaskReplyHashStableCount) || 0,
+      };
+    }
+
+    function logTaskVerifyState(task, evaluation) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const taskIndex = Number(run.currentIndex || 0) + 1;
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][START] taskIndex=${taskIndex} question=${JSON.stringify(String(run.currentTaskQuestionText || getTaskQuestionTextForVerify(task) || ''))}`,
+      );
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][REPLY_STATE] generating=${evaluation.generating ? 1 : 0} waitingReply=${evaluation.waitingReply ? 1 : 0} `
+        + `stable=${evaluation.stable ? 1 : 0} textLen=${String(evaluation.replyText || '').length} `
+        + `stableCount=${evaluation.replyHashStableCount}/${TASK_REPLY_STABLE_HASH_ROUNDS}`,
+      );
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][EXPECTED] expected=${String(run.currentTaskExpectedAnswer || '-') || '-'}`,
+      );
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY][ACTUAL] actualText=${JSON.stringify(String(evaluation.replyText || ''))}`,
+      );
+      if (evaluation.answerVerified) {
+        ToolboxShell.appendLog(`[TASK_VERIFY][PASS] taskIndex=${taskIndex}`);
+      } else if (evaluation.verifyResult && evaluation.verifyResult.reason === 'no-math-expectation') {
+        ToolboxShell.appendLog(`[TASK_VERIFY][SKIP] taskIndex=${taskIndex} reason=no-math-expectation`);
+      } else {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY][FAIL] taskIndex=${taskIndex} reason=${evaluation.blockedReason || evaluation.verifyResult.reason || 'not_verified'}`,
+        );
+      }
+    }
+
+    function canAdvanceToNextTask(taskRunState) {
+      return !!(
+        taskRunState
+        && taskRunState.canAdvance === true
+      );
+    }
+
+    function logTaskAdvanceBlocked(reason) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const taskIndex = Number(run.currentIndex || 0) + 1;
+      ToolboxShell.appendLog(`[TASK_ADVANCE][BLOCKED] taskIndex=${taskIndex} reason=${String(reason || 'not_verified')}`);
+    }
+
+    async function maybeAdvanceToNextTask(reason, options = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const task = options.task || getCurrentRunningTask();
+      const evaluation = evaluateCurrentTaskAdvanceState({
+        task,
+        replyText: options.replyText,
+        replySnapshot: options.replySnapshot,
+        source: String(reason || 'maybe-advance'),
+      });
+      logTaskVerifyState(task, evaluation);
+
+      if (!evaluation.canAdvance) {
+        logTaskAdvanceBlocked(evaluation.blockedReason || 'not-verified');
+        if (
+          task
+          && !evaluation.generating
+          && !evaluation.waitingReply
+        ) {
+          run.pendingSendKind = 'verification_hold';
+          state.taskRun = run;
+          setTaskBatchStep('wait-task-verify', task, { log: false });
+          recoverBatchTaskGroup(getBatchTaskGroupRunId(), evaluation.blockedReason || 'task-advance-blocked', {
+            action: 'wait-reply-recover',
+            clearStepRunning: true,
+            clearWaiting: false,
+          });
+        }
+        return {
+          ok: false,
+          advanced: false,
+          reason: evaluation.blockedReason || 'not-verified',
+          evaluation,
+        };
+      }
+
+      recordCurrentTaskAnswerCompletedOnce(task, String(reason || 'maybe-advance'));
+      const from = Number(run.currentIndex || 0);
+      const to = from + 1;
+      ToolboxShell.appendLog(`[TASK_ADVANCE][NEXT] fromIndex=${from} toIndex=${to}`);
+      const moved = await moveToNextTask(reason, {
+        skipGate: true,
+      });
+      return {
+        ok: !!moved,
+        advanced: !!moved,
+        reason: moved ? 'advanced' : 'move-next-failed',
+        evaluation,
+      };
+    }
+
     async function handleTaskDoneSignal(task, profile, resolved, replyText, source = 'unknown') {
       if (!task) {
         ToolboxShell.appendLog(`[AUTOQ][TASK_DONE][SKIP] source=${source} reason=missing-task`);
@@ -5203,10 +6445,48 @@ const AutoQueueModule = (() => {
         + `verifyEnabled=${verifyEnabled ? 1 : 0} verifyRunning=${state.taskRun.doneSignalVerificationRunning ? 1 : 0} `
         + `verificationAlreadyStarted=${verificationAlreadyStarted ? 1 : 0} running=${state.running ? 1 : 0}`,
       );
+      syncCurrentTaskVerificationContext(task, { resetState: false, keepRetryCount: true });
 
       if (verifyEnabled && !verificationAlreadyStarted) {
         await runDoneSignalVerification(task, profile, resolved, replyText);
         return true;
+      }
+
+      const answerReplyText = getCurrentTaskReplyTextForVerify(task, replyText, {
+        preferOriginalTaskReply: true,
+      });
+      const advanceGate = canAdvanceToNextTaskAfterVerify(task, answerReplyText, {
+        source: `task-done:${source}`,
+        preferOriginalTaskReply: true,
+      });
+
+      if (!advanceGate.ok) {
+        const reason = advanceGate.reason || 'answer-not-verified';
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_DONE][BLOCKED] source=${source} task=${task.title || '-'} reason=${reason}`,
+        );
+
+        if (reason === 'answer-mismatch') {
+          failCurrentTask(reason, {
+            stopEntireBatch: true,
+          });
+          return false;
+        }
+
+        recoverBatchTaskGroup(getBatchTaskGroupRunId(), reason, {
+          action: 'wait-reply-recover',
+          clearStepRunning: true,
+          clearWaiting: false,
+        });
+        return false;
+      }
+
+      recordCurrentTaskAnswerCompletedOnce(task, source);
+
+      if (state.taskRun) {
+        state.taskRun.verifyReplyTextForResend = '';
+        state.taskRun.doneSignalVerificationRunning = false;
       }
 
       ToolboxShell.appendLog(`[AUTOQ][TASK_DONE][COMPLETE] source=${source} task=${task.title || '-'}`);
@@ -5215,9 +6495,17 @@ const AutoQueueModule = (() => {
 
       markTaskStatus(task, 'completed');
       notifyRuntimeTaskComplete(task);
-      state.taskRun.pendingSendKind = 'initial';
+
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = 'initial';
+        state.taskRun.doneSignalVerificationRunning = false;
+        state.taskRun.verifyReplyTextForResend = '';
+      }
+
       setTaskBatchStep('next-task', task, { log: false });
-      void moveToNextTask().catch(handleMoveToNextTaskError);
+      void moveToNextTask(`task-done:${source}`, {
+        skipGate: true,
+      }).catch(handleMoveToNextTaskError);
       return true;
     }
 
@@ -5238,7 +6526,7 @@ const AutoQueueModule = (() => {
       const run = state.taskRun || {};
       run.doneSignalVerificationRunning = true;
       run.pendingSendKind = 'verification';
-      run.verifyReplyTextForResend = String(replyText || '');
+      run.verifyReplyTextForResend = getCurrentTaskReplyTextForVerify(task, replyText);
       state.taskRun = run;
 
       ToolboxShell.appendLog(
@@ -5478,7 +6766,7 @@ const AutoQueueModule = (() => {
           taskAutoUploadEveryNMessages: 5,
           taskAutoUploadCountInitialPrompt: true,
           taskAutoUploadCountContinuePrompt: true,
-          taskAutoUploadCountVerifyPrompt: true,
+          taskAutoUploadCountVerifyPrompt: false,
           taskAutoUploadCountMode: 'message',
         };
 
@@ -5494,7 +6782,7 @@ const AutoQueueModule = (() => {
         ),
         countInitialPrompt: raw.taskAutoUploadCountInitialPrompt !== false,
         countContinuePrompt: raw.taskAutoUploadCountContinuePrompt !== false,
-        countVerifyPrompt: raw.taskAutoUploadCountVerifyPrompt !== false,
+        countVerifyPrompt: raw.taskAutoUploadCountVerifyPrompt === true,
         countMode: normalizeTaskAutoUploadCountMode(
           raw.taskAutoUploadCountMode || defaults.taskAutoUploadCountMode || 'message',
         ),
@@ -6129,8 +7417,20 @@ const AutoQueueModule = (() => {
       );
 
       if (forceUpload && composerHasUploadPayload) {
-        state.taskRun.forceUploadBeforeNextSend = false;
-        state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
+        if (state.taskRun) {
+          state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
+          state.taskRun.lastAutoUploadDoneAt = Date.now();
+          state.taskRun.forceUploadBeforeNextSend = false;
+        }
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} `
+          + `uploadSlotNo=${uploadSlotNo} ok=1 uploaded=0 failed=0 skipped=0 reason=composer-already-has-upload-payload`,
+        );
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][MARK_SLOT_DONE] uploadSlotNo=${uploadSlotNo} `
+          + `lastAutoUploadAt=${state.taskRun ? state.taskRun.lastAutoUploadAtMessageCount : uploadSlotNo} uploaded=0 reason=composer-already-has-upload-payload`,
+        );
 
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_AUTO_UPLOAD][COMPOSER_HAS_FILE_CONTINUE] force=1 nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} reason=composer-already-has-upload-payload`,
@@ -6229,16 +7529,10 @@ const AutoQueueModule = (() => {
         const reason = String(uploadResult && uploadResult.reason || '').trim();
 
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadedCount} skipped=${skippedCount} reason=${reason || '-'}`,
+          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} `
+          + `uploadSlotNo=${uploadSlotNo} ok=${uploadResult && uploadResult.ok ? 1 : 0} `
+          + `uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount} reason=${reason || '-'}`,
         );
-
-        state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
-        if (state.taskRun && uploadResult && uploadResult.ok === true) {
-          state.taskRun.lastAutoUploadDoneAt = Date.now();
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_AUTO_UPLOAD][DONE_AT] kind=${kind || '-'} ts=${state.taskRun.lastAutoUploadDoneAt}`,
-          );
-        }
 
         if (!uploadResult || uploadResult.ok !== true) {
           if (
@@ -6259,21 +7553,31 @@ const AutoQueueModule = (() => {
           };
         }
 
-        if (reason === 'composer-already-has-file' || reason === 'no-readable-files-after-force-reset') {
-          if (forceUpload && state.taskRun) {
-            state.taskRun.forceUploadBeforeNextSend = false;
-          }
+        const composerPayloadAccepted = (
+          reason === 'composer-already-has-file'
+          || reason === 'composer-already-has-upload-payload'
+        );
 
+        if (uploadedCount <= 0 && !composerPayloadAccepted) {
           ToolboxShell.appendLog(
-            `[AUTOQ][TASK_AUTO_UPLOAD][SKIPPED] sentMessageCount=${currentCount} reason=${reason || 'no-upload-needed'}`,
+            `[AUTOQ][TASK_AUTO_UPLOAD][FAILED] sentMessageCount=${currentCount} uploaded=0 reason=no-uploaded-files markSlot=0`,
           );
 
           return {
-            ok: true,
-            skipped: true,
-            reason: reason || 'no-upload-needed',
+            ok: false,
+            reason: reason || 'no-uploaded-files',
           };
         }
+
+        if (state.taskRun) {
+          state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
+          state.taskRun.lastAutoUploadDoneAt = Date.now();
+        }
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][MARK_SLOT_DONE] uploadSlotNo=${uploadSlotNo} `
+          + `lastAutoUploadAt=${state.taskRun ? state.taskRun.lastAutoUploadAtMessageCount : uploadSlotNo} uploaded=${uploadedCount} reason=${reason || '-'}`,
+        );
 
         if (uploadedCount <= 0) {
           ToolboxShell.appendLog(
@@ -6294,8 +7598,8 @@ const AutoQueueModule = (() => {
 
         return {
           ok: true,
-          skipped: false,
-          reason: 'uploaded',
+          skipped: uploadedCount <= 0,
+          reason: uploadedCount > 0 ? 'uploaded' : (reason || 'composer-payload-ready'),
           uploadResult,
         };
       } catch (error) {
@@ -6335,6 +7639,7 @@ const AutoQueueModule = (() => {
 
       const task = getCurrentRunningTask();
       const title = task && task.title ? task.title : '-';
+      syncCurrentTaskVerificationContext(task, { resetState: false, keepRetryCount: true });
       const replySnapshot = buildAssistantReplySnapshot();
       const mergedText = String(replyText || replySnapshot.text || '').trim();
       const validation = validateAssistantReplyForRun(
@@ -6362,11 +7667,6 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog(
         `[AUTOQ][REPLY_SETTLED] task=${title} chars=${chars} reason=${meta && meta.reason ? meta.reason : '-'}`,
       );
-
-      state.taskRun.completedAnswerCount = Math.max(
-        0,
-        Number(state.taskRun.completedAnswerCount) || 0,
-      ) + 1;
 
       if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
         ToolboxShell.appendLog('[AUTOQ][REPLY_READY_BLOCKED_BUSY] reason=assistant-still-busy');
@@ -6407,6 +7707,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      syncCurrentTaskVerificationContext(task, { resetState: false, keepRetryCount: true });
       setTaskBatchStep('wait-reply', task, { log: false });
 
       let replyText = '';
@@ -6426,6 +7727,20 @@ const AutoQueueModule = (() => {
 
       const profile = getActiveTaskProfile();
       const resolved = resolveTaskContinueSettings(task, profile, { log: true });
+
+      if (!replyText) {
+        const skipTaskIndex = state.taskRun ? Number(state.taskRun.currentIndex || 0) : 0;
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][COPY_REPLY_SKIP] reason=no-reply-found taskIndex=${skipTaskIndex + 1}`,
+        );
+
+        recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'empty-reply', {
+          action: 'wait-reply-recover',
+          clearStepRunning: true,
+          clearWaiting: false,
+        });
+        return;
+      }
 
       if (tryStopBatchOnReplyClassify(replyText, task)) {
         return;
@@ -6626,6 +7941,9 @@ const AutoQueueModule = (() => {
           failCurrentTask(errText);
         } finally {
           state.taskBatchStepRunning = false;
+          if (state.taskRun && state.taskRun.pendingSendKind === 'processing') {
+            state.taskRun.pendingSendKind = null;
+          }
         }
 
         return;
@@ -6796,11 +8114,15 @@ const AutoQueueModule = (() => {
           const copiedChars = String(
             (result && result.copied_text) || replyText || '',
           ).length;
+          const copyDoneTaskIndex = state.taskRun ? Number(state.taskRun.currentIndex || 0) : 0;
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][COPY_DONE] task=${task.title} chars=${copiedChars}`);
+          ToolboxShell.appendLog(`[BATCH_TASK_GROUP][COPY_REPLY_DONE] taskIndex=${copyDoneTaskIndex} length=${copiedChars}`);
         } else if (!result.assistantDoneSignal) {
+          const copyFailTaskIndex = state.taskRun ? Number(state.taskRun.currentIndex || 0) : 0;
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_BATCH][COPY_NOT_DONE] task=${task.title} reason=${failReason || 'copy-failed'}`,
           );
+          ToolboxShell.appendLog(`[BATCH_TASK_GROUP][COPY_REPLY_FAIL] reason=${failReason || 'copy-failed'} taskIndex=${copyFailTaskIndex}`);
         }
 
         if (result.hotkeySent) {
@@ -6874,9 +8196,7 @@ const AutoQueueModule = (() => {
         failCurrentTask(errText);
       } finally {
         state.taskBatchStepRunning = false;
-        if (!state.running) {
-          state.taskRun.pendingSendKind = null;
-        }
+        state.taskRun.pendingSendKind = null;
         updateStatus('task-reply-ready');
       }
     }
@@ -11885,6 +13205,9 @@ const AutoQueueModule = (() => {
     async function writeAndVerifyComposerForBatch(prompt, source, retryIndex) {
       const { taskName, taskId } = getBatchSendTaskMeta();
       const text = String(prompt || '');
+      const beforeSendable = typeof ComposerApi.canSendNow === 'function'
+        ? (ComposerApi.canSendNow() ? 1 : 0)
+        : 0;
 
       if (typeof ComposerApi.clearComposerValue === 'function') {
         ComposerApi.clearComposerValue();
@@ -11914,6 +13237,15 @@ const AutoQueueModule = (() => {
         ? 400
         : (BATCH_COMPOSER_SYNC_RETRY_DELAYS_MS[retryIndex - 1] || 2000);
       await sleepMs(settleMs);
+
+      const afterSendable = typeof ComposerApi.canSendNow === 'function'
+        ? (ComposerApi.canSendNow() ? 1 : 0)
+        : 0;
+      ToolboxShell.appendLog(
+        `[AUTOQ][SENDABLE_RECHECK_AFTER_INPUT] before=${beforeSendable} after=${afterSendable} taskIndex=${
+          state.taskRun ? Number(state.taskRun.currentIndex || 0) + 1 : '?'
+        } source=${String(source || '-')} retryIndex=${Number(retryIndex || 0)}`,
+      );
 
       const check = typeof ComposerApi.checkComposerTextSyncDetailed === 'function'
         ? ComposerApi.checkComposerTextSyncDetailed(text)
@@ -12569,6 +13901,80 @@ const AutoQueueModule = (() => {
       const runStep = state.taskRun && state.taskRun.currentStep
         ? String(state.taskRun.currentStep)
         : '';
+
+      // Pending action: reply is ready but still stuck at copy-last-reply.
+      // In this state, we must finish copy and advance immediately (do not just log decision=continue).
+      if (
+        state.running === true
+        && !state.waitingReply
+        && !isChatGPTActuallyBusyForTaskQueue()
+        && String(state.phase || '') === 'reply_ready'
+        && runStep === 'copy-last-reply'
+      ) {
+        const run = state.taskRun || {};
+        const current = Number(run.currentIndex || 0);
+        const total = Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0;
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_PENDING_ACTION] action=finish-copy-and-advance current=${current} total=${total}`,
+        );
+
+        let replyText = '';
+        let copyErr = null;
+        try {
+          replyText = getLastAssistantReplyText();
+        } catch (e) {
+          copyErr = e;
+        }
+
+        const taskIndex = current;
+        const trimmed = String(replyText || '').trim();
+        if (copyErr) {
+          const errText = copyErr && copyErr.message ? copyErr.message : String(copyErr);
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][COPY_REPLY_FAIL] reason=${errText || 'copy-failed'} taskIndex=${taskIndex}`,
+          );
+          const allowFailContinue = !(
+            config.taskQueueSettings
+            && config.taskQueueSettings.copyLastReplyFailureContinue === false
+          );
+          if (allowFailContinue) {
+            recoverBatchTaskGroup(getBatchTaskGroupRunId(), errText || 'copy-last-reply-failed', {
+              action: 'wait-reply-recover',
+              clearStepRunning: true,
+              clearWaiting: false,
+            });
+          }
+        } else if (trimmed) {
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][COPY_REPLY_DONE] taskIndex=${taskIndex} length=${trimmed.length}`,
+          );
+          const currentTask = getCurrentRunningTask();
+          if (state.taskRun) {
+            const run = syncCurrentTaskVerificationContext(currentTask, { resetState: false, keepRetryCount: true });
+            run.currentTaskReplyText = trimmed;
+            state.taskRun = run;
+          }
+          void handleTaskReplyReady().catch((error) => {
+            logTaskRunError('[AUTOQ][COPY_REPLY_DONE][HANDLE_REPLY_READY_FAILED]', error, currentTask);
+            recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'copy-last-reply-done-handle-failed', {
+              action: 'wait-reply-recover',
+              clearStepRunning: true,
+              clearWaiting: false,
+            });
+          });
+        } else {
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][COPY_REPLY_SKIP] reason=no-reply-found-but-page-idle taskIndex=${taskIndex}`,
+          );
+          recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'copy-last-reply-empty', {
+            action: 'wait-reply-recover',
+            clearStepRunning: true,
+            clearWaiting: false,
+          });
+        }
+        return;
+      }
+
       if (runStep === 'send-wait-retry' || runStep === 'send-initial-wait-retry') {
         return;
       }
@@ -12596,7 +14002,7 @@ const AutoQueueModule = (() => {
       const task = getCurrentRunningTask();
 
       if (!task) {
-        void moveToNextTask().then((moved) => {
+        void moveToNextTask('missing-current-task', { skipGate: true }).then((moved) => {
           if (!moved) {
             return;
           }
@@ -12622,14 +14028,14 @@ const AutoQueueModule = (() => {
         if (currentTask.sourceType === 'prompt-manager' && currentTask.promptId && !initial) {
           log(`任务「${currentTask.title}」关联的 Prompt 不存在或内容为空`);
           markTaskStatus(currentTask, 'failed');
-          void moveToNextTask().catch(handleMoveToNextTaskError);
+          void moveToNextTask('prompt-missing-initial', { skipGate: true }).catch(handleMoveToNextTaskError);
           return;
         }
 
         if (!initial) {
           log(`任务「${currentTask.title}」缺少初始指令，跳过`);
           markTaskStatus(currentTask, 'skipped');
-          void moveToNextTask().catch(handleMoveToNextTaskError);
+          void moveToNextTask('initial-empty-skip', { skipGate: true }).catch(handleMoveToNextTaskError);
           return;
         }
 

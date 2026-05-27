@@ -2,17 +2,14 @@
 from __future__ import annotations
 
 import threading
-import time
 import traceback
 from pathlib import Path
+
+from app.utils.time_utils import now_text as _now_text
 
 _BRIDGE_JSON_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 BRIDGE_JSON_LOG_FILE = _BRIDGE_JSON_LOG_DIR / "bridge_json.log"
 _BRIDGE_JSON_LOG_LOCK = threading.RLock()
-
-
-def _now_text():
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 def append_bridge_json_log(message: str) -> None:

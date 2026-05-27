@@ -24,6 +24,52 @@ function buildBrowserRuntimeFields(reason = '-') {
   };
 }
 
+function getForegroundCapabilityLight(reason = '-') {
+  const safeReason = String(reason || '-').trim() || '-';
+  try {
+    if (typeof detectComposerResponseState === 'function') {
+      const state = detectComposerResponseState({ light: true });
+      return {
+        inputable: !!(state && state.can_accept_input),
+        sendable: !!(state && state.can_send_now),
+        response_state: state && state.response_state ? state.response_state : 'unknown',
+        source: 'detectComposerResponseState(light)',
+        reason: safeReason,
+      };
+    }
+  } catch (error) {
+    console.error('[FOREGROUND_CATCH_UP][LIGHT_CAPABILITY_FAILED]', error);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[FOREGROUND_CATCH_UP][LIGHT_CAPABILITY_FAILED] reason=${safeReason} type=${error && error.name ? error.name : 'Error'} error=${error && error.message ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  try {
+    if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getPageCapability === 'function') {
+      const cap = ComposerApi.getPageCapability(`foreground-catch-up:${safeReason}`);
+      return {
+        inputable: !!(cap && cap.inputable),
+        sendable: !!(cap && cap.sendable),
+        response_state: cap && cap.response_state ? cap.response_state : 'unknown',
+        source: 'ComposerApi.getPageCapability',
+        reason: safeReason,
+      };
+    }
+  } catch (error) {
+    console.error('[FOREGROUND_CATCH_UP][CAPABILITY_FALLBACK_FAILED]', error);
+  }
+
+  return {
+    inputable: false,
+    sendable: false,
+    response_state: 'unknown',
+    source: 'none',
+    reason: safeReason,
+  };
+}
+
 const BrowserRuntimeHealth = (() => {
   const state = {
     lastTickAt: Date.now(),
@@ -62,7 +108,9 @@ const BrowserRuntimeHealth = (() => {
       void forceForegroundCatchUp('visibility-visible');
     } else if (state.throttled || document.hidden) {
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
-        ToolboxShell.setStatus('页面后台限速中，等待恢复可见后继续', 'warning');
+        ToolboxShell.setStatus('页面后台限速中，等待恢复可见后继续', 'warning', {
+          owner: 'system',
+        });
       }
     }
   }
@@ -100,7 +148,9 @@ const BrowserRuntimeHealth = (() => {
 
         if (nextThrottled) {
           if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
-            ToolboxShell.setStatus('页面后台限速中，恢复可见后继续', 'warning');
+            ToolboxShell.setStatus('页面后台限速中，恢复可见后继续', 'warning', {
+              owner: 'system',
+            });
           }
         }
       }
@@ -171,7 +221,14 @@ async function executeForegroundResume(reason = '-') {
   }
 
   try {
-    if (typeof refreshToolboxPageStatusDisplay === 'function') {
+    const uploadCritical = (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+      && UploadCriticalRuntime.isUploadCriticalMode()
+    );
+
+    if (!uploadCritical && typeof refreshToolboxPageStatusDisplay === 'function') {
       refreshToolboxPageStatusDisplay(`foreground-catch-up:${catchReason}`);
     }
 
@@ -179,16 +236,14 @@ async function executeForegroundResume(reason = '-') {
       updateChatInputStateBadge();
     }
 
-    if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getPageCapability === 'function') {
-      const cap = ComposerApi.getPageCapability(`foreground-catch-up:${catchReason}`);
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(
-          `[FOREGROUND_CATCH_UP][CAPABILITY] reason=${catchReason} inputable=${cap && cap.inputable ? 1 : 0} sendable=${cap && cap.sendable ? 1 : 0} response_state=${cap && cap.response_state ? cap.response_state : '-'}`,
-        );
-      }
+    const cap = getForegroundCapabilityLight(catchReason);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[FOREGROUND_CATCH_UP][CAPABILITY] reason=${catchReason} mode=light source=${cap.source} inputable=${cap.inputable ? 1 : 0} sendable=${cap.sendable ? 1 : 0} response_state=${cap.response_state || '-'}`,
+      );
     }
 
-    if (typeof BridgeModule !== 'undefined' && typeof BridgeModule.forceCatchUp === 'function') {
+    if (!uploadCritical && typeof BridgeModule !== 'undefined' && typeof BridgeModule.forceCatchUp === 'function') {
       BridgeModule.forceCatchUp(`foreground-catch-up:${catchReason}`);
     }
 

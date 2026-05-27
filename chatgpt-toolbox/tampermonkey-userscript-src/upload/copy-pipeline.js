@@ -325,5 +325,8 @@
       writeClipboardAndVerify,
       sanitizeCopiedAssistantText,
       normalizeClipboardTextForCompare,
+      // Provide SINGLE SOURCE OF TRUTH for caller-side text normalization.
+      strip: stripChatGptInstrumentsLabel,
+      collapseInstrumentsCalculatorReply,
     };
   })();

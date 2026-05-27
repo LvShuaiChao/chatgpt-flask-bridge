@@ -17,7 +17,8 @@ from app.constants import (
     PENDING_REPLY_HARD_TIMEOUT_SECONDS,
     PENDING_REPLY_SYNC_AFTER_SECONDS,
     is_assistant_reply_pending_status,
-    RUNTIME_DIR,
+    CHAT_SESSIONS_DIR,
+    LEGACY_PROJECT_SESSIONS_FILE,
     SESSIONS_FILE,
     SESSIONS_JSON_VERSION,
     SESSION_BIND_LIST_STYLES,
@@ -36,7 +37,10 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
-from app.utils.legacy_cleanup import assert_no_legacy_fields
+from app.utils.legacy_cleanup import (
+    assert_no_legacy_fields,
+    assert_no_remote_chatgpt_invalid_fields,
+)
 from app.ui.widgets.session_list_item import (
     SESSION_LIST_ITEM_HEIGHT,
     SessionListItemWidget,
@@ -2204,11 +2208,7 @@ class SessionMixin:
             "content": message.content,
             "created_at": message.created_at,
             "ui_status": message.ui_status or "",
-            "detail": message.detail or "",
             "message_source": message.message_source or "",
-            "bridge_message_id": message.bridge_message_id,
-            "parent_message_id": message.parent_message_id,
-            "visible_in_chat": message.visible_in_chat,
         }
     def _session_float_field(self, data, field, default=None, *, scope="session"):
         del scope
@@ -2217,40 +2217,97 @@ class SessionMixin:
         fallback = time.time() if default is None else default
         return safe_float_field(data, field, fallback)
 
-    @staticmethod
-    def _normalize_legacy_message_dict(data):
-        item = dict(data) if isinstance(data, dict) else {}
-        for legacy_key in ("text", "message", "prompt", "raw_content"):
-            if legacy_key in item and not (item.get("content") or "").strip():
-                item["content"] = item.pop(legacy_key)
-            else:
+    def _normalize_legacy_message_dict(self, data):
+        if not isinstance(data, dict):
+            return {}
+
+        item = dict(data)
+        removed = []
+
+        detail_value = item.get("detail")
+        if detail_value is not None:
+            detail_text = str(detail_value).strip()
+            content_text = str(item.get("content") or "").strip()
+            text_text = str(item.get("text") or "").strip()
+            body_text = str(item.get("body") or "").strip()
+            message_text = str(item.get("message") or "").strip()
+
+            if (
+                detail_text
+                and not content_text
+                and not text_text
+                and not body_text
+                and not message_text
+            ):
+                item["content"] = detail_text
+
+        for legacy_key in ("text", "body", "message", "prompt", "raw_content"):
+            if legacy_key in item:
+                if not str(item.get("content") or "").strip():
+                    legacy_value = item.get(legacy_key)
+                    if str(legacy_value or "").strip():
+                        item["content"] = legacy_value
                 item.pop(legacy_key, None)
+                removed.append(legacy_key)
+
         if "status" in item:
-            if not (item.get("ui_status") or "").strip():
-                item["ui_status"] = item.pop("status")
-            else:
-                item.pop("status", None)
+            if not str(item.get("ui_status") or "").strip():
+                item["ui_status"] = item.get("status")
+            item.pop("status", None)
+            removed.append("status")
+
         if "source" in item:
-            if not (item.get("message_source") or "").strip():
-                item["message_source"] = item.pop("source")
-            else:
-                item.pop("source", None)
+            if not str(item.get("message_source") or "").strip():
+                item["message_source"] = item.get("source")
+            item.pop("source", None)
+            removed.append("source")
+
+        legacy_fields = [
+            "detail",
+            "bridge_message_id",
+            "parent_message_id",
+            "visible_in_chat",
+        ]
+        for key in legacy_fields:
+            if key in item:
+                item.pop(key, None)
+                removed.append(key)
+
         if "visible" in item:
-            if "visible_in_chat" not in item:
-                item["visible_in_chat"] = item.pop("visible")
-            else:
-                item.pop("visible", None)
+            item.pop("visible", None)
+            removed.append("visible")
+
         if "request_id" in item:
-            if not (item.get("bridge_message_id") or "").strip():
-                item["bridge_message_id"] = item.pop("request_id")
+            item.pop("request_id", None)
+            removed.append("request_id")
+
+        if removed:
+            self._session_legacy_migrated = True
+            removed_fields = ",".join(dict.fromkeys(removed))
+            log_info = getattr(self, "_log_info", None)
+            if callable(log_info):
+                try:
+                    log_info(
+                        "[SESSION][LEGACY_MESSAGE_NORMALIZED] removed_fields=%s",
+                        removed_fields,
+                    )
+                except Exception as error:
+                    print(
+                        "[SESSION][LEGACY_MESSAGE_NORMALIZED][LOG_FAILED]",
+                        type(error).__name__,
+                        str(error),
+                    )
             else:
-                item.pop("request_id", None)
+                print(
+                    f"[SESSION][LEGACY_MESSAGE_NORMALIZED] removed_fields={removed_fields}"
+                )
+
         return item
 
     def _message_from_dict(self, data):
         from app.utils.legacy_cleanup import assert_no_legacy_fields
 
-        item = dict(data) if isinstance(data, dict) else {}
+        item = self._normalize_legacy_message_dict(data)
         assert_no_legacy_fields(item, owner="session_message_load")
         content = item.get("content")
         if content is None:
@@ -2266,17 +2323,25 @@ class SessionMixin:
             message_id=item.get("message_id", ""),
             turn_id=item.get("turn_id", ""),
             ui_status=(item.get("ui_status") or "").strip(),
-            detail=item.get("detail", ""),
+            detail="",
             message_source=(item.get("message_source") or "").strip(),
-            bridge_message_id=item.get("bridge_message_id", ""),
-            parent_message_id=item.get("parent_message_id", ""),
-            visible_in_chat=bool(item.get("visible_in_chat", True)),
+            bridge_message_id="",
+            parent_message_id="",
+            visible_in_chat=True,
         )
     def _session_to_dict(self, session):
         if hasattr(self, "_normalize_session_for_persistence"):
             return self._normalize_session_for_persistence(session)
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        assert_no_legacy_fields(remote, owner="GUI save session.remote_chatgpt")
+        assert_no_remote_chatgpt_invalid_fields(
+            remote,
+            owner="GUI save session.remote_chatgpt",
+        )
+        compose_draft = ""
+        drafts_map = getattr(self, "_session_compose_drafts", None) or {}
+        raw = drafts_map.get(session.session_id, "")
+        if isinstance(raw, str) and raw.strip():
+            compose_draft = raw
         return {
             "session_id": session.session_id,
             "title": session.title,
@@ -2288,6 +2353,7 @@ class SessionMixin:
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
             "reply_waiting_since": 0,
+            "compose_draft": compose_draft,
             "messages": [self._message_to_dict(item) for item in session.messages],
         }
     def _session_from_dict(self, data):
@@ -2304,7 +2370,17 @@ class SessionMixin:
                     echo=True,
                 )
                 continue
-            messages.append(self._message_from_dict(self._normalize_legacy_message_dict(item)))
+            try:
+                normalized_message = self._normalize_legacy_message_dict(item)
+                messages.append(self._message_from_dict(normalized_message))
+            except Exception as error:
+                logger.exception(
+                    "[SESSION][MESSAGE_LOAD_FAILED] message_index=%s error_type=%s error=%s item_keys=%s",
+                    index,
+                    type(error).__name__,
+                    error,
+                    list(item.keys()) if isinstance(item, dict) else type(item).__name__,
+                )
         remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
         session = ChatSession(
             session_id=data.get("session_id") or str(uuid.uuid4()),
@@ -2320,6 +2396,20 @@ class SessionMixin:
             reply_waiting_since=0,
         )
         session.trim_messages()
+        # ???????
+        compose_draft = data.get("compose_draft", "")
+        if isinstance(compose_draft, str) and compose_draft.strip():
+            session_id = session.session_id
+            drafts = getattr(self, "_session_compose_drafts", None)
+            if drafts is None:
+                drafts = {}
+                self._session_compose_drafts = drafts
+            drafts[session_id] = compose_draft
+            logger.info(
+                "[SESSION][COMPOSE_DRAFT_RESTORE] session_id=%s length=%d",
+                session_id,
+                len(compose_draft),
+            )
         return session
 
     def _schedule_save_sessions_to_disk(self, delay_ms=800):
@@ -2357,7 +2447,7 @@ class SessionMixin:
         sessions_file = None
         tmp_file = None
         try:
-            data_dir = Path(self._chat_sessions_path or RUNTIME_DIR)
+            data_dir = Path(self._chat_sessions_path or CHAT_SESSIONS_DIR)
             data_dir.mkdir(parents=True, exist_ok=True)
             sessions_file = data_dir / "chat_sessions.json"
             tmp_file = data_dir / "chat_sessions.json.tmp"
@@ -2399,10 +2489,14 @@ class SessionMixin:
                 finally:
                     self._session_save_failure_notifying = False
     def _load_sessions_from_disk(self):
-        data_dir = Path(self._chat_sessions_path or RUNTIME_DIR)
+        self._session_legacy_migrated = False
+        data_dir = Path(self._chat_sessions_path or CHAT_SESSIONS_DIR)
         sessions_file = data_dir / "chat_sessions.json"
+        preferred_sessions_file = sessions_file
         if not sessions_file.exists() and SESSIONS_FILE.exists():
             sessions_file = SESSIONS_FILE
+        if not sessions_file.exists() and LEGACY_PROJECT_SESSIONS_FILE.exists():
+            sessions_file = LEGACY_PROJECT_SESSIONS_FILE
         if not sessions_file.exists():
             return
         try:
@@ -2481,8 +2575,43 @@ class SessionMixin:
                 self._cleanup_stale_pending_on_load(session)
             # 加载后裁剪超出上限的消息
             session.trim_messages()
-        if startup_cleared:
-            self._save_sessions_to_disk()
+        legacy_message_migrated = bool(
+            getattr(self, "_session_legacy_migrated", False)
+        )
+        if startup_cleared or sessions_file != preferred_sessions_file or legacy_message_migrated:
+            if sessions_file != preferred_sessions_file:
+                logger.info(
+                    "[SESSION][MIGRATE_RUNTIME] old_path=%s new_path=%s result=start",
+                    str(sessions_file),
+                    str(preferred_sessions_file),
+                )
+            try:
+                self._save_sessions_to_disk()
+                if legacy_message_migrated:
+                    self._session_legacy_migrated = False
+                if sessions_file != preferred_sessions_file:
+                    logger.info(
+                        "[SESSION][MIGRATE_RUNTIME] old_path=%s new_path=%s result=ok session_count=%d",
+                        str(sessions_file),
+                        str(preferred_sessions_file),
+                        len(self._sessions),
+                    )
+            except Exception as error:
+                if sessions_file != preferred_sessions_file:
+                    logger.error(
+                        (
+                            "[SESSION][MIGRATE_RUNTIME] old_path=%s new_path=%s "
+                            "result=failed error=%s"
+                        ),
+                        str(sessions_file),
+                        str(preferred_sessions_file),
+                        error,
+                    )
+                    logger.error(
+                        "[SESSION][MIGRATE_RUNTIME] traceback:",
+                    )
+                    logger.error(traceback.format_exc())
+                raise
         if hasattr(self, "_cleanup_bridge_runtime_maps"):
             self._cleanup_bridge_runtime_maps("session_changed")
 

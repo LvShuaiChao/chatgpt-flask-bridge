@@ -10,8 +10,8 @@ import traceback
 from app.utils.log_utils import append_log, set_log_runtime_options
 
 from app.constants import (
+    CHAT_SESSIONS_DIR,
     DEFAULT_APP_SETTINGS,
-    RUNTIME_DIR,
 )
 # 无设置页 UI 的布尔项：仅用 DEFAULT_APP_SETTINGS 固定值，不写入 QSettings。
 _ACTIVE_FIXED_BOOL_SETTING_ATTRS = (
@@ -212,7 +212,7 @@ class SettingsMixin:
         defaults = DEFAULT_APP_SETTINGS
         try:
             self._apply_fixed_service_settings()
-            self._chat_sessions_path = str(RUNTIME_DIR)
+            self._chat_sessions_path = str(CHAT_SESSIONS_DIR)
             self._save_chat_history = True
             self._load_ui_and_bind_settings_from_qsettings()
         except Exception as error:
@@ -231,7 +231,7 @@ class SettingsMixin:
         )
     def _read_settings_from_widgets(self):
         self._apply_fixed_service_settings()
-        self._chat_sessions_path = str(RUNTIME_DIR)
+        self._chat_sessions_path = str(CHAT_SESSIONS_DIR)
         self._save_chat_history = True
         set_log_runtime_options(
             verbose=self._debug_mode,

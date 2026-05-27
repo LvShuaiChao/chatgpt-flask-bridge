@@ -13,7 +13,7 @@ from app.utils.page_command import (
     resolve_page_command_target,
 )
 from app.models import BIND_STATE_BOUND_CONVERSATION
-from app.utils.page_status import PageRegistry
+from app.utils.page_snapshot import PageRegistry
 
 
 class _FakeSession:

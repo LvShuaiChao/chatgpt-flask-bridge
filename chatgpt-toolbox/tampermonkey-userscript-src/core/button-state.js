@@ -4,6 +4,7 @@
 
   const ButtonPhase = Object.freeze({
     IDLE: 'idle',
+    INITIALIZING: 'initializing',
     WAITING: 'waiting',
     RUNNING: 'running',
     SENDING: 'sending',
@@ -67,6 +68,7 @@
   ]);
 
   const BUTTON_BUSY_PHASES = new Set([
+    ButtonPhase.INITIALIZING,
     ButtonPhase.WAITING,
     ButtonPhase.RUNNING,
     ButtonPhase.SENDING,
@@ -86,6 +88,7 @@
 
   const BUTTON_STATE_COLOR_CLASSES = Object.freeze([
     'cgpt-btn-idle',
+    'cgpt-btn-initializing',
     'cgpt-btn-waiting',
     'cgpt-btn-running',
     'cgpt-btn-sending',
@@ -167,19 +170,25 @@
   const SEND_BTN_ALLOWED_TEXTS = new Set([
     '发送消息',
     '等待发送',
+    '等待点击发送',
+    '等待页面回复后发送',
     '等待输入框',
     '等待附件',
     '检查中',
     '发送中',
     '等待回复',
     '取消中',
+    '发送失败',
   ]);
 
   const TASK_PHASE_TO_BUTTON_PHASE = Object.freeze({
     idle: ButtonPhase.IDLE,
+    initializing: ButtonPhase.INITIALIZING,
     waiting: ButtonPhase.WAITING,
     uploading: ButtonPhase.UPLOADING,
     waiting_send: ButtonPhase.WAITING_SEND,
+    // 页面正在回复，消息尚未发出：视觉属于“等待发送”分支（文案由上层区分）。
+    waiting_page_reply_to_send: ButtonPhase.WAITING_SEND,
     waiting_ready: ButtonPhase.WAITING_SEND,
     sending: ButtonPhase.SENDING,
     waiting_reply: ButtonPhase.WAITING_REPLY,
@@ -240,14 +249,15 @@
     ).trim();
     const runtimeAction = String(
       button.dataset.cgptRuntimeAction
-      || button.dataset.cgptButtonAction
       || '',
     ).trim();
+    const legacyRuntimeAction = String(button.dataset.cgptButtonAction || '').trim();
     const effectiveAction = runtimeAction || baseAction || domAction;
 
     return {
       baseAction,
       runtimeAction,
+      legacyRuntimeAction,
       domAction,
       effectiveAction,
     };
@@ -260,7 +270,7 @@
     const value = String(runtimeAction || '').trim();
     if (value) {
       button.dataset.cgptRuntimeAction = value;
-      button.dataset.cgptButtonAction = value;
+      delete button.dataset.cgptButtonAction;
     } else {
       delete button.dataset.cgptRuntimeAction;
       delete button.dataset.cgptButtonAction;
@@ -474,8 +484,14 @@
     if (isButtonStateDebugEnabled()) {
       console.log(line);
     }
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
+    if (typeof ToolboxShell !== 'undefined') {
+      const key = `BUTTON_COLOR:STATE:${id}`;
+      const value = `${text}|${phase || '-'}|${isBusyState ? 1 : 0}|${classNames}|${reason || '-'}`;
+      if (typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(key, value, line, 5000);
+      } else if (typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      }
     }
   }
 
@@ -513,12 +529,120 @@
   function auditHomePageButtonColors(root = document) {
     const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
     const buttons = scope.querySelectorAll(HOME_PAGE_BUTTON_COLOR_AUDIT_SELECTOR);
+    const resolveColorFamily = (value) => {
+      const text = String(value || '').trim().toLowerCase();
+      if (!text || text === 'none' || text === 'transparent') {
+        return 'unknown';
+      }
+      if (
+        text.includes('#2563eb')
+        || text.includes('#3b82f6')
+        || text.includes('#4f46e5')
+        || text.includes('#6366f1')
+        || text.includes('147, 197, 253')
+        || text.includes('191, 219, 254')
+      ) {
+        return 'blue';
+      }
+      if (text.includes('#7c3aed') || text.includes('#8b5cf6') || text.includes('#6d28d9')) {
+        return 'purple';
+      }
+      if (text.includes('#166534') || text.includes('#15803d') || text.includes('#22c55e')) {
+        return 'green';
+      }
+      if (text.includes('#dc2626') || text.includes('#b91c1c') || text.includes('#ef4444')) {
+        return 'red';
+      }
+      if (
+        text.includes('#b45309')
+        || text.includes('#d97706')
+        || text.includes('#ea580c')
+        || text.includes('#f97316')
+        || text.includes('#f59e0b')
+      ) {
+        return 'orange';
+      }
+      if (text.includes('#0891b2') || text.includes('#22d3ee') || text.includes('#0e7490')) {
+        return 'cyan';
+      }
+      return 'unknown';
+    };
+    const isCompatibleFamily = (normalFamily, hoverFamily) => {
+      if (!normalFamily || !hoverFamily || normalFamily === 'unknown' || hoverFamily === 'unknown') {
+        return false;
+      }
+      if (normalFamily === hoverFamily) {
+        return true;
+      }
+      // 蓝/紫渐变视为同色系（复制相关按钮允许蓝紫互转）
+      return (
+        (normalFamily === 'blue' && hoverFamily === 'purple')
+        || (normalFamily === 'purple' && hoverFamily === 'blue')
+      );
+    };
+    const resolveCategory = (button) => {
+      const action = String(
+        button.dataset.cgptBaseAction
+        || button.dataset.action
+        || button.id
+        || '',
+      ).trim().toLowerCase();
+      if (action.includes('copy')) {
+        return 'copy';
+      }
+      if (action.includes('send')) {
+        return 'send';
+      }
+      if (action.includes('upload')) {
+        return 'upload';
+      }
+      if (action.includes('danger') || button.classList.contains('danger')) {
+        return 'danger';
+      }
+      return 'general';
+    };
     buttons.forEach((button) => {
       if (isSendMessageToolboxButton(button)) {
         auditSendMessageButtonColorLeak(button);
       } else {
         auditButtonColorLeak(button);
       }
+      const alreadyAudited = String(button.dataset.cgptStyleAuditLogged || '').trim() === '1';
+      if (alreadyAudited) {
+        return;
+      }
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(button) : null;
+      const action = getButtonActionId(button);
+      const text = String(button.textContent || '').trim() || '-';
+      const className = String(button.className || '').trim() || '-';
+      const category = resolveCategory(button);
+      const normalBackground = style
+        ? (
+          style.getPropertyValue('--cgpt-btn-bg').trim()
+          || style.backgroundImage
+          || style.backgroundColor
+          || '-'
+        )
+        : '-';
+      const hoverBackground = style
+        ? (
+          style.getPropertyValue('--cgpt-btn-hover-bg').trim()
+          || style.getPropertyValue('--cgpt-btn-bg').trim()
+          || style.backgroundImage
+          || style.backgroundColor
+          || '-'
+        )
+        : '-';
+      const normalFamily = resolveColorFamily(normalBackground);
+      const hoverFamily = resolveColorFamily(hoverBackground);
+      const isSameColorFamily = isCompatibleFamily(normalFamily, hoverFamily) ? '1' : '0';
+      const line = `[BUTTON_STYLE_AUDIT] action=${action} text=${text} className=${className} category=${category} normalBackground=${normalBackground} hoverBackground=${hoverBackground} isSameColorFamily=${isSameColorFamily}`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      } else {
+        console.log(line);
+      }
+      button.dataset.cgptStyleAuditLogged = '1';
     });
   }
 
@@ -652,6 +776,7 @@
       button.setAttribute('aria-busy', 'false');
     } else if (
       phase === ButtonPhase.IDLE
+      || phase === ButtonPhase.INITIALIZING
       || phase === ButtonPhase.SUCCESS
       || phase === ButtonPhase.FAILED
       || phase === ButtonPhase.CANCELLED
@@ -682,7 +807,9 @@
       || phase === ButtonPhase.DISABLED;
 
     if (!isSendBtn && !preserveDisabledIdleColor) {
-      if (phase === ButtonPhase.FAILED) {
+      if (phase === ButtonPhase.INITIALIZING) {
+        button.classList.add('cgpt-btn-initializing');
+      } else if (phase === ButtonPhase.FAILED) {
         button.classList.add('cgpt-btn-failed');
       } else if (phase === ButtonPhase.CANCELLED) {
         button.classList.add('cgpt-btn-cancelled');
@@ -718,6 +845,20 @@
       disabled: false,
       reason: extra.reason || 'idle',
       title: extra.title || '',
+      ...extra,
+    });
+  }
+
+  function setButtonInitializing(button, text = '初始化中', extra = {}) {
+    return setToolboxButtonState(button, {
+      phase: ButtonPhase.INITIALIZING,
+      text,
+      disabled: true,
+      allowCancel: false,
+      reason: extra.reason || 'initializing',
+      title: extra.title || text,
+      ariaBusy: extra.ariaBusy != null ? extra.ariaBusy : true,
+      busy: false,
       ...extra,
     });
   }
@@ -932,6 +1073,7 @@
     auditHomePageButtonColors,
     setToolboxButtonState,
     setButtonIdle,
+    setButtonInitializing,
     setButtonWaiting,
     setButtonRunning,
     setButtonSending,

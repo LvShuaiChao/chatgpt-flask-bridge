@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from app.constants import SYNC_COMMAND_POLL_MAX_AGE_SECONDS
-from app.utils.page_status import PageRegistry, PageSnapshot, binding_from_session
+from app.utils.page_snapshot import PageRegistry, PageSnapshot, binding_from_session
 from app.utils.page_status import (
     can_sync_conversation,
     evaluate_page_capability,

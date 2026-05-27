@@ -3,6 +3,218 @@
  ********************************************************************/
 
 const CGPT_TOOLBOX_INSTANCE_KEY = '__cgpt_toolbox_active_instance__';
+const BOOT_ERROR_GRACE_MS = 2000;
+const MODULE_FAIL_THRESHOLD = 3;
+const MODULE_RECOVER_THRESHOLD = 2;
+
+const MODULE_NAMES = Object.freeze([
+  'UploadModule',
+  'AutoQueueModule',
+  'PromptManagerModule',
+  'BridgeModule',
+  'ExportModule',
+  'LogModule',
+  'SettingsModule',
+]);
+
+const ToolboxBootRuntime = {
+  bootStartedAt: 0,
+  bootCompleteToastShown: false,
+  bootCompleteAt: 0,
+  moduleHealth: {},
+};
+if (typeof globalThis !== 'undefined') {
+  globalThis.__CGPT_TOOLBOX_MODULE_HEALTH__ = ToolboxBootRuntime.moduleHealth;
+}
+
+function ensureModuleHealthRecord(moduleName) {
+  const key = String(moduleName || '').trim();
+  if (!key) {
+    return null;
+  }
+
+  if (!ToolboxBootRuntime.moduleHealth[key]) {
+    ToolboxBootRuntime.moduleHealth[key] = {
+      ok: true,
+      lastError: '',
+      failCount: 0,
+      successCount: 0,
+      lastOkAt: 0,
+      lastFailAt: 0,
+    };
+  }
+
+  return ToolboxBootRuntime.moduleHealth[key];
+}
+
+function getModuleNameFromInitStepName(stepName) {
+  const moduleMatch = String(stepName || '').match(/^(\w+)\.mount:/);
+  return moduleMatch ? moduleMatch[1] : '';
+}
+
+function shouldTreatModuleErrorAsTransient(now = Date.now()) {
+  if (!(ToolboxBootRuntime.bootStartedAt > 0)) {
+    return false;
+  }
+  return now - ToolboxBootRuntime.bootStartedAt < BOOT_ERROR_GRACE_MS;
+}
+
+function getModuleHealthSummary() {
+  return MODULE_NAMES
+    .map((name) => {
+      const item = ensureModuleHealthRecord(name);
+      if (!item) {
+        return `${name}:na`;
+      }
+      return `${name}:ok=${item.ok ? 1 : 0},fail=${item.failCount},succ=${item.successCount}`;
+    })
+    .join('|');
+}
+
+function logModuleHealth(reason = '') {
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog(
+      `[TOOLBOX_MODULES][HEALTH_UPDATE] reason=${String(reason || '-')} state=${getModuleHealthSummary()}`,
+    );
+  }
+}
+
+function isModuleHealthDebugEnabled() {
+  try {
+    if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+      if (MemoryManager.get('moduleHealthDebugEnabled', false)) {
+        return true;
+      }
+      if (MemoryManager.get('bridgeDebugEnabled', false)) {
+        return true;
+      }
+    }
+  } catch (error) {
+    console.error('[TOOLBOX_MODULES][DEBUG_FLAG_READ_FAILED]', error);
+  }
+  return false;
+}
+
+function hasPersistentModuleFailure() {
+  return MODULE_NAMES.some((name) => {
+    const item = ensureModuleHealthRecord(name);
+    return !!(item && item.failCount >= MODULE_FAIL_THRESHOLD);
+  });
+}
+
+function hasAnyTransientModuleFailure() {
+  return MODULE_NAMES.some((name) => {
+    const item = ensureModuleHealthRecord(name);
+    return !!(item && item.failCount > 0);
+  });
+}
+
+function applyBootPhaseStatus(reason = '') {
+  if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
+    return;
+  }
+
+  const isBootGrace = shouldTreatModuleErrorAsTransient();
+
+  if (hasPersistentModuleFailure() && !isBootGrace) {
+    ToolboxShell.setStatus('模块失败（持续异常）', 'error', {
+      owner: 'system',
+      shortText: '模块失败',
+      persistent: true,
+      title: `存在连续失败模块：${getModuleHealthSummary()}`,
+      reason: reason || 'module-health-persistent-failure',
+    });
+    return;
+  }
+
+  if (hasAnyTransientModuleFailure()) {
+    ToolboxShell.setStatus('模块恢复中', 'warning', {
+      owner: 'system',
+      shortText: '恢复中',
+      persistent: true,
+      title: `模块临时异常，等待恢复：${getModuleHealthSummary()}`,
+      reason: reason || 'module-health-transient',
+    });
+    return;
+  }
+
+  if (isBootGrace) {
+    ToolboxShell.setStatus('初始化中', 'running', {
+      owner: 'system',
+      shortText: '初始化中',
+      persistent: true,
+      reason: reason || 'boot-grace',
+    });
+  }
+}
+
+function updateModuleHealth(moduleName, payload = {}) {
+  const item = ensureModuleHealthRecord(moduleName);
+  if (!item) {
+    return;
+  }
+
+  const now = Date.now();
+  const nextOk = payload.ok === true;
+  const prevOk = item.ok === true;
+  const prevFailCount = Number(item.failCount || 0);
+
+  let recoveredLogged = false;
+
+  if (nextOk) {
+    item.ok = true;
+    item.lastError = '';
+    item.successCount += 1;
+    item.lastOkAt = now;
+    const shouldClearFailCount = item.successCount >= MODULE_RECOVER_THRESHOLD;
+    if (item.successCount >= MODULE_RECOVER_THRESHOLD) {
+      item.failCount = 0;
+    }
+    const didRecover = (prevFailCount > 0 || !prevOk)
+      && shouldClearFailCount
+      && Number(item.failCount || 0) === 0;
+    if (didRecover && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      recoveredLogged = true;
+      ToolboxShell.appendLog(
+        `[TOOLBOX_MODULES][RECOVERED] module=${moduleName} success_count=${item.successCount} fail_count=${item.failCount}`,
+      );
+    }
+  } else {
+    const errText = String(payload.error || '').trim() || 'unknown';
+    item.ok = false;
+    item.lastError = errText;
+    item.lastFailAt = now;
+    item.failCount += 1;
+    item.successCount = 0;
+    const transient = shouldTreatModuleErrorAsTransient(now) || item.failCount < MODULE_FAIL_THRESHOLD;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        transient
+          ? `[TOOLBOX_MODULES][TRANSIENT_ERROR] module=${moduleName} fail_count=${item.failCount} error=${errText}`
+          : `[TOOLBOX_MODULES][MOUNT_FAILED] module=${moduleName} fail_count=${item.failCount} error=${errText}`,
+      );
+    }
+  }
+
+  const debugEnabled = isModuleHealthDebugEnabled();
+  if (!nextOk || recoveredLogged || debugEnabled) {
+    logModuleHealth(payload.reason || '-');
+  }
+  applyBootPhaseStatus(payload.reason || '-');
+}
+
+const ToolboxModuleHealth = {
+  report(moduleName, payload = {}) {
+    updateModuleHealth(moduleName, payload);
+  },
+  getSummary() {
+    return getModuleHealthSummary();
+  },
+};
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.ToolboxModuleHealth = ToolboxModuleHealth;
+}
 
 function cleanupStaleToolboxDomBeforeInit(reason = '') {
   const selectors = [
@@ -59,16 +271,24 @@ function installToolboxInstanceGuard() {
 async function safeInitStep(name, fn) {
   try {
     await fn();
+    const moduleName = getModuleNameFromInitStepName(name);
+    if (moduleName) {
+      updateModuleHealth(moduleName, {
+        ok: true,
+        reason: `safeInitStep:${name}`,
+      });
+    }
     return true;
   } catch (e) {
     const errText = logError(`[INIT][${name}]`, e);
-
-    const moduleMatch = String(name || '').match(/^(\w+)\.mount:/);
-    if (moduleMatch && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-      ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_FAILED] module=${moduleMatch[1]} error=${errText}`);
-      if (typeof ToolboxShell.setStatus === 'function') {
-        ToolboxShell.setStatus(`模块初始化失败：${moduleMatch[1]}：${errText}`, 'error');
-      }
+    const moduleName = getModuleNameFromInitStepName(name);
+    if (moduleName) {
+      console.error('[TOOLBOX_MODULES][MOUNT_ERROR]', { moduleName, errText, error: e });
+      updateModuleHealth(moduleName, {
+        ok: false,
+        error: errText,
+        reason: `safeInitStep:${name}`,
+      });
     }
 
     return false;
@@ -77,6 +297,13 @@ async function safeInitStep(name, fn) {
 
 async function mountAllModules(reason = 'init') {
   console.info('[TOOLBOX][MODULE_MOUNT_START]', { reason });
+  if (reason === 'init' && !(ToolboxBootRuntime.bootStartedAt > 0)) {
+    ToolboxBootRuntime.bootStartedAt = Date.now();
+  }
+  MODULE_NAMES.forEach((name) => {
+    ensureModuleHealthRecord(name);
+  });
+  applyBootPhaseStatus(`mount-start:${reason}`);
 
   if (typeof cleanupRuntimeHandles === 'function') {
     cleanupRuntimeHandles(`mount:${reason}`);
@@ -137,9 +364,7 @@ async function mountAllModules(reason = 'init') {
     if (ToolboxShell.appendLog) {
       ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_SUMMARY] failed=${failedNames.join('|')}`);
     }
-    if (typeof ToolboxShell.setStatus === 'function') {
-      ToolboxShell.setStatus(`部分模块初始化失败：${failedNames.join('、')}`, 'error');
-    }
+    applyBootPhaseStatus(`mount-summary:${reason}`);
   }
 
   if (typeof bindConversationTurnCountObserver === 'function') {
@@ -149,17 +374,21 @@ async function mountAllModules(reason = 'init') {
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_DONE] reason=${reason}`);
   }
+  applyBootPhaseStatus(`mount-done:${reason}`);
 
   console.info('[TOOLBOX][MODULE_MOUNT_DONE]', { reason, failed: failedNames });
 }
 
 async function initToolbox() {
   console.info('[TOOLBOX][BOOT_START] initToolbox called');
+  console.info('[BOOTSTRAP][START]');
 
   installToolboxInstanceGuard();
   cleanupStaleToolboxDomBeforeInit('init-start');
 
   try {
+    console.info('[SHELL][DEFINE_READY]');
+    console.info('[SHELL][MOUNT_START]');
     ToolboxShell.create();
     const rootEl = document.querySelector('#cgpt-toolbox-root');
     if (!rootEl) {
@@ -170,6 +399,7 @@ async function initToolbox() {
       }
       return;
     }
+    console.info('[SHELL][MOUNT_OK]');
     console.info('[TOOLBOX][SHELL_CREATED] root created', {
       root: !!rootEl,
       panel: !!document.querySelector('#cgpt-toolbox-panel'),
@@ -220,6 +450,29 @@ async function initToolbox() {
     ToolboxShell.applyToolboxPageState('init');
   });
 
+  await safeInitStep('registerRuntimeDebugApis', () => {
+    console.info('[DEBUG_API][REGISTER_START]');
+    if (typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog('[DEBUG_API][REGISTER_START]');
+    }
+    try {
+      registerRuntimeDebugApi({
+        ToolboxShell,
+        shell: ToolboxShell,
+        runtimeState: ToolboxBootRuntime,
+      });
+      console.info('[DEBUG_API][REGISTER_OK]');
+      if (typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[DEBUG_API][REGISTER_OK]');
+      }
+    } catch (error) {
+      console.error('[DEBUG_API][REGISTER_FAILED]', error);
+      if (typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[DEBUG_API][REGISTER_FAILED]');
+      }
+    }
+  });
+
   await safeInitStep('ToolboxShell.appendLog', () => {
     ToolboxShell.appendLog('工具箱初始化完成');
   });
@@ -229,14 +482,76 @@ async function initToolbox() {
       RuntimeStatsModule.onAppStart();
     }
   });
+
+  await safeInitStep('ToolboxShell.showBootCompleteToast', () => {
+    if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.showToast !== 'function') {
+      return;
+    }
+    if (ToolboxBootRuntime.bootCompleteToastShown) {
+      return;
+    }
+
+    ToolboxBootRuntime.bootCompleteToastShown = true;
+    ToolboxBootRuntime.bootCompleteAt = Date.now();
+
+    const moduleHealth = ToolboxBootRuntime.moduleHealth || {};
+    const failedNames = Object.keys(moduleHealth).filter((name) => {
+      const item = moduleHealth[name];
+      return item && item.ok === false && Number(item.failCount || 0) >= 1;
+    });
+
+    if (failedNames.length > 0) {
+      ToolboxShell.showToast(`工具箱已加载，部分模块恢复中：${failedNames.join('、')}`, 'warn', 3200);
+      ToolboxShell.appendLog(`[TOOLBOX_BOOT][TOAST] partial=${failedNames.join('|')}`);
+      return;
+    }
+
+    ToolboxShell.showToast('工具箱加载完成', 'boot-ready', 2200);
+    ToolboxShell.appendLog('[TOOLBOX_BOOT][TOAST] loaded');
+  });
+}
+
+function showBootFatalOverlay(error) {
+  try {
+    const msg = (error && error.message) ? error.message : String(error);
+    console.error('[CGPT_TOOLBOX][BOOT_FAILED]', error);
+
+    const box = document.createElement('div');
+    box.textContent = `[CGPT_TOOLBOX][BOOT_FAILED] ${msg}`;
+    box.style.cssText = [
+      'position:fixed',
+      'right:20px',
+      'top:20px',
+      'z-index:2147483647',
+      'background:#7f1d1d',
+      'color:#fff',
+      'padding:10px 12px',
+      'border-radius:8px',
+      'font-size:13px',
+      'max-width:420px',
+      'white-space:pre-wrap',
+      'word-break:break-word',
+    ].join(';');
+    document.documentElement.appendChild(box);
+  } catch (overlayError) {
+    console.error('[CGPT_TOOLBOX][BOOT_FAILED_OVERLAY_FAILED]', overlayError);
+  }
+}
+
+async function boot() {
+  try {
+    await initToolbox();
+  } catch (error) {
+    showBootFatalOverlay(error);
+  }
 }
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
-    void initToolbox();
+    void boot();
   }, {
     once: true,
   });
 } else {
-  void initToolbox();
+  void boot();
 }

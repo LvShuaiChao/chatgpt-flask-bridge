@@ -62,7 +62,7 @@ class BridgeMixin(AssistantReplyUpsertMixin):
     def enqueue_page_command(self, session, command, payload=None):
         """统一页面命令入队：先 resolve_page_command_target，再 enqueue_control_command。"""
         from app.utils.page_command import resolve_page_command_target
-        from app.utils.page_status import PageRegistry
+        from app.utils.page_snapshot import PageRegistry
 
         command = (command or "").strip()
         registry = getattr(self, "page_registry", None)
@@ -233,18 +233,18 @@ class BridgeMixin(AssistantReplyUpsertMixin):
 
     def _prepare_chat_send_from_pending(self, session, pending):
         """从 pending 解析发送上下文（不改 payload 入队顺序）。"""
-        from app.utils.legacy_cleanup import LEGACY_FIELD_NAMES
+        from app.utils.legacy_cleanup import ALLOWED_TOP_LEVEL_FIELDS
 
         pending = pending if isinstance(pending, dict) else {}
         envelope_legacy = sorted(
             k
             for k in pending.keys()
-            if k in LEGACY_FIELD_NAMES and k not in self._PENDING_ENVELOPE_KEYS
+            if k not in ALLOWED_TOP_LEVEL_FIELDS and k not in self._PENDING_ENVELOPE_KEYS
         )
         if envelope_legacy:
             raise ValueError(f"legacy fields in pending: {envelope_legacy}")
         payload = dict(pending.get("payload") or {})
-        payload_legacy = sorted(set(payload.keys()) & LEGACY_FIELD_NAMES)
+        payload_legacy = sorted(set(payload.keys()) - ALLOWED_TOP_LEVEL_FIELDS)
         if payload_legacy:
             raise ValueError(f"legacy fields in pending payload: {payload_legacy}")
         if pending.get("refresh_send_target"):

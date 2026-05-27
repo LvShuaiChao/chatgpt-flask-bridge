@@ -195,6 +195,9 @@
   function storageKey(key) {
     return `${APP.storagePrefix}${key}`;
   }
+  function dataStorageKey(key) {
+    return `${APP.DATA_STORAGE_PREFIX}${key}`;
+  }
 
   function readStorage(key, fallback) {
     return StorageKit.readJson(key, fallback, { scoped: true });
@@ -210,6 +213,14 @@
 
   function writeLocalJson(key, value, tag = '[STORAGE]') {
     return StorageKit.writeJson(key, value, { scoped: false, tag });
+  }
+
+  function readDataStorage(key, fallback) {
+    return StorageKit.readJson(key, fallback, { dataScoped: true });
+  }
+
+  function writeDataStorage(key, value) {
+    return StorageKit.writeJson(key, value, { dataScoped: true });
   }
 
   function clonePlainObject(value, fallback = null, tag = '[CLONE]') {
@@ -324,6 +335,117 @@
       return false;
     }
     return !!MemoryManager.get('bridgeDebugEnabled', false);
+  }
+
+  // ---- Perf counters (always-on, lightweight) ----
+  // Bucketed counters for "per minute" rates and debugging snapshots.
+  // Exposed as global functions so other modules (that don't import) can call them.
+  const PerfCounters = (() => {
+    const BUCKET_MS = 1000;
+    const WINDOW_S = 60;
+    const buckets = new Map(); // name -> Array(WINDOW_S) of counts
+    let startedAt = Date.now();
+    let lastTick = 0;
+
+    function ensureBuckets(name) {
+      const key = String(name || 'unknown');
+      let arr = buckets.get(key);
+      if (!arr) {
+        arr = new Array(WINDOW_S).fill(0);
+        buckets.set(key, arr);
+      }
+      return arr;
+    }
+
+    function tick(now) {
+      const t = Number(now || Date.now());
+      const sec = Math.floor(t / BUCKET_MS);
+      if (!lastTick) {
+        lastTick = sec;
+        return sec;
+      }
+      if (sec <= lastTick) return sec;
+
+      const delta = Math.min(WINDOW_S, sec - lastTick);
+      if (delta >= WINDOW_S) {
+        buckets.forEach((arr) => arr.fill(0));
+      } else {
+        // clear advanced buckets
+        for (let i = 1; i <= delta; i += 1) {
+          const idx = (lastTick + i) % WINDOW_S;
+          buckets.forEach((arr) => {
+            arr[idx] = 0;
+          });
+        }
+      }
+      lastTick = sec;
+      return sec;
+    }
+
+    function inc(name, n = 1, now) {
+      const sec = tick(now);
+      const idx = sec % WINDOW_S;
+      const arr = ensureBuckets(name);
+      arr[idx] += Number(n || 1) || 1;
+    }
+
+    function perMinute(name, now) {
+      tick(now);
+      const arr = ensureBuckets(name);
+      return arr.reduce((a, b) => a + b, 0);
+    }
+
+    function snapshot(now) {
+      const t = Number(now || Date.now());
+      tick(t);
+
+      const result = {
+        uptimeMs: Math.max(0, t - startedAt),
+        logsPerMinute: perMinute('log.append', t),
+        composerDetectCountPerMinute: perMinute('composer.detect', t),
+        uploadRenderCountPerMinute: perMinute('upload.render', t),
+        topStatusRefreshCountPerMinute: perMinute('topStatus.refresh', t),
+        bridgePollCountPerMinute: perMinute('bridge.poll', t),
+        queuePendingCheckCountPerMinute: perMinute('chatQueue.pendingCheck', t),
+        titleFlashStopKeydownPerMinute: perMinute('titleFlash.stop.keydown', t),
+      };
+
+      if (typeof performance !== 'undefined' && performance && performance.memory) {
+        try {
+          result.memory = {
+            usedJSHeapSize: performance.memory.usedJSHeapSize,
+            totalJSHeapSize: performance.memory.totalJSHeapSize,
+          };
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      return result;
+    }
+
+    function reset(reason = '') {
+      void reason;
+      startedAt = Date.now();
+      lastTick = 0;
+      buckets.clear();
+    }
+
+    return {
+      inc,
+      perMinute,
+      snapshot,
+      reset,
+    };
+  })();
+
+  function registerPerfDebugApis() {
+    const target = getDebugApiTarget();
+    // global helpers for modules without imports
+    target.__CGPT_TOOLBOX_PERF_INC__ = (name, n) => {
+      PerfCounters.inc(name, n);
+    };
+    target.__CGPT_TOOLBOX_PERF_SNAPSHOT__ = () => PerfCounters.snapshot();
   }
 
   function logPerfThrottled(tag, message, throttleMs = 2000) {
@@ -960,14 +1082,37 @@
   })();
 
   const StorageKit = (() => {
-    function fullKey(key, scoped = true) {
-      return scoped ? storageKey(key) : String(key || '');
+    function fullKey(key, scoped = true, dataScoped = false) {
+      if (dataScoped) return dataStorageKey(key);
+      return scoped ? storageKey(key) : String(key || "");
+    }
+
+    function legacyFullKeys(key, scoped = true) {
+      if (!scoped || !APP || !Array.isArray(APP.storageLegacyPrefixes)) {
+        return [];
+      }
+
+      return APP.storageLegacyPrefixes
+        .filter((prefix) => typeof prefix === 'string' && prefix && prefix !== APP.storagePrefix)
+        .map((prefix) => `${prefix}${key}`);
+    }
+
+    function migrateLegacyValue(key, value, legacyKey, tag) {
+      const ok = writeJson(key, value, { scoped: true, tag });
+      if (ok) {
+        console.info('[ChatGPT toolbox] migrated legacy storage key', {
+          tag,
+          legacyKey,
+          currentKey: storageKey(key),
+        });
+      }
+      return value;
     }
 
     function readJson(key, fallback, options = {}) {
       const scoped = options.scoped !== false;
       const tag = options.tag || '[STORAGE]';
-      const resolvedKey = fullKey(key, scoped);
+      const resolvedKey = fullKey(key, scoped, options.dataScoped);
 
       try {
         if (scoped && typeof GM_getValue === 'function') {
@@ -980,20 +1125,48 @@
 
       try {
         const raw = window.localStorage.getItem(resolvedKey);
-        if (raw == null || raw === '') return fallback;
-
-        const parsed = JSON.parse(raw);
-        return parsed == null ? fallback : parsed;
+        if (raw != null && raw !== '') {
+          const parsed = JSON.parse(raw);
+          return parsed == null ? fallback : parsed;
+        }
       } catch (error) {
         logError(`${tag}[localStorage-read-failed]`, error, resolvedKey);
-        return fallback;
       }
+
+      const legacyKeys = legacyFullKeys(key, scoped);
+      for (let i = 0; i < legacyKeys.length; i += 1) {
+        const legacyKey = legacyKeys[i];
+        try {
+          if (typeof GM_getValue === 'function') {
+            const value = GM_getValue(legacyKey, null);
+            if (value != null) {
+              return migrateLegacyValue(key, value, legacyKey, tag);
+            }
+          }
+        } catch (error) {
+          logError(`${tag}[GM_getValue-legacy-failed]`, error, legacyKey);
+        }
+
+        try {
+          const raw = window.localStorage.getItem(legacyKey);
+          if (raw != null && raw !== '') {
+            const parsed = JSON.parse(raw);
+            if (parsed != null) {
+              return migrateLegacyValue(key, parsed, legacyKey, tag);
+            }
+          }
+        } catch (error) {
+          logError(`${tag}[localStorage-legacy-read-failed]`, error, legacyKey);
+        }
+      }
+
+      return fallback;
     }
 
     function writeJson(key, value, options = {}) {
       const scoped = options.scoped !== false;
       const tag = options.tag || '[STORAGE]';
-      const resolvedKey = fullKey(key, scoped);
+      const resolvedKey = fullKey(key, scoped, options.dataScoped);
 
       try {
         if (scoped && typeof GM_setValue === 'function') {
@@ -1037,6 +1210,7 @@
       logPrefix,
       emptyText,
       playSuccessBeep = true,
+      statusOwner = 'logger',
     } = options || {};
 
     const content = String(text ?? '');
@@ -1047,14 +1221,29 @@
 
     if (!content) {
       const msg = emptyText || '没有可复制的内容';
-      ToolboxShell.setStatus(msg, 'warn');
+      ToolboxShell.setStatus(msg, 'warn', { owner: statusOwner });
       ToolboxShell.appendLog(`[${resolvedLogPrefix}][skip] reason=empty`);
       return false;
     }
 
     try {
-      await copyTextUnified(content, `${resolvedLogPrefix}:copyWithStatus`);
-      ToolboxShell.setStatus(resolvedSuccessStatus, 'success');
+      const copied = await copyTextUnified(content, `${resolvedLogPrefix}:copyWithStatus`);
+      if (copied !== true) {
+        const failReason = 'clipboard-write-returned-false';
+        console.error('[ChatGPT toolbox] copyWithStatus failed: clipboard writer returned false', {
+          logPrefix: resolvedLogPrefix,
+          chars: content.length,
+          reason: failReason,
+        });
+        ToolboxShell.setStatus(`${resolvedFailPrefix}：剪贴板写入失败`, 'error', {
+          owner: statusOwner,
+        });
+        ToolboxShell.appendLog(
+          `[${resolvedLogPrefix}][failed] reason=${failReason} chars=${content.length}`,
+        );
+        return false;
+      }
+      ToolboxShell.setStatus(resolvedSuccessStatus, 'success', { owner: statusOwner });
       ToolboxShell.appendLog(`[${resolvedLogPrefix}][ok] chars=${content.length} ${resolvedSuccessLog}`);
 
       if (playSuccessBeep !== false) {
@@ -1072,9 +1261,11 @@
       console.error(failTag, error);
 
       if (typeof formatFailStatus === 'function') {
-        ToolboxShell.setStatus(formatFailStatus(errText), 'error');
+        ToolboxShell.setStatus(formatFailStatus(errText), 'error', { owner: statusOwner });
       } else {
-        ToolboxShell.setStatus(`${resolvedFailPrefix}：${errText}`, 'error');
+        ToolboxShell.setStatus(`${resolvedFailPrefix}：${errText}`, 'error', {
+          owner: statusOwner,
+        });
       }
 
       ToolboxShell.appendLog(`[${resolvedLogPrefix}][failed] error=${errText}`);
@@ -1086,34 +1277,80 @@
     return typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   }
 
-  function registerToolboxDebugApi(name, fn, options = {}) {
+  function createDebugApiContext(context = {}) {
+    const shell = context.shell || context.ToolboxShell || null;
+    const appendLog = typeof context.appendLog === 'function'
+      ? context.appendLog
+      : (shell && typeof shell.appendLog === 'function' ? shell.appendLog.bind(shell) : null);
+
+    return {
+      target: context.target || getDebugApiTarget(),
+      override: context.override === true,
+      appendLog,
+    };
+  }
+
+  function registerToolboxDebugApi(nameOrPayload, maybeFn, maybeOptions = {}) {
+    const payload = (
+      nameOrPayload
+      && typeof nameOrPayload === 'object'
+      && !Array.isArray(nameOrPayload)
+      && typeof maybeFn === 'undefined'
+    )
+      ? nameOrPayload
+      : {
+        name: nameOrPayload,
+        fn: maybeFn,
+        ...maybeOptions,
+      };
+
+    const { name, fn } = payload;
     const fullName = String(name || '').startsWith('__cgpt')
       ? String(name)
       : `__cgptToolbox${String(name || '')}`;
-    const target = options.target || getDebugApiTarget();
+    const { target, override, appendLog } = createDebugApiContext(payload);
 
     if (typeof fn !== 'function') {
       console.error('[ChatGPT toolbox] registerToolboxDebugApi requires function', fullName);
       return;
     }
 
-    if (target[fullName] && options.override !== true) {
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[DEBUG_API][skip-existing] ${fullName}`);
+    if (target[fullName] && !override) {
+      if (appendLog) {
+        appendLog(`[DEBUG_API][skip-existing] ${fullName}`);
       }
       return;
     }
 
     target[fullName] = fn;
 
-    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-      ToolboxShell.appendLog(`[DEBUG_API][registered] ${fullName}`);
+    if (appendLog) {
+      appendLog(`[DEBUG_API][registered] ${fullName}`);
     }
   }
 
-  function registerToolboxDebugApis(apiMap, options = {}) {
+  function registerToolboxDebugApis(apiMapOrPayload, maybeOptions = {}) {
+    const payload = (
+      apiMapOrPayload
+      && typeof apiMapOrPayload === 'object'
+      && !Array.isArray(apiMapOrPayload)
+      && Object.prototype.hasOwnProperty.call(apiMapOrPayload, 'apiMap')
+      && typeof maybeOptions === 'object'
+      && Object.keys(maybeOptions).length === 0
+    )
+      ? apiMapOrPayload
+      : {
+        apiMap: apiMapOrPayload,
+        ...maybeOptions,
+      };
+
+    const { apiMap } = payload;
     Object.entries(apiMap || {}).forEach(([name, fn]) => {
-      registerToolboxDebugApi(name, fn, options);
+      registerToolboxDebugApi({
+        ...payload,
+        name,
+        fn,
+      });
     });
   }
 
@@ -1121,6 +1358,7 @@
     const getLocalEl = options.getLocalEl || (() => null);
     const useGlobal = options.useGlobal !== false;
     const useLog = options.useLog !== false;
+    const owner = String(options.owner || '').trim();
     let clearTimer = 0;
 
     function set(message, type = 'info', opts = {}) {
@@ -1134,7 +1372,10 @@
       }
 
       if (useGlobal && text && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.setStatus === 'function') {
-        ToolboxShell.setStatus(text, type, opts);
+        ToolboxShell.setStatus(text, type, owner ? {
+          ...opts,
+          owner: opts && opts.owner ? opts.owner : owner,
+        } : opts);
       }
 
       if (useLog && text && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
@@ -1171,6 +1412,23 @@
     const timers = new Map();
     const rafs = new Map();
     const intervals = new Map();
+    const name = String(moduleName || 'MODULE').trim() || 'MODULE';
+
+    const globalTarget = getDebugApiTarget();
+    if (!globalTarget.__CGPT_TOOLBOX_TIMERS__) {
+      globalTarget.__CGPT_TOOLBOX_TIMERS__ = new Map();
+    }
+    // keep last registry for each moduleName
+    try {
+      globalTarget.__CGPT_TOOLBOX_TIMERS__.set(name, {
+        moduleName: name,
+        timers,
+        rafs,
+        intervals,
+      });
+    } catch (e) {
+      // ignore
+    }
 
     function logTimerCleanupFailure(action, error) {
       const errText = getErrorText(error);
@@ -1294,7 +1552,7 @@
       return timers.has(name);
     }
 
-    return {
+    const api = {
       timeout,
       clearTimeout: clearTimeoutByName,
       raf,
@@ -1304,6 +1562,156 @@
       clearAll,
       has,
     };
+    api._dump = () => ({
+      moduleName: name,
+      timeouts: timers.size,
+      rafs: rafs.size,
+      intervals: intervals.size,
+    });
+    return api;
+  }
+
+  function createObserverRegistry(moduleName) {
+    const name = String(moduleName || 'MODULE').trim() || 'MODULE';
+    const observers = new Map(); // name -> MutationObserver
+
+    const globalTarget = getDebugApiTarget();
+    if (!globalTarget.__CGPT_TOOLBOX_OBSERVERS__) {
+      globalTarget.__CGPT_TOOLBOX_OBSERVERS__ = new Map();
+    }
+    try {
+      globalTarget.__CGPT_TOOLBOX_OBSERVERS__.set(name, observers);
+    } catch (e) {
+      // ignore
+    }
+
+    function register(observerName, observer) {
+      const key = String(observerName || '').trim() || 'observer';
+      if (!(observer instanceof MutationObserver)) {
+        return false;
+      }
+      if (observers.has(key)) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(`[OBSERVER][SKIP_DUPLICATE] module=${name} name=${key}`);
+        }
+        return false;
+      }
+      observers.set(key, observer);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(`[OBSERVER][CREATE] module=${name} name=${key}`);
+      }
+      return true;
+    }
+
+    function disconnect(observerName) {
+      const key = String(observerName || '').trim() || 'observer';
+      const obs = observers.get(key);
+      if (!obs) return false;
+      try {
+        obs.disconnect();
+      } catch (error) {
+        console.warn(`[ChatGPT toolbox] ${name}.observer disconnect failed`, error);
+      }
+      observers.delete(key);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(`[OBSERVER][DISCONNECT] module=${name} name=${key}`);
+      }
+      return true;
+    }
+
+    function disconnectAll() {
+      Array.from(observers.keys()).forEach((k) => disconnect(k));
+    }
+
+    function dump() {
+      return {
+        moduleName: name,
+        activeObservers: observers.size,
+        names: Array.from(observers.keys()),
+      };
+    }
+
+    return {
+      register,
+      disconnect,
+      disconnectAll,
+      dump,
+      has: (observerName) => observers.has(String(observerName || '').trim() || 'observer'),
+    };
+  }
+
+  function dumpAllTimers() {
+    const target = getDebugApiTarget();
+    const map = target.__CGPT_TOOLBOX_TIMERS__;
+    if (!map || typeof map.forEach !== 'function') {
+      return { total: { timeouts: 0, rafs: 0, intervals: 0 }, modules: [] };
+    }
+    const modules = [];
+    const total = { timeouts: 0, rafs: 0, intervals: 0 };
+    map.forEach((entry) => {
+      const t = entry && entry.timers ? entry.timers.size : 0;
+      const r = entry && entry.rafs ? entry.rafs.size : 0;
+      const i = entry && entry.intervals ? entry.intervals.size : 0;
+      modules.push({
+        moduleName: entry && entry.moduleName ? entry.moduleName : '-',
+        timeouts: t,
+        rafs: r,
+        intervals: i,
+      });
+      total.timeouts += t;
+      total.rafs += r;
+      total.intervals += i;
+    });
+    modules.sort((a, b) => (b.intervals + b.timeouts + b.rafs) - (a.intervals + a.timeouts + a.rafs));
+    return { total, modules };
+  }
+
+  function dumpAllObservers() {
+    const target = getDebugApiTarget();
+    const map = target.__CGPT_TOOLBOX_OBSERVERS__;
+    if (!map || typeof map.forEach !== 'function') {
+      return { total: 0, modules: [] };
+    }
+    const modules = [];
+    let total = 0;
+    map.forEach((observers, moduleName) => {
+      const size = observers && typeof observers.size === 'number' ? observers.size : 0;
+      total += size;
+      modules.push({
+        moduleName: String(moduleName || '-'),
+        activeObservers: size,
+        names: observers && typeof observers.keys === 'function' ? Array.from(observers.keys()) : [],
+      });
+    });
+    modules.sort((a, b) => b.activeObservers - a.activeObservers);
+    return { total, modules };
+  }
+
+  function registerRuntimeDebugApis(context = {}) {
+    registerPerfDebugApis();
+    registerToolboxDebugApis({
+      ...context,
+      apiMap: {
+        DumpTimers: () => dumpAllTimers(),
+        DumpObservers: () => dumpAllObservers(),
+        PerfSnapshot: () => {
+          const snap = PerfCounters.snapshot();
+          const timers = dumpAllTimers();
+          const observers = dumpAllObservers();
+          return {
+            ...snap,
+            activeTimers: timers.total.timeouts,
+            activeIntervals: timers.total.intervals,
+            activeRafs: timers.total.rafs,
+            activeObservers: observers.total,
+          };
+        },
+      },
+    });
+  }
+
+  function registerRuntimeDebugApi(context = {}) {
+    registerRuntimeDebugApis(context);
   }
 
   function collectDomRefs(root, schema, options = {}) {
@@ -1571,8 +1979,6 @@
       uploadLastActiveGroupId: 'uploadLastActiveGroupId',
       lastManualUploadGroupId: 'lastManualUploadGroupId',
       uploadBlobPersistEnabled: 'uploadBlobPersistEnabled',
-      uploadUseUniqueFileName: 'uploadUseUniqueFileName',
-      uploadUseUniqueFileNameTimestampSeqV1: 'uploadUseUniqueFileNameTimestampSeqV1',
       autoQueueConfig: 'autoQueueConfig',
       promptManagerData: 'promptManagerData',
       promptManagerActiveCategory: 'promptManagerActiveCategory',
@@ -1601,12 +2007,6 @@
 
     function remove(key) {
       writeStorage(key, null);
-    }
-
-    // 上传附件默认：时间戳 + 序号（仅内存 File.name；用户可在设置里关闭）。
-    if (!get(KEYS.uploadUseUniqueFileNameTimestampSeqV1, false)) {
-      set(KEYS.uploadUseUniqueFileName, true);
-      set(KEYS.uploadUseUniqueFileNameTimestampSeqV1, true);
     }
 
     function getToolboxState() {
@@ -1696,17 +2096,22 @@
   const TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES = Object.freeze({
     activeTab: ['active_tab'],
     uploadActiveGroupId: ['upload_active_group_id'],
+    layoutState: ['layout_state'],
     quickPromptCategory: ['quick_prompt_category'],
   });
 
   const TOOLBOX_PAGE_STATE_LEGACY_WRITE_KEYS = Object.freeze([
     'active_tab',
     'upload_active_group_id',
+    'layout_state',
     'quick_prompt_category',
   ]);
 
   const TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS = Object.freeze([
     'activeTab',
+    'uploadActiveGroupId',
+    'layoutState',
+    'uploadSelection',
     'quickPromptCategory',
     'toolboxRouteKey',
     'page_instance_id',
@@ -1759,10 +2164,29 @@
   function normalizeToolboxStatePatchForWrite(patch) {
     const input = patch && typeof patch === 'object' ? patch : {};
     const out = {};
+    const droppedKeys = [];
 
     const activeTab = readToolboxStateField(input, 'activeTab', '');
     if (activeTab) {
       out.activeTab = activeTab;
+    }
+
+    const uploadSelection = input.uploadSelection && typeof input.uploadSelection === 'object'
+      ? input.uploadSelection
+      : {};
+    const uploadActiveGroupId = String(
+      readToolboxStateField(input, 'uploadActiveGroupId', '')
+      || readToolboxStateField(uploadSelection, 'activeGroupId', '')
+      || '',
+    ).trim();
+    if (uploadActiveGroupId) {
+      out.uploadActiveGroupId = uploadActiveGroupId;
+      out.uploadSelection = { activeGroupId: uploadActiveGroupId };
+    }
+
+    const layoutState = readToolboxStateField(input, 'layoutState', null);
+    if (layoutState && typeof layoutState === 'object') {
+      out.layoutState = layoutState;
     }
 
     const quickPromptCategory = readToolboxStateField(input, 'quickPromptCategory', '');
@@ -1771,7 +2195,13 @@
     }
 
     TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS.forEach((key) => {
-      if (key === 'activeTab' || key === 'quickPromptCategory') {
+      if (
+        key === 'activeTab'
+        || key === 'quickPromptCategory'
+        || key === 'uploadActiveGroupId'
+        || key === 'uploadSelection'
+        || key === 'layoutState'
+      ) {
         return;
       }
       if (!Object.prototype.hasOwnProperty.call(input, key)) {
@@ -1783,6 +2213,23 @@
       }
       out[key] = value;
     });
+
+    Object.keys(input).forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(out, key)) {
+        return;
+      }
+      if (TOOLBOX_PAGE_STATE_PATCH_ALLOW_KEYS.includes(key)) {
+        return;
+      }
+      if (TOOLBOX_PAGE_STATE_LEGACY_READ_ALIASES[key]) {
+        return;
+      }
+      droppedKeys.push(key);
+    });
+
+    toolboxPageStateAppendLog(
+      `[STATE_SCHEMA][PAGE_STATE_SAVE_FILTER] kept=${Object.keys(out).join(',') || '-'} dropped=${droppedKeys.join(',') || '-'}`,
+    );
 
     return out;
   }
@@ -2186,6 +2633,7 @@
     messageQuotaMaxMessages: 150,
     uploadQuotaRecords: [],
     messageQuotaRecords: [],
+    uploadLoopMode: 'closed',
   });
 
   function normalizeCompactUiConfig(input) {
@@ -2262,6 +2710,7 @@
     cfg.messageQuotaMaxMessages = normalizePositiveInt(cfg.messageQuotaMaxMessages, 150, 1, 10000);
     cfg.uploadQuotaRecords = Array.isArray(cfg.uploadQuotaRecords) ? cfg.uploadQuotaRecords : [];
     cfg.messageQuotaRecords = Array.isArray(cfg.messageQuotaRecords) ? cfg.messageQuotaRecords : [];
+    cfg.uploadLoopMode = String(cfg.uploadLoopMode || 'closed').trim() === 'open' ? 'open' : 'closed';
 
     // 继续指令 & 终止信号（兼容旧版 copyHotkeyLoop* 字段）
     const legacyLoopPrompt = typeof cfg.copyHotkeyLoopContinuePrompt === 'string'
@@ -2346,11 +2795,16 @@
     }
 
     function readStoredCategory() {
+      let val = readDataStorage("promptManagerActiveCategory", null);
+      if (val != null && String(val).trim()) {
+        return normalizeCategoryName(val);
+      }
       const fromPromptManager = MemoryManager.get(
         MemoryManager.KEYS.promptManagerActiveCategory,
         null,
       );
       if (fromPromptManager != null && String(fromPromptManager).trim()) {
+        writeDataStorage("promptManagerActiveCategory", fromPromptManager);
         return normalizeCategoryName(fromPromptManager);
       }
 
@@ -2377,6 +2831,7 @@
         MemoryManager.KEYS.promptManagerActiveCategory,
         activeCategory,
       );
+      writeDataStorage("promptManagerActiveCategory", activeCategory);
 
       if (opts.syncCompactUi !== false) {
         CompactUiConfigStore.patch({
@@ -2884,6 +3339,9 @@
       .trim()
       .toLowerCase()
       .replace(/\s+/g, '')
+      .replace(/controlleft|controlright|ctrlleft|ctrlright/g, 'ctrl')
+      .replace(/altleft|altright/g, 'alt')
+      .replace(/metaleft|metaright|winleft|winright|osleft|osright/g, 'meta')
       .replace(/control/g, 'ctrl')
       .replace(/command/g, 'meta')
       .replace(/cmd/g, 'meta');
@@ -2908,6 +3366,21 @@
   }
 
   function isShortcutMatched(event, shortcutText) {
+    const rawShortcut = String(shortcutText || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '');
+    const eventCode = String((event && event.code) || '').toLowerCase();
+
+    // Side-specific Shift: allow explicit "ShiftRight"/"ShiftLeft" to bind
+    // only that physical key, so left Shift won't trigger right Shift actions.
+    if (rawShortcut === 'shiftright') {
+      return eventCode === 'shiftright';
+    }
+    if (rawShortcut === 'shiftleft') {
+      return eventCode === 'shiftleft';
+    }
+
     return normalizeShortcutText(shortcutFromEvent(event))
       === normalizeShortcutText(shortcutText);
   }
@@ -3191,44 +3664,6 @@
     }
 
     return `${raw}_${tag}`;
-  }
-
-  /** 上传附件用时间戳（无随机后缀）：YYYYMMDD_HHMMSS */
-  function buildUploadAttachTimestamp() {
-    const d = new Date();
-
-    return [
-      d.getFullYear(),
-      pad2(d.getMonth() + 1),
-      pad2(d.getDate()),
-    ].join('') + '_' + [
-      pad2(d.getHours()),
-      pad2(d.getMinutes()),
-      pad2(d.getSeconds()),
-    ].join('');
-  }
-
-  /** 上传附件：时间戳 + 批次序号，例如 ``0_merged_for_chatgpt_20260523_200319_01.zip`` */
-  function buildUploadAttachFileName(fileName, seq, total) {
-    const safeSeq = Math.max(1, Number(seq) || 1);
-    const safeTotal = Math.max(safeSeq, Number(total) || safeSeq);
-    const seqWidth = safeTotal > 99 ? 3 : 2;
-    const tag = `${buildUploadAttachTimestamp()}_${String(safeSeq).padStart(seqWidth, '0')}`;
-    return buildTimestampedFileName(fileName, tag);
-  }
-
-  /** 为规避 ChatGPT 重复附件提示，在内存中克隆 File；不创建临时磁盘文件。 */
-  function cloneFileForUploadAttach(file, seq, total) {
-    if (!isFileLike(file) && !(file instanceof Blob)) {
-      return file;
-    }
-
-    const newName = buildUploadAttachFileName(file.name, seq, total);
-
-    return new File([file], newName, {
-      type: file.type || 'application/octet-stream',
-      lastModified: Number(file.lastModified) || Date.now(),
-    });
   }
 
   function getObjectTag(value) {

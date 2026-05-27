@@ -7,44 +7,103 @@
     'waiting',
     'uploading',
     'waiting_send',
-    'waiting_page_reply_to_send',
     'sending',
     'waiting_reply',
+    'cancelling',
+    'cancelled',
+    'success',
+    'failed',
+  ]);
+
+  const BUTTON_TASK_UI_PHASES = Object.freeze([
+    ...BUTTON_TASK_PHASES,
+    'initializing',
+    'waiting_page_reply_to_send',
     'copying',
     'running',
     'continuing',
     'navigating',
     'quota_waiting',
     'startup_uploading',
-    'cancelling',
     'checking',
     'waiting_input',
     'waiting_attachment',
-    'cancelled',
-    'success',
-    'failed',
     'completed',
     'danger',
     'disabled',
+    'sending_hotkey',
+    'sending_continue',
+    'confirming_clipboard',
+    'waiting_next_reply',
+    'auto_uploading',
+    'home_navigation',
+    'stopped',
+    'stopping',
+    'pending_confirm',
   ]);
 
   const BUTTON_TASK_CANCELLABLE_PHASES = new Set([
     'waiting',
     'uploading',
     'waiting_send',
-    'waiting_page_reply_to_send',
     'sending',
     'waiting_reply',
-    'copying',
-    'running',
-    'continuing',
-    'navigating',
     'cancelling',
   ]);
+
+  const BUTTON_TASK_PHASE_NORMALIZERS = Object.freeze({
+    waiting_ready: { phase: 'waiting_send' },
+    initializing: { phase: 'waiting', subPhase: 'initializing' },
+    waiting_page_reply_to_send: { phase: 'waiting_send', subPhase: 'waiting_page_reply_to_send' },
+    waiting_input: { phase: 'waiting_send', subPhase: 'waiting_input' },
+    waiting_attachment: { phase: 'waiting_send', subPhase: 'waiting_attachment' },
+    copying: { phase: 'waiting', subPhase: 'copying' },
+    running: { phase: 'waiting', subPhase: 'running' },
+    continuing: { phase: 'waiting', subPhase: 'continuing' },
+    navigating: { phase: 'waiting', subPhase: 'navigating' },
+    quota_waiting: { phase: 'waiting', subPhase: 'quota_waiting' },
+    checking: { phase: 'waiting', subPhase: 'checking' },
+    sending_hotkey: { phase: 'sending', subPhase: 'sending_hotkey' },
+    sending_continue: { phase: 'sending', subPhase: 'sending_continue' },
+    confirming_clipboard: { phase: 'waiting', subPhase: 'confirming_clipboard' },
+    waiting_next_reply: { phase: 'waiting_reply', subPhase: 'waiting_next_reply' },
+    auto_uploading: { phase: 'uploading', subPhase: 'auto_uploading' },
+    startup_uploading: { phase: 'uploading', subPhase: 'startup_uploading' },
+    home_navigation: { phase: 'waiting', subPhase: 'home_navigation' },
+    stopped: { phase: 'cancelled', subPhase: 'stopped' },
+    stopping: { phase: 'cancelling', subPhase: 'stopping' },
+    pending_confirm: { phase: 'waiting', subPhase: 'pending_confirm' },
+    completed: { phase: 'success', subPhase: 'completed' },
+    danger: { phase: 'waiting', subPhase: 'danger' },
+    disabled: { phase: 'idle', subPhase: 'disabled' },
+  });
+
+  function canonicalizeTaskPhaseInput(phase, subPhase = '') {
+    const rawPhase = String(phase || 'idle').trim().toLowerCase() || 'idle';
+    const rawSubPhase = String(subPhase || '').trim();
+    if (BUTTON_TASK_PHASES.includes(rawPhase)) {
+      return {
+        phase: rawPhase,
+        subPhase: rawSubPhase,
+      };
+    }
+    const mapped = BUTTON_TASK_PHASE_NORMALIZERS[rawPhase];
+    if (mapped) {
+      return {
+        phase: mapped.phase,
+        subPhase: String(mapped.subPhase || '').trim() || rawSubPhase,
+      };
+    }
+    return {
+      phase: 'idle',
+      subPhase: rawSubPhase || rawPhase,
+    };
+  }
 
   function createDefaultButtonTask(extra = {}) {
     return {
       phase: 'idle',
+      subPhase: '',
       runId: '',
       cancelRequested: false,
       stopRequested: false,
@@ -64,6 +123,10 @@
         upload: createDefaultButtonTask(),
         send: createDefaultButtonTask(),
         copy: createDefaultButtonTask(),
+        copyHotkeyOnce: createDefaultButtonTask(),
+        copyHotkeyContinue: createDefaultButtonTask(),
+        copyHotkeyContinueLoop: createDefaultButtonTask(),
+        copyHotkeyUploadVerifyLoop: createDefaultButtonTask(),
         continue: createDefaultButtonTask(),
         batch: createDefaultButtonTask({
           currentIndex: -1,
@@ -123,12 +186,16 @@
       return '';
     }
 
-    let nextPhase = String(phase || 'idle').trim() || 'idle';
-    if (nextPhase === 'waiting_ready') {
-      nextPhase = 'waiting_send';
-    }
+    const canonical = canonicalizeTaskPhaseInput(
+      phase,
+      extra.subPhase != null ? extra.subPhase : extra.subphase,
+    );
+    const nextPhase = canonical.phase;
     const oldPhase = String(task.phase || 'idle');
+    const oldSubPhase = String(task.subPhase || task.subphase || '').trim();
     task.phase = nextPhase;
+    task.subPhase = canonical.subPhase;
+    task.subphase = canonical.subPhase;
 
     if (extra.runId != null) {
       task.runId = String(extra.runId || '');
@@ -151,12 +218,13 @@
     if (extra.total != null) {
       task.total = Number(extra.total);
     }
-    if (extra.subphase != null) {
-      task.subphase = String(extra.subphase || '').trim();
+    if (extra.subphase != null || extra.subPhase != null) {
+      task.subPhase = canonical.subPhase;
+      task.subphase = canonical.subPhase;
     }
 
-    if (oldPhase !== nextPhase) {
-      const subphase = task.subphase ? String(task.subphase) : '';
+    if (oldPhase !== nextPhase || oldSubPhase !== canonical.subPhase) {
+      const subphase = task.subPhase ? String(task.subPhase) : '';
       const subLog = subphase ? ` subphase=${subphase}` : '';
       logButtonTaskChange(taskName, oldPhase, `${nextPhase}${subLog}`, reason, task.runId);
     }
@@ -189,6 +257,8 @@
 
     const keys = [
       'phase',
+      'subPhase',
+      'subphase',
       'runId',
       'cancelRequested',
       'stopRequested',
@@ -203,6 +273,14 @@
         task[key] = snapshot[key];
       }
     });
+
+    const canonical = canonicalizeTaskPhaseInput(
+      task.phase,
+      task.subPhase != null ? task.subPhase : task.subphase,
+    );
+    task.phase = canonical.phase;
+    task.subPhase = canonical.subPhase;
+    task.subphase = canonical.subPhase;
   }
 
   function logButtonTaskClick(action, taskName, phase, runId) {
@@ -295,6 +373,8 @@
 
   const ButtonTasks = Object.freeze({
     Phases: BUTTON_TASK_PHASES,
+    UiPhases: BUTTON_TASK_UI_PHASES,
+    AllPhases: BUTTON_TASK_UI_PHASES,
     CancellablePhases: BUTTON_TASK_CANCELLABLE_PHASES,
     ensureGlobalButtonTasks,
     getButtonTask,
@@ -307,4 +387,5 @@
     logButtonTaskCancel,
     assertButtonStateConsistency,
     renderAllButtonStates,
+    canonicalizeTaskPhaseInput,
   });

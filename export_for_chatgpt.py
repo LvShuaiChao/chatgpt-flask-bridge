@@ -500,13 +500,49 @@ def _stdlib_top_level() -> frozenset[str]:
     return _STDLIB_TOP
 
 
+_EXPORT_READ_FALLBACK_ENCODINGS: tuple[str, ...] = (
+    "utf-8",
+    "utf-8-sig",
+    "gb18030",
+    "gbk",
+    "latin-1",
+)
+
+
+def read_text_auto_with_encoding(file_path: Path) -> tuple[str, str, bool]:
+    """
+    Read text with strict decoding and explicit fallback order.
+    - never errors="replace"
+    - never silently skip on decode failure: always print the path/encoding/error
+    """
+    raw = file_path.read_bytes()
+    last_err: UnicodeDecodeError | None = None
+    for idx, enc in enumerate(_EXPORT_READ_FALLBACK_ENCODINGS):
+        try:
+            text = raw.decode(enc)
+            used_fallback = idx != 0
+            return text, enc, used_fallback
+        except UnicodeDecodeError as e:
+            last_err = e
+            print(
+                f"[错误] 源码读取失败（将继续尝试其它编码） file={file_path} encoding={enc} error={e}",
+                file=sys.stderr,
+            )
+            logger.error(
+                "[export] read_text decode failed file=%s encoding=%s error=%s",
+                file_path,
+                enc,
+                e,
+                exc_info=True,
+            )
+    if last_err is not None:
+        raise last_err
+    raise UnicodeDecodeError("utf-8", b"", 0, 1, "no-bytes")
+
+
 def read_text_auto(file_path: Path) -> str:
-    """
-    Read text strictly as UTF-8.
-    - do NOT use errors="replace"
-    - caller should handle UnicodeDecodeError and decide to skip
-    """
-    return file_path.read_text(encoding="utf-8")
+    text, _enc, _fallback = read_text_auto_with_encoding(file_path)
+    return text
 
 
 def _read_log_tail_utf8(file_path: Path, max_bytes: int) -> str:
@@ -554,6 +590,23 @@ def read_export_text(file_path: Path, project_root: Path) -> str:
     ):
         return _read_log_tail_utf8(file_path, EXPORT_LOG_TAIL_MAX_BYTES)
     return read_text_auto(file_path)
+
+
+def read_export_text_with_encoding(
+    file_path: Path, project_root: Path
+) -> tuple[str, str, bool]:
+    """导出用读文（带编码信息）：返回 (text, encoding_used, used_fallback)。"""
+    try:
+        rel = file_path.resolve().relative_to(project_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        rel = file_path.name
+    rel_norm = rel.replace("\\", "/")
+    if _is_separate_log_export_path(rel_norm) and (
+        file_path.suffix.lower() == ".log" or rel_norm.replace("\\", "/") in EXPORT_LOG_RELATIVE_CANDIDATES
+    ):
+        # 大日志尾部读取始终按 utf-8（必要时 replace），不适合纳入「源码编码统计」
+        return _read_log_tail_utf8(file_path, EXPORT_LOG_TAIL_MAX_BYTES), "utf-8", False
+    return read_text_auto_with_encoding(file_path)
 
 
 def collect_export_log_paths(project_root: Path) -> list[Path]:
@@ -926,25 +979,52 @@ def _prepare_export_file(
         content = f"[已跳过：不在允许导出后缀列表中] {file_path}"
     else:
         try:
-            content_raw = read_export_text(file_path, project_root)
+            content_raw, encoding_used, used_fallback = read_export_text_with_encoding(file_path, project_root)
         except UnicodeDecodeError as exc:
             rel_err = None
             try:
                 rel_err = file_path.resolve().relative_to(project_root.resolve()).as_posix()
             except (OSError, ValueError):
                 rel_err = str(file_path)
+            print(
+                f"[错误] 文件读取失败（所有编码均失败） file={rel_err} error={exc}",
+                file=sys.stderr,
+            )
             logger.error(
-                "[export] read_text failed stage=utf8_decode file_path=%s reason=%s",
+                "[export] read_text failed stage=decode_all_failed file_path=%s reason=%s",
                 rel_err,
                 exc,
                 exc_info=True,
             )
-            content = f"[已跳过：UnicodeDecodeError] {rel_err} | {exc}"
+            # Do NOT silently skip: keep an explicit failure block in output.
+            content = f"[读取失败：UnicodeDecodeError] {rel_err} | {exc}"
+            encoding_used = "decode_failed"
+            used_fallback = False
+            if stats_lock is not None:
+                with stats_lock:
+                    run_stats["encoding_failed_count"] = int(run_stats.get("encoding_failed_count", 0)) + 1
+            else:
+                run_stats["encoding_failed_count"] = int(run_stats.get("encoding_failed_count", 0)) + 1
         else:
             try:
                 rel_posix = file_path.resolve().relative_to(project_root.resolve()).as_posix()
             except (OSError, ValueError):
                 rel_posix = str(file_path)
+            if stats_lock is not None:
+                with stats_lock:
+                    run_stats["encoding_utf8_count"] = int(run_stats.get("encoding_utf8_count", 0)) + (
+                        1 if (not used_fallback and encoding_used == "utf-8") else 0
+                    )
+                    run_stats["encoding_fallback_count"] = int(run_stats.get("encoding_fallback_count", 0)) + (
+                        1 if used_fallback else 0
+                    )
+            else:
+                run_stats["encoding_utf8_count"] = int(run_stats.get("encoding_utf8_count", 0)) + (
+                    1 if (not used_fallback and encoding_used == "utf-8") else 0
+                )
+                run_stats["encoding_fallback_count"] = int(run_stats.get("encoding_fallback_count", 0)) + (
+                    1 if used_fallback else 0
+                )
             if suffix in {".py", ".json", ".qss", ".ui"}:
                 if stats_lock is not None:
                     with stats_lock:
@@ -966,11 +1046,18 @@ def _prepare_export_file(
             )
 
     tok_line = _tokens_header_line_for_exported_body(content, token_count=source_tokens)
+    encoding_line = ""
+    try:
+        if suffix in ALLOWED_SUFFIXES and "encoding_used" in locals():
+            encoding_line = f"ENCODING: {encoding_used}{' (fallback)' if used_fallback else ''}"
+    except Exception:  # noqa: BLE001
+        encoding_line = ""
 
     block = "\n".join(
         [
             "\n" + "=" * 100,
             f"FILE: {rel_path.as_posix()}",
+            encoding_line,
             tok_line,
             "=" * 100,
             "",
@@ -1943,6 +2030,9 @@ def export_bundle(
         "excluded_dirs_count": 0,
         "excluded_examples": [],
         "suspicious_encoding_files": [],
+        "encoding_utf8_count": 0,
+        "encoding_fallback_count": 0,
+        "encoding_failed_count": 0,
     }
     ordered_py = _collect_full_scanned_candidates(project_root, output_path, run_stats=_RUN_STATS)
     full_project_files_for_manifest = list(ordered_py)
@@ -2293,6 +2383,15 @@ def export_bundle(
         part_metas=part_metas,
         export_ok=export_zip_ok if export_zip else True,
     )
+
+    # Encoding summary (source files only; large log-tail exports are excluded)
+    try:
+        utf8_ok = int(_RUN_STATS.get("encoding_utf8_count", 0) or 0)
+        fb_ok = int(_RUN_STATS.get("encoding_fallback_count", 0) or 0)
+        failed = int(_RUN_STATS.get("encoding_failed_count", 0) or 0)
+        print(f"[导出编码汇总] utf-8={utf8_ok} fallback={fb_ok} failed={failed}")
+    except Exception:  # noqa: BLE001
+        logger.warning("[export] encoding summary print failed", exc_info=True)
 
     log_written = write_log_export_bundle(project_root, run_stats=_RUN_STATS)
     if log_written:

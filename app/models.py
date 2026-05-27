@@ -6,8 +6,9 @@ from app.url_utils import parse_conversation_id
 
 logger = logging.getLogger(__name__)
 
-# 会话消息保留上限（防止 chat_sessions.json 无限增长）
-MAX_SESSION_MESSAGES = 500
+# Session message retention limit: prevent unbounded JSON growth without
+# clipping long-running GUI history too aggressively.
+MAX_SESSION_MESSAGES = 5000
 
 BIND_STATE_UNBOUND = "UNBOUND"
 BIND_STATE_TEMP_HOME_BOUND = "TEMP_HOME_BOUND"
@@ -143,9 +144,11 @@ def is_temp_home_bound_state(bind_state: str) -> bool:
 
 
 def remote_binding_active(remote) -> bool:
-    """bind_state != UNBOUND 即视为已启用绑定（不再持久化 enabled）。"""
-    remote = normalize_remote_chatgpt(remote)
-    return (remote.get("bind_state") or "").strip() != BIND_STATE_UNBOUND
+    """bind_state != UNBOUND 即视为已启用绑定。这里不做 normalize，避免 UI 初始化阶段二次 normalize。"""
+    if not isinstance(remote, dict):
+        return False
+    bind_state = _canonical_bind_state(remote.get("bind_state") or BIND_STATE_UNBOUND)
+    return bind_state != BIND_STATE_UNBOUND
 
 
 _REMOTE_BINDING_DEPRECATED_LOGGED = False
@@ -283,35 +286,16 @@ def normalize_remote_chatgpt(remote):
             type(remote).__name__,
         )
         return base
-    from app.utils.legacy_cleanup import assert_no_legacy_fields
+    from app.utils.legacy_cleanup import assert_no_remote_chatgpt_invalid_fields
 
     remote_work = dict(remote)
+    assert_no_remote_chatgpt_invalid_fields(
+        remote_work,
+        owner="normalize_remote_chatgpt",
+    )
     bootstrap_in_progress = bool(remote_work.get("bootstrap_in_progress"))
     bootstrap_message_id = (remote_work.get("bootstrap_message_id") or "").strip()
     raw_bind_state_before = (remote_work.get("bind_state") or "").strip()
-    remote_work.pop("binding", None)
-    for drop_key in (
-        "enabled",
-        "canonical_url",
-        "last_reported_url",
-        "prebound_home_client_id",
-        "prebound_home_page_instance_id",
-        "reserved_client_id",
-        "reserved_page_instance_id",
-        "reserved_at",
-        "created_from_home",
-        "opened_home_at",
-        "bound_at",
-        "reopen_request_id",
-        "reopen_target_url",
-        "pending_bootstrap_created_at",
-        "pending_send_created_at",
-        "bootstrap_message_id",
-        "bootstrap_started_at",
-        "bootstrap_in_progress",
-    ):
-        remote_work.pop(drop_key, None)
-    assert_no_legacy_fields(remote_work, owner="normalize_remote_chatgpt")
     for key in _REMOTE_NORMALIZE_KEYS:
         if key in remote_work:
             base[key] = remote_work[key]
@@ -412,9 +396,9 @@ def write_session_remote_chatgpt(session, **fields):
         remote.get("url"),
     )
     remote = normalize_remote_chatgpt(remote)
-    from app.utils.legacy_cleanup import assert_no_legacy_fields
+    from app.utils.legacy_cleanup import assert_no_remote_chatgpt_invalid_fields
 
-    assert_no_legacy_fields(remote, owner="GUI session.remote_chatgpt")
+    assert_no_remote_chatgpt_invalid_fields(remote, owner="GUI session.remote_chatgpt")
     session.remote_chatgpt = remote
     return remote
 

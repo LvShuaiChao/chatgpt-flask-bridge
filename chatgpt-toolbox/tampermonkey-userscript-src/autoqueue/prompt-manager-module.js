@@ -42,18 +42,36 @@
     let prompts = [];
     let categories = [];
     let searchKeyword = '';
-    let activeCategory = typeof PromptCategoryState !== 'undefined'
-      && typeof PromptCategoryState.getActiveCategory === 'function'
+    let activeCategory = typeof PromptCategoryState !== "undefined"
+      && typeof PromptCategoryState.getActiveCategory === "function"
       ? PromptCategoryState.getActiveCategory()
-      : MemoryManager.get(
-        MemoryManager.KEYS.promptManagerActiveCategory,
-        '全部',
-      );
+      : (function () {
+          var val = readDataStorage("promptManagerActiveCategory", null);
+          if (val == null) {
+            val = MemoryManager.get(
+              MemoryManager.KEYS.promptManagerActiveCategory,
+              "??",
+            );
+            if (val != null) {
+              writeDataStorage("promptManagerActiveCategory", val);
+            }
+          }
+          return val != null ? val : "??";
+        })();
     let activePromptSubtab = normalizePromptSubtab(
-      MemoryManager.get(
-        MemoryManager.KEYS.promptManagerActiveSubtab,
-        'manage',
-      ),
+      (function () {
+        var val = readDataStorage("promptManagerActiveSubtab", null);
+        if (val == null) {
+          val = MemoryManager.get(
+            MemoryManager.KEYS.promptManagerActiveSubtab,
+            "manage",
+          );
+          if (val != null) {
+            writeDataStorage("promptManagerActiveSubtab", val);
+          }
+        }
+        return val != null ? val : "manage";
+      })(),
     );
 
     function normalizePromptSubtab(value) {
@@ -115,13 +133,26 @@
     function normalizePromptItem(item) {
       if (!item) return null;
 
-      const title = String(item.title || '').trim();
-      const content = String(item.content || '');
+      const title = String(item.title || item.name || item.label || "").trim();
+      const content = String(item.content || item.prompt || item.text || item.message || item.raw_content || "");
 
       if (!title || !content.trim()) return null;
 
+      const legacyTitleField = (item.title ? "title" : (item.name ? "name" : (item.label ? "label" : "-")));
+      const legacyContentField = (item.content ? "content" : (item.prompt ? "prompt" : (item.text ? "text" : (item.message ? "message" : (item.raw_content ? "raw_content" : "-")))));
+
+      if (legacyTitleField !== "title" && legacyTitleField !== "-") {
+        console.log(
+          "[PROMPT][MIGRATE_LEGACY_FIELD] id=" + String(item.id || "-") + " titleField=" + legacyTitleField + " contentField=" + legacyContentField
+        );
+      } else if (legacyContentField !== "content" && legacyContentField !== "-") {
+        console.log(
+          "[PROMPT][MIGRATE_LEGACY_FIELD] id=" + String(item.id || "-") + " titleField=" + legacyTitleField + " contentField=" + legacyContentField
+        );
+      }
+
       return {
-        id: String(item.id || createId('prompt')),
+        id: String(item.id || createId("prompt")),
         title,
         category: normalizePromptCategoryName(item.category),
         content,
@@ -144,7 +175,17 @@
     }
 
     function buildNormalizedDefaultPrompts() {
-      return createDefaultPrompts().map((item, index) => normalizePromptItem({
+      const defaults = createDefaultPrompts();
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        try {
+          ToolboxShell.appendLog(
+            `[PROMPT_MANAGER][BUILTIN_PROMPT_REGISTER] count=${Array.isArray(defaults) ? defaults.length : 0}`,
+          );
+        } catch (e) {
+          // ignore logging failure
+        }
+      }
+      return defaults.map((item, index) => normalizePromptItem({
         id: item && item.id ? item.id : createStablePromptId(item, index),
         title: item.title,
         category: item.category || '默认',
@@ -224,46 +265,179 @@
     }
 
     function loadPromptManagerData() {
-      const raw = MemoryManager.get(STORAGE_KEY, null);
-
-      if (!raw) {
-        const defaults = normalizePromptManagerData(null);
-        savePromptManagerData(defaults);
-        return defaults;
+      // 1. ??????????
+      let data = null;
+      try {
+        data = readDataStorage("promptManagerData", null);
+      } catch (err) {
+        console.error("[PROMPT][LOAD] readDataStorage failed", err);
       }
 
-      const normalized = normalizePromptManagerData(raw);
-
-      if (Array.isArray(raw) || (raw && typeof raw === 'object' && !Array.isArray(raw.categories))) {
-        savePromptManagerData(normalized);
+      if (data) {
+        const normalized = normalizePromptManagerData(data);
+        // ?DATA_STORAGE_PREFIX???????????Prompt??????legacy key?????????
+        const defaults = buildNormalizedDefaultPrompts();
+        const defaultIds = new Set();
+        for (let di = 0; di < defaults.length; di += 1) {
+          defaultIds.add(defaults[di].id);
+        }
+        const onlyDefaults = (
+          normalized.prompts.length > 0 &&
+          normalized.prompts.length === defaults.length &&
+          normalized.prompts.every(function (p) { return defaultIds.has(p.id); })
+        );
+        if (!onlyDefaults) {
+          console.log(
+            "[PROMPT][LOAD] source=DATA_STORAGE key=cgpt_toolbox_data:promptManagerData count=" + String(normalized.prompts.length)
+          );
+          return normalized;
+        }
+        // ??????????????legacy key
+      }
+      const legacyPrefixes = [APP.storagePrefix];
+      if (Array.isArray(APP.storageLegacyPrefixes)) {
+        for (let idx = 0; idx < APP.storageLegacyPrefixes.length; idx += 1) {
+          legacyPrefixes.push(APP.storageLegacyPrefixes[idx]);
+        }
       }
 
-      return normalized;
+      let migratedFrom = "";
+      let bestRaw = null;
+
+      for (let idx = 0; idx < legacyPrefixes.length; idx += 1) {
+        const prefix = legacyPrefixes[idx];
+        const fullKey = prefix + "promptManagerData";
+        let raw = null;
+
+        try {
+          if (typeof GM_getValue === "function") {
+            raw = GM_getValue(fullKey, null);
+          }
+        } catch (err) {
+          console.error("[PROMPT][MIGRATE] GM_getValue failed", fullKey, err);
+        }
+
+        if (raw == null) {
+          try {
+            const rawText = window.localStorage.getItem(fullKey);
+            if (rawText != null && rawText !== "") {
+              raw = JSON.parse(rawText);
+            }
+          } catch (err) {
+            console.error("[PROMPT][MIGRATE] localStorage read failed", fullKey, err);
+          }
+        }
+
+        if (raw) {
+          const normalized = normalizePromptManagerData(raw);
+          // ??????????
+          const defaults = buildNormalizedDefaultPrompts();
+          const defaultIds = new Set();
+          for (let di = 0; di < defaults.length; di += 1) {
+            defaultIds.add(defaults[di].id);
+          }
+          const isOnlyDefaults = (
+            normalized.prompts.length > 0 &&
+            normalized.prompts.length === defaults.length &&
+            normalized.prompts.every(function (p) { return defaultIds.has(p.id); })
+          );
+
+          if (!isOnlyDefaults) {
+            bestRaw = normalized;
+            migratedFrom = fullKey;
+            break;
+          }
+          // ??????????????? key
+        }
+      }
+
+      // 3. ???????? ? ???????
+      if (bestRaw) {
+        try {
+          writeDataStorage("promptManagerData", {
+            prompts: bestRaw.prompts,
+            categories: bestRaw.categories,
+          });
+        } catch (err) {
+          console.error("[PROMPT][MIGRATE_STORAGE] writeDataStorage failed", err);
+        }
+        console.log(
+          "[PROMPT][MIGRATE_STORAGE] from=" + migratedFrom
+          + " to=cgpt_toolbox_data:promptManagerData count=" + String(bestRaw.prompts.length)
+        );
+        console.log(
+          "[PROMPT][LOAD] source=legacy key=" + migratedFrom + " count=" + String(bestRaw.prompts.length)
+        );
+        return bestRaw;
+      }
+
+      // 4. ???????? ? ????? Prompt
+      const defaults = normalizePromptManagerData(null);
+      try {
+        writeDataStorage("promptManagerData", {
+          prompts: defaults.prompts,
+          categories: defaults.categories,
+        });
+      } catch (err) {
+        console.error("[PROMPT][LOAD] initial writeDataStorage failed", err);
+      }
+      console.log(
+        "[PROMPT][LOAD] source=default key=cgpt_toolbox_data:promptManagerData count=" + String(defaults.prompts.length)
+      );
+      savePromptManagerData(defaults);
+      return defaults;
     }
 
     function savePromptManagerData(data) {
       const payload = data || { prompts, categories };
+      const promptCount = (payload.prompts || prompts).length;
+      const categoryCount = (payload.categories || categories).length;
 
-      const ok = MemoryManager.set(STORAGE_KEY, {
-        prompts: payload.prompts || prompts,
-        categories: payload.categories || categories,
-      });
+      let ok = false;
+      let errorType = "";
+      let errorMsg = "";
+
+      try {
+        ok = writeDataStorage("promptManagerData", {
+          prompts: payload.prompts || prompts,
+          categories: payload.categories || categories,
+        });
+      } catch (err) {
+        errorType = (err && err.name) || "Error";
+        errorMsg = (err && err.message) || String(err);
+        console.error(
+          "[PROMPT][SAVE] save failed",
+          { error_type: errorType, error: errorMsg, key: "cgpt_toolbox_data:promptManagerData" }
+        );
+        if (typeof ToolboxShell !== "undefined" && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            "[PROMPT][SAVE] save failed error_type=" + errorType + " error=" + errorMsg
+          );
+        }
+      }
 
       if (!ok) {
-        console.error('[ChatGPT toolbox] savePromptManagerData failed');
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog('[Prompt 管理] 保存失败：浏览器存储写入失败');
+        if (!errorType) {
+          console.error("[ChatGPT toolbox] savePromptManagerData failed");
+          if (typeof ToolboxShell !== "undefined" && ToolboxShell.appendLog) {
+            ToolboxShell.appendLog("[Prompt ??] ??????????????");
+          }
         }
       } else {
+        console.log(
+          "[PROMPT][SAVE] key=cgpt_toolbox_data:promptManagerData count=" + String(promptCount)
+        );
         let preserveAutoQueue = 0;
-        if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getConfig === 'function') {
+        if (typeof AutoQueueModule !== "undefined" && typeof AutoQueueModule.getConfig === "function") {
           const autoCfg = AutoQueueModule.getConfig();
           const tasks = autoCfg && Array.isArray(autoCfg.autoQueueTasks) ? autoCfg.autoQueueTasks : [];
           preserveAutoQueue = tasks.length;
         }
-        ToolboxShell.appendLog(
-          `[PROMPT][SAVE] count=${(payload.prompts || prompts).length} preserveAutoQueue=${preserveAutoQueue}`,
-        );
+        if (typeof ToolboxShell !== "undefined" && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            "[PROMPT][SAVE] count=" + String(promptCount) + " preserveAutoQueue=" + String(preserveAutoQueue)
+          );
+        }
       }
 
       return ok;
@@ -315,6 +489,7 @@
         MemoryManager.KEYS.promptManagerActiveCategory,
         activeCategory,
       );
+      writeDataStorage("promptManagerActiveCategory", activeCategory);
       return activeCategory;
     }
 
@@ -693,9 +868,31 @@
       return Object.assign({}, DEFAULT_COMPACT_UI_CONFIG || {}, saved);
     }
 
+    function normalizeQuickPromptSelectionMode(value) {
+      const raw = String(value || '').trim().toLowerCase();
+      return raw === 'manual' ? 'manual' : 'auto';
+    }
+
+    function shouldMarkQuickPromptSelectionManualByReason(reason = '') {
+      const normalized = String(reason || '').trim().toLowerCase();
+      if (!normalized) return false;
+      // 任何来自“展示设置”面板的显式选择行为，都视为用户手动选择（包括全不选）。
+      return normalized.startsWith('bulk-')
+        || normalized.startsWith('display-')
+        || normalized.includes('prompt-check-change')
+        || normalized.includes('display-option-change');
+    }
+
     function savePromptDisplayConfig(nextConfig, reason = '') {
       const current = getPromptDisplayConfig();
-      const next = Object.assign({}, current, nextConfig || {});
+      const merged = Object.assign({}, current, nextConfig || {});
+      const next = Object.assign({}, merged, {
+        quickPromptSelectionMode: normalizeQuickPromptSelectionMode(
+          shouldMarkQuickPromptSelectionManualByReason(reason)
+            ? 'manual'
+            : (merged.quickPromptSelectionMode || 'auto'),
+        ),
+      });
 
       if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.saveConfig === 'function') {
         SettingsModule.saveConfig(next);
@@ -752,6 +949,7 @@
           : current.confirmPromptDraftOverwrite === true,
 
         quickPromptIds: selectedIds,
+        quickPromptSelectionMode: normalizeQuickPromptSelectionMode(current.quickPromptSelectionMode || 'auto'),
       });
     }
 
@@ -857,10 +1055,13 @@
 
       if (mode === 'all') {
         cfg.quickPromptIds = allIds;
+        cfg.quickPromptSelectionMode = 'manual';
       } else if (mode === 'none') {
         cfg.quickPromptIds = [];
+        cfg.quickPromptSelectionMode = 'manual';
       } else if (mode === 'invert') {
         cfg.quickPromptIds = allIds.filter((id) => !currentSelected.has(id));
+        cfg.quickPromptSelectionMode = 'manual';
       } else {
         ToolboxShell.appendLog(`[PROMPT_DISPLAY][BULK][SKIP] unknownMode=${mode}`);
         return;
@@ -2318,6 +2519,7 @@
             MemoryManager.KEYS.promptManagerActiveSubtab,
             activePromptSubtab,
           );
+          writeDataStorage("promptManagerActiveSubtab", activePromptSubtab);
 
           render();
         }, 'bound_prompt_subtab_bar_click');
@@ -2469,19 +2671,29 @@
             && typeof PromptCategoryState.hydrateFromStorage === 'function') {
             activeCategory = PromptCategoryState.hydrateFromStorage();
           } else {
-            activeCategory = persistActivePromptCategory(
+            var restoredCat = readDataStorage("promptManagerActiveCategory", null);
+            if (restoredCat != null) {
+              activeCategory = persistActivePromptCategory(restoredCat);
+            } else {
+              activeCategory = persistActivePromptCategory(
+                MemoryManager.get(
+                  MemoryManager.KEYS.promptManagerActiveCategory,
+                  activeCategory,
+                ),
+              );
+            }
+          }
+          var restoredSubtab = readDataStorage("promptManagerActiveSubtab", null);
+          if (restoredSubtab != null) {
+            activePromptSubtab = normalizePromptSubtab(restoredSubtab);
+          } else {
+            activePromptSubtab = normalizePromptSubtab(
               MemoryManager.get(
-                MemoryManager.KEYS.promptManagerActiveCategory,
-                activeCategory,
+                MemoryManager.KEYS.promptManagerActiveSubtab,
+                'manage',
               ),
             );
           }
-          activePromptSubtab = normalizePromptSubtab(
-            MemoryManager.get(
-              MemoryManager.KEYS.promptManagerActiveSubtab,
-              'manage',
-            ),
-          );
           render();
         },
       });

@@ -758,7 +758,15 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact [data-page="upload"] #cgpt-upload-group-manage {
-          display: none !important;
+          display: inline-flex !important;
+          align-items: center;
+          justify-content: center;
+          height: 26px;
+          min-width: 52px;
+          padding: 0 10px;
+          font-size: 12px;
+          border-radius: 999px;
+          white-space: nowrap;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact #cgpt-upload-module .cgpt-upload-groups-head {
@@ -1182,6 +1190,16 @@
           background: rgba(22, 101, 52, 0.96);
           color: #dcfce7;
           border-color: rgba(74, 222, 128, 0.75);
+        }
+
+        .cgpt-toast-boot-ready {
+          background: #fde047;
+          color: #111827;
+          border-color: #facc15;
+          box-shadow:
+            0 10px 26px rgba(0, 0, 0, 0.35),
+            0 0 0 1px rgba(250, 204, 21, 0.45),
+            0 0 18px rgba(253, 224, 71, 0.45);
         }
 
         .cgpt-toast-running {
@@ -1768,9 +1786,9 @@
         .cgpt-btn {
           height: 32px;
           padding: 0 10px;
-          border: 1px solid #475569;
-          background: #1f2937;
-          color: #f2f2f2;
+          border: 1px solid var(--cgpt-btn-border, #475569);
+          background: var(--cgpt-btn-bg, #1f2937);
+          color: var(--cgpt-btn-text, #f2f2f2);
           border-radius: 9px;
           cursor: pointer;
           white-space: nowrap;
@@ -1782,7 +1800,9 @@
         }
 
         .cgpt-btn:hover {
-          background: #273449;
+          background: var(--cgpt-btn-hover-bg, #273449);
+          border-color: var(--cgpt-btn-hover-border, var(--cgpt-btn-border, #475569));
+          color: var(--cgpt-btn-hover-text, var(--cgpt-btn-text, #f2f2f2));
         }
 
         .cgpt-btn:focus {
@@ -1810,16 +1830,40 @@
           background: #1d4ed8;
         }
 
+        .cgpt-btn[data-action="copy-only"],
+        .cgpt-btn[data-action="copy-last-reply"],
+        .cgpt-btn[data-action="copy-log"],
+        .cgpt-btn[data-action="copy-and-hotkey"],
+        .cgpt-btn[data-action="copy-shortcut"],
+        .cgpt-btn[data-action="copy-and-continue"],
+        .cgpt-btn[data-action="copy-hotkey-continue"],
+        .cgpt-btn[data-action="loop-copy-hotkey-continue"] {
+          --cgpt-btn-bg: linear-gradient(135deg, #2563eb, #4f46e5);
+          --cgpt-btn-border: rgba(147, 197, 253, 0.75);
+          --cgpt-btn-hover-bg: linear-gradient(135deg, #3b82f6, #6366f1);
+          --cgpt-btn-hover-border: rgba(191, 219, 254, 0.95);
+          --cgpt-btn-text: #ffffff;
+          --cgpt-btn-hover-text: #ffffff;
+        }
+
         #cgpt-copy-toolbox-log.cgpt-btn,
         .cgpt-btn[data-action="copy-log"] {
-          background: linear-gradient(180deg, #2563eb, #1d4ed8);
-          border-color: rgba(147, 197, 253, 0.45);
-          color: #ffffff;
+          --cgpt-btn-bg: linear-gradient(135deg, #2563eb, #4f46e5);
+          --cgpt-btn-border: rgba(147, 197, 253, 0.75);
+          --cgpt-btn-hover-bg: linear-gradient(135deg, #3b82f6, #6366f1);
+          --cgpt-btn-hover-border: rgba(191, 219, 254, 0.95);
+          --cgpt-btn-text: #ffffff;
+          --cgpt-btn-hover-text: #ffffff;
+          background: var(--cgpt-btn-bg);
+          border-color: var(--cgpt-btn-border);
+          color: var(--cgpt-btn-text);
         }
 
         #cgpt-copy-toolbox-log.cgpt-btn:hover,
         .cgpt-btn[data-action="copy-log"]:hover {
-          background: linear-gradient(180deg, #3b82f6, #2563eb);
+          background: var(--cgpt-btn-hover-bg);
+          border-color: var(--cgpt-btn-hover-border, var(--cgpt-btn-border));
+          color: var(--cgpt-btn-hover-text, var(--cgpt-btn-text));
         }
 
         #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-busy,
@@ -2025,7 +2069,6 @@
           cursor: not-allowed;
         }
 
-        #cgpt-upload-start[data-upload-state="uploading"],
         #cgpt-upload-start.cgpt-btn-busy,
         #cgpt-upload-start[data-cgpt-button-phase="uploading"],
         #cgpt-upload-start[data-cgpt-button-phase="running"] {
@@ -2036,7 +2079,6 @@
           cursor: pointer !important;
         }
 
-        #cgpt-upload-start[data-upload-state="uploading"]:hover,
         #cgpt-upload-start.cgpt-btn-busy:hover,
         #cgpt-upload-start[data-cgpt-button-phase="uploading"]:hover,
         #cgpt-upload-start[data-cgpt-button-phase="running"]:hover {
@@ -2146,9 +2188,15 @@
 
         
         #cgpt-copy-last-message-scroll-bottom {
-          background: #2563eb !important;
-          border-color: #3b82f6 !important;
-          color: #ffffff !important;
+          --cgpt-btn-bg: linear-gradient(135deg, #2563eb, #4f46e5);
+          --cgpt-btn-border: rgba(147, 197, 253, 0.75);
+          --cgpt-btn-hover-bg: linear-gradient(135deg, #3b82f6, #6366f1);
+          --cgpt-btn-hover-border: rgba(191, 219, 254, 0.95);
+          --cgpt-btn-text: #ffffff;
+          --cgpt-btn-hover-text: #ffffff;
+          background: var(--cgpt-btn-bg) !important;
+          border-color: var(--cgpt-btn-border) !important;
+          color: var(--cgpt-btn-text) !important;
           pointer-events: auto !important;
           user-select: none !important;
           touch-action: manipulation !important;
@@ -2158,10 +2206,17 @@
           pointer-events: auto !important;
         }
 
-        #cgpt-copy-last-message-scroll-bottom:hover:not(:disabled),
+        #cgpt-copy-last-message-scroll-bottom:hover:not(:disabled) {
+          background: var(--cgpt-btn-hover-bg) !important;
+          border-color: var(--cgpt-btn-hover-border, var(--cgpt-btn-border)) !important;
+          color: var(--cgpt-btn-hover-text, var(--cgpt-btn-text)) !important;
+        }
+
         #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer:hover:not(:disabled),
         #cgpt-copy-last-message-scroll-bottom.waiting:hover:not(:disabled) {
           background: #b45309 !important;
+          border-color: #f59e0b !important;
+          color: #ffffff !important;
         }
 
         #cgpt-copy-last-message-scroll-bottom.cgpt-waiting-answer,
@@ -4484,7 +4539,29 @@
       headerTitleFlashBaseText = '';
       headerTitleFlashOn = false;
 
-      appendLog(`[TITLE_FLASH][header-stop] reason=${reason || '-'}`);
+      const reasonText = String(reason || '-');
+      if (/keydown/i.test(reasonText)) {
+        try {
+          const perfInc = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__CGPT_TOOLBOX_PERF_INC__;
+          if (typeof perfInc === 'function') {
+            perfInc('titleFlash.stop.keydown', 1);
+          }
+        } catch (e) {
+          // ignore
+        }
+
+        // 默认关闭普通 keydown 日志，仅在性能调试模式下输出，且 1s 节流
+        if (isPerfDebugEnabled()) {
+          appendLogThrottled(
+            'TITLE_FLASH:header-stop:keydown',
+            `[TITLE_FLASH][header-stop] reason=${reasonText}`,
+            1000,
+          );
+        }
+        return;
+      }
+
+      appendLog(`[TITLE_FLASH][header-stop] reason=${reasonText}`);
     }
 
     function flashHeaderTitleOnce(message = '回复完成', options = {}) {
@@ -5515,6 +5592,14 @@
         && typeof AutoQueueModule.bindDelegatedActions === 'function'
       ) {
         AutoQueueModule.bindDelegatedActions('switch-tab-autoq');
+      }
+
+      if (
+        nextTab === 'upload'
+        && typeof UploadModule !== 'undefined'
+        && typeof UploadModule.refresh === 'function'
+      ) {
+        UploadModule.refresh({ reason: `switch-tab:${nextTab}` });
       }
 
       scheduleToolboxHorizontalOverflowLog(`switch-tab:${nextTab}`, 0);
@@ -7546,7 +7631,7 @@
     function saveToolboxLayoutState(reason = '') {
       const layout = collectToolboxLayoutState();
       saveToolboxPageStatePatch(
-        { layout_state: layout },
+        { layoutState: layout },
         reason || 'save-toolbox-layout',
       );
       appendLog(
@@ -9391,6 +9476,7 @@
         'offline',
         'online',
         'danger',
+        'boot-ready',
       ].includes(normalizedType)) {
         return normalizedType;
       }
@@ -9620,8 +9706,84 @@
       badge.style.display = 'none';
     }
 
-    function setStatus(text, type, options) {
-      create();
+    const ToolboxStatusArbiter = {
+      slots: Object.create(null),
+      computePriority(owner, statusType, text, options = {}) {
+        if (typeof options.priority === 'number') {
+          return options.priority;
+        }
+        const type = String(statusType || '').trim();
+        if (owner === 'upload' && (type === 'running' || type === 'danger')) return 90;
+        if (owner === 'send' && (type === 'running' || type === 'danger')) return 85;
+        if (owner === 'boot' && (type === 'error' || type === 'danger')) return 80;
+        if (owner === 'module-health' && (type === 'error' || type === 'danger')) return 75;
+        if (owner === 'bridge' && (type === 'online' || type === 'danger' || type === 'offline')) return 40;
+        if (owner === 'autoqueue') return 35;
+        if (type === 'danger' || type === 'error') return 70;
+        if (type === 'running') return 60;
+        if (type === 'warn') return 50;
+        if (type === 'offline') return 45;
+        if (type === 'online' || type === 'success') return 30;
+        return 10;
+      },
+      push(entry) {
+        const owner = entry && entry.owner ? String(entry.owner) : 'legacy';
+        if (!owner) return;
+        this.slots[owner] = entry;
+      },
+      clear(owner) {
+        const key = String(owner || '').trim();
+        if (!key) {
+          return;
+        }
+        delete this.slots[key];
+      },
+      purgeExpired(now) {
+        Object.keys(this.slots).forEach((key) => {
+          const item = this.slots[key];
+          if (!item) return;
+          if (item.expiresAt && now >= item.expiresAt) {
+            delete this.slots[key];
+          }
+        });
+      },
+      getTop(now) {
+        this.purgeExpired(now);
+        let best = null;
+        Object.keys(this.slots).forEach((key) => {
+          const item = this.slots[key];
+          if (!item) return;
+          if (!best) {
+            best = item;
+            return;
+          }
+          if (item.priority > best.priority) {
+            best = item;
+            return;
+          }
+          if (item.priority === best.priority && item.createdAt > best.createdAt) {
+            best = item;
+          }
+        });
+        return best;
+      },
+    };
+
+    function applyTopStatusEntry(entry) {
+      if (!entry) {
+        latestStatusText = '';
+        hideStatusBadge();
+        if (root) {
+          root.setAttribute('data-status-type', 'idle');
+        }
+        return;
+      }
+
+      const {
+        text,
+        statusType,
+        options,
+      } = entry;
 
       const rawStatusText = String(text || '').trim();
 
@@ -9635,7 +9797,6 @@
       const opts = options || {};
       latestStatusText = rawStatusText;
 
-      const statusType = inferStatusType(latestStatusText, type);
       const persistent = shouldPersistStatus(statusType, latestStatusText, opts);
       const shortText = buildShortStatusText(latestStatusText, statusType, opts);
       const isTopMainStatus = isTopMainStatusDisplayText(latestStatusText, statusType, {
@@ -9686,6 +9847,72 @@
         if (logModuleRef && typeof logModuleRef.add === 'function') {
           logModuleRef.add(`[状态][${statusType}] ${latestStatusText}`);
         }
+      }
+    }
+
+    function setStatus(text, type, options) {
+      create();
+
+      const rawStatusText = String(text || '').trim();
+
+      if (isPromptCountStatusText(rawStatusText)) {
+        latestStatusText = '';
+        hideStatusBadge();
+        purgeForbiddenStatusBadge('setStatus-prompt-count');
+        return;
+      }
+
+      const statusType = inferStatusType(rawStatusText, type);
+      const opts = options || {};
+      const owner = String(opts.owner || 'ui');
+      if (
+        owner === 'upload'
+        && statusType === 'error'
+        && opts.source !== 'real-upload'
+      ) {
+        if (opts.persist == null) {
+          opts.persist = false;
+        }
+        appendLog(
+          `[STATUS_ARBITER][UPLOAD_ERROR_SUPPRESSED] owner=${owner} text=${rawStatusText || '-'} source=${String(opts.source || '-')} reason=${String(opts.reason || '-')}`,
+        );
+      }
+      if (!opts.owner) {
+        appendLog(`[STATUS_ARBITER][MISSING_OWNER] text=${rawStatusText || '-'} type=${statusType || '-'} fallback=ui`);
+      }
+      const now = Date.now();
+      const ttlMs = Number(opts.ttlMs || 0);
+      const entry = {
+        owner,
+        text: rawStatusText,
+        statusType,
+        options: opts,
+        createdAt: now,
+        priority: ToolboxStatusArbiter.computePriority(owner, statusType, rawStatusText, opts),
+        expiresAt: ttlMs > 0 ? now + ttlMs : 0,
+      };
+
+      ToolboxStatusArbiter.push(entry);
+
+      const top = ToolboxStatusArbiter.getTop(now);
+      applyTopStatusEntry(top);
+    }
+
+    function clearStatus(owner) {
+      const ownerKey = String(owner || '').trim();
+      if (!ownerKey) {
+        return;
+      }
+      ToolboxStatusArbiter.clear(ownerKey);
+      const top = ToolboxStatusArbiter.getTop(Date.now());
+      applyTopStatusEntry(top);
+    }
+
+    function refreshStatus(reason = '') {
+      const top = ToolboxStatusArbiter.getTop(Date.now());
+      applyTopStatusEntry(top);
+      if (reason) {
+        appendLog(`[STATUS_ARBITER][REFRESH] reason=${reason}`);
       }
     }
 
@@ -9752,6 +9979,7 @@
         'cgpt-toast-danger',
         'cgpt-toast-offline',
         'cgpt-toast-online',
+        'cgpt-toast-boot-ready',
         'show',
       );
       box.classList.add(`cgpt-toast-${toastType}`);
@@ -9916,6 +10144,14 @@
       appendingLog = true;
 
       try {
+        try {
+          const perfInc = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__CGPT_TOOLBOX_PERF_INC__;
+          if (typeof perfInc === 'function') {
+            perfInc('log.append', 1);
+          }
+        } catch (e) {
+          // ignore
+        }
         const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
         if (logModule && typeof logModule.add === 'function') {
           logModule.add(message);
@@ -9926,6 +10162,47 @@
         console.error('[ChatGPT toolbox] appendLog failed', err, message);
       } finally {
         appendingLog = false;
+      }
+    }
+
+    const logThrottleAt = new Map(); // key -> ts
+    const logLastValue = new Map(); // key -> lastValue
+
+    function appendLogThrottled(key, text, throttleMs = 2000) {
+      const k = String(key || text || 'default');
+      const now = Date.now();
+      const lastAt = Number(logThrottleAt.get(k) || 0);
+      const gap = Number(throttleMs || 0) || 0;
+      if (gap > 0 && now - lastAt < gap) {
+        return false;
+      }
+      logThrottleAt.set(k, now);
+      appendLog(text);
+      return true;
+    }
+
+    function appendLogIfChanged(key, value, text, throttleMsIfSame = 0) {
+      const k = String(key || 'default');
+      const v = value == null ? '' : String(value);
+      const prev = logLastValue.get(k);
+      if (prev === v) {
+        if (throttleMsIfSame > 0) {
+          return appendLogThrottled(`${k}:same`, text, throttleMsIfSame);
+        }
+        return false;
+      }
+      logLastValue.set(k, v);
+      appendLog(text);
+      return true;
+    }
+
+    function isPerfDebugEnabled() {
+      try {
+        return typeof MemoryManager !== 'undefined'
+          && typeof MemoryManager.get === 'function'
+          && !!MemoryManager.get('bridgeDebugEnabled', false);
+      } catch (e) {
+        return false;
       }
     }
 
@@ -10104,8 +10381,12 @@
       create,
       getHost,
       setStatus,
+      clearStatus,
+      refreshStatus,
       showToast,
       appendLog,
+      appendLogThrottled,
+      appendLogIfChanged,
       purgeForbiddenStatusBadge,
       ensureToolboxHeaderPageStatusRow,
       switchTab,

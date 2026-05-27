@@ -15,6 +15,7 @@ from app.cursor_code.runtime import (
     get_cursor_code_pause_reason,
     is_cursor_code_paused,
 )
+from app.utils.time_utils import now_text as _now_text
 
 job_queue = deque()
 job_map = {}
@@ -139,10 +140,6 @@ CHATGPT_CURSOR_PROMPT_TEMPLATE = """请根据下面需求，整理成适合直�
 用户需求：
 {user_requirement}
 """
-
-
-def _now_text():
-    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _new_job_id():

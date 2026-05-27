@@ -32,6 +32,16 @@
     let logDomDirty = false;
     let renderScheduled = false;
 
+    function setLogStatus(text, type, options = {}) {
+      if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
+        return;
+      }
+      ToolboxShell.setStatus(text, type, {
+        ...options,
+        owner: options.owner || 'logger',
+      });
+    }
+
     function normalizeToolboxLogText(text) {
       const raw = String(text || '');
       if (raw.length <= TOOLBOX_MAX_LOG_TEXT_LEN) {
@@ -87,6 +97,7 @@
         logPrefix: 'LOG_COPY',
         emptyText: '暂无日志',
         playSuccessBeep: false,
+        statusOwner: 'logger',
       });
       ToolboxShell.appendLog(
         `[LOG_COPY][${ok ? 'ok' : 'failed'}] source=${String(source || '-')} lines=${state.lines.length} chars=${text.length}`,
@@ -99,7 +110,7 @@
         void copyAllLogs('log-tab-button').catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] copy log failed', err);
-          ToolboxShell.setStatus(`复制日志失败：${errText}`, 'error');
+          setLogStatus(`复制日志失败：${errText}`, 'error');
           ToolboxShell.appendLog(`[LOG_COPY][failed] source=log-tab-button error=${errText}`);
         });
       }, {
@@ -118,7 +129,7 @@
         logDomDirty = false;
         render();
         persistLogLines();
-        ToolboxShell.setStatus('已清空日志');
+        setLogStatus('已清空日志');
       }, {
         moduleName: 'LogModule',
         bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-clear',
@@ -212,6 +223,7 @@
           logPrefix: 'LOG_COPY_ERRORS',
           emptyText: '未发现错误日志',
           playSuccessBeep: false,
+          statusOwner: 'logger',
         });
       }, {
         moduleName: 'LogModule',

@@ -90,7 +90,7 @@ def build_ui_page_selector_refresh() -> str:
     return '''
     def _pages_for_page_combo(self, status=None):
         """优先使用 PageRegistry.snapshot.pages，否则从 bridge status 提取。"""
-        from app.utils.page_status import PageRegistry
+        from app.utils.page_snapshot import PageRegistry
 
         reg = getattr(self, "page_registry", None)
         if isinstance(reg, PageRegistry) and reg.pages:

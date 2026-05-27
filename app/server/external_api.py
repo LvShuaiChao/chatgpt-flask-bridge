@@ -18,10 +18,6 @@ from app.server.runtime_state import (
 logger = logging.getLogger(__name__)
 
 
-def _external_auth_ok():
-    return external_auth_ok()
-
-
 def _external_json_error(error, code, status=400):
     return jsonify({"ok": False, "error": error, "code": code}), status
 
@@ -781,7 +777,7 @@ def _external_create_chat_send(body):
 
 
 def _require_external_auth():
-    if _external_auth_ok():
+    if external_auth_ok():
         return None
     return _external_json_error("未授权", "UNAUTHORIZED", 401)
 

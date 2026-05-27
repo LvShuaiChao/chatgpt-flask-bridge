@@ -625,7 +625,7 @@ class SendFlowMixin:
         if not temp_page_id:
             return result
         from app.utils.page_command import resolve_bound_page_in_registry
-        from app.utils.page_status import PageRegistry, binding_from_session
+        from app.utils.page_snapshot import PageRegistry, binding_from_session
 
         status = self._bridge_ui.last_bridge_status or {}
         reg = getattr(self, "page_registry", None)

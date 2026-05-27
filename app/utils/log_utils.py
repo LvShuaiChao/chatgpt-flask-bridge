@@ -4,8 +4,9 @@ import os
 import platform
 import sys
 import threading
-import time
 import traceback
+
+from app.utils.time_utils import now_text as _now_text
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -175,10 +176,6 @@ def _rotate_log_if_needed(next_line_bytes):
         LOG_FILE.replace(_rotated_log_path(1))
     except Exception as error:
         print(f"[LOG_ROTATE_FAILED] {type(error).__name__}: {error}")
-
-
-def _now_text():
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 def _safe_text(value, max_len=_MAX_FIELD_TEXT_LEN):

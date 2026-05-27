@@ -8,7 +8,7 @@ import traceback
 from app.models import normalize_remote_chatgpt, remote_binding_enabled
 from app.server import get_bridge_status, is_server_running
 from app.utils.page_command import resolve_page_command_target
-from app.utils.page_status import (
+from app.utils.page_snapshot import (
     PageRegistry,
     binding_from_session,
     pages_from_bridge_status,

@@ -30,7 +30,6 @@ from app.models import (
 )
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import (
-    PageRegistry,
     can_sync_conversation,
     find_reusable_chatgpt_home_page,
     is_page_online,
@@ -39,7 +38,7 @@ from app.utils.page_status import (
     page_list_display_id,
     page_url_from,
 )
-from app.utils.page_snapshot import pages_from_bridge_status
+from app.utils.page_snapshot import PageRegistry, pages_from_bridge_status
 from app.utils.tm_activity import classify_tm_client_activity
 
 
@@ -80,7 +79,8 @@ class PageAutoBindMixin:
             .strip()
         )
         status = bridge_status if bridge_status is not None else self._bridge_ui.last_bridge_status
-        from app.utils.page_status import PageRegistry, is_page_online
+        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import is_page_online
 
         reg = getattr(self, "page_registry", None)
         if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
@@ -1885,7 +1885,8 @@ class PageAutoBindMixin:
             write_session_remote_chatgpt,
         )
         from app.url_utils import parse_conversation_id
-        from app.utils.page_status import PageRegistry, page_url_from
+        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import page_url_from
 
         reg = registry
         if not isinstance(reg, PageRegistry):

@@ -12,6 +12,7 @@ import traceback
 from flask import jsonify, request
 from werkzeug.exceptions import BadRequest
 
+from app.server.auth_utils import external_auth_ok
 from app.server.runtime_state import _dispatch_to_gui, _log
 
 SYSTEM_HOTKEY_MIN_INTERVAL_SEC = 0.8
@@ -21,12 +22,24 @@ _MODIFIER_ALIASES = {
     "ctrl": "ctrl",
     "control": "ctrl",
     "ctl": "ctrl",
+    "controlleft": "ctrl",
+    "controlright": "ctrl",
+    "ctrlleft": "ctrl",
+    "ctrlright": "ctrl",
     "alt": "alt",
     "option": "alt",
+    "altleft": "alt",
+    "altright": "alt",
     "shift": "shift",
+    "shiftleft": "shift",
+    "shiftright": "shift",
     "meta": "win",
     "cmd": "win",
     "command": "win",
+    "metaleft": "win",
+    "metaright": "win",
+    "winleft": "win",
+    "winright": "win",
     "win": "win",
     "windows": "win",
 }
@@ -59,12 +72,6 @@ _ALLOWED_NON_MODIFIER_KEYS = {
     *[f"f{num}" for num in range(1, 13)],
     *_NAMED_KEY_ALIASES.values(),
 }
-
-
-def _external_auth_ok() -> bool:
-    from app.server.auth_utils import external_auth_ok
-
-    return external_auth_ok()
 
 
 def _is_local_request() -> bool:
@@ -157,7 +164,7 @@ def execute_system_hotkey(hotkey: str, *, source: str = "") -> dict:
 def api_v1_system_hotkey():
     if not _is_local_request():
         return _hotkey_error("仅允许本机请求执行快捷键", "LOCAL_ONLY", 403)
-    if not _external_auth_ok():
+    if not external_auth_ok():
         return _hotkey_error("认证失败", "UNAUTHORIZED", 401)
 
     try:

@@ -3,7 +3,7 @@
   const SEND_PIPELINE_BUTTON_WAIT_MAX_ATTEMPTS = 40;
   const SEND_PIPELINE_BUTTON_WAIT_INTERVAL_MS = 200;
   const SEND_PIPELINE_BUTTON_DISABLED_WAIT_MS = 8000;
-  const SEND_PIPELINE_MANUAL_BUTTON_WAIT_MAX_ATTEMPTS = 12;
+  const SEND_PIPELINE_MANUAL_BUTTON_WAIT_MAX_ATTEMPTS = 20;
   const SEND_PIPELINE_MANUAL_BUTTON_WAIT_INTERVAL_MS = 150;
   const SEND_PIPELINE_MANUAL_BUTTON_DISABLED_WAIT_MS = 2500;
   const SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS = 10000;
@@ -182,6 +182,10 @@
   async function sendPipelineWriteAndVerifyText(prompt, source, retryIndex, ctx) {
     const text = String(prompt || '');
 
+    const beforeSendable = typeof ComposerApi.canSendNow === 'function'
+      ? (ComposerApi.canSendNow() ? 1 : 0)
+      : 0;
+
     if (typeof ComposerApi.clearComposerValue === 'function') {
       ComposerApi.clearComposerValue();
     } else if (typeof ComposerApi.setComposerValue === 'function') {
@@ -220,6 +224,21 @@
       };
 
     if (check.ok) {
+      const afterSendable = typeof ComposerApi.canSendNow === 'function'
+        ? (ComposerApi.canSendNow() ? 1 : 0)
+        : 0;
+      try {
+        const taskIndex = (typeof state !== 'undefined' && state && state.taskRun)
+          ? Number(state.taskRun.currentIndex || 0) + 1
+          : '?';
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[AUTOQ][SENDABLE_RECHECK_AFTER_INPUT] before=${beforeSendable} after=${afterSendable} taskIndex=${taskIndex}`,
+          );
+        }
+      } catch (e) {
+        // ignore log failures
+      }
       sendPipelineLog('[SEND_PIPELINE][TEXT_VERIFY_OK]', {
         source: ctx.source,
         mode: ctx.mode,
@@ -243,16 +262,13 @@
   }
 
   function sendPipelineNativeSendReadyNow() {
-    const payload = typeof composerHasPayloadInInput === 'function'
-      ? composerHasPayloadInInput()
-      : { attachmentUploading: false };
-    if (payload.attachmentUploading) {
-      return false;
-    }
     const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
       ? getComposerSendButtonSnapshot({ silent: true })
       : { ready: false };
-    return sendSnap.ready === true;
+    if (sendSnap.ready === true) {
+      return true;
+    }
+    return false;
   }
 
   function sendPipelineIsNativeSendButtonReady(sendSnap, capability) {
@@ -308,12 +324,35 @@
     );
     const startedAt = Date.now();
     let useEnterFallback = false;
+    let lastBackgroundWaitLogAt = 0;
 
     if (typeof invalidateComposerResponseStateCache === 'function') {
       invalidateComposerResponseStateCache();
     }
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const throttled = !!(
+        (typeof BrowserRuntimeHealth !== 'undefined'
+          && BrowserRuntimeHealth
+          && typeof BrowserRuntimeHealth.isProbablyThrottled === 'function'
+          && BrowserRuntimeHealth.isProbablyThrottled())
+        || (typeof document !== 'undefined' && document.hidden)
+      );
+      if (throttled) {
+        attempt -= 1;
+        const now = Date.now();
+        if (now - lastBackgroundWaitLogAt >= 2000) {
+          lastBackgroundWaitLogAt = now;
+          sendPipelineLog('[SEND_PIPELINE][WAIT_BACKGROUND]', Object.assign({}, ctx, {
+            reason: 'browser-throttled',
+            retryable: true,
+            wait_send: true,
+          }));
+        }
+        await sendPipelineSleep(intervalMs);
+        continue;
+      }
+
       if (typeof ctx.shouldStop === 'function' && ctx.shouldStop()) {
         return { ok: false, reason: 'cancelled' };
       }
@@ -416,8 +455,12 @@
 
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(line);
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][WAIT_NATIVE_SEND] attempt=${attempt} nativeReady=${sendSnap && sendSnap.ready ? 1 : 0} reason=${String(checkReason || '-')}`,
+          );
         } else {
           console.log(line);
+          console.log(`[SEND_MESSAGE][WAIT_NATIVE_SEND] attempt=${attempt} nativeReady=${sendSnap && sendSnap.ready ? 1 : 0} reason=${String(checkReason || '-')}`);
         }
       } catch (logErr) {
         // 日志失败不应影响发送流程本身
@@ -434,11 +477,16 @@
       const hasComposerText = typeof ComposerApi.hasRealComposerText === 'function'
         ? ComposerApi.hasRealComposerText()
         : composerText.length > 0;
-      const hasAttachment = Number(capability.attachment_count || 0) > 0
+      const uniqueAttachmentSnapshot = typeof ComposerApi.getUniqueComposerAttachmentSnapshot === 'function'
+        ? ComposerApi.getUniqueComposerAttachmentSnapshot({ reason: 'wait-native-send' })
+        : null;
+      const hasAttachment = (uniqueAttachmentSnapshot ? Number(uniqueAttachmentSnapshot.uniqueCount || 0) : 0) > 0
+        || Number(capability.attachment_count || 0) > 0
         || Boolean(capability.has_composer_payload && !hasComposerText);
       const hasUploadingAttachment = Number(
         capability.attachment_uploading_count || capability.attachmentUploadingCount || 0,
       ) > 0
+        || (uniqueAttachmentSnapshot && Number(uniqueAttachmentSnapshot.uploadingCount || 0) > 0)
         || (typeof ComposerApi !== 'undefined'
           && typeof ComposerApi.isAttachmentStillUploading === 'function'
           && ComposerApi.isAttachmentStillUploading());
@@ -713,9 +761,16 @@
       const composerTextLen = typeof ComposerApi.getComposerText === 'function'
         ? String(ComposerApi.getComposerText() || '').trim().length
         : 0;
-      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-        ? ComposerApi.countAttachmentChips()
-        : 0;
+      const attachmentSnapshot = typeof ComposerApi.getUniqueComposerAttachmentSnapshot === 'function'
+        ? ComposerApi.getUniqueComposerAttachmentSnapshot({ reason: 'send-click' })
+        : null;
+      const attachmentCount = attachmentSnapshot
+        ? Number(attachmentSnapshot.uniqueCount || 0)
+        : (
+          typeof ComposerApi.countAttachmentChips === 'function'
+            ? ComposerApi.countAttachmentChips()
+            : 0
+        );
       const uploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
         && ComposerApi.isAttachmentStillUploading();
       let nativeReady = 0;
@@ -738,8 +793,12 @@
       ].join(' ');
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(fastLine);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][CLICK] source=${source} textLen=${composerTextLen} attachmentUniqueCount=${attachmentCount} nativeReady=${nativeReady} url=${location.href || '-'}`,
+        );
       } else {
         console.log(fastLine);
+        console.log(`[SEND_MESSAGE][CLICK] source=${source} textLen=${composerTextLen} attachmentUniqueCount=${attachmentCount} nativeReady=${nativeReady} url=${location.href || '-'}`);
       }
     }
 
@@ -779,9 +838,29 @@
           && isHomeNewChatReadyToSendNow();
         const responseState = detectComposerResponseState();
         if (responseState.is_responding && !homeReady) {
+          const composerTextLen = typeof ComposerApi.getComposerText === 'function'
+            ? String(ComposerApi.getComposerText() || '').trim().length
+            : 0;
+          const attachmentSnapshot = typeof ComposerApi.getUniqueComposerAttachmentSnapshot === 'function'
+            ? ComposerApi.getUniqueComposerAttachmentSnapshot({ reason: 'blocked-assistant-busy' })
+            : null;
+          const attachmentCount = attachmentSnapshot ? Number(attachmentSnapshot.uniqueCount || 0) : 0;
           result.reason = 'assistant_busy';
           result.wait_reply = true;
           result.retryable = true;
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][BLOCKED_BY_ASSISTANT_BUSY] hasPayload=${composerTextLen > 0 || attachmentCount > 0 ? 1 : 0} textLen=${composerTextLen} attachmentCount=${attachmentCount}`,
+            );
+            if (typeof ToolboxShell.setStatus === 'function') {
+              ToolboxShell.setStatus('助手正在回复，当前不能发送新消息', 'warning', {
+                owner: 'send',
+              });
+            }
+            if (typeof ToolboxShell.showToast === 'function') {
+              ToolboxShell.showToast('助手正在回复，当前不能发送新消息', 'warn', 1800);
+            }
+          }
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
             wait_reply: true,
@@ -1068,7 +1147,7 @@
           return result;
         }
 
-        if (attachmentUploading) {
+        if (attachmentUploading && !nativeReady) {
           if (manualSend) {
             result.reason = 'waiting_attachment_upload_done';
             result.retryable = true;
@@ -1184,8 +1263,10 @@
         const hasAttachmentOnFail = typeof hasComposerAttachment === 'function' && hasComposerAttachment();
         const attachmentStillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
           && ComposerApi.isAttachmentStillUploading();
+        const nativeReadyOnFail = sendPipelineNativeSendReadyNow();
         if (
           hasAttachmentOnFail
+          && !nativeReadyOnFail
           && (
             attachmentStillUploading
             || result.reason === 'waiting_attachment_upload_done'
@@ -1201,6 +1282,7 @@
           });
         } else if (
           hasAttachmentOnFail
+          && !nativeReadyOnFail
           && (result.reason === 'send_button_not_found' || result.reason === 'send_button_not_ready_after_text')
         ) {
           result.reason = 'waiting_attachment_upload_done';

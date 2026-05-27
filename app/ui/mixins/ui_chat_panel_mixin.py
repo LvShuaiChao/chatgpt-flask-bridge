@@ -1,5 +1,8 @@
 """聊天页：侧栏、会话区、状态条与分割条持久化。"""
+import logging
 import traceback
+
+logger = logging.getLogger(__name__)
 
 from app.constants import DEFAULT_CHAT_INPUT_TEXT, STATUS_CHIP_SESSION_BIND_TOOLTIP
 from app.ui.widgets.chat_input import ChatInput
@@ -70,6 +73,11 @@ class UiChatPanelMixin:
         text = input_widget.toPlainText()
         if text.strip():
             drafts[session_id] = text
+            logger.info(
+                "[SESSION][COMPOSE_DRAFT_SAVE] session_id=%s length=%d",
+                session_id,
+                len(text),
+            )
         else:
             drafts.pop(session_id, None)
 
@@ -85,6 +93,11 @@ class UiChatPanelMixin:
         if str(draft).strip():
             input_widget.setPlainText(draft)
             self._move_message_input_cursor_to_end(input_widget)
+            logger.info(
+                "[SESSION][COMPOSE_DRAFT_RESTORE] session_id=%s length=%d",
+                session_id,
+                len(str(draft)),
+            )
             return
         self._ensure_default_chat_input_text()
 

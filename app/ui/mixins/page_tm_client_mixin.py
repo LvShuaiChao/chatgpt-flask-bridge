@@ -41,7 +41,7 @@ from app.utils.tm_activity import (
     classify_tm_client_activity,
     compute_tm_activity_metrics,
 )
-from app.utils.page_status import PageRegistry, sort_pages_by_display_id
+from app.utils.page_snapshot import PageRegistry, sort_pages_by_display_id
 
 
 class PageTmClientMixin:
@@ -851,7 +851,8 @@ class PageTmClientMixin:
 
     def _find_page_by_display_id(self, page_display_id: str) -> dict | None:
         """按 page_display_id 在最新 registry 中查找页面摘要（含 online）。"""
-        from app.utils.page_status import PageRegistry, is_page_online
+        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import is_page_online
 
         pid = (page_display_id or "").strip()
         if not pid:

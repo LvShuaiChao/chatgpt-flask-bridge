@@ -2,22 +2,54 @@
    * UploadButtonVm：上传区按钮状态判定矩阵（文字 / phase / disabled / action）
    ********************************************************************/
 
+  const REQUIRED_TASK_UI_PHASES = Object.freeze([
+    'idle',
+    'initializing',
+    'waiting',
+    'uploading',
+    'waiting_send',
+    'waiting_page_reply_to_send',
+    'sending',
+    'waiting_reply',
+    'copying',
+    'running',
+    'continuing',
+    'navigating',
+    'quota_waiting',
+    'startup_uploading',
+    'cancelling',
+    'checking',
+    'waiting_input',
+    'waiting_attachment',
+    'cancelled',
+    'success',
+    'failed',
+    'completed',
+    'danger',
+    'disabled',
+    'sending_hotkey',
+    'sending_continue',
+    'confirming_clipboard',
+    'waiting_next_reply',
+    'auto_uploading',
+    'home_navigation',
+    'stopped',
+    'stopping',
+    'pending_confirm',
+  ]);
+
   function buildTaskPhaseEnum() {
-    const phases = typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.Phases)
-      ? ButtonTasks.Phases
-      : [
-        'idle',
-        'uploading',
-        'waiting_send',
-        'sending',
-        'waiting_reply',
-        'copying',
-        'running',
-        'cancelling',
-        'cancelled',
-        'success',
-        'failed',
-      ];
+    const inheritedPhases = typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.UiPhases)
+      ? ButtonTasks.UiPhases
+      : (
+        typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.AllPhases)
+          ? ButtonTasks.AllPhases
+          : []
+      );
+    const phases = Array.from(new Set([
+      ...inheritedPhases,
+      ...REQUIRED_TASK_UI_PHASES,
+    ]));
     const out = {};
     for (const phase of phases) {
       const key = String(phase || '').trim().toUpperCase().replace(/-/g, '_');
@@ -137,18 +169,83 @@
     return '按钮';
   }
 
-  function resolveWaitingReplyOwner(snapshot = {}, capability = {}) {
-    void capability;
+  function getNormalizedSendTaskPhase(snapshot = {}) {
     const sendTask = snapshot.sendTask && typeof snapshot.sendTask === 'object'
       ? snapshot.sendTask
       : {};
-    const sendPhase = normalizeTaskPhase(sendTask.phase);
+    const rawPhase = String(sendTask.phase || TaskPhase.IDLE).trim().toLowerCase();
+    const rawSubPhase = String(
+      (sendTask.subPhase != null ? sendTask.subPhase : sendTask.subphase) || '',
+    ).trim().toLowerCase();
+    const normalizedPhase = normalizeTaskPhase(rawPhase === 'waiting_ready' ? 'waiting_send' : rawPhase);
+    if (normalizedPhase === TaskPhase.WAITING_SEND) {
+      if (rawSubPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
+        return TaskPhase.WAITING_PAGE_REPLY_TO_SEND;
+      }
+      if (rawSubPhase === TaskPhase.WAITING_INPUT) {
+        return TaskPhase.WAITING_INPUT;
+      }
+      if (rawSubPhase === TaskPhase.WAITING_ATTACHMENT) {
+        return TaskPhase.WAITING_ATTACHMENT;
+      }
+    }
+    return normalizedPhase;
+  }
+
+  function isLegacySendPending(snapshot = {}) {
+    return !!snapshot.pendingSendAfterReply;
+  }
+
+  function isLegacySendWaitingReply(snapshot = {}) {
+    return !!snapshot.waitingReply;
+  }
+
+  function isLegacyMessageSending(snapshot = {}) {
+    return !!snapshot.messageSending;
+  }
+
+  function getNormalizedAutoQueuePhase() {
+    if (typeof AutoQueueModule === 'undefined' || typeof AutoQueueModule.getState !== 'function') {
+      return TaskPhase.IDLE;
+    }
+    const autoState = AutoQueueModule.getState() || {};
+    return normalizeTaskPhase(String(autoState.phase || TaskPhase.IDLE).trim().toLowerCase());
+  }
+
+  function isAutoQueueWaitingReplyPhase() {
+    return getNormalizedAutoQueuePhase() === TaskPhase.WAITING_REPLY;
+  }
+
+  function getNormalizedCopyTaskPhase(snapshot = {}) {
+    const copyTask = snapshot.copyTask && typeof snapshot.copyTask === 'object'
+      ? snapshot.copyTask
+      : {};
+    const taskPhase = normalizeTaskPhase(copyTask.phase || TaskPhase.IDLE);
+    if (taskPhase && taskPhase !== TaskPhase.IDLE) {
+      return taskPhase;
+    }
+
+    const legacyStatus = normalizeTaskPhase(snapshot.copyStatus || TaskPhase.IDLE);
+    if (legacyStatus && legacyStatus !== TaskPhase.IDLE) {
+      return legacyStatus;
+    }
+
+    if (snapshot.copyWaiting) {
+      return TaskPhase.WAITING_REPLY;
+    }
+
+    return taskPhase || TaskPhase.IDLE;
+  }
+
+  function resolveWaitingReplyOwner(snapshot = {}, capability = {}) {
+    void capability;
+    const sendPhase = getNormalizedSendTaskPhase(snapshot);
     // waiting_reply: 已发送，等待 ChatGPT 回复
     // waiting_page_reply_to_send: 页面正在回复，消息尚未真正发送，等待页面空闲后再发
     if (
       sendPhase === TaskPhase.WAITING_REPLY
       || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
-      || !!snapshot.pendingSendAfterReply
+      || isLegacySendPending(snapshot)
     ) {
       return 'send-message';
     }
@@ -176,18 +273,13 @@
     }
 
     if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getState === 'function') {
-      const autoState = AutoQueueModule.getState() || {};
-      const autoPhase = String(autoState.phase || '').trim().toLowerCase();
-      if (autoPhase === TaskPhase.WAITING_REPLY || !!autoState.waitingReply) {
+      if (isAutoQueueWaitingReplyPhase()) {
         return 'auto-continue';
       }
     }
 
-    const copyTask = snapshot.copyTask && typeof snapshot.copyTask === 'object'
-      ? snapshot.copyTask
-      : {};
-    const copyPhase = normalizeTaskPhase(copyTask.phase || snapshot.copyStatus);
-    if (copyPhase === TaskPhase.WAITING_REPLY || !!snapshot.copyWaiting) {
+    const copyPhase = getNormalizedCopyTaskPhase(snapshot);
+    if (copyPhase === TaskPhase.WAITING_REPLY) {
       return 'copy-only';
     }
 
@@ -416,6 +508,32 @@
       : {};
     const phase = normalizeTaskPhase(task.phase);
     const uploadRunning = phase === TaskPhase.UPLOADING || phase === TaskPhase.CANCELLING;
+    const moduleInitState = String(snapshot.moduleInitState || '').trim().toLowerCase();
+    const moduleInitError = String(snapshot.moduleInitError || '').trim();
+
+    if (moduleInitState === 'initializing') {
+      return {
+        phase: TaskPhase.INITIALIZING,
+        text: '初始化中',
+        title: '上传模块初始化中，请稍候',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'initializing',
+      };
+    }
+
+    if (moduleInitState === 'failed' && moduleInitError) {
+      return {
+        phase: TaskPhase.FAILED,
+        text: '上传失败，点击重试',
+        title: moduleInitError,
+        disabled: false,
+        allowCancel: false,
+        action: 'start',
+        buttonPhase: 'failed',
+      };
+    }
 
     if (task.cancelRequested || phase === TaskPhase.CANCELLING) {
       return {
@@ -502,13 +620,7 @@
   }
 
   function getSendMessageButtonViewState(snapshot = {}, capability = {}, hints = {}) {
-    const sendTask = snapshot && typeof snapshot === 'object' && snapshot.sendTask && typeof snapshot.sendTask === 'object'
-      ? snapshot.sendTask
-      : {};
-
-    const rawPhase = String(sendTask.phase || TaskPhase.IDLE).trim().toLowerCase();
-    const normalizedPhase = rawPhase === 'waiting_ready' ? 'waiting_send' : rawPhase;
-    const phase = normalizeTaskPhase(normalizedPhase);
+    const phase = getNormalizedSendTaskPhase(snapshot);
 
     const failureHint = typeof hints.failureHint === 'string' ? hints.failureHint : '';
     const successHint = typeof hints.successHint === 'string' ? hints.successHint : '';
@@ -550,6 +662,12 @@
         && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
         ? ComposerApi.hasComposerAttachmentUnified()
         : false;
+      const nativeReady = !!(
+        capability.canSendNow
+        || capability.nativeReadyForClick
+        || (typeof capability.isUploadNativeSendReadyForSendNow === 'function'
+          && capability.isUploadNativeSendReadyForSendNow())
+      );
 
       let waitText = '等待发送';
       let waitTitle = '正在等待 ChatGPT 发送按钮可用';
@@ -557,7 +675,12 @@
       if (!textLen && !hasAttachment) {
         waitText = '等待输入框';
         waitTitle = '输入框尚未就绪';
-      } else if (hasAttachment && (!capability.canSendNow || capability.isResponding)) {
+      } else if (hasAttachment && nativeReady) {
+        waitText = capability.isResponding ? '发送中' : '等待点击发送';
+        waitTitle = capability.isResponding
+          ? '原生发送按钮已就绪，正在进入发送流程'
+          : '原生发送按钮已可点击，正在准备触发发送';
+      } else if (hasAttachment && (!nativeReady || capability.isResponding)) {
         waitText = '等待附件';
         waitTitle = '附件仍在上传或处理中';
       } else if (capability.isResponding) {
@@ -613,7 +736,7 @@
     }
 
     // idle
-    if (pendingAttachmentWaitSend) {
+    if (pendingAttachmentWaitSend && !capability.nativeReadyForClick) {
       return finish({
         phase: TaskPhase.IDLE,
         text: '发送消息',
@@ -704,16 +827,13 @@
   }
 
   function getCopyLastReplyButtonViewState(snapshot = {}) {
-    const task = snapshot.copyTask && typeof snapshot.copyTask === 'object'
-      ? snapshot.copyTask
-      : {};
-    const phase = normalizeTaskPhase(task.phase || snapshot.copyStatus || TaskPhase.IDLE);
+    const phase = getNormalizedCopyTaskPhase(snapshot);
     const running = phase !== TaskPhase.IDLE
       && phase !== TaskPhase.SUCCESS
       && phase !== TaskPhase.FAILED
       && phase !== TaskPhase.CANCELLED;
 
-    if (phase === TaskPhase.SUCCESS || snapshot.copyStatus === 'success') {
+    if (phase === TaskPhase.SUCCESS) {
       return {
         phase: TaskPhase.IDLE,
         text: '复制最后回复',
@@ -725,7 +845,7 @@
       };
     }
 
-    if (phase === TaskPhase.FAILED || snapshot.copyStatus === 'failed') {
+    if (phase === TaskPhase.FAILED) {
       return {
         phase: TaskPhase.FAILED,
         text: '复制失败',
@@ -737,7 +857,7 @@
       };
     }
 
-    if (running && (phase === TaskPhase.WAITING_REPLY || snapshot.copyWaiting || snapshot.copyStatus === 'waiting')) {
+    if (running && phase === TaskPhase.WAITING_REPLY) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '等待回复后复制',
@@ -749,7 +869,7 @@
       };
     }
 
-    if (running && (phase === TaskPhase.COPYING || snapshot.copyStatus === 'copying')) {
+    if (running && phase === TaskPhase.COPYING) {
       return {
         phase: TaskPhase.COPYING,
         text: '复制中',
@@ -785,6 +905,11 @@
   }
 
   function getCopyHotkeyOnceButtonViewState(snapshot = {}) {
+    const task = snapshot.copyHotkeyOnceTask && typeof snapshot.copyHotkeyOnceTask === 'object'
+      ? snapshot.copyHotkeyOnceTask
+      : {};
+    const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
+    const phase = normalizeTaskPhase(rawPhase);
     const onceRunning = resolveSnapshotTaskActive(
       snapshot,
       'copyHotkeyOnceTask',
@@ -808,14 +933,37 @@
       return getCopyHotkeyMutualBlockView('continue');
     }
 
-    if (onceRunning) {
+    if (rawPhase === TaskPhase.CANCELLING || task.cancelRequested) {
       return {
-        phase: TaskPhase.RUNNING,
-        text: '处理中...',
-        title: '复制+快捷键流程进行中',
+        phase: TaskPhase.CANCELLING,
+        text: '正在取消',
+        title: '正在取消复制+快捷键等待任务',
         disabled: true,
         allowCancel: false,
         action: 'none',
+        buttonPhase: 'cancelled',
+      };
+    }
+
+    if (onceRunning) {
+      if (rawPhase === TaskPhase.WAITING_REPLY) {
+        return {
+          phase: TaskPhase.WAITING_REPLY,
+          text: '取消等待',
+          title: '正在等待回复完成；再次点击将取消本次复制+快捷键任务',
+          disabled: false,
+          allowCancel: true,
+          action: 'cancel',
+          buttonPhase: 'waiting',
+        };
+      }
+      return {
+        phase: rawPhase || phase || TaskPhase.RUNNING,
+        text: '处理中...',
+        title: '复制+快捷键流程进行中；再次点击将请求取消',
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel',
         buttonPhase: 'running',
       };
     }
@@ -1094,7 +1242,7 @@
       };
     }
 
-    if (phase === 'waiting_reply' || autoState.waitingReply) {
+    if (phase === TaskPhase.WAITING_REPLY || isAutoQueueWaitingReplyPhase()) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '等待回复',
@@ -1163,10 +1311,7 @@
     const normalized = String(action || '').trim();
 
     if (normalized === 'send-message') {
-      const send = snapshot.sendTask && typeof snapshot.sendTask === 'object'
-        ? snapshot.sendTask
-        : {};
-      return normalizeTaskPhase(send.phase);
+      return getNormalizedSendTaskPhase(snapshot);
     }
 
     if (normalized === 'send-hotkey') {
@@ -1177,10 +1322,7 @@
     }
 
     if (normalized === 'copy-only' || normalized === 'copy-last-reply') {
-      const copy = snapshot.copyTask && typeof snapshot.copyTask === 'object'
-        ? snapshot.copyTask
-        : {};
-      return normalizeTaskPhase(copy.phase || snapshot.copyStatus);
+      return getNormalizedCopyTaskPhase(snapshot);
     }
 
     if (normalized === 'copy-and-continue' || normalized === 'copy-continue') {
@@ -1217,10 +1359,20 @@
   }
 
   function getPageReplyStatus(snapshot = {}) {
-    if (snapshot.waitingReply) {
+    const sendPhase = getNormalizedSendTaskPhase(snapshot);
+    if (sendPhase === TaskPhase.WAITING_REPLY) {
       return 'waiting_reply';
     }
-    if (snapshot.messageSending) {
+    if (sendPhase === TaskPhase.SENDING || sendPhase === TaskPhase.WAITING_SEND) {
+      return 'sending';
+    }
+    if (sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
+      return 'answering';
+    }
+    if (isLegacySendWaitingReply(snapshot)) {
+      return 'waiting_reply';
+    }
+    if (isLegacyMessageSending(snapshot)) {
       return 'sending';
     }
     if (snapshot.assistantBusy) {
@@ -1239,10 +1391,14 @@
 
   function isEffectiveReplyBusy(snapshot = {}, capability = {}) {
     const cap = capability && typeof capability === 'object' ? capability : {};
+    const sendPhase = getNormalizedSendTaskPhase(snapshot);
     const pageReplyStatus = getPageReplyStatus(snapshot);
     return !!(
-      snapshot.waitingReply
-      || snapshot.messageSending
+      sendPhase === TaskPhase.WAITING_REPLY
+      || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
+      || sendPhase === TaskPhase.SENDING
+      || isLegacySendWaitingReply(snapshot)
+      || isLegacyMessageSending(snapshot)
       || snapshot.assistantBusy
       || cap.isResponding
       || pageReplyStatus === 'answering'
@@ -1368,7 +1524,11 @@
         || sendPhase === TaskPhase.CANCELLING
         || pageReplyStatus === 'answering'
         || pageReplyStatus === 'waiting_reply';
-      reason = disabled ? `send-message-blocked-${sendPhase || pageReplyStatus}` : 'ok';
+      reason = disabled
+        ? (pageReplyStatus === 'answering'
+          ? 'send-message-blocked-assistant-answering'
+          : `send-message-blocked-${sendPhase || pageReplyStatus}`)
+        : 'ok';
     } else if (normalized === 'send-hotkey') {
       disabled = sendHotkeyPhase === 'sending_hotkey';
       reason = disabled ? `send-hotkey-${sendHotkeyPhase}` : 'ok';
@@ -1490,9 +1650,16 @@
       + ` copyPhase=${payload.copyPhase} copyHotkeyPhase=${payload.copyHotkeyPhase}`
       + ` waitContinuePhase=${payload.waitContinuePhase} pageReplyStatus=${payload.pageReplyStatus}`
       + ` viewDisabled=${payload.viewDisabled}`;
-    console.log(line);
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
+    const key = `BUTTON_DISABLED:DECIDE:${payload.action}`;
+    const value = `${payload.disabled}|${payload.reason}|${payload.sendPhase}|${payload.sendHotkeyPhase}|${payload.copyPhase}|${payload.copyHotkeyPhase}|${payload.waitContinuePhase}|${payload.pageReplyStatus}|${payload.viewDisabled}`;
+    const hasDedupe = typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function';
+    const emitted = hasDedupe
+      ? ToolboxShell.appendLogIfChanged(key, value, line, 5000)
+      : (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function'
+        ? (ToolboxShell.appendLog(line), true)
+        : false);
+    if (emitted) {
+      console.log(line);
     }
   }
 
@@ -1846,6 +2013,12 @@
     if (buttonPhase === 'checking' || taskPhase === TaskPhase.CHECKING) {
       return { ...base, phase: ButtonState.Phase.CHECKING, allowCancel: false };
     }
+    if (taskPhase === TaskPhase.WAITING_INPUT) {
+      return { ...base, phase: ButtonState.Phase.WAITING_INPUT };
+    }
+    if (taskPhase === TaskPhase.WAITING_ATTACHMENT) {
+      return { ...base, phase: ButtonState.Phase.WAITING_ATTACHMENT };
+    }
     if (taskPhase === TaskPhase.WAITING_SEND) {
       if (base.text === '等待输入框') {
         return { ...base, phase: ButtonState.Phase.WAITING_INPUT };
@@ -1895,6 +2068,9 @@
 
     if (buttonPhase === 'success' || taskPhase === TaskPhase.SUCCESS) {
       return { ...base, phase: ButtonState.Phase.IDLE };
+    }
+    if (buttonPhase === 'initializing' || taskPhase === TaskPhase.INITIALIZING) {
+      return { ...base, phase: ButtonState.Phase.INITIALIZING };
     }
     if (buttonPhase === 'failed' || taskPhase === TaskPhase.FAILED) {
       return { ...base, phase: ButtonState.Phase.FAILED };
@@ -1970,24 +2146,33 @@
     const id = String(button.id || '-').trim() || '-';
     const baseAction = String(button.dataset.cgptBaseAction || '-').trim() || '-';
     const domAction = String(button.dataset.action || '-').trim() || '-';
-    const runtimeAction = String(
-      button.dataset.cgptRuntimeAction
-      || button.dataset.cgptButtonAction
-      || '-',
-    ).trim() || '-';
+    const runtimeAction = String(button.dataset.cgptRuntimeAction || '-').trim() || '-';
+    const resolvedAction = String(resolvedView && resolvedView.action ? resolvedView.action : runtimeAction).trim() || '-';
     const text = String(button.textContent || '').trim() || '-';
     const disabled = button.disabled ? 1 : 0;
     const phase = String(resolvedView && resolvedView.phase ? resolvedView.phase : button.dataset.cgptTaskPhase || '-').trim() || '-';
-    const line = `[BUTTON_ACTION][STATE] id=${id} data-action=${domAction} data-cgpt-base-action=${baseAction}`
-      + ` data-cgpt-button-action=${runtimeAction} text=${text} disabled=${disabled} phase=${phase} reason=${reason || '-'}`;
-    console.log(line);
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
+    const subPhase = String(
+      (resolvedView && (resolvedView.subPhase || resolvedView.subphase))
+      || button.dataset.cgptTaskSubPhase
+      || '-',
+    ).trim() || '-';
+    const line = `[STATE_SCHEMA][BUTTON_ACTION_RESOLVED] id=${id} data-action=${domAction} runtimeAction=${runtimeAction} resolvedAction=${resolvedAction} phase=${phase} subPhase=${subPhase} disabled=${disabled} text=${text} baseAction=${baseAction} reason=${reason || '-'}`;
+    const key = `BUTTON_ACTION:STATE:${id || baseAction || domAction || '-'}`;
+    const value = `${domAction}|${runtimeAction}|${resolvedAction}|${phase}|${subPhase}|${disabled}|${reason || '-'}`;
+    const hasDedupe = typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function';
+    const emitted = hasDedupe
+      ? ToolboxShell.appendLogIfChanged(key, value, line, 5000)
+      : (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function'
+        ? (ToolboxShell.appendLog(line), true)
+        : false);
+    if (emitted) {
+      console.log(line);
     }
   }
 
   const UPLOAD_BUTTON_INDICATOR_CLASSES = [
     'cgpt-upload-idle',
+    'cgpt-upload-initializing',
     'cgpt-upload-running',
     'cgpt-upload-stopping',
     'cgpt-upload-failed',
@@ -2011,7 +2196,9 @@
     }
 
     const phase = normalizeTaskPhase(view && view.phase);
-    if (phase === TaskPhase.FAILED) {
+    if (phase === TaskPhase.INITIALIZING) {
+      button.classList.add('cgpt-upload-initializing');
+    } else if (phase === TaskPhase.FAILED) {
       button.classList.add('cgpt-upload-failed');
     } else if (phase === TaskPhase.CANCELLING) {
       button.classList.add('cgpt-upload-stopping');
@@ -2071,11 +2258,30 @@
       const decideAction = isUploadButtonBusinessAction(runtimeAction) ? runtimeAction : action;
       const decideForRuntime = computeUploadActionDisabled(decideAction, snapshot);
       const ownPhase = normalizeTaskPhase(resolvedView.phase);
+      const rawOwnPhase = String(resolvedView.phase || '').trim().toLowerCase();
+      const isOwnActiveRawPhase = rawOwnPhase
+        && ![
+          TaskPhase.IDLE,
+          TaskPhase.SUCCESS,
+          TaskPhase.FAILED,
+          TaskPhase.CANCELLED,
+          TaskPhase.DISABLED,
+        ].includes(rawOwnPhase);
+      const isOwnCancelView = resolvedView.allowCancel === true
+        && (runtimeAction === 'cancel' || runtimeAction === 'stop')
+        && isOwnActiveRawPhase;
       const pageReplyBlocked = isBlockedByPageReplyBusyReason(decideForRuntime.reason)
         || isBlockedByPageReplyBusyReason(decide.reason)
         || resolvedView.blockedByPageReplyBusy === true;
 
-      if (ownPhase === TaskPhase.IDLE && pageReplyBlocked && decideForRuntime.disabled) {
+      if (isOwnCancelView) {
+        resolvedView = {
+          ...resolvedView,
+          disabled: false,
+          action: runtimeAction,
+          preserveBaseColorWhenDisabled: false,
+        };
+      } else if (ownPhase === TaskPhase.IDLE && pageReplyBlocked && decideForRuntime.disabled) {
         resolvedView = {
           ...resolvedView,
           phase: TaskPhase.IDLE,
@@ -2188,11 +2394,11 @@
       ButtonState.setButtonRuntimeAction(button, runtimeAction);
     } else if (runtimeAction) {
       button.dataset.cgptRuntimeAction = runtimeAction;
-      button.dataset.cgptButtonAction = runtimeAction;
     } else {
       delete button.dataset.cgptRuntimeAction;
-      delete button.dataset.cgptButtonAction;
     }
+    delete button.dataset.cgptButtonAction;
+    button.dataset.cgptTaskSubPhase = String(resolvedView.subPhase || resolvedView.subphase || '').trim();
 
     syncUploadButtonIndicatorClasses(button, resolvedView);
 

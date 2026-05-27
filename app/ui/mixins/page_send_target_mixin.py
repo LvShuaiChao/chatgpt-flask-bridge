@@ -93,7 +93,8 @@ class PageSendTargetMixin:
         if not conversation_id:
             return None
         status = status or self._bridge_ui.last_bridge_status or {}
-        from app.utils.page_status import PageRegistry, find_online_fallback_page_for_binding
+        from app.utils.page_snapshot import PageRegistry
+        from app.utils.page_status import find_online_fallback_page_for_binding
 
         reg = getattr(self, "page_registry", None)
         if not isinstance(reg, PageRegistry) or not reg.matches_status(status):
@@ -557,7 +558,7 @@ class PageSendTargetMixin:
         )
         if not isinstance(resolved, dict):
             from app.utils.page_command import resolve_page_command_target
-            from app.utils.page_status import PageRegistry
+            from app.utils.page_snapshot import PageRegistry
 
             cmd_map = {
                 "send": "send_message",
@@ -624,7 +625,7 @@ class PageSendTargetMixin:
         发送/同步共用的绑定页解析：基于最新 PageRegistry，支持同会话新鲜页兜底与自动换绑。
         """
         from app.utils.page_command import resolve_bound_page_in_registry
-        from app.utils.page_status import PageRegistry, binding_from_session
+        from app.utils.page_snapshot import PageRegistry, binding_from_session
 
         action = (action or "").strip() or "send"
         if action == "sync":

@@ -213,7 +213,7 @@ def test_get_bound_page_snapshot_without_resolve():
 
     }
 
-    from app.utils.page_status import PageRegistry
+    from app.utils.page_snapshot import PageRegistry
 
     host.page_registry = PageRegistry.from_bridge_status(
         {

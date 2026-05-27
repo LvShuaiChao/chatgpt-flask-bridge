@@ -1,5 +1,6 @@
 ﻿import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -97,11 +98,29 @@ function assembleUserscript() {
   return [header, buildGeneratedNotice(), bundled, ''].join('\n\n');
 }
 
+function checkJavaScriptSyntax(filePath) {
+  const result = spawnSync(process.execPath, ['--check', filePath], {
+    encoding: 'utf8',
+  });
+
+  if (result.status !== 0) {
+    const output = [
+      result.stdout || '',
+      result.stderr || '',
+    ].join('\n').trim();
+
+    throw new Error(
+      'Generated userscript syntax check failed: ' + filePath + '\n' + output
+    );
+  }
+}
+
 function writeOutput() {
   fs.mkdirSync(DIST_DIR, { recursive: true });
   const output = assembleUserscript();
   fs.writeFileSync(OUT_FILE, output, 'utf8');
   fs.writeFileSync(REPO_ROOT_CLIENT, output, 'utf8');
+  checkJavaScriptSyntax(OUT_FILE);
   console.log('Wrote ' + OUT_FILE);
   console.log('Synced ' + REPO_ROOT_CLIENT);
 }

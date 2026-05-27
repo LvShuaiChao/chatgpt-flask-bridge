@@ -65,8 +65,77 @@ const ComposerCapability = (() => {
     return cap;
   }
 
+  function appendNativeSendReadyLog(state) {
+    const line = `[COMPOSER_CAPABILITY][NATIVE_SEND_READY] source=unified/native-send-ready ready=${state.ready ? 1 : 0} sendSnapReady=${state.sendSnapReady ? 1 : 0} hasSubmitButton=${state.hasSubmitButton ? 1 : 0} canSendLight=${state.canSendLight ? 1 : 0} canSendForce=${state.canSendForce ? 1 : 0}`;
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLogIfChanged === 'function') {
+      ToolboxShell.appendLogIfChanged(
+        'COMPOSER_CAPABILITY:NATIVE_SEND_READY',
+        `${state.ready ? 1 : 0}|${state.sendSnapReady ? 1 : 0}|${state.hasSubmitButton ? 1 : 0}|${state.canSendLight ? 1 : 0}|${state.canSendForce ? 1 : 0}`,
+        line,
+        1000,
+      );
+    } else if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+  }
+
+  function callComposerOrLocal(name, args = []) {
+    try {
+      if (name === 'getComposerSendButtonSnapshot' && typeof getComposerSendButtonSnapshot === 'function') {
+        return getComposerSendButtonSnapshot(...args);
+      }
+      if (name === 'hasRealSubmitButton' && typeof hasRealSubmitButton === 'function') {
+        return hasRealSubmitButton(...args);
+      }
+      if (name === 'canSendNowLight' && typeof canSendNowLight === 'function') {
+        return canSendNowLight(...args);
+      }
+      if (name === 'canSendNow' && typeof canSendNow === 'function') {
+        return canSendNow(...args);
+      }
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi[name] === 'function'
+      ) {
+        return ComposerApi[name](...args);
+      }
+    } catch (err) {
+      console.error(`[ChatGPT toolbox] ComposerCapability.${name} failed`, err);
+    }
+    return undefined;
+  }
+
+  function isNativeSendReadyForUpload(options = {}) {
+    let sendSnapReady = false;
+    const sendSnap = callComposerOrLocal('getComposerSendButtonSnapshot', [{ silent: true }]);
+    if (sendSnap && sendSnap.ready === true) {
+      sendSnapReady = true;
+    }
+
+    const hasSubmitButton = !!callComposerOrLocal('hasRealSubmitButton');
+    const canSendLight = !!callComposerOrLocal('canSendNowLight');
+    const canSendForce = !!callComposerOrLocal('canSendNow', [{ force: true }]);
+    const ready = sendSnapReady || (hasSubmitButton && (canSendLight || canSendForce));
+
+    if (options.log !== false) {
+      appendNativeSendReadyLog({
+        ready,
+        sendSnapReady,
+        hasSubmitButton,
+        canSendLight,
+        canSendForce,
+      });
+    }
+
+    return ready;
+  }
+
   return {
     getPageCapability: getPageCapabilityUnified,
+    isNativeSendReadyForUpload,
   };
 })();
 

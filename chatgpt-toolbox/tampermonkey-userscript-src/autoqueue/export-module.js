@@ -8,6 +8,16 @@
 
     const REVIEW_JSON_MARKER = '<<<REVIEW_JSON>>>';
 
+    function setExportStatus(text, type, options = {}) {
+      if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
+        return;
+      }
+      ToolboxShell.setStatus(text, type, {
+        ...options,
+        owner: options.owner || 'export',
+      });
+    }
+
     function rememberExportButtonIdleText(btn) {
       if (!btn) {
         return '';
@@ -331,11 +341,11 @@ Prompt 总数：${promptCount}
             const payload = await buildSettingsExportPayload();
             downloadJsonFile(`chatgpt-toolbox-settings-${buildDateTimeStamp()}.json`, payload);
             ToolboxShell.appendLog('已导出工具箱设置');
-            ToolboxShell.setStatus('已导出工具箱设置');
+            setExportStatus('已导出工具箱设置');
             return true;
           } catch (e) {
             const errText = logError('[EXPORT][settings-export]', e);
-            ToolboxShell.setStatus(`导出设置失败：${errText}`);
+            setExportStatus(`导出设置失败：${errText}`, 'error');
             return false;
           }
         });
@@ -396,13 +406,13 @@ Prompt 总数：${promptCount}
 
             if (ok) {
               ToolboxShell.appendLog('已导入工具箱设置');
-              ToolboxShell.setStatus('已导入工具箱设置');
+              setExportStatus('已导入工具箱设置');
               if (settingsImportBtn) {
                 setExportButtonSuccess(settingsImportBtn, '已导入');
                 window.setTimeout(() => restoreExportButton(settingsImportBtn), 1200);
               }
             } else {
-              ToolboxShell.setStatus('导入失败：文件格式无效');
+              setExportStatus('导入失败：文件格式无效', 'error');
               if (settingsImportBtn) {
                 setExportButtonFailed(settingsImportBtn, '导入失败');
                 window.setTimeout(() => restoreExportButton(settingsImportBtn), 1400);
@@ -411,7 +421,7 @@ Prompt 总数：${promptCount}
           } catch (e) {
             const errText = logError('[EXPORT][settings-import]', e);
             console.error('[EXPORT][settings-import][failed]', e);
-            ToolboxShell.setStatus(`导入失败：${errText}`);
+            setExportStatus(`导入失败：${errText}`, 'error');
             if (settingsImportBtn) {
               setExportButtonFailed(settingsImportBtn, '导入失败');
               window.setTimeout(() => restoreExportButton(settingsImportBtn), 1400);

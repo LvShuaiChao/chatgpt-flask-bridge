@@ -6,7 +6,7 @@ import pytest
 
 from app.ui.main_window_state import BridgeUiState
 from app.ui.mixins.bridge_mixin import BridgeMixin
-from app.utils.page_status import PageRegistry
+from app.utils.page_snapshot import PageRegistry
 
 
 class _EnqueueHost(BridgeMixin):
@@ -43,6 +43,7 @@ def _status_with_page():
                 "url": "https://chatgpt.com/c/conv1",
                 "conversation_id": "conv1",
                 "last_seen": now,
+                "last_poll_at": now,
             }
         ]
     }
@@ -60,7 +61,7 @@ def test_enqueue_page_command_success():
         }
     )
     with patch(
-        "app.ui.mixins.bridge_mixin.server.enqueue_control_command",
+        "app.ui.mixins.bridge_mixin.enqueue_control_command",
         return_value={"ok": True, "message_id": "msg-123", "command": "sync_conversation"},
     ):
         result = host.enqueue_page_command(session, "sync_conversation", payload={"mode": "merge"})
@@ -81,7 +82,7 @@ def test_enqueue_page_command_missing_message_id_not_ok():
         }
     )
     with patch(
-        "app.ui.mixins.bridge_mixin.server.enqueue_control_command",
+        "app.ui.mixins.bridge_mixin.enqueue_control_command",
         return_value={"ok": True, "message": {}},
     ):
         result = host.enqueue_page_command(session, "sync_conversation")
