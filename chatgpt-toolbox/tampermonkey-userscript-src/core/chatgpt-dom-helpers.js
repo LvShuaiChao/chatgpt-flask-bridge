@@ -147,44 +147,117 @@ function shouldLetNativeChatGptHandleDrop(e, options = {}) {
   return !!target.closest(selectors.join(','));
 }
 
-function findRealChatGPTSendButton() {
-  const selectors = [
-    'button#composer-submit-button',
-    'button[data-testid="send-button"]',
-    'button[data-testid="composer-submit-button"]',
-    'form button[type="submit"]',
-    'button[aria-label="发送"]',
-    'button[aria-label="发送消息"]',
-    'button[aria-label="发送提示"]',
-    'button[aria-label="Send"]',
-    'button[aria-label="Send message"]',
-    'button[aria-label="Send prompt"]',
-    'button[title="Send"]',
-    'button[title="发送"]',
-  ];
+const SEND_BUTTON_SELECTORS = [
+  'button#composer-submit-button',
+  'button[data-testid="send-button"]',
+  'button[data-testid="composer-submit-button"]',
+  'form button[type="submit"]',
+  'button[aria-label="发送"]',
+  'button[aria-label="发送消息"]',
+  'button[aria-label="发送提示"]',
+  'button[aria-label="Send"]',
+  'button[aria-label="Send message"]',
+  'button[aria-label="Send prompt"]',
+  'button[title="Send"]',
+  'button[title="发送"]',
+];
 
-  const candidates = [];
+const COMPOSER_SCOPE_SELECTORS = [
+  '[data-testid="composer-root"]',
+  '[data-testid="composer"]',
+  'form[class*="composer"]',
+  '#prompt-textarea',
+  'textarea[name="prompt-textarea"]',
+  '[contenteditable="true"][data-lexical-editor="true"]',
+];
 
-  for (const selector of selectors) {
-    const buttons = Array.from(document.querySelectorAll(selector));
+let sendButtonGlobalFallbackLoggedAt = 0;
+const SEND_BUTTON_GLOBAL_FALLBACK_LOG_MS = 5000;
+let sendButtonCandidatesLoggedAt = 0;
+const SEND_BUTTON_CANDIDATES_LOG_MS = 2000;
 
-    for (const btn of buttons) {
-      if (!btn || isInsideToolbox(btn)) continue;
+function isDomHelperComposerDebugEnabled(options = {}) {
+  if (options && options.debug === true) {
+    return true;
+  }
 
-      const rect = btn.getBoundingClientRect();
-      const style = window.getComputedStyle(btn);
-
-      if (
-        rect.width > 0
-        && rect.height > 0
-        && style.display !== 'none'
-        && style.visibility !== 'hidden'
-      ) {
-        candidates.push(btn);
-      }
+  if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+    if (MemoryManager.get('bridgeDebugEnabled', false)) {
+      return true;
     }
   }
 
+  if (typeof getCompactUiConfig === 'function') {
+    const cfg = getCompactUiConfig();
+    if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function resolveComposerScopeForSendButton(options = {}) {
+  if (options.scope instanceof HTMLElement) {
+    return options.scope;
+  }
+
+  for (const sel of COMPOSER_SCOPE_SELECTORS) {
+    const el = document.querySelector(sel);
+    if (el && !isInsideToolbox(el)) {
+      return el.closest('form') || el.parentElement || el;
+    }
+  }
+
+  return null;
+}
+
+function collectVisibleSendButtonCandidates(buttons, candidates) {
+  for (const btn of buttons) {
+    if (!btn || isInsideToolbox(btn)) {
+      continue;
+    }
+
+    const rect = btn.getBoundingClientRect();
+    const style = window.getComputedStyle(btn);
+
+    if (
+      rect.width > 0
+      && rect.height > 0
+      && style.display !== 'none'
+      && style.visibility !== 'hidden'
+    ) {
+      candidates.push(btn);
+    }
+  }
+}
+
+function collectSendButtonCandidatesFromScope(scope, candidates) {
+  if (!(scope instanceof HTMLElement)) {
+    return;
+  }
+
+  for (const selector of SEND_BUTTON_SELECTORS) {
+    collectVisibleSendButtonCandidates(
+      Array.from(scope.querySelectorAll(selector)),
+      candidates,
+    );
+  }
+}
+
+function logSendButtonGlobalFallbackThrottled() {
+  const now = Date.now();
+  if (now - sendButtonGlobalFallbackLoggedAt < SEND_BUTTON_GLOBAL_FALLBACK_LOG_MS) {
+    return;
+  }
+
+  sendButtonGlobalFallbackLoggedAt = now;
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog('[COMPOSER][SEND_BUTTON_GLOBAL_FALLBACK]');
+  }
+}
+
+function pickBestSendButtonCandidate(candidates) {
   const enabled = candidates.find((btn) => !btn.disabled && btn.getAttribute('aria-disabled') !== 'true');
   if (enabled) {
     return enabled;
@@ -194,25 +267,45 @@ function findRealChatGPTSendButton() {
     return candidates[0];
   }
 
-  // Fallback：在 composer form 内搜索右侧发送按钮（黑色圆形箭头）
-  try {
-    const composerSelectors = [
-      '[data-testid="composer-root"]',
-      '[data-testid="composer"]',
-      'form[class*="composer"]',
-      '#prompt-textarea',
-      'textarea[name="prompt-textarea"]',
-      '[contenteditable="true"][data-lexical-editor="true"]',
-    ];
+  return null;
+}
 
-    let composerScope = null;
-    for (const sel of composerSelectors) {
-      const el = document.querySelector(sel);
-      if (el && !isInsideToolbox(el)) {
-        composerScope = el.closest('form') || el.parentElement || el;
-        break;
+function findRealChatGPTSendButton(options = {}) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const explicitScope = opts.scope instanceof HTMLElement ? opts.scope : null;
+  const candidates = [];
+  let usedGlobalFallback = false;
+
+  if (explicitScope) {
+    collectSendButtonCandidatesFromScope(explicitScope, candidates);
+  } else {
+    const composerScope = resolveComposerScopeForSendButton(opts);
+    if (composerScope) {
+      collectSendButtonCandidatesFromScope(composerScope, candidates);
+    }
+
+    if (candidates.length === 0 && isDomHelperComposerDebugEnabled(opts)) {
+      usedGlobalFallback = true;
+      for (const selector of SEND_BUTTON_SELECTORS) {
+        collectVisibleSendButtonCandidates(
+          Array.from(document.querySelectorAll(selector)),
+          candidates,
+        );
       }
     }
+  }
+
+  const picked = pickBestSendButtonCandidate(candidates);
+  if (picked) {
+    if (usedGlobalFallback) {
+      logSendButtonGlobalFallbackThrottled();
+    }
+    return picked;
+  }
+
+  // Fallback：在 composer form 内搜索右侧发送按钮（黑色圆形箭头）
+  try {
+    const composerScope = explicitScope || resolveComposerScopeForSendButton(opts);
 
     if (!composerScope) {
       return null;
@@ -279,14 +372,25 @@ function findRealChatGPTSendButton() {
       fallbackCandidates.sort((a, b) => b.score - a.score);
 
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        const items = fallbackCandidates.slice(0, 5).map((c) => (
-          `tag=button type=${c.btnType || '-'} aria-label=${c.ariaLabel || '-'} testid=${c.testId || '-'}`
-          + ` disabled=${c.isDisabled ? 1 : 0} rect=${Math.round(c.rect.left)},${Math.round(c.rect.top)},${Math.round(c.rect.width)}x${Math.round(c.rect.height)}`
-          + ` svgCount=${c.svgCount} score=${c.score}`
-        ));
-        ToolboxShell.appendLog(
-          `[COMPOSER][SEND_BUTTON_CANDIDATES] count=${fallbackCandidates.length} item=${items.join(' | ')}`,
-        );
+        const now = Date.now();
+        if (now - sendButtonCandidatesLoggedAt >= SEND_BUTTON_CANDIDATES_LOG_MS) {
+          sendButtonCandidatesLoggedAt = now;
+          const debugEnabled = isDomHelperComposerDebugEnabled(options);
+          if (debugEnabled) {
+            const items = fallbackCandidates.slice(0, 5).map((c) => (
+              `tag=button type=${c.btnType || '-'} aria-label=${c.ariaLabel || '-'} testid=${c.testId || '-'}`
+              + ` disabled=${c.isDisabled ? 1 : 0} rect=${Math.round(c.rect.left)},${Math.round(c.rect.top)},${Math.round(c.rect.width)}x${Math.round(c.rect.height)}`
+              + ` svgCount=${c.svgCount} score=${c.score}`
+            ));
+            ToolboxShell.appendLog(
+              `[COMPOSER][SEND_BUTTON_CANDIDATES] count=${fallbackCandidates.length} item=${items.join(' | ')}`,
+            );
+          } else {
+            ToolboxShell.appendLog(
+              `[COMPOSER][SEND_BUTTON_CANDIDATES] count=${fallbackCandidates.length}`,
+            );
+          }
+        }
       }
 
       const best = fallbackCandidates[0];

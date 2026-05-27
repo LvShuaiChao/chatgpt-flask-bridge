@@ -2166,19 +2166,13 @@
     confirmPromptDraftOverwrite: false,
     globalDropCaptureEnabled: false,
     restoreScrollAfterCopyLastMessage: false,
-    closedLoopAutoUploadEnabled: true,
-    closedLoopAutoUploadInterval: 5,
-    closedLoopHomeNavEnabled: true,
-    closedLoopHomeNavInterval: 20,
-    closedLoopHomeNavUrl: 'https://chatgpt.com/',
-    copyHotkeyLoopAutoUploadEnabled: true,
-    copyHotkeyLoopAutoUploadInterval: 5,
-    unifiedContinueHomeNavEnabled: true,
-    unifiedContinueHomeNavInterval: 20,
-    unifiedContinueHomeNavUrl: 'https://chatgpt.com/',
-    copyHotkeyLoopHomeNavEnabled: true,
-    copyHotkeyLoopHomeNavInterval: 20,
-    copyHotkeyLoopHomeNavUrl: 'https://chatgpt.com/',
+    continueAutomation: Object.freeze({
+      autoUploadEnabled: true,
+      autoUploadInterval: 5,
+      homeNavEnabled: true,
+      homeNavInterval: 20,
+      homeNavUrl: 'https://chatgpt.com/',
+    }),
     copyHotkeyContinuePromptText: '',
     copyHotkeyContinueStopSignal: (
       typeof getDefaultDoneSignal === 'function'
@@ -2248,65 +2242,19 @@
       return intValue;
     }
 
-    const closedLoopAutoUploadEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopAutoUploadEnabled')
-      ? raw.closedLoopAutoUploadEnabled
-      : raw.copyHotkeyLoopAutoUploadEnabled;
-    const closedLoopAutoUploadIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopAutoUploadInterval')
-      ? raw.closedLoopAutoUploadInterval
-      : raw.copyHotkeyLoopAutoUploadInterval;
-
-    cfg.closedLoopAutoUploadEnabled = closedLoopAutoUploadEnabledRaw !== false;
-    cfg.closedLoopAutoUploadInterval = normalizePositiveInt(closedLoopAutoUploadIntervalRaw, 5, 1, 999);
-    cfg.copyHotkeyLoopAutoUploadEnabled = cfg.closedLoopAutoUploadEnabled;
-    cfg.copyHotkeyLoopAutoUploadInterval = cfg.closedLoopAutoUploadInterval;
-
-    const closedLoopHomeNavEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavEnabled')
-      ? raw.closedLoopHomeNavEnabled
-      : raw.copyHotkeyLoopHomeNavEnabled;
-    const closedLoopHomeNavIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavInterval')
-      ? raw.closedLoopHomeNavInterval
-      : raw.copyHotkeyLoopHomeNavInterval;
-    const closedLoopHomeNavUrlRaw = Object.prototype.hasOwnProperty.call(raw, 'closedLoopHomeNavUrl')
-      ? raw.closedLoopHomeNavUrl
-      : raw.copyHotkeyLoopHomeNavUrl;
-
-    cfg.closedLoopHomeNavEnabled = closedLoopHomeNavEnabledRaw !== false;
-    cfg.closedLoopHomeNavInterval = normalizePositiveInt(closedLoopHomeNavIntervalRaw, 20, 1, 999);
-    cfg.closedLoopHomeNavUrl = (
-      typeof closedLoopHomeNavUrlRaw === 'string' && closedLoopHomeNavUrlRaw.trim().length > 0
-    )
-      ? closedLoopHomeNavUrlRaw.trim()
-      : 'https://chatgpt.com/';
-
-    const unifiedHomeNavEnabledRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavEnabled')
-      ? raw.unifiedContinueHomeNavEnabled
-      : raw.copyHotkeyLoopHomeNavEnabled;
-    const unifiedHomeNavIntervalRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavInterval')
-      ? raw.unifiedContinueHomeNavInterval
-      : raw.copyHotkeyLoopHomeNavInterval;
-    const unifiedHomeNavUrlRaw = Object.prototype.hasOwnProperty.call(raw, 'unifiedContinueHomeNavUrl')
-      ? raw.unifiedContinueHomeNavUrl
-      : raw.copyHotkeyLoopHomeNavUrl;
-
-    cfg.unifiedContinueHomeNavEnabled = unifiedHomeNavEnabledRaw !== false;
-    cfg.unifiedContinueHomeNavInterval = normalizePositiveInt(
-      unifiedHomeNavIntervalRaw,
-      20,
-      1,
-      999,
-    );
-    cfg.unifiedContinueHomeNavUrl = (
-      typeof unifiedHomeNavUrlRaw === 'string' && unifiedHomeNavUrlRaw.trim().length > 0
-    )
-      ? unifiedHomeNavUrlRaw.trim()
-      : 'https://chatgpt.com/';
-
-    cfg.copyHotkeyLoopHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled;
-    cfg.copyHotkeyLoopHomeNavInterval = cfg.unifiedContinueHomeNavInterval;
-    cfg.copyHotkeyLoopHomeNavUrl = cfg.unifiedContinueHomeNavUrl;
-    cfg.closedLoopHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled;
-    cfg.closedLoopHomeNavInterval = cfg.unifiedContinueHomeNavInterval;
-    cfg.closedLoopHomeNavUrl = cfg.unifiedContinueHomeNavUrl;
+    const continueAutomationRaw = (
+      raw.continueAutomation && typeof raw.continueAutomation === 'object'
+    ) ? raw.continueAutomation : {};
+    cfg.continueAutomation = {
+      autoUploadEnabled: continueAutomationRaw.autoUploadEnabled !== false,
+      autoUploadInterval: normalizePositiveInt(continueAutomationRaw.autoUploadInterval, 5, 1, 999),
+      homeNavEnabled: continueAutomationRaw.homeNavEnabled !== false,
+      homeNavInterval: normalizePositiveInt(continueAutomationRaw.homeNavInterval, 20, 1, 999),
+      homeNavUrl: (
+        typeof continueAutomationRaw.homeNavUrl === 'string'
+        && continueAutomationRaw.homeNavUrl.trim().length > 0
+      ) ? continueAutomationRaw.homeNavUrl.trim() : 'https://chatgpt.com/',
+    };
 
     cfg.uploadQuotaWindowHours = normalizePositiveInt(cfg.uploadQuotaWindowHours, 3, 1, 72);
     cfg.uploadQuotaMaxFiles = normalizePositiveInt(cfg.uploadQuotaMaxFiles, 80, 1, 10000);

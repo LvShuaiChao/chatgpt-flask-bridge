@@ -995,9 +995,11 @@
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge {
           color: #ffffff;
-          background: linear-gradient(180deg, #2e4367 0%, #1f2f4f 100%);
-          border-color: rgba(118, 154, 220, 0.35);
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+          background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+          border-color: rgba(147, 197, 253, 0.70);
+          box-shadow:
+            0 0 0 1px rgba(37, 99, 235, 0.20),
+            inset 0 1px 0 rgba(255, 255, 255, 0.12);
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge.cgpt-toolbox-turn-count-warning {
@@ -1806,6 +1808,28 @@
 
         .cgpt-btn.primary:hover {
           background: #1d4ed8;
+        }
+
+        #cgpt-copy-toolbox-log.cgpt-btn,
+        .cgpt-btn[data-action="copy-log"] {
+          background: linear-gradient(180deg, #2563eb, #1d4ed8);
+          border-color: rgba(147, 197, 253, 0.45);
+          color: #ffffff;
+        }
+
+        #cgpt-copy-toolbox-log.cgpt-btn:hover,
+        .cgpt-btn[data-action="copy-log"]:hover {
+          background: linear-gradient(180deg, #3b82f6, #2563eb);
+        }
+
+        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-busy,
+        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-danger,
+        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-disabled,
+        #cgpt-copy-toolbox-log.cgpt-btn:disabled {
+          background: linear-gradient(180deg, #2563eb, #1d4ed8) !important;
+          border-color: rgba(147, 197, 253, 0.45) !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
         }
 
         .cgpt-btn.cgpt-btn-busy {
@@ -9455,6 +9479,11 @@
       const value = String(text || '');
 
       if (statusType === 'error') {
+        if (/部分模块初始化失败|模块初始化失败/.test(value)) return '模块失败';
+        if (/上传队列初始化失败|UPLOAD_INIT/.test(value)) return '上传失败';
+        if (/UploadModule/.test(value)) return '上传模块失败';
+        if (/AutoQueueModule/.test(value)) return '队列失败';
+        if (/BridgeModule|Bridge/.test(value)) return 'Bridge失败';
         return '失败';
       }
 
@@ -10532,7 +10561,12 @@
   }
 
   function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
-    if (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true) {
+    if (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+      && UploadCriticalRuntime.isUploadCriticalMode()
+    ) {
       // 上传关键期只做轻量 fallback，避免触发 after-thinking 提取/重型清洗。
       const cleanFn =
         typeof ChatMessageExtractor !== 'undefined' &&

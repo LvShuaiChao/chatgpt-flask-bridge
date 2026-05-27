@@ -496,7 +496,7 @@ const AutoQueueModule = (() => {
 
       const strategy = progressSnapshot.autoUploadStrategy;
       const autoUploadText = strategy && strategy.enabled
-        ? `已计入 ${progressSnapshot.autoUploadCount} 次，下次第 ${progressSnapshot.taskAutoUploadNextAt} 次；${strategy.summary}`
+        ? `首次已上传；下次第 ${progressSnapshot.taskAutoUploadNextAt} 轮（已计入 ${progressSnapshot.autoUploadCount} 次）；${strategy.summary}`
         : (strategy ? strategy.summary : '未启用');
 
       const rotateProgressText = buildTaskPageRotateProgressText(progressSnapshot);
@@ -5926,7 +5926,7 @@ const AutoQueueModule = (() => {
         countMode,
         countModeLabel,
         enabled: true,
-        summary: `文件上传频率：每 ${interval}${unitText}上传一次；当前策略：第 ${patternText}${unitText}发送前强制重传（计数口径：${countModeLabel}）`,
+        summary: `上传规则：首次上传，之后每 ${interval}${unitText}再次上传；当前策略：第 ${patternText}${unitText}发送前强制重传（计数口径：${countModeLabel}）`,
         patternText,
       };
     }
@@ -8444,29 +8444,37 @@ const AutoQueueModule = (() => {
       }
     }
 
+    function resolveAutoQueueAttachmentSnapshot(options = {}) {
+      const needDetailed = options.detailed === true;
+      if (
+        !needDetailed
+        && typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.getComposerAttachmentSnapshotFast === 'function'
+      ) {
+        return ComposerApi.getComposerAttachmentSnapshotFast('autoq-status');
+      }
+      if (
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+      ) {
+        return ComposerApi.getComposerAttachmentSnapshot('autoq-status');
+      }
+      return null;
+    }
+
     function getAutoQueueUploadStatusText() {
       const status = String(state.autoQueueUploadStatus || 'idle');
       const stats = state.autoQueueUploadStats || {};
 
       if (status === 'uploading') {
-        const attachSnap = (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
-        )
-          ? ComposerApi.getComposerAttachmentSnapshot()
-          : null;
+        const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && attachSnap.uploadingCount > 0) {
           return `上传中 ${attachSnap.uploadingCount} 个`;
         }
         return '上传中';
       }
       if (status === 'done') {
-        const attachSnap = (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
-        )
-          ? ComposerApi.getComposerAttachmentSnapshot()
-          : null;
+        const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && !attachSnap.hasAnyAttachment) {
           return `上传完成，成功 ${Number(stats.uploaded) || 0} 个，失败 ${Number(stats.failed) || 0} 个（本轮未检测到附件）`;
         }
@@ -8488,12 +8496,7 @@ const AutoQueueModule = (() => {
       }
 
       if (status === 'idle' || status === 'cancelled') {
-        const attachSnap = (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
-        )
-          ? ComposerApi.getComposerAttachmentSnapshot()
-          : null;
+        const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && attachSnap.hasReadyAttachment) {
           return `已加入输入框 ${attachSnap.readyCount} 个`;
         }
@@ -8661,6 +8664,9 @@ const AutoQueueModule = (() => {
         if (typeof event.stopPropagation === 'function') {
           event.stopPropagation();
         }
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
       }
 
       logUploadEntry('CLICK', { source: safeSource, buttonId: 'cgpt-autoq-start-upload' });
@@ -8733,7 +8739,7 @@ const AutoQueueModule = (() => {
 
         const hasManualUpload = (
           typeof UploadModule !== 'undefined'
-          && typeof UploadModule.startManualUploadOnlyFlow === 'function'
+          && typeof UploadModule.runStartUploadButtonCore === 'function'
         );
         if (!hasManualUpload) {
           const reason = 'upload-module-missing';
@@ -8784,7 +8790,7 @@ const AutoQueueModule = (() => {
 
         logUploadBatchState('manual-upload-start');
 
-        const uploadRoute = 'UploadModule.startManualUploadOnlyFlow';
+        const uploadRoute = 'UploadModule.runStartUploadButtonCore';
         logUploadEntry('ROUTE', {
           source: safeSource,
           buttonId: 'cgpt-autoq-start-upload',
@@ -8792,7 +8798,7 @@ const AutoQueueModule = (() => {
         });
         ToolboxShell.appendLog(`[AUTOQUEUE][START_UPLOAD][ROUTE] target=${uploadRoute}`);
 
-        const result = await UploadModule.startManualUploadOnlyFlow({
+        const result = await UploadModule.runStartUploadButtonCore({
           source: `autoqueue-start-upload:${safeSource}`,
           preserveAttached: true,
           shouldStop: () => state.autoQueueUploadCancelRequested === true,
@@ -8915,6 +8921,32 @@ const AutoQueueModule = (() => {
     }
 
     function readPageTurnCount() {
+      const uploadCritical = (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+        && UploadCriticalRuntime.isUploadCriticalMode()
+      );
+
+      if (uploadCritical) {
+        const cached = typeof getCachedConversationStatsForHeader === 'function'
+          ? getCachedConversationStatsForHeader()
+          : null;
+        const round = Number(cached && cached.round_count) || 0;
+        return round > 0 ? Math.floor(round) : null;
+      }
+
+      if (typeof getLightConversationStatsForHeader === 'function') {
+        const stats = getLightConversationStatsForHeader({ preferCache: true });
+        const round = Math.max(
+          Number(stats && stats.round_count) || 0,
+          Number(stats && stats.dom_estimated_round_count) || 0,
+        );
+        if (round > 0) {
+          return Math.floor(round);
+        }
+      }
+
       if (typeof getCurrentPageTurnCount === 'function') {
         return getCurrentPageTurnCount();
       }
@@ -9218,16 +9250,58 @@ const AutoQueueModule = (() => {
     }
 
     function shouldSkipAutoqUnrelatedButtonRefresh(refreshReason = '') {
+      const refreshReasonText = String(refreshReason || '').trim();
+      const forceRefreshReasons = new Set([
+        'batch-start',
+        'batch-stop',
+        'stop-final-upload-start',
+        'stop-final-upload-done',
+        'batch-start-error',
+        'start-upload-click-handler-error',
+        'manual-upload-click-immediate',
+      ]);
+      if (forceRefreshReasons.has(refreshReasonText)) {
+        return false;
+      }
+
+      const uploadCriticalNow = (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+        && UploadCriticalRuntime.isUploadCriticalMode()
+      );
+      if (uploadCriticalNow) {
+        return true;
+      }
+
       const autoqActive = !!(state.running || state.batchTaskRunning);
       if (autoqActive) {
         return false;
       }
 
+      const uploadTask = typeof resolveAutoQueueUploadTaskState === 'function'
+        ? resolveAutoQueueUploadTaskState()
+        : null;
+      const uploadTaskPhase = uploadTask
+        ? String(uploadTask.phase || 'idle').trim().toLowerCase()
+        : 'idle';
+      const uploadTaskBusy = uploadTaskPhase === 'uploading' || uploadTaskPhase === 'cancelling';
+
+      const fullyIdle = !(
+        state.running
+        || state.batchTaskRunning
+        || state.waitingReply
+        || state.uploadingFromAutoQueue
+        || state.batchAutoUploading
+        || state.manualUploadRunning
+        || uploadTaskBusy
+      );
+
       if (
         typeof UploadModule === 'undefined'
         || typeof UploadModule.getSendTaskPhase !== 'function'
       ) {
-        return false;
+        return fullyIdle;
       }
 
       const sendPhase = String(UploadModule.getSendTaskPhase() || 'idle').trim().toLowerCase();
@@ -9236,12 +9310,16 @@ const AutoQueueModule = (() => {
         || sendPhase === 'waiting_send'
         || sendPhase === 'cancelling';
 
+      if (fullyIdle && !uploadSendBusy) {
+        return true;
+      }
+
       if (!uploadSendBusy) {
         return false;
       }
 
       ToolboxShell.appendLog(
-        `[AUTOQ_BUTTON][SKIP_REFRESH_PAGE_BUSY_ONLY] reason=${String(refreshReason || '-').trim() || '-'} sendPhase=${sendPhase}`,
+        `[AUTOQ_BUTTON][SKIP_REFRESH_PAGE_BUSY_ONLY] reason=${refreshReasonText || '-'} sendPhase=${sendPhase}`,
       );
       return true;
     }
@@ -9610,6 +9688,10 @@ const AutoQueueModule = (() => {
       return config.promptMode === 'task' ? '开始批量任务组' : '开始';
     }
 
+    function getAutoQueueSendOnceIdleText() {
+      return config.promptMode === 'task' ? '只发送初始指令一次' : '发送一次';
+    }
+
     function isAutoQueueWaitingDelay() {
       const nextAt = Number(state.nextSendAt) || 0;
       return !!state.running
@@ -9627,7 +9709,7 @@ const AutoQueueModule = (() => {
       const task = state.sendOnceTask || { phase: 'idle' };
       const phase = String(task.phase || 'idle');
       const reason = String(context.refreshReason || 'update-status');
-      const idleText = config.promptMode === 'task' ? '只发送初始指令一次' : '发送一次';
+      const idleText = getAutoQueueSendOnceIdleText();
 
       if (!sendOnceBtn.dataset.cgptIdleText) {
         sendOnceBtn.dataset.cgptIdleText = idleText;
@@ -9707,7 +9789,7 @@ const AutoQueueModule = (() => {
       const sendOnceBtn = root ? qs('#cgpt-autoq-send-once', root) : null;
       if (sendOnceBtn && typeof ButtonState !== 'undefined' && typeof ButtonState.flashButtonThenIdle === 'function') {
         const idleText = sendOnceBtn.dataset.cgptIdleText
-          || (config.promptMode === 'task' ? '只发送初始指令一次' : '发送一次');
+          || getAutoQueueSendOnceIdleText();
         const flashFn = flashPhase === 'success' ? setButtonSuccess : setButtonFailed;
         ButtonState.flashButtonThenIdle(sendOnceBtn, flashFn, flashText, idleText, delayMs, {
           expectedRunId: flashRunId,
@@ -12099,14 +12181,12 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog('[AUTO_QUEUE][BATCH][INITIAL_SEND_START]');
 
       {
-        const attachSnap = (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
-        )
-          ? ComposerApi.getComposerAttachmentSnapshot()
-          : null;
+        const attachSnap = resolveAutoQueueAttachmentSnapshot({ detailed: true });
         if (attachSnap) {
-          const logLine = `[AUTOQ][SEND_WITH_ATTACHMENT_SNAPSHOT] ready=${attachSnap.readyCount} uploading=${attachSnap.uploadingCount} fileCount=${attachSnap.fileCount} filenames=${attachSnap.filenames.join(',') || '-'}`;
+          const filenameList = Array.isArray(attachSnap.filenames)
+            ? attachSnap.filenames.join(',')
+            : ((attachSnap.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-');
+          const logLine = `[AUTOQ][SEND_WITH_ATTACHMENT_SNAPSHOT] ready=${attachSnap.readyCount} uploading=${attachSnap.uploadingCount} fileCount=${attachSnap.fileCount} filenames=${filenameList || '-'}`;
           ToolboxShell.appendLog(logLine);
           if (attachSnap.readyCount === 0 && attachSnap.fileCount === 0) {
             ToolboxShell.appendLog(`[AUTOQ][SEND_WITHOUT_ATTACHMENT][WARN] taskId=${taskId} reason=no-ready-attachment`);
@@ -13492,6 +13572,15 @@ const AutoQueueModule = (() => {
       if (uploadBtn && syncAutoQueueRootFromActionButton(uploadBtn)) {
         if (event) {
           event.autoqDelegatedHandled = true;
+          if (typeof event.preventDefault === 'function') {
+            event.preventDefault();
+          }
+          if (typeof event.stopPropagation === 'function') {
+            event.stopPropagation();
+          }
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
         }
         void runAutoQueueStartUploadFromButton(uploadBtn, 'root-delegated', event);
         return;
@@ -13502,6 +13591,9 @@ const AutoQueueModule = (() => {
         event.autoqDelegatedHandled = true;
         event.preventDefault();
         event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
 
         handleAutoQueueStartBatchButtonClick('delegated');
         return;
@@ -13512,6 +13604,9 @@ const AutoQueueModule = (() => {
         event.autoqDelegatedHandled = true;
         event.preventDefault();
         event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
 
         ToolboxShell.appendLog('[AUTOQ][SEND_ONCE][CLICK_DELEGATED]');
         void triggerContinueOnce();
@@ -13766,8 +13861,8 @@ const AutoQueueModule = (() => {
 
           <div class="cgpt-autoq-actions">
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="start-upload" data-button-role="start-upload">开始上传</button>
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">开始</button>
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">发送一次</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">${getAutoQueueStartIdleText()}</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">${getAutoQueueSendOnceIdleText()}</button>
           </div>
         </div>
 

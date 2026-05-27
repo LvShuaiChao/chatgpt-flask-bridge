@@ -34,9 +34,9 @@
     edgeHotzoneId: 'cgpt-toolbox-edge-hotzone',
     restoreHotzoneId: 'cgpt-toolbox-restore-hotzone',
     restoreHandleId: 'cgpt-toolbox-restore-handle',
-    storagePrefix: 'cgpt_toolbox_tabs_v31:',
-    uploadDbName: 'cgpt-toolbox-upload-db-v31',
-    uploadDbVersion: 3,
+    storagePrefix: 'cgpt_toolbox_tabs_v32:',
+    uploadDbName: 'cgpt-toolbox-upload-db-v32',
+    uploadDbVersion: 1,
     uploadBlobMaxBytes: 20 * 1024 * 1024,
     uploadStore: 'queue',
     uploadGroupStore: 'groups',
@@ -44,9 +44,6 @@
 
   const UploadState = Object.freeze({
     IDLE: 'IDLE',
-    // @deprecated 旧缓存可能含 READY；新流程不再产生，normalizeUploadState 会归一化为 IDLE。
-    // 删除条件：升级 uploadDbVersion 后迁移一个版本，且无旧状态迁移日志。
-    READY: 'READY',
     READING: 'READING',
     ATTACHING: 'ATTACHING',
     ATTACHED: 'ATTACHED',
@@ -55,17 +52,7 @@
     MISSING_FILE: 'MISSING_FILE',
   });
 
-  // @deprecated 仅用于兼容旧版本上传缓存状态，新上传流程不再产生这些状态。
-  // 删除条件：升级 uploadDbVersion 后迁移一个版本，且无旧状态迁移日志。
-  const LEGACY_UPLOAD_STATES = Object.freeze(new Set([
-    'VERIFYING',
-    'PENDING_CONFIRM',
-    'PLATFORM_DUPLICATE',
-  ]));
-
   const UploadStateMeta = (() => {
-    const LEGACY_UNFINISHED = LEGACY_UPLOAD_STATES;
-
     const RUNNING = new Set([
       UploadState.READING,
       UploadState.ATTACHING,
@@ -89,10 +76,6 @@
       return RUNNING.has(normalize(state));
     }
 
-    function isLegacyUnfinished(state) {
-      return LEGACY_UNFINISHED.has(normalize(state));
-    }
-
     function isSuccess(state) {
       return SUCCESS.has(normalize(state));
     }
@@ -108,7 +91,7 @@
 
     function isUnfinished(state) {
       const value = normalize(state);
-      return isRunning(value) || isLegacyUnfinished(value);
+      return isRunning(value);
     }
 
     function count(items) {
@@ -156,7 +139,6 @@
 
     return {
       isRunning,
-      isLegacyUnfinished,
       isSuccess,
       isFailed,
       isFinal,
@@ -165,18 +147,6 @@
       allSettled,
     };
   })();
-
-  function isLegacyUploadState(value) {
-    const ok = UploadStateMeta.isLegacyUnfinished(value);
-    if (ok) {
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_LEGACY_STATE][HIT] state=${String(value || '-')}`,
-        );
-      }
-    }
-    return ok;
-  }
 
   function isUploadUnfinishedState(value) {
     return UploadStateMeta.isUnfinished(value);
@@ -230,15 +200,11 @@
     // 发送按钮：只负责发送。新 ID 不再带 upload-start，避免语义和状态污染。
     sendMessageBtn: '#cgpt-send-message-once',
 
-    // 旧 ID 只用于兼容迁移，不允许新渲染继续使用。
-    legacyStartSendBtn: '#cgpt-upload-start-send',
-
     copyContinueBtn: '#cgpt-upload-continue-once',
-    // @deprecated 独立“发送快捷键”按钮已移除，仅用于历史 DOM 清理。
-    legacySendHotkeyBtn: '#cgpt-send-hotkey-once',
     autoContinueBtn: '#cgpt-auto-continue-once',
     autoContinueUntilDoneBtn: '#cgpt-auto-continue-until-done',
     copyLastMessageBtn: '#cgpt-copy-last-message-scroll-bottom',
+    copyLogBtn: '#cgpt-copy-toolbox-log',
     copyHotkeyOnceBtn: '#cgpt-copy-hotkey-once',
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
     copyHotkeyContinueLoopBtn: '#cgpt-copy-hotkey-continue-loop',

@@ -130,9 +130,22 @@
       };
     }
 
+    function createStablePromptId(item, index) {
+      const title = String(item && item.title ? item.title : '').trim();
+      const category = String(item && item.category ? item.category : '默认').trim() || '默认';
+      const base = `${category}::${title}::${Number.isFinite(Number(index)) ? Number(index) : 0}`;
+      let hash = 0;
+
+      for (let i = 0; i < base.length; i += 1) {
+        hash = ((hash << 5) - hash + base.charCodeAt(i)) | 0;
+      }
+
+      return `default_prompt_${Math.abs(hash)}`;
+    }
+
     function buildNormalizedDefaultPrompts() {
-      return createDefaultPrompts().map((item) => normalizePromptItem({
-        id: createId('prompt'),
+      return createDefaultPrompts().map((item, index) => normalizePromptItem({
+        id: item && item.id ? item.id : createStablePromptId(item, index),
         title: item.title,
         category: item.category || '默认',
         content: item.content,

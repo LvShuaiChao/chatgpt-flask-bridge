@@ -75,21 +75,32 @@
       });
     }
 
+    async function copyAllLogs(source = 'log-module') {
+      flushLogBufferSync();
+      const text = state.lines.length > 0
+        ? state.lines.join('\n')
+        : '暂无日志。';
+      const ok = await copyWithStatus({
+        text,
+        successText: `已复制日志（${state.lines.length} 条）`,
+        failedPrefix: '复制日志失败',
+        logPrefix: 'LOG_COPY',
+        emptyText: '暂无日志',
+        playSuccessBeep: false,
+      });
+      ToolboxShell.appendLog(
+        `[LOG_COPY][${ok ? 'ok' : 'failed'}] source=${String(source || '-')} lines=${state.lines.length} chars=${text.length}`,
+      );
+      return ok;
+    }
+
     function bindLogCopy(root) {
       bindClick(root, '#cgpt-log-copy', () => {
-        flushLogBufferSync();
-
-        const text = state.lines.length > 0
-          ? state.lines.join('\n')
-          : '暂无日志。';
-
-        void copyWithStatus({
-          text,
-          successText: `已复制日志（${state.lines.length} 条）`,
-          failedPrefix: '复制日志失败',
-          logPrefix: 'LOG_COPY',
-          emptyText: '暂无日志',
-          playSuccessBeep: false,
+        void copyAllLogs('log-tab-button').catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] copy log failed', err);
+          ToolboxShell.setStatus(`复制日志失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[LOG_COPY][failed] source=log-tab-button error=${errText}`);
         });
       }, {
         moduleName: 'LogModule',
@@ -379,6 +390,7 @@
       mount,
       add,
       flushDomIfNeeded,
+      copyAllLogs,
     };
   })();
 

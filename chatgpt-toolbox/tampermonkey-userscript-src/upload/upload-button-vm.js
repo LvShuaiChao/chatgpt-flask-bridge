@@ -143,7 +143,13 @@
       ? snapshot.sendTask
       : {};
     const sendPhase = normalizeTaskPhase(sendTask.phase);
-    if (sendPhase === TaskPhase.WAITING_REPLY || !!snapshot.pendingSendAfterReply) {
+    // waiting_reply: 已发送，等待 ChatGPT 回复
+    // waiting_page_reply_to_send: 页面正在回复，消息尚未真正发送，等待页面空闲后再发
+    if (
+      sendPhase === TaskPhase.WAITING_REPLY
+      || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
+      || !!snapshot.pendingSendAfterReply
+    ) {
       return 'send-message';
     }
 
@@ -245,6 +251,7 @@
     'send-hotkey',
     'copy-hotkey-once',
     'copy-continue',
+    'copy-log',
   ]);
 
   function isUploadButtonBusinessAction(action) {
@@ -581,15 +588,23 @@
       });
     }
 
-    if (phase === TaskPhase.WAITING_REPLY) {
-      const replyTitle = pendingSendAfterReply
-        ? '助手正在回复，页面可发送后将自动点击'
-        : '正在等待回复';
+    if (phase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
+      return finish({
+        phase: TaskPhase.WAITING_PAGE_REPLY_TO_SEND,
+        text: '等待页面回复后发送',
+        title: '页面正在回答，当前消息尚未发送；等待页面空闲后将自动发送',
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel-send',
+        buttonPhase: 'waiting',
+      });
+    }
 
+    if (phase === TaskPhase.WAITING_REPLY) {
       return finish({
         phase: TaskPhase.WAITING_REPLY,
         text: '等待回复',
-        title: replyTitle,
+        title: '正在等待 ChatGPT 回复完成',
         disabled: false,
         allowCancel: true,
         action: 'cancel-wait-reply',
@@ -612,13 +627,13 @@
 
     if (pendingSendAfterReply) {
       return finish({
-        phase: TaskPhase.WAITING_REPLY,
-        text: '等待回复',
-        title: '助手正在回复，页面可发送后将自动点击',
+        phase: TaskPhase.WAITING_PAGE_REPLY_TO_SEND,
+        text: '等待页面回复后发送',
+        title: '页面正在回答，当前消息尚未发送；等待页面空闲后将自动发送',
         disabled: false,
         allowCancel: true,
-        action: 'cancel-wait-reply',
-        buttonPhase: 'waiting_reply',
+        action: 'cancel-send',
+        buttonPhase: 'waiting',
       });
     }
 
@@ -1348,6 +1363,7 @@
     } else if (normalized === 'send-message') {
       disabled = sendPhase === TaskPhase.SENDING
         || sendPhase === TaskPhase.WAITING_SEND
+        || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
         || sendPhase === 'waiting_ready'
         || sendPhase === TaskPhase.CANCELLING
         || pageReplyStatus === 'answering'
@@ -1663,6 +1679,7 @@
       : `闭环继续+每${interval}轮上传`;
     const label = snapshot.closedLoopLabel || fallbackLabel;
     const isActiveMode = running && activeMode === (isHotkeyMode ? 'with_hotkey' : 'without_hotkey');
+    const buttonName = isHotkeyMode ? 'closed-loop-with-hotkey' : 'closed-loop-without-hotkey';
 
     if (isActiveMode) {
       return {
@@ -1676,6 +1693,19 @@
         action: 'stop',
         buttonPhase: 'running',
       };
+    }
+
+    const pageBusyClosedLoopView = buildPageReplyBusyIdleDisabledView(
+      buttonName,
+      TaskPhase.IDLE,
+      {
+        text: snapshot.closedLoopLabel || label,
+        titleWhenBlocked: '当前页面正在回答，暂不可用',
+      },
+      snapshot,
+    );
+    if (pageBusyClosedLoopView) {
+      return logButtonViewStateGuard(buttonName, TaskPhase.IDLE, pageBusyClosedLoopView, snapshot);
     }
 
     return {
@@ -1823,6 +1853,10 @@
       if (base.text === '等待附件') {
         return { ...base, phase: ButtonState.Phase.WAITING_ATTACHMENT };
       }
+      return { ...base, phase: ButtonState.Phase.WAITING_SEND };
+    }
+    if (taskPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
+      // 页面正在回复，消息尚未发出；视觉上属于“等待发送”的一种，但文案需区分。
       return { ...base, phase: ButtonState.Phase.WAITING_SEND };
     }
     if (taskPhase === TaskPhase.SENDING) {
@@ -2013,6 +2047,18 @@
       reason,
     );
 
+    if (action === 'copy-log') {
+      resolvedView = {
+        ...resolvedView,
+        phase: TaskPhase.IDLE,
+        buttonPhase: 'idle',
+        disabled: false,
+        allowCancel: false,
+        action: 'copy-log',
+        preserveBaseColorWhenDisabled: false,
+      };
+    }
+
     if (action) {
       const decide = computeUploadActionDisabled(action, snapshot);
       const viewDisabled = !!view.disabled;
@@ -2050,6 +2096,10 @@
         || action === 'loop-copy-hotkey-continue'
         || action === 'send-message'
         || action === 'auto-continue-until-done'
+        || action === 'closed-loop-with-hotkey'
+        || action === 'closed-loop-without-hotkey'
+        || action === 'closed-loop-upload-continue-hotkey'
+        || action === 'closed-loop-upload-continue'
       ) {
         if (decideForRuntime.disabled !== viewDisabled) {
           const keepIdleColor = ownPhase === TaskPhase.IDLE

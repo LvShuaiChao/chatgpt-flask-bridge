@@ -235,7 +235,6 @@
     const domAction = String(button.dataset.action || '').trim();
     const baseAction = String(
       button.dataset.cgptBaseAction
-      || button.dataset.cgptAction
       || domAction
       || '',
     ).trim();
@@ -275,10 +274,8 @@
     const value = String(baseAction || '').trim();
     if (value) {
       button.dataset.cgptBaseAction = value;
-      button.dataset.cgptAction = value;
     } else {
       delete button.dataset.cgptBaseAction;
-      delete button.dataset.cgptAction;
     }
   }
 
@@ -614,7 +611,7 @@
     const explicitBlock = button.hasAttribute('data-enter-block')
       || (button.hasAttribute('data-danger-enter-block') && button.dataset.autoDangerEnterBlock !== '1');
     const actionName = String(
-      button.dataset.cgptAction || button.dataset.action || button.getAttribute('data-action') || '',
+      button.dataset.cgptBaseAction || button.dataset.action || button.getAttribute('data-action') || '',
     ).trim().toLowerCase();
     const isCancelAction =
       actionName.includes('cancel')

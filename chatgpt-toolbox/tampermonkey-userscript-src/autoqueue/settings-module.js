@@ -273,68 +273,30 @@
         quickPromptIds,
         globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
         restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
-        closedLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
-        closedLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.closedLoopAutoUploadInterval || current.copyHotkeyLoopAutoUploadInterval || 5),
-        copyHotkeyLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
-        copyHotkeyLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.closedLoopAutoUploadInterval || current.copyHotkeyLoopAutoUploadInterval || 5),
-        unifiedContinueHomeNavEnabled: !!(
-          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
-        )?.checked,
-        unifiedContinueHomeNavInterval: Number(
-          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
-          || current.unifiedContinueHomeNavInterval
-          || current.copyHotkeyLoopHomeNavInterval
-          || 20,
-        ),
-        unifiedContinueHomeNavUrl: String(
-          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
-          || current.unifiedContinueHomeNavUrl
-          || current.copyHotkeyLoopHomeNavUrl
-          || 'https://chatgpt.com/'
-        ).trim(),
-        closedLoopHomeNavEnabled: !!(
-          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
-        )?.checked,
-        closedLoopHomeNavInterval: Number(
-          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
-          || current.closedLoopHomeNavInterval
-          || current.unifiedContinueHomeNavInterval
-          || current.copyHotkeyLoopHomeNavInterval
-          || 20,
-        ),
-        closedLoopHomeNavUrl: String(
-          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
-          || current.closedLoopHomeNavUrl
-          || current.unifiedContinueHomeNavUrl
-          || current.copyHotkeyLoopHomeNavUrl
-          || 'https://chatgpt.com/'
-        ).trim(),
-        copyHotkeyLoopHomeNavEnabled: !!(
-          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
-        )?.checked,
-        copyHotkeyLoopHomeNavInterval: Number(
-          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
-          || current.closedLoopHomeNavInterval
-          || current.unifiedContinueHomeNavInterval
-          || current.copyHotkeyLoopHomeNavInterval
-          || 20,
-        ),
-        copyHotkeyLoopHomeNavUrl: String(
-          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
-          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
-          || current.closedLoopHomeNavUrl
-          || current.unifiedContinueHomeNavUrl
-          || current.copyHotkeyLoopHomeNavUrl
-          || 'https://chatgpt.com/'
-        ).trim(),
+        continueAutomation: {
+          autoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
+          autoUploadInterval: Number(
+            qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value
+            || current.continueAutomation?.autoUploadInterval
+            || 5,
+          ),
+          homeNavEnabled: !!(
+            qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
+          )?.checked,
+          homeNavInterval: Number(
+            qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
+            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+            || current.continueAutomation?.homeNavInterval
+            || 20,
+          ),
+          homeNavUrl: String(
+            qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
+            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+            || current.continueAutomation?.homeNavUrl
+            || 'https://chatgpt.com/',
+          ).trim(),
+        },
         copyHotkeyContinuePromptText: (() => {
           const raw = String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim();
           const defaultText = typeof getDefaultContinuePromptText === 'function'
@@ -402,17 +364,17 @@
 
       const loopAutoUploadEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root);
       if (loopAutoUploadEnabledEl) {
-        loopAutoUploadEnabledEl.checked = cfg.closedLoopAutoUploadEnabled !== false;
+        loopAutoUploadEnabledEl.checked = cfg.continueAutomation?.autoUploadEnabled !== false;
       }
 
       const loopAutoUploadIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root);
       if (loopAutoUploadIntervalEl) {
-        loopAutoUploadIntervalEl.value = String(cfg.closedLoopAutoUploadInterval || cfg.copyHotkeyLoopAutoUploadInterval || 5);
+        loopAutoUploadIntervalEl.value = String(cfg.continueAutomation?.autoUploadInterval || 5);
       }
 
-      const unifiedHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled !== false;
-      const unifiedHomeNavInterval = Number(cfg.unifiedContinueHomeNavInterval || cfg.closedLoopHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20);
-      const unifiedHomeNavUrl = cfg.unifiedContinueHomeNavUrl || cfg.closedLoopHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
+      const unifiedHomeNavEnabled = cfg.continueAutomation?.homeNavEnabled !== false;
+      const unifiedHomeNavInterval = Number(cfg.continueAutomation?.homeNavInterval || 20);
+      const unifiedHomeNavUrl = cfg.continueAutomation?.homeNavUrl || 'https://chatgpt.com/';
 
       const loopHomeNavEnabledEl = qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
         || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
@@ -747,8 +709,9 @@
       const onCompactSettingChange = () => {
         const cfg = readFromUi();
         saveConfig(cfg);
+        const continueCfg = cfg.continueAutomation || {};
         ToolboxShell.appendLog(
-          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${cfg.unifiedContinueHomeNavEnabled !== false ? 1 : 0} interval=${cfg.unifiedContinueHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20} url=${cfg.unifiedContinueHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/'}`,
+          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${continueCfg.homeNavEnabled !== false ? 1 : 0} interval=${continueCfg.homeNavInterval || 20} url=${continueCfg.homeNavUrl || 'https://chatgpt.com/'}`,
         );
         render();
       };
