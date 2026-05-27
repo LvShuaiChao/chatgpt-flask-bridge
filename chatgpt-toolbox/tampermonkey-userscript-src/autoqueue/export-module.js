@@ -3,7 +3,6 @@
 
   const ExportModule = (() => {
     let root = null;
-    let statsLineEl = null;
     let settingsImportFileEl = null;
     let settingsImportBtn = null;
 
@@ -200,7 +199,27 @@
     function buildPanelExportText() {
       const autoCfg = AutoQueueModule.getConfig();
       const autoState = AutoQueueModule.getState();
-      const uploadStatus = UploadModule.getStatus();
+      const runtimeStatus = UploadModule.getUnifiedRuntimeStatus
+        ? UploadModule.getUnifiedRuntimeStatus('export-panel')
+        : null;
+      const uploadStatus = runtimeStatus && runtimeStatus.uploadQueue
+        ? runtimeStatus.uploadQueue
+        : UploadModule.getStatus();
+      const legacyFlags = runtimeStatus && runtimeStatus.legacyFlags
+        ? runtimeStatus.legacyFlags
+        : {};
+      const uploadTaskPhase = runtimeStatus && runtimeStatus.uploadTask
+        ? String(runtimeStatus.uploadTask.phase || 'idle')
+        : 'idle';
+      const sendTaskPhase = runtimeStatus && runtimeStatus.sendTask
+        ? String(runtimeStatus.sendTask.phase || 'idle')
+        : 'idle';
+      const uploadRunning = !!(
+        legacyFlags.running
+        || uploadStatus.running
+        || uploadTaskPhase === 'uploading'
+        || uploadTaskPhase === 'cancelling'
+      );
       const promptCount = PromptManagerModule.getPrompts().length;
 
       const continueLoop = autoCfg.modeSettings &&
@@ -249,183 +268,11 @@ Prompt 总数：${promptCount}
 当前组队列数量：${uploadStatus.total}
 已挂载：${uploadStatus.attached}
 失败：${uploadStatus.failed}
-运行状态：${uploadStatus.running ? '运行中' : '已停止'}
+运行状态：${uploadRunning ? '运行中' : '已停止'}
+上传任务：${uploadTaskPhase}
+发送任务：${sendTaskPhase}
 `;
     }
-    function stripMarkdownCodeFences(text) {
-      return String(text || '').replace(/```(?:json)?\s*([\s\S]*?)```/gi, '$1');
-    }
-
-    function extractJsonObjectsFromText(raw) {
-      const text = stripMarkdownCodeFences(raw);
-      const out = [];
-      let i = 0;
-
-      while (i < text.length) {
-        const start = text.indexOf('{', i);
-
-        if (start === -1) break;
-
-        let depth = 0;
-        let inStr = false;
-        let esc = false;
-        let closed = false;
-
-        for (let j = start; j < text.length; j += 1) {
-          const c = text[j];
-
-          if (inStr) {
-            if (esc) {
-              esc = false;
-            } else if (c === '\\') {
-              esc = true;
-            } else if (c === '"') {
-              inStr = false;
-            }
-
-            continue;
-          }
-
-          if (c === '"') {
-            inStr = true;
-            continue;
-          }
-
-          if (c === '{') {
-            depth += 1;
-          } else if (c === '}') {
-            depth -= 1;
-
-            if (depth === 0) {
-              const slice = text.slice(start, j + 1);
-
-              try {
-                out.push(JSON.parse(slice));
-              } catch (e) {
-                console.debug('[ChatGPT toolbox] skip invalid JSON candidate', e);
-              }
-
-              i = j + 1;
-              closed = true;
-              break;
-            }
-          }
-        }
-
-        if (!closed) {
-          i = start + 1;
-        }
-      }
-
-      return dedupeParsedObjects(out);
-    }
-
-    function dedupeParsedObjects(objs) {
-      const seen = new Set();
-      const out = [];
-
-      for (const o of objs) {
-        try {
-          const k = JSON.stringify(o);
-
-          if (seen.has(k)) continue;
-
-          seen.add(k);
-          out.push(o);
-        } catch (e) {
-          console.debug('[ChatGPT toolbox] JSON stringify failed during dedupe', e);
-          out.push(o);
-        }
-      }
-
-      return out;
-    }
-
-    function isReviewPayload(obj) {
-      return !!(obj && typeof obj === 'object' && Array.isArray(obj.issues));
-    }
-
-    function getAssistantMessageFullText(el) {
-      if (!el) return '';
-
-      const z = (s) => String(s || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
-      const chunks = [];
-
-      qsa('pre, code', el).forEach((node) => {
-        if (isInToolbox(node)) return;
-
-        const t = z(node.textContent);
-        if (t) chunks.push(t);
-      });
-
-      chunks.push(z(el.innerText));
-      chunks.push(z(el.textContent));
-
-      return [...new Set(chunks.filter(Boolean))].join('\n\n');
-    }
-
-    function scanReviewIssueStats() {
-      const assistantEls = ComposerApi.getChatMessageElementsInOrder()
-        .filter((el) => (el.getAttribute('data-message-author-role') || '') === 'assistant');
-
-      let jsonBlocks = 0;
-      let issueTotal = 0;
-      let metaSumDeclared = 0;
-      const items = [];
-
-      assistantEls.forEach((el, idx) => {
-        const raw = getAssistantMessageFullText(el);
-        const payloads = extractJsonObjectsFromText(raw).filter(isReviewPayload);
-
-        payloads.forEach((obj) => {
-          jsonBlocks += 1;
-
-          const n = obj.issues.length;
-          issueTotal += n;
-
-          const metaCount = obj.meta && typeof obj.meta.issue_count === 'number'
-            ? obj.meta.issue_count
-            : null;
-
-          if (metaCount != null) {
-            metaSumDeclared += metaCount;
-          }
-
-          items.push({
-            msgIndex: idx + 1,
-            qid: obj.qid || '',
-            issueCount: n,
-            metaIssueCount: metaCount,
-          });
-        });
-      });
-
-      return {
-        assistantWithRoleCount: assistantEls.length,
-        jsonBlocks,
-        issueTotal,
-        metaSumDeclared,
-        items,
-      };
-    }
-
-    function applyIssueTotalToTabTitle(issueTotal) {
-      TitlePrefixModule.applyIssueTotalToTitle(issueTotal);
-    }
-
-    function renderStats() {
-      const s = scanReviewIssueStats();
-
-      if (statsLineEl) {
-        statsLineEl.textContent =
-          `issues 总数：${s.issueTotal} 条；JSON 块：${s.jsonBlocks}；助手消息：${s.assistantWithRoleCount}`;
-      }
-
-      applyIssueTotalToTabTitle(s.issueTotal);
-
-      return s;
-    }
-
     const EXPORT_ACTIONS = Object.freeze([
       {
         selector: '#cgpt-export-copy-chat',
@@ -453,34 +300,6 @@ Prompt 总数：${promptCount}
           logPrefix: 'EXPORT_COPY_PANEL',
         }),
       },
-      {
-        selector: '#cgpt-export-refresh-stats',
-        name: 'refresh-stats',
-        runningText: '刷新中',
-        successText: '已刷新',
-        failedText: '刷新失败',
-        handler: () => {
-          const s = renderStats();
-          ToolboxShell.appendLog(`issues 统计刷新：${s.issueTotal} 条`);
-          return true;
-        },
-      },
-      {
-        selector: '#cgpt-export-copy-stats',
-        name: 'copy-stats',
-        runningText: '复制中',
-        successText: '已复制',
-        failedText: '复制失败',
-        handler: () => {
-          const s = renderStats();
-          return copyWithStatus({
-            text: JSON.stringify(s, null, 2),
-            successText: '已复制 issues 统计 JSON',
-            failedPrefix: '复制 issues 统计失败',
-            logPrefix: 'EXPORT_COPY_STATS',
-          });
-        },
-      },
     ]);
 
     function bindExportActionWithButtonState(action) {
@@ -504,26 +323,6 @@ Prompt 总数：${promptCount}
       EXPORT_ACTIONS.forEach((action) => {
         bindExportActionWithButtonState(action);
       });
-
-      DomUtil.bindClick(root, '#cgpt-export-prompts', () => {
-        const btn = root ? qs('#cgpt-export-prompts', root) : null;
-        void flashExportButton(btn, '导出中', '已导出', '导出失败', () => {
-          try {
-            const data = PromptManagerModule.exportData();
-            downloadJsonFile(`chatgpt-prompts-${buildDateStamp()}.json`, data);
-            ToolboxShell.appendLog('已导出 Prompt 管理数据');
-            ToolboxShell.setStatus('已导出 Prompt 管理数据');
-            return true;
-          } catch (error) {
-            console.error('[EXPORT][prompts-export][failed]', error);
-            throw error;
-          }
-        }).catch((error) => {
-          const errText = error && error.message ? error.message : String(error);
-          console.error('[EXPORT][prompts-export][failed]', error);
-          ToolboxShell.setStatus(`导出 Prompt 失败：${errText}`, 'error');
-        });
-      }, 'EXPORT');
 
       bindClick(root, '#cgpt-export-settings', () => {
         const btn = root ? qs('#cgpt-export-settings', root) : null;
@@ -690,27 +489,11 @@ Prompt 总数：${promptCount}
           <div class="cgpt-row" style="flex-wrap:wrap;">
             <button type="button" class="cgpt-btn primary" id="cgpt-export-copy-chat">复制完整对话</button>
             <button type="button" class="cgpt-btn" id="cgpt-export-copy-panel">复制工具箱配置</button>
-            <button type="button" class="cgpt-btn" id="cgpt-export-prompts">导出 Prompt</button>
           </div>
         </div>
       `;
     }
 
-    function buildExportStatsSectionHtml() {
-      return `
-        <div class="cgpt-section">
-          <div class="cgpt-section-title">issues 统计</div>
-          <div class="cgpt-hint">
-            会扫描助手回复中的 JSON 对象，统计形如 {"issues": [...]} 的结果数量，并同步到浏览器标题。
-          </div>
-          <div class="cgpt-row" style="flex-wrap:wrap;">
-            <button type="button" class="cgpt-btn primary" id="cgpt-export-refresh-stats">刷新统计</button>
-            <button type="button" class="cgpt-btn" id="cgpt-export-copy-stats">复制统计 JSON</button>
-          </div>
-          <div id="cgpt-export-stats-line" class="cgpt-hint" style="margin-top:8px;">issues 总数：-</div>
-        </div>
-      `;
-    }
 
     function buildExportSettingsBackupSectionHtml() {
       return `
@@ -731,7 +514,6 @@ Prompt 总数：${promptCount}
     function buildExportModuleHtml() {
       return `
         ${buildExportChatSectionHtml()}
-        ${buildExportStatsSectionHtml()}
         ${buildExportSettingsBackupSectionHtml()}
       `;
     }
@@ -744,15 +526,11 @@ Prompt 总数：${promptCount}
         html: buildExportModuleHtml(),
         onRefs: (mountedRoot) => {
           root = mountedRoot;
-          statsLineEl = qs('#cgpt-export-stats-line', root);
           settingsImportFileEl = qs('#cgpt-export-settings-import-file', root);
         },
         onBind: () => {
           bindEvents();
-        },
-        onRender: () => {
-          renderStats();
-        },
+        }
       });
     }
 

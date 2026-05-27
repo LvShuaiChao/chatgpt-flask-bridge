@@ -456,6 +456,7 @@
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
           page_display_id: pageDisplayId,
+          // page_no is legacy compatibility alias of page_display_id.
           page_no: pageDisplayId,
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
@@ -513,6 +514,7 @@
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
           page_display_id: fallbackPageDisplayId,
+          // page_no is legacy compatibility alias of page_display_id.
           page_no: fallbackPageDisplayId,
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
@@ -2176,7 +2178,10 @@
           + `name=${name} size=${file.size}`,
         );
 
-        const uploadResult = await ComposerApi.attachFilesByFileInput([file], 12000, {});
+        const uploadResult = await ComposerApi.attachFilesByFileInput([file], 12000, {
+          uploadOnly: true,
+          requireSendReady: false,
+        });
 
         if (!uploadResult || !uploadResult.ok) {
           const reason = (uploadResult && uploadResult.reason)
@@ -2304,6 +2309,9 @@
         const uploadStatus = UploadModule.getStatus
           ? UploadModule.getStatus()
           : {};
+        const runtimeStatus = UploadModule.getUnifiedRuntimeStatus
+          ? UploadModule.getUnifiedRuntimeStatus('bridge:start_upload')
+          : null;
         uploadResult = {
           success: queueResult && queueResult.ok ? Number(queueResult.uploadedCount) || 0 : 0,
           failed: Number(queueResult && queueResult.failedCount) || 0,
@@ -2314,6 +2322,7 @@
           skipped: !!(queueResult && !queueResult.ok && isNoFilesBridgeReason(queueResult.reason)),
           reason: String(queueResult && queueResult.reason || ''),
           upload_status: uploadStatus,
+          runtime_status: runtimeStatus,
           queue_result: queueResult,
         };
       } catch (error) {
@@ -2335,6 +2344,22 @@
       const uploadStatus = uploadResult && uploadResult.upload_status
         ? uploadResult.upload_status
         : {};
+      const runtimeStatus = uploadResult && uploadResult.runtime_status
+        ? uploadResult.runtime_status
+        : (
+          UploadModule && typeof UploadModule.getUnifiedRuntimeStatus === 'function'
+            ? UploadModule.getUnifiedRuntimeStatus('bridge:start_upload:post-check')
+            : null
+        );
+      const uploadTaskPhase = runtimeStatus && runtimeStatus.uploadTask
+        ? String(runtimeStatus.uploadTask.phase || 'idle').trim().toLowerCase()
+        : 'idle';
+      const uploadTaskStillActive = uploadTaskPhase === 'uploading' || uploadTaskPhase === 'cancelling';
+      const legacyUploadRunning = !!(
+        runtimeStatus
+        && runtimeStatus.legacyFlags
+        && runtimeStatus.legacyFlags.running
+      );
 
       const success = Number(uploadResult && uploadResult.success) || 0;
       const failed = Number(uploadResult && uploadResult.failed) || 0;
@@ -2357,6 +2382,9 @@
         reason = skipped
           ? `发送前上传跳过：${uploadResult.reason || '没有可上传文件'}`
           : '发送前上传没有成功文件';
+      } else if (uploadTaskStillActive && !legacyUploadRunning && !uploadStatus.running) {
+        ok = false;
+        reason = `上传任务状态未复位：uploadTask.phase=${uploadTaskPhase}`;
       }
 
       if (!ok) {

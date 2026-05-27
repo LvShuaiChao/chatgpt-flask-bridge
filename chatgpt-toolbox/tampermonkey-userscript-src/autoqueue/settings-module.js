@@ -273,8 +273,10 @@
         quickPromptIds,
         globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
         restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
+        closedLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
+        closedLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.closedLoopAutoUploadInterval || current.copyHotkeyLoopAutoUploadInterval || 5),
         copyHotkeyLoopAutoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
-        copyHotkeyLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.copyHotkeyLoopAutoUploadInterval || 5),
+        copyHotkeyLoopAutoUploadInterval: Number(qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value || current.closedLoopAutoUploadInterval || current.copyHotkeyLoopAutoUploadInterval || 5),
         unifiedContinueHomeNavEnabled: !!(
           qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
           || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
@@ -293,6 +295,26 @@
           || current.copyHotkeyLoopHomeNavUrl
           || 'https://chatgpt.com/'
         ).trim(),
+        closedLoopHomeNavEnabled: !!(
+          qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
+        )?.checked,
+        closedLoopHomeNavInterval: Number(
+          qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+          || current.closedLoopHomeNavInterval
+          || current.unifiedContinueHomeNavInterval
+          || current.copyHotkeyLoopHomeNavInterval
+          || 20,
+        ),
+        closedLoopHomeNavUrl: String(
+          qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
+          || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          || current.closedLoopHomeNavUrl
+          || current.unifiedContinueHomeNavUrl
+          || current.copyHotkeyLoopHomeNavUrl
+          || 'https://chatgpt.com/'
+        ).trim(),
         copyHotkeyLoopHomeNavEnabled: !!(
           qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
           || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
@@ -300,6 +322,7 @@
         copyHotkeyLoopHomeNavInterval: Number(
           qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
           || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+          || current.closedLoopHomeNavInterval
           || current.unifiedContinueHomeNavInterval
           || current.copyHotkeyLoopHomeNavInterval
           || 20,
@@ -307,6 +330,7 @@
         copyHotkeyLoopHomeNavUrl: String(
           qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
           || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+          || current.closedLoopHomeNavUrl
           || current.unifiedContinueHomeNavUrl
           || current.copyHotkeyLoopHomeNavUrl
           || 'https://chatgpt.com/'
@@ -321,7 +345,8 @@
           }
           return raw;
         })(),
-        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim() || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
+        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim()
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'),
       };
     }
 
@@ -377,17 +402,17 @@
 
       const loopAutoUploadEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root);
       if (loopAutoUploadEnabledEl) {
-        loopAutoUploadEnabledEl.checked = cfg.copyHotkeyLoopAutoUploadEnabled !== false;
+        loopAutoUploadEnabledEl.checked = cfg.closedLoopAutoUploadEnabled !== false;
       }
 
       const loopAutoUploadIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root);
       if (loopAutoUploadIntervalEl) {
-        loopAutoUploadIntervalEl.value = String(cfg.copyHotkeyLoopAutoUploadInterval || 5);
+        loopAutoUploadIntervalEl.value = String(cfg.closedLoopAutoUploadInterval || cfg.copyHotkeyLoopAutoUploadInterval || 5);
       }
 
       const unifiedHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled !== false;
-      const unifiedHomeNavInterval = Number(cfg.unifiedContinueHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20);
-      const unifiedHomeNavUrl = cfg.unifiedContinueHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
+      const unifiedHomeNavInterval = Number(cfg.unifiedContinueHomeNavInterval || cfg.closedLoopHomeNavInterval || cfg.copyHotkeyLoopHomeNavInterval || 20);
+      const unifiedHomeNavUrl = cfg.unifiedContinueHomeNavUrl || cfg.closedLoopHomeNavUrl || cfg.copyHotkeyLoopHomeNavUrl || 'https://chatgpt.com/';
 
       const loopHomeNavEnabledEl = qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
         || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
@@ -409,7 +434,8 @@
 
       const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
       if (stopSignalEl) {
-        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>');
       }
 
       const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
@@ -698,8 +724,8 @@
         resetContinuePromptBtn.addEventListener('click', () => {
           const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
           const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
-          const defaultStop = typeof DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL === 'string'
-            ? DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL
+          const defaultStop = typeof getDefaultDoneSignal === 'function'
+            ? getDefaultDoneSignal()
             : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
 
           if (promptTextEl) {
@@ -1088,7 +1114,7 @@
                   <span class="cgpt-hotkey-setting-label-text">发送消息</span>
                 </label>
                 <input id="cgpt-shortcut-send-label" class="cgpt-hotkey-setting-input" readonly>
-                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-record" title="点击录制后按下完整快捷键，例如 Ctrl+Alt+S。只按 Ctrl/Alt/Shift 不会保存，需再按一个主键。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-record" title="默认 Ctrl+Alt+S。录制时请按完整组合键；仅按 Ctrl/Alt/Shift 不会保存，需再按主键。按 Esc 取消。">录制</button>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-clear">清空</button>
               </div>
 

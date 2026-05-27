@@ -1,5 +1,4 @@
 from app.server import (
-    get_bridge_status,
     get_server_port,
     get_server_public_host,
     is_server_running,
@@ -281,16 +280,3 @@ class SettingsMixin:
         self._set_settings_hint(text)
         if text:
             self.statusBar().showMessage(text, 8000)
-
-    def _on_check_tampermonkey(self):
-        if not is_server_running():
-            self._set_settings_hint("请先启动服务，再检查油猴连接。")
-            return
-        status = get_bridge_status()
-        self._apply_bridge_status(status)
-        if status.get("tampermonkey_online"):
-            self._set_settings_hint("油猴在线。")
-        elif status.get("tampermonkey_last_seen"):
-            self._set_settings_hint("油猴离线（曾连接过）。")
-        else:
-            self._set_settings_hint("油猴未连接。")

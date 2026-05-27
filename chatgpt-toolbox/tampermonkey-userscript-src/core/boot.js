@@ -14,6 +14,8 @@ function cleanupStaleToolboxDomBeforeInit(reason = '') {
     '#cgpt-toolbox-restore-handle',
     '#cgpt-autoq-prompt-picker-overlay',
     '#cgpt-prompt-editor-overlay',
+    '#cgpt-prompt-editor-close-confirm',
+    '.cgpt-modal-overlay',
   ];
 
   selectors.forEach((selector) => {
@@ -24,6 +26,9 @@ function cleanupStaleToolboxDomBeforeInit(reason = '') {
       );
     });
   });
+
+  document.documentElement.classList.remove('cgpt-toolbox-global-dragging');
+  document.body.classList.remove('cgpt-toolbox-global-dragging');
 }
 
 function installToolboxInstanceGuard() {
@@ -71,6 +76,8 @@ async function safeInitStep(name, fn) {
 }
 
 async function mountAllModules(reason = 'init') {
+  console.info('[TOOLBOX][MODULE_MOUNT_START]', { reason });
+
   if (typeof cleanupRuntimeHandles === 'function') {
     cleanupRuntimeHandles(`mount:${reason}`);
   }
@@ -142,15 +149,40 @@ async function mountAllModules(reason = 'init') {
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_DONE] reason=${reason}`);
   }
+
+  console.info('[TOOLBOX][MODULE_MOUNT_DONE]', { reason, failed: failedNames });
 }
 
 async function initToolbox() {
+  console.info('[TOOLBOX][BOOT_START] initToolbox called');
+
   installToolboxInstanceGuard();
   cleanupStaleToolboxDomBeforeInit('init-start');
 
-  await safeInitStep('ToolboxShell.create', () => {
+  try {
     ToolboxShell.create();
-  });
+    const rootEl = document.querySelector('#cgpt-toolbox-root');
+    if (!rootEl) {
+      const msg = 'ToolboxShell.create() completed but #cgpt-toolbox-root is missing';
+      console.error('[TOOLBOX][SHELL_CREATE_FAILED]', msg);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(`[TOOLBOX][SHELL_CREATE_FAILED] ${msg}`);
+      }
+      return;
+    }
+    console.info('[TOOLBOX][SHELL_CREATED] root created', {
+      root: !!rootEl,
+      panel: !!document.querySelector('#cgpt-toolbox-panel'),
+    });
+  } catch (e) {
+    const errText = e && e.message ? e.message : String(e);
+    console.error('[TOOLBOX][SHELL_CREATE_FAILED]', e);
+    logError('[INIT][ToolboxShell.create]', e);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(`[TOOLBOX][SHELL_CREATE_FAILED] ${errText}`);
+    }
+    return;
+  }
 
   await safeInitStep('validateCanonicalFieldsOnStartup', () => {
     if (typeof validateCanonicalFieldsOnStartup === 'function') {

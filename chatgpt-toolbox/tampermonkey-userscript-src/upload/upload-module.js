@@ -19,6 +19,12 @@
     const SEND_STABLE_RETRY_LIMIT = 30;
     const SEND_STABLE_RETRY_INTERVAL_MS = 300;
     const SEND_WAIT_TIMEOUT_MS = 60 * 1000;
+    /** 手动点击「发送消息」：总等待上限（含重试），超时即失败。 */
+    const MANUAL_SEND_TIMEOUT_MS = 5000;
+    /** 手动发送时 composer 附件仍在上传的最大等待。 */
+    const MANUAL_SEND_ATTACHMENT_WAIT_MS = 10000;
+    const MANUAL_SEND_RETRY_INTERVAL_MS = 400;
+    const MANUAL_SEND_FAILURE_HINT_CLEAR_MS = 1200;
     const PRE_SEND_OPPORTUNITY_POLL_MS = 1000;
     const COPY_CONTINUE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
     const COPY_CONTINUE_STABLE_ROUNDS = 3;
@@ -42,6 +48,7 @@
       activeId: '',
       observer: null,
       uploadAbortController: null,
+      sendAbortController: null,
       uploadCancelRequested: false,
       runId: 0,
       waitingSend: false,
@@ -76,6 +83,13 @@
         activeId: '',
         cancelRequested: false,
         abortController: null,
+        owner: '',
+        cancelable: false,
+        source: '',
+        startedAt: 0,
+        updatedAt: 0,
+        parentTask: '',
+        cycleIndex: 0,
       },
       sendTask: {
         phase: 'idle',
@@ -161,8 +175,10 @@
     let enterSendDispatchLastAt = 0;
     // deprecated: only used for compatibility, do not use as render source
     let uploadSendShortcutRunning = false;
+    let lastUploadSendPanelFailReason = '';
     let uploadSendTaskStartedAt = 0;
     let lastWaitRealSendButtonLogAt = 0;
+    let lastHealStaleDelegateAutoqAt = 0;
     const WAIT_REAL_SEND_BUTTON_POLL_MS = 400;
     const WAIT_REAL_SEND_BUTTON_LOG_INTERVAL_MS = 2000;
     let waitingReplyIdleStreak = 0;
@@ -219,8 +235,8 @@
         buttonId: 'cgpt-closed-loop-upload-every5-hotkey-btn',
         selector: '#cgpt-closed-loop-upload-every5-hotkey-btn',
         toolbarKey: 'closed-loop-with-hotkey',
-        label: '闭环继续+快捷键+每N轮上传',
-        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；第 1 轮与每 N 轮自动上传代码',
+        label: '',
+        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；按配置间隔自动上传代码',
       }),
       WITHOUT_HOTKEY: Object.freeze({
         mode: CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY,
@@ -232,8 +248,8 @@
         buttonId: 'cgpt-closed-loop-upload-every5-btn',
         selector: '#cgpt-closed-loop-upload-every5-btn',
         toolbarKey: 'closed-loop-without-hotkey',
-        label: '闭环继续+每N轮上传',
-        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；第 1 轮与每 N 轮自动上传代码',
+        label: '',
+        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；按配置间隔自动上传代码',
         datasetClosedLoopMode: 'without_hotkey',
       }),
     });
@@ -310,7 +326,7 @@
       };
     }
 
-    function buildClosedLoopActionLabel(mode) {
+    function getClosedLoopButtonLabel(mode) {
       const closedLoopCfg = getClosedLoopAutomationConfig();
       const interval = closedLoopCfg.autoUploadInterval;
       if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
@@ -320,7 +336,7 @@
     }
 
     function getClosedLoopModeLabel(mode) {
-      return buildClosedLoopActionLabel(mode);
+      return getClosedLoopButtonLabel(mode);
     }
 
     function getClosedLoopContinueActionDef(mode) {
@@ -357,29 +373,12 @@
       }
       btn.id = actionDef.id;
       btn.dataset.action = actionDef.action;
+      btn.dataset.cgptBaseAction = actionDef.action;
       btn.textContent = getClosedLoopModeLabel(actionDef.mode);
       btn.title = actionDef.title;
       if (actionDef.datasetClosedLoopMode) {
         btn.dataset.closedLoopMode = actionDef.datasetClosedLoopMode;
       }
-    }
-
-    function resolveClosedLoopModeFromButton(btn) {
-      if (!(btn instanceof HTMLElement)) {
-        return CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
-      }
-      const action = normalizeClosedLoopAction(btn.dataset.action || '');
-      const modeFromAction = getClosedLoopModeFromAction(action);
-      if (modeFromAction) {
-        return modeFromAction;
-      }
-      if (
-        btn.id === CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id
-        || btn.dataset.closedLoopMode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
-      ) {
-        return CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
-      }
-      return CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
     }
 
     function isClosedLoopUserCancelledReason(reason) {
@@ -420,7 +419,6 @@
       prevWaitingReply: false,
       homeNavigationRunning: false,
       skipNextHomeCheck: false,
-      watcherId: null,
     };
 
     function resolveDefaultDoneSignal() {
@@ -481,34 +479,6 @@
       return `${String(prefix || 'task')}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     }
 
-    function logClosedLoopUploadVerifyState(tag, extra = {}) {
-      const uploadLoopTask = ensureCopyHotkeyUploadVerifyLoopTask();
-      const continueLoopTask = ensureCopyHotkeyContinueLoopTask();
-      const autoState = (
-        typeof AutoQueueModule !== 'undefined'
-        && AutoQueueModule
-        && typeof AutoQueueModule.getState === 'function'
-      )
-        ? AutoQueueModule.getState()
-        : null;
-      const extras = extra && typeof extra === 'object' ? extra : {};
-      const extraText = Object.keys(extras).length
-        ? ` ${Object.entries(extras).map(([key, value]) => `${key}=${value == null ? '-' : value}`).join(' ')}`
-        : '';
-      ToolboxShell.appendLog(
-        `[CLOSED_LOOP][${tag}] uploadRunGen=${copyHotkeyUploadVerifyLoopRunGeneration}`
-        + ` uploadRunId=${uploadLoopTask.runId || '-'}`
-        + ` uploadPhase=${uploadLoopTask.phase || '-'}`
-        + ` uploadStopRequested=${copyHotkeyUploadVerifyLoopStopRequested || uploadLoopTask.stopRequested ? 1 : 0}`
-        + ` uploadRunning=${copyHotkeyUploadVerifyLoopRunning ? 1 : 0}`
-        + ` continueRunGen=${copyHotkeyContinueLoopRunGeneration}`
-        + ` continueRunId=${continueLoopTask.runId || '-'}`
-        + ` continueStopRequested=${copyHotkeyContinueLoopStopRequested || continueLoopTask.stopRequested ? 1 : 0}`
-        + ` autoContinueRunning=${autoState && (autoState.running || autoState.waitingReply) ? 1 : 0}`
-        + `${extraText}`,
-      );
-    }
-
     function haltClosedLoopCompanionAutomation(source = 'unknown') {
       const src = String(source || 'unknown').trim() || 'unknown';
 
@@ -566,17 +536,6 @@
       );
 
       return copyHotkeyContinueLoopRunGeneration;
-    }
-
-    function buildCopyHotkeyUploadVerifyLoopShouldStop(runId) {
-      const expectedRunId = String(runId || '').trim();
-      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
-
-      return () => !!(
-        copyHotkeyUploadVerifyLoopStopRequested
-        || loopTask.stopRequested
-        || (expectedRunId && loopTask.runId !== expectedRunId)
-      );
     }
 
     function buildCopyHotkeyContinueLoopShouldStop(runId) {
@@ -1075,7 +1034,7 @@
               `[CLOSED_LOOP][RETRY_HOME_RECOVER] runId=${runId} round=${currentRound} attempts=${closedLoopContinueState.retryAttempts} reason=${reasonText}`,
             );
             void runUnifiedContinueHomeNavigation(
-              'closed-loop-upload-every5-hotkey',
+              CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action,
               currentRound,
               'retry-recover',
             ).then((homeResult) => {
@@ -1312,41 +1271,37 @@
       const plainBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
       let changed = 0;
 
+      const vmAvailable = typeof UploadButtonVm !== 'undefined'
+        && typeof UploadButtonVm.getClosedLoopContinueButtonViewState === 'function'
+        && typeof UploadButtonVm.applyUploadButtonViewState === 'function';
+
       const renderOne = (btn, mode) => {
         if (!btn) {
           return false;
         }
 
+        if (!vmAvailable) {
+          return false;
+        }
+
+        const actionDef = getClosedLoopContinueActionDef(mode);
+        const closedLoopCfg = getClosedLoopAutomationConfig();
+        const snapshot = buildUploadButtonRenderSnapshot();
+        snapshot.closedLoopLabel = getClosedLoopButtonLabel(mode);
+        snapshot.closedLoopUploadInterval = closedLoopCfg.autoUploadInterval;
+        snapshot.closedLoopTitle = actionDef.title;
+
+        const view = UploadButtonVm.getClosedLoopContinueButtonViewState(snapshot, mode);
+        const applied = UploadButtonVm.applyUploadButtonViewState(
+          btn,
+          view,
+          'render-closed-loop',
+          { snapshot, buttonName: actionDef.action },
+        );
+
         const isRunning = !!closedLoopContinueState.running;
         const isActiveMode = isRunning && closedLoopContinueState.mode === mode;
-        const label = getClosedLoopModeLabel(mode);
-        const actionDef = getClosedLoopContinueActionDef(mode);
-        const idleTitle = actionDef.title;
-
-        let applied = false;
-        if (isActiveMode) {
-          applied = setButtonDanger(
-            btn,
-            closedLoopContinueState.stopping ? '正在停止闭环继续' : '停止闭环继续',
-            {
-              reason: 'closed-loop-running',
-              title: closedLoopContinueState.stopping
-                ? '正在停止闭环继续任务'
-                : `${label}运行中，再次点击停止`,
-              disabled: false,
-            },
-          );
-        } else if (setButtonIdle(btn, label, {
-          reason: 'closed-loop-idle',
-          title: idleTitle,
-          disabled: isRunning,
-        })) {
-          applied = true;
-        }
-
-        if (applied) {
-          btn.setAttribute('aria-disabled', isRunning && !isActiveMode ? 'true' : 'false');
-        }
+        btn.setAttribute('aria-disabled', isRunning && !isActiveMode ? 'true' : 'false');
         return applied;
       };
 
@@ -1509,14 +1464,16 @@
       };
     }
 
-    function hasPendingUploadQueueItems() {
+    function hasPendingUploadQueueItems(options = {}) {
       if (typeof getPendingUploadItems !== 'function') {
         return false;
       }
+      const groupId = getActiveUploadScopeGroupId(options);
       try {
-        return (getPendingUploadItems() || []).length > 0;
+        return (getPendingUploadItems({ groupId }) || []).length > 0;
       } catch (error) {
         console.error('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][pending-queue-check-failed]', {
+          groupId,
           error_type: error && error.name,
           error: error && error.message,
           stack: error && error.stack,
@@ -1525,12 +1482,111 @@
       }
     }
 
+    function isManualSendMessageSource(source) {
+      const src = String(source || '').trim();
+      return /^(button|shortcut|send-message|manual-send-message)/i.test(src);
+    }
+
+    function getUnreadableLocalQueueItems() {
+      return (state.queue || []).filter((q) => q && isUploadItemLocallyUnreadable(q));
+    }
+
+    function hasUnreadableLocalQueueForSend() {
+      return getUnreadableLocalQueueItems().length > 0;
+    }
+
+    function hasLocalQueueFilesWithoutComposerAttachment() {
+      const queueHasFiles = (state.queue || []).length > 0;
+      if (!queueHasFiles) {
+        return false;
+      }
+
+      const unifiedHas = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        && ComposerApi.hasComposerAttachmentUnified();
+      const chipCount = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+
+      return !unifiedHas && chipCount <= 0;
+    }
+
+    function probeSendMessageNativeReady() {
+      const sendButton = typeof findUploadComposerSendButton === 'function'
+        ? findUploadComposerSendButton()
+        : null;
+      return !!(
+        sendButton instanceof HTMLButtonElement
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(sendButton)
+      );
+    }
+
+    function logSendMessageComposerState(source, extraSuffix = '') {
+      const textLen = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim().length
+        : 0;
+      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+      const uploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+      const nativeReady = probeSendMessageNativeReady() ? 1 : 0;
+      const suffix = extraSuffix ? ` ${extraSuffix}` : '';
+
+      ToolboxShell.appendLog(
+        `[SEND_MESSAGE][COMPOSER_STATE] source=${source} textLen=${textLen} attachmentCount=${attachmentCount} uploading=${uploading ? 1 : 0} nativeReady=${nativeReady}${suffix}`,
+      );
+
+      return {
+        textLen,
+        attachmentCount,
+        uploading,
+        nativeReady: nativeReady === 1,
+      };
+    }
+
+    function scheduleManualSendFailureHintClear(runId) {
+      window.setTimeout(() => {
+        if (state.autoSendRunId !== runId) {
+          return;
+        }
+        if (!state.uploadSendFailureHint) {
+          return;
+        }
+        state.uploadSendFailureHint = '';
+        state.uploadSendFailureHintAt = 0;
+        scheduleRenderUpload('send-message:manual-fail-hint-clear');
+      }, MANUAL_SEND_FAILURE_HINT_CLEAR_MS);
+    }
+
+    function failManualSendEarly(runId, source, reason, failMessage) {
+      lastUploadSendPanelFailReason = reason;
+      const composerSnap = logSendMessageComposerState(source, `reason=${reason}`);
+      ToolboxShell.appendLog(
+        `[SEND_MESSAGE][FAILED] reason=${reason} source=${source} textLen=${composerSnap.textLen} attachmentCount=${composerSnap.attachmentCount} nativeReady=${composerSnap.nativeReady ? 1 : 0}`,
+      );
+      resetUploadSendUiState(`send-message:manual-fail:${reason}`, runId);
+      setStatus(failMessage, 'warn');
+      state.uploadSendFailureHint = failMessage;
+      state.uploadSendFailureHintAt = Date.now();
+      scheduleRenderUpload('send-message:manual-fail');
+      scheduleManualSendFailureHintClear(runId);
+      logUploadSendUiState('not-sent', reason, runId);
+      return false;
+    }
+
     async function sendExistingComposerBySendMessageButtonCore(options = {}) {
       const source = String(options.source || 'shared-send-message').trim() || 'shared-send-message';
       const shouldStop = typeof options.shouldStop === 'function'
         ? options.shouldStop
         : () => false;
-      const timeoutMs = Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000);
+      const unifiedText = options.text != null ? String(options.text) : '';
+      const isManualSend = options.manualSend === true || isManualSendMessageSource(source);
+      const timeoutMs = Number(
+        options.timeoutMs
+        || (isManualSend ? MANUAL_SEND_TIMEOUT_MS : SEND_WAIT_TIMEOUT_MS)
+        || 120000,
+      );
 
       ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][ENTER] source=${source}`);
 
@@ -1542,14 +1598,46 @@
         };
       }
 
-      const sendLock = claimUploadActionLock('send-message', {
+      let sendLock = claimUploadActionLock('send-message', {
         timeoutMs,
       });
+
+      if (!sendLock.ok && sendLock.reason === 'task-running') {
+        // 检查是否是 stale lock：锁认为在运行，但所有状态都表明任务已结束
+        const sendPhaseNow = typeof getSendTaskPhase === 'function' ? getSendTaskPhase() : 'idle';
+        const sendPhaseIdle = sendPhaseNow === 'idle'
+          || sendPhaseNow === 'failed'
+          || sendPhaseNow === 'cancelled'
+          || sendPhaseNow === 'completed'
+          || sendPhaseNow === 'success';
+        const flowRunActive = !!(currentUploadSendFlowRun && !currentUploadSendFlowRun.cancelled);
+        const stateActive = !!(
+          state.waitingSend
+          || state.autoSendWaiting
+          || state.waitingReply
+          || state.messageSending
+        );
+        const isStale = sendPhaseIdle && !flowRunActive && !stateActive;
+
+        if (isStale) {
+          ToolboxShell.appendLog(
+            `[SEND_LOCK][STALE_RELEASE] key=send-message reason=task-running-but-send-task-idle source=${source} sendPhase=${sendPhaseNow}`,
+          );
+          releaseUploadActionLock('send-message');
+          sendLock = claimUploadActionLock('send-message', { timeoutMs });
+        }
+      }
 
       if (!sendLock.ok) {
         ToolboxShell.appendLog(
           `[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=send-action-lock detail=${sendLock.reason || '-'}`,
         );
+        logSendHotkeyBlocked('send-action-lock', source, `detail=${sendLock.reason || '-'}`);
+        const failMsg = '发送失败：发送任务锁未释放';
+        setStatus(failMsg, 'warn');
+        state.uploadSendFailureHint = failMsg;
+        state.uploadSendFailureHintAt = Date.now();
+        scheduleRenderUpload('send-message:lock-blocked');
         return {
           ok: false,
           reason: `send-action-lock:${sendLock.reason || 'locked'}`,
@@ -1560,6 +1648,7 @@
       if (!flowRun) {
         releaseUploadActionLock('send-message');
         ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=upload-send-flow-locked`);
+        logSendHotkeyBlocked('upload-send-flow-locked', source);
         return {
           ok: false,
           reason: 'upload-send-flow-locked',
@@ -1581,7 +1670,11 @@
           };
         }
 
-        const ok = await sendCurrentMessageFromUploadPanel(source, runId, flowRun);
+        const ok = await sendCurrentMessageFromUploadPanel(source, runId, flowRun, {
+          text: unifiedText,
+          manualSend: isManualSend,
+          sendDeadlineMs: Date.now() + timeoutMs,
+        });
 
         if (shouldStop()) {
           ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-send`);
@@ -1595,9 +1688,22 @@
           `[SEND_MESSAGE_SHARED][DONE] source=${source} ok=${ok ? 1 : 0}`,
         );
 
+        if (ok !== true) {
+          const panelReason = String(lastUploadSendPanelFailReason || 'send-message-button-core-failed').trim()
+            || 'send-message-button-core-failed';
+          logSendHotkeyBlocked(panelReason, source);
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=${panelReason} detail=sendCurrentMessageFromUploadPanel-returned-false`,
+          );
+          return {
+            ok: false,
+            reason: panelReason,
+          };
+        }
+
         return {
-          ok: ok === true,
-          reason: ok === true ? 'send-message-button-core' : 'send-message-button-core-failed',
+          ok: true,
+          reason: 'send-message-button-core',
         };
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
@@ -1692,36 +1798,6 @@
         );
       }
 
-      const okSet = ComposerApi.setComposerValue(content);
-      if (!okSet) {
-        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=composer-set-failed`);
-        return {
-          ok: false,
-          reason: 'composer-set-failed',
-        };
-      }
-
-      if (typeof ComposerApi.waitForComposerTextSynced === 'function') {
-        const synced = await ComposerApi.waitForComposerTextSynced(
-          content,
-          typeof SEND_TEXT_SYNC_TIMEOUT_MS === 'number' ? SEND_TEXT_SYNC_TIMEOUT_MS : 10000,
-          { shouldStop },
-        );
-
-        if (!synced || !synced.ok) {
-          const reason = synced && synced.reason ? synced.reason : 'composer-text-not-synced';
-          ToolboxShell.appendLog(
-            `[SEND_MESSAGE_SHARED][TEXT_FAILED] source=${source} reason=${reason}`,
-          );
-          return {
-            ok: false,
-            reason,
-          };
-        }
-      } else {
-        await sleep(300);
-      }
-
       if (shouldStop()) {
         return {
           ok: false,
@@ -1733,6 +1809,7 @@
         source,
         shouldStop,
         timeoutMs: Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000),
+        text: content,
       });
     }
 
@@ -1895,10 +1972,6 @@
       });
     }
 
-    async function handleClosedLoopContinueClick(mode = CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY) {
-      return handleClosedLoopContinueModeClick(mode, 'button-toggle');
-    }
-
     async function startClosedLoopContinue(options = {}) {
       const reason = typeof options === 'string'
         ? options
@@ -1969,9 +2042,7 @@
     }
 
     function buildClosedLoopDoneVerificationPrompt() {
-      const doneSignal = typeof DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL === 'string'
-        ? DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL
-        : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+      const doneSignal = resolveDefaultDoneSignal();
 
       const blockedSignal = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
       const noMoreSignal = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
@@ -2096,7 +2167,7 @@
           {
             continuePrompt: verifyPrompt,
             shouldStop,
-            doneSignal: DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+            doneSignal: resolveDefaultDoneSignal(),
             strictDoneSignal: true,
             disableBatchTextTerminalStop: true,
             skipDoneSignalBeforeSendCheck: true,
@@ -2200,6 +2271,8 @@
 
     async function runClosedLoopSharedUpload(round, runId, options = {}) {
       const useHotkey = options.useHotkey === true;
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
+      const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
       const shouldStop = typeof options.shouldStop === 'function'
         ? options.shouldStop
         : () => false;
@@ -2209,7 +2282,7 @@
         : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
 
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][SHARED_UPLOAD_ENTER] runId=${runId || '-'} round=${round} source=${source}`,
+        `[CLOSED_LOOP][SHARED_UPLOAD_ENTER] runId=${runId || '-'} round=${round} source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`,
       );
 
       const result = await runStartUploadButtonCore({
@@ -2217,11 +2290,12 @@
         reason: round === 1 ? 'closed-loop-initial' : 'closed-loop-every5',
         parentTask: 'closedLoopContinue',
         cycleIndex: round,
+        groupId: scopeGroupId,
         shouldStop,
       });
 
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][SHARED_UPLOAD_DONE] runId=${runId || '-'} round=${round} source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+        `[CLOSED_LOOP][SHARED_UPLOAD_DONE] runId=${runId || '-'} round=${round} source=${source} groupId=${scopeGroupId || '-'} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
       );
 
       return result;
@@ -2244,21 +2318,23 @@
           `[CLOSED_LOOP][STEP_RETRY_CURRENT_ROUND] runId=${runId} round=${round} reason=${options.retryReason || '-'}`,
         );
       } else {
-        closedLoopContinueState.round += 1;
-        round = closedLoopContinueState.round;
+        round = closedLoopContinueState.round + 1;
         closedLoopContinueState.retryAttempts = 0;
       }
-      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
-      loopTask.cycleIndex = round;
-      copyHotkeyUploadVerifyLoopCount = round;
+      syncClosedLoopRound(round, retryCurrentRound ? 'retry-current-round' : 'step-advance');
 
-      ToolboxShell.appendLog(`[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][cycle-start] index=${round}`);
+      ToolboxShell.appendLog(`[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][cycle-start] round=${round}`);
       ToolboxShell.appendLog(`[CLOSED_LOOP][STEP_START] runId=${runId} round=${round}`);
+
+      const closedLoopCfg = getClosedLoopAutomationConfig();
+      const closedLoopHomeSource = closedLoopContinueState.mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+        ? CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.action
+        : CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action;
 
       const skipHomeNavigation = options && options.skipHomeNavigation === true;
       const homeCheck = shouldRunUnifiedContinueHomeNavigation(
         round,
-        'closed-loop-upload-every5-hotkey',
+        closedLoopHomeSource,
       );
       if (
         homeCheck.ok
@@ -2277,7 +2353,7 @@
           closedLoopContinueState.lastHomeNavigationRound = round;
           closedLoopContinueState.homeNavigationRunning = true;
           const homeResult = await runUnifiedContinueHomeNavigation(
-            'closed-loop-upload-every5-hotkey',
+            closedLoopHomeSource,
             round,
             'interval',
           );
@@ -2314,16 +2390,29 @@
       const shouldStop = () => !isClosedLoopRunActive(runId);
       const composerPayload = getComposerPayloadStateForInitialSend();
       const useHotkey = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
+      const activeUploadGroupId = getActiveUploadScopeGroupId();
+      const activeGroupHasUploadableFiles = hasActiveScopeUploadableFiles({
+        groupId: activeUploadGroupId,
+      });
 
       let needUpload = false;
       if (round === 1) {
-        if (!composerPayload.hasAttachment && hasPendingUploadQueueItems()) {
+        if (activeGroupHasUploadableFiles) {
           needUpload = true;
           ToolboxShell.appendLog(
-            `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-upload] round=${round} reason=no-composer-attachment queue-has-files`,
+            `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-upload] round=${round} reason=active-group-has-files groupId=${activeUploadGroupId || '-'}`,
+          );
+        } else if (!composerPayload.hasAttachment && hasPendingUploadQueueItems({ groupId: activeUploadGroupId })) {
+          needUpload = true;
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-upload] round=${round} reason=no-composer-attachment-active-group-pending groupId=${activeUploadGroupId || '-'}`,
           );
         }
-      } else if (round % closedLoopContinueState.uploadEveryRounds === 0) {
+      } else if (isCopyHotkeyLoopIntervalHit(
+        round,
+        closedLoopCfg.autoUploadEnabled,
+        closedLoopCfg.autoUploadInterval,
+      )) {
         needUpload = true;
       }
 
@@ -2339,6 +2428,7 @@
         const uploadResult = await runClosedLoopSharedUpload(round, runId, {
           useHotkey,
           shouldStop,
+          groupId: activeUploadGroupId,
         });
 
         if (!uploadResult || uploadResult.ok !== true) {
@@ -2377,7 +2467,7 @@
       const closedLoopFlowOptions = {
         isolated: true,
         shouldStop,
-        doneSignal: DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+        doneSignal: resolveDefaultDoneSignal(),
         strictDoneSignal: true,
         disableBatchTextTerminalStop: true,
         useHotkey,
@@ -2597,7 +2687,7 @@
 
       legacyBtn.id = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id;
       legacyBtn.dataset.action = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.action;
-      legacyBtn.textContent = CLOSED_LOOP_CONTINUE_MODE_LABELS[CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY];
+      legacyBtn.textContent = getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
       ToolboxShell.appendLog('[CLOSED_LOOP][MIGRATE] legacy closed-loop button id -> hotkey btn');
     }
 
@@ -2686,21 +2776,20 @@
         if (!target) {
           return;
         }
+        const hotkeyDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY;
+        const plainDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY;
+        const legacyActionSelectors = [
+          ...CLOSED_LOOP_ACTIONS.WITH_HOTKEY.legacyActions,
+          ...CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.legacyActions,
+        ].map((legacyAction) => `[data-action="${legacyAction}"]`).join(', ');
         const btn = target.closest(
-          `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}, #${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}, [data-action="${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.action}"], [data-action="${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.action}"]`,
+          `#${hotkeyDef.id}, #${plainDef.id}, [data-action="${hotkeyDef.action}"], [data-action="${plainDef.action}"], ${legacyActionSelectors}`,
         );
         if (!(btn instanceof HTMLElement)) {
           return;
         }
-        const action = String(btn.dataset.action || '').trim();
-        const hotkeyDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY;
-        const plainDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY;
-        if (
-          action !== hotkeyDef.action
-          && action !== plainDef.action
-          && btn.id !== hotkeyDef.id
-          && btn.id !== plainDef.id
-        ) {
+        const action = normalizeClosedLoopAction(btn.dataset.action || '');
+        if (!isClosedLoopCanonicalAction(action) && btn.id !== hotkeyDef.id && btn.id !== plainDef.id) {
           return;
         }
         if (event && event.cgptUploadUiActionHandled) {
@@ -2709,9 +2798,9 @@
           );
           return;
         }
-        const resolvedAction = action || (
-          btn.id === plainDef.id ? plainDef.action : hotkeyDef.action
-        );
+        const resolvedAction = isClosedLoopCanonicalAction(action)
+          ? action
+          : (btn.id === plainDef.id ? plainDef.action : hotkeyDef.action);
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][DOCUMENT_CLICK] id=${btn.id || '-'} action=${resolvedAction} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
         );
@@ -3094,9 +3183,7 @@
         return 'copy-hotkey-loop';
       }
 
-      if (normalized === 'loop-copy-hotkey-continue-upload-verify'
-        || normalized === 'closed-loop-upload-every5-hotkey'
-        || normalized === 'closed-loop-upload-every5') {
+      if (isClosedLoopCanonicalAction(normalized)) {
         return 'copy-hotkey-upload-verify-loop';
       }
 
@@ -3214,19 +3301,19 @@
         : {};
 
       let signal = String(
-        cfg.copyHotkeyContinueStopSignal || DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL,
+        cfg.copyHotkeyContinueStopSignal || resolveDefaultDoneSignal(),
       ).trim();
 
       if (LEGACY_ASSISTANT_DONE_SIGNAL_LITERALS.includes(signal)) {
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
-            `[AUTOQ][TASK_SIGNAL][MIGRATE] from=${signal} to=${DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL}`,
+            `[AUTOQ][TASK_SIGNAL][MIGRATE] from=${signal} to=${resolveDefaultDoneSignal()}`,
           );
         }
-        signal = DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL;
+        signal = resolveDefaultDoneSignal();
       }
 
-      return signal || DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL;
+      return signal || resolveDefaultDoneSignal();
     }
 
     function getCopyHotkeyContinuePromptText(options = {}) {
@@ -3299,7 +3386,7 @@
 
     function analyzeClosedLoopTerminalSignalText(text, options = {}) {
       const configuredDoneSignal = getCopyHotkeyContinueStopSignal(options);
-      const defaultDoneSignal = DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL;
+      const defaultDoneSignal = resolveDefaultDoneSignal();
       const blockedSignal = typeof DEFAULT_BATCH_BLOCKED_SIGNAL !== 'undefined'
         ? DEFAULT_BATCH_BLOCKED_SIGNAL
         : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
@@ -3527,6 +3614,88 @@
       return (state.queue || []).filter(
         (file) => file && String(file.groupId || '').trim() === groupId,
       );
+    }
+
+    function getUploadItemGroupId(item) {
+      if (!item) return '';
+      return String(
+        item.groupId
+        || item.uploadActiveGroupId
+        || item.upload_active_group_id
+        || item.projectGroupId
+        || ''
+      ).trim();
+    }
+
+    function getUploadGroupById(groupId) {
+      const gid = String(groupId || '').trim();
+      if (!gid) return null;
+      return (state.groups || []).find((group) => group && group.id === gid) || null;
+    }
+
+    function getActiveUploadScopeGroupId(options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const groupId = String(opts.groupId || opts.scopeGroupId || getActiveGroupId() || '').trim();
+      return groupId;
+    }
+
+    function isFlaskUploadGroupId(groupId) {
+      const group = getUploadGroupById(groupId);
+      if (!group) return false;
+      const stableKey = typeof getUploadGroupStableKey === 'function'
+        ? String(getUploadGroupStableKey(group) || '').trim()
+        : '';
+      const name = String(group.name || group.title || '').trim();
+      const lowerName = name.toLowerCase();
+      return (
+        stableKey === 'youhou-flask'
+        || stableKey === 'flask'
+        || name.includes('油猴flask')
+        || lowerName.includes('flask')
+      );
+    }
+
+    function isUploadItemInActiveScope(item, groupId) {
+      if (!item) return false;
+      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
+      if (!scopeGroupId) return true;
+      const itemGroupId = getUploadItemGroupId(item);
+      if (itemGroupId) {
+        return itemGroupId === scopeGroupId;
+      }
+      if (typeof isFlaskLocalDirectItem === 'function' && isFlaskLocalDirectItem(item)) {
+        return isFlaskUploadGroupId(scopeGroupId);
+      }
+      return false;
+    }
+
+    function getScopedQueueItemsForUpload(groupId) {
+      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
+      return (state.queue || []).filter((item) => isUploadItemInActiveScope(item, scopeGroupId));
+    }
+
+    function getScopedFlaskFilesForUpload(groupId) {
+      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
+      return (state.flaskFiles || []).filter((item) => isUploadItemInActiveScope(item, scopeGroupId));
+    }
+
+    function hasActiveScopeUploadableFiles(options = {}) {
+      const groupId = getActiveUploadScopeGroupId(options);
+      const queueFiles = getScopedQueueItemsForUpload(groupId).filter((item) => {
+        if (!item) return false;
+        if (typeof hasReusableUploadSourceForReset === 'function' && hasReusableUploadSourceForReset(item)) {
+          return true;
+        }
+        if (typeof hasAttemptableUploadSource === 'function' && hasAttemptableUploadSource(item)) {
+          return true;
+        }
+        return false;
+      });
+      const flaskFiles = getScopedFlaskFilesForUpload(groupId).filter((item) => {
+        if (!item) return false;
+        return typeof isFlaskLocalDirectItem === 'function' && isFlaskLocalDirectItem(item);
+      });
+      return queueFiles.length + flaskFiles.length > 0;
     }
 
     function getSelectedFileIdForActiveGroup() {
@@ -3821,33 +3990,11 @@
     }
 
     function hasActuallyReusableUploadSource(q) {
-      return !!(
-        q &&
-        (
-          isFileLike(q.file) ||
-          isFileLike(q.sourceFile) ||
-          isFileLike(q.originalFile) ||
-          isBlobLike(q.blob) ||
-          isBlobLike(q.sourceBlob)
-        )
-      );
+      return hasAttemptableUploadSource(q);
     }
 
     function hasReusableUploadSourceForReset(q) {
-      return !!(
-        q &&
-        (
-          isFileLike(q.file) ||
-          isFileLike(q.sourceFile) ||
-          isFileLike(q.originalFile) ||
-          isBlobLike(q.blob) ||
-          isBlobLike(q.sourceBlob) ||
-          (
-            q.fileHandle &&
-            typeof q.fileHandle.getFile === 'function'
-          )
-        )
-      );
+      return hasAttemptableUploadSource(q);
     }
 
     function reconcileUploadPhase(reason = '') {
@@ -3882,27 +4029,19 @@
         return false;
       }
 
-      if (isFileLike(item.file) || isFileLike(item.sourceFile) || isFileLike(item.originalFile)) {
-        if (!isFileLike(item.file)) {
-          item.file = item.sourceFile || item.originalFile;
-        }
-        if (!isFileLike(item.sourceFile)) {
-          item.sourceFile = item.file;
-        }
-        if (!isFileLike(item.originalFile)) {
-          item.originalFile = item.file;
-        }
-        return true;
+      if (isUploadSourceCacheForbidden(item) && !hasLocalReadableHandle(item) && !isFlaskLocalDirectSource(item)) {
+        markCacheForbiddenUploadItems([item], source || 'ensureReusableFileForUploadItem');
+        return false;
       }
 
-      if (isBlobLike(item.blob) || isBlobLike(item.sourceBlob)) {
-        if (!isBlobLike(item.blob)) {
-          item.blob = item.sourceBlob;
+      if (isFlaskLocalDirectSource(item) || isFlaskLocalDirectItem(item)) {
+        const hasFlaskEndpoint = !!(
+          String(item.download_url || item.url || item.file_url || '').trim()
+          || String(item.file_id || '').trim()
+        );
+        if (hasFlaskEndpoint) {
+          return true;
         }
-        if (!isBlobLike(item.sourceBlob)) {
-          item.sourceBlob = item.blob;
-        }
-        return true;
       }
 
       if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
@@ -3936,12 +4075,15 @@
       return false;
     }
 
-    async function getPendingUploadItemsForStart(source = '') {
+    async function getPendingUploadItemsForStart(source = '', options = {}) {
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
       const items = [];
       const seen = new Set();
+      const forceReupload = options && typeof options === 'object' && options.forceReupload === true;
 
       const pushItem = (item, itemSource) => {
         if (!item) return;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) return;
         const key = [
           itemSource,
           item.id || item.file_id || '',
@@ -3952,26 +4094,40 @@
         seen.add(key);
         items.push({
           ...item,
+          groupId: getUploadItemGroupId(item) || scopeGroupId,
           source: itemSource || item.source || 'browser_file',
         });
       };
 
       for (const item of state.queue || []) {
         if (!item) continue;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
 
-        const reusable = await ensureReusableFileForUploadItem(item, source);
-        if (!reusable) {
+        const normalizedStatus = String(item.status || '').trim().toLowerCase();
+        const isAlreadyFinal = (
+          item.state === UploadState.ATTACHED
+          || item.state === 'UPLOADED'
+          || item.state === 'DONE'
+          || normalizedStatus === 'attached'
+          || normalizedStatus === 'uploaded'
+          || normalizedStatus === 'done'
+        );
+        if (isAlreadyFinal && !forceReupload) {
           ToolboxShell.appendLog(
-            `[UPLOAD][PENDING_SKIP] source=${source || '-'} name=${item.name || item.filename || '-'} reason=no-reusable-source state=${item.state || '-'} status=${item.status || '-'}`,
+            `[UPLOAD][PENDING_SKIP_ALREADY_ATTACHED] name=${item.name || item.filename || '-'} state=${item.state || '-'} status=${item.status || '-'} source=${source || '-'}`,
           );
           continue;
         }
 
-        if (
-          item.state === UploadState.ATTACHED
-          || item.status === 'uploaded'
-          || item.status === 'attached'
-        ) {
+        const reusable = await ensureReusableFileForUploadItem(item, source);
+        if (!reusable) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_SKIP] source=${source || '-'} groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} reason=no-reusable-source state=${item.state || '-'} status=${item.status || '-'}`,
+          );
+          continue;
+        }
+
+        if (isLegacyUploadItemAttached(item)) {
           continue;
         }
 
@@ -3984,13 +4140,29 @@
 
       for (const item of state.flaskFiles || []) {
         if (!item) continue;
-        if (item.status === 'uploaded') continue;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
+        const normalizedStatus = String(item.status || '').trim().toLowerCase();
+        const isAlreadyFinal = (
+          item.state === UploadState.ATTACHED
+          || item.state === 'UPLOADED'
+          || item.state === 'DONE'
+          || normalizedStatus === 'attached'
+          || normalizedStatus === 'uploaded'
+          || normalizedStatus === 'done'
+        );
+        if (isAlreadyFinal && !forceReupload) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_SKIP_ALREADY_ATTACHED] name=${item.name || item.filename || '-'} state=${item.state || '-'} status=${item.status || '-'} source=${source || '-'}`,
+          );
+          continue;
+        }
+        if (isLegacyUploadItemAttached(item)) continue;
         if (!isFlaskLocalDirectItem(item)) continue;
         pushItem(item, 'flask_local_direct');
       }
 
       ToolboxShell.appendLog(
-        `[UPLOAD][PENDING_FOR_START] source=${source || '-'} count=${items.length}`,
+        `[UPLOAD][PENDING_FOR_START] source=${source || '-'} groupId=${scopeGroupId || '-'} count=${items.length}`,
       );
       return items;
     }
@@ -4011,20 +4183,22 @@
     }
 
     function hasAttemptableUploadSource(q) {
-      return !!(
-        q &&
-        (
-          isFileLike(q.file) ||
-          isFileLike(q.sourceFile) ||
-          isFileLike(q.originalFile) ||
-          isBlobLike(q.blob) ||
-          isBlobLike(q.sourceBlob) ||
-          (
-            q.fileHandle &&
-            typeof q.fileHandle.getFile === 'function'
-          )
-        )
-      );
+      if (!q || isUploadSourceCacheForbidden(q)) {
+        return false;
+      }
+
+      if (hasLocalReadableHandle(q)) {
+        return true;
+      }
+
+      if (isFlaskLocalDirectSource(q)) {
+        return !!(
+          String(q.download_url || q.url || q.file_url || '').trim()
+          || String(q.file_id || '').trim()
+        );
+      }
+
+      return false;
     }
 
     function isHandleReadFailureMessage(message) {
@@ -4078,6 +4252,7 @@
       const forceResetUploaded = opts.forceResetUploaded === true;
       const forceResetDone = opts.forceResetDone === true;
       const preserveAttached = opts.preserveAttached !== false;
+      const scopeGroupId = String(opts.groupId || opts.scopeGroupId || '').trim();
       const reason = String(opts.reason || '').trim();
       let changed = false;
       let resetCount = 0;
@@ -4091,6 +4266,9 @@
 
       state.queue.forEach((q) => {
         if (!q) return;
+        if (scopeGroupId && !isUploadItemInActiveScope(q, scopeGroupId)) {
+          return;
+        }
 
         const oldState = q.state;
         const oldStatus = q.status;
@@ -4177,7 +4355,7 @@
         q.uploadName = '';
         q.persistedAttached = false;
         q.attachedInSession = false;
-        if (q.status === 'uploaded') {
+        if (isLegacyUploadItemAttached(q)) {
           q.status = 'pending';
         }
         q.updatedAt = Date.now();
@@ -4201,16 +4379,21 @@
       return resetCount;
     }
 
-    function resetFlaskFilesForUpload(reason = '') {
+    function resetFlaskFilesForUpload(reason = '', options = {}) {
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
       let changed = false;
 
       state.flaskFiles = (state.flaskFiles || []).map((row) => {
         if (!row) return row;
+        if (scopeGroupId && !isUploadItemInActiveScope(row, scopeGroupId)) {
+          return row;
+        }
 
-        if (row.status === 'uploaded') {
+        if (isLegacyUploadItemAttached(row)) {
           changed = true;
           return {
             ...row,
+            groupId: getUploadItemGroupId(row) || scopeGroupId,
             status: 'pending',
           };
         }
@@ -4220,7 +4403,7 @@
 
       if (changed) {
         ToolboxShell.appendLog(
-          `[UPLOAD][FLASK_RESET_FOR_REUPLOAD] reason=${String(reason || '-')}`
+          `[UPLOAD][FLASK_RESET_FOR_REUPLOAD] reason=${String(reason || '-')} groupId=${scopeGroupId || '-'}`
         );
       }
 
@@ -4238,7 +4421,7 @@
     function shouldShowRebindButton(q) {
       if (!q) return false;
 
-      if (isCachedUploadSnapshot(q)) {
+      if (isUploadSourceCacheForbidden(q)) {
         return true;
       }
 
@@ -4246,7 +4429,7 @@
         q.state === UploadState.MISSING_FILE ||
         q.sourceKind === 'missing-file' ||
         q.sourceKind === 'missing-local' ||
-        (!q.file && !q.blob && !hasLocalReadableHandle(q))
+        !hasAttemptableUploadSource(q)
       );
     }
 
@@ -4350,47 +4533,263 @@
       );
     }
 
-        function isCachedUploadSnapshot(q) {
-      // Blob persistence disabled - no cached snapshots
+    function isUploadSourceCacheForbidden(q) {
+      if (!q) {
+        return false;
+      }
+
+      const kind = String(q.sourceKind || '').trim();
+      const readMode = String(q.readMode || '').trim();
+
+      if (
+        kind === 'cached-snapshot'
+        || kind === 'cached-only'
+        || kind === 'indexeddb-blob'
+        || kind === 'session-file'
+        || kind === 'session-blob'
+        || readMode === 'indexeddb-blob'
+        || readMode === 'snapshot'
+        || readMode === 'session'
+      ) {
+        return true;
+      }
+
+      if (hasLocalReadableHandle(q) || isFlaskLocalDirectSource(q)) {
+        return false;
+      }
+
+      return !!(
+        isFileLike(q.file)
+        || isFileLike(q.sourceFile)
+        || isFileLike(q.originalFile)
+        || isBlobLike(q.blob)
+        || isBlobLike(q.sourceBlob)
+      );
+    }
+
+    function isCachedUploadSnapshot(q) {
+      return isUploadSourceCacheForbidden(q);
+    }
+
+    const STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE = '禁止使用缓存上传，请重新绑定真实本地文件';
+
+    function markCacheForbiddenUploadItems(items, stage = '') {
+      let count = 0;
+      const stageText = String(stage || '-').trim() || '-';
+      const forbiddenMessage = STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE;
+
+      (items || []).forEach((q) => {
+        if (!q || !isUploadSourceCacheForbidden(q)) {
+          return;
+        }
+
+        q.state = UploadState.MISSING_FILE;
+        q.sourceKind = q.sourceKind || 'cached-snapshot';
+        q.readMode = q.readMode || '';
+        q.message = forbiddenMessage;
+        q.updatedAt = Date.now();
+        count += 1;
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][BLOCK_CACHE_SOURCE] stage=${stageText} name=${q.name || '-'} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`,
+        );
+      });
+
+      return count;
+    }
+
+    function blockUploadIfCacheSourcesPresent(files, stage = '') {
+      const blockedItems = (files || []).filter(isUploadSourceCacheForbidden);
+      if (!blockedItems.length) {
+        return false;
+      }
+
+      markCacheForbiddenUploadItems(blockedItems, stage);
+      setStatus('上传失败：当前文件是缓存快照，必须重新绑定真实本地文件后才能上传。', 'error');
+      scheduleRenderUpload(`block-cache-source:${stage || 'upload'}`);
+      persistQueueThrottled(`block-cache-source:${stage || 'upload'}`);
+      return true;
+    }
+
+    function isUploadListDebugEnabled() {
+      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+        if (MemoryManager.get('bridgeDebugEnabled', false)) {
+          return true;
+        }
+      }
+
+      if (typeof getCompactUiConfig === 'function') {
+        const cfg = getCompactUiConfig();
+        if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
+          return true;
+        }
+      }
+
       return false;
     }
 
-    function getUploadInlineStatusText(q) {
-      if (!q) return '未知来源';
+    function isFlaskLocalDirectSource(q) {
+      return !!(
+        q
+        && (
+          q.source === 'flask_local_direct'
+          || q.sourceKind === 'flask_local_direct'
+          || q.flask_local_direct === true
+        )
+      );
+    }
 
-      if (
-        q.state === UploadState.MISSING_FILE ||
-        q.sourceKind === 'missing-file' ||
-        q.sourceKind === 'missing-local' ||
-        (!q.file && !q.fileHandle && !hasLocalReadableHandle(q))
-      ) {
-        return '需重新拖入';
+    function getUploadSourceModeLabel(q) {
+      if (!q) {
+        return '';
       }
 
-      if (q.state === UploadState.ATTACHED) {
-        if (hasReusableUploadSourceForReset(q)) {
-          return '已绑定到输入框，可重新上传';
-        }
-        return '已绑定记录，需重新拖入';
-      }
-
-      if (
-        q.source === 'flask_local_direct'
-        || q.sourceKind === 'flask_local_direct'
-        || q.flask_local_direct === true
-      ) {
+      if (isFlaskLocalDirectSource(q) && hasAttemptableUploadSource(q)) {
         return '本地直读';
       }
 
-      if (hasLocalReadableHandle(q) || q.fileHandle) {
-        return '实时读取（本地可读，未必已上传）';
+      if (hasLocalReadableHandle(q) || q.sourceKind === 'local-handle') {
+        return '本地句柄可读';
+      }
+
+      if (isUploadSourceCacheForbidden(q)) {
+        return '缓存快照，需重新绑定';
+      }
+
+      return '';
+    }
+
+    function isUploadItemLocallyUnreadable(q) {
+      if (!q) {
+        return true;
+      }
+
+      if (isUploadSourceCacheForbidden(q)) {
+        return true;
+      }
+
+      if (
+        q.state === UploadState.MISSING_FILE
+        || q.sourceKind === 'missing-file'
+        || q.sourceKind === 'missing-local'
+      ) {
+        return true;
+      }
+
+      if (hasAttemptableUploadSource(q)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function isUploadItemSentWithMessage(q) {
+      if (!q || q.state !== UploadState.ATTACHED) {
+        return false;
+      }
+
+      if (!q.persistedAttached && !q.attachedInSession) {
+        return false;
+      }
+
+      if (hasAttachmentEvidenceForItem(q)) {
+        return false;
+      }
+
+      return !!(
+        state.waitingReply
+        || (
+          state.uploadSendSuccessHint
+          && (Date.now() - Number(state.uploadSendSuccessHintAt || 0) < 12000)
+        )
+      );
+    }
+
+    function getUploadUserStatusLabel(q) {
+      if (!q) {
+        return '未知';
+      }
+
+      if (isUploadSourceCacheForbidden(q)) {
+        return '需重新绑定';
+      }
+
+      if (isUploadItemLocallyUnreadable(q)) {
+        return '本地文件不可读';
+      }
+
+      if (q.state === UploadState.FAILED) {
+        return '上传失败';
+      }
+
+      if (
+        q.state === UploadState.READING
+        || q.state === UploadState.ATTACHING
+        || (state.running && q.id === state.activeId)
+      ) {
+        return '上传中';
+      }
+
+      if (q.state === UploadState.ATTACHED) {
+        if (isUploadItemSentWithMessage(q)) {
+          return '已发送';
+        }
+
+        if (hasAttachmentEvidenceForItem(q)) {
+          return '已添加到输入框';
+        }
+
+        return '已绑定';
+      }
+
+      return '未上传';
+    }
+
+    function getUploadSourceDebugDetails(q) {
+      const parts = [];
+
+      if (!q) {
+        return parts;
+      }
+
+      if (hasLocalReadableHandle(q)) {
+        parts.push('本地文件句柄可读');
+      } else if (q.fileHandle) {
+        parts.push('句柄存在但不可读');
       }
 
       if (q.file) {
-        return '本次选择';
+        parts.push('File 对象可用');
       }
 
-      return '需重新拖入';
+      if (q.blob) {
+        parts.push('Blob 可用');
+      }
+
+      if (q.sourceKind) {
+        parts.push(`sourceKind=${q.sourceKind}`);
+      }
+
+      if (q.state) {
+        parts.push(`state=${q.state}`);
+      }
+
+      if (q.uploadName) {
+        parts.push(`uploadName=${q.uploadName}`);
+      }
+
+      return parts;
+    }
+
+    function getUploadInlineStatusText(q) {
+      const modeLabel = getUploadSourceModeLabel(q);
+      const statusLabel = getUploadUserStatusLabel(q);
+
+      if (modeLabel) {
+        return `${modeLabel} · ${statusLabel}`;
+      }
+
+      return statusLabel;
     }
 
     function buildUploadItemTitle(q) {
@@ -4408,20 +4807,46 @@
         }
       }
 
-      lines.push(`来源：${getUploadInlineStatusText(q)}`);
+      lines.push(`状态：${getUploadUserStatusLabel(q)}`);
+
+      const modeLabel = getUploadSourceModeLabel(q);
+      if (modeLabel) {
+        lines.push(`读取方式：${modeLabel}`);
+      }
 
       if (hasLocalReadableHandle(q)) {
-        lines.push('说明：已保存本地文件句柄，刷新后可实时读取最新文件；这不等于已上传到 ChatGPT 对话');
-      } else if (isCachedUploadSnapshot(q)) {
-              // lines.push('说明：这是浏览器 IndexedDB 中保存的文件快照，不是本地文件句柄；原文件变化后不会自动同步');
-      } else if (q.sourceKind === 'session-file' && (q.file || q.blob)) {
-              // lines.push('说明：仅当前页面内存可用，刷新后会变为需重新拖入');
-      } else if (
-        q.sourceKind === 'missing-file' ||
-        q.sourceKind === 'missing-local' ||
-        q.state === UploadState.MISSING_FILE
-      ) {
-        lines.push('说明：缺少可读文件，请点击“重新绑定”或重新拖入');
+        lines.push('提示：本地句柄可读，每次上传都会从磁盘重新读取最新文件。');
+      } else if (isFlaskLocalDirectSource(q) && hasAttemptableUploadSource(q)) {
+        lines.push('提示：本地直读，每次上传都会由 Flask 从真实路径重新读取文件。');
+      } else if (isUploadSourceCacheForbidden(q)) {
+        lines.push('说明：缓存快照不可上传，请点击“重新绑定”选择真实本地文件。');
+      } else if (isUploadItemLocallyUnreadable(q)) {
+        lines.push('说明：本地文件不可读，请点击“重新绑定”。');
+      }
+
+      const showMessage = !!String(q.message || '').trim()
+        && (
+          q.state === UploadState.FAILED
+          || q.state === UploadState.MISSING_FILE
+          || (
+            q.state === UploadState.IDLE
+            && isCachedUploadSnapshot(q)
+          )
+        );
+
+      if (showMessage) {
+        lines.push(`详情：${q.message}`);
+      }
+
+      if (isUploadListDebugEnabled()) {
+        const debugParts = getUploadSourceDebugDetails(q);
+        if (debugParts.length) {
+          lines.push(`[调试] ${debugParts.join('；')}`);
+        }
+
+        if (hasLocalReadableHandle(q)) {
+          lines.push('[调试] 本地可读，尚未确认提交到 ChatGPT 输入框');
+        }
       }
 
       return lines.join('\n');
@@ -4432,6 +4857,27 @@
 
       state.queue.forEach((q) => {
         if (!q) return;
+
+        if (isUploadSourceCacheForbidden(q)) {
+          if (q.state !== UploadState.MISSING_FILE) {
+            q.state = UploadState.MISSING_FILE;
+            changed = true;
+          }
+
+          const cacheMsg = STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE;
+          if (q.message !== cacheMsg) {
+            q.message = cacheMsg;
+            changed = true;
+          }
+
+          if (!q.sourceKind || q.sourceKind === 'missing-file') {
+            q.sourceKind = 'cached-snapshot';
+            changed = true;
+          }
+
+          q.uploadName = '';
+          return;
+        }
 
         const attemptable = hasAttemptableUploadSource(q);
 
@@ -4601,8 +5047,91 @@
       return q.state || UploadState.IDLE;
     }
 
-    function buildPersistRow(q) {
-      const hasHandle = isFileHandleLike(q.fileHandle);
+    function getUploadItemSizeBytes(item) {
+      if (!item) return 0;
+
+      const direct = Number(item.size) || 0;
+      if (direct > 0) {
+        return direct;
+      }
+
+      const blob = resolveUploadBlobCandidate(item);
+      if (blob) {
+        return Number(blob.size) || 0;
+      }
+
+      return 0;
+    }
+
+    function resolveUploadBlobCandidate(item) {
+      if (!item) return null;
+
+      if (isBlobLike(item.blob)) {
+        return item.blob;
+      }
+
+      if (isBlobLike(item.sourceBlob)) {
+        return item.sourceBlob;
+      }
+
+      if (isFileLike(item.file)) {
+        return item.file;
+      }
+
+      if (isFileLike(item.sourceFile)) {
+        return item.sourceFile;
+      }
+
+      if (isFileLike(item.originalFile)) {
+        return item.originalFile;
+      }
+
+      return null;
+    }
+
+    function hasPersistableUploadBlob(item) {
+      const blob = resolveUploadBlobCandidate(item);
+      if (!blob) {
+        return false;
+      }
+
+      const size = getUploadItemSizeBytes(item) || Number(blob.size) || 0;
+      return size > 0 && size <= APP.uploadBlobMaxBytes;
+    }
+
+    function mergeQueueItemWithPersistedBlob(item, existingRow) {
+      if (!item || !existingRow || hasAttemptableUploadSource(item)) {
+        return item;
+      }
+
+      const size = getUploadItemSizeBytes(item) || Number(existingRow.size) || 0;
+      const cacheKind = item.sourceKind || existingRow.sourceKind || 'cached-snapshot';
+      const cacheReadMode = item.readMode || existingRow.readMode || 'indexeddb-blob';
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][persist-row:merge-cache-metadata-only] name=${item.name || '-'} size=${size} sourceKind=${cacheKind}`,
+      );
+
+      return {
+        ...item,
+        sourceKind: cacheKind,
+        readMode: cacheReadMode,
+        size: item.size || existingRow.size || size,
+        state: UploadState.MISSING_FILE,
+        message: item.message || '禁止使用缓存快照上传，请重新绑定真实本地文件',
+      };
+    }
+
+    function buildPersistRow(q, existingRow = null) {
+      const mergedItem = mergeQueueItemWithPersistedBlob(q, existingRow) || q;
+      const hasHandle = isFileHandleLike(mergedItem.fileHandle);
+      const blobCandidate = resolveUploadBlobCandidate(mergedItem);
+      const size = getUploadItemSizeBytes(mergedItem) || (blobCandidate ? Number(blobCandidate.size) || 0 : 0);
+      const canSaveBlob = !!(
+        blobCandidate
+        && size > 0
+        && size <= APP.uploadBlobMaxBytes
+      );
 
       const row = {
         id: q.id,
@@ -4625,9 +5154,31 @@
         debugSavedFrom: '',
       };
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][persist-row:no-blob] name=${q.name || '-'} handle=${hasHandle ? 1 : 0} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`
-      );
+      if (canSaveBlob) {
+        row.blob = blobCandidate;
+        row.blobSaved = true;
+        row.blobSavedAt = Date.now();
+        row.debugSavedFrom = String(q.sourceKind || q.readMode || 'unknown');
+
+        // 无 handle 的场景（input/拖拽未拿到句柄）才把 sourceKind 标记为缓存快照；
+        // 跨窗口恢复后 UI 显示「缓存快照，需重新绑定」，禁止用缓存上传。
+        if (!hasHandle) {
+          row.sourceKind = 'cached-snapshot';
+          row.readMode = 'indexeddb-blob';
+        }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][persist-row:blob-saved] name=${q.name || '-'} size=${size} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`
+        );
+      } else if (blobCandidate && size > APP.uploadBlobMaxBytes) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][persist-row:blob-skip-large] name=${q.name || '-'} size=${size} limit=${APP.uploadBlobMaxBytes}`
+        );
+      } else {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][persist-row:no-readable-source] name=${q.name || '-'} handle=${hasHandle ? 1 : 0} blob=${blobCandidate ? 1 : 0}`
+        );
+      }
 
       return row;
     }
@@ -5089,6 +5640,18 @@
 
           req.onsuccess = () => {
             const rows = req.result || [];
+            const existingRowsById = new Map();
+
+            rows.forEach((r) => {
+              if (!r || !r.id) {
+                return;
+              }
+
+              const gid = String(r.groupId || '').trim() || groupIdSnapshot;
+              if (gid === groupIdSnapshot) {
+                existingRowsById.set(r.id, r);
+              }
+            });
 
             rows.forEach((r) => {
               const gid = String(r.groupId || '').trim() || groupIdSnapshot;
@@ -5101,7 +5664,7 @@
               const row = buildPersistRow({
                 ...q,
                 groupId: groupIdSnapshot,
-              });
+              }, existingRowsById.get(q.id));
 
               const putReq = store.put(row);
 
@@ -5554,15 +6117,6 @@
       return false;
     }
 
-        // [DEPRECATED] Blob persistence is disabled
-    function restoreBlobBackedUploadItem(item, row, restoredState) {
-      console.warn('[ChatGPT toolbox] restoreBlobBackedUploadItem called but blob persistence is disabled');
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][restore-blob:deprecated] name=${item.name || '-'} id=${item.id || '-'}`
-      );
-      return restoreMissingUploadItem(item, restoredState);
-    }
-
     function restoreMissingUploadItem(item, restoredState) {
       item.sourceKind = 'missing-file';
       item.readMode = '';
@@ -5579,8 +6133,10 @@
 
         function restoreUploadItemFromPersistRow(row, activeGroupId) {
       const restoredState = row.state || UploadState.IDLE;
-      const hasBlob = false;
       const handle = row.handle || null;
+      const persistedBlob = row.blob || null;
+      const hasBlob = isBlobLike(persistedBlob);
+      const hasHandle = !!(handle && isFileHandleLike(handle));
 
       const item = {
         id: row.id || newId(),
@@ -5592,7 +6148,7 @@
         type: row.type || 'application/octet-stream',
         file: null,
         blob: null,
-        fileHandle: handle && isFileHandleLike(handle) ? handle : null,
+        fileHandle: hasHandle ? handle : null,
         state: UploadState.IDLE,
         message: '',
         uploadName: row.uploadName || '',
@@ -5606,8 +6162,27 @@
       let needsReDrag = false;
 
       if (item.fileHandle) {
-        needsReDrag = restoreHandleBackedUploadItem(item, restoredState, false);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][restore-row:handle] name=${item.name || '-'} handle=1`
+        );
+        needsReDrag = restoreHandleBackedUploadItem(item, restoredState, hasBlob);
+      } else if (hasBlob) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][restore-row:blob-cache-forbidden] name=${item.name || '-'} blob=1 size=${item.size || 0}`,
+        );
+
+        item.sourceKind = row.sourceKind || 'cached-snapshot';
+        item.readMode = row.readMode || 'indexeddb-blob';
+        item.state = UploadState.MISSING_FILE;
+        item.message = '禁止使用缓存快照上传，请重新绑定真实本地文件';
+        item.uploadName = '';
+        item.persistedAttached = false;
+        item.attachedInSession = false;
+        needsReDrag = true;
       } else {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][restore-row:missing] name=${item.name || '-'} reason=no-handle-no-blob`
+        );
         needsReDrag = restoreMissingUploadItem(item, restoredState);
       }
 
@@ -5616,14 +6191,15 @@
           id: row.id,
           name: row.name,
           state: row.state,
-          hasHandle: !!row.handle,
+          hasHandle: hasHandle ? 1 : 0,
+          hasBlob: hasBlob ? 1 : 0,
         },
         item: describeUploadSource(item),
         needsReDrag,
       });
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][restore-row] name=${item.name || '-'} blob=0 handle=${item.fileHandle ? 1 : 0} sourceKind=${item.sourceKind || '-'} readMode=${item.readMode || '-'}`,
+        `[UPLOAD_DIAG][restore-row] name=${item.name || '-'} blob=${hasBlob ? 1 : 0} handle=${item.fileHandle ? 1 : 0} sourceKind=${item.sourceKind || '-'} readMode=${item.readMode || '-'}`,
       );
 
       logUploadItemSource('loadQueue:item-restored', item, {
@@ -5709,11 +6285,21 @@
       const haystack = ComposerApi.collectAttachmentChipText();
 
       const names = [
+        q.originalName,
+        q.displayName,
+        q.canonicalName,
         q.uploadName,
         q.name,
       ].filter(Boolean);
 
-      return names.some((name) => ComposerApi.fileNameEvidence(name, haystack));
+      const matched = names.some((name) => ComposerApi.fileNameEvidence(name, haystack));
+      const canonical = typeof ComposerApi.canonicalFileName === 'function'
+        ? ComposerApi.canonicalFileName(q.originalName || q.name || '')
+        : '';
+      ToolboxShell.appendLog(
+        `[UPLOAD][MATCH] original=${q.originalName || q.name || '-'} display=${q.displayName || q.name || '-'} canonical=${canonical || q.canonicalName || '-'} matched=${matched ? 1 : 0}`,
+      );
+      return matched;
     }
 
     async function reconcileFailedItems() {
@@ -7110,6 +7696,102 @@
       return null;
     }
 
+    function getUnifiedRuntimeStatus(reason = '') {
+      const uploadTask = (
+        typeof ButtonTasks !== 'undefined'
+        && typeof ButtonTasks.getButtonTask === 'function'
+      )
+        ? ButtonTasks.getButtonTask('upload')
+        : (state.uploadTask || { phase: 'idle', runId: '', cancelRequested: false });
+      const sendTask = (
+        typeof ButtonTasks !== 'undefined'
+        && typeof ButtonTasks.getButtonTask === 'function'
+      )
+        ? ButtonTasks.getButtonTask('send')
+        : (state.sendTask || { phase: 'idle', runId: '', cancelRequested: false });
+      const copyTask = (
+        typeof ButtonTasks !== 'undefined'
+        && typeof ButtonTasks.getButtonTask === 'function'
+      )
+        ? ButtonTasks.getButtonTask('copy')
+        : (state.copyTask || { phase: 'idle', runId: '', cancelRequested: false });
+      const batchTask = (
+        typeof ButtonTasks !== 'undefined'
+        && typeof ButtonTasks.getButtonTask === 'function'
+      )
+        ? ButtonTasks.getButtonTask('batch')
+        : null;
+
+      let capability = {};
+      try {
+        capability = getUploadPageCapabilityLight();
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] getUnifiedRuntimeStatus capability failed', error);
+        capability = {
+          hasComposer: false,
+          canSendNow: false,
+          can_send_now: false,
+          isResponding: false,
+          is_responding: false,
+          response_state: 'not_ready',
+          response_state_reason: `capability_error:${errText}`,
+          sendable: false,
+        };
+      }
+
+      let uploadQueue = {};
+      try {
+        uploadQueue = getUploadStatus();
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] getUnifiedRuntimeStatus upload status failed', error);
+        uploadQueue = {
+          total: 0,
+          attached: 0,
+          failed: 0,
+          missing: 0,
+          running: false,
+          error: errText,
+        };
+      }
+
+      const uploadQuota = getUploadQuotaState();
+      const messageQuota = getMessageQuotaState();
+
+      const legacyFlags = {
+        running: !!state.running,
+        waitingSend: !!state.waitingSend,
+        waitingReply: !!state.waitingReply,
+        autoSendWaiting: !!state.autoSendWaiting,
+        messageSending: !!state.messageSending,
+        cancelled: !!state.cancelled,
+        copyLastReplyTaskRunning: !!copyLastReplyTaskRunning,
+        copyHotkeyContinueLoopRunning: !!copyHotkeyContinueLoopRunning,
+      };
+
+      const pageStatus = {
+        pageDisplayId: getBridgePageDisplayIdText(),
+        reason: String(reason || ''),
+        at: Date.now(),
+      };
+
+      return {
+        reason: String(reason || ''),
+        at: Date.now(),
+        pageStatus,
+        capability,
+        uploadQueue,
+        uploadQuota,
+        messageQuota,
+        legacyFlags,
+        uploadTask: uploadTask || { phase: 'idle', runId: '', cancelRequested: false },
+        sendTask: sendTask || { phase: 'idle', runId: '', cancelRequested: false },
+        copyTask: copyTask || { phase: 'idle', runId: '', cancelRequested: false },
+        batchTask,
+      };
+    }
+
     function renderToolboxPageStatusRow() {
       let pageStatusRowEl = document.getElementById('cgpt-toolbox-page-status-row');
 
@@ -7129,35 +7811,109 @@
       const pageDisplayId = getBridgePageDisplayIdText();
       const stats = getCurrentConversationSnapshotStatsForHeader();
 
-      const roundCount = stats ? Number(stats.round_count || 0) : 0;
+      const statsRound = stats
+        ? Math.max(Number(stats.round_count || 0), Number(stats.dom_estimated_round_count || 0))
+        : 0;
       const domEstimatedRound = stats
         ? Number(stats.dom_estimated_round_count || 0)
         : 0;
 
       logConversationTurnCountIfChanged(domEstimatedRound, 'renderToolboxPageStatusRow');
 
+      let roundCount = statsRound;
+      if (roundCount <= 0 && typeof getCurrentPageTurnCount === 'function') {
+        const fallbackRound = Number(getCurrentPageTurnCount()) || 0;
+        if (fallbackRound > 0) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_TOP_STATUS][TURN_FALLBACK] statsRound=${statsRound} fallbackRound=${fallbackRound} reason=renderToolboxPageStatusRow`,
+          );
+          roundCount = fallbackRound;
+        }
+      }
+
       const pageIdText = `页面ID:${pageDisplayId}`;
       const roundText = `页面轮数:${roundCount}`;
 
-      const uploadQuota = getUploadQuotaState();
-      const messageQuota = getMessageQuotaState();
-      const uploadQuotaText = `上传额度:${uploadQuota.used}/${uploadQuota.maxFiles}`;
-      const messageQuotaText = `消息额度:${messageQuota.used}/${messageQuota.maxMessages}`;
+      const runtimeSnapshot = (
+        typeof getUnifiedRuntimeStatus === 'function'
+      )
+        ? getUnifiedRuntimeStatus('renderToolboxPageStatusRow')
+        : {
+            uploadQuota: getUploadQuotaState(),
+            messageQuota: getMessageQuotaState(),
+            capability: {},
+            uploadQueue: {},
+            legacyFlags: {},
+          };
+      const uploadQuota = runtimeSnapshot.uploadQuota && typeof runtimeSnapshot.uploadQuota === 'object'
+        ? runtimeSnapshot.uploadQuota
+        : getUploadQuotaState();
+      const messageQuota = runtimeSnapshot.messageQuota && typeof runtimeSnapshot.messageQuota === 'object'
+        ? runtimeSnapshot.messageQuota
+        : getMessageQuotaState();
+      const QUOTA_WARN_UPLOAD_REMAINING = 5;
+      const QUOTA_WARN_MESSAGE_REMAINING = 10;
+
+      const uploadQuotaRemaining = Math.max(0, Number(uploadQuota.remaining) || 0);
+      const messageQuotaRemaining = Math.max(0, Number(messageQuota.remaining) || 0);
+
+      const uploadIsFullWait = uploadQuotaRemaining <= 0;
+      const messageIsFullWait = messageQuotaRemaining <= 0;
+
+      const uploadIsWarn = !uploadIsFullWait && uploadQuotaRemaining <= QUOTA_WARN_UPLOAD_REMAINING;
+      const messageIsWarn = !messageIsFullWait && messageQuotaRemaining <= QUOTA_WARN_MESSAGE_REMAINING;
+
+      const uploadStatusLabel = uploadIsFullWait
+        ? '已满等待'
+        : (uploadIsWarn ? '即将满额' : '可上传');
+
+      const messageStatusLabel = messageIsFullWait
+        ? '已满等待'
+        : (messageIsWarn ? '即将满额' : '可上传');
+
+      const uploadBadgeStateClass = uploadIsFullWait
+        ? 'cgpt-state-blocked'
+        : (uploadIsWarn ? 'cgpt-state-waiting' : '');
+
+      const messageBadgeStateClass = messageIsFullWait
+        ? 'cgpt-state-blocked'
+        : (messageIsWarn ? 'cgpt-state-waiting' : '');
+
+      const uploadQuotaText = (uploadIsWarn || uploadIsFullWait)
+        ? `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}，仅剩 ${uploadQuotaRemaining}`
+        : `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}`;
+
+      const messageQuotaText = (messageIsWarn || messageIsFullWait)
+        ? `本地消息:${messageQuota.used}/${messageQuota.maxMessages}，仅剩 ${messageQuotaRemaining}`
+        : `本地消息:${messageQuota.used}/${messageQuota.maxMessages}`;
+
       const uploadReleaseText = uploadQuota.remaining <= 0
         ? formatQuotaReleaseCountdown(uploadQuota.nextReleaseAt)
         : '可立即使用';
       const messageReleaseText = messageQuota.remaining <= 0
         ? formatQuotaReleaseCountdown(messageQuota.nextReleaseAt)
         : '可立即使用';
-      const uploadQuotaTitle = `${uploadQuotaText}；剩余:${uploadQuota.remaining}；下一条释放:${uploadReleaseText}`;
-      const messageQuotaTitle = `${messageQuotaText}；剩余:${messageQuota.remaining}；下一条释放:${messageReleaseText}`;
+
+      const uploadWindowMinutes = Math.max(1, Math.round(Number(uploadQuota.windowMs) / 60000) || 180);
+      const messageWindowMinutes = Math.max(1, Math.round(Number(messageQuota.windowMs) / 60000) || 180);
+
+      const uploadNextReleaseTitle = uploadIsFullWait
+        ? (uploadReleaseText === '即将释放' ? '即将释放' : `${uploadReleaseText} 后`)
+        : '可立即使用';
+
+      const messageNextReleaseTitle = messageIsFullWait
+        ? (messageReleaseText === '即将释放' ? '即将释放' : `${messageReleaseText} 后`)
+        : '可立即使用';
+
+      const uploadQuotaTitle = `本地上传统计（非官方额度）：已用：${uploadQuota.used}/${uploadQuota.maxFiles}；剩余：${uploadQuotaRemaining}；窗口：${uploadWindowMinutes} 分钟；下一条释放：${uploadNextReleaseTitle}；状态：${uploadStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
+      const messageQuotaTitle = `本地消息统计（非官方额度）：已用：${messageQuota.used}/${messageQuota.maxMessages}；剩余：${messageQuotaRemaining}；窗口：${messageWindowMinutes} 分钟；下一条释放：${messageNextReleaseTitle}；状态：${messageStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
 
       pageStatusRowEl.innerHTML = `
         <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge" title="${escapeHtml(roundText)}（当前对话已完成轮数）">${escapeHtml(roundText)}</span>
-        <span class="cgpt-toolbox-top-status-badge" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
-        <span class="cgpt-toolbox-top-status-badge" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
+        <span class="cgpt-toolbox-top-status-badge ${uploadBadgeStateClass}" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
+        <span class="cgpt-toolbox-top-status-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
       `;
       updateChatInputStateBadge();
     }
@@ -7211,17 +7967,26 @@
 
           if (healed) {
             render();
-            persistQueueInBackground(`updateItem-final-state:${patch.state}`);
+            if (!(typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating())) {
+              persistQueueInBackground(`updateItem-final-state:${patch.state}`);
+            }
           }
         }, 300);
       }
 
+      const skipPersistWhileNavigating = typeof isToolboxPageNavigating === 'function'
+        && isToolboxPageNavigating();
+
       if (state.running) {
         scheduleRenderUpload('updateItem');
-        persistQueueThrottled('updateItem');
+        if (!skipPersistWhileNavigating) {
+          persistQueueThrottled('updateItem');
+        }
       } else {
         render();
-        persistQueueInBackground('updateItem');
+        if (!skipPersistWhileNavigating) {
+          persistQueueInBackground('updateItem');
+        }
       }
     }
 
@@ -7231,91 +7996,559 @@
         (signal && signal.aborted);
     }
 
-    async function waitComposerAttachmentReady(options = {}) {
-      const timeoutMs = Number(options.timeoutMs || 120000);
-      const startedAt = Date.now();
-      let loggedStillUploading = false;
+    const NATIVE_UPLOAD_ERROR_SELECTORS = [
+      // 仅扫描可能的 toast/alert/upload-error 区域
+      '[role="alert"]',
+      '[data-testid*="toast"]',
+      '[data-testid*="upload-error"]',
+      '[aria-label*="上传失败"]',
+      '[aria-label*="Upload failed"]',
+    ].join(', ');
 
-      while (Date.now() - startedAt < timeoutMs) {
-        const nativeSendReady = !!(
+    const NATIVE_UPLOAD_ERROR_PATTERNS = [
+      // 强匹配：只认文件服务器域名或明确的英文/失败描述
+      /files\.oaiusercontent\.com/i,
+      /上传到\s*files\.oaiusercontent\.com\s*失败/i,
+      /upload\s+failed/i,
+      /couldn'?t\s+upload/i,
+      /failed\s+to\s+upload/i,
+    ];
+
+    function detectChatGPTNativeUploadError() {
+      try {
+        if (
           typeof ComposerApi !== 'undefined'
-          && (
-            (
-              typeof ComposerApi.hasRealSubmitButton === 'function'
-              && ComposerApi.hasRealSubmitButton()
-            )
-            || (
-              typeof ComposerApi.canSendNowLight === 'function'
-              && ComposerApi.canSendNowLight()
-            )
-            || (
-              typeof ComposerApi.canSendNow === 'function'
-              && ComposerApi.canSendNow({ force: true })
-            )
-          )
-        );
+          && typeof ComposerApi.detectChatGPTNativeUploadError === 'function'
+        ) {
+          const pick = ComposerApi.detectChatGPTNativeUploadError();
+          if (pick && pick.ok === false) {
+            return pick;
+          }
+        }
 
-        if (nativeSendReady) {
-          ToolboxShell.appendLog('[UPLOAD][ATTACHMENT_READY] reason=native-send-ready');
+        const nodes = Array.from(document.querySelectorAll(NATIVE_UPLOAD_ERROR_SELECTORS)).filter((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          if (typeof isInToolbox === 'function' && isInToolbox(el)) return false;
+          if (typeof isInsideConversationHistory === 'function' && isInsideConversationHistory(el)) return false;
+          if (typeof isElementVisible === 'function') return isElementVisible(el);
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        for (let i = 0; i < nodes.length; i += 1) {
+          const el = nodes[i];
+          const text = [
+            el.innerText || '',
+            el.textContent || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+          ].join(' ').replace(/\s+/g, ' ').trim();
+
+          if (!text) continue;
+          if (!NATIVE_UPLOAD_ERROR_PATTERNS.some((pattern) => pattern.test(text))) continue;
+
           return {
-            ok: true,
-            reason: 'native-send-ready',
+            ok: false,
+            reason: 'native-upload-failed',
+            message: text.slice(0, 500),
           };
         }
 
+        return null;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] detectChatGPTNativeUploadError failed', error);
+        ToolboxShell.appendLog(`[UPLOAD_NATIVE][DETECT_ERROR] error=${errText}`);
+        return null;
+      }
+    }
+
+    function isNativeSendReadyForUpload() {
+      const hasSubmitButton = !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.hasRealSubmitButton === 'function'
+        && ComposerApi.hasRealSubmitButton()
+      );
+      const canSendLight = !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.canSendNowLight === 'function'
+        && ComposerApi.canSendNowLight()
+      );
+      const canSendForce = !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.canSendNow === 'function'
+        && ComposerApi.canSendNow({ force: true })
+      );
+
+      // 防止仅凭按钮存在就过早放行：需要按钮存在且发送状态可用。
+      return hasSubmitButton && (canSendLight || canSendForce);
+    }
+
+    async function waitChatGPTNativeUploadSettled(files, options = {}) {
+      try {
         if (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.waitChatGPTNativeUploadSettled === 'function'
+        ) {
+          return await ComposerApi.waitChatGPTNativeUploadSettled(files, options);
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[ChatGPT toolbox] ComposerApi.waitChatGPTNativeUploadSettled failed; fallback to local', error);
+        ToolboxShell.appendLog(`[UPLOAD_NATIVE][DETECT_ERROR] error=${errText} phase=proxy_wait_native_settled`);
+      }
+
+      const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
+      const pollMs = Number(options.pollMs) || 500;
+      const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
+      const signal = options.signal;
+      const isCancelled = typeof options.isCancelled === 'function'
+        ? options.isCancelled
+        : () => !!(signal && signal.aborted);
+
+      const requireSendReady = options.requireSendReady === undefined
+        ? true
+        : options.requireSendReady === true;
+
+      const cleanFiles = (files || []).filter(Boolean);
+      const fileNames = cleanFiles.map((f) => f && f.name).filter(Boolean).join('|');
+      const deadline = Date.now() + timeoutMs;
+
+      while (Date.now() < deadline) {
+        if (isCancelled()) {
+          return { ok: false, cancelled: true, reason: 'cancelled' };
+        }
+
+        const nativeErr = detectChatGPTNativeUploadError();
+        if (nativeErr) {
+          ToolboxShell.appendLog(`[UPLOAD_NATIVE][FAILED] names=${fileNames || '-'} message=${nativeErr.message || '-'}`);
+          return nativeErr;
+        }
+
+        const stillUploading = !!(
           typeof ComposerApi !== 'undefined'
           && typeof ComposerApi.isAttachmentStillUploading === 'function'
           && ComposerApi.isAttachmentStillUploading()
+        );
+        const sendReady = isNativeSendReadyForUpload();
+
+        const hasAttachmentChip = !requireSendReady
+          ? (
+              typeof ComposerApi !== 'undefined'
+              && typeof ComposerApi.countAttachmentChipsFast === 'function'
+                ? ComposerApi.countAttachmentChipsFast() > 0
+                : (
+                  typeof ComposerApi !== 'undefined'
+                  && typeof ComposerApi.countAttachmentChips === 'function'
+                    ? ComposerApi.countAttachmentChips() > 0
+                    : true
+                )
+            )
+          : true;
+
+        if (!stillUploading && hasAttachmentChip && (requireSendReady ? sendReady : true)) {
+          await sleep(stableMs);
+
+          if (isCancelled()) {
+            return { ok: false, cancelled: true, reason: 'cancelled' };
+          }
+
+          const nativeErrAfterStable = detectChatGPTNativeUploadError();
+          if (nativeErrAfterStable) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][FAILED] names=${fileNames || '-'} message=${nativeErrAfterStable.message || '-'} phase=post-stable`
+            );
+            return nativeErrAfterStable;
+          }
+
+          const stillUploadingAfterStable = !!(
+            typeof ComposerApi !== 'undefined'
+            && typeof ComposerApi.isAttachmentStillUploading === 'function'
+            && ComposerApi.isAttachmentStillUploading()
+          );
+          const sendReadyAfterStable = isNativeSendReadyForUpload();
+
+          const hasAttachmentChipAfterStable = !requireSendReady
+            ? (
+                typeof ComposerApi !== 'undefined'
+                && typeof ComposerApi.countAttachmentChipsFast === 'function'
+                  ? ComposerApi.countAttachmentChipsFast() > 0
+                  : (
+                    typeof ComposerApi !== 'undefined'
+                    && typeof ComposerApi.countAttachmentChips === 'function'
+                      ? ComposerApi.countAttachmentChips() > 0
+                      : true
+                  )
+              )
+            : true;
+
+          if (
+            !stillUploadingAfterStable
+            && hasAttachmentChipAfterStable
+            && (requireSendReady ? sendReadyAfterStable : true)
+          ) {
+            ToolboxShell.appendLog(
+              requireSendReady
+                ? `[UPLOAD_NATIVE][SETTLED] names=${fileNames || '-'}`
+                : `[UPLOAD][ATTACHED_ONLY][NATIVE_STABLE_OFF] names=${fileNames || '-'} requireSendReady=0`,
+            );
+            return {
+              ok: true,
+              reason: requireSendReady
+                ? 'native-upload-settled'
+                : 'native-upload-settled-without-send-ready',
+            };
+          }
+        }
+
+        await sleep(pollMs);
+      }
+
+      ToolboxShell.appendLog(`[UPLOAD_NATIVE][TIMEOUT] names=${fileNames || '-'} timeoutMs=${timeoutMs}`);
+      return { ok: false, reason: 'native-upload-settle-timeout' };
+    }
+
+    async function waitComposerAttachmentReady(options = {}) {
+      const timeoutMs = Number(options.timeoutMs || 120000);
+      const pollMs = 500;
+      const stableMs = 1300;
+      const startedAt = Date.now();
+      let loggedWaitSnapshot = false;
+      let loggedAttachmentWaitingDetail = false;
+
+      const initialStillUploading = !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading()
+      );
+      const initialHasAttachment = !!(
+        (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.countAttachmentChipsFast === 'function'
+          && ComposerApi.countAttachmentChipsFast() > 0)
+        || (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+          && ComposerApi.hasVisibleComposerAttachmentPayload())
+        || (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          && ComposerApi.hasComposerAttachmentUnified())
+      );
+      if (!initialStillUploading && !initialHasAttachment) {
+        ToolboxShell.appendLog('[SEND][SKIP_ATTACHMENT_WAIT] reason=text-only-payload');
+        return { ok: true, reason: 'no-attachment-payload' };
+      }
+
+      const pickNativeUploadError = () => {
+        if (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.detectChatGPTNativeUploadError === 'function'
         ) {
-          if (!loggedStillUploading && Date.now() - startedAt > 3000) {
-            loggedStillUploading = true;
+          return ComposerApi.detectChatGPTNativeUploadError();
+        }
+        return detectChatGPTNativeUploadError();
+      };
+
+      const expectedNames = [
+        options.originalName,
+        options.displayName,
+        options.canonicalName,
+        options.fileName,
+        options.name,
+      ].filter(Boolean);
+
+      const pickStillUploading = () => !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading({ expectedNames })
+      );
+
+      const pickAttachmentReady = () => !!(
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAttachmentReadyInComposer === 'function'
+        && ComposerApi.isAttachmentReadyInComposer({
+          expectedNames,
+          requireSendReady: false,
+        })
+      );
+
+      const pickHasAttachment = () => !!(
+        (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.countAttachmentChipsFast === 'function'
+          && ComposerApi.countAttachmentChipsFast() > 0)
+        || (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+          && ComposerApi.hasVisibleComposerAttachmentPayload())
+      );
+
+      while (Date.now() - startedAt < timeoutMs) {
+        if (options.signal && options.signal.aborted) {
+          return { ok: false, reason: 'cancelled' };
+        }
+        if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+
+        const nativeErr = pickNativeUploadError();
+        if (nativeErr && nativeErr.ok === false) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][FAILED] message=${nativeErr.message || '-'} phase=waitComposerAttachmentReady`,
+          );
+          return {
+            ok: false,
+            reason: 'native-upload-failed',
+            detail: nativeErr.message || '',
+          };
+        }
+
+        const stillUploading = pickStillUploading();
+        const attachmentReady = pickAttachmentReady();
+        const hasAttachment = pickHasAttachment() || attachmentReady;
+        const sendReady = isNativeSendReadyForUpload();
+        const elapsed = Date.now() - startedAt;
+
+        if (!loggedWaitSnapshot && elapsed > 2500) {
+          loggedWaitSnapshot = true;
+          ToolboxShell.appendLog(
+            `[UPLOAD][WAIT] uploading=${stillUploading ? 1 : 0} ready=${attachmentReady ? 1 : 0} sendReady=${sendReady ? 1 : 0} elapsed=${elapsed}`,
+          );
+        }
+
+        if (stillUploading) {
+          if (!loggedAttachmentWaitingDetail && elapsed > 3000) {
+            loggedAttachmentWaitingDetail = true;
             let textPreview = '';
-            if (typeof ComposerApi.collectAttachmentChipText === 'function') {
+            if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.collectAttachmentChipText === 'function') {
               textPreview = ComposerApi.collectAttachmentChipText().slice(0, 500);
             }
             ToolboxShell.appendLog(
               `[UPLOAD][ATTACHMENT_WAITING] reason=still-uploading textPreview=${textPreview}`,
             );
           }
-          await sleep(500);
+          await sleep(pollMs);
           continue;
         }
 
-        const failed = document.querySelector(
-          '[data-testid*="upload-error"], [aria-label*="上传失败"], [aria-label*="Upload failed"]',
-        );
+        if (hasAttachment && sendReady) {
+          await sleep(stableMs);
 
-        if (failed) {
-          ToolboxShell.appendLog('[UPLOAD][ATTACHMENT_FAILED] reason=attachment-upload-failed');
-          return {
-            ok: false,
-            reason: 'attachment-upload-failed',
-          };
+          const nativeErrAfterStable = pickNativeUploadError();
+          if (nativeErrAfterStable && nativeErrAfterStable.ok === false) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][FAILED] message=${nativeErrAfterStable.message || '-'} phase=waitComposerAttachmentReady-post-stable`,
+            );
+            return {
+              ok: false,
+              reason: 'native-upload-failed',
+              detail: nativeErrAfterStable.message || '',
+            };
+          }
+
+          const stillUploadingAfterStable = pickStillUploading();
+          const sendReadyAfterStable = isNativeSendReadyForUpload();
+          const hasAttachmentAfterStable = pickHasAttachment();
+
+          if (hasAttachmentAfterStable && !stillUploadingAfterStable && sendReadyAfterStable) {
+            ToolboxShell.appendLog('[UPLOAD][ATTACHMENT_READY] reason=native-upload-settled-before-send');
+            return {
+              ok: true,
+              reason: 'native-upload-settled-before-send',
+            };
+          }
         }
 
-        const hasAttachment = !!(
-          (typeof ComposerApi !== 'undefined' && typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-            && ComposerApi.hasVisibleComposerAttachmentPayload())
-          || (typeof ComposerApi !== 'undefined' && typeof ComposerApi.countAttachmentChips === 'function'
-            && ComposerApi.countAttachmentChips() > 0)
-        );
-
-        if (hasAttachment) {
-          ToolboxShell.appendLog('[UPLOAD][ATTACHMENT_READY] reason=attachment-ready');
-          return {
-            ok: true,
-            reason: 'attachment-ready',
-          };
-        }
-
-        await sleep(500);
+        await sleep(pollMs);
       }
 
-      ToolboxShell.appendLog('[UPLOAD][ATTACHMENT_NOT_READY] reason=attachment-ready-timeout');
+      if (pickAttachmentReady()) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][ATTACHMENT_READY] reason=attachment-ready-at-timeout elapsed=${Date.now() - startedAt}`,
+        );
+        return {
+          ok: true,
+          reason: 'attachment-ready-at-timeout',
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][TIMEOUT] file=${expectedNames.join('|') || '-'} elapsed=${Date.now() - startedAt}`,
+      );
       return {
         ok: false,
         reason: 'attachment-ready-timeout',
+      };
+    }
+
+    async function waitChatGPTComposerReadyForUpload(options = {}) {
+      const timeoutMs = Number(options.timeoutMs) || 120000;
+      const pollMs = Number(options.pollMs) || 500;
+      const stableMs = Number(options.stableMs) || 1500;
+      const deadline = Date.now() + timeoutMs;
+
+      ToolboxShell.appendLog(
+        `[FINAL_UPLOAD][WAIT_COMPOSER_READY] timeoutMs=${timeoutMs} stableMs=${stableMs} pollMs=${pollMs}`,
+      );
+
+      let lastBusyLogAt = 0;
+
+      const getSnapshot = () => {
+        const cap = typeof getUploadPageCapabilityLight === 'function'
+          ? getUploadPageCapabilityLight()
+          : null;
+        return cap && typeof cap === 'object' ? cap : null;
+      };
+
+      const isElementUsable = (el) => {
+        if (!el) return false;
+        if (el.disabled) return false;
+        if (typeof el.getAttribute === 'function') {
+          const ariaDisabled = el.getAttribute('aria-disabled');
+          if (String(ariaDisabled || '').trim().toLowerCase() === 'true') return false;
+        }
+        try {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        } catch (err) {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] isElementUsable rect failed', err);
+          ToolboxShell.appendLog(`[FINAL_UPLOAD][COMPOSER_READY_CHECK_ERROR] isElementUsable error=${errText}`);
+          return false;
+        }
+      };
+
+      const hasUsableComposerForUpload = (cap) => {
+        const hasComposerInput = !!(cap && cap.hasComposer);
+        const nativeUploading = typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAttachmentStillUploading === 'function'
+          ? !!ComposerApi.isAttachmentStillUploading()
+          : false;
+
+        const fileInput = document.querySelector('input[type="file"]');
+        const fileInputUsable = isElementUsable(fileInput);
+
+        let attachmentEntryUsable = false;
+        if (!fileInputUsable) {
+          const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+          attachmentEntryUsable = candidates.some((el) => {
+            if (!isElementUsable(el)) return false;
+            const text = (el.innerText || el.textContent || '').trim();
+            const aria = (el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '').trim();
+            const title = (el.getAttribute && el.getAttribute('title') ? el.getAttribute('title') : '').trim();
+            return (
+              text.includes('添加')
+              || text.includes('上传')
+              || text.includes('Attach')
+              || text.includes('Upload')
+              || aria.includes('Attach')
+              || aria.includes('Upload')
+              || aria.includes('附件')
+              || title.includes('Attach')
+              || title.includes('Upload')
+              || title.includes('附件')
+            );
+          });
+        }
+
+        return hasComposerInput && !nativeUploading && (fileInputUsable || attachmentEntryUsable);
+      };
+
+      const pickComposerBusy = (cap) => {
+        const response_state = String(cap && cap.response_state ? cap.response_state : '');
+        const response_state_reason = String(cap && cap.response_state_reason ? cap.response_state_reason : '');
+        const stopBtnPresent = (
+          typeof hasRealChatGPTStopGeneratingButton === 'function'
+          && hasRealChatGPTStopGeneratingButton()
+        );
+
+        const assistantGenerating = (
+          response_state === 'generating'
+          || response_state === 'streaming'
+          || response_state_reason === 'assistant_busy'
+          || (typeof ComposerApi !== 'undefined'
+            && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+            && ComposerApi.isAssistantLikelyBusy())
+        );
+
+        return {
+          response_state,
+          response_state_reason,
+          stopBtnPresent,
+          assistantGenerating,
+        };
+      };
+
+      while (Date.now() < deadline) {
+        try {
+          const cap = getSnapshot();
+          const busy = pickComposerBusy(cap || {});
+          const usable = hasUsableComposerForUpload(cap);
+
+          const composerReadyNow = (
+            !busy.assistantGenerating
+            && !busy.stopBtnPresent
+            && usable
+          );
+
+          if (!composerReadyNow) {
+            const now = Date.now();
+            if (!lastBusyLogAt || now - lastBusyLogAt >= 2500) {
+              lastBusyLogAt = now;
+              const nativeUploading = typeof ComposerApi !== 'undefined'
+                && typeof ComposerApi.isAttachmentStillUploading === 'function'
+                ? !!ComposerApi.isAttachmentStillUploading()
+                : false;
+              ToolboxShell.appendLog(
+                `[FINAL_UPLOAD][COMPOSER_BUSY] response_state=${busy.response_state || '-'} response_state_reason=${
+                  busy.response_state_reason || '-'
+                } stopBtn=${busy.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading ? 1 : 0}`,
+              );
+            }
+
+            await sleep(pollMs);
+            continue;
+          }
+
+          await sleep(stableMs);
+
+          // 稳定复查：避免“刚好没 stop 但马上又开始生成”
+          const cap2 = getSnapshot();
+          const busy2 = pickComposerBusy(cap2 || {});
+          const usable2 = hasUsableComposerForUpload(cap2);
+
+          const composerReadyAfterStable = (
+            !busy2.assistantGenerating
+            && !busy2.stopBtnPresent
+            && usable2
+          );
+
+          if (composerReadyAfterStable) {
+            const nativeUploading2 = typeof ComposerApi !== 'undefined'
+              && typeof ComposerApi.isAttachmentStillUploading === 'function'
+              ? !!ComposerApi.isAttachmentStillUploading()
+              : false;
+            ToolboxShell.appendLog(
+              `[FINAL_UPLOAD][COMPOSER_READY] response_state=${busy2.response_state || '-'} response_state_reason=${
+                busy2.response_state_reason || '-'
+              } stopBtn=${busy2.stopBtnPresent ? 1 : 0} nativeUploading=${nativeUploading2 ? 1 : 0} reason=composer-ready-for-upload`,
+            );
+            return {
+              ok: true,
+              reason: 'composer-ready-for-upload',
+            };
+          }
+        } catch (err) {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] waitChatGPTComposerReadyForUpload failed', err);
+          ToolboxShell.appendLog(`[FINAL_UPLOAD][COMPOSER_READY_CHECK_ERROR] error=${errText}`);
+        }
+
+        await sleep(pollMs);
+      }
+
+      ToolboxShell.appendLog(
+        `[FINAL_UPLOAD][COMPOSER_READY_TIMEOUT] timeoutMs=${timeoutMs} reason=final-upload-blocked-composer-not-ready`,
+      );
+      return {
+        ok: false,
+        reason: 'final-upload-blocked-composer-not-ready',
       };
     }
 
@@ -7582,6 +8815,46 @@
       );
       renderToolboxTopStatus();
       scheduleRenderUpload('quota-record-upload-success');
+    }
+
+    // 用于去重的已记录 runId 集合，最多保留最近 50 条
+    const _uploadSuccessRecordedRunIds = [];
+    const _UPLOAD_SUCCESS_RUNID_KEEP = 50;
+
+    function recordUploadSuccessOnce(fileCount, source, runId) {
+      const count = Number(fileCount || 0);
+      const src = String(source || 'unknown');
+      const rid = String(runId || '');
+
+      if (!Number.isFinite(count) || count <= 0) {
+        return;
+      }
+
+      if (rid) {
+        if (_uploadSuccessRecordedRunIds.indexOf(rid) !== -1) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_QUOTA][RECORD_SKIP_DUP] source=${src} runId=${rid}`,
+          );
+          return;
+        }
+        _uploadSuccessRecordedRunIds.push(rid);
+        if (_uploadSuccessRecordedRunIds.length > _UPLOAD_SUCCESS_RUNID_KEEP) {
+          _uploadSuccessRecordedRunIds.shift();
+        }
+      }
+
+      const quota = getUploadQuotaState();
+      const nextRecords = quota.records.concat([{ ts: Date.now(), count }]);
+      saveCompactUiConfigPatch({
+        uploadQuotaRecords: normalizeQuotaRecords(nextRecords, quota.windowMs),
+      });
+
+      const after = getUploadQuotaState({ logSnapshot: true });
+      ToolboxShell.appendLog(
+        `[UPLOAD_QUOTA][RECORD_ONCE] source=${src} runId=${rid || '-'} count=${count} used=${after.used} max=${after.maxFiles} remaining=${after.remaining}`,
+      );
+      renderToolboxTopStatus();
+      scheduleRenderUpload('quota-record-upload-success-once');
     }
 
     function recordMessageSent() {
@@ -7956,7 +9229,7 @@
       const action = shouldSend ? 'send' : 'fill';
 
       ToolboxShell.appendLog(
-        `[PROMPT][CLICK] source=${source} title=${title} text_len=${rawText.length} action=${action} auto_send=${shouldSend ? 1 : 0} waiting=${isWaitingSendActive() ? 1 : 0}`,
+        `[PROMPT][CLICK] source=${source} title=${title} text_len=${rawText.length} action=${action} auto_send=${shouldSend ? 1 : 0} sendBusy=${isSendPipelineBusy() ? 1 : 0}`,
       );
 
       if (payload.isEmpty) {
@@ -7965,7 +9238,7 @@
         return;
       }
 
-      if (shouldSend && isWaitingSendActive()) {
+      if (shouldSend && isSendPipelineBusy()) {
         setStatus('当前已有发送任务进行中，请稍后再点击 Prompt', 'warn');
         ToolboxShell.appendLog(`[PROMPT][CLICK][SKIP] source=${source} reason=waiting_send_active`);
         return;
@@ -8020,7 +9293,7 @@
       const result = await sendTextBySendMessageButtonCore(rawText, {
         source,
         allowReplaceDraft: true,
-        shouldStop: () => isWaitingSendActive(),
+        shouldStop: () => isSendPipelineBusy(),
       });
 
       const sentOk = !!(result && result.ok);
@@ -8208,6 +9481,12 @@
     }
 
     function normalizeClipboardTextForCompare(text) {
+      if (typeof CopyPipeline !== 'undefined'
+        && CopyPipeline
+        && typeof CopyPipeline.normalizeClipboardTextForCompare === 'function') {
+        return CopyPipeline.normalizeClipboardTextForCompare(text);
+      }
+
       return String(text || '')
         .replace(/\r\n/g, '\n')
         .trim();
@@ -8495,79 +9774,34 @@
       'copy-continue': '#cgpt-upload-continue-once',
       'copy-hotkey-continue': '#cgpt-copy-hotkey-continue-once',
       'continuous-copy-hotkey-continue': '#cgpt-copy-hotkey-continue-loop',
-      'closed-loop-upload-continue-hotkey': `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
-      'closed-loop-upload-continue': `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}`,
+      [CLOSED_LOOP_ACTIONS.WITH_HOTKEY.toolbarKey]: CLOSED_LOOP_ACTIONS.WITH_HOTKEY.selector,
+      [CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.toolbarKey]: CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.selector,
+      'closed-loop-upload-continue-hotkey': CLOSED_LOOP_ACTIONS.WITH_HOTKEY.selector,
+      'closed-loop-upload-continue': CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.selector,
     });
 
-    const COPY_TOOLBAR_ACTION_ALIASES = Object.freeze({
-      'copy-only': 'copy-last-reply',
-      'copy-last-message': 'copy-last-reply',
-      'copy-and-hotkey': 'copy-hotkey',
-      'copy-and-continue': 'copy-continue',
-      'loop-copy-hotkey-continue': 'continuous-copy-hotkey-continue',
-      'loop-copy-hotkey-continue-upload-verify': 'closed-loop-upload-continue-hotkey',
-      'closed-loop-upload-every5-hotkey': 'closed-loop-upload-continue-hotkey',
-      'closed-loop-upload-every5': 'closed-loop-upload-continue',
-    });
+    const COPY_TOOLBAR_ACTION_ALIASES = (() => {
+      const map = {
+        'copy-only': 'copy-last-reply',
+        'copy-last-message': 'copy-last-reply',
+        'copy-and-hotkey': 'copy-hotkey',
+        'copy-and-continue': 'copy-continue',
+        'loop-copy-hotkey-continue': 'continuous-copy-hotkey-continue',
+      };
+      Object.values(CLOSED_LOOP_ACTIONS).forEach((def) => {
+        map[def.action] = def.toolbarKey;
+        (def.legacyActions || []).forEach((legacyAction) => {
+          map[legacyAction] = def.toolbarKey;
+        });
+      });
+      map['closed-loop-upload-continue-hotkey'] = CLOSED_LOOP_ACTIONS.WITH_HOTKEY.toolbarKey;
+      map['closed-loop-upload-continue'] = CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.toolbarKey;
+      return Object.freeze(map);
+    })();
 
     function normalizeToolbarCopyAction(action) {
       const key = String(action || '').trim();
       return COPY_TOOLBAR_ACTION_ALIASES[key] || key;
-    }
-
-    function mapToolbarPhaseToButtonPhase(phase) {
-      const key = String(phase || '').trim().toLowerCase();
-      if (typeof ButtonState === 'undefined' || !ButtonState.Phase) {
-        return key;
-      }
-      const map = {
-        running: ButtonState.Phase.RUNNING,
-        success: ButtonState.Phase.SUCCESS,
-        failed: ButtonState.Phase.FAILED,
-        idle: ButtonState.Phase.IDLE,
-      };
-      return map[key] || key;
-    }
-
-    function setButtonPhase(action, phase, text) {
-      const normalized = normalizeToolbarCopyAction(action);
-      const selector = COPY_TOOLBAR_BUTTON_SELECTORS[normalized];
-      if (!selector) {
-        return false;
-      }
-      const scope = rootElRef || document;
-      const btn = typeof qs === 'function' ? qs(selector, scope) : null;
-      if (!btn) {
-        return false;
-      }
-
-      const nextPhase = mapToolbarPhaseToButtonPhase(phase);
-      const nextText = String(text || '').trim();
-
-      if (typeof ButtonState !== 'undefined' && typeof ButtonState.setToolboxButtonState === 'function') {
-        ButtonState.setToolboxButtonState(btn, {
-          phase: nextPhase,
-          text: nextText,
-          reason: `setButtonPhase:${normalized}`,
-        });
-        return true;
-      }
-
-      if (nextText) {
-        btn.textContent = nextText;
-      }
-      const failedPhase = typeof ButtonState !== 'undefined' && ButtonState.Phase
-        ? ButtonState.Phase.FAILED
-        : 'failed';
-      const successPhase = typeof ButtonState !== 'undefined' && ButtonState.Phase
-        ? ButtonState.Phase.SUCCESS
-        : 'success';
-      if (nextPhase === 'failed' || nextPhase === failedPhase) {
-        btn.classList.add('cgpt-btn-failed');
-      } else if (nextPhase === 'success' || nextPhase === successPhase) {
-        btn.classList.add('cgpt-btn-success');
-      }
-      return true;
     }
 
     async function runCopyAction(actionType, options = {}) {
@@ -8611,12 +9845,9 @@
         return runCopyHotkeyContinueLoop(source);
       }
 
-      if (type === 'loop-copy-hotkey-continue-upload-verify' || type === 'closed-loop-upload-every5-hotkey') {
-        return handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY, source);
-      }
-
-      if (type === 'closed-loop-upload-every5') {
-        return handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY, source);
+      const closedLoopMode = getClosedLoopModeFromAction(type);
+      if (closedLoopMode) {
+        return handleClosedLoopContinueModeClick(closedLoopMode, source);
       }
 
       ToolboxShell.appendLog(`[COPY_ACTION][UNKNOWN_TYPE] type=${type}`);
@@ -8887,20 +10118,30 @@
       delete btn.dataset.waitDangerReason;
 
       if (stateName === 'running') {
-        btn.textContent = '复制中';
-        btn.title = '正在复制最后一条回复';
-        btn.disabled = true;
-        btn.setAttribute('aria-busy', 'true');
+        if (typeof setButtonRunning === 'function') {
+          setButtonRunning(btn, '复制中', {
+            title: '正在复制最后一条回复',
+            allowCancel: false,
+            disabled: true,
+            reason: reason || 'copy-last-running',
+          });
+        } else {
+          btn.textContent = '复制中';
+          btn.title = '正在复制最后一条回复';
+          btn.disabled = true;
+          btn.setAttribute('aria-busy', 'true');
+          btn.classList.add('cgpt-btn-busy');
+        }
         btn.classList.add('cgpt-copy-last-running');
         btn.dataset.copyState = 'running';
         return;
       }
 
       if (stateName === 'success') {
-        btn.textContent = '复制成功';
-        btn.title = '最后回复已复制';
-        btn.classList.add('cgpt-copy-last-success');
-        btn.dataset.copyState = 'success';
+        btn.textContent = '复制最后回复';
+        btn.title = '等待最后一条 assistant 回复稳定后复制到剪贴板';
+        btn.dataset.copyState = 'idle';
+        btn.classList.add('cgpt-copy-last-idle');
         return;
       }
 
@@ -9098,7 +10339,7 @@
         }
       }
 
-      if (isWaitingSendActive()) {
+      if (isSendTaskBusy() || isWaitingSendButton()) {
         cancelWaitingSend('copy-continue');
       }
 
@@ -9278,6 +10519,26 @@
     }
 
     function getLastAssistantMessageTextForStopSignal() {
+      try {
+        if (typeof getLatestAssistantReplyText === 'function') {
+          const picked = getLatestAssistantReplyText({
+            label: 'stop-signal',
+            forceRefresh: true,
+          });
+          if (picked && picked.ok && picked.text) {
+            return String(picked.text || '').trim();
+          }
+        }
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[STOP_SIGNAL][LATEST_ASSISTANT_READ_FAILED]', error);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[STOP_SIGNAL][LATEST_ASSISTANT_READ_FAILED] error=${errText}`,
+          );
+        }
+      }
+
       const assistantNodes = Array.from(
         document.querySelectorAll('[data-message-author-role="assistant"]'),
       );
@@ -10753,6 +12014,15 @@
       const continueReason = result && result.continueReason
         ? String(result.continueReason)
         : (result && result.continueSent ? 'ok' : '');
+      const continueSent = !!(result && result.continueSent);
+      // continueSent=true 时消息已由 enterUploadWaitingReplyAfterSend->recordMessageSentAfterConfirmed 记录
+      // 外层不应再调用 recordTaskSendRateLimitHit，否则会重复计数
+      const quotaRecorded = continueSent;
+      if (continueSent) {
+        ToolboxShell.appendLog(
+          `[MESSAGE_QUOTA][RECORD_SOURCE] source=${source} quotaRecorded=1`,
+        );
+      }
       return {
         ok: !!(result && result.ok),
         assistantDoneSignal: !!(result && result.assistantDoneSignal),
@@ -10762,7 +12032,8 @@
         continueReason,
         copied: !!(result && result.copied),
         hotkeySent: !!(result && result.hotkeySent),
-        continueSent: !!(result && result.continueSent),
+        continueSent,
+        quotaRecorded,
         copied_text: result && result.copied_text ? String(result.copied_text) : '',
         assistantMessageKey: result && result.assistantMessageKey ? String(result.assistantMessageKey) : '',
       };
@@ -11035,11 +12306,7 @@
     }
 
     function stopAutoContinueUnifiedHomeWatcher(reason = 'unknown') {
-      if (autoContinueUnifiedHomeState.watcherId) {
-        clearInterval(autoContinueUnifiedHomeState.watcherId);
-        autoContinueUnifiedHomeState.watcherId = null;
-        ToolboxShell.appendLog(`[AUTO_CONTINUE_HOME][WATCHER_STOP] reason=${reason || '-'}`);
-      }
+      ToolboxShell.appendLog(`[AUTO_CONTINUE_HOME][WATCHER_STOP] reason=${reason || '-'}`);
       autoContinueUnifiedHomeState.active = false;
       autoContinueUnifiedHomeState.mode = '';
       autoContinueUnifiedHomeState.round = 0;
@@ -11114,91 +12381,11 @@
       return { ok: true, reason: 'home-nav-ok', round: nextRound };
     }
 
-    function tickAutoContinueUnifiedHomeWatcher() {
-      if (
-        typeof AutoQueueModule === 'undefined'
-        || !AutoQueueModule
-        || typeof AutoQueueModule.getState !== 'function'
-      ) {
-        stopAutoContinueUnifiedHomeWatcher('module-unavailable');
-        return;
-      }
-
-      const autoState = AutoQueueModule.getState();
-      if (!autoContinueUnifiedHomeState.active || !isAutoQueueContinueLoopActive(autoState)) {
-        stopAutoContinueUnifiedHomeWatcher('auto-queue-stopped');
-        return;
-      }
-
-      if (autoState.waitingReply) {
-        autoContinueUnifiedHomeState.prevWaitingReply = true;
-        return;
-      }
-
-      if (autoContinueUnifiedHomeState.prevWaitingReply) {
-        autoContinueUnifiedHomeState.round = Math.max(
-          0,
-          Number(autoContinueUnifiedHomeState.round) || 0,
-        ) + 1;
-        autoContinueUnifiedHomeState.prevWaitingReply = false;
-        ToolboxShell.appendLog(
-          `[AUTO_CONTINUE_HOME][ROUND_DONE] mode=${autoContinueUnifiedHomeState.mode || '-'} round=${autoContinueUnifiedHomeState.round}`,
-        );
-      }
-
-      if (autoContinueUnifiedHomeState.homeNavigationRunning) {
-        return;
-      }
-
-      const busy = (
-        typeof ComposerApi !== 'undefined'
-        && ComposerApi
-        && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-        && ComposerApi.isAssistantLikelyBusy()
-      );
-      if (busy || autoState.sendingNow) {
-        return;
-      }
-
-      if (Date.now() < Number(autoState.nextSendAt || 0)) {
-        return;
-      }
-
-      void maybeRunAutoContinueUnifiedHomeBeforeSend(autoState).then((homeGate) => {
-        if (!homeGate || homeGate.ok !== true) {
-          ToolboxShell.appendLog(
-            `[AUTO_CONTINUE_HOME][GATE_FAILED] reason=${homeGate && homeGate.reason ? homeGate.reason : 'unknown'}`,
-          );
-        }
-      }).catch((error) => {
-        autoContinueUnifiedHomeState.homeNavigationRunning = false;
-        const errText = formatToolboxError(error);
-        console.error('[AUTO_CONTINUE_HOME][WATCHER_FAILED]', error);
-        ToolboxShell.appendLog(`[AUTO_CONTINUE_HOME][WATCHER_FAILED] error=${errText}`);
-      });
-    }
-
-    function startAutoContinueUnifiedHomeWatcher(mode, reason = 'unknown') {
-      stopAutoContinueUnifiedHomeWatcher(`restart:${reason || '-'}`);
-      autoContinueUnifiedHomeState.active = true;
-      autoContinueUnifiedHomeState.mode = String(mode || 'auto-continue');
-      autoContinueUnifiedHomeState.round = 0;
-      autoContinueUnifiedHomeState.prevWaitingReply = false;
-      autoContinueUnifiedHomeState.homeNavigationRunning = false;
-      autoContinueUnifiedHomeState.skipNextHomeCheck = false;
-      autoContinueUnifiedHomeState.watcherId = window.setInterval(
-        tickAutoContinueUnifiedHomeWatcher,
-        500,
-      );
-      ToolboxShell.appendLog(
-        `[AUTO_CONTINUE_HOME][WATCHER_START] mode=${autoContinueUnifiedHomeState.mode} reason=${reason || '-'}`,
-      );
-    }
+    ToolboxShell.appendLog('[AUTO_CONTINUE_HOME][DEAD_WATCHER_REMOVED]');
 
     function getCopyHotkeyLoopAutomationConfig() {
+      const closedLoopCfg = getClosedLoopAutomationConfig();
       const cfg = getCompactUiConfig();
-
-      const autoUploadInterval = Number(cfg.copyHotkeyLoopAutoUploadInterval || 5);
 
       const unifiedHomeNavEnabled = cfg.unifiedContinueHomeNavEnabled !== false;
       const unifiedHomeNavIntervalRaw = Number(
@@ -11214,19 +12401,17 @@
       ).trim() || DEFAULT_UNIFIED_CONTINUE_HOME_NAV.url;
 
       return {
-        autoUploadEnabled: cfg.copyHotkeyLoopAutoUploadEnabled !== false,
-        autoUploadInterval: Number.isFinite(autoUploadInterval) && autoUploadInterval > 0
-          ? Math.floor(autoUploadInterval)
-          : 5,
+        autoUploadEnabled: closedLoopCfg.autoUploadEnabled,
+        autoUploadInterval: closedLoopCfg.autoUploadInterval,
         unifiedContinueHomeNavEnabled: unifiedHomeNavEnabled,
         unifiedContinueHomeNavInterval: unifiedHomeNavInterval,
         unifiedContinueHomeNavUrl: unifiedHomeNavUrl,
         copyHotkeyLoopHomeNavEnabled: unifiedHomeNavEnabled,
         copyHotkeyLoopHomeNavInterval: unifiedHomeNavInterval,
         copyHotkeyLoopHomeNavUrl: unifiedHomeNavUrl,
-        homeNavEnabled: unifiedHomeNavEnabled,
-        homeNavInterval: unifiedHomeNavInterval,
-        homeNavUrl: unifiedHomeNavUrl,
+        homeNavEnabled: closedLoopCfg.homeNavEnabled && unifiedHomeNavEnabled,
+        homeNavInterval: closedLoopCfg.homeNavInterval || unifiedHomeNavInterval,
+        homeNavUrl: closedLoopCfg.homeNavUrl || unifiedHomeNavUrl,
       };
     }
 
@@ -11669,15 +12854,20 @@
     }
 
     function buildFlaskUploadListHtml() {
+      const activeGroupId = getActiveUploadScopeGroupId();
       const flaskRows = (state.flaskFiles || []).filter(
-        (row) => row && row.status !== 'uploaded',
+        (row) => row
+          && row.status !== 'uploaded'
+          && isUploadItemInActiveScope(row, activeGroupId),
       );
 
       return flaskRows.map((row) => {
+        const flaskStatusText = '本地直读 · 未上传';
         const itemTitle = escapeHtml([
           `文件名：${row.name || '-'}`,
           `大小：${formatBytes(row.size)}`,
-          '来源：本地直读',
+          '状态：未上传',
+          '读取方式：本地直读',
           row.download_url ? `下载：${row.download_url}` : '',
         ].filter(Boolean).join('\n'));
 
@@ -11688,7 +12878,7 @@
                 <div class="cgpt-upload-meta">
                   ${escapeHtml(formatBytes(row.size))}
                   <span class="cgpt-upload-dot">·</span>
-                  <span class="cgpt-upload-source-label">本地直读</span>
+                  <span class="cgpt-upload-source-label">${escapeHtml(flaskStatusText)}</span>
                 </div>
               </div>
             </div>
@@ -11895,34 +13085,37 @@
 
     async function collectDroppedFilesWithHandles(transfer) {
       const result = [];
-      const seen = new Set();
+      const entryByKey = new Map();
 
-      function pushEntry(file, handle) {
+      function upsertEntry(file, handle) {
         if (!file) return;
 
         const key = buildQueueFileKey(file) || buildQueueLooseFileKey(file);
-        if (key && seen.has(key)) {
+        const normalizedHandle = isFileHandleLike(handle) ? handle : null;
+
+        if (key && entryByKey.has(key)) {
+          const entry = entryByKey.get(key);
+          // 允许把后续通过 items 拿到的 handle 补齐到前面已有的 transfer.files entry。
+          if (normalizedHandle && !entry.handle) {
+            entry.handle = normalizedHandle;
+          }
           return;
         }
 
-        if (key) {
-          seen.add(key);
-        }
-
-        result.push({
+        const entry = {
           file,
-          handle: isFileHandleLike(handle) ? handle : null,
-        });
+          handle: normalizedHandle,
+        };
+        result.push(entry);
+        if (key) {
+          entryByKey.set(key, entry);
+        }
       }
 
       const directFiles = Array.from(transfer && transfer.files ? transfer.files : []).filter(Boolean);
       directFiles.forEach((file) => {
-        pushEntry(file, null);
+        upsertEntry(file, null);
       });
-
-      if (result.length) {
-        return result;
-      }
 
       const items = Array.from(transfer && transfer.items ? transfer.items : []);
       for (const item of items) {
@@ -11944,7 +13137,7 @@
         }
 
         const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
-        pushEntry(file, handle);
+        upsertEntry(file, handle);
       }
 
       return result;
@@ -12006,10 +13199,14 @@
     }
 
     async function addDroppedFilesToCurrentUploadProject(files, source) {
-      const fileList = Array.from(files || []).filter(Boolean);
-      const validFiles = [];
+      const list = Array.from(files || []).filter(Boolean);
+      const validEntries = [];
 
-      fileList.forEach((file) => {
+      list.forEach((entryOrFile) => {
+        const isEntry = entryOrFile && typeof entryOrFile === 'object' && 'file' in entryOrFile;
+        const file = isEntry ? entryOrFile.file : entryOrFile;
+        const handle = isEntry ? entryOrFile.handle : null;
+
         if (!file || Number(file.size) <= 0) {
           console.info('[MULTI_UPLOAD][DROP_SKIP_EMPTY_FILE]', {
             name: file && file.name ? file.name : '-',
@@ -12018,10 +13215,13 @@
           return;
         }
 
-        validFiles.push(file);
+        validEntries.push({
+          file,
+          handle: isFileHandleLike(handle) ? handle : null,
+        });
       });
 
-      if (!validFiles.length) {
+      if (!validEntries.length) {
         console.info('[MULTI_UPLOAD][DROP_EMPTY]');
         setStatus('没有检测到可添加的文件');
         return {
@@ -12034,15 +13234,13 @@
       try {
         const projectId = await ensureUploadProjectForDrop(source || 'drag_drop_toolbox');
         const beforeCount = getActiveGroupFiles().length;
-        const dropped = await collectDroppedFilesFromFileList(validFiles);
-
-        await addDroppedFiles(dropped);
+        await addDroppedFiles(validEntries);
         dedupeActiveGroupQueue('drop');
 
         const afterCount = getActiveGroupFiles().length;
         const addedCount = Math.max(0, afterCount - beforeCount);
 
-        setStatus(`已拖入：${validFiles.length} 个文件，新增：${addedCount} 个`);
+        setStatus(`已拖入：${validEntries.length} 个文件，新增：${addedCount} 个`);
 
         const acceptedPayload = {
           project_id: projectId || state.activeGroupId || '',
@@ -12098,23 +13296,25 @@
         return;
       }
 
-      if (!rawFiles.length) {
-        const dropped = await collectDroppedFilesWithHandles(transfer);
-        if (!dropped.length) {
-          console.info('[MULTI_UPLOAD][DROP_EMPTY]');
-          setStatus('没有检测到可添加的文件');
-          ToolboxShell.appendLog('[UPLOAD_DIAG][drop:empty]');
-          return;
-        }
+      const dropped = await collectDroppedFilesWithHandles(transfer);
 
-        await addDroppedFilesToCurrentUploadProject(
-          dropped.map((entry) => entry.file).filter(Boolean),
-          sourceText,
-        );
+      if (!dropped.length) {
+        console.info('[MULTI_UPLOAD][DROP_EMPTY]');
+        setStatus('没有检测到可添加的文件');
+        ToolboxShell.appendLog('[UPLOAD_DIAG][drop:empty]');
         return;
       }
 
-      await addDroppedFilesToCurrentUploadProject(rawFiles, sourceText);
+      dropped.forEach((entry) => {
+        const name = entry && entry.file && entry.file.name ? entry.file.name : 'unknown';
+        if (entry && entry.handle) {
+          ToolboxShell.appendLog(`[MULTI_UPLOAD][DROP_HANDLE] name=${name} handle=1`);
+        } else {
+          ToolboxShell.appendLog(`[MULTI_UPLOAD][DROP_HANDLE_MISSING] name=${name} fallback=session-file`);
+        }
+      });
+
+      await addDroppedFilesToCurrentUploadProject(dropped, sourceText);
     }
 
     function bindMultiUploadDragDrop(uploadRootEl) {
@@ -12440,6 +13640,9 @@
     async function addFiles(files, options = {}) {
       const cleanFiles = Array.from(files || []).filter(Boolean);
       const handles = Array.isArray(options.handles) ? options.handles : [];
+      const noHandleReadMode = options.noHandleReadMode
+        ? String(options.noHandleReadMode).trim()
+        : 'snapshot';
 
       if (!ensureActiveUploadGroupIdValid('add-files')) {
         if (!state.groups.length) {
@@ -12487,6 +13690,8 @@
 
         const handle = handles[index] || null;
         const hasHandle = isFileHandleLike(handle);
+        const fileSize = Number(file.size) || 0;
+        const canPersistBlob = fileSize > 0 && fileSize <= APP.uploadBlobMaxBytes;
 
         const item = {
           id: newId(),
@@ -12501,11 +13706,17 @@
           blob: file,
           sourceBlob: file,
           fileHandle: hasHandle ? handle : null,
-          sourceKind: hasHandle ? 'local-handle' : 'session-file',
-          readMode: hasHandle ? 'handle' : 'snapshot',
-          state: UploadState.IDLE,
+          sourceKind: hasHandle
+            ? 'local-handle'
+            : (canPersistBlob ? 'cached-snapshot' : 'session-file'),
+          readMode: hasHandle
+            ? 'handle'
+            : (canPersistBlob ? 'indexeddb-blob' : noHandleReadMode),
+          state: hasHandle ? UploadState.IDLE : UploadState.MISSING_FILE,
           status: 'pending',
-          message: '',
+          message: hasHandle
+            ? ''
+            : '禁止使用缓存快照上传，请重新绑定真实本地文件',
           uploadName: '',
           persistedAttached: false,
         };
@@ -12654,9 +13865,170 @@
         }, 0);
 
         ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1');
+        ToolboxShell.appendLog('[UPLOAD_DIAG][picker:before-open] mode=input-file multiple=0');
 
         input.click();
       });
+    }
+
+    function pickLocalFilesByInputMultiple() {
+      return new Promise((resolve, reject) => {
+        const input = document.createElement('input');
+        let finished = false;
+        let focusCancelTimer = 0;
+
+        function cleanup() {
+          window.removeEventListener('focus', onWindowFocus, true);
+
+          if (focusCancelTimer) {
+            window.clearTimeout(focusCancelTimer);
+            focusCancelTimer = 0;
+          }
+
+          if (input && input.parentNode) {
+            input.parentNode.removeChild(input);
+          }
+        }
+
+        function finishOk(files) {
+          if (finished) return;
+          finished = true;
+          cleanup();
+
+          const clean = Array.from(files || []).filter(Boolean);
+          resolve(clean.map((file) => ({
+            file,
+            handle: null,
+            source: 'input-file',
+          })));
+        }
+
+        function finishFailed(err) {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          reject(err);
+        }
+
+        function readSelectedFiles() {
+          const files = input.files ? Array.from(input.files).filter(Boolean) : [];
+          if (!files.length) {
+            finishFailed(new Error('用户取消选择文件'));
+            return;
+          }
+          finishOk(files);
+        }
+
+        function onWindowFocus() {
+          if (focusCancelTimer) {
+            window.clearTimeout(focusCancelTimer);
+          }
+
+          focusCancelTimer = window.setTimeout(() => {
+            focusCancelTimer = 0;
+
+            if (finished) return;
+
+            const files = input.files ? Array.from(input.files).filter(Boolean) : [];
+            if (files.length) {
+              finishOk(files);
+              return;
+            }
+
+            finishFailed(new Error('用户取消选择文件'));
+          }, 1200);
+        }
+
+        input.type = 'file';
+        input.multiple = true;
+        input.style.position = 'fixed';
+        input.style.left = '-9999px';
+        input.style.top = '-9999px';
+        input.style.width = '1px';
+        input.style.height = '1px';
+        input.style.opacity = '0';
+        input.style.pointerEvents = 'none';
+        input.style.zIndex = '-1';
+
+        input.addEventListener('change', () => {
+          if (focusCancelTimer) {
+            window.clearTimeout(focusCancelTimer);
+            focusCancelTimer = 0;
+          }
+
+          readSelectedFiles();
+        }, {
+          once: true,
+        });
+
+        input.addEventListener('cancel', () => {
+          finishFailed(new Error('用户取消选择文件'));
+        }, {
+          once: true,
+        });
+
+        document.body.appendChild(input);
+
+        window.setTimeout(() => {
+          window.addEventListener('focus', onWindowFocus, true);
+        }, 0);
+
+        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1 multiple=1');
+        input.click();
+      });
+    }
+
+    async function pickLocalFilesWithHandlesForAdd() {
+      const showOpenFilePicker = getShowOpenFilePickerFn();
+
+      if (!showOpenFilePicker) {
+        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1 supported=0 multiple=1');
+        return pickLocalFilesByInputMultiple();
+      }
+
+      ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=file-system-access supported=1 multiple=1');
+
+      let handles;
+      try {
+        handles = await showOpenFilePicker({
+          multiple: true,
+        });
+      } catch (e) {
+        if (e && (e.name === 'AbortError' || e.code === 20)) {
+          throw new Error('用户取消选择文件');
+        }
+
+        console.error('[ChatGPT toolbox] showOpenFilePicker failed', e);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][picker:file-system-access-failed] error=${e && e.message ? e.message : String(e)}`,
+        );
+        throw e;
+      }
+
+      const entries = [];
+      const list = Array.isArray(handles) ? handles : [];
+      for (const handle of list) {
+        if (!handle || typeof handle.getFile !== 'function') {
+          continue;
+        }
+
+        const file = await handle.getFile();
+        if (!file) {
+          continue;
+        }
+
+        entries.push({
+          file,
+          handle,
+          source: 'file-system-access',
+        });
+      }
+
+      if (!entries.length) {
+        throw new Error('未选择到有效文件');
+      }
+
+      return entries;
     }
 
     async function pickOneLocalFileWithHandle() {
@@ -12668,6 +14040,7 @@
       }
 
       ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=file-system-access supported=1');
+      ToolboxShell.appendLog('[UPLOAD_DIAG][picker:before-open] mode=file-system-access multiple=0');
 
       let handles;
 
@@ -12728,6 +14101,8 @@
 
 
     async function rebindUploadFile(id) {
+      ToolboxShell.appendLog(`[UPLOAD_DIAG][rebind-file:enter] id=${id || '-'}`);
+
       if (!id) {
         setStatus('重新绑定失败：缺少文件 ID');
         ToolboxShell.appendLog('[UPLOAD_DIAG][rebind-file:skip] reason=empty-id');
@@ -12778,19 +14153,36 @@
         q.blob = file;
         q.sourceBlob = file;
 
-        if (hasHandle) {
-          q.fileHandle = handle;
-          q.sourceKind = 'local-handle';
-          q.readMode = 'handle';
-          q.message = '';
-        } else {
+        if (!hasHandle) {
           q.fileHandle = null;
-          q.sourceKind = 'session-file';
-          q.readMode = 'snapshot';
+          q.file = null;
+          q.sourceFile = null;
+          q.originalFile = null;
+          q.blob = null;
+          q.sourceBlob = null;
+          q.state = UploadState.MISSING_FILE;
+          q.sourceKind = 'missing-file';
+          q.readMode = '';
+          q.message = '重新绑定未获得文件句柄，请使用支持本地文件句柄的浏览器重新选择';
+          q.uploadName = '';
+          q.persistedAttached = false;
+
+          await schedulePersistQueue();
+          await refreshUploadGroupCounts();
+          render();
+
+          setStatus('重新绑定失败：未获得本地文件句柄，无法保证从磁盘读取');
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][rebind-file:no-handle] id=${id || '-'} name=${q.name || '-'}`,
+          );
+          return;
         }
 
-        q.state = UploadState.IDLE;
+        q.fileHandle = handle;
+        q.sourceKind = 'local-handle';
+        q.readMode = 'handle';
         q.message = '';
+        q.state = UploadState.IDLE;
         q.uploadName = '';
         q.persistedAttached = false;
 
@@ -12820,29 +14212,93 @@
       }
     }
 
-    // 上传前统一入口：有 fileHandle 则必须 getFile() 从磁盘读最新文件，失败就直接报错，绝不走缓存降级
-    async function readFreshFile(q) {
-      if (!q) {
-        throw new Error('readFreshFile: empty queue item');
+    function throwStrictCacheForbidden(item, callerSource = '') {
+      markCacheForbiddenUploadItems([item], callerSource || 'strict-local-file');
+      const err = new Error(STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE);
+      console.error('[ChatGPT toolbox] resolveStrictLocalUploadFile: cache forbidden', {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+        callerSource,
+        itemName: item && (item.name || item.filename) ? (item.name || item.filename) : '-',
+      });
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][readFreshFile:cache-forbidden] stage=${callerSource || '-'} name=${item && (item.name || item.filename) ? (item.name || item.filename) : '-'} sourceKind=${item && item.sourceKind ? item.sourceKind : '-'} readMode=${item && item.readMode ? item.readMode : '-'}`,
+      );
+      throw err;
+    }
+
+    function resolveFlaskLocalDirectDownloadUrl(q) {
+      const direct = String(
+        q.download_url || q.url || q.file_url || '',
+      ).trim();
+      if (direct) {
+        return direct;
       }
 
-      if (q.fileHandle && typeof q.fileHandle.getFile === 'function') {
+      const fileId = String(q.file_id || '').trim();
+      if (!fileId) {
+        return '';
+      }
+
+      let base = 'http://127.0.0.1:5000';
+      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+        const stored = String(MemoryManager.get('bridgeBaseUrl', base) || '').trim();
+        if (stored) {
+          base = stored;
+        }
+      }
+
+      return `${base.replace(/\/$/, '')}/api/upload_files/${encodeURIComponent(fileId)}/content`;
+    }
+
+    function hasStrictLocalCachePayload(item) {
+      if (!item) {
+        return false;
+      }
+
+      return !!(
+        isFileLike(item.file)
+        || isFileLike(item.sourceFile)
+        || isFileLike(item.originalFile)
+        || isBlobLike(item.blob)
+        || isBlobLike(item.sourceBlob)
+      );
+    }
+
+    // 所有上传路径的唯一底层读取入口：仅 local-handle 或 flask_local_direct
+    async function resolveStrictLocalUploadFile(item, options = {}) {
+      const callerSource = String(options.source || 'resolveStrictLocalUploadFile').trim()
+        || 'resolveStrictLocalUploadFile';
+      const itemName = item && (item.name || item.filename)
+        ? (item.name || item.filename)
+        : '-';
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_STRICT_SOURCE][ENTER] source=${callerSource} name=${itemName}`,
+      );
+
+      if (!item) {
+        throw new Error(`${callerSource}: empty queue item`);
+      }
+
+      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
         try {
-          const fresh = await q.fileHandle.getFile();
+          const fresh = await item.fileHandle.getFile();
 
           if (fresh && fresh.size >= 0) {
-            q.file = fresh;
-            q.blob = fresh;
-            q.name = fresh.name || q.name;
-            q.size = fresh.size;
-            q.type = fresh.type || q.type || 'application/octet-stream';
-            q.lastModified = fresh.lastModified || q.lastModified;
-            q.sourceKind = 'local-handle';
-            q.readMode = 'handle';
-            q.message = '';
+            item.file = fresh;
+            item.blob = fresh;
+            item.name = fresh.name || item.name;
+            item.size = fresh.size;
+            item.type = fresh.type || item.type || 'application/octet-stream';
+            item.lastModified = fresh.lastModified || item.lastModified;
+            item.sourceKind = 'local-handle';
+            item.readMode = 'handle';
+            item.message = '';
 
             ToolboxShell.appendLog(
-              `[UPLOAD_FILE][USE_FILE_HANDLE] name=${q.name || '-'} size=${q.size || 0}`,
+              `[UPLOAD_FILE][USE_FILE_HANDLE] name=${item.name || '-'} size=${item.size || 0}`,
             );
 
             return fresh;
@@ -12850,74 +14306,111 @@
         } catch (e) {
           const errName = e && e.name ? e.name : 'Error';
           const errText = e && e.message ? e.message : String(e);
+          const errStack = e && e.stack ? e.stack : '-';
 
-          console.warn('[ChatGPT toolbox] fileHandle.getFile failed, no fallback to cache', e);
+          console.error('[ChatGPT toolbox] resolveStrictLocalUploadFile: fileHandle.getFile failed', e);
 
-          q.message = '文件句柄读取失败，无法从磁盘读取最新文件';
-          q.state = UploadState.MISSING_FILE;
-          q.sourceKind = 'missing-file';
-          q.readMode = '';
+          item.message = '文件句柄读取失败，无法从磁盘读取最新文件';
+          item.state = UploadState.MISSING_FILE;
+          item.sourceKind = 'missing-file';
+          item.readMode = '';
 
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][readFreshFile:handle-failed-no-fallback] name=${q.name || '-'} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'} type=${errName} error=${errText}`,
+            `[UPLOAD_DIAG][strict-local-file:handle-failed] source=${callerSource} name=${itemName} error.name=${errName} error.message=${errText} stack=${errStack}`,
           );
 
-          throw new Error('文件句柄读取失败，无法保证从磁盘读取最新文件 ' + (q.name || '-'));
+          throw new Error('文件句柄读取失败，无法保证从磁盘读取最新文件 ' + itemName);
         }
 
-        // handle 存在但 getFile 返回空/无效 → 也报错
-        q.state = UploadState.MISSING_FILE;
-        q.sourceKind = 'missing-file';
-        q.readMode = '';
-        q.message = '文件句柄读取返回空文件';
+        item.state = UploadState.MISSING_FILE;
+        item.sourceKind = 'missing-file';
+        item.readMode = '';
+        item.message = '文件句柄读取返回空文件';
 
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][readFreshFile:handle-returned-invalid] name=${q.name || '-'}`,
+          `[UPLOAD_DIAG][strict-local-file:handle-invalid] source=${callerSource} name=${itemName}`,
         );
 
-        throw new Error('文件句柄读取返回空文件，无法保证从磁盘读取最新文件 ' + (q.name || '-'));
+        throw new Error('文件句柄读取返回空文件，无法保证从磁盘读取最新文件 ' + itemName);
       }
 
-      const sessionFile = q.file;
-      if (sessionFile instanceof File || sessionFile instanceof Blob) {
-        q.sourceKind = sessionFile instanceof File ? 'session-file' : 'session-blob';
-        q.readMode = 'session';
-        q.message = '';
-        ToolboxShell.appendLog(
-          `[UPLOAD_FILE][USE_SESSION_FILE] name=${q.name || '-'} size=${sessionFile.size || 0}`,
-        );
-        return sessionFile;
-      }
+      const isFlaskDirect = isFlaskLocalDirectSource(item) || isFlaskLocalDirectItem(item);
+      if (isFlaskDirect) {
+        const fileName = item.name || item.filename || 'upload.bin';
+        const downloadUrl = resolveFlaskLocalDirectDownloadUrl(item);
 
-      const sessionBlob = q.blob;
-      if (sessionBlob instanceof Blob) {
-        const fileName = q.name || 'upload.bin';
-        const mime = q.type || sessionBlob.type || 'application/octet-stream';
-        const asFile = new File([sessionBlob], fileName, {
-          type: mime,
-          lastModified: q.lastModified || Date.now(),
+        if (!downloadUrl) {
+          throw new Error(`文件缺少 download_url/file_id，无法从 Flask 本地直读：${fileName}`);
+        }
+
+        item.source = item.source || 'flask_local_direct';
+        item.sourceKind = 'flask_local_direct';
+        item.readMode = item.readMode || 'flask-local-direct';
+
+        const response = await fetch(downloadUrl, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
         });
-        q.file = asFile;
-        q.blob = asFile;
-        q.sourceKind = 'session-blob';
-        q.readMode = 'session';
-        q.message = '';
-        ToolboxShell.appendLog(
-          `[UPLOAD_FILE][USE_SESSION_BLOB] name=${fileName} size=${asFile.size || 0}`,
+
+        if (!response.ok) {
+          throw new Error(
+            `Flask 本地直读失败：${response.status} ${response.statusText} ${fileName}`,
+          );
+        }
+
+        const blob = await response.blob();
+        if (!blob || Number(blob.size) <= 0) {
+          throw new Error(`Flask 本地直读返回空文件：${fileName}`);
+        }
+
+        const freshFile = new File(
+          [blob],
+          fileName,
+          {
+            type: item.mime_type || item.type || blob.type || 'application/octet-stream',
+            lastModified: item.lastModified || Date.now(),
+          },
         );
-        return asFile;
+
+        item.file = freshFile;
+        item.blob = freshFile;
+        item.size = freshFile.size;
+        item.type = freshFile.type || item.type || 'application/octet-stream';
+        item.message = '';
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_FILE][USE_FLASK_LOCAL_DIRECT] name=${fileName} size=${freshFile.size || 0} file_id=${item.file_id || '-'} url=${downloadUrl}`,
+        );
+
+        return freshFile;
       }
 
-      q.state = UploadState.MISSING_FILE;
-      q.sourceKind = 'missing-file';
-      q.readMode = '';
-      q.message = '缺少文件句柄，无法从磁盘读取最新文件';
+      if (isUploadSourceCacheForbidden(item) || hasStrictLocalCachePayload(item)) {
+        throwStrictCacheForbidden(item, callerSource);
+      }
+
+      item.state = UploadState.MISSING_FILE;
+      item.sourceKind = 'missing-file';
+      item.readMode = '';
+      item.message = '缺少文件句柄，无法从磁盘读取最新文件';
 
       ToolboxShell.appendLog(
-        `[UPLOAD_FILE][NEED_REBIND] name=${q.name || '-'}`,
+        `[UPLOAD_FILE][NEED_REBIND] name=${itemName}`,
+      );
+      ToolboxShell.appendLog(
+        `[UPLOAD_DIAG][strict-local-file:missing-handle] source=${callerSource} name=${itemName}`,
       );
 
-      throw new Error('缺少文件句柄，无法从磁盘读取最新文件，缺少可读取的文件对象 ' + (q.name || '-'));
+      throw new Error('缺少文件句柄，无法从磁盘读取最新文件，缺少可读取的文件对象 ' + itemName);
+    }
+
+    async function readFreshFile(q) {
+      if (!q) {
+        throw new Error('readFreshFile: empty queue item');
+      }
+
+      return resolveStrictLocalUploadFile(q, { source: 'readFreshFile' });
     }
 
     function cloneFileWithUniqueName(file, seq, total) {
@@ -13035,55 +14528,135 @@
       return !hasAttemptableUploadSource(q);
     }
 
-    async function resolveLiveFileForUpload(item) {
-      if (!item) {
-        ToolboxShell.appendLog('[UPLOAD_DIAG][live-read:null-item]');
-        return null;
-      }
+    function isNativeUploadFailureReason(text = '') {
+      const raw = String(text || '');
+      return /native-upload-failed|files\.oaiusercontent\.com|上传到\s*files\.oaiusercontent\.com\s*失败|upload\s+failed|couldn'?t\s+upload|failed\s+to\s+upload/i.test(raw);
+    }
 
-      if (isFileLike(item.file)) {
+    async function cleanupComposerAfterNativeUploadFailure(reason = '', options = {}) {
+      const reasonText = String(reason || '').slice(0, 500);
+      const opts = options && typeof options === 'object' ? options : {};
+      const runId = String(opts.runId || '').trim();
+      const forceClearAll = opts.forceClearAll === true;
+      const beforeSnapshot = opts.beforeSnapshot && typeof opts.beforeSnapshot === 'object'
+        ? opts.beforeSnapshot
+        : null;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_NATIVE][RETRYABLE] reason=${reasonText || '-'} runId=${runId || '-'}`,
+      );
+
+      if (!ComposerApi) {
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][live-read:session-file] name=${item.name || '-'} size=${item.size || 0}`
+          `[UPLOAD_NATIVE][CLEANUP_SKIP] reason=ComposerApi-missing detail=${reasonText || '-'}`,
         );
-        return item.file;
+        return { ok: false, reason: 'ComposerApi-missing' };
       }
 
-      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
+      const canSnapshot = typeof ComposerApi.getComposerAttachmentSnapshot === 'function';
+      const canClearByKeys = typeof ComposerApi.clearAttachmentsByKeys === 'function';
+      const canClearAll = typeof ComposerApi.clearAttachments === 'function';
+
+      // 关键保护：native-upload-failed 路径默认禁止全局清空附件
+      if (!forceClearAll) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_NATIVE][CLEANUP_SKIP_GLOBAL] reason=avoid-removing-existing-attachments detail=${reasonText || '-'} runId=${runId || '-'}`,
+        );
+      }
+
+      // 有 before 快照时：只允许清理 after 中新增的附件
+      if (beforeSnapshot && canSnapshot) {
+        const beforeCount = Number(beforeSnapshot.count != null ? beforeSnapshot.count : beforeSnapshot.fileCount) || 0;
+        const beforeItems = Array.isArray(beforeSnapshot.items) ? beforeSnapshot.items : [];
+        const beforeKeys = new Set(beforeItems.map((x) => (x && x.key ? String(x.key) : '')).filter(Boolean));
+
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_SNAPSHOT_BEFORE] runId=${runId || '-'} count=${beforeCount} names=${beforeItems.map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+        );
+
+        const afterSnapshot = ComposerApi.getComposerAttachmentSnapshot(`native-fail:after:${reasonText}`);
+        const afterCount = Number(afterSnapshot && (afterSnapshot.count != null ? afterSnapshot.count : afterSnapshot.fileCount)) || 0;
+        const afterItems = afterSnapshot && Array.isArray(afterSnapshot.items) ? afterSnapshot.items : [];
+
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_SNAPSHOT_AFTER] runId=${runId || '-'} count=${afterCount} names=${afterItems.map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+        );
+
+        const newItems = afterItems.filter((it) => it && it.key && !beforeKeys.has(String(it.key)));
+        const newKeys = newItems.map((it) => String(it.key));
+
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_CLEANUP_DIFF] runId=${runId || '-'} before=${beforeCount} after=${afterCount} new=${newKeys.length}`,
+        );
+
+        if (beforeCount > 0) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_CLEANUP_PRESERVE_EXISTING] runId=${runId || '-'} preserved=${beforeCount}`,
+          );
+        }
+
+        if (newKeys.length && canClearByKeys) {
+          try {
+            return await ComposerApi.clearAttachmentsByKeys(
+              newKeys,
+              `native-upload-failed:${reasonText}`,
+            );
+          } catch (cleanupErr) {
+            const errText = cleanupErr && cleanupErr.message ? cleanupErr.message : String(cleanupErr);
+            console.error('[ChatGPT toolbox] cleanupComposerAfterNativeUploadFailure(clearAttachmentsByKeys) failed', cleanupErr);
+            ToolboxShell.appendLog(`[UPLOAD_NATIVE][CLEANUP_FAILED] error=${errText}`);
+            return { ok: false, reason: 'clearAttachmentsByKeys-error' };
+          }
+        }
+
+        // 无法判定新增附件 / 没有 keys / 无按 key 清理能力：宁可不删
+        return {
+          ok: true,
+          skipped: true,
+          reason: newKeys.length ? 'clearAttachmentsByKeys-unavailable' : 'no-new-attachments',
+        };
+      }
+
+      // 没有 beforeSnapshot：默认不自动清理（避免误删旧附件）
+      if (!beforeSnapshot) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'no-before-snapshot',
+        };
+      }
+
+      // 只有在明确 forceClearAll==true 且“上传前没有附件”时才允许全局清空
+      if (forceClearAll && canClearAll && canSnapshot) {
+        const beforeCount = Number(beforeSnapshot.count != null ? beforeSnapshot.count : beforeSnapshot.fileCount) || 0;
+        if (beforeCount > 0) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][CLEANUP_SKIP_GLOBAL] reason=beforeSnapshot-nonzero runId=${runId || '-'} before=${beforeCount}`,
+          );
+          return { ok: true, skipped: true, reason: 'beforeSnapshot-nonzero' };
+        }
+
         try {
-          const file = await item.fileHandle.getFile();
-
-          item.file = file;
-          item.sourceFile = file;
-          item.originalFile = file;
-          item.name = file.name || item.name;
-          item.size = Number(file.size) || item.size;
-          item.lastModified = Number(file.lastModified) || item.lastModified;
-          item.type = file.type || item.type || 'application/octet-stream';
-          item.readMode = 'file-handle-live';
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][live-read:handle] name=${item.name || '-'} size=${item.size}`
+          const result = await ComposerApi.clearAttachments(
+            `native-upload-failed(forceClearAll):${reasonText}`,
           );
-
-          return file;
-        } catch (e) {
-          console.error('[ChatGPT toolbox] resolveLiveFileForUpload: handle.getFile failed', e);
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][live-read:handle-failed] name=${item.name || '-'} error=${e && e.message ? e.message : String(e)}`
+            `[UPLOAD_NATIVE][CLEANUP] reason=${reasonText || '-'} removed=${result && result.removed != null ? result.removed : '-'} remaining=${result && result.remaining != null ? result.remaining : '-'}`,
           );
+          return result;
+        } catch (cleanupErr) {
+          const errText = cleanupErr && cleanupErr.message ? cleanupErr.message : String(cleanupErr);
+          console.error('[ChatGPT toolbox] cleanupComposerAfterNativeUploadFailure(forceClearAll) failed', cleanupErr);
+          ToolboxShell.appendLog(`[UPLOAD_NATIVE][CLEANUP_FAILED] error=${errText}`);
+          return { ok: false, reason: 'clearAttachments-error' };
         }
       }
 
-      item.file = null;
-      item.blob = null;
-      item.state = UploadState.MISSING_FILE;
-      item.message = '未保存文件内容，请重新拖入后再上传';
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][live-read:missing] name=${item.name || '-'} reason=no-file-no-handle`
-      );
-
-      return null;
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'global-clear-not-allowed',
+      };
     }
 
     async function uploadOne(q, seq, total, options = {}) {
@@ -13184,6 +14757,17 @@
 
         ToolboxShell.appendLog(`[UPLOAD_DIAG][uploadOne:before-attach] name=${q.name} uploadName=${uploadFile.name} size=${uploadFile.size}`);
 
+        const beforeSnapshot = (typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function')
+          ? ComposerApi.getComposerAttachmentSnapshot(`uploadOne:before:${q.name}`)
+          : null;
+        if (beforeSnapshot) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_SNAPSHOT_BEFORE] runId=${runId || '-'} count=${Number(beforeSnapshot.count != null ? beforeSnapshot.count : beforeSnapshot.fileCount) || 0} names=${(beforeSnapshot.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+          );
+        }
+
         const result = await ComposerApi.attachFilesByFileInput([uploadFile], 90000, {
           signal,
           runId,
@@ -13197,12 +14781,20 @@
         }
 
         if (result.ok) {
-          q.state = UploadState.ATTACHED;
-          q.status = 'attached';
-          q.message = '';
-          q.attachedInSession = true;
-          q.persistedAttached = true;
-          q.updatedAt = Date.now();
+          markUploadItemAttached(q, 'upload-one-ok', uploadFile);
+          const nameFields = resolveUploadItemNameFields(q, uploadFile);
+          updateItem(q.id, {
+            originalName: nameFields.originalName,
+            displayName: nameFields.displayName,
+            canonicalName: nameFields.canonicalName,
+            uploadName: uploadFile.name,
+          });
+          if (state.uploadTask && state.uploadTask.phase === 'uploading') {
+            setAuthoritativeUploadTaskState({
+              phase: 'ready',
+              fileName: nameFields.originalName || q.name || '',
+            }, 'upload-one-ready');
+          }
           logUploadSourceCheck(q, 'attach-ok');
 
           ToolboxShell.appendLog(
@@ -13216,7 +14808,28 @@
         const nativeFailText = [nativeFailReason, nativeFailDetail].filter(Boolean).join('：');
 
         if (isNativeUploadFailureReason(nativeFailText)) {
-          await cleanupComposerAfterNativeUploadFailure(nativeFailText);
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][FAILED] name=${q.name || '-'} reason=${nativeFailText || '-'}`,
+          );
+          await cleanupComposerAfterNativeUploadFailure(nativeFailText, {
+            runId,
+            beforeSnapshot,
+            forceClearAll: false,
+          });
+        }
+
+        const isTimeoutLike = /native-upload-settle-timeout|attachment-ready-timeout|final-upload-blocked-composer-not-ready/i
+          .test(nativeFailReason || '');
+
+        if (isTimeoutLike && detectComposerHasUploadPayload()) {
+          updateItem(q.id, {
+            state: UploadState.ATTACHED,
+            message: '已绑定到 ChatGPT 输入框（等待发送就绪）',
+          });
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_CONFIRM] name=${q.name || '-'} reason=${nativeFailReason || '-'} marked=ATTACHED`,
+          );
+          return true;
         }
 
         console.warn('[ChatGPT toolbox] legacy input upload failed', {
@@ -13299,7 +14912,9 @@
 
         q.state = UploadState.MISSING_FILE;
         q.sourceKind = 'missing-file';
-        q.message = '缺少文件，请重新拖入';
+        q.message = isUploadSourceCacheForbidden(q)
+          ? '禁止使用缓存快照上传，请重新绑定真实本地文件'
+          : '缺少文件，请重新拖入';
         changed = true;
 
         ToolboxShell.appendLog(
@@ -13330,6 +14945,53 @@
       return false;
     }
 
+    function setAuthoritativeUploadTaskState(next = {}, reason = '') {
+      if (!state.uploadTask || typeof state.uploadTask !== 'object') {
+        state.uploadTask = { phase: 'idle', runId: '', cancelRequested: false };
+      }
+      const task = state.uploadTask;
+      const now = Date.now();
+      const oldPhase = String(task.phase || 'idle').trim().toLowerCase();
+      const nextPhase = String(next.phase || task.phase || 'idle').trim().toLowerCase();
+      Object.assign(task, next);
+      task.phase = nextPhase;
+      if (oldPhase !== nextPhase) {
+        const fileLabel = String(next.fileName || task.fileName || task.source || '-');
+        ToolboxShell.appendLog(
+          `[UPLOAD][STATE] old=${oldPhase} new=${nextPhase} file=${fileLabel} reason=${reason || '-'}`,
+        );
+      }
+      task.cancelable = next.cancelable != null
+        ? !!next.cancelable
+        : (
+          nextPhase === 'uploading'
+          || nextPhase === 'cancelling'
+          || nextPhase === 'waiting_send'
+          || nextPhase === 'waiting_reply'
+        );
+      if (next.startedAt != null) {
+        task.startedAt = Number(next.startedAt) || 0;
+      } else if (nextPhase === 'uploading' && !Number(task.startedAt)) {
+        task.startedAt = now;
+      } else if (nextPhase === 'idle') {
+        task.startedAt = 0;
+      }
+      task.updatedAt = now;
+      const owner = String(task.owner || '').trim();
+      const source = String(task.source || '').trim();
+      ToolboxShell.appendLog(
+        `[UPLOAD_STATE][AUTHORITATIVE] phase=${task.phase} owner=${owner || '-'} source=${source || '-'} cancelable=${task.cancelable ? 1 : 0} reason=${reason || '-'}`,
+      );
+      const manualUploadRunning = !!state.running;
+      const phaseImpliesManualRunning = task.phase === 'uploading' && owner !== 'batch-initial';
+      if (manualUploadRunning !== phaseImpliesManualRunning) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_STATE][MISMATCH] manualUploadRunning=${manualUploadRunning ? 1 : 0} uploadPhase=${task.phase} owner=${owner || '-'}`,
+        );
+      }
+      return task;
+    }
+
     function syncUploadTaskFromLegacyState() {
       if (!state.uploadTask || typeof state.uploadTask !== 'object') {
         state.uploadTask = { phase: 'idle', runId: '', cancelRequested: false };
@@ -13338,37 +15000,130 @@
       const task = state.uploadTask;
 
       if (task.parentTask && task.phase === 'uploading') {
-        return task;
+        return setAuthoritativeUploadTaskState({}, 'sync:child-uploading');
       }
 
       if (state.uploadCancelRequested) {
         if (state.running || isUploadRunActuallyActive()) {
-          task.phase = 'cancelling';
-          task.cancelRequested = true;
-          return task;
+          return setAuthoritativeUploadTaskState({
+            phase: 'cancelling',
+            cancelRequested: true,
+          }, 'sync:legacy-cancelling');
         }
       }
 
       if (isUploadRunActuallyActive()) {
-        task.phase = 'uploading';
-        task.cancelRequested = !!state.uploadCancelRequested;
-        if (!task.runId && state.runId) {
-          task.runId = `upload_${state.runId}`;
+        const nextTask = setAuthoritativeUploadTaskState({
+          phase: 'uploading',
+          cancelRequested: !!state.uploadCancelRequested,
+        }, 'sync:legacy-uploading');
+        if (!nextTask.runId && state.runId) {
+          nextTask.runId = `upload_${state.runId}`;
         }
-        return task;
+        return nextTask;
       }
 
-      task.phase = 'idle';
-      task.cancelRequested = false;
-      return task;
+      return setAuthoritativeUploadTaskState({
+        phase: 'idle',
+        cancelRequested: false,
+        cancelable: false,
+      }, 'sync:legacy-idle');
     }
 
-    function syncSendTaskFromLegacyState() {
+    function setAuthoritativeSendTaskState(next = {}, reason = '') {
       if (!state.sendTask || typeof state.sendTask !== 'object') {
         state.sendTask = { phase: 'idle', runId: '', cancelRequested: false };
       }
 
       const task = state.sendTask;
+      const oldPhase = String(task.phase || 'idle').trim().toLowerCase();
+      let nextPhase = String(
+        next.phase != null ? next.phase : task.phase || 'idle',
+      ).trim().toLowerCase();
+      if (nextPhase === 'waiting_ready') {
+        nextPhase = 'waiting_send';
+      }
+
+      Object.assign(task, next);
+      task.phase = nextPhase;
+      task._authoritative = true;
+      if (next.subphase != null) {
+        task.subphase = String(next.subphase || '').trim();
+      }
+      if (next.runId != null) {
+        task.runId = String(next.runId || '');
+      }
+      if (next.cancelRequested != null) {
+        task.cancelRequested = !!next.cancelRequested;
+      }
+
+      if (oldPhase !== nextPhase) {
+        const subphase = task.subphase ? String(task.subphase) : '';
+        const subLog = subphase ? ` subphase=${subphase}` : '';
+        ToolboxShell.appendLog(
+          `[SEND_STATE][AUTHORITATIVE] old=${oldPhase} new=${nextPhase}${subLog} reason=${reason || '-'}`,
+        );
+        if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.setTaskPhase === 'function') {
+          ButtonTasks.setTaskPhase('send', nextPhase, reason || 'authoritative', {
+            runId: task.runId,
+            cancelRequested: task.cancelRequested,
+            subphase: task.subphase || '',
+          });
+        }
+      }
+
+      syncLegacySendFlagsFromSendTask(reason);
+      return task;
+    }
+
+    function syncLegacySendFlagsFromSendTask(reason = '') {
+      const phase = String(state.sendTask && state.sendTask.phase || 'idle').trim().toLowerCase();
+      const prevWaitingReply = !!state.waitingReply;
+      const prevMessageSending = !!state.messageSending;
+
+      state.waitingReply = phase === 'waiting_reply';
+      state.messageSending = phase === 'sending';
+
+      if (
+        (prevWaitingReply !== state.waitingReply || prevMessageSending !== state.messageSending)
+        && reason
+      ) {
+        ToolboxShell.appendLog(
+          `[SEND_STATE][LEGACY_FLAGS] phase=${phase} waitingReply=${state.waitingReply ? 1 : 0} `
+          + `messageSending=${state.messageSending ? 1 : 0} reason=${reason}`,
+        );
+      }
+    }
+
+    function isWaitingReplyFromSendTask() {
+      return getSendTaskPhase() === 'waiting_reply';
+    }
+
+    function isMessageSendingFromSendTask() {
+      return getSendTaskPhase() === 'sending';
+    }
+
+    function isWaitingSendFromSendTask() {
+      return getSendTaskPhase() === 'waiting_send';
+    }
+
+    // @deprecated 仅作迁移/诊断：禁止在正常渲染路径调用，以免旧布尔字段覆盖 sendTask.phase。
+    function syncSendTaskFromLegacyState(options = {}) {
+      const forceLegacy = !!(options && options.forceLegacy === true);
+      if (!forceLegacy && state.sendTask && state.sendTask._authoritative) {
+        return state.sendTask;
+      }
+
+      if (!state.sendTask || typeof state.sendTask !== 'object') {
+        state.sendTask = { phase: 'idle', runId: '', cancelRequested: false };
+      }
+
+      const task = state.sendTask;
+
+      ToolboxShell.appendLog(
+        `[SEND_STATE][LEGACY_MIGRATE] force=${forceLegacy ? 1 : 0} `
+        + `waitingReply=${state.waitingReply ? 1 : 0} messageSending=${state.messageSending ? 1 : 0}`,
+      );
 
       if (state.messageSendCancelRequested) {
         task.cancelRequested = true;
@@ -13376,15 +15131,18 @@
 
       if (state.waitingReply) {
         task.phase = 'waiting_reply';
+        task._authoritative = false;
         return task;
       }
 
-      if (isWaitingSendActive() || state.messageSending) {
+      if (isWaitingSendButton() || isShortcutDispatching() || state.messageSending) {
         task.phase = state.messageSending ? 'sending' : 'waiting_send';
+        task._authoritative = false;
         return task;
       }
 
       task.phase = 'idle';
+      task._authoritative = false;
       return task;
     }
 
@@ -13489,7 +15247,7 @@
       const running = !!(autoState && (autoState.running || autoState.waitingReply));
       return {
         phase: running ? 'running' : 'idle',
-        text: running ? '停止继续' : '自动继续',
+        text: running ? '停止继续' : '无限继续',
         title: running
           ? '自动继续正在运行，点击后停止'
           : '复用自动指令队列：循环发送“继续”；再点一次停止',
@@ -13570,8 +15328,12 @@
         && typeof UploadButtonVm.applyUploadButtonViewState === 'function'
       ) {
         const view = UploadButtonVm.getAutoContinueUntilDoneButtonViewState(autoState);
+        const snapshot = typeof buildUploadButtonRenderSnapshot === 'function'
+          ? buildUploadButtonRenderSnapshot()
+          : {};
         return UploadButtonVm.applyUploadButtonViewState(button, view, reason, {
           buttonName: 'auto-continue-until-done',
+          snapshot,
         });
       }
 
@@ -13586,7 +15348,7 @@
         );
         return setToolboxButtonState(button, {
           phase: running ? ButtonPhase.DANGER : ButtonPhase.IDLE,
-          text: running ? '停止智能继续' : '自动继续直到完成',
+          text: running ? '停止智能继续' : '无限继续直到完成',
           title: running
             ? '自动继续直到完成正在运行，点击后停止（与「自动继续」共用 AutoQueue 运行态）'
             : '循环发送强约束继续指令；只有检测到严格完成信号才停止',
@@ -13617,7 +15379,6 @@
 
     function syncButtonTasksFromModuleState(reason = '') {
       syncUploadTaskFromLegacyState();
-      syncSendTaskFromLegacyState();
       syncCopyTaskFromLegacyState();
       syncCopyContinueTaskFromLegacyState();
 
@@ -13666,9 +15427,14 @@
 
     function buildUploadOnlyButtonSnapshot() {
       syncUploadTaskFromLegacyState();
+      const runtime = getUnifiedRuntimeStatus('buildUploadOnlyButtonSnapshot');
 
       return {
-        uploadTask: state.uploadTask,
+        pageStatus: runtime.pageStatus,
+        capability: runtime.capability,
+        uploadQueue: runtime.uploadQueue,
+        legacyFlags: runtime.legacyFlags,
+        uploadTask: runtime.uploadTask,
         uploadRunning: isUploadRunActuallyActive(),
         activeFilesCount: getActiveGroupFiles().length,
       };
@@ -13676,15 +15442,23 @@
 
     function buildUploadButtonRenderSnapshot() {
       syncButtonTasksFromModuleState('buildUploadButtonRenderSnapshot');
+      const runtime = getUnifiedRuntimeStatus('buildUploadButtonRenderSnapshot');
+      const legacyFlags = runtime.legacyFlags && typeof runtime.legacyFlags === 'object'
+        ? runtime.legacyFlags
+        : {};
 
       return {
-        uploadTask: state.uploadTask,
-        sendTask: state.sendTask,
-        copyTask: state.copyTask,
+        pageStatus: runtime.pageStatus,
+        capability: runtime.capability,
+        uploadQueue: runtime.uploadQueue,
+        legacyFlags,
+        uploadTask: runtime.uploadTask,
+        sendTask: runtime.sendTask,
+        copyTask: runtime.copyTask,
         uploadRunning: isUploadRunActuallyActive(),
-        waitingSend: isWaitingSendActive(),
-        waitingReply: !!state.waitingReply,
-        messageSending: !!state.messageSending,
+        waitingSend: !!legacyFlags.waitingSend,
+        waitingReply: !!legacyFlags.waitingReply,
+        messageSending: !!legacyFlags.messageSending,
         activeFilesCount: getActiveGroupFiles().length,
         copyRunning: copyLastReplyTaskRunning || copyLastMessageTaskRunning,
         copyWaiting: copyLastMessageWaiting,
@@ -13712,7 +15486,130 @@
         assistantBusy: typeof ComposerApi !== 'undefined'
           && typeof ComposerApi.isAssistantLikelyBusy === 'function'
           && ComposerApi.isAssistantLikelyBusy(),
+        autoContinueRunning: (() => {
+          if (
+            typeof AutoQueueModule === 'undefined'
+            || typeof AutoQueueModule.getState !== 'function'
+          ) {
+            return false;
+          }
+          const autoState = AutoQueueModule.getState() || {};
+          return !!(
+            autoState.running
+            || autoState.waitingReply
+            || autoState.cancelling
+          );
+        })(),
       };
+    }
+
+    function snapshotForConflictCheck(capability) {
+      const snapshot = buildUploadButtonRenderSnapshot();
+      if (capability && typeof capability === 'object') {
+        snapshot.capability = capability;
+      }
+      return snapshot;
+    }
+
+    function logUploadSendStateConflicts(snapshot, capability, sendMessageBtn) {
+      const cap = capability && typeof capability === 'object'
+        ? capability
+        : (snapshot.capability && typeof snapshot.capability === 'object' ? snapshot.capability : {});
+      const sendTask = snapshot.sendTask && typeof snapshot.sendTask === 'object'
+        ? snapshot.sendTask
+        : {};
+      const sendPhase = String(sendTask.phase || 'idle').trim().toLowerCase();
+      const sendButtonText = sendMessageBtn
+        ? String(sendMessageBtn.textContent || '').trim()
+        : '-';
+      const sendButtonAction = sendMessageBtn
+        ? String(sendMessageBtn.dataset.action || '').trim()
+        : '-';
+      const sendButtonCgptAction = sendMessageBtn
+        ? String(sendMessageBtn.dataset.cgptRuntimeAction || sendMessageBtn.dataset.cgptButtonAction || '').trim()
+        : '-';
+      const sendButtonDisabled = sendMessageBtn ? !!sendMessageBtn.disabled : false;
+      const assistantBusy = snapshot.assistantBusy ? 1 : 0;
+      const capabilityResponding = cap.isResponding ? 1 : 0;
+      const fields = [
+        `assistantBusy=${assistantBusy}`,
+        `capability.isResponding=${capabilityResponding}`,
+        `state.waitingReply=${state.waitingReply ? 1 : 0}`,
+        `state.messageSending=${state.messageSending ? 1 : 0}`,
+        `sendTask.phase=${sendPhase}`,
+        `sendButtonText=${sendButtonText}`,
+        `sendButtonAction=${sendButtonAction || '-'}`,
+        `sendButtonCgptAction=${sendButtonCgptAction || '-'}`,
+        `copyHotkeyOnceActive=${snapshot.copyHotkeyOnceActive ? 1 : 0}`,
+        `copyHotkeyContinueActive=${snapshot.copyHotkeyContinueActive ? 1 : 0}`,
+        `copyHotkeyLoopActive=${snapshot.copyHotkeyLoopActive ? 1 : 0}`,
+        `closedLoopContinueRunning=${snapshot.closedLoopContinueRunning ? 1 : 0}`,
+        `autoContinueRunning=${snapshot.autoContinueRunning ? 1 : 0}`,
+      ].join(' ');
+
+      const warn = (detail) => {
+        ToolboxShell.appendLog(`[SEND_STATE][CONFLICT] ${fields} detail=${detail}`);
+        console.warn(`[SEND_STATE][CONFLICT] ${detail}`, {
+          assistantBusy,
+          capabilityResponding,
+          sendPhase,
+          sendButtonText,
+          sendButtonCgptAction,
+        });
+      };
+
+      const replyBusy = typeof UploadButtonVm !== 'undefined'
+        && typeof UploadButtonVm.isEffectiveReplyBusy === 'function'
+        && UploadButtonVm.isEffectiveReplyBusy(snapshot, cap);
+
+      if (replyBusy && sendPhase === 'idle' && sendButtonText === '发送消息' && !sendButtonDisabled) {
+        warn('assistant-busy-but-send-idle');
+      }
+
+      if (
+        (sendButtonCgptAction === 'cancel-send' || sendButtonCgptAction === 'cancel-wait-reply')
+        && sendButtonAction === 'send-message'
+        && sendButtonCgptAction !== sendButtonAction
+      ) {
+        warn('cancel-action-mismatch-dataset');
+      }
+
+      if (sendButtonCgptAction === 'none' && sendMessageBtn && !sendButtonDisabled) {
+        warn('none-action-but-clickable');
+      }
+
+      if (snapshot.closedLoopContinueRunning) {
+        const hotkeyBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
+        const plainBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
+        const buttons = [hotkeyBtn, plainBtn].filter(Boolean);
+        const badClosedLoop = buttons.filter((btn) => {
+          const cgptAction = String(btn.dataset.cgptRuntimeAction || btn.dataset.cgptButtonAction || '').trim();
+          return !btn.disabled && cgptAction !== 'stop';
+        });
+        if (badClosedLoop.length > 1) {
+          warn('closed-loop-multiple-startable');
+        }
+      }
+
+      if (snapshot.copyHotkeyLoopActive) {
+        const onceBtn = rootElRef
+          ? qs(UploadSelectors.copyHotkeyOnceBtn, rootElRef)
+          : null;
+        if (onceBtn && !onceBtn.disabled) {
+          warn('copy-hotkey-loop-active-but-once-clickable');
+        }
+      }
+
+      if (snapshot.autoContinueRunning) {
+        const untilDoneBtn = resolveAutoContinueUntilDoneButton(rootElRef);
+        if (untilDoneBtn) {
+          const cgptAction = String(untilDoneBtn.dataset.cgptRuntimeAction || untilDoneBtn.dataset.cgptButtonAction || '').trim();
+          const text = String(untilDoneBtn.textContent || '').trim();
+          if (!untilDoneBtn.disabled && cgptAction === 'start' && text === '无限继续直到完成') {
+            warn('auto-continue-running-but-until-done-idle-start');
+          }
+        }
+      }
     }
 
     function cancelUploadFlow(reason = 'unknown') {
@@ -13814,7 +15711,7 @@
 
       const queueHtml = files.map((q) => {
         const activeClass = selectedFileId === q.id ? 'active' : '';
-        const cachedClass = isCachedUploadSnapshot(q) ? 'cached-snapshot' : '';
+        const cachedClass = isUploadSourceCacheForbidden(q) ? 'cached-snapshot' : '';
         const sourceText = getUploadInlineStatusText(q);
         const itemTitle = escapeHtml(buildUploadItemTitle(q));
 
@@ -13822,6 +15719,8 @@
           ? `
             <button type="button"
               class="cgpt-upload-file-rebind"
+              data-action="rebind-upload-file"
+              data-cgpt-base-action="rebind-upload-file"
               data-upload-rebind-id="${escapeHtml(q.id)}"
               title="重新选择本地文件">
               重新绑定
@@ -13836,7 +15735,7 @@
                 <div class="cgpt-upload-meta">
                   ${escapeHtml(formatBytes(q.size))}
                   <span class="cgpt-upload-dot">·</span>
-                  <span class="cgpt-upload-source-label ${isCachedUploadSnapshot(q) ? 'cached-source' : ''}">
+                  <span class="cgpt-upload-source-label ${isUploadSourceCacheForbidden(q) ? 'cached-source' : ''}">
                     ${escapeHtml(sourceText)}
                   </span>
                   ${rebindButtonHtml}
@@ -13869,9 +15768,118 @@
       }
 
       uploadTimers.raf('upload-render', () => {
+        const reasonText = String(reason || '').trim();
+        const critical = (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true);
+        const lightOnly = critical && /poll|foreground-catch-up|update-status|renderUploadButtonsOnly/i.test(reasonText);
+        const scope = resolveUploadButtonRenderScope({ buttonTasksReason: reasonText });
+
+        if (lightOnly) {
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[UPLOAD_CRITICAL][LIGHT_RENDER_ONLY] reason=${reasonText} scope=${scope}`);
+          }
+          // 上传关键期：只刷新按钮/状态，避免 innerHTML 重建上传列表引入时序抖动。
+          renderUploadButtonsOnly({
+            heavy: false,
+            buttonTasksReason: `light:${reasonText}`,
+            skipCapabilityScan: true,
+            scope,
+          });
+          return;
+        }
+
         renderUploadListOnly();
-        renderAllButtonStates();
+        renderAllButtonStates({ buttonTasksReason: reasonText, scope });
       });
+    }
+
+    function isNonSendUploadButtonTaskActive() {
+      const uploadTask = state.uploadTask || {};
+      const uploadPhase = String(uploadTask.phase || 'idle').trim().toLowerCase();
+      if (uploadPhase === 'uploading' || uploadPhase === 'cancelling') {
+        return true;
+      }
+      if (isCopyHotkeyOnceActive() || isCopyHotkeyContinueActive() || isCopyHotkeyLoopActive()) {
+        return true;
+      }
+      if (copyLastReplyTaskRunning || copyLastMessageTaskRunning) {
+        return true;
+      }
+      const copyContinueTask = state.copyContinueTask || {};
+      const copyContinuePhase = String(copyContinueTask.phase || 'idle').trim().toLowerCase();
+      if (copyContinuePhase !== 'idle'
+        && copyContinuePhase !== 'success'
+        && copyContinuePhase !== 'failed'
+        && copyContinuePhase !== 'cancelled') {
+        return true;
+      }
+      if (closedLoopContinueState && closedLoopContinueState.running) {
+        return true;
+      }
+      if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getState === 'function') {
+        const autoState = AutoQueueModule.getState() || {};
+        if (autoState.running || autoState.batchTaskRunning) {
+          return true;
+        }
+      }
+      const homeTask = state.homeTask || {};
+      const homePhase = String(homeTask.phase || 'idle').trim().toLowerCase();
+      if (homePhase === 'running') {
+        return true;
+      }
+      return false;
+    }
+
+    function inferUploadButtonRenderScopeFromActiveTasks() {
+      const sendPhase = String(getSendTaskPhase() || 'idle').trim().toLowerCase();
+      const sendActive = sendPhase === 'waiting_reply'
+        || sendPhase === 'sending'
+        || sendPhase === 'waiting_send'
+        || sendPhase === 'cancelling';
+      if (sendActive && !isNonSendUploadButtonTaskActive()) {
+        return 'send-only';
+      }
+      return 'all';
+    }
+
+    function resolveUploadButtonRenderScope(options = {}) {
+      const explicit = String(options.scope || '').trim().toLowerCase();
+      if (explicit === 'send-only' || explicit === 'upload-only' || explicit === 'all') {
+        return explicit;
+      }
+
+      const reason = String(options.buttonTasksReason || options.reason || '').trim().toLowerCase();
+      const sendOnlyReasonPatterns = [
+        /send-message/,
+        /waiting.?reply/,
+        /message.?send/,
+        /send-state/,
+        /send_state/,
+        /heal-stale-send/,
+        /wait-send/,
+        /shared-send/,
+        /pending-send/,
+        /auto-send/,
+        /send-message:/,
+      ];
+
+      if (reason && sendOnlyReasonPatterns.some((pattern) => pattern.test(reason))) {
+        if (!isNonSendUploadButtonTaskActive()) {
+          return 'send-only';
+        }
+      }
+
+      if (/^(light:)?(poll|foreground-catch-up|update-status|renderuploadbuttonsonly)/i.test(reason)) {
+        return inferUploadButtonRenderScopeFromActiveTasks();
+      }
+
+      return 'all';
+    }
+
+    function logSkipUnrelatedButtonRender(buttonName, scope, detail = '') {
+      const line = `[BUTTON_RENDER][SKIP_UNRELATED] button=${String(buttonName || '-').trim() || '-'} reason=${String(scope || '-').trim() || '-'} detail=${String(detail || '-').trim() || '-'}`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      }
     }
 
     function renderUploadListOnly() {
@@ -13908,45 +15916,37 @@
       return [
         location.href,
         composerTextLen,
-        isWaitingSendActive() ? 1 : 0,
+        isSendPipelineBusy() ? 1 : 0,
         state.waitingReply ? 1 : 0,
         countActiveUploadItemsForCapability(),
         responding ? 1 : 0,
       ].join('|');
     }
 
-    function getComposerAttachmentState() {
+    function getComposerAttachmentState(options = {}) {
+      const useHeavy = options.heavy === true;
       let attachmentCount = 0;
       let hasAttachment = false;
       let attachmentUploading = false;
       let hasComposerPayload = false;
 
       try {
-        if (typeof ComposerApi.countAttachmentChips === 'function') {
+        if (useHeavy && typeof ComposerApi.countAttachmentChips === 'function') {
+          attachmentCount = Number(ComposerApi.countAttachmentChips()) || 0;
+        } else if (typeof ComposerApi.countAttachmentChipsFast === 'function') {
+          attachmentCount = Number(ComposerApi.countAttachmentChipsFast()) || 0;
+        } else if (typeof ComposerApi.countAttachmentChips === 'function') {
           attachmentCount = Number(ComposerApi.countAttachmentChips()) || 0;
         }
 
-        if (typeof ComposerApi.hasComposerAttachmentUnified === 'function') {
-          hasAttachment = !!ComposerApi.hasComposerAttachmentUnified();
-        } else if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
-          hasAttachment = !!ComposerApi.hasVisibleComposerAttachmentPayload();
+        if (useHeavy && typeof ComposerApi.hasComposerAttachmentUnified === 'function') {
+          hasAttachment = !!ComposerApi.hasComposerAttachmentUnified({ heavy: true });
+        } else {
+          hasAttachment = attachmentCount > 0;
         }
 
-        if (typeof ComposerApi.isAttachmentStillUploading === 'function') {
+        if (useHeavy && typeof ComposerApi.isAttachmentStillUploading === 'function') {
           attachmentUploading = !!ComposerApi.isAttachmentStillUploading();
-        }
-
-        if (typeof detectComposerResponseState === 'function') {
-          const responseState = detectComposerResponseState({ light: true });
-          if (Number.isFinite(Number(responseState.attachment_count))) {
-            attachmentCount = Math.max(
-              attachmentCount,
-              Number(responseState.attachment_count) || 0,
-            );
-          }
-          if (responseState.has_composer_payload === true) {
-            hasComposerPayload = true;
-          }
         }
 
         if (hasAttachment && attachmentCount <= 0) {
@@ -13954,8 +15954,7 @@
         }
 
         hasComposerPayload = !!(
-          hasComposerPayload
-          || hasAttachment
+          hasAttachment
           || attachmentUploading
           || attachmentCount > 0
         );
@@ -13987,42 +15986,28 @@
       let attachmentCount = 0;
 
       try {
-        const attachmentState = getComposerAttachmentState();
-        attachmentCount = attachmentState.attachmentCount;
-        hasComposerPayload = attachmentState.hasComposerPayload;
-
-        hasComposer = typeof ComposerApi.hasComposer === 'function' && ComposerApi.hasComposer();
-        isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
-          && ComposerApi.isAssistantLikelyBusy();
-        canSendNow = typeof ComposerApi.canSendNowLight === 'function'
-          ? ComposerApi.canSendNowLight()
-          : (
-            typeof ComposerApi.canSendNow === 'function'
-            && ComposerApi.canSendNow({ maxAgeMs: 450 })
-          );
-
         if (typeof detectComposerResponseState === 'function') {
           const responseState = detectComposerResponseState({ light: true });
           response_state = String(responseState.response_state || response_state);
           response_state_reason = String(responseState.response_state_reason || '');
           canSendNow = responseState.can_send_now === true;
           isResponding = responseState.is_responding === true;
-          if (responseState.has_composer_payload === true) {
-            hasComposerPayload = true;
-          }
+          hasComposerPayload = responseState.has_composer_payload === true;
           if (Number.isFinite(Number(responseState.attachment_count))) {
-            attachmentCount = Math.max(
-              attachmentCount,
-              Number(responseState.attachment_count) || 0,
-            );
+            attachmentCount = Number(responseState.attachment_count) || 0;
           }
-        } else {
-          response_state = isResponding ? 'generating' : (canSendNow ? 'ready' : 'not_ready');
         }
 
-        const attachmentStateAfter = getComposerAttachmentState();
-        attachmentCount = Math.max(attachmentCount, attachmentStateAfter.attachmentCount);
-        hasComposerPayload = hasComposerPayload || attachmentStateAfter.hasComposerPayload;
+        hasComposer = typeof ComposerApi.hasComposer === 'function' && ComposerApi.hasComposer();
+        if (!hasComposerPayload && attachmentCount <= 0) {
+          const composerText = typeof ComposerApi.getComposerText === 'function'
+            ? String(ComposerApi.getComposerText() || '').trim()
+            : '';
+          hasComposerPayload = composerText.length > 0;
+        }
+        if (!response_state_reason) {
+          response_state = isResponding ? 'generating' : (canSendNow ? 'ready' : 'not_ready');
+        }
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] getUploadPageCapabilityLight failed', err);
@@ -14062,7 +16047,7 @@
       const startedAt = (typeof performance !== 'undefined' && performance.now)
         ? performance.now()
         : Date.now();
-      const attachmentState = getComposerAttachmentState();
+      const attachmentState = getComposerAttachmentState({ heavy: true });
       let attachmentCount = attachmentState.attachmentCount;
       let hasComposerPayload = attachmentState.hasComposerPayload;
       let response_state = 'not_ready';
@@ -14075,7 +16060,15 @@
           const payloadSnapshot = ComposerApi.getExistingComposerPayloadSnapshot();
           if (payloadSnapshot && payloadSnapshot.hasPayload) {
             hasComposerPayload = true;
-            attachmentCount = Math.max(attachmentCount, 1);
+            if (Number(payloadSnapshot.attachmentCount || 0) > 0) {
+              attachmentCount = Math.max(
+                attachmentCount,
+                Number(payloadSnapshot.attachmentCount) || 0,
+              );
+            }
+            if (payloadSnapshot.hasVisibleAttachment) {
+              attachmentCount = Math.max(attachmentCount, 1);
+            }
           }
         }
 
@@ -14093,7 +16086,6 @@
           }
           if (responseState.has_composer_payload === true) {
             hasComposerPayload = true;
-            attachmentCount = Math.max(attachmentCount, 1);
           }
         }
 
@@ -14174,15 +16166,18 @@
     }
 
     function syncSendTaskPhase() {
-      return syncSendTaskFromLegacyState().phase;
+      return getSendTaskPhase();
     }
 
     function getSendTaskPhase() {
-      return syncSendTaskPhase();
+      if (!state.sendTask || typeof state.sendTask !== 'object') {
+        return 'idle';
+      }
+      const phase = String(state.sendTask.phase || 'idle').trim().toLowerCase();
+      return phase === 'waiting_ready' ? 'waiting_send' : phase;
     }
 
     function getSendTaskState() {
-      syncSendTaskPhase();
       return Object.assign({}, state.sendTask || { phase: 'idle', runId: '', cancelRequested: false });
     }
 
@@ -14249,11 +16244,15 @@
       if (stateText === 'uploading') {
         btn.dataset.uploadState = 'uploading';
         btn.setAttribute('aria-busy', 'true');
-        btn.textContent = '上传中，点击停止';
+        btn.textContent = '上传中';
+        btn.title = '上传中';
+        btn.setAttribute('data-danger-enter-block', '1');
       } else {
         btn.dataset.uploadState = 'idle';
-        btn.removeAttribute('aria-busy');
+        btn.setAttribute('aria-busy', 'false');
         btn.textContent = '开始上传';
+        btn.title = '开始上传';
+        btn.removeAttribute('data-danger-enter-block');
       }
 
       btn.classList.toggle('cgpt-btn-busy', stateText === 'uploading');
@@ -14270,47 +16269,88 @@
     }
 
     function setSendButtonState(stateName, reason = '') {
+      const legacyReason = String(reason || '').trim() || 'legacy';
+      console.warn(
+        '[ChatGPT toolbox] setSendButtonState is deprecated; use UploadButtonVm.applyUploadButtonViewState instead',
+        { stateName, reason: legacyReason },
+      );
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND_BUTTON][LEGACY_SET_STATE] state=${String(stateName || 'idle')} reason=${legacyReason}`,
+        );
+      }
+
       const btn = document.querySelector(UploadSelectors.sendMessageBtn);
-      if (!(btn instanceof HTMLButtonElement)) {
+      if (!(btn instanceof HTMLButtonElement) || typeof setToolboxButtonState !== 'function') {
         return;
       }
 
       const stateText = String(stateName || 'idle');
+      const legacyUiMap = {
+        idle: {
+          phase: ButtonPhase.IDLE,
+          text: '发送消息',
+          allowCancel: false,
+          ariaBusy: false,
+        },
+        sending: {
+          phase: ButtonPhase.SENDING,
+          text: '发送中',
+          allowCancel: true,
+          ariaBusy: true,
+        },
+        'waiting-reply': {
+          phase: ButtonPhase.WAITING_REPLY,
+          text: '等待回复',
+          allowCancel: true,
+          ariaBusy: true,
+        },
+        cancelling: {
+          phase: ButtonPhase.CANCELLING,
+          text: '取消中',
+          allowCancel: false,
+          ariaBusy: true,
+        },
+        'cancelable-waiting': {
+          phase: ButtonPhase.WAITING_SEND,
+          text: '等待发送',
+          allowCancel: true,
+          ariaBusy: true,
+        },
+        waiting: {
+          phase: ButtonPhase.WAITING_SEND,
+          text: '等待发送',
+          allowCancel: true,
+          ariaBusy: true,
+        },
+        checking: {
+          phase: ButtonPhase.CHECKING,
+          text: '检查中',
+          allowCancel: false,
+          ariaBusy: true,
+        },
+      };
+      const ui = legacyUiMap[stateText] || legacyUiMap.idle;
 
-      btn.dataset.sendState = stateText;
-      delete btn.dataset.uploadSendState;
-      btn.setAttribute('aria-busy', stateText === 'sending' || stateText === 'waiting-reply' ? 'true' : 'false');
-
-      const danger = stateText === 'sending'
-        || stateText === 'waiting-reply'
-        || stateText === 'cancelable-waiting';
-
-      btn.classList.toggle('danger', danger);
-      btn.classList.toggle('cgpt-send-danger', danger);
-      btn.classList.toggle('cgpt-wait-send-cancel', danger);
-      btn.classList.toggle('cgpt-btn-waiting-danger', false);
-
-      if (!danger) {
-        delete btn.dataset.waitDanger;
-        delete btn.dataset.waitDangerReason;
-        if (typeof clearButtonLongWaitDangerTimer === 'function') {
-          clearButtonLongWaitDangerTimer(btn, reason || 'send-state');
-        }
-      }
-
-      if (stateText === 'sending') {
-        btn.textContent = '发送中';
-      } else if (stateText === 'waiting-reply') {
-        btn.textContent = '已发送';
-      } else if (stateText === 'cancelable-waiting') {
-        btn.textContent = '发送中';
-      } else {
-        btn.textContent = '发送消息';
+      delete btn.dataset.waitDanger;
+      delete btn.dataset.waitDangerReason;
+      if (typeof clearButtonLongWaitDangerTimer === 'function') {
+        clearButtonLongWaitDangerTimer(btn, reason || 'send-state');
       }
 
       btn.disabled = false;
+      setToolboxButtonState(btn, {
+        phase: ui.phase,
+        text: ui.text,
+        title: ui.text,
+        allowCancel: ui.allowCancel,
+        ariaBusy: ui.ariaBusy,
+        reason: reason || `legacy-send-state:${stateText}`,
+      });
 
-      ToolboxShell.appendLog(`[SEND_BUTTON][STATE] state=${stateText} danger=${danger ? 1 : 0} reason=${reason || '-'}`);
+      ToolboxShell.appendLog(
+        `[SEND_BUTTON][STATE] state=${stateText} reason=${reason || '-'} text=${String(btn.textContent || '').trim() || '-'}`,
+      );
     }
 
     function applyStartUploadButtonState(button, options = {}) {
@@ -14326,7 +16366,7 @@
         const uploadPhase = uploadSnapshot.uploadTask
           ? String(uploadSnapshot.uploadTask.phase || 'idle')
           : 'idle';
-        const sendBusy = isWaitingSendActive() || !!state.waitingReply || !!state.messageSending;
+        const sendBusy = isSendPipelineBusy();
         const activeFiles = Number(uploadSnapshot.activeFilesCount || 0);
         ToolboxShell.appendLog(
           `[BUTTON_DECOUPLE][UPLOAD_START] uploadPhase=${uploadPhase} uploadRunning=${uploadSnapshot.uploadRunning ? 1 : 0} `
@@ -14348,8 +16388,8 @@
 
       if (phase === 'uploading') {
         setUploadButtonState('uploading', reason);
-        return setButtonDanger(button, '上传中，点击停止', {
-          title: '正在上传/绑定文件，点击停止上传',
+        return setButtonDanger(button, '上传中', {
+          title: '上传中',
           allowCancel: true,
           reason,
         });
@@ -14389,41 +16429,20 @@
       return idleUploadResult;
     }
 
-    function setSendMessageButtonVisualState(button, active, state = '') {
+    function setSendMessageButtonVisualState(button, active) {
       if (!button) {
         return;
       }
 
       button.classList.toggle('cgpt-send-action-active', !!active);
-
-      if (state) {
-        button.dataset.sendState = state;
-      } else {
-        delete button.dataset.sendState;
-      }
+      // data-send-state is deprecated; do not write or use it as a logic source.
+      delete button.dataset.sendState;
       delete button.dataset.uploadSendState;
     }
 
     function finalizeSendButtonStateFromTask(reason = '') {
       syncSendTaskPhase();
-      const sendPhase = state.sendTask.phase;
-
-      if (sendPhase === 'sending') {
-        setSendButtonState('sending', reason);
-        return;
-      }
-
-      if (sendPhase === 'waiting_reply') {
-        setSendButtonState('waiting-reply', reason);
-        return;
-      }
-
-      if (sendPhase === 'cancelling' || sendPhase === 'waiting_send' || sendPhase === 'waiting_ready') {
-        setSendButtonState('cancelable-waiting', reason);
-        return;
-      }
-
-      setSendButtonState('idle', reason);
+      logSendButtonStateSource(state.sendTask.phase, reason);
     }
 
     function logSendButtonStateSource(sendPhase, reason = '') {
@@ -14432,7 +16451,7 @@
         return;
       }
       ToolboxShell.appendLog(
-        `[SEND_BUTTON][STATE_SOURCE] phase=${sendPhase} waitingSend=${isWaitingSendActive() ? 1 : 0} `
+        `[SEND_BUTTON][STATE_SOURCE] phase=${sendPhase} sendPipelineBusy=${isSendPipelineBusy() ? 1 : 0} `
         + `messageSending=${state.messageSending ? 1 : 0} waitingReply=${state.waitingReply ? 1 : 0} reason=${reason || '-'}`,
       );
     }
@@ -14470,24 +16489,21 @@
         : '';
 
       const buttonAttachmentState = getComposerAttachmentState();
-      const hasPendingComposerPayload = !!(
-        capability.hasComposerPayload
-        || capability.has_composer_payload
-        || buttonAttachmentState.hasComposerPayload
-        || buttonAttachmentState.has_composer_payload
-        || buttonAttachmentState.hasAttachment
-        || Number(capability.attachmentCount || buttonAttachmentState.attachmentCount || 0) > 0
-        || buttonAttachmentState.attachmentUploading
+      const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
+        buttonAttachmentState,
+        capability,
       );
 
-      const pendingAttachmentWaitSend = hasPendingComposerPayload
+      const pendingAttachmentWaitSend = hasAttachmentPayloadToWait
         && !capability.canSendNow
         && sendPhase === 'idle';
 
       if (sendPhase === 'cancelling') {
         button.dataset.action = 'cancel-send';
         setSendMessageButtonVisualState(button, true, 'cancelling');
-        const cancellingResult = setButtonWaiting(button, '取消中...', {
+        const cancellingResult = setToolboxButtonState(button, {
+          phase: ButtonPhase.CANCELLING,
+          text: '取消中',
           title: '正在取消发送/等待',
           allowCancel: false,
           reason,
@@ -14499,8 +16515,8 @@
       if (sendPhase === 'waiting_send' || sendPhase === 'waiting_ready') {
         button.dataset.action = 'cancel-send';
         setSendMessageButtonVisualState(button, true, 'waiting-send');
-        const waitSendResult = setButtonWaiting(button, '等待可发送，点击取消', {
-          title: '正在等待发送按钮可用，再次点击可取消',
+        const waitSendResult = setButtonWaiting(button, '等待发送', {
+          title: '等待发送',
           reason,
         });
         finalizeSendButtonStateFromTask(reason);
@@ -14510,8 +16526,8 @@
       if (sendPhase === 'sending') {
         button.dataset.action = 'cancel-send';
         setSendMessageButtonVisualState(button, true, 'sending');
-        const sendingResult = setButtonSending(button, '发送中，点击取消', {
-          title: '正在发送，再次点击可取消',
+        const sendingResult = setButtonSending(button, '发送中', {
+          title: '正在发送',
           reason,
         });
         finalizeSendButtonStateFromTask(reason);
@@ -14520,18 +16536,19 @@
 
       if (sendPhase === 'waiting_reply') {
         button.dataset.action = 'cancel-wait-reply';
-        setSendMessageButtonVisualState(button, true, 'waiting-reply');
+        setSendMessageButtonVisualState(button, true);
 
-        const pendingAuto = !!state.pendingSendAfterReply;
-        const replyText = pendingAuto ? '等待可发送，点击取消' : '等待回复，点击取消';
-        const replyTitle = pendingAuto
-          ? '助手正在回复或发送按钮未就绪，页面可发送后将自动点击；再次点击可取消'
-          : '再次点击可取消等待回复';
-
-        const waitingReplyResult = setButtonWaiting(button, '已发送', {
-          title: replyTitle,
+        const waitingReplyResult = setToolboxButtonState(button, {
+          phase: ButtonPhase.WAITING_REPLY,
+          text: '等待回复',
+          title: state.pendingSendAfterReply
+            ? '助手正在回复中，页面可发送后将自动点击'
+            : '正在等待回复',
+          allowCancel: true,
+          ariaBusy: true,
           reason,
         });
+
         finalizeSendButtonStateFromTask(reason);
         return waitingReplyResult;
       }
@@ -14556,42 +16573,21 @@
             ? '助手正在回复，暂不可发送'
             : '当前页面未检测到可用输入框或发送按钮'));
 
-        const shortText = successHint
-          ? '已发送'
-          : (
-            failureHint && failureHint.length > 22
-              ? `${failureHint.slice(0, 22)}…`
-              : (failureHint || '发送不可用')
-          );
-
         button.dataset.action = (failureHint || successHint) ? 'send-message' : 'none';
         setSendMessageButtonVisualState(button, false, '');
 
-        if (successHint) {
-          const successResult = setButtonWaiting(button, shortText, {
+        if (failureHint || successHint) {
+          const hintResult = setButtonIdle(button, '发送消息', {
             title: hint,
-            allowCancel: false,
             reason,
-            ariaBusy: false,
           });
           finalizeSendButtonStateFromTask(reason);
-          return successResult;
-        }
-
-        if (failureHint) {
-          const failureWaitResult = setButtonWaiting(button, shortText, {
-            title: hint,
-            allowCancel: false,
-            reason,
-            ariaBusy: false,
-          });
-          finalizeSendButtonStateFromTask(reason);
-          return failureWaitResult;
+          return hintResult;
         }
 
         const disabledResult = setToolboxButtonState(button, {
-          phase: ButtonPhase.DISABLED,
-          text: shortText,
+          phase: ButtonPhase.IDLE,
+          text: '发送消息',
           title: hint,
           disabled: true,
           reason,
@@ -14618,13 +16614,23 @@
       let changedButtons = 0;
       const useHeavy = options && options.heavy === true;
       const skipCapabilityScan = !!(options && options.skipCapabilityScan);
+      const renderScope = resolveUploadButtonRenderScope(options);
+      const renderReason = String(options.buttonTasksReason || 'renderUploadButtonsOnly').trim() || 'renderUploadButtonsOnly';
+      const scopeSendOnly = renderScope === 'send-only';
+      const scopeUploadOnly = renderScope === 'upload-only';
+      const skipUnrelatedForSend = scopeSendOnly;
+      const skipSendForUploadOnly = scopeUploadOnly;
 
-      reconcileUploadPhase(options.buttonTasksReason || 'renderUploadButtonsOnly');
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[BUTTON_RENDER][SCOPE] scope=${renderScope} reason=${renderReason}`);
+      }
+
+      reconcileUploadPhase(renderReason);
       healStaleUploadRunningLockIfNeeded('renderUploadButtonsOnly');
       healStaleSendUiStateIfNeeded('renderUploadButtonsOnly');
       healStaleWaitingReplyStateIfNeeded('renderUploadButtonsOnly');
 
-      syncButtonTasksFromModuleState(options.buttonTasksReason || 'renderUploadButtonsOnly');
+      syncButtonTasksFromModuleState(renderReason);
 
       const fallbackCapability = {
         hasComposer: false,
@@ -14648,12 +16654,16 @@
         startBtn = currentStartBtn;
       }
 
-      if (applyStartUploadButtonState(currentStartBtn, { reason: 'renderUploadButtonsOnly' })) {
+      if (skipUnrelatedForSend) {
+        logSkipUnrelatedButtonRender('start-upload', renderScope, renderReason);
+      } else if (applyStartUploadButtonState(currentStartBtn, { reason: 'renderUploadButtonsOnly' })) {
         changedButtons += 1;
       }
 
       const autoqStartUploadBtn = document.querySelector('#cgpt-autoq-start-upload');
-      if (
+      if (skipUnrelatedForSend) {
+        logSkipUnrelatedButtonRender('autoq-start-upload', renderScope, renderReason);
+      } else if (
         autoqStartUploadBtn
         && autoqStartUploadBtn !== currentStartBtn
         && applyStartUploadButtonState(autoqStartUploadBtn, {
@@ -14665,12 +16675,72 @@
       }
 
       const sendMessageBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
-      if (sendMessageBtn && applySendMessageButtonState(sendMessageBtn, capability, { reason: 'renderUploadButtonsOnly' })) {
-        changedButtons += 1;
+      if (skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('send-message', renderScope, renderReason);
+      } else if (sendMessageBtn) {
+        const vmAvailable = typeof UploadButtonVm !== 'undefined'
+          && typeof UploadButtonVm.applyUploadButtonViewState === 'function'
+          && typeof UploadButtonVm.getSendMessageButtonViewState === 'function';
+
+        if (vmAvailable) {
+          const snapshot = buildUploadButtonRenderSnapshot();
+          const sendCapability = snapshot.capability && typeof snapshot.capability === 'object'
+            ? snapshot.capability
+            : capability;
+
+          const failureHint = state.uploadSendFailureHint
+            && (Date.now() - Number(state.uploadSendFailureHintAt || 0) < 12000)
+            ? String(state.uploadSendFailureHint)
+            : '';
+          const successHint = state.uploadSendSuccessHint
+            && (Date.now() - Number(state.uploadSendSuccessHintAt || 0) < 4000)
+            ? String(state.uploadSendSuccessHint)
+            : '';
+
+          const sendPhaseRaw = snapshot.sendTask && typeof snapshot.sendTask === 'object'
+            ? String(snapshot.sendTask.phase || 'idle')
+            : 'idle';
+
+          const buttonAttachmentState = getComposerAttachmentState();
+          const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
+            buttonAttachmentState,
+            sendCapability,
+          );
+
+          const pendingAttachmentWaitSend = hasAttachmentPayloadToWait
+            && !sendCapability.canSendNow
+            && String(sendPhaseRaw).trim().toLowerCase() === 'idle';
+
+          const view = UploadButtonVm.getSendMessageButtonViewState(
+            snapshot,
+            sendCapability,
+            {
+              failureHint,
+              successHint,
+              pendingSendAfterReply: !!state.pendingSendAfterReply,
+              pendingAttachmentWaitSend,
+            },
+          );
+
+          const applied = UploadButtonVm.applyUploadButtonViewState(
+            sendMessageBtn,
+            view,
+            'renderUploadButtonsOnly:send-message',
+            { snapshot },
+          );
+
+          if (applied) {
+            changedButtons += 1;
+          }
+        } else if (applySendMessageButtonState(sendMessageBtn, capability, { reason: 'renderUploadButtonsOnly' })) {
+          changedButtons += 1;
+        }
       }
 
       const copyContinueBtn = rootElRef ? qs(UploadSelectors.copyContinueBtn, rootElRef) : null;
-      if (copyContinueBtn) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('copy-continue', renderScope, renderReason);
+      } else if (copyContinueBtn) {
         let applied = false;
         let copyContinueView = null;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
@@ -14680,6 +16750,7 @@
             copyContinueBtn,
             copyContinueView,
             'renderUploadButtonsOnly:copy-continue',
+            { snapshot },
           );
         } else if (setButtonIdle(copyContinueBtn, '复制并继续', {
           title: '先复制最后回复，再发送“继续”',
@@ -14698,12 +16769,16 @@
       }
 
       const autoContinueBtn = resolveAutoContinueButton(rootElRef);
-      if (autoContinueBtn && applyAutoContinueButtonState(autoContinueBtn, { reason: 'renderUploadButtonsOnly' })) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('auto-continue', renderScope, renderReason);
+      } else if (autoContinueBtn && applyAutoContinueButtonState(autoContinueBtn, { reason: 'renderUploadButtonsOnly' })) {
         changedButtons += 1;
       }
 
       const autoContinueUntilDoneBtn = resolveAutoContinueUntilDoneButton(rootElRef);
-      if (
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('auto-continue-until-done', renderScope, renderReason);
+      } else if (
         autoContinueUntilDoneBtn
         && applyAutoContinueUntilDoneButtonState(autoContinueUntilDoneBtn, {
           reason: 'renderUploadButtonsOnly',
@@ -14713,7 +16788,9 @@
       }
 
       const copyLastMessageBtn = rootElRef ? qs(UploadSelectors.copyLastMessageBtn, rootElRef) : null;
-      if (copyLastMessageBtn && !isCopyLastButtonManagedLocally(copyLastMessageBtn)) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('copy-last-reply', renderScope, renderReason);
+      } else if (copyLastMessageBtn && !isCopyLastButtonManagedLocally(copyLastMessageBtn)) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
           const snapshot = buildUploadButtonRenderSnapshot();
@@ -14722,6 +16799,7 @@
             copyLastMessageBtn,
             view,
             'renderUploadButtonsOnly:copy-last',
+            { snapshot },
           );
         } else if (setButtonIdle(copyLastMessageBtn, '复制最后回复', {
           title: '等待最后一条 assistant 回复稳定后复制到剪贴板',
@@ -14737,7 +16815,9 @@
       const copyHotkeyOnceBtn = rootElRef
         ? qs(UploadSelectors.copyHotkeyOnceBtn, rootElRef)
         : null;
-      if (copyHotkeyOnceBtn) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('copy-hotkey-once', renderScope, renderReason);
+      } else if (copyHotkeyOnceBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
           const snapshot = buildUploadButtonRenderSnapshot();
@@ -14765,7 +16845,9 @@
       const copyHotkeyContinueOnceBtn = rootElRef
         ? qs(UploadSelectors.copyHotkeyContinueOnceBtn, rootElRef)
         : null;
-      if (copyHotkeyContinueOnceBtn) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('copy-hotkey-continue', renderScope, renderReason);
+      } else if (copyHotkeyContinueOnceBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
           const snapshot = buildUploadButtonRenderSnapshot();
@@ -14786,7 +16868,9 @@
       const copyHotkeyContinueLoopBtn = rootElRef
         ? qs(UploadSelectors.copyHotkeyContinueLoopBtn, rootElRef)
         : null;
-      if (copyHotkeyContinueLoopBtn) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('loop-copy-hotkey-continue', renderScope, renderReason);
+      } else if (copyHotkeyContinueLoopBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
           const snapshot = buildUploadButtonRenderSnapshot();
@@ -14806,7 +16890,7 @@
             && loopPhase !== 'failed'
             && loopPhase !== 'cancelled';
           if (loopPhase === 'stopping') {
-            applied = setButtonWaiting(copyHotkeyContinueLoopBtn, '连续复制+快捷键+继续', {
+            applied = setButtonWaiting(copyHotkeyContinueLoopBtn, '无限连续复制+快捷键+继续', {
               title: '停止请求已提交，正在等待连续复制任务退出',
               allowCancel: false,
               disabled: true,
@@ -14816,7 +16900,7 @@
             applied = setButtonDanger(copyHotkeyContinueLoopBtn, '停止连续复制', {
               reason: 'copy-hotkey-loop-running',
             });
-          } else if (setButtonIdle(copyHotkeyContinueLoopBtn, '连续复制+快捷键+继续', {
+          } else if (setButtonIdle(copyHotkeyContinueLoopBtn, '无限连续复制+快捷键+继续', {
             reason: 'copy-hotkey-loop-idle',
           })) {
             applied = true;
@@ -14828,12 +16912,16 @@
         }
       }
 
-      if (renderClosedLoopContinueButton()) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('closed-loop-continue', renderScope, renderReason);
+      } else if (renderClosedLoopContinueButton()) {
         changedButtons += 1;
       }
 
       const homeBtn = rootElRef ? qs(HomeActionSelectors.homeBtn, rootElRef) : null;
-      if (homeBtn) {
+      if (skipUnrelatedForSend || skipSendForUploadOnly) {
+        logSkipUnrelatedButtonRender('home', renderScope, renderReason);
+      } else if (homeBtn) {
         let applied = false;
         if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
           const snapshot = buildUploadButtonRenderSnapshot();
@@ -14860,12 +16948,44 @@
         ? qsa('#cgpt-upload-start', rootElRef)
         : (startBtn ? [startBtn] : []);
       compactStartBtns.forEach((btn) => {
+        if (skipUnrelatedForSend) {
+          return;
+        }
         if (btn && btn !== currentStartBtn && applyStartUploadButtonState(btn, { reason: 'compact-mirror' })) {
           changedButtons += 1;
         }
       });
 
+      const readButtonState = (button) => ({
+        text: button ? String(button.textContent || '').trim() || '-' : '-',
+        phase: button ? String(button.dataset.cgptButtonPhase || button.dataset.cgptTaskPhase || '').trim() || '-' : '-',
+        disabled: button ? (button.disabled ? '1' : '0') : '-',
+        ariaBusy: button ? String(button.getAttribute('aria-busy') || 'false').trim() : '-',
+      });
+      const autoqBatchBtn = document.querySelector('#cgpt-autoq-start');
+      const uploadFinal = readButtonState(currentStartBtn || autoqStartUploadBtn);
+      const batchFinal = readButtonState(autoqBatchBtn);
+      const sendFinal = readButtonState(sendMessageBtn);
+      let batchTaskRunning = false;
+      let batchAutoUploading = false;
+      if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getState === 'function') {
+        const autoqState = AutoQueueModule.getState() || {};
+        batchTaskRunning = !!(autoqState.batchTaskRunning || autoqState.running);
+        batchAutoUploading = !!autoqState.batchAutoUploading;
+      }
+      const uploadTask = state.uploadTask || {};
+      ToolboxShell.appendLog(
+        `[BUTTON_STATE_FINAL] uploadBtnText=${uploadFinal.text} uploadBtnPhase=${uploadFinal.phase} uploadBtnDisabled=${uploadFinal.disabled} uploadBtnAriaBusy=${uploadFinal.ariaBusy} uploadTaskPhase=${String(uploadTask.phase || 'idle')} uploadTaskOwner=${String(uploadTask.owner || '-')}` +
+        ` batchBtnText=${batchFinal.text} batchBtnPhase=${batchFinal.phase} batchTaskRunning=${batchTaskRunning ? 1 : 0} batchAutoUploading=${batchAutoUploading ? 1 : 0}` +
+        ` sendBtnText=${sendFinal.text} sendBtnPhase=${sendFinal.phase}`,
+      );
+
       assertRenderedUploadButtonConsistency();
+      logUploadSendStateConflicts(snapshotForConflictCheck(capability), capability, sendMessageBtn);
+
+      if (typeof ButtonState !== 'undefined' && typeof ButtonState.auditHomePageButtonColors === 'function') {
+        ButtonState.auditHomePageButtonColors(rootElRef || document);
+      }
 
       rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
 
@@ -15129,8 +17249,28 @@
         return '发送失败：ChatGPT 发送按钮不可用';
       }
 
-      if (baseReason === 'composer_empty') {
-        return '发送失败：输入框无文本且无附件';
+      if (baseReason === 'composer_empty' || baseReason === 'empty_text_and_no_attachment') {
+        return '发送失败：当前输入框没有文字或附件';
+      }
+
+      if (baseReason === 'local_file_unreadable') {
+        return '发送失败：本地文件不可读，请重新绑定或先点击开始上传。';
+      }
+
+      if (baseReason === 'local_queue_no_composer_attachment') {
+        return '发送失败：本地列表有文件但未添加到 ChatGPT 输入框，请先点击开始上传。';
+      }
+
+      if (baseReason === 'manual_send_timeout') {
+        return '发送失败：等待超时（5 秒），请检查输入框与附件后重试。';
+      }
+
+      if (baseReason === 'attachment_still_uploading') {
+        return '发送失败：附件仍在上传，请稍后再点发送。';
+      }
+
+      if (baseReason === 'send-message-button-core-failed') {
+        return '发送失败：发送核心未完成';
       }
 
       if (baseReason === 'assistant_busy') {
@@ -15236,7 +17376,14 @@
 
       logUploadSendUiState('reset', reason, runId);
 
-      setSendButtonState('idle', reason || 'reset');
+      if (!preserveCancelRequested) {
+        setAuthoritativeSendTaskState(
+          { phase: 'idle', cancelRequested: false },
+          reason || 'reset-upload-send-ui',
+        );
+      } else {
+        syncLegacySendFlagsFromSendTask(reason || 'reset-upload-send-ui-preserve-cancel');
+      }
 
       if (preserveCancelRequested) {
         ToolboxShell.appendLog(
@@ -15279,7 +17426,7 @@
     }
 
     function healStaleSendUiStateIfNeeded(context) {
-      if (!isWaitingSendActive()) return false;
+      if (!isWaitingSendButton() && !isShortcutDispatching()) return false;
       if (state.waitingReply) return false;
 
       if (state.waitingRealSendButton) {
@@ -15294,25 +17441,93 @@
       if (elapsed < 8000) return false;
 
       try {
-        const hasPendingComposerPayload = !!(
-          (
-            typeof ComposerApi.getExistingComposerPayloadSnapshot === 'function'
-            && ComposerApi.getExistingComposerPayloadSnapshot().hasPayload
-          )
-          || (
-            typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-            && ComposerApi.hasVisibleComposerAttachmentPayload()
-          )
-          || (
-            typeof ComposerApi.isAttachmentStillUploading === 'function'
-            && ComposerApi.isAttachmentStillUploading()
-          )
+        const healCapability = typeof getUploadPageCapability === 'function'
+          ? getUploadPageCapability({ heavy: true })
+          : null;
+        const hasPendingAttachmentPayload = detectAttachmentPayloadToWaitForSend(
+          getComposerAttachmentState({ heavy: true }),
+          healCapability,
         );
 
-        if (hasPendingComposerPayload) {
-          ToolboxShell.appendLog(
-            `[SEND_UI][HEAL_STALE_SKIP] reason=${String(context || '-scheduled')} runningMs=${elapsed} cause=pending_composer_payload`,
+        if (hasPendingAttachmentPayload) {
+          const autoState = (
+            typeof AutoQueueModule !== 'undefined'
+            && AutoQueueModule
+            && typeof AutoQueueModule.getState === 'function'
+          ) ? AutoQueueModule.getState() : null;
+          const taskRun = autoState && autoState.taskRun ? autoState.taskRun : {};
+
+          const pendingSendKind = taskRun.pendingSendKind;
+          const pendingSendStartedAt = Number(taskRun.pendingSendStartedAt || 0);
+          const pendingMs = pendingSendStartedAt > 0 ? Date.now() - pendingSendStartedAt : 0;
+
+          let hardTimeoutMs = 45000;
+          try {
+            const cfg = (
+              typeof AutoQueueModule !== 'undefined'
+              && AutoQueueModule
+              && typeof AutoQueueModule.getConfig === 'function'
+            ) ? AutoQueueModule.getConfig() : null;
+            const settings = cfg && cfg.taskQueueSettings ? cfg.taskQueueSettings : {};
+            hardTimeoutMs = Math.max(15000, Number(settings.taskSendHardTimeoutMs) || 45000);
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            console.error('[SEND_UI][HEAL_STALE_DELEGATE_AUTOQ] getConfig failed', error);
+            ToolboxShell.appendLog(
+              `[SEND_UI][HEAL_STALE_DELEGATE_AUTOQ][ERROR] error=${errText} stack=${error && error.stack ? String(error.stack) : '-'}`,
+            );
+          }
+
+          // 检查页面是否已经 ready、sendTask 也处于 idle，
+          // 如果是，说明只是输入框有残留内容，没有真实发送循环在运行，应该直接 reset。
+          const capNow = getUploadPageCapability();
+          const pageReadyNow = !capNow.isResponding
+            && capNow.response_state !== 'generating'
+            && capNow.response_state !== 'responding';
+          const nativeSendReadyNow = (
+            typeof ComposerApi.canSendNow === 'function' && ComposerApi.canSendNow()
           );
+          const sendTaskPhaseNow = getSendTaskPhase();
+          const noRealSendLoop = sendTaskPhaseNow === 'idle';
+
+          if (pageReadyNow && noRealSendLoop && !state.waitingRealSendButton) {
+            const snapshot = typeof ComposerApi.getExistingComposerPayloadSnapshot === 'function'
+              ? ComposerApi.getExistingComposerPayloadSnapshot()
+              : {};
+            ToolboxShell.appendLog(
+              `[SEND_UI][STALE_PAYLOAD_READY] textLen=${snapshot.textLen || 0} attachmentCount=${snapshot.attachmentCount || 0} nativeSendReady=${nativeSendReadyNow ? 1 : 0} pageReady=${pageReadyNow ? 1 : 0} runningMs=${elapsed}`,
+            );
+            ToolboxShell.appendLog(
+              `[SEND_UI][STALE_RESET] reason=payload-ready-but-no-send-loop runningMs=${elapsed}`,
+            );
+            resetUploadSendUiState('stale-send-ui:payload-ready-but-no-send-loop', state.autoSendRunId);
+            scheduleRenderUpload('heal-stale-send-ui:payload-ready');
+            return true;
+          }
+
+          ToolboxShell.appendLog(
+            `[SEND_UI][HEAL_STALE_SKIP] reason=${String(context || '-scheduled')} runningMs=${elapsed} cause=pending_attachment_payload pageReady=${pageReadyNow ? 1 : 0} phase=${sendTaskPhaseNow}`,
+          );
+
+          const now = Date.now();
+          const shouldDelegate = (
+            pendingSendKind === 'processing'
+            && pendingSendStartedAt > 0
+            && pendingMs >= hardTimeoutMs
+          );
+          if (
+            shouldDelegate
+            && now - lastHealStaleDelegateAutoqAt > 5000
+            && typeof AutoQueueModule !== 'undefined'
+            && AutoQueueModule
+            && typeof AutoQueueModule.forceRecoverPendingSendProcessingStale === 'function'
+          ) {
+            ToolboxShell.appendLog(
+              `[SEND_UI][HEAL_STALE_DELEGATE_AUTOQ] cause=pending_composer_payload pendingSendKind=${String(pendingSendKind || '-')} pendingMs=${pendingMs} hardTimeoutMs=${hardTimeoutMs}`,
+            );
+            lastHealStaleDelegateAutoqAt = now;
+            AutoQueueModule.forceRecoverPendingSendProcessingStale('send-ui-stale-delegate');
+          }
           return false;
         }
 
@@ -15341,7 +17556,7 @@
         return false;
       }
 
-      if (state.messageSending || isWaitingSendActive()) {
+      if (state.messageSending || isWaitingSendButton() || isShortcutDispatching()) {
         return false;
       }
 
@@ -15421,7 +17636,7 @@
       return true;
     }
 
-    function buildUploadSkipResult(reason, extra = {}) {
+    function buildLegacyBridgeUploadSkipResult(reason, extra = {}) {
       return {
         success: 0,
         failed: 0,
@@ -15433,7 +17648,7 @@
       };
     }
 
-    function buildUploadResult(success, failed, cancelled, total, extra = {}) {
+    function buildLegacyBridgeUploadResult(success, failed, cancelled, total, extra = {}) {
       return {
         success: Number(success) || 0,
         failed: Number(failed) || 0,
@@ -15444,19 +17659,28 @@
       };
     }
 
+    const buildUploadSkipResult = buildLegacyBridgeUploadSkipResult;
+    const buildUploadResult = buildLegacyBridgeUploadResult;
+
     function buildQueueUploadResult({
       ok = false,
       uploadedCount = 0,
       failedCount = 0,
       skippedCount = 0,
+      totalCount = null,
       reason = '',
       cancelled = false,
     } = {}) {
+      const uploaded = Number(uploadedCount) || 0;
+      const failed = Number(failedCount) || 0;
+      const skipped = Number(skippedCount) || 0;
+      const total = totalCount == null ? uploaded + failed + skipped : Number(totalCount) || 0;
       return {
         ok: !!ok,
-        uploadedCount: Number(uploadedCount) || 0,
-        failedCount: Number(failedCount) || 0,
-        skippedCount: Number(skippedCount) || 0,
+        uploadedCount: uploaded,
+        failedCount: failed,
+        skippedCount: skipped,
+        totalCount: total,
         reason: String(reason || ''),
         cancelled: !!cancelled,
       };
@@ -15471,40 +17695,46 @@
       );
     }
 
-    function toLegacyUploadResult(queueResult) {
+    function toBridgeUploadResult(queueResult) {
       const result = queueResult && typeof queueResult === 'object' ? queueResult : {};
       const uploadedCount = Number(result.uploadedCount) || 0;
       const failedCount = Number(result.failedCount) || 0;
       const skippedCount = Number(result.skippedCount) || 0;
+      const totalCount = Number(result.totalCount);
+      const total = Number.isFinite(totalCount) && totalCount >= 0
+        ? totalCount
+        : uploadedCount + failedCount + skippedCount;
       const reason = String(result.reason || '');
       const cancelled = !!result.cancelled || reason === 'cancelled';
 
       if (cancelled) {
-        return buildUploadResult(uploadedCount, failedCount, true, uploadedCount + failedCount + skippedCount, {
+        return buildLegacyBridgeUploadResult(uploadedCount, failedCount, true, total, {
           skipped: false,
           reason: 'cancelled',
         });
       }
 
       if (isNoFilesUploadReason(reason)) {
-        return buildUploadSkipResult('no-pending-files', {
+        return buildLegacyBridgeUploadSkipResult('no-pending-files', {
           total: 0,
           failed: 0,
         });
       }
 
       if (result.ok) {
-        return buildUploadResult(uploadedCount, failedCount, false, uploadedCount + failedCount + skippedCount, {
+        return buildLegacyBridgeUploadResult(uploadedCount, failedCount, false, total, {
           skipped: skippedCount > 0,
           reason: reason || 'unified-file-input',
         });
       }
 
-      return buildUploadResult(uploadedCount, failedCount, false, uploadedCount + failedCount + skippedCount, {
+      return buildLegacyBridgeUploadResult(uploadedCount, failedCount, false, total, {
         skipped: false,
         reason: reason || 'upload-failed',
       });
     }
+
+    const toLegacyUploadResult = toBridgeUploadResult;
 
     function cancelCurrentUploadRun(context) {
       const ctx = String(context || '-');
@@ -15688,44 +17918,29 @@
       setStatus(waitStatus.text, 'running');
     }
 
-    function isSendActuallyConfirmed() {
-      try {
-        const composerText = typeof ComposerApi.getComposerText === 'function'
-          ? String(ComposerApi.getComposerText() || '').trim()
-          : '';
-        const hasPendingPayload = detectPendingComposerPayloadForSend();
-
-        if (composerText || hasPendingPayload) {
-          return false;
-        }
-
-        if (typeof ComposerApi.isAssistantLikelyBusy === 'function' && ComposerApi.isAssistantLikelyBusy()) {
-          return true;
-        }
-
-        const cap = getUploadPageCapability({ heavy: false });
-        return !!(
-          cap.isResponding
-          || cap.response_state === 'generating'
-          || cap.response_state === 'streaming'
-        );
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] isSendActuallyConfirmed failed', err);
-        ToolboxShell.appendLog(`[SEND][CONFIRM_CHECK_ERROR] error=${errText}`);
-        return false;
-      }
+    function isSendTaskBusy() {
+      const phase = getSendTaskPhase();
+      return ['waiting_send', 'waiting_ready', 'sending', 'waiting_reply', 'cancelling'].includes(phase);
     }
 
+    function isWaitingSendButton() {
+      return !!(state.waitingSend || state.autoSendWaiting);
+    }
+
+    function isShortcutDispatching() {
+      return !!uploadSendShortcutRunning;
+    }
+
+    /** @deprecated 仅表示「等待发送按钮或快捷键派发中」，不代表整条发送管线忙碌 */
     function isWaitingSendActive() {
-      return !!(state.waitingSend || state.autoSendWaiting || uploadSendShortcutRunning);
+      return isWaitingSendButton() || isShortcutDispatching();
     }
 
-    function clearStaleBusySendStateOnHomeReady(reason) {
-      if (typeof isHomeNewChatReadyToSendNow !== 'function' || !isHomeNewChatReadyToSendNow()) {
-        return false;
-      }
+    function isSendPipelineBusy() {
+      return isSendTaskBusy() || isWaitingSendButton() || isShortcutDispatching();
+    }
 
+    function resetRuntimeStateOnBoot(reason) {
       state.waitingSend = false;
       state.autoSendWaiting = false;
       state.messageSending = false;
@@ -15739,7 +17954,21 @@
       state.pendingSendAfterReplySource = '';
       state.pendingSendRetrying = false;
 
-      setSendButtonState('idle', reason || 'home-ready');
+      syncSendTaskPhase();
+      setAuthoritativeSendTaskState(
+        { phase: 'idle', cancelRequested: false },
+        reason || 'reset-runtime-on-boot',
+      );
+      scheduleRenderUpload(`reset-runtime-on-boot:${reason || 'boot'}`);
+      ToolboxShell.appendLog(`[SEND][RESET_RUNTIME_STATE_ON_BOOT] reason=${reason || 'boot'}`);
+    }
+
+    function clearStaleBusySendStateOnHomeReady(reason) {
+      if (typeof isHomeNewChatReadyToSendNow !== 'function' || !isHomeNewChatReadyToSendNow()) {
+        return false;
+      }
+
+      resetRuntimeStateOnBoot(reason || 'home-ready');
       ToolboxShell.appendLog(`[SEND][CLEAR_STALE_BUSY_STATE] reason=${reason || 'home-ready'}`);
       return true;
     }
@@ -15771,11 +18000,11 @@
           kind: 'upload-send',
           source: String(source || 'upload-send'),
           startedAt: Date.now(),
-          controller: state.uploadAbortController || new AbortController(),
+          controller: state.sendAbortController || new AbortController(),
           cancelled: false,
         };
         currentUploadSendFlowRun = legacyRun;
-        state.uploadAbortController = legacyRun.controller;
+        state.sendAbortController = legacyRun.controller;
         return legacyRun;
       }
 
@@ -15790,7 +18019,7 @@
       const run = flowResult.run;
       run.source = String(source || 'upload-send');
       currentUploadSendFlowRun = run;
-      state.uploadAbortController = run.controller;
+      state.sendAbortController = run.controller;
       return run;
     }
 
@@ -15818,9 +18047,9 @@
           ToolboxShell.appendLog(`[UPLOAD][ABORT_FAILED] reason=${reason} error=${errText}`);
         }
       }
-      if (state.uploadAbortController) {
+      if (state.sendAbortController) {
         try {
-          state.uploadAbortController.abort();
+          state.sendAbortController.abort();
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
           console.error('[ChatGPT toolbox] cancelUploadSendRun state abort failed', error);
@@ -15838,7 +18067,7 @@
         currentUploadSendFlowRun = null;
       }
       if (!currentUploadSendFlowRun) {
-        state.uploadAbortController = null;
+        state.sendAbortController = null;
       }
     }
 
@@ -15956,6 +18185,7 @@
         };
       }
 
+      ToolboxShell.appendLog(`[UPLOAD][START] source=${source}`);
       ToolboxShell.appendLog(`[UPLOAD_MANUAL][START] source=${source}`);
       setStatus('正在上传文件...', 'running');
       scheduleRenderUpload(`upload-manual:start:${source}`);
@@ -15963,14 +18193,23 @@
       try {
         const uploadOpts = {
           source: `upload-manual:${source}`,
+          groupId: getActiveUploadScopeGroupId(opts),
           shouldStop: typeof opts.shouldStop === 'function' ? opts.shouldStop : undefined,
           parentTask: opts.parentTask,
           cycleIndex: opts.cycleIndex,
+          maxFiles: opts.maxFiles,
+          forceResetAttached: opts.forceResetAttached,
+          forceResetUploaded: opts.forceResetUploaded,
+          forceResetDone: opts.forceResetDone,
+          preserveAttached: opts.preserveAttached,
         };
 
         const uploadResult = await uploadFromCurrentQueueShared({
           ...uploadOpts,
-          source,
+          source: uploadOpts.source,
+          mode: 'upload_only',
+          uploadOnly: true,
+          requireSendReady: false,
         });
 
         const result = uploadResult && typeof uploadResult === 'object'
@@ -15985,23 +18224,133 @@
 
         if (result.cancelled) {
           setStatus('上传已取消', 'warning');
+          ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0} cancelled=1`);
           ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=cancelled source=${source}`);
           return result;
         }
 
         if (!result.ok && result.reason !== 'no-files') {
           setStatus(`上传失败：${result.reason || 'unknown'}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD][FAILED] source=${source} reason=${result.reason || 'failed'} stack=-`);
           ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=${result.reason || 'failed'} source=${source}`);
           return result;
         }
 
         if (result.reason === 'no-files') {
+          const activeFilesNow = getActiveGroupFiles();
+
+          // 只有“当前项目队列为空”时，才尝试打开文件选择器补齐队列。
+          // 如果队列里已有“本地文件不可读”的条目，应该走“重新绑定”按钮，而不是盲目选新文件。
+          if (activeFilesNow.length === 0) {
+            ToolboxShell.appendLog(`[UPLOAD_MANUAL][NO_FILES_PICK] source=${source}`);
+
+            try {
+              if (!state.groups.length || !state.activeGroupId) {
+                await ensureDefaultGroupReady();
+              }
+
+              const pickedEntries = await pickLocalFilesWithHandlesForAdd();
+              const pickedFiles = (pickedEntries || [])
+                .map((x) => x && x.file)
+                .filter(Boolean);
+              const pickedHandles = (pickedEntries || [])
+                .map((x) => (x && x.handle ? x.handle : null));
+
+              if (pickedFiles.length) {
+                await addFiles(pickedFiles, {
+                  handles: pickedHandles,
+                  sourceKind: 'picker',
+                  noHandleReadMode: 'input-file',
+                });
+
+                const uploadResult2 = await uploadFromCurrentQueueShared({
+                  ...uploadOpts,
+                  source: uploadOpts.source,
+                  mode: 'upload_only',
+                  uploadOnly: true,
+                  requireSendReady: false,
+                });
+
+                const result2 = uploadResult2 && typeof uploadResult2 === 'object'
+                  ? uploadResult2
+                  : {
+                      ok: !!uploadResult2,
+                      reason: uploadResult2 ? 'done' : 'upload-failed',
+                      uploadedCount: 0,
+                      failedCount: 0,
+                      skippedCount: 0,
+                    };
+
+                if (result2.cancelled) {
+                  setStatus('上传已取消', 'warning');
+                  ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} cancelled=1 reason=no-files-pick`);
+                  ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=cancelled-pick source=${source}`);
+                  return result2;
+                }
+
+                if (!result2.ok && result2.reason !== 'no-files') {
+                  setStatus(`上传失败：${result2.reason || 'unknown'}`, 'error');
+                  ToolboxShell.appendLog(`[UPLOAD][FAILED] source=${source} reason=${result2.reason || 'failed'} stack=-`);
+                  ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=${result2.reason || 'failed'} source=${source}`);
+                  return result2;
+                }
+
+                if (result2.reason === 'no-files') {
+                  setStatus('没有可上传文件', 'warning');
+                  ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} uploaded=0 failed=0 skipped=0 reason=no-files-after-pick`);
+                  ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=no-files-after-pick source=${source}`);
+                  return result2;
+                }
+
+                setStatus('文件已上传到输入框', 'success');
+                ToolboxShell.appendLog(
+                  `[UPLOAD][DONE] source=${source} uploaded=${result2.uploadedCount || 0} failed=${result2.failedCount || 0} skipped=${result2.skippedCount || 0}`,
+                );
+                ToolboxShell.appendLog(
+                  `[UPLOAD_MANUAL][DONE] source=${source} uploaded=${result2.uploadedCount || 0} failed=${result2.failedCount || 0} skipped=${result2.skippedCount || 0}`,
+                );
+                scheduleRenderUpload(`upload-manual:done:${source}`);
+                return result2;
+              }
+            } catch (pickErr) {
+              const pickErrText = pickErr && pickErr.message ? pickErr.message : String(pickErr);
+              if (pickErrText.includes('用户取消选择文件')) {
+                setStatus('已取消选择文件', 'warning');
+                ToolboxShell.appendLog(`[UPLOAD_MANUAL][NO_FILES_PICK_CANCEL] source=${source}`);
+                return {
+                  ok: false,
+                  reason: 'cancelled',
+                  uploadedCount: 0,
+                  failedCount: 0,
+                  skippedCount: 0,
+                  cancelled: true,
+                };
+              }
+
+              console.error('[ChatGPT toolbox] no-files pick-and-upload failed', pickErr);
+              ToolboxShell.appendLog(`[UPLOAD_MANUAL][NO_FILES_PICK_FAILED] source=${source} error=${pickErrText}`);
+              setStatus(`上传失败：${pickErrText}`, 'error');
+
+              return {
+                ok: false,
+                reason: pickErrText,
+                uploadedCount: 0,
+                failedCount: 0,
+                skippedCount: 0,
+              };
+            }
+          }
+
           setStatus('没有可上传文件', 'warning');
+          ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} uploaded=0 failed=0 skipped=0 reason=no-files`);
           ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=no-files source=${source}`);
           return result;
         }
 
         setStatus('文件已上传到输入框', 'success');
+        ToolboxShell.appendLog(
+          `[UPLOAD][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0}`,
+        );
         ToolboxShell.appendLog(
           `[UPLOAD_MANUAL][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0}`,
         );
@@ -16012,6 +18361,7 @@
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] startManualUploadOnlyFlow failed', err);
         ToolboxShell.appendLog(`[UPLOAD_MANUAL][FAILED] source=${source} error=${errText}`);
+        ToolboxShell.appendLog(`[UPLOAD][FAILED] source=${source} reason=exception stack=${err && err.stack ? String(err.stack).replace(/\s+/g, ' ').slice(0, 500) : '-'}`);
         setStatus(`上传失败：${errText}`, 'error');
 
         return {
@@ -16028,12 +18378,15 @@
 
     async function runStartUploadButtonCore(options = {}) {
       const source = String(options.source || 'manual-start-upload').trim() || 'manual-start-upload';
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
+      const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
 
-      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source}`);
+      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`);
 
       try {
         const result = await startManualUploadOnlyFlow({
           ...options,
+          groupId: scopeGroupId,
           source,
         });
 
@@ -16082,13 +18435,6 @@
       syncSendTaskPhase();
       const sendPhase = getSendTaskPhase();
 
-      if (sendPhase !== 'idle') {
-        ToolboxShell.appendLog(
-          `[UPLOAD][TRIGGER_SEND][SKIP] reason=send-task-active phase=${sendPhase} source=${src}`,
-        );
-        return false;
-      }
-
       if (state.waitingReply) {
         if (detectPendingComposerPayloadForSend()) {
           state.pendingSendAfterReply = true;
@@ -16110,16 +18456,49 @@
         ToolboxShell.appendLog(
           `[UPLOAD][TRIGGER_SEND][SKIP] reason=waiting-reply-no-payload source=${src}`,
         );
+        logSendHotkeyBlocked('waiting-reply-no-payload', src);
 
         return false;
       }
 
-      if (isWaitingSendActive()) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][TRIGGER_SEND][SKIP] reason=already-waiting-send source=${src}`,
-        );
+      const healResult = tryHealStaleSendStateBeforeTrigger(src);
+      if (!healResult.canProceed) {
+        const phaseAfterHealCheck = getSendTaskPhase();
+        if (
+          healResult.skipReason === 'real-send-flow-active'
+          || healResult.skipReason === 'real-send-task-active'
+        ) {
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][TRIGGER_SKIP_REAL_ACTIVE] phase=${phaseAfterHealCheck} reason=${healResult.skipReason} source=${src}`,
+          );
+          logSendHotkeyBlocked(healResult.skipReason, src, `phase=${phaseAfterHealCheck}`);
+          return false;
+        }
 
-        return false;
+        // stale heal 未成功时，若原生发送按钮已就绪且没有真实发送循环，再尝试一次强制清理。
+        if (phaseAfterHealCheck !== 'idle' || isWaitingSendButton() || isShortcutDispatching()) {
+          const retryHeal = tryHealStaleSendStateBeforeTrigger(`${src}:retry`);
+          if (retryHeal.canProceed) {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][TRIGGER_CONTINUE_AFTER_HEAL] phase=${getSendTaskPhase()} source=${src}`,
+            );
+          } else {
+            if (phaseAfterHealCheck !== 'idle') {
+              ToolboxShell.appendLog(
+                `[UPLOAD][TRIGGER_SEND][SKIP] reason=send-task-active phase=${phaseAfterHealCheck} source=${src}`,
+              );
+              logSendHotkeyBlocked('send-task-active', src, `phase=${phaseAfterHealCheck}`);
+            } else if (isWaitingSendButton() || isShortcutDispatching()) {
+              ToolboxShell.appendLog(
+                `[UPLOAD][TRIGGER_SEND][SKIP] reason=already-waiting-send source=${src}`,
+              );
+              logSendHotkeyBlocked('already-waiting-send', src);
+            }
+            return false;
+          }
+        } else {
+          return false;
+        }
       }
 
       ToolboxShell.appendLog(
@@ -16127,16 +18506,39 @@
       );
 
       try {
+        const isManualSend = isManualSendMessageSource(src);
         const result = await sendExistingComposerBySendMessageButtonCore({
           source: src || 'manual-send-message-button',
-          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+          manualSend: isManualSend,
+          timeoutMs: isManualSend
+            ? MANUAL_SEND_TIMEOUT_MS
+            : (typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000),
         });
 
+        const doneOk = !!(result && result.ok);
+        const doneReason = result && result.reason ? String(result.reason) : '-';
+
         ToolboxShell.appendLog(
-          `[UPLOAD][TRIGGER_SEND][DONE] source=${src} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+          `[UPLOAD][TRIGGER_SEND][DONE] source=${src} ok=${doneOk ? 1 : 0} reason=${doneReason}`,
         );
 
-        return !!(result && result.ok);
+        if (!doneOk) {
+          const blockedReason = doneReason.startsWith('send-action-lock')
+            ? 'send-action-lock'
+            : doneReason === 'upload-send-flow-locked'
+              ? 'upload-send-flow-locked'
+              : doneReason;
+          logSendHotkeyBlocked(blockedReason, src);
+          const failMessage = mapUploadSendFailureMessage(blockedReason)
+            || mapForeverSendFailureMessage(blockedReason)
+            || `发送失败：${blockedReason}`;
+          setStatus(failMessage, 'warn');
+          state.uploadSendFailureHint = failMessage;
+          state.uploadSendFailureHintAt = Date.now();
+          scheduleRenderUpload('send-message:trigger-blocked');
+        }
+
+        return doneOk;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
 
@@ -16157,12 +18559,20 @@
     }
 
     function cancelWaitingSend(reason = 'user-click') {
-      if (!isWaitingSendActive() && !state.waitingReply) {
+      if (!isSendTaskBusy() && !isWaitingSendButton() && !state.waitingReply) {
         return false;
       }
 
       const cancelRunId = state.autoSendRunId;
       state.cancelWaitingSend = true;
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'cancelling',
+          runId: cancelRunId || (state.sendTask && state.sendTask.runId) || '',
+          cancelRequested: true,
+        },
+        `cancel-send:${reason || 'user-click'}`,
+      );
       state.autoSendRunId += 1;
       resetUploadSendUiState('cancel:' + reason, cancelRunId);
       ToolboxShell.appendLog(`[UPLOAD][WAIT_SEND][CANCEL] reason=${reason}`);
@@ -16187,10 +18597,17 @@
       setWaitingSendActive(true);
       uploadSendShortcutRunning = true;
       uploadSendTaskStartedAt = Date.now();
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'waiting_send',
+          runId: id,
+          cancelRequested: false,
+          subphase: 'claim-waiting-send',
+        },
+        `wait-send:claim:${source || '-'}`,
+      );
       scheduleRenderUpload(`wait-send:claim:${source || '-'}`);
       logUploadSendUiState('claim', `wait-send:claim:${source || '-'}`, id);
-
-      setSendButtonState('waiting', `wait-send:claim:${source || '-'}`);
 
       return id;
     }
@@ -16207,7 +18624,19 @@
         return '长时间未找到 ChatGPT 输入框，已停止发送';
       }
       if (normalized === 'composer_empty' || normalized === 'empty_text_and_no_attachment') {
-        return '输入框为空，未发送';
+        return '发送失败：当前输入框没有文字或附件';
+      }
+      if (normalized === 'local_file_unreadable') {
+        return '发送失败：本地文件不可读，请重新绑定或先点击开始上传。';
+      }
+      if (normalized === 'local_queue_no_composer_attachment') {
+        return '发送失败：本地列表有文件但未添加到 ChatGPT 输入框，请先点击开始上传。';
+      }
+      if (normalized === 'manual_send_timeout') {
+        return '发送失败：等待超时（5 秒），请检查输入框与附件后重试。';
+      }
+      if (normalized === 'attachment_still_uploading') {
+        return '发送失败：附件仍在上传，请稍后再点发送。';
       }
       if (normalized === 'composer_text_not_ready') {
         return '附件已就绪，正在发送附件';
@@ -16247,7 +18676,10 @@
       state.pendingSendRetrying = false;
       state.uploadSendFailureHint = '';
       state.uploadSendFailureHintAt = 0;
-      state.waitingReply = true;
+      setAuthoritativeSendTaskState(
+        { phase: 'waiting_reply', runId: runId || (state.sendTask && state.sendTask.runId) || '' },
+        'enter-waiting-reply-after-send',
+      );
       setStatus('已发送信息');
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][send-message-button:sent] runId=${runId} source=${source || '-'}`,
@@ -16275,6 +18707,14 @@
       state.pendingSendAfterReply = true;
       state.pendingSendAfterReplySource = String(source || 'button');
       state.pendingSendRetrying = false;
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'waiting_reply',
+          subphase: 'pending_resend',
+          runId: runId || (state.sendTask && state.sendTask.runId) || '',
+        },
+        'enter-waiting-reply-blocked',
+      );
 
       setStatus('助手正在回复，持续等待可发送机会...', 'running');
 
@@ -16286,6 +18726,43 @@
       updateChatInputStateBadge();
       startWaitingReplyCheck(runId, Date.now());
       scheduleRenderUpload('send-message:blocked-waiting-reply-retry');
+    }
+
+    /**
+     * 硬阻断：页面正在回答时点击"发送消息"，直接无效，不排队，不挂起 pendingSendAfterReply。
+     * 与 enterUploadWaitingReplyBlocked 的区别：后者会排队重发，而这里不排队。
+     */
+    function blockSendBecauseAssistantBusy(runId, source) {
+      ToolboxShell.appendLog(
+        `[SEND][BLOCKED_ASSISTANT_BUSY] source=${source || '-'} runId=${runId} reason=page_is_responding`,
+      );
+      logUploadSendUiState('send-aborted', 'assistant-busy-hard-block', runId);
+      resetUploadSendUiState(`send-message:blocked-assistant-busy`, runId);
+      scheduleRenderUpload('send-message:blocked-assistant-busy');
+    }
+
+    /**
+     * 软等待：进入 waiting_payload 状态，保持发送任务，等输入框有内容后自动继续。
+     */
+    function enterWaitingPayloadState(runId, source, textLen, attachmentCount) {
+      ToolboxShell.appendLog(
+        `[SEND][WAIT_PAYLOAD] source=${source || '-'} runId=${runId} textLen=${textLen} attachmentCount=${attachmentCount}`,
+      );
+      setWaitingRealSendButton(true);
+      state.waitingSend = true;
+      state.autoSendWaiting = true;
+      state.waitingReply = false;
+      setAuthoritativeSendTaskState(
+        {
+          phase: 'waiting_send',
+          runId,
+          cancelRequested: false,
+          subphase: 'waiting_payload',
+        },
+        'send-message:wait-payload',
+      );
+      setStatus('等待输入', 'running');
+      scheduleRenderUpload('send-message:wait-payload');
     }
 
     function shouldStopForeverSend(runId) {
@@ -16325,6 +18802,129 @@
           && ComposerApi.isAttachmentStillUploading()
         )
       );
+    }
+
+    function detectAttachmentPayloadToWaitForSend(attachmentState, capability) {
+      const cap = capability && typeof capability === 'object' ? capability : {};
+      const att = attachmentState && typeof attachmentState === 'object' ? attachmentState : {};
+      const attCount = Number(att.attachmentCount || 0);
+      const capCount = Number(cap.attachmentCount || 0);
+      const unifiedHasAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        && ComposerApi.hasComposerAttachmentUnified();
+      const stillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+
+      // attachmentCount 只能来自真实附件信号；纯文本 payload 不得触发附件等待。
+      return !!(
+        att.hasAttachment
+        || attCount > 0
+        || att.attachmentUploading
+        || stillUploading
+        || unifiedHasAttachment
+        || (
+          capCount > 0
+          && (att.hasAttachment || attCount > 0 || unifiedHasAttachment || stillUploading)
+        )
+      );
+    }
+
+    function detectAttachmentBeforeSendForWait(attachmentState, capability) {
+      const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
+        attachmentState,
+        capability,
+      );
+
+      return !!(
+        hasAttachmentPayloadToWait
+        || (
+          typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          && ComposerApi.hasComposerAttachmentUnified()
+        )
+        || (
+          typeof ComposerApi.countAttachmentChips === 'function'
+          && ComposerApi.countAttachmentChips() > 0
+        )
+        || (
+          typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading()
+        )
+      );
+    }
+
+    function tryHealStaleSendStateBeforeTrigger(source) {
+      syncSendTaskPhase();
+      const sendPhase = getSendTaskPhase();
+      const needsHealCheck = sendPhase !== 'idle'
+        || isWaitingSendButton()
+        || isShortcutDispatching();
+
+      if (!needsHealCheck) {
+        return { canProceed: true, healed: false };
+      }
+
+      const flowRunActive = !!(currentUploadSendFlowRun && !currentUploadSendFlowRun.cancelled);
+      if (flowRunActive) {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][TRIGGER_SKIP_REAL_ACTIVE] phase=${sendPhase} reason=upload-send-flow-active source=${source}`,
+        );
+        return { canProceed: false, healed: false, skipReason: 'real-send-flow-active' };
+      }
+
+      try {
+        const capability = typeof getUploadPageCapability === 'function'
+          ? getUploadPageCapability({ heavy: true })
+          : null;
+        const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
+          && isHomeNewChatReadyToSendNow();
+        const hasComposer = !!(capability && (
+          capability.hasComposer
+          || capability.has_composer
+          || capability.input_found
+        ));
+        let nativeSendEnabled = !!(capability && capability.canSendNow);
+        if (typeof evaluateComposerSendability === 'function') {
+          const sendability = evaluateComposerSendability(findUploadComposerSendButton());
+          nativeSendEnabled = !!(
+            sendability.realSendButtonEnabled
+            || nativeSendEnabled
+          );
+        }
+        const assistantBusy = !!(capability && capability.isResponding && !homeReadyToSend);
+        const canHeal = hasComposer && nativeSendEnabled && !assistantBusy;
+
+        if (canHeal) {
+          const oldPhase = sendPhase;
+          const oldWaitingSend = state.waitingSend ? 1 : 0;
+          const oldShortcut = uploadSendShortcutRunning ? 1 : 0;
+          resetRuntimeStateOnBoot(`trigger-send:stale-heal:${source}`);
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][TRIGGER_STALE_CLEAR] oldPhase=${oldPhase} waitingSend=${oldWaitingSend} shortcut=${oldShortcut} reason=native-ready-before-trigger source=${source}`,
+          );
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][TRIGGER_CONTINUE_AFTER_HEAL] phase=${getSendTaskPhase()}`,
+          );
+          return { canProceed: true, healed: true };
+        }
+
+        const realActiveSend = (sendPhase === 'sending' || sendPhase === 'waiting_reply')
+          && !!state.messageSending;
+        if (realActiveSend) {
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][TRIGGER_SKIP_REAL_ACTIVE] phase=${sendPhase} reason=real-send-task-active source=${source}`,
+          );
+          return { canProceed: false, healed: false, skipReason: 'real-send-task-active' };
+        }
+
+        return { canProceed: false, healed: false, skipReason: 'send-state-blocked' };
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        const errStack = error && error.stack ? String(error.stack) : '';
+        console.error('[ChatGPT toolbox] tryHealStaleSendStateBeforeTrigger failed', error);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][TRIGGER_STALE_HEAL_ERROR] source=${source} phase=${sendPhase} error=${errText} stack=${String(errStack).slice(0, 300)}`,
+        );
+        return { canProceed: false, healed: false, skipReason: 'heal-error' };
+      }
     }
 
     function shouldRetryForeverSendReason(failReason) {
@@ -16436,15 +19036,105 @@
       ToolboxShell.appendLog(`[UPLOAD][STOP_UPLOAD_TASK] source=${reason}`);
     }
 
+    function isPageNavigationCleanupSource(source) {
+      return String(source || '').trim() === 'page-navigation';
+    }
+
+    function releaseUploadPayloadForNavigation(item, reason) {
+      if (!item) return;
+
+      const name = item.name || '-';
+      const keepHandle = isFileHandleLike(item.fileHandle);
+      const keepBlob = hasPersistableUploadBlob(item);
+      let released = false;
+
+      if (item.file) {
+        item.file = null;
+        released = true;
+      }
+
+      if (item.sourceFile) {
+        item.sourceFile = null;
+        released = true;
+      }
+
+      if (item.originalFile) {
+        item.originalFile = null;
+        released = true;
+      }
+
+      if (!keepBlob) {
+        if (item.blob) {
+          item.blob = null;
+          released = true;
+        }
+
+        if (item.sourceBlob) {
+          item.sourceBlob = null;
+          released = true;
+        }
+      }
+
+      if (item.arrayBuffer) {
+        item.arrayBuffer = null;
+        released = true;
+      }
+
+      if (item.objectUrl) {
+        try {
+          URL.revokeObjectURL(item.objectUrl);
+        } catch (revokeErr) {
+          const errText = revokeErr && revokeErr.message ? revokeErr.message : String(revokeErr);
+          console.error('[ChatGPT toolbox] releaseUploadPayloadForNavigation revokeObjectURL failed', revokeErr);
+          ToolboxShell.appendLog(
+            `[UPLOAD][RELEASE_NAV_TRANSIENT][revoke-failed] name=${name} error=${errText}`,
+          );
+        }
+        item.objectUrl = '';
+        released = true;
+      }
+
+      if (item.rawFile) {
+        item.rawFile = null;
+      }
+
+      if (released) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][RELEASE_NAV_TRANSIENT] name=${name} keepBlob=${keepBlob ? 1 : 0} keepHandle=${keepHandle ? 1 : 0} reason=${reason || '-'}`,
+        );
+      }
+
+      if (keepHandle) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_CLEANUP][KEEP_FILE_HANDLE] name=${name} source=page-navigation`,
+        );
+      }
+
+      if (keepBlob) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_CLEANUP][KEEP_PERSISTABLE_BLOB] name=${name} size=${getUploadItemSizeBytes(item)} source=page-navigation`,
+        );
+      }
+    }
+
     function clearUploadTransientFileRefs(source) {
       try {
         ToolboxShell.appendLog(
           `[UPLOAD_CLEANUP][TRANSIENT_FILES] source=${source || '-'}`,
         );
 
+        const isPageNav = isPageNavigationCleanupSource(source);
+
         const releaseItemRefs = (item) => {
           if (!item) return;
+
+          if (isPageNav) {
+            releaseUploadPayloadForNavigation(item, `nav-cleanup:${source || '-'}`);
+            return;
+          }
+
           releaseUploadPayload(item, `nav-cleanup:${source || '-'}`, { clearFileRefs: true });
+
           if (item.rawFile) {
             item.rawFile = null;
           }
@@ -16494,24 +19184,55 @@
       };
     }
 
-    async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null) {
+    async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null, sendPayload = null) {
+      lastUploadSendPanelFailReason = '';
       const source = triggerSource || 'button';
       const usePresetRunId = presetRunId != null && Number(presetRunId) > 0;
       const activeFlowRun = flowRun || currentUploadSendFlowRun;
+      const payloadOpts = sendPayload && typeof sendPayload === 'object' ? sendPayload : {};
+      const unifiedText = typeof payloadOpts.text !== 'undefined'
+        ? String(payloadOpts.text || '')
+        : '';
+      const shouldInjectText = !!String(unifiedText || '').trim();
+      const isManualSend = payloadOpts.manualSend === true || isManualSendMessageSource(source);
+      const sendDeadlineMs = Number(payloadOpts.sendDeadlineMs)
+        || (Date.now() + (isManualSend ? MANUAL_SEND_TIMEOUT_MS : SEND_WAIT_TIMEOUT_MS));
 
       const runId = usePresetRunId
         ? Number(presetRunId)
         : claimWaitingSendRun(source, Date.now());
 
       ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][send-message-button:click] source=${source} runId=${runId} queue=${state.queue.length} running=${state.running}`
+        `[UPLOAD_DIAG][send-message-button:click] source=${source} runId=${runId} queue=${state.queue.length} running=${state.running} manual=${isManualSend ? 1 : 0}`,
       );
+      ToolboxShell.appendLog(`[SEND_MESSAGE][FAST_PATH_CHECK] source=${source} manual=${isManualSend ? 1 : 0}`);
+      logSendMessageComposerState(source);
 
       logUploadSendUiState('click', 'send-message-start', runId);
-      setSendButtonState('sending', 'send-message-start');
       clearStaleBusySendStateOnHomeReady('send-panel-click');
 
       let sendFailureHandled = false;
+
+      if (isManualSend && hasUnreadableLocalQueueForSend()) {
+        return failManualSendEarly(
+          runId,
+          source,
+          'local_file_unreadable',
+          mapForeverSendFailureMessage('local_file_unreadable'),
+        );
+      }
+
+      if (isManualSend && hasLocalQueueFilesWithoutComposerAttachment()) {
+        const composerStateEarly = logSendMessageComposerState(source, 'reason=local_queue_no_composer_attachment');
+        if (composerStateEarly.textLen <= 0 && composerStateEarly.attachmentCount <= 0) {
+          return failManualSendEarly(
+            runId,
+            source,
+            'local_queue_no_composer_attachment',
+            mapForeverSendFailureMessage('local_queue_no_composer_attachment'),
+          );
+        }
+      }
 
       function uploadSendFlowCancelCheck(stage) {
         const stageText = String(stage || '-');
@@ -16582,16 +19303,18 @@
           return false;
         }
 
-        const cadenceResult = await prepareUploadByCadenceIfNeeded();
-        if (!assertUploadSendFlowAlive(activeFlowRun, 'after-cadence')) {
-          sendFailureHandled = true;
-          return false;
-        }
-        if (cadenceResult && cadenceResult.ok === false && !cadenceResult.skipped) {
-          setStatus('按节奏自动上传失败，已停止发送', 'warn');
-          resetUploadSendUiState('send-message:cadence-upload-failed', runId);
-          sendFailureHandled = true;
-          return false;
+        if (!isManualSend) {
+          const cadenceResult = await prepareUploadByCadenceIfNeeded();
+          if (!assertUploadSendFlowAlive(activeFlowRun, 'after-cadence')) {
+            sendFailureHandled = true;
+            return false;
+          }
+          if (cadenceResult && cadenceResult.ok === false && !cadenceResult.skipped) {
+            setStatus('按节奏自动上传失败，已停止发送', 'warn');
+            resetUploadSendUiState('send-message:cadence-upload-failed', runId);
+            sendFailureHandled = true;
+            return false;
+          }
         }
 
         if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
@@ -16605,34 +19328,9 @@
           && isHomeNewChatReadyToSendNow();
 
         const sendAttachmentState = getComposerAttachmentState();
-        const hasPendingComposerPayload = !!(
-          capability.hasComposerPayload
-          || capability.has_composer_payload
-          || Number(capability.attachmentCount || 0) > 0
-          || sendAttachmentState.hasComposerPayload
-          || sendAttachmentState.has_composer_payload
-          || sendAttachmentState.hasAttachment
-          || sendAttachmentState.attachmentCount > 0
-          || sendAttachmentState.attachmentUploading
-        );
-
-        if (capability.isResponding && !homeReadyToSend) {
-          enterUploadWaitingReplyBlocked(runId, source);
-          sendFailureHandled = true;
-          return false;
-        }
-
-        if (capability.isResponding && homeReadyToSend) {
-          ToolboxShell.appendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_ready_to_send');
-        }
-
         const composerTextNow = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim()
           : '';
-        const hasAnythingToSend = !!(
-          hasPendingComposerPayload
-          || composerTextNow
-        );
 
         let realSendButtonEnabled = !!capability.canSendNow;
         if (typeof evaluateComposerSendability === 'function') {
@@ -16641,6 +19339,30 @@
             sendability.realSendButtonEnabled
             || capability.canSendNow
           );
+        }
+
+        const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
+          sendAttachmentState,
+          capability,
+        );
+        const hasComposerTextPayload = composerTextNow.length > 0;
+        const hasComposerPayloadForSend = !!(
+          hasComposerTextPayload
+          || hasAttachmentPayloadToWait
+        );
+        const hasAnythingToSend = isManualSend
+          ? hasComposerPayloadForSend
+          : !!(hasComposerPayloadForSend || realSendButtonEnabled);
+
+        if (capability.isResponding && !homeReadyToSend) {
+          // 硬阻断：正在回答中，点击发送无效，不排队，不挂起 pendingSendAfterReply
+          blockSendBecauseAssistantBusy(runId, source);
+          sendFailureHandled = true;
+          return false;
+        }
+
+        if (capability.isResponding && homeReadyToSend) {
+          ToolboxShell.appendLog('[SEND][IGNORE_STALE_BUSY] reason=home_new_chat_ready_to_send');
         }
 
         const attachmentCount = Number(
@@ -16660,20 +19382,18 @@
 
         if (capability.hasComposer && !hasAnythingToSend) {
           if (!realSendButtonEnabled) {
-            if (sendGate.workflow_can_start) {
-              ToolboxShell.appendLog(
-                `[SEND_MESSAGE][WAIT_PAYLOAD] reason=empty_but_workflow_started composer_empty=1 native_send_disabled=1 workflow_can_start=1 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+            if (isManualSend) {
+              return failManualSendEarly(
+                runId,
+                source,
+                'empty_text_and_no_attachment',
+                mapForeverSendFailureMessage('empty_text_and_no_attachment'),
               );
-              setStatus('等待注入内容后发送', 'running');
-            } else {
-              ToolboxShell.appendLog(
-                `[SEND_MESSAGE][SKIP_EMPTY] reason=composer_empty native_send_disabled=1 workflow_can_start=0 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
-              );
-              setStatus('输入框为空，请先填写内容或选择 Prompt', 'warn');
-              resetUploadSendUiState('send-message:composer-empty', runId);
-              sendFailureHandled = true;
-              return false;
             }
+            ToolboxShell.appendLog(
+              `[SEND][WAIT_PAYLOAD] reason=composer_empty native_send_disabled=1 workflow_can_start=${sendGate.workflow_can_start ? 1 : 0} textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+            );
+            enterWaitingPayloadState(runId, source, textLen, attachmentCount);
           } else {
             ToolboxShell.appendLog(
               `[SEND_MESSAGE][EMPTY_BUT_NATIVE_SEND] textLen=${textLen} attachmentCount=${attachmentCount} realSendButtonEnabled=1`,
@@ -16683,7 +19403,8 @@
 
         if (!capability.hasComposer && !hasAnythingToSend) {
           const blockReason = 'no-composer';
-          const blockMessage = '未找到 ChatGPT 输入框';
+          const blockMessage = '发送失败：未找到 ChatGPT 输入框';
+          lastUploadSendPanelFailReason = 'composer_not_found';
           setStatus(blockMessage, 'warn');
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][FAILED] currentUrl=${location.href} composerFound=0 composerTextLength=${composerTextNow.length} sendButtonFound=${capability.canSendNow ? 1 : 0} activeTab=upload`,
@@ -16698,35 +19419,54 @@
         }
 
         if (!hasAnythingToSend && !realSendButtonEnabled) {
-          if (sendGate.workflow_can_start) {
-            ToolboxShell.appendLog(
-              `[SEND_MESSAGE][WAIT_PAYLOAD] reason=empty_but_workflow_started composer_empty=1 native_send_disabled=1 workflow_can_start=1 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+          if (isManualSend) {
+            return failManualSendEarly(
+              runId,
+              source,
+              'empty_text_and_no_attachment',
+              mapForeverSendFailureMessage('empty_text_and_no_attachment'),
             );
-            setStatus('等待注入内容后发送', 'running');
-          } else {
-            const blockReason = 'composer-empty';
-            setStatus('输入框为空，请先填写内容或选择 Prompt', 'warn');
-            ToolboxShell.appendLog(
-              `[SEND_MESSAGE][SKIP_EMPTY] reason=${blockReason} composer_empty=1 native_send_disabled=1 workflow_can_start=0 textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
-            );
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][send-message-button:blocked] source=${source} reason=${blockReason}`,
-            );
-            resetUploadSendUiState(`send-message-blocked:${blockReason}`, runId);
-            scheduleRenderUpload('send-message:blocked');
-            sendFailureHandled = true;
-            return false;
           }
+          ToolboxShell.appendLog(
+            `[SEND][WAIT_PAYLOAD] reason=composer_empty native_send_disabled=1 workflow_can_start=${sendGate.workflow_can_start ? 1 : 0} textLen=${textLen} attachmentCount=${attachmentCount} source=${source}`,
+          );
+          enterWaitingPayloadState(runId, source, textLen, attachmentCount);
         }
 
-        if (!capability.canSendNow && hasPendingComposerPayload) {
+        const requireUploadDone = hasAttachmentPayloadToWait;
+        const requireAttachmentBound = hasAttachmentPayloadToWait;
+
+        ToolboxShell.appendLog(
+          `[SEND][PAYLOAD_CLASSIFY] textLen=${textLen} hasAttachmentPayloadToWait=${hasAttachmentPayloadToWait ? 1 : 0} realSendButtonEnabled=${realSendButtonEnabled ? 1 : 0} requireUploadDone=${requireUploadDone ? 1 : 0} source=${source}`,
+        );
+
+        if (!requireUploadDone) {
+          ToolboxShell.appendLog('[SEND][SKIP_ATTACHMENT_WAIT] reason=text-only-payload');
+        }
+
+        if (requireUploadDone && !capability.canSendNow) {
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][send-message-button:wait-payload] source=${source} reason=payload_exists_but_send_not_ready attachmentCount=${Number(capability.attachmentCount || 0)} responseState=${capability.response_state || '-'}`,
+            `[UPLOAD_DIAG][send-message-button:wait-payload] source=${source} reason=attachment_exists_but_send_not_ready attachmentCount=${Number(capability.attachmentCount || 0)} responseState=${capability.response_state || '-'}`,
           );
         }
 
-        if (!capability.canSendNow) {
+        if (isManualSend) {
+          setAuthoritativeSendTaskState({ phase: 'sending', runId }, 'manual-send-start');
+          setStatus('发送中', 'running');
+        } else if (!capability.canSendNow) {
           setWaitingRealSendButton(true);
+          state.waitingSend = true;
+          state.autoSendWaiting = true;
+          state.waitingReply = false;
+          setAuthoritativeSendTaskState(
+            {
+              phase: 'waiting_send',
+              runId,
+              cancelRequested: false,
+              subphase: 'wait-real-send-button',
+            },
+            'send-message:wait-real-send-button',
+          );
           const waitStatus = resolveUploadSendWaitStatus(capability);
           setStatus(waitStatus.text, 'running');
           logWaitRealSendButtonIfDue(runId, source, capability);
@@ -16741,20 +19481,46 @@
           return false;
         }
 
-        const hasAttachmentBeforeSend = detectPendingComposerPayloadForSend();
-        if (hasAttachmentBeforeSend) {
+        const hasAttachmentBeforeSend = detectAttachmentBeforeSendForWait(
+          sendAttachmentState,
+          capability,
+        );
+        if (requireUploadDone && hasAttachmentBeforeSend) {
+          ToolboxShell.appendLog('[SEND][ATTACHMENT_WAIT_REQUIRED] reason=real-attachment-detected');
+          const attachmentWaitMs = isManualSend
+            ? MANUAL_SEND_ATTACHMENT_WAIT_MS
+            : 120000;
           const attachmentReady = await waitComposerAttachmentReady({
-            timeoutMs: 120000,
+            timeoutMs: attachmentWaitMs,
           });
 
           if (!attachmentReady.ok) {
+            if (isManualSend) {
+              return failManualSendEarly(
+                runId,
+                source,
+                'attachment_still_uploading',
+                mapForeverSendFailureMessage('attachment_still_uploading'),
+              );
+            }
             ToolboxShell.appendLog(
-              `[UPLOAD][ATTACHMENT_NOT_READY] reason=${attachmentReady.reason || 'attachment-not-ready'}`,
+              `[SEND][WAIT_ATTACHMENT_UPLOAD] reason=${attachmentReady.reason || 'attachment-not-ready'} source=${source}`,
             );
-            setStatus('附件尚未就绪，已暂停发送', 'warn');
-            sendFailureHandled = true;
-            resetUploadSendUiState(`send-message:${attachmentReady.reason || 'attachment-not-ready'}`, runId);
-            return false;
+            setWaitingRealSendButton(true);
+            state.waitingSend = true;
+            state.autoSendWaiting = true;
+            state.waitingReply = false;
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'waiting_send',
+                runId,
+                cancelRequested: false,
+                subphase: attachmentReady.reason || 'wait-attachment-upload',
+              },
+              'send-message:wait-attachment-upload',
+            );
+            setStatus('上传中', 'running');
+            scheduleRenderUpload('send-message:wait-attachment-upload');
           }
         }
 
@@ -16767,19 +19533,37 @@
               : `manual-send-message-${source}`
           );
 
-        if (typeof stableSendMessage !== 'function') {
-          console.error('[ChatGPT toolbox] stableSendMessage is not available');
+        if (typeof sendUnifiedMessage !== 'function') {
+          console.error('[ChatGPT toolbox] sendUnifiedMessage is not available');
           setStatus('发送模块未就绪，请刷新页面后重试', 'error');
           return false;
         }
 
-        ToolboxShell.appendLog(`[SEND_MESSAGE][ACTION] mode=composer_click source=${source}`);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][ACTION] mode=send_unified source=${source} injectText=${shouldInjectText ? 1 : 0}`,
+        );
 
         let sendResult = null;
         let outerAttempt = 0;
+        const manualMaxAttempts = 4;
+        const manualStableMaxAttempts = 3;
 
         while (state.autoSendRunId === runId && !shouldStopForeverSend(runId)) {
           outerAttempt += 1;
+
+          if (isManualSend && Date.now() >= sendDeadlineMs) {
+            sendResult = {
+              ok: false,
+              reason: 'manual_send_timeout',
+              retryable: false,
+              wait_send: false,
+              wait_reply: false,
+            };
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][FAILED] reason=manual_send_timeout source=${source} attempt=${outerAttempt}`,
+            );
+            break;
+          }
 
           if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
             logUploadSendUiState('send-aborted', 'page-navigating', runId);
@@ -16791,7 +19575,12 @@
           const homeReadyNow = typeof isHomeNewChatReadyToSendNow === 'function'
             && isHomeNewChatReadyToSendNow();
           if (capabilityNow.isResponding && !homeReadyNow) {
-            enterUploadWaitingReplyBlocked(runId, source);
+            // 循环中遇到助手忙：硬阻断，不排队，直接取消本次发送任务
+            ToolboxShell.appendLog(
+              `[SEND][BLOCKED_ASSISTANT_BUSY] source=${source || '-'} runId=${runId} reason=page_is_responding_during_send_loop attempt=${outerAttempt}`,
+            );
+            logUploadSendUiState('send-aborted', 'assistant-busy-during-send-loop', runId);
+            resetUploadSendUiState(`send-message:blocked-assistant-busy-loop`, runId);
             sendFailureHandled = true;
             return false;
           }
@@ -16804,21 +19593,46 @@
             return false;
           }
 
+          if (capabilityNow.canSendNow) {
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'sending',
+                runId,
+                cancelRequested: false,
+                subphase: 'click-native-send-button',
+              },
+              'send-message:click-native-send-button',
+            );
+          }
+
           if (!assertUploadSendFlowAlive(activeFlowRun, 'before-stable-send')) {
             ToolboxShell.appendLog(`[UPLOAD][SEND_ABORT] reason=stale-run run=${runId}`);
             sendFailureHandled = true;
             return false;
           }
 
-          sendResult = await stableSendMessage({
+          sendResult = await sendUnifiedMessage({
             source: stableSendSource,
-            sendExistingComposer: true,
-            maxAttempts: SEND_STABLE_RETRY_LIMIT,
-            intervalMs: SEND_STABLE_RETRY_INTERVAL_MS,
-            blockWhenResponding: true,
-            timeoutMs: SEND_WAIT_TIMEOUT_MS,
+            mode: isManualSend ? 'upload-panel-send-manual' : 'upload-panel-send',
+            sendExistingComposer: !shouldInjectText,
+            text: shouldInjectText ? unifiedText : '',
+            waitForReplyIdle: true,
+            waitForAttachmentReady: requireUploadDone,
+            requireUploadDone,
+            requireAttachmentBound,
+            allowEnterFallback: true,
+            allowWaitPayload: !isManualSend,
+            manualSend: isManualSend,
+            attachmentWaitTimeoutMs: isManualSend ? MANUAL_SEND_ATTACHMENT_WAIT_MS : 0,
+            maxAttempts: isManualSend
+              ? manualStableMaxAttempts
+              : Number(SEND_STABLE_RETRY_LIMIT || 8),
+            buttonMaxAttempts: isManualSend ? 12 : 0,
+            buttonIntervalMs: isManualSend ? 150 : 0,
+            buttonMaxDisabledWaitMs: isManualSend ? 2500 : 0,
             shouldStop: () => shouldStopForeverSend(runId)
-              || !assertUploadSendFlowAlive(activeFlowRun, 'stable-send-loop'),
+              || !assertUploadSendFlowAlive(activeFlowRun, 'send-unified-loop')
+              || (isManualSend && Date.now() >= sendDeadlineMs),
           });
 
           if (!assertUploadSendFlowAlive(activeFlowRun, 'after-stable-send')) {
@@ -16843,10 +19657,106 @@
 
           const failReason = String((sendResult && sendResult.reason) || 'unknown');
 
-          if (sendResult && sendResult.wait_reply) {
-            enterUploadWaitingReplyBlocked(runId, source);
-            sendFailureHandled = true;
-            return false;
+          // 软等待 reason：这些状态下绝对不能进入 wait_reply，只能 wait_send
+          const softWaitReasons = new Set([
+            'composer_empty_wait_payload',
+            'waiting_payload',
+            'attachment_uploading',
+            'waiting_attachment_upload',
+            'waiting_attachment_upload_done',
+            'enter_fallback_blocked_with_attachment',
+            'send_button_not_ready_with_attachment',
+            'send_button_not_found',
+            'send_button_disabled',
+            'button_disabled',
+            'payload_ready_but_send_button_missing',
+            'attachment_ready_but_send_button_missing',
+            'send_button_not_ready_after_text',
+            'waiting_real_send_button',
+          ]);
+
+          if (sendResult && sendResult.wait_reply && !softWaitReasons.has(failReason)) {
+            // 只有真正发送后才能进入等待回复
+            const trulySentReasons = new Set([
+              'sent_wait_reply',
+              'send_started',
+              'message_accepted',
+            ]);
+            const assistantBusyBeforeSend = new Set([
+              'assistant_busy',
+              'response_generating',
+              'waiting_reply',
+            ]);
+            if (trulySentReasons.has(failReason)) {
+              // 消息已真正发出，等待回复
+              enterUploadWaitingReplyAfterSend(runId, failReason);
+              sendFailureHandled = true;
+              return true;
+            }
+            if (assistantBusyBeforeSend.has(failReason)) {
+              // 页面正在回答，消息尚未发出 → 硬阻断，不排队
+              ToolboxShell.appendLog(
+                `[SEND][BLOCKED_ASSISTANT_BUSY] source=${source || '-'} runId=${runId} reason=${failReason}_during_send_loop attempt=${outerAttempt}`,
+              );
+              logUploadSendUiState('send-aborted', `assistant-busy:${failReason}`, runId);
+              resetUploadSendUiState(`send-message:blocked-assistant-busy-loop`, runId);
+              sendFailureHandled = true;
+              return false;
+            }
+          }
+
+          if (isManualSend && softWaitReasons.has(failReason)) {
+            const manualFailReason = failReason === 'waiting_payload'
+              || failReason === 'composer_empty_wait_payload'
+              ? 'empty_text_and_no_attachment'
+              : (
+                failReason === 'waiting_attachment_upload'
+                || failReason === 'waiting_attachment_upload_done'
+                || failReason === 'attachment_uploading'
+                  ? 'attachment_still_uploading'
+                  : failReason
+              );
+            sendResult = {
+              ok: false,
+              reason: manualFailReason,
+              retryable: false,
+              wait_send: false,
+              wait_reply: false,
+            };
+            logSendMessageComposerState(source, `reason=${manualFailReason}`);
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][FAILED] reason=${manualFailReason} source=${source} attempt=${outerAttempt}`,
+            );
+            break;
+          }
+
+          // 强制修正：软等待 reason 下，确保 wait_reply=false，wait_send=true
+          if (softWaitReasons.has(failReason) && sendResult) {
+            sendResult.wait_reply = false;
+            sendResult.wait_send = true;
+            sendResult.retryable = true;
+          }
+
+          const waitSendOnlyReasons = softWaitReasons;
+          if (
+            (sendResult && sendResult.wait_send)
+            || waitSendOnlyReasons.has(failReason)
+          ) {
+            setWaitingRealSendButton(true);
+            state.waitingSend = true;
+            state.autoSendWaiting = true;
+            state.waitingReply = false;
+            if (failReason === 'waiting_payload' || failReason === 'composer_empty_wait_payload') {
+              ToolboxShell.appendLog(`[SEND][WAIT_PAYLOAD] source=${source} runId=${runId} attempt=${outerAttempt}`);
+              setStatus('等待输入', 'running');
+            } else if (failReason === 'waiting_attachment_upload' || failReason === 'attachment_uploading') {
+              ToolboxShell.appendLog(`[SEND][WAIT_ATTACHMENT_UPLOAD] source=${source} runId=${runId} attempt=${outerAttempt}`);
+              setStatus('上传中', 'running');
+            } else {
+              ToolboxShell.appendLog(`[SEND][WAIT_REAL_SEND_BUTTON] source=${source} runId=${runId} reason=${failReason} attempt=${outerAttempt}`);
+              setStatus('等待发送', 'running');
+            }
+            scheduleRenderUpload('send-message:wait-real-send-button');
           }
 
           if (failReason === 'page_navigating' || failReason === 'cancelled') {
@@ -16854,9 +19764,19 @@
           }
 
           const retryableByResult = !!(sendResult && sendResult.retryable === true);
-          const retryableByReason = shouldRetryForeverSendReason(failReason);
 
-          if (!(retryableByResult || retryableByReason)) {
+          if (!retryableByResult) {
+            break;
+          }
+
+          if (isManualSend && outerAttempt >= manualMaxAttempts) {
+            sendResult = {
+              ok: false,
+              reason: 'manual_send_timeout',
+              retryable: false,
+              wait_send: false,
+              wait_reply: false,
+            };
             break;
           }
 
@@ -16875,7 +19795,8 @@
           uploadSendShortcutRunning = true;
           uploadSendTaskStartedAt = Date.now();
           scheduleRenderUpload('send-message:retry-transient');
-          const slept = await sleepWithWaitSendCancel(800, runId);
+          const retrySleepMs = isManualSend ? MANUAL_SEND_RETRY_INTERVAL_MS : 800;
+          const slept = await sleepWithWaitSendCancel(retrySleepMs, runId);
           if (!slept) {
             break;
           }
@@ -16890,23 +19811,29 @@
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][DONE] ok=1 source=${source} reason=${sendResult.reason || '-'}`,
           );
-          state.uploadSendSuccessHint = '已发送';
-          state.uploadSendSuccessHintAt = Date.now();
+          // 不再在顶部按钮上延时显示“已发送”；成功语义交给日志/批量统计
+          state.uploadSendSuccessHint = '';
+          state.uploadSendSuccessHintAt = 0;
           enterUploadWaitingReplyAfterSend(runId, sendResult.reason || source);
           return true;
         }
 
         const failReason = String((sendResult && sendResult.reason) || 'unknown');
+        lastUploadSendPanelFailReason = failReason;
         const composerTextAfterFail = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '')
           : '';
         const attachmentCountAfterFail = typeof ComposerApi.countAttachmentChips === 'function'
           ? ComposerApi.countAttachmentChips()
           : 0;
+        const nativeReadyAfterFail = probeSendMessageNativeReady() ? 1 : 0;
 
         const failMessage = mapForeverSendFailureMessage(failReason)
           || mapUploadSendFailureMessage(failReason);
 
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE][FAILED] reason=${failReason} source=${source} textLen=${composerTextAfterFail.length} attachmentCount=${attachmentCountAfterFail} nativeReady=${nativeReadyAfterFail}`,
+        );
         ToolboxShell.appendLog(
           `[UPLOAD][SEND_FOREVER_FAILED] run=${runId} attempt=${outerAttempt} reason=${failReason}`,
         );
@@ -16939,6 +19866,9 @@
           setStatus(hintText, 'warn');
           state.uploadSendFailureHint = hintText;
           state.uploadSendFailureHintAt = Date.now();
+          if (isManualSend) {
+            scheduleManualSendFailureHintClear(runId);
+          }
         }
 
         scheduleRenderUpload('send-message:not-sent-reset');
@@ -16961,14 +19891,14 @@
         sendFailureHandled = true;
         return false;
       } finally {
-        if (!state.waitingReply && !isWaitingSendActive()) {
+        if (!state.waitingReply && !isSendPipelineBusy()) {
           state.waitingSend = false;
           state.autoSendWaiting = false;
           uploadSendShortcutRunning = false;
           uploadSendTaskStartedAt = 0;
         }
 
-        if (!state.waitingReply && !sendFailureHandled && !isWaitingSendActive()) {
+        if (!state.waitingReply && !sendFailureHandled && !isSendPipelineBusy()) {
           state.uploadSendFailureHint = '';
           state.uploadSendFailureHintAt = 0;
           resetUploadSendUiState(
@@ -17098,6 +20028,20 @@
       ToolboxShell.appendLog(`[SEND_HOTKEY][${stage}]${extra ? ` ${extra}` : ''}`);
     }
 
+    function isSendHotkeySource(source) {
+      return /shortcut|enter-hotkey/i.test(String(source || ''));
+    }
+
+    function logSendHotkeyBlocked(reason, source, extra) {
+      if (!isSendHotkeySource(source)) {
+        return;
+      }
+
+      ToolboxShell.appendLog(
+        `[SEND_HOTKEY][BLOCKED] reason=${reason} source=${source}${extra ? ` ${extra}` : ''}`,
+      );
+    }
+
     function formatSendHotkeyKey(e) {
       if (typeof formatShortcutFromEvent === 'function') {
         return formatShortcutFromEvent(e);
@@ -17194,7 +20138,7 @@
     }
 
     function getSendHotkeyPreDispatchBlockReason() {
-      if (uploadSendShortcutRunning && !isWaitingSendActive() && !state.waitingReply) {
+      if (uploadSendShortcutRunning && !isSendPipelineBusy() && !state.waitingReply) {
         return 'sending-in-progress';
       }
 
@@ -17318,21 +20262,33 @@
       const src = `shortcut:${String(shortcutSource || 'document').trim() || 'document'}`;
 
       ToolboxShell.appendLog(`[SEND_HOTKEY][TRIGGER_SEND] source=${src}`);
+      scheduleRenderUpload(`send-shortcut:checking:${src}`);
 
       const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
 
       if (sendBtn) {
-        runUploadUiAction('send-message', sendBtn, src, event);
+        const runtimeAction = resolveUploadButtonRuntimeAction(sendBtn, 'send-message');
+        runUploadUiAction(runtimeAction, sendBtn, src, event);
         return true;
       }
 
       void triggerSendFromToolbox(src)
         .then((ok) => {
           if (ok) {
-            logSendHotkey('DISPATCH_OK', `source=${src}`);
-          } else {
-            logSendHotkey('DISPATCH_BLOCKED', `reason=send-flow-returned-false source=${src}`);
+            logSendHotkey('DISPATCH_OK', `source=${src} claimed=${isWaitingSendActive() ? 1 : 0}`);
+            return;
           }
+
+          const panelReason = String(lastUploadSendPanelFailReason || 'send-message-button-core-failed').trim()
+            || 'send-message-button-core-failed';
+          logSendHotkey('DISPATCH_BLOCKED', `reason=${panelReason} source=${src} waitingSend=${isWaitingSendActive() ? 1 : 0}`);
+          const failMessage = mapUploadSendFailureMessage(panelReason)
+            || mapForeverSendFailureMessage(panelReason)
+            || `发送失败：${panelReason}`;
+          setStatus(failMessage, 'warn');
+          state.uploadSendFailureHint = failMessage;
+          state.uploadSendFailureHintAt = Date.now();
+          scheduleRenderUpload('send-message:shortcut-failed');
         })
         .catch((err) => {
           const errText = err && err.message ? err.message : String(err);
@@ -17422,7 +20378,7 @@
         return true;
       }
 
-      if (isWaitingSendActive()) {
+      if (isSendPipelineBusy()) {
         if (isChatGPTComposerEditableTarget(e.target)) {
           logSendHotkey('SKIP', `reason=chatgpt-composer-waiting-send key=${formatSendHotkeyKey(e)}`);
           return false;
@@ -17489,9 +20445,9 @@
         void triggerSendFromToolbox(enterSource)
           .then((ok) => {
             if (ok) {
-              logSendHotkey('DISPATCH_OK', `source=${enterSource}`);
+              logSendHotkey('DISPATCH_OK', `source=${enterSource} claimed=${isSendPipelineBusy() ? 1 : 0}`);
             } else {
-              logSendHotkey('DISPATCH_BLOCKED', `reason=send-flow-returned-false key=${formatSendHotkeyKey(e)}`);
+              logSendHotkey('DISPATCH_BLOCKED', `reason=send-flow-returned-false key=${formatSendHotkeyKey(e)} sendPipelineBusy=${isSendPipelineBusy() ? 1 : 0}`);
             }
           })
           .catch((err) => {
@@ -17564,8 +20520,12 @@
       const sendItem = cfg && cfg.sendMessage ? cfg.sendMessage : null;
       const sendLabel = sendItem && sendItem.label ? String(sendItem.label) : '-';
       const sendCtrl = sendItem && sendItem.ctrl ? '1' : '0';
+      const sendAlt = sendItem && sendItem.alt ? '1' : '0';
+      const sendShift = sendItem && sendItem.shift ? '1' : '0';
+      const sendMeta = sendItem && sendItem.meta ? '1' : '0';
+      const sendEnabled = sendItem && sendItem.enabled !== false ? '1' : '0';
       ToolboxShell.appendLog(
-        `[SHORTCUT][bind] send=configurable Enter|Ctrl+Enter label=${sendLabel} ctrl=${sendCtrl}`,
+        `[SHORTCUT][bind] send=enabled=${sendEnabled} label=${sendLabel} ctrl=${sendCtrl} alt=${sendAlt} shift=${sendShift} meta=${sendMeta}`,
       );
     }
 
@@ -17718,6 +20678,11 @@
       persistQueueThrottled('startUpload:after-refresh');
 
       logUploadQueueSnapshot('startUpload:after-refresh');
+
+      if (blockUploadIfCacheSourcesPresent(activeFiles, 'start-upload')) {
+        ToolboxShell.appendLog('[UPLOAD_DIAG][startUpload:blocked-cache-source]');
+        return buildUploadSkipResult('cache-source-blocked');
+      }
 
       const attachedCount = activeFiles.filter((q) => q && q.state === UploadState.ATTACHED).length;
       const uploadablePlan = activeFiles.filter((q) => {
@@ -17947,10 +20912,63 @@
       return finalResult || buildUploadSkipResult('upload-not-finalized');
     }
 
+    function isLegacyUploadItemAttached(q) {
+      return !!q && (
+        q.state === UploadState.ATTACHED
+        || q.status === 'uploaded'
+        || q.status === 'attached'
+      );
+    }
+
+    function resolveUploadItemNameFields(q, uploadFile) {
+      const originalName = String(
+        (q && (q.originalName || q.name)) || (uploadFile && uploadFile.name) || '',
+      ).replace(/^.*[/\\]/, '').trim();
+      const displayName = String(
+        (q && q.displayName) || originalName,
+      ).replace(/^.*[/\\]/, '').trim();
+      const canonicalName = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.canonicalFileName === 'function'
+        ? ComposerApi.canonicalFileName(originalName)
+        : displayName;
+
+      return {
+        originalName,
+        displayName,
+        canonicalName,
+      };
+    }
+
+    function markUploadItemAttached(q, reason = '', uploadFile = null) {
+      if (!q) {
+        return;
+      }
+      const nameFields = resolveUploadItemNameFields(q, uploadFile);
+      q.state = UploadState.ATTACHED;
+      q.status = 'attached';
+      q.message = '';
+      q.attachedInSession = true;
+      q.persistedAttached = true;
+      q.originalName = nameFields.originalName || q.originalName || q.name || '';
+      q.displayName = nameFields.displayName || q.displayName || q.name || '';
+      q.canonicalName = nameFields.canonicalName || q.canonicalName || '';
+      q.updatedAt = Date.now();
+      if (reason) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][ITEM_ATTACHED] name=${getUploadItemName(q)} original=${q.originalName || '-'} display=${q.displayName || '-'} canonical=${q.canonicalName || '-'} reason=${reason}`,
+        );
+      }
+    }
+
+    function getUploadItemName(item) {
+      if (!item) {
+        return '-';
+      }
+      return String(item.name || item.filename || item.fileName || '-').trim() || '-';
+    }
+
     function isQueueItemAlreadyUploaded(q) {
-      if (!q) return true;
-      if (q.status === 'uploaded') return true;
-      return q.state === UploadState.ATTACHED;
+      return isLegacyUploadItemAttached(q);
     }
 
     function isFlaskLocalDirectItem(item) {
@@ -17969,15 +20987,24 @@
       );
     }
 
-    function normalizeFlaskFilesFromBridge(list) {
+    function normalizeFlaskFilesFromBridge(list, options = {}) {
       const rows = Array.isArray(list) ? list : [];
+      const fallbackGroupId = getActiveUploadScopeGroupId(options);
       return rows
         .filter((item) => item && typeof item === 'object')
-        .map((item) => ({
-          ...item,
-          source: 'flask_local_direct',
-          status: item.status || 'pending',
-        }));
+        .map((item) => {
+          const explicitGroupId = getUploadItemGroupId(item);
+          const groupId = explicitGroupId || (
+            isFlaskUploadGroupId(fallbackGroupId) ? fallbackGroupId : ''
+          );
+          return {
+            ...item,
+            groupId,
+            uploadActiveGroupId: groupId,
+            source: 'flask_local_direct',
+            status: item.status || 'pending',
+          };
+        });
     }
 
     function applyBridgeUploadFiles(patch) {
@@ -17985,7 +21012,9 @@
       if (!Object.prototype.hasOwnProperty.call(payload, 'upload_files')) {
         return;
       }
-      const incoming = normalizeFlaskFilesFromBridge(payload.upload_files);
+      const incoming = normalizeFlaskFilesFromBridge(payload.upload_files, {
+        groupId: getActiveUploadScopeGroupId(),
+      });
       state.flaskFiles = incoming;
       ToolboxShell.appendLog(
         `[UPLOAD][FLASK_SYNC] count=${incoming.length} names=${incoming.map((f) => f.name || '-').join('|')}`,
@@ -17993,12 +21022,14 @@
       scheduleRenderUpload('bridge-upload-files-sync');
     }
 
-    function getPendingUploadItems() {
+    function getPendingUploadItems(options = {}) {
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
       const items = [];
       const seen = new Set();
 
       const pushItem = (item, source) => {
         if (!item) return;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) return;
         const key = [
           source,
           item.id || item.file_id || '',
@@ -18009,12 +21040,14 @@
         seen.add(key);
         items.push({
           ...item,
+          groupId: getUploadItemGroupId(item) || scopeGroupId,
           source: source || item.source || 'browser_file',
         });
       };
 
       for (const item of state.queue || []) {
         if (!item) continue;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
 
         if (isQueueItemAlreadyUploaded(item)) {
           continue;
@@ -18023,9 +21056,17 @@
         const attemptable = hasAttemptableUploadSource(item);
         const flaskDirect = isFlaskLocalDirectItem(item);
 
+        if (isUploadSourceCacheForbidden(item) && !attemptable && !flaskDirect) {
+          markCacheForbiddenUploadItems([item], 'getPendingUploadItems');
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_FILTERED] groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} state=${item.state || '-'} source=${item.source || '-'} reason=cache-forbidden`,
+          );
+          continue;
+        }
+
         if (!attemptable && !flaskDirect) {
           ToolboxShell.appendLog(
-            `[UPLOAD][PENDING_FILTERED] name=${item.name || item.filename || '-'} state=${item.state || '-'} source=${item.source || '-'} reason=no-attemptable-source`,
+            `[UPLOAD][PENDING_FILTERED] groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} state=${item.state || '-'} source=${item.source || '-'} reason=no-attemptable-source`,
           );
           continue;
         }
@@ -18035,7 +21076,8 @@
 
       for (const item of state.flaskFiles || []) {
         if (!item) continue;
-        if (item.status === 'uploaded') continue;
+        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
+        if (isLegacyUploadItemAttached(item)) continue;
         if (!isFlaskLocalDirectItem(item)) continue;
         pushItem(item, 'flask_local_direct');
       }
@@ -18064,105 +21106,21 @@
         throw new Error('空文件项，无法解析上传对象');
       }
 
-      if (item.file instanceof File) {
-        return item.file;
+      const fresh = await resolveStrictLocalUploadFile(item, { source: 'resolveUploadFileObject' });
+      const normalized = normalizeToNativeFile(fresh, item.name || item.filename || 'upload.bin');
+      if (normalized) {
+        return normalized;
       }
 
-      if (item.sourceFile instanceof File) {
-        item.file = item.sourceFile;
-        return item.sourceFile;
-      }
-
-      if (item.originalFile instanceof File) {
-        item.file = item.originalFile;
-        return item.originalFile;
-      }
-
-      if (item.blob instanceof Blob) {
+      if (fresh instanceof Blob) {
         return new File(
-          [item.blob],
+          [fresh],
           item.name || item.filename || 'upload.bin',
           { type: item.mime_type || item.type || 'application/octet-stream' },
         );
       }
 
-      if (item.id && (item.fileHandle || item.file || item.blob)) {
-        const fresh = await readFreshFile(item);
-        const normalized = normalizeToNativeFile(fresh, item.name || 'upload.bin');
-        if (normalized) {
-          return normalized;
-        }
-        if (fresh instanceof Blob) {
-          return new File(
-            [fresh],
-            item.name || 'upload.bin',
-            { type: item.mime_type || item.type || 'application/octet-stream' },
-          );
-        }
-        return fresh;
-      }
-
-      const fileName = item.name || item.filename || 'upload.bin';
-      const downloadUrl = String(
-        item.download_url || item.url || item.file_url || '',
-      ).trim();
-
-      if (!downloadUrl) {
-        throw new Error(`文件缺少 download_url，无法从 Flask 获取内容：${fileName}`);
-      }
-
-      const response = await fetch(downloadUrl, {
-        method: 'GET',
-        credentials: 'include',
-        cache: 'no-store',
-      });
-
-      if (!response.ok) {
-        throw new Error(
-          `下载文件失败：${response.status} ${response.statusText} ${fileName}`,
-        );
-      }
-
-      const blob = await response.blob();
-
-      return new File(
-        [blob],
-        fileName,
-        { type: item.mime_type || blob.type || 'application/octet-stream' },
-      );
-    }
-
-    function findChatGPTFileInput() {
-      const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-      if (inputs.length > 0) {
-        return inputs[0];
-      }
-
-      const attachButtons = Array.from(
-        document.querySelectorAll('button, [role="button"]'),
-      ).filter((el) => {
-        const text = (el.innerText || el.textContent || '').trim();
-        const aria = (el.getAttribute('aria-label') || '').trim();
-        const title = (el.getAttribute('title') || '').trim();
-        return (
-          text.includes('添加')
-          || text.includes('上传')
-          || text.includes('Attach')
-          || text.includes('Upload')
-          || aria.includes('Attach')
-          || aria.includes('Upload')
-          || aria.includes('添加')
-          || aria.includes('上传')
-          || title.includes('Attach')
-          || title.includes('Upload')
-        );
-      });
-
-      if (attachButtons.length > 0) {
-        attachButtons[0].click();
-      }
-
-      return document.querySelector('input[type="file"]');
+      return fresh;
     }
 
     async function uploadFilesToChatGPT(files, options = {}) {
@@ -18186,10 +21144,24 @@
         typeof ComposerApi !== 'undefined'
         && typeof ComposerApi.attachFilesByFileInput === 'function'
       ) {
-        const uploadResult = await ComposerApi.attachFilesByFileInput(cleanFiles, 90000, {
+        const mode = opts.mode || 'send';
+        const isUploadOnly = mode === 'upload_only' || opts.uploadOnly === true;
+
+        const attachOptions = {
           signal,
           isCancelled,
-        });
+        };
+
+        if (isUploadOnly) {
+          attachOptions.uploadOnly = true;
+          attachOptions.requireSendReady = false;
+        }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][ATTACH_OPTIONS] mode=${mode} uploadOnly=${isUploadOnly ? 1 : 0} requireSendReady=${isUploadOnly ? 0 : 1}`,
+        );
+
+        const uploadResult = await ComposerApi.attachFilesByFileInput(cleanFiles, 90000, attachOptions);
         if (uploadResult && uploadResult.ok) {
           return true;
         }
@@ -18206,21 +21178,9 @@
         throw new Error(reason);
       }
 
-      const input = findChatGPTFileInput();
-      if (!input) {
-        throw new Error('未找到 ChatGPT 文件输入框 input[type=file]');
-      }
-
-      const dataTransfer = new DataTransfer();
-      for (const file of cleanFiles) {
-        dataTransfer.items.add(file);
-      }
-
-      input.files = dataTransfer.files;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-
-      return true;
+      throw new Error(
+        'ComposerApi.attachFilesByFileInput 不可用，禁止走未校验 native upload settled 的 fallback 上传路径',
+      );
     }
 
     function releaseUploadPayload(item, reason, options = {}) {
@@ -18253,11 +21213,6 @@
 
         if (item.sourceBlob) {
           item.sourceBlob = null;
-          released = true;
-        }
-
-        if (item.fileHandle) {
-          item.fileHandle = null;
           released = true;
         }
       }
@@ -18305,10 +21260,10 @@
           updateItem(item.id, {
             state: UploadState.ATTACHED,
             status: 'attached',
-            message: '已绑定到输入框',
+            message: '已上传到 ChatGPT 输入框并确认完成',
           });
           const queueItem = (state.queue || []).find((q) => q && q.id === item.id) || item;
-          logUploadSourceCheck(queueItem, 'attached-to-input');
+          logUploadSourceCheck(queueItem, 'native-upload-settled');
         }
       }
 
@@ -18345,6 +21300,7 @@
     async function startUploadForAutoQueue(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const uploadSource = String(opts.source || 'autoq').trim() || 'autoq';
+      const scopeGroupId = getActiveUploadScopeGroupId(opts);
       const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
       const forceReupload = opts.forceReupload === true;
       const maxFilesRaw = Number(opts.maxFiles);
@@ -18353,25 +21309,32 @@
         : 0;
 
       ToolboxShell.appendLog(
-        `[UPLOAD][AUTOQ_START] source=${uploadSource} forceReupload=${forceReupload ? 1 : 0} maxFiles=${maxFiles || '-'}`,
+        `[UPLOAD][AUTOQ_START] source=${uploadSource} groupId=${scopeGroupId || '-'} forceReupload=${forceReupload ? 1 : 0} maxFiles=${maxFiles || '-'}`,
       );
 
       if (!forceReupload) {
         // 兼容旧行为：仅重置已绑定，避免影响其它入口调用
         resetQueueItemsForUpload({
           forceResetAttached: true,
+          groupId: scopeGroupId,
           reason: uploadSource,
         });
-        resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`);
+        resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`, {
+          groupId: scopeGroupId,
+        });
 
-        const pendingItems = getPendingUploadItems();
+        const pendingItems = getPendingUploadItems({ groupId: scopeGroupId });
         const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
 
         if (pendingCount > 0) {
           return startUploadFromCurrentQueue({
             source: uploadSource,
+            groupId: scopeGroupId,
             shouldStop,
             maxFiles,
+            mode: 'upload_only',
+            uploadOnly: true,
+            requireSendReady: false,
           });
         }
 
@@ -18401,6 +21364,7 @@
           forceResetAttached: true,
           forceResetUploaded: true,
           forceResetDone: true,
+          groupId: scopeGroupId,
           reason: uploadSource,
         })) || 0;
 
@@ -18411,7 +21375,9 @@
         let flaskResetCount = 0;
         try {
           if (typeof resetFlaskFilesForUpload === 'function') {
-            flaskResetCount = resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`) ? 1 : 0;
+            flaskResetCount = resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`, {
+              groupId: scopeGroupId,
+            }) ? 1 : 0;
           }
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
@@ -18424,7 +21390,7 @@
         );
       }
 
-      const pendingItems = getPendingUploadItems();
+      const pendingItems = getPendingUploadItems({ groupId: scopeGroupId });
       const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
 
       ToolboxShell.appendLog(
@@ -18448,20 +21414,35 @@
 
       return startUploadFromCurrentQueue({
         source: uploadSource,
+        groupId: scopeGroupId,
         shouldStop,
         maxFiles,
+        mode: 'upload_only',
+        uploadOnly: true,
+        requireSendReady: false,
       });
     }
 
     async function uploadFromCurrentQueueShared(options = {}) {
       const source = String(options.source || 'shared-upload');
+      const scopeGroupId = getActiveUploadScopeGroupId(options);
+      const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
       reconcileUploadPhase(`shared-enter:${source}`);
+      ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`);
+
+      // 默认不重置已完成状态；只有显式传 true 才允许重置
+      const forceResetAttached = options.forceResetAttached === true;
+      const forceResetUploaded = options.forceResetUploaded === true;
+      const forceResetDone = options.forceResetDone === true;
+      // 默认必须保留已绑定到输入框的文件
+      const preserveAttached = options.preserveAttached !== false;
 
       const resetCount = resetQueueItemsForUpload({
-        forceResetAttached: true,
-        forceResetUploaded: true,
-        forceResetDone: true,
-        preserveAttached: false,
+        forceResetAttached,
+        forceResetUploaded,
+        forceResetDone,
+        preserveAttached,
+        groupId: scopeGroupId,
         reason: `uploadFromCurrentQueueShared:${source}`,
       });
       ToolboxShell.appendLog(`[UPLOAD_SHARED][RESET_DONE] source=${source} resetCount=${resetCount}`);
@@ -18469,10 +21450,12 @@
       const result = await startUploadFromCurrentQueue({
         ...options,
         source,
+        groupId: scopeGroupId,
         skipPreReset: true,
-        forceResetAttached: true,
-        forceResetUploaded: true,
-        forceResetDone: true,
+        forceResetAttached,
+        forceResetUploaded,
+        forceResetDone,
+        preserveAttached,
       });
 
       reconcileUploadPhase(`shared-done:${source}`);
@@ -18491,6 +21474,22 @@
       const maxFiles = Number.isFinite(maxFilesRaw) && maxFilesRaw > 0
         ? Math.floor(maxFilesRaw)
         : 0;
+      const scopeGroupId = getActiveUploadScopeGroupId(opts);
+      const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
+      const resolveUploadOwner = (sourceText, parentTaskText) => {
+        const sourceLower = String(sourceText || '').trim().toLowerCase();
+        const parentLower = String(parentTaskText || '').trim().toLowerCase();
+        if (parentLower === 'batch-initial' || parentLower.includes('batch')) {
+          return 'batch-initial';
+        }
+        if (parentLower.includes('closed-loop') || sourceLower.includes('closed-loop')) {
+          return 'closed-loop';
+        }
+        if (parentLower.includes('copy-loop') || sourceLower.includes('copy-loop')) {
+          return 'copy-loop';
+        }
+        return 'manual';
+      };
 
       reconcileUploadPhase(`start-enter:${uploadSource}`);
 
@@ -18564,13 +21563,17 @@
 
       const childUploadRunId = isChildUpload ? createUploadTaskRunId('upload_child') : '';
       if (isChildUpload) {
-        state.uploadTask.phase = 'uploading';
-        state.uploadTask.runId = childUploadRunId;
-        state.uploadTask.parentTask = parentTask;
-        state.uploadTask.source = uploadSource;
-        state.uploadTask.cycleIndex = cycleIndex;
-        state.uploadTask.cancelRequested = false;
         state.uploadTask.abortController = new AbortController();
+        setAuthoritativeUploadTaskState({
+          phase: 'uploading',
+          runId: childUploadRunId,
+          parentTask,
+          source: uploadSource,
+          cycleIndex,
+          owner: resolveUploadOwner(uploadSource, parentTask),
+          cancelRequested: false,
+          cancelable: true,
+        }, `start-child:${uploadSource}`);
         scheduleRenderUpload(`startUpload:child:${uploadSource}`);
       }
 
@@ -18591,17 +21594,37 @@
           forceResetUploaded: opts.forceResetUploaded === true,
           forceResetDone: opts.forceResetDone === true,
           preserveAttached: opts.preserveAttached,
+          groupId: scopeGroupId,
           reason: uploadSource,
         });
       }
-      resetFlaskFilesForUpload(`startUploadFromCurrentQueue:${uploadSource}`);
+      resetFlaskFilesForUpload(`startUploadFromCurrentQueue:${uploadSource}`, {
+        groupId: scopeGroupId,
+      });
 
-      const allPendingItems = await getPendingUploadItemsForStart(uploadSource);
+      const allPendingItems = await getPendingUploadItemsForStart(uploadSource, {
+        groupId: scopeGroupId,
+      });
       const pendingItems = maxFiles > 0
         ? allPendingItems.slice(0, maxFiles)
         : allPendingItems;
 
       const skippedByMaxFiles = Math.max(0, allPendingItems.length - pendingItems.length);
+
+      const scopeQueueItems = (state.queue || []).filter(
+        (item) => item && isUploadItemInActiveScope(item, scopeGroupId),
+      );
+      if (blockUploadIfCacheSourcesPresent(scopeQueueItems, `start-upload-queue:${uploadSource}`)) {
+        reconcileUploadPhase(`cache-blocked:${uploadSource}`);
+        if (!isChildUpload) {
+          setUploadButtonState('idle', 'cache-source-blocked');
+          state.running = false;
+        }
+        return buildQueueUploadResult({
+          ok: false,
+          reason: 'cache-source-blocked',
+        });
+      }
 
       if (!pendingItems.length) {
         reconcileUploadPhase(`no-files:${uploadSource}`);
@@ -18614,7 +21637,7 @@
           stats,
         });
         ToolboxShell.appendLog(
-          `[UPLOAD][FAILED] source=${uploadSource} reason=no-files queue=${(state.queue || []).length} flask=${(state.flaskFiles || []).length}`,
+          `[UPLOAD][FAILED] source=${uploadSource} reason=no-files groupId=${scopeGroupId || '-'} queue=${(state.queue || []).length} flask=${(state.flaskFiles || []).length}`,
         );
         return buildQueueUploadResult({
           ok: false,
@@ -18622,10 +21645,53 @@
         });
       }
 
+      // 真正进入“绑定/上传”链路前，先等待 ChatGPT composer 空闲。
+      // 目的：避免在 assistant 正在生成时抢 DOM，导致错误检测误判 native-upload-failed。
+      const mode = opts.mode
+        ? String(opts.mode).trim() === 'upload_only'
+          ? 'upload_only'
+          : 'send'
+        : (uploadSource.startsWith('upload-manual:') ? 'upload_only' : 'send');
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][MODE] source=${uploadSource} mode=${mode} uploadOnly=${mode === 'upload_only' ? 1 : 0}`,
+      );
+
+      const composerReady = await waitChatGPTComposerReadyForUpload({
+        timeoutMs: 120000,
+        pollMs: 500,
+        stableMs: 1500,
+        mode,
+      });
+      if (!composerReady.ok) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][COMPOSER_BLOCKED] source=${uploadSource} reason=${composerReady.reason || '-'}`,
+        );
+        reconcileUploadPhase(`composer-not-ready:${uploadSource}`);
+        if (!isChildUpload) {
+          setStatus('等待输入框空闲后再上传', 'waiting');
+          setUploadButtonState('idle', 'composer-not-ready');
+        }
+        return buildQueueUploadResult({
+          ok: false,
+          reason: composerReady.reason || 'final-upload-blocked-composer-not-ready',
+        });
+      }
+
       if (!isChildUpload) {
         state.uploadCancelRequested = false;
         state.uploadAbortController = new AbortController();
         state.running = true;
+        setAuthoritativeUploadTaskState({
+          phase: 'uploading',
+          source: uploadSource,
+          owner: resolveUploadOwner(uploadSource, parentTask),
+          parentTask: '',
+          cycleIndex,
+          cancelRequested: false,
+          cancelable: true,
+          runId: createUploadTaskRunId('upload_manual'),
+        }, `start-main:${uploadSource}`);
         setUploadButtonState('uploading', 'start-upload');
         scheduleRenderUpload('startUploadFromCurrentQueue:start');
       }
@@ -18641,13 +21707,21 @@
           : null;
       };
 
+      const currentRunId = isChildUpload
+        ? childUploadRunId
+        : (state.uploadTask && state.uploadTask.runId ? String(state.uploadTask.runId) : '');
+      let composerBeforeSnapshot = null;
+      let prevUploadCriticalFlag = false;
+      let didSetUploadCriticalFlag = false;
+      let uploadRunStartedAt = 0;
+
       try {
         const statusText = isChildUpload && cycleIndex > 0
           ? `第 ${cycleIndex} 轮：正在自动上传…`
           : '正在上传…';
         setStatus(statusText, 'running');
         ToolboxShell.appendLog(
-          `[UPLOAD][START] source=${uploadSource} parentTask=${parentTask || '-'} pending=${pendingItems.length} allPending=${allPendingItems.length} maxFiles=${maxFiles || '-'} skippedByMaxFiles=${skippedByMaxFiles}`,
+          `[UPLOAD][START] source=${uploadSource} parentTask=${parentTask || '-'} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'} pending=${pendingItems.length} allPending=${allPendingItems.length} maxFiles=${maxFiles || '-'} skippedByMaxFiles=${skippedByMaxFiles}`,
         );
 
         const files = [];
@@ -18679,10 +21753,121 @@
         }
 
         const uploadSignal = resolveUploadAbortSignal();
+
+        composerBeforeSnapshot = (typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function')
+          ? ComposerApi.getComposerAttachmentSnapshot(`upload:before:${uploadSource}`)
+          : null;
+
+        if (composerBeforeSnapshot) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_SNAPSHOT_BEFORE] runId=${currentRunId || '-'} count=${Number(composerBeforeSnapshot.count != null ? composerBeforeSnapshot.count : composerBeforeSnapshot.fileCount) || 0} names=${(composerBeforeSnapshot.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+          );
+        }
+
+        // 上传关键期：禁止 chat 全页扫描 & 降级工具箱重渲染，降低时序抖动。
+        prevUploadCriticalFlag = !!(window && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true);
+        window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = true;
+        uploadRunStartedAt = Date.now();
+        window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = uploadRunStartedAt;
+        didSetUploadCriticalFlag = true;
+
         await uploadFilesToChatGPT(files, {
           signal: uploadSignal,
           isCancelled: () => checkShouldStop(),
+          mode,
         });
+        let composerAfterSnapshot = null;
+        let readyDiff = null;
+        const canCompareReadyDiff = !!(
+          composerBeforeSnapshot
+          && typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+        );
+
+        if (canCompareReadyDiff) {
+          composerAfterSnapshot = ComposerApi.getComposerAttachmentSnapshot(`upload:after:${uploadSource}`);
+          const beforeReady = Number(
+            composerBeforeSnapshot.readyCount != null
+              ? composerBeforeSnapshot.readyCount
+              : (composerBeforeSnapshot.fileCount - composerBeforeSnapshot.uploadingCount),
+          ) || 0;
+          const afterReady = Number(
+            composerAfterSnapshot.readyCount != null
+              ? composerAfterSnapshot.readyCount
+              : (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount),
+          ) || 0;
+
+          readyDiff = afterReady - beforeReady;
+
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_SNAPSHOT_AFTER] runId=${currentRunId || '-'} count=${Number(composerAfterSnapshot.count != null ? composerAfterSnapshot.count : composerAfterSnapshot.fileCount) || 0} names=${(composerAfterSnapshot.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+          );
+
+          // uploadFilesToChatGPT 已结束：尽快退出 critical，避免后续渲染/状态更新继续触发重型扫描。
+          if (didSetUploadCriticalFlag) {
+            if (typeof window !== 'undefined') {
+              window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = prevUploadCriticalFlag ? true : false;
+              window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
+            }
+            didSetUploadCriticalFlag = false;
+          }
+
+          if (!(readyDiff > 0)) {
+            // native upload 流程结束了，但 composer 侧没有确认“新增 ready”
+            const hasPayload = detectComposerHasUploadPayload();
+            for (const item of pendingItems || []) {
+              if (!item) continue;
+              const timeoutMsg = '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中';
+              if (item.id) {
+                updateItem(item.id, {
+                  state: hasPayload ? UploadState.ATTACHED : UploadState.FAILED,
+                  status: hasPayload ? 'attached' : 'failed',
+                  message: hasPayload
+                    ? '已绑定到 ChatGPT 输入框（等待发送就绪）'
+                    : timeoutMsg,
+                });
+              } else {
+                item.status = hasPayload ? 'attached' : 'failed';
+                item.message = hasPayload
+                  ? '已绑定到 ChatGPT 输入框（等待发送就绪）'
+                  : timeoutMsg;
+                item.state = hasPayload ? UploadState.ATTACHED : UploadState.FAILED;
+              }
+            }
+
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][TIMEOUT_NO_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${readyDiff}`,
+            );
+
+            if (!isChildUpload) {
+              setStatus('上传等待超时：页面较重或状态检测超时，文件可能仍在处理中', 'waiting');
+              ToolboxShell.showToast(
+                '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中',
+                'warn',
+                3200,
+              );
+              scheduleRenderUpload('startUploadFromCurrentQueue:timeout-wait-ready');
+            }
+            persistQueueThrottled('startUploadFromCurrentQueue:timeout-wait-ready');
+
+            return buildQueueUploadResult({
+              ok: false,
+              uploadedCount: files.length,
+              failedCount: 0,
+              skippedCount: skippedByMaxFiles,
+              reason: 'timeout-wait-ready',
+            });
+          }
+
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][SUCCESS_BY_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${readyDiff}`,
+          );
+        }
+
+        // 未能比较 ready diff 时，保留旧逻辑：以 attachFilesByFileInput 的结果作为成功依据
         markPendingItemsUploaded(pendingItems);
         pendingItems.forEach((item) => {
           logUploadSourceCheck(item, `after-upload:${uploadSource}`);
@@ -18694,8 +21879,12 @@
         persistQueueThrottled('startUploadFromCurrentQueue:done');
 
         if (!isChildUpload) {
+          setAuthoritativeUploadTaskState({
+            phase: 'done',
+            fileName: files.map((f) => f && f.name).filter(Boolean).join('|'),
+          }, `upload-complete:${uploadSource}`);
           ToolboxShell.showToast(
-            `已提交 ${files.length} 个文件到 ChatGPT 上传框`,
+            `已添加 ${files.length} 个文件到输入框`,
             'success',
             2200,
           );
@@ -18706,15 +21895,15 @@
           type: f.type,
         })));
         const doneStatus = isChildUpload && cycleIndex > 0
-          ? `第 ${cycleIndex} 轮自动上传：已提交 ${files.length} 个文件`
-          : `已提交 ${files.length} 个文件到 ChatGPT`;
+          ? `第 ${cycleIndex} 轮自动上传：已添加 ${files.length} 个文件到输入框`
+          : `已添加 ${files.length} 个文件到输入框`;
         setStatus(doneStatus, 'success');
         ToolboxShell.appendLog(
           `[UPLOAD][DONE] source=${uploadSource} parentTask=${parentTask || '-'} uploaded=${files.length} failed=0 skipped=${skippedByMaxFiles}`,
         );
-        if (!isChildUpload) {
-          recordUploadSuccess(files.length);
-        }
+        const uploadRunIdForQuota = isChildUpload ? (childUploadRunId || '') : '';
+        const uploadSourceForQuota = isChildUpload ? `child:${parentTask || 'unknown'}` : uploadSource;
+        recordUploadSuccessOnce(files.length, uploadSourceForQuota, uploadRunIdForQuota);
 
         return buildQueueUploadResult({
           ok: true,
@@ -18745,17 +21934,197 @@
           error: errText,
           stack: errStack,
         });
+
+        const isNativeFail = isNativeUploadFailureReason(errText);
+
+        const isTimeoutLikeBatch = /native-upload-settle-timeout|attachment-ready-timeout|final-upload-blocked-composer-not-ready/i
+          .test(errText || '');
+
+        const nativeFailIsOaiDomain = isNativeFail && /files\.oaiusercontent\.com/i.test(errText || '');
+        const isJsError = (
+          String(errName || '').toLowerCase().includes('referenceerror')
+          || String(errName || '').toLowerCase().includes('typeerror')
+          || String(errName || '').toLowerCase().includes('syntaxerror')
+          || /is not defined|referenceerror|typeerror|syntaxerror/i.test(errText || '')
+        );
+
+        // 最终 UI 展示文案：用于替换 catch 末尾的统一“上传失败：...”
+        let uiFailToastText = isNativeFail
+          ? (nativeFailIsOaiDomain
+            ? '上传服务器失败：files.oaiusercontent.com 不可达或被代理/网络拦截'
+            : `ChatGPT 原生文件上传失败：${errText}`)
+          : (isTimeoutLikeBatch
+            ? '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中'
+            : (isJsError
+              ? `工具箱上传流程异常：${errText}`
+              : `上传失败：${errText}`));
+
+        if (!isNativeFail && isTimeoutLikeBatch && detectComposerHasUploadPayload()) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][PENDING_CONFIRM] source=${uploadSource} reason=${errText} marked=ATTACHED batch=true`,
+          );
+
+          for (const item of pendingItems || []) {
+            if (!item) continue;
+            if (item.id) {
+              updateItem(item.id, {
+                state: UploadState.ATTACHED,
+                status: 'attached',
+                message: '已绑定到 ChatGPT 输入框（等待发送就绪）',
+              });
+            } else {
+              item.status = 'attached';
+              item.message = '已绑定到 ChatGPT 输入框（等待发送就绪）';
+              item.state = UploadState.ATTACHED;
+            }
+          }
+
+          if (!isChildUpload) {
+            setStatus('文件已绑定到输入框', 'success');
+            ToolboxShell.showToast('文件已绑定到输入框（等待发送就绪）', 'success', 2400);
+          }
+
+          return buildQueueUploadResult({
+            ok: true,
+            uploadedCount: pendingItems.length,
+            failedCount: 0,
+            skippedCount: 0,
+            reason: 'attached-to-composer-without-send-ready',
+          });
+        }
+
+        if (isNativeFail) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_NATIVE][FAILED] source=${uploadSource} reason=${errText}`,
+          );
+          ToolboxShell.appendLog(
+            `[UPLOAD][FAILED_MARK_PENDING_ONLY] pending=${pendingItems && pendingItems.length ? pendingItems.length : 0} reason=${errText || '-'}`,
+          );
+
+          // 使用 composer 快照差分做最终判定：避免“native 错误但其实已 ready”导致误清理/误判失败。
+          const canCompareReadyDiffOnFail = !!(
+            composerBeforeSnapshot
+            && typeof ComposerApi !== 'undefined'
+            && ComposerApi
+            && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+          );
+          if (canCompareReadyDiffOnFail) {
+            const beforeReady = Number(
+              composerBeforeSnapshot.readyCount != null
+                ? composerBeforeSnapshot.readyCount
+                : (composerBeforeSnapshot.fileCount - composerBeforeSnapshot.uploadingCount),
+            ) || 0;
+            const composerAfterSnapshot = ComposerApi.getComposerAttachmentSnapshot(`native-fail:after:${uploadSource}`);
+            const afterReady = Number(
+              composerAfterSnapshot.readyCount != null
+                ? composerAfterSnapshot.readyCount
+                : (composerAfterSnapshot.fileCount - composerAfterSnapshot.uploadingCount),
+            ) || 0;
+            const diff = afterReady - beforeReady;
+
+            ToolboxShell.appendLog(
+              `[COMPOSER][ATTACHMENT_SNAPSHOT_AFTER] runId=${currentRunId || '-'} count=${Number(composerAfterSnapshot.count != null ? composerAfterSnapshot.count : composerAfterSnapshot.fileCount) || 0} names=${(composerAfterSnapshot.items || []).map((x) => x && x.name ? x.name : '').filter(Boolean).join(',') || '-'}`,
+            );
+
+            if (diff > 0) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_NATIVE][SUCCESS_BY_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${diff}`,
+              );
+              markPendingItemsUploaded(pendingItems);
+              pendingItems.forEach((item) => {
+                logUploadSourceCheck(item, `after-native-fail-success:${uploadSource}`);
+              });
+              if (!isChildUpload) {
+                setStatus('文件已添加到输入框', 'success');
+                ToolboxShell.showToast('文件已添加到输入框', 'success', 2200);
+              }
+              return buildQueueUploadResult({
+                ok: true,
+                uploadedCount: pendingItems.length,
+                failedCount: 0,
+                skippedCount: 0,
+                reason: 'success-by-ready-diff',
+              });
+            }
+
+            ToolboxShell.appendLog(
+              `[UPLOAD_NATIVE][TIMEOUT_NO_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${diff}`,
+            );
+          }
+
+          // 失败清理：只清理本次上传后新增附件，禁止全局清空
+          await cleanupComposerAfterNativeUploadFailure(errText, {
+            runId: currentRunId,
+            beforeSnapshot: composerBeforeSnapshot,
+            forceClearAll: false,
+          });
+
+          for (const item of pendingItems || []) {
+            if (!item) continue;
+            const failMessage = nativeFailIsOaiDomain
+              ? '上传服务器失败：files.oaiusercontent.com 不可达或被代理/网络拦截'
+              : `ChatGPT 原生文件上传失败：${errText}`;
+            const normalizedStatus = String(item.status || '').trim().toLowerCase();
+            const alreadyAttached = item.state === UploadState.ATTACHED || normalizedStatus === 'attached' || normalizedStatus === 'uploaded' || normalizedStatus === 'done';
+            if (alreadyAttached) {
+              ToolboxShell.appendLog(
+                `[UPLOAD][FAILED_KEEP_ATTACHED] name=${item.name || item.filename || '-'} state=${item.state || '-'} status=${item.status || '-'} reason=${errText || '-'}`,
+              );
+              continue;
+            }
+            if (item.id) {
+              updateItem(item.id, {
+                state: UploadState.FAILED,
+                status: 'failed',
+                message: failMessage,
+              });
+            } else {
+              item.status = 'failed';
+              item.message = failMessage;
+            }
+          }
+        } else {
+          for (const item of pendingItems || []) {
+            if (!item) continue;
+            const isFinal = !!(
+              UploadStateUtils
+              && typeof UploadStateUtils.isFinal === 'function'
+              && UploadStateUtils.isFinal(item.state)
+            );
+            if (isFinal) continue;
+
+            const failMessage = isTimeoutLikeBatch
+              ? '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中'
+              : (isJsError
+                ? `工具箱上传流程异常：${errText}`
+                : `上传失败：${errText}`);
+            if (item.id) {
+              updateItem(item.id, {
+                state: UploadState.FAILED,
+                status: 'failed',
+                message: failMessage,
+              });
+            } else {
+              item.status = 'failed';
+              item.message = failMessage;
+            }
+          }
+        }
+
         ToolboxShell.appendLog(
           `[UPLOAD][FAILED] source=${uploadSource} reason=${errText}`,
         );
+
         if (!isChildUpload) {
-          ToolboxShell.showToast(`上传失败：${errText}`, 'error', 3200);
+          ToolboxShell.showToast(uiFailToastText, isNativeFail ? 'error' : (isTimeoutLikeBatch ? 'warn' : 'error'), 3200);
         }
         setStatus(
           isChildUpload && cycleIndex > 0
-            ? `第 ${cycleIndex} 轮自动上传失败：${errText}`
-            : `上传失败：${errText}`,
-          'error',
+            ? `第 ${cycleIndex} 轮自动上传失败：${uiFailToastText}`
+            : uiFailToastText,
+          isNativeFail
+            ? 'error'
+            : (isTimeoutLikeBatch ? 'waiting' : 'error'),
         );
 
         return buildQueueUploadResult({
@@ -18769,12 +22138,16 @@
         reconcileUploadPhase(`start-finally:${uploadSource}`);
         if (isChildUpload) {
           if (state.uploadTask && state.uploadTask.runId === childUploadRunId) {
-            state.uploadTask.phase = 'idle';
-            state.uploadTask.parentTask = '';
-            state.uploadTask.source = '';
-            state.uploadTask.cycleIndex = 0;
-            state.uploadTask.runId = '';
-            state.uploadTask.cancelRequested = false;
+            setAuthoritativeUploadTaskState({
+              phase: 'idle',
+              parentTask: '',
+              source: '',
+              cycleIndex: 0,
+              runId: '',
+              owner: '',
+              cancelRequested: false,
+              cancelable: false,
+            }, `child-reset:${uploadSource}`);
           }
           scheduleRenderUpload(`startUploadFromCurrentQueue:child-finally:${uploadSource}`);
         } else {
@@ -18783,8 +22156,22 @@
           if (state.uploadAbortController) {
             state.uploadAbortController = null;
           }
+          setAuthoritativeUploadTaskState({
+            phase: 'idle',
+            owner: '',
+            source: '',
+            parentTask: '',
+            cycleIndex: 0,
+            cancelRequested: false,
+            cancelable: false,
+          }, `main-reset:${uploadSource}`);
           setUploadButtonState('idle', 'upload-finished-or-reset');
           scheduleRenderUpload('startUploadFromCurrentQueue:finally');
+        }
+
+        if (didSetUploadCriticalFlag) {
+          window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ = prevUploadCriticalFlag ? true : false;
+          window.__CGPT_TOOLBOX_UPLOAD_RUN_STARTED_AT__ = 0;
         }
       }
     }
@@ -18793,7 +22180,7 @@
       const queueResult = await runStartUploadButtonCore({
         source: source || 'handle-start-upload',
       });
-      return toLegacyUploadResult(queueResult);
+      return toBridgeUploadResult(queueResult);
     }
 
     async function triggerStartUpload(source = 'button') {
@@ -18842,19 +22229,295 @@
       return false;
     }
 
+    function resolveUploadButtonRuntimeAction(button, configAction = '') {
+      if (!(button instanceof HTMLElement)) {
+        return String(configAction || '').trim();
+      }
+
+      const resolvedAction = (
+        typeof ButtonState !== 'undefined'
+        && typeof ButtonState.resolveButtonAction === 'function'
+      )
+        ? ButtonState.resolveButtonAction(button)
+        : null;
+      const runtimeAction = String(
+        (resolvedAction && resolvedAction.runtimeAction)
+        || button.dataset.cgptRuntimeAction
+        || button.dataset.cgptButtonAction
+        || '',
+      ).trim();
+      const domAction = String(
+        (resolvedAction && resolvedAction.domAction)
+        || button.dataset.action
+        || '',
+      ).trim();
+      const baseAction = String(
+        (resolvedAction && resolvedAction.baseAction)
+        || button.dataset.cgptBaseAction
+        || configAction
+        || domAction
+        || '',
+      ).trim();
+
+      if (!runtimeAction) {
+        return domAction || baseAction;
+      }
+
+      if (runtimeAction === 'none') {
+        return 'none';
+      }
+
+      if (runtimeAction === 'cancel-send' || runtimeAction === 'cancel-wait-reply') {
+        return runtimeAction;
+      }
+
+      if (runtimeAction === 'start') {
+        return baseAction || domAction;
+      }
+
+      if (runtimeAction === 'cancel' || runtimeAction === 'stop') {
+        if (baseAction === 'send-message') {
+          return 'cancel-send';
+        }
+        if (baseAction === 'start-upload') {
+          return 'cancel-upload';
+        }
+        if (
+          baseAction === 'copy-hotkey-continue'
+          || baseAction === 'loop-copy-hotkey-continue'
+          || baseAction === 'auto-continue'
+          || baseAction === 'auto-continue-until-done'
+          || baseAction === 'closed-loop-upload-continue-hotkey'
+          || baseAction === 'closed-loop-upload-continue'
+          || baseAction === 'closed-loop-with-hotkey'
+          || baseAction === 'closed-loop-without-hotkey'
+        ) {
+          return baseAction;
+        }
+        return baseAction || domAction;
+      }
+
+      return runtimeAction || baseAction || domAction;
+    }
+
     function normalizeUploadUiAction(action) {
       const key = String(action || '').trim();
+      const closedLoopCanonical = normalizeClosedLoopAction(key);
+      if (closedLoopCanonical !== key && isClosedLoopCanonicalAction(closedLoopCanonical)) {
+        return closedLoopCanonical;
+      }
       const aliases = {
         'copy-last-message': 'copy-only',
         'copy-continue': 'copy-and-continue',
         'copy-hotkey-once': 'copy-and-hotkey',
         'toggle-upload-manage': 'toggle-upload-group-manage',
-        'cancel-send': 'send-message',
-        'cancel-wait-reply': 'send-message',
         'send': 'send-message',
         'send-once': 'send-message',
+        'autoq-start-upload': 'start-upload',
+        'autoqueue-start-upload': 'start-upload',
       };
       return aliases[key] || key;
+    }
+
+    const UPLOAD_ACTION_HANDLERS = Object.freeze({
+      'copy-only': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runCopyAction('copy-only', { source: src }).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][copy-only:failed]', err);
+          setStatus(`复制最后回复失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-only:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'cancel-send': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][cancel-send] source=${src}`);
+        cancelWaitingSend(src);
+        return true;
+      },
+      'cancel-wait-reply': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][cancel-wait-reply] source=${src}`);
+        cancelWaitingSend(src);
+        return true;
+      },
+      'send-message': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        const triggerPhase = getSendTaskPhase();
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:trigger] source=${src} phase=${triggerPhase}`);
+        ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_TRIGGER] source=${src}`);
+        ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
+        void triggerSendFromToolbox(src).catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] send message UI action failed', err);
+          setStatus(`发送信息失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'copy-and-continue': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runCopyAction('copy-and-continue', { source: src || 'runUploadUiAction' }).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][copy-and-continue:failed]', err);
+          setStatus(`复制并继续失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-and-continue:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'copy-and-hotkey': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        const event = ctx ? ctx.event : null;
+        void runCopyHotkeyOnce(src, event).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[ChatGPT toolbox] copy hotkey once failed', err);
+          setStatus(`复制+快捷键失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-and-hotkey:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'copy-hotkey-continue': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        const task = ensureCopyHotkeyContinueTask();
+        if (COPY_HOTKEY_CONTINUE_CANCELLABLE_PHASES.has(task.phase)) {
+          void cancelCopyHotkeyContinue(src).catch((err) => {
+            const errText = formatToolboxError(err);
+            console.error('[UPLOAD_UI_ACTION][copy-hotkey-continue:cancel-failed]', err);
+            ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-hotkey-continue:cancel-failed] source=${src} error=${errText}`);
+          });
+          return true;
+        }
+        if (task.phase === 'cancelling') {
+          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][click-ignore] source=${src} phase=cancelling`);
+          return true;
+        }
+        void runCopyHotkeyContinueOnce(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][copy-hotkey-continue:failed]', err);
+          setStatus(`复制+快捷键+继续失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-hotkey-continue:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'loop-copy-hotkey-continue': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void handleCopyHotkeyContinueLoopClick(src);
+        return true;
+      },
+      [CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action]: (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY, src);
+        return true;
+      },
+      [CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.action]: (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY, src);
+        return true;
+      },
+      'send-hotkey': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runSendHotkeyOnce(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[ChatGPT toolbox] send hotkey once failed', err);
+          setStatus(`发送 Ctrl+Alt+I 失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-hotkey:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'auto-continue': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runAutoContinueOnce(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][auto-continue:failed]', err);
+          setStatus(`自动继续失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][auto-continue:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'auto-continue-until-done': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runAutoContinueUntilDone(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][auto-continue-until-done:failed]', err);
+          setStatus(`自动继续直到完成失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][auto-continue-until-done:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'click-new-chat': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        void runJumpHome(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][jump-home:failed]', err);
+          setStatus(`回到首页失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][click-new-chat:failed] source=${src} error=${errText}`);
+        });
+        return true;
+      },
+      'cancel-upload': (ctx) => {
+        const src = ctx && ctx.source ? ctx.source : 'unknown';
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][cancel-upload] source=${src}`);
+        cancelUploadFlow(`button:${src}`);
+        return true;
+      },
+      'start-upload': () => {
+        syncButtonTasksFromModuleState('click:start-upload');
+        const uploadTask = typeof ButtonTasks !== 'undefined' && ButtonTasks.getButtonTask
+          ? ButtonTasks.getButtonTask('upload')
+          : state.uploadTask;
+        if (uploadTask && uploadTask.phase === 'cancelling') {
+          ToolboxShell.appendLog('[UPLOAD_BUTTON][CLICK_IGNORED] cancelling');
+          return true;
+        }
+        if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.logButtonTaskClick === 'function') {
+          ButtonTasks.logButtonTaskClick('start-upload', 'upload', uploadTask.phase, uploadTask.runId);
+        }
+        ToolboxShell.appendLog('[UPLOAD][START_CLICK]');
+        ToolboxShell.appendLog('[UPLOAD_UI_ACTION][hit] action=start-upload source=multi-upload-start-button');
+        void runStartUploadButtonCore({ source: 'multi-upload-start-button' }).catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] start upload UI action failed', err);
+          setStatus(`上传失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][start-upload:failed] error=${errText}`);
+        });
+        return true;
+      },
+    });
+
+    function handleUploadActionByMap(action, context) {
+      const ctx = context || {};
+      const handler = UPLOAD_ACTION_HANDLERS[action];
+      return typeof handler === 'function' ? handler(ctx) : false;
+    }
+
+    async function runUploadPanelAction(action, options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const normalizedAction = normalizeUploadUiAction(action);
+      const source = String(opts.source || 'upload-panel').trim() || 'upload-panel';
+      const button = opts.button || null;
+      const event = opts.event || null;
+
+      if (normalizedAction === 'start-upload') {
+        if (event && typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        return runStartUploadButtonCore({
+          ...opts,
+          source,
+          button,
+        });
+      }
+
+      const handled = runUploadUiAction(action, button, source, event);
+      return {
+        ok: handled !== false,
+        handled,
+        reason: handled === false ? 'unhandled' : 'ui-action',
+      };
     }
 
     function runUploadUiAction(action, button, source, event) {
@@ -18863,6 +22526,11 @@
 
       if (!action || !button) {
         return false;
+      }
+
+      if (normalizedAction === 'none') {
+        ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][skip] action=none source=${src}`);
+        return true;
       }
 
       if (event && event.cgptUploadUiActionHandled) {
@@ -18904,11 +22572,7 @@
         } else if (normalizedAction === 'loop-copy-hotkey-continue') {
           phase = state.copyHotkeyContinueLoopTask ? String(state.copyHotkeyContinueLoopTask.phase || 'idle') : 'idle';
           legacyRunning = copyHotkeyContinueLoopRunning ? '1' : '0';
-        } else if (
-          normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
-          || normalizedAction === 'closed-loop-upload-every5-hotkey'
-          || normalizedAction === 'closed-loop-upload-every5'
-        ) {
+        } else if (isClosedLoopCanonicalAction(normalizedAction)) {
           phase = state.copyHotkeyUploadVerifyLoopTask
             ? String(state.copyHotkeyUploadVerifyLoopTask.phase || 'idle')
             : 'idle';
@@ -18976,37 +22640,54 @@
         syncSendTaskPhase();
         const activeSendPhase = getSendTaskPhase();
         const btnRawAction = button instanceof HTMLElement
-          ? String(button.dataset.action || '').trim()
-          : '';
-        const btnSendState = button instanceof HTMLElement
-          ? String(button.dataset.sendState || '').trim()
+          ? String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || button.dataset.action || '').trim()
           : '';
 
         ToolboxShell.appendLog(
-          `[SEND_MESSAGE][BUTTON_HIT] source=${src} action=${btnRawAction} phase=${activeSendPhase} waitingReply=${state.waitingReply ? 1 : 0} waitingSend=${isWaitingSendActive() ? 1 : 0}`,
+          `[SEND_MESSAGE][BUTTON_HIT] source=${src} action=${btnRawAction} phase=${activeSendPhase} waitingReply=${state.waitingReply ? 1 : 0} waitingSend=${isWaitingSendButton() ? 1 : 0} shortcut=${isShortcutDispatching() ? 1 : 0}`,
         );
 
-        const isCancelIntent = (
-          btnRawAction === 'cancel-send'
-          || btnRawAction === 'cancel-wait-reply'
-          || btnSendState === 'waiting-reply'
-          || btnSendState === 'sending'
-        );
+        if (
+          activeSendPhase !== 'idle'
+          || isWaitingSendButton()
+          || isShortcutDispatching()
+        ) {
+          let healed = false;
+          let healedPhase = activeSendPhase;
+          try {
+            const healResult = tryHealStaleSendStateBeforeTrigger(src);
+            healed = !!healResult.healed;
+            healedPhase = getSendTaskPhase();
 
-        if (isCancelIntent) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_UI_ACTION][send-message:cancel] source=${src} phase=${activeSendPhase} action=${btnRawAction}`,
-          );
-          ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_CANCEL] source=${src}`);
-          cancelWaitingSend(src);
-          return true;
-        }
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE][BUTTON_HIT_CONTINUE] source=${src} phase=${healedPhase} healed=${healed ? 1 : 0} canProceed=${healResult.canProceed ? 1 : 0}`,
+            );
 
-        if (activeSendPhase !== 'idle' && !state.waitingReply) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_UI_ACTION][send-message:skip] source=${src} phase=${activeSendPhase}`,
-          );
-          return true;
+            if (!healResult.canProceed && healedPhase !== 'idle') {
+              if (
+                healResult.skipReason === 'real-send-flow-active'
+                || healResult.skipReason === 'real-send-task-active'
+              ) {
+                ToolboxShell.appendLog(
+                  `[UPLOAD_UI_ACTION][send-message:skip] source=${src} phase=${healedPhase} reason=${healResult.skipReason}`,
+                );
+                return true;
+              }
+              ToolboxShell.appendLog(
+                `[UPLOAD_UI_ACTION][send-message:skip] source=${src} phase=${healedPhase} reason=active-send-task`,
+              );
+              return true;
+            }
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            const errStack = error && error.stack ? String(error.stack) : '';
+            console.error('[ChatGPT toolbox] runUploadUiAction(send-message) phase heal failed', error);
+            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+              ToolboxShell.appendLog(
+                `[SEND_MESSAGE][STALE_PHASE_CLEAR_ERROR] source=${src} phase=${activeSendPhase} error=${errText} stack=${String(errStack).slice(0, 300)}`,
+              );
+            }
+          }
         }
       }
 
@@ -19039,9 +22720,7 @@
           || copyHotkeyContinueLoopRunning
         )
       ) || (
-        (normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
-          || normalizedAction === 'closed-loop-upload-every5-hotkey'
-          || normalizedAction === 'closed-loop-upload-every5')
+        isClosedLoopCanonicalAction(normalizedAction)
         && closedLoopContinueState.running
       );
 
@@ -19082,9 +22761,7 @@
           || copyHotkeyContinueLoopRunning
         );
       const copyHotkeyUploadVerifyLoopCancellable = (
-        normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
-        || normalizedAction === 'closed-loop-upload-every5'
-        || normalizedAction === 'closed-loop-upload-every5-hotkey'
+        isClosedLoopCanonicalAction(normalizedAction)
       ) && closedLoopContinueState.running;
 
       if (
@@ -19092,6 +22769,8 @@
         && normalizedAction !== 'copy-only'
         && normalizedAction !== 'copy-and-continue'
         && normalizedAction !== 'send-message'
+        && normalizedAction !== 'cancel-send'
+        && normalizedAction !== 'cancel-wait-reply'
         && !copyHotkeyContinueCancellable
         && !copyHotkeyLoopCancellable
         && !copyHotkeyUploadVerifyLoopCancellable
@@ -19102,156 +22781,32 @@
         return true;
       }
 
-      if (normalizedAction === 'copy-only') {
-        void runCopyAction('copy-only', { source: src }).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][copy-only:failed]', err);
-          setStatus(`复制最后回复失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-only:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'send-message') {
-        const triggerPhase = getSendTaskPhase();
-        const triggerAction = button instanceof HTMLElement
-          ? String(button.dataset.action || '').trim()
-          : '';
-        ToolboxShell.appendLog(
-          `[UPLOAD_UI_ACTION][send-message:trigger] source=${src} phase=${triggerPhase} action=${triggerAction}`,
-        );
-        ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_TRIGGER] source=${src}`);
-        ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
-        void triggerSendFromToolbox(src).catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] send message UI action failed', err);
-          setStatus(`发送信息失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:failed] source=${src} error=${errText}`);
-        });
-
-        return true;
-      }
-
-      if (normalizedAction === 'copy-and-continue') {
-        void runCopyAction('copy-and-continue', { source: src || 'runUploadUiAction' }).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][copy-and-continue:failed]', err);
-          setStatus(`复制并继续失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-and-continue:failed] source=${src} error=${errText}`);
-        });
-
-        return true;
-      }
-
-      if (normalizedAction === 'copy-and-hotkey') {
-        void runCopyHotkeyOnce(src, event).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[ChatGPT toolbox] copy hotkey once failed', err);
-          setStatus(`复制+快捷键失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-and-hotkey:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'copy-hotkey-continue') {
-        const copyHotkeyContinueTaskForClick = ensureCopyHotkeyContinueTask();
-        if (COPY_HOTKEY_CONTINUE_CANCELLABLE_PHASES.has(copyHotkeyContinueTaskForClick.phase)) {
-          void cancelCopyHotkeyContinue(src).catch((err) => {
-            const errText = formatToolboxError(err);
-            console.error('[UPLOAD_UI_ACTION][copy-hotkey-continue:cancel-failed]', err);
-            ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-hotkey-continue:cancel-failed] source=${src} error=${errText}`);
-          });
+      if (normalizedAction === 'stop') {
+        const closedLoopMode = getClosedLoopModeFromAction(String(button.dataset.action || '').trim())
+          || (
+            button.dataset.closedLoopMode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              : (
+                button.dataset.closedLoopMode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY
+                  ? CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY
+                  : null
+              )
+          );
+        if (closedLoopContinueState.running || closedLoopMode) {
+          const mode = closedLoopMode
+            || closedLoopContinueState.mode
+            || CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+          void handleClosedLoopContinueModeClick(mode, src);
           return true;
         }
-        if (copyHotkeyContinueTaskForClick.phase === 'cancelling') {
-          ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][click-ignore] source=${src} phase=cancelling`);
-          return true;
-        }
-        void runCopyHotkeyContinueOnce(src).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][copy-hotkey-continue:failed]', err);
-          setStatus(`复制+快捷键+继续失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-hotkey-continue:failed] source=${src} error=${errText}`);
-        });
-        return true;
       }
 
-      if (normalizedAction === 'loop-copy-hotkey-continue') {
-        void handleCopyHotkeyContinueLoopClick(src);
-        return true;
-      }
-
-      if (normalizedAction === 'loop-copy-hotkey-continue-upload-verify'
-        || normalizedAction === 'closed-loop-upload-every5-hotkey') {
-        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY, src);
-        return true;
-      }
-
-      if (normalizedAction === 'closed-loop-upload-every5') {
-        void handleClosedLoopContinueModeClick(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY, src);
-        return true;
-      }
-
-      if (normalizedAction === 'send-hotkey') {
-        void runSendHotkeyOnce(src).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[ChatGPT toolbox] send hotkey once failed', err);
-          setStatus(`发送 Ctrl+Alt+I 失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-hotkey:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'auto-continue') {
-        void runAutoContinueOnce(src).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][auto-continue:failed]', err);
-          setStatus(`自动继续失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][auto-continue:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'auto-continue-until-done') {
-        void runAutoContinueUntilDone(src).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][auto-continue-until-done:failed]', err);
-          setStatus(`自动继续直到完成失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][auto-continue-until-done:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'click-new-chat') {
-        void runJumpHome(src).catch((err) => {
-          const errText = formatToolboxError(err);
-          console.error('[UPLOAD_UI_ACTION][jump-home:failed]', err);
-          setStatus(`回到首页失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][click-new-chat:failed] source=${src} error=${errText}`);
-        });
-        return true;
-      }
-
-      if (normalizedAction === 'start-upload') {
-        syncButtonTasksFromModuleState('click:start-upload');
-        const uploadTask = typeof ButtonTasks !== 'undefined' && ButtonTasks.getButtonTask
-          ? ButtonTasks.getButtonTask('upload')
-          : state.uploadTask;
-        if (uploadTask && uploadTask.phase === 'cancelling') {
-          ToolboxShell.appendLog('[UPLOAD_BUTTON][CLICK_IGNORED] cancelling');
-          return true;
-        }
-        if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.logButtonTaskClick === 'function') {
-          ButtonTasks.logButtonTaskClick('start-upload', 'upload', uploadTask.phase, uploadTask.runId);
-        }
-        ToolboxShell.appendLog('[UPLOAD][START_CLICK]');
-        void runStartUploadButtonCore({ source: 'manual-start-upload-button' }).catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] start upload UI action failed', err);
-          setStatus(`上传失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][start-upload:failed] error=${errText}`);
-        });
-
+      const handled = handleUploadActionByMap(normalizedAction, {
+        button,
+        source: src,
+        event,
+      });
+      if (handled) {
         return true;
       }
 
@@ -19277,9 +22832,9 @@
         return;
       }
       if (phase === 'success') {
-        setButtonSuccess(homeBtn, options.text || '已跳转', {
-          title: '已跳转到新聊天',
-          reason: options.reason || 'home-success',
+        setButtonIdle(homeBtn, options.idleText || '回到首页', {
+          title: '跳转到 ChatGPT 主页',
+          reason: options.reason || 'home-success-idle',
         });
         return;
       }
@@ -19375,62 +22930,150 @@
       }
     }
 
-    const UPLOAD_UI_ACTIONS = Object.freeze([
-      {
+    const UPLOAD_ACTION_BUTTON_DEFS = Object.freeze([
+      Object.freeze({
+        key: 'startUpload',
+        id: 'cgpt-upload-start',
         selector: UploadSelectors.startBtn,
         action: 'start-upload',
         label: '开始上传',
-      },
-      {
-        selector: UploadSelectors.copyLastMessageBtn,
-        action: 'copy-only',
-        label: '复制最后回复',
-      },
-      {
-        selector: UploadSelectors.copyContinueBtn,
-        action: 'copy-and-continue',
-        label: '复制并继续',
-      },
-      {
-        selector: UploadSelectors.sendMessageBtn,
-        action: 'send-message',
-        label: '发送消息',
-      },
-      {
-        selector: HomeActionSelectors.homeBtn,
-        action: 'click-new-chat',
-        label: '回到首页',
-      },
-      {
-        selector: UploadSelectors.autoContinueBtn,
-        action: 'auto-continue',
-        label: '自动继续',
-      },
-      {
+        className: 'cgpt-btn cgpt-btn-upload cgpt-btn-idle',
+        title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
+        required: true,
+        dataButtonRole: 'upload-start',
+      }),
+      Object.freeze({
+        key: 'copyHotkeyOnce',
+        id: 'cgpt-copy-hotkey-once',
         selector: UploadSelectors.copyHotkeyOnceBtn,
         action: 'copy-and-hotkey',
         label: '复制+快捷键',
-      },
-      {
+        className: 'cgpt-btn purple',
+        title: '复制最后回复，并发送配置的目标快捷键',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'copyContinue',
+        id: 'cgpt-upload-continue-once',
+        selector: UploadSelectors.copyContinueBtn,
+        action: 'copy-and-continue',
+        label: '复制并继续',
+        className: 'cgpt-btn cgpt-btn-copy-continue',
+        title: '先复制最后回复，再发送“继续”',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'sendMessage',
+        id: 'cgpt-send-message-once',
+        selector: UploadSelectors.sendMessageBtn,
+        action: 'send-message',
+        label: '发送消息',
+        className: 'cgpt-btn cgpt-send-btn cgpt-send-btn-idle',
+        title: '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'goHome',
+        id: 'cgpt-open-chatgpt-home',
+        selector: HomeActionSelectors.homeBtn,
+        action: 'click-new-chat',
+        label: '回到首页',
+        className: 'cgpt-btn primary',
+        title: '点击左侧新聊天',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'autoContinue',
+        id: 'cgpt-auto-continue-once',
+        selector: UploadSelectors.autoContinueBtn,
+        action: 'auto-continue',
+        label: '无限继续',
+        className: 'cgpt-btn teal',
+        title: '',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'autoContinueUntilDone',
+        id: 'cgpt-auto-continue-until-done',
+        selector: UploadSelectors.autoContinueUntilDoneBtn,
+        action: 'auto-continue-until-done',
+        label: '无限继续直到完成',
+        className: 'cgpt-btn teal',
+        title: '循环发送强约束继续指令；只有检测到严格完成信号才停止',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'copyLastReply',
+        id: 'cgpt-copy-last-message-scroll-bottom',
+        selector: UploadSelectors.copyLastMessageBtn,
+        action: 'copy-only',
+        label: '复制最后回复',
+        className: 'cgpt-btn',
+        title: '等待最后一条 assistant 回复稳定后复制到剪贴板',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'copyHotkeyContinue',
+        id: 'cgpt-copy-hotkey-continue-once',
         selector: UploadSelectors.copyHotkeyContinueOnceBtn,
         action: 'copy-hotkey-continue',
         label: '复制+快捷键+继续',
-      },
-      {
+        className: 'cgpt-btn purple',
+        title: '等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'copyHotkeyContinueLoop',
+        id: 'cgpt-copy-hotkey-continue-loop',
         selector: UploadSelectors.copyHotkeyContinueLoopBtn,
         action: 'loop-copy-hotkey-continue',
-        label: '连续复制+快捷键+继续',
-      },
-      {
+        label: '无限连续复制+快捷键+继续',
+        className: 'cgpt-btn cyan',
+        title: '等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令',
+        required: true,
+      }),
+      Object.freeze({
+        key: 'closedLoopWithHotkey',
+        id: CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id,
         selector: UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
         action: CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.action,
         label: CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.label,
-      },
-      {
+        className: 'cgpt-btn cyan',
+        title: CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.title,
+        required: true,
+      }),
+      Object.freeze({
+        key: 'closedLoopWithoutHotkey',
+        id: CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id,
         selector: UploadSelectors.closedLoopUploadEvery5Btn,
         action: CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.action,
         label: CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.label,
-      },
+        className: 'cgpt-btn cyan',
+        title: CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.title,
+        required: true,
+      }),
+    ]);
+
+    function renderUploadActionButtonHtml(def) {
+      const titleAttr = def.title ? ` title="${def.title}"` : '';
+      const buttonRoleAttr = def.dataButtonRole ? ` data-button-role="${def.dataButtonRole}"` : '';
+      let label = def.label;
+      if (def.key === 'copyHotkeyOnce' && typeof getCopyAndHotkeyButtonLabel === 'function') {
+        label = getCopyAndHotkeyButtonLabel();
+      } else if (def.key === 'closedLoopWithHotkey') {
+        label = getClosedLoopButtonLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
+      } else if (def.key === 'closedLoopWithoutHotkey') {
+        label = getClosedLoopButtonLabel(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
+      }
+      return `<button type="button" class="${def.className}" id="${def.id}" data-action="${def.action}" data-cgpt-base-action="${def.action}"${buttonRoleAttr}${titleAttr}>${label}</button>`;
+    }
+
+    const UPLOAD_UI_ACTIONS = Object.freeze([
+      ...UPLOAD_ACTION_BUTTON_DEFS.map((def) => ({
+        selector: def.selector,
+        action: def.action,
+        label: def.label,
+      })),
       {
         selector: '#cgpt-upload-group-manage',
         action: 'toggle-upload-group-manage',
@@ -19548,6 +23191,41 @@
         return;
       }
 
+      const rebindBtn = target.closest('[data-upload-rebind-id]');
+
+      if (rebindBtn) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+
+        const id = rebindBtn.getAttribute('data-upload-rebind-id');
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][rebind-file:click] source=root-delegated id=${id || '-'}`,
+        );
+
+        if (!id) {
+          setStatus('重新绑定失败：缺少文件 ID', 'error');
+          ToolboxShell.appendLog('[UPLOAD_DIAG][rebind-file:skip] reason=empty-id source=root-delegated');
+          return;
+        }
+
+        void rebindUploadFile(id).catch((err) => {
+          const errName = err && err.name ? err.name : 'Error';
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] root delegated rebind upload file failed', err);
+          setStatus(`重新绑定失败：${errText}`, 'error');
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][rebind-file:root-delegated-failed] id=${id || '-'} type=${errName} error=${errText}`,
+          );
+        });
+
+        return;
+      }
+
       for (const def of UPLOAD_UI_ACTIONS) {
         const button = target.closest(def.selector);
         if (!button) {
@@ -19560,10 +23238,16 @@
           );
         }
 
+        const runtimeAction = resolveUploadButtonRuntimeAction(button, def.action);
+        const domAction = String(button.dataset.action || '').trim();
+        const baseAction = String(button.dataset.cgptBaseAction || '').trim();
+        const cgptRuntime = String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || '').trim();
+
         ToolboxShell.appendLog(
-          `[UPLOAD_UI_ACTION][event] source=delegated-click action=${def.action}`,
+          `[UPLOAD_UI_ACTION][event] source=delegated-click defAction=${def.action} domAction=${domAction}`
+          + ` baseAction=${baseAction} runtimeAction=${cgptRuntime} resolvedAction=${runtimeAction}`,
         );
-        runUploadUiAction(def.action, button, 'delegated-click', event);
+        runUploadUiAction(runtimeAction, button, 'delegated-click', event);
         return;
       }
 
@@ -19572,15 +23256,20 @@
         return;
       }
 
-      const action = String(actionBtn.dataset.action || '').trim();
-      if (!action) {
+      const domAction = String(actionBtn.dataset.action || '').trim();
+      if (!domAction) {
         return;
       }
 
+      const resolvedAction = resolveUploadButtonRuntimeAction(actionBtn, domAction);
+      const baseAction = String(actionBtn.dataset.cgptBaseAction || '').trim();
+      const cgptRuntime = String(actionBtn.dataset.cgptRuntimeAction || actionBtn.dataset.cgptButtonAction || '').trim();
+
       ToolboxShell.appendLog(
-        `[UPLOAD_UI_ACTION][event] source=delegated-click action=${action}`,
+        `[UPLOAD_UI_ACTION][event] source=delegated-click domAction=${domAction} runtimeAction=${cgptRuntime}`
+        + ` baseAction=${baseAction} resolvedAction=${resolvedAction}`,
       );
-      runUploadUiAction(action, actionBtn, 'delegated-click', event);
+      runUploadUiAction(resolvedAction, actionBtn, 'delegated-click', event);
     }
 
     function bindUploadDelegatedClick(rootEl) {
@@ -19642,6 +23331,7 @@
         const btn = qs(selector, root);
         if (!btn) return;
         btn.dataset.action = action;
+        btn.dataset.cgptBaseAction = action;
         btn.dataset.uploadUiAction = action;
       });
     }
@@ -19833,33 +23523,6 @@
           return;
         }
 
-        const rebindBtn = target.closest('[data-upload-rebind-id]');
-
-        if (rebindBtn) {
-          e.preventDefault();
-          e.stopPropagation();
-
-          const id = rebindBtn.getAttribute('data-upload-rebind-id');
-          if (!id) return;
-
-          try {
-            await rebindUploadFile(id);
-          } catch (err) {
-            const errName = err && err.name ? err.name : 'Error';
-            const errText = err && err.message ? err.message : String(err);
-
-            console.error('[ChatGPT toolbox] rebind upload file failed', err);
-
-            setStatus(`上传队列保存失败或超时：${errText}`, 'error');
-
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][rebind-file:failed] id=${id || '-'} type=${errName} error=${errText}`,
-            );
-          }
-
-          return;
-        }
-
         const itemEl = target.closest('.cgpt-upload-item[data-id]');
 
         if (!itemEl) return;
@@ -19900,38 +23563,12 @@
     }
 
     function buildUploadActionToolbarInnerHtml() {
+      const buttonsHtml = UPLOAD_ACTION_BUTTON_DEFS
+        .map((def) => renderUploadActionButtonHtml(def))
+        .join('');
       return `
           <div class="cgpt-row cgpt-upload-action-row cgpt-upload-main-action-row" data-action-row="main">
-            <button
-              type="button"
-              class="cgpt-btn cgpt-btn-upload cgpt-btn-idle"
-              id="cgpt-upload-start"
-              data-action="start-upload"
-              data-button-role="upload-start"
-              title="只上传/绑定文件到 ChatGPT 输入框，不自动发送"
-            >开始上传</button>
-            <button
-              type="button"
-              class="cgpt-btn purple"
-              id="cgpt-copy-hotkey-once"
-              data-action="copy-and-hotkey"
-              title="复制最后回复，并发送配置的目标快捷键"
-            >复制+快捷键</button>
-            <button type="button" class="cgpt-btn cgpt-btn-copy-continue" id="cgpt-upload-continue-once" data-action="copy-and-continue" title="先复制最后回复，再发送“继续”">复制并继续</button>
-            <button
-              type="button"
-              class="cgpt-btn danger"
-              id="cgpt-send-message-once"
-              data-action="send-message"
-              title="发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）"
-            >发送消息</button>
-            <button type="button" class="cgpt-btn primary" id="cgpt-open-chatgpt-home" data-action="click-new-chat" title="点击左侧新聊天">回到首页</button>
-            <button type="button" class="cgpt-btn teal" id="cgpt-auto-continue-once" data-action="auto-continue">自动继续</button>
-            <button type="button" class="cgpt-btn teal" id="cgpt-auto-continue-until-done" data-action="auto-continue-until-done" title="循环发送强约束继续指令；只有检测到严格完成信号才停止">自动继续直到完成</button>
-            <button type="button" class="cgpt-btn" id="cgpt-copy-last-message-scroll-bottom" data-action="copy-only">复制最后回复</button>
-            <button type="button" class="cgpt-btn purple" id="cgpt-copy-hotkey-continue-once" data-action="copy-hotkey-continue" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令">复制+快捷键+继续</button>
-            <button type="button" class="cgpt-btn cyan" id="cgpt-copy-hotkey-continue-loop" data-action="loop-copy-hotkey-continue" title="等待回答完成 -> 检查终止信号 -> 复制最后回复 -> 目标快捷键 -> 发送继续指令">连续复制+快捷键+继续</button>
-            ${buildClosedLoopContinueButtonsHtml()}
+            ${buttonsHtml}
           </div>
       `;
     }
@@ -19983,20 +23620,9 @@
         return true;
       }
 
-      const requiredButtons = [
-        UploadSelectors.startBtn,
-        UploadSelectors.sendMessageBtn,
-        UploadSelectors.copyContinueBtn,
-        HomeActionSelectors.homeBtn,
-        UploadSelectors.autoContinueBtn,
-        UploadSelectors.autoContinueUntilDoneBtn,
-        UploadSelectors.copyLastMessageBtn,
-        UploadSelectors.copyHotkeyOnceBtn,
-        UploadSelectors.copyHotkeyContinueOnceBtn,
-        UploadSelectors.copyHotkeyContinueLoopBtn,
-        UploadSelectors.closedLoopUploadEvery5HotkeyBtn,
-        UploadSelectors.closedLoopUploadEvery5Btn,
-      ];
+      const requiredButtons = UPLOAD_ACTION_BUTTON_DEFS
+        .filter((def) => def.required)
+        .map((def) => def.selector);
 
       return requiredButtons.some((selector) => !mainRow.querySelector(selector));
     }
@@ -20092,8 +23718,8 @@
               </div>
 
               <div class="cgpt-upload-manage-row">
-                <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-clear-inline" data-action="clear-upload-group">清空当前组</button>
-                <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-delete-inline" data-action="delete-upload-group">删除当前组</button>
+                <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-clear-inline" data-action="clear-upload-group" data-danger-enter-block="1">清空当前组</button>
+                <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-delete-inline" data-action="delete-upload-group" data-danger-enter-block="1">删除当前组</button>
               </div>
 
               <div class="cgpt-hint">这里只管理当前文件组，不会自动上传到 ChatGPT。</div>
@@ -20219,40 +23845,46 @@
         return;
       }
 
-      let copyLastBtn = qs(UploadSelectors.copyLastMessageBtn, actionRow);
-      if (!copyLastBtn) {
+      const createdByKey = new Map();
+      const buttonByKey = new Map();
+      UPLOAD_ACTION_BUTTON_DEFS.forEach((def) => {
+        let button = qs(def.selector, actionRow);
+        if (!button) {
+          button = document.createElement('button');
+          button.type = 'button';
+          actionRow.appendChild(button);
+          createdByKey.set(def.key, true);
+          ToolboxShell.appendLog(`[UPLOAD_UI][HEAL_CREATE] button=${def.id}`);
+        }
+        button.className = def.className;
+        button.id = def.id;
+        button.dataset.action = def.action;
+        button.textContent = def.key === 'copyHotkeyOnce' && typeof getCopyAndHotkeyButtonLabel === 'function'
+          ? getCopyAndHotkeyButtonLabel()
+          : def.label;
+        if (def.title) {
+          button.title = def.key === 'copyHotkeyOnce' ? getCopyAndHotkeyButtonTitle() : def.title;
+        } else {
+          button.removeAttribute('title');
+        }
+        if (def.dataButtonRole) {
+          button.dataset.buttonRole = def.dataButtonRole;
+        } else {
+          delete button.dataset.buttonRole;
+        }
+        if (def.key === 'closedLoopWithHotkey' || def.key === 'closedLoopWithoutHotkey') {
+          applyClosedLoopContinueButtonDef(button, getClosedLoopContinueActionDef(
+            def.key === 'closedLoopWithoutHotkey'
+              ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY,
+          ));
+        }
+        buttonByKey.set(def.key, button);
+      });
+
+      if (!buttonByKey.get('copyLastReply') && !createdByKey.get('copyLastReply')) {
         console.error('[ChatGPT toolbox] ensureUploadActionButtons: 缺少复制最后回复按钮');
         ToolboxShell.appendLog('[UPLOAD_UI][missing-copy-last-button]');
-        copyLastBtn = document.createElement('button');
-        copyLastBtn.type = 'button';
-        copyLastBtn.className = 'cgpt-btn';
-        copyLastBtn.id = 'cgpt-copy-last-message-scroll-bottom';
-        copyLastBtn.dataset.action = 'copy-only';
-        copyLastBtn.textContent = '复制最后回复';
-        copyLastBtn.title = '等待最后一条 assistant 回复稳定后复制到剪贴板';
-        ToolboxShell.appendLog('[UPLOAD_UI][HEAL_CREATE] button=cgpt-copy-last-message-scroll-bottom');
-        actionRow.appendChild(copyLastBtn);
-      }
-
-      const uploadStartBtn = qs(UploadSelectors.startBtn, actionRow);
-      if (uploadStartBtn) {
-        uploadStartBtn.title = '只上传/绑定文件到 ChatGPT 输入框，不自动发送';
-        uploadStartBtn.dataset.action = 'start-upload';
-        uploadStartBtn.dataset.buttonRole = 'upload-start';
-      }
-
-      let sendMessageBtn = qs(UploadSelectors.sendMessageBtn, actionRow);
-      if (!sendMessageBtn) {
-        sendMessageBtn = document.createElement('button');
-        sendMessageBtn.type = 'button';
-        sendMessageBtn.className = 'cgpt-btn danger';
-        sendMessageBtn.id = 'cgpt-send-message-once';
-        sendMessageBtn.dataset.action = 'send-message';
-        sendMessageBtn.textContent = '发送消息';
-        sendMessageBtn.title = '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）';
-        ToolboxShell.appendLog('[UPLOAD_UI][HEAL_CREATE] button=cgpt-send-message-once');
-      } else {
-        sendMessageBtn.dataset.action = 'send-message';
       }
 
       const legacyUploadAndSendBtn = qs('#cgpt-upload-start-and-send', actionRow);
@@ -20261,131 +23893,16 @@
         ToolboxShell.appendLog('[UPLOAD_UI][REMOVED_LEGACY] button=cgpt-upload-start-and-send');
       }
 
-      const copyContinueBtn = qs(UploadSelectors.copyContinueBtn, actionRow);
-      if (copyContinueBtn) {
-        copyContinueBtn.dataset.action = 'copy-and-continue';
-      }
-
-      copyLastBtn.dataset.action = 'copy-only';
-
       const legacySendHotkeyBtn = qs(UploadSelectors.legacySendHotkeyBtn, actionRow);
       if (legacySendHotkeyBtn) {
         legacySendHotkeyBtn.remove();
         ToolboxShell.appendLog('[UPLOAD_UI][REMOVED_LEGACY] button=cgpt-send-hotkey-once');
       }
 
-      let homeBtn = qs(HomeActionSelectors.homeBtn, actionRow);
-      if (!homeBtn) {
-        homeBtn = document.createElement('button');
-        homeBtn.type = 'button';
-        homeBtn.className = 'cgpt-btn primary';
-        homeBtn.id = 'cgpt-open-chatgpt-home';
-        homeBtn.dataset.action = 'click-new-chat';
-        homeBtn.textContent = '回到首页';
-        homeBtn.title = '点击左侧新聊天';
-      } else {
-        homeBtn.dataset.action = 'click-new-chat';
-      }
-
-      let autoContinueBtn = qs(UploadSelectors.autoContinueBtn, actionRow);
-      if (!autoContinueBtn) {
-        autoContinueBtn = document.createElement('button');
-        autoContinueBtn.type = 'button';
-        autoContinueBtn.className = 'cgpt-btn teal';
-        autoContinueBtn.id = 'cgpt-auto-continue-once';
-        autoContinueBtn.dataset.action = 'auto-continue';
-        autoContinueBtn.textContent = '自动继续';
-      } else {
-        autoContinueBtn.dataset.action = 'auto-continue';
-      }
-
-      let autoContinueUntilDoneBtn = qs(UploadSelectors.autoContinueUntilDoneBtn, actionRow);
-      if (!autoContinueUntilDoneBtn) {
-        autoContinueUntilDoneBtn = document.createElement('button');
-        autoContinueUntilDoneBtn.type = 'button';
-        autoContinueUntilDoneBtn.className = 'cgpt-btn teal';
-        autoContinueUntilDoneBtn.id = 'cgpt-auto-continue-until-done';
-        autoContinueUntilDoneBtn.dataset.action = 'auto-continue-until-done';
-        autoContinueUntilDoneBtn.textContent = '自动继续直到完成';
-        autoContinueUntilDoneBtn.title = '循环发送强约束继续指令；只有检测到严格完成信号才停止';
-      } else {
-        autoContinueUntilDoneBtn.dataset.action = 'auto-continue-until-done';
-      }
-
-      let copyHotkeyOnceBtn = qs(UploadSelectors.copyHotkeyOnceBtn, actionRow);
-      if (!copyHotkeyOnceBtn) {
-        copyHotkeyOnceBtn = document.createElement('button');
-        copyHotkeyOnceBtn.type = 'button';
-        copyHotkeyOnceBtn.className = 'cgpt-btn purple';
-        copyHotkeyOnceBtn.id = 'cgpt-copy-hotkey-once';
-        copyHotkeyOnceBtn.dataset.action = 'copy-and-hotkey';
-        copyHotkeyOnceBtn.textContent = typeof getCopyAndHotkeyButtonLabel === 'function'
-          ? getCopyAndHotkeyButtonLabel()
-          : '复制+快捷键';
-      }
-      copyHotkeyOnceBtn.dataset.action = 'copy-and-hotkey';
-      copyHotkeyOnceBtn.title = getCopyAndHotkeyButtonTitle();
-
-      let copyHotkeyContinueOnceBtn = qs(UploadSelectors.copyHotkeyContinueOnceBtn, actionRow);
-      if (!copyHotkeyContinueOnceBtn) {
-        copyHotkeyContinueOnceBtn = document.createElement('button');
-        copyHotkeyContinueOnceBtn.type = 'button';
-        copyHotkeyContinueOnceBtn.className = 'cgpt-btn purple';
-        copyHotkeyContinueOnceBtn.id = 'cgpt-copy-hotkey-continue-once';
-        copyHotkeyContinueOnceBtn.dataset.action = 'copy-hotkey-continue';
-        copyHotkeyContinueOnceBtn.textContent = '复制+快捷键+继续';
-      } else {
-        copyHotkeyContinueOnceBtn.dataset.action = 'copy-hotkey-continue';
-      }
-
-      let copyHotkeyContinueLoopBtn = qs(UploadSelectors.copyHotkeyContinueLoopBtn, actionRow);
-      if (!copyHotkeyContinueLoopBtn) {
-        copyHotkeyContinueLoopBtn = document.createElement('button');
-        copyHotkeyContinueLoopBtn.type = 'button';
-        copyHotkeyContinueLoopBtn.className = 'cgpt-btn cyan';
-        copyHotkeyContinueLoopBtn.id = 'cgpt-copy-hotkey-continue-loop';
-        copyHotkeyContinueLoopBtn.dataset.action = 'loop-copy-hotkey-continue';
-        copyHotkeyContinueLoopBtn.textContent = '连续复制+快捷键+继续';
-        copyHotkeyContinueLoopBtn.title = '等待回答完成 -> 检查终止信号 -> 复制最后回复 -> Ctrl+Alt+I -> 发送继续指令';
-      } else {
-        copyHotkeyContinueLoopBtn.dataset.action = 'loop-copy-hotkey-continue';
-      }
-
       migrateLegacyClosedLoopHotkeyButton(actionRow);
-
-      const closedLoopHotkeyDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY;
-      const closedLoopPlainDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY;
-
-      let closedLoopHotkeyBtn = qs(UploadSelectors.closedLoopUploadEvery5HotkeyBtn, actionRow);
-      if (!closedLoopHotkeyBtn) {
-        closedLoopHotkeyBtn = document.createElement('button');
-        closedLoopHotkeyBtn.type = 'button';
-        closedLoopHotkeyBtn.className = 'cgpt-btn cyan';
-      }
-      applyClosedLoopContinueButtonDef(closedLoopHotkeyBtn, closedLoopHotkeyDef);
-
-      let closedLoopPlainBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, actionRow);
-      if (!closedLoopPlainBtn) {
-        closedLoopPlainBtn = document.createElement('button');
-        closedLoopPlainBtn.type = 'button';
-        closedLoopPlainBtn.className = 'cgpt-btn cyan';
-      }
-      applyClosedLoopContinueButtonDef(closedLoopPlainBtn, closedLoopPlainDef);
-
-      const orderedButtons = [
-        uploadStartBtn,
-        copyHotkeyOnceBtn,
-        copyContinueBtn,
-        sendMessageBtn,
-        homeBtn,
-        autoContinueBtn,
-        autoContinueUntilDoneBtn,
-        copyLastBtn,
-        copyHotkeyContinueOnceBtn,
-        copyHotkeyContinueLoopBtn,
-        closedLoopHotkeyBtn,
-        closedLoopPlainBtn,
-      ].filter(Boolean);
+      const orderedButtons = UPLOAD_ACTION_BUTTON_DEFS
+        .map((def) => qs(def.selector, actionRow))
+        .filter(Boolean);
 
       orderedButtons.forEach((btn) => {
         actionRow.appendChild(btn);
@@ -20414,22 +23931,21 @@
     }
 
     function validateUploadDomStructure(rootEl) {
-      validateDomRules(rootEl, [
-        {
+      const requiredActionRules = UPLOAD_ACTION_BUTTON_DEFS
+        .filter((def) => def.required)
+        .map((def) => ({
           type: 'required',
-          selector: '#cgpt-copy-last-message-scroll-bottom',
-          missingLog: '[UPLOAD_DOM][missing] #cgpt-copy-last-message-scroll-bottom',
-        },
+          selector: def.selector,
+          missingLog: `[UPLOAD_DOM][missing] ${def.selector}`,
+        }));
+      validateDomRules(rootEl, [
+        ...requiredActionRules,
         {
           type: 'notContains',
           parent: '#cgpt-upload-manage-panel',
           child: '#cgpt-copy-last-message-scroll-bottom',
           message: '复制最后回复按钮被错误放进管理面板',
           invalidLog: '[UPLOAD_DOM][invalid] 复制最后回复按钮被错误放进管理面板',
-        },
-        {
-          type: 'required',
-          selector: '#cgpt-upload-start',
         },
         {
           type: 'notContains',
@@ -20444,11 +23960,6 @@
           child: '#cgpt-send-message-once',
           message: '发送消息按钮必须位于主操作行',
           invalidLog: '[UPLOAD_DOM][invalid] send message button not in main action row',
-        },
-        {
-          type: 'required',
-          selector: '#cgpt-send-message-once',
-          missingLog: '[UPLOAD_DOM][missing] #cgpt-send-message-once',
         },
         {
           type: 'contains',
@@ -20804,11 +24315,7 @@
       bindEvents(rootEl);
       logUploadButtonSplitDom();
 
-      
-return clearPersistedUploadBlobs('startup-disable-blob-cache')
-        .catch((e) => {
-          console.warn('[ChatGPT toolbox] startup clearPersistedUploadBlobs failed', e);
-        })
+      return Promise.resolve()
         .then(() => loadGroups())
         .then(() => refreshUploadGroupCounts())
         .then(() => loadQueueForActiveGroup())
@@ -20818,7 +24325,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
           uploadGroupsInitResolved = true;
           ensureActiveUploadGroupIdValid('init-pipeline-complete');
           syncUploadGroupAppState();
-                ToolboxShell.appendLog('[UPLOAD_DIAG][blob-cache-disabled] upload blob persistence disabled');
+          ToolboxShell.appendLog('[UPLOAD_DIAG][blob-cache-enabled] upload blob persistence enabled');
       appendUploadGroupLog('INIT', { stage: 'pipeline-complete', reason: reason || '-' });
         })
         .catch((err) => {
@@ -20851,6 +24358,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       if (existed) {
         host = targetHost;
         restoreUploadDomRefs(existed);
+        resetRuntimeStateOnBoot('mount-reuse-dom');
         ToolboxShell.appendLog('[UPLOAD][mount-reuse-dom] rebind refs and reinit groups');
         uploadModuleInitPromise = runUploadModuleInitPipeline(existed, 'mount-reuse-dom');
         return uploadModuleInitPromise;
@@ -20895,8 +24403,8 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
                 </div>
 
                 <div class="cgpt-upload-manage-row">
-                  <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-clear-inline" data-action="clear-upload-group">清空当前组</button>
-                  <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-delete-inline" data-action="delete-upload-group">删除当前组</button>
+                  <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-clear-inline" data-action="clear-upload-group" data-danger-enter-block="1">清空当前组</button>
+                  <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-upload-group-delete-inline" data-action="delete-upload-group" data-danger-enter-block="1">删除当前组</button>
                 </div>
 
                 <div class="cgpt-hint">这里只管理当前文件组，不会自动上传到 ChatGPT。</div>
@@ -20906,7 +24414,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
             <div class="cgpt-upload-common-settings">
               <div class="cgpt-upload-manage-subtitle">公共上传设置</div>
 
-              <!-- Blob persistence disabled - file content no longer saved to IndexedDB -->
+              <!-- Blob persistence enabled - small files cached to IndexedDB -->
 
               <label class="cgpt-checkbox-line">
                 <input type="checkbox" id="cgpt-upload-use-unique-name-inline">
@@ -20936,6 +24444,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       listEl = qs(UploadSelectors.list, rootEl);
       startBtn = qs(UploadSelectors.startBtn, rootEl);
       refreshUploadGroupDomRefs(rootEl);
+      resetRuntimeStateOnBoot('mount-new-dom');
 
       uploadModuleInitPromise = runUploadModuleInitPipeline(rootEl, 'mount-new-dom');
 
@@ -21036,7 +24545,9 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       state.waitingReplyCheckedAt = Date.now();
       logUploadSendUiState('waiting-reply-start', `runId=${runId}`, runId);
 
-      setSendButtonState('waiting-reply', 'send-message-sent-waiting-reply');
+      scheduleRenderUpload(
+        state.pendingSendAfterReply ? 'waiting-reply-idle' : 'send-success-reset',
+      );
 
       state.waitingReplyTimer = setInterval(function () {
         void (async function tickWaitingReplyOrSendOpportunity() {
@@ -21207,6 +24718,21 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
           if (Object.prototype.hasOwnProperty.call(row, 'upload_active_group_id')) {
             legacyRowFields.push(`queue[${index}].upload_active_group_id`);
           }
+          if (Object.prototype.hasOwnProperty.call(row, 'filename')) {
+            legacyRowFields.push(`queue[${index}].filename`);
+          }
+          if (Object.prototype.hasOwnProperty.call(row, 'file_id')) {
+            legacyRowFields.push(`queue[${index}].file_id`);
+          }
+          if (Object.prototype.hasOwnProperty.call(row, 'download_url')) {
+            legacyRowFields.push(`queue[${index}].download_url`);
+          }
+          if (Object.prototype.hasOwnProperty.call(row, 'mime_type')) {
+            legacyRowFields.push(`queue[${index}].mime_type`);
+          }
+          if (row.status === 'uploaded' || row.status === 'attached') {
+            legacyRowFields.push(`queue[${index}].status=${row.status}`);
+          }
         });
       } catch (error) {
         console.error('[ChatGPT toolbox] scanQueueRowsForLegacyFields failed', error);
@@ -21227,8 +24753,14 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
 
     async function startUploadFromBridge(payload = {}) {
       const source = String(payload.source || 'bridge_command').trim() || 'bridge_command';
-      const queueResult = await runStartUploadButtonCore({ source });
-      const result = toLegacyUploadResult(queueResult);
+      const queueResult = await runStartUploadButtonCore({
+        source,
+        groupId: getActiveUploadScopeGroupId(payload),
+        mode: 'upload_only',
+        uploadOnly: true,
+        requireSendReady: false,
+      });
+      const result = toBridgeUploadResult(queueResult);
       const status = getUploadStatus();
       const finalResult = {
         ...(result || {}),
@@ -21247,6 +24779,7 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       mount,
       applyToolboxPageState,
       getStatus: getUploadStatus,
+      getUnifiedRuntimeStatus,
       getQuickPromptActiveCategory,
       getUploadInitPromise,
       scanQueueRowsForLegacyFields,
@@ -21261,6 +24794,11 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       ),
       isWaitingReplyOnly: () => !!state.waitingReply,
       isWaitingSendActive,
+      isSendPipelineBusy,
+      isSendTaskBusy,
+      isWaitingSendButton,
+      isShortcutDispatching,
+      waitChatGPTComposerReadyForUpload,
       refreshToolboxTopStatus: (reason = '', mode = 'heavy') => {
         const runRefresh = () => {
           const heavy = mode !== 'light';
@@ -21366,9 +24904,11 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
           );
         }
       },
+      resetRuntimeStateOnBoot,
       startUploadFromBridge,
       startUploadFromCurrentQueue,
       runStartUploadButtonCore,
+      runUploadPanelAction,
       uploadFromCurrentQueueShared,
       getPendingUploadItemsForStart,
       reconcileUploadPhase,
@@ -21390,11 +24930,13 @@ return clearPersistedUploadBlobs('startup-disable-blob-cache')
       stopUploadSendTask,
       stopUploadTask,
       clearUploadTransientFileRefs,
+      persistQueueSnapshotBeforeNavCleanup: schedulePersistQueue,
       getUploadQuotaState,
       getMessageQuotaState,
       clearUploadQuotaRecords,
       clearMessageQuotaRecords,
       recordUploadSuccess,
+      recordUploadSuccessOnce,
       recordMessageSent,
       canStartNextTaskByQuota,
       renderToolboxTopStatus,

@@ -78,18 +78,19 @@ function assembleUserscript() {
   const mainText = fs.readFileSync(ENTRY_FILE, 'utf8');
   const { header, body: mainBody } = extractHeader(mainText);
 
-  // Build body from all non-entry parts
-  const nonEntryParts = allParts.filter(function(p) { return p !== 'core/main.js'; });
-  const bodyParts = nonEntryParts.map(function(p) { return readPart(p); });
-
-  // Expand the upload marker in main.js body
   if (!mainBody.includes(marker)) {
     throw new Error(
       'core/main.js is missing upload insert marker ' + marker + '. ' +
       'Check that the upload module part has a matching InsertModule block.'
     );
   }
-  bodyParts.push(mainBody.replace(marker, '\n'));
+
+  const bodyParts = allParts.map(function(p) {
+    if (p === 'core/main.js') {
+      return mainBody.replace(marker, '\n');
+    }
+    return readPart(p);
+  });
 
   const body = bodyParts.join('');
   const bundled = '(function () {\n  \'use strict\';\n\n' + body + '})();';

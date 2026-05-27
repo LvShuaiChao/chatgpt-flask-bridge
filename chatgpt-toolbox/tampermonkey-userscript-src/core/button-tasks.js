@@ -4,28 +4,40 @@
 
   const BUTTON_TASK_PHASES = Object.freeze([
     'idle',
+    'waiting',
     'uploading',
     'waiting_send',
-    'waiting_ready',
     'sending',
     'waiting_reply',
     'copying',
     'running',
+    'continuing',
+    'navigating',
+    'quota_waiting',
+    'startup_uploading',
     'cancelling',
+    'checking',
+    'waiting_input',
+    'waiting_attachment',
     'cancelled',
     'success',
     'failed',
     'completed',
+    'danger',
+    'disabled',
   ]);
 
   const BUTTON_TASK_CANCELLABLE_PHASES = new Set([
+    'waiting',
     'uploading',
     'waiting_send',
-    'waiting_ready',
     'sending',
     'waiting_reply',
     'copying',
     'running',
+    'continuing',
+    'navigating',
+    'cancelling',
   ]);
 
   function createDefaultButtonTask(extra = {}) {
@@ -109,7 +121,10 @@
       return '';
     }
 
-    const nextPhase = String(phase || 'idle').trim() || 'idle';
+    let nextPhase = String(phase || 'idle').trim() || 'idle';
+    if (nextPhase === 'waiting_ready') {
+      nextPhase = 'waiting_send';
+    }
     const oldPhase = String(task.phase || 'idle');
     task.phase = nextPhase;
 
@@ -134,9 +149,14 @@
     if (extra.total != null) {
       task.total = Number(extra.total);
     }
+    if (extra.subphase != null) {
+      task.subphase = String(extra.subphase || '').trim();
+    }
 
     if (oldPhase !== nextPhase) {
-      logButtonTaskChange(taskName, oldPhase, nextPhase, reason, task.runId);
+      const subphase = task.subphase ? String(task.subphase) : '';
+      const subLog = subphase ? ` subphase=${subphase}` : '';
+      logButtonTaskChange(taskName, oldPhase, `${nextPhase}${subLog}`, reason, task.runId);
     }
 
     return nextPhase;
@@ -223,22 +243,6 @@
       console.warn('[BUTTON_STATE][MISMATCH]', {
         action,
         reason: 'text-says-cancel-but-task-idle',
-        phase,
-        text,
-        disabled,
-      });
-      return;
-    }
-
-    if (
-      (text.includes('开始') || text.includes('上传'))
-      && BUTTON_TASK_CANCELLABLE_PHASES.has(phase)
-      && !text.includes('取消')
-      && !text.includes('停止')
-    ) {
-      console.warn('[BUTTON_STATE][MISMATCH]', {
-        action,
-        reason: 'task-running-but-text-not-cancellable',
         phase,
         text,
         disabled,

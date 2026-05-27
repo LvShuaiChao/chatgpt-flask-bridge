@@ -132,20 +132,63 @@
       toggleBtnEl.textContent = state.visible ? '隐藏日志' : '显示最近日志';
     }
 
+    const COPY_ERROR_REAL_EXCEPTION_RE = /typeerror|referenceerror|syntaxerror|uncaught|stack=|\[error\]|\[failed\]|error=/i;
+
+    const COPY_ERROR_CAPABILITY_NOISE_REASONS = [
+      'home_new_chat_payload_but_send_button_missing',
+      'send_button_missing',
+      'payload_ready_but_send_button_missing',
+      'attachment_ready_but_send_button_missing',
+    ];
+
+    function lineHasRealExceptionSignal(line) {
+      return COPY_ERROR_REAL_EXCEPTION_RE.test(String(line || ''));
+    }
+
+    function isStateOverrideNoiseLogLine(line) {
+      const text = String(line || '');
+      if (text.includes('[BRIDGE][STATE_OVERRIDE]')) return true;
+      if (text.includes('[TOOLBOX_TOP_STATUS][STATE_OVERRIDE]')) return true;
+      if (text.includes('[COMPOSER][BUSY_OVERRIDE]')) return true;
+      return false;
+    }
+
+    function isCapabilityNoiseReasonLogLine(line) {
+      const lower = String(line || '').toLowerCase();
+      const hitsNoiseReason = COPY_ERROR_CAPABILITY_NOISE_REASONS.some((reason) => lower.includes(reason));
+      if (!hitsNoiseReason) {
+        return false;
+      }
+      return !lineHasRealExceptionSignal(line);
+    }
+
+    function isCopyableErrorLogLine(line) {
+      const text = String(line || '');
+      if (!text.trim()) {
+        return false;
+      }
+      if (isStateOverrideNoiseLogLine(text)) {
+        return false;
+      }
+      if (isCapabilityNoiseReasonLogLine(text)) {
+        return false;
+      }
+
+      const lower = text.toLowerCase();
+      const errorKeywords = [
+        'error', 'warn', 'failed', 'fail', 'exception', 'traceback',
+        '失败', '错误', '异常', '超时', 'timeout', 'unauthorized',
+        'forbidden', 'not found', 'undefined', 'null',
+      ];
+
+      return errorKeywords.some((kw) => lower.includes(kw));
+    }
+
     function bindLogCopyErrors(root) {
       bindClick(root, '#cgpt-log-copy-errors', () => {
         flushLogBufferSync();
 
-        const errorKeywords = [
-          'error', 'warn', 'failed', 'fail', 'exception', 'traceback',
-          '失败', '错误', '异常', '超时', 'timeout', 'unauthorized',
-          'forbidden', 'not found', 'undefined', 'null',
-        ];
-
-        const errorLines = state.lines.filter((line) => {
-          const lower = String(line || '').toLowerCase();
-          return errorKeywords.some((kw) => lower.includes(kw));
-        });
+        const errorLines = state.lines.filter((line) => isCopyableErrorLogLine(line));
 
         const text = errorLines.length > 0
           ? errorLines.join('\n')
@@ -338,3 +381,5 @@
       flushDomIfNeeded,
     };
   })();
+
+  globalThis.__CGPT_TOOLBOX_LOG_MODULE__ = LogModule;

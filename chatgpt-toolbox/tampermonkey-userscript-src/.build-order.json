@@ -6,6 +6,7 @@
     "core/button-tasks.js",
     "core/flow-runtime.js",
     "core/logger.js",
+    "autoqueue/log-module.js",
     "core/dom-action-utils.js",
     "core/chatgpt-dom-helpers.js",
     "core/send-pipeline.js",
@@ -22,7 +23,6 @@
     "autoqueue/settings-module.js",
     "autoqueue/bridge-module.js",
     "autoqueue/export-module.js",
-    "autoqueue/log-module.js",
     "core/browser-runtime-health.js",
     "core/boot.js"
   ],

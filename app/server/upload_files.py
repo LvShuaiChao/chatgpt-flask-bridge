@@ -1,4 +1,10 @@
-"""GUI 注册的本地直读上传文件：登记、列表与受控下载。"""
+"""GUI 注册的本地直读上传文件：登记、列表与受控下载。
+
+`upload_status`（如 pending / uploaded）是 Flask 本地文件注册表状态，表示文件是否已在
+服务端登记并可受控下载；**不等同于**浏览器油猴上传队列里的 ``UploadState``（ATTACHED /
+FAILED / ATTACHING 等）。不得用本模块的 ``upload_status`` 判断 ChatGPT 页面是否已完成
+附件上传或输入框挂载。
+"""
 from __future__ import annotations
 
 import mimetypes
@@ -141,15 +147,18 @@ def register_upload_file(
         mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
     )
     now = _now()
+    stat = resolved.stat()
     entry = {
         "file_id": file_id,
         "name": resolved.name,
-        "size": resolved.stat().st_size,
+        "size": int(stat.st_size),
+        "mtime": float(stat.st_mtime),
         "path": str(resolved),
         "mime_type": mime_type,
         "session_id": (session_id or "").strip(),
         "client_id": (client_id or "").strip(),
         "page_instance_id": (page_instance_id or "").strip(),
+        # Flask 本地注册状态；与浏览器 UploadState / uploadTask.phase 无关。
         "upload_status": "pending",
         "created_at": now,
         "updated_at": now,
@@ -213,7 +222,45 @@ def read_upload_file_bytes(file_id: str) -> tuple[bytes, dict]:
     if not entry:
         raise FileNotFoundError(f"未知 file_id：{file_id}")
     resolved = _resolve_stored_upload_path(entry)
+    stat = resolved.stat()
+    size = int(stat.st_size)
+    mtime = float(stat.st_mtime)
+    if size <= 0:
+        raise ValueError(f"文件大小为 0：{resolved}")
+
+    registered_size = int(entry.get("size") or 0)
+    registered_mtime = float(entry.get("mtime") or 0)
+    _log(
+        "[UPLOAD_LOCAL_DIRECT][READ_FILE] "
+        f"path={resolved} size={size} mtime={mtime} "
+        f"registered_size={registered_size} registered_mtime={registered_mtime}"
+    )
+
+    if registered_size and registered_size != size:
+        _log(
+            "[UPLOAD_LOCAL_DIRECT][READ_FILE][SIZE_CHANGED] "
+            f"file_id={file_id} old={registered_size} new={size}"
+        )
+    if registered_mtime and abs(registered_mtime - mtime) > 0.0001:
+        _log(
+            "[UPLOAD_LOCAL_DIRECT][READ_FILE][MTIME_CHANGED] "
+            f"file_id={file_id} old={registered_mtime} new={mtime}"
+        )
+
+    with st._state_lock:
+        stored = st._upload_files_by_id.get(file_id)
+        if isinstance(stored, dict):
+            stored["size"] = size
+            stored["mtime"] = mtime
+            stored["updated_at"] = _now()
+            entry = dict(stored)
+
     data = resolved.read_bytes()
+    if len(data) != size:
+        _log(
+            "[UPLOAD_LOCAL_DIRECT][READ_FILE][WARN] "
+            f"file_id={file_id} read_len={len(data)} stat_size={size}"
+        )
     return data, entry
 
 
@@ -322,4 +369,6 @@ def api_download_upload_file(file_id: str):
     response = Response(data, mimetype=mime_type)
     response.headers["Content-Disposition"] = f'attachment; filename="{name}"'
     response.headers["Content-Length"] = str(len(data))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return response

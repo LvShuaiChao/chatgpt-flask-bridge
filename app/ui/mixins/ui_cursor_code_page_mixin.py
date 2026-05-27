@@ -1,4 +1,8 @@
-"""Cursor代码 页面 UI。"""
+"""Cursor代码 页面 UI。
+
+TODO: Cursor代码页属于可选截图自动化功能；如后续确认不用，可整块移除
+UiCursorCodePageMixin、CursorCodeMixin 和 app/cursor_code 模块以精简依赖。
+"""
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,

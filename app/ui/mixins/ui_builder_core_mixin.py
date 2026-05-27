@@ -272,12 +272,11 @@ class UiBuilderCoreMixin:
         self.chat_page = self._build_chat_page()
         self.cursor_code_page = self._build_cursor_code_page()
         self.settings_page = self._build_settings_page()
-        self.debug_page = self._build_debug_page()
+        # 调试页仅在显式启用调试模式时再挂载，默认不在主界面展示
 
         self.main_tabs.addTab(self.chat_page, "聊天")
         self.main_tabs.addTab(self.cursor_code_page, "Cursor代码")
         self.main_tabs.addTab(self.settings_page, "设置")
-        self.main_tabs.addTab(self.debug_page, "调试")
 
         root.addWidget(self.main_tabs, stretch=1)
 

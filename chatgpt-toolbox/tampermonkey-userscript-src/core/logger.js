@@ -317,50 +317,6 @@
     });
   }
 
-  function setButtonState(button, options = {}) {
-    if (!button) return;
-
-    const {
-      text,
-      title,
-      disabled,
-      addClasses,
-      removeClasses,
-      ariaDisabled,
-    } = options || {};
-
-    if (Array.isArray(removeClasses) && removeClasses.length) {
-      button.classList.remove(...removeClasses);
-    }
-
-    if (Array.isArray(addClasses) && addClasses.length) {
-      button.classList.add(...addClasses);
-    }
-
-    if (text != null) {
-      button.textContent = text;
-    }
-
-    if (title != null) {
-      button.title = title;
-    }
-
-    if (disabled != null) {
-      const isCopyContinueBtn = button.id === 'cgpt-upload-continue-once';
-      const effectiveDisabled = isCopyContinueBtn ? false : !!disabled;
-
-      button.disabled = effectiveDisabled;
-
-      if (!effectiveDisabled) {
-        button.removeAttribute('disabled');
-      }
-    }
-
-    if (ariaDisabled != null) {
-      button.setAttribute('aria-disabled', ariaDisabled ? 'true' : 'false');
-    }
-  }
-
   const perfLogThrottleAt = {};
 
   function isToolboxPerfDebugEnabled() {
@@ -519,28 +475,26 @@
 
     if (SEND_ONLY_BUTTON_IDS.has(buttonId)) {
       if (enabled) {
-        if (
-          typeof UploadModule !== 'undefined'
-          && typeof UploadModule.setSendButtonState === 'function'
-        ) {
-          UploadModule.setSendButtonState('waiting-reply', reason || 'wait_danger');
-          return;
-        }
-
-        button.classList.add('cgpt-btn-waiting-danger');
+        button.classList.add('cgpt-btn-busy');
         button.dataset.waitDanger = '1';
         button.dataset.waitDangerReason = reason || 'waiting';
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            `[BUTTON][WAIT_DANGER_ON] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || '-'} sendButtonVmOnly=1`,
+          );
+        }
         return;
       }
 
-      button.classList.remove('cgpt-btn-waiting-danger');
+      button.classList.remove('cgpt-btn-busy', 'cgpt-btn-waiting-danger');
       delete button.dataset.waitDanger;
       delete button.dataset.waitDangerReason;
       return;
     }
 
     if (enabled) {
-      button.classList.add('cgpt-btn-waiting-danger');
+      button.classList.add('cgpt-btn-busy');
+      button.classList.remove('cgpt-btn-waiting-danger');
       button.dataset.waitDanger = '1';
       button.dataset.waitDangerReason = reason || 'waiting';
 
@@ -552,7 +506,7 @@
       return;
     }
 
-    button.classList.remove('cgpt-btn-waiting-danger');
+    button.classList.remove('cgpt-btn-busy', 'cgpt-btn-waiting-danger');
     delete button.dataset.waitDanger;
     delete button.dataset.waitDangerReason;
 
@@ -584,11 +538,13 @@
 
     const timer = window.setTimeout(() => {
       if (SEND_ONLY_BUTTON_IDS.has(buttonId)) {
-        if (
-          typeof UploadModule !== 'undefined'
-          && typeof UploadModule.setSendButtonState === 'function'
-        ) {
-          UploadModule.setSendButtonState('waiting-reply', reason || 'long_wait');
+        button.classList.add('cgpt-btn-busy');
+        button.dataset.waitDanger = '1';
+        button.dataset.waitDangerReason = reason || 'long_wait';
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            `[BUTTON][LONG_WAIT_DANGER] id=${button.id || '-'} text=${String(button.textContent || '').trim()} reason=${reason || 'long_wait'} sendButtonVmOnly=1`,
+          );
         }
         return;
       }
@@ -652,23 +608,69 @@
         return;
       }
 
-      const tagName = String(target.tagName || '').toLowerCase();
+      const el = target instanceof Element ? target : null;
+      if (!el) {
+        return;
+      }
+
+      const tagName = String(el.tagName || '').toLowerCase();
       const isEditable =
         tagName === 'input' ||
         tagName === 'textarea' ||
-        target.isContentEditable === true;
+        tagName === 'select' ||
+        el.isContentEditable === true ||
+        !!el.closest('[contenteditable="true"]');
 
       if (isEditable) {
         return;
       }
 
-      if (tagName === 'button' && (event.key === 'Enter' || event.key === ' ')) {
-        event.preventDefault();
-        event.stopPropagation();
+      const btn = el.closest('button');
+      if (!btn) {
+        return;
+      }
 
-        if (typeof target.blur === 'function') {
-          target.blur();
+      const key = String(event.key || '');
+      const isEnterOrSpace = key === 'Enter' || key === ' ';
+      if (!isEnterOrSpace) {
+        return;
+      }
+
+      const id = btn.id || '-';
+
+      if (btn.hasAttribute('data-enter-keep-native')) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_KEYBOARD_GUARD][ALLOW_BUTTON_ENTER] id=${id} key=${key}`,
+          );
         }
+        return;
+      }
+
+      const shouldBlockButtonEnter =
+        btn.hasAttribute('data-enter-block') ||
+        btn.hasAttribute('data-danger-enter-block');
+
+      if (!shouldBlockButtonEnter) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_KEYBOARD_GUARD][ALLOW_BUTTON_ENTER] id=${id} key=${key}`,
+          );
+        }
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (typeof btn.blur === 'function') {
+        btn.blur();
+      }
+
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[TOOLBOX_KEYBOARD_GUARD][BLOCK_BUTTON_ENTER] id=${id} key=${key} reason=danger-button`,
+        );
       }
     }, true);
   }
@@ -2546,19 +2548,27 @@
       && !item.meta;
   }
 
-  function migrateUnsafePlainEnterSendShortcut(sendMessage) {
+  function migrateUnsafePlainEnterSendShortcut(sendMessage, rawConfig) {
     if (!isPlainEnterShortcutItem(sendMessage)) {
       return false;
     }
 
-    sendMessage.label = 'Ctrl+Alt+S';
-    sendMessage.key = 's';
-    sendMessage.code = 'KeyS';
-    sendMessage.ctrl = true;
-    sendMessage.alt = true;
-    sendMessage.shift = false;
-    sendMessage.meta = false;
-    return true;
+    const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : null;
+    const hasExplicitConfig = !!(raw && raw.sendMessage);
+
+    if (hasExplicitConfig) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[SHORTCUT][PLAIN_ENTER_ALLOWED] source=user-config');
+        ToolboxShell.appendLog('[SHORTCUT][PLAIN_ENTER_MIGRATE_SKIP] reason=user-explicit-config');
+      }
+      return false;
+    }
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog('[SHORTCUT][PLAIN_ENTER_MIGRATE_SKIP] reason=no-explicit-config');
+    }
+
+    return false;
   }
 
   const LEGACY_DEFAULT_SENDMESSAGE_CTRL_ENTER = Object.freeze({
@@ -2646,7 +2656,7 @@
       DEFAULT_SHORTCUT_CONFIG.startUpload,
     );
 
-    const migratedUnsafeEnter = migrateUnsafePlainEnterSendShortcut(sendMessage);
+    const migratedUnsafeEnter = migrateUnsafePlainEnterSendShortcut(sendMessage, raw);
     const migratedLegacyCtrlEnter = migrateLegacyCtrlEnterDefaultSendShortcut(sendMessage, raw);
     if ((migratedUnsafeEnter || migratedLegacyCtrlEnter) && raw) {
       saveShortcutConfig({
@@ -3043,7 +3053,7 @@
       }
 
       uploadStartSendBtn.title = waitingSend
-        ? '再次点击可取消等待发送'
+        ? '等待发送'
         : `发送信息快捷键：${shortcutCfg.sendMessage.label || '未设置'}`;
     }
 
@@ -3056,9 +3066,9 @@
       ) {
         const copyPhase = UploadModule.syncCopyContinueTaskPhase();
         if (copyPhase === 'waiting_reply') {
-          copyTitle = '正在等待回复，再次点击可取消';
+          copyTitle = '正在等待回复';
         } else if (copyPhase === 'copying' || copyPhase === 'sending_continue' || copyPhase === 'running') {
-          copyTitle = '复制并继续任务进行中，再次点击可取消';
+          copyTitle = '复制并继续任务进行中';
         } else if (copyPhase === 'cancelling') {
           copyTitle = '停止请求已提交，正在等待复制并继续任务退出';
         }
@@ -3077,7 +3087,7 @@
       if (typeof UploadModule !== 'undefined' && typeof UploadModule.syncUploadTaskPhase === 'function') {
         const uploadPhase = UploadModule.syncUploadTaskPhase();
         if (uploadPhase === 'uploading') {
-          uploadTitle = '上传中，点击取消';
+          uploadTitle = '上传中';
         } else if (uploadPhase === 'cancelling') {
           uploadTitle = '正在取消上传';
         } else if (uploadPhase === 'success') {
@@ -3333,8 +3343,17 @@
     return rect.width > 0 && rect.height > 0;
   }
 
+  const TOOLBOX_DOM_EXCLUDE_SELECTOR = [
+    `#${APP.rootId}`,
+    '#xz-toolbox-root',
+    '.xz-toolbox-root',
+    '.cgpt-toolbox-root',
+    '[data-xz-toolbox="1"]',
+    '[data-cgpt-toolbox-root="1"]',
+  ].join(', ');
+
   function isInToolbox(el) {
-    return !!(el && el.closest && el.closest(`#${APP.rootId}`));
+    return !!(el && el.closest && el.closest(TOOLBOX_DOM_EXCLUDE_SELECTOR));
   }
 
   function escapeHtml(s) {
@@ -4086,16 +4105,6 @@
     }
 
 
-    function applyIssueTotalToTitle(issueTotal) {
-      const base = stripKnownPrefixes(document.title);
-      const next = issueTotal > 0
-        ? `(${issueTotal}) ${PREFIX}${base || 'ChatGPT'}`
-        : `${PREFIX}${base || 'ChatGPT'}`;
-
-      document.title = next;
-      fixTitle();
-    }
-
     function stopReplyDoneFlash(reason = '') {
       const wasActive = !!replyDoneFlashTimer || !!replyDoneFlashBaseTitle;
 
@@ -4168,7 +4177,6 @@
 
     return {
       start,
-      applyIssueTotalToTitle,
       startReplyDoneFlash,
       stopReplyDoneFlash,
     };

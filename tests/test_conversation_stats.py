@@ -33,7 +33,7 @@ def test_empty_session_stats(host):
     assert stats["total_count"] == 0
     assert stats["total_chars"] == 0
     assert host._format_conversation_stats_text(stats) == (
-        "统计：共 0 条｜我 0 条 0 字｜AI 0 条 0 字｜总 0 字"
+        "本地统计：共 0 条｜我 0 条 0 字｜AI 0 条 0 字｜总 0 字"
     )
 
 
@@ -154,7 +154,7 @@ def test_dict_message_roles(host):
     conversation = {
         "messages": [
             {"role": "user", "sender": "me", "content": "abc"},
-            {"role": "assistant", "type": "assistant", "text": "xyz"},
+            {"role": "assistant", "type": "assistant", "content": "xyz"},
         ]
     }
     stats = host._calc_conversation_stats(conversation)
@@ -162,3 +162,41 @@ def test_dict_message_roles(host):
     assert stats["assistant_count"] == 1
     assert stats["user_chars"] == 3
     assert stats["assistant_chars"] == 3
+
+
+def test_format_local_stats_summary_empty(host):
+    stats = host._calc_conversation_stats(None)
+    assert host._format_local_stats_summary(stats) == "本地：0条 · 0字"
+
+
+def test_format_local_stats_summary_system_only(host):
+    messages = [
+        ChatMessage(role="system", content="系统提示内容"),
+    ]
+    stats = host._calc_conversation_stats(_session_with_messages(messages))
+    expected_chars = host._count_message_chars("系统提示内容")
+    assert host._format_local_stats_summary(stats) == f"本地：1条 · {expected_chars}字"
+
+
+def test_format_local_stats_tooltip_system_only(host):
+    messages = [
+        ChatMessage(role="system", content="系统提示内容"),
+    ]
+    stats = host._calc_conversation_stats(_session_with_messages(messages))
+    expected_chars = host._count_message_chars("系统提示内容")
+    tooltip = host._format_local_stats_tooltip(stats)
+    assert "本地统计详情：" in tooltip
+    assert f"总消息：1 条 / {expected_chars} 字" in tooltip
+    assert "用户消息：0 条 / 0 字" in tooltip
+    assert "AI消息：0 条 / 0 字" in tooltip
+    assert f"系统消息：1 条 / {expected_chars} 字" in tooltip
+
+
+def test_format_local_stats_tooltip_includes_failed_when_present(host):
+    messages = [
+        ChatMessage(role="error", content="错误：测试"),
+    ]
+    stats = host._calc_conversation_stats(_session_with_messages(messages))
+    expected_chars = host._count_message_chars("错误：测试")
+    tooltip = host._format_local_stats_tooltip(stats)
+    assert f"失败消息：1 条 / {expected_chars} 字" in tooltip

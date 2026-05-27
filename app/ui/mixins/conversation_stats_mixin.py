@@ -194,6 +194,45 @@ class ConversationStatsMixin:
         parts.append(f"总 {stats['total_chars']} 字")
         return "｜".join(parts)
 
+    def _format_local_stats_summary(self, stats):
+        stats = stats or self._EMPTY_CONVERSATION_STATS
+        total_count = int(stats.get("total_count") or 0)
+        total_chars = int(stats.get("total_chars") or 0)
+        return f"本地：{total_count}条 · {total_chars}字"
+
+    def _format_local_stats_tooltip(self, stats):
+        stats = stats or self._EMPTY_CONVERSATION_STATS
+
+        total_count = int(stats.get("total_count") or 0)
+        total_chars = int(stats.get("total_chars") or 0)
+        user_count = int(stats.get("user_count") or 0)
+        user_chars = int(stats.get("user_chars") or 0)
+        assistant_count = int(stats.get("assistant_count") or 0)
+        assistant_chars = int(stats.get("assistant_chars") or 0)
+        system_count = int(stats.get("system_count") or 0)
+        system_chars = int(stats.get("system_chars") or 0)
+
+        failed_count = int(stats.get("failed_count") or 0)
+        failed_chars = int(stats.get("failed_chars") or 0)
+        unknown_count = int(stats.get("unknown_count") or 0)
+        unknown_chars = int(stats.get("unknown_chars") or 0)
+
+        lines = [
+            "本地统计详情：",
+            f"总消息：{total_count} 条 / {total_chars} 字",
+            f"用户消息：{user_count} 条 / {user_chars} 字",
+            f"AI消息：{assistant_count} 条 / {assistant_chars} 字",
+            f"系统消息：{system_count} 条 / {system_chars} 字",
+        ]
+
+        # 失败/其他通常是调试信息，放 tooltip 里但默认不影响主界面干净度。
+        if failed_count > 0:
+            lines.append(f"失败消息：{failed_count} 条 / {failed_chars} 字")
+        if unknown_count > 0:
+            lines.append(f"其他消息：{unknown_count} 条 / {unknown_chars} 字")
+
+        return "\n".join(lines)
+
     def _format_web_snapshot_stats_tooltip(self, session):
         if session is None:
             return ""
@@ -243,11 +282,20 @@ class ConversationStatsMixin:
 
         try:
             stats = self._calc_conversation_stats(session)
-            text = self._format_conversation_stats_text(stats)
-            tooltip = text
+            detailed_text = self._format_conversation_stats_text(stats)
+            summary_text = self._format_local_stats_summary(stats)
+            local_tooltip = self._format_local_stats_tooltip(stats)
+
+            show_detailed = (
+                hasattr(self, "_is_debug_mode_enabled")
+                and bool(self._is_debug_mode_enabled())
+            )
+            text = detailed_text if show_detailed else summary_text
+
+            tooltip = local_tooltip
             web_tooltip = self._format_web_snapshot_stats_tooltip(session)
             if web_tooltip:
-                tooltip = f"{text}\n{web_tooltip}"
+                tooltip = f"{tooltip}\n{web_tooltip}"
             label.setText(text)
             label.setToolTip(tooltip)
             label.setVisible(True)
@@ -264,9 +312,19 @@ class ConversationStatsMixin:
         except Exception as exc:
             import traceback
 
-            fallback = self._format_conversation_stats_text(self._EMPTY_CONVERSATION_STATS)
-            label.setText(fallback)
-            label.setToolTip(fallback)
+            fallback_stats = self._EMPTY_CONVERSATION_STATS
+            fallback_detailed = self._format_conversation_stats_text(fallback_stats)
+            fallback_summary = self._format_local_stats_summary(fallback_stats)
+            fallback_tooltip = self._format_local_stats_tooltip(fallback_stats)
+
+            show_detailed = (
+                hasattr(self, "_is_debug_mode_enabled")
+                and bool(self._is_debug_mode_enabled())
+            )
+            fallback_text = fallback_detailed if show_detailed else fallback_summary
+
+            label.setText(fallback_text)
+            label.setToolTip(fallback_tooltip)
             label.setVisible(True)
 
             if hasattr(self, "_append_log"):

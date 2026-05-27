@@ -911,11 +911,9 @@
 
         #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] .cgpt-section-title,
         #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] .cgpt-hint,
-        #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] #cgpt-export-stats-line,
         #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] .cgpt-export-advanced,
         #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] #cgpt-export-copy-panel,
-        #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] #cgpt-export-prompts,
-        #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] #cgpt-export-copy-stats {
+        #${APP.panelId}.cgpt-toolbox-compact [data-page="export"] #cgpt-export-prompts {
           display: none !important;
         }
 
@@ -1800,46 +1798,36 @@
           color: #ffffff !important;
         }
 
-        .cgpt-btn.cgpt-btn-idle,
         .cgpt-btn.primary {
           background: #2563eb;
           border-color: #3b82f6;
           color: #ffffff;
         }
 
-        .cgpt-btn.cgpt-btn-idle:hover,
         .cgpt-btn.primary:hover {
           background: #1d4ed8;
         }
 
-        .cgpt-btn.cgpt-btn-waiting {
-          background: #d97706 !important;
-          border-color: #f59e0b !important;
-          color: #ffffff !important;
-        }
-
-        .cgpt-btn.cgpt-btn-waiting:hover {
-          background: #b45309 !important;
-        }
-
-        .cgpt-btn.cgpt-btn-running,
-        .cgpt-btn.cgpt-btn-sending,
-        .cgpt-btn.cgpt-btn-danger {
+        .cgpt-btn.cgpt-btn-busy {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
         }
 
-        .cgpt-btn.cgpt-btn-running:hover,
-        .cgpt-btn.cgpt-btn-sending:hover,
-        .cgpt-btn.cgpt-btn-danger:hover {
+        .cgpt-btn.cgpt-btn-busy:hover {
           background: #b91c1c !important;
+          border-color: #dc2626 !important;
+          color: #ffffff !important;
         }
 
-        .cgpt-btn.cgpt-btn-success {
-          background: #16a34a !important;
-          border-color: #22c55e !important;
+        .cgpt-btn.cgpt-btn-danger:not(.cgpt-btn-busy) {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
           color: #ffffff !important;
+        }
+
+        .cgpt-btn.cgpt-btn-danger:not(.cgpt-btn-busy):hover {
+          background: #b91c1c !important;
         }
 
         .cgpt-btn.cgpt-btn-cancelled {
@@ -1974,18 +1962,27 @@
           cursor: not-allowed;
         }
 
-        #cgpt-copy-hotkey-continue-loop.danger {
-          background: #dc2626;
-          border-color: #ef4444;
-          color: #ffffff;
-        }
-
-        #cgpt-autoq-start-upload.cgpt-btn-danger,
-        #cgpt-autoq-start-upload.cgpt-btn-running,
-        #cgpt-autoq-start-upload[aria-busy="true"] {
+        #cgpt-copy-hotkey-continue-loop.cgpt-btn-busy {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
+        }
+
+        #cgpt-autoq-start-upload.cgpt-btn-busy,
+        #cgpt-autoq-start-upload[data-cgpt-button-phase="uploading"],
+        #cgpt-autoq-start-upload[data-cgpt-button-phase="running"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+        }
+
+        #cgpt-autoq-start-upload.cgpt-btn-disabled,
+        #cgpt-autoq-start-upload:disabled {
+          background: #334155 !important;
+          border-color: #64748b !important;
+          color: #cbd5e1 !important;
+          cursor: not-allowed !important;
           opacity: 1 !important;
         }
 
@@ -2005,10 +2002,9 @@
         }
 
         #cgpt-upload-start[data-upload-state="uploading"],
-        #cgpt-upload-start.cgpt-btn-danger,
-        #cgpt-upload-start.cgpt-btn-running,
-        #cgpt-upload-start.cgpt-btn-uploading,
-        #cgpt-upload-start[aria-busy="true"] {
+        #cgpt-upload-start.cgpt-btn-busy,
+        #cgpt-upload-start[data-cgpt-button-phase="uploading"],
+        #cgpt-upload-start[data-cgpt-button-phase="running"] {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
@@ -2017,10 +2013,9 @@
         }
 
         #cgpt-upload-start[data-upload-state="uploading"]:hover,
-        #cgpt-upload-start.cgpt-btn-danger:hover,
-        #cgpt-upload-start.cgpt-btn-running:hover,
-        #cgpt-upload-start.cgpt-btn-uploading:hover,
-        #cgpt-upload-start[aria-busy="true"]:hover {
+        #cgpt-upload-start.cgpt-btn-busy:hover,
+        #cgpt-upload-start[data-cgpt-button-phase="uploading"]:hover,
+        #cgpt-upload-start[data-cgpt-button-phase="running"]:hover {
           background: #b91c1c !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
@@ -2076,23 +2071,23 @@
           display: contents !important;
         }
 
-        #cgpt-send-message-once {
-          background: #1d4ed8 !important;
-          border-color: #3b82f6 !important;
+        .cgpt-btn.cgpt-send-btn.cgpt-send-btn-idle,
+        #cgpt-send-message-once.cgpt-send-btn-idle,
+        #cgpt-send-message-btn.cgpt-send-btn-idle {
+          background: #166534 !important;
+          border-color: #22c55e !important;
           color: #ffffff !important;
         }
 
-        #cgpt-send-message-once:hover:not(:disabled) {
-          background: #2563eb !important;
+        .cgpt-btn.cgpt-send-btn.cgpt-send-btn-idle:hover:not(:disabled),
+        #cgpt-send-message-once.cgpt-send-btn-idle:hover:not(:disabled),
+        #cgpt-send-message-btn.cgpt-send-btn-idle:hover:not(:disabled) {
+          background: #15803d !important;
         }
 
-        #cgpt-send-message-once.danger,
-        #cgpt-send-message-once.cgpt-send-danger,
-        #cgpt-send-message-once.cgpt-wait-send-cancel,
-        #cgpt-send-message-once[data-send-state="sending"],
-        #cgpt-send-message-once[data-send-state="waiting-reply"],
-        #cgpt-send-message-once[data-send-state="cancelable-waiting"],
-        #cgpt-send-message-once[aria-busy="true"] {
+        .cgpt-btn.cgpt-send-btn.cgpt-send-btn-busy,
+        #cgpt-send-message-once.cgpt-send-btn-busy,
+        #cgpt-send-message-btn.cgpt-send-btn-busy {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
           color: #ffffff !important;
@@ -2100,27 +2095,29 @@
           opacity: 1;
         }
 
-        .cgpt-btn-copy-continue,
-        #cgpt-upload-continue-once,
-        #cgpt-upload-continue-once.copy-continue,
-        #cgpt-upload-continue-once.cgpt-btn-busy {
+        .cgpt-btn.cgpt-send-btn.cgpt-send-btn-busy:hover:not(:disabled),
+        #cgpt-send-message-once.cgpt-send-btn-busy:hover:not(:disabled),
+        #cgpt-send-message-btn.cgpt-send-btn-busy:hover:not(:disabled) {
+          background: #b91c1c !important;
+        }
+
+        #cgpt-send-message-once.cgpt-send-btn-idle[disabled],
+        #cgpt-send-message-btn.cgpt-send-btn-idle[disabled] {
+          opacity: 0.65;
+          cursor: not-allowed;
+        }
+
+        .cgpt-btn-copy-continue:not(.cgpt-btn-busy),
+        #cgpt-upload-continue-once:not(.cgpt-btn-busy),
+        #cgpt-upload-continue-once.copy-continue:not(.cgpt-btn-busy) {
           background: #7c3aed !important;
           border-color: #8b5cf6 !important;
           color: #ffffff !important;
           opacity: 1 !important;
         }
-}
- 
-        #cgpt-upload-continue-once:hover {
-          background: #8b5cf6 !important;
-        }
 
-        #cgpt-upload-continue-once.cgpt-waiting-answer,
-        #cgpt-upload-continue-once.cgpt-waiting-answer:hover {
-          background: #d97706 !important;
-          border-color: #f59e0b !important;
-          color: #ffffff !important;
-          opacity: 1 !important;
+        #cgpt-upload-continue-once:not(.cgpt-btn-busy):hover {
+          background: #8b5cf6 !important;
         }
 
         
@@ -2803,10 +2800,7 @@
           color: #ffffff !important;
         }
 
-        #cgpt-autoq-start.cgpt-btn-danger,
-        #cgpt-autoq-start.cgpt-btn-running,
-        #cgpt-autoq-start.cgpt-btn-sending,
-        #cgpt-autoq-start.cgpt-btn-waiting-danger,
+        #cgpt-autoq-start.cgpt-btn-busy,
         #cgpt-autoq-start[aria-busy="true"] {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
@@ -2819,10 +2813,7 @@
           cursor: not-allowed;
         }
 
-        #cgpt-autoq-start.cgpt-btn-idle,
-        #cgpt-autoq-start.cgpt-btn-running,
-        #cgpt-autoq-start.cgpt-btn-waiting,
-        #cgpt-autoq-start.cgpt-btn-sending {
+        #cgpt-autoq-start {
           pointer-events: auto !important;
         }
 
@@ -3167,10 +3158,13 @@
           gap: 6px;
           max-height: 260px;
           overflow-y: auto;
+          overflow-x: hidden;
           border: 1px solid #2f3542;
           border-radius: 10px;
           padding: 6px;
           background: #0f1115;
+          container-type: inline-size;
+          container-name: autoq-task-list;
         }
 
         .cgpt-autoq-task-item {
@@ -3203,9 +3197,9 @@
         }
 
         .cgpt-autoq-task-item-title {
-          flex: 0 1 auto !important;
-          min-width: 80px !important;
-          max-width: 220px !important;
+          flex: 1 1 auto !important;
+          min-width: 0 !important;
+          max-width: none !important;
           overflow: hidden !important;
           text-overflow: ellipsis !important;
           white-space: nowrap !important;
@@ -3234,6 +3228,58 @@
           gap: 5px !important;
           flex-wrap: wrap !important;
           row-gap: 4px !important;
+        }
+
+        @container autoq-task-list (max-width: 520px) {
+          .cgpt-autoq-task-item {
+            grid-template-columns: minmax(0, 1fr) !important;
+            column-gap: 0 !important;
+            padding: 7px 8px !important;
+          }
+
+          .cgpt-autoq-task-item-main-inline {
+            width: 100% !important;
+            min-width: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 2px !important;
+            overflow: hidden !important;
+            white-space: normal !important;
+          }
+
+          .cgpt-autoq-task-item-title {
+            display: block !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: none !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+            font-size: 13px !important;
+            line-height: 1.35 !important;
+          }
+
+          .cgpt-autoq-task-item-meta,
+          .cgpt-autoq-task-item-source,
+          .cgpt-autoq-task-item-category {
+            display: none !important;
+          }
+
+          .cgpt-autoq-task-item-actions {
+            display: none !important;
+          }
+        }
+
+        @container autoq-task-list (max-width: 360px) {
+          .cgpt-autoq-task-item {
+            padding: 8px 9px !important;
+          }
+
+          .cgpt-autoq-task-item-title {
+            font-size: 14px !important;
+            line-height: 1.4 !important;
+          }
         }
 
         .cgpt-autoq-task-item-actions .cgpt-btn,
@@ -5051,6 +5097,9 @@
 
       root = document.createElement('div');
       root.id = APP.rootId;
+      root.setAttribute('data-xz-toolbox', '1');
+      root.setAttribute('data-cgpt-toolbox-root', '1');
+      root.classList.add('cgpt-toolbox-root');
       root.innerHTML = `
         <button id="${APP.toggleId}" type="button" aria-label="打开小张工具箱" title="小张工具箱">
           <span class="cgpt-toolbox-toggle-icon" aria-hidden="true"></span>
@@ -5163,6 +5212,10 @@
         creatingToolbox = false;
 
         if (root) {
+          console.info('[TOOLBOX][SHELL_CREATED] root created', {
+            root: !!root,
+            panel: !!panel,
+          });
           startToolboxWatchdog();
           bindGlobalErrorGuard();
         }
@@ -5427,8 +5480,9 @@
         panel.setAttribute('data-compact-active-tab', 'upload');
       }
 
-      if (nextTab === 'log' && typeof LogModule.flushDomIfNeeded === 'function') {
-        LogModule.flushDomIfNeeded();
+      const logModuleRef = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+      if (nextTab === 'log' && logModuleRef && typeof logModuleRef.flushDomIfNeeded === 'function') {
+        logModuleRef.flushDomIfNeeded();
       }
 
       if (
@@ -9599,7 +9653,10 @@
       }
 
       if (latestStatusText) {
-        LogModule.add(`[状态][${statusType}] ${latestStatusText}`);
+        const logModuleRef = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+        if (logModuleRef && typeof logModuleRef.add === 'function') {
+          logModuleRef.add(`[状态][${statusType}] ${latestStatusText}`);
+        }
       }
     }
 
@@ -9830,8 +9887,9 @@
       appendingLog = true;
 
       try {
-        if (typeof LogModule !== 'undefined' && LogModule.add) {
-          LogModule.add(message);
+        const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+        if (logModule && typeof logModule.add === 'function') {
+          logModule.add(message);
         } else {
           console.debug('[ChatGPT toolbox][LOG_BEFORE_READY]', message);
         }
@@ -10052,50 +10110,6 @@
         '[aria-label*="conversation"]',
       ].join(','),
     );
-  }
-
-  function forceScrollContainerToEnd(el, reason = 'unknown') {
-    if (!el) return false;
-
-    const reasonText = String(reason || 'unknown');
-
-    try {
-      if (
-        el === document.scrollingElement ||
-        el === document.documentElement ||
-        el === document.body
-      ) {
-        const maxY = Math.max(
-          document.documentElement ? document.documentElement.scrollHeight : 0,
-          document.body ? document.body.scrollHeight : 0,
-          el.scrollHeight || 0,
-        );
-
-        window.scrollTo({
-          top: maxY,
-          left: 0,
-          behavior: 'auto',
-        });
-
-        if (document.documentElement) {
-          document.documentElement.scrollTop = maxY;
-        }
-
-        if (document.body) {
-          document.body.scrollTop = maxY;
-        }
-
-        return true;
-      }
-
-      el.scrollTop = el.scrollHeight;
-      return true;
-    } catch (err) {
-      const errText = err && err.message ? err.message : String(err);
-      console.warn('[ChatGPT toolbox] forceScrollContainerToEnd failed', err);
-      ToolboxShell.appendLog(`[CHAT_PAGE][force-end:container-failed] reason=${reasonText} error=${errText}`);
-      return false;
-    }
   }
 
   const COMPOSER_AREA_SELECTORS_FOR_MESSAGE = [
@@ -10518,6 +10532,28 @@
   }
 
   function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
+    if (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_UPLOAD_CRITICAL__ === true) {
+      // 上传关键期只做轻量 fallback，避免触发 after-thinking 提取/重型清洗。
+      const cleanFn =
+        typeof ChatMessageExtractor !== 'undefined' &&
+        ChatMessageExtractor &&
+        typeof ChatMessageExtractor.cleanMessageText === 'function'
+          ? ChatMessageExtractor.cleanMessageText
+          : cleanCopiedMessageText;
+
+      const cleanedFallback = cleanFn(fallbackText || rawText || '');
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog('[UPLOAD_CRITICAL][SKIP_HEAVY_CHAT_SCAN] reason=uploading');
+      }
+
+      return {
+        text: String(cleanedFallback || '').trim(),
+        source: 'fallback-content',
+        isStreaming: false,
+      };
+    }
+
     const cleanFn =
       typeof ChatMessageExtractor !== 'undefined' &&
       ChatMessageExtractor &&

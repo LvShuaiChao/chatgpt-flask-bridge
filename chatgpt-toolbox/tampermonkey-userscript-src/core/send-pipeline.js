@@ -3,6 +3,10 @@
   const SEND_PIPELINE_BUTTON_WAIT_MAX_ATTEMPTS = 40;
   const SEND_PIPELINE_BUTTON_WAIT_INTERVAL_MS = 200;
   const SEND_PIPELINE_BUTTON_DISABLED_WAIT_MS = 8000;
+  const SEND_PIPELINE_MANUAL_BUTTON_WAIT_MAX_ATTEMPTS = 12;
+  const SEND_PIPELINE_MANUAL_BUTTON_WAIT_INTERVAL_MS = 150;
+  const SEND_PIPELINE_MANUAL_BUTTON_DISABLED_WAIT_MS = 2500;
+  const SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS = 10000;
   const SEND_PIPELINE_TEXT_REWRITE_MAX = 3;
   const SEND_PIPELINE_COMPOSER_READY_TIMEOUT_MS = 10000;
   const SEND_PIPELINE_STABLE_INTERVAL_MS = 300;
@@ -27,6 +31,7 @@
       `sendExistingComposer=${extra.sendExistingComposer ? 1 : 0}`,
       `reason=${String(extra.reason || '-')}`,
       `retryable=${extra.retryable ? 1 : 0}`,
+      `wait_send=${extra.wait_send ? 1 : 0}`,
       `wait_reply=${extra.wait_reply ? 1 : 0}`,
     ];
 
@@ -50,6 +55,7 @@
       ok: false,
       reason: '',
       retryable: false,
+      wait_send: false,
       wait_reply: false,
       source: String(base.source || ''),
       mode: String(base.mode || ''),
@@ -57,6 +63,7 @@
     const merged = Object.assign(out, base || {}, patch || {});
     merged.ok = merged.ok === true;
     merged.retryable = merged.retryable === true;
+    merged.wait_send = merged.wait_send === true;
     merged.wait_reply = merged.wait_reply === true;
     return merged;
   }
@@ -71,8 +78,38 @@
     if (stableResult.retryable === true) {
       result.retryable = true;
     }
-    if (stableResult.wait_reply === true || stableResult.wait === true) {
+    if (stableResult.wait_send === true) {
+      result.wait_send = true;
+      result.retryable = true;
+    }
+    if (stableResult.wait_reply === true) {
       result.wait_reply = true;
+      result.retryable = true;
+    }
+    if (stableResult.wait === true) {
+      const softWaitSendReasons = new Set([
+        'send_button_not_ready_with_attachment',
+        'send_button_not_found',
+        'send_button_disabled',
+        'button_disabled',
+        'payload_ready_but_send_button_missing',
+        'attachment_ready_but_send_button_missing',
+        'send_button_not_ready_after_text',
+        'waiting_real_send_button',
+        'composer_empty_wait_payload',
+        'waiting_payload',
+        'attachment_uploading',
+        'waiting_attachment_upload',
+        'waiting_attachment_upload_done',
+        'enter_fallback_blocked_with_attachment',
+      ]);
+      const stableReason = String(stableResult.reason || '');
+      if (softWaitSendReasons.has(stableReason)) {
+        result.wait_send = true;
+        result.wait_reply = false;
+      } else {
+        result.wait_reply = true;
+      }
       result.retryable = true;
     }
     return result;
@@ -116,6 +153,9 @@
       'composer_text_lost_after_rewrite',
       'send_button_not_found',
       'send_button_not_ready_after_text',
+      'send_button_not_ready_with_attachment',
+      'waiting_attachment_upload_done',
+      'enter_fallback_blocked_with_attachment',
       'send_button_disabled',
       'button_disabled',
       'send_button_wait_timeout',
@@ -202,6 +242,47 @@
     return check;
   }
 
+  function sendPipelineIsNativeSendButtonReady(sendSnap, capability) {
+    if (!sendSnap || sendSnap.found !== true || sendSnap.ready !== true) {
+      return false;
+    }
+    const nativeButton = sendSnap.button;
+    const nativeButtonVisible = !!(
+      nativeButton
+      && nativeButton instanceof HTMLElement
+      && nativeButton.offsetParent !== null
+    );
+    if (!nativeButtonVisible) {
+      return false;
+    }
+    if (capability && capability.is_responding) {
+      return false;
+    }
+    return true;
+  }
+
+  function sendPipelineLogAttachmentWait(tag, fields) {
+    const payload = typeof composerHasPayloadInInput === 'function'
+      ? composerHasPayloadInInput()
+      : { hasAttachment: false, attachmentUploading: false, textLen: 0 };
+    const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+      ? getComposerSendButtonSnapshot({ silent: true })
+      : { ready: false };
+    const line = [
+      String(tag || '[SEND]'),
+      `hasAttachment=${payload.hasAttachment ? 1 : 0}`,
+      `attachmentUploading=${payload.attachmentUploading ? 1 : 0}`,
+      `sendButtonReady=${sendSnap.ready ? 1 : 0}`,
+      `nativeDisabled=${sendSnap.ready ? 0 : 1}`,
+      `reason=${String((fields && fields.reason) || '-')}`,
+    ].join(' ');
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+  }
+
   async function sendPipelineWaitSendButtonReady(ctx, options) {
     const maxAttempts = Math.max(1, Number(options.maxAttempts || SEND_PIPELINE_BUTTON_WAIT_MAX_ATTEMPTS));
     const intervalMs = Math.max(50, Number(options.intervalMs || SEND_PIPELINE_BUTTON_WAIT_INTERVAL_MS));
@@ -227,9 +308,91 @@
       const capability = typeof getPageCapability === 'function'
         ? getPageCapability('send-pipeline-wait-button')
         : {};
-      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
-        ? getComposerSendButtonSnapshot({ silent: true })
-        : { found: false, ready: false, button: null, reason: 'button-not-found', aria: '' };
+      let sendSnap = null;
+      if (typeof getComposerSendButtonSnapshot === 'function') {
+        sendSnap = getComposerSendButtonSnapshot({ silent: true });
+      }
+      if (!sendSnap || sendSnap.found !== true) {
+        const fallbackButton = (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.findSendButton === 'function'
+        )
+          ? ComposerApi.findSendButton({ silent: true })
+          : null;
+        const fallbackReady = !!(
+          fallbackButton instanceof HTMLButtonElement
+          && (
+            typeof ComposerApi === 'undefined'
+            || typeof ComposerApi.isSendButtonReady !== 'function'
+            || ComposerApi.isSendButtonReady(fallbackButton)
+          )
+        );
+        sendSnap = {
+          found: fallbackButton instanceof HTMLButtonElement,
+          ready: fallbackReady,
+          button: fallbackButton instanceof HTMLButtonElement ? fallbackButton : null,
+          reason: fallbackButton instanceof HTMLButtonElement
+            ? (fallbackReady ? 'send_button_ready' : 'send_button_disabled')
+            : 'button-not-found',
+        };
+      }
+
+      try {
+        const composerText = typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '')
+          : '';
+        const nativeButton = sendSnap && sendSnap.button ? sendSnap.button : null;
+        const nativeButtonFound = !!(nativeButton || sendSnap.found);
+        const nativeButtonDisabled = !sendSnap.ready;
+        const nativeButtonVisible = !!(
+          nativeButton
+          && typeof nativeButton === 'object'
+          && nativeButton instanceof HTMLElement
+          && nativeButton.offsetParent !== null
+        );
+        const stopButtonFound = !!(capability.stop_button_found || capability.stopButtonFound);
+        const uploadPendingCount = Number(
+          capability.attachment_uploading_count
+          || capability.attachmentUploadingCount
+          || 0,
+        );
+        const attachmentBoundCount = Number(
+          capability.attachment_count
+          || capability.attachmentCount
+          || 0,
+        );
+
+        const checkReason = sendSnap.reason
+          || capability.response_state_reason
+          || capability.responseStateReason
+          || '-';
+
+        const line = [
+          '[SEND_READY][CHECK]',
+          `source=${String(ctx.source || '-')}`,
+          `mode=${String(ctx.mode || '-')}`,
+          `input_found=${capability.has_composer || capability.hasComposer ? 1 : 0}`,
+          `input_text_len=${composerText.trim().length}`,
+          `native_send_button_found=${nativeButtonFound ? 1 : 0}`,
+          `native_send_button_disabled=${nativeButtonDisabled ? 1 : 0}`,
+          `native_send_button_visible=${nativeButtonVisible ? 1 : 0}`,
+          `stop_button_found=${stopButtonFound ? 1 : 0}`,
+          `upload_pending_count=${uploadPendingCount}`,
+          `attachment_bound_count=${attachmentBoundCount}`,
+          `requireUploadDone=${options && options.requireUploadDone ? 1 : 0}`,
+          `requireAttachmentBound=${options && options.requireAttachmentBound ? 1 : 0}`,
+          `reason=${String(checkReason || '-')}`,
+        ].join(' ');
+
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        } else {
+          console.log(line);
+        }
+      } catch (logErr) {
+        // 日志失败不应影响发送流程本身
+        console.error('[ChatGPT toolbox] sendPipelineWaitSendButtonReady check log failed', logErr);
+      }
 
       if (ctx.waitForReplyIdle && capability.is_responding) {
         return { ok: false, reason: 'assistant_busy', wait_reply: true, retryable: true };
@@ -243,6 +406,14 @@
         : composerText.length > 0;
       const hasAttachment = Number(capability.attachment_count || 0) > 0
         || Boolean(capability.has_composer_payload && !hasComposerText);
+      const hasUploadingAttachment = Number(
+        capability.attachment_uploading_count || capability.attachmentUploadingCount || 0,
+      ) > 0
+        || (typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading());
+      // hasPayload: 有文本、有附件、或附件上传中，三者任一均视为有内容可发送
+      const hasPayload = hasComposerText || hasAttachment || hasUploadingAttachment;
 
       if (requireText && !hasComposerText) {
         const lostReason = hasAttachment
@@ -273,20 +444,57 @@
         }
       }
 
-      if (hasComposerText && capability.can_send_now && sendSnap.ready) {
+      const nativeReadyWithoutText = (
+        ctx.sendExistingComposer
+        && !hasComposerText
+        && !hasAttachment
+        && !hasUploadingAttachment
+        && sendPipelineIsNativeSendButtonReady(sendSnap, capability)
+      );
+      const nativeButtonReady = sendPipelineIsNativeSendButtonReady(sendSnap, capability);
+
+      if (hasUploadingAttachment && !nativeButtonReady) {
+        sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+          reason: 'waiting_attachment_upload_done',
+        });
+        await sendPipelineSleep(intervalMs);
+        continue;
+      }
+
+      // 以 ChatGPT 原生发送按钮为准：存在、可见、未 disabled，且页面未在回答中
+      if ((hasPayload || nativeReadyWithoutText) && nativeButtonReady) {
+        if (hasAttachment && !hasUploadingAttachment) {
+          sendPipelineLogAttachmentWait('[SEND][ATTACHMENT_READY_NATIVE_BUTTON_READY]', {
+            reason: 'send_button_ready',
+          });
+        }
         sendPipelineLog('[SEND_PIPELINE][BUTTON_READY]', {
           source: ctx.source,
           mode: ctx.mode,
           text_len: composerText.length,
+          has_attachment: hasAttachment ? 1 : 0,
+          has_uploading: hasUploadingAttachment ? 1 : 0,
           sendExistingComposer: ctx.sendExistingComposer ? 1 : 0,
-          reason: 'send_button_ready',
+          reason: nativeReadyWithoutText
+            ? 'native_send_button_ready_without_text_detector'
+            : (hasComposerText ? 'send_button_ready' : 'send_button_ready_attachment_only'),
         });
-        return { ok: true, reason: 'send_button_ready', useEnterFallback: false };
+        return {
+          ok: true,
+          reason: nativeReadyWithoutText
+            ? 'native_send_button_ready_without_text_detector'
+            : (hasComposerText ? 'send_button_ready' : 'send_button_ready_attachment_only'),
+          useEnterFallback: false,
+        };
       }
 
+      const blockEnterFallback = typeof shouldBlockEnterFallbackForComposer === 'function'
+        && shouldBlockEnterFallbackForComposer();
+
       if (
-        allowDisabledWithText
-        && hasComposerText
+        !blockEnterFallback
+        && allowDisabledWithText
+        && hasPayload
         && sendSnap.button
         && Date.now() - startedAt >= maxDisabledWaitMs
       ) {
@@ -295,6 +503,7 @@
           source: ctx.source,
           mode: ctx.mode,
           text_len: composerText.length,
+          has_attachment: hasAttachment ? 1 : 0,
           sendExistingComposer: ctx.sendExistingComposer ? 1 : 0,
           reason: 'send_button_disabled_use_enter_fallback',
         });
@@ -305,7 +514,7 @@
         };
       }
 
-      if (hasComposerText && !sendSnap.button && Date.now() - startedAt >= maxDisabledWaitMs) {
+      if (!blockEnterFallback && hasPayload && !sendSnap.button && Date.now() - startedAt >= maxDisabledWaitMs) {
         useEnterFallback = true;
         break;
       }
@@ -330,7 +539,47 @@
       };
     }
 
-    if (allowDisabledWithText && finalHasText) {
+    const finalHasAttachment = typeof hasComposerAttachment === 'function' && hasComposerAttachment();
+    const finalAttachmentUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+      && ComposerApi.isAttachmentStillUploading();
+    const finalHasPayload = finalHasText || finalHasAttachment || finalAttachmentUploading;
+    const finalSendSnap = typeof getComposerSendButtonSnapshot === 'function'
+      ? getComposerSendButtonSnapshot({ silent: true })
+      : { found: false, ready: false };
+    const finalCapability = typeof getPageCapability === 'function'
+      ? getPageCapability('send-pipeline-wait-button-final')
+      : {};
+    const finalNativeReady = sendPipelineIsNativeSendButtonReady(finalSendSnap, finalCapability);
+    const blockEnterFallback = typeof shouldBlockEnterFallbackForComposer === 'function'
+      && shouldBlockEnterFallbackForComposer();
+
+    if (finalNativeReady && (finalHasPayload || ctx.sendExistingComposer)) {
+      if (finalHasAttachment && !finalAttachmentUploading) {
+        sendPipelineLogAttachmentWait('[SEND][ATTACHMENT_READY_NATIVE_BUTTON_READY]', {
+          reason: 'send_button_ready',
+        });
+      }
+      return {
+        ok: true,
+        reason: finalHasText ? 'send_button_ready' : 'send_button_ready_attachment_only',
+        useEnterFallback: false,
+      };
+    }
+
+    if (finalHasAttachment && (finalAttachmentUploading || !finalNativeReady)) {
+      sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+        reason: 'waiting_attachment_upload_done',
+      });
+      return {
+        ok: false,
+        reason: 'waiting_attachment_upload_done',
+        retryable: true,
+        wait_send: true,
+        wait_reply: false,
+      };
+    }
+
+    if (!blockEnterFallback && allowDisabledWithText && finalHasPayload) {
       return {
         ok: true,
         reason: 'send_button_missing_use_enter_fallback',
@@ -352,10 +601,33 @@
     const text = String(opts.text || '').trim();
     const sendExistingComposer = opts.sendExistingComposer === true;
     const waitForReplyIdle = opts.waitForReplyIdle !== false;
-    const waitForAttachmentReady = opts.waitForAttachmentReady !== false;
+    const requireUploadDone = opts.requireUploadDone !== false;
+    const requireAttachmentBound = opts.requireAttachmentBound !== false;
+    const waitForAttachmentReady = opts.waitForAttachmentReady != null
+      ? opts.waitForAttachmentReady !== false
+      : requireUploadDone;
     const allowEnterFallback = opts.allowEnterFallback !== false;
+    const allowWaitPayload = opts.allowWaitPayload !== false;
+    const manualSend = opts.manualSend === true;
     const maxAttempts = Math.max(1, Number(opts.maxAttempts || 8));
     const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
+    const writeTextBeforeAttachmentWait = opts.writeTextBeforeAttachmentWait === true;
+    const attachmentWaitTimeoutMs = Number(opts.attachmentWaitTimeoutMs || 0);
+    let buttonMaxDisabledWaitMs = Number(opts.buttonMaxDisabledWaitMs || 0);
+    let buttonMaxAttempts = Number(opts.buttonMaxAttempts || 0);
+    let buttonIntervalMs = Number(opts.buttonIntervalMs || 0);
+
+    if (manualSend) {
+      if (buttonMaxAttempts <= 0) {
+        buttonMaxAttempts = SEND_PIPELINE_MANUAL_BUTTON_WAIT_MAX_ATTEMPTS;
+      }
+      if (buttonIntervalMs <= 0) {
+        buttonIntervalMs = SEND_PIPELINE_MANUAL_BUTTON_WAIT_INTERVAL_MS;
+      }
+      if (buttonMaxDisabledWaitMs <= 0) {
+        buttonMaxDisabledWaitMs = SEND_PIPELINE_MANUAL_BUTTON_DISABLED_WAIT_MS;
+      }
+    }
 
     const ctx = {
       source,
@@ -375,6 +647,26 @@
       wait_reply: false,
     });
 
+    // 防误发校验：autoqueue-batch-send 只有在已验证 composer 文本存在时，才允许 sendExistingComposer=true。
+    if (mode === 'autoqueue-batch-send' && sendExistingComposer === true) {
+      const expected = String(text || '').trim();
+      const actual = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : '';
+
+      const expectedNorm = expected.replace(/\s+/g, ' ');
+      const actualNorm = actual.replace(/\s+/g, ' ');
+      const expectedProbe = expectedNorm.slice(0, Math.min(80, expectedNorm.length));
+      const verified = Boolean(actualNorm && expectedNorm && (actualNorm === expectedNorm || actualNorm.includes(expectedProbe)));
+
+      if (!verified) {
+        result.reason = 'verified_prompt_missing_for_sendExistingComposer';
+        result.retryable = true;
+        sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+        return result;
+      }
+    }
+
     sendPipelineLog('[SEND_PIPELINE][START]', {
       source,
       mode,
@@ -384,8 +676,42 @@
           : 0)
         : text.length,
       sendExistingComposer,
-      reason: '-',
+      reason: manualSend ? 'manual_send=1' : '-',
     });
+
+    if (manualSend) {
+      const composerTextLen = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim().length
+        : 0;
+      const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0;
+      const uploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+      let nativeReady = 0;
+      try {
+        if (typeof getComposerSendButtonSnapshot === 'function') {
+          const snap = getComposerSendButtonSnapshot({ silent: true });
+          nativeReady = snap && snap.ready ? 1 : 0;
+        }
+      } catch (snapErr) {
+        console.error('[ChatGPT toolbox] sendUnifiedMessage manual FAST_PATH nativeReady failed', snapErr);
+      }
+      const fastLine = [
+        '[SEND_MESSAGE][FAST_PATH_CHECK]',
+        `source=${source}`,
+        `mode=${mode}`,
+        `textLen=${composerTextLen}`,
+        `attachmentCount=${attachmentCount}`,
+        `uploading=${uploading ? 1 : 0}`,
+        `nativeReady=${nativeReady}`,
+      ].join(' ');
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(fastLine);
+      } else {
+        console.log(fastLine);
+      }
+    }
 
     try {
       if (shouldStop()) {
@@ -435,18 +761,87 @@
         }
       }
 
+      let textAlreadySynced = false;
+
+      // Optional optimization: try to write prompt text as soon as possible,
+      // without waiting attachments to become stable (still wait before sending).
+      if (
+        writeTextBeforeAttachmentWait
+        && text
+        && !sendExistingComposer
+      ) {
+        for (let retryIndex = 0; retryIndex < SEND_PIPELINE_COMPOSER_SYNC_MAX_RETRIES; retryIndex += 1) {
+          if (shouldStop()) {
+            result.reason = 'cancelled';
+            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+            return result;
+          }
+
+          const syncCheck = await sendPipelineWriteAndVerifyText(text, source, retryIndex, ctx);
+          if (syncCheck.ok) {
+            textAlreadySynced = true;
+            sendPipelineLog('[SEND_PIPELINE][EARLY_TEXT_SYNC_OK]', Object.assign({}, ctx, {
+              reason: 'write-before-attachment-wait',
+            }));
+            break;
+          }
+
+          sendPipelineLog('[SEND_PIPELINE][EARLY_TEXT_SYNC_RETRY]', Object.assign({}, ctx, {
+            reason: String(syncCheck.reason || 'composer_text_not_synced'),
+            retryable: true,
+          }));
+        }
+
+        if (!textAlreadySynced) {
+          result.reason = 'composer_text_not_ready_before_attachment_wait';
+          result.retryable = true;
+          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
+            reason: result.reason,
+            retryable: true,
+          }));
+          return result;
+        }
+      }
+
       if (waitForAttachmentReady && typeof waitAttachmentsStableForSend === 'function') {
         const stillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
           && ComposerApi.isAttachmentStillUploading();
-        if (stillUploading) {
+        const composerHasRealAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          ? ComposerApi.hasComposerAttachmentUnified()
+          : (
+            typeof ComposerApi.countAttachmentChips === 'function'
+              && ComposerApi.countAttachmentChips() > 0
+          );
+        if (stillUploading && !composerHasRealAttachment && !allowWaitPayload) {
+          result.reason = 'empty_text_and_no_attachment';
+          result.retryable = false;
+          result.wait_send = false;
+          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          return result;
+        }
+        if (stillUploading && composerHasRealAttachment) {
+          sendPipelineLog('[SEND_PIPELINE][ATTACHMENT_WAIT_AFTER_TEXT]', Object.assign({}, ctx, {
+            reason: textAlreadySynced ? 'text-written-wait-attachment' : 'wait-attachment-before-text',
+          }));
+          const defaultAttachWaitMs = typeof MAX_ATTACHMENT_SEND_WAIT_MS === 'number'
+            ? MAX_ATTACHMENT_SEND_WAIT_MS
+            : 120000;
+          const attachWaitMs = attachmentWaitTimeoutMs > 0
+            ? attachmentWaitTimeoutMs
+            : (manualSend ? SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS : defaultAttachWaitMs);
           const attachWait = await waitAttachmentsStableForSend(
-            typeof MAX_ATTACHMENT_SEND_WAIT_MS === 'number' ? MAX_ATTACHMENT_SEND_WAIT_MS : 120000,
+            attachWaitMs,
             shouldStop,
             { source },
           );
           if (!attachWait || attachWait.ok !== true) {
-            result.reason = (attachWait && attachWait.reason) || 'attachment_not_ready';
-            result.retryable = sendPipelineIsRetryableReason(result.reason);
+            result.reason = manualSend
+              ? 'attachment_still_uploading'
+              : ((attachWait && attachWait.reason) || 'attachment_not_ready');
+            result.retryable = manualSend
+              ? false
+              : sendPipelineIsRetryableReason(result.reason);
+            result.wait_send = manualSend ? false : result.retryable;
             sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
               reason: result.reason,
               retryable: result.retryable,
@@ -456,9 +851,59 @@
         }
       }
 
+      if (
+        textAlreadySynced
+        && text
+        && !sendExistingComposer
+      ) {
+        if (shouldStop()) {
+          result.reason = 'cancelled';
+          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          return result;
+        }
+
+        const syncCheckAfterAttachment = typeof ComposerApi.checkComposerTextSyncDetailed === 'function'
+          ? ComposerApi.checkComposerTextSyncDetailed(text)
+          : {
+            ok: typeof ComposerApi.isComposerTextSynced === 'function'
+              && ComposerApi.isComposerTextSynced(text),
+            reason: 'composer_text_not_synced_after_attachment_wait',
+          };
+
+        if (!syncCheckAfterAttachment.ok) {
+          sendPipelineLog('[SEND_PIPELINE][EARLY_TEXT_LOST_REWRITE]', Object.assign({}, ctx, {
+            reason: String(syncCheckAfterAttachment.reason || 'composer_text_lost_after_attachment_wait'),
+            retryable: true,
+          }));
+
+          if (shouldStop()) {
+            result.reason = 'cancelled';
+            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+            return result;
+          }
+
+          const rewriteCheck = await sendPipelineWriteAndVerifyText(
+            text,
+            source,
+            SEND_PIPELINE_COMPOSER_SYNC_MAX_RETRIES,
+            ctx,
+          );
+
+          if (!rewriteCheck.ok) {
+            result.reason = String(rewriteCheck.reason || 'composer_text_lost_after_attachment_wait');
+            result.retryable = true;
+            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
+              reason: result.reason,
+              retryable: true,
+            }));
+            return result;
+          }
+        }
+      }
+
       let useEnterFallback = false;
 
-      if (text && !sendExistingComposer) {
+      if (text && !sendExistingComposer && !textAlreadySynced) {
         let syncOk = false;
         let lastSyncReason = 'composer_text_not_synced';
 
@@ -492,15 +937,143 @@
         const existingText = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim()
           : '';
+        const attachmentUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading();
+
+        let nativeReady = false;
+        try {
+          let sendSnap = null;
+          if (typeof getComposerSendButtonSnapshot === 'function') {
+            sendSnap = getComposerSendButtonSnapshot({ silent: true });
+          }
+          if (!sendSnap || sendSnap.found !== true) {
+            const fallbackButton = (
+              typeof ComposerApi !== 'undefined'
+              && typeof ComposerApi.findSendButton === 'function'
+            )
+              ? ComposerApi.findSendButton({ silent: true })
+              : null;
+            const fallbackReady = !!(
+              fallbackButton instanceof HTMLButtonElement
+              && (
+                typeof ComposerApi === 'undefined'
+                || typeof ComposerApi.isSendButtonReady !== 'function'
+                || ComposerApi.isSendButtonReady(fallbackButton)
+              )
+            );
+            sendSnap = {
+              found: fallbackButton instanceof HTMLButtonElement,
+              ready: fallbackReady,
+            };
+          }
+          nativeReady = !!(sendSnap && sendSnap.ready);
+        } catch (snapErr) {
+          console.error('[ChatGPT toolbox] sendUnifiedMessage nativeReady probe failed', snapErr);
+        }
+
         const hasPayload = !!existingText
           || (typeof hasComposerAttachment === 'function' && hasComposerAttachment())
-          || (typeof ComposerApi.isAttachmentStillUploading === 'function'
-            && ComposerApi.isAttachmentStillUploading());
+          || attachmentUploading
+          || nativeReady;
+
+        try {
+          const textLen = existingText.length;
+          const line = [
+            '[SEND_MESSAGE][TEXT_DETECT]',
+            `source=${source}`,
+            `mode=${mode}`,
+            `textLen=${textLen}`,
+            `nativeReady=${nativeReady ? 1 : 0}`,
+            `hasAttachment=${typeof hasComposerAttachment === 'function' && hasComposerAttachment() ? 1 : 0}`,
+            `uploading=${attachmentUploading ? 1 : 0}`,
+          ].join(' ');
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(line);
+          } else {
+            console.log(line);
+          }
+        } catch (logErr) {
+          console.error('[ChatGPT toolbox] sendUnifiedMessage TEXT_DETECT log failed', logErr);
+        }
+
+        const composerStateLine = [
+          '[SEND_MESSAGE][COMPOSER_STATE]',
+          `source=${source}`,
+          `mode=${mode}`,
+          `textLen=${existingText.length}`,
+          `attachmentCount=${typeof ComposerApi.countAttachmentChips === 'function' ? ComposerApi.countAttachmentChips() : 0}`,
+          `uploading=${attachmentUploading ? 1 : 0}`,
+          `nativeReady=${nativeReady ? 1 : 0}`,
+        ].join(' ');
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(composerStateLine);
+        } else {
+          console.log(composerStateLine);
+        }
 
         if (!hasPayload) {
-          result.reason = 'composer_empty';
-          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          if (!allowWaitPayload) {
+            result.reason = 'empty_text_and_no_attachment';
+            result.retryable = false;
+            result.wait_send = false;
+            result.wait_reply = false;
+            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+            return result;
+          }
+          result.reason = 'waiting_payload';
+          result.retryable = true;
+          result.wait_send = true;
+          result.wait_reply = false;
+          sendPipelineLog('[SEND][WAIT_PAYLOAD]', Object.assign({}, ctx, {
+            reason: result.reason,
+            wait_send: true,
+            wait_reply: false,
+          }));
           return result;
+        }
+
+        if (attachmentUploading) {
+          if (manualSend && typeof waitAttachmentsStableForSend === 'function') {
+            const manualAttachWaitMs = attachmentWaitTimeoutMs > 0
+              ? attachmentWaitTimeoutMs
+              : SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS;
+            const attachWait = await waitAttachmentsStableForSend(
+              manualAttachWaitMs,
+              shouldStop,
+              { source },
+            );
+            if (!attachWait || attachWait.ok !== true) {
+              result.reason = 'attachment_still_uploading';
+              result.retryable = false;
+              result.wait_send = false;
+              result.wait_reply = false;
+              sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+              return result;
+            }
+          } else if (!allowWaitPayload) {
+            result.reason = 'attachment_still_uploading';
+            result.retryable = false;
+            result.wait_send = false;
+            result.wait_reply = false;
+            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+            return result;
+          } else {
+            result.reason = 'waiting_attachment_upload_done';
+            result.retryable = true;
+            result.wait_send = true;
+            result.wait_reply = false;
+            sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+              reason: result.reason,
+            });
+            return result;
+          }
+        }
+
+        if (manualSend && nativeReady && hasPayload) {
+          sendPipelineLog('[SEND_MESSAGE][FAST_PATH_READY]', Object.assign({}, ctx, {
+            reason: 'native_ready_with_payload',
+            text_len: existingText.length,
+          }));
         }
       }
 
@@ -509,6 +1082,16 @@
         expectedText: text && !sendExistingComposer ? text : '',
         allowDisabledWithText: allowEnterFallback,
       };
+
+      if (buttonMaxAttempts > 0) {
+        buttonWaitOptions.maxAttempts = buttonMaxAttempts;
+      }
+      if (buttonIntervalMs > 0) {
+        buttonWaitOptions.intervalMs = buttonIntervalMs;
+      }
+      if (buttonMaxDisabledWaitMs > 0) {
+        buttonWaitOptions.maxDisabledWaitMs = buttonMaxDisabledWaitMs;
+      }
 
       let buttonWait = await sendPipelineWaitSendButtonReady(ctx, buttonWaitOptions);
 
@@ -551,20 +1134,105 @@
         if (buttonWait.wait_reply) {
           result.wait_reply = true;
         }
+        if (buttonWait.wait_send) {
+          result.wait_send = true;
+        }
         result.retryable = buttonWait.retryable === true
           || sendPipelineIsRetryableReason(result.reason);
-        if (result.reason === 'send_button_not_found') {
-          result.reason = 'send_button_not_ready_after_text';
+        const hasAttachmentOnFail = typeof hasComposerAttachment === 'function' && hasComposerAttachment();
+        const attachmentStillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading();
+        if (
+          hasAttachmentOnFail
+          && (
+            attachmentStillUploading
+            || result.reason === 'waiting_attachment_upload_done'
+            || result.reason === 'waiting_attachment_upload'
+          )
+        ) {
+          result.reason = 'waiting_attachment_upload_done';
+          result.wait_reply = false;
+          result.wait_send = true;
+          result.retryable = true;
+          sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
+            reason: result.reason,
+          });
+        } else if (
+          hasAttachmentOnFail
+          && (result.reason === 'send_button_not_found' || result.reason === 'send_button_not_ready_after_text')
+        ) {
+          result.reason = 'waiting_attachment_upload_done';
+          result.wait_reply = false;
+          result.wait_send = true;
+          result.retryable = true;
         }
         sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
           reason: result.reason,
           retryable: result.retryable,
+          wait_send: result.wait_send ? 1 : 0,
           wait_reply: result.wait_reply,
         }));
         return result;
       }
 
       useEnterFallback = allowEnterFallback && buttonWait.useEnterFallback === true;
+
+      const blockEnterForSend = useEnterFallback
+        && typeof shouldBlockEnterFallbackForComposer === 'function'
+        && shouldBlockEnterFallbackForComposer();
+
+      if (blockEnterForSend) {
+        if (typeof logSendPreSendGate === 'function') {
+          logSendPreSendGate({ source, mode });
+        }
+        result.reason = 'enter_fallback_blocked_with_attachment';
+        result.retryable = true;
+        result.wait_send = true;
+        result.wait_reply = false;
+        sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
+          reason: result.reason,
+          retryable: result.retryable,
+          wait_send: result.wait_send ? 1 : 0,
+          wait_reply: result.wait_reply,
+        }));
+        return result;
+      }
+
+      if (typeof logSendPreSendGate === 'function') {
+        logSendPreSendGate({ source, mode });
+      }
+
+      const responseStateNow = typeof detectComposerResponseState === 'function'
+        ? detectComposerResponseState()
+        : {};
+      const sendBtnNow = typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
+      const sendButtonDisabledNow = !(sendBtnNow instanceof HTMLButtonElement)
+        ? true
+        : !!sendBtnNow.disabled;
+      const hasAttachmentNow = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        ? !!ComposerApi.hasComposerAttachmentUnified()
+        : (
+          typeof ComposerApi.countAttachmentChips === 'function'
+            ? ComposerApi.countAttachmentChips() > 0
+            : false
+        );
+      const textLenNow = typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim().length
+        : ctx.text_len;
+
+      // 发送前断言/观测：用于定位“附件已在输入框但文案未注入”的异常链路。
+      sendPipelineLog('[SEND_PIPELINE][PRE_SEND_PAYLOAD]', {
+        source,
+        mode,
+        textLen: textLenNow,
+        hasAttachment: hasAttachmentNow ? 1 : 0,
+        sendButtonDisabled: sendButtonDisabledNow ? 1 : 0,
+        responseState: String(responseStateNow.response_state || '-'),
+        reason: String(responseStateNow.response_state_reason || buttonWait.reason || '-'),
+        sendExistingComposer: sendExistingComposer ? 1 : 0,
+      });
 
       sendPipelineLog('[SEND_PIPELINE][CALL_STABLE_SEND]', Object.assign({}, ctx, {
         reason: buttonWait.reason || '-',

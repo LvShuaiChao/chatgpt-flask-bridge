@@ -23,7 +23,7 @@
    * - 回答完成后在页面失焦时闪烁标签标题提醒。?
    *
    * ExportModule
-   * - 只负责对话导出、配置导出、issues 统计。?
+   * - 只负责对话导出、配置导出、设置备份。?
    ********************************************************************/
 
   const APP = Object.freeze({
@@ -725,6 +725,13 @@
       taskUploadRateLimitEnabled: true,
       taskUploadRateLimitWindowMinutes: 180,
       taskUploadRateLimitMaxFiles: 80,
+
+      // 批量任务：上传/消息额度不足时的等待策略
+      // wait_until_available：一直等待额度恢复
+      // stop_on_limit：额度满立即停止整个批量任务组
+      // wait_max_then_stop：最多等待指定时间后停止
+      taskQuotaWaitMode: 'wait_until_available',
+      taskQuotaMaxWaitMinutes: 30,
 
       showRuntimeStats: true,
       preserveRuntimeStatsAverage: false,

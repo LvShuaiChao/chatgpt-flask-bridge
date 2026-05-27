@@ -294,10 +294,6 @@ class UiChatPanelMixin:
         page_row_layout.addLayout(self._build_page_action_row())
         outer.addWidget(page_row_host)
 
-        self.open_live_page_btn = QPushButton("打开")
-        self.open_live_page_btn.setObjectName("PrimaryButton")
-        self.open_live_page_btn.setVisible(False)
-
         return bar
 
     def _build_chat_panel(self):
@@ -390,11 +386,12 @@ class UiChatPanelMixin:
         session_title_row_layout.addWidget(self.current_session_title, 1)
 
         self.chat_stats_label = QLabel(
-            "统计：共 0 条｜我 0 条 0 字｜AI 0 条 0 字｜总 0 字"
+            "本地：0条 · 0字"
         )
         self.chat_stats_label.setObjectName("CurrentSessionStatsLabel")
         self.chat_stats_label.setMinimumHeight(28)
-        self.chat_stats_label.setMinimumWidth(520)
+        # 主界面默认只显示摘要，减少占用宽度避免挤压右侧按钮
+        self.chat_stats_label.setMinimumWidth(240)
         self.chat_stats_label.setWordWrap(False)
         self.chat_stats_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.chat_stats_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
