@@ -216,7 +216,9 @@ const AutoQueueModule = (() => {
       'write-initial': '正在写入初始指令',
       'composer-sync-retry': '正在同步输入框',
       'send-retry': '正在重试发送',
-      'send-initial': '正在发送初始指令',
+      'send-initial': '准备发送初始指令',
+      'send-wait-button': '等待发送按钮',
+      'send-verification': '正在发送校验指令',
       'send-initial-wait-retry': '等待发送重试',
       'send-wait-retry': '等待发送重试',
       'send-initial-failed': '发送初始指令失败',
@@ -1510,6 +1512,7 @@ const AutoQueueModule = (() => {
         lastAutoUploadAtAssistantReplyCount: 0,
       },
       taskBatchStepRunning: false,
+      taskBatchStepRunningSince: 0,
       batchInitialWaitLoggedAt: 0,
       batchTask: {
         phase: 'idle',
@@ -1573,6 +1576,7 @@ const AutoQueueModule = (() => {
     const BATCH_TASK_GROUP_WATCHDOG_STALL_MS = 60000;
     const BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES = 3;
     const BATCH_TASK_GROUP_MAX_WATCHDOG_RECOVER_STREAK = 3;
+    const BATCH_TASK_GROUP_STEP_RUNNING_HARD_TIMEOUT_MS = 120000;
     const BATCH_TASK_STARTUP_GUARD_MS = 1200;
     const TASK_REPLY_STABLE_HASH_ROUNDS = 2;
 
@@ -3807,30 +3811,318 @@ const AutoQueueModule = (() => {
       'processing',
     ]);
 
+    function normalizeComposerUserTextForAutoQueue(text) {
+      const raw = String(text || '');
+      if (!raw) {
+        return '';
+      }
+
+      return raw
+        .replace(/\u00A0/g, ' ')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map((line) => String(line || '').trim())
+        .filter((line) => {
+          if (!line) {
+            return false;
+          }
+          if (/^(有问题，尽管问|添加文件等|压缩归档)$/i.test(line)) {
+            return false;
+          }
+          if (/^(attached file|uploaded file|file attached|drag files here|drop files here)$/i.test(line)) {
+            return false;
+          }
+          if (/^(移除|删除|remove|delete|上传中|已上传|正在分析)$/i.test(line)) {
+            return false;
+          }
+          if (/^[\w.\- ]+\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv|png|jpg|jpeg|webp|gif)$/i.test(line)) {
+            return false;
+          }
+          return true;
+        })
+        .join('\n')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+    }
+
+    function getAutoQueueComposerAttachmentEvidence(reason = 'autoq-payload') {
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+      ) {
+        return ComposerAttachments.getSharedComposerAttachmentEvidence(reason, { heavy: true }) || {
+          hasAttachment: false,
+          count: 0,
+          readyCount: 0,
+          uploadingCount: 0,
+          textLen: 0,
+        };
+      }
+      return {
+        hasAttachment: false,
+        count: 0,
+        readyCount: 0,
+        uploadingCount: 0,
+        textLen: 0,
+      };
+    }
+
+    function getAutoQueueComposerPayloadState(reason = 'autoq-payload') {
+      const attachment = getAutoQueueComposerAttachmentEvidence(reason);
+      const rawText = typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '')
+          : '';
+      const cleanText = normalizeComposerUserTextForAutoQueue(rawText);
+
+      return {
+        hasAttachment: Number(attachment.count || 0) > 0 || Number(attachment.readyCount || 0) > 0,
+        attachmentCount: Math.max(0, Number(attachment.count || 0)),
+        readyCount: Math.max(0, Number(attachment.readyCount || 0)),
+        uploadingCount: Math.max(0, Number(attachment.uploadingCount || 0)),
+        text: cleanText,
+        textLen: cleanText.trim().length,
+        rawText,
+      };
+    }
+
     function getComposerPayloadEvidenceForAutoQueue() {
-      const snapshot = typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
-        ? ComposerApi.getComposerRuntimeSnapshotLight(500)
-        : null;
-      const composerText = snapshot
-        ? String(snapshot.composerTextTrimmed || '')
-        : (
-          typeof ComposerApi.getComposerText === 'function'
-            ? String(ComposerApi.getComposerText() || '').trim()
-            : ''
+      const payload = getAutoQueueComposerPayloadState('autoq-payload');
+      return {
+        composerText: payload.text,
+        textLen: payload.textLen,
+        hasAttachment: payload.hasAttachment,
+        attachmentCount: payload.attachmentCount,
+        uploadingCount: payload.uploadingCount,
+        readyCount: payload.readyCount,
+        rawText: payload.rawText,
+      };
+    }
+
+    function isRealUserDraftBlockingAutoQueue(composerText, task, reason = 'autoq-draft-check') {
+      const text = normalizeComposerUserTextForAutoQueue(composerText);
+      const initialPrompt = task && task.initialPrompt ? String(task.initialPrompt || '').trim() : '';
+
+      if (!text) {
+        return false;
+      }
+
+      const ignoredTexts = new Set([
+        '有问题，尽管问',
+        '添加文件等',
+        '压缩归档',
+      ]);
+
+      if (ignoredTexts.has(text)) {
+        return false;
+      }
+
+      if (initialPrompt && (text === initialPrompt || initialPrompt.includes(text) || text.includes(initialPrompt))) {
+        return false;
+      }
+
+      const evidence = getAutoQueueComposerPayloadState(`draft-check:${reason}`);
+      if (evidence.hasAttachment && evidence.textLen === 0) {
+        return false;
+      }
+
+      if (evidence.hasAttachment && text) {
+        const lines = text.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+        const filenameLinePattern = /^[\w.\-\u4e00-\u9fff ()（）]+\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv|png|jpg|jpeg|webp|gif)$/i;
+        const uiNoiseLinePattern = /^(有问题，尽管问|添加文件等|压缩归档|attached file|uploaded file|file attached|drag files here|drop files here|移除|删除|remove|delete|上传中|已上传|正在分析)$/i;
+        if (
+          lines.length > 0
+          && lines.every((line) => filenameLinePattern.test(line) || uiNoiseLinePattern.test(line))
+        ) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    function shouldWriteInitialPromptToComposer(expectedPrompt, reason = 'initial-prompt-write') {
+      const expected = String(expectedPrompt || '').trim();
+      const payload = getAutoQueueComposerPayloadState(reason);
+      const existing = String(payload.text || '').trim();
+
+      if (!expected) {
+        return { ok: false, reason: 'empty-expected-prompt' };
+      }
+      if (!existing) {
+        return { ok: true, reason: 'composer-empty' };
+      }
+      if (existing === expected) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][INITIAL_PROMPT_ALREADY_PRESENT] reason=${reason} chars=${existing.length} action=send-existing`,
         );
-      const textLen = composerText.length;
-      const hasAttachment = snapshot
-        ? Number(snapshot.attachmentCount || 0) > 0
-        : (
-          typeof ComposerApi.countAttachmentChipsFast === 'function'
-            ? ComposerApi.countAttachmentChipsFast() > 0
-            : (
-              typeof ComposerApi.countAttachmentChips === 'function'
-                ? ComposerApi.countAttachmentChips() > 0
-                : false
-            )
+        return { ok: false, reason: 'already-present-send-existing' };
+      }
+      if (existing.includes(expected) || expected.includes(existing)) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][INITIAL_PROMPT_DUPLICATE_GUARD] reason=${reason} `
+          + `existingLen=${existing.length} expectedLen=${expected.length} action=block-write`,
         );
-      return { composerText, textLen, hasAttachment };
+        return { ok: false, reason: 'duplicate-prompt-guard' };
+      }
+      if (!isRealUserDraftBlockingAutoQueue(existing, { initialPrompt: expected }, reason)) {
+        return { ok: true, reason: 'non-blocking-composer-noise' };
+      }
+      return { ok: false, reason: 'composer-has-different-text' };
+    }
+
+    function getComposerInitialUploadReadiness() {
+      const evidence = getAutoQueueComposerPayloadState('autoq-initial-upload-readiness');
+      const composerHasPayload = evidence.hasAttachment;
+      const readyCount = Math.max(0, Number(evidence.readyCount) || 0);
+      const uploadingCount = Math.max(0, Number(evidence.uploadingCount) || 0);
+      const attachmentCount = Math.max(0, Number(evidence.attachmentCount) || 0);
+
+      const composerReady = composerHasPayload && attachmentCount > 0 && uploadingCount === 0;
+
+      const sharedEvidence = getAutoQueueComposerAttachmentEvidence('autoq-initial-upload-readiness');
+      const attachSnap = {
+        readyCount,
+        uploadingCount,
+        fileCount: attachmentCount,
+        hasReadyAttachment: composerReady,
+        hasAnyAttachment: composerHasPayload,
+        filenames: sharedEvidence && Array.isArray(sharedEvidence.filenames) ? sharedEvidence.filenames : [],
+      };
+
+      return {
+        composerHasPayload,
+        readyCount,
+        uploadingCount,
+        composerReady,
+        attachSnap,
+      };
+    }
+
+    function logInitialUploadPhaseGuard(task, extra = {}) {
+      const run = state.taskRun || {};
+      const readiness = getComposerInitialUploadReadiness();
+      const taskTitle = task && task.title ? task.title : '-';
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][INITIAL_UPLOAD_PHASE_GUARD] phase=${String(state.phase || '-')} `
+        + `step=${String(run.currentStep || '-')} `
+        + `composerHasPayload=${readiness.composerHasPayload ? 1 : 0} `
+        + `readyCount=${readiness.readyCount} uploadingCount=${readiness.uploadingCount} `
+        + `task=${taskTitle} pendingSendKind=${String(run.pendingSendKind || '-')} `
+        + `batchAutoUploading=${state.batchAutoUploading ? 1 : 0} `
+        + `sendingNow=${state.sendingNow ? 1 : 0} `
+        + `${extra && extra.tag ? `tag=${extra.tag}` : 'tag=-'}`,
+      );
+    }
+
+    function markTaskBatchStepRunning(active) {
+      state.taskBatchStepRunning = !!active;
+      state.taskBatchStepRunningSince = active ? Date.now() : 0;
+    }
+
+    function getTaskBatchStepRunningMs() {
+      if (!state.taskBatchStepRunning) {
+        return 0;
+      }
+      const since = Number(state.taskBatchStepRunningSince) || 0;
+      return since > 0 ? Math.max(0, Date.now() - since) : 0;
+    }
+
+    function shouldBypassPreSendButtonWaitForBatchPromptWrite() {
+      if (config.promptMode !== 'task') {
+        return false;
+      }
+
+      if (!state.running || state.waitingReply || state.sendingNow) {
+        return false;
+      }
+
+      const task = getCurrentRunningTask();
+      if (!task) {
+        return false;
+      }
+
+      const run = state.taskRun || {};
+      const step = String(run.currentStep || run.batchStep || '').trim();
+      const pendingSendKind = String(run.pendingSendKind || '').trim();
+
+      const isInitialPromptPending = (
+        pendingSendKind === 'initial'
+        || step === 'send-initial'
+        || step === 'send-wait-button'
+        || step === 'send-wait-retry'
+        || step === 'auto-upload-before-send'
+      );
+
+      if (!isInitialPromptPending) {
+        return false;
+      }
+
+      const evidence = getAutoQueueComposerPayloadState('autoq-bypass-pre-send-button-wait');
+      const canInput = (
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.canAcceptInput === 'function'
+        && ComposerApi.canAcceptInput()
+      );
+
+      const assistantBusy = isChatGPTActuallyBusyForTaskQueue();
+
+      const attachmentReady = evidence.readyCount > 0
+        || (evidence.attachmentCount > 0 && evidence.uploadingCount === 0);
+
+      const shouldBypass = (
+        canInput
+        && !assistantBusy
+        && evidence.hasAttachment
+        && attachmentReady
+        && evidence.textLen === 0
+        && (
+          String(state.phase || '') === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED
+          || step === 'send-wait-button'
+        )
+      );
+
+      if (shouldBypass) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][BYPASS_PRE_SEND_BUTTON_WAIT] reason=attachment-without-prompt `
+          + `task=${task.title || '-'} step=${step || '-'} pendingSendKind=${pendingSendKind || '-'} `
+          + `hasAttachment=${evidence.hasAttachment ? 1 : 0} textLen=${evidence.textLen}`,
+        );
+      }
+
+      return shouldBypass;
+    }
+
+    function isBatchSendWaitAttachmentWithoutPrompt() {
+      if (!state.running || state.waitingReply || state.sendingNow) {
+        return false;
+      }
+      if (state.batchAutoUploading || state.uploadingFromAutoQueue) {
+        return false;
+      }
+
+      const run = state.taskRun || {};
+      const step = String(run.currentStep || '').trim();
+      if (step !== 'send-wait-button') {
+        return false;
+      }
+
+      const canInput = (
+        typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.canAcceptInput === 'function'
+        && ComposerApi.canAcceptInput()
+      );
+      if (!canInput) {
+        return false;
+      }
+
+      const evidence = getAutoQueueComposerPayloadState('autoq-send-wait-no-prompt');
+      return evidence.hasAttachment && evidence.textLen === 0;
     }
 
     function isComposerSendButtonWaitBlocking() {
@@ -3893,12 +4185,54 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      if (shouldBypassPreSendButtonWaitForBatchPromptWrite()) {
+        return false;
+      }
+
       const evidence = getComposerPayloadEvidenceForAutoQueue();
-      return evidence.textLen > 0 || evidence.hasAttachment;
+      const currentTask = getCurrentRunningTask();
+      if (evidence.hasAttachment && evidence.textLen === 0) {
+        return false;
+      }
+      if (isRealUserDraftBlockingAutoQueue(evidence.composerText, currentTask, 'send-button-wait-final')) {
+        return true;
+      }
+      return evidence.textLen > 0;
     }
 
     function holdTaskUntilSendButtonReady(task, reason) {
       const currentTask = task || getCurrentRunningTask();
+
+      if (
+        shouldBypassPreSendButtonWaitForBatchPromptWrite()
+        || shouldWriteInitialPromptImmediatelyAfterUpload(currentTask)
+      ) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][SKIP_SEND_BUTTON_WAIT] reason=attachment-ready-need-prompt-first `
+          + `task=${currentTask ? currentTask.title : '-'} trigger=${String(reason || '-')}`,
+        );
+        state.nextSendAt = 0;
+        scheduleNextBatchTaskStep('skip-send-wait-write-prompt', 0, {
+          reason: 'skip-send-wait-write-prompt',
+        });
+        return;
+      }
+
+      if (
+        state.phase === AUTO_QUEUE_PHASES.UPLOADING
+        && state.batchAutoUploading !== true
+        && state.uploadingFromAutoQueue !== true
+      ) {
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, `send-button-wait-after-upload:${reason || '-'}`, {
+          force: true,
+        });
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_PHASE_REPAIRED_BEFORE_SEND_WAIT] reason=${String(reason || '-')} `
+          + `task=${currentTask ? currentTask.title : '-'}`,
+        );
+      }
+
       setTaskBatchStep('send-wait-button', currentTask, { log: false });
       const delayMs = 1500;
       state.nextSendAt = Date.now() + delayMs;
@@ -3944,40 +4278,75 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      if (isRawAssistantBusyForStateRepair()) {
-        return false;
-      }
-
-      const evidence = getComposerPayloadEvidenceForAutoQueue();
-      if (!evidence.hasAttachment && evidence.textLen <= 0) {
-        return false;
-      }
-
-      const preservedKind = pendingKind || 'initial';
-      state.waitingReply = false;
-      state.replyBecameBusy = false;
-      state.idleSince = 0;
-      state.waitingStartedAt = 0;
-      state.sendingNow = false;
-      state.taskBatchStepRunning = false;
-      state.nextSendAt = Date.now() + 1500;
-      run.pendingSendKind = preservedKind;
-      run.nextSendRetryAt = state.nextSendAt;
-      state.taskRun = run;
-
       const task = getCurrentRunningTask();
-      setTaskBatchStep('send-wait-button', task, { log: false });
+      const waitStep = pendingKind === 'verification'
+        ? 'wait-verification-reply'
+        : (pendingKind === 'continue' ? 'wait-continue-reply' : 'wait-initial-reply');
 
+      run.pendingSendKind = '';
+      run.pendingSendStartedAt = 0;
+      run.lastPendingSendKindBeforeProcessing = null;
+      run.nextSendRetryAt = 0;
+      state.taskRun = run;
+      state.sendingNow = false;
+      markTaskBatchStepRunning(false);
+
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, `repair:waiting-reply-clear-pending:${reason || '-'}`, {
+        force: true,
+      });
+      setTaskBatchStep(waitStep, task, { log: false });
+
+      const evidence = getAutoQueueComposerPayloadState(`false-waiting-reply:${reason}`);
       ToolboxShell.appendLog(
         `[AUTOQ][STATE_REPAIR][WAITING_REPLY_WITH_PENDING_SEND] reason=${String(reason || '-')} `
-        + `pendingSendKind=${preservedKind} hasAttachment=${evidence.hasAttachment ? 1 : 0} `
-        + `textLen=${evidence.textLen} action=back-to-send-wait`,
+        + `clearedPendingKind=${pendingKind} hasAttachment=${evidence.hasAttachment ? 1 : 0} `
+        + `textLen=${evidence.textLen} action=clear-pending-keep-waiting step=${waitStep}`,
       );
 
-      updateStatus('waiting-reply-pending-send-repair');
+      updateStatus('waiting-reply-cleared-stale-pending');
       if (typeof updateChatInputStateBadge === 'function') {
         updateChatInputStateBadge();
       }
+      return true;
+    }
+
+    function repairFalseWaitingReplyWithComposerPayload(reason = 'autoq-false-waiting-reply') {
+      if (!state.running || state.waitingReply !== true) {
+        return false;
+      }
+
+      const run = state.taskRun || {};
+      const task = getCurrentRunningTask();
+      const expectedPrompt = task && task.initialPrompt
+        ? String(task.initialPrompt || '').trim()
+        : '';
+      const payload = getAutoQueueComposerPayloadState(`false-waiting-reply:${reason}`);
+      const composerText = String(payload.text || '').trim();
+      const attachCount = Math.max(0, Number(payload.attachmentCount || 0));
+      const stillHasPayload = composerText.length > 0 || attachCount > 0;
+      const looksLikeUnsentInitialPrompt = !!(
+        expectedPrompt
+        && composerText
+        && composerText.includes(expectedPrompt.slice(0, Math.min(50, expectedPrompt.length)))
+      );
+
+      if (!stillHasPayload || !looksLikeUnsentInitialPrompt) {
+        return false;
+      }
+
+      state.waitingReply = false;
+      state.sendingNow = false;
+      run.pendingSendKind = 'initial';
+      run.pendingSendStartedAt = Date.now();
+      run.lastPendingSendKindBeforeProcessing = null;
+      state.taskRun = run;
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, `false-waiting-reply:${reason}`, { force: true });
+      setTaskBatchStep('send-initial', task, { log: false });
+      state.nextSendAt = 0;
+      ToolboxShell.appendLog(
+        `[AUTOQ][FALSE_WAITING_REPLY_REPAIR] reason=${reason} `
+        + `composerTextLen=${composerText.length} attachCount=${attachCount} action=rewrite-prompt-send-initial`,
+      );
       return true;
     }
 
@@ -5036,7 +5405,7 @@ const AutoQueueModule = (() => {
         pendingSendKind: 'initial',
         pendingReplyKind: null,
         doneSignalVerificationRunning: false,
-        currentStep: 'send-initial',
+        currentStep: 'auto-upload-before-send',
         currentQuestionText: '',
         currentExpectedAnswer: '',
         currentReplyText: '',
@@ -5097,7 +5466,7 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
       log(`批量任务组任务开始，共 ${runnable.length} 个任务`);
       syncCurrentTaskVerificationContext(runnable[0] || null, { resetState: true });
-      setTaskBatchStep('send-initial', runnable[0] || null);
+      setTaskBatchStep('auto-upload-before-send', runnable[0] || null);
       touchBatchTaskGroupActivity('prepare-queue');
       setBatchTaskGroupDisplayState('running', 'prepare-queue');
 
@@ -5166,7 +5535,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_PENDING]');
         setTaskBatchStep('new-chat-switch', currentTask || nextTask);
 
-        state.taskBatchStepRunning = true;
+        markTaskBatchStepRunning(true);
         try {
           const switchReason = `task-${currentTask ? currentTask.id : 'unknown'}-to-${nextTask ? nextTask.id : 'unknown'}`;
           const switchResult = await clickChatGPTNewChatInPage(switchReason);
@@ -5193,7 +5562,7 @@ const AutoQueueModule = (() => {
           }
           updateStatus('new-chat-ready');
         } finally {
-          state.taskBatchStepRunning = false;
+          markTaskBatchStepRunning(false);
         }
       }
 
@@ -5233,7 +5602,7 @@ const AutoQueueModule = (() => {
       state.waitingStartedAt = 0;
 
       const activeNextTask = getCurrentRunningTask();
-      setTaskBatchStep('send-initial', activeNextTask);
+      setTaskBatchStep('auto-upload-before-send', activeNextTask);
       state.nextSendAt = Date.now() + getRandomDelayMs();
       ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_START]');
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][NEXT_TASK] index=${nextIndex + 1} total=${run.enabledTaskIds.length}`);
@@ -5297,7 +5666,9 @@ const AutoQueueModule = (() => {
         normalized === 'waiting_payload'
         || raw === 'waiting_payload'
         || detail === 'waiting_payload'
+        || raw === 'send_not_confirmed_composer_still_has_payload'
         || String(raw || '').includes('waiting_payload')
+        || String(raw || '').startsWith('send_not_confirmed:')
       ) {
         retryable = true;
       }
@@ -5321,6 +5692,9 @@ const AutoQueueModule = (() => {
       const isWaitingPayloadFailure = normalizedReason === 'waiting_payload'
         || String(reason || '').trim() === 'waiting_payload'
         || detail === 'waiting_payload'
+        || String(reason || '').trim() === 'send_not_confirmed_composer_still_has_payload'
+        || String(reason || '').trim() === 'duplicate_prompt_text_detected'
+        || String(reason || '').includes('send_not_confirmed:')
         || (
           normalizedReason === 'continue-send-failed'
           && detail === 'waiting_payload'
@@ -5496,7 +5870,11 @@ const AutoQueueModule = (() => {
         return true;
       }
 
-      if (isComposerSendButtonWaitBlocking()) {
+      if (
+        isComposerSendButtonWaitBlocking()
+        && !shouldBypassPreSendButtonWaitForBatchPromptWrite()
+        && !shouldWriteInitialPromptImmediatelyAfterUpload(getCurrentRunningTask())
+      ) {
         const buttonWaitDelayMs = 5000;
         run.nextSendRetryAt = Date.now() + buttonWaitDelayMs;
         state.nextSendAt = run.nextSendRetryAt;
@@ -5671,7 +6049,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      state.taskBatchStepRunning = false;
+      markTaskBatchStepRunning(false);
 
       if (meta.clearWaiting === true) {
         state.waitingReply = false;
@@ -5900,7 +6278,7 @@ const AutoQueueModule = (() => {
       state.replyBecameBusy = false;
       state.idleSince = 0;
       state.waitingStartedAt = 0;
-      state.taskBatchStepRunning = false;
+      markTaskBatchStepRunning(false);
 
       recordCurrentTaskAnswerCompletedOnce(task, `finish-current:${reasonText}`);
 
@@ -5996,7 +6374,7 @@ const AutoQueueModule = (() => {
       const run = state.taskRun || {};
       run.currentTaskFailCount = 0;
       state.taskRun = run;
-      state.taskBatchStepRunning = false;
+      markTaskBatchStepRunning(false);
 
       if (task) {
         markTaskStatus(task, reasonText === 'timeout' ? 'timeout' : 'failed');
@@ -6055,6 +6433,21 @@ const AutoQueueModule = (() => {
       const reasonText = String(reason || '').trim();
       const watchdogReason = fromWatchdog || reasonText.includes('watchdog-stall');
       const delayMs = Math.max(0, Number(options.delayMs) || BATCH_TASK_GROUP_RECOVER_DELAY_MS);
+
+      if (state.taskBatchStepRunning) {
+        const runningMs = getTaskBatchStepRunningMs();
+        const currentStep = String(run.currentStep || '').trim();
+        if (runningMs < BATCH_TASK_GROUP_STEP_RUNNING_HARD_TIMEOUT_MS) {
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][RECOVER_SKIP_ALREADY_STEP_RUNNING] step=${currentStep} runningMs=${runningMs} reason=${reasonText || '-'}`,
+          );
+          return false;
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][RECOVER_FORCE_CLEAR_STEP_RUNNING] step=${currentStep} runningMs=${runningMs} reason=${reasonText || '-'}`,
+        );
+        markTaskBatchStepRunning(false);
+      }
       ensureTaskRunVerificationFields(run);
       run.currentTaskRetryCount = Math.max(0, Number(run.currentTaskRetryCount) || 0) + 1;
       state.taskRun = run;
@@ -6073,7 +6466,7 @@ const AutoQueueModule = (() => {
           + `action=stop-batch reason=${reason || 'watchdog-stall'} streak=${state.batchTask.watchdogRecoverStreak}`,
         );
         state.batchTask.watchdogRecoverStreak = 0;
-        state.taskBatchStepRunning = false;
+        markTaskBatchStepRunning(false);
         failCurrentTask(`recover-limit-reached:${reason || 'watchdog-stall'}`, {
           stopEntireBatch: true,
         });
@@ -6095,7 +6488,7 @@ const AutoQueueModule = (() => {
         );
         state.batchTask.watchdogRecoverStreakPerTaskIndex = {};
         state.batchTask.watchdogRecoverStreak = 0;
-        state.taskBatchStepRunning = false;
+        markTaskBatchStepRunning(false);
         failCurrentTask(`recover-limit-reached:${reason || 'recover'}`, {
           stopEntireBatch: true,
         });
@@ -6114,7 +6507,7 @@ const AutoQueueModule = (() => {
       setBatchTaskGroupDisplayState('recovering', String(reason || 'recover'));
 
       if (options.clearStepRunning === true) {
-        state.taskBatchStepRunning = false;
+        markTaskBatchStepRunning(false);
       }
 
       if (watchdogReason && state.waitingReply) {
@@ -6198,6 +6591,23 @@ const AutoQueueModule = (() => {
         `[BATCH_TASK_GROUP][WATCHDOG] stallMs=${stallMs} step=${state.taskRun && state.taskRun.currentStep ? state.taskRun.currentStep : '-'} `
         + `waitingReply=${state.waitingReply ? 1 : 0} taskBatchStepRunning=${state.taskBatchStepRunning ? 1 : 0}`,
       );
+
+      if (currentStep === 'send-wait-button' && isBatchSendWaitAttachmentWithoutPrompt()) {
+        ToolboxShell.appendLog(
+          '[BATCH_TASK_GROUP][WATCHDOG_SEND_WAIT_REPAIR] reason=attachment-without-prompt action=resume-send-initial',
+        );
+        setTaskBatchStep('send-initial', getCurrentRunningTask(), { log: false });
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, 'watchdog-send-wait-repair', { force: true });
+        state.nextSendAt = Date.now() + 300;
+        const runRef = state.taskRun || {};
+        runRef.pendingSendKind = 'initial';
+        state.taskRun = runRef;
+        touchBatchTaskGroupActivity('watchdog-send-wait-repair');
+        scheduleNextBatchTaskStep('watchdog-send-wait-repair', 300, {
+          reason: 'watchdog-send-wait-repair',
+        });
+        return true;
+      }
 
       if (
         currentStep === 'wait-initial-reply'
@@ -7558,10 +7968,223 @@ const AutoQueueModule = (() => {
       return decision;
     }
 
+    function markBatchAutoUploadReadyToSend(kind = 'initial', task = null, uploadResult = null) {
+      const safeKind = String(kind || 'initial').trim() || 'initial';
+      const currentTask = task || getCurrentRunningTask();
+      const run = state.taskRun || {};
+
+      state.batchAutoUploading = false;
+      state.uploadingFromAutoQueue = false;
+
+      run.pendingSendKind = safeKind === 'verification'
+        ? 'verification'
+        : (safeKind === 'continue' ? 'continue' : 'initial');
+
+      run.pendingSendStartedAt = 0;
+      run.lastPendingSendKindBeforeProcessing = null;
+      run.lastAutoUploadDoneAt = Date.now();
+      run.forceUploadBeforeNextSend = false;
+
+      state.taskRun = run;
+
+      if (safeKind === 'initial') {
+        setTaskBatchStep('send-initial', currentTask, { log: false });
+      } else if (safeKind === 'verification') {
+        setTaskBatchStep('send-verification', currentTask, { log: false });
+      } else {
+        setTaskBatchStep('send-continue', currentTask, { log: false });
+      }
+
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, `auto-upload-ready-to-send:${safeKind}`, { force: true });
+      setBatchTaskGroupDisplayState('running', `auto-upload-ready-to-send:${safeKind}`);
+      touchBatchTaskGroupActivity(`auto-upload-ready-to-send:${safeKind}`);
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][POST_UPLOAD_READY_TO_SEND] kind=${safeKind} `
+        + `task=${currentTask ? currentTask.title : '-'} `
+        + `ok=${uploadResult && uploadResult.ok ? 1 : 0} `
+        + `reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'} `
+        + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')}`,
+      );
+
+      if (safeKind === 'initial') {
+        ToolboxShell.appendLog(
+          `[AUTOQ][POST_UPLOAD_IMMEDIATE_PROMPT_WRITE_SCHEDULED] task=${currentTask ? currentTask.title : '-'} kind=initial delayMs=0`,
+        );
+        scheduleNextBatchTaskStep('auto-upload-done-immediate-send', 0, {
+          reason: 'auto-upload-done-immediate-send',
+        });
+      }
+    }
+
+    async function waitAutoQueueAttachmentReadyFast(reason = 'autoq-attachment-ready-fast') {
+      const startedAt = Date.now();
+      let stableHits = 0;
+      while (Date.now() - startedAt < 3000) {
+        const payload = getAutoQueueComposerPayloadState(reason);
+        if (payload.readyCount > 0 && payload.uploadingCount === 0) {
+          stableHits += 1;
+          if (stableHits >= 2) {
+            ToolboxShell.appendLog(
+              `[AUTOQ][ATTACHMENT_READY_FAST_PATH] count=${payload.attachmentCount} ready=${payload.readyCount} `
+              + `stableHits=${stableHits} costMs=${Date.now() - startedAt}`,
+            );
+            return {
+              ok: true,
+              payload,
+              reason: 'attachment-ready-fast-path',
+            };
+          }
+        } else {
+          stableHits = 0;
+        }
+        await sleepMs(180);
+      }
+      return {
+        ok: false,
+        reason: 'attachment-ready-fast-timeout',
+      };
+    }
+
+    function shouldWriteInitialPromptImmediatelyAfterUpload(task) {
+      if (config.promptMode !== 'task' || !state.running) {
+        return false;
+      }
+      const currentTask = task || getCurrentRunningTask();
+      if (!currentTask) {
+        return false;
+      }
+      const run = state.taskRun || {};
+      const step = String(run.currentStep || '').trim();
+      const pendingSendKind = String(run.pendingSendKind || '').trim();
+      const payload = getAutoQueueComposerPayloadState('autoq-immediate-after-upload');
+      const draftBlocking = isRealUserDraftBlockingAutoQueue(payload.text, currentTask, 'after-upload-immediate');
+
+      const attachmentReady = (
+        payload.readyCount > 0
+        || (payload.attachmentCount > 0 && payload.uploadingCount === 0)
+      );
+
+      return (
+        String(state.phase || '') === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED
+        && (step === 'send-initial' || step === 'send-wait-button' || pendingSendKind === 'initial')
+        && payload.hasAttachment
+        && attachmentReady
+        && !draftBlocking
+      );
+    }
+
+    async function runImmediateInitialPromptAfterUpload(task, logTag = '[AUTOQ][IMMEDIATE_AFTER_UPLOAD]') {
+      const currentTask = task || getCurrentRunningTask();
+      if (!currentTask || !state.running || state.waitingReply || state.sendingNow) {
+        return { ok: false, reason: 'not-ready' };
+      }
+
+      const resolvedInitial = resolveTaskInitialPrompt(currentTask, { log: true });
+      const initial = String(resolvedInitial.initialPrompt || '').trim();
+      if (!initial) {
+        return { ok: false, reason: 'empty-initial-prompt' };
+      }
+
+      setTaskBatchStep('send-initial', currentTask, { log: false });
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, 'immediate-prompt-after-upload', { force: true });
+      state.nextSendAt = 0;
+
+      markTaskBatchStepRunning(true);
+      try {
+        const prepareResult = await prepareTaskPageBeforeNextSend('initial', currentTask);
+        if (!prepareResult || prepareResult.ok !== true) {
+          const prepareReason = prepareResult && prepareResult.reason
+            ? prepareResult.reason
+            : 'prepare-before-send-failed';
+          if (prepareResult && prepareResult.retryable === true) {
+            scheduleRelentlessSendRetry(prepareReason, 'initial', currentTask);
+            return { ok: false, reason: prepareReason, wait: true };
+          }
+          handleTaskInitialSendFailure(prepareReason);
+          return { ok: false, reason: prepareReason };
+        }
+
+        return await sendTaskPrompt(initial, logTag, 'initial');
+      } finally {
+        markTaskBatchStepRunning(false);
+      }
+    }
+
     async function runTaskAutoUploadBeforeNextSend(kind, task) {
       const decision = logTaskAutoUploadDecision(kind);
       const normalizedKind = String(kind || '').trim().toLowerCase();
       const isInitialSend = normalizedKind === 'initial';
+      const runAtStart = state.taskRun || {};
+      const pendingAtStart = String(runAtStart.pendingSendKind || '');
+
+      if (
+        state.waitingReply === true
+        && (isInitialSend || pendingAtStart === 'initial')
+      ) {
+        runAtStart.pendingSendKind = '';
+        runAtStart.pendingSendStartedAt = 0;
+        runAtStart.lastPendingSendKindBeforeProcessing = null;
+        state.taskRun = runAtStart;
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, 'skip-initial-upload-while-waiting-reply', {
+          force: true,
+        });
+        const waitingTask = task || getCurrentRunningTask();
+        setTaskBatchStep('wait-initial-reply', waitingTask, { log: false });
+        ToolboxShell.appendLog(
+          `[AUTOQ][SKIP_INITIAL_UPLOAD_WHILE_WAITING_REPLY] task=${waitingTask && waitingTask.title ? waitingTask.title : '-'} `
+          + `pendingSendKind=${pendingAtStart || '-'} phase=${String(state.phase || '-')} step=${String(runAtStart.currentStep || '-')}`,
+        );
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'waiting-reply-skip-initial-upload',
+        };
+      }
+
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+      ) {
+        const sharedAttach = getAutoQueueComposerAttachmentEvidence('autoq-pre-upload');
+        if (sharedAttach.count > 1) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][DUPLICATE_ATTACHMENT_DETECTED] count=${sharedAttach.count} action=skip-reupload `
+            + `kind=${normalizedKind || '-'}`,
+          );
+        }
+        if (sharedAttach.count > 0 && sharedAttach.uploadingCount === 0) {
+          if (state.taskRun) {
+            if (decision.countMode === 'assistantAnswer') {
+              state.taskRun.lastAutoUploadAtAssistantReplyCount = Math.max(
+                0,
+                Number(decision.currentCount) || 0,
+              );
+            } else {
+              state.taskRun.lastAutoUploadAtMessageCount = Math.max(
+                1,
+                Number(decision.uploadSlotNo || decision.nextMessageNo) || 1,
+              );
+            }
+            state.taskRun.lastAutoUploadDoneAt = Date.now();
+            state.taskRun.forceUploadBeforeNextSend = false;
+          }
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][SKIP] kind=${normalizedKind || '-'} reason=composer-already-has-stable-attachment `
+            + `count=${sharedAttach.count} ready=${sharedAttach.readyCount}`,
+          );
+          markBatchAutoUploadReadyToSend(kind, task, {
+            ok: true,
+            reason: 'composer-already-has-stable-attachment',
+          });
+          return {
+            ok: true,
+            skipped: true,
+            reason: 'composer-already-has-stable-attachment',
+          };
+        }
+      }
 
       if (!decision.shouldUpload) {
         ToolboxShell.appendLog(
@@ -7604,24 +8227,8 @@ const AutoQueueModule = (() => {
         Number(decision.uploadSlotNo || decision.nextMessageNo) || decision.nextMessageNo,
       );
 
-      let composerHasUploadPayload = false;
-
-      if (typeof UploadModule.detectComposerHasUploadPayload === 'function') {
-        composerHasUploadPayload = !!UploadModule.detectComposerHasUploadPayload();
-      } else if (typeof ComposerApi !== 'undefined') {
-        if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
-          composerHasUploadPayload = composerHasUploadPayload
-            || !!ComposerApi.hasVisibleComposerAttachmentPayload();
-        }
-
-        if (typeof ComposerApi.countAttachmentChipsFast === 'function') {
-          composerHasUploadPayload = composerHasUploadPayload
-            || ComposerApi.countAttachmentChipsFast() > 0;
-        } else if (typeof ComposerApi.countAttachmentChips === 'function') {
-          composerHasUploadPayload = composerHasUploadPayload
-            || ComposerApi.countAttachmentChips() > 0;
-        }
-      }
+      const uploadReadiness = getComposerInitialUploadReadiness();
+      const composerHasUploadPayload = uploadReadiness.composerHasPayload;
 
       const pendingItems = typeof UploadModule.getPendingUploadItems === 'function'
         ? UploadModule.getPendingUploadItems()
@@ -7629,9 +8236,53 @@ const AutoQueueModule = (() => {
 
       const pendingUploadCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
 
+      if (isInitialSend) {
+        logInitialUploadPhaseGuard(task, { tag: 'before-upload-decision' });
+      }
+
       ToolboxShell.appendLog(
-        `[AUTOQ][TASK_AUTO_UPLOAD][PRECHECK] force=${forceUpload ? 1 : 0} pendingUploadCount=${pendingUploadCount} composerHasPayload=${composerHasUploadPayload ? 1 : 0} nextMessageNo=${nextMessageNo}`,
+        `[AUTOQ][TASK_AUTO_UPLOAD][PRECHECK] force=${forceUpload ? 1 : 0} pendingUploadCount=${pendingUploadCount} `
+        + `composerHasPayload=${composerHasUploadPayload ? 1 : 0} readyCount=${uploadReadiness.readyCount} `
+        + `uploadingCount=${uploadReadiness.uploadingCount} nextMessageNo=${nextMessageNo}`,
       );
+
+      if (isInitialSend && uploadReadiness.composerReady) {
+        const readyFast = await waitAutoQueueAttachmentReadyFast('autoq-initial-upload-ready-fast');
+        if (!readyFast.ok) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][FAST_READY_TIMEOUT] task=${task && task.title ? task.title : '-'} reason=${readyFast.reason}`,
+          );
+        }
+        if (state.taskRun) {
+          if (decision.countMode === 'assistantAnswer') {
+            state.taskRun.lastAutoUploadAtAssistantReplyCount = currentCount;
+          } else {
+            state.taskRun.lastAutoUploadAtMessageCount = uploadSlotNo;
+          }
+          state.taskRun.lastAutoUploadDoneAt = Date.now();
+          state.taskRun.forceUploadBeforeNextSend = false;
+        }
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][INITIAL_UPLOAD_SKIP_COMPOSER_READY] task=${task && task.title ? task.title : '-'} `
+          + `readyCount=${uploadReadiness.readyCount} reason=composer-already-has-upload-payload`,
+        );
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_DONE] kind=${kind || '-'} nextMessageNo=${nextMessageNo} `
+          + `uploadSlotNo=${uploadSlotNo} ok=1 uploaded=0 failed=0 skipped=0 reason=composer-already-has-upload-payload`,
+        );
+
+        markBatchAutoUploadReadyToSend(kind, task, {
+          ok: true,
+          reason: 'composer-already-has-upload-payload',
+        });
+
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'composer-already-has-upload-payload',
+        };
+      }
 
       if (forceUpload && composerHasUploadPayload) {
         if (state.taskRun) {
@@ -7660,6 +8311,11 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_AUTO_UPLOAD][COMPOSER_HAS_FILE_CONTINUE] force=1 nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} reason=composer-already-has-upload-payload`,
         );
 
+        markBatchAutoUploadReadyToSend(kind, task, {
+          ok: true,
+          reason: 'composer-already-has-upload-payload',
+        });
+
         return {
           ok: true,
           skipped: true,
@@ -7667,10 +8323,11 @@ const AutoQueueModule = (() => {
         };
       }
 
-      setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: true });
+      setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: isInitialSend ? false : true });
       if (isInitialSend) {
         ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][INITIAL_UPLOAD]');
         ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+        logInitialUploadPhaseGuard(task, { tag: 'upload-start' });
       } else {
         ToolboxShell.setStatus(`批量任务组：第 ${uploadSlotNo} 次发送前自动上传文件`);
       }
@@ -7691,7 +8348,8 @@ const AutoQueueModule = (() => {
       }
       logUploadBatchState('batch-auto-upload-start');
       ToolboxShell.appendLog('[BATCH_AUTO_UPLOAD][START] manualUploadRunning=0 batchTaskRunning=1 batchAutoUploading=1');
-      setAutoQueuePhase('uploading', 'upload-start');
+      const uploadPhaseReason = isInitialSend ? 'initial-auto-upload-start' : 'upload-start';
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOADING, uploadPhaseReason, { force: true });
       updateStatus('task-auto-upload-start');
 
       try {
@@ -7827,6 +8485,23 @@ const AutoQueueModule = (() => {
         if (forceUpload && state.taskRun) {
           state.taskRun.forceUploadBeforeNextSend = false;
         }
+
+        if (isInitialSend) {
+          const readyFast = await waitAutoQueueAttachmentReadyFast('autoq-upload-done-fast');
+          if (!readyFast.ok) {
+            ToolboxShell.appendLog(
+              `[AUTOQ][TASK_AUTO_UPLOAD][FAST_READY_TIMEOUT] task=${task && task.title ? task.title : '-'} reason=${readyFast.reason}`,
+            );
+          }
+        }
+
+        markBatchAutoUploadReadyToSend(kind, task, {
+          ok: true,
+          reason: uploadedCount > 0 ? 'uploaded' : (reason || 'composer-payload-ready'),
+          uploadedCount,
+          failedCount,
+          skippedCount,
+        });
 
         return {
           ok: true,
@@ -8022,7 +8697,7 @@ const AutoQueueModule = (() => {
 
         state.taskRun.pendingSendKind = 'processing';
         setTaskBatchStep('copy-last-reply', task, { log: false });
-        state.taskBatchStepRunning = true;
+        markTaskBatchStepRunning(true);
 
         try {
           const maxRounds = normalizeContinueRoundLimit(
@@ -8185,7 +8860,7 @@ const AutoQueueModule = (() => {
           console.error('[ChatGPT toolbox] verify continue step failed', err);
           failCurrentTask(errText);
         } finally {
-          state.taskBatchStepRunning = false;
+          markTaskBatchStepRunning(false);
           if (state.taskRun && state.taskRun.pendingSendKind === 'processing') {
             state.taskRun.pendingSendKind = null;
           }
@@ -8245,7 +8920,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      state.taskBatchStepRunning = true;
+      markTaskBatchStepRunning(true);
       state.taskRun.pendingSendKind = 'processing';
 
       try {
@@ -8450,7 +9125,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][FAILED] task=${task.title} error=${errText}`);
         failCurrentTask(errText);
       } finally {
-        state.taskBatchStepRunning = false;
+        markTaskBatchStepRunning(false);
         state.taskRun.pendingSendKind = null;
         updateStatus('task-reply-ready');
       }
@@ -9259,23 +9934,17 @@ const AutoQueueModule = (() => {
 
     function renderTaskList() {
       if (!taskListEl) return;
-
       const prevScrollTop = taskListEl.scrollTop;
-
       const profile = getActiveTaskProfile();
-
       if (!profile) {
         taskListEl.innerHTML = '<div class="cgpt-hint">暂无任务组</div>';
         return;
       }
-
       ensureSelectedTaskId(profile);
-
       if (!profile.tasks.length) {
         taskListEl.innerHTML = '<div class="cgpt-hint">暂无任务，请点击「新增任务」</div>';
         return;
       }
-
       taskListEl.innerHTML = profile.tasks.map((task, index) => {
         const selected = task.id === selectedTaskId ? ' active' : '';
         const enabledMark = task.enabled ? '' : '（禁用）';
@@ -9290,14 +9959,24 @@ const AutoQueueModule = (() => {
         const metaText = `${statusLabel} · 继续 ${Number(task.continueCount) || 0}/${maxRoundsText}`;
         const sourceText = formatTaskListSourceText(task);
         const categoryText = formatTaskListCategoryText(task);
-
+        const tooltipText = [
+          `名称：${titleText}`,
+          `状态：${metaText}`,
+          sourceText,
+          categoryText,
+        ].filter(Boolean).join('\n');
         return `
-      <div class="cgpt-autoq-task-item${selected}" data-task-id="${escapeHtml(task.id)}">
+      <div
+        class="cgpt-autoq-task-item${selected}"
+        data-task-id="${escapeHtml(task.id)}"
+        title="${escapeHtml(tooltipText)}"
+        aria-label="${escapeHtml(tooltipText)}"
+      >
         <div class="cgpt-autoq-task-item-main cgpt-autoq-task-item-main-inline">
-          <span class="cgpt-autoq-task-item-title" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</span>
-          <span class="cgpt-autoq-task-item-meta">${escapeHtml(metaText)}</span>
-          <span class="cgpt-autoq-task-item-source">${escapeHtml(sourceText)}</span>
-          <span class="cgpt-autoq-task-item-category">${escapeHtml(categoryText)}</span>
+          <span
+            class="cgpt-autoq-task-item-title"
+            title="${escapeHtml(tooltipText)}"
+          >${escapeHtml(titleText)}</span>
         </div>
         <div class="cgpt-autoq-task-item-actions">
           <button type="button" class="cgpt-toolbox-small-btn" data-task-action="edit" data-task-id="${escapeHtml(task.id)}">编辑</button>
@@ -9310,7 +9989,6 @@ const AutoQueueModule = (() => {
         </div>
       </div>`;
       }).join('');
-
       window.requestAnimationFrame(() => {
         if (taskListEl && !_isUserScrollProtected()) {
           taskListEl.scrollTop = prevScrollTop;
@@ -10037,12 +10715,50 @@ const AutoQueueModule = (() => {
       return null;
     }
 
+    function getBatchAttachmentReadyStatusText() {
+      if (config.promptMode !== 'task' || (!state.running && !state.batchTaskRunning)) {
+        return null;
+      }
+
+      const run = state.taskRun || {};
+      const step = String(run.currentStep || '');
+      const attachSnap = resolveAutoQueueAttachmentSnapshot();
+
+      if (!attachSnap || !attachSnap.hasReadyAttachment || attachSnap.uploadingCount > 0) {
+        return null;
+      }
+
+      const phase = String(state.phase || '');
+      const isInitialSendFlow = (
+        run.pendingSendKind === 'initial'
+        || step === 'auto-upload-before-send'
+        || step === 'send-initial'
+        || step === 'send-wait-retry'
+        || step === 'send-wait-button'
+        || phase === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED
+      );
+
+      if (!isInitialSendFlow) {
+        return null;
+      }
+
+      return '附件已就绪，准备发送初始指令';
+    }
+
     function getAutoQueueUploadStatusText() {
+      const attachmentReadyText = getBatchAttachmentReadyStatusText();
+      if (attachmentReadyText) {
+        return attachmentReadyText;
+      }
+
       const status = String(state.autoQueueUploadStatus || 'idle');
       const stats = state.autoQueueUploadStats || {};
 
       if (status === 'uploading') {
         const attachSnap = resolveAutoQueueAttachmentSnapshot();
+        if (attachSnap && attachSnap.hasReadyAttachment && attachSnap.uploadingCount === 0 && !state.batchAutoUploading) {
+          return '附件已就绪，准备发送初始指令';
+        }
         if (attachSnap && attachSnap.uploadingCount > 0) {
           return `上传中 ${attachSnap.uploadingCount} 个`;
         }
@@ -10446,6 +11162,9 @@ const AutoQueueModule = (() => {
     let lastButtonHitTestAt = 0;
     let lastButtonDomStateLogAt = 0;
     let lastStatusPanelLogAt = 0;
+    let lastUploadButtonReadyLogKey = '';
+    let lastUploadButtonReadyLogAt = 0;
+    const UPLOAD_BUTTON_READY_LOG_MIN_MS = 5000;
 
     // Delegated event binding throttling (avoid repeated remove/add listeners)
     let delegatedBoundRoot = null;
@@ -11004,8 +11723,12 @@ const AutoQueueModule = (() => {
         runStateText = '已完成';
       } else if (phase === AUTO_QUEUE_PHASES.FAILED) {
         runStateText = '调度异常';
+      } else if (phase === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED) {
+        const attachmentReadyText = getBatchAttachmentReadyStatusText();
+        runStateText = attachmentReadyText || '待发送 / 附件已就绪';
       } else if (phase === 'uploading' || state.uploadingFromAutoQueue || state.batchAutoUploading) {
-        runStateText = '上传中';
+        const attachmentReadyText = getBatchAttachmentReadyStatusText();
+        runStateText = attachmentReadyText || '上传中';
       } else if (phase === 'waiting_reply' || phase === 'reply_ready') {
         runStateText = '等待回复';
       } else if (phase === 'sending' || phase === 'sent') {
@@ -11032,8 +11755,28 @@ const AutoQueueModule = (() => {
         ]);
         if (waitingSteps.has(taskStepKeyForStatus)) {
           runStateText = '等待额度恢复';
+        } else if (taskStepKeyForStatus === 'send-wait-button') {
+          runStateText = '等待发送按钮';
+        } else if (taskStepKeyForStatus === 'auto-upload-before-send') {
+          const attachmentReadyText = getBatchAttachmentReadyStatusText();
+          runStateText = attachmentReadyText || (
+            state.batchAutoUploading
+              ? BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.starting_upload
+              : '准备上传初始附件'
+          );
+        } else if (taskStepKeyForStatus === 'send-initial') {
+          const attachmentReadyText = getBatchAttachmentReadyStatusText();
+          runStateText = attachmentReadyText || '准备发送初始指令';
+        } else if (taskStepKeyForStatus === 'wait-initial-reply') {
+          runStateText = '等待回复';
+        } else if (phase === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED) {
+          const attachmentReadyText = getBatchAttachmentReadyStatusText();
+          runStateText = attachmentReadyText || '待发送 / 附件已就绪';
         } else if (phase === 'uploading' || state.uploadingFromAutoQueue || state.batchAutoUploading) {
-          if (taskStepKeyForStatus === 'auto-upload-before-send' && state.batchAutoUploading) {
+          const attachmentReadyText = getBatchAttachmentReadyStatusText();
+          if (attachmentReadyText) {
+            runStateText = attachmentReadyText;
+          } else if (taskStepKeyForStatus === 'auto-upload-before-send' && state.batchAutoUploading) {
             setBatchTaskGroupDisplayState('starting_upload', 'phase-initial-auto-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.starting_upload;
             ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
@@ -12062,7 +12805,7 @@ const AutoQueueModule = (() => {
       state.batchAutoUploading = false;
       state.batchStartupGuardUntilMs = 0;
       state.nextSendAt = 0;
-      state.taskBatchStepRunning = false;
+      markTaskBatchStepRunning(false);
       state.batchInitialWaitLoggedAt = 0;
       if (state.taskRun) {
         state.taskRun.pendingSendKind = null;
@@ -12206,34 +12949,15 @@ const AutoQueueModule = (() => {
     }
 
     function getComposerEvidenceForProcessingStaleRecovery() {
-      const snapshot = typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
-        ? ComposerApi.getComposerRuntimeSnapshotLight(500)
+      const payloadEvidence = getComposerPayloadEvidenceForAutoQueue();
+      const composerText = payloadEvidence.composerText || '';
+      const textLen = payloadEvidence.textLen || composerText.length;
+      const attachmentCount = Math.max(0, Number(payloadEvidence.attachmentCount) || 0);
+      const hasAttachment = payloadEvidence.hasAttachment === true || attachmentCount > 0;
+
+      const sendButton = typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
         : null;
-      const composerText = snapshot
-        ? String(snapshot.composerTextTrimmed || '')
-        : (
-          typeof ComposerApi.getComposerText === 'function'
-            ? String(ComposerApi.getComposerText() || '').trim()
-            : ''
-        );
-      const textLen = composerText.length;
-
-      const attachmentCount = snapshot
-        ? Number(snapshot.attachmentCount || 0)
-        : (
-          typeof ComposerApi.countAttachmentChipsFast === 'function'
-            ? Number(ComposerApi.countAttachmentChipsFast() || 0)
-            : 0
-        );
-      const hasAttachment = attachmentCount > 0;
-
-      const sendButton = snapshot && snapshot.sendButton
-        ? snapshot.sendButton
-        : (
-          typeof ComposerApi.findSendButton === 'function'
-            ? ComposerApi.findSendButton({ silent: true })
-            : null
-        );
       const sendButtonDisabled = !(sendButton instanceof HTMLButtonElement)
         ? true
         : !!sendButton.disabled;
@@ -12317,7 +13041,7 @@ const AutoQueueModule = (() => {
           state.replyBecameBusy = false;
           state.idleSince = 0;
           state.waitingStartedAt = 0;
-          state.taskBatchStepRunning = false;
+          markTaskBatchStepRunning(false);
           state.nextSendAt = 0;
 
           updateStatus('processing-post-upload-force-retry');
@@ -12372,7 +13096,7 @@ const AutoQueueModule = (() => {
         state.replyBecameBusy = false;
         state.idleSince = 0;
         state.waitingStartedAt = 0;
-        state.taskBatchStepRunning = false;
+        markTaskBatchStepRunning(false);
         state.nextSendAt = 0;
 
         updateStatus('processing-stale-rewrite-prompt');
@@ -12453,7 +13177,7 @@ const AutoQueueModule = (() => {
               state.replyBecameBusy = false;
               state.idleSince = 0;
               state.waitingStartedAt = 0;
-              state.taskBatchStepRunning = false;
+              markTaskBatchStepRunning(false);
               state.nextSendAt = 0;
 
               updateStatus('processing-stale-retry-failed');
@@ -12479,7 +13203,7 @@ const AutoQueueModule = (() => {
             state.replyBecameBusy = false;
             state.idleSince = 0;
             state.waitingStartedAt = 0;
-            state.taskBatchStepRunning = false;
+            markTaskBatchStepRunning(false);
             state.nextSendAt = 0;
           } finally {
             processingStaleRecoveryInFlight = false;
@@ -12505,7 +13229,7 @@ const AutoQueueModule = (() => {
       state.replyBecameBusy = false;
       state.idleSince = 0;
       state.waitingStartedAt = 0;
-      state.taskBatchStepRunning = false;
+      markTaskBatchStepRunning(false);
       state.nextSendAt = 0;
 
       updateStatus('processing-stale-replace-prompt');
@@ -12518,6 +13242,14 @@ const AutoQueueModule = (() => {
 
     function maybeUpdateWaitingState() {
       if (repairIllegalWaitingReplyPendingSendState('maybe-update-waiting')) {
+        return;
+      }
+
+      if (repairFalseWaitingReplyWithComposerPayload('maybe-update-waiting')) {
+        updateStatus('false-waiting-reply-repair');
+        if (typeof updateChatInputStateBadge === 'function') {
+          updateChatInputStateBadge();
+        }
         return;
       }
 
@@ -13910,7 +14642,6 @@ const AutoQueueModule = (() => {
 
     async function sendTaskPrompt(content, logTag, sendKind = 'initial') {
       const prompt = String(content || '').trim();
-      const source = 'batch-task-group-initial-instruction';
       const safeSendKind = String(sendKind || 'initial');
 
       if (!prompt) {
@@ -13928,66 +14659,81 @@ const AutoQueueModule = (() => {
       }
 
       const run = state.taskRun || {};
-      run.lastPendingSendKindBeforeProcessing = safeSendKind;
-      run.pendingSendKind = 'processing';
-      run.pendingSendStartedAt = Date.now();
+      const task = getCurrentRunningTask();
+      const taskTitle = task && task.title ? task.title : '-';
+      const taskIndex = Math.max(0, Number(run.currentIndex || 0));
+      const source = `autoq-task-${safeSendKind}-${taskIndex + 1}`;
+
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.runSharedComposerSendFlow !== 'function'
+      ) {
+        ToolboxShell.appendLog('[AUTOQ][SEND_FLOW][FALLBACK] reason=runSharedComposerSendFlow-unavailable');
+        return sendBatchTextViaUnifiedPipeline(prompt, source);
+      }
+
+      const pendingBeforeSend = safeSendKind === 'verification'
+        ? 'verification'
+        : (safeSendKind === 'continue' ? 'continue' : 'initial');
+      run.pendingSendKind = pendingBeforeSend;
+      run.pendingSendStartedAt = 0;
       state.taskRun = run;
-      state.sendingNow = true;
 
       try {
-        // 自动上传后的关键顺序校验：
-        // 1) 输入框若只有附件（textLen=0），必须记录并确保后续流程重写 prompt + 发送。
-        // 2) 上传后附件若仍在 processing，则先 waitAttachmentsStableForSend，再进入 unified 发送链路。
-        const task = getCurrentRunningTask();
-        const taskTitle = task && task.title ? task.title : '-';
-        const composerTextTrimmed = typeof ComposerApi.getComposerText === 'function'
-          ? String(ComposerApi.getComposerText() || '').trim()
-          : '';
-        const hasAttachmentPayload = typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
-          ? Number(ComposerApi.getComposerRuntimeSnapshotLight(500).attachmentCount || 0) > 0
-          : (
-            typeof ComposerApi.countAttachmentChipsFast === 'function'
-              ? ComposerApi.countAttachmentChipsFast() > 0
-              : (
-                typeof ComposerApi.countAttachmentChips === 'function'
-                  ? ComposerApi.countAttachmentChips() > 0
-                  : false
-              )
-          );
-        if (hasAttachmentPayload && !composerTextTrimmed) {
-          const textLen = 0;
+        const payloadEvidence = getComposerPayloadEvidenceForAutoQueue();
+        if (payloadEvidence.hasAttachment && payloadEvidence.textLen <= 0) {
           ToolboxShell.appendLog(
-            `[AUTOQ][POST_UPLOAD_PROMPT_MISSING] task=${taskTitle} kind=${safeSendKind} attachment=1 textLen=${textLen} action=rewrite-prompt`,
+            `[AUTOQ][POST_UPLOAD_PROMPT_MISSING] task=${taskTitle} kind=${safeSendKind} attachment=1 textLen=0 action=rewrite-prompt`,
           );
         }
 
-        if (
-          typeof waitAttachmentsStableForSend === 'function'
-          && hasAttachmentPayload
-        ) {
-          await waitAttachmentsStableForSend(
-            typeof MAX_ATTACHMENT_SEND_WAIT_MS === 'number' ? MAX_ATTACHMENT_SEND_WAIT_MS : 120000,
-            () => !state.running,
-            { source: `autoq-pre-send-attach-stable:${safeSendKind}` },
-          );
+        setTaskBatchStep(
+          safeSendKind === 'verification' ? 'send-verification' : (safeSendKind === 'continue' ? 'send-continue' : 'send-initial'),
+          task,
+          { log: false },
+        );
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][INITIAL_PROMPT_WRITE_START] task=${taskTitle} textLen=${prompt.length} `
+          + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} kind=${safeSendKind}`,
+        );
+
+        run.lastPendingSendKindBeforeProcessing = safeSendKind;
+        run.pendingSendKind = 'processing';
+        run.pendingSendStartedAt = Date.now();
+        state.taskRun = run;
+        state.sendingNow = true;
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.SENDING, `send-task-prompt:${safeSendKind}`);
+
+        const rateLimitResult = await waitForTaskSendRateLimit(source, {
+          shouldStop: () => !state.running,
+        });
+        if (!rateLimitResult.ok) {
+          return {
+            ok: false,
+            reason: rateLimitResult.reason || 'rate-limit-cancelled',
+          };
         }
 
-        const hasUnifiedAfterStableWait = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-          ? !!ComposerApi.hasComposerAttachmentUnified()
-          : hasAttachmentPayload;
-
-        if (!hasUnifiedAfterStableWait) {
-          ToolboxShell.appendLog(
-            `[AUTOQ][POST_UPLOAD_ATTACHMENT_UNIFIED_FALSE] task=${taskTitle} kind=${safeSendKind} action=continue-send`,
-          );
+        if (guardAutoQueueBackgroundThrottle('send-task-prompt')) {
+          return { ok: false, reason: 'background-throttled', wait: true };
         }
 
         const sendResult = await withAutoQueueSendTimeout(
-          sendBatchTextViaUnifiedPipeline(prompt, source),
+          UploadModule.runSharedComposerSendFlow({
+            source,
+            promptText: prompt,
+            uploadBeforeSend: false,
+            waitAttachmentStable: true,
+            requireAttachmentReady: safeSendKind === 'initial',
+            shouldStop: () => !state.running || state.stopRequested,
+            logPrefix: 'AUTOQ',
+            allowReplaceDraft: false,
+          }),
           getAutoQueueSendHardTimeoutMs(),
           {
             phase: safeSendKind,
-            task: getCurrentRunningTask(),
+            task,
             source,
           },
         );
@@ -14010,11 +14756,46 @@ const AutoQueueModule = (() => {
 
         if (!sendResult || sendResult.ok !== true) {
           const reason = String((sendResult && sendResult.reason) || 'unknown');
-          run.pendingSendKind = safeSendKind === 'verification' ? 'verification' : 'initial';
+          const previousPhase = String(state.phase || '-');
+          run.pendingSendKind = safeSendKind === 'verification'
+            ? 'verification'
+            : (safeSendKind === 'continue' ? 'continue' : 'initial');
+          state.sendingNow = false;
+
+          if (
+            reason === 'send_not_confirmed_composer_still_has_payload'
+            || reason === 'duplicate_prompt_text_detected'
+          ) {
+            run.pendingSendKind = safeSendKind;
+            run.pendingSendStartedAt = Date.now();
+            state.taskRun = run;
+            setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, `send-not-confirmed:${reason}`, { force: true });
+            setTaskBatchStep('send-wait-button', task, { log: false });
+            ToolboxShell.appendLog(
+              `[AUTOQ][SEND_NOT_CONFIRMED_KEEP_WAIT_SEND] task=${taskTitle} kind=${safeSendKind} reason=${reason}`,
+            );
+            return {
+              ok: false,
+              reason,
+              wait: true,
+              retryable: true,
+              wait_send: true,
+            };
+          }
 
           const classified = logSendFailureClassified(safeSendKind, getCurrentRunningTask(), reason, sendResult);
+          const isAttachmentWaitReason = reason === 'waiting_attachment_upload_done';
+          const phaseRepairForce = isAttachmentWaitReason
+            || previousPhase === AUTO_QUEUE_PHASES.SENDING;
 
-          if (classified.action === 'retry') {
+          if (isAttachmentWaitReason) {
+            setAutoQueuePhase(
+              AUTO_QUEUE_PHASES.UPLOAD_ATTACHED,
+              'repair:waiting_attachment_upload_done',
+              { force: true },
+            );
+            setTaskBatchStep('send-wait-retry', getCurrentRunningTask(), { log: false });
+            state.taskRun = run;
             return {
               ok: false,
               wait: true,
@@ -14024,45 +14805,77 @@ const AutoQueueModule = (() => {
             };
           }
 
-          const failLabel = reason === 'send_button_not_found'
-            ? '发送失败：找不到可用发送按钮'
-            : `发送失败：${reason}`;
-          log(failLabel);
+          if (classified.action === 'retry') {
+            setAutoQueuePhase(
+              AUTO_QUEUE_PHASES.UPLOAD_ATTACHED,
+              `send-wait-retry:${reason}`,
+              { force: phaseRepairForce },
+            );
+            setTaskBatchStep(
+              sendResult && sendResult.wait ? 'send-wait-retry' : 'send-wait-button',
+              getCurrentRunningTask(),
+              { log: false },
+            );
+            state.taskRun = run;
+            return {
+              ok: false,
+              wait: true,
+              retryable: true,
+              relentlessRetry: true,
+              reason,
+            };
+          }
+
+          setAutoQueuePhase(
+            AUTO_QUEUE_PHASES.UPLOAD_ATTACHED,
+            `send-wait-retry:${reason}`,
+            { force: phaseRepairForce },
+          );
+          setTaskBatchStep(
+            sendResult && sendResult.wait ? 'send-wait-retry' : 'send-wait-button',
+            getCurrentRunningTask(),
+            { log: false },
+          );
+          log(reason === 'send_button_not_found' ? '发送失败：找不到可用发送按钮' : `发送失败：${reason}`);
           ToolboxShell.appendLog(`${logTag} failed reason=${reason}`);
-          ToolboxShell.appendLog(`[AUTO_QUEUE][BATCH][INITIAL_SEND_FAILED] reason=${reason}`);
+          state.taskRun = run;
           return sendResult || { ok: false, reason };
         }
 
         if (Number(run.sendRetryCount) > 0) {
           ToolboxShell.appendLog(
-            `[AUTOQ][TASK_BATCH][SEND_RETRY_SUCCESS] task=${getCurrentRunningTask() ? getCurrentRunningTask().title : '-'} `
-            + `retryCount=${run.sendRetryCount}`,
+            `[AUTOQ][TASK_BATCH][SEND_RETRY_SUCCESS] task=${taskTitle} retryCount=${run.sendRetryCount}`,
           );
         }
         clearRelentlessSendRetryState();
+        recordTaskSendRateLimitHit(source);
 
         ToolboxShell.appendLog('[AUTO_QUEUE][BATCH_INITIAL_SEND_DONE]');
         ToolboxShell.appendLog('[AUTO_QUEUE][BATCH_WAIT_REPLY_START]');
         state.batchInitialWaitLoggedAt = 0;
-
         state.sentCount += 1;
-        state.currentMessageId = String(
-          (sendResult && sendResult.messageId) || state.currentMessageId || '',
-        ).trim();
+        state.currentMessageId = String(state.currentMessageId || '').trim();
         setAutoQueuePhase(AUTO_QUEUE_PHASES.SENT, 'message accepted');
         state.waitingReply = true;
         setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, 'await-assistant');
         state.replyBecameBusy = false;
         state.idleSince = 0;
         state.waitingStartedAt = Date.now();
-        run.pendingSendKind = null;
-        const runningTask = getCurrentRunningTask();
-        setTaskBatchStep('wait-initial-reply', runningTask, { log: false });
-        ToolboxShell.appendLog(`${logTag} task=${runningTask ? runningTask.title : '-'}`);
+        run.pendingSendKind = '';
+        run.pendingSendStartedAt = 0;
+        run.lastPendingSendKindBeforeProcessing = null;
+        state.sendingNow = false;
+
+        const waitStep = safeSendKind === 'verification'
+          ? 'wait-verification-reply'
+          : (safeSendKind === 'continue' ? 'wait-continue-reply' : 'wait-initial-reply');
+        setTaskBatchStep(waitStep, task, { log: false });
+        ToolboxShell.appendLog(`${logTag} task=${taskTitle}`);
         ToolboxShell.appendLog('[AUTOQ][TASK][WAIT_REPLY]');
         log(`已发送：${prompt.slice(0, 80)}`);
         updateStatus();
         updateChatInputStateBadge();
+        state.taskRun = run;
         return sendResult;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
@@ -14071,24 +14884,28 @@ const AutoQueueModule = (() => {
           error: errText,
           stack: err && err.stack ? err.stack : '',
         });
+        ToolboxShell.appendLog(`[AUTOQ][SEND_FLOW][EXCEPTION] task=${taskTitle} error=${errText}`);
         run.pendingSendKind = safeSendKind === 'verification'
           ? 'verification'
-          : (safeSendKind === 'continue' ? null : 'initial');
+          : (safeSendKind === 'continue' ? 'continue' : 'initial');
         setTaskBatchStep('send-initial-failed', getCurrentRunningTask(), { log: false });
         log(`发送异常：${errText}`);
         ToolboxShell.setStatus(`发送失败：${errText}`, 'error');
         ToolboxShell.appendLog(`${logTag} error=${errText}`);
-        ToolboxShell.appendLog(`[AUTO_QUEUE][BATCH][INITIAL_SEND_FAILED] reason=${errText}`);
         return { ok: false, reason: errText };
       } finally {
         state.sendingNow = false;
-        if (run.pendingSendKind === 'processing') {
+        if (state.waitingReply) {
+          run.pendingSendKind = '';
+          run.pendingSendStartedAt = 0;
+          run.lastPendingSendKindBeforeProcessing = null;
+        } else if (run.pendingSendKind === 'processing') {
           run.pendingSendKind = safeSendKind === 'verification'
             ? 'verification'
-            : (safeSendKind === 'continue' ? null : 'initial');
+            : (safeSendKind === 'continue' ? 'continue' : 'initial');
+          run.pendingSendStartedAt = 0;
+          run.lastPendingSendKindBeforeProcessing = null;
         }
-        run.pendingSendStartedAt = 0;
-        run.lastPendingSendKindBeforeProcessing = null;
         state.taskRun = run;
       }
     }
@@ -14146,7 +14963,57 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (isComposerSendButtonWaitBlocking()) {
+      const payloadAtSendCheck = getAutoQueueComposerPayloadState('maybe-send-next-precheck');
+      const currentTaskForSendCheck = getCurrentRunningTask();
+      const stepAtSendCheck = state.taskRun && state.taskRun.currentStep
+        ? String(state.taskRun.currentStep)
+        : '';
+      const pendingKindAtSendCheck = state.taskRun && state.taskRun.pendingSendKind
+        ? String(state.taskRun.pendingSendKind)
+        : '';
+
+      if (
+        stepAtSendCheck === 'send-wait-button'
+        && payloadAtSendCheck.attachmentCount > 0
+        && payloadAtSendCheck.textLen === 0
+        && pendingKindAtSendCheck === 'initial'
+      ) {
+        setTaskBatchStep('send-initial', currentTaskForSendCheck, { log: false });
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.UPLOAD_ATTACHED, 'send-wait-repair-to-send-initial', { force: true });
+        state.nextSendAt = 0;
+        ToolboxShell.appendLog(
+          '[AUTOQ][SEND_WAIT_REPAIR_TO_SEND_INITIAL] reason=attachment-ready-no-prompt',
+        );
+      }
+
+      if (shouldWriteInitialPromptImmediatelyAfterUpload(currentTaskForSendCheck)) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][WRITE_PROMPT_IMMEDIATELY_AFTER_UPLOAD] task=${currentTaskForSendCheck ? currentTaskForSendCheck.title || '-' : '-'}`,
+        );
+        if (
+          !state.waitingReply
+          && !state.sendingNow
+          && !state.taskBatchStepRunning
+        ) {
+          void runImmediateInitialPromptAfterUpload(
+            currentTaskForSendCheck,
+            '[AUTOQ][WRITE_PROMPT_IMMEDIATELY_AFTER_UPLOAD]',
+          ).catch((error) => {
+            console.error('[AUTOQ][WRITE_PROMPT_IMMEDIATELY_AFTER_UPLOAD]', error);
+            ToolboxShell.appendLog(
+              `[AUTOQ][WRITE_PROMPT_IMMEDIATELY_AFTER_UPLOAD][FAILED] `
+              + `error=${error && error.message ? error.message : String(error)}`,
+            );
+          });
+          return;
+        }
+      }
+
+      if (
+        isComposerSendButtonWaitBlocking()
+        && !shouldBypassPreSendButtonWaitForBatchPromptWrite()
+        && !shouldWriteInitialPromptImmediatelyAfterUpload(currentTaskForSendCheck)
+      ) {
         holdTaskUntilSendButtonReady(getCurrentRunningTask(), 'send-button-wait-before-send');
         return;
       }
@@ -14164,6 +15031,14 @@ const AutoQueueModule = (() => {
 
       if (config.promptMode === 'task') {
         logBatchPendingCheck(shouldContinueBatch() ? 'continue' : 'stop');
+      }
+
+      if (repairFalseWaitingReplyWithComposerPayload('maybe-send-next')) {
+        updateStatus('false-waiting-reply-repair');
+        if (typeof updateChatInputStateBadge === 'function') {
+          updateChatInputStateBadge();
+        }
+        return;
       }
 
       const runStep = state.taskRun && state.taskRun.currentStep
@@ -14336,6 +15211,47 @@ const AutoQueueModule = (() => {
           `[AUTO_QUEUE][BATCH_INITIAL_PROMPT_PICKED] text_len=${initial.length} task_title=${currentTask.title}`,
         );
 
+        const writeGuard = shouldWriteInitialPromptToComposer(
+          initial,
+          `maybe-send-next:${currentTask.id || currentTask.title || 'initial'}`,
+        );
+        const preSendEvidence = getAutoQueueComposerPayloadState('maybe-send-next-initial');
+        if (
+          preSendEvidence.attachmentCount > 1
+          && preSendEvidence.text
+          && preSendEvidence.text === initial
+        ) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][DUPLICATE_ATTACHMENT_WITH_PROMPT] attachCount=${preSendEvidence.attachmentCount} `
+            + `textLen=${preSendEvidence.textLen} action=send-existing-or-stop`,
+          );
+          if (isComposerSendButtonWaitBlocking()) {
+            setTaskBatchStep('send-wait-button', currentTask, { log: false });
+            ToolboxShell.setStatus('已有重复附件，请手动清理后重试', 'warn');
+            return;
+          }
+        }
+
+        if (writeGuard.reason === 'duplicate-prompt-guard') {
+          setTaskBatchStep('send-initial', currentTask, { log: false });
+          ToolboxShell.setStatus('检测到重复 Prompt，请清理输入框后重试', 'warn');
+          return;
+        }
+
+        if (writeGuard.reason === 'composer-has-different-text') {
+          const draftRecheck = getAutoQueueComposerPayloadState('maybe-send-draft-recheck');
+          if (!isRealUserDraftBlockingAutoQueue(draftRecheck.text, currentTask, 'maybe-send-draft-recheck')) {
+            ToolboxShell.appendLog(
+              `[AUTOQ][DRAFT_FALSE_POSITIVE_IGNORED] task=${currentTask.title} textLen=${draftRecheck.textLen} `
+              + `hasAttachment=${draftRecheck.hasAttachment ? 1 : 0} action=continue-send-initial`,
+            );
+          } else {
+            setTaskBatchStep('send-initial', currentTask, { log: false });
+            ToolboxShell.setStatus('输入框已有其他草稿，请先清理后再运行批量任务', 'warn');
+            return;
+          }
+        }
+
         const uploadPrecheck = precheckUploadGroupForRun(
           { groupId: state.currentGroupId, runId: state.currentRunId },
           currentTask,
@@ -14356,7 +15272,7 @@ const AutoQueueModule = (() => {
           );
         }
 
-        state.taskBatchStepRunning = true;
+        markTaskBatchStepRunning(true);
         void (async () => {
           try {
             const prepareResult = await prepareTaskPageBeforeNextSend('initial', currentTask);
@@ -14427,7 +15343,7 @@ const AutoQueueModule = (() => {
             runState.pendingSendKind = 'initial';
             handleTaskInitialSendFailure(errText);
           } finally {
-            state.taskBatchStepRunning = false;
+            markTaskBatchStepRunning(false);
           }
         })();
         return;
@@ -14545,6 +15461,13 @@ const AutoQueueModule = (() => {
         if (config.promptMode === 'task') {
           checkBatchTaskGroupWatchdog();
           repairIllegalWaitingReplyPendingSendState('tick');
+          if (repairFalseWaitingReplyWithComposerPayload('tick')) {
+            updateStatus('false-waiting-reply-repair');
+            if (typeof updateChatInputStateBadge === 'function') {
+              updateChatInputStateBadge();
+            }
+            return;
+          }
         }
 
         if (maybeResumeRelentlessSendRetry()) {
@@ -15217,41 +16140,185 @@ const AutoQueueModule = (() => {
       });
     }
 
-    function logAutoQueueUploadButtonReady(reason = '') {
-      const why = String(reason || '-');
-      const btn = root ? qs('#cgpt-autoq-start-upload', root) : null;
-      if (!btn) {
-        ToolboxShell.appendLog(`[AUTOQ][UPLOAD_BUTTON_READY] reason=${why} found=0`);
-        return;
+    function collectAutoQueueUploadButtonCandidates() {
+      const candidates = [];
+      const addCandidate = (btn) => {
+        if (!(btn instanceof HTMLElement)) {
+          return;
+        }
+        if (candidates.includes(btn)) {
+          return;
+        }
+        candidates.push(btn);
+      };
+
+      if (root) {
+        root.querySelectorAll('#cgpt-autoq-start-upload').forEach(addCandidate);
+      }
+      if (!candidates.length) {
+        document.querySelectorAll('#cgpt-autoq-start-upload').forEach(addCandidate);
       }
 
-      const rect = btn.getBoundingClientRect();
-      const w = Math.floor(rect.width || 0);
-      const h = Math.floor(rect.height || 0);
-      const zeroRect = w <= 0 || h <= 0;
+      return candidates;
+    }
 
-      let topEl = null;
-      let blocked = false;
-      if (!zeroRect) {
-        const x = Math.floor(rect.left + rect.width / 2);
-        const y = Math.floor(rect.top + rect.height / 2);
-        topEl = document.elementFromPoint(x, y);
-        blocked = !!(topEl && topEl !== btn && !btn.contains(topEl));
+    function isAutoQueueUploadButtonIntentionallyHidden(btn) {
+      if (!(btn instanceof HTMLElement)) {
+        return false;
       }
 
-      ToolboxShell.appendLog(
-        `[AUTOQ][UPLOAD_BUTTON_READY] reason=${why} found=1 disabled=${btn.disabled ? 1 : 0} `
-        + `rect.width=${w} rect.height=${h} `
-        + `topTag=${topEl ? topEl.tagName || '-' : '-'} topId=${topEl ? topEl.id || '-' : '-'} `
-        + `blocked=${blocked ? 1 : 0}`,
+      const moduleEl = btn.closest('#cgpt-autoq-module, .cgpt-autoq-module, [data-cgpt-module="autoqueue"]');
+      const moduleHidden = !!(
+        moduleEl
+        && (
+          moduleEl.classList.contains('cgpt-toolbox-hidden')
+          || moduleEl.hidden
+          || getComputedStyle(moduleEl).display === 'none'
+          || getComputedStyle(moduleEl).visibility === 'hidden'
+        )
       );
+      const docHidden = typeof document !== 'undefined' && !!document.hidden;
 
-      if (zeroRect) {
-        const isIntentionallyHidden = btn.classList.contains('cgpt-toolbox-hidden');
-        if (!isIntentionallyHidden) {
-          ToolboxShell.appendLog('[AUTOQ][UPLOAD_BUTTON_READY][WARN] reason=zero-rect');
+      return btn.classList.contains('cgpt-toolbox-hidden') || moduleHidden || docHidden;
+    }
+
+    function resolveAutoQueueUploadButtonReadyState(source = '') {
+      const why = String(source || '-');
+      const candidates = collectAutoQueueUploadButtonCandidates();
+      const skipped = [];
+
+      for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+        const btn = candidates[candidateIndex];
+        const tag = String(btn.tagName || '').toLowerCase();
+        const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+
+        if (disabled) {
+          skipped.push({ reason: 'disabled', tag, candidateIndex });
+          continue;
+        }
+
+        const rect = btn.getBoundingClientRect();
+        const w = Math.floor(rect.width || 0);
+        const h = Math.floor(rect.height || 0);
+        const zeroRect = w <= 0 || h <= 0;
+
+        if (!zeroRect) {
+          return {
+            ok: true,
+            node: btn,
+            reason: 'visible-upload-button-ready',
+            source: why,
+            candidateCount: candidates.length,
+            skippedCount: skipped.length,
+            skipped,
+            rect: { width: w, height: h },
+          };
+        }
+
+        if (isAutoQueueUploadButtonIntentionallyHidden(btn)) {
+          skipped.push({ reason: 'zero-rect-hidden-module', tag, candidateIndex });
+        } else {
+          skipped.push({ reason: 'zero-rect', tag, candidateIndex });
         }
       }
+
+      const softReadyBtn = candidates.find((btn) => (
+        btn instanceof HTMLElement
+        && !btn.disabled
+        && btn.getAttribute('aria-disabled') !== 'true'
+      ));
+      if (softReadyBtn) {
+        return {
+          ok: true,
+          node: softReadyBtn,
+          reason: 'upload-button-soft-ready-zero-rect',
+          source: why,
+          candidateCount: candidates.length,
+          skippedCount: skipped.length,
+          skipped,
+        };
+      }
+
+      return {
+        ok: false,
+        node: null,
+        reason: candidates.length ? 'no-visible-upload-button' : 'upload-button-not-found',
+        source: why,
+        candidateCount: candidates.length,
+        skippedCount: skipped.length,
+        skipped,
+      };
+    }
+
+    function logAutoQueueUploadButtonReady(reason = '') {
+      const why = String(reason || '-');
+      const state = resolveAutoQueueUploadButtonReadyState(why);
+      const logKey = [
+        state.ok ? 'ok' : 'fail',
+        state.reason || '-',
+        state.candidateCount || 0,
+        state.skippedCount || 0,
+        state.node && state.node.id ? state.node.id : '-',
+      ].join('|');
+      const now = Date.now();
+      const shouldLog = (
+        logKey !== lastUploadButtonReadyLogKey
+        || now - lastUploadButtonReadyLogAt >= UPLOAD_BUTTON_READY_LOG_MIN_MS
+      );
+
+      if (!shouldLog) {
+        return state;
+      }
+
+      lastUploadButtonReadyLogKey = logKey;
+      lastUploadButtonReadyLogAt = now;
+
+      if (!state.candidateCount) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_BUTTON_READY][FAILED] source=${why} reason=${state.reason} candidateCount=0`,
+        );
+        return state;
+      }
+
+      if (state.ok) {
+        const btn = state.node;
+        let topEl = null;
+        let blocked = false;
+        const rect = btn instanceof HTMLElement ? btn.getBoundingClientRect() : null;
+        const w = rect ? Math.floor(rect.width || 0) : 0;
+        const h = rect ? Math.floor(rect.height || 0) : 0;
+        if (rect && w > 0 && h > 0) {
+          const x = Math.floor(rect.left + rect.width / 2);
+          const y = Math.floor(rect.top + rect.height / 2);
+          topEl = document.elementFromPoint(x, y);
+          blocked = !!(topEl && topEl !== btn && !btn.contains(topEl));
+        }
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_BUTTON_READY][OK] source=${why} reason=${state.reason} `
+          + `candidateCount=${state.candidateCount} skippedCount=${state.skippedCount} `
+          + `disabled=${btn && btn.disabled ? 1 : 0} rect.width=${w} rect.height=${h} `
+          + `topTag=${topEl ? topEl.tagName || '-' : '-'} topId=${topEl ? topEl.id || '-' : '-'} `
+          + `blocked=${blocked ? 1 : 0}`,
+        );
+        return state;
+      }
+
+      (state.skipped || []).forEach((item) => {
+        const skipReason = item && item.reason ? item.reason : 'unknown';
+        const skipTag = item && item.tag ? item.tag : '-';
+        const skipIndex = item && Number.isFinite(item.candidateIndex) ? item.candidateIndex : '-';
+        const level = skipReason === 'zero-rect-hidden-module' ? 'INFO' : 'SKIP';
+        ToolboxShell.appendLog(
+          `[AUTOQ][UPLOAD_BUTTON_READY][${level}] source=${why} reason=${skipReason} tag=${skipTag} candidateIndex=${skipIndex}`,
+        );
+      });
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][UPLOAD_BUTTON_READY][FAILED] source=${why} reason=${state.reason} `
+        + `candidateCount=${state.candidateCount} skippedCount=${state.skippedCount}`,
+      );
+      return state;
     }
 
     function syncAutoQueueRootFromActionButton(btn) {
@@ -15489,6 +16556,29 @@ const AutoQueueModule = (() => {
 
         ToolboxShell.appendLog('[AUTOQ][SEND_ONCE][CLICK_DELEGATED]');
         void triggerContinueOnce();
+        return;
+      }
+
+      const copyLogBtn = target.closest('[data-action="copy-log"]');
+      if (copyLogBtn && root && root.contains(copyLogBtn) && syncAutoQueueRootFromActionButton(copyLogBtn)) {
+        event.autoqDelegatedHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+
+        const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+        if (!logModule || typeof logModule.invokeCopyToolboxLog !== 'function') {
+          const msg = '日志模块未就绪，无法复制日志';
+          console.error('[ChatGPT toolbox] copy log skipped: LogModule not ready');
+          ToolboxShell.setStatus(msg, 'warn');
+          ToolboxShell.appendLog('[AUTOQ][COPY_LOG][skip] reason=log_module_not_ready');
+          return;
+        }
+
+        ToolboxShell.appendLog('[AUTOQ][COPY_LOG][CLICK_DELEGATED]');
+        logModule.invokeCopyToolboxLog('autoq-action-bar:delegated');
       }
     }
 
@@ -15742,6 +16832,7 @@ const AutoQueueModule = (() => {
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="start-upload" data-button-role="start-upload">开始上传</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">${getAutoQueueStartIdleText()}</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">${getAutoQueueSendOnceIdleText()}</button>
+            <button type="button" class="cgpt-btn" id="cgpt-autoq-copy-log" data-action="copy-log" title="复制小张工具箱内存日志，便于排查上传、发送、等待回复等问题">复制日志</button>
           </div>
         </div>
 
@@ -15853,6 +16944,32 @@ const AutoQueueModule = (() => {
       }
 
       repairIllegalWaitingReplyPendingSendState('foreground-resume');
+      repairFalseWaitingReplyWithComposerPayload('foreground-resume');
+
+      const run = state.taskRun || {};
+      const step = String(run.currentStep || '').trim();
+      const pendingSendKind = String(run.pendingSendKind || '').trim();
+      const shouldFastResumeSend = (
+        pendingSendKind === 'initial'
+        && (
+          String(state.phase || '') === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED
+          || step === 'send-initial'
+          || step === 'send-wait-button'
+        )
+      );
+      if (shouldFastResumeSend) {
+        state.nextSendAt = 0;
+        state.lastBackgroundThrottleLogAt = 0;
+        markTaskBatchStepRunning(false);
+        ToolboxShell.appendLog(
+          `[AUTOQ][FOREGROUND_RESUME_FAST_SEND_CHECK] phase=${String(state.phase || '-')} step=${step || '-'} `
+          + `pendingSendKind=${pendingSendKind || '-'} action=maybe-send-next-task`,
+        );
+        scheduleNextBatchTaskStep('foreground-resume-fast-send', 0, {
+          reason: 'foreground-resume-fast-send',
+        });
+        maybeSendNextTask();
+      }
 
       ToolboxShell.appendLog(
         `[AUTOQ][VERIFY_STATE] foreground=1 running=${state.running ? 1 : 0} waitingReply=${state.waitingReply ? 1 : 0} pendingSendKind=${state.taskRun && state.taskRun.pendingSendKind ? state.taskRun.pendingSendKind : '-'}`,

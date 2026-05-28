@@ -69,14 +69,40 @@
       return ok;
     }
 
+    function handleCopyToolboxLog(source = 'log-module') {
+      void copyAllLogs(source).catch((err) => {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] copy log failed', err);
+        setLogStatus(`复制日志失败：${errText}`, 'error');
+        ToolboxShell.appendLog(`[LOG_COPY][failed] source=${String(source || '-')} error=${errText}`);
+      });
+    }
+
+    function invokeCopyToolboxLog(source = 'manual') {
+      const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+      if (!logModule || typeof logModule.copyAllLogs !== 'function') {
+        const msg = '日志模块未就绪，无法复制日志';
+        console.error('[ChatGPT toolbox] copy log skipped: LogModule not ready');
+        setLogStatus(msg, 'warn');
+        ToolboxShell.appendLog(`[LOG_COPY][skip] source=${String(source || '-')} reason=log_module_not_ready`);
+        return false;
+      }
+      if (typeof logModule.handleCopyToolboxLog === 'function') {
+        logModule.handleCopyToolboxLog(source);
+        return true;
+      }
+      void logModule.copyAllLogs(source).catch((err) => {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] copy log failed', err);
+        setLogStatus(`复制日志失败：${errText}`, 'error');
+        ToolboxShell.appendLog(`[LOG_COPY][failed] source=${String(source || '-')} error=${errText}`);
+      });
+      return true;
+    }
+
     function bindLogCopy(root) {
       bindClick(root, '#cgpt-log-copy', () => {
-        void copyAllLogs('log-tab-button').catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] copy log failed', err);
-          setLogStatus(`复制日志失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[LOG_COPY][failed] source=log-tab-button error=${errText}`);
-        });
+        handleCopyToolboxLog('log-tab-button');
       }, {
         moduleName: 'LogModule',
         bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-copy',
@@ -393,6 +419,8 @@
       add,
       flushDomIfNeeded,
       copyAllLogs,
+      handleCopyToolboxLog,
+      invokeCopyToolboxLog,
     };
   })();
 

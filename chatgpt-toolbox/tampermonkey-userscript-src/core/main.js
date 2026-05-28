@@ -6227,19 +6227,37 @@
             ))
             : null;
           if (existingComposerInput instanceof HTMLInputElement) {
-            if (isElementVisible(existingComposerInput) && !isHiddenFileInput(existingComposerInput)) {
-              ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_FAST_PATH] usable=1');
-              inputs = [existingComposerInput].concat(findFileInputsLegacy().filter((x) => x !== existingComposerInput));
-            } else {
-              ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_SKIP] reason=hidden-input');
-            }
+            const hiddenInput = isHiddenFileInput(existingComposerInput);
+            ToolboxShell.appendLog(
+              `[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_FAST_PATH] usable=1 hidden=${hiddenInput ? 1 : 0}`,
+            );
+            inputs = [existingComposerInput].concat(findFileInputsLegacy().filter((x) => x !== existingComposerInput));
           }
 
-          const candidates = inputs.length
+          let candidates = inputs.length
             ? []
             : roots
-              .flatMap((root) => qsa(attachSelectors, root))
+              .flatMap((scanRoot) => qsa(attachSelectors, scanRoot))
               .filter((el) => isUsableAttachButton(el));
+
+          if (
+            !inputs.length
+            && !candidates.length
+            && typeof resolveChatGPTUploadEntryReadyState === 'function'
+          ) {
+            const entryState = resolveChatGPTUploadEntryReadyState({
+              source: 'attachFilesByFileInput',
+              scope: composerRoot instanceof HTMLElement ? composerRoot : null,
+            });
+            if (
+              entryState
+              && entryState.ok === true
+              && entryState.node instanceof HTMLElement
+              && entryState.reason === 'visible-upload-button-ready'
+            ) {
+              candidates = [entryState.node];
+            }
+          }
 
           candidates.forEach((el, index) => {
             const rect = el.getBoundingClientRect();
@@ -6255,30 +6273,60 @@
             `[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON] candidates=${candidates.length}`,
           );
 
-          if (!inputs.length && candidates[0]) {
-            try {
-              candidates[0].click();
-            } catch (clickErr) {
-              const errText = clickErr && clickErr.message ? clickErr.message : String(clickErr);
-              console.error('[ChatGPT toolbox] click official attach button failed', clickErr);
-              ToolboxShell.appendLog(`[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON_FAILED] error=${errText}`);
+          const deadline = Date.now() + Math.min(2500, Math.max(300, Number(timeoutMs) || 0));
+          let picked = null;
+          if (!inputs.length && candidates.length) {
+            for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+              const attachBtn = candidates[candidateIndex];
+              try {
+                attachBtn.click();
+              } catch (clickErr) {
+                const errText = clickErr && clickErr.message ? clickErr.message : String(clickErr);
+                console.error('[ChatGPT toolbox] click official attach button failed', clickErr);
+                ToolboxShell.appendLog(
+                  `[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON_FAILED] index=${candidateIndex} error=${errText}`,
+                );
+                continue;
+              }
+
+              const clickDeadline = Date.now() + 900;
+              while (Date.now() < clickDeadline) {
+                if (isCancelled()) break;
+                const nowInputs = qsa('input[type="file"]').filter((el) => el instanceof HTMLInputElement);
+                const newOnes = nowInputs.filter((el) => !beforeInputs.has(el));
+                const inComposerNew = composerRoot instanceof HTMLElement
+                  ? newOnes.find((el) => composerRoot.contains(el))
+                  : null;
+                picked = inComposerNew || (newOnes[0] || null);
+                if (picked) {
+                  ToolboxShell.appendLog(
+                    `[UPLOAD_OFFICIAL_UI][CLICK_ATTACH_BUTTON_OK] index=${candidateIndex}`,
+                  );
+                  break;
+                }
+                await sleep(120);
+              }
+
+              if (picked) {
+                break;
+              }
             }
           }
 
-          const deadline = Date.now() + Math.min(2500, Math.max(300, Number(timeoutMs) || 0));
-          let picked = null;
-          while (Date.now() < deadline) {
-            if (isCancelled()) break;
-            const nowInputs = qsa('input[type="file"]').filter((el) => el instanceof HTMLInputElement);
-            const newOnes = nowInputs.filter((el) => !beforeInputs.has(el));
-            const inComposerNew = composerRoot instanceof HTMLElement
-              ? newOnes.find((el) => composerRoot.contains(el))
-              : null;
-            picked = inComposerNew || (newOnes[0] || null);
-            if (picked) {
-              break;
+          if (!picked && !inputs.length) {
+            while (Date.now() < deadline) {
+              if (isCancelled()) break;
+              const nowInputs = qsa('input[type="file"]').filter((el) => el instanceof HTMLInputElement);
+              const newOnes = nowInputs.filter((el) => !beforeInputs.has(el));
+              const inComposerNew = composerRoot instanceof HTMLElement
+                ? newOnes.find((el) => composerRoot.contains(el))
+                : null;
+              picked = inComposerNew || (newOnes[0] || null);
+              if (picked) {
+                break;
+              }
+              await sleep(120);
             }
-            await sleep(120);
           }
 
           if (picked) {

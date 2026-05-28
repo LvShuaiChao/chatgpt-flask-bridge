@@ -431,6 +431,148 @@ const COMPOSER_REMOVE_FILE_PATTERN = /remove file|remove attachment|移除文件
 const COMPOSER_FILE_CHIP_PATTERN = /file-chip|file-preview|composer-file|attachment-chip|attachment-preview/i;
 const COMPOSER_UPLOAD_ENTRY_PATTERN = /添加文件|选择文件|上传文件|附加文件|add file|browse files|attach file|upload file|composer-plus-btn|file-input|plus button/i;
 
+const CHATGPT_UPLOAD_ENTRY_SELECTORS = [
+  'button[aria-label*="上传"]',
+  'button[aria-label*="Upload"]',
+  'button[aria-label*="Attach"]',
+  'button[aria-label*="添加文件"]',
+  'button[aria-label*="上传文件"]',
+  'button[aria-label*="附件"]',
+  'button[aria-label*="添加照片"]',
+  'button[data-testid*="upload"]',
+  'button[data-testid*="attachment"]',
+  'button[data-testid*="attach"]',
+  'button[title*="Attach"]',
+  'button[title*="Upload"]',
+  '[role="button"][aria-label*="Attach"]',
+  '[role="button"][aria-label*="Upload"]',
+  '[role="button"][aria-label*="添加文件"]',
+  '[role="button"][aria-label*="上传文件"]',
+  'input[type="file"]',
+];
+
+const CHATGPT_UPLOAD_ATTACH_LABEL_RE = /添加文件|上传文件|附件|添加照片|Attach|Upload|Add files|upload|attach/i;
+
+function isChatGPTUploadAttachControl(node) {
+  if (!(node instanceof HTMLElement) || isInsideToolbox(node)) {
+    return false;
+  }
+
+  const text = [
+    node.innerText || '',
+    node.textContent || '',
+    node.getAttribute('aria-label') || '',
+    node.getAttribute('title') || '',
+    node.getAttribute('data-testid') || '',
+  ].join(' ');
+
+  return CHATGPT_UPLOAD_ATTACH_LABEL_RE.test(text);
+}
+
+function resolveChatGPTUploadEntryReadyState(options = {}) {
+  const source = String(options.source || '').trim() || '-';
+  const explicitScope = options.scope instanceof HTMLElement ? options.scope : null;
+  const searchRoots = [];
+
+  if (explicitScope) {
+    searchRoots.push(explicitScope);
+  } else {
+    searchRoots.push(...getHomeComposerScanRoots());
+    if (!searchRoots.length) {
+      const mainEl = document.querySelector('main');
+      if (mainEl instanceof HTMLElement && !isInsideToolbox(mainEl)) {
+        searchRoots.push(mainEl);
+      }
+    }
+  }
+
+  const candidates = [];
+  const addCandidate = (node) => {
+    if (!(node instanceof HTMLElement) || isInsideToolbox(node)) {
+      return;
+    }
+    if (candidates.includes(node)) {
+      return;
+    }
+    candidates.push(node);
+  };
+
+  const rootsToScan = searchRoots.length ? searchRoots : [document];
+  for (const scanRoot of rootsToScan) {
+    for (const selector of CHATGPT_UPLOAD_ENTRY_SELECTORS) {
+      const nodes = scanRoot === document
+        ? Array.from(document.querySelectorAll(selector))
+        : Array.from(scanRoot.querySelectorAll(selector));
+      for (const node of nodes) {
+        addCandidate(node);
+      }
+    }
+  }
+
+  const skipped = [];
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const node = candidates[candidateIndex];
+    const tag = String(node.tagName || '').toLowerCase();
+    const type = String(node.getAttribute('type') || '').toLowerCase();
+    const isFileInput = tag === 'input' && type === 'file';
+
+    if (node.disabled || node.getAttribute('aria-disabled') === 'true') {
+      skipped.push({ reason: 'disabled', tag, candidateIndex });
+      continue;
+    }
+
+    if (isFileInput) {
+      return {
+        ok: true,
+        node,
+        reason: 'file-input-ready',
+        source,
+        candidateCount: candidates.length,
+        skippedCount: skipped.length,
+        skipped,
+      };
+    }
+
+    if (!isChatGPTUploadAttachControl(node)) {
+      skipped.push({ reason: 'not-upload-entry', tag, candidateIndex });
+      continue;
+    }
+
+    const style = window.getComputedStyle(node);
+    const hidden = style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+    if (hidden) {
+      skipped.push({ reason: 'hidden-style', tag, candidateIndex });
+      continue;
+    }
+
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      skipped.push({ reason: 'zero-rect', tag, candidateIndex });
+      continue;
+    }
+
+    return {
+      ok: true,
+      node,
+      reason: 'visible-upload-button-ready',
+      source,
+      candidateCount: candidates.length,
+      skippedCount: skipped.length,
+      skipped,
+    };
+  }
+
+  return {
+    ok: false,
+    node: null,
+    reason: candidates.length ? 'no-visible-upload-button' : 'upload-button-not-found',
+    source,
+    candidateCount: candidates.length,
+    skippedCount: skipped.length,
+    skipped,
+  };
+}
+
 const HOME_COMPOSER_ATTACHMENT_CHIP_SELECTORS = [
   '[data-testid*="file-chip"]',
   '[data-testid*="file-preview"]',

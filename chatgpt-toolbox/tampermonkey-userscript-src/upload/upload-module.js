@@ -372,7 +372,7 @@
         selector: '#cgpt-closed-loop-upload-every5-hotkey-btn',
         toolbarKey: 'closed-loop-with-hotkey',
         label: '',
-        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 目标快捷键 -> 发送继续指令；按配置间隔自动上传代码',
+        title: '快捷键模式：等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 触发配置快捷键 -> 使用稳定直接发送链路发送继续指令；按配置间隔自动上传代码',
       }),
       WITHOUT_HOTKEY: Object.freeze({
         mode: CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY,
@@ -381,7 +381,7 @@
         selector: '#cgpt-closed-loop-upload-every5-btn',
         toolbarKey: 'closed-loop-without-hotkey',
         label: '',
-        title: '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；按配置间隔自动上传代码',
+        title: '直接发送模式：等待回复完成 -> 判断终止信号 -> 直接发送继续指令；按配置间隔自动上传代码，不触发快捷键',
         datasetClosedLoopMode: 'without_hotkey',
       }),
     });
@@ -449,9 +449,9 @@
       const closedLoopCfg = getClosedLoopAutomationConfig();
       const interval = closedLoopCfg.autoUploadInterval;
       if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
-        return `闭环继续+每${interval}轮上传`;
+        return `闭环-直接发送+每${interval}轮上传`;
       }
-      return `闭环继续+快捷键+每${interval}轮上传`;
+      return `闭环-快捷键模式+每${interval}轮上传`;
     }
 
     function getClosedLoopModeLabel(mode) {
@@ -534,6 +534,7 @@
       lastHomeNavigationRound: 0,
       sendFailedStreak: 0,
       hotkeyContinueSendFailCount: 0,
+      finishFinalStatus: '',
     };
 
     const autoContinueUnifiedHomeState = {
@@ -1702,9 +1703,27 @@
       return true;
     }
 
+    function isClosedLoopSuccessfulFinishCleanup(reason = '') {
+      const src = String(reason || '').trim();
+      if (!src.includes('closed-loop-finish')) {
+        return false;
+      }
+      const finishFinalStatus = String(closedLoopContinueState.finishFinalStatus || '').trim().toLowerCase();
+      if (finishFinalStatus === 'completed') {
+        return true;
+      }
+      const task = ensureCopyHotkeyUploadVerifyLoopTask();
+      const taskPhase = String(task && task.phase ? task.phase : '').trim().toLowerCase();
+      return (
+        taskPhase === 'success'
+        || src.includes('assistant-terminal-signal-verified')
+      );
+    }
+
     function finishClosedLoopContinue(reason = 'unknown', options = {}) {
       const src = String(reason || 'unknown').trim() || 'unknown';
       const finalStatus = String(options.finalStatus || 'finished');
+      closedLoopContinueState.finishFinalStatus = finalStatus;
 
       if (!closedLoopContinueState.running && !closedLoopContinueState.stopping) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][FINISH_SKIP] reason=${src} state=idle`);
@@ -2112,7 +2131,13 @@
         `[SEND_MESSAGE][FAILED] reason=${reason} source=${source} textLen=${composerSnap.textLen} attachmentCount=${composerSnap.attachmentCount} nativeReady=${composerSnap.nativeReady ? 1 : 0}`,
       );
       resetUploadSendUiState(`send-message:manual-fail:${reason}`, runId);
-      setStatus(failMessage, 'warn');
+      const statusType = isIdleComposerEmptySendButtonNotFound(reason) ? 'info' : 'warn';
+      if (statusType === 'info') {
+        ToolboxShell.appendLog(
+          `[SEND_UI][IDLE_SEND_BUTTON_NOT_FOUND] reason=${reason} source=${source} downgraded=info`,
+        );
+      }
+      setStatus(failMessage, statusType);
       state.uploadSendFailureHint = failMessage;
       state.uploadSendFailureHintAt = Date.now();
       scheduleRenderUpload('send-message:manual-fail');
@@ -2238,6 +2263,7 @@
           singleShot: options.singleShot === true,
           maxStableAttempts: options.maxStableAttempts,
           sendDeadlineMs: isManualSend ? resolveManualSendDeadlineMs() : Date.now() + timeoutMs,
+          allowReplaceDraft: options.allowReplaceDraft !== false,
           payloadVerify: options.payloadVerify || null,
         });
 
@@ -2272,6 +2298,28 @@
         if (ok !== true) {
           const panelReason = String(lastUploadSendPanelFailReason || 'send-message-button-core-failed').trim()
             || 'send-message-button-core-failed';
+          const softWaitReasons = new Set([
+            'send_not_confirmed_composer_still_has_payload',
+            'duplicate_prompt_text_detected',
+            'waiting_payload',
+            'composer_empty_wait_payload',
+            'attachment_still_uploading',
+            'attachment_uploading',
+            'waiting_attachment_upload',
+            'waiting_attachment_upload_done',
+            'waiting_real_send_button',
+          ]);
+          const isSendNotConfirmed = panelReason.startsWith('send_not_confirmed:');
+          const wait = softWaitReasons.has(panelReason) || isSendNotConfirmed;
+          const retryable = panelReason === 'send_not_confirmed_composer_still_has_payload'
+            || panelReason === 'waiting_payload'
+            || panelReason === 'composer_empty_wait_payload'
+            || panelReason === 'attachment_still_uploading'
+            || panelReason === 'attachment_uploading'
+            || panelReason === 'waiting_attachment_upload'
+            || panelReason === 'waiting_attachment_upload_done'
+            || panelReason === 'waiting_real_send_button'
+            || isSendNotConfirmed;
           logSendHotkeyBlocked(panelReason, source);
           ToolboxShell.appendLog(
             `[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=${panelReason} detail=sendCurrentMessageFromUploadPanel-returned-false`,
@@ -2279,6 +2327,10 @@
           return {
             ok: false,
             reason: panelReason,
+            wait,
+            retryable,
+            wait_send: wait,
+            wait_reply: false,
           };
         }
 
@@ -2300,6 +2352,36 @@
         releaseUploadActionLock('send-message');
         scheduleRenderUpload(`shared-send-message-finally:${source}`);
       }
+    }
+
+    function getSharedComposerTextTrimmed() {
+      if (
+        typeof ComposerApi === 'undefined'
+        || !ComposerApi
+        || typeof ComposerApi.getComposerText !== 'function'
+      ) {
+        return '';
+      }
+      return String(ComposerApi.getComposerText() || '').trim();
+    }
+
+    function inspectSharedComposerPromptState(text) {
+      const expectedText = String(text || '').trim();
+      const existingText = getSharedComposerTextTrimmed();
+      const exactMatch = !!(expectedText && existingText && existingText === expectedText);
+      const duplicateLongerMatch = !!(
+        expectedText
+        && existingText
+        && existingText.length > expectedText.length
+        && existingText.includes(expectedText)
+      );
+
+      return {
+        expectedText,
+        existingText,
+        exactMatch,
+        duplicateLongerMatch,
+      };
     }
 
     async function sendTextBySendMessageButtonCore(text, options = {}) {
@@ -2342,10 +2424,42 @@
         };
       }
 
-      const existingText = String(ComposerApi.getComposerText() || '').trim();
+      const promptState = inspectSharedComposerPromptState(content);
+      const existingText = promptState.existingText;
       const cfg = typeof getCompactUiConfig === 'function'
         ? getCompactUiConfig()
         : {};
+
+      if (promptState.exactMatch) {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][TEXT_ALREADY_PRESENT] source=${source} chars=${existingText.length} action=send-existing`,
+        );
+        return sendExistingComposerBySendMessageButtonCore({
+          source,
+          rawSource: options.rawSource || source,
+          shouldStop,
+          manualSend: options.manualSend === true,
+          singleShot: options.singleShot === true,
+          maxStableAttempts: options.maxStableAttempts,
+          timeoutMs: Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000),
+          text: '',
+          allowReplaceDraft: false,
+          payloadVerify: options.payloadVerify || null,
+        });
+      }
+
+      if (promptState.duplicateLongerMatch) {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][DUPLICATE_TEXT_GUARD] source=${source} expectedLen=${promptState.expectedText.length} `
+          + `existingLen=${existingText.length} action=block-rewrite`,
+        );
+        return {
+          ok: false,
+          reason: 'duplicate_prompt_text_detected',
+          wait: true,
+          retryable: false,
+        };
+      }
 
       if (existingText && existingText !== content.trim()) {
         if (!allowReplaceDraft) {
@@ -2606,12 +2720,22 @@
 
       repairStaleClosedLoopRunningBeforeClick(`mode-click:${normalizedMode}`);
 
+      const useHotkey = normalizedMode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][MODE_EXPLAIN] mode=${normalizedMode} useHotkey=${useHotkey ? 1 : 0} sharedState=closedLoopContinueState`,
+      );
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][MODE_CLICK] mode=${normalizedMode} running=${closedLoopContinueState.running ? 1 : 0} activeMode=${closedLoopContinueState.mode || '-'}`,
       );
       ToolboxShell.appendLog('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][click]');
 
       if (closedLoopContinueState.running) {
+        const currentMode = closedLoopContinueState.mode;
+        if (currentMode && currentMode !== normalizedMode) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][MODE_SWITCH_CLICK_AS_STOP] currentMode=${currentMode} clickedMode=${normalizedMode} action=stop-current-loop`,
+          );
+        }
         const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
         const phase = String(loopTask && loopTask.phase ? loopTask.phase : '').trim().toLowerCase();
         if (phase === 'paused' || loopTask.currentSubtask === 'paused') {
@@ -3546,12 +3670,7 @@
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][HOTKEY_CONTINUE_SEND_FAIL] runId=${runId} round=${round} count=${failCount} reason=${failReason} detail=${failDetail || '-'}`,
           );
-          if (failCount <= 2) {
-            if (failCount === 2) {
-              ToolboxShell.appendLog(
-                `[CLOSED_LOOP][HOTKEY_CONTINUE_FALLBACK_DIRECT] runId=${runId} round=${round} reason=${failReason}`,
-              );
-            }
+          if (failCount === 1) {
             const recoverReason = `hotkey-continue-send-failed:${failReason}`;
             setStatus(
               `闭环第 ${round} 轮继续发送失败（${failCount}/3），准备重试：${failReason}`,
@@ -3563,9 +3682,19 @@
             });
             return;
           }
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][HOTKEY_CONTINUE_PAUSE_AFTER_RETRY_LIMIT] runId=${runId} round=${round} reason=${failReason}`,
-          );
+          if (failCount >= 2) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][HOTKEY_CONTINUE_PAUSE_AFTER_RETRY_LIMIT] runId=${runId} round=${round} reason=${failReason}`,
+            );
+            const pauseMsg = '继续发送失败，已暂停，请手动检查输入框或点击重新发送继续指令。';
+            pauseClosedLoopContinue(`hotkey-continue-pause:${failReason}`, {
+              level: 'warn',
+              message: pauseMsg,
+            });
+            setStatus(pauseMsg, 'warn');
+            renderClosedLoopContinueButtons();
+            return;
+          }
         }
 
         if (shouldClosedLoopPauseAfterSendFailed(failReason)) {
@@ -3765,13 +3894,8 @@
       // 每次绑定/重绑都先修复按钮动作字段，避免 render 后 data-action/runtime/baseAction 不一致。
       applyClosedLoopContinueButtonDef(btn, actionDef);
 
-      const invokeClosedLoop = (event, trigger) => {
-        const normalizedTrigger = String(trigger || '').trim().toLowerCase();
-        const isPointerDown = normalizedTrigger === 'pointerdown';
-        const triggerTag = isPointerDown ? 'POINTERDOWN' : 'CLICK';
-        const triggerReason = normalizedTrigger === 'pointerdown'
-          ? `direct-pointerdown:${action}`
-          : `direct-click:${action}`;
+      const invokeClosedLoop = (event) => {
+        const triggerReason = `direct-click:${action}`;
 
         if (event) {
           event.preventDefault();
@@ -3783,49 +3907,31 @@
         }
 
         if (btn.disabled) {
-          if (isPointerDown) {
-            ToolboxShell.appendLog(
-              `[CLOSED_LOOP][DIRECT_POINTERDOWN_SKIP] reason=disabled id=${btn.id || '-'} action=${action}`,
-            );
-          } else {
-            ToolboxShell.appendLog(
-              `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=disabled id=${btn.id || '-'} action=${action}`,
-            );
-          }
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=disabled id=${btn.id || '-'} action=${action}`,
+          );
           return;
         }
 
         const now = Date.now();
         const lastInvokeAt = Number(btn.dataset.closedLoopLastInvokeAt || 0);
         if (now - lastInvokeAt < 500) {
-          if (isPointerDown) {
-            ToolboxShell.appendLog(
-              `[CLOSED_LOOP][DIRECT_POINTERDOWN_SKIP] reason=dedupe id=${btn.id || '-'} action=${action} gap=${now - lastInvokeAt}`,
-            );
-          } else {
-            ToolboxShell.appendLog(
-              `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=dedupe id=${btn.id || '-'} action=${action} gap=${now - lastInvokeAt}`,
-            );
-          }
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=dedupe id=${btn.id || '-'} action=${action} gap=${now - lastInvokeAt}`,
+          );
           return;
         }
         btn.dataset.closedLoopLastInvokeAt = String(now);
 
-        if (isPointerDown) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][DIRECT_POINTERDOWN] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
-          );
-        } else {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][DIRECT_CLICK] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
-          );
-        }
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DIRECT_CLICK] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
+        );
 
         Promise.resolve(handleClosedLoopContinueModeClick(mode, triggerReason)).catch((error) => {
           const errText = formatToolboxError(error);
           console.error('[CLOSED_LOOP][DIRECT_TRIGGER_FAILED]', error);
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][DIRECT_TRIGGER_FAILED] trigger=${triggerTag} action=${action} error=${errText}`,
+            `[CLOSED_LOOP][DIRECT_TRIGGER_FAILED] trigger=CLICK action=${action} error=${errText}`,
           );
           setStatus(`闭环继续启动失败：${errText}`, 'error');
         });
@@ -3834,7 +3940,7 @@
       if (btn.dataset.closedLoopDirectClickBound !== '1') {
         btn.dataset.closedLoopDirectClickBound = '1';
         btn.addEventListener('click', (event) => {
-          invokeClosedLoop(event, 'click');
+          invokeClosedLoop(event);
         });
       }
 
@@ -11465,11 +11571,26 @@
           if (String(ariaDisabled || '').trim().toLowerCase() === 'true') return false;
           if (typeof isInToolbox === 'function' && isInToolbox(input)) return false;
           if (typeof isInsideConversationHistory === 'function' && isInsideConversationHistory(input)) return false;
-          if (uploadOnly) return true;
-          return isElementUsable(input);
+          return true;
         });
+
         let attachmentEntryUsable = false;
-        if (composerScope instanceof HTMLElement && !fileInputUsable) {
+        let uploadEntryReason = '';
+        if (typeof resolveChatGPTUploadEntryReadyState === 'function') {
+          const entryState = resolveChatGPTUploadEntryReadyState({
+            source: `wait-composer-ready:${source}`,
+            scope: composerScope instanceof HTMLElement ? composerScope : null,
+          });
+          uploadEntryReason = entryState && entryState.reason ? String(entryState.reason) : '';
+          attachmentEntryUsable = !!(
+            entryState
+            && entryState.ok === true
+            && entryState.reason !== 'file-input-ready'
+          );
+          if (entryState && entryState.ok === true && entryState.reason === 'file-input-ready') {
+            // Hidden file inputs are injectable even when rect is zero.
+          }
+        } else if (composerScope instanceof HTMLElement && !fileInputUsable) {
           const candidates = Array.from(composerScope.querySelectorAll('button, [role="button"]'));
           attachmentEntryUsable = candidates.some((el) => {
             if (!isElementUsable(el)) return false;
@@ -11490,6 +11611,7 @@
             );
           });
         }
+
         const usable = uploadOnly
           ? (fileInputUsable || attachmentEntryUsable || composerScope instanceof HTMLElement)
           : (hasComposerInput && !nativeUploading && (fileInputUsable || attachmentEntryUsable));
@@ -11500,6 +11622,7 @@
           fileInputs,
           fileInputUsable,
           attachmentEntryUsable,
+          uploadEntryReason,
           usable,
         };
       };
@@ -14457,6 +14580,193 @@
       return focused;
     }
 
+    async function runSharedComposerSendFlow(options = {}) {
+      const sourceText = String(options.source || 'shared-composer-send').trim() || 'shared-composer-send';
+      const logPrefix = String(options.logPrefix || 'SHARED_COMPOSER').trim() || 'SHARED_COMPOSER';
+      const promptText = String(options.promptText || '');
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const uploadBeforeSend = options.uploadBeforeSend === true;
+      const waitAttachmentStable = options.waitAttachmentStable === true;
+      const requireAttachmentReady = options.requireAttachmentReady === true;
+      const allowReplaceDraft = options.allowReplaceDraft !== false;
+      const onPhase = typeof options.onPhase === 'function' ? options.onPhase : null;
+      const payloadVerify = options.payloadVerify || null;
+
+      const emitPhase = (phase, detail) => {
+        if (onPhase) {
+          try {
+            onPhase(phase, detail || {});
+          } catch (phaseErr) {
+            const phaseErrText = phaseErr && phaseErr.message ? phaseErr.message : String(phaseErr);
+            console.error(`[${logPrefix}][SEND_FLOW][ON_PHASE_FAILED]`, phaseErr);
+            ToolboxShell.appendLog(
+              `[${logPrefix}][SEND_FLOW][ON_PHASE_FAILED] source=${sourceText} phase=${phase} error=${phaseErrText}`,
+            );
+          }
+        }
+      };
+
+      if (shouldStop()) {
+        ToolboxShell.appendLog(`[${logPrefix}][SEND_FLOW][CANCELLED] source=${sourceText} stage=enter`);
+        return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+      }
+
+      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+        ToolboxShell.appendLog(
+          `[${logPrefix}][SEND_FLOW][CANCELLED] source=${sourceText} cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} `
+          + `messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+        );
+        return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+      }
+
+      if (typeof document !== 'undefined') {
+        const hasFocus = !document.hasFocus || document.hasFocus();
+        const hidden = !!document.hidden;
+        if (hidden) {
+          return { ok: false, reason: 'page-hidden', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+        }
+        if (!hasFocus) {
+          ToolboxShell.appendLog(
+            `[${logPrefix}][FOCUS_SOFT_RECOVER] source=${sourceText} hidden=${hidden ? 1 : 0} hasFocus=${hasFocus ? 1 : 0}`,
+          );
+          await focusComposerForClosedLoop(sourceText);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+
+      emitPhase('focus-composer', { source: sourceText });
+      await focusComposerForClosedLoop(sourceText);
+
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+      }
+
+      let attachmentEvidence = null;
+      const readAttachmentEvidence = (tag) => {
+        if (
+          typeof ComposerAttachments !== 'undefined'
+          && ComposerAttachments
+          && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+        ) {
+          return ComposerAttachments.getSharedComposerAttachmentEvidence(tag || sourceText, { heavy: true });
+        }
+        if (typeof getUnifiedComposerAttachmentState === 'function') {
+          const unified = getUnifiedComposerAttachmentState(tag || sourceText, { heavy: true });
+          return {
+            hasAttachment: !!unified.hasAttachment,
+            count: Math.max(0, Number(unified.fileCount) || 0),
+            readyCount: unified.ready ? Math.max(0, Number(unified.fileCount) || 0) : 0,
+            uploadingCount: unified.uploading ? 1 : 0,
+            textLen: 0,
+            filenames: Array.isArray(unified.filenames) ? unified.filenames : [],
+            source: String(unified.source || 'unified-fallback'),
+          };
+        }
+        return {
+          hasAttachment: false,
+          count: 0,
+          readyCount: 0,
+          uploadingCount: 0,
+          textLen: 0,
+          filenames: [],
+          source: 'unavailable',
+        };
+      };
+
+      if (uploadBeforeSend) {
+        emitPhase('upload-before-send', { source: sourceText });
+        ToolboxShell.appendLog(
+          `[${logPrefix}][SEND_FLOW][UPLOAD_BEFORE_SEND] source=${sourceText} action=delegated-to-caller`,
+        );
+      }
+
+      attachmentEvidence = readAttachmentEvidence(`pre-send:${sourceText}`);
+
+      if (attachmentEvidence.count > 1) {
+        ToolboxShell.appendLog(
+          `[${logPrefix}][DUPLICATE_ATTACHMENT_DETECTED] count=${attachmentEvidence.count} action=skip-reupload source=${sourceText}`,
+        );
+      }
+
+      if (waitAttachmentStable && attachmentEvidence.count > 0) {
+        emitPhase('wait-attachment-stable', { count: attachmentEvidence.count });
+        if (typeof waitAttachmentsStableForSend === 'function') {
+          const attachWaitMs = typeof MAX_ATTACHMENT_SEND_WAIT_MS === 'number'
+            ? MAX_ATTACHMENT_SEND_WAIT_MS
+            : 120000;
+          await waitAttachmentsStableForSend(
+            attachWaitMs,
+            shouldStop,
+            { source: `${logPrefix.toLowerCase()}-pre-send-attach-stable:${sourceText}` },
+          );
+        }
+        attachmentEvidence = readAttachmentEvidence(`post-attach-wait:${sourceText}`);
+      }
+
+      const attachmentReady = attachmentEvidence.count > 0 && attachmentEvidence.uploadingCount === 0;
+      if (requireAttachmentReady && attachmentEvidence.count > 0 && !attachmentReady) {
+        ToolboxShell.appendLog(
+          `[${logPrefix}][SEND_FLOW][ATTACHMENT_NOT_READY] source=${sourceText} count=${attachmentEvidence.count} `
+          + `uploading=${attachmentEvidence.uploadingCount}`,
+        );
+        return {
+          ok: false,
+          reason: 'waiting_attachment_upload_done',
+          detail: 'attachment-still-uploading',
+          sent: false,
+          attachmentReady: false,
+          textLen: promptText.length,
+          source: sourceText,
+          wait: true,
+          retryable: true,
+        };
+      }
+
+      if (!promptText.trim()) {
+        ToolboxShell.appendLog(`[${logPrefix}][SEND_FLOW][EMPTY_PROMPT] source=${sourceText}`);
+        return {
+          ok: false,
+          reason: 'empty-prompt',
+          detail: '',
+          sent: false,
+          attachmentReady,
+          textLen: 0,
+          source: sourceText,
+        };
+      }
+
+      emitPhase('write-and-send', { textLen: promptText.length, attachmentReady: attachmentReady ? 1 : 0 });
+      const sendCoreResult = await sendTextBySendMessageButtonCore(promptText, {
+        source: sourceText,
+        rawSource: sourceText,
+        allowReplaceDraft,
+        shouldStop,
+        timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+        payloadVerify,
+      });
+
+      const ok = !!(sendCoreResult && sendCoreResult.ok === true);
+      const reason = String((sendCoreResult && sendCoreResult.reason) || (ok ? 'sent' : 'send-failed'));
+      const detail = String((sendCoreResult && sendCoreResult.detail) || '');
+
+      ToolboxShell.appendLog(
+        `[${logPrefix}][SEND_FLOW][DONE] source=${sourceText} ok=${ok ? 1 : 0} reason=${reason} `
+        + `attachmentReady=${attachmentReady ? 1 : 0} textLen=${promptText.length}`,
+      );
+
+      return {
+        ok,
+        reason,
+        detail,
+        sent: ok,
+        attachmentReady,
+        textLen: promptText.length,
+        source: sourceText,
+        wait: sendCoreResult && sendCoreResult.wait === true,
+        retryable: sendCoreResult && sendCoreResult.retryable === true,
+      };
+    }
+
     async function sendClosedLoopContinuePrompt(promptText, context = {}) {
       const sourceText = String(context.source || 'closed-loop-continue').trim() || 'closed-loop-continue';
       const shouldStop = typeof context.shouldStop === 'function' ? context.shouldStop : () => false;
@@ -14465,43 +14775,15 @@
         ? DEFAULT_BATCH_BLOCKED_SIGNAL
         : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
 
-      if (shouldStop()) {
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter shouldStop=1`,
-        );
-        return { ok: false, reason: 'cancelled' };
-      }
-
-      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter `
-          + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
-        );
-        return { ok: false, reason: 'cancelled' };
-      }
-
-      if (typeof document !== 'undefined') {
-        const hasFocus = !document.hasFocus || document.hasFocus();
-        const hidden = !!document.hidden;
-        if (hidden) {
-          return { ok: false, reason: 'page-hidden' };
-        }
-        if (!hasFocus) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][FOCUS_SOFT_RECOVER] source=${sourceText || '-'} hidden=${hidden ? 1 : 0} hasFocus=${hasFocus ? 1 : 0}`,
-          );
-          await focusComposerForClosedLoop(sourceText);
-          await new Promise((resolve) => setTimeout(resolve, 300));
-        }
-      }
-
-      const text = String(promptText || '');
-      return sendTextBySendMessageButtonCore(text, {
+      return runSharedComposerSendFlow({
         source: sourceText,
-        rawSource: sourceText,
-        allowReplaceDraft: true,
+        promptText: String(promptText || ''),
+        uploadBeforeSend: false,
+        waitAttachmentStable: false,
+        requireAttachmentReady: false,
         shouldStop,
-        timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+        logPrefix: 'CLOSED_LOOP',
+        allowReplaceDraft: true,
         payloadVerify: {
           allowLenDelta: 10,
           allowCoreContains: true,
@@ -23228,8 +23510,35 @@
       return '发送失败：unknown';
     }
 
+    function isIdleComposerEmptySendButtonNotFound(reason) {
+      const normalized = String(reason || '').trim();
+      if (normalized !== 'send_button_not_found' && !normalized.includes('send_button_not_found')) {
+        return false;
+      }
+      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+      const loopPhase = String(loopTask && loopTask.phase ? loopTask.phase : 'idle').trim().toLowerCase();
+      const loopFinished = !closedLoopContinueState.running && (
+        loopPhase === 'idle'
+        || loopPhase === 'success'
+        || loopPhase === 'stopped'
+        || String(closedLoopContinueState.finishFinalStatus || '').toLowerCase() === 'completed'
+      );
+      if (!loopFinished) {
+        return false;
+      }
+      const composerText = (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function'
+      )
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : '';
+      return composerText.length <= 0;
+    }
+
     function resetUploadSendUiState(reason, runId, options = {}) {
       const preserveCancelRequested = options && options.preserveCancelRequested === true;
+      const closedLoopFinishCleanup = options && options.closedLoopFinishCleanup === true;
 
       if (state.waitingSendAbortController) {
         try {
@@ -23294,14 +23603,21 @@
       );
 
       if (preserveCancelRequested) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=1`,
-        );
+        if (closedLoopFinishCleanup) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=1 closedLoopFinishCleanup=1`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=1`,
+          );
+        }
       }
     }
 
     function finishUploadSendFlow(reason, options = {}) {
       const preserveCancelRequested = options && options.preserveCancelRequested === true;
+      const closedLoopFinishCleanup = options && options.closedLoopFinishCleanup === true;
 
       if (state.uploadAbortController && !preserveCancelRequested) {
         try {
@@ -23318,12 +23634,21 @@
         state.uploadAbortController = null;
       }
 
-      resetUploadSendUiState(reason, state.autoSendRunId, { preserveCancelRequested });
+      resetUploadSendUiState(reason, state.autoSendRunId, {
+        preserveCancelRequested,
+        closedLoopFinishCleanup,
+      });
       scheduleRenderUpload(`upload-send-flow:finish:${reason || '-'}`);
 
-      ToolboxShell.appendLog(
-        `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=${preserveCancelRequested ? '1' : '0'}`,
-      );
+      if (closedLoopFinishCleanup) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=${preserveCancelRequested ? '1' : '0'} closedLoopFinishCleanup=1`,
+        );
+      } else {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FINISH] reason=${reason || '-'} preserveCancel=${preserveCancelRequested ? '1' : '0'}`,
+        );
+      }
     }
 
     function resetUploadSendButtonState(reason = 'send_failed_or_timeout', runId) {
@@ -24025,6 +24350,7 @@
 
     function cancelCurrentUploadSend(reason) {
       const sendReason = String(reason || 'manual').trim() || 'manual';
+      const closedLoopFinishCleanup = isClosedLoopSuccessfulFinishCleanup(sendReason);
 
       state.messageSendCancelRequested = true;
       state.cancelWaitingSend = true;
@@ -24032,12 +24358,19 @@
       cancelUploadSendRun(sendReason);
 
       ToolboxShell.appendLog(
-        `[UPLOAD][SEND_CANCEL_REQUEST] reason=${sendReason} uploadRunning=${state.running ? 1 : 0}`,
+        `[UPLOAD][SEND_CANCEL_REQUEST] reason=${sendReason} uploadRunning=${state.running ? 1 : 0} closedLoopFinishCleanup=${closedLoopFinishCleanup ? 1 : 0}`,
       );
       void stopChatGPTGeneratingIfPossible();
-      setStatus('已请求取消发送，正在等待当前发送流程退出', 'warning');
+      if (closedLoopFinishCleanup) {
+        setStatus('闭环已完成，正在清理状态', 'running');
+      } else {
+        setStatus('已请求取消发送，正在等待当前发送流程退出', 'warning');
+      }
 
-      finishUploadSendFlow('cancel-requested', { preserveCancelRequested: true });
+      finishUploadSendFlow('cancel-requested', {
+        preserveCancelRequested: true,
+        closedLoopFinishCleanup,
+      });
 
       return true;
     }
@@ -24252,8 +24585,16 @@
 
       if (result.cancelled) {
           setLastRealUploadError('', { reason: `manual-upload-cancelled:${source}` });
-          setStatus('上传已取消', 'warning');
-          ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0} cancelled=1`);
+          const closedLoopFinishCleanup = (
+            String(closedLoopContinueState.finishFinalStatus || '').toLowerCase() === 'completed'
+            && !closedLoopContinueState.running
+          );
+          if (closedLoopFinishCleanup) {
+            setStatus('闭环已完成，正在清理状态', 'running');
+          } else {
+            setStatus('上传已取消', 'warning');
+          }
+          ToolboxShell.appendLog(`[UPLOAD][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0} cancelled=1 closedLoopFinishCleanup=${closedLoopFinishCleanup ? 1 : 0}`);
           ToolboxShell.appendLog(`[UPLOAD_MANUAL][DONE] reason=cancelled source=${source}`);
           return result;
         }
@@ -25541,6 +25882,165 @@
       return { ok: false, reason: 'payload_dropped', expectedLen, actualLen: finalLen };
     }
 
+    function getLatestConversationMessageRecordForSendVerify() {
+      try {
+        if (typeof getLatestConversationMessageRecordFast === 'function') {
+          return getLatestConversationMessageRecordFast({
+            preferAssistant: false,
+            includeHidden: false,
+          });
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getLatestConversationMessageRecordForSendVerify fast failed', err);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][VERIFY_SEND_RECORD_FAST_FAILED] error=${errText}`,
+        );
+      }
+
+      try {
+        if (typeof getLatestConversationMessageRecord === 'function') {
+          return getLatestConversationMessageRecord({
+            preferAssistant: false,
+            forceFullScan: true,
+            includeHidden: false,
+          });
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getLatestConversationMessageRecordForSendVerify full failed', err);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][VERIFY_SEND_RECORD_FULL_FAILED] error=${errText}`,
+        );
+      }
+
+      return null;
+    }
+
+    function getCurrentPageConversationIdSafe() {
+      try {
+        if (typeof parseConversationIdFromPath === 'function') {
+          return String(parseConversationIdFromPath(location.pathname || '') || '');
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getCurrentPageConversationIdSafe failed', err);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][VERIFY_SEND_CONVERSATION_ID_FAILED] error=${errText}`,
+        );
+      }
+      return '';
+    }
+
+    function getCurrentPageTurnCountSafe() {
+      try {
+        if (typeof getCurrentPageTurnCount === 'function') {
+          const count = Number(getCurrentPageTurnCount());
+          if (Number.isFinite(count)) {
+            return count;
+          }
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getCurrentPageTurnCountSafe failed', err);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][VERIFY_SEND_TURN_COUNT_FAILED] error=${errText}`,
+        );
+      }
+      return null;
+    }
+
+    async function verifyMessageActuallyLeftComposerAfterSend(source, expectedText, timeoutMs = 5000, options = {}) {
+      const sourceText = String(source || 'verify-message-left-composer').trim() || 'verify-message-left-composer';
+      const expected = String(expectedText || '').trim();
+      const startedAt = Date.now();
+      const beforeLatestKey = String(options.beforeLatestKey || '').trim();
+      const beforeConversationId = String(options.beforeConversationId || '').trim();
+      const beforeTurnCount = Number.isFinite(Number(options.beforeTurnCount))
+        ? Number(options.beforeTurnCount)
+        : null;
+      const expectedProbe = expected.slice(0, Math.min(80, expected.length));
+
+      while (Date.now() - startedAt < timeoutMs) {
+        const currentText = getSharedComposerTextTrimmed();
+        const attachmentEvidence = typeof ComposerAttachments !== 'undefined'
+          && ComposerAttachments
+          && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+            ? ComposerAttachments.getSharedComposerAttachmentEvidence(`after-send:${sourceText}`, { heavy: true })
+            : null;
+        const attachCount = attachmentEvidence ? Math.max(0, Number(attachmentEvidence.count || 0)) : 0;
+        const latestRecord = getLatestConversationMessageRecordForSendVerify();
+        const latestKey = latestRecord && latestRecord.key ? String(latestRecord.key) : '';
+        const latestRole = latestRecord && latestRecord.role ? String(latestRecord.role) : '';
+        const latestText = latestRecord && latestRecord.text ? String(latestRecord.text || '').trim() : '';
+        const conversationIdNow = getCurrentPageConversationIdSafe();
+        const turnCountNow = getCurrentPageTurnCountSafe();
+
+        const composerCleared = currentText.length === 0 && attachCount === 0;
+        const textGone = expected && currentText !== expected && !currentText.includes(expected);
+        const latestUserAppeared = latestRole === 'user' && (
+          (!!beforeLatestKey && !!latestKey && latestKey !== beforeLatestKey)
+          || (expectedProbe && latestText.includes(expectedProbe))
+          || (!!expected && latestText === expected)
+        );
+        const turnCountIncreased = beforeTurnCount != null
+          && turnCountNow != null
+          && Number(turnCountNow) > Number(beforeTurnCount);
+        const conversationChanged = (!beforeConversationId && !!conversationIdNow)
+          || (!!beforeConversationId && !!conversationIdNow && conversationIdNow !== beforeConversationId);
+
+        if (
+          composerCleared
+          || textGone
+          || latestUserAppeared
+          || turnCountIncreased
+          || conversationChanged
+        ) {
+          const confirmReason = composerCleared
+            ? 'composer-cleared-after-send'
+            : (textGone
+              ? 'payload-left-composer-after-send'
+              : (latestUserAppeared
+                ? 'user-message-appeared-after-send'
+                : (turnCountIncreased
+                  ? 'turn-count-increased-after-send'
+                  : 'conversation-changed-after-send')));
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][REAL_SEND_CONFIRMED] source=${sourceText} reason=${confirmReason} `
+            + `composerTextLen=${currentText.length} attachCount=${attachCount} `
+            + `latestRole=${latestRole || '-'} turnCountNow=${turnCountNow == null ? '-' : turnCountNow} `
+            + `conversationIdNow=${conversationIdNow || '-'}`,
+          );
+          return {
+            ok: true,
+            reason: confirmReason,
+            composerTextLen: currentText.length,
+            attachCount,
+          };
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      const finalText = getSharedComposerTextTrimmed();
+      const finalAttachmentEvidence = typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+          ? ComposerAttachments.getSharedComposerAttachmentEvidence(`after-send-final:${sourceText}`, { heavy: true })
+          : null;
+      const finalAttachCount = finalAttachmentEvidence ? Math.max(0, Number(finalAttachmentEvidence.count || 0)) : 0;
+      ToolboxShell.appendLog(
+        `[SEND_MESSAGE_SHARED][REAL_SEND_NOT_CONFIRMED] source=${sourceText} expectedLen=${expected.length} `
+        + `composerTextLen=${finalText.length} attachCount=${finalAttachCount}`,
+      );
+      return {
+        ok: false,
+        reason: 'send_not_confirmed_composer_still_has_payload',
+        composerTextLen: finalText.length,
+        attachCount: finalAttachCount,
+      };
+    }
+
     async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null, sendPayload = null) {
       lastUploadSendPanelFailReason = '';
       const source = triggerSource || 'button';
@@ -25558,6 +26058,12 @@
         || normalizedSource.startsWith('quick-prompt');
       const sendDeadlineMs = resolveSendDeadlineMs(payloadOpts.sendDeadlineMs, isManualSend);
       const allowReplaceDraft = payloadOpts.allowReplaceDraft !== false;
+      const beforeLatestRecord = getLatestConversationMessageRecordForSendVerify();
+      const beforeLatestKey = beforeLatestRecord && beforeLatestRecord.key
+        ? String(beforeLatestRecord.key)
+        : '';
+      const beforeConversationId = getCurrentPageConversationIdSafe();
+      const beforeTurnCount = getCurrentPageTurnCountSafe();
 
       const runId = usePresetRunId
         ? Number(presetRunId)
@@ -25573,20 +26079,39 @@
       clearStaleBusySendStateOnHomeReady('send-panel-click');
 
       let sendFailureHandled = false;
+      let textAlreadyInjected = false;
 
       if (shouldInjectText) {
-        const injectResult = await writeTextPayloadToComposerAndVerify(unifiedText, source, {
-          shouldStop: () => uploadSendFlowCancelCheck('payload-inject'),
-          allowReplaceDraft,
-          payloadVerify: payloadOpts.payloadVerify || null,
-          maxAttempts: 30,
-          intervalMs: 100,
-        });
-        if (!injectResult.ok) {
-          lastUploadSendPanelFailReason = injectResult.reason || 'payload-inject-failed';
-          setStatus(`发送失败：${lastUploadSendPanelFailReason}`, 'warn');
+        const promptState = inspectSharedComposerPromptState(unifiedText);
+        if (promptState.exactMatch) {
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][TEXT_ALREADY_PRESENT] source=${source} chars=${promptState.existingText.length} action=send-existing`,
+          );
+          textAlreadyInjected = true;
+        } else if (promptState.duplicateLongerMatch) {
+          lastUploadSendPanelFailReason = 'duplicate_prompt_text_detected';
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][DUPLICATE_TEXT_GUARD] source=${source} expectedLen=${promptState.expectedText.length} `
+            + `existingLen=${promptState.existingText.length} action=block-rewrite`,
+          );
+          setStatus('发送失败：检测到重复 Prompt，请清理输入框后重试', 'warn');
           sendFailureHandled = true;
           return false;
+        } else {
+          const injectResult = await writeTextPayloadToComposerAndVerify(unifiedText, source, {
+            shouldStop: () => uploadSendFlowCancelCheck('payload-inject'),
+            allowReplaceDraft,
+            payloadVerify: payloadOpts.payloadVerify || null,
+            maxAttempts: 30,
+            intervalMs: 100,
+          });
+          if (!injectResult.ok) {
+            lastUploadSendPanelFailReason = injectResult.reason || 'payload-inject-failed';
+            setStatus(`发送失败：${lastUploadSendPanelFailReason}`, 'warn');
+            sendFailureHandled = true;
+            return false;
+          }
+          textAlreadyInjected = injectResult.ok === true;
         }
       }
 
@@ -26031,8 +26556,8 @@
           sendResult = await sendUnifiedMessage({
             source: stableSendSource,
             mode: isManualSend ? 'upload-panel-send-manual' : 'upload-panel-send',
-            sendExistingComposer: !shouldInjectText,
-            text: shouldInjectText ? unifiedText : '',
+            sendExistingComposer: true,
+            text: '',
             waitForReplyIdle: true,
             waitForAttachmentReady,
             requireUploadDone: sendRequireUploadDone,
@@ -26266,6 +26791,38 @@
         }
 
         if (sendResult && sendResult.ok) {
+          const realSendCheck = await verifyMessageActuallyLeftComposerAfterSend(
+            source,
+            shouldInjectText || textAlreadyInjected ? unifiedText : '',
+            5000,
+            {
+              beforeLatestKey,
+              beforeConversationId,
+              beforeTurnCount,
+            },
+          );
+
+          if (!realSendCheck.ok) {
+            lastUploadSendPanelFailReason = realSendCheck.reason || 'send_not_confirmed';
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE_SHARED][DONE_REJECTED] source=${source} reason=${lastUploadSendPanelFailReason}`,
+            );
+            setWaitingRealSendButton(true);
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'waiting_send',
+                runId,
+                cancelRequested: false,
+                subphase: lastUploadSendPanelFailReason,
+              },
+              `send-message:not-confirmed:${lastUploadSendPanelFailReason}`,
+            );
+            setStatus('等待发送按钮', 'running');
+            scheduleRenderUpload('send-message:not-confirmed');
+            sendFailureHandled = true;
+            return false;
+          }
+
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][DONE] ok=1 source=${source} reason=${sendResult.reason || '-'}`,
           );
@@ -29611,19 +30168,14 @@
       'copy-log': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
         const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
-        if (!logModule || typeof logModule.copyAllLogs !== 'function') {
+        if (!logModule || typeof logModule.invokeCopyToolboxLog !== 'function') {
           const msg = '日志模块未就绪，无法复制日志';
           console.error('[ChatGPT toolbox] copy log skipped: LogModule not ready');
           setStatus(msg, 'warn');
           ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-log:skip] source=${src} reason=log_module_not_ready`);
           return true;
         }
-        void logModule.copyAllLogs(`upload-home-button:${src}`).catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] copy log from upload home failed', err);
-          setStatus(`复制日志失败：${errText}`, 'error');
-          ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-log:failed] source=${src} error=${errText}`);
-        });
+        logModule.invokeCopyToolboxLog(`upload-home-button:${src}`);
         return true;
       },
       'cancel-send': (ctx) => {
@@ -32630,6 +33182,7 @@
       getSendTaskPhase,
       getSendTaskState,
       getUnifiedComposerAttachmentState,
+      runSharedComposerSendFlow,
       syncCopyTaskPhase,
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,

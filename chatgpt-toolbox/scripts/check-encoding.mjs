@@ -5,11 +5,8 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 
 const TARGETS = [
   path.join(ROOT, 'tampermonkey-userscript-src'),
-  path.join(ROOT, 'build.userjs.mjs'),
   path.join(ROOT, 'dist', 'client.user.js'),
   path.join(ROOT, '..', 'client.user.js'),
-  path.join(ROOT, '..', 'app'),
-  path.join(ROOT, '..', 'GUI.py'),
 ];
 
 const BAD_LITERAL_MARKERS = [

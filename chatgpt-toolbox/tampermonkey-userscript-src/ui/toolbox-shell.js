@@ -3254,7 +3254,7 @@
           display: grid !important;
           grid-template-columns: minmax(0, 1fr) auto !important;
           align-items: center !important;
-          column-gap: 8px !important;
+          column-gap: 10px !important;
           row-gap: 4px !important;
           padding: 6px 8px !important;
           margin: 0 0 6px 0 !important;
@@ -3269,20 +3269,17 @@
           box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
         }
 
+        .cgpt-autoq-task-item-main,
         .cgpt-autoq-task-item-main-inline {
-          display: flex !important;
-          flex-direction: row !important;
-          align-items: center !important;
-          gap: 8px !important;
           min-width: 0 !important;
+          width: 100% !important;
           overflow: hidden !important;
-          white-space: nowrap !important;
         }
 
         .cgpt-autoq-task-item-title {
-          flex: 1 1 auto !important;
+          display: block !important;
+          width: 100% !important;
           min-width: 0 !important;
-          max-width: none !important;
           overflow: hidden !important;
           text-overflow: ellipsis !important;
           white-space: nowrap !important;
@@ -3293,14 +3290,7 @@
         .cgpt-autoq-task-item-meta,
         .cgpt-autoq-task-item-source,
         .cgpt-autoq-task-item-category {
-          flex: 0 0 auto !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-          white-space: nowrap !important;
-          font-size: 12px !important;
-          color: #9ca3af !important;
-          margin-top: 0 !important;
-          line-height: 1.25 !important;
+          display: none !important;
         }
 
         .cgpt-autoq-task-item-actions {
@@ -3309,48 +3299,31 @@
           align-items: center !important;
           justify-content: flex-end !important;
           gap: 5px !important;
-          flex-wrap: wrap !important;
-          row-gap: 4px !important;
+          flex-wrap: nowrap !important;
+          min-width: max-content !important;
         }
 
         @container autoq-task-list (max-width: 520px) {
           .cgpt-autoq-task-item {
             grid-template-columns: minmax(0, 1fr) !important;
+            align-items: start !important;
             column-gap: 0 !important;
             padding: 7px 8px !important;
           }
 
-          .cgpt-autoq-task-item-main-inline {
-            width: 100% !important;
+          .cgpt-autoq-task-item-actions {
+            justify-content: flex-start !important;
+            flex-wrap: wrap !important;
             min-width: 0 !important;
-            display: flex !important;
-            flex-direction: column !important;
-            align-items: stretch !important;
-            gap: 2px !important;
-            overflow: hidden !important;
-            white-space: normal !important;
+            width: 100% !important;
           }
 
           .cgpt-autoq-task-item-title {
-            display: block !important;
-            width: 100% !important;
-            min-width: 0 !important;
-            max-width: none !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            white-space: nowrap !important;
-            font-size: 13px !important;
-            line-height: 1.35 !important;
-          }
-
-          .cgpt-autoq-task-item-meta,
-          .cgpt-autoq-task-item-source,
-          .cgpt-autoq-task-item-category {
-            display: none !important;
-          }
-
-          .cgpt-autoq-task-item-actions {
-            display: none !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
           }
         }
 

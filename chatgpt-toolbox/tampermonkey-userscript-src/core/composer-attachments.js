@@ -257,8 +257,146 @@ const ComposerAttachments = (() => {
     return getComposerAttachmentState(options);
   }
 
+  function getSharedComposerAttachmentEvidence(reason = '', options = {}) {
+    const reasonText = String(reason || options.reason || '').trim() || '-';
+    const useHeavy = options.heavy === true;
+    const canonical = getComposerAttachmentState({ heavy: useHeavy, reason: reasonText });
+
+    let filenames = [];
+    let snapshotCount = 0;
+    let snapshotReadyCount = 0;
+    let snapshotUploadingCount = 0;
+    let snapshotHasAttachment = false;
+    try {
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+      ) {
+        const snap = ComposerApi.getComposerAttachmentSnapshot(`shared-evidence:${reasonText}`) || {};
+        snapshotCount = Math.max(
+          0,
+          Number(
+            snap.count != null
+              ? snap.count
+              : (snap.fileCount != null ? snap.fileCount : (Array.isArray(snap.items) ? snap.items.length : 0))
+          ) || 0,
+        );
+        snapshotReadyCount = Math.max(
+          0,
+          Number(
+            snap.readyCount != null
+              ? snap.readyCount
+              : (snap.hasReadyAttachment === true ? snapshotCount : 0)
+          ) || 0,
+        );
+        snapshotUploadingCount = Math.max(
+          0,
+          Number(
+            snap.uploadingCount != null
+              ? snap.uploadingCount
+              : (snap.hasUploadingAttachment === true ? Math.max(1, snapshotCount - snapshotReadyCount) : 0)
+          ) || 0,
+        );
+        snapshotHasAttachment = snapshotCount > 0
+          || snap.hasAnyAttachment === true
+          || snap.hasReadyAttachment === true;
+        if (Array.isArray(snap.filenames)) {
+          filenames = snap.filenames.filter(Boolean).map((name) => String(name));
+        } else if (Array.isArray(snap.items)) {
+          filenames = snap.items
+            .map((item) => (item && item.name ? String(item.name) : ''))
+            .filter(Boolean);
+        }
+      }
+    } catch (err) {
+      console.error('[ChatGPT toolbox] getSharedComposerAttachmentEvidence snapshot failed', err);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE][SNAPSHOT_FAILED] reason=${reasonText} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const count = Math.max(
+      0,
+      Math.max(
+        Number(
+          canonical.uniqueCount != null
+            ? canonical.uniqueCount
+            : (canonical.attachmentCount != null ? canonical.attachmentCount : canonical.count)
+        ) || 0,
+        snapshotCount,
+        Array.isArray(filenames) ? filenames.length : 0,
+      ),
+    );
+    const uploadingCount = Math.max(
+      0,
+      Math.max(Number(canonical.uploadingCount) || 0, snapshotUploadingCount),
+    );
+    const readyCount = Math.max(
+      0,
+      Math.max(Number(canonical.readyCount) || 0, snapshotReadyCount, count > 0 && uploadingCount === 0 ? count : 0),
+    );
+    const hasAttachment = count > 0
+      || canonical.hasAttachment === true
+      || canonical.hasAny === true
+      || snapshotHasAttachment === true;
+
+    let textLen = 0;
+    try {
+      if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.getComposerText === 'function') {
+        textLen = String(ComposerApi.getComposerText() || '').trim().length;
+      }
+    } catch (err) {
+      console.error('[ChatGPT toolbox] getSharedComposerAttachmentEvidence textLen failed', err);
+    }
+
+    const evidence = {
+      hasAttachment,
+      count,
+      readyCount: hasAttachment && uploadingCount === 0 ? Math.max(readyCount, count) : readyCount,
+      uploadingCount,
+      textLen,
+      filenames,
+      source: String(canonical._unified_source || canonical.source || 'composer-attachments'),
+    };
+
+    const logKey = [
+      reasonText,
+      evidence.count,
+      evidence.readyCount,
+      evidence.uploadingCount,
+      evidence.textLen,
+      evidence.hasAttachment ? 1 : 0,
+    ].join('|');
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      if (typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(
+          `SHARED_COMPOSER:ATTACHMENT_EVIDENCE:${reasonText}`,
+          logKey,
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE] reason=${reasonText} count=${evidence.count} `
+          + `ready=${evidence.readyCount} uploading=${evidence.uploadingCount} textLen=${evidence.textLen} `
+          + `hasAttachment=${evidence.hasAttachment ? 1 : 0}`,
+          1200,
+        );
+      } else {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE] reason=${reasonText} count=${evidence.count} `
+          + `ready=${evidence.readyCount} uploading=${evidence.uploadingCount} textLen=${evidence.textLen} `
+          + `hasAttachment=${evidence.hasAttachment ? 1 : 0}`,
+        );
+      }
+    }
+
+    return evidence;
+  }
+
   return {
     getComposerAttachmentState,
+    getSharedComposerAttachmentEvidence,
     isAttachmentStillUploading,
     hasComposerAttachmentPayload,
     waitNativeUploadSettled,
