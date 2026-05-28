@@ -1172,6 +1172,13 @@
       );
     }
 
+    function clearUploadPendingTimersOnBatchDoneSignal(source = 'batch-done-signal') {
+      const src = String(source || 'batch-done-signal').trim() || 'batch-done-signal';
+      clearClosedLoopStepTimer(`batch-done:${src}`);
+      clearClosedLoopRetryTimer(`batch-done:${src}`);
+      ToolboxShell.appendLog(`[BATCH_FLOW][CLEAR_TIMERS_ON_DONE_SIGNAL] source=${src}`);
+    }
+
     function clearClosedLoopRetryTimer(reason = 'unknown') {
       if (closedLoopContinueState.retryTimerId) {
         clearTimeout(closedLoopContinueState.retryTimerId);
@@ -12424,6 +12431,19 @@
       );
     }
 
+    function isCadenceContinueUploadSource(source) {
+      const sourceText = String(source || '');
+      return sourceText.includes('upload-cadence-policy')
+        || sourceText.includes('cadence-upload')
+        || sourceText.includes('auto-upload-cadence')
+        || sourceText.includes('continue_with_upload')
+        || sourceText.includes('send_continue_with_upload')
+        || sourceText.includes('continue-with-upload')
+        || sourceText.includes('auto-upload-every-n')
+        || sourceText.includes('closed-loop-every5-upload')
+        || sourceText.includes('closed-loop-hotkey-every5-upload');
+    }
+
     async function prepareUploadByCadenceIfNeeded(context = {}) {
       const source = context && typeof context === 'object' ? context.source : '';
       const round = context && typeof context === 'object' ? context.round : 0;
@@ -12452,16 +12472,29 @@
         `[UPLOAD_CADENCE][TRIGGER] count=${UploadCadencePolicy.messageCountSinceLastUpload} every=${UploadCadencePolicy.uploadEveryMessages}`,
       );
 
-      const result = await startUploadOnlyFlow({ source: 'upload-cadence-policy' });
+      const cadenceSource = 'upload-cadence-policy';
+      const result = await startUploadOnlyFlow({ source: cadenceSource });
 
       if (result) {
         UploadCadencePolicy.recordUploadDone();
+        return {
+          ok: true,
+          skipped: false,
+          reason: 'cadence-upload-ok',
+          source: cadenceSource,
+        };
       }
 
+      ToolboxShell.appendLog(
+        `[UPLOAD_CADENCE][FAILED] source=${cadenceSource} reason=cadence-upload-failed`,
+      );
+
       return {
-        ok: !!result,
+        ok: false,
         skipped: false,
-        reason: result ? 'cadence-upload-ok' : 'cadence-upload-failed',
+        blocked: true,
+        reason: 'cadence-upload-failed',
+        source: cadenceSource,
       };
     }
 
@@ -21467,6 +21500,10 @@
         return `forbidden-upload-source:${sourceText}`;
       }
 
+      if (isCadenceContinueUploadSource(sourceText)) {
+        return '';
+      }
+
       const isButtonSnapshotSource = (
         sourceText === 'button-snapshot'
         || sourceText.includes('renderUploadButtonsOnly')
@@ -21578,8 +21615,14 @@
         || sourceText.includes('auto-upload-every-n')
         || sourceText.includes('continue-with-upload')
         || sourceText.includes('closed-loop-every5-upload')
-        || sourceText.includes('closed-loop-hotkey-every5-upload');
+        || sourceText.includes('closed-loop-hotkey-every5-upload')
+        || sourceText.includes('upload-cadence-policy')
+        || sourceText.includes('cadence-upload')
+        || sourceText.includes('auto-upload-cadence');
       if (allowedEveryN) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][ALLOW_CADENCE_UPLOAD_AFTER_INITIAL] source=${sourceText || '-'} reason=continue_upload_cadence`,
+        );
         return {
           blocked: false,
           reason: 'allowed-continue-with-upload',
@@ -34942,6 +34985,7 @@
       getPendingUploadItems,
       getUploadCountStats,
       runCopyHotkeyContinueOnceForTaskQueue,
+      clearUploadPendingTimersOnBatchDoneSignal,
       stopUploadSendTask,
       stopUploadTask,
       clearUploadTransientFileRefs,

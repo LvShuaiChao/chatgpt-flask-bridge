@@ -4466,7 +4466,16 @@ const AutoQueueModule = (() => {
       if (!currentTask) {
         return { ok: false, reason: 'no-current-task' };
       }
+
+      rewritePendingKindInitialToContinueBeforeSend(reasonText);
+
       const expectedPrompt = getCurrentAutoQueueExpectedPrompt(currentTask);
+      const sendKindForFlow = (
+        isCurrentRunAfterInitialStrict()
+        || (state.taskRun && state.taskRun.pendingSendKind === 'continue')
+      )
+        ? 'continue'
+        : 'initial';
       const payload = getAutoQueueComposerPayloadState(`send-existing:${reasonText}`);
       syncCurrentComposerOwnerActualText(payload.text, `before-send-existing:${reasonText}`);
 
@@ -4497,7 +4506,7 @@ const AutoQueueModule = (() => {
           waitAttachmentStable: false,
           requireAttachmentReady: false,
           logPrefix: 'AUTOQ',
-          sendKind: 'initial',
+          sendKind: sendKindForFlow,
           expectedPromptText: expectedPrompt,
           expectedTaskTitle: currentTask.title || '-',
           shouldStop: () => !state.running || state.stopRequested,
@@ -4512,7 +4521,7 @@ const AutoQueueModule = (() => {
           uploadBeforeSend: false,
           waitAttachmentStable: false,
           logPrefix: 'AUTOQ',
-          sendKind: 'initial',
+          sendKind: sendKindForFlow,
           expectedPromptText: expectedPrompt,
           shouldStop: () => !state.running || state.stopRequested,
         });
@@ -4536,6 +4545,12 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(
           `[AUTOQ][SEND_EXISTING_BY_SHARED_FLOW_FAILED] reason=${reasonText} resultReason=${failReason}`,
         );
+        if (
+          failReason === 'send-message-button-core-failed'
+          || String(failReason).includes('send-message-button-core-failed')
+        ) {
+          resetBatchSendStateAfterSendButtonFailure(failReason, 'send-existing-by-shared-flow');
+        }
         return {
           ok: false,
           reason: failReason,
@@ -4549,7 +4564,7 @@ const AutoQueueModule = (() => {
 
       if (flowResult && flowResult.canEnterWaitingReply === true) {
         const entered = await enterAutoQueueWaitingReplyAfterConfirm({
-          sendKind: 'initial',
+          sendKind: sendKindForFlow,
           task: currentTask,
           taskTitle: currentTask.title || '-',
           prompt: expectedPrompt,
@@ -5922,6 +5937,11 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (forceStopBatchTaskOnExactDoneSignal(replyText, `visible-done:${triggerReason || '-'}`)) {
+        clearVisibleDoneSignalTracking();
+        return;
+      }
+
       const profile = getActiveTaskProfile();
       const resolved = resolveTaskContinueSettings(task, profile, { log: false });
       const doneCheck = isTaskDoneSignalMatched(replyText, resolved.actualDoneSignal);
@@ -6577,6 +6597,98 @@ const AutoQueueModule = (() => {
         matched: lines.length === 1 && lines[0] === signal,
         corrupted: false,
       };
+    }
+
+    function isExactBatchDoneSignalText(text, doneSignal) {
+      const signal = String(
+        doneSignal
+        || TASK_DONE_SIGNAL
+        || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'
+      ).trim();
+      const value = String(text || '')
+        .replace(/\r\n/g, '\n')
+        .trim();
+
+      if (!value || !signal) {
+        return false;
+      }
+
+      const lines = value
+        .split('\n')
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+
+      return lines.length === 1 && lines[0] === signal;
+    }
+
+    function forceStopBatchTaskOnExactDoneSignal(replyText, source) {
+      if (!state.running || !state.taskRun) {
+        return false;
+      }
+
+      const task = getCurrentRunningTask();
+      const profile = getActiveTaskProfile();
+      const resolved = task
+        ? resolveTaskContinueSettings(task, profile, { log: false })
+        : null;
+      const doneSignal = resolved && resolved.actualDoneSignal
+        ? resolved.actualDoneSignal
+        : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+
+      if (!isExactBatchDoneSignalText(replyText, doneSignal)) {
+        return false;
+      }
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][FORCE_STOP_ON_DONE_SIGNAL] task=${task && task.title ? task.title : '-'} source=${source || '-'}`,
+      );
+
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = null;
+        state.taskRun.doneSignalVerificationRunning = false;
+        state.taskRun.verifyReplyTextForResend = '';
+        state.taskRun.visibleDoneSignalText = '';
+        state.taskRun.visibleDoneSignalSeenAt = 0;
+      }
+
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.waitingStartedAt = 0;
+      state.idleSince = 0;
+      state.lastContinueSendFailedAt = 0;
+      state.lastContinueSendFailedReason = '';
+
+      if (task) {
+        markTaskStatus(task, 'completed');
+      }
+
+      abortBatchTaskGroupScheduledTimer('batch-done-signal');
+      clearRelentlessSendRetryState();
+      markTaskBatchStepRunning(false);
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearUploadPendingTimersOnBatchDoneSignal === 'function'
+      ) {
+        UploadModule.clearUploadPendingTimersOnBatchDoneSignal(source || 'batch-done-signal');
+      } else {
+        ToolboxShell.appendLog('[BATCH_FLOW][CLEAR_TIMERS_ON_DONE_SIGNAL]');
+      }
+
+      setTaskBatchStep('done-signal-complete', task, { log: false });
+
+      stop({
+        reason: 'batch-done-signal',
+        finalStep: 'all-done',
+        markCurrent: false,
+        logStop: false,
+        sendReason: 'exact-batch-done-signal',
+      });
+
+      ToolboxShell.setStatus('批量任务：检测到完成终止符，已停止', 'success');
+      updateStatus('batch-done-signal-stop');
+      updateChatInputStateBadge();
+      return true;
     }
 
     function recordReplyClassifyDecision(decision) {
@@ -7709,7 +7821,10 @@ const AutoQueueModule = (() => {
         ? Math.max(0, Number(requestedDelayMs))
         : 0;
 
-      if (actionText === 'auto-upload-done-immediate-send') {
+      if (
+        actionText === 'auto-upload-done-immediate-send'
+        || actionText === 'cadence-upload-done-immediate-send'
+      ) {
         if (typeof document !== 'undefined' && !document.hidden && document.hasFocus()) {
           return Math.min(requested, 200);
         }
@@ -8664,6 +8779,13 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      if (isExactBatchDoneSignalText(replyText, resolved && resolved.actualDoneSignal)) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_DONE][SKIP_VERIFY_EXACT_DONE] source=${source || '-'} task=${task && task.title ? task.title : '-'}`,
+        );
+        return forceStopBatchTaskOnExactDoneSignal(replyText, `handleTaskDoneSignal:${source || '-'}`);
+      }
+
       const settings = config.taskQueueSettings || {};
       const verifyEnabled = settings.verifyAfterDoneSignal !== false;
       const verificationAlreadyStarted = !!(
@@ -9333,6 +9455,31 @@ const AutoQueueModule = (() => {
       const uploadResult = await runTaskAutoUploadBeforeNextSend(kind, task);
 
       if (!uploadResult || uploadResult.ok !== true) {
+        const uploadFailReason = uploadResult && uploadResult.reason
+          ? String(uploadResult.reason)
+          : 'auto-upload-failed';
+        const isCadenceUploadAttempt = isCadenceContinueUploadSource(kind)
+          || isCadenceContinueUploadSource(uploadFailReason)
+          || !!(uploadResult && uploadResult.cadenceAbort);
+
+        if (
+          isCadenceUploadAttempt
+          && (
+            uploadResult.blocked === true
+            || uploadFailReason === 'initial_payload_consumed'
+            || uploadFailReason === 'cadence-upload-failed'
+            || uploadResult.cadenceAbort === true
+          )
+        ) {
+          abortCadenceUploadFailed(uploadFailReason, `prepare-upload:${kind || '-'}`);
+          return {
+            ok: false,
+            rotated: !!rotateResult.rotated,
+            reason: uploadFailReason,
+            cadenceAbort: true,
+          };
+        }
+
         if (uploadResult && uploadResult.retryable === true) {
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_AUTO_UPLOAD][PREPARE_WAIT] kind=${String(kind || '-')} `
@@ -9349,14 +9496,12 @@ const AutoQueueModule = (() => {
 
         ToolboxShell.appendLog(
           `[PAGE_ROTATE][FAILED] kind=${String(kind || '-')} phase=upload `
-          + `reason=${uploadResult && uploadResult.reason ? uploadResult.reason : 'auto-upload-failed'}`,
+          + `reason=${uploadFailReason}`,
         );
         return {
           ok: false,
           rotated: !!rotateResult.rotated,
-          reason: uploadResult && uploadResult.reason
-            ? uploadResult.reason
-            : 'auto-upload-failed',
+          reason: uploadFailReason,
         };
       }
 
@@ -9622,6 +9767,7 @@ const AutoQueueModule = (() => {
     function markBatchAutoUploadReadyToSend(kind = 'initial', task = null, uploadResult = null) {
       const safeKind = String(kind || 'initial').trim() || 'initial';
       const currentTask = task || getCurrentRunningTask();
+      const isContinueUploadKind = safeKind === 'continue' || safeKind === 'continue_with_upload';
       if (safeKind === 'initial' && isBatchAfterInitialRound()) {
         ToolboxShell.appendLog(
           `[AUTOQ][POST_UPLOAD_SKIP_INITIAL_REWRITE] task=${currentTask ? currentTask.title : '-'} reason=after-initial-round`,
@@ -9635,7 +9781,7 @@ const AutoQueueModule = (() => {
 
       run.pendingSendKind = safeKind === 'verification'
         ? 'verification'
-        : (safeKind === 'continue' ? 'continue' : 'initial');
+        : (isContinueUploadKind ? 'continue' : 'initial');
 
       run.pendingSendStartedAt = 0;
       run.lastPendingSendKindBeforeProcessing = null;
@@ -9648,6 +9794,8 @@ const AutoQueueModule = (() => {
         setTaskBatchStep('send-initial', currentTask, { log: false });
       } else if (safeKind === 'verification') {
         setTaskBatchStep('send-verification', currentTask, { log: false });
+      } else if (safeKind === 'continue_with_upload') {
+        setTaskBatchStep('send-continue', currentTask, { log: false });
       } else {
         setTaskBatchStep('send-continue', currentTask, { log: false });
       }
@@ -9664,7 +9812,9 @@ const AutoQueueModule = (() => {
         + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')}`,
       );
 
-      if (safeKind === 'initial') {
+      if (safeKind === 'continue_with_upload' && isCurrentRunAfterInitialStrict()) {
+        scheduleCadenceContinuePromptWriteAfterUpload(currentTask, 'auto-upload-done');
+      } else if (safeKind === 'initial') {
         if (blockInitialOnlyPathAfterInitial('post-upload-immediate-prompt-write-schedule', 'auto-upload-done')) {
           return;
         }
@@ -9676,6 +9826,159 @@ const AutoQueueModule = (() => {
           reason: 'auto-upload-done-immediate-send',
         });
       }
+    }
+
+    async function writeBatchPromptToComposer(text, options = {}) {
+      const promptText = String(text || '').trim();
+      const source = String(options.source || 'cadence-upload-after-initial').trim() || 'cadence-upload-after-initial';
+
+      if (!promptText) {
+        return {
+          ok: false,
+          reason: 'empty-prompt',
+        };
+      }
+
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.sendTextToChatGPTComposerDirectly !== 'function'
+      ) {
+        return {
+          ok: false,
+          reason: 'composer-direct-unavailable',
+        };
+      }
+
+      return UploadModule.sendTextToChatGPTComposerDirectly(promptText, {
+        source,
+        clickSend: false,
+        requireNoAttachment: false,
+      });
+    }
+
+    function scheduleCadenceContinuePromptWriteAfterUpload(task, reason = 'cadence-upload-after-initial') {
+      const currentTask = task || getCurrentRunningTask();
+      if (!currentTask || !state.running) {
+        return;
+      }
+
+      const continueText = resolveBatchContinuePromptForCurrentTask(currentTask, reason);
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CADENCE_UPLOAD_WRITE_CONTINUE_PROMPT] `
+        + `currentRunSentCount=${Number(state.currentRunSentCount || 0)} continueLen=${String(continueText || '').length} `
+        + `source=${reason || '-'}`,
+      );
+
+      void (async () => {
+        const writeResult = await writeBatchPromptToComposer(continueText, {
+          kind: 'continue',
+          source: 'cadence-upload-after-initial',
+        });
+        if (!writeResult || writeResult.ok !== true) {
+          const writeReason = writeResult && writeResult.reason ? writeResult.reason : 'cadence-continue-write-failed';
+          console.error('[ChatGPT toolbox] cadence continue prompt write failed', writeReason);
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][CADENCE_UPLOAD_WRITE_CONTINUE_FAILED] reason=${writeReason}`,
+          );
+          abortCadenceUploadFailed(writeReason, reason);
+          return;
+        }
+
+        if (state.taskRun) {
+          state.taskRun.pendingSendKind = 'continue';
+        }
+        setTaskBatchStep('send-continue', currentTask, { log: false });
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.SENDING, 'cadence-upload-continue-prompt-written', { force: true });
+        scheduleNextBatchTaskStep('cadence-upload-done-immediate-send', 0, {
+          reason: 'cadence-upload-done-immediate-send',
+        });
+      })();
+    }
+
+    function abortCadenceUploadFailed(reason, source) {
+      const safeReason = String(reason || 'cadence-upload-failed').trim() || 'cadence-upload-failed';
+      const safeSource = String(source || '-').trim() || '-';
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CADENCE_UPLOAD_FAILED_ABORT_SEND] reason=${safeReason} source=${safeSource}`,
+      );
+
+      state.batchAutoUploading = false;
+      state.uploadingFromAutoQueue = false;
+      state.sendingNow = false;
+      state.waitingReply = false;
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING, 'cadence-upload-failed', { force: true });
+
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = null;
+        state.taskRun.currentStep = 'cadence-upload-failed';
+      }
+
+      const brs = ensureBatchRunState();
+      brs.waitingReply = false;
+      state.batchRunState = brs;
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearStaleBusySendStateOnHomeReady === 'function'
+      ) {
+        UploadModule.clearStaleBusySendStateOnHomeReady(`cadence-upload-failed:${safeReason}`);
+      }
+
+      markTaskBatchStepRunning(false);
+      updateStatus('cadence-upload-failed');
+      failCurrentTask('cadence-upload-failed', {
+        detail: safeReason,
+        retryable: true,
+        wait: false,
+      });
+    }
+
+    function resetBatchSendStateAfterSendButtonFailure(reason, source) {
+      const safeReason = String(reason || 'send-message-button-core-failed').trim() || 'send-message-button-core-failed';
+      const safeSource = String(source || '-').trim() || '-';
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][RESET_SEND_STATE_AFTER_BUTTON_FAILURE] reason=${safeReason} source=${safeSource}`,
+      );
+
+      state.waitingReply = false;
+      state.sendingNow = false;
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING, 'send-button-failed', { force: true });
+
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = null;
+        state.taskRun.currentStep = 'send-button-failed';
+      }
+
+      const brs = ensureBatchRunState();
+      brs.waitingReply = false;
+      state.batchRunState = brs;
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.clearStaleBusySendStateOnHomeReady === 'function'
+      ) {
+        UploadModule.clearStaleBusySendStateOnHomeReady(`send-button-failed:${safeReason}`);
+      }
+
+      markTaskBatchStepRunning(false);
+      updateStatus('batch-send-button-failed');
+    }
+
+    function rewritePendingKindInitialToContinueBeforeSend(source) {
+      if (!isCurrentRunAfterInitialStrict() || !state.taskRun) {
+        return false;
+      }
+      if (state.taskRun.pendingSendKind !== 'initial') {
+        return false;
+      }
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][REWRITE_PENDING_KIND_INITIAL_TO_CONTINUE_BEFORE_SEND_EXISTING] `
+        + `currentRunSentCount=${Number(state.currentRunSentCount || 0)} source=${source || '-'}`,
+      );
+      state.taskRun.pendingSendKind = 'continue';
+      return true;
     }
 
     async function waitAutoQueueAttachmentReadyFast(reason = 'autoq-attachment-ready-fast') {
@@ -9796,8 +10099,43 @@ const AutoQueueModule = (() => {
     }
 
     async function runTaskAutoUploadBeforeNextSend(kind, task) {
-      const decision = logTaskAutoUploadDecision(kind);
-      const normalizedKind = String(kind || '').trim().toLowerCase();
+      let effectiveKind = String(kind || '').trim().toLowerCase();
+      const previewDecision = getTaskAutoUploadDecision(effectiveKind);
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      const brs = ensureBatchRunState();
+      const afterInitial = currentRunSentCount > 0
+        || brs.initialPromptSent
+        || brs.initialPayloadConsumed
+        || Number(brs.roundIndex || 1) > 1;
+
+      if (
+        afterInitial
+        && (
+          previewDecision.shouldUploadByInterval
+          || previewDecision.shouldUploadByMissedSlot
+          || previewDecision.shouldUploadByReplyGap
+        )
+      ) {
+        if (effectiveKind === 'initial') {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][KIND_REWRITE_CONTINUE_WITH_UPLOAD] `
+            + `currentRunSentCount=${currentRunSentCount} currentCount=${previewDecision.currentCount} `
+            + `nextMessageNo=${previewDecision.nextMessageNo} interval=${previewDecision.interval}`,
+          );
+        }
+        effectiveKind = 'continue_with_upload';
+        if (state.taskRun) {
+          state.taskRun.pendingSendKind = 'continue';
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CADENCE_UPLOAD_DUE] currentCount=${previewDecision.currentCount} `
+          + `nextMessageNo=${previewDecision.nextMessageNo} interval=${previewDecision.interval} `
+          + `kind=continue_with_upload`,
+        );
+      }
+
+      const decision = logTaskAutoUploadDecision(effectiveKind);
+      const normalizedKind = effectiveKind;
       const isInitialSend = normalizedKind === 'initial';
       const runAtStart = state.taskRun || {};
       const pendingAtStart = String(runAtStart.pendingSendKind || '');
@@ -10115,8 +10453,12 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_START] kind=${kind || '-'} nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} interval=${decision.interval} force=${forceUpload ? 1 : 0}`,
         );
 
+        const uploadSource = normalizedKind === 'continue_with_upload'
+          ? 'upload-cadence-policy'
+          : `autoq-task-${String(normalizedKind || '-').trim() || '-'}-${uploadSlotNo}`;
+
         const uploadResult = await UploadModule.startUploadForAutoQueue({
-          source: `autoq-task-${String(kind || '-').trim() || '-'}-${uploadSlotNo}`,
+          source: uploadSource,
           forceReupload: true,
           shouldStop: () => !state.running,
           maxFiles: maxFilesForThisUpload,
@@ -10145,6 +10487,22 @@ const AutoQueueModule = (() => {
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_AUTO_UPLOAD][FAILED] sentMessageCount=${currentCount} uploaded=${uploadedCount} failed=${failedCount} skipped=${skippedCount} reason=${reason || 'upload-failed'}`,
           );
+
+          if (
+            normalizedKind === 'continue_with_upload'
+            && (
+              uploadResult.blocked === true
+              || reason === 'initial_payload_consumed'
+              || reason === 'cadence-upload-failed'
+            )
+          ) {
+            return {
+              ok: false,
+              blocked: true,
+              cadenceAbort: true,
+              reason: reason || 'cadence-upload-failed',
+            };
+          }
 
           return {
             ok: false,
@@ -10211,7 +10569,7 @@ const AutoQueueModule = (() => {
           }
         }
 
-        markBatchAutoUploadReadyToSend(kind, task, {
+        markBatchAutoUploadReadyToSend(normalizedKind, task, {
           ok: true,
           reason: uploadedCount > 0 ? 'uploaded' : (reason || 'composer-payload-ready'),
           uploadedCount,
@@ -10362,6 +10720,10 @@ const AutoQueueModule = (() => {
           clearStepRunning: true,
           clearWaiting: false,
         });
+        return;
+      }
+
+      if (forceStopBatchTaskOnExactDoneSignal(replyText, 'handleTaskReplyReady')) {
         return;
       }
 
@@ -10535,6 +10897,18 @@ const AutoQueueModule = (() => {
           }
 
           if (result && result.assistantDoneSignal) {
+            const terminalText = String(
+              result.assistantText
+              || result.replyText
+              || result.copied_text
+              || replyText
+              || ''
+            ).trim();
+
+            if (forceStopBatchTaskOnExactDoneSignal(terminalText, 'copy-hotkey-result')) {
+              return;
+            }
+
             ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][DONE_SIGNAL] task=${task.title}`);
             ToolboxShell.appendLog(`[AUTOQ][TASK][DONE_SIGNAL] task=${task.title}`);
 
@@ -10754,31 +11128,6 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_BATCH][SEND_CONTINUE] task=${task.title} nextMessageNo=${nextMessageNo}`,
         );
 
-        const directResult = await sendBatchContinueDirectly(actualContinuePrompt, continueSource);
-
-        if (directResult && directResult.deferred) {
-          return;
-        }
-
-        if (directResult && directResult.ok) {
-          ToolboxShell.appendLog(
-            `[BATCH_FLOW][CONTINUE_DIRECT_PATH_USED] task=${task.title || task.name || '-'} nextMessageNo=${nextMessageNo}`,
-          );
-          await finishBatchContinueDirectSuccess(
-            task,
-            actualContinuePrompt,
-            round,
-            `autoq-task-continue-${task.id}-${round}`,
-            '[AUTOQ][CONTINUE_SEND]',
-          );
-          return;
-        }
-
-        ToolboxShell.appendLog(
-          `[BATCH_FLOW][CONTINUE_DIRECT_FALLBACK_HOTKEY] task=${task.title || task.name || '-'} `
-          + `nextMessageNo=${nextMessageNo} reason=${directResult && directResult.reason ? directResult.reason : '-'}`,
-        );
-
         const result = await UploadModule.runCopyHotkeyContinueOnceForTaskQueue({
           source: continueSource,
           continuePrompt: actualContinuePrompt,
@@ -10800,58 +11149,29 @@ const AutoQueueModule = (() => {
           return;
         }
 
-        if (result.copied) {
+        if (result && result.assistantDoneSignal) {
+          const terminalText = String(
+            result.assistantText
+            || result.replyText
+            || result.copied_text
+            || replyText
+            || ''
+          ).trim();
+
+          if (forceStopBatchTaskOnExactDoneSignal(terminalText, 'copy-hotkey-continue')) {
+            return;
+          }
+        }
+
+        if (result && result.ok && result.copied && result.hotkeySent && result.continueSent) {
           const copiedChars = String(
             (result && result.copied_text) || replyText || '',
           ).length;
           const copyDoneTaskIndex = state.taskRun ? Number(state.taskRun.currentIndex || 0) : 0;
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][COPY_DONE] task=${task.title} chars=${copiedChars}`);
           ToolboxShell.appendLog(`[BATCH_TASK_GROUP][COPY_REPLY_DONE] taskIndex=${copyDoneTaskIndex} length=${copiedChars}`);
-        } else if (!result.assistantDoneSignal) {
-          const copyFailTaskIndex = state.taskRun ? Number(state.taskRun.currentIndex || 0) : 0;
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_BATCH][COPY_NOT_DONE] task=${task.title} reason=${failReason || 'copy-failed'}`,
-          );
-          ToolboxShell.appendLog(`[BATCH_TASK_GROUP][COPY_REPLY_FAIL] reason=${failReason || 'copy-failed'} taskIndex=${copyFailTaskIndex}`);
-        }
-
-        if (result.hotkeySent) {
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][HOTKEY_DONE] task=${task.title}`);
-        } else if (!result.assistantDoneSignal) {
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_BATCH][HOTKEY_NOT_DONE] task=${task.title} reason=${failReason || 'hotkey-failed'}`,
-          );
-        }
 
-        if (result.assistantDoneSignal) {
-          ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][DONE_SIGNAL] task=${task.title}`);
-          ToolboxShell.appendLog(`[AUTOQ][TASK][DONE_SIGNAL] task=${task.title}`);
-
-          void handleTaskDoneSignal(task, profile, resolved, replyText, 'copy-hotkey-done-signal').catch((err) => {
-            const errText = err && err.message ? err.message : String(err);
-            console.error('[ChatGPT toolbox] [AUTOQ][TASK_DONE][FAILED]', err);
-            ToolboxShell.appendLog(
-              `[AUTOQ][TASK_DONE][FAILED] source=copy-hotkey-done-signal task=${task.title || '-'} reason=${errText}`,
-            );
-            failCurrentTask(errText || 'done-signal-handler-failed');
-          });
-          return;
-        }
-
-        if (!result.ok) {
-          if (failReason === 'continue-send-failed') {
-            resetBatchContinueSendFailedState('continue-send-failed');
-          }
-          ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][FAILED] task=${task.title} reason=${failReason || 'copy-hotkey-continue-failed'}`);
-          failCurrentTask(failReason || 'copy-hotkey-continue-failed', {
-            detail: result && result.detail ? result.detail : '',
-            retryable: !!(result && result.retryable === true),
-            wait: !!(result && result.wait === true),
-          });
-          return;
-        }
-
-        if (result.continueSent) {
           if (result.quotaRecorded !== true) {
             recordTaskSendRateLimitHit('continue');
           } else {
@@ -10860,47 +11180,77 @@ const AutoQueueModule = (() => {
           recordTaskBatchMessageSent('continue');
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][SEND_CONTINUE] task=${task.title} round=${round}`);
           ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][CONTINUE_SEND] task=${task.title} kind=continue round=${round}`);
-        } else {
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_BATCH][CONTINUE_NOT_SENT] task=${task.title} reason=${failReason || 'continue-not-sent'}`,
-          );
-        }
 
-        if (!(result.copied && result.hotkeySent && result.continueSent)) {
-          failCurrentTask(failReason || 'batch-step-incomplete', {
-            detail: result && result.detail ? result.detail : '',
-            retryable: !!(result && result.retryable === true),
-            wait: !!(result && result.wait === true),
+          task.continueCount = round;
+          task.updatedAt = nowMs();
+          saveConfig();
+          renderTaskList();
+          renderTaskEditor();
+
+          const enteredWaiting = await enterAutoQueueWaitingReplyAfterConfirm({
+            sendKind: 'continue',
+            task,
+            taskTitle: task.title || '-',
+            prompt: actualContinuePrompt,
+            source: `autoq-task-continue-${task.id}-${round}`,
+            logTag: '[AUTOQ][CONTINUE_SEND]',
+            timeoutMs: 2000,
           });
+          if (!enteredWaiting || enteredWaiting.ok !== true) {
+            state.taskRun.pendingSendKind = 'continue';
+            state.taskRun.pendingSendStartedAt = Date.now();
+            updateStatus('continue-send-not-verified');
+          } else {
+            state.taskRun.pendingSendKind = null;
+            setTaskBatchStep('wait-next-reply', task, { log: false });
+            log(`已执行复制+快捷键+继续，等待下一轮回复 (${task.continueCount}/${formatContinueRoundLimit(maxRounds)})`);
+            updateStatus('continue-sent');
+          }
+          updateChatInputStateBadge();
           return;
         }
 
-        task.continueCount = round;
-        task.updatedAt = nowMs();
-        saveConfig();
-        renderTaskList();
-        renderTaskEditor();
+        const allowDirectFallback = [
+          'hotkey-unavailable',
+          'clipboard-unavailable',
+          'copy-hotkey-unavailable',
+          'direct-fallback-allowed',
+          'composer-direct-fallback-allowed',
+        ].includes(failReason);
 
-        const enteredWaiting = await enterAutoQueueWaitingReplyAfterConfirm({
-          sendKind: 'continue',
-          task,
-          taskTitle: task.title || '-',
-          prompt: actualContinuePrompt,
-          source: `autoq-task-continue-${task.id}-${round}`,
-          logTag: '[AUTOQ][CONTINUE_SEND]',
-          timeoutMs: 2000,
-        });
-        if (!enteredWaiting || enteredWaiting.ok !== true) {
-          state.taskRun.pendingSendKind = 'continue';
-          state.taskRun.pendingSendStartedAt = Date.now();
-          updateStatus('continue-send-not-verified');
-        } else {
-          state.taskRun.pendingSendKind = null;
-          setTaskBatchStep('wait-next-reply', task, { log: false });
-          log(`已执行复制+快捷键+继续，等待下一轮回复 (${task.continueCount}/${formatContinueRoundLimit(maxRounds)})`);
-          updateStatus('continue-sent');
+        if (allowDirectFallback) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][CONTINUE_HOTKEY_FAILED_FALLBACK_DIRECT] reason=${failReason} source=${continueSource}`,
+          );
+
+          const directResult = await sendBatchContinueDirectly(actualContinuePrompt, continueSource);
+
+          if (directResult && directResult.deferred) {
+            return;
+          }
+
+          if (directResult && directResult.ok) {
+            await finishBatchContinueDirectSuccess(
+              task,
+              actualContinuePrompt,
+              round,
+              `autoq-task-continue-${task.id}-${round}`,
+              '[AUTOQ][CONTINUE_SEND_DIRECT_FALLBACK]',
+            );
+            return;
+          }
         }
-        updateChatInputStateBadge();
+
+        if (failReason === 'continue-send-failed') {
+          resetBatchContinueSendFailedState('continue-send-failed');
+        }
+
+        failCurrentTask(failReason || 'copy-hotkey-continue-failed', {
+          detail: result && result.detail ? result.detail : '',
+          retryable: !!(result && result.retryable === true),
+          wait: !!(result && result.wait === true),
+        });
+        return;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] handleTaskReplyReady batch step failed', err);
@@ -16814,6 +17164,19 @@ const AutoQueueModule = (() => {
       return sendKind;
     }
 
+    function isCadenceContinueUploadSource(source) {
+      const sourceText = String(source || '');
+      return sourceText.includes('upload-cadence-policy')
+        || sourceText.includes('cadence-upload')
+        || sourceText.includes('auto-upload-cadence')
+        || sourceText.includes('continue_with_upload')
+        || sourceText.includes('send_continue_with_upload')
+        || sourceText.includes('continue-with-upload')
+        || sourceText.includes('auto-upload-every-n')
+        || sourceText.includes('closed-loop-every5-upload')
+        || sourceText.includes('closed-loop-hotkey-every5-upload');
+    }
+
     function decideNextBatchAction(batchStateOverride) {
       const brs = batchStateOverride || syncBatchRunStateFromRuntime();
       const currentRunSentCount = Number(state.currentRunSentCount || 0);
@@ -16835,14 +17198,37 @@ const AutoQueueModule = (() => {
         };
       }
       const run = state.taskRun || {};
+      const cadenceDecision = getTaskAutoUploadDecision('continue');
+      if (cadenceDecision.shouldUpload) {
+        if (state.taskRun) {
+          state.taskRun.pendingSendKind = 'continue';
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CADENCE_UPLOAD_DUE] currentCount=${cadenceDecision.currentCount} `
+          + `nextMessageNo=${cadenceDecision.nextMessageNo} interval=${cadenceDecision.interval} `
+          + `kind=continue_with_upload`,
+        );
+        return {
+          action: 'send_continue_with_upload',
+          reason: 'cadence-upload-due',
+          promptKind: 'continue',
+          upload: true,
+        };
+      }
       const pendingKind = String(run.pendingSendKind || '').trim();
+      const effectivePending = (
+        (pendingKind === 'initial' || !pendingKind)
+        && isCurrentRunAfterInitialStrict()
+      )
+        ? 'continue'
+        : (pendingKind || 'continue');
       return {
-        action: pendingKind === 'continue' || pendingKind === 'verify-continue'
+        action: effectivePending === 'continue' || effectivePending === 'verify-continue'
           ? 'send_continue'
           : 'send_initial',
-        reason: pendingKind || 'pending-send-kind',
-        promptKind: pendingKind === 'continue' || pendingKind === 'verify-continue' ? 'continue' : 'initial',
-        upload: pendingKind !== 'continue',
+        reason: effectivePending || 'pending-send-kind',
+        promptKind: effectivePending === 'continue' || effectivePending === 'verify-continue' ? 'continue' : 'initial',
+        upload: false,
       };
     }
 
@@ -18134,9 +18520,23 @@ const AutoQueueModule = (() => {
         }
       }
 
-      const kind = (batchDecision && batchDecision.promptKind === 'initial')
-        ? 'initial'
-        : (run.pendingSendKind || 'initial');
+      let kind = 'continue';
+      if (batchDecision && batchDecision.promptKind === 'initial' && isCurrentRunFirstMessage()) {
+        kind = 'initial';
+      } else if (batchDecision && batchDecision.action === 'send_continue_with_upload') {
+        kind = 'continue_with_upload';
+        if (state.taskRun) {
+          state.taskRun.pendingSendKind = 'continue';
+        }
+      } else if (batchDecision && batchDecision.promptKind === 'continue') {
+        kind = 'continue';
+      } else if (run.pendingSendKind === 'continue' || run.pendingSendKind === 'verification') {
+        kind = run.pendingSendKind;
+      } else if (isCurrentRunAfterInitialStrict()) {
+        kind = 'continue';
+      }
+
+      rewritePendingKindInitialToContinueBeforeSend('maybe-send-next-task');
 
       if (kind === 'initial') {
         const resolvedInitial = resolveTaskInitialPrompt(currentTask, { log: true });
@@ -18259,35 +18659,69 @@ const AutoQueueModule = (() => {
 
         if (writeGuard.reason === 'already-present-send-existing') {
           const presentPayload = getAutoQueueComposerPayloadState('maybe-send-existing-prompt');
+          const prepareKindForExisting = isCurrentRunAfterInitialStrict()
+            ? 'continue_with_upload'
+            : 'initial';
           setTaskBatchStep('prompt-ready', currentTask, { log: false });
           setAutoQueuePhase(AUTO_QUEUE_PHASES.SENDING, 'maybe-send-existing-composer-prompt', { force: true });
           ToolboxShell.appendLog(
             `[AUTOQ][CURRENT_PROMPT_ALREADY_IN_COMPOSER] task=${currentTask.title} `
-            + `textLen=${presentPayload.textLen} promptLen=${expectedPrompt.length} action=send-existing`,
+            + `textLen=${presentPayload.textLen} promptLen=${expectedPrompt.length} action=send-existing `
+            + `prepareKind=${prepareKindForExisting}`,
           );
           markTaskBatchStepRunning(true);
           void (async () => {
             try {
-              const prepareResult = await prepareTaskPageBeforeNextSend('initial', currentTask);
+              rewritePendingKindInitialToContinueBeforeSend('maybe-send-existing-prompt');
+              const prepareResult = await prepareTaskPageBeforeNextSend(prepareKindForExisting, currentTask);
               if (!prepareResult || prepareResult.ok !== true) {
+                if (prepareResult && prepareResult.cadenceAbort === true) {
+                  return;
+                }
                 const prepareReason = prepareResult && prepareResult.reason
                   ? prepareResult.reason
                   : 'prepare-before-send-failed';
                 if (prepareResult && prepareResult.retryable === true) {
-                  scheduleRelentlessSendRetry(prepareReason, 'initial', currentTask);
+                  scheduleRelentlessSendRetry(prepareReason, 'continue', currentTask);
                   return;
                 }
-                handleTaskInitialSendFailure(prepareReason);
+                if (isCurrentRunAfterInitialStrict()) {
+                  abortCadenceUploadFailed(prepareReason, 'maybe-send-existing-prompt-prepare-failed');
+                } else {
+                  handleTaskInitialSendFailure(prepareReason);
+                }
                 return;
               }
-              await sendAutoQueueExistingComposer(currentTask, 'maybe-send-existing-prompt');
+              const sendResult = await sendAutoQueueExistingComposer(currentTask, 'maybe-send-existing-prompt');
+              if (!sendResult || sendResult.ok !== true) {
+                const sendReason = sendResult && sendResult.reason ? sendResult.reason : 'send-existing-failed';
+                if (
+                  isCurrentRunAfterInitialStrict()
+                  && (
+                    sendReason === 'send-message-button-core-failed'
+                    || String(sendReason).includes('send-message-button-core-failed')
+                  )
+                ) {
+                  resetBatchSendStateAfterSendButtonFailure(sendReason, 'maybe-send-existing-prompt');
+                  return;
+                }
+                if (isCurrentRunAfterInitialStrict()) {
+                  abortCadenceUploadFailed(sendReason, 'maybe-send-existing-prompt-send-failed');
+                } else {
+                  handleTaskInitialSendFailure(sendReason);
+                }
+              }
             } catch (err) {
               const errText = err && err.message ? err.message : String(err);
               console.error('[ChatGPT toolbox] [AUTOQ][MAYBE_SEND_EXISTING_PROMPT]', err);
               ToolboxShell.appendLog(
                 `[AUTOQ][MAYBE_SEND_EXISTING_PROMPT][FAILED] error=${errText}`,
               );
-              handleTaskInitialSendFailure(errText);
+              if (isCurrentRunAfterInitialStrict()) {
+                abortCadenceUploadFailed(errText, 'maybe-send-existing-prompt-exception');
+              } else {
+                handleTaskInitialSendFailure(errText);
+              }
             } finally {
               markTaskBatchStepRunning(false);
             }
