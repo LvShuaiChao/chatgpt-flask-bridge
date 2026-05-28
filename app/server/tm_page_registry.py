@@ -722,8 +722,19 @@ def _touch_tampermonkey(meta, action="poll"):
             strict_unknown=True,
         )
         if bridge_reject:
-            body, _status = bridge_reject
-            raise ValueError(body.get("error") or "bridge_fields_not_allowed")
+            error_body, _status = bridge_reject
+            _log(
+                "[TM][FIELD_REJECTED] "
+                f"context={error_body.get('context') or f'_touch_tampermonkey:{action}'} "
+                f"error={error_body.get('error') or '-'} "
+                f"unknown_fields={error_body.get('unknown_fields') or []} "
+                f"legacy_fields={error_body.get('legacy_fields') or []}"
+            )
+            raise ValueError(
+                f"{error_body.get('error') or 'bridge_fields_not_allowed'} "
+                f"unknown_fields={error_body.get('unknown_fields') or []} "
+                f"legacy_fields={error_body.get('legacy_fields') or []}"
+            )
     now = _now()
     client_id = (meta.get("client_id") or "").strip()
     if not client_id:

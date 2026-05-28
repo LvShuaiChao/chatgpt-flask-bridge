@@ -4,7 +4,7 @@ from app.constants import (
     PERSIST_PENDING_RESET_MESSAGE,
     STARTUP_PENDING_RESET_MESSAGE,
 )
-from app.models import _message_field, is_waiting_placeholder_message, normalize_remote_chatgpt
+from app.models import _message_field, is_waiting_placeholder_message
 
 
 class ConversationStatsMixin:

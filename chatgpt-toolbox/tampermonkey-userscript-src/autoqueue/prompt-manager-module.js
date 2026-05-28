@@ -177,13 +177,9 @@
     function buildNormalizedDefaultPrompts() {
       const defaults = createDefaultPrompts();
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        try {
-          ToolboxShell.appendLog(
-            `[PROMPT_MANAGER][BUILTIN_PROMPT_REGISTER] count=${Array.isArray(defaults) ? defaults.length : 0}`,
-          );
-        } catch (e) {
-          // ignore logging failure
-        }
+        ToolboxShell.appendLog(
+          `[PROMPT_MANAGER][BUILTIN_PROMPT_REGISTER] count=${Array.isArray(defaults) ? defaults.length : 0}`,
+        );
       }
       return defaults.map((item, index) => normalizePromptItem({
         id: item && item.id ? item.id : createStablePromptId(item, index),
@@ -211,8 +207,32 @@
         .map((item) => normalizePromptItem(item))
         .filter(Boolean);
 
+      const beforeBuiltinCleanup = nextPrompts.length;
+      nextPrompts = nextPrompts.filter((p) => {
+        const id = String(p && p.id || '');
+        const title = String(p && p.title || '').trim();
+        const category = String(p && p.category || '').trim();
+        const content = String(p && p.content || '');
+        const isBuiltinId = id.startsWith('default_prompt_');
+        const isMathOnce = content.includes('math_once_one_by_one');
+        const isNumericTitle = title === '数字计算';
+        const isDefaultCategory = category === '默认';
+        if (isBuiltinId && isMathOnce && (isNumericTitle || isDefaultCategory)) {
+          return false;
+        }
+        return true;
+      });
+      if (beforeBuiltinCleanup !== nextPrompts.length) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog('[AUTOQ][DEFAULT_SEED][CLEANUP] target=promptManager.prompts removed=builtin-math_once_one_by_one');
+        }
+      }
+
       if (!nextPrompts.length) {
-        nextPrompts = buildNormalizedDefaultPrompts();
+        nextPrompts = [];
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog('[AUTOQ][DEFAULT_SEED][SKIP] reason=user-manual-mode target=promptManager.prompts');
+        }
       }
 
       if (!nextCategories.length) {

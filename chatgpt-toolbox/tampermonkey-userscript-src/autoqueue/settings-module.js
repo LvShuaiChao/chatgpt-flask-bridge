@@ -104,6 +104,7 @@
       const showEl = qs('#cgpt-setting-runtime-stats-show', root);
       const preserveEl = qs('#cgpt-setting-runtime-stats-preserve-average', root);
       const intervalEl = qs('#cgpt-setting-runtime-stats-refresh-interval', root);
+      const debugTraceEl = qs('#cgpt-setting-autoq-trace-debug', root);
       const intervalMs = Number(intervalEl && intervalEl.value ? intervalEl.value : 1000);
       const allowed = [1000, 2000, 5000];
 
@@ -111,6 +112,7 @@
         showRuntimeStats: showEl ? !!showEl.checked : true,
         preserveRuntimeStatsAverage: preserveEl ? !!preserveEl.checked : false,
         runtimeStatsRefreshIntervalMs: allowed.includes(intervalMs) ? intervalMs : 1000,
+        debugAutoQueueTrace: debugTraceEl ? !!debugTraceEl.checked : false,
       };
     }
 
@@ -118,7 +120,7 @@
       const patch = readRuntimeStatsSettingsFromUi();
       saveAutoQueueTaskQueueSettings(patch);
       ToolboxShell.appendLog(
-        `[SETTINGS][runtime-stats] show=${patch.showRuntimeStats ? 1 : 0} preserveAverage=${patch.preserveRuntimeStatsAverage ? 1 : 0} intervalMs=${patch.runtimeStatsRefreshIntervalMs}`,
+        `[SETTINGS][runtime-stats] show=${patch.showRuntimeStats ? 1 : 0} preserveAverage=${patch.preserveRuntimeStatsAverage ? 1 : 0} intervalMs=${patch.runtimeStatsRefreshIntervalMs} autoqTrace=${patch.debugAutoQueueTrace ? 1 : 0}`,
       );
     }
 
@@ -429,6 +431,10 @@
       if (runtimeStatsIntervalEl) {
         runtimeStatsIntervalEl.value = String(runtimeStatsCfg.runtimeStatsRefreshIntervalMs || 1000);
       }
+      const debugTraceEl = qs('#cgpt-setting-autoq-trace-debug', root);
+      if (debugTraceEl) {
+        debugTraceEl.checked = runtimeStatsCfg.debugAutoQueueTrace === true;
+      }
 
       const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
       if (edgeAutoHideEl) {
@@ -735,6 +741,7 @@
         '#cgpt-setting-runtime-stats-show',
         '#cgpt-setting-runtime-stats-preserve-average',
         '#cgpt-setting-runtime-stats-refresh-interval',
+        '#cgpt-setting-autoq-trace-debug',
       ].forEach((selector) => {
         bindSettingChange(root, selector, onRuntimeStatsSettingChange, {
           moduleName: 'SETTINGS',
@@ -1230,6 +1237,11 @@
                 <option value="5000">5000 ms</option>
               </select>
             </div>
+
+            <label class="cgpt-checkbox-line" title="开启后输出 AUTOQ_TRACE 多步骤闭环状态机日志，便于排查为什么没有继续、没有验收或为什么提前停止。">
+              <input type="checkbox" id="cgpt-setting-autoq-trace-debug">
+              开启 AUTOQ_TRACE 调试日志
+            </label>
 
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn" id="cgpt-setting-runtime-stats-reset" title="重置会清空批量/任务计时与平均耗时，但不会重置「程序运行时长」。">重置计时统计</button>

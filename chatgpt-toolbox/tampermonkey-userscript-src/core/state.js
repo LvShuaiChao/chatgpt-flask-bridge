@@ -694,6 +694,8 @@
     const settings = {
       stopOnMaxContinueRounds: true,
       defaultMaxContinueRoundsMigratedToUnlimited: false,
+      appendTaskInputToInitialPrompt: false,
+      skipFailedTasks: false,
       /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
       switchNewChatBetweenTasks: true,
       switchNewChatAfterAllDone: false,
@@ -736,6 +738,7 @@
       showRuntimeStats: true,
       preserveRuntimeStatsAverage: false,
       runtimeStatsRefreshIntervalMs: 1000,
+      debugAutoQueueTrace: true,
 
       taskRelentlessSendRetryEnabled: true,
       taskRelentlessSendRetryIntervalMs: 1500,
@@ -879,29 +882,10 @@
     return { value: trimmed, migrated: false, reason: 'user-customized' };
   }
 
-  const DEFAULT_SINGLE_QUESTION_STEP_PROMPT = `做下面题目，一次只回答一道题，分多次回答。
-
-硬性规则：
-1. 本次回复只回答当前尚未回答的第一道题。
-2. 禁止一次性回答多道题。
-3. 禁止把所有题目一次性列出答案。
-4. 禁止输出解释、分析、总结、寒暄。
-5. 回答格式固定为：原题=答案
-6. 回答完当前这一道题后立刻停止，等待下一次继续指令。
-7. 下一次收到继续指令时，再回答下一道尚未回答的题。
-8. 只有当下面所有题目都已经逐题回答完成后，才允许回复终止信号。
-
-题目：
-1+1=
-2+2=
-3+3=
-4+4=
-5+5=
-6+6=`;
-
   function createDefaultAutoConfig() {
     return {
-      listPromptsText: DEFAULT_SINGLE_QUESTION_STEP_PROMPT,
+      // 用户手动模式：不内置/不自动注入默认示例 Prompt
+      listPromptsText: '',
       continuePromptsText: '',
       promptMode: 'continue',
       listProfiles: [],
@@ -918,93 +902,8 @@
   }
 
   function createDefaultPrompts() {
-    return [
-    {
-      title: '分轮答题测试',
-      category: '测试',
-      content: DEFAULT_SINGLE_QUESTION_STEP_PROMPT,
-    },
-    {
-      title: '找僵尸代码',
-      category: '代码',
-      content: `请你作为资深代码审查专家，帮我识别当前代码中的僵尸代码（dead code / unreachable code），并给出可执行清理方案。
-
-请按下面格式输出：
-1. 僵尸代码清单：
-- 文件路径
-- 函数/变量/分支名称
-- 为什么判定为僵尸代码（无引用、永远不会执行、被新逻辑替代等）
-
-2. 风险评估：
-- 删除后是否可能影响运行时行为
-- 是否与反射、动态调用、配置开关、埋点或兼容逻辑有关
-
-3. 清理建议：
-- 可直接删除
-- 建议保留但标记 @deprecated
-- 建议先加日志观察再删除
-
-4. 如果代码量不大，请直接给出清理后的关键代码片段。`,
-    },
-    {
-      title: '找 bug',
-      category: '代码',
-      content: `请根据我提供的代码，整理完整的 bug 定位和修改建议。
-
-要求：
-1. 明确指出可能存在 bug 的位置。
-2. 说明 bug 产生的原因。
-3. 给出修改方案。
-4. 如果代码不长，直接给出修改后的完整代码。
-5. 不要泛泛而谈，要结合具体代码分析。`,
-    },
-    {
-      title: '整理成 Cursor 指令',
-      category: 'Cursor',
-      content: `请根据你在上文中刚刚对我的代码所做的修改、优化和建议，进行整理和汇总。
-
-我的目标不是让你再次修改代码，而是让你把这些已经给出的修改内容，转换成一段适合直接发给 Cursor 的指令。
-
-要求：
-1. 基于你上文已经给出的修改内容来总结，不要重新发散分析。
-2. 把已经修改过的内容、建议修改的内容、以及后续可继续优化的内容，整理成 Cursor 更容易执行的任务描述。
-3. 表达方式要适合 Cursor 使用，强调“基于现有代码继续修改和完善”。
-4. 不要写成聊天式描述，要写成明确的执行指令。
-5. 如果上文已经给出了修改后的代码，也要把对应修改目标一并总结进去。
-6. 输出结果要尽量清楚、简洁、可直接复制给 Cursor。
-7. 只给出对出的要求，不要输出多余的文字说明。
-
-输出格式：
-指令放到代码块中`,
-    },
-    {
-      title: '重复代码审查',
-      category: '代码',
-      content: `请针对我提供的代码进行深度审查，重点识别冗余、重复、可抽象的逻辑。
-
-要求：
-1. 明确指出重复模块、重复函数或重复逻辑块。
-2. 分析这些重复代码对维护性、性能、可读性的影响。
-3. 给出重构方案。
-4. 如果代码不长，直接给出修改后的完整代码。
-5. 不要破坏原有功能和调用方式。`,
-    },
-    {
-      title: '数字计算',
-      category: '默认',
-      content: `math_once_one_by_one
-
-请严格按顺序逐题计算（不要合并题目、不要跳步），每一题都必须给出清晰的中间步骤与最终答案。
-
-要求：
-1. 一次只计算一题，完成后再进入下一题。
-2. 每题输出格式：
-   - 题目：
-   - 过程：
-   - 答案：
-3. 若题目存在歧义，先列出你做的合理假设再计算。`,
-    },
-  ];
+    // 用户手动模式：不内置/不自动注入任何默认 Prompt（包括 math_once_one_by_one / 数字计算）
+    return [];
   }
 
 

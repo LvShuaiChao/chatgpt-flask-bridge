@@ -73,7 +73,7 @@ class UiStatusCompactMixin:
             getattr(session, "remote_chatgpt", {}) or {}
         ) if session else {}
         if remote_binding_enabled(remote):
-            saved_page_no = str(remote.get("page_no") or "").strip()
+            saved_page_no = str(remote.get("page_display_id") or "").strip()
             if saved_page_no and saved_page_no != "-":
                 return saved_page_no
             registry_id = self._page_no_from_registry(
@@ -124,7 +124,7 @@ class UiStatusCompactMixin:
             getattr(session, "remote_chatgpt", {}) or {}
         ) if session else {}
         if remote_binding_enabled(remote):
-            saved_page_no = str(remote.get("page_no") or "").strip()
+            saved_page_no = str(remote.get("page_display_id") or "").strip()
             if saved_page_no and saved_page_no != "-":
                 return saved_page_no
             registry_id = self._page_no_from_registry(

@@ -731,7 +731,7 @@ class PageSendTargetMixin:
                 f"session_id={session_id} "
                 f"old_client_id={(remote.get('client_id') or '-')} "
                 f"old_page_instance_id={(remote.get('page_instance_id') or '-')} "
-                f"old_page_no={str(remote.get('page_no') or remote.get('page_display_id') or '-')} "
+                f"old_page_no={str(remote.get('page_display_id') or '-')} "
                 f"old_conversation_id={(self._remote_conversation_id(remote) or '-')} "
                 f"new_client_id={(fb_raw.get('client_id') or getattr(page, 'client_id', '') or '-')} "
                 f"new_page_instance_id={(fb_raw.get('page_instance_id') or getattr(page, 'page_instance_id', '') or '-')} "
@@ -750,12 +750,7 @@ class PageSendTargetMixin:
             if isinstance(item, dict):
                 old_client = (remote.get("client_id") or "").strip()
                 old_instance = (remote.get("page_instance_id") or "").strip()
-                old_page_no = (
-                    remote.get("page_no")
-                    or remote.get("page_display_id")
-                    or remote.get("temp_page_id")
-                    or ""
-                )
+                old_page_no = (remote.get("page_display_id") or "")
                 old_conv = self._remote_conversation_id(remote) or ""
                 relink_reason = (
                     "before_send_offline_fallback"
@@ -833,7 +828,7 @@ class PageSendTargetMixin:
                         f"session_id={session_id} "
                         f"old_client_id={(remote.get('client_id') or '-')} "
                         f"old_page_instance_id={(remote.get('page_instance_id') or '-')} "
-                        f"old_page_no={str(remote.get('page_no') or remote.get('page_display_id') or '-')} "
+                        f"old_page_no={str(remote.get('page_display_id') or '-')} "
                         f"old_conversation_id={bound_conv_log} "
                         f"reason={reason_code or 'bound_page_offline'}",
                         echo=user_initiated,

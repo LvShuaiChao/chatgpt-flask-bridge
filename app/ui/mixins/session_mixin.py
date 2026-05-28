@@ -1,3 +1,24 @@
+from app.ui.mixins.session_inbound_mixin import SessionInboundMixin
+from app.ui.mixins.session_list_mixin import SessionListMixin
+from app.ui.mixins.session_pending_mixin import SessionPendingMixin
+from app.ui.mixins.session_persistence_mixin import SessionPersistenceMixin
+from app.ui.mixins.session_reply_flash_mixin import SessionReplyFlashMixin
+from app.ui.mixins.session_runtime_mixin import SessionRuntimeMixin
+from app.ui.mixins.session_selection_mixin import SessionSelectionMixin
+
+
+class SessionMixin(
+    SessionRuntimeMixin,
+    SessionSelectionMixin,
+    SessionListMixin,
+    SessionPendingMixin,
+    SessionInboundMixin,
+    SessionReplyFlashMixin,
+    SessionPersistenceMixin,
+):
+    SESSION_RENDER_TEXT_LIMIT = 12000
+    SESSION_LOAD_RECENT_MESSAGES = 24
+
 import hashlib
 import json
 import logging
@@ -937,75 +958,6 @@ class SessionMixin:
                 return title
         return session.title or "新对话"
 
-    def _session_has_pending_assistant_reply(self, session):
-        from app.models import is_waiting_placeholder_message
-
-        if not session:
-            return False
-
-        messages_by_id = {
-            (getattr(message, "message_id", "") or "").strip(): message
-            for message in session.messages
-            if (getattr(message, "message_id", "") or "").strip()
-        }
-
-        for message in reversed(session.messages):
-            if not getattr(message, "visible_in_chat", True):
-                continue
-
-            if message.role != "assistant":
-                continue
-
-            # queued 消息的 assistant 占位不应算 pending
-            msg_source = (getattr(message, "message_source", "") or "").strip()
-            if msg_source in ("queued_placeholder", "local_queue"):
-                continue
-
-            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
-            if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
-                continue
-            if not bridge_id:
-                parent_id = (getattr(message, "parent_message_id", "") or "").strip()
-                parent = messages_by_id.get(parent_id)
-                parent_bridge_id = (
-                    (getattr(parent, "bridge_message_id", "") or "").strip()
-                    if parent is not None
-                    else ""
-                )
-                parent_source = (
-                    (parent.message_source or "").strip()
-                    if parent is not None
-                    else ""
-                )
-                parent_ui_status = (
-                    (getattr(parent, "ui_status", "") or "").strip()
-                    if parent is not None
-                    else ""
-                )
-                # parent 是 queued 消息且没有 bridge_message_id，不算 pending
-                if (
-                    parent is not None
-                    and not parent_bridge_id
-                    and parent_source in ("local_send", "local_queue")
-                ):
-                    continue
-                # parent 的 ui_status 是队列状态，不算 pending
-                if parent is not None and parent_ui_status in USER_SEND_PENDING_STATUSES:
-                    continue
-                if parent is not None and not parent_bridge_id:
-                    parent_send_failed = parent_ui_status in (
-                        "发送失败",
-                        "failed",
-                        "send_failed",
-                    )
-                    if parent_send_failed:
-                        continue
-
-            if is_waiting_placeholder_message(message):
-                return True
-
-        return False
-
     def _session_pending_messages_index(self, session):
         return {
             (getattr(message, "message_id", "") or "").strip(): message
@@ -1507,111 +1459,6 @@ class SessionMixin:
             ).strip() or "unknown",
             "can_accept_input": bool(client_info.get("can_accept_input", True)),
         }
-
-    def _session_preview_text(self, session):
-        ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
-        response_state = self._session_bound_response_state(session)
-        has_pending = self._session_has_pending_assistant_reply(session)
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-
-        bind_list_state = self._session_bind_list_state(
-            session,
-            getattr(self._bridge_ui, 'last_bridge_status', None),
-        )
-
-        if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
-            return f"{ts} · 等待首页上线..."
-
-        if self._auto_bind.pending_session_id == session.session_id:
-            return f"{ts} · 等待绑定..."
-
-        if has_pending:
-            if hasattr(self, "_session_bootstrap_claim_pending") and self._session_bootstrap_claim_pending(session):
-                elapsed = ""
-                if hasattr(self, "_session_waiting_preview_suffix"):
-                    elapsed = self._session_waiting_preview_suffix(session)
-                from app.constants import BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS
-
-                pending_elapsed = 0.0
-                if hasattr(self, "_session_pending_elapsed_sec"):
-                    pending_elapsed = float(self._session_pending_elapsed_sec(session) or 0)
-                if pending_elapsed >= float(BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS):
-                    if elapsed:
-                        return f"{ts} · 首页未领取 {elapsed}"
-                    return f"{ts} · 首页未领取..."
-                if elapsed:
-                    return f"{ts} · 等待首页领取 {elapsed}"
-                return f"{ts} · 等待首页领取..."
-            if hasattr(self, "_session_bootstrap_message_id"):
-                bridge_id = self._session_bootstrap_message_id(session)
-                if bridge_id and hasattr(self, "_bootstrap_message_delivery_phase"):
-                    if self._bootstrap_message_delivery_phase(bridge_id) == "delivered":
-                        elapsed = ""
-                        if hasattr(self, "_session_waiting_preview_suffix"):
-                            elapsed = self._session_waiting_preview_suffix(session)
-                        if elapsed:
-                            return f"{ts} · 页面已领取 {elapsed}"
-                        return f"{ts} · 页面已领取..."
-            elapsed = ""
-            if hasattr(self, "_session_waiting_preview_suffix"):
-                elapsed = self._session_waiting_preview_suffix(session)
-            if elapsed:
-                return f"{ts} · 等待回复 {elapsed}"
-            return f"{ts} · 等待回复..."
-
-        if response_state["is_responding"]:
-            return f"{ts} · 正在回答..."
-
-        if bind_list_state == "bound_offline":
-            return f"{ts} · 已绑定离线"
-
-        if bind_list_state == "bind_mismatch":
-            return f"{ts} · 绑定异常"
-
-        if bind_list_state == "prebound_home":
-            return f"{ts} · 等待进入对话"
-
-        if bind_list_state == "waiting_bound_conversation":
-            return f"{ts} · 等待打开绑定页"
-
-        if bind_list_state == "waiting_conversation_created":
-            return f"{ts} · 创建中"
-
-        text = self._latest_visible_chat_message_text(session)
-        if text:
-            text = text.replace("\n", " ")
-            if len(text) > 36:
-                text = text[:36] + "…"
-            return f"{ts} · {text}"
-
-        if bind_list_state == "bound_online":
-            return f"{ts} · 已绑定在线"
-
-        if remote_binding_enabled(remote) and (remote.get("client_id") or "").strip():
-            return f"{ts} · 已绑定离线"
-
-        return ts
-
-    def _session_list_visual_signature(self):
-        self._ensure_session_order()
-        rows = []
-        for sid in self._tab_session_ids:
-            session = self._sessions.get(sid)
-            if not session:
-                continue
-            bind_state = self._session_bind_list_state(session, self._bridge_ui.last_bridge_status)
-            preview = self._session_preview_text(session)
-            pending = self._session_has_pending_assistant_reply(session)
-            reply_flash_phase = self._session_reply_done_flash_phase(session)
-            rows.append((
-                sid,
-                self._session_list_title_text(session),
-                preview,
-                bind_state,
-                pending,
-                reply_flash_phase,
-            ))
-        return tuple(rows)
 
     def _session_item_is_current(self, session_id):
         current_id = getattr(self, "_current_session_id", "") or ""
@@ -2806,103 +2653,6 @@ class SessionMixin:
             parent_message_id=item.get("parent_message_id", ""),
             visible_in_chat=bool(item.get("visible_in_chat", True)),
         )
-    def _session_to_dict(self, session):
-        from app.utils.legacy_cleanup import (
-            SESSION_MESSAGE_ALLOWED_FIELDS,
-            assert_no_legacy_fields,
-        )
-
-        if hasattr(self, "_normalize_session_for_persistence"):
-            return self._normalize_session_for_persistence(session)
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        assert_no_remote_chatgpt_invalid_fields(
-            remote,
-            owner=f"GUI save session.remote_chatgpt session_id={session.session_id}",
-        )
-        compose_draft = ""
-        drafts_map = getattr(self, "_session_compose_drafts", None) or {}
-        raw = drafts_map.get(session.session_id, "")
-        if isinstance(raw, str) and raw.strip():
-            compose_draft = raw
-        messages = [self._message_to_dict(item) for item in session.messages]
-        for index, message in enumerate(messages):
-            assert_no_legacy_fields(
-                message,
-                owner=f"GUI save session.messages session_id={session.session_id} index={index}",
-                allowed_fields=SESSION_MESSAGE_ALLOWED_FIELDS,
-                strict_unknown=True,
-            )
-        return {
-            "session_id": session.session_id,
-            "title": session.title,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-            "task_type": session.task_type,
-            "context_mode": session.context_mode,
-            "summary": session.summary,
-            "pinned_context": session.pinned_context,
-            "remote_chatgpt": dict(remote),
-            "web_snapshot": dict(getattr(session, "web_snapshot", {}) or {}),
-            "reply_waiting_since": 0,
-            "compose_draft": compose_draft,
-            "messages": messages,
-        }
-    def _session_from_dict(self, data):
-        if not isinstance(data, dict):
-            raise ValueError(f"session item must be dict, got {type(data).__name__}")
-
-        messages = []
-        for index, item in enumerate(data.get("messages") or []):
-            if not isinstance(item, dict):
-                self._append_log(
-                    f"[SESSION][MESSAGE_SKIP_INVALID_ITEM] "
-                    f"session_id={data.get('session_id') or '-'} "
-                    f"index={index} type={type(item).__name__}",
-                    echo=True,
-                )
-                continue
-            try:
-                normalized_message = self._normalize_legacy_message_dict(item)
-                messages.append(self._message_from_dict(normalized_message))
-            except Exception as error:
-                logger.exception(
-                    "[SESSION][MESSAGE_LOAD_FAILED] message_index=%s error_type=%s error=%s item_keys=%s",
-                    index,
-                    type(error).__name__,
-                    error,
-                    list(item.keys()) if isinstance(item, dict) else type(item).__name__,
-                )
-        remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
-        session = ChatSession(
-            session_id=data.get("session_id") or str(uuid.uuid4()),
-            title=data.get("title") or "新对话",
-            created_at=self._session_float_field(data, "created_at"),
-            updated_at=self._session_float_field(data, "updated_at"),
-            task_type=data.get("task_type", ""),
-            context_mode=data.get("context_mode", ""),
-            summary=data.get("summary", ""),
-            pinned_context=data.get("pinned_context", ""),
-            remote_chatgpt=remote,
-            web_snapshot=data.get("web_snapshot") or {},
-            messages=messages,
-            reply_waiting_since=0,
-        )
-        session.trim_messages()
-        # 恢复该会话的输入框草稿
-        compose_draft = data.get("compose_draft", "")
-        if isinstance(compose_draft, str) and compose_draft.strip():
-            session_id = session.session_id
-            drafts = getattr(self, "_session_compose_drafts", None)
-            if drafts is None:
-                drafts = {}
-                self._session_compose_drafts = drafts
-            drafts[session_id] = compose_draft
-            logger.info(
-                "[SESSION][COMPOSE_DRAFT_RESTORE] session_id=%s length=%d",
-                session_id,
-                len(compose_draft),
-            )
-        return session
 
     def _schedule_save_sessions_to_disk(self, delay_ms=800):
         """防抖保存：合并短时间内的多次全量 JSON 写入。"""
@@ -2925,13 +2675,6 @@ class SessionMixin:
             self._session_save_timer = timer
         timer.stop()
         timer.start(delay_ms)
-
-    def _flush_pending_sessions_save(self):
-        """立即落盘：先取消待执行的防抖保存，再写入磁盘。"""
-        timer = getattr(self, "_session_save_timer", None)
-        if timer is not None and timer.isActive():
-            timer.stop()
-        self._save_sessions_to_disk()
 
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:

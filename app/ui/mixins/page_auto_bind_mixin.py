@@ -72,10 +72,7 @@ class PageAutoBindMixin:
         remote = normalize_remote_chatgpt(remote)
         if self._remote_bind_state(remote) != BIND_STATE_PREBOUND_HOME:
             return False
-        temp_page_id = (
-            (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-            .strip()
-        )
+        temp_page_id = (remote.get("page_display_id") or "").strip()
         status = bridge_status if bridge_status is not None else self._bridge_ui.last_bridge_status
         from app.utils.page_snapshot import PageRegistry
         from app.utils.page_status import is_page_online
@@ -86,7 +83,7 @@ class PageAutoBindMixin:
 
         page_instance_id = (remote.get("page_instance_id") or "").strip()
         client_id = (remote.get("client_id") or "").strip()
-        page_no = (remote.get("page_no") or temp_page_id or "").strip()
+        page_no = temp_page_id
 
         if page_instance_id:
             page = reg.get_by_identity(client_id, page_instance_id)
@@ -1169,11 +1166,7 @@ class PageAutoBindMixin:
                         echo=True,
                     )
                     return True
-            temp_page_id = (
-                remote.get("temp_page_id")
-                or remote.get("page_display_id")
-                or ""
-            ).strip()
+            temp_page_id = (remote.get("page_display_id") or "").strip()
             if temp_page_id:
                 return self._wait_for_existing_temp_home_page_online(
                     session, temp_page_id
@@ -1920,10 +1913,7 @@ class PageAutoBindMixin:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             if not self._is_temp_home_bound_state(self._remote_bind_state(remote)):
                 continue
-            temp_page_id = (
-                (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-                .strip()
-            )
+            temp_page_id = (remote.get("page_display_id") or "").strip()
             bound_client_id = (remote.get("client_id") or "").strip()
             bound_instance_id = (remote.get("page_instance_id") or "").strip()
             old_url = (remote.get("url") or "https://chatgpt.com/").strip()

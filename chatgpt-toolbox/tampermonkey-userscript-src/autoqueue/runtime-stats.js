@@ -16,6 +16,8 @@
       lastTaskDurationMs: 0,
       completedTaskDurationsMs: [],
       completedTaskCount: 0,
+      failedTaskCount: 0,
+      stoppedTaskCount: 0,
 
       totalTaskCount: 0,
       running: false,
@@ -71,6 +73,8 @@
         `taskTitle=${payload.taskTitle || '-'}`,
         `durationMs=${payload.durationMs != null ? payload.durationMs : '-'}`,
         `completedTaskCount=${payload.completedTaskCount != null ? payload.completedTaskCount : runtimeStats.completedTaskCount}`,
+        `failedTaskCount=${payload.failedTaskCount != null ? payload.failedTaskCount : runtimeStats.failedTaskCount}`,
+        `stoppedTaskCount=${payload.stoppedTaskCount != null ? payload.stoppedTaskCount : runtimeStats.stoppedTaskCount}`,
         `totalTaskCount=${payload.totalTaskCount != null ? payload.totalTaskCount : runtimeStats.totalTaskCount}`,
         `averageDurationMs=${payload.averageDurationMs != null ? payload.averageDurationMs : getAverageDurationMs()}`,
         `estimatedRemainingMs=${payload.estimatedRemainingMs != null ? payload.estimatedRemainingMs : getEstimatedRemainingMs()}`,
@@ -336,6 +340,8 @@
       if (!preserveAverage) {
         runtimeStats.completedTaskDurationsMs = [];
         runtimeStats.completedTaskCount = 0;
+        runtimeStats.failedTaskCount = 0;
+        runtimeStats.stoppedTaskCount = 0;
         runtimeStats.successRuns = 0;
         runtimeStats.failedRuns = 0;
       }
@@ -346,6 +352,8 @@
       if (!settings.preserveRuntimeStatsAverage) {
         runtimeStats.completedTaskDurationsMs = [];
         runtimeStats.completedTaskCount = 0;
+        runtimeStats.failedTaskCount = 0;
+        runtimeStats.stoppedTaskCount = 0;
         runtimeStats.lastTaskDurationMs = 0;
         runtimeStats.successRuns = 0;
         runtimeStats.failedRuns = 0;
@@ -367,24 +375,35 @@
     }
 
     function onBatchStop(reason = '') {
+      const stopReason = String(reason || 'batch-stopped');
       if (runtimeStats.running && runtimeStats.batchStartedAt > 0) {
         runtimeStats.batchEndedAt = Date.now();
       }
       runtimeStats.running = false;
 
       if (runtimeStats.currentTaskStartedAt > 0) {
-        logRuntime('TASK_FAIL', {
+        const durationMs = Date.now() - runtimeStats.currentTaskStartedAt;
+        runtimeStats.lastTaskDurationMs = durationMs;
+        if (stopReason === 'all-done') {
+          runtimeStats.failedRuns += 0;
+        } else if (stopReason.includes('stop') || stopReason.includes('cancel')) {
+          runtimeStats.stoppedTaskCount += 1;
+        } else {
+          runtimeStats.failedTaskCount += 1;
+          runtimeStats.failedRuns += 1;
+        }
+        logRuntime(stopReason.includes('stop') || stopReason.includes('cancel') ? 'TASK_STOP' : 'TASK_FAIL', {
           taskId: runtimeStats.currentTaskId,
           taskTitle: runtimeStats.currentTaskTitle,
-          reason: reason || 'batch-stopped',
-          durationMs: Date.now() - runtimeStats.currentTaskStartedAt,
+          reason: stopReason,
+          durationMs,
         });
         runtimeStats.currentTaskStartedAt = 0;
         runtimeStats.currentTaskId = '';
         runtimeStats.currentTaskTitle = '';
       }
 
-      logRuntime('BATCH_STOP', { reason: reason || '-' });
+      logRuntime('BATCH_STOP', { reason: stopReason || '-' });
       renderRuntimeStats(true);
     }
 
@@ -410,13 +429,13 @@
       if (runtimeStats.currentTaskStartedAt > 0) {
         const durationMs = Date.now() - runtimeStats.currentTaskStartedAt;
         runtimeStats.lastTaskDurationMs = durationMs;
-        runtimeStats.completedTaskDurationsMs.push(durationMs);
-        runtimeStats.completedTaskCount += 1;
+        runtimeStats.failedTaskCount += 1;
         runtimeStats.failedRuns += 1;
         runtimeStats.currentTaskStartedAt = 0;
         runtimeStats.currentTaskId = '';
         runtimeStats.currentTaskTitle = '';
       } else {
+        runtimeStats.failedTaskCount += 1;
         runtimeStats.failedRuns += 1;
       }
 
@@ -466,6 +485,8 @@
         totalRuns: runtimeStats.completedTaskCount,
         successRuns: runtimeStats.successRuns,
         failedRuns: runtimeStats.failedRuns,
+        failedTaskCount: runtimeStats.failedTaskCount,
+        stoppedTaskCount: runtimeStats.stoppedTaskCount,
       };
     }
 

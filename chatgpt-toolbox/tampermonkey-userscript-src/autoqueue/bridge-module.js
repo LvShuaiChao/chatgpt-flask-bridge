@@ -693,6 +693,46 @@
         payload.payload.identity_mode = mode;
       }
 
+      // Bridge backend is strict about top-level schema fields (unknown_fields_not_allowed).
+      // Apply allowlist filtering for action=report only, to avoid breaking other actions.
+      if (String(payload.action || '').trim() === 'report') {
+        const REPORT_ALLOWED_TOP_LEVEL_FIELDS = new Set([
+          // Keep in sync with app/utils/legacy_cleanup.py PAGE_REGISTRY_ALLOWED_FIELDS
+          'action', 'event', 'source', 'test_connection', 'debug_status', 'message_id',
+          'session_id', 'turn_id', 'role', 'content', 'content_len', 'success', 'detail',
+          'reason', 'created_at', 'payload', 'client_id', 'page_instance_id', 'page_display_id',
+          'conversation_id', 'url', 'page_type', 'page_title', 'bind_request_id', 'script_version',
+          'upload_bridge_supported', 'upload_bridge_version', 'is_top_frame', 'visibility_state',
+          'has_focus', 'heartbeat_alive', 'pathname', 'last_seen', 'last_poll_at', 'last_heartbeat_at',
+          'is_responding', 'response_state', 'response_state_reason', 'response_state_at',
+          'can_accept_input', 'can_send_now', 'url_syncable', 'conversation_syncable', 'combo',
+          'event_at', 'identity_error',
+          'last_dom_mutation_at', 'last_reply_watch_at', 'pending_reply_active', 'pending_reply_started_at',
+          'pending_reply_text_length', 'browser_hidden', 'browser_visibility_state', 'browser_has_focus',
+          'browser_timer_drift_ms', 'browser_probably_throttled',
+        ]);
+
+        const filtered = {};
+        const kept = [];
+        const dropped = [];
+        Object.keys(payload).forEach((key) => {
+          if (REPORT_ALLOWED_TOP_LEVEL_FIELDS.has(key)) {
+            filtered[key] = payload[key];
+            kept.push(key);
+          } else {
+            dropped.push(key);
+          }
+        });
+
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            `[BRIDGE][REPORT_FILTER] kept=${kept.join('|') || '-'} dropped=${dropped.join('|') || '-'}`,
+          );
+        }
+
+        return filtered;
+      }
+
       return payload;
     }
 

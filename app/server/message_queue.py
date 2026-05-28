@@ -2124,6 +2124,62 @@ def _log_finalized(msg, message_id, event):
     )
 
 
+PAGE_REGISTRY_REPORT_META_FIELDS = frozenset(
+    {
+        "client_id",
+        "page_instance_id",
+        "page_display_id",
+        "url",
+        "page_title",
+        "page_type",
+        "conversation_id",
+        "pathname",
+        "bind_request_id",
+        "script_version",
+        "upload_bridge_supported",
+        "upload_bridge_version",
+        "is_top_frame",
+        "visibility_state",
+        "has_focus",
+        "heartbeat_alive",
+        "last_seen",
+        "last_poll_at",
+        "last_heartbeat_at",
+        "is_responding",
+        "response_state",
+        "response_state_reason",
+        "response_state_at",
+        "can_accept_input",
+        "can_send_now",
+        "url_syncable",
+        "conversation_syncable",
+        "event_at",
+        "identity_error",
+        "last_dom_mutation_at",
+        "last_reply_watch_at",
+        "pending_reply_active",
+        "pending_reply_started_at",
+        "pending_reply_text_length",
+        "browser_hidden",
+        "browser_visibility_state",
+        "browser_has_focus",
+        "browser_timer_drift_ms",
+        "browser_probably_throttled",
+    }
+)
+
+
+def _build_page_registry_report_meta(body, payload=None):
+    meta = {}
+    for source in (body, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in PAGE_REGISTRY_REPORT_META_FIELDS:
+            if key in source:
+                meta[key] = source.get(key)
+    return meta
+
+
 def _handle_report(body):
     client_id = (body.get("client_id") or "").strip()
     event = body.get("event") or "info"
@@ -2138,9 +2194,7 @@ def _handle_report(body):
             old_entry = dict(st._tampermonkey_pages.get(registry_key) or {})
         old_url = page_url_from(old_entry)
         old_conv = (old_entry.get("conversation_id") or "").strip()
-        merge_meta = dict(body)
-        if isinstance(payload, dict):
-            merge_meta.update(payload)
+        merge_meta = _build_page_registry_report_meta(body, payload)
         _touch_tampermonkey(merge_meta, action="report")
         new_url = page_url_from(merge_meta)
         new_conv = (merge_meta.get("conversation_id") or "").strip()
@@ -2163,9 +2217,7 @@ def _handle_report(body):
         _notify_status()
         return {"ok": True}
     if event == "focus_state":
-        merge_meta = dict(body)
-        if isinstance(payload, dict):
-            merge_meta.update(payload)
+        merge_meta = _build_page_registry_report_meta(body, payload)
         _touch_tampermonkey(merge_meta, action="report")
         entry = _registry_entry_for_client(
             client_id,
@@ -2187,7 +2239,8 @@ def _handle_report(body):
         )
         _notify_status()
         return {"ok": True}
-    _touch_tampermonkey(body, action="report")
+    merge_meta = _build_page_registry_report_meta(body, payload)
+    _touch_tampermonkey(merge_meta, action="report")
     if not client_id:
         _log(f"[BRIDGE][REPORT] 拒绝：缺少 client_id event={event}")
         return {"ok": False, "error": "缺少 client_id"}

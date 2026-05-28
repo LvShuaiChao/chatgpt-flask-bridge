@@ -86,7 +86,16 @@ def api_bridge():
         strict_unknown=True,
     )
     if legacy_err:
-        return jsonify(legacy_err[0]), legacy_err[1]
+        error_body, status_code = legacy_err
+        _log(
+            "[BRIDGE][FIELD_REJECTED][API] "
+            f"action={action or '-'} "
+            f"context={error_body.get('context') or 'api_bridge'} "
+            f"error={error_body.get('error') or '-'} "
+            f"unknown_fields={error_body.get('unknown_fields') or []} "
+            f"legacy_fields={error_body.get('legacy_fields') or []}"
+        )
+        return jsonify(error_body), status_code
     log_tm_to_server_full(body)
     if body.get("test_connection"):
         _log(

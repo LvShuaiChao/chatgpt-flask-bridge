@@ -2215,12 +2215,7 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         ):
             return bind_state.lower()
         if self._is_temp_home_bound_state(bind_state):
-            temp_page_id = (
-                remote.get("temp_page_id")
-                or remote.get("page_display_id")
-                or remote.get("page_no")
-                or ""
-            ).strip()
+            temp_page_id = (remote.get("page_display_id") or "").strip()
             if temp_page_id and hasattr(self, "_resolve_temp_home_send_target"):
                 temp_info = self._resolve_temp_home_send_target(session, remote)
                 if temp_info.get("matched"):
