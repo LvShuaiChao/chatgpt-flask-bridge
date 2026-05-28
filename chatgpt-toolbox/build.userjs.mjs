@@ -172,8 +172,9 @@ function assembleUserscript() {
   assertNoMojibake(body, 'assembled-source-body');
 
   const bundled = '(function () {\n  \'use strict\';\n\n' + body + '})();';
+  const bundledSanitized = bundled.replace(/\uFEFF/g, '');
 
-  const asciiBundled = escapeNonAsciiForJsSource(bundled);
+  const asciiBundled = escapeNonAsciiForJsSource(bundledSanitized);
 
   return [header, buildGeneratedNotice(), asciiBundled, ''].join('\n\n');
 }
