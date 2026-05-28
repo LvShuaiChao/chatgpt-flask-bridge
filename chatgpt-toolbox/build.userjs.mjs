@@ -25,6 +25,15 @@ const MOJIBAKE_MARKERS = [
   '缁',
 ];
 
+const OUTPUT_POLLUTION_MARKERS = [
+  '\uFFFD',
+  '锟斤拷',
+  'ï¿½',
+  '[QUESTION_PLACEHOLDER]',
+];
+
+const BAD_QUESTION_MARK_RE = /\?{3,}/;
+
 function loadBuildConfig() {
   if (!fs.existsSync(ORDER_FILE)) {
     throw new Error('.build-order.json not found at ' + ORDER_FILE);
@@ -187,6 +196,173 @@ function assertNoMojibake(text, label) {
   }
 }
 
+function toLineColumn(text, index) {
+  let line = 1;
+  let column = 1;
+
+  for (let i = 0; i < index && i < text.length; i += 1) {
+    if (text[i] === '\n') {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+
+  return { line, column };
+}
+
+function scanJsStringLiterals(text, onHit) {
+  let i = 0;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  function isEscaped(pos) {
+    let backslashes = 0;
+    for (let k = pos - 1; k >= 0 && text[k] === '\\'; k -= 1) backslashes += 1;
+    return backslashes % 2 === 1;
+  }
+
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      i += 1;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === '\'' || ch === '"') {
+      const quote = ch;
+      const start = i;
+      i += 1;
+      let value = '';
+      while (i < text.length) {
+        const c = text[i];
+        if (c === quote && !isEscaped(i)) break;
+        value += c;
+        i += 1;
+      }
+      onHit({ start, value });
+      i += 1;
+      continue;
+    }
+
+    if (ch === '`') {
+      i += 1;
+      let chunkStart = i;
+      let braceDepth = 0;
+      let inExpr = false;
+
+      while (i < text.length) {
+        const c = text[i];
+        const n = text[i + 1];
+
+        if (!inExpr) {
+          if (c === '`' && !isEscaped(i)) {
+            onHit({ start: chunkStart, value: text.slice(chunkStart, i) });
+            i += 1;
+            break;
+          }
+
+          if (c === '$' && n === '{' && !isEscaped(i)) {
+            onHit({ start: chunkStart, value: text.slice(chunkStart, i) });
+            inExpr = true;
+            braceDepth = 1;
+            i += 2;
+            continue;
+          }
+
+          i += 1;
+          continue;
+        }
+
+        if (c === '{') {
+          braceDepth += 1;
+          i += 1;
+          continue;
+        }
+
+        if (c === '}') {
+          braceDepth -= 1;
+          i += 1;
+          if (braceDepth <= 0) {
+            inExpr = false;
+            chunkStart = i;
+          }
+          continue;
+        }
+
+        i += 1;
+      }
+
+      continue;
+    }
+
+    i += 1;
+  }
+}
+
+function failGeneratedOutput(filePath, reason, index, fullText) {
+  const lc = toLineColumn(fullText, index);
+  const snip = fullText.slice(Math.max(0, index - 40), Math.min(fullText.length, index + 40));
+
+  console.error(
+    [
+      reason,
+      'file=' + filePath,
+      'line=' + lc.line,
+      'column=' + lc.column,
+      'snippet=' + JSON.stringify(snip),
+    ].join(' '),
+  );
+  process.exit(1);
+}
+
+function assertGeneratedOutputEncoding(output, filePath) {
+  for (const marker of OUTPUT_POLLUTION_MARKERS) {
+    const idx = output.indexOf(marker);
+    if (idx !== -1) {
+      const reason = marker === '[QUESTION_PLACEHOLDER]'
+        ? '[BUILD_ENCODING][BAD_PLACEHOLDER]'
+        : '[BUILD_ENCODING][BAD_MARKER]';
+      failGeneratedOutput(filePath, reason, idx, output);
+    }
+  }
+
+  scanJsStringLiterals(output, (lit) => {
+    const questionMatch = lit.value.match(BAD_QUESTION_MARK_RE);
+    if (!questionMatch) return;
+
+    const hitIdxInValue = lit.value.indexOf(questionMatch[0]);
+    const hitIdx = lit.start + hitIdxInValue;
+    failGeneratedOutput(filePath, '[BUILD_ENCODING][BAD_QUESTION_MARKS]', hitIdx, output);
+  });
+}
+
 function escapeNonAsciiForJsSource(text) {
   let output = '';
 
@@ -287,16 +463,18 @@ function writeOutput() {
 
   const output = assembleUserscript();
   assertNoMojibake(output, 'generated-userscript');
+  assertGeneratedOutputEncoding(output, OUT_FILE);
 
   fs.writeFileSync(OUT_FILE, output, 'utf8');
-  fs.writeFileSync(REPO_ROOT_CLIENT, output, 'utf8');
-
   checkJavaScriptSyntax(OUT_FILE);
+
+  fs.writeFileSync(REPO_ROOT_CLIENT, output, 'utf8');
   checkJavaScriptSyntax(REPO_ROOT_CLIENT);
 
   console.log('[BUILD][OK] Wrote ' + OUT_FILE);
   console.log('[BUILD][OK] Synced ' + REPO_ROOT_CLIENT);
   console.log('[BUILD][OK] JS body escaped to ASCII-safe unicode literals');
+  console.log('[BUILD][OK] Generated output encoding validation passed');
 }
 
 function watch() {

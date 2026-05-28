@@ -6,6 +6,8 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const TARGETS = [
   path.join(ROOT, 'tampermonkey-userscript-src'),
   path.join(ROOT, 'build.userjs.mjs'),
+  path.join(ROOT, 'dist', 'client.user.js'),
+  path.join(ROOT, '..', 'client.user.js'),
   path.join(ROOT, '..', 'app'),
   path.join(ROOT, '..', 'GUI.py'),
 ];
@@ -355,8 +357,12 @@ function checkFile(filePath) {
   // Only block consecutive question marks in JS sources (string/template literals).
   // We intentionally do NOT scan full file text to avoid false positives like URL/query params.
   const ext = path.extname(filePath).toLowerCase();
-  const isUserscriptSource = filePath.includes('tampermonkey-userscript-src');
-  if (isUserscriptSource && (ext === '.js' || ext === '.mjs')) {
+  const normalizedPath = filePath.split(path.sep).join('/');
+  const isJsLiteralScanTarget =
+    normalizedPath.includes('tampermonkey-userscript-src/')
+    || normalizedPath.endsWith('/dist/client.user.js')
+    || normalizedPath.endsWith('/client.user.js');
+  if (isJsLiteralScanTarget && (ext === '.js' || ext === '.mjs')) {
     checkBadQuestionMarksInJsLiterals(filePath, text);
   }
 }

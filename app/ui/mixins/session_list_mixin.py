@@ -6,15 +6,12 @@ logger = logging.getLogger(__name__)
 from app.constants import (
     ASSISTANT_WAIT_TEXTS,
     ASSISTANT_REPLY_PENDING_STATUSES,
-    USER_SEND_PENDING_STATUSES,
     SESSION_BIND_LIST_STYLES,
     UNBOUND_SESSION_SEND_HINT,
 )
 from app.models import (
     remote_binding_enabled,
     BIND_STATE_WAITING_HOME,
-    ChatSession,
-    default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id

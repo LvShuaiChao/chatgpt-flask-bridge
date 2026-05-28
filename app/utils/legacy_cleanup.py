@@ -8,7 +8,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from app.utils.legacy_fields import (
     LEGACY_ASSERT_FIELD_NAMES,
     LEGACY_CLEANUP_FIELD_NAMES,
-    LEGACY_FIELD_NAMES as ALL_LEGACY_FIELD_NAMES,
 )
 
 LEGACY_FIELD_NAMES = LEGACY_CLEANUP_FIELD_NAMES | frozenset({"title"})

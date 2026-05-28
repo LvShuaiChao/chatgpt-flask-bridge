@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 
 from app.models import (
     remote_binding_enabled,
-    BIND_MODE_CONVERSATION,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_UNBOUND,
     normalize_remote_chatgpt,

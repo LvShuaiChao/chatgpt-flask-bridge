@@ -73,6 +73,8 @@ class SessionSaveWorker(QThread):
 
 
 class CursorTaskCreateWorker(QThread):
+    # TODO(dead-code-observe): CursorTaskCreateWorker 当前没有实例化入口。
+    # 如果连续两个版本全项目无 CursorTaskCreateWorker(...) 调用，可删除该类。
     result_ready = pyqtSignal(object)
 
     def __init__(

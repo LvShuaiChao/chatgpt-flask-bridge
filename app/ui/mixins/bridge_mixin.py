@@ -2630,41 +2630,6 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
             )
             complete_gui_dispatch(action_id, result)
             return
-            from app.server.system_hotkey import execute_system_hotkey
-
-            combo = str((payload or {}).get("combo") or "").strip()
-            if not combo:
-                result = {
-                    "ok": False,
-                    "error": "快捷键不能为空",
-                    "code": "INVALID_HOTKEY",
-                }
-            else:
-                self._append_log(
-                    f"[SYSTEM_HOTKEY][EXEC] combo={combo}",
-                    echo=True,
-                )
-                result = execute_system_hotkey(
-                    combo,
-                    source="gui_dispatch",
-                )
-                if result.get("ok"):
-                    self._append_log(
-                        "[SYSTEM_HOTKEY][DONE] "
-                        f"combo={result.get('hotkey') or combo} "
-                        f"keys={result.get('keys')}",
-                        echo=True,
-                    )
-                else:
-                    self._append_log(
-                        "[SYSTEM_HOTKEY][FAILED] "
-                        f"combo={combo} "
-                        f"code={result.get('code') or '-'} "
-                        f"error={result.get('error') or '-'}",
-                        echo=True,
-                    )
-            complete_gui_dispatch(action_id, result)
-            return
         complete_gui_dispatch(
             action_id,
             {

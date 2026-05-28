@@ -470,6 +470,9 @@
       const task = ensureCopyHotkeyUploadVerifyLoopTask();
       task.cycleIndex = value;
       copyHotkeyUploadVerifyLoopCount = value;
+      if (reason !== 'retry-current-round') {
+        closedLoopContinueState.hotkeyContinueSendFailCount = 0;
+      }
       if (reason) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][ROUND_SYNC] round=${value} reason=${reason}`);
       }
@@ -529,6 +532,8 @@
       doneVerificationRound: 0,
       homeNavigationRunning: false,
       lastHomeNavigationRound: 0,
+      sendFailedStreak: 0,
+      hotkeyContinueSendFailCount: 0,
     };
 
     const autoContinueUnifiedHomeState = {
@@ -2709,6 +2714,8 @@
       closedLoopContinueState.doneVerificationRound = 0;
       closedLoopContinueState.homeNavigationRunning = false;
       closedLoopContinueState.lastHomeNavigationRound = 0;
+      closedLoopContinueState.sendFailedStreak = 0;
+      closedLoopContinueState.hotkeyContinueSendFailCount = 0;
       copyHotkeyUploadVerifyLoopStopRequested = false;
 
       const runId = closedLoopContinueState.runId;
@@ -3278,7 +3285,110 @@
           currentSubtask: useHotkey ? 'copy_hotkey_continue' : 'copy_continue',
         });
         if (useHotkey) {
-          result = await runClosedLoopContinueOnce(`closed-loop-every5-${round}`, closedLoopFlowOptions);
+          const sourceText = `closed-loop-every5-${round}`;
+          const context = buildCopyHotkeyContinueContext(sourceText, closedLoopFlowOptions);
+          const copyStage = await copyLastAssistantReplyForContinue(
+            sourceText,
+            closedLoopFlowOptions,
+            context,
+          );
+          if (!copyStage || copyStage.ok === false) {
+            result = copyStage || {
+              ok: false,
+              reason: 'copy-failed',
+              source: sourceText,
+              loopMode: true,
+              copied: false,
+              hotkeySent: false,
+              continueSent: false,
+              assistantMessageKey: '',
+            };
+          } else if (copyStage.assistantDoneSignal === true || copyStage.assistantBatchTerminalStop === true) {
+            result = copyStage;
+          } else {
+            const hotkeyStage = await triggerContinueHotkeyForContinue(
+              sourceText,
+              closedLoopFlowOptions,
+              context,
+              copyStage,
+            );
+            if (!hotkeyStage || hotkeyStage.ok === false) {
+              result = {
+                ok: false,
+                reason: hotkeyStage && hotkeyStage.reason ? hotkeyStage.reason : 'hotkey-failed',
+                detail: hotkeyStage && hotkeyStage.detail ? hotkeyStage.detail : '',
+                source: sourceText,
+                loopMode: true,
+                copied: true,
+                hotkeySent: false,
+                continueSent: false,
+                assistantMessageKey: copyStage.assistantMessageKey || '',
+              };
+            } else {
+              await focusComposerForClosedLoop(sourceText);
+              await sleep(300);
+              const continuePromptText = getCopyHotkeyContinuePromptText(closedLoopFlowOptions);
+              appendClosedLoopTrace('CONTINUE_PAYLOAD_PREPARED', {
+                runId,
+                round,
+                source: sourceText,
+                expectedLen: continuePromptText.length,
+              });
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][HOTKEY_THEN_DIRECT_CONTINUE] runId=${runId} round=${round} source=${sourceText} promptLen=${continuePromptText.length}`,
+              );
+              let sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
+                ...closedLoopFlowOptions,
+                source: sourceText,
+                shouldStop,
+              });
+              if (!sendResult || sendResult.ok !== true) {
+                const failReason = sendResult && sendResult.reason
+                  ? sendResult.reason
+                  : 'continue-send-failed';
+                if (isHotkeyContinueDirectSendRetryReason(failReason)) {
+                  ToolboxShell.appendLog(
+                    `[CLOSED_LOOP][HOTKEY_CONTINUE_FALLBACK_DIRECT] runId=${runId} round=${round} reason=${failReason}`,
+                  );
+                  resetClosedLoopOwnWaitingSendState(sourceText);
+                  await focusComposerForClosedLoop(`${sourceText}:retry-after-${failReason}`);
+                  await sleep(300);
+                  sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
+                    ...closedLoopFlowOptions,
+                    source: `${sourceText}:retry-direct`,
+                    shouldStop,
+                  });
+                }
+              }
+              appendClosedLoopTrace(sendResult && sendResult.ok ? 'CONTINUE_SENT' : 'SEND_FAILED', {
+                runId,
+                round,
+                source: sourceText,
+                expectedLen: continuePromptText.length,
+                decision: sendResult && sendResult.ok ? 'sent' : 'failed',
+                reason: sendResult && sendResult.reason
+                  ? sendResult.reason
+                  : (sendResult && sendResult.ok ? 'ok' : 'send-failed'),
+              });
+              result = {
+                ok: !!(sendResult && sendResult.ok),
+                reason: sendResult && sendResult.ok
+                  ? (sendResult.reason || 'hotkey-direct-continue-sent')
+                  : (sendResult && sendResult.reason ? sendResult.reason : 'continue-send-failed'),
+                assistantDoneSignal: false,
+                assistantBatchTerminalStop: false,
+                source: sourceText,
+                loopMode: true,
+                copied: true,
+                hotkeySent: true,
+                continueSent: !!(sendResult && sendResult.ok),
+                assistantMessageKey: copyStage.assistantMessageKey || '',
+                copied_text: copyStage.waitCopyResult && copyStage.waitCopyResult.text
+                  ? String(copyStage.waitCopyResult.text)
+                  : '',
+              };
+            }
+          }
         } else {
           const continuePromptText = getCopyHotkeyContinuePromptText(closedLoopFlowOptions);
           appendClosedLoopTrace('CONTINUE_PAYLOAD_PREPARED', {
@@ -3422,6 +3532,42 @@
           return;
         }
 
+        if (
+          useHotkey
+          && (
+            isHotkeyContinueDirectSendRetryReason(failReason)
+            || failReason === 'hotkey-failed'
+            || failReason === 'copy-failed'
+          )
+        ) {
+          closedLoopContinueState.hotkeyContinueSendFailCount += 1;
+          const failCount = closedLoopContinueState.hotkeyContinueSendFailCount;
+          const failDetail = result && result.detail ? String(result.detail) : '';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][HOTKEY_CONTINUE_SEND_FAIL] runId=${runId} round=${round} count=${failCount} reason=${failReason} detail=${failDetail || '-'}`,
+          );
+          if (failCount <= 2) {
+            if (failCount === 2) {
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][HOTKEY_CONTINUE_FALLBACK_DIRECT] runId=${runId} round=${round} reason=${failReason}`,
+              );
+            }
+            const recoverReason = `hotkey-continue-send-failed:${failReason}`;
+            setStatus(
+              `闭环第 ${round} 轮继续发送失败（${failCount}/3），准备重试：${failReason}`,
+              'warn',
+            );
+            recoverClosedLoopContinue(runId, recoverReason, {
+              delayMs: 3000,
+              retryCurrentRound: true,
+            });
+            return;
+          }
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][HOTKEY_CONTINUE_PAUSE_AFTER_RETRY_LIMIT] runId=${runId} round=${round} reason=${failReason}`,
+          );
+        }
+
         if (shouldClosedLoopPauseAfterSendFailed(failReason)) {
           const msg = '继续发送失败，已暂停，请手动检查输入框或点击重新发送继续指令。';
           ToolboxShell.appendLog(
@@ -3472,6 +3618,9 @@
         });
         return;
       }
+
+      closedLoopContinueState.hotkeyContinueSendFailCount = 0;
+      closedLoopContinueState.sendFailedStreak = 0;
 
       setCopyHotkeyUploadVerifyLoopPhase('waiting_next_reply', `round-${round}-wait`, {
         cycleIndex: round,
@@ -14145,6 +14294,96 @@
       }
     }
 
+    function resetClosedLoopOwnWaitingSendState(source = 'closed-loop-reset-waiting-send') {
+      const sourceText = String(source || 'closed-loop-reset-waiting-send');
+      const oldPhase = state && state.sendTask && state.sendTask.phase
+        ? String(state.sendTask.phase)
+        : '-';
+      const oldSource = state && state.sendTask && state.sendTask.source
+        ? String(state.sendTask.source)
+        : '-';
+      if (
+        state
+        && state.sendTask
+        && (
+          oldSource.startsWith('closed-loop-every5-')
+          || oldSource === '-'
+          || oldSource === ''
+        )
+      ) {
+        state.cancelWaitingSend = false;
+        state.messageSendCancelRequested = false;
+        state.sendTask.phase = 'idle';
+        state.sendTask.cancelRequested = false;
+        state.sendTask.source = '';
+        state.sendTask.owner = '';
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][RESET_OWN_WAITING_SEND] source=${sourceText} oldPhase=${oldPhase} oldSource=${oldSource}`,
+      );
+    }
+
+    function logSendCorePayloadDroppedDiag(source, expectedLen, actualLen) {
+      const sourceText = String(source || '-');
+      let activeTag = '-';
+      let activeId = '-';
+      let activeClass = '-';
+      if (typeof document !== 'undefined' && document.activeElement) {
+        const el = document.activeElement;
+        activeTag = el && el.tagName ? String(el.tagName) : '-';
+        activeId = el && el.id ? String(el.id) : '-';
+        activeClass = el && el.className ? String(el.className).slice(0, 80) : '-';
+      }
+      const composerLen = (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function'
+      )
+        ? String(ComposerApi.getComposerText() || '').length
+        : 0;
+      const clickState = typeof resolveComposerSendClickState === 'function'
+        ? resolveComposerSendClickState(sourceText)
+        : null;
+      const btn = clickState && clickState.btn;
+      const sendBtnExists = btn instanceof HTMLButtonElement ? 1 : 0;
+      const sendBtnDisabled = btn instanceof HTMLButtonElement
+        ? ((btn.disabled || btn.getAttribute('aria-disabled') === 'true') ? 1 : 0)
+        : '-';
+      const cap = typeof getUploadPageCapabilityLight === 'function'
+        ? getUploadPageCapabilityLight()
+        : {};
+      const responseState = String(cap.response_state || '-');
+      const inputable = cap.inputable !== undefined
+        ? (cap.inputable ? 1 : 0)
+        : (cap.canSendNow || cap.can_send_now ? 1 : 0);
+      const sendable = cap.sendable ? 1 : 0;
+      const hidden = typeof document !== 'undefined' && document.hidden ? 1 : 0;
+      const focus = typeof document !== 'undefined' && document.hasFocus && document.hasFocus() ? 1 : 0;
+      const sendPhase = typeof getSendTaskPhase === 'function'
+        ? String(getSendTaskPhase() || '-')
+        : '-';
+
+      ToolboxShell.appendLog(
+        `[SEND_CORE][PAYLOAD_DROPPED_DIAG] source=${sourceText} expectedLen=${expectedLen} actualLen=${actualLen} `
+        + `activeTag=${activeTag} activeId=${activeId} activeClass=${activeClass} composerLen=${composerLen} `
+        + `sendBtn=${sendBtnExists} disabled=${sendBtnDisabled} responseState=${responseState} `
+        + `inputable=${inputable} sendable=${sendable} sendPhase=${sendPhase} hidden=${hidden} focus=${focus}`,
+      );
+    }
+
+    function isHotkeyContinueDirectSendRetryReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) return false;
+      return (
+        text === 'payload_dropped'
+        || text.includes('payload_dropped')
+        || text === 'send-task-busy-same-closed-loop'
+        || text.includes('send-task-busy-same-closed-loop')
+        || text === 'continue-send-failed'
+        || text.includes('continue-send-failed')
+      );
+    }
+
     async function focusComposerForClosedLoop(source = '') {
       const sourceText = String(source || '').trim() || '-';
       const selectors = [
@@ -15619,6 +15858,14 @@
       }
 
       await sleep(300);
+
+      if (typeof focusComposerForClosedLoop === 'function') {
+        await focusComposerForClosedLoop(sourceText || 'after-hotkey');
+        await sleep(200);
+      }
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE][AFTER_HOTKEY_FOCUS_RECOVER] source=${sourceText || '-'}`,
+      );
 
       return {
         ok: true,
@@ -25285,7 +25532,13 @@
       ToolboxShell.appendLog(
         `[SEND_PAYLOAD][DROPPED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} expectedPreview=${expectedPreview} actualPreview=${finalPreview}`,
       );
-      return { ok: false, reason: finalLen <= 0 ? 'composer_empty' : 'payload_dropped', expectedLen, actualLen: finalLen };
+      if (finalLen <= 0) {
+        return { ok: false, reason: 'composer_empty', expectedLen, actualLen: finalLen };
+      }
+      if (typeof logSendCorePayloadDroppedDiag === 'function') {
+        logSendCorePayloadDroppedDiag(source, expectedLen, finalLen);
+      }
+      return { ok: false, reason: 'payload_dropped', expectedLen, actualLen: finalLen };
     }
 
     async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null, sendPayload = null) {

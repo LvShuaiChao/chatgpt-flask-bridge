@@ -2697,8 +2697,9 @@ def main() -> None:
                     incremental=bool(args.incremental),
                 )
                 if manifest_disk and _mtime_maps_equal(snap, manifest_disk):
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     print(
-                        f"[循环] 无文件变更，跳过导出（距上次清单一致） | {PROJECT_ROOT.resolve().name}"
+                        f"[循环] {now_str} | 无文件变更，跳过导出（距上次清单一致） | {PROJECT_ROOT.resolve().name}"
                     )
                     time.sleep(LOOP_EXPORT_INTERVAL_SEC)
                     continue

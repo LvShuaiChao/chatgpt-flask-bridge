@@ -1,7 +1,6 @@
 import html
 import re
 import time
-import traceback
 
 from PyQt5.QtCore import QTimer
 

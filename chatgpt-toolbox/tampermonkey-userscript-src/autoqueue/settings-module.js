@@ -825,6 +825,28 @@
         });
       }
 
+      const clearAutoQueueMojibakeBtn = qs('#cgpt-setting-clear-autoqueue-mojibake-cache', root);
+      bindOnce(clearAutoQueueMojibakeBtn, 'click', () => {
+        const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
+          ? window.confirm('将清除自动指令配置缓存（不含 Prompt 数据）。清理后需要刷新页面，是否继续？')
+          : true;
+
+        if (!confirmed) {
+          ToolboxShell.appendLog('[SETTINGS][clear-autoqueue-mojibake-cache] cancelled');
+          return;
+        }
+
+        if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.clearAutoQueueMojibakeCache === 'function') {
+          AutoQueueModule.clearAutoQueueMojibakeCache('settings-manual-clear');
+        } else {
+          ToolboxShell.appendLog('[SETTINGS][clear-autoqueue-mojibake-cache] AutoQueueModule.clearAutoQueueMojibakeCache 不存在');
+          return;
+        }
+
+        setSettingsStatus('已清理自动指令缓存，请刷新页面', 'ok', { ttlMs: 8000 });
+        ToolboxShell.appendLog('[SETTINGS][clear-autoqueue-mojibake-cache] done — refresh page recommended');
+      });
+
       const forceShowBtn = qs('#cgpt-setting-force-show-toolbox', root);
       bindOnce(forceShowBtn, 'click', () => {
           if (typeof ToolboxShell.restoreToolboxFromHiddenState === 'function') {
@@ -1025,6 +1047,15 @@
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn" id="cgpt-setting-reset-toolbox-position" title="重置工具箱在页面中的位置">重置工具箱位置</button>
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-force-show-toolbox" title="当工具箱跑出屏幕、贴边状态异常或隐藏后找不到入口时，可先强制显示，再按需重置位置。">强制显示工具箱</button>
+            </div>
+
+            <div class="cgpt-row" style="margin-top: 10px;">
+              <button
+                type="button"
+                class="cgpt-btn"
+                id="cgpt-setting-clear-autoqueue-mojibake-cache"
+                title="仅清除自动指令相关缓存（autoQueueConfig、autoqueueActiveSubtab），不会删除 Prompt 管理器数据。清理后请刷新页面。"
+              >清理自动指令乱码缓存</button>
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">额度设置</div>

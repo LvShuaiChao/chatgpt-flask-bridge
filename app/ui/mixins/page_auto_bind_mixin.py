@@ -1896,7 +1896,6 @@ class PageAutoBindMixin:
     def _upgrade_temp_home_sessions_from_registry(self, registry=None):
         """页面通道绑定在目标页创建对话后，自动升级为 conversation 绑定。"""
         from app.models import (
-            BIND_MODE_CONVERSATION,
             BIND_STATE_BOUND_CONVERSATION,
             write_session_remote_chatgpt,
         )

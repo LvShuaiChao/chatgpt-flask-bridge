@@ -3,11 +3,11 @@
   "private": true,
   "description": "Tampermonkey userscript build for ChatGPT toolbox",
   "scripts": {
-    "build": "node build.userjs.mjs",
-    "watch": "node build.userjs.mjs --watch",
+    "build": "node scripts/check-encoding.mjs && node build.userjs.mjs && node --check dist/client.user.js",
+    "watch": "node scripts/check-encoding.mjs && node build.userjs.mjs --watch",
     "check:encoding": "node scripts/check-encoding.mjs",
     "check:dist": "node --check dist/client.user.js",
-    "rebuild": "node scripts/check-encoding.mjs && node build.userjs.mjs && node --check dist/client.user.js"
+    "rebuild": "npm run build"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
