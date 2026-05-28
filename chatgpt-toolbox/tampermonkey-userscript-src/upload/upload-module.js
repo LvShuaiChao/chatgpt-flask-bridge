@@ -5186,6 +5186,157 @@
       );
     }
 
+    function getUploadStateSnapshot() {
+      return {
+        phase: state.uploadTask && state.uploadTask.phase
+          ? String(state.uploadTask.phase || '')
+          : '',
+        running: !!state.running,
+        activeGroupId: state.activeGroupId || '',
+        queue: Array.isArray(state.queue) ? state.queue : [],
+      };
+    }
+
+    function isCadenceUploadSource(source) {
+      const sourceText = String(source || '');
+      return sourceText.includes('upload-cadence-policy')
+        || sourceText.includes('cadence-upload')
+        || sourceText.includes('auto-upload-cadence')
+        || sourceText.includes('continue_with_upload')
+        || sourceText.includes('send_continue_with_upload');
+    }
+
+    async function resolveReusableFilesForCadenceUpload(source) {
+      const sourceText = String(source || '');
+      const result = {
+        files: [],
+        items: [],
+        reason: '',
+        queueCount: 0,
+        groupCount: 0,
+        pendingCount: 0,
+        reusableCount: 0,
+      };
+
+      const uploadState = getUploadStateSnapshot();
+      const activeGroupId = uploadState.activeGroupId || '';
+      const queue = uploadState.queue;
+      const groupItems = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles()
+        : [];
+
+      result.queueCount = queue.length;
+      result.groupCount = groupItems.length;
+
+      const candidates = [];
+      for (const item of groupItems) {
+        if (item) {
+          candidates.push(item);
+        }
+      }
+      for (const item of queue) {
+        if (!item) {
+          continue;
+        }
+        if (activeGroupId && !isUploadItemInActiveScope(item, activeGroupId)) {
+          continue;
+        }
+        candidates.push(item);
+      }
+
+      const seen = new Set();
+      const uniqueCandidates = [];
+      for (const item of candidates) {
+        const key = String(
+          item.id
+          || item.uploadId
+          || item.name
+          || item.originalName
+          || item.virtualName
+          || '',
+        );
+        if (!key || seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        uniqueCandidates.push(item);
+      }
+
+      const resolveOpts = {
+        source: `cadence-reuse:${sourceText || '-'}`,
+        forceLatestLocalHandle: true,
+        allowUploadedReuse: true,
+        allowAttachedReuse: true,
+      };
+
+      for (const item of uniqueCandidates) {
+        const name = String(item.name || item.originalName || item.virtualName || '');
+        const status = String(item.status || item.phase || item.uploadStatus || '');
+        const hasFile = !!(
+          item.file
+          || item.sourceFile
+          || item.originalFile
+          || item.blob
+          || item.handle
+          || item.fileHandle
+        );
+        const localReadable = !!(
+          hasFile
+          || item.sourceKind === 'local-handle'
+          || item.readMode === 'handle'
+          || item.localReadable
+          || item.localBound
+          || item.reusableForCadence
+          || (item.fileHandle && typeof item.fileHandle.getFile === 'function')
+        );
+        const isPending = status === 'pending'
+          || status === 'queued'
+          || status === 'ready'
+          || status === 'idle'
+          || !status;
+
+        if (isPending) {
+          result.pendingCount += 1;
+        }
+
+        if (!localReadable) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_SKIP_NOT_READABLE] source=${sourceText || '-'} name=${name || '-'} status=${status || '-'}`,
+          );
+          continue;
+        }
+
+        const file = await resolveUploadFileObject(item, resolveOpts);
+        if (file) {
+          result.files.push(file);
+          result.items.push(item);
+          result.reusableCount += 1;
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_FILE_OK] source=${sourceText || '-'} name=${name || file.name || '-'} status=${status || '-'}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_RESOLVE_FAILED] source=${sourceText || '-'} name=${name || '-'} status=${status || '-'} hasFile=${hasFile ? 1 : 0}`,
+          );
+        }
+      }
+
+      if (result.files.length > 0) {
+        result.reason = 'cadence_reusable_files';
+      } else {
+        result.reason = 'no_reusable_local_files';
+      }
+
+      ToolboxShell.appendLog(
+        `[UPLOAD][CADENCE_REUSE_SUMMARY] source=${sourceText || '-'} `
+        + `queueCount=${result.queueCount} groupCount=${result.groupCount} `
+        + `pendingCount=${result.pendingCount} reusableCount=${result.reusableCount} files=${result.files.length} `
+        + `reason=${result.reason}`,
+      );
+
+      return result;
+    }
+
     function getUploadItemGroupId(item) {
       if (!item) return '';
       return String(
@@ -29937,13 +30088,49 @@
       };
     }
 
-    async function resolveUploadFileObject(item) {
+    async function resolveUploadFileObject(item, options = {}) {
       if (!item) {
         throw new Error('空文件项，无法解析上传对象');
       }
 
+      const opts = options && typeof options === 'object' ? options : {};
+      const sourceLabel = String(opts.source || 'resolveUploadFileObject').trim() || 'resolveUploadFileObject';
+      const status = String(item.status || item.phase || item.uploadStatus || '').trim().toLowerCase();
+      const itemName = item.name || item.filename || item.virtualName || '-';
+
+      if (opts.allowUploadedReuse && ['uploaded', 'attached', 'done', 'ok'].includes(status)) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_FILE][REUSE_UPLOADED_ITEM] name=${itemName} status=${status || '-'} source=${sourceLabel}`,
+        );
+      } else if (opts.allowAttachedReuse && ['attached', 'uploaded', 'done', 'ok'].includes(status)) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_FILE][REUSE_ATTACHED_ITEM] name=${itemName} status=${status || '-'} source=${sourceLabel}`,
+        );
+      }
+
+      const hasInlineSource = !!(
+        item.file
+        || item.sourceFile
+        || item.originalFile
+        || item.blob
+        || item.handle
+        || item.fileHandle
+        || item.localHandle
+      );
+
+      if (!hasInlineSource && !(item.fileHandle && typeof item.fileHandle.getFile === 'function')) {
+        if (opts.allowUploadedReuse || opts.allowAttachedReuse) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_FILE][REUSE_FAILED_NO_SOURCE] name=${itemName} status=${status || '-'} source=${sourceLabel}`,
+          );
+        }
+      }
+
       try {
-        const uploadFile = await prepareVirtualUploadFileForItem(item, 'resolveUploadFileObject');
+        const prepareSource = opts.forceLatestLocalHandle
+          ? `${sourceLabel}:force-latest-local-handle`
+          : sourceLabel;
+        const uploadFile = await prepareVirtualUploadFileForItem(item, prepareSource);
         const normalized = normalizeToNativeFile(
           uploadFile,
           uploadFile && uploadFile.name ? uploadFile.name : (item.name || item.filename || 'upload.bin'),
@@ -29958,7 +30145,7 @@
           error: e,
         });
         ToolboxShell.appendLog(
-          `[UPLOAD][VIRTUAL_FILE][FAILED] name=${item.name || item.filename || '-'} source=resolveUploadFileObject error=${errText}`,
+          `[UPLOAD][VIRTUAL_FILE][FAILED] name=${item.name || item.filename || '-'} source=${sourceLabel} error=${errText}`,
         );
         throw e;
       }
@@ -30158,7 +30345,22 @@
           flaskIds.push(item.file_id);
         }
 
-        if (item.source === 'flask_local_direct' || item.file_id) {
+        const batchRunning = !!(
+          typeof AutoQueueModule !== 'undefined'
+          && AutoQueueModule
+          && typeof AutoQueueModule.getState === 'function'
+          && AutoQueueModule.getState()
+          && AutoQueueModule.getState().running
+        );
+
+        if (batchRunning) {
+          item.status = 'uploaded';
+          item.reusableForCadence = true;
+          item.localReadable = true;
+          ToolboxShell.appendLog(
+            `[UPLOAD][KEEP_LOCAL_FILE_FOR_CADENCE] name=${item.name || item.filename || '-'} status=uploaded reusableForCadence=1`,
+          );
+        } else if (item.source === 'flask_local_direct' || item.file_id) {
           releaseUploadPayload(item, 'flask-uploaded');
         }
       }
@@ -30441,8 +30643,28 @@
         );
       }
 
-      const pendingItems = getPendingUploadItems({ groupId: scopeGroupId });
-      const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+      let pendingItems = await getPendingUploadItemsForStart(uploadSource, {
+        groupId: scopeGroupId,
+        forceReupload: true,
+      });
+      let pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+
+      if (pendingCount <= 0 && isCadenceUploadSource(uploadSource)) {
+        const reuse = await resolveReusableFilesForCadenceUpload(uploadSource);
+        if (reuse.items.length > 0) {
+          pendingItems = reuse.items;
+          pendingCount = pendingItems.length;
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_PENDING_EMPTY_BUT_LOCAL_FOUND] source=${uploadSource || '-'} files=${reuse.files.length}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_NO_FILES] source=${uploadSource || '-'} `
+            + `queueCount=${reuse.queueCount} groupCount=${reuse.groupCount} pendingCount=${reuse.pendingCount} `
+            + `reusableCount=${reuse.reusableCount} reason=${reuse.reason}`,
+          );
+        }
+      }
 
       ToolboxShell.appendLog(
         `[UPLOAD][AUTOQ_PENDING_AFTER_RESET] source=${uploadSource} pendingUploadCount=${pendingCount}`,
@@ -30454,9 +30676,8 @@
         );
 
         return buildQueueUploadResult({
-          ok: true,
-          skipped: true,
-          reason: 'no-readable-files-after-force-reset',
+          ok: false,
+          reason: isCadenceUploadSource(uploadSource) ? 'no-files' : 'no-readable-files-after-force-reset',
           uploadedCount: 0,
           failedCount: 0,
           skippedCount: 0,
@@ -30468,6 +30689,7 @@
         groupId: scopeGroupId,
         shouldStop,
         maxFiles,
+        forceReupload: true,
         mode: 'upload_only',
         uploadOnly: true,
         requireSendReady: false,
@@ -30708,13 +30930,38 @@
         groupId: scopeGroupId,
       });
 
-      const allPendingItems = await getPendingUploadItemsForStart(uploadSource, {
+      let allPendingItems = await getPendingUploadItemsForStart(uploadSource, {
         groupId: scopeGroupId,
         forceReupload: opts.forceReupload === true,
       });
+
+      let cadenceReusedFiles = null;
+      if (
+        (!allPendingItems || allPendingItems.length === 0)
+        && isCadenceUploadSource(uploadSource)
+      ) {
+        const reuse = await resolveReusableFilesForCadenceUpload(uploadSource);
+        if (reuse.items.length > 0) {
+          allPendingItems = reuse.items;
+          cadenceReusedFiles = reuse.files;
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_PENDING_EMPTY_BUT_LOCAL_FOUND] source=${uploadSource || '-'} files=${reuse.files.length}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD][CADENCE_REUSE_NO_FILES] source=${uploadSource || '-'} `
+            + `queueCount=${reuse.queueCount} groupCount=${reuse.groupCount} pendingCount=${reuse.pendingCount} `
+            + `reusableCount=${reuse.reusableCount} reason=${reuse.reason}`,
+          );
+        }
+      }
+
       const pendingItems = maxFiles > 0
         ? allPendingItems.slice(0, maxFiles)
         : allPendingItems;
+      const cadenceFilesForPending = cadenceReusedFiles && maxFiles > 0
+        ? cadenceReusedFiles.slice(0, maxFiles)
+        : cadenceReusedFiles;
 
       const skippedByMaxFiles = Math.max(0, allPendingItems.length - pendingItems.length);
 
@@ -30933,7 +31180,8 @@
         );
 
         const files = [];
-        for (const item of pendingItems) {
+        for (let itemIndex = 0; itemIndex < pendingItems.length; itemIndex += 1) {
+          const item = pendingItems[itemIndex];
           if (checkShouldStop()) {
             ToolboxShell.appendLog(
               `[UPLOAD][CANCELLED] source=${uploadSource}`,
@@ -30945,7 +31193,15 @@
             });
           }
 
-          const file = await resolveUploadFileObject(item);
+          const cadenceFile = cadenceFilesForPending && cadenceFilesForPending[itemIndex]
+            ? cadenceFilesForPending[itemIndex]
+            : null;
+          const file = cadenceFile || await resolveUploadFileObject(item, {
+            source: `start-upload:${uploadSource}`,
+            forceLatestLocalHandle: isCadenceUploadSource(uploadSource),
+            allowUploadedReuse: isCadenceUploadSource(uploadSource),
+            allowAttachedReuse: isCadenceUploadSource(uploadSource),
+          });
           files.push(file);
         }
 

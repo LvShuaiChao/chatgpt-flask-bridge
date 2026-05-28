@@ -1628,6 +1628,82 @@ const AutoQueueModule = (() => {
       return true;
     }
 
+    function isCadenceUploadSource(source) {
+      const sourceText = String(source || '');
+      return sourceText.includes('upload-cadence-policy')
+        || sourceText.includes('cadence-upload')
+        || sourceText.includes('auto-upload-cadence')
+        || sourceText.includes('continue_with_upload')
+        || sourceText.includes('send_continue_with_upload');
+    }
+
+    function isCadenceUploadNoFilesReason(reason) {
+      const reasonText = String(reason || '').trim().toLowerCase();
+      return reasonText === 'no-files'
+        || reasonText === 'no-readable-files-after-force-reset'
+        || reasonText === 'no-uploaded-files'
+        || reasonText === 'no_reusable_local_files';
+    }
+
+    function isRealUploadRunningForBatch() {
+      let uploadPhase = '';
+      let uploadRunning = false;
+
+      const uploadTask = resolveAutoQueueUploadTaskState();
+      if (uploadTask) {
+        uploadPhase = String(uploadTask.phase || '').trim().toLowerCase();
+        uploadRunning = uploadPhase === 'uploading'
+          || uploadPhase === 'preparing'
+          || uploadPhase === 'attaching'
+          || uploadPhase === 'verifying';
+      }
+
+      if (
+        !uploadRunning
+        && typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getUploadTaskState === 'function'
+      ) {
+        const moduleTask = UploadModule.getUploadTaskState() || {};
+        uploadPhase = String(moduleTask.phase || uploadPhase || '').trim().toLowerCase();
+        uploadRunning = uploadPhase === 'uploading'
+          || uploadPhase === 'preparing'
+          || uploadPhase === 'attaching'
+          || uploadPhase === 'verifying';
+      }
+
+      let evidence = null;
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+      ) {
+        evidence = ComposerAttachments.getSharedComposerAttachmentEvidence('real-upload-running-check');
+      }
+
+      const nativeUploading = !!(evidence && (evidence.uploading || evidence.nativeUploading));
+
+      return !!(
+        uploadRunning
+        || uploadPhase === 'uploading'
+        || uploadPhase === 'attaching'
+        || nativeUploading
+      );
+    }
+
+    function clearBatchUploadRunningFlags(source) {
+      state.batchAutoUploading = false;
+      state.uploadingFromAutoQueue = false;
+      state.manualUploadRunning = false;
+      if (state.taskRun) {
+        state.taskRun.uploadRunning = false;
+        state.taskRun.waitingUpload = false;
+      }
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CLEAR_BATCH_UPLOAD_RUNNING_FLAGS] source=${source || '-'}`,
+      );
+    }
+
     function isUploadInProgressForAutoQueue() {
       if (
         typeof UploadCriticalRuntime !== 'undefined'
@@ -1637,27 +1713,63 @@ const AutoQueueModule = (() => {
       ) {
         return true;
       }
-      if (state.manualUploadRunning || state.batchAutoUploading || state.uploadingFromAutoQueue) {
+
+      if (isRealUploadRunningForBatch()) {
         return true;
       }
-      const uploadTask = resolveAutoQueueUploadTaskState();
-      const uploadPhase = uploadTask && uploadTask.phase
-        ? String(uploadTask.phase || '').trim().toLowerCase()
-        : '';
-      if (uploadPhase === 'uploading' || uploadPhase === 'preparing' || uploadPhase === 'verifying') {
+
+      const hadStaleBatchFlags = !!(
+        state.manualUploadRunning
+        || state.batchAutoUploading
+        || state.uploadingFromAutoQueue
+      );
+
+      if (hadStaleBatchFlags) {
+        const uploadTask = resolveAutoQueueUploadTaskState();
+        const uploadPhase = uploadTask && uploadTask.phase
+          ? String(uploadTask.phase || '').trim().toLowerCase()
+          : '';
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CLEAR_STALE_UPLOAD_IN_PROGRESS] source=upload-in-progress-check `
+          + `uploadPhase=${uploadPhase || '-'} uploadRunning=0 batchAutoUploading=${state.batchAutoUploading ? 1 : 0}`,
+        );
+        clearBatchUploadRunningFlags('stale-upload-in-progress');
+        return false;
+      }
+
+      if (
+        String(state.phase || '') === AUTO_QUEUE_PHASES.UPLOADING
+        && isRealUploadRunningForBatch()
+      ) {
         return true;
       }
-      if (String(state.phase || '') === AUTO_QUEUE_PHASES.UPLOADING) {
-        return true;
-      }
+
       return false;
     }
 
     function shouldDeferAutoQueueWhileUploadRunning(reason = '') {
+      const source = String(reason || 'upload-in-progress').trim() || 'upload-in-progress';
+
+      if (!isRealUploadRunningForBatch()) {
+        if (state.manualUploadRunning || state.batchAutoUploading || state.uploadingFromAutoQueue) {
+          const uploadTask = resolveAutoQueueUploadTaskState();
+          const uploadPhase = uploadTask && uploadTask.phase
+            ? String(uploadTask.phase || '').trim().toLowerCase()
+            : '';
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][CLEAR_STALE_UPLOAD_IN_PROGRESS] source=${source} `
+            + `uploadPhase=${uploadPhase || '-'} uploadRunning=0`,
+          );
+          clearBatchUploadRunningFlags('stale-upload-in-progress');
+        }
+        return false;
+      }
+
       if (!isUploadInProgressForAutoQueue()) {
         return false;
       }
-      const reasonText = String(reason || 'upload-in-progress').trim() || 'upload-in-progress';
+
+      const reasonText = source;
       logAutoQueueDebugThrottled(
         'AUTOQ:SKIP_WHILE_UPLOAD_RUNNING',
         `[AUTOQ][SKIP_WHILE_UPLOAD_RUNNING] reason=${reasonText} action=defer-send-next`,
@@ -5748,6 +5860,175 @@ const AutoQueueModule = (() => {
       return canEnterAutoQueueWaitingReply({ allowSyncFallback: true });
     }
 
+    function getAutoQueueBatchStepKey() {
+      const run = state.taskRun || {};
+      return String(run.currentStep || state.step || '').trim();
+    }
+
+    function isAutoQueueWaitingReplyStepStale() {
+      const phase = String(state.phase || '').trim();
+      const step = getAutoQueueBatchStepKey();
+      return !!(
+        state.running
+        && phase === AUTO_QUEUE_PHASES.WAITING_REPLY
+        && (
+          step === 'wait-current-reply'
+          || step === 'wait-initial-reply'
+          || step === 'wait-reply'
+          || step === 'await-assistant'
+        )
+      );
+    }
+
+    function getLatestAssistantReplyTextForBatchSafe(source) {
+      let text = '';
+      if (typeof getLastAssistantReplyText === 'function') {
+        text = String(getLastAssistantReplyText() || '').trim();
+      }
+      if (!text && typeof getLatestAssistantMessageText === 'function') {
+        text = String(getLatestAssistantMessageText() || '').trim();
+      }
+      if (!text && typeof pickLatestAssistantFinalAnswer === 'function') {
+        const picked = pickLatestAssistantFinalAnswer(source || 'batch-stale-waiting-reply');
+        if (picked && picked.text) {
+          text = String(picked.text || '').trim();
+        } else if (typeof picked === 'string') {
+          text = String(picked || '').trim();
+        }
+      }
+      return text;
+    }
+
+    function getBatchReplyStableSnapshot(source) {
+      const text = getLatestAssistantReplyTextForBatchSafe(source);
+      const now = Date.now();
+      if (!state.batchReplyStableSnapshot) {
+        state.batchReplyStableSnapshot = {
+          text: '',
+          firstSeenAt: 0,
+          lastSeenAt: 0,
+          count: 0,
+        };
+      }
+      const snap = state.batchReplyStableSnapshot;
+      if (text && text === snap.text) {
+        snap.lastSeenAt = now;
+        snap.count += 1;
+      } else {
+        snap.text = text;
+        snap.firstSeenAt = text ? now : 0;
+        snap.lastSeenAt = text ? now : 0;
+        snap.count = text ? 1 : 0;
+      }
+      state.batchReplyStableSnapshot = snap;
+      return {
+        text,
+        stableMs: text ? now - Number(snap.firstSeenAt || now) : 0,
+        count: snap.count,
+      };
+    }
+
+    function isBatchAssistantActuallyIdleForSettle(source) {
+      const assistantBusy = typeof isAssistantBusy === 'function'
+        ? !!isAssistantBusy()
+        : isChatGPTActuallyBusyForTaskQueue();
+      const stopButton = !!document.querySelector(
+        '[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]',
+      );
+      const uploadEvidence = getAutoQueueComposerAttachmentEvidence(`stale-waiting-reply-check:${source || '-'}`);
+      const uploading = !!(
+        (typeof isUploadInProgressForAutoQueue === 'function' && isUploadInProgressForAutoQueue())
+        || (
+          uploadEvidence
+          && (
+            uploadEvidence.uploading
+            || uploadEvidence.nativeUploading
+            || (Number(uploadEvidence.uploadingCount) || 0) > 0
+          )
+        )
+      );
+      return {
+        idle: !assistantBusy && !stopButton && !uploading,
+        assistantBusy,
+        stopButton,
+        uploading,
+      };
+    }
+
+    async function maybeRepairStaleBatchWaitingReply(source) {
+      if (state.batchWaitingReplyRepairRunning) {
+        return false;
+      }
+      state.batchWaitingReplyRepairRunning = true;
+      try {
+        if (!isAutoQueueWaitingReplyStepStale()) {
+          return false;
+        }
+        const idle = isBatchAssistantActuallyIdleForSettle(source);
+        const reply = getBatchReplyStableSnapshot(source);
+        if (!idle.idle) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][WAITING_REPLY_REPAIR_SKIP_BUSY] source=${source || '-'} `
+            + `assistantBusy=${idle.assistantBusy ? 1 : 0} stopButton=${idle.stopButton ? 1 : 0} uploading=${idle.uploading ? 1 : 0}`,
+          );
+          return false;
+        }
+        if (!reply.text) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][WAITING_REPLY_REPAIR_SKIP_EMPTY] source=${source || '-'}`,
+          );
+          return false;
+        }
+        if (reply.stableMs < 800 || reply.count < 2) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][WAITING_REPLY_REPAIR_WAIT_STABLE] source=${source || '-'} `
+            + `stableMs=${reply.stableMs} count=${reply.count} chars=${reply.text.length}`,
+          );
+          return false;
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][WAITING_REPLY_REPAIR_FORCE_SETTLE] source=${source || '-'} `
+          + `chars=${reply.text.length} stableMs=${reply.stableMs} count=${reply.count} `
+          + `oldPhase=${state.phase || '-'} oldStep=${getAutoQueueBatchStepKey() || '-'}`,
+        );
+        state.waitingReply = false;
+        state.replyBecameBusy = false;
+        state.waitingStartedAt = 0;
+        state.phase = 'running';
+        const repairTask = getCurrentRunningTask();
+        if (repairTask) {
+          setTaskBatchStep('reply-ready', repairTask, { log: false });
+        } else {
+          state.step = 'reply-ready';
+        }
+        const brs = ensureBatchRunState();
+        brs.waitingReply = false;
+        state.batchRunState = brs;
+        if (forceStopBatchTaskOnExactDoneSignal(reply.text, `stale-waiting-reply:${source || '-'}`)) {
+          return true;
+        }
+        if (typeof handleTaskReplyReady === 'function') {
+          await handleTaskReplyReady({
+            source: `stale-waiting-reply:${source || '-'}`,
+            replyText: reply.text,
+            repaired: true,
+          });
+          return true;
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][WAITING_REPLY_REPAIR_NO_HANDLER] source=${source || '-'}`,
+        );
+        return false;
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        ToolboxShell.appendLog(`[BATCH_FLOW][WAITING_REPLY_REPAIR_ERROR] source=${source || '-'} error=${msg}`);
+        console.error('[BATCH_FLOW][WAITING_REPLY_REPAIR_ERROR]', err);
+        return false;
+      } finally {
+        state.batchWaitingReplyRepairRunning = false;
+      }
+    }
+
     function repairAutoQueueFalseWaitingReply(reason = 'autoq-false-waiting-reply') {
       if (!state.running) {
         return false;
@@ -9460,7 +9741,24 @@ const AutoQueueModule = (() => {
           : 'auto-upload-failed';
         const isCadenceUploadAttempt = isCadenceContinueUploadSource(kind)
           || isCadenceContinueUploadSource(uploadFailReason)
+          || isCadenceUploadSource(kind)
+          || isCadenceUploadSource(uploadFailReason)
           || !!(uploadResult && uploadResult.cadenceAbort);
+
+        if (
+          isCadenceUploadAttempt
+          && isCadenceUploadNoFilesReason(uploadFailReason)
+        ) {
+          const fallbackResult = await handleCadenceUploadNoFilesFallback(task, `prepare-upload:${kind || '-'}`);
+          if (fallbackResult && fallbackResult.ok === true) {
+            return {
+              ok: true,
+              rotated: !!rotateResult.rotated,
+              reason: fallbackResult.reason || 'cadence-continue-only-fallback',
+              uploadResult: fallbackResult,
+            };
+          }
+        }
 
         if (
           isCadenceUploadAttempt
@@ -10372,12 +10670,19 @@ const AutoQueueModule = (() => {
       setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: isInitialSend ? false : true });
       if (isInitialSend) {
         ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][INITIAL_UPLOAD]');
-        if (
+        if (isAutoQueueWaitingReplyStepStale()) {
+          ToolboxShell.setStatus('批量任务：等待当前回复完成', 'running');
+        } else if (
           state.phase === 'waiting_reply'
           || state.waitingReply
           || isChatGPTActuallyBusyForTaskQueue()
         ) {
           ToolboxShell.setStatus('批量任务：等待当前回复完成');
+        } else if (
+          typeof isCurrentRunInitialMessageStrict === 'function'
+          && isCurrentRunInitialMessageStrict()
+        ) {
+          ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令', 'running');
         } else if (isCurrentRunFirstMessage()) {
           ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
         }
@@ -10490,6 +10795,13 @@ const AutoQueueModule = (() => {
 
           if (
             normalizedKind === 'continue_with_upload'
+            && isCadenceUploadNoFilesReason(reason)
+          ) {
+            return handleCadenceUploadNoFilesFallback(task, uploadSource);
+          }
+
+          if (
+            normalizedKind === 'continue_with_upload'
             && (
               uploadResult.blocked === true
               || reason === 'initial_payload_consumed'
@@ -10519,6 +10831,13 @@ const AutoQueueModule = (() => {
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_AUTO_UPLOAD][FAILED] sentMessageCount=${currentCount} uploaded=0 reason=no-uploaded-files markSlot=0`,
           );
+
+          if (
+            normalizedKind === 'continue_with_upload'
+            && isCadenceUploadNoFilesReason(reason || 'no-uploaded-files')
+          ) {
+            return handleCadenceUploadNoFilesFallback(task, uploadSource);
+          }
 
           return {
             ok: false,
@@ -13760,6 +14079,9 @@ const AutoQueueModule = (() => {
       if (!isUploadInProgressForAutoQueue()) {
         repairAutoQueueFalseWaitingReply(`update-status:${String(refreshReason || '-')}`);
       }
+      if (config.promptMode === 'task' && isAutoQueueWaitingReplyStepStale()) {
+        ToolboxShell.setStatus('批量任务：等待当前回复完成', 'running');
+      }
       ensureTicker();
       syncLegacyRunFlagsFromPhase();
       const running = !!state.running;
@@ -13916,12 +14238,19 @@ const AutoQueueModule = (() => {
           } else if (taskStepKeyForStatus === 'auto-upload-before-send' && state.batchAutoUploading) {
             setBatchTaskGroupDisplayState('starting_upload', 'phase-initial-auto-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.starting_upload;
-            if (
+            if (isAutoQueueWaitingReplyStepStale()) {
+              ToolboxShell.setStatus('批量任务：等待当前回复完成', 'running');
+            } else if (
               phase === 'waiting_reply'
               || state.waitingReply
               || isChatGPTActuallyBusyForTaskQueue()
             ) {
               ToolboxShell.setStatus('批量任务：等待当前回复完成');
+            } else if (
+              typeof isCurrentRunInitialMessageStrict === 'function'
+              && isCurrentRunInitialMessageStrict()
+            ) {
+              ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令', 'running');
             } else if (isCurrentRunFirstMessage()) {
               ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
             }
@@ -17597,6 +17926,92 @@ const AutoQueueModule = (() => {
       return true;
     }
 
+    async function sendBatchContinueDirectlyOrCopyHotkey(continueText, options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const source = String(opts.source || 'cadence-no-files-fallback').trim() || 'cadence-no-files-fallback';
+      const text = String(continueText || '').trim();
+      const task = getCurrentRunningTask();
+      const requireCopyHotkey = opts.requireCopyHotkey === true;
+
+      if (!text) {
+        return {
+          ok: false,
+          reason: 'empty_continue_text',
+        };
+      }
+
+      if (
+        requireCopyHotkey
+        && typeof UploadModule !== 'undefined'
+        && typeof UploadModule.runCopyHotkeyContinueOnceForTaskQueue === 'function'
+        && task
+      ) {
+        const profile = typeof getActiveTaskProfile === 'function' ? getActiveTaskProfile() : null;
+        const resolved = resolveTaskContinueSettings(task, profile, { log: false });
+        const actualDoneSignal = typeof normalizeDoneSignal === 'function'
+          ? normalizeDoneSignal(resolved.actualDoneSignal)
+          : resolved.actualDoneSignal;
+        const hotkeyResult = await UploadModule.runCopyHotkeyContinueOnceForTaskQueue({
+          source,
+          continuePrompt: text,
+          doneSignal: actualDoneSignal,
+          shouldStop: () => !state.running,
+        });
+
+        if (hotkeyResult && hotkeyResult.ok) {
+          return {
+            ok: true,
+            reason: 'copy-hotkey-continue',
+          };
+        }
+
+        const hotkeyReason = hotkeyResult && hotkeyResult.reason
+          ? String(hotkeyResult.reason)
+          : 'copy-hotkey-failed';
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CADENCE_FALLBACK_HOTKEY_FAILED] reason=${hotkeyReason} source=${source}`,
+        );
+      }
+
+      return sendBatchContinueDirectly(text, source);
+    }
+
+    async function handleCadenceUploadNoFilesFallback(task, source) {
+      const safeSource = String(source || 'cadence-no-files-fallback').trim() || 'cadence-no-files-fallback';
+      const currentTask = task || getCurrentRunningTask();
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CADENCE_UPLOAD_NO_FILES_FALLBACK_CONTINUE_ONLY] source=${safeSource}`,
+      );
+
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING, 'cadence-no-files-fallback', { force: true });
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = 'continue';
+        state.taskRun.currentStep = 'send-continue';
+      }
+      setTaskBatchStep('send-continue', currentTask, { log: false });
+
+      const continueText = resolveBatchContinuePromptForCurrentTask(currentTask, 'cadence-no-files-fallback');
+      const sendResult = await sendBatchContinueDirectlyOrCopyHotkey(continueText, {
+        source: safeSource,
+        requireCopyHotkey: true,
+      });
+
+      if (sendResult && sendResult.ok) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'cadence-continue-only-fallback',
+          uploadSkipped: true,
+        };
+      }
+
+      return {
+        ok: false,
+        reason: sendResult && sendResult.reason ? sendResult.reason : 'cadence-fallback-send-failed',
+      };
+    }
+
     async function sendBatchContinueDirectly(continueText, source) {
       const text = String(continueText || '').trim();
 
@@ -18248,6 +18663,8 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      void maybeRepairStaleBatchWaitingReply('maybe-send-next-task');
+
       releaseInitialSendScheduleLockIfComposerReady('maybe-send-next');
       if (recoverAutoQueueFailedButComposerReady('maybe-send-next')) {
         return;
@@ -18328,6 +18745,26 @@ const AutoQueueModule = (() => {
 
       if (config.promptMode === 'task') {
         logBatchPendingCheck(shouldContinueBatch() ? 'continue' : 'stop');
+
+        const pendingRunStep = getAutoQueueBatchStepKey();
+        const pendingAssistantBusy = isChatGPTActuallyBusyForTaskQueue();
+        if (
+          state.running
+          && String(state.phase || '') === AUTO_QUEUE_PHASES.WAITING_REPLY
+          && pendingRunStep === 'wait-current-reply'
+          && !state.waitingReply
+          && !pendingAssistantBusy
+        ) {
+          const run = state.taskRun || {};
+          const current = Number(run.currentIndex || 0);
+          const total = Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0;
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][BATCH_PENDING_CHECK_STALE_WAITING_REPLY] `
+            + `current=${current} total=${total} phase=${state.phase} step=${pendingRunStep}`,
+          );
+          void maybeRepairStaleBatchWaitingReply('batch-pending-check');
+          return;
+        }
       }
 
       if (!isUploadInProgressForAutoQueue() && repairAutoQueueFalseWaitingReply('maybe-send-next')) {
@@ -19069,6 +19506,7 @@ const AutoQueueModule = (() => {
             checkBatchTaskGroupWatchdog();
           }
           repairIllegalWaitingReplyPendingSendState('tick');
+          void maybeRepairStaleBatchWaitingReply('tick');
           if (!isUploadInProgressForAutoQueue() && repairAutoQueueFalseWaitingReply('tick')) {
             updateStatus('false-waiting-reply-repair');
             if (typeof updateChatInputStateBadge === 'function') {
@@ -20552,6 +20990,7 @@ const AutoQueueModule = (() => {
       }
 
       repairIllegalWaitingReplyPendingSendState('foreground-resume');
+      void maybeRepairStaleBatchWaitingReply('foreground-catch-up');
       if (!isUploadInProgressForAutoQueue()) {
         repairAutoQueueFalseWaitingReply('foreground-resume');
       }
