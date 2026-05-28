@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 
 from app.utils.legacy_cleanup import (
+    GUI_PUSH_ALLOWED_FIELDS,
+    QUEUE_MESSAGE_ALLOWED_FIELDS,
     assert_no_legacy_fields,
     reject_legacy_fields,
 )
@@ -152,7 +154,12 @@ def normalize_inbound_push_payload(payload: Any) -> Dict[str, Any]:
 
     data = dict(payload)
 
-    legacy_reject = reject_legacy_fields(data, context="normalize_inbound_push_payload")
+    legacy_reject = reject_legacy_fields(
+        data,
+        context="normalize_inbound_push_payload",
+        allowed_fields=GUI_PUSH_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     if legacy_reject:
         body, _status = legacy_reject
         raise ValueError(body.get("error") or "legacy_fields_not_allowed")
@@ -283,12 +290,21 @@ def validate_outbound_queue_message(msg: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     out = dict(msg)
     legacy_err = reject_legacy_fields(
-        out, context="validate_outbound_queue_message", migrate=False
+        out,
+        context="validate_outbound_queue_message",
+        migrate=False,
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
     )
     if legacy_err:
         body, _status = legacy_err
         raise ValueError(body.get("error") or "legacy_fields_not_allowed")
-    assert_no_legacy_fields(out, owner="validate_outbound_queue_message")
+    assert_no_legacy_fields(
+        out,
+        owner="validate_outbound_queue_message",
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     mid = (out.get("message_id") or "").strip()
     if not mid:
         raise ValueError("message_id is required")
@@ -328,8 +344,12 @@ def normalize_outbound_bridge_message(msg: Dict[str, Any]) -> Dict[str, Any]:
 
         out["message_status"] = status
 
-    assert_no_legacy_fields(out, owner="normalize_outbound_bridge_message")
+    assert_no_legacy_fields(
+        out,
+        owner="normalize_outbound_bridge_message",
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
 
     return out
-
 

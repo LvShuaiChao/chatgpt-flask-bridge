@@ -50,13 +50,13 @@
           if (val == null) {
             val = MemoryManager.get(
               MemoryManager.KEYS.promptManagerActiveCategory,
-              "??",
+              "全部",
             );
             if (val != null) {
               writeDataStorage("promptManagerActiveCategory", val);
             }
           }
-          return val != null ? val : "??";
+          return val != null ? val : "全部";
         })();
     let activePromptSubtab = normalizePromptSubtab(
       (function () {
@@ -265,7 +265,7 @@
     }
 
     function loadPromptManagerData() {
-      // 1. ??????????
+      // 1. 优先读取新存储（统一 key）
       let data = null;
       try {
         data = readDataStorage("promptManagerData", null);
@@ -275,7 +275,7 @@
 
       if (data) {
         const normalized = normalizePromptManagerData(data);
-        // ?DATA_STORAGE_PREFIX???????????Prompt??????legacy key?????????
+        // 若新 key 里只有默认 Prompt，继续检查 legacy key（兼容旧版本）
         const defaults = buildNormalizedDefaultPrompts();
         const defaultIds = new Set();
         for (let di = 0; di < defaults.length; di += 1) {
@@ -292,7 +292,7 @@
           );
           return normalized;
         }
-        // ??????????????legacy key
+        // 否则继续向下尝试 legacy key
       }
       const legacyPrefixes = [APP.storagePrefix];
       if (Array.isArray(APP.storageLegacyPrefixes)) {
@@ -330,7 +330,7 @@
 
         if (raw) {
           const normalized = normalizePromptManagerData(raw);
-          // ??????????
+          // 如果是只有默认数据，继续检查下一个旧 key
           const defaults = buildNormalizedDefaultPrompts();
           const defaultIds = new Set();
           for (let di = 0; di < defaults.length; di += 1) {
@@ -347,11 +347,11 @@
             migratedFrom = fullKey;
             break;
           }
-          // ??????????????? key
+          // 当前 legacy key 仅含默认数据，继续下一个 key
         }
       }
 
-      // 3. ???????? ? ???????
+      // 3. 找到可用 legacy 数据：回写到新 key 并返回
       if (bestRaw) {
         try {
           writeDataStorage("promptManagerData", {
@@ -371,7 +371,7 @@
         return bestRaw;
       }
 
-      // 4. ???????? ? ????? Prompt
+      // 4. 未命中任何存储：初始化默认 Prompt
       const defaults = normalizePromptManagerData(null);
       try {
         writeDataStorage("promptManagerData", {
@@ -420,7 +420,7 @@
         if (!errorType) {
           console.error("[ChatGPT toolbox] savePromptManagerData failed");
           if (typeof ToolboxShell !== "undefined" && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog("[Prompt ??] ??????????????");
+            ToolboxShell.appendLog("[Prompt 管理] 保存失败：浏览器存储写入失败");
           }
         }
       } else {

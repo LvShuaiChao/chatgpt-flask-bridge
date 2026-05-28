@@ -97,6 +97,7 @@ def _bridge_runtime_patch_for_body(body):
     }
     if page_no:
         patch["page_no"] = page_no
+        patch["page_display_id"] = str(page_no)
     try:
         from app.server import upload_files as uf
 
@@ -702,15 +703,27 @@ def _update_last_focused_tm_page(entry):
 
 
 def _touch_tampermonkey(meta, action="poll"):
-    from app.utils.legacy_cleanup import reject_legacy_fields
+    from app.utils.legacy_cleanup import (
+        BRIDGE_REQUEST_ALLOWED_FIELDS,
+        PAGE_REGISTRY_ALLOWED_FIELDS,
+        reject_legacy_fields,
+    )
 
     if isinstance(meta, dict):
-        legacy_reject = reject_legacy_fields(
-            meta, context=f"_touch_tampermonkey:{action}"
+        allowed_fields = (
+            PAGE_REGISTRY_ALLOWED_FIELDS
+            if action in ("hello", "register", "poll", "report", "assistant_reply")
+            else BRIDGE_REQUEST_ALLOWED_FIELDS
         )
-        if legacy_reject:
-            body, _status = legacy_reject
-            raise ValueError(body.get("error") or "legacy_fields_not_allowed")
+        bridge_reject = reject_legacy_fields(
+            meta,
+            context=f"_touch_tampermonkey:{action}",
+            allowed_fields=allowed_fields,
+            strict_unknown=True,
+        )
+        if bridge_reject:
+            body, _status = bridge_reject
+            raise ValueError(body.get("error") or "bridge_fields_not_allowed")
     now = _now()
     client_id = (meta.get("client_id") or "").strip()
     if not client_id:

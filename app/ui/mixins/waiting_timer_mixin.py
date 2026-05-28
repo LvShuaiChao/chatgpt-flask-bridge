@@ -340,16 +340,8 @@ class WaitingTimerMixin:
             return
         if session.session_id != getattr(self, "_current_session_id", None):
             return
-        if hasattr(self, "_patch_waiting_elapsed_in_transcript"):
-            if self._patch_waiting_elapsed_in_transcript(session):
-                return
-        if hasattr(self, "_render_session_chat"):
-            self._render_session_chat(session, scroll_policy="preserve")
-        elif hasattr(self, "_render_current_chat_messages"):
-            self._render_current_chat_messages(
-                scroll_policy="preserve",
-                reason="waiting_elapsed_tick",
-            )
+        if hasattr(self, "_update_waiting_status_label"):
+            self._update_waiting_status_label(session)
 
     def _refresh_status_bar_waiting_text(self):
         if not hasattr(self, "_apply_tm_action_hint_with_waiting"):
@@ -374,6 +366,7 @@ class WaitingTimerMixin:
         now_ts = time.time()
         any_waiting = False
         current_session = None
+        touched_session_ids = []
 
         for session in self._iter_all_chat_sessions():
             since_ts = float(getattr(session, "reply_waiting_since", 0) or 0)
@@ -387,16 +380,30 @@ class WaitingTimerMixin:
             if hasattr(self, "_maybe_wake_bound_page_for_reply_wait"):
                 self._maybe_wake_bound_page_for_reply_wait(session)
             self._maybe_log_waiting_tick(session, elapsed)
+            touched_session_ids.append(session.session_id)
+            runtime_getter = getattr(self, "_session_runtime_entry", None)
+            if callable(runtime_getter):
+                runtime = runtime_getter(session)
+                last_elapsed = int(runtime.get("last_waiting_elapsed_sec") or -1)
+                if last_elapsed != elapsed:
+                    runtime["last_waiting_elapsed_sec"] = elapsed
+                    runtime["preview_cache"] = None
+                    runtime["visual_row_signature"] = None
+                    if hasattr(self, "_update_session_list_item_runtime"):
+                        self._update_session_list_item_runtime(
+                            session,
+                            selected=(session.session_id == current_session_id),
+                        )
 
             if session.session_id == current_session_id:
                 current_session = session
 
         if not any_waiting:
             self._waiting_tick_log_at.clear()
+            if current_session_id and hasattr(self, "_update_waiting_status_label"):
+                self._update_waiting_status_label(None)
             return
 
-        if hasattr(self, "_refresh_session_list"):
-            self._refresh_session_list(select_session_id=current_session_id)
         if current_session is not None:
             self._refresh_current_chat_waiting_text(current_session)
         self._refresh_status_bar_waiting_text()

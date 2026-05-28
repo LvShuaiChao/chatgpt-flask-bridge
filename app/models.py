@@ -46,45 +46,20 @@ _LEGACY_BIND_STATE_ALIASES = {
 
 REMOTE_CHATGPT_PERSISTENT_KEYS = (
     "bind_state",
-    "conversation_id",
-    "url",
     "client_id",
     "page_instance_id",
-    "page_no",
     "page_display_id",
-    "temp_page_id",
-    "page_type",
-    "page_title",
-    "last_seen",
-    "bind_request_id",
-    "bind_started_at",
-    "pending_bootstrap_content",
-    "pending_send_content",
-    "pending_send_message_id",
-    "reopen_started_at",
-    "bind_mode",
+    "conversation_id",
+    "url",
 )
 
 _REMOTE_NORMALIZE_KEYS = (
     "bind_state",
-    "bind_mode",
-    "url",
-    "conversation_id",
     "client_id",
     "page_instance_id",
-    "page_no",
     "page_display_id",
-    "temp_page_id",
-    "page_type",
-    "page_title",
-    "last_seen",
-    "last_poll_at",
-    "bind_request_id",
-    "bind_started_at",
-    "pending_bootstrap_content",
-    "pending_send_content",
-    "pending_send_message_id",
-    "reopen_started_at",
+    "conversation_id",
+    "url",
 )
 
 
@@ -94,21 +69,9 @@ def default_remote_chatgpt():
         "bind_state": BIND_STATE_UNBOUND,
         "client_id": "",
         "page_instance_id": "",
+        "page_display_id": "",
         "conversation_id": "",
         "url": "",
-        "page_display_id": "",
-        "temp_page_id": "",
-        "page_no": "",
-        "page_type": "",
-        "page_title": "",
-        "last_seen": 0,
-        "bind_mode": "",
-        "bind_request_id": "",
-        "bind_started_at": 0,
-        "pending_bootstrap_content": "",
-        "pending_send_content": "",
-        "pending_send_message_id": "",
-        "reopen_started_at": 0,
     }
 
 
@@ -116,9 +79,6 @@ def derive_bind_mode(remote) -> str:
     """由 bind_mode / bind_state / conversation_id 推导绑定模式。"""
     if not isinstance(remote, dict):
         return ""
-    explicit = (remote.get("bind_mode") or "").strip()
-    if explicit in VALID_BIND_MODES:
-        return explicit
     conversation_id = (remote.get("conversation_id") or "").strip()
     bind_state = _canonical_bind_state(remote.get("bind_state") or "")
     if conversation_id or bind_state == BIND_STATE_BOUND_CONVERSATION:
@@ -219,9 +179,8 @@ def _infer_bind_state(
     page_instance_id = (
         remote.get("page_instance_id") or base.get("page_instance_id") or ""
     ).strip()
-    temp_page_id = (
-        (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-        .strip()
+    page_display_id = (
+        (remote.get("page_display_id") or base.get("page_display_id") or "").strip()
     )
     page_channel_waiting = raw_bind_state in (
         "WAITING_CONVERSATION_CREATED",
@@ -234,7 +193,7 @@ def _infer_bind_state(
             remote.get("url") or base.get("url") or "",
             conversation_id,
         )
-        if page_type == "home" or temp_page_id:
+        if page_type == "home" or page_display_id:
             return BIND_STATE_TEMP_HOME_BOUND
     if explicit in VALID_BIND_STATES and explicit != BIND_STATE_BOUND_OFFLINE:
         return explicit
@@ -244,9 +203,49 @@ def _infer_bind_state(
         remote.get("url") or base.get("url") or "",
         conversation_id,
     )
-    if page_type == "home" or temp_page_id:
+    if page_type == "home" or page_display_id:
         return BIND_STATE_TEMP_HOME_BOUND
     return BIND_STATE_UNBOUND
+
+
+def _migrate_remote_legacy_fields(remote: dict) -> dict:
+    migrated = dict(remote)
+    page_display_id = (
+        str(
+            migrated.get("page_display_id")
+            or migrated.get("temp_page_id")
+            or migrated.get("page_no")
+            or ""
+        ).strip()
+    )
+    if page_display_id:
+        migrated["page_display_id"] = page_display_id
+    for key in (
+        "temp_page_id",
+        "page_no",
+        "page_type",
+        "page_title",
+        "last_seen",
+        "last_poll_at",
+        "bind_mode",
+        "bind_request_id",
+        "bind_started_at",
+        "pending_bootstrap_content",
+        "pending_send_content",
+        "pending_send_message_id",
+        "reopen_started_at",
+        "bootstrap_in_progress",
+        "bootstrap_message_id",
+        "bootstrap_started_at",
+        "pending_bootstrap_created_at",
+        "opened_home_at",
+        "bound_at",
+        "pending_send_created_at",
+        "reopen_request_id",
+        "reopen_target_url",
+    ):
+        migrated.pop(key, None)
+    return migrated
 
 
 def _core_remote_dict(remote: dict) -> dict:
@@ -254,25 +253,10 @@ def _core_remote_dict(remote: dict) -> dict:
         "bind_state": _canonical_bind_state(remote.get("bind_state") or BIND_STATE_UNBOUND),
         "client_id": (remote.get("client_id") or "").strip(),
         "page_instance_id": (remote.get("page_instance_id") or "").strip(),
+        "page_display_id": (remote.get("page_display_id") or "").strip(),
         "conversation_id": (remote.get("conversation_id") or "").strip(),
         "url": (remote.get("url") or "").strip(),
     }
-    for key in _REMOTE_NORMALIZE_KEYS:
-        if key in remote and key not in out:
-            out[key] = remote[key]
-    for key in ("page_no", "page_type", "page_title", "last_seen", "last_poll_at"):
-        if key in remote and key not in out:
-            out[key] = remote[key]
-    temp_page_id = (out.get("temp_page_id") or out.get("page_display_id") or out.get("page_no") or "").strip()
-    if temp_page_id:
-        out["temp_page_id"] = temp_page_id
-        if not (out.get("page_display_id") or "").strip():
-            out["page_display_id"] = temp_page_id
-        if not (out.get("page_no") or "").strip():
-            out["page_no"] = temp_page_id
-    bind_mode = derive_bind_mode(out)
-    if bind_mode:
-        out["bind_mode"] = bind_mode
     return out
 
 
@@ -286,29 +270,36 @@ def normalize_remote_chatgpt(remote):
             type(remote).__name__,
         )
         return base
-    from app.utils.legacy_cleanup import assert_no_remote_chatgpt_invalid_fields
-
     remote_work = dict(remote)
-    assert_no_remote_chatgpt_invalid_fields(
-        remote_work,
-        owner="normalize_remote_chatgpt",
+    from app.utils.legacy_cleanup import assert_no_remote_chatgpt_invalid_fields
+    from app.utils.legacy_fields import LEGACY_CLEANUP_FIELD_NAMES
+
+    invalid_legacy_fields = sorted(
+        key
+        for key in remote_work.keys()
+        if key in LEGACY_CLEANUP_FIELD_NAMES
     )
+    if invalid_legacy_fields:
+        raise ValueError(
+            f"legacy fields not allowed in remote_chatgpt: {invalid_legacy_fields}"
+        )
+    raw_bind_state_before = (remote_work.get("bind_state") or "").strip()
     bootstrap_in_progress = bool(remote_work.get("bootstrap_in_progress"))
     bootstrap_message_id = (remote_work.get("bootstrap_message_id") or "").strip()
-    raw_bind_state_before = (remote_work.get("bind_state") or "").strip()
+    migrated = _migrate_remote_legacy_fields(remote_work)
     for key in _REMOTE_NORMALIZE_KEYS:
-        if key in remote_work:
-            base[key] = remote_work[key]
+        if key in migrated:
+            base[key] = migrated[key]
 
-    url = (base.get("url") or "").strip() or (remote_work.get("url") or "").strip()
+    url = (base.get("url") or "").strip() or (migrated.get("url") or "").strip()
     if url and not (base.get("url") or "").strip():
         base["url"] = url
 
     bind_state_before_conv = _canonical_bind_state(
-        remote_work.get("bind_state") or base.get("bind_state") or ""
+        migrated.get("bind_state") or base.get("bind_state") or ""
     )
     legacy_conversation_id = (base.get("conversation_id") or "").strip() or (
-        remote_work.get("conversation_id") or ""
+        migrated.get("conversation_id") or ""
     ).strip()
     if bind_state_before_conv != BIND_STATE_TEMP_HOME_BOUND:
         if not legacy_conversation_id:
@@ -338,7 +329,13 @@ def normalize_remote_chatgpt(remote):
             base["bind_state"] = BIND_STATE_BOUND_CONVERSATION
         else:
             base["bind_state"] = BIND_STATE_UNBOUND
-    return _core_remote_dict(base)
+
+    remote_clean = _core_remote_dict(base)
+    assert_no_remote_chatgpt_invalid_fields(
+        remote_clean,
+        owner="normalize_remote_chatgpt",
+    )
+    return remote_clean
 
 
 def write_session_remote_chatgpt(session, **fields):
@@ -351,7 +348,19 @@ def write_session_remote_chatgpt(session, **fields):
     remote = normalize_remote_chatgpt(session.remote_chatgpt)
     from app.utils.bind_runtime import TRANSIENT_REMOTE_CHATGPT_KEYS
 
-    for key in _REMOTE_NORMALIZE_KEYS:
+    if "page_display_id" not in fields:
+        migrated_page_display_id = (
+            str(
+                fields.get("temp_page_id")
+                or fields.get("page_no")
+                or remote.get("page_display_id")
+                or ""
+            ).strip()
+        )
+        if migrated_page_display_id:
+            fields["page_display_id"] = migrated_page_display_id
+
+    for key in REMOTE_CHATGPT_PERSISTENT_KEYS:
         if key in fields and fields[key] is not None:
             remote[key] = fields[key]
     for key, value in fields.items():
@@ -362,7 +371,7 @@ def write_session_remote_chatgpt(session, **fields):
                 key,
             )
             continue
-        if key not in _REMOTE_NORMALIZE_KEYS:
+        if key not in REMOTE_CHATGPT_PERSISTENT_KEYS:
             logger.debug(
                 "[SESSION_REMOTE][SKIP_UNKNOWN] session_id=%s field=%s",
                 getattr(session, "session_id", "-"),

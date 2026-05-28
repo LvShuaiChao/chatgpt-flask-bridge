@@ -262,7 +262,7 @@ function installToolboxInstanceGuard() {
   window[CGPT_TOOLBOX_INSTANCE_KEY] = {
     instanceId,
     startedAt: now,
-    version: '3.6.6',
+    version: '3.6.7',
   };
 
   return instanceId;
@@ -406,10 +406,17 @@ async function initToolbox() {
     });
   } catch (e) {
     const errText = e && e.message ? e.message : String(e);
-    console.error('[TOOLBOX][SHELL_CREATE_FAILED]', e);
+    const errStack = e && e.stack ? e.stack : '(no stack)';
+    console.error(
+      `[TOOLBOX][SHELL_CREATE_FAILED] stage=initToolbox module=tampermonkey-userscript-src/core/boot.js message=${errText}`,
+    );
+    console.error(
+      `[TOOLBOX][SHELL_CREATE_FAILED][STACK] stage=initToolbox module=tampermonkey-userscript-src/core/boot.js\n${errStack}`,
+    );
+    console.error('[TOOLBOX][SHELL_CREATE_FAILED][ERROR_OBJECT]', e);
     logError('[INIT][ToolboxShell.create]', e);
     if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-      ToolboxShell.appendLog(`[TOOLBOX][SHELL_CREATE_FAILED] ${errText}`);
+      ToolboxShell.appendLog(`[TOOLBOX][SHELL_CREATE_FAILED] ${errText}\n${errStack}`);
     }
     return;
   }
@@ -509,6 +516,8 @@ async function initToolbox() {
     ToolboxShell.showToast('工具箱加载完成', 'boot-ready', 2200);
     ToolboxShell.appendLog('[TOOLBOX_BOOT][TOAST] loaded');
   });
+
+  console.info('[TOOLBOX][BOOT_DONE] initToolbox completed');
 }
 
 function showBootFatalOverlay(error) {
@@ -541,6 +550,7 @@ function showBootFatalOverlay(error) {
 async function boot() {
   try {
     await initToolbox();
+    console.info('[TOOLBOX][BOOT_DONE] boot completed');
   } catch (error) {
     showBootFatalOverlay(error);
   }

@@ -2,7 +2,7 @@
 // @name         ChatGPT 工具箱：多文件上传 + 自动指令队列 + Prompt 管理
 // @namespace    https://github.com/xiaozhang/chatgpt-toolbox
 // @version      3.6.7
-// @description  一个统一工具箱面板：多文件队列上传、自动指令队列、Prompt 管理、标题前缀、对话导出与设置备份。每个功能独立模块，放到不同选项卡。?
+// @description  一个统一工具箱面板：多文件队列上传、自动指令队列、Prompt 管理、标题前缀、对话导出与设置备份。每个功能独立模块，放到不同选项卡。
 // @author       小张
 // @match        https://chatgpt.com/*
 // @match        https://*.chatgpt.com/*
@@ -968,12 +968,12 @@
         BridgeModule.stop();
       }
 
-      if (typeof stopUploadSendTask === 'function') {
-        stopUploadSendTask('page-navigation');
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.stopUploadSendTask === 'function') {
+        UploadModule.stopUploadSendTask('page-navigation');
       }
 
-      if (typeof stopUploadTask === 'function') {
-        stopUploadTask('page-navigation');
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.stopUploadTask === 'function') {
+        UploadModule.stopUploadTask('page-navigation');
       }
 
       if (typeof disconnectToolboxObservers === 'function') {
@@ -985,8 +985,8 @@
       }
 
       const finishNavFileCleanup = () => {
-        if (typeof clearUploadTransientFileRefs === 'function') {
-          clearUploadTransientFileRefs('page-navigation');
+        if (typeof UploadModule !== 'undefined' && typeof UploadModule.clearUploadTransientFileRefs === 'function') {
+          UploadModule.clearUploadTransientFileRefs('page-navigation');
         }
 
         ToolboxShell.appendLog(
@@ -7501,6 +7501,20 @@
       : Date.now();
     const lightMode = options && options.light === true;
     const reasonText = String(options && options.reason ? options.reason : '').slice(0, 120) || '-';
+    const now = Date.now();
+    const responseCacheKey = [
+      location.href || '',
+      document.visibilityState || '',
+      document.hasFocus() ? 1 : 0,
+      lightMode ? 1 : 0,
+    ].join('|');
+    if (
+      responseStateCache.value
+      && responseStateCache.key === responseCacheKey
+      && now - Number(responseStateCache.at || 0) <= PAGE_CAPABILITY_CACHE_TTL_MS
+    ) {
+      return responseStateCache.value;
+    }
     if (detectComposerResponseStateDepth >= MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH) {
       const line = `[COMPOSER][RECURSION_GUARD] scope=detectComposerResponseState depth=${detectComposerResponseStateDepth} max=${MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH}`;
       console.error('[ChatGPT toolbox] detectComposerResponseState recursion guard triggered', {
@@ -7722,16 +7736,20 @@
       };
     }
 
-    return {
-      is_responding: false,
-      response_state: 'ready',
-      response_state_reason: 'payload_ready',
-      can_accept_input: canAcceptInput,
-      can_send_now: true,
-      attachment_count: attachmentCount,
-      has_composer_payload: true,
-      response_state_at: Date.now(),
-    };
+      const result = {
+        is_responding: false,
+        response_state: 'ready',
+        response_state_reason: 'payload_ready',
+        can_accept_input: canAcceptInput,
+        can_send_now: true,
+        attachment_count: attachmentCount,
+        has_composer_payload: true,
+        response_state_at: Date.now(),
+      };
+      responseStateCache.at = Date.now();
+      responseStateCache.key = responseCacheKey;
+      responseStateCache.value = result;
+      return result;
     } catch (error) {
       const errText = error && error.message ? error.message : String(error);
       console.error('[ChatGPT toolbox] detectComposerResponseState failed', error);
@@ -9157,12 +9175,45 @@
     return '';
   }
 
+  const PAGE_CAPABILITY_CACHE_TTL_MS = 800;
+  const pageCapabilityCache = {
+    at: 0,
+    key: '',
+    value: null,
+  };
+  const responseStateCache = {
+    at: 0,
+    key: '',
+    value: null,
+  };
+
+  function buildPageCapabilityCacheKey(reason = '') {
+    return [
+      location.href || '',
+      document.visibilityState || '',
+      document.hasFocus() ? 1 : 0,
+      String(reason || '').trim(),
+    ].join('|');
+  }
+
   function getPageCapability(reason = '') {
+    const now = Date.now();
+    const cacheKey = buildPageCapabilityCacheKey(reason);
+    if (
+      pageCapabilityCache.value
+      && pageCapabilityCache.key === cacheKey
+      && now - Number(pageCapabilityCache.at || 0) <= PAGE_CAPABILITY_CACHE_TTL_MS
+    ) {
+      return pageCapabilityCache.value;
+    }
     const conversationId = parseConversationIdFromPath(location.pathname || '');
     const url = location.href || '';
     const pathname = location.pathname || '';
     const isHomePage = pathname === '/' || pathname === '';
-    const responseState = detectComposerResponseState({ light: true });
+    const responseState = detectComposerResponseState({
+      light: true,
+      reason: `getPageCapability:${String(reason || '-').trim() || '-'}`,
+    });
     const clientId = (() => {
       try {
         return sessionStorage.getItem('tm_bridge_client_id') || '';
@@ -9212,6 +9263,9 @@
       applyHomeNewChatCapabilityOverride(capability);
     }
 
+    pageCapabilityCache.at = now;
+    pageCapabilityCache.key = cacheKey;
+    pageCapabilityCache.value = capability;
     return capability;
   }
 
@@ -9778,6 +9832,7 @@
     return sawVoice;
   }
 
+  // Compatibility wrapper for legacy callers. New code should prefer ComposerApi.hasRealComposerText().
   function hasRealComposerText() {
     if (typeof ComposerApi.hasRealComposerText === 'function') {
       return ComposerApi.hasRealComposerText();
@@ -9790,6 +9845,7 @@
     return text.length > 0;
   }
 
+  // Compatibility wrapper for legacy callers. New code should prefer ComposerApi.hasRealSubmitButton().
   function hasRealSubmitButton() {
     if (typeof ComposerApi.hasRealSubmitButton === 'function') {
       return ComposerApi.hasRealSubmitButton();

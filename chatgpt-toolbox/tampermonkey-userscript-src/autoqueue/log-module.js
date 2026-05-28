@@ -27,6 +27,7 @@
     let listEl = null;
     let hintEl = null;
     let toggleBtnEl = null;
+    let lastPersistLogAt = 0;
     const logBuffer = [];
     const logTimers = createTimerRegistry('LOG');
     let logDomDirty = false;
@@ -56,6 +57,11 @@
 
     function persistLogLines() {
       if (!isLogPersistEnabled()) return;
+      const now = Date.now();
+      if (now - lastPersistLogAt < 4000) {
+        return;
+      }
+      lastPersistLogAt = now;
 
       MemoryManager.set(MemoryManager.KEYS.logPersistLines, state.lines.slice(0, PERSIST_MAX_LINES));
     }
@@ -321,7 +327,6 @@
       }
 
       logDomDirty = true;
-      persistLogLines();
     }
 
     function flushLogBuffer() {

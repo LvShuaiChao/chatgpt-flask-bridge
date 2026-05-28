@@ -7,11 +7,13 @@ from typing import Any, Tuple
 TARGET_SOURCE_BOUND_PAGE = "bound_page"
 TARGET_SOURCE_NO_SESSION = "no_session"
 TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID = "temp_home_page_display_id"
+TARGET_SOURCE_SAME_CONVERSATION_REBOUND_AFTER_LOST = "same_conversation_rebound_after_lost"
 
 TARGET_SOURCES: Tuple[str, ...] = (
     TARGET_SOURCE_BOUND_PAGE,
     TARGET_SOURCE_NO_SESSION,
     TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID,
+  TARGET_SOURCE_SAME_CONVERSATION_REBOUND_AFTER_LOST,
 )
 
 
@@ -45,6 +47,7 @@ __all__ = [
     "TARGET_SOURCE_BOUND_PAGE",
     "TARGET_SOURCE_NO_SESSION",
     "TARGET_SOURCE_TEMP_HOME_PAGE_DISPLAY_ID",
+  "TARGET_SOURCE_SAME_CONVERSATION_REBOUND_AFTER_LOST",
     "target_source_from",
     "canonical_target_source",
     "target_source_label",

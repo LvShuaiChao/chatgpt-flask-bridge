@@ -35,7 +35,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_GARBLED_TOKEN_CHARS = ("鍟", "銆", "鏍", "鏂", "Ã", "Â", "ç", "è", "ä")
+_GARBLED_TOKEN_CHARS = ("鍟", "銆", "鏍", "鏂")
 
 _RUN_STATS: dict = {}
 
@@ -193,7 +193,11 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
     if not INCLUDE_RUNTIME_STATE and parts and parts[0] == "runtime":
         return True
     if not INCLUDE_LOGS:
-        if bn.endswith(".log") or bn.endswith(".jsonl") or "snapshot" in bn:
+        if bn.endswith(".log") or bn.endswith(".jsonl"):
+            return True
+        if "snapshot" in bn and not rel.endswith(
+            (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")
+        ):
             return True
 
     if SLIM_SKIP_TESTS and parts and parts[0] == "tests":

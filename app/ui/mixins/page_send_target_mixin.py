@@ -39,6 +39,23 @@ from app.utils.target_sources import (
 
 class PageSendTargetMixin:
 
+    @property
+    def _bridge_ui(self):
+        """兼容测试桩：允许 mixin 在未初始化 MainWindow 状态时运行。"""
+
+        state = self.__dict__.get("_bridge_ui_state")
+        if state is not None:
+            return state
+        from app.ui.main_window_state import BridgeUiState
+
+        state = BridgeUiState()
+        self.__dict__["_bridge_ui_state"] = state
+        return state
+
+    @_bridge_ui.setter
+    def _bridge_ui(self, value):
+        self.__dict__["_bridge_ui_state"] = value
+
     def _page_float_field(self, item, field, default=0.0):
         from app.utils.safe_parse import safe_float_field
 
@@ -1434,6 +1451,29 @@ class PageSendTargetMixin:
         if conversation_id and not bound_client:
             return "no_bound_page_for_conversation"
         if bound_client:
+            # If the exact bound page instance is missing but another page with the same
+            # conversation is online, show a more actionable blocked reason.
+            try:
+                if conversation_id and bound_instance:
+                    exact, _matched_by = self._find_page_by_bound_identity(
+                        remote,
+                        status=status,
+                        allow_fallback=False,
+                    )
+                    if not exact:
+                        for item in self._iter_tm_clients(status, online_only=False):
+                            if not isinstance(item, dict):
+                                continue
+                            if (item.get("client_id") or "").strip() != bound_client:
+                                continue
+                            if self._client_conversation_id(item) != conversation_id:
+                                continue
+                            if not self._tm_page_is_online_simple(item):
+                                continue
+                            return "bound_page_instance_lost_same_conversation_online"
+            except Exception:
+                # Fall back to generic reason if host does not implement helper methods.
+                pass
             return "bound_page_offline"
         return "no_target_page"
 

@@ -18,7 +18,7 @@ from app.utils.bridge_payload import (
     read_bridge_page_instance_id,
     validate_outbound_queue_message,
 )
-from app.utils.legacy_cleanup import assert_no_legacy_fields
+from app.utils.legacy_cleanup import QUEUE_MESSAGE_ALLOWED_FIELDS, assert_no_legacy_fields
 from app.utils.page_status import page_url_from
 
 
@@ -48,7 +48,12 @@ STRICT_TARGET_CONTROL_COMMANDS = frozenset({
 
 def _queue_control_message(command, *, log_label="", **extra):
     msg = _make_command_message(command, **extra)
-    assert_no_legacy_fields(msg, owner="server._queue_control_message")
+    assert_no_legacy_fields(
+        msg,
+        owner="server._queue_control_message",
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     with st._state_lock:
         if len(st._control_queue) >= MAX_CONTROL_QUEUE_SIZE:
             _log(
@@ -156,7 +161,12 @@ def _make_command_message(command, **extra):
     if url:
         msg["url"] = url
     msg = validate_outbound_queue_message(msg)
-    assert_no_legacy_fields(msg, owner="server._make_command_message")
+    assert_no_legacy_fields(
+        msg,
+        owner="server._make_command_message",
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     return msg
 
 

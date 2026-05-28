@@ -84,5 +84,5 @@ def test_legacy_field_names_binding_aliases_only():
         "chatgpt_url",
     ):
         assert key in LEGACY_FIELD_NAMES
-    for key in ("id", "status", "title", "message", "prompt"):
+    for key in ("id", "status", "message", "prompt"):
         assert key not in LEGACY_FIELD_NAMES

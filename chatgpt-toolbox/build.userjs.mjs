@@ -10,6 +10,20 @@ const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const OUT_FILE = path.join(DIST_DIR, 'client.user.js');
 const REPO_ROOT_CLIENT = path.join(ROOT_DIR, '..', 'client.user.js');
 const ORDER_FILE = path.join(SRC_DIR, '.build-order.json');
+const MOJIBAKE_MARKERS = [
+  '鑷',
+  '涓',
+  '妯',
+  '鐢?',
+  '绛',
+  '锛',
+  '閿',
+  '鏂',
+  '鍒',
+  '褰',
+  '淇',
+  '缁',
+];
 
 function loadBuildConfig() {
   if (!fs.existsSync(ORDER_FILE)) {
@@ -43,6 +57,8 @@ function buildGeneratedNotice() {
     '// To modify behavior, edit source files first, then run:',
     '// npm run build',
     '//',
+    '// Generated JS body is ASCII-escaped to avoid Windows/clipboard encoding damage.',
+    '//',
     '// Generated at: ' + buildTime,
     '// =============================================================================',
   ].join('\n');
@@ -59,12 +75,66 @@ function extractHeader(mainText) {
   };
 }
 
+function readUtf8File(filePath) {
+  return fs.readFileSync(filePath, 'utf8');
+}
+
 function readPart(name) {
   const filePath = path.join(SRC_DIR, name);
   if (!fs.existsSync(filePath)) {
     throw new Error('Missing source part: ' + filePath);
   }
-  return fs.readFileSync(filePath, 'utf8');
+  return readUtf8File(filePath);
+}
+
+function findMojibakeMarkers(text) {
+  const hits = [];
+  for (const marker of MOJIBAKE_MARKERS) {
+    if (text.includes(marker)) {
+      hits.push(marker);
+    }
+  }
+  return hits;
+}
+
+function assertNoMojibake(text, label) {
+  const hits = findMojibakeMarkers(text);
+  if (hits.length > 0) {
+    throw new Error(
+      [
+        '[BUILD_ENCODING][MOJIBAKE_DETECTED]',
+        'label=' + label,
+        'markers=' + hits.join(','),
+        'reason=source-or-output-looks-like-utf8-decoded-as-gbk',
+      ].join(' '),
+    );
+  }
+}
+
+function escapeNonAsciiForJsSource(text) {
+  let output = '';
+
+  for (const char of text) {
+    const codePoint = char.codePointAt(0);
+
+    if (
+      codePoint === 0x09
+      || codePoint === 0x0a
+      || codePoint === 0x0d
+      || (codePoint >= 0x20 && codePoint <= 0x7e)
+    ) {
+      output += char;
+      continue;
+    }
+
+    if (codePoint <= 0xffff) {
+      output += '\\u' + codePoint.toString(16).padStart(4, '0');
+    } else {
+      output += '\\u{' + codePoint.toString(16) + '}';
+    }
+  }
+
+  return output;
 }
 
 function assembleUserscript() {
@@ -76,26 +146,36 @@ function assembleUserscript() {
     throw new Error('.build-order.json is missing "parts" array');
   }
 
-  const mainText = fs.readFileSync(ENTRY_FILE, 'utf8');
+  const mainText = readUtf8File(ENTRY_FILE);
+  assertNoMojibake(mainText, 'core/main.js');
+
   const { header, body: mainBody } = extractHeader(mainText);
 
   if (!mainBody.includes(marker)) {
     throw new Error(
-      'core/main.js is missing upload insert marker ' + marker + '. ' +
-      'Check that the upload module part has a matching InsertModule block.'
+      'core/main.js is missing upload insert marker ' + marker + '. '
+      + 'Check that the upload module part has a matching InsertModule block.',
     );
   }
 
-  const bodyParts = allParts.map(function(p) {
-    if (p === 'core/main.js') {
+  const bodyParts = allParts.map((partName) => {
+    if (partName === 'core/main.js') {
       return mainBody.replace(marker, '\n');
     }
-    return readPart(p);
+
+    const partText = readPart(partName);
+    assertNoMojibake(partText, partName);
+    return partText;
   });
 
   const body = bodyParts.join('');
+  assertNoMojibake(body, 'assembled-source-body');
+
   const bundled = '(function () {\n  \'use strict\';\n\n' + body + '})();';
-  return [header, buildGeneratedNotice(), bundled, ''].join('\n\n');
+
+  const asciiBundled = escapeNonAsciiForJsSource(bundled);
+
+  return [header, buildGeneratedNotice(), asciiBundled, ''].join('\n\n');
 }
 
 function checkJavaScriptSyntax(filePath) {
@@ -110,29 +190,39 @@ function checkJavaScriptSyntax(filePath) {
     ].join('\n').trim();
 
     throw new Error(
-      'Generated userscript syntax check failed: ' + filePath + '\n' + output
+      'Generated userscript syntax check failed: ' + filePath + '\n' + output,
     );
   }
 }
 
 function writeOutput() {
   fs.mkdirSync(DIST_DIR, { recursive: true });
+
   const output = assembleUserscript();
+  assertNoMojibake(output, 'generated-userscript');
+
   fs.writeFileSync(OUT_FILE, output, 'utf8');
   fs.writeFileSync(REPO_ROOT_CLIENT, output, 'utf8');
+
   checkJavaScriptSyntax(OUT_FILE);
-  console.log('Wrote ' + OUT_FILE);
-  console.log('Synced ' + REPO_ROOT_CLIENT);
+  checkJavaScriptSyntax(REPO_ROOT_CLIENT);
+
+  console.log('[BUILD][OK] Wrote ' + OUT_FILE);
+  console.log('[BUILD][OK] Synced ' + REPO_ROOT_CLIENT);
+  console.log('[BUILD][OK] JS body escaped to ASCII-safe unicode literals');
 }
 
 function watch() {
   writeOutput();
+
   console.log('Watching ' + SRC_DIR + ' ...');
-  fs.watch(SRC_DIR, { recursive: true }, function() {
+
+  fs.watch(SRC_DIR, { recursive: true }, () => {
     try {
       writeOutput();
     } catch (err) {
-      console.error(err);
+      const message = err && err.stack ? err.stack : String(err);
+      console.error('[BUILD][FAILED]\n' + message);
     }
   });
 }

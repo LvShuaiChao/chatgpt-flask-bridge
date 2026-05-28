@@ -533,6 +533,8 @@ class ChatSessionMixin:
         )
 
         count_after = self._session_visible_message_count(session)
+        if hasattr(self, "_invalidate_session_runtime"):
+            self._invalidate_session_runtime(session, reason="append_message_to_session")
 
 
 

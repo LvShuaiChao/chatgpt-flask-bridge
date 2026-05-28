@@ -43,6 +43,8 @@
       pendingReplyDomObserverTimer: 0,
       lastDomMutationAt: 0,
       lastReplyWatchAt: 0,
+      lastResponseStateAt: 0,
+      lastResponseStateCache: null,
     };
 
     const bridgeTimers = createTimerRegistry('BRIDGE');
@@ -232,8 +234,42 @@
       };
     }
 
-    function detectResponseState() {
-      return detectComposerResponseState();
+    function detectResponseState(options = {}) {
+      const startedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const now = Date.now();
+      const maxAgeMs = Math.max(3000, Math.min(5000, Number(options.maxAgeMs || 4000)));
+      const lightState = typeof detectComposerResponseState === 'function'
+        ? detectComposerResponseState({ light: true, reason: `bridge-light:${String(options.reason || '-')}` })
+        : {};
+      const cached = state.lastResponseStateCache && typeof state.lastResponseStateCache === 'object'
+        ? state.lastResponseStateCache
+        : null;
+      const cachedBusy = !!(cached && cached.is_responding);
+      const lightBusy = !!(lightState && lightState.is_responding);
+      const shouldRefresh = !!options.force
+        || !cached
+        || (now - Number(state.lastResponseStateAt || 0) > maxAgeMs)
+        || cachedBusy !== lightBusy;
+      const result = shouldRefresh
+        ? detectComposerResponseState({ reason: `bridge-full:${String(options.reason || '-')}` })
+        : cached;
+      if (result && typeof result === 'object') {
+        state.lastResponseStateCache = result;
+        state.lastResponseStateAt = now;
+      }
+      const costMs = Math.round(
+        ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - startedAt,
+      );
+      if (costMs > 50 && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[PERF][DOM_DETECT] source=detectComposerResponseState cost=${costMs}ms force=${options.force ? 1 : 0} reason=${String(options.reason || '-').trim() || '-'}`,
+        );
+      }
+      return result || lightState || {};
     }
 
     function bridgeUrlFrom(obj) {
@@ -496,48 +532,55 @@
       return '';
     }
 
+    function getPageIdentityLight() {
+      const url = new URL(location.href);
+      const path = url.pathname || '';
+      const conversationId = parseConversationIdFromPath(path);
+      const hasBindTokenInUrl = Boolean(
+        url.searchParams.get('xz_bind_token')
+        || (url.hash && url.hash.includes('xz_bind_token=')),
+      );
+      let pageType = 'other';
+      if (conversationId) {
+        pageType = 'conversation';
+      } else if (path === '/' || path === '' || hasBindTokenInUrl) {
+        pageType = 'home';
+      } else if (path.startsWith('/backend-api/') || path.includes('/sentinel/')) {
+        pageType = 'ignored';
+      }
+      const pageDisplayId = getCurrentBridgePageDisplayId();
+      return {
+        client_id: CLIENT_ID,
+        page_instance_id: PAGE_INSTANCE_ID,
+        page_display_id: pageDisplayId,
+        url: location.href,
+        page_type: pageType,
+        conversation_id: conversationId,
+        visibility_state: document.visibilityState || 'unknown',
+        has_focus: document.hasFocus(),
+      };
+    }
+
     function getPageIdentity() {
+      const perfStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       try {
+        const lightIdentity = getPageIdentityLight();
         const url = new URL(location.href);
         const path = url.pathname || '';
-
-        let pageType = 'unknown';
-        const conversationId = parseConversationIdFromPath(path);
+        const conversationId = lightIdentity.conversation_id || '';
         const bindToken = getBindRequestToken();
-        const hasBindTokenInUrl = Boolean(
-          url.searchParams.get('xz_bind_token')
-          || (url.hash && url.hash.includes('xz_bind_token=')),
-        );
-        if (conversationId) {
-          pageType = 'conversation';
-        } else if (path === '/' || path === '' || hasBindTokenInUrl) {
-          pageType = 'home';
-        } else if (path.startsWith('/backend-api/') || path.includes('/sentinel/')) {
-          pageType = 'ignored';
-        } else {
-          pageType = 'other';
-        }
-
-        const responseState = detectResponseState();
-        const visibilityPayload = buildVisibilityPayload();
-        const pageDisplayId = getCurrentBridgePageDisplayId();
+        const responseState = detectResponseState({ reason: 'getPageIdentity' });
         const identity = {
-          client_id: CLIENT_ID,
-          page_instance_id: PAGE_INSTANCE_ID,
-          page_display_id: pageDisplayId,
-          // page_no is legacy compatibility alias of page_display_id.
-          page_no: pageDisplayId,
+          ...lightIdentity,
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
-          url: location.href,
           page_title: document.title || '',
-          page_type: pageType,
-          conversation_id: conversationId,
           bind_request_id: bindToken,
           is_top_frame: window.top === window.self,
 
-          ...visibilityPayload,
           ...(typeof buildBrowserRuntimeFields === 'function'
             ? buildBrowserRuntimeFields('page-identity')
             : {}),
@@ -558,6 +601,17 @@
         const cfg = getConfig();
         if (cfg.bridgeDebugEnabled) {
           logPageCapability(getPageCapability('getPageIdentity'), '[BRIDGE][IDENTITY]');
+        }
+
+        const costMs = Math.round(
+          ((typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()) - perfStartedAt,
+        );
+        if (costMs > 50 && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[PERF][DOM_DETECT] source=getPageIdentity cost=${costMs}ms conversation_id=${identity.conversation_id || '-'} page_display_id=${identity.page_display_id || '-'}`,
+          );
         }
 
         return identity;
@@ -583,8 +637,6 @@
           client_id: CLIENT_ID,
           page_instance_id: PAGE_INSTANCE_ID,
           page_display_id: fallbackPageDisplayId,
-          // page_no is legacy compatibility alias of page_display_id.
-          page_no: fallbackPageDisplayId,
           script_version: SCRIPT_VERSION,
           upload_bridge_supported: true,
           upload_bridge_version: 1,
@@ -620,8 +672,10 @@
     ]);
 
     function buildBridgeRequestPayload(body) {
+      const mode = String((body && body.identityMode) || '').trim().toLowerCase();
+      const identity = mode === 'full' ? getPageIdentity() : getPageIdentityLight();
       return {
-        ...getPageIdentity(),
+        ...identity,
         ...(body || {}),
       };
     }
@@ -830,6 +884,7 @@
         message_id: messageId,
         success,
         detail: detail || '',
+        identityMode: 'full',
       });
       updateChatInputStateBadge();
       return result;
@@ -842,6 +897,7 @@
           event,
           payload: payload || {},
           message_id: messageId || null,
+          identityMode: options.identityMode || 'light',
         });
         return { ok: true };
       } catch (error) {
@@ -2555,7 +2611,7 @@
             }
           }
 
-          const responseState = detectResponseState();
+          const responseState = detectResponseState({ force: true, reason: 'sync_conversation' });
           const capability = getPageCapability('sync_conversation');
           const snapshot = buildConversationSnapshotForBridge(getPageIdentity, {
             source: 'bridge-sync-conversation',
@@ -2584,8 +2640,7 @@
             conversation_id: cmdPayload.conversation_id || snapshot.conversation_id || identity.conversation_id || '',
             client_id: cmdPayload.client_id || snapshot.client_id || identity.client_id || CLIENT_ID,
             page_instance_id: cmdPayload.page_instance_id || snapshot.page_instance_id || identity.page_instance_id || PAGE_INSTANCE_ID,
-            page_no: identity.page_no || identity.page_display_id || getCurrentBridgePageDisplayId() || '',
-            page_display_id: identity.page_display_id || identity.page_no || getCurrentBridgePageDisplayId() || '',
+            page_display_id: identity.page_display_id || getCurrentBridgePageDisplayId() || '',
             url: snapshotUrl,
             messages: snapshot.messages || [],
             stats: snapshotStats,
@@ -2978,7 +3033,7 @@
         if (now - Number(state.lastBusyHeartbeatAt || 0) >= 3000) {
           state.lastBusyHeartbeatAt = now;
           const identity = getPageIdentity();
-          const responseState = detectResponseState();
+          const responseState = detectResponseState({ force: true, reason: 'heartbeat_busy' });
 
           await report('heartbeat_busy', {
             ...identity,

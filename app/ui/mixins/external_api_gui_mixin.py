@@ -22,11 +22,12 @@ from app.models import (
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
+from app.ui.mixins.system_hotkey_gui_mixin import SystemHotkeyGuiMixin
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
 
 
-class ExternalApiGuiMixin:
+class ExternalApiGuiMixin(SystemHotkeyGuiMixin):
     def _handle_external_gui_dispatch(self, action_id, action, payload):
         try:
             if action == "chat_send":
@@ -44,7 +45,10 @@ class ExternalApiGuiMixin:
             elif action == "sessions_summary":
                 result = self._external_api_sessions_summary()
             elif action == "system_hotkey":
-                result = self._external_api_system_hotkey(payload or {})
+                result = self._execute_system_hotkey_from_gui_payload(
+                    payload or {},
+                    source="external_api",
+                )
             else:
                 result = {
                     "ok": False,

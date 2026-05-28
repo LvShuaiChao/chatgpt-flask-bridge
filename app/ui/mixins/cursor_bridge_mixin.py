@@ -20,6 +20,7 @@ import uuid
 from PyQt5.QtCore import Qt
 
 from PyQt5.QtWidgets import QMessageBox
+from app.ui.async_workers import CursorTaskCreateWorker
 
 
 

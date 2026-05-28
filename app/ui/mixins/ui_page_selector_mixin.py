@@ -438,7 +438,6 @@ QComboBox#{name} QAbstractItemView::item:selected {{
     def _refresh_tm_page_selector(
         self, status=None, *, force_rebuild=False, snapshot=None
     ):
-        del snapshot
         if not hasattr(self, "tm_page_combo"):
             return
         full_status = status if isinstance(status, dict) else None

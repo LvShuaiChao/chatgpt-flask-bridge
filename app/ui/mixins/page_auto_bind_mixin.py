@@ -1739,7 +1739,7 @@ class PageAutoBindMixin:
             or ""
         ).strip()
         old_bind_state = self._remote_bind_state(remote_prev)
-        # ????????????????????
+        # 仅在“预绑定主页”语义下才读取旧会话会话号
         old_conversation_id = (remote_prev.get("conversation_id") or "").strip()
         old_url_val = (remote_prev.get("url") or "").strip()
         incoming_url = (page_url or CHATGPT_HOME_URL).strip()

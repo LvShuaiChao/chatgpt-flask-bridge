@@ -909,10 +909,6 @@ class TmPageSelectorFormatMixin:
 
                 continue
 
-            last_seen = float(page.get("last_seen") or 0)
-
-            last_seen_bucket = int(last_seen // 2) if last_seen > 0 else 0
-
             liveness = get_page_liveness(page, now=now)
 
             page_url = (
@@ -966,8 +962,6 @@ class TmPageSelectorFormatMixin:
                     is_page_online(page, now=now),
 
                     liveness,
-
-                    last_seen_bucket,
 
                 )
 

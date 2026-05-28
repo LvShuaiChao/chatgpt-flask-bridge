@@ -398,6 +398,19 @@ class UiChatPanelMixin:
         )
         session_title_row_layout.addWidget(self.current_session_title, 1)
 
+        self.waiting_status_label = QLabel("")
+        self.waiting_status_label.setObjectName("CurrentWaitingStatusLabel")
+        self.waiting_status_label.setMinimumHeight(24)
+        self.waiting_status_label.setWordWrap(False)
+        self.waiting_status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.waiting_status_label.setSizePolicy(
+            QSizePolicy.Fixed, QSizePolicy.Preferred
+        )
+        self.waiting_status_label.setVisible(False)
+        session_title_row_layout.addWidget(
+            self.waiting_status_label, 0, Qt.AlignLeft | Qt.AlignVCenter
+        )
+
         self.chat_stats_label = QLabel(
             "本地：0条 · 0字"
         )

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import time
@@ -37,6 +38,7 @@ from app.models import (
     normalize_remote_chatgpt,
 )
 from app.url_utils import parse_conversation_id
+from app.ui.async_workers import SessionSaveWorker
 from app.utils.legacy_cleanup import (
     assert_no_legacy_fields,
     assert_no_remote_chatgpt_invalid_fields,
@@ -45,7 +47,7 @@ from app.ui.widgets.session_list_item import (
     SESSION_LIST_ITEM_HEIGHT,
     SessionListItemWidget,
 )
-from PyQt5.QtCore import QSize, Qt, QTimer
+from PyQt5.QtCore import QObject, QSize, Qt, QTimer
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
     QInputDialog,
@@ -55,6 +57,412 @@ from PyQt5.QtWidgets import (
 
 
 class SessionMixin:
+    SESSION_RENDER_TEXT_LIMIT = 12000
+    SESSION_LOAD_RECENT_MESSAGES = 24
+
+    def _session_runtime_entry(self, session_or_id):
+        if isinstance(session_or_id, str):
+            session_id = (session_or_id or "").strip()
+        else:
+            session_id = (getattr(session_or_id, "session_id", "") or "").strip()
+        if not session_id:
+            return {}
+        store = getattr(self, "_session_runtime_cache", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._session_runtime_cache = store
+        entry = store.get(session_id)
+        if not isinstance(entry, dict):
+            entry = {}
+            store[session_id] = entry
+        return entry
+
+    def _session_message_records(self, session):
+        if session is None:
+            return []
+        runtime = self._session_runtime_entry(session)
+        raw_messages = runtime.get("all_messages_raw")
+        if isinstance(raw_messages, list) and raw_messages:
+            return list(raw_messages)
+        records = []
+        for message in getattr(session, "messages", []) or []:
+            try:
+                records.append(self._message_to_dict(message))
+            except Exception:
+                logger.exception(
+                    "[SESSION][MESSAGE_RECORD_BUILD_FAILED] session_id=%s",
+                    getattr(session, "session_id", "-"),
+                )
+        return records
+
+    def _session_all_messages_loaded(self, session) -> bool:
+        runtime = self._session_runtime_entry(session)
+        if runtime.get("all_messages_loaded") is True:
+            return True
+        raw_messages = runtime.get("all_messages_raw")
+        if isinstance(raw_messages, list) and len(raw_messages) == len(
+            getattr(session, "messages", []) or []
+        ):
+            return True
+        return False
+
+    def _set_session_messages_from_raw(
+        self,
+        session,
+        raw_messages,
+        *,
+        visible_tail_count=None,
+        all_loaded=False,
+    ):
+        if session is None:
+            return 0
+        runtime = self._session_runtime_entry(session)
+        source_rows = [
+            dict(item)
+            for item in (raw_messages or [])
+            if isinstance(item, dict)
+        ]
+        runtime["all_messages_raw"] = source_rows
+        runtime["message_count"] = len(source_rows)
+        runtime["all_messages_loaded"] = bool(all_loaded)
+        if visible_tail_count is None or all_loaded:
+            rows_to_load = source_rows
+        else:
+            keep = max(0, int(visible_tail_count))
+            rows_to_load = source_rows[-keep:] if keep else []
+        messages = []
+        for index, item in enumerate(rows_to_load):
+            try:
+                normalized_message = self._normalize_legacy_message_dict(item)
+                messages.append(self._message_from_dict(normalized_message))
+            except Exception as error:
+                logger.exception(
+                    "[SESSION][MESSAGE_LOAD_FAILED] session_id=%s message_index=%s error_type=%s error=%s",
+                    getattr(session, "session_id", "-"),
+                    index,
+                    type(error).__name__,
+                    error,
+                )
+        session.messages = messages
+        session.trim_messages()
+        return len(messages)
+
+    def _ensure_session_full_messages_loaded(self, session, *, reason=""):
+        if session is None or self._session_all_messages_loaded(session):
+            return False
+        loaded_count = self._set_session_messages_from_raw(
+            session,
+            self._session_runtime_entry(session).get("all_messages_raw") or [],
+            all_loaded=True,
+        )
+        self._invalidate_session_runtime(
+            session,
+            reason=reason or "ensure_full_messages_loaded",
+        )
+        if hasattr(self, "_append_log") and getattr(self, "_debug_mode", False):
+            self._append_log(
+                "[SESSION][LAZY_LOAD_FULL] "
+                f"session_id={session.session_id} "
+                f"loaded_count={loaded_count} "
+                f"reason={reason or '-'}",
+                echo=False,
+            )
+        return True
+
+    def _session_dirty_ids(self):
+        dirty = getattr(self, "_dirty_session_ids", None)
+        if not isinstance(dirty, set):
+            dirty = set()
+            self._dirty_session_ids = dirty
+        return dirty
+
+    def _mark_session_dirty(self, session_or_id):
+        if isinstance(session_or_id, str):
+            session_id = (session_or_id or "").strip()
+            session = self._sessions.get(session_id) if session_id else None
+        else:
+            session = session_or_id
+            session_id = (getattr(session, "session_id", "") or "").strip()
+        if not session_id:
+            return
+        self._session_dirty_ids().add(session_id)
+        runtime = self._session_runtime_entry(session_id)
+        runtime["dirty_at"] = time.time()
+        if session is not None:
+            runtime["updated_at"] = float(getattr(session, "updated_at", 0) or 0)
+
+    def _truncate_message_text_for_render(self, text):
+        value = str(text or "")
+        limit = int(getattr(self, "SESSION_RENDER_TEXT_LIMIT", 12000) or 12000)
+        if len(value) <= limit:
+            return value, False
+        notice = f"\n\n[内容较长，已折叠显示前 {limit} 字]"
+        keep = max(0, limit - len(notice))
+        return f"{value[:keep]}{notice}", True
+
+    def _message_render_text(self, message, session=None):
+        plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
+        if session is None and hasattr(self, "_current_session"):
+            session = self._current_session()
+        truncated, clipped = self._truncate_message_text_for_render(plain)
+        return truncated, clipped
+
+    def _visible_message_signature(self, message, session=None):
+        if session is None and hasattr(self, "_current_session"):
+            session = self._current_session()
+        render_text, clipped = self._message_render_text(message, session=session)
+        return (
+            (getattr(message, "message_id", "") or "").strip(),
+            (getattr(message, "turn_id", "") or "").strip(),
+            (getattr(message, "role", "") or "").strip(),
+            render_text,
+            bool(clipped),
+            (getattr(message, "ui_status", "") or "").strip(),
+            (getattr(message, "detail", "") or "").strip(),
+            bool(getattr(message, "visible_in_chat", True)),
+        )
+
+    def _compute_session_pending_state(self, session):
+        from app.models import is_waiting_placeholder_message
+
+        if not session:
+            return {
+                "has_pending": False,
+                "pending_assistant_message_id": "",
+                "pending_turn_id": "",
+                "pending_reason": "",
+                "visible_message_count": 0,
+            }
+        messages_by_id = {
+            (getattr(message, "message_id", "") or "").strip(): message
+            for message in getattr(session, "messages", []) or []
+            if (getattr(message, "message_id", "") or "").strip()
+        }
+        visible_count = 0
+        pending_message_id = ""
+        pending_turn_id = ""
+        pending_reason = ""
+        has_pending = False
+        for message in reversed(getattr(session, "messages", []) or []):
+            if not getattr(message, "visible_in_chat", True):
+                continue
+            visible_count += 1
+            if message.role != "assistant":
+                continue
+            msg_source = (getattr(message, "message_source", "") or "").strip()
+            if msg_source in ("queued_placeholder", "local_queue"):
+                continue
+            bridge_id = (getattr(message, "bridge_message_id", "") or "").strip()
+            if bridge_id and hasattr(self, "_is_finalized") and self._is_finalized(bridge_id):
+                continue
+            if not bridge_id:
+                parent_id = (getattr(message, "parent_message_id", "") or "").strip()
+                parent = messages_by_id.get(parent_id)
+                parent_bridge_id = (
+                    (getattr(parent, "bridge_message_id", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                parent_source = (
+                    (getattr(parent, "message_source", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                parent_ui_status = (
+                    (getattr(parent, "ui_status", "") or "").strip()
+                    if parent is not None
+                    else ""
+                )
+                if (
+                    parent is not None
+                    and not parent_bridge_id
+                    and parent_source in ("local_send", "local_queue")
+                ):
+                    continue
+                if parent is not None and parent_ui_status in USER_SEND_PENDING_STATUSES:
+                    continue
+                if parent is not None and not parent_bridge_id:
+                    parent_send_failed = parent_ui_status in (
+                        "发送失败",
+                        "failed",
+                        "send_failed",
+                    )
+                    if parent_send_failed:
+                        continue
+            if is_waiting_placeholder_message(message):
+                has_pending = True
+                pending_message_id = (getattr(message, "message_id", "") or "").strip()
+                pending_turn_id = (getattr(message, "turn_id", "") or "").strip()
+                pending_reason = (
+                    (getattr(message, "ui_status", "") or "").strip()
+                    or "waiting_placeholder"
+                )
+                break
+        return {
+            "has_pending": has_pending,
+            "pending_assistant_message_id": pending_message_id,
+            "pending_turn_id": pending_turn_id,
+            "pending_reason": pending_reason,
+            "visible_message_count": visible_count,
+        }
+
+    def _invalidate_session_runtime(self, session_or_id, *, reason=""):
+        if isinstance(session_or_id, str):
+            session = self._sessions.get((session_or_id or "").strip())
+            session_id = (session_or_id or "").strip()
+        else:
+            session = session_or_id
+            session_id = (getattr(session, "session_id", "") or "").strip()
+        if not session_id:
+            return {}
+        runtime = self._session_runtime_entry(session_id)
+        if session is None:
+            runtime.pop("pending_cache", None)
+            runtime.pop("preview_cache", None)
+            runtime.pop("visual_row_signature", None)
+            runtime.pop("waiting_preview_suffix", None)
+            runtime.pop("chat_fingerprint", None)
+            runtime.pop("chat_render_html", None)
+            runtime.pop("chat_render_message_count", None)
+            runtime.pop("chat_last_full_render_at", None)
+            return runtime
+        pending_cache = self._compute_session_pending_state(session)
+        runtime["pending_cache"] = pending_cache
+        runtime["has_pending_reply_cached"] = bool(pending_cache.get("has_pending"))
+        runtime["visible_message_count"] = int(pending_cache.get("visible_message_count") or 0)
+        if not runtime["has_pending_reply_cached"] and float(
+            getattr(session, "reply_waiting_since", 0) or 0
+        ) <= 0:
+            runtime["waiting_preview_suffix"] = ""
+        runtime["preview_cache"] = None
+        runtime["visual_row_signature"] = None
+        runtime["chat_fingerprint"] = None
+        runtime["chat_render_html"] = ""
+        runtime["chat_render_message_count"] = None
+        runtime["updated_at"] = float(getattr(session, "updated_at", 0) or 0)
+        self._mark_session_dirty(session)
+        if hasattr(self, "_append_log") and getattr(self, "_debug_mode", False):
+            now = time.time()
+            last_log_at = float(runtime.get("last_invalidate_log_at", 0) or 0)
+            if now - last_log_at >= 5.0:
+                runtime["last_invalidate_log_at"] = now
+                self._append_log(
+                    "[SESSION][RUNTIME_INVALIDATE] "
+                    f"session_id={session_id} "
+                    f"reason={reason or '-'} "
+                    f"pending={'1' if runtime['has_pending_reply_cached'] else '0'}",
+                    echo=False,
+                )
+        return runtime
+
+    def _build_session_preview_text(self, session):
+        ts = time.strftime("%H:%M", time.localtime(session.updated_at or time.time()))
+        response_state = self._session_bound_response_state(session)
+        runtime = self._session_runtime_entry(session)
+        pending_cache = runtime.get("pending_cache") or self._compute_session_pending_state(session)
+        has_pending = bool(pending_cache.get("has_pending"))
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+
+        bind_list_state = self._session_bind_list_state(
+            session,
+            getattr(self._bridge_ui, "last_bridge_status", None),
+        )
+
+        if self._remote_bind_state(remote) == BIND_STATE_WAITING_HOME:
+            return f"{ts} 路 等待首页上线..."
+
+        if self._auto_bind.pending_session_id == session.session_id:
+            return f"{ts} 路 等待绑定..."
+
+        if has_pending:
+            if hasattr(self, "_session_bootstrap_claim_pending") and self._session_bootstrap_claim_pending(session):
+                elapsed = ""
+                if hasattr(self, "_session_waiting_preview_suffix"):
+                    elapsed = self._session_waiting_preview_suffix(session)
+                from app.constants import BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS
+
+                pending_elapsed = 0.0
+                if hasattr(self, "_session_pending_elapsed_sec"):
+                    pending_elapsed = float(self._session_pending_elapsed_sec(session) or 0)
+                if pending_elapsed >= float(BOOTSTRAP_CLAIM_WARN_AFTER_SECONDS):
+                    if elapsed:
+                        return f"{ts} 路 首页未领取 {elapsed}"
+                    return f"{ts} 路 首页未领取..."
+                if elapsed:
+                    return f"{ts} 路 等待首页领取 {elapsed}"
+                return f"{ts} 路 等待首页领取..."
+            if hasattr(self, "_session_bootstrap_message_id"):
+                bridge_id = self._session_bootstrap_message_id(session)
+                if bridge_id and hasattr(self, "_bootstrap_message_delivery_phase"):
+                    if self._bootstrap_message_delivery_phase(bridge_id) == "delivered":
+                        elapsed = ""
+                        if hasattr(self, "_session_waiting_preview_suffix"):
+                            elapsed = self._session_waiting_preview_suffix(session)
+                        if elapsed:
+                            return f"{ts} 路 页面已领取 {elapsed}"
+                        return f"{ts} 路 页面已领取..."
+            elapsed = ""
+            if hasattr(self, "_session_waiting_preview_suffix"):
+                elapsed = self._session_waiting_preview_suffix(session)
+            if elapsed:
+                return f"{ts} 路 等待回复 {elapsed}"
+            return f"{ts} 路 等待回复..."
+
+        if response_state["is_responding"]:
+            return f"{ts} 路 正在回答..."
+
+        if bind_list_state == "bound_offline":
+            return f"{ts} 路 已绑定离线"
+
+        if bind_list_state == "bind_mismatch":
+            return f"{ts} 路 绑定异常"
+
+        if bind_list_state == "prebound_home":
+            return f"{ts} 路 等待进入对话"
+
+        if bind_list_state == "waiting_bound_conversation":
+            return f"{ts} 路 等待打开绑定页"
+
+        if bind_list_state == "waiting_conversation_created":
+            return f"{ts} 路 创建中..."
+
+        text = self._latest_visible_chat_message_text(session)
+        if text:
+            text = text.replace("\n", " ")
+            if len(text) > 36:
+                text = text[:36] + "..."
+            return f"{ts} 路 {text}"
+
+        if bind_list_state == "bound_online":
+            return f"{ts} 路 已绑定在线"
+
+        if remote_binding_enabled(remote) and (remote.get("client_id") or "").strip():
+            return f"{ts} 路 已绑定离线"
+
+        return ts
+
+    def _session_visual_row_signature(self, session):
+        runtime = self._session_runtime_entry(session)
+        cached = runtime.get("visual_row_signature")
+        if cached:
+            return cached
+        pending_cache = runtime.get("pending_cache") or self._compute_session_pending_state(session)
+        preview = self._session_preview_text(session)
+        bind_state = self._session_bind_list_state(
+            session,
+            self._bridge_ui.last_bridge_status,
+        )
+        value = (
+            session.session_id,
+            self._session_list_title_text(session),
+            preview,
+            bind_state,
+            bool(pending_cache.get("has_pending")),
+            self._session_reply_done_flash_phase(session),
+        )
+        runtime["visual_row_signature"] = value
+        return value
+
     def _message_input_widget(self):
         widget = getattr(self, "message_input", None)
         if widget is not None:
@@ -234,6 +642,11 @@ class SessionMixin:
         self._current_session_id = session_id
         self._suspend_status_ui_until = time.time() + 0.8
         session = self._sessions[session_id]
+        if hasattr(self, "_ensure_session_full_messages_loaded"):
+            self._ensure_session_full_messages_loaded(
+                session,
+                reason="select_session",
+            )
 
         old_session = self._sessions.get(old_session_id) if old_session_id else None
         old_title = (
@@ -1277,6 +1690,37 @@ class SessionMixin:
                 session_id, is_current, badge_title
             )
 
+    def _update_session_list_item_runtime(self, session, *, selected=None):
+        if session is None or not hasattr(self, "session_list"):
+            return False
+        session_id = (session.session_id or "").strip()
+        if not session_id:
+            return False
+        index = self._list_index_for_session(session_id)
+        if index < 0:
+            return False
+        item = self.session_list.item(index)
+        if item is None:
+            return False
+        if selected is None:
+            selected = self._session_item_is_current(session_id)
+        started_at = time.perf_counter()
+        self._apply_session_list_item_widget(
+            item,
+            session,
+            selected=selected,
+        )
+        cost_ms = int((time.perf_counter() - started_at) * 1000)
+        if cost_ms > 80 and hasattr(self, "_append_log"):
+            self._append_log(
+                "[PERF][SESSION_LIST] "
+                f"session_id={session_id} "
+                f"mode=item_update "
+                f"cost={cost_ms}ms",
+                echo=False,
+            )
+        return True
+
     def _set_session_item_selected_fast(self, session_id, selected):
         is_current = self._session_item_is_current(session_id)
         index = self._list_index_for_session(session_id)
@@ -1528,6 +1972,7 @@ class SessionMixin:
     def _refresh_session_list(self, select_session_id=None):
         if not hasattr(self, "session_list"):
             return
+        started_at = time.perf_counter()
         self._ensure_session_order()
         new_sig = self._session_list_visual_signature()
         old_sig = getattr(self, "_last_session_list_visual_signature", None)
@@ -1545,6 +1990,15 @@ class SessionMixin:
             self._refresh_session_list_current_badges(
                 [target_id] if target_id else None
             )
+            cost_ms = int((time.perf_counter() - started_at) * 1000)
+            if cost_ms > 80 and hasattr(self, "_append_log"):
+                self._append_log(
+                    "[PERF][SESSION_LIST] "
+                    f"mode=skip "
+                    f"cost={cost_ms}ms "
+                    f"target_id={target_id or '-'}",
+                    echo=False,
+                )
             return
 
         structure_same = (
@@ -1602,6 +2056,15 @@ class SessionMixin:
         self._page_cmd.list_refreshing = False
         self._last_session_list_visual_signature = new_sig
         self._refresh_session_list_current_badges()
+        cost_ms = int((time.perf_counter() - started_at) * 1000)
+        if cost_ms > 80 and hasattr(self, "_append_log"):
+            self._append_log(
+                "[PERF][SESSION_LIST] "
+                f"mode={'structure_same' if structure_same else 'rebuild'} "
+                f"cost={cost_ms}ms "
+                f"count={len(new_sig)}",
+                echo=False,
+            )
 
     def _on_session_list_pressed_fast(self, item):
         if self._page_cmd.list_refreshing or item is None:
@@ -1887,8 +2350,15 @@ class SessionMixin:
         )
         session.messages.append(message)
         session.updated_at = time.time()
+        runtime = self._session_runtime_entry(session)
+        raw_messages = runtime.get("all_messages_raw")
+        if isinstance(raw_messages, list):
+            raw_messages.append(self._message_to_dict(message))
+            runtime["message_count"] = len(raw_messages)
         # 裁剪超出上限的旧消息
         session.trim_messages()
+        if hasattr(self, "_invalidate_session_runtime"):
+            self._invalidate_session_runtime(session, reason="append_session_message")
         return message
     def _find_assistant_by_turn(self, session, turn_id):
         if not session or not turn_id:
@@ -2196,9 +2666,15 @@ class SessionMixin:
             return
         session.has_pending_reply = True
         session.reply_waiting_since = time.time()
+        if hasattr(self, "_invalidate_session_runtime"):
+            self._invalidate_session_runtime(session, reason="mark_session_pending")
         if hasattr(self, "_mark_session_waiting_started"):
             self._mark_session_waiting_started(session, reason="mark_session_pending")
-        self._refresh_session_list(select_session_id=self._current_session_id)
+        if hasattr(self, "_update_session_list_item_runtime"):
+            self._update_session_list_item_runtime(
+                session,
+                selected=(session_id == getattr(self, "_current_session_id", "")),
+            )
     @staticmethod
     def _message_to_dict(message):
         return {
@@ -2262,22 +2738,15 @@ class SessionMixin:
             item.pop("source", None)
             removed.append("source")
 
-        legacy_fields = [
-            "detail",
-            "bridge_message_id",
-            "parent_message_id",
-            "visible_in_chat",
-        ]
-        for key in legacy_fields:
-            if key in item:
-                item.pop(key, None)
-                removed.append(key)
-
         if "visible" in item:
+            if "visible_in_chat" not in item:
+                item["visible_in_chat"] = item.get("visible")
             item.pop("visible", None)
             removed.append("visible")
 
         if "request_id" in item:
+            if not str(item.get("bridge_message_id") or "").strip():
+                item["bridge_message_id"] = item.get("request_id")
             item.pop("request_id", None)
             removed.append("request_id")
 
@@ -2305,10 +2774,18 @@ class SessionMixin:
         return item
 
     def _message_from_dict(self, data):
-        from app.utils.legacy_cleanup import assert_no_legacy_fields
+        from app.utils.legacy_cleanup import (
+            SESSION_MESSAGE_ALLOWED_FIELDS,
+            assert_no_legacy_fields,
+        )
 
         item = self._normalize_legacy_message_dict(data)
-        assert_no_legacy_fields(item, owner="session_message_load")
+        assert_no_legacy_fields(
+            item,
+            owner="session_message_load",
+            allowed_fields=SESSION_MESSAGE_ALLOWED_FIELDS,
+            strict_unknown=True,
+        )
         content = item.get("content")
         if content is None:
             content = ""
@@ -2323,11 +2800,11 @@ class SessionMixin:
             message_id=item.get("message_id", ""),
             turn_id=item.get("turn_id", ""),
             ui_status=(item.get("ui_status") or "").strip(),
-            detail="",
+            detail=item.get("detail", ""),
             message_source=(item.get("message_source") or "").strip(),
-            bridge_message_id="",
-            parent_message_id="",
-            visible_in_chat=True,
+            bridge_message_id=item.get("bridge_message_id", ""),
+            parent_message_id=item.get("parent_message_id", ""),
+            visible_in_chat=bool(item.get("visible_in_chat", True)),
         )
     def _session_to_dict(self, session):
         if hasattr(self, "_normalize_session_for_persistence"):
@@ -2396,7 +2873,7 @@ class SessionMixin:
             reply_waiting_since=0,
         )
         session.trim_messages()
-        # ???????
+        # 恢复该会话的输入框草稿
         compose_draft = data.get("compose_draft", "")
         if isinstance(compose_draft, str) and compose_draft.strip():
             session_id = session.session_id
@@ -2444,13 +2921,8 @@ class SessionMixin:
     def _save_sessions_to_disk(self):
         if not self._save_chat_history:
             return
-        sessions_file = None
-        tmp_file = None
+        started_at = time.perf_counter()
         try:
-            data_dir = Path(self._chat_sessions_path or CHAT_SESSIONS_DIR)
-            data_dir.mkdir(parents=True, exist_ok=True)
-            sessions_file = data_dir / "chat_sessions.json"
-            tmp_file = data_dir / "chat_sessions.json.tmp"
             payload = {
                 "version": SESSIONS_JSON_VERSION,
                 "current_session_id": self._current_session_id,
@@ -2458,36 +2930,55 @@ class SessionMixin:
                 "sessions": [
                     self._session_to_dict(item) for item in self._sessions.values()
                 ],
-                "message_to_session": self._message_to_session,
-                "message_to_turn": self._message_to_turn,
+                "message_to_session": dict(self._message_to_session),
+                "message_to_turn": dict(self._message_to_turn),
                 "finalized_bridge_message_ids": list(
                     self._bridge_msg.finalized_bridge_message_ids
                 ),
             }
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-            tmp_file.write_text(text, encoding="utf-8")
-            tmp_file.replace(sessions_file)
+            payload_hash = hashlib.sha1(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
         except Exception as error:
-            detail = (
-                "[SESSION][SAVE_FAILED] "
-                f"path={sessions_file or '-'} tmp_path={tmp_file or '-'} "
+            self._append_log(
+                "[SESSION][SAVE_SNAPSHOT_FAILED] "
                 f"error_type={type(error).__name__} error={error}\n"
-                f"{traceback.format_exc()}"
+                f"{traceback.format_exc()}",
+                echo=True,
             )
-            self._append_log(detail, echo=True)
-            if hasattr(self, "_set_tm_action_hint"):
-                self._set_tm_action_hint(f"保存对话记录失败：{error}")
-            if (
-                hasattr(self, "_add_system_message")
-                and not getattr(self, "_session_save_failure_notifying", False)
-            ):
-                self._session_save_failure_notifying = True
-                try:
-                    self._add_system_message(
-                        f"保存对话记录失败，请检查磁盘权限或路径：{error}"
-                    )
-                finally:
-                    self._session_save_failure_notifying = False
+            return
+
+        if payload_hash == getattr(self, "_last_session_save_payload_hash", ""):
+            return
+
+        request_id = uuid.uuid4().hex
+        worker = SessionSaveWorker(
+            request_id=request_id,
+            data_dir=str(self._chat_sessions_path or CHAT_SESSIONS_DIR),
+            payload=payload,
+            payload_hash=payload_hash,
+        )
+        pending = getattr(self, "_session_save_pending_worker", None)
+        if pending is not None and pending.isRunning():
+            self._session_save_queued_payload = payload
+            self._session_save_queued_payload_hash = payload_hash
+            return
+        self._session_save_pending_worker = worker
+        worker.result_ready.connect(self._on_save_sessions_worker_result)
+        worker.finished.connect(lambda w=worker: self._on_save_sessions_worker_finished(w))
+        worker.start()
+        cost_ms = int((time.perf_counter() - started_at) * 1000)
+        if cost_ms > 120 and hasattr(self, "_append_log"):
+            self._append_log(
+                "[PERF][SESSION_SAVE] "
+                f"stage=snapshot cost={cost_ms}ms",
+                echo=False,
+            )
     def _load_sessions_from_disk(self):
         self._session_legacy_migrated = False
         data_dir = Path(self._chat_sessions_path or CHAT_SESSIONS_DIR)
@@ -2615,6 +3106,136 @@ class SessionMixin:
         if hasattr(self, "_cleanup_bridge_runtime_maps"):
             self._cleanup_bridge_runtime_maps("session_changed")
 
+    def _session_to_dict(self, session):
+        runtime = self._session_runtime_entry(session)
+        if self._session_all_messages_loaded(session):
+            runtime["all_messages_raw"] = [
+                self._message_to_dict(item)
+                for item in getattr(session, "messages", []) or []
+            ]
+        if hasattr(self, "_normalize_session_for_persistence"):
+            return self._normalize_session_for_persistence(session)
+        remote = normalize_remote_chatgpt(session.remote_chatgpt)
+        assert_no_remote_chatgpt_invalid_fields(
+            remote,
+            owner="GUI save session.remote_chatgpt",
+        )
+        compose_draft = ""
+        drafts_map = getattr(self, "_session_compose_drafts", None) or {}
+        raw = drafts_map.get(session.session_id, "")
+        if isinstance(raw, str) and raw.strip():
+            compose_draft = raw
+        messages = runtime.get("all_messages_raw")
+        if not isinstance(messages, list):
+            messages = [self._message_to_dict(item) for item in getattr(session, "messages", []) or []]
+            runtime["all_messages_raw"] = list(messages)
+        return {
+            "session_id": session.session_id,
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "task_type": session.task_type,
+            "context_mode": session.context_mode,
+            "summary": session.summary,
+            "pinned_context": session.pinned_context,
+            "remote_chatgpt": dict(remote),
+            "reply_waiting_since": 0,
+            "compose_draft": compose_draft,
+            "messages": list(messages),
+        }
+
+    def _session_from_dict(self, data):
+        if not isinstance(data, dict):
+            raise ValueError(f"session item must be dict, got {type(data).__name__}")
+        raw_messages = []
+        for index, item in enumerate(data.get("messages") or []):
+            if not isinstance(item, dict):
+                self._append_log(
+                    f"[SESSION][MESSAGE_SKIP_INVALID_ITEM] "
+                    f"session_id={data.get('session_id') or '-'} "
+                    f"index={index} type={type(item).__name__}",
+                    echo=True,
+                )
+                continue
+            try:
+                raw_messages.append(self._normalize_legacy_message_dict(item))
+            except Exception as error:
+                logger.exception(
+                    "[SESSION][MESSAGE_NORMALIZE_FAILED] message_index=%s error_type=%s error=%s item_keys=%s",
+                    index,
+                    type(error).__name__,
+                    error,
+                    list(item.keys()) if isinstance(item, dict) else type(item).__name__,
+                )
+        remote = normalize_remote_chatgpt(data.get("remote_chatgpt") or {})
+        session = ChatSession(
+            session_id=data.get("session_id") or str(uuid.uuid4()),
+            title=data.get("title") or "新对话",
+            created_at=self._session_float_field(data, "created_at"),
+            updated_at=self._session_float_field(data, "updated_at"),
+            task_type=data.get("task_type", ""),
+            context_mode=data.get("context_mode", ""),
+            summary=data.get("summary", ""),
+            pinned_context=data.get("pinned_context", ""),
+            remote_chatgpt=remote,
+            messages=[],
+            reply_waiting_since=0,
+        )
+        self._set_session_messages_from_raw(
+            session,
+            raw_messages,
+            visible_tail_count=self.SESSION_LOAD_RECENT_MESSAGES,
+            all_loaded=len(raw_messages) <= self.SESSION_LOAD_RECENT_MESSAGES,
+        )
+        compose_draft = data.get("compose_draft", "")
+        if isinstance(compose_draft, str) and compose_draft.strip():
+            session_id = session.session_id
+            drafts = getattr(self, "_session_compose_drafts", None)
+            if drafts is None:
+                drafts = {}
+                self._session_compose_drafts = drafts
+            drafts[session_id] = compose_draft
+            logger.info(
+                "[SESSION][COMPOSE_DRAFT_RESTORE] session_id=%s length=%d",
+                session_id,
+                len(compose_draft),
+            )
+        if hasattr(self, "_invalidate_session_runtime"):
+            self._invalidate_session_runtime(session, reason="session_from_dict")
+        return session
+
+    def _session_has_pending_assistant_reply(self, session):
+        if not session:
+            return False
+        runtime = self._session_runtime_entry(session)
+        pending_cache = runtime.get("pending_cache")
+        if not isinstance(pending_cache, dict):
+            pending_cache = self._compute_session_pending_state(session)
+            runtime["pending_cache"] = pending_cache
+            runtime["has_pending_reply_cached"] = bool(pending_cache.get("has_pending"))
+        return bool(pending_cache.get("has_pending"))
+
+    def _session_preview_text(self, session):
+        if session is None:
+            return ""
+        runtime = self._session_runtime_entry(session)
+        cached = runtime.get("preview_cache")
+        if isinstance(cached, str) and cached:
+            return cached
+        text = self._build_session_preview_text(session)
+        runtime["preview_cache"] = text
+        return text
+
+    def _session_list_visual_signature(self):
+        self._ensure_session_order()
+        rows = []
+        for sid in self._tab_session_ids:
+            session = self._sessions.get(sid)
+            if not session:
+                continue
+            rows.append(self._session_visual_row_signature(session))
+        return tuple(rows)
+
     def _migrate_loaded_remote_bindings(self):
         from app.utils.bind_runtime import migrate_transient_from_remote
 
@@ -2704,3 +3325,79 @@ class SessionMixin:
             self._settings.setValue("current_session_id", self._current_session_id)
         if self._saved_page_url and hasattr(self, "_persist_page_url"):
             self._persist_page_url(self._saved_page_url)
+
+    def _flush_pending_sessions_save(self):
+        timer = getattr(self, "_session_save_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._save_sessions_to_disk()
+        worker = getattr(self, "_session_save_pending_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(5000)
+
+    def _on_save_sessions_worker_result(self, result):
+        if not isinstance(result, dict):
+            return
+        if result.get("ok"):
+            self._last_session_save_payload_hash = result.get("payload_hash") or ""
+            self._dirty_session_ids = set()
+            elapsed_ms = int(result.get("elapsed_ms") or 0)
+            if elapsed_ms > 120 and hasattr(self, "_append_log"):
+                self._append_log(
+                    "[PERF][SESSION_SAVE] "
+                    f"stage=worker cost={elapsed_ms}ms "
+                    f"bytes={int(result.get('bytes') or 0)}",
+                    echo=False,
+                )
+            return
+        error = result.get("error") or "unknown"
+        detail = (
+            "[SESSION][SAVE_FAILED] "
+            f"path={result.get('path') or '-'} "
+            f"tmp_path={result.get('tmp_path') or '-'} "
+            f"error_type={result.get('error_type') or '-'} "
+            f"error={error}\n"
+            f"{result.get('traceback') or ''}"
+        )
+        self._append_log(detail, echo=True)
+        if hasattr(self, "_set_tm_action_hint"):
+            self._set_tm_action_hint(f"保存对话记录失败：{error}")
+        if (
+            hasattr(self, "_add_system_message")
+            and not getattr(self, "_session_save_failure_notifying", False)
+        ):
+            self._session_save_failure_notifying = True
+            try:
+                self._add_system_message(
+                    f"保存对话记录失败，请检查磁盘权限或路径：{error}"
+                )
+            finally:
+                self._session_save_failure_notifying = False
+
+    def _on_save_sessions_worker_finished(self, worker):
+        if worker is None:
+            return
+        if getattr(worker, "result_consumed", False):
+            return
+        worker.result_consumed = True
+        if worker is getattr(self, "_session_save_pending_worker", None):
+            self._session_save_pending_worker = None
+        queued_payload = getattr(self, "_session_save_queued_payload", None)
+        queued_hash = getattr(self, "_session_save_queued_payload_hash", "")
+        self._session_save_queued_payload = None
+        self._session_save_queued_payload_hash = ""
+        if queued_payload and queued_hash and queued_hash != getattr(
+            self, "_last_session_save_payload_hash", ""
+        ):
+            next_worker = SessionSaveWorker(
+                request_id=uuid.uuid4().hex,
+                data_dir=str(self._chat_sessions_path or CHAT_SESSIONS_DIR),
+                payload=queued_payload,
+                payload_hash=queued_hash,
+            )
+            self._session_save_pending_worker = next_worker
+            next_worker.result_ready.connect(self._on_save_sessions_worker_result)
+            next_worker.finished.connect(
+                lambda w=next_worker: self._on_save_sessions_worker_finished(w)
+            )
+            next_worker.start()

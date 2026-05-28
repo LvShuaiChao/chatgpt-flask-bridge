@@ -3,7 +3,7 @@
 import inspect
 import unittest
 
-from app.ui.mixins.bridge_mixin import BridgeMixin
+from app.ui.mixins.page_bind_mixin import PageBindMixin
 from app.utils.bridge_payload import (
     build_gui_push_payload,
     get_bridge_message_id,
@@ -178,7 +178,7 @@ class BridgePayloadTests(unittest.TestCase):
             )
 
     def test_build_bridge_send_payload_accepts_url_kwarg(self):
-        sig = inspect.signature(BridgeMixin._build_bridge_send_payload)
+        sig = inspect.signature(PageBindMixin._compose_send_payload)
         self.assertIn("url", sig.parameters)
         self.assertIn("raw_content", sig.parameters)
         self.assertIn("content", sig.parameters)

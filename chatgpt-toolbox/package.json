@@ -4,7 +4,9 @@
   "description": "Tampermonkey userscript build for ChatGPT toolbox",
   "scripts": {
     "build": "node build.userjs.mjs",
-    "watch": "node build.userjs.mjs --watch"
+    "watch": "node build.userjs.mjs --watch",
+    "check:dist": "node --check dist/client.user.js",
+    "rebuild": "node build.userjs.mjs && node --check dist/client.user.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

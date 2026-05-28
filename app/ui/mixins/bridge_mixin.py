@@ -34,6 +34,7 @@ from app.models import (
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
+from app.ui.mixins.system_hotkey_gui_mixin import SystemHotkeyGuiMixin
 from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
 from app.utils.page_status import page_url_from
@@ -42,7 +43,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
 
-class BridgeMixin(AssistantReplyUpsertMixin):
+class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
     @staticmethod
     def _normalize_enqueue_result(enqueue_result):
         """统一解析 enqueue_control_command 返回值（结构化 / 裸 msg / 旧 bool）。"""
@@ -233,18 +234,18 @@ class BridgeMixin(AssistantReplyUpsertMixin):
 
     def _prepare_chat_send_from_pending(self, session, pending):
         """从 pending 解析发送上下文（不改 payload 入队顺序）。"""
-        from app.utils.legacy_cleanup import ALLOWED_TOP_LEVEL_FIELDS
+        from app.utils.legacy_cleanup import GUI_PUSH_ALLOWED_FIELDS
 
         pending = pending if isinstance(pending, dict) else {}
         envelope_legacy = sorted(
             k
             for k in pending.keys()
-            if k not in ALLOWED_TOP_LEVEL_FIELDS and k not in self._PENDING_ENVELOPE_KEYS
+            if k not in GUI_PUSH_ALLOWED_FIELDS and k not in self._PENDING_ENVELOPE_KEYS
         )
         if envelope_legacy:
             raise ValueError(f"legacy fields in pending: {envelope_legacy}")
         payload = dict(pending.get("payload") or {})
-        payload_legacy = sorted(set(payload.keys()) - ALLOWED_TOP_LEVEL_FIELDS)
+        payload_legacy = sorted(set(payload.keys()) - GUI_PUSH_ALLOWED_FIELDS)
         if payload_legacy:
             raise ValueError(f"legacy fields in pending payload: {payload_legacy}")
         if pending.get("refresh_send_target"):
@@ -776,6 +777,8 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             return False
         message.ui_status = (status or "").strip()
         session.updated_at = time.time()
+        if hasattr(self, "_invalidate_session_runtime"):
+            self._invalidate_session_runtime(session, reason="set_user_message_status")
         return True
 
     def _init_status_scheduler(self):
@@ -921,6 +924,8 @@ class BridgeMixin(AssistantReplyUpsertMixin):
             )
             return
         reason = self._bridge_ui.current_status_apply_reason or "status_flush"
+        if reason in self.LIGHTWEIGHT_STATUS_REASONS:
+            return
         if hasattr(self, "should_schedule_page_registry_refresh"):
             self.should_schedule_page_registry_refresh(status, reason=reason)
         elif hasattr(self, "schedule_page_registry_refresh"):
@@ -941,6 +946,17 @@ class BridgeMixin(AssistantReplyUpsertMixin):
         style = label.style()
         style.unpolish(label)
         style.polish(label)
+
+    def _show_status_bar_message_throttled(self, text, timeout_ms=0):
+        text = str(text or "").strip()
+        now = time.time()
+        last_text = getattr(self, "_status_bar_message_text", "")
+        last_at = float(getattr(self, "_status_bar_message_at", 0) or 0)
+        if text == last_text and now - last_at < 0.8:
+            return
+        self._status_bar_message_text = text
+        self._status_bar_message_at = now
+        self.statusBar().showMessage(text, int(timeout_ms or 0))
 
     def _refresh_page_selector_after_heavy_skip(self, status=None):
         del status
@@ -2602,6 +2618,12 @@ class BridgeMixin(AssistantReplyUpsertMixin):
     def _handle_external_gui_dispatch(self, action_id, action, payload):
         from app.server.runtime_state import complete_gui_dispatch
         if action == "system_hotkey":
+            result = self._execute_system_hotkey_from_gui_payload(
+                payload or {},
+                source="gui_dispatch",
+            )
+            complete_gui_dispatch(action_id, result)
+            return
             from app.server.system_hotkey import execute_system_hotkey
 
             combo = str((payload or {}).get("combo") or "").strip()

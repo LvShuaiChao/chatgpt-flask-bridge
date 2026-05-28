@@ -20,7 +20,11 @@ from app.utils.bridge_payload import (
     read_bridge_page_instance_id,
 )
 from app.constants import is_invalid_assistant_reply_text
-from app.utils.legacy_cleanup import assert_no_legacy_fields
+from app.utils.legacy_cleanup import (
+    POLL_RESPONSE_ALLOWED_FIELDS,
+    QUEUE_MESSAGE_ALLOWED_FIELDS,
+    assert_no_legacy_fields,
+)
 from app.utils.page_status import build_page_key, page_url_from
 from app.server.runtime_state import (
     _format_time,
@@ -175,7 +179,12 @@ def push_message(data):
         "finalized_at": None,
         "error_detail": None,
     }
-    assert_no_legacy_fields(msg, owner="server.push_message")
+    assert_no_legacy_fields(
+        msg,
+        owner="server.push_message",
+        allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     with st._state_lock:
         queue_before = len(st._outbound_queue)
         if queue_before >= MAX_OUTBOUND_QUEUE_SIZE:
@@ -1173,7 +1182,12 @@ def _flush_poll_summary(client_id, force=False):
 
 def _poll_response(msg, retry):
     if isinstance(msg, dict):
-        assert_no_legacy_fields(dict(msg), owner="server._poll_response")
+        assert_no_legacy_fields(
+            dict(msg),
+            owner="server._poll_response",
+            allowed_fields=QUEUE_MESSAGE_ALLOWED_FIELDS,
+            strict_unknown=True,
+        )
     msg = normalize_outbound_bridge_message(msg)
     message_id = (msg.get("message_id") or "").strip()
     message_status = (msg.get("message_status") or "").strip()
@@ -1212,7 +1226,12 @@ def _poll_response(msg, retry):
             resp["bootstrap_conversation"] = True
         if msg.get("target_page_id"):
             resp["target_page_id"] = msg.get("target_page_id")
-    assert_no_legacy_fields(resp, owner="server._poll_response")
+    assert_no_legacy_fields(
+        resp,
+        owner="server._poll_response",
+        allowed_fields=POLL_RESPONSE_ALLOWED_FIELDS,
+        strict_unknown=True,
+    )
     return resp
 
 

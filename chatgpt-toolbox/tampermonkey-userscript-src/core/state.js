@@ -691,7 +691,7 @@
   }
 
   function createDefaultTaskQueueSettings() {
-    return {
+    const settings = {
       stopOnMaxContinueRounds: true,
       defaultMaxContinueRoundsMigratedToUnlimited: false,
       /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
@@ -761,6 +761,10 @@
         '5. 不要把原始题目重新列出来。',
       ].join('\n'),
     };
+    if (typeof getDefaultVerifyAfterDoneSignalPromptTemplate === 'function') {
+      settings.verifyAfterDoneSignalPrompt = getDefaultVerifyAfterDoneSignalPromptTemplate();
+    }
+    return settings;
   }
 
   function createDefaultModeSettings() {

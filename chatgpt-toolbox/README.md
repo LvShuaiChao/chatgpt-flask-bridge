@@ -21,8 +21,24 @@
 
 1. 禁止直接修改 dist/client.user.js 或根目录 client.user.js。
 2. 功能改动只改 tampermonkey-userscript-src/ 下的源码文件。
-3. 改完后在 chatgpt-toolbox 目录执行 npm run build。
-4. 构建后执行 node --check dist/client.user.js 验证语法。
+3. 改完后在 chatgpt-toolbox 目录执行 npm run rebuild。
+4. 构建后执行 node scripts/check-installed-userscript.mjs 验证安装产物完整性。
+5. 禁止把 tampermonkey-userscript-src/ 下源码直接粘贴进 Tampermonkey（只能安装 dist/client.user.js）。
+
+## 安装与重建（必须）
+
+修改源码后，必须执行：
+
+cd chatgpt-toolbox
+npm run rebuild
+
+然后把 `dist/client.user.js` 复制到 Tampermonkey 安装/更新。
+
+禁止操作：
+
+- 禁止直接把 `tampermonkey-userscript-src/` 下源码粘贴到 Tampermonkey。
+- 禁止直接编辑 `dist/client.user.js`。
+- 禁止直接编辑仓库根目录 `client.user.js`（它只是同步产物）。
 
 ## 开发
 

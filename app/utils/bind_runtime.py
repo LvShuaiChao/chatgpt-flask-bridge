@@ -8,28 +8,42 @@ from typing import Any, Dict
 
 TRANSIENT_REMOTE_CHATGPT_KEYS = frozenset(
     {
+        "bind_request_id",
+        "bind_started_at",
         "bootstrap_in_progress",
         "bootstrap_message_id",
         "bootstrap_started_at",
+        "pending_bootstrap_content",
         "pending_bootstrap_created_at",
         "opened_home_at",
         "bound_at",
+        "pending_send_content",
+        "pending_send_message_id",
         "pending_send_created_at",
         "reopen_request_id",
+        "reopen_started_at",
+        "reopen_target_url",
     }
 )
 
 
 @dataclass
 class BindSessionRuntime:
+    bind_request_id: str = ""
+    bind_started_at: float = 0.0
     bootstrap_in_progress: bool = False
     bootstrap_message_id: str = ""
     bootstrap_started_at: float = 0.0
+    pending_bootstrap_content: str = ""
     pending_bootstrap_created_at: float = 0.0
     opened_home_at: float = 0.0
     bound_at: float = 0.0
+    pending_send_content: str = ""
+    pending_send_message_id: str = ""
     pending_send_created_at: float = 0.0
     reopen_request_id: str = ""
+    reopen_started_at: float = 0.0
+    reopen_target_url: str = ""
 
 
 def _session_key(session: Any) -> str:

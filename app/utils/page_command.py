@@ -179,7 +179,7 @@ def command_target_result(
 
 
 def _resolve_page_raw(page):
-    """? PageSnapshot ? raw dict ???????"""
+    """统一获取页面原始字典（兼容 PageSnapshot 或 raw dict）。"""
     if isinstance(page, dict):
         return page
     if hasattr(page, '_raw') and isinstance(page._raw, dict):
@@ -193,12 +193,12 @@ def is_page_polling_active(
     now_ts=None,
     max_age_sec=15.0,
 ):
-    """???????????????
-    
-    ?? online=true ? last_poll_at ?????????????????????
-    ?????? polling / is_polling / poll_state ???
-    
-    ???? raw dict ? PageSnapshot ???
+    """判断页面轮询是否仍在活跃状态。
+
+    要求 online=true 且 last_poll_at 在可接受时间窗内，
+    同时兼容 polling / is_polling / poll_state 等字段。
+
+    参数 page 支持 raw dict 或 PageSnapshot 对象。
     """
     raw = _resolve_page_raw(page)
     if not isinstance(raw, dict) or not raw.get("online"):

@@ -6,7 +6,11 @@ from flask import jsonify, request
 from app.server import state as st
 from app.server.bridge_logging import log_server_to_tm_full, log_tm_to_server_full
 from app.server.request_utils import json_body_or_error
-from app.utils.legacy_cleanup import reject_legacy_fields
+from app.utils.legacy_cleanup import (
+    BRIDGE_REQUEST_ALLOWED_FIELDS,
+    PAGE_REGISTRY_ALLOWED_FIELDS,
+    reject_legacy_fields,
+)
 
 from app.server.message_queue import (
     _handle_ack,
@@ -69,7 +73,18 @@ def api_bridge():
     body, error_response = json_body_or_error("[BRIDGE][JSON_BODY]")
     if error_response:
         return error_response
-    legacy_err = reject_legacy_fields(body, context="api_bridge")
+    action = body.get("action", "poll")
+    allowed_fields = (
+        PAGE_REGISTRY_ALLOWED_FIELDS
+        if action in ("hello", "register", "poll", "report", "assistant_reply")
+        else BRIDGE_REQUEST_ALLOWED_FIELDS
+    )
+    legacy_err = reject_legacy_fields(
+        body,
+        context="api_bridge",
+        allowed_fields=allowed_fields,
+        strict_unknown=True,
+    )
     if legacy_err:
         return jsonify(legacy_err[0]), legacy_err[1]
     log_tm_to_server_full(body)
@@ -83,7 +98,6 @@ def api_bridge():
             f"[BRIDGE] remote={remote_addr} action={body.get('action', 'poll')} "
             f"client_id={body.get('client_id') or '-'}"
         )
-    action = body.get("action", "poll")
     need_notify = False
     identity_changed = False
     if action == "system_hotkey":

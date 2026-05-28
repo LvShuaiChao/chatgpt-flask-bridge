@@ -1,4 +1,4 @@
-﻿  /********************************************************************
+  /********************************************************************
    * 4. AutoQueueModule：自动指令队列模块
    ********************************************************************/
 
@@ -624,6 +624,8 @@ const AutoQueueModule = (() => {
         promptId: '',
         status: 'pending',
         continueCount: 0,
+        manualInitialSentAt: 0,
+        lastManualContinueAt: 0,
         createdAt: ts,
         updatedAt: ts,
       };
@@ -671,6 +673,8 @@ const AutoQueueModule = (() => {
         promptId: String(raw.promptId || ''),
         status: String(raw.status || 'pending'),
         continueCount: Math.max(0, Number(raw.continueCount) || 0),
+        manualInitialSentAt: Math.max(0, Number(raw.manualInitialSentAt) || 0),
+        lastManualContinueAt: Math.max(0, Number(raw.lastManualContinueAt) || 0),
         createdAt: normalizeTimestamp(raw.createdAt, ts),
         updatedAt: normalizeTimestamp(raw.updatedAt, ts),
       };
@@ -5164,28 +5168,56 @@ const AutoQueueModule = (() => {
 
     function isRetryableSendFailureReason(reason) {
       const { raw, normalized } = normalizeSendFailureReason(reason);
+      const detail = arguments.length > 1 ? String(arguments[1] || '').trim() : '';
       let retryable = false;
 
-      if (typeof sendPipelineIsRetryableReason === 'function') {
+      if (
+        normalized === 'waiting_payload'
+        || raw === 'waiting_payload'
+        || detail === 'waiting_payload'
+        || String(raw || '').includes('waiting_payload')
+      ) {
+        retryable = true;
+      }
+
+      if (!retryable && typeof sendPipelineIsRetryableReason === 'function') {
         retryable = sendPipelineIsRetryableReason(normalized) || sendPipelineIsRetryableReason(raw);
-      } else {
+      } else if (!retryable) {
         console.error('[ChatGPT toolbox] isRetryableSendFailureReason: sendPipelineIsRetryableReason missing');
       }
 
       ToolboxShell.appendLog(
-        `[AUTOQ][RETRYABLE_REASON_CHECK] rawReason=${raw || '-'} normalizedReason=${normalized || '-'} retryable=${retryable ? 1 : 0}`,
+        `[AUTOQ][RETRYABLE_REASON_CHECK] rawReason=${raw || '-'} normalizedReason=${normalized || '-'} detail=${detail || '-'} retryable=${retryable ? 1 : 0} reason=${retryable && (detail === 'waiting_payload' || normalized === 'waiting_payload' || raw === 'waiting_payload' || String(raw || '').includes('waiting_payload')) ? 'waiting_payload' : (normalized || raw || '-')}`,
       );
 
       return retryable;
     }
 
     function logSendFailureClassified(phase, task, reason, sendResult) {
-      const retryable = isRetryableSendFailureReason(reason)
+      const detail = sendResult && sendResult.detail ? String(sendResult.detail) : '';
+      const normalizedReason = normalizeSendFailureReason(reason).normalized;
+      const isWaitingPayloadFailure = normalizedReason === 'waiting_payload'
+        || String(reason || '').trim() === 'waiting_payload'
+        || detail === 'waiting_payload'
+        || (
+          normalizedReason === 'continue-send-failed'
+          && detail === 'waiting_payload'
+        )
+        || String(reason || '').includes('waiting_payload');
+      const retryable = isRetryableSendFailureReason(reason, detail)
         || (sendResult && sendResult.retryable === true)
         || (sendResult && sendResult.wait === true);
       let action = 'stop';
 
-      if (retryable) {
+      if (isWaitingPayloadFailure || normalizedReason === 'continue-send-failed') {
+        const scheduled = phase === 'send-once'
+          ? true
+          : scheduleRelentlessSendRetry(reason, phase, task);
+        action = scheduled ? 'wait-and-retry' : 'retry-schedule-failed';
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][SEND_BLOCKED] reason=${isWaitingPayloadFailure ? 'waiting_payload' : (detail || normalizedReason || reason || '-')} action=${action}`,
+        );
+      } else if (retryable) {
         if (phase === 'send-once') {
           action = 'retry';
         } else {
@@ -5199,7 +5231,7 @@ const AutoQueueModule = (() => {
 
       ToolboxShell.appendLog(
         `[AUTOQ][TASK_BATCH][SEND_FAILURE_CLASSIFIED] phase=${phase} task=${task ? task.title : '-'} `
-        + `reason=${reason || '-'} retryable=${retryable ? 1 : 0} action=${action}`,
+        + `reason=${reason || '-'} detail=${detail || '-'} retryable=${retryable ? 1 : 0} action=${action}`,
       );
 
       return { retryable, action };
@@ -6126,6 +6158,7 @@ const AutoQueueModule = (() => {
     function failCurrentTask(reason, options = {}) {
       const task = getCurrentRunningTask();
       const reasonText = String(reason || 'failed');
+      const detailText = String(options && options.detail ? options.detail : '').trim();
 
       if (shouldStopEntireBatchForReason(reasonText, options)) {
         if (task) {
@@ -6136,11 +6169,24 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      const failPhase = state.taskRun && state.taskRun.pendingSendKind === 'verification'
+      const pendingSendKind = state.taskRun && state.taskRun.pendingSendKind
+        ? String(state.taskRun.pendingSendKind)
+        : '';
+      const lastPendingSendKind = state.taskRun && state.taskRun.lastPendingSendKindBeforeProcessing
+        ? String(state.taskRun.lastPendingSendKindBeforeProcessing)
+        : '';
+      const effectivePendingSendKind = pendingSendKind === 'processing'
+        ? lastPendingSendKind
+        : pendingSendKind;
+      const failPhase = effectivePendingSendKind === 'verification'
         ? 'verification'
-        : (state.taskRun && state.taskRun.pendingSendKind === 'continue' ? 'continue' : 'initial');
-      const classified = logSendFailureClassified(failPhase, task, reasonText);
-      if (state.running && classified.action === 'retry') {
+        : (effectivePendingSendKind === 'continue' ? 'continue' : 'initial');
+      const classified = logSendFailureClassified(failPhase, task, reasonText, {
+        detail: detailText,
+        retryable: options && options.retryable === true,
+        wait: options && options.wait === true,
+      });
+      if (state.running && (classified.action === 'retry' || classified.action === 'wait-and-retry')) {
         return;
       }
 
@@ -6181,6 +6227,20 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (
+        reasonText === 'continue-send-failed'
+        || detailText === 'waiting_payload'
+        || String(reasonText || '').includes('waiting_payload')
+      ) {
+        ToolboxShell.appendLog(`[BATCH_TASK_GROUP][STOP_ON_SEND_FAILED] reason=${reasonText}`);
+        stopEntireBatchTaskGroup(reasonText, {
+          sendReason: detailText || reasonText,
+          markCurrent: true,
+          logStop: true,
+        });
+        return;
+      }
+
       skipCurrentTaskWithFailure(reasonText, options);
     }
 
@@ -6208,25 +6268,13 @@ const AutoQueueModule = (() => {
       const defaults = typeof createDefaultTaskQueueSettings === 'function'
         ? createDefaultTaskQueueSettings()
         : {};
-      return String(defaults.verifyAfterDoneSignalPrompt || '').trim() || [
-        '这是一次“完成状态确认”，不是重新执行任务。',
-        '',
-        '请不要重新回答题目，不要重新生成代码，不要重新展开原任务内容。',
-        '你只需要根据上一次助手回复，判断它是否已经完成当前任务要求。',
-        '',
-        '当前任务标题：{{taskTitle}}',
-        '任务简述：{{taskBrief}}',
-        '',
-        '上一次助手回复：',
-        '{{lastReply}}',
-        '',
-        '判断要求：',
-        '1. 如果上一次助手回复已经完整完成任务，并且没有明显遗漏，只回复：{{doneSignal}}',
-        '2. 如果上一次助手回复还没有完成，请只继续输出缺失的剩余内容。',
-        '3. 不要重复已经回答过的内容。',
-        '4. 不要从头重新回答整个任务。',
-        '5. 不要把原始题目重新列出来。',
-      ].join('\n');
+      if (String(defaults.verifyAfterDoneSignalPrompt || '').trim()) {
+        return String(defaults.verifyAfterDoneSignalPrompt || '').trim();
+      }
+      if (typeof getDefaultVerifyAfterDoneSignalPromptTemplate === 'function') {
+        return getDefaultVerifyAfterDoneSignalPromptTemplate();
+      }
+      return '';
     }
 
     function buildTaskBriefForDoneVerify(task) {
@@ -7913,7 +7961,11 @@ const AutoQueueModule = (() => {
           }
 
           if (!result || !result.ok) {
-            failCurrentTask(failReason || 'verify-continue-failed');
+            failCurrentTask(failReason || 'verify-continue-failed', {
+              detail: result && result.detail ? result.detail : '',
+              retryable: !!(result && result.retryable === true),
+              wait: !!(result && result.wait === true),
+            });
             return;
           }
 
@@ -8150,7 +8202,11 @@ const AutoQueueModule = (() => {
 
         if (!result.ok) {
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][FAILED] task=${task.title} reason=${failReason || 'copy-hotkey-continue-failed'}`);
-          failCurrentTask(failReason || 'copy-hotkey-continue-failed');
+          failCurrentTask(failReason || 'copy-hotkey-continue-failed', {
+            detail: result && result.detail ? result.detail : '',
+            retryable: !!(result && result.retryable === true),
+            wait: !!(result && result.wait === true),
+          });
           return;
         }
 
@@ -8169,7 +8225,11 @@ const AutoQueueModule = (() => {
         }
 
         if (!(result.copied && result.hotkeySent && result.continueSent)) {
-          failCurrentTask(failReason || 'batch-step-incomplete');
+          failCurrentTask(failReason || 'batch-step-incomplete', {
+            detail: result && result.detail ? result.detail : '',
+            retryable: !!(result && result.retryable === true),
+            wait: !!(result && result.wait === true),
+          });
           return;
         }
 
@@ -11009,7 +11069,16 @@ const AutoQueueModule = (() => {
     }
 
     function getAutoQueueSendOnceIdleText() {
-      return config.promptMode === 'task' ? '只发送初始指令一次' : '发送一次';
+      if (config.promptMode !== 'task') {
+        return '发送一次';
+      }
+
+      const profile = getActiveTaskProfile();
+      const task = getSelectedTask(profile);
+
+      return shouldSendTaskContinueFromSendOnce(task, { allowDomProbe: false })
+        ? '继续当前任务一次'
+        : '只发送初始指令一次';
     }
 
     function isAutoQueueWaitingDelay() {
@@ -11031,9 +11100,7 @@ const AutoQueueModule = (() => {
       const reason = String(context.refreshReason || 'update-status');
       const idleText = getAutoQueueSendOnceIdleText();
 
-      if (!sendOnceBtn.dataset.cgptIdleText) {
-        sendOnceBtn.dataset.cgptIdleText = idleText;
-      }
+      sendOnceBtn.dataset.cgptIdleText = idleText;
 
       if (phase === 'sending') {
         setButtonSending(sendOnceBtn, '发送中...', {
@@ -13914,9 +13981,6 @@ const AutoQueueModule = (() => {
         const run = state.taskRun || {};
         const current = Number(run.currentIndex || 0);
         const total = Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0;
-        ToolboxShell.appendLog(
-          `[AUTOQ][BATCH_PENDING_ACTION] action=finish-copy-and-advance current=${current} total=${total}`,
-        );
 
         let replyText = '';
         let copyErr = null;
@@ -13929,6 +13993,9 @@ const AutoQueueModule = (() => {
         const taskIndex = current;
         const trimmed = String(replyText || '').trim();
         if (copyErr) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][BATCH_PENDING_ACTION] action=wait-reply-recover current=${current} total=${total}`,
+          );
           const errText = copyErr && copyErr.message ? copyErr.message : String(copyErr);
           ToolboxShell.appendLog(
             `[BATCH_TASK_GROUP][COPY_REPLY_FAIL] reason=${errText || 'copy-failed'} taskIndex=${taskIndex}`,
@@ -13945,15 +14012,33 @@ const AutoQueueModule = (() => {
             });
           }
         } else if (trimmed) {
-          ToolboxShell.appendLog(
-            `[BATCH_TASK_GROUP][COPY_REPLY_DONE] taskIndex=${taskIndex} length=${trimmed.length}`,
-          );
           const currentTask = getCurrentRunningTask();
           if (state.taskRun) {
             const run = syncCurrentTaskVerificationContext(currentTask, { resetState: false, keepRetryCount: true });
             run.currentTaskReplyText = trimmed;
+            const stableState = updateCurrentTaskReplyStableState(trimmed);
             state.taskRun = run;
+            if (!stableState.stable) {
+              ToolboxShell.appendLog(
+                `[COPY_REPLY][WAIT_STABLE] stable=${stableState.stableCount}/${stableState.required || TASK_REPLY_STABLE_HASH_ROUNDS} chars=${trimmed.length}`,
+              );
+              ToolboxShell.appendLog(
+                `[AUTOQ][BATCH_PENDING_ACTION] action=wait-reply-recover current=${current} total=${total}`,
+              );
+              recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'reply-not-stable', {
+                action: 'wait-reply-recover',
+                clearStepRunning: true,
+                clearWaiting: false,
+              });
+              return;
+            }
           }
+          ToolboxShell.appendLog(
+            `[AUTOQ][BATCH_PENDING_ACTION] action=finish-copy-and-advance current=${current} total=${total}`,
+          );
+          ToolboxShell.appendLog(
+            `[BATCH_TASK_GROUP][COPY_REPLY_DONE] taskIndex=${taskIndex} length=${trimmed.length}`,
+          );
           void handleTaskReplyReady().catch((error) => {
             logTaskRunError('[AUTOQ][COPY_REPLY_DONE][HANDLE_REPLY_READY_FAILED]', error, currentTask);
             recoverBatchTaskGroup(getBatchTaskGroupRunId(), 'copy-last-reply-done-handle-failed', {
@@ -13963,6 +14048,9 @@ const AutoQueueModule = (() => {
             });
           });
         } else {
+          ToolboxShell.appendLog(
+            `[AUTOQ][BATCH_PENDING_ACTION] action=wait-reply-recover current=${current} total=${total}`,
+          );
           ToolboxShell.appendLog(
             `[BATCH_TASK_GROUP][COPY_REPLY_SKIP] reason=no-reply-found-but-page-idle taskIndex=${taskIndex}`,
           );
@@ -14373,6 +14461,17 @@ const AutoQueueModule = (() => {
           return false;
         }
 
+        const sentAt = nowMs();
+        task.status = 'running';
+        task.manualInitialSentAt = sentAt;
+        task.updatedAt = sentAt;
+        saveConfig();
+        renderTaskList();
+        renderTaskEditor();
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_SINGLE][INITIAL_MARK_SENT] task=${task.title} manualInitialSentAt=${task.manualInitialSentAt}`,
+        );
+
         log(`已发送初始指令（仅一次）：${initial.slice(0, 80)}`);
         return true;
       } catch (err) {
@@ -14381,6 +14480,163 @@ const AutoQueueModule = (() => {
         log(`发送异常：${errText}`);
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_SINGLE][SEND_INITIAL_ONLY] error task=${task.title} error=${errText}`,
+        );
+        return false;
+      } finally {
+        state.sendingNow = false;
+      }
+    }
+
+    function hasCurrentAssistantReplyForTaskContinue() {
+      if (typeof getLastAssistantReplyText !== 'function') {
+        return false;
+      }
+
+      let text = '';
+
+      try {
+        text = String(getLastAssistantReplyText() || '').trim();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[AUTOQ][TASK_SINGLE][CHECK_REPLY_FAILED]', err);
+        ToolboxShell.appendLog(`[AUTOQ][TASK_SINGLE][CHECK_REPLY_FAILED] error=${errText}`);
+        return false;
+      }
+
+      if (!text) {
+        return false;
+      }
+
+      if (
+        typeof isInvalidAssistantReplyText === 'function'
+        && isInvalidAssistantReplyText(text)
+      ) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function shouldSendTaskContinueFromSendOnce(task, options = {}) {
+      if (!task) {
+        return false;
+      }
+
+      const allowDomProbe = !!(options && options.allowDomProbe === true);
+
+      if (Number(task.manualInitialSentAt || 0) > 0) {
+        return true;
+      }
+
+      if (String(task.status || '').trim().toLowerCase() === 'running') {
+        return true;
+      }
+
+      if (Number(task.continueCount || 0) > 0) {
+        return true;
+      }
+
+      if (allowDomProbe && hasCurrentAssistantReplyForTaskContinue()) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function buildManualTaskContinuePrompt(task, profile) {
+      const resolved = resolveTaskContinueSettings(task, profile, { log: true });
+
+      const actualDoneSignal = typeof normalizeDoneSignal === 'function'
+        ? normalizeDoneSignal(resolved.actualDoneSignal)
+        : resolved.actualDoneSignal;
+
+      const actualContinuePrompt = typeof renderContinuePromptTemplate === 'function'
+        ? renderContinuePromptTemplate(
+          resolved.actualContinuePromptTemplate,
+          actualDoneSignal,
+        )
+        : String(resolved.actualContinuePromptTemplate || '');
+
+      return {
+        prompt: String(actualContinuePrompt || '').trim(),
+        doneSignal: actualDoneSignal,
+        resolved,
+      };
+    }
+
+    async function sendTaskContinueOnce() {
+      if (state.running) {
+        log('批量任务组运行中，请先停止再手动发送继续指令');
+        return false;
+      }
+
+      readPanelConfig('task');
+
+      const profile = getActiveTaskProfile();
+      const task = getSelectedTask(profile);
+
+      if (!task) {
+        log('请先选择任务');
+        return false;
+      }
+
+      const built = buildManualTaskContinuePrompt(task, profile);
+      const prompt = String(built.prompt || '').trim();
+
+      if (!prompt) {
+        log('继续指令为空，无法发送');
+        ToolboxShell.appendLog(`[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][FAILED] task=${task.title} reason=empty-continue-prompt`);
+        return false;
+      }
+
+      if (state.sendingNow) {
+        log('正在发送中，请稍候');
+        return false;
+      }
+
+      state.sendingNow = true;
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY] task=${task.title} prompt_len=${prompt.length}`,
+      );
+
+      try {
+        const sendResult = await sendOnceWithRelentlessRetry(
+          prompt,
+          'auto-queue-task-manual-continue',
+        );
+
+        if (!sendResult || sendResult.ok !== true) {
+          const reason = String((sendResult && sendResult.reason) || 'unknown');
+          log(`发送继续指令失败：${reason}`);
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][FAILED] task=${task.title} reason=${reason}`,
+          );
+          return false;
+        }
+
+        const continuedAt = nowMs();
+        task.status = 'running';
+        task.continueCount = Math.max(0, Number(task.continueCount) || 0) + 1;
+        task.lastManualContinueAt = continuedAt;
+        task.updatedAt = continuedAt;
+
+        saveConfig();
+        renderTaskList();
+        renderTaskEditor();
+
+        log(`已发送继续指令（仅一次）：${prompt.slice(0, 80)}`);
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][DONE] task=${task.title} continueCount=${task.continueCount}`,
+        );
+
+        return true;
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] send task continue once failed', err);
+        log(`发送继续指令异常：${errText}`);
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][ERROR] task=${task.title} error=${errText}`,
         );
         return false;
       } finally {
@@ -14631,7 +14887,22 @@ const AutoQueueModule = (() => {
       if (config.promptMode === 'task') {
         setSendOnceTaskPhase('sending');
         try {
-          const ok = await sendTaskInitialOnce();
+          readPanelConfig('task');
+
+          const profile = getActiveTaskProfile();
+          const task = getSelectedTask(profile);
+
+          const shouldContinue = shouldSendTaskContinueFromSendOnce(task, {
+            allowDomProbe: true,
+          });
+
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_SINGLE][SEND_ONCE_DECIDE] task=${task ? task.title : '-'} action=${shouldContinue ? 'continue' : 'initial'}`,
+          );
+
+          const ok = shouldContinue
+            ? await sendTaskContinueOnce()
+            : await sendTaskInitialOnce();
           if (ok) {
             flashSendOnceThenIdle('success', '已发送');
           } else {

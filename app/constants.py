@@ -85,6 +85,13 @@ ASSISTANT_WAIT_TEXTS = frozenset(
         BOOTSTRAP_STALE_TIMEOUT_TEXT,
     }
 )
+
+# UI 状态展示文案（测试与 UI 共享的最小映射）。
+UI_STATUS_DISPLAY_TEXT = {
+    "waiting": ASSISTANT_WAIT_TEXT,
+    "assistant_pending": ASSISTANT_WAIT_TEXT,
+    "sending": "发送中",
+}
 ASSISTANT_REPLY_PENDING_STATUSES = frozenset(
     {
         "waiting",
@@ -95,6 +102,10 @@ ASSISTANT_REPLY_PENDING_STATUSES = frozenset(
         "等待回复中",
     }
 )
+
+# Backward-compatible alias for older tests/callers.
+# Prefer `ASSISTANT_REPLY_PENDING_STATUSES` in new code.
+PENDING_ASSISTANT_STATUSES = ASSISTANT_REPLY_PENDING_STATUSES
 
 USER_SEND_PENDING_STATUSES = frozenset(
     {
