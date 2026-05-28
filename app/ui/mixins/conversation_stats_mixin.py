@@ -237,34 +237,34 @@ class ConversationStatsMixin:
         if session is None:
             return ""
 
-        remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None))
-        message_count = int(remote.get("last_web_snapshot_message_count") or 0)
-        if message_count <= 0 and not remote.get("last_web_snapshot_stats"):
+        snapshot = getattr(session, "web_snapshot", {}) or {}
+        message_count = int(snapshot.get("message_count") or 0)
+        if message_count <= 0 and not snapshot.get("stats"):
             return ""
 
-        web_stats = remote.get("last_web_snapshot_stats")
+        web_stats = snapshot.get("stats") or {}
         if isinstance(web_stats, dict) and web_stats:
-            user_count = int(web_stats.get("user_count") or remote.get("last_web_snapshot_user_count") or 0)
+            user_count = int(web_stats.get("user_count") or snapshot.get("user_count") or 0)
             assistant_count = int(
                 web_stats.get("assistant_count")
-                or remote.get("last_web_snapshot_assistant_count")
+                or snapshot.get("assistant_count")
                 or 0
             )
-            round_count = int(web_stats.get("round_count") or remote.get("last_web_snapshot_round_count") or 0)
+            round_count = int(web_stats.get("round_count") or snapshot.get("round_count") or 0)
             dom_estimated = int(
                 web_stats.get("dom_estimated_round_count")
-                or remote.get("last_web_snapshot_dom_estimated_round_count")
+                or snapshot.get("dom_estimated_round_count")
                 or 0
             )
             total_count = int(web_stats.get("total_count") or message_count)
         else:
-            user_count = int(remote.get("last_web_snapshot_user_count") or 0)
-            assistant_count = int(remote.get("last_web_snapshot_assistant_count") or 0)
-            round_count = int(remote.get("last_web_snapshot_round_count") or 0)
-            dom_estimated = int(remote.get("last_web_snapshot_dom_estimated_round_count") or 0)
+            user_count = int(snapshot.get("user_count") or 0)
+            assistant_count = int(snapshot.get("assistant_count") or 0)
+            round_count = int(snapshot.get("round_count") or 0)
+            dom_estimated = int(snapshot.get("dom_estimated_round_count") or 0)
             total_count = message_count
 
-        page_display_id = str(remote.get("last_web_snapshot_page_display_id") or "").strip()
+        page_display_id = str(snapshot.get("page_display_id") or "").strip()
         page_part = f"页面ID {page_display_id}｜" if page_display_id else ""
         return (
             f"{page_part}网页快照：共 {total_count} 条｜"

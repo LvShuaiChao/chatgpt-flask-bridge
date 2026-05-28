@@ -13,6 +13,7 @@ from app.models import (
     BIND_STATE_WAITING_BOUND_CONVERSATION,
     BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
+    derive_remote_page_type,
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
@@ -88,7 +89,10 @@ class PageBindMixin(
         if session is not None:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             if remote_binding_enabled(remote) and not summary.get("bound_page_type"):
-                summary["bound_page_type"] = (remote.get("page_type") or "").strip()
+                summary["bound_page_type"] = derive_remote_page_type(
+                    remote.get("url"),
+                    remote.get("conversation_id"),
+                )
             if self._remote_bind_state(remote) == BIND_STATE_PREBOUND_HOME:
                 summary["bound_page_type"] = "home"
         return summary
@@ -220,7 +224,10 @@ class PageBindMixin(
             "page_instance_id": (remote.get("page_instance_id") or "").strip(),
             "conversation_id": (remote.get("conversation_id") or "").strip(),
             "url": ((remote.get("url") or "").strip()).strip(),
-            "page_type": (remote.get("page_type") or "").strip(),
+            "page_type": derive_remote_page_type(
+                remote.get("url"),
+                remote.get("conversation_id"),
+            ),
         }, "offline", "reentrant_session_only"
 
     def _resolve_bound_page_info_impl(self, status=None, snapshot=None):
@@ -240,14 +247,12 @@ class PageBindMixin(
             "page_instance_id": page_instance_id,
             "conversation_id": (remote.get("conversation_id") or "").strip(),
             "url": ((remote.get("url") or "").strip()).strip(),
-            "page_type": (remote.get("page_type") or "").strip(),
-            "page_no": (remote.get("page_no") or remote.get("temp_page_id") or "").strip(),
-            "page_display_id": (
-                remote.get("page_display_id")
-                or remote.get("temp_page_id")
-                or remote.get("page_no")
-                or ""
-            ).strip(),
+            "page_type": derive_remote_page_type(
+                remote.get("url"),
+                remote.get("conversation_id"),
+            ),
+            "page_no": (remote.get("page_display_id") or "").strip(),
+            "page_display_id": (remote.get("page_display_id") or "").strip(),
         }
 
         reg = getattr(self, "page_registry", None)
@@ -758,7 +763,7 @@ class PageBindMixin(
         bind_request_id = (bind_request_id or "").strip()
         if not bind_request_id and hasattr(self, "_session_bind_request_id"):
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
-            bind_request_id = self._session_bind_request_id(remote)
+            bind_request_id = self._session_bind_request_id(session, remote)
 
         if isinstance(cap_page, dict) and cap_page:
             cap_page = dict(cap_page)

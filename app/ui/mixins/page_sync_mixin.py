@@ -552,8 +552,6 @@ class PageSyncMixin:
         bound_page_id = str(
             remote.get("target_page_id")
             or remote.get("page_display_id")
-            or remote.get("page_no")
-            or remote.get("temp_page_id")
             or ""
         ).strip()
         if bound_page_id and report_page_id and bound_page_id != report_page_id:
@@ -568,7 +566,6 @@ class PageSyncMixin:
             if page_url:
                 remote["url"] = page_url
             remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
-            remote["page_type"] = "conversation"
             session.remote_chatgpt = remote
             self._schedule_save_sessions_to_disk()
 
@@ -887,23 +884,15 @@ class PageSyncMixin:
                 self._refresh_session_list(select_session_id=session.session_id)
             return
 
-        remote = normalize_remote_chatgpt(session.remote_chatgpt)
-        remote["last_web_snapshot_stats"] = payload.get("stats") or {}
-        remote["last_web_snapshot_page_display_id"] = (
-            payload.get("page_display_id")
-            or payload.get("page_no")
-            or ""
-        )
-        remote["last_web_snapshot_message_count"] = int(payload.get("message_count") or 0)
-        remote["last_web_snapshot_user_count"] = int(payload.get("user_count") or 0)
-        remote["last_web_snapshot_assistant_count"] = int(
-            payload.get("assistant_count") or 0
-        )
-        remote["last_web_snapshot_round_count"] = int(payload.get("round_count") or 0)
-        remote["last_web_snapshot_dom_estimated_round_count"] = int(
-            payload.get("dom_estimated_round_count") or 0
-        )
-        session.remote_chatgpt = remote
+        session.web_snapshot = {
+            "stats": payload.get("stats") or {},
+            "page_display_id": payload.get("page_display_id") or payload.get("page_no") or "",
+            "message_count": int(payload.get("message_count") or 0),
+            "user_count": int(payload.get("user_count") or 0),
+            "assistant_count": int(payload.get("assistant_count") or 0),
+            "round_count": int(payload.get("round_count") or 0),
+            "dom_estimated_round_count": int(payload.get("dom_estimated_round_count") or 0),
+        }
 
         mode = str(
             payload.get("mode")
@@ -2031,11 +2020,10 @@ class PageSyncMixin:
             (item.get("client_id") or "").strip()
             or (remote.get("prebound_home_client_id") or remote.get("client_id") or "").strip()
         )
-        bind_token = (
-            remote.get("bind_request_id")
-            or item.get("bind_request_id")
-            or ""
-        ).strip()
+        from app.utils.bind_runtime import get_bind_runtime
+
+        runtime = get_bind_runtime(self, session)
+        bind_token = ((runtime.bind_request_id or item.get("bind_request_id") or "")).strip()
         url = self._page_url_from_item(item) or (
             (remote.get("url") or "https://chatgpt.com/").strip()
         )

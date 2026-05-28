@@ -162,6 +162,33 @@
     return text || fallback;
   }
 
+  function normalizeQuickPromptSelectionMode(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    return raw === 'manual' ? 'manual' : 'auto';
+  }
+
+  if (typeof window !== 'undefined' && typeof window.normalizeQuickPromptSelectionMode !== 'function') {
+    window.normalizeQuickPromptSelectionMode = normalizeQuickPromptSelectionMode;
+  }
+
+  function isToolboxDebugEnabled(options = {}) {
+    if (options && options.debug === true) {
+      return true;
+    }
+    if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+      if (MemoryManager.get('bridgeDebugEnabled', false)) {
+        return true;
+      }
+    }
+    if (typeof getCompactUiConfig === 'function') {
+      const cfg = getCompactUiConfig();
+      if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function qs(sel, root) {
     try {
       return (root || document).querySelector(sel);

@@ -14,8 +14,6 @@ from app.constants import (
 from app.models import (
     remote_binding_active,
     remote_binding_enabled,
-    BIND_MODE_CONVERSATION,
-    BIND_MODE_HOME_PENDING,
     BIND_STATE_BOUND_CONVERSATION,
     BIND_STATE_BOUND_OFFLINE,
     BIND_STATE_PREBOUND_HOME,
@@ -311,12 +309,14 @@ class PageAutoBindMixin:
         if activity == "stale_hidden":
             return "stale_hidden_home"
         return "latest_home"
-    @staticmethod
-    def _session_bind_request_id(remote):
-        remote = normalize_remote_chatgpt(remote)
-        return (
-            remote.get("bind_request_id") or ""
-        ).strip()
+    def _session_bind_request_id(self, session, remote=None):
+        from app.utils.bind_runtime import get_bind_runtime
+
+        runtime = get_bind_runtime(self, session)
+        bind_request_id = (getattr(runtime, "bind_request_id", "") or "").strip()
+        if bind_request_id:
+            return bind_request_id
+        return ""
 
     def _resolve_session_for_conversation_created(self, item):
         payload = item.get("payload") or {}
@@ -344,7 +344,7 @@ class PageAutoBindMixin:
         if bind_token:
             for session in self._sessions.values():
                 remote = normalize_remote_chatgpt(session.remote_chatgpt)
-                expected = self._session_bind_request_id(remote)
+                expected = self._session_bind_request_id(session, remote)
                 if expected and expected == bind_token:
                     return session
 
@@ -722,17 +722,20 @@ class PageAutoBindMixin:
             if isinstance(item, dict) and (item.get("page_instance_id") or "").strip()
         }
 
+        from app.utils.bind_runtime import get_bind_runtime, update_bind_runtime
+
         remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-        bind_request_id = self._session_bind_request_id(remote_now)
+        bind_request_id = self._session_bind_request_id(session, remote_now)
         if not bind_request_id:
             bind_request_id = uuid.uuid4().hex
-            session.remote_chatgpt = {
-                **remote_now,
-                "bind_request_id": bind_request_id,
-                "bind_started_at": time.time(),
-            }
+            update_bind_runtime(
+                self,
+                session,
+                bind_request_id=bind_request_id,
+                bind_started_at=time.time(),
+            )
             self._schedule_save_sessions_to_disk()
-            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
+        runtime = get_bind_runtime(self, session)
 
         url = f"{CHATGPT_HOME_URL}#xz_bind_token={bind_request_id}"
         opened = self._open_url_in_browser(url, "发送首条消息时打开 ChatGPT 首页")
@@ -743,10 +746,7 @@ class PageAutoBindMixin:
             method = "bridge_command"
             result = "queued"
 
-        pending_text = (
-            normalize_remote_chatgpt(session.remote_chatgpt).get("pending_bootstrap_content")
-            or ""
-        ).strip()
+        pending_text = (runtime.pending_bootstrap_content or "").strip()
         self._append_log(
             f"[AUTO_BIND][OPEN_HOME_ON_SEND] session_id={session_id} "
             f"bind_request_id={bind_request_id} url={url} "
@@ -862,15 +862,11 @@ class PageAutoBindMixin:
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_TEMP_HOME_BOUND,
-            bind_mode=BIND_MODE_HOME_PENDING,
             page_display_id=page_display_id,
-            temp_page_id=page_display_id,
-            page_no=page_display_id,
             url=page_url or CHATGPT_HOME_URL,
             conversation_id="",
             client_id=client_id,
             page_instance_id=page_instance_id,
-            page_type="home",
         )
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
@@ -1242,7 +1238,9 @@ class PageAutoBindMixin:
             return True, ""
 
         if bind_state == BIND_STATE_WAITING_HOME:
-            pending = (remote.get("pending_bootstrap_content") or "").strip()
+            pending = (
+                self._remote_runtime_get(session, remote, "pending_bootstrap_content", "") or ""
+            ).strip()
             if pending:
                 return (
                     False,
@@ -1398,10 +1396,16 @@ class PageAutoBindMixin:
         session.remote_chatgpt = {
             **default_remote_chatgpt(),
             "bind_state": BIND_STATE_WAITING_HOME,
-            "bind_request_id": bind_request_id,
-            "bind_started_at": now,
-            "opened_home_at": now,
         }
+        from app.utils.bind_runtime import update_bind_runtime
+
+        update_bind_runtime(
+            self,
+            session,
+            bind_request_id=bind_request_id,
+            bind_started_at=now,
+            opened_home_at=now,
+        )
         session.updated_at = now
         self._schedule_save_sessions_to_disk()
         self._start_waiting_home_on_send(session)
@@ -1454,15 +1458,17 @@ class PageAutoBindMixin:
 
         pending_text = (text or "").strip()
         if bind_state == BIND_STATE_WAITING_BOUND_CONVERSATION:
-            remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-            session.remote_chatgpt = {
-                **remote_now,
-                "pending_send_content": pending_text
-                or (remote_now.get("pending_send_content") or ""),
-                "pending_send_message_id": (user_message_id or "").strip()
-                or (remote_now.get("pending_send_message_id") or ""),
-                "pending_send_created_at": time.time(),
-            }
+            from app.utils.bind_runtime import get_bind_runtime, update_bind_runtime
+
+            runtime = get_bind_runtime(self, session)
+            update_bind_runtime(
+                self,
+                session,
+                pending_send_content=pending_text or (runtime.pending_send_content or ""),
+                pending_send_message_id=(user_message_id or "").strip()
+                or (runtime.pending_send_message_id or ""),
+                pending_send_created_at=time.time(),
+            )
             session.updated_at = time.time()
             self._schedule_save_sessions_to_disk()
             if session.session_id == self._current_session_id:
@@ -1477,20 +1483,25 @@ class PageAutoBindMixin:
         if not target_url:
             return True
 
-        reopen_request_id = (
-            remote.get("reopen_request_id") or ""
-        ).strip() or uuid.uuid4().hex
+        from app.utils.bind_runtime import get_bind_runtime, update_bind_runtime
+
+        runtime = get_bind_runtime(self, session)
+        reopen_request_id = (runtime.reopen_request_id or "").strip() or uuid.uuid4().hex
         now = time.time()
         session.remote_chatgpt = {
             **remote,
             "bind_state": BIND_STATE_WAITING_BOUND_CONVERSATION,
-            "pending_send_content": pending_text,
-            "pending_send_message_id": (user_message_id or "").strip(),
-            "pending_send_created_at": now if pending_text else 0,
-            "reopen_request_id": reopen_request_id,
-            "reopen_started_at": now,
-            "reopen_target_url": target_url,
         }
+        update_bind_runtime(
+            self,
+            session,
+            pending_send_content=pending_text,
+            pending_send_message_id=(user_message_id or "").strip(),
+            pending_send_created_at=now if pending_text else 0,
+            reopen_request_id=reopen_request_id,
+            reopen_started_at=now,
+            reopen_target_url=target_url,
+        )
         session.updated_at = now
         self._schedule_save_sessions_to_disk()
         opened = self._open_bound_conversation_url(
@@ -1519,23 +1530,36 @@ class PageAutoBindMixin:
             if self._remote_bind_state(remote) != BIND_STATE_WAITING_BOUND_CONVERSATION:
                 continue
 
-            started = self._auto_bind_float_field(remote, "reopen_started_at", 0)
+            started = self._remote_runtime_get(session, remote, "reopen_started_at", 0)
             if started and (
                 now - started > self.REOPEN_BOUND_CONVERSATION_TIMEOUT_SECONDS
             ):
                 self._append_log(
                     f"[BIND][REOPEN_BOUND_TIMEOUT] session_id={session.session_id} "
                     f"conversation_id={remote.get('conversation_id') or '-'} "
-                    f"pending_text_len={len((remote.get('pending_send_content') or '').strip())}"
+                    f"pending_text_len={len((self._remote_runtime_get(session, remote, 'pending_send_content', '') or '').strip())}"
                 )
                 session.remote_chatgpt = {
                     **remote,
                     "bind_state": BIND_STATE_BOUND_OFFLINE,
-                    "reopen_started_at": 0,
-                    "reopen_target_url": "",
                 }
+                from app.utils.bind_runtime import update_bind_runtime
+
+                update_bind_runtime(
+                    self,
+                    session,
+                    pending_send_content="",
+                    pending_send_message_id="",
+                    pending_send_created_at=0,
+                    reopen_request_id="",
+                    reopen_started_at=0,
+                    reopen_target_url="",
+                )
                 session.updated_at = now
-                pending_message_id = (remote.get("pending_send_message_id") or "").strip()
+                pending_message_id = (
+                    self._remote_runtime_get(session, remote, "pending_send_message_id", "")
+                    or ""
+                ).strip()
                 if pending_message_id:
                     self._set_user_message_status(
                         session, pending_message_id, "发送失败"
@@ -1590,8 +1614,13 @@ class PageAutoBindMixin:
             if not client_info:
                 continue
 
-            pending_text = (remote.get("pending_send_content") or "").strip()
-            pending_message_id = (remote.get("pending_send_message_id") or "").strip()
+            pending_text = (
+                self._remote_runtime_get(session, remote, "pending_send_content", "") or ""
+            ).strip()
+            pending_message_id = (
+                self._remote_runtime_get(session, remote, "pending_send_message_id", "")
+                or ""
+            ).strip()
             if not self._bind_conversation_to_session(
                 session, client_info, silent=True
             ):
@@ -1608,16 +1637,18 @@ class PageAutoBindMixin:
                     pending_text,
                     reuse_user_message_id=pending_message_id,
                 )
-                remote_after_send = normalize_remote_chatgpt(session.remote_chatgpt)
-                session.remote_chatgpt = {
-                    **remote_after_send,
-                    "pending_send_content": "",
-                    "pending_send_message_id": "",
-                    "pending_send_created_at": 0,
-                    "reopen_request_id": "",
-                    "reopen_started_at": 0,
-                    "reopen_target_url": "",
-                }
+                from app.utils.bind_runtime import update_bind_runtime
+
+                update_bind_runtime(
+                    self,
+                    session,
+                    pending_send_content="",
+                    pending_send_message_id="",
+                    pending_send_created_at=0,
+                    reopen_request_id="",
+                    reopen_started_at=0,
+                    reopen_target_url="",
+                )
                 session.updated_at = time.time()
                 self._schedule_save_sessions_to_disk()
                 self._append_log(
@@ -1628,15 +1659,18 @@ class PageAutoBindMixin:
                     f"text_len={len(pending_text)}"
                 )
             else:
-                session.remote_chatgpt = {
-                    **normalize_remote_chatgpt(session.remote_chatgpt),
-                    "pending_send_content": "",
-                    "pending_send_message_id": "",
-                    "pending_send_created_at": 0,
-                    "reopen_request_id": "",
-                    "reopen_started_at": 0,
-                    "reopen_target_url": "",
-                }
+                from app.utils.bind_runtime import update_bind_runtime
+
+                update_bind_runtime(
+                    self,
+                    session,
+                    pending_send_content="",
+                    pending_send_message_id="",
+                    pending_send_created_at=0,
+                    reopen_request_id="",
+                    reopen_started_at=0,
+                    reopen_target_url="",
+                )
                 session.updated_at = time.time()
                 self._schedule_save_sessions_to_disk()
             self._refresh_session_list(select_session_id=self._current_session_id)
@@ -1790,7 +1824,7 @@ class PageAutoBindMixin:
             client_info.get("bind_request_id")
             or ""
         ).strip()
-        session_bind_token = self._session_bind_request_id(remote_prev)
+        session_bind_token = self._session_bind_request_id(session, remote_prev)
         if (
             old_bind_state == BIND_STATE_WAITING_HOME
             and session_bind_token
@@ -1819,42 +1853,31 @@ class PageAutoBindMixin:
             return False
         now = time.time()
         bind_request_id = session_bind_token or client_bind_token
-        temp_page_id = (
+        page_display_id = (
             str(client_info.get("page_display_id") or client_info.get("page_no") or page_no or "")
             .strip()
         )
-        page_type = (client_info.get("page_type") or "").strip() or "home"
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_TEMP_HOME_BOUND,
-            bind_mode=BIND_MODE_HOME_PENDING,
             conversation_id="",
             url=page_url or CHATGPT_HOME_URL,
             client_id=client_id,
             page_instance_id=page_instance_id,
-            page_no=page_no,
-            page_display_id=temp_page_id,
-            temp_page_id=temp_page_id,
-            page_type=page_type,
-            page_title=(client_info.get("page_title") or "").strip(),
-            last_seen=self._auto_bind_float_field(
-                client_info,
-                "last_seen",
-                time.time(),
-            ),
-            bind_request_id=bind_request_id,
-            bind_started_at=self._auto_bind_float_field(
-                remote_prev,
-                "bind_started_at",
-                now,
-            ),
+            page_display_id=page_display_id,
         )
         from app.utils.bind_runtime import update_bind_runtime
 
-        update_bind_runtime(self, session, bootstrap_in_progress=False)
+        update_bind_runtime(
+            self,
+            session,
+            bind_request_id=bind_request_id,
+            bind_started_at=self._remote_runtime_get(session, remote_prev, "bind_started_at", now),
+            bootstrap_in_progress=False,
+        )
         session.updated_at = time.time()
         self._schedule_save_sessions_to_disk()
-        self._maybe_show_home_with_local_history_notice(session, page_no=page_no or temp_page_id)
+        self._maybe_show_home_with_local_history_notice(session, page_no=page_no or page_display_id)
         if hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason="prebound_home")
         self._apply_chat_bind_visual_state()
@@ -1868,7 +1891,7 @@ class PageAutoBindMixin:
         self._append_log(
             "[BIND][PAGE_CHANNEL_BOUND] "
             f"session_id={session.session_id} "
-            f"page_no={page_no or temp_page_id or '-'} "
+            f"page_no={page_no or page_display_id or '-'} "
             f"client_id={client_id or '-'} "
             f"page_instance_id={page_instance_id or '-'} "
             f"url={page_url or CHATGPT_HOME_URL} "
@@ -1923,28 +1946,24 @@ class PageAutoBindMixin:
             if not conversation_id:
                 continue
             conversation_url = page_url if "/c/" in page_url else f"https://chatgpt.com/c/{conversation_id}"
-            page_no = temp_page_id or str(remote.get("page_no") or "").strip()
+            page_display_id = temp_page_id
             write_session_remote_chatgpt(
                 session,
                 bind_state=BIND_STATE_BOUND_CONVERSATION,
-                bind_mode=BIND_MODE_CONVERSATION,
                 conversation_id=conversation_id,
                 url=conversation_url,
-                page_type="conversation",
                 client_id=(raw.get("client_id") or page.client_id or bound_client_id or "").strip(),
                 page_instance_id=(
                     raw.get("page_instance_id") or page.page_instance_id or bound_instance_id or ""
                 ).strip(),
-                page_no=page_no,
-                page_display_id=page_no,
-                temp_page_id="",
+                page_display_id=page_display_id,
             )
             session.updated_at = time.time()
             changed = True
             self._append_log(
                 "[CHAT_BIND][PROMOTE_HOME_TO_CONVERSATION] "
                 f"localConversationId={session.session_id} "
-                f"page_id={page_no or '-'} "
+                f"page_id={page_display_id or '-'} "
                 f"conversation_id={conversation_id} "
                 f"url={conversation_url}",
                 echo=True,
@@ -1952,7 +1971,7 @@ class PageAutoBindMixin:
             self._append_log(
                 "[BIND][PROMOTE_PAGE_TO_CONVERSATION] "
                 f"session_id={session.session_id} "
-                f"page_no={page_no or '-'} "
+                f"page_no={page_display_id or '-'} "
                 f"conversation_id={conversation_id} "
                 f"old_url={old_url or 'https://chatgpt.com/'} "
                 f"new_url={conversation_url}",
@@ -2037,19 +2056,11 @@ class PageAutoBindMixin:
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_BOUND_CONVERSATION,
-            bind_mode=BIND_MODE_CONVERSATION,
             conversation_id=conversation_id,
             url=conversation_url,
             client_id=client_id,
             page_instance_id=(client_info.get("page_instance_id") or "").strip(),
-            page_no=page_no,
-            page_type="conversation",
-            page_title=(client_info.get("page_title") or "").strip(),
-            last_seen=self._auto_bind_float_field(
-                client_info,
-                "last_seen",
-                time.time(),
-            ),
+            page_display_id=page_no,
         )
         from app.utils.bind_runtime import update_bind_runtime
 
@@ -2109,34 +2120,30 @@ class PageAutoBindMixin:
         page_instance_id = (
             payload.get("page_instance_id") or remote.get("page_instance_id") or ""
         ).strip()
-        bind_request_id = self._session_bind_request_id(remote)
-        page_no = str(
-            payload.get("page_no") or remote.get("page_no") or ""
+        bind_request_id = self._session_bind_request_id(session, remote)
+        page_display_id = str(
+            payload.get("page_display_id") or payload.get("page_no") or remote.get("page_display_id") or ""
         ).strip()
-        if page_no == "-":
-            page_no = ""
+        if page_display_id == "-":
+            page_display_id = ""
         write_session_remote_chatgpt(
             session,
             bind_state=BIND_STATE_BOUND_CONVERSATION,
-            bind_mode=BIND_MODE_CONVERSATION,
             conversation_id=conversation_id,
             url=page_url,
             client_id=bound_client_id,
             page_instance_id=page_instance_id,
-            page_no=page_no,
-            page_type="conversation",
-            page_title=remote.get("page_title") or "",
-            last_seen=time.time(),
-            bind_request_id=bind_request_id,
-            bind_started_at=self._auto_bind_float_field(remote, "bind_started_at", 0),
-            pending_bootstrap_content="",
+            page_display_id=page_display_id,
         )
         from app.utils.bind_runtime import update_bind_runtime
 
         update_bind_runtime(
             self,
             session,
+            bind_request_id=bind_request_id,
+            bind_started_at=self._remote_runtime_get(session, remote, "bind_started_at", 0),
             bootstrap_in_progress=False,
+            pending_bootstrap_content="",
             pending_bootstrap_created_at=0,
             bootstrap_message_id="",
             bootstrap_started_at=0,
@@ -2208,10 +2215,11 @@ class PageAutoBindMixin:
                 continue
             if (remote.get("conversation_id") or "").strip():
                 continue
-            started_at = self._auto_bind_float_field(
+            started_at = self._remote_runtime_get(
+                session,
                 remote,
                 "bootstrap_started_at",
-                self._auto_bind_float_field(remote, "bind_started_at", 0),
+                self._remote_runtime_get(session, remote, "bind_started_at", 0),
             )
             if started_at <= 0:
                 continue
@@ -2223,6 +2231,18 @@ class PageAutoBindMixin:
                 **default_remote_chatgpt(),
                 "bind_state": BIND_STATE_UNBOUND,
             }
+            from app.utils.bind_runtime import update_bind_runtime
+
+            update_bind_runtime(
+                self,
+                session,
+                bootstrap_in_progress=False,
+                bootstrap_message_id="",
+                bootstrap_started_at=0,
+                pending_bootstrap_content="",
+                pending_bootstrap_created_at=0,
+                opened_home_at=0,
+            )
             session.updated_at = now
             changed = True
 
@@ -2361,7 +2381,7 @@ class PageAutoBindMixin:
             BIND_STATE_PREBOUND_HOME,
         ):
             return None
-        expected_token = self._session_bind_request_id(remote)
+        expected_token = self._session_bind_request_id(session, remote)
         if not expected_token:
             return None
         candidates = []
@@ -2407,7 +2427,7 @@ class PageAutoBindMixin:
             self._auto_bind.pending_known_page_instances = set()
             self._append_log(
                 f"[AUTO_BIND][RECOVER_WAITING_HOME] session_id={session.session_id} "
-                f"bind_request_id={self._session_bind_request_id(session.remote_chatgpt)} "
+                f"bind_request_id={self._session_bind_request_id(session, session.remote_chatgpt)} "
                 f"client_id={self._tm_client_id(matched) or '-'} "
                 f"page_instance_id={self._tm_page_instance_id(matched) or '-'}"
             )
@@ -2420,7 +2440,7 @@ class PageAutoBindMixin:
             remote = normalize_remote_chatgpt(session.remote_chatgpt)
             if self._remote_bind_state(remote) != BIND_STATE_PREBOUND_HOME:
                 continue
-            expected_token = self._session_bind_request_id(remote)
+            expected_token = self._session_bind_request_id(session, remote)
             if not expected_token:
                 continue
             current_client = (remote.get("client_id") or "").strip()
@@ -2488,10 +2508,16 @@ class PageAutoBindMixin:
             session.remote_chatgpt = {
                 **remote,
                 "bind_state": BIND_STATE_UNBOUND,
-                "pending_bootstrap_content": "",
-                "pending_bootstrap_created_at": 0,
-                "opened_home_at": 0,
             }
+            from app.utils.bind_runtime import update_bind_runtime
+
+            update_bind_runtime(
+                self,
+                session,
+                pending_bootstrap_content="",
+                pending_bootstrap_created_at=0,
+                opened_home_at=0,
+            )
             self._schedule_save_sessions_to_disk()
             self._clear_pending_auto_bind()
             self._refresh_session_list(select_session_id=self._current_session_id)
@@ -2506,7 +2532,7 @@ class PageAutoBindMixin:
                 self._clear_pending_auto_bind()
                 return
 
-        expected_token = self._session_bind_request_id(remote)
+        expected_token = self._session_bind_request_id(session, remote)
         candidates = []
         for item in self._iter_tm_clients(status, online_only=True, page_type="home"):
             client_id = self._tm_client_id(item)
@@ -2561,17 +2587,17 @@ class PageAutoBindMixin:
         if not ok:
             return
 
-        pending_text = (
-            normalize_remote_chatgpt(session.remote_chatgpt).get("pending_bootstrap_content")
-            or remote.get("pending_bootstrap_content")
-            or ""
-        ).strip()
-        session.remote_chatgpt = {
-            **normalize_remote_chatgpt(session.remote_chatgpt),
-            "pending_bootstrap_content": "",
-            "pending_bootstrap_created_at": 0,
-            "opened_home_at": 0,
-        }
+        from app.utils.bind_runtime import get_bind_runtime, update_bind_runtime
+
+        runtime = get_bind_runtime(self, session)
+        pending_text = (runtime.pending_bootstrap_content or "").strip()
+        update_bind_runtime(
+            self,
+            session,
+            pending_bootstrap_content="",
+            pending_bootstrap_created_at=0,
+            opened_home_at=0,
+        )
         matched_token = (
             selected.get("bind_request_id")
             or expected_token
@@ -2672,9 +2698,10 @@ class PageAutoBindMixin:
                         "url": page_url,
                         "client_id": client_id,
                         "page_instance_id": page_instance_id,
-                        "page_type": "conversation",
-                        "bootstrap_in_progress": False,
                     }
+                    from app.utils.bind_runtime import update_bind_runtime
+
+                    update_bind_runtime(self, session, bootstrap_in_progress=False)
                     session.updated_at = time.time()
                     changed = True
                     self._append_log(
@@ -2715,14 +2742,7 @@ class PageAutoBindMixin:
                             "conversation_id": client_conversation_id,
                             "url": page_url,
                             "page_instance_id": page_instance_id,
-                            "page_type": "conversation",
                             "bind_state": BIND_STATE_BOUND_CONVERSATION,
-                            "page_title": (item.get("page_title") or "").strip(),
-                            "last_seen": self._auto_bind_float_field(
-                                item,
-                                "last_seen",
-                                time.time(),
-                            ),
                         }
                     )
                     session.remote_chatgpt = remote
@@ -2771,13 +2791,6 @@ class PageAutoBindMixin:
                 **remote,
                 "url": page_url,
                 "conversation_id": conversation_id,
-                "page_type": (item.get("page_type") or remote.get("page_type") or "").strip(),
-                "page_title": (item.get("page_title") or remote.get("page_title") or "").strip(),
-                "last_seen": self._auto_bind_float_field(
-                    item,
-                    "last_seen",
-                    time.time(),
-                ),
             }
             session.updated_at = time.time()
             changed = True

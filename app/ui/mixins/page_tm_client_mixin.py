@@ -906,10 +906,7 @@ class PageTmClientMixin:
         ):
             if self._session_has_prebound_home_online(remote):
                 return state
-            temp_page_id = (
-                (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-                .strip()
-            )
+            temp_page_id = (remote.get("page_display_id") or "").strip()
             if temp_page_id:
                 return state
             return BIND_STATE_BOUND_OFFLINE

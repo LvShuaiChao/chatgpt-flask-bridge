@@ -605,10 +605,7 @@ class SendFlowMixin:
     def _resolve_temp_home_send_target(self, session, remote=None):
         remote = normalize_remote_chatgpt(remote or session.remote_chatgpt)
         bind_state = self._remote_bind_state(remote)
-        temp_page_id = (
-            (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-            .strip()
-        )
+        temp_page_id = (remote.get("page_display_id") or "").strip()
         result = {
             "matched": False,
             "temp_page_id": temp_page_id,

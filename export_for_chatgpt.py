@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -2644,18 +2645,33 @@ def main() -> None:
             if cycle > 1:
                 print(f"[项目] {PROJECT_ROOT.resolve().name}")
         use_incremental = bool(args.incremental) and incremental_active
-        elapsed_sec = export_bundle(
-            project_root=PROJECT_ROOT,
-            output_path=output_path,
-            extra_names=extras,
-            loop_iteration=cycle,
-            incremental=use_incremental,
-            export_zip=not bool(args.no_export_zip),
-            workers=int(args.workers),
-        )
-        incremental_active = True
-        if loop_mode:
-            _print_export_cycle_separator(cycle, ended=True, elapsed_sec=elapsed_sec)
+        elapsed_sec: float | None = None
+        try:
+            elapsed_sec = export_bundle(
+                project_root=PROJECT_ROOT,
+                output_path=output_path,
+                extra_names=extras,
+                loop_iteration=cycle,
+                incremental=use_incremental,
+                export_zip=not bool(args.no_export_zip),
+                workers=int(args.workers),
+            )
+            incremental_active = True
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[循环] 第 {cycle} 次导出异常：{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exc()
+        finally:
+            if loop_mode:
+                if elapsed_sec is not None:
+                    _print_export_cycle_separator(cycle, ended=True, elapsed_sec=elapsed_sec)
+                else:
+                    _print_export_cycle_separator(cycle, ended=True, elapsed_sec=0.0)
 
     project_name = PROJECT_ROOT.resolve().name
     cycle = 0

@@ -865,6 +865,18 @@ class PageSendTargetMixin:
             relink=True,
         )
         if not isinstance(resolved, dict) or not resolved.get("ok"):
+            if hasattr(self, "_append_log"):
+                reason = "-"
+                if isinstance(resolved, dict):
+                    reason = (resolved.get("reason") or resolved.get("reason_code") or "-").strip() or "-"
+                self._append_log(
+                    "[SYNC][TARGET_BLOCKED] "
+                    f"reason=resolve_bound_page_target_failed "
+                    f"action={action or '-'} "
+                    f"detail_reason={reason}",
+                    echo=True,
+                    level="WARNING",
+                )
             return None
         return resolved.get("target")
 

@@ -468,7 +468,7 @@ class ChatSessionMixin:
 
                 f"role={role or '-'} content_len={len(content)} "
 
-                f"request_id={(message.get('request_id') or message.get('bridge_message_id') or '-')}",
+                f"bridge_message_id={(message.get('bridge_message_id') or '-')}",
 
                 echo=True,
 
@@ -492,43 +492,17 @@ class ChatSessionMixin:
 
             turn_id=(message.get("turn_id") or "").strip(),
 
-            ui_status=(
-
-                (message.get("ui_status") or message.get("status") or "")
-
-                .strip()
-
-            ),
+            ui_status=((message.get("ui_status") or "").strip()),
 
             created_at=message.get("created_at"),
 
-            bridge_message_id=(
-
-                (message.get("bridge_message_id") or message.get("request_id") or "")
-
-                .strip()
-
-            ),
+            bridge_message_id=((message.get("bridge_message_id") or "").strip()),
 
             parent_message_id=(message.get("parent_message_id") or "").strip(),
 
-            message_source=(
+            message_source=((message.get("message_source") or "").strip()),
 
-                (message.get("message_source") or message.get("source") or "")
-
-                .strip()
-
-            ),
-
-            visible_in_chat=(
-
-                message.get("visible_in_chat")
-
-                if "visible_in_chat" in message
-
-                else bool(message.get("visible", True))
-
-            ),
+            visible_in_chat=bool(message.get("visible_in_chat", True)),
 
         )
 
@@ -538,7 +512,7 @@ class ChatSessionMixin:
 
 
 
-        source = (message.get("source") or "-").strip()
+        source = (message.get("message_source") or "-").strip()
 
         self._append_log(
 
@@ -570,7 +544,7 @@ class ChatSessionMixin:
 
                 f"reason=count_not_increased session_id={session_id} "
 
-                f"request_id={(message.get('request_id') or message.get('bridge_message_id') or '-')}",
+                f"bridge_message_id={(message.get('bridge_message_id') or '-')}",
 
                 echo=True,
 

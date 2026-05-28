@@ -869,6 +869,9 @@
     }
 
     function normalizeQuickPromptSelectionMode(value) {
+      if (typeof window.normalizeQuickPromptSelectionMode === 'function') {
+        return window.normalizeQuickPromptSelectionMode(value);
+      }
       const raw = String(value || '').trim().toLowerCase();
       return raw === 'manual' ? 'manual' : 'auto';
     }

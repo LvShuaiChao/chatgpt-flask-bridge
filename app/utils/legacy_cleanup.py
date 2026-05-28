@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.utils.legacy_fields import (
@@ -31,10 +32,17 @@ SESSION_MESSAGE_ALLOWED_FIELDS = frozenset(
 REMOTE_CHATGPT_ALLOWED_FIELDS = frozenset(
     {
         "bind_state",
-        "bind_mode",
         "client_id",
         "page_instance_id",
         "page_display_id",
+        "conversation_id",
+        "url",
+    }
+)
+
+REMOTE_CHATGPT_LOAD_MIGRATION_FIELDS = frozenset(
+    {
+        "bind_mode",
         "temp_page_id",
         "page_no",
         "page_type",
@@ -43,12 +51,19 @@ REMOTE_CHATGPT_ALLOWED_FIELDS = frozenset(
         "last_poll_at",
         "bind_request_id",
         "bind_started_at",
+        "bootstrap_in_progress",
+        "bootstrap_message_id",
+        "bootstrap_started_at",
         "pending_bootstrap_content",
+        "pending_bootstrap_created_at",
+        "opened_home_at",
+        "bound_at",
         "pending_send_content",
         "pending_send_message_id",
+        "pending_send_created_at",
+        "reopen_request_id",
         "reopen_started_at",
-        "conversation_id",
-        "url",
+        "reopen_target_url",
     }
 )
 
@@ -87,12 +102,16 @@ BRIDGE_REQUEST_ALLOWED_FIELDS = frozenset(
         "heartbeat_alive",
         "pathname",
         "last_seen",
+        "last_poll_at",
+        "last_heartbeat_at",
         "is_responding",
         "response_state",
         "response_state_reason",
         "response_state_at",
         "can_accept_input",
         "can_send_now",
+        "url_syncable",
+        "conversation_syncable",
         "combo",
         "event_at",
         "identity_error",
@@ -296,10 +315,12 @@ def assert_no_legacy_fields(
     )
     if not found:
         return
+    caller = inspect.stack()[1]
     print(
         "[FIELD][LEGACY_BLOCKED]\n"
         f"owner={owner}\n"
         f"fields={found}\n"
+        f"caller={caller.filename}:{caller.lineno} {caller.function}\n"
         f"replacement={_REPLACEMENT_HINT}"
     )
     raise ValueError(
@@ -322,15 +343,6 @@ def assert_no_remote_chatgpt_invalid_fields(obj: Any, *, owner: str = "-") -> No
         "reserved_page_instance_id",
         "reserved_at",
         "created_from_home",
-        "opened_home_at",
-        "bound_at",
-        "reopen_request_id",
-        "reopen_target_url",
-        "pending_bootstrap_created_at",
-        "pending_send_created_at",
-        "bootstrap_message_id",
-        "bootstrap_started_at",
-        "bootstrap_in_progress",
     )
     for key in removable_legacy:
         obj.pop(key, None)
@@ -340,10 +352,12 @@ def assert_no_remote_chatgpt_invalid_fields(obj: Any, *, owner: str = "-") -> No
             invalid.append(key)
     if not invalid:
         return
+    caller = inspect.stack()[1]
     print(
         "[REMOTE_FIELD][INVALID_BLOCKED]\n"
         f"owner={owner}\n"
         f"invalid={invalid}\n"
+        f"caller={caller.filename}:{caller.lineno} {caller.function}\n"
         "replacement=canonical remote_chatgpt fields / BindSessionRuntime"
     )
     raise ValueError(
@@ -418,6 +432,7 @@ __all__ = [
     "LEGACY_FIELD_NAMES",
     "SESSION_MESSAGE_ALLOWED_FIELDS",
     "REMOTE_CHATGPT_ALLOWED_FIELDS",
+    "REMOTE_CHATGPT_LOAD_MIGRATION_FIELDS",
     "BRIDGE_REQUEST_ALLOWED_FIELDS",
     "PAGE_REGISTRY_ALLOWED_FIELDS",
     "QUEUE_MESSAGE_ALLOWED_FIELDS",

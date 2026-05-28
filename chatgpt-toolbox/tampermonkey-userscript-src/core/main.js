@@ -117,6 +117,9 @@
     let copyPipelineFallbackWarnedOnce = false;
 
     function stripChatGptInstrumentsLabel(text) {
+      if (typeof TextNormalizer !== 'undefined' && TextNormalizer && typeof TextNormalizer.stripLabel === 'function') {
+        return TextNormalizer.stripLabel(text);
+      }
       if (
         typeof CopyPipeline !== 'undefined'
         && CopyPipeline
@@ -144,6 +147,11 @@
     }
 
     function collapseInstrumentsCalculatorReply(text) {
+      if (typeof TextNormalizer !== 'undefined'
+        && TextNormalizer
+        && typeof TextNormalizer.collapseInstrumentsCalculatorReply === 'function') {
+        return TextNormalizer.collapseInstrumentsCalculatorReply(text);
+      }
       if (
         typeof CopyPipeline !== 'undefined'
         && CopyPipeline
@@ -2203,19 +2211,9 @@
     }
 
     function isComposerDebugEnabled() {
-      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
-        if (MemoryManager.get('bridgeDebugEnabled', false)) {
-          return true;
-        }
+      if (typeof isToolboxDebugEnabled === 'function') {
+        return isToolboxDebugEnabled();
       }
-
-      if (typeof getCompactUiConfig === 'function') {
-        const cfg = getCompactUiConfig();
-        if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
-          return true;
-        }
-      }
-
       return false;
     }
 
@@ -5419,24 +5417,12 @@
     ];
 
     function isNativeSendReadyForUpload() {
-      if (
-        typeof ComposerAttachments !== 'undefined'
-        && ComposerAttachments
-        && typeof ComposerAttachments.isAttachmentStillUploading === 'function'
-      ) {
-        try {
-          const uploading = !!ComposerAttachments.isAttachmentStillUploading({ heavy: true });
-          if (uploading) return false;
-        } catch (err) {
-          console.error('[ChatGPT toolbox] isNativeSendReadyForUpload composerAttachments check failed', err);
-        }
+      if (typeof ComposerCapability !== 'undefined'
+        && ComposerCapability
+        && typeof ComposerCapability.isNativeSendReadyForUpload === 'function') {
+        return !!ComposerCapability.isNativeSendReadyForUpload({ source: 'main-wrapper/native-send-ready' });
       }
-
-      return !!(
-        (typeof hasRealSubmitButton === 'function' && hasRealSubmitButton())
-        || (typeof canSendNowLight === 'function' && canSendNowLight())
-        || (typeof canSendNow === 'function' && canSendNow({ force: true }))
-      );
+      return false;
     }
 
     function detectChatGPTNativeUploadError() {
@@ -5453,248 +5439,27 @@
             message: String(pick.errorText || '').slice(0, 500),
           };
         }
-        return null;
       }
 
       try {
-        const uploadRunStartedAt = (
-          typeof UploadCriticalRuntime !== 'undefined'
+        if (typeof UploadCriticalRuntime !== 'undefined'
           && UploadCriticalRuntime
-          && typeof UploadCriticalRuntime.getUploadCriticalStartedAt === 'function'
-        )
-          ? UploadCriticalRuntime.getUploadCriticalStartedAt()
-          : 0;
-
-        const criticalNow = (
-          typeof UploadCriticalRuntime !== 'undefined'
-          && UploadCriticalRuntime
-          && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
-          && UploadCriticalRuntime.isUploadCriticalMode()
-        );
-        const debugNativeUpload = typeof isComposerDebugEnabled === 'function'
-          && isComposerDebugEnabled();
-
-        const composerRoot = typeof getComposerRoot === 'function' ? getComposerRoot() : null;
-
-        const isSidebarEl = (el) => {
-          if (typeof isChatSidebarElement === 'function') {
-            try {
-              return !!isChatSidebarElement(el);
-            } catch (e) {
-              console.error('[ChatGPT toolbox] isChatSidebarElement failed', e);
-            }
+          && typeof UploadCriticalRuntime.detectChatGptUploadErrorToast === 'function') {
+          const toastPick = UploadCriticalRuntime.detectChatGptUploadErrorToast({ minIntervalMs: 800 });
+          if (toastPick && toastPick.ok) {
+            return {
+              ok: false,
+              reason: 'native-upload-failed',
+              message: String(toastPick.message || '').slice(0, 500),
+            };
           }
-          return !!el.closest('nav, aside, [data-testid*="sidebar"], [data-testid*="chat-sidebar"]');
-        };
-
-        const isToolboxEl = (el) => {
-          if (typeof isInToolbox === 'function') {
-            try {
-              return !!isInToolbox(el);
-            } catch (e) {
-              console.error('[ChatGPT toolbox] isInToolbox failed', e);
-              return false;
-            }
-          }
-          return false;
-        };
-
-        const isToastLikeErrorEl = (el, text, dataTestId, className) => {
-          const role = String(el.getAttribute('role') || '').trim().toLowerCase();
-          const ariaLabel = String(el.getAttribute('aria-label') || '').trim();
-          const title = String(el.getAttribute('title') || '').trim();
-          const cls = String(className || '');
-          const tid = String(dataTestId || '');
-          const t = String(text || '');
-
-          // role=alert 或者明确的 toast/upload-error 语义
-          if (role === 'alert') return true;
-          if (/toast/i.test(tid) || /upload-error|upload error/i.test(tid)) return true;
-          if (/toast/i.test(cls) || /upload-error|upload error/i.test(cls)) return true;
-          if (/toast/i.test(ariaLabel) || /upload-error|upload error/i.test(ariaLabel)) return true;
-          if (/toast/i.test(title) || /upload-error|upload error/i.test(title)) return true;
-
-          // 兜底：包含文件服务器域名时，按错误上下文处理（避免误判普通文案）
-          return /files\.oaiusercontent\.com/i.test(t);
-        };
-
-        const nodes = qsa(NATIVE_UPLOAD_ERROR_SELECTORS).filter((el) => {
-          if (!(el instanceof HTMLElement)) return false;
-
-          if (isToolboxEl(el)) {
-            if (criticalNow && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-              ToolboxShell.appendLog('[UPLOAD_NATIVE][ERROR_SCOPE_SKIP] reason=toolbox');
-            }
-            return false;
-          }
-
-          if (isSidebarEl(el)) {
-            if (criticalNow && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-              ToolboxShell.appendLog('[UPLOAD_NATIVE][ERROR_SCOPE_SKIP] reason=sidebar');
-            }
-            return false;
-          }
-
-          if (isInsideConversationHistory(el)) {
-            if (criticalNow && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-              ToolboxShell.appendLog('[UPLOAD_NATIVE][ERROR_SCOPE_SKIP] reason=history');
-            }
-            return false;
-          }
-
-          const visible = isElementVisible(el);
-          if (!visible) return false;
-
-          // fallback-global：只接受 uploadRunStartedAt 之后出现的节点（当我们能确定出现时间时）
-          if (uploadRunStartedAt > 0) {
-            const seenAt = nativeUploadErrorSeenAt.get(el);
-            if (seenAt != null && seenAt < uploadRunStartedAt) {
-              if (criticalNow && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-                ToolboxShell.appendLog('[UPLOAD_NATIVE][ERROR_SCOPE_SKIP] reason=old-node');
-              }
-              return false;
-            }
-          }
-
-          return true;
-        });
-
-        for (let i = 0; i < nodes.length; i += 1) {
-          const el = nodes[i];
-          const role = String(el.getAttribute('role') || '').trim();
-          const ariaLive = String(el.getAttribute('aria-live') || '').trim();
-          const dataTestId = String(el.getAttribute('data-testid') || '').trim();
-          const className = String(el.className || '').trim();
-          const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-          const text = criticalNow
-            ? [
-              el.textContent || '',
-              el.getAttribute('aria-label') || '',
-              el.getAttribute('title') || '',
-              el.getAttribute('data-testid') || '',
-            ].join(' ').replace(/\s+/g, ' ').trim()
-            : [
-              el.innerText || '',
-              el.textContent || '',
-              el.getAttribute('aria-label') || '',
-              el.getAttribute('title') || '',
-            ].join(' ').replace(/\s+/g, ' ').trim();
-
-          const textPreview = text.slice(0, 120);
-
-          const isSidebar = isSidebarEl(el);
-          const isToolbox = isToolboxEl(el);
-          const isConversationHistory = isInsideConversationHistory(el);
-
-          if (debugNativeUpload) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_NATIVE][CANDIDATE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-              + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
-                rect
-                  ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                  : '-'
-              } textPreview=${textPreview || '-'} `
-              + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${isConversationHistory ? 1 : 0} `
-              + `acceptedReason=- rejectedReason=-`,
-            );
-          }
-
-          if (!text) {
-            continue;
-          }
-
-          const containsOai = /files\.oaiusercontent\.com/i.test(text);
-          const matchedReason = (
-            /files\.oaiusercontent\.com/i.test(text) ? 'oai-domain' : (
-              /上传到\s*files\.oaiusercontent\.com\s*失败/i.test(text) ? 'cn-upload-to-oai-failed' : (
-                /upload\s+failed/i.test(text) ? 'upload-failed' : (
-                  /couldn'?t\s+upload/i.test(text) ? "couldn't-upload" : (
-                    /failed\s+to\s+upload/i.test(text) ? 'failed-to-upload' : ''
-                  )
-                )
-              )
-            )
-          ).trim();
-
-          const matched = NATIVE_UPLOAD_ERROR_PATTERNS.some((pattern) => pattern.test(text));
-
-          // 明确的“误判文本”场景：只要不是文件服务器错误上下文，就拒绝
-          const isKnownFalsePositiveText = (
-            /上传失败原因分析/i.test(text)
-            || /无法点击停止原因/i.test(text)
-          ) && !containsOai;
-
-          if (isKnownFalsePositiveText) {
-            if (debugNativeUpload) {
-              ToolboxShell.appendLog(
-                `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-                + `dataTestId=${dataTestId || '-'} className=${className || '-'} `
-                + `rect=${
-                  rect
-                    ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                    : '-'
-                } textPreview=${textPreview || '-'} `
-                + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
-                  isConversationHistory ? 1 : 0
-                } acceptedReason=- rejectedReason=known-false-positive-text`,
-              );
-            }
-            continue;
-          }
-
-          if (!matched) {
-            continue;
-          }
-
-          const isToastLike = isToastLikeErrorEl(el, text, dataTestId, className);
-          if (!isToastLike) {
-            if (debugNativeUpload) {
-              ToolboxShell.appendLog(
-                `[UPLOAD_NATIVE][REJECT_FALSE_POSITIVE] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-                + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
-                  rect
-                    ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                    : '-'
-                } textPreview=${textPreview || '-'} `
-                + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
-                  isConversationHistory ? 1 : 0
-                } acceptedReason=- rejectedReason=not-toast-like`,
-              );
-            }
-            continue;
-          }
-
-          // 强匹配通过后，认为是 native upload 失败
-          const inComposer = composerRoot instanceof HTMLElement && composerRoot.contains(el);
-          const scope = inComposer ? 'composer' : 'toast';
-          ToolboxShell.appendLog(`[UPLOAD_NATIVE][ERROR_SCOPE] scope=${scope}`);
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_NATIVE][ACCEPT_ERROR] tagName=${el.tagName} role=${role || '-'} ariaLive=${ariaLive || '-'} `
-            + `dataTestId=${dataTestId || '-'} className=${className || '-'} rect=${
-              rect
-                ? `x=${Math.round(rect.left)} y=${Math.round(rect.top)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`
-                : '-'
-            } textPreview=${textPreview || '-'} `
-            + `isSidebar=${isSidebar ? 1 : 0} isToolbox=${isToolbox ? 1 : 0} isConversationHistory=${
-              isConversationHistory ? 1 : 0
-            } acceptedReason=${matchedReason || 'pattern-match'} rejectedReason=-`,
-          );
-
-          return {
-            ok: false,
-            reason: 'native-upload-failed',
-            message: text.slice(0, 500),
-          };
         }
-
-        return null;
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
         console.error('[ChatGPT toolbox] detectChatGPTNativeUploadError failed', error);
         ToolboxShell.appendLog(`[UPLOAD_NATIVE][DETECT_ERROR] error=${errText}`);
-        return null;
       }
+      return null;
     }
 
     function getComposerUploadSnapshot(snapshotOptions = {}) {
@@ -5800,63 +5565,13 @@
     }
 
     async function waitChatGPTNativeUploadSettled(files, options = {}) {
-      if (
-        typeof ComposerAttachments !== 'undefined'
-        && ComposerAttachments
-        && typeof ComposerAttachments.waitNativeUploadSettled === 'function'
-      ) {
-        const requireSendReady = options.requireSendReady === undefined
-          ? true
-          : options.requireSendReady === true;
-        const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
-        const pollMs = Number(options.pollMs) || 500;
-        const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));
-
-        const signal = options.signal;
-        const isCancelled = typeof options.isCancelled === 'function'
-          ? options.isCancelled
-          : () => !!(signal && signal.aborted);
-
-        const settled = await ComposerAttachments.waitNativeUploadSettled({
-          timeoutMs,
-          intervalMs: pollMs,
-          signal,
-          isCancelled,
+      if (typeof UploadNativeRuntime !== 'undefined'
+        && UploadNativeRuntime
+        && typeof UploadNativeRuntime.waitChatGPTNativeUploadSettled === 'function') {
+        return UploadNativeRuntime.waitChatGPTNativeUploadSettled(files, {
+          ...options,
+          detectNativeUploadError: detectChatGPTNativeUploadError,
         });
-
-        if (settled && settled.cancelled) {
-          return { ok: false, cancelled: true, reason: 'cancelled' };
-        }
-
-        if (!settled || settled.ok !== true) {
-          return { ok: false, reason: 'native-upload-settle-timeout' };
-        }
-
-        if (!requireSendReady) {
-          return { ok: true, reason: 'native-upload-settled-without-send-ready' };
-        }
-
-        if (isCancelled()) {
-          return { ok: false, cancelled: true, reason: 'cancelled' };
-        }
-
-        await sleep(stableMs);
-
-        if (isCancelled()) {
-          return { ok: false, cancelled: true, reason: 'cancelled' };
-        }
-
-        const nativeErrAfterStable = detectChatGPTNativeUploadError();
-        if (nativeErrAfterStable) {
-          return nativeErrAfterStable;
-        }
-
-        const sendReady = isNativeSendReadyForUpload();
-        if (!sendReady) {
-          return { ok: false, reason: 'native-upload-send-not-ready' };
-        }
-
-        return { ok: true, reason: 'native-upload-settled' };
       }
 
       const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);

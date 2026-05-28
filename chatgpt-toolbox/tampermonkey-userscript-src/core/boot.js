@@ -3,6 +3,7 @@
  ********************************************************************/
 
 const CGPT_TOOLBOX_INSTANCE_KEY = '__cgpt_toolbox_active_instance__';
+const TOOLBOX_SCRIPT_VERSION = '3.6.7';
 const BOOT_ERROR_GRACE_MS = 2000;
 const MODULE_FAIL_THRESHOLD = 3;
 const MODULE_RECOVER_THRESHOLD = 2;
@@ -25,6 +26,23 @@ const ToolboxBootRuntime = {
 };
 if (typeof globalThis !== 'undefined') {
   globalThis.__CGPT_TOOLBOX_MODULE_HEALTH__ = ToolboxBootRuntime.moduleHealth;
+  globalThis.__CGPT_TOOLBOX_VERSION__ = TOOLBOX_SCRIPT_VERSION;
+  globalThis.__CGPT_TOOLBOX_DIAG__ = () => {
+    const instance = (typeof window !== 'undefined' && window[CGPT_TOOLBOX_INSTANCE_KEY])
+      ? window[CGPT_TOOLBOX_INSTANCE_KEY]
+      : null;
+    const bootStartedAt = Number(ToolboxBootRuntime.bootStartedAt || 0);
+    const bootCompleteAt = Number(ToolboxBootRuntime.bootCompleteAt || 0);
+    return {
+      version: TOOLBOX_SCRIPT_VERSION,
+      instanceId: instance && instance.instanceId ? instance.instanceId : '',
+      startedAt: instance && instance.startedAt ? instance.startedAt : 0,
+      bootStartedAt,
+      bootCompleteAt,
+      bootStartedAtIso: bootStartedAt > 0 ? new Date(bootStartedAt).toISOString() : '',
+      bootCompleteAtIso: bootCompleteAt > 0 ? new Date(bootCompleteAt).toISOString() : '',
+    };
+  };
 }
 
 function ensureModuleHealthRecord(moduleName) {
@@ -262,7 +280,7 @@ function installToolboxInstanceGuard() {
   window[CGPT_TOOLBOX_INSTANCE_KEY] = {
     instanceId,
     startedAt: now,
-    version: '3.6.7',
+    version: TOOLBOX_SCRIPT_VERSION,
   };
 
   return instanceId;
@@ -381,6 +399,7 @@ async function mountAllModules(reason = 'init') {
 
 async function initToolbox() {
   console.info('[TOOLBOX][BOOT_START] initToolbox called');
+  console.info(`[TOOLBOX][VERSION] ${TOOLBOX_SCRIPT_VERSION}`);
   console.info('[BOOTSTRAP][START]');
 
   installToolboxInstanceGuard();
@@ -482,6 +501,7 @@ async function initToolbox() {
 
   await safeInitStep('ToolboxShell.appendLog', () => {
     ToolboxShell.appendLog('工具箱初始化完成');
+    ToolboxShell.appendLog(`[TOOLBOX][VERSION] ${TOOLBOX_SCRIPT_VERSION}`);
   });
 
   await safeInitStep('RuntimeStatsModule.onAppStart', () => {
@@ -518,6 +538,7 @@ async function initToolbox() {
   });
 
   console.info('[TOOLBOX][BOOT_DONE] initToolbox completed');
+  console.info(`[TOOLBOX][VERSION_OK] ${TOOLBOX_SCRIPT_VERSION}`);
 }
 
 function showBootFatalOverlay(error) {

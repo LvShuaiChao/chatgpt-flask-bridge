@@ -57,8 +57,7 @@ class PageBindingStateMixin:
             conversation_id="",
             client_id="",
             page_instance_id="",
-            page_type="",
-            last_seen=0,
+            page_display_id="",
         )
         self._purge_session_binding_caches(session_id)
         if getattr(self._auto_bind, 'pending_session_id', '') == session_id:
@@ -334,16 +333,11 @@ class PageBindingStateMixin:
             write_session_remote_chatgpt(
                 session,
                 bind_state=BIND_STATE_BOUND_CONVERSATION,
-                bind_mode=BIND_MODE_CONVERSATION,
                 conversation_id=conversation_id,
                 url=bind_url,
                 client_id=client_id,
                 page_instance_id=page_instance_id,
-                page_no=page_no,
-                page_type=page_type,
-                page_title=(selected_page.get("page_title") or "").strip(),
-                last_seen=last_seen_val,
-                last_poll_at=last_poll_at,
+                page_display_id=page_no,
             )
             from app.utils.bind_runtime import update_bind_runtime
 
@@ -410,7 +404,6 @@ class PageBindingStateMixin:
         new_url = f"https://chatgpt.com/c/{conversation_id}"
         remote["url"] = new_url
         remote["bind_state"] = BIND_STATE_BOUND_CONVERSATION
-        remote["page_type"] = "conversation"
         session.remote_chatgpt = remote
         session.updated_at = time.time()
         self._save_sessions_to_disk()

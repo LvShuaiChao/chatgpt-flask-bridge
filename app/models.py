@@ -348,18 +348,6 @@ def write_session_remote_chatgpt(session, **fields):
     remote = normalize_remote_chatgpt(session.remote_chatgpt)
     from app.utils.bind_runtime import TRANSIENT_REMOTE_CHATGPT_KEYS
 
-    if "page_display_id" not in fields:
-        migrated_page_display_id = (
-            str(
-                fields.get("temp_page_id")
-                or fields.get("page_no")
-                or remote.get("page_display_id")
-                or ""
-            ).strip()
-        )
-        if migrated_page_display_id:
-            fields["page_display_id"] = migrated_page_display_id
-
     for key in REMOTE_CHATGPT_PERSISTENT_KEYS:
         if key in fields and fields[key] is not None:
             remote[key] = fields[key]
@@ -438,6 +426,7 @@ class ChatSession:
     summary: str = ""
     pinned_context: str = ""
     remote_chatgpt: dict = field(default_factory=default_remote_chatgpt)
+    web_snapshot: dict = field(default_factory=dict)
     messages: list = field(default_factory=list)
     reply_waiting_since: float = 0
     reply_wake_count: int = 0

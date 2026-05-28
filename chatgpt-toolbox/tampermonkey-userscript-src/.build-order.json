@@ -15,6 +15,7 @@
     "core/composer-capability.js",
     "core/upload-native-runtime.js",
     "core/send-pipeline.js",
+    "core/text-normalizer.js",
     "ui/toolbox-shell.js",
     "core/main.js",
     "core/new-chat-switch.js",

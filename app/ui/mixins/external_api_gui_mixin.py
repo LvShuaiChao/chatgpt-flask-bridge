@@ -640,18 +640,24 @@ class ExternalApiGuiMixin(SystemHotkeyGuiMixin):
         self._message_to_session[bridge_message_id] = session.session_id
         self._message_to_turn[bridge_message_id] = turn_id
         if is_bootstrap:
+            from app.utils.bind_runtime import update_bind_runtime
+
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
             session.remote_chatgpt = {
                 **remote_now,
                 "bind_state": BIND_STATE_WAITING_CONVERSATION_CREATED,
-                "bootstrap_in_progress": True,
-                "bootstrap_message_id": bridge_message_id,
-                "bootstrap_started_at": time.time(),
                 "client_id": (payload.get("client_id") or "").strip()
                 or (remote_now.get("client_id") or ""),
                 "page_instance_id": (payload.get("page_instance_id") or "").strip()
                 or (remote_now.get("page_instance_id") or ""),
             }
+            update_bind_runtime(
+                self,
+                session,
+                bootstrap_in_progress=True,
+                bootstrap_message_id=bridge_message_id,
+                bootstrap_started_at=time.time(),
+            )
             session.updated_at = time.time()
         self._append_session_message(
             session,

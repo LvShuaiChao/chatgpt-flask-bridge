@@ -221,12 +221,14 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         {
             "payload",
             "content",
+            "raw_content",
             "turn_id",
             "user_message_id",
             "assistant_message_id",
             "reuse_user_message_id",
             "from_pending_bootstrap",
             "source",
+            "message_source",
             "suppress_system_message",
             "refresh_send_target",
         }
@@ -258,7 +260,8 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         assistant_message_id = (pending.get("assistant_message_id") or "").strip()
         reuse_user_message_id = (pending.get("reuse_user_message_id") or "").strip()
         from_pending_bootstrap = bool(pending.get("from_pending_bootstrap"))
-        message_source = (pending.get("source") or "direct").strip()
+        has_source_key = "source" in pending
+        message_source = (pending.get("source") or pending.get("message_source") or "direct").strip()
         suppress_system_message = bool(pending.get("suppress_system_message"))
         bind_state = self._effective_bind_state(session)
         is_bootstrap = bind_state == BIND_STATE_PREBOUND_HOME
@@ -274,20 +277,24 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
             )
             or ""
         ).strip()
-        return {
+        ctx = {
             "payload": payload,
             "content": raw_content,
+            "raw_content": raw_content,
             "turn_id": turn_id,
             "user_message_id": user_message_id,
             "assistant_message_id": assistant_message_id,
             "reuse_user_message_id": reuse_user_message_id,
             "from_pending_bootstrap": from_pending_bootstrap,
-            "source": message_source,
+            "message_source": message_source,
             "suppress_system_message": suppress_system_message,
             "is_bootstrap": is_bootstrap,
             "existing_user_message": existing_user_message,
             "trace_id": trace_id,
         }
+        if has_source_key:
+            ctx["source"] = message_source
+        return ctx
 
     def _patch_chat_send_target_payload(self, session, payload):
         """入队前校验 target 字段。
@@ -319,7 +326,6 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         target_page_id = str(
             payload.get("target_page_id")
             or remote.get("target_page_id")
-            or remote.get("temp_page_id")
             or remote.get("page_display_id")
             or getattr(session, "bound_page_id", None)
             or ""
@@ -525,20 +531,25 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         )
 
         if is_bootstrap:
+            from app.utils.bind_runtime import update_bind_runtime
+
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
             target_client = (payload.get("client_id") or "").strip()
             target_instance = (payload.get("page_instance_id") or "").strip()
-            target_page_id = (payload.get("target_page_id") or "").strip()
             session.remote_chatgpt = {
                 **remote_now,
                 "bind_state": BIND_STATE_WAITING_CONVERSATION_CREATED,
-                "bootstrap_in_progress": True,
-                "bootstrap_message_id": bridge_message_id,
-                "bootstrap_started_at": time.time(),
                 "client_id": target_client or (remote_now.get("client_id") or ""),
                 "page_instance_id": target_instance
                 or (remote_now.get("page_instance_id") or ""),
             }
+            update_bind_runtime(
+                self,
+                session,
+                bootstrap_in_progress=True,
+                bootstrap_message_id=bridge_message_id,
+                bootstrap_started_at=time.time(),
+            )
             session.updated_at = time.time()
             self._append_log(
                 "[SEND][BOOTSTRAP_START] "
@@ -1467,18 +1478,18 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
             report_client = (item.get("client_id") or "").strip()
             if report_client:
                 remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-                if not remote_now.get("bootstrap_in_progress"):
+                if not self._remote_runtime_bool(session, remote_now, "bootstrap_in_progress"):
                     self._remember_session_page_from_client(
                         session, report_client
                     )
                 self.schedule_page_registry_refresh(reason="send_ack_success")
         else:
+            from app.utils.bind_runtime import get_bind_runtime, update_bind_runtime
+
             remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
-            if remote_now.get("bootstrap_in_progress"):
-                session.remote_chatgpt = {
-                    **remote_now,
-                    "bootstrap_in_progress": False,
-                }
+            runtime = get_bind_runtime(self, session)
+            if runtime.bootstrap_in_progress:
+                update_bind_runtime(self, session, bootstrap_in_progress=False)
                 self._schedule_save_sessions_to_disk()
             if is_assistant_busy:
                 self._append_log(
@@ -1533,7 +1544,7 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         remote_now = normalize_remote_chatgpt(session.remote_chatgpt)
         bind_state_now = self._remote_bind_state(remote_now)
         if (
-            remote_now.get("bootstrap_in_progress")
+            self._remote_runtime_bool(session, remote_now, "bootstrap_in_progress")
             or bind_state_now == BIND_STATE_WAITING_CONVERSATION_CREATED
             or (
                 bind_state_now == BIND_STATE_PREBOUND_HOME

@@ -570,10 +570,7 @@ class TmPageSelectorFormatMixin:
 
         bound_instance = (remote.get("page_instance_id") or "").strip()
         bind_state = self._remote_bind_state(remote) if hasattr(self, "_remote_bind_state") else ""
-        temp_page_id = (
-            (remote.get("temp_page_id") or remote.get("page_display_id") or remote.get("page_no") or "")
-            .strip()
-        )
+        temp_page_id = (remote.get("page_display_id") or "").strip()
 
         bound_conv = (
 

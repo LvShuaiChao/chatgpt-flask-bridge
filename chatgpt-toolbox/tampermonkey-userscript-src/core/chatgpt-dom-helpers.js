@@ -177,24 +177,10 @@ let sendButtonCandidatesLoggedAt = 0;
 const SEND_BUTTON_CANDIDATES_LOG_MS = 2000;
 
 function isDomHelperComposerDebugEnabled(options = {}) {
-  if (options && options.debug === true) {
-    return true;
+  if (typeof isToolboxDebugEnabled === 'function') {
+    return isToolboxDebugEnabled(options);
   }
-
-  if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
-    if (MemoryManager.get('bridgeDebugEnabled', false)) {
-      return true;
-    }
-  }
-
-  if (typeof getCompactUiConfig === 'function') {
-    const cfg = getCompactUiConfig();
-    if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
-      return true;
-    }
-  }
-
-  return false;
+  return options && options.debug === true;
 }
 
 function resolveComposerScopeForSendButton(options = {}) {

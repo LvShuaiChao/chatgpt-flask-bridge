@@ -210,24 +210,11 @@ def binding_from_session(session: Any) -> Dict[str, Any]:
     remote = normalize_remote_chatgpt(getattr(session, "remote_chatgpt", None))
     return {
         "bind_state": (remote.get("bind_state") or "").strip(),
-        "bind_mode": (remote.get("bind_mode") or "").strip(),
         "client_id": (remote.get("client_id") or "").strip(),
         "page_instance_id": (remote.get("page_instance_id") or "").strip(),
         "conversation_id": (remote.get("conversation_id") or "").strip(),
         "url": (remote.get("url") or "").strip(),
-        "page_no": (remote.get("page_no") or "").strip(),
-        "temp_page_id": (
-            remote.get("temp_page_id")
-            or remote.get("page_display_id")
-            or remote.get("page_no")
-            or ""
-        ).strip(),
-        "page_display_id": (
-            remote.get("page_display_id")
-            or remote.get("temp_page_id")
-            or remote.get("page_no")
-            or ""
-        ).strip(),
+        "page_display_id": (remote.get("page_display_id") or "").strip(),
     }
 
 

@@ -674,10 +674,26 @@
     function buildBridgeRequestPayload(body) {
       const mode = String((body && body.identityMode) || '').trim().toLowerCase();
       const identity = mode === 'full' ? getPageIdentity() : getPageIdentityLight();
-      return {
+      const payload = {
         ...identity,
         ...(body || {}),
       };
+
+      if (Object.prototype.hasOwnProperty.call(payload, 'identityMode')) {
+        delete payload.identityMode;
+      }
+
+      if (
+        mode
+        && payload.payload
+        && typeof payload.payload === 'object'
+        && !Array.isArray(payload.payload)
+        && !Object.prototype.hasOwnProperty.call(payload.payload, 'identity_mode')
+      ) {
+        payload.payload.identity_mode = mode;
+      }
+
+      return payload;
     }
 
     function stringifyFullBridgeJsonForLog(obj) {

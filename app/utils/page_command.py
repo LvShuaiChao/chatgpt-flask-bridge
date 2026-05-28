@@ -303,10 +303,7 @@ def _resolve_page_channel_page(
         now = time.time()
     bound_instance = (binding.get("page_instance_id") or "").strip()
     bound_client = (binding.get("client_id") or "").strip()
-    page_no = (
-        (binding.get("page_no") or binding.get("temp_page_id") or binding.get("page_display_id") or "")
-        .strip()
-    )
+    page_no = (binding.get("page_display_id") or "").strip()
 
     if bound_client and bound_instance:
         page = registry.get_by_identity(bound_client, bound_instance)
@@ -352,10 +349,7 @@ def _resolve_page_channel_page(
         if len(matches) > 1:
             return None, "page_no_ambiguous", "ambiguous_page_no"
 
-    temp_page_id = (
-        (binding.get("temp_page_id") or binding.get("page_display_id") or "")
-        .strip()
-    )
+    temp_page_id = (binding.get("page_display_id") or "").strip()
     if temp_page_id:
         page = registry.get_by_page_display_id(temp_page_id)
         if page is not None:
@@ -423,7 +417,7 @@ def resolve_bound_page_in_registry(
                 "relink_needed": False,
                 "bootstrap_conversation": False,
                 "target_page_id": (
-                    (binding.get("temp_page_id") or binding.get("page_no") or binding.get("page_display_id") or "")
+                    (binding.get("page_display_id") or "")
                     .strip()
                 ),
             }
@@ -458,7 +452,7 @@ def resolve_bound_page_in_registry(
                 "relink_needed": False,
             }
         target_page_id = (
-            (binding.get("temp_page_id") or binding.get("page_no") or binding.get("page_display_id") or "")
+            (binding.get("page_display_id") or "")
             .strip()
         )
         return {

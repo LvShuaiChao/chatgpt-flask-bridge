@@ -2,54 +2,12 @@
    * UploadButtonVm：上传区按钮状态判定矩阵（文字 / phase / disabled / action）
    ********************************************************************/
 
-  const REQUIRED_TASK_UI_PHASES = Object.freeze([
-    'idle',
-    'initializing',
-    'waiting',
-    'uploading',
-    'waiting_send',
-    'waiting_page_reply_to_send',
-    'sending',
-    'waiting_reply',
-    'copying',
-    'running',
-    'continuing',
-    'navigating',
-    'quota_waiting',
-    'startup_uploading',
-    'cancelling',
-    'checking',
-    'waiting_input',
-    'waiting_attachment',
-    'cancelled',
-    'success',
-    'failed',
-    'completed',
-    'danger',
-    'disabled',
-    'sending_hotkey',
-    'sending_continue',
-    'confirming_clipboard',
-    'waiting_next_reply',
-    'auto_uploading',
-    'home_navigation',
-    'stopped',
-    'stopping',
-    'pending_confirm',
-  ]);
-
   function buildTaskPhaseEnum() {
-    const inheritedPhases = typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.UiPhases)
-      ? ButtonTasks.UiPhases
-      : (
-        typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.AllPhases)
-          ? ButtonTasks.AllPhases
-          : []
-      );
-    const phases = Array.from(new Set([
-      ...inheritedPhases,
-      ...REQUIRED_TASK_UI_PHASES,
-    ]));
+    const phases = typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.AllPhases)
+      ? ButtonTasks.AllPhases
+      : (typeof ButtonTasks !== 'undefined' && Array.isArray(ButtonTasks.UiPhases)
+        ? ButtonTasks.UiPhases
+        : []);
     const out = {};
     for (const phase of phases) {
       const key = String(phase || '').trim().toUpperCase().replace(/-/g, '_');

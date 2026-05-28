@@ -4490,6 +4490,9 @@
     }
 
     function getUploadGroupById(groupId) {
+      if (typeof findUploadGroupById === 'function') {
+        return findUploadGroupById(groupId);
+      }
       const gid = String(groupId || '').trim();
       if (!gid) return null;
       return (state.groups || []).find((group) => group && group.id === gid) || null;
@@ -5979,19 +5982,9 @@
     }
 
     function isUploadListDebugEnabled() {
-      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
-        if (MemoryManager.get('bridgeDebugEnabled', false)) {
-          return true;
-        }
+      if (typeof isToolboxDebugEnabled === 'function') {
+        return isToolboxDebugEnabled();
       }
-
-      if (typeof getCompactUiConfig === 'function') {
-        const cfg = getCompactUiConfig();
-        if (cfg && cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode) {
-          return true;
-        }
-      }
-
       return false;
     }
 
@@ -10396,14 +10389,16 @@
           return null;
         }
 
-        if (
-          typeof ComposerApi !== 'undefined'
-          && ComposerApi
-          && typeof ComposerApi.detectChatGPTNativeUploadError === 'function'
-        ) {
-          const pick = ComposerApi.detectChatGPTNativeUploadError();
-          if (pick && pick.ok === false) {
-            return pick;
+        if (typeof UploadCriticalRuntime !== 'undefined'
+          && UploadCriticalRuntime
+          && typeof UploadCriticalRuntime.detectChatGptUploadErrorToast === 'function') {
+          const toastPick = UploadCriticalRuntime.detectChatGptUploadErrorToast({ minIntervalMs: 800 });
+          if (toastPick && toastPick.ok) {
+            return {
+              ok: false,
+              reason: 'native-upload-failed',
+              message: String(toastPick.message || '').slice(0, 500),
+            };
           }
         }
 
@@ -11478,13 +11473,7 @@
     }
 
     function getPromptCategoryName(prompt) {
-      if (typeof PromptManagerModule !== 'undefined'
-        && typeof PromptManagerModule.getPromptCategoryName === 'function') {
-        return PromptManagerModule.getPromptCategoryName(prompt);
-      }
-
-      const text = String(prompt && prompt.category ? prompt.category : '').trim();
-      return text || '默认';
+      return normalizePromptCategoryName(prompt, '默认');
     }
 
     function getQuickPromptGroups(promptList) {
@@ -20893,6 +20882,9 @@
     }
 
     function normalizeQuickPromptSelectionMode(value) {
+      if (typeof window.normalizeQuickPromptSelectionMode === 'function') {
+        return window.normalizeQuickPromptSelectionMode(value);
+      }
       const raw = String(value || '').trim().toLowerCase();
       return raw === 'manual' ? 'manual' : 'auto';
     }

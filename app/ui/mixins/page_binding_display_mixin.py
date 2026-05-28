@@ -17,6 +17,7 @@ from app.models import (
     BIND_STATE_WAITING_CONVERSATION_CREATED,
     BIND_STATE_WAITING_HOME,
     derive_bind_mode,
+    derive_remote_page_type,
     normalize_remote_chatgpt,
 )
 from app.utils.page_status import page_url_from, read_snapshot_identity
@@ -622,7 +623,10 @@ class PageBindingDisplayMixin:
                 "page_instance_id": (remote.get("page_instance_id") or "").strip(),
                 "conversation_id": bound_conversation_id,
                 "url": bound_url,
-                "page_type": (remote.get("page_type") or "").strip(),
+                "page_type": derive_remote_page_type(
+                    remote.get("url"),
+                    remote.get("conversation_id"),
+                ),
             }
 
         can_open_bound_page = bool(

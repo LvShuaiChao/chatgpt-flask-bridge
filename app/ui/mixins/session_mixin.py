@@ -2807,18 +2807,31 @@ class SessionMixin:
             visible_in_chat=bool(item.get("visible_in_chat", True)),
         )
     def _session_to_dict(self, session):
+        from app.utils.legacy_cleanup import (
+            SESSION_MESSAGE_ALLOWED_FIELDS,
+            assert_no_legacy_fields,
+        )
+
         if hasattr(self, "_normalize_session_for_persistence"):
             return self._normalize_session_for_persistence(session)
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         assert_no_remote_chatgpt_invalid_fields(
             remote,
-            owner="GUI save session.remote_chatgpt",
+            owner=f"GUI save session.remote_chatgpt session_id={session.session_id}",
         )
         compose_draft = ""
         drafts_map = getattr(self, "_session_compose_drafts", None) or {}
         raw = drafts_map.get(session.session_id, "")
         if isinstance(raw, str) and raw.strip():
             compose_draft = raw
+        messages = [self._message_to_dict(item) for item in session.messages]
+        for index, message in enumerate(messages):
+            assert_no_legacy_fields(
+                message,
+                owner=f"GUI save session.messages session_id={session.session_id} index={index}",
+                allowed_fields=SESSION_MESSAGE_ALLOWED_FIELDS,
+                strict_unknown=True,
+            )
         return {
             "session_id": session.session_id,
             "title": session.title,
@@ -2829,9 +2842,10 @@ class SessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
+            "web_snapshot": dict(getattr(session, "web_snapshot", {}) or {}),
             "reply_waiting_since": 0,
             "compose_draft": compose_draft,
-            "messages": [self._message_to_dict(item) for item in session.messages],
+            "messages": messages,
         }
     def _session_from_dict(self, data):
         if not isinstance(data, dict):
@@ -2869,6 +2883,7 @@ class SessionMixin:
             summary=data.get("summary", ""),
             pinned_context=data.get("pinned_context", ""),
             remote_chatgpt=remote,
+            web_snapshot=data.get("web_snapshot") or {},
             messages=messages,
             reply_waiting_since=0,
         )
@@ -3107,6 +3122,11 @@ class SessionMixin:
             self._cleanup_bridge_runtime_maps("session_changed")
 
     def _session_to_dict(self, session):
+        from app.utils.legacy_cleanup import (
+            SESSION_MESSAGE_ALLOWED_FIELDS,
+            assert_no_legacy_fields,
+        )
+
         runtime = self._session_runtime_entry(session)
         if self._session_all_messages_loaded(session):
             runtime["all_messages_raw"] = [
@@ -3118,7 +3138,7 @@ class SessionMixin:
         remote = normalize_remote_chatgpt(session.remote_chatgpt)
         assert_no_remote_chatgpt_invalid_fields(
             remote,
-            owner="GUI save session.remote_chatgpt",
+            owner=f"GUI save session.remote_chatgpt session_id={session.session_id}",
         )
         compose_draft = ""
         drafts_map = getattr(self, "_session_compose_drafts", None) or {}
@@ -3129,6 +3149,13 @@ class SessionMixin:
         if not isinstance(messages, list):
             messages = [self._message_to_dict(item) for item in getattr(session, "messages", []) or []]
             runtime["all_messages_raw"] = list(messages)
+        for index, message in enumerate(messages):
+            assert_no_legacy_fields(
+                message,
+                owner=f"GUI save session.messages session_id={session.session_id} index={index}",
+                allowed_fields=SESSION_MESSAGE_ALLOWED_FIELDS,
+                strict_unknown=True,
+            )
         return {
             "session_id": session.session_id,
             "title": session.title,
@@ -3139,6 +3166,7 @@ class SessionMixin:
             "summary": session.summary,
             "pinned_context": session.pinned_context,
             "remote_chatgpt": dict(remote),
+            "web_snapshot": dict(getattr(session, "web_snapshot", {}) or {}),
             "reply_waiting_since": 0,
             "compose_draft": compose_draft,
             "messages": list(messages),
@@ -3178,6 +3206,7 @@ class SessionMixin:
             summary=data.get("summary", ""),
             pinned_context=data.get("pinned_context", ""),
             remote_chatgpt=remote,
+            web_snapshot=data.get("web_snapshot") or {},
             messages=[],
             reply_waiting_since=0,
         )

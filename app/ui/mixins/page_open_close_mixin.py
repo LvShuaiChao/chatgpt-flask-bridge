@@ -171,6 +171,8 @@ class PageOpenCloseMixin:
             conversation_id = parse_conversation_id(page_url)
         page_type = (client_info.get("page_type") or "").strip()
         if conversation_id or page_type == "conversation":
+            from app.utils.bind_runtime import update_bind_runtime
+
             session.remote_chatgpt = {
                 **remote,
                 "bind_state": BIND_STATE_BOUND_CONVERSATION,
@@ -178,11 +180,8 @@ class PageOpenCloseMixin:
                 "url": page_url,
                 "client_id": client_id,
                 "page_instance_id": (client_info.get("page_instance_id") or "").strip(),
-                "page_type": "conversation",
-                "page_title": (client_info.get("page_title") or "").strip(),
-                "last_seen": time.time(),
-                "bootstrap_in_progress": False,
             }
+            update_bind_runtime(self, session, bootstrap_in_progress=False)
         else:
             session.remote_chatgpt = dict(remote)
         self._schedule_save_sessions_to_disk()

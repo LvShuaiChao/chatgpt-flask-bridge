@@ -2,7 +2,7 @@
 
 import time
 
-from app.models import normalize_remote_chatgpt, remote_binding_enabled
+from app.models import derive_remote_page_type, normalize_remote_chatgpt, remote_binding_enabled
 from app.url_utils import parse_conversation_id
 from app.utils.page_status import page_url_from
 from PyQt5.QtCore import Qt
@@ -306,7 +306,7 @@ class PageSelectorMixin:
             "page_instance_id": (remote.get("page_instance_id") or "").strip(),
             "conversation_id": conversation_id,
             "url": page_url,
-            "page_type": (remote.get("page_type") or "conversation").strip(),
+            "page_type": derive_remote_page_type(page_url, conversation_id) or "conversation",
         }
 
     def _safe_status_float(self, status, field, default=0.0):

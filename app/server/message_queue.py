@@ -2385,7 +2385,7 @@ def _handle_report(body):
             _notify_status()
             return {"ok": True}
         if event == "assistant_reply":
-            text = (payload.get("content") or payload.get("text") or "").strip()
+            text = (payload.get("content") or "").strip()
             if _is_invalid_assistant_reply_text(text):
                 _log(
                     "[BRIDGE][ASSISTANT_REPLY][SKIP_INVALID_TEXT] "
@@ -2394,7 +2394,6 @@ def _handle_report(body):
                 )
                 _notify_status()
                 return {"ok": False, "error": "invalid_assistant_reply_text"}
-            msg["reply_text"] = text
             session_id_log = (msg.get("session_id") or "").strip()
             turn_id_log = (msg.get("turn_id") or "").strip()
             mid_log = message_id or "-"
@@ -2546,12 +2545,7 @@ def _handle_assistant_reply(body):
     client_id = read_bridge_client_id(body)
     page_instance_id = read_bridge_page_instance_id(body)
     message_id = str(body.get("message_id") or "").strip()
-    content = str(
-        body.get("content")
-        or body.get("text")
-        or body.get("assistant_text")
-        or ""
-    ).strip()
+    content = str(body.get("content") or "").strip()
     if not content:
         return {"ok": False, "error": "empty_assistant_reply"}
     if _is_invalid_assistant_reply_text(content):
@@ -2606,7 +2600,6 @@ def _handle_assistant_reply(body):
     )
 
     if msg:
-        msg["reply_text"] = content
         if not session_id:
             session_id = str(msg.get("session_id") or "").strip()
             inbound_kw["session_id"] = session_id

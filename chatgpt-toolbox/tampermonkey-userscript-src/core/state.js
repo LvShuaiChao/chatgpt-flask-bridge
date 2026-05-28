@@ -696,6 +696,7 @@
       defaultMaxContinueRoundsMigratedToUnlimited: false,
       /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
       switchNewChatBetweenTasks: true,
+      switchNewChatAfterAllDone: false,
       /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
       stopBatchOnTaskSendFailure: false,
       verifyAfterDoneSignal: true,
@@ -706,8 +707,8 @@
       taskAutoUploadEveryNMessages: 5,
       taskAutoUploadCountInitialPrompt: true,
       taskAutoUploadCountContinuePrompt: true,
-      taskAutoUploadCountVerifyPrompt: true,
-      taskAutoUploadCountMode: 'message',
+      taskAutoUploadCountVerifyPrompt: false,
+      taskAutoUploadCountMode: 'assistantAnswer',
 
       taskRotateNewChatByPageTurnEnabled: true,
       taskRotateNewChatPageTurnThreshold: 30,
@@ -742,23 +743,23 @@
       taskRelentlessSendRetryBackoffEnabled: true,
 
       verifyAfterDoneSignalPrompt: [
-        '这是一次“完成状态确认”，不是重新执行任务。',
+        '这是一次“完成状态二次确认”，不是重新执行任务。',
+        '已重新上传当前项目文件/附件，请结合附件、原始任务内容和上一轮助手回复判断当前任务是否真的已经完整完成。',
         '',
-        '请不要重新回答题目，不要重新生成代码，不要重新展开原任务内容。',
-        '你只需要根据上一次助手回复，判断它是否已经完成当前任务要求。',
-        '',
-        '当前任务标题：{{taskTitle}}',
+        '任务标题：{{taskTitle}}',
         '任务简述：{{taskBrief}}',
         '',
-        '上一次助手回复：',
+        '原始任务内容：',
+        '{{taskContent}}',
+        '',
+        '上一轮助手回复：',
         '{{lastReply}}',
         '',
-        '判断要求：',
-        '1. 如果上一次助手回复已经完整完成任务，并且没有明显遗漏，只回复：{{doneSignal}}',
-        '2. 如果上一次助手回复还没有完成，请只继续输出缺失的剩余内容。',
+        '判断规则：',
+        '1. 如果你确认任务已经完整完成，并且没有任何遗漏，只输出：{{doneSignal}}',
+        '2. 如果仍有遗漏，不要输出终止符，直接继续补充缺失内容。',
         '3. 不要重复已经回答过的内容。',
-        '4. 不要从头重新回答整个任务。',
-        '5. 不要把原始题目重新列出来。',
+        '4. 不要把这次确认当成重新执行整项任务。',
       ].join('\n'),
     };
     if (typeof getDefaultVerifyAfterDoneSignalPromptTemplate === 'function') {
@@ -878,9 +879,29 @@
     return { value: trimmed, migrated: false, reason: 'user-customized' };
   }
 
+  const DEFAULT_SINGLE_QUESTION_STEP_PROMPT = `做下面题目，一次只回答一道题，分多次回答。
+
+硬性规则：
+1. 本次回复只回答当前尚未回答的第一道题。
+2. 禁止一次性回答多道题。
+3. 禁止把所有题目一次性列出答案。
+4. 禁止输出解释、分析、总结、寒暄。
+5. 回答格式固定为：原题=答案
+6. 回答完当前这一道题后立刻停止，等待下一次继续指令。
+7. 下一次收到继续指令时，再回答下一道尚未回答的题。
+8. 只有当下面所有题目都已经逐题回答完成后，才允许回复终止信号。
+
+题目：
+1+1=
+2+2=
+3+3=
+4+4=
+5+5=
+6+6=`;
+
   function createDefaultAutoConfig() {
     return {
-      listPromptsText: '请先自我介绍一下\n请再用 3 点总结你能做什么',
+      listPromptsText: DEFAULT_SINGLE_QUESTION_STEP_PROMPT,
       continuePromptsText: '',
       promptMode: 'continue',
       listProfiles: [],
@@ -898,6 +919,11 @@
 
   function createDefaultPrompts() {
     return [
+    {
+      title: '分轮答题测试',
+      category: '测试',
+      content: DEFAULT_SINGLE_QUESTION_STEP_PROMPT,
+    },
     {
       title: '找僵尸代码',
       category: '代码',
@@ -1007,6 +1033,17 @@
     activeUploadGroupId: '',
     uploadItems: [],
   };
+
+  function findUploadGroupById(groupId) {
+    const gid = String(groupId || '').trim();
+    if (!gid) {
+      return null;
+    }
+    const groups = Array.isArray(UploadGroupAppState.uploadGroups)
+      ? UploadGroupAppState.uploadGroups
+      : [];
+    return groups.find((group) => group && group.id === gid) || null;
+  }
 
   let toolboxPageNavigating = false;
 
