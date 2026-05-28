@@ -18,6 +18,10 @@
     let importFileEl = null;
     let promptImporting = false;
     let modalOverlay = null;
+    let categoryManagerOverlay = null;
+    let categoryPickerOverlay = null;
+    let categoryManagerOutsideClickBound = false;
+    let categoryManagerOutsideClickHandler = null;
 
     const PROMPT_EDITOR_MODAL_POSITION_KEY = 'promptEditorModalPosition';
     const PROMPT_EDITOR_DRAFT_KEY = 'promptEditorDraftV1';
@@ -72,6 +76,9 @@
         }
         return val != null ? val : "manage";
       })(),
+    );
+    let selectedPromptId = String(
+      readDataStorage("promptManagerSelectedPromptId", "") || ""
     );
 
     function normalizePromptSubtab(value) {
@@ -278,6 +285,76 @@
       };
     }
 
+    function isCursorCategoryValue(value) {
+      const text = String(value == null ? '' : value).trim();
+      return text.toLowerCase() === 'cursor';
+    }
+
+    function removeCursorPromptGroupFromData(data, source = '') {
+      const inputPrompts = Array.isArray(data && data.prompts) ? data.prompts : [];
+      const inputCategories = Array.isArray(data && data.categories) ? data.categories : [];
+
+      const nextPrompts = inputPrompts.filter((prompt) => {
+        if (!prompt) return false;
+        return !(
+          isCursorCategoryValue(prompt.category)
+          || isCursorCategoryValue(prompt.categoryId)
+          || isCursorCategoryValue(prompt.categoryName)
+          || isCursorCategoryValue(prompt.group)
+          || isCursorCategoryValue(prompt.groupId)
+          || isCursorCategoryValue(prompt.groupName)
+        );
+      });
+
+      const nextCategories = inputCategories.filter((cat) => {
+        if (!cat) return false;
+        return !(
+          isCursorCategoryValue(cat.id)
+          || isCursorCategoryValue(cat.name)
+          || isCursorCategoryValue(cat.label)
+          || isCursorCategoryValue(cat.title)
+        );
+      });
+
+      const removedPrompts = inputPrompts.length - nextPrompts.length;
+      const removedCategories = inputCategories.length - nextCategories.length;
+      const hasCursorData = removedPrompts > 0 || removedCategories > 0;
+
+      const cleaned = normalizePromptManagerData({
+        prompts: nextPrompts,
+        categories: nextCategories,
+      });
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        if (hasCursorData) {
+          ToolboxShell.appendLog(
+            `[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] removedCategories=${removedCategories} removedPrompts=${removedPrompts} reason=remove-cursor-group source=${String(source || '-')}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP_SKIP] reason=no-cursor-data source=${String(source || '-')}`,
+          );
+        }
+      }
+
+      if (hasCursorData) {
+        console.log(
+          `[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] removedCategories=${removedCategories} removedPrompts=${removedPrompts} reason=remove-cursor-group source=${String(source || '-')}`,
+        );
+      } else {
+        console.log(
+          `[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP_SKIP] reason=no-cursor-data source=${String(source || '-')}`,
+        );
+      }
+
+      return {
+        data: cleaned,
+        migrated: hasCursorData,
+        removedCategories,
+        removedPrompts,
+      };
+    }
+
     function applyPromptManagerData(data) {
       const normalized = normalizePromptManagerData(data);
       prompts = normalized.prompts;
@@ -310,7 +387,25 @@
           console.log(
             "[PROMPT][LOAD] source=DATA_STORAGE key=cgpt_toolbox_data:promptManagerData count=" + String(normalized.prompts.length)
           );
-          return normalized;
+          try {
+            const migrated = removeCursorPromptGroupFromData(normalized, 'DATA_STORAGE');
+            if (migrated.migrated) {
+              savePromptManagerData(migrated.data);
+              if (isCursorCategoryValue(activeCategory)) {
+                activeCategory = '全部';
+                writeDataStorage("promptManagerActiveCategory", activeCategory);
+              }
+            }
+            return migrated.data;
+          } catch (err) {
+            console.warn("[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=DATA_STORAGE", err);
+            if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+              ToolboxShell.appendLog(
+                "[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=DATA_STORAGE error=" + String((err && err.message) || err),
+              );
+            }
+            return normalized;
+          }
         }
         // 否则继续向下尝试 legacy key
       }
@@ -373,26 +468,60 @@
 
       // 3. 找到可用 legacy 数据：回写到新 key 并返回
       if (bestRaw) {
+        let bestAfter = bestRaw;
+        try {
+          const migrated = removeCursorPromptGroupFromData(bestRaw, 'LEGACY');
+          bestAfter = migrated.data;
+          if (migrated.migrated) {
+            if (isCursorCategoryValue(activeCategory)) {
+              activeCategory = '全部';
+              writeDataStorage("promptManagerActiveCategory", activeCategory);
+            }
+          }
+        } catch (err) {
+          console.warn("[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=LEGACY", err);
+          if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+            ToolboxShell.appendLog(
+              "[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=LEGACY error=" + String((err && err.message) || err),
+            );
+          }
+        }
         try {
           writeDataStorage("promptManagerData", {
-            prompts: bestRaw.prompts,
-            categories: bestRaw.categories,
+            prompts: bestAfter.prompts,
+            categories: bestAfter.categories,
           });
         } catch (err) {
           console.error("[PROMPT][MIGRATE_STORAGE] writeDataStorage failed", err);
         }
         console.log(
           "[PROMPT][MIGRATE_STORAGE] from=" + migratedFrom
-          + " to=cgpt_toolbox_data:promptManagerData count=" + String(bestRaw.prompts.length)
+          + " to=cgpt_toolbox_data:promptManagerData count=" + String(bestAfter.prompts.length)
         );
         console.log(
-          "[PROMPT][LOAD] source=legacy key=" + migratedFrom + " count=" + String(bestRaw.prompts.length)
+          "[PROMPT][LOAD] source=legacy key=" + migratedFrom + " count=" + String(bestAfter.prompts.length)
         );
-        return bestRaw;
+        try {
+          savePromptManagerData(bestAfter);
+        } catch (err) {
+          console.error("[PROMPT][MIGRATE_STORAGE] savePromptManagerData failed", err);
+        }
+        return bestAfter;
       }
 
       // 4. 未命中任何存储：初始化默认 Prompt
-      const defaults = normalizePromptManagerData(null);
+      let defaults = normalizePromptManagerData(null);
+      try {
+        const migrated = removeCursorPromptGroupFromData(defaults, 'DEFAULT');
+        defaults = migrated.data;
+      } catch (err) {
+        console.warn("[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=DEFAULT", err);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            "[PROMPT][MIGRATE_REMOVE_CURSOR_GROUP] failed source=DEFAULT error=" + String((err && err.message) || err),
+          );
+        }
+      }
       try {
         writeDataStorage("promptManagerData", {
           prompts: defaults.prompts,
@@ -463,9 +592,27 @@
       return ok;
     }
 
-    function getPromptCategoryCount(categoryName) {
-      const normalized = normalizePromptCategoryName(categoryName);
-      return prompts.filter((item) => getPromptCategoryName(item) === normalized).length;
+    function getPromptCategoryCounts(promptList, categoryList) {
+      const list = Array.isArray(promptList) ? promptList : [];
+      const cats = Array.isArray(categoryList) ? categoryList : [];
+      const counts = {};
+      let total = 0;
+
+      cats.forEach((cat) => {
+        const name = normalizePromptCategoryName(cat && cat.name);
+        if (name) {
+          counts[name] = 0;
+        }
+      });
+
+      list.forEach((prompt) => {
+        total += 1;
+        const category = normalizePromptCategoryName(prompt && prompt.category) || '默认';
+        counts[category] = (counts[category] || 0) + 1;
+      });
+
+      counts.__all__ = total;
+      return counts;
     }
 
     function getPromptCategoriesForFilter() {
@@ -581,9 +728,12 @@
     }
 
     function renderCategoryManager() {
-      const listEl = qs('#cgpt-prompt-category-manage-list', root);
+      const host = categoryManagerOverlay || root;
+      const listEl = qs('#cgpt-prompt-category-manage-list', host);
 
       if (!listEl) return;
+
+      const counts = getPromptCategoryCounts(prompts, categories);
 
       if (!categories.length) {
         listEl.innerHTML = renderEmptyState('暂无类别', 'cgpt-log-empty cgpt-empty-state');
@@ -591,7 +741,7 @@
       }
 
       listEl.innerHTML = categories.map((cat) => {
-        const count = getPromptCategoryCount(cat.name);
+        const count = Number(counts[normalizePromptCategoryName(cat.name)] || 0);
         const locked = cat.name === '默认';
 
         return `
@@ -619,7 +769,8 @@
     }
 
     function addPromptCategory() {
-      const input = qs('#cgpt-prompt-category-name', root);
+      const host = categoryManagerOverlay || root;
+      const input = qs('#cgpt-prompt-category-name', host);
       const name = normalizePromptCategoryName(input && input.value);
 
       if (!name) {
@@ -639,6 +790,8 @@
         setStatus('保存失败：浏览器存储写入失败', 'error');
         return;
       }
+
+      ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_CREATE] category=' + name);
 
       if (input) input.value = '';
 
@@ -689,6 +842,7 @@
       render();
       notifyUploadQuickPromptsRefresh('prompt-save');
 
+      ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_RENAME] old=' + oldName + ' new=' + nextName);
       setStatus(`已重命名类别：${oldName} -> ${nextName}`);
     }
 
@@ -705,7 +859,8 @@
         return;
       }
 
-      const count = getPromptCategoryCount(cat.name);
+      const counts = getPromptCategoryCounts(prompts, categories);
+      const count = Number(counts[normalizePromptCategoryName(cat.name)] || 0);
 
       const ok = window.confirm(
         `确定删除类别：${cat.name}”吗？该类别：${count} Prompt 会移动到“默认”。`,
@@ -734,6 +889,7 @@
 
       if (activeCategory === cat.name) {
         persistActivePromptCategory('全部');
+        ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_RESET_TO_ALL] reason=active-category-deleted');
       }
 
       if (!savePromptManagerData()) {
@@ -744,6 +900,7 @@
       render();
       notifyUploadQuickPromptsRefresh('prompt-save');
 
+      ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_DELETE] category=' + cat.name + ' removedPrompts=' + String(count));
       setStatus(`已删除类别：${cat.name}，相关 Prompt 已移动到默认`);
     }
 
@@ -792,6 +949,10 @@
       }
 
       prompts = prompts.filter((prompt) => prompt.id !== promptId);
+      if (String(selectedPromptId || '') === String(promptId || '')) {
+        const next = prompts[0] || null;
+        persistSelectedPromptId(next ? next.id : '', 'delete-selected');
+      }
       commitPromptManagerChange(promptDeletedMessage(item.title), {
         closeEditor: options.closeEditor === true,
         reason: 'prompt-delete',
@@ -857,6 +1018,277 @@
       });
     }
 
+    function persistSelectedPromptId(id, source = '') {
+      selectedPromptId = String(id || '');
+      writeDataStorage("promptManagerSelectedPromptId", selectedPromptId);
+      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.set === 'function') {
+        MemoryManager.set("promptManagerSelectedPromptId", selectedPromptId);
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[PROMPT][SELECT] source=${source || '-'} id=${selectedPromptId || '-'}`,
+        );
+      }
+    }
+
+    function findPromptById(id) {
+      const targetId = String(id || '');
+      if (!targetId) return null;
+      return prompts.find((item) => String(item.id || '') === targetId) || null;
+    }
+
+    function resolveSelectedPromptForItems(items) {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) {
+        // Filtering/searching should not permanently rewrite user's selectedPromptId.
+        return null;
+      }
+      const current = list.find((item) => String(item.id || '') === selectedPromptId);
+      if (current) {
+        return current;
+      }
+      // Selected prompt is not visible under current filter; use first visible as a temporary selection.
+      // IMPORTANT: do NOT persist this fallback.
+      const first = list[0];
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[PROMPT][SELECT_VISIBLE_FALLBACK] id=${String(first && first.id ? first.id : '-')}`,
+        );
+      }
+      return first;
+    }
+
+    function selectPrompt(id, source = '') {
+      const nextId = String(id || '');
+      if (!nextId) {
+        persistSelectedPromptId('', source || 'clear');
+        render();
+        return;
+      }
+      const item = findPromptById(nextId);
+      if (!item) {
+        persistSelectedPromptId('', source || 'missing');
+        render();
+        return;
+      }
+      persistSelectedPromptId(nextId, source || 'select');
+      render();
+    }
+
+    function escapeCssIdent(value) {
+      const text = String(value || '');
+      if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(text);
+      }
+      return text.replace(/["\\]/g, '\\$&');
+    }
+
+    function focusSelectedPromptRow(id) {
+      if (!listEl) return;
+      const targetId = String(id || selectedPromptId || '');
+      if (!targetId) return;
+      const safeId = escapeCssIdent(targetId);
+      const row = listEl.querySelector(`[data-prompt-nav-item="1"][data-id="${safeId}"]`);
+      if (!(row instanceof HTMLElement)) return;
+      row.focus({ preventScroll: true });
+      row.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+      });
+    }
+
+    function movePromptSelectionByKeyboard(delta, source) {
+      const items = filteredPrompts();
+      if (!items.length) return;
+
+      let currentIndex = items.findIndex((item) => String(item.id || '') === String(selectedPromptId || ''));
+      if (currentIndex < 0) {
+        currentIndex = 0;
+      } else {
+        currentIndex += delta;
+      }
+      if (currentIndex < 0) currentIndex = 0;
+      if (currentIndex >= items.length) currentIndex = items.length - 1;
+
+      const next = items[currentIndex];
+      if (!next || !next.id) return;
+      persistSelectedPromptId(next.id, source || 'keyboard');
+      render();
+      window.requestAnimationFrame(() => focusSelectedPromptRow(next.id));
+    }
+
+    function jumpPromptSelectionByKeyboard(position, source) {
+      const items = filteredPrompts();
+      if (!items.length) return;
+
+      const next = position === 'end'
+        ? items[items.length - 1]
+        : items[0];
+      if (!next || !next.id) return;
+      persistSelectedPromptId(next.id, source || 'keyboard-jump');
+      render();
+      window.requestAnimationFrame(() => focusSelectedPromptRow(next.id));
+    }
+
+    function handlePromptListKeydown(event) {
+      if (!event) return;
+
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target) {
+        const tag = String(target.tagName || '').toLowerCase();
+        if (
+          tag === 'input'
+          || tag === 'textarea'
+          || tag === 'select'
+          || target.isContentEditable
+        ) {
+          return;
+        }
+      }
+
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        event.stopPropagation();
+        movePromptSelectionByKeyboard(1, 'keyboard-arrow-down');
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        event.stopPropagation();
+        movePromptSelectionByKeyboard(-1, 'keyboard-arrow-up');
+        return;
+      }
+      if (event.key === 'Home') {
+        event.preventDefault();
+        event.stopPropagation();
+        jumpPromptSelectionByKeyboard('start', 'keyboard-home');
+        return;
+      }
+      if (event.key === 'End') {
+        event.preventDefault();
+        event.stopPropagation();
+        jumpPromptSelectionByKeyboard('end', 'keyboard-end');
+      }
+    }
+
+    function renderPromptDetailPanel(item) {
+      const panel = root ? qs('#cgpt-prompt-detail-panel', root) : null;
+      if (!panel) return;
+      panel.innerHTML = '';
+
+      if (!item) {
+        const empty = document.createElement('div');
+        empty.className = 'cgpt-prompt-detail-empty';
+        empty.innerHTML = `
+          <div class="cgpt-panel-title">Prompt 详情</div>
+          <div class="cgpt-hint">左侧选择一个 Prompt 后，这里显示完整内容。</div>
+        `;
+        panel.appendChild(empty);
+        return;
+      }
+
+      const title = document.createElement('div');
+      title.className = 'cgpt-prompt-detail-title';
+      title.textContent = item.title || '未命名 Prompt';
+
+      const meta = document.createElement('div');
+      meta.className = 'cgpt-prompt-detail-meta';
+      meta.textContent = `分类：${item.category || '默认'}｜字数：${String(item.content || '').length}`;
+
+      const content = document.createElement('textarea');
+      content.className = 'cgpt-prompt-detail-content cgpt-input';
+      content.readOnly = true;
+      content.value = String(item.content || '');
+
+      const actions = document.createElement('div');
+      actions.className = 'cgpt-prompt-detail-actions';
+
+      const batchLabel = document.createElement('label');
+      batchLabel.className = 'cgpt-checkbox-line cgpt-prompt-detail-batch-check';
+      const batchCheck = document.createElement('input');
+      batchCheck.type = 'checkbox';
+      batchCheck.checked = (
+        typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.isPromptBatchTaskSelected === 'function'
+        && AutoQueueModule.isPromptBatchTaskSelected(item.id)
+      );
+      batchCheck.addEventListener('change', () => {
+        if (
+          typeof AutoQueueModule === 'undefined'
+          || typeof AutoQueueModule.addPromptBatchTask !== 'function'
+          || typeof AutoQueueModule.removePromptBatchTask !== 'function'
+        ) {
+          batchCheck.checked = false;
+          return;
+        }
+        if (batchCheck.checked) {
+          AutoQueueModule.addPromptBatchTask(item.id);
+        } else {
+          AutoQueueModule.removePromptBatchTask(item.id);
+        }
+        renderPromptDetailPanel(item);
+      });
+      const batchText = document.createElement('span');
+      batchText.textContent = '加入批量任务';
+      batchLabel.appendChild(batchCheck);
+      batchLabel.appendChild(batchText);
+
+      const fillBtn = createActionButton('填入');
+      fillBtn.addEventListener('click', () => {
+        sendPrompt(item.content, false);
+      });
+
+      const sendBtn = createActionButton('发送', 'primary');
+      sendBtn.addEventListener('click', () => {
+        void sendPrompt(item.content, true);
+      });
+
+      const copyBtn = createActionButton('复制');
+      copyBtn.addEventListener('click', async () => {
+        const ok = await copyTextUnified(item.content, 'prompt-manager:copy-detail');
+        if (ok) {
+          setStatus(`已复制：${item.title}`);
+        } else {
+          setStatus('复制失败，请手动复制', 'error');
+        }
+      });
+
+      const editBtn = createActionButton('编辑');
+      editBtn.addEventListener('click', () => {
+        openEditor(item.id);
+      });
+
+      const deleteBtn = createActionButton('删除');
+      deleteBtn.classList.add('danger');
+      deleteBtn.addEventListener('click', () => {
+        deletePromptById(item.id);
+      });
+
+      const upBtn = createActionButton('上移');
+      upBtn.addEventListener('click', () => {
+        movePrompt(item.id, -1);
+      });
+
+      const downBtn = createActionButton('下移');
+      downBtn.addEventListener('click', () => {
+        movePrompt(item.id, 1);
+      });
+
+      actions.appendChild(batchLabel);
+      actions.appendChild(fillBtn);
+      actions.appendChild(sendBtn);
+      actions.appendChild(copyBtn);
+      actions.appendChild(editBtn);
+      actions.appendChild(deleteBtn);
+      actions.appendChild(upBtn);
+      actions.appendChild(downBtn);
+
+      panel.appendChild(title);
+      panel.appendChild(meta);
+      panel.appendChild(content);
+      panel.appendChild(actions);
+    }
+
     function renderCategoryBar() {
       if (!root) return;
 
@@ -865,13 +1297,126 @@
 
       const filterCategories = getPromptCategoriesForFilter();
       const current = normalizeActiveCategory();
+      const counts = getPromptCategoryCounts(prompts, categories);
+
+      const allNames = filterCategories.map((cat) => cat.name);
+      const normalNames = allNames.filter((name) => String(name || '').trim() && String(name || '').trim() !== '全部');
+      const maxChipCount = 8;
+
+      let visibleNames = allNames.slice();
+      let moreHiddenCount = 0;
+
+      if (normalNames.length + 1 > maxChipCount) {
+        const ensure = (name, list) => {
+          const text = String(name || '').trim();
+          if (!text) return;
+          if (!list.includes(text)) list.push(text);
+        };
+
+        visibleNames = [];
+        ensure('全部', visibleNames);
+        ensure('默认', visibleNames);
+        ensure(current, visibleNames);
+
+        const ranked = normalNames
+          .filter((name) => name !== '默认' && name !== current)
+          .map((name) => ({ name, count: Number(counts[normalizePromptCategoryName(name)] || 0) }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+        const remainingSlots = Math.max(0, maxChipCount - 1 - visibleNames.length);
+        ranked.slice(0, remainingSlots).forEach((item) => ensure(item.name, visibleNames));
+
+        const hiddenNames = normalNames.filter((name) => !visibleNames.includes(name));
+        moreHiddenCount = hiddenNames.length;
+        visibleNames.push('__more__');
+      }
 
       bar.innerHTML = renderPromptCategoryChips(
-        filterCategories.map((cat) => cat.name),
+        visibleNames.map((name) => (name === '__more__' ? `更多 ${moreHiddenCount}...` : name)),
         current,
-        (name) => getPromptCategoryCount(name),
+        (name) => {
+          if (name === '全部') return Number(counts.__all__ || 0);
+          if (String(name || '').startsWith('更多 ')) return moreHiddenCount;
+          const normalized = normalizePromptCategoryName(name);
+          return Number(counts[normalized] || 0);
+        },
         'data-prompt-category',
       );
+    }
+
+    function toggleCategoryManagerModal(show, source = '') {
+      if (!categoryManagerOverlay && root) {
+        categoryManagerOverlay = qs('#cgpt-prompt-category-popover', root);
+      }
+      if (!categoryManagerOverlay) return;
+
+      const nextShow = show === true ? true : (show === false ? false : categoryManagerOverlay.style.display === 'none');
+      categoryManagerOverlay.style.display = nextShow ? 'block' : 'none';
+
+      if (nextShow) {
+        ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_MANAGER_OPEN] source=' + (source || 'manage-button'));
+        renderCategoryManager();
+        const input = qs('#cgpt-prompt-category-name', categoryManagerOverlay);
+        if (input) {
+          window.setTimeout(() => input.focus(), 50);
+        }
+
+        if (!categoryManagerOutsideClickBound) {
+          categoryManagerOutsideClickBound = true;
+          categoryManagerOutsideClickHandler = (event) => {
+            if (!categoryManagerOverlay || categoryManagerOverlay.style.display === 'none') return;
+            const target = event && event.target ? event.target : null;
+            const manageBtn = root ? qs('#cgpt-prompt-category-manage-btn', root) : null;
+
+            if (target instanceof Node) {
+              if (categoryManagerOverlay.contains(target)) return;
+              if (manageBtn && manageBtn.contains && manageBtn.contains(target)) return;
+            }
+
+            ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_MANAGER_CLOSE] source=outside-click');
+            categoryManagerOverlay.style.display = 'none';
+          };
+          window.addEventListener('mousedown', categoryManagerOutsideClickHandler, true);
+        }
+      } else {
+        ToolboxShell.appendLog('[PROMPT_UI][CATEGORY_MANAGER_CLOSE] source=' + (source || 'toggle'));
+      }
+    }
+
+    function renderCategoryPickerList() {
+      if (!categoryPickerOverlay) {
+        categoryPickerOverlay = root ? qs('#cgpt-prompt-category-picker-modal', root) : null;
+      }
+      if (!categoryPickerOverlay) return;
+
+      const wrap = qs('#cgpt-prompt-category-picker-list', categoryPickerOverlay);
+      if (!wrap) return;
+
+      const filterCategories = getPromptCategoriesForFilter();
+      const current = normalizeActiveCategory();
+      const counts = getPromptCategoryCounts(prompts, categories);
+
+      const names = filterCategories.map((cat) => cat.name);
+      wrap.innerHTML = renderPromptCategoryChips(
+        names,
+        current,
+        (name) => {
+          if (name === '全部') return Number(counts.__all__ || 0);
+          return Number(counts[normalizePromptCategoryName(name)] || 0);
+        },
+        'data-prompt-category-pick',
+      );
+    }
+
+    function toggleCategoryPickerModal(show) {
+      if (!categoryPickerOverlay) {
+        categoryPickerOverlay = root ? qs('#cgpt-prompt-category-picker-modal', root) : null;
+      }
+      if (!categoryPickerOverlay) return;
+      if (show) {
+        renderCategoryPickerList();
+      }
+      categoryPickerOverlay.style.display = show ? 'flex' : 'none';
     }
 
     function getPromptDisplayConfig() {
@@ -1147,6 +1692,7 @@
       renderCategoryManager();
 
       const items = filteredPrompts();
+      const selectedItem = resolveSelectedPromptForItems(items);
       listEl.innerHTML = '';
 
       if (!items.length) {
@@ -1161,6 +1707,7 @@
           empty.innerHTML = '当前分类没有 Prompt<br>可以点击左上角「+ 新增 Prompt」创建';
         }
         listEl.appendChild(empty);
+        renderPromptDetailPanel(null);
         clearPromptStatus();
 
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.purgeForbiddenStatusBadge === 'function') {
@@ -1171,129 +1718,32 @@
       }
 
       for (const item of items) {
-        const row = document.createElement('div');
-        row.className = 'cgpt-prompt-item';
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'cgpt-prompt-nav-item';
         row.dataset.id = item.id;
+        row.dataset.promptNavItem = '1';
+        if (selectedItem && String(selectedItem.id || '') === String(item.id || '')) {
+          row.classList.add('active');
+          row.tabIndex = 0;
+        } else {
+          row.tabIndex = -1;
+        }
 
         const title = document.createElement('div');
-        title.className = 'cgpt-prompt-title';
-        title.textContent = item.title;
+        title.className = 'cgpt-prompt-nav-title';
+        title.textContent = item.title || '未命名 Prompt';
 
         const meta = document.createElement('div');
-        meta.className = 'cgpt-prompt-meta';
-        meta.textContent = `分类：${item.category || '默认'}｜字数：${String(item.content || '').length}`;
-
-        const preview = document.createElement('div');
-        preview.className = 'cgpt-prompt-preview';
-        preview.textContent = item.content.replace(/\s+/g, ' ').slice(0, 140);
+        meta.className = 'cgpt-prompt-nav-meta';
+        meta.textContent = `${item.category || '默认'}｜${String(item.content || '').length} 字`;
 
         row.appendChild(title);
         row.appendChild(meta);
-        row.appendChild(preview);
-
-        const actions = document.createElement('div');
-        actions.className = 'cgpt-prompt-actions cgpt-prompt-actions-compact';
-
-        const batchLabel = document.createElement('label');
-        batchLabel.className = 'cgpt-prompt-batch-check';
-        batchLabel.title = '加入批量任务';
-        const batchCheck = document.createElement('input');
-        batchCheck.type = 'checkbox';
-        batchCheck.checked = (
-          typeof AutoQueueModule !== 'undefined'
-          && typeof AutoQueueModule.isPromptBatchTaskSelected === 'function'
-          && AutoQueueModule.isPromptBatchTaskSelected(item.id)
-        );
-        batchCheck.addEventListener('click', (e) => {
-          e.stopPropagation();
+        row.addEventListener('click', () => {
+          selectPrompt(item.id, 'left-list-click');
+          window.requestAnimationFrame(() => focusSelectedPromptRow(item.id));
         });
-        batchCheck.addEventListener('change', (e) => {
-          e.stopPropagation();
-          if (
-            typeof AutoQueueModule === 'undefined'
-            || typeof AutoQueueModule.addPromptBatchTask !== 'function'
-            || typeof AutoQueueModule.removePromptBatchTask !== 'function'
-          ) {
-            batchCheck.checked = false;
-            return;
-          }
-
-          if (batchCheck.checked) {
-            AutoQueueModule.addPromptBatchTask(item.id);
-          } else {
-            AutoQueueModule.removePromptBatchTask(item.id);
-          }
-          render();
-        });
-        const batchText = document.createElement('span');
-        batchText.textContent = '加入批量任务';
-        batchLabel.appendChild(batchCheck);
-        batchLabel.appendChild(batchText);
-        actions.appendChild(batchLabel);
-
-        const fillBtn = createActionButton('填入');
-        fillBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          sendPrompt(item.content, false);
-        });
-
-        const sendBtn = createActionButton('发送', 'primary');
-        sendBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          void sendPrompt(item.content, true);
-        });
-
-        const copyBtn = createActionButton('复制');
-        copyBtn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const ok = await copyTextUnified(item.content, 'prompt-manager:copy-item');
-          if (ok) {
-            setStatus(`已复制：${item.title}`);
-          } else {
-            setStatus('复制失败，请手动复制', 'error');
-          }
-        });
-
-        const editBtn = createActionButton('编辑');
-        editBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openEditor(item.id);
-        });
-
-        const deleteBtn = createActionButton('删除');
-        deleteBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          deletePromptById(item.id);
-        });
-
-        const upBtn = createActionButton('↑', '', 'cgpt-prompt-order-btn');
-        upBtn.title = '上移';
-        upBtn.dataset.promptId = item.id;
-        upBtn.dataset.action = 'move-up';
-        upBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          movePrompt(item.id, -1);
-        });
-
-        const downBtn = createActionButton('↓', '', 'cgpt-prompt-order-btn');
-        downBtn.title = '下移';
-        downBtn.dataset.promptId = item.id;
-        downBtn.dataset.action = 'move-down';
-        downBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          movePrompt(item.id, 1);
-        });
-
-        actions.appendChild(fillBtn);
-        actions.appendChild(sendBtn);
-        actions.appendChild(copyBtn);
-        actions.appendChild(editBtn);
-        actions.appendChild(deleteBtn);
-        actions.appendChild(upBtn);
-        actions.appendChild(downBtn);
-
-        row.appendChild(actions);
-
         listEl.appendChild(row);
       }
 
@@ -1303,6 +1753,7 @@
         ToolboxShell.purgeForbiddenStatusBadge('prompt-render-end');
       }
 
+      renderPromptDetailPanel(selectedItem);
       logPromptListCompactLayout('render');
     }
 
@@ -1313,19 +1764,21 @@
         return;
       }
 
-      const firstItem = list.querySelector('.cgpt-prompt-item');
-      const firstActions = list.querySelector('.cgpt-prompt-actions, .cgpt-prompt-actions-compact');
+      const firstItem = list.querySelector('.cgpt-prompt-nav-item');
 
-      if (!firstItem || !firstActions) {
+      if (!firstItem) {
         ToolboxShell.appendLog(`[PROMPT_UI][COMPACT_CHECK] reason=${reason} result=empty`);
         return;
       }
 
+      const hasTitle = !!firstItem.querySelector('.cgpt-prompt-nav-title');
+      const hasMeta = !!firstItem.querySelector('.cgpt-prompt-nav-meta');
+      const detailPanel = root ? root.querySelector('#cgpt-prompt-detail-panel') : null;
+      const hasDetail = !!detailPanel;
       const itemStyle = window.getComputedStyle(firstItem);
-      const actionStyle = window.getComputedStyle(firstActions);
 
       ToolboxShell.appendLog(
-        `[PROMPT_UI][COMPACT_CHECK] reason=${reason} itemPadding=${itemStyle.padding} itemMargin=${itemStyle.margin} actionGap=${actionStyle.gap} actionWrap=${actionStyle.flexWrap}`,
+        `[PROMPT_UI][COMPACT_CHECK] reason=${reason} itemPadding=${itemStyle.padding} itemMargin=${itemStyle.margin} title=${hasTitle ? 1 : 0} meta=${hasMeta ? 1 : 0} detail=${hasDetail ? 1 : 0}`,
       );
     }
 
@@ -2418,6 +2871,12 @@
       root.dataset.promptManagerEventsBound = '1';
       ToolboxShell.appendLog('[PROMPT_MANAGER][BIND_EVENTS_ONCE]');
 
+      if (listEl) {
+        listEl.tabIndex = 0;
+        listEl.title = '支持 ↑/↓ 快速切换 Prompt，Home/End 跳转首尾';
+        DomUtil.bindOnce(listEl, 'keydown', handlePromptListKeydown, 'bound_prompt_list_keydown');
+      }
+
       bindClick(root, '#cgpt-prompt-new-quick-btn', () => {
         const category = getDefaultPromptEditorCategory();
         ToolboxShell.appendLog(
@@ -2469,16 +2928,68 @@
           e.preventDefault();
           e.stopPropagation();
 
-          activeCategory = btn.getAttribute('data-prompt-category') || '全部';
+          const nextCategory = btn.getAttribute('data-prompt-category') || '全部';
+
+          if (String(nextCategory).startsWith('更多 ')) {
+            toggleCategoryPickerModal(true);
+            return;
+          }
+
+          activeCategory = nextCategory;
 
           persistActivePromptCategory(activeCategory);
 
           render();
           setStatus(`已切换分类：${activeCategory}`);
+
+          const counts = getPromptCategoryCounts(prompts, categories);
+          const normalized = normalizePromptCategoryName(activeCategory);
+          const count = normalized === '全部'
+            ? Number(counts.__all__ || 0)
+            : Number(counts[normalized] || 0);
+          ToolboxShell.appendLog(
+            '[PROMPT_UI][CATEGORY_SELECT] category=' + normalized + ' count=' + String(count) + ' source=horizontal-tabs',
+          );
         }, 'bound_prompt_category_bar_click');
       }
 
-      const categoryAddBtn = qs('#cgpt-prompt-category-add', root);
+      bindClick(root, '#cgpt-prompt-category-manage-btn', () => {
+        toggleCategoryManagerModal(true, 'manage-button');
+      }, {
+        moduleName: 'PromptManagerModule',
+        bindMissingLog: '[PROMPT][bind-missing] #cgpt-prompt-category-manage-btn',
+      });
+
+      if (categoryPickerOverlay) {
+        const closeBtn = qs('#cgpt-prompt-category-picker-close', categoryPickerOverlay);
+        if (closeBtn) {
+          bindOnce(closeBtn, 'click', () => toggleCategoryPickerModal(false));
+        }
+        const pickerBody = qs('#cgpt-prompt-category-picker-list', categoryPickerOverlay);
+        if (pickerBody) {
+          DomUtil.bindOnce(pickerBody, 'click', (e) => {
+            const btn = e.target instanceof HTMLElement
+              ? e.target.closest('[data-prompt-category-pick]')
+              : null;
+            if (!btn) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const picked = btn.getAttribute('data-prompt-category-pick') || '全部';
+            activeCategory = picked;
+            persistActivePromptCategory(activeCategory);
+            toggleCategoryPickerModal(false);
+            render();
+            setStatus(`已切换分类：${activeCategory}`);
+          }, 'bound_prompt_category_picker_click');
+        }
+        categoryPickerOverlay.addEventListener('mousedown', (event) => {
+          if (event.target === categoryPickerOverlay) {
+            toggleCategoryPickerModal(false);
+          }
+        });
+      }
+
+      const categoryAddBtn = qs('#cgpt-prompt-category-add', categoryManagerOverlay || root);
 
       if (categoryAddBtn) {
         bindOnce(categoryAddBtn, 'click', () => {
@@ -2486,7 +2997,7 @@
         });
       }
 
-      const categoryNameInput = qs('#cgpt-prompt-category-name', root);
+      const categoryNameInput = qs('#cgpt-prompt-category-name', categoryManagerOverlay || root);
 
       if (categoryNameInput) {
         bindOnce(categoryNameInput, 'keydown', (e) => {
@@ -2497,7 +3008,7 @@
         });
       }
 
-      const categoryManageList = qs('#cgpt-prompt-category-manage-list', root);
+      const categoryManageList = qs('#cgpt-prompt-category-manage-list', categoryManagerOverlay || root);
 
       if (categoryManageList) {
         DomUtil.bindOnce(categoryManageList, 'click', (e) => {
@@ -2593,6 +3104,122 @@
 
     const PROMPT_MODULE_HTML = `
         <div class="cgpt-section cgpt-prompt-page">
+          <style>
+            .cgpt-prompt-body {
+              display: grid;
+              grid-template-columns: 260px minmax(0, 1fr);
+              gap: 12px;
+              min-height: 0;
+              flex: 1 1 auto;
+            }
+            .cgpt-prompt-list-panel,
+            .cgpt-prompt-detail-panel {
+              border: 1px solid rgba(148, 163, 184, 0.28);
+              border-radius: 10px;
+              background: rgba(15, 23, 42, 0.72);
+              padding: 10px;
+              min-height: 0;
+            }
+            .cgpt-prompt-list-panel {
+              display: flex;
+              flex-direction: column;
+              gap: 10px;
+              overflow: hidden;
+            }
+            .cgpt-prompt-detail-panel {
+              display: flex;
+              flex-direction: column;
+              gap: 10px;
+              overflow: hidden;
+            }
+            .cgpt-prompt-list {
+              display: flex;
+              flex-direction: column;
+              gap: 0 !important;
+              flex: 1 1 auto;
+              min-height: 0;
+              overflow: auto;
+              border: 1px solid #2f3542;
+              border-radius: 12px;
+              background: #0f1115;
+            }
+            .cgpt-prompt-nav-item {
+              width: 100%;
+              border: 0;
+              border-bottom: 1px solid rgba(55, 65, 81, 0.7);
+              background: transparent;
+              color: #e5e7eb;
+              padding: 8px 10px;
+              text-align: left;
+              cursor: pointer;
+            }
+            .cgpt-prompt-nav-item:hover {
+              background: rgba(37, 99, 235, 0.14);
+            }
+            .cgpt-prompt-nav-item.active {
+              background: rgba(37, 99, 235, 0.34);
+              box-shadow: inset 3px 0 0 #3b82f6;
+            }
+            .cgpt-prompt-nav-title {
+              font-size: 13px;
+              font-weight: 700;
+              line-height: 1.3;
+              color: #f8fafc;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+            .cgpt-prompt-nav-meta {
+              margin-top: 3px;
+              font-size: 12px;
+              line-height: 1.25;
+              color: #94a3b8;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+            .cgpt-prompt-detail-title {
+              font-size: 16px;
+              font-weight: 800;
+              color: #f8fafc;
+              line-height: 1.35;
+            }
+            .cgpt-prompt-detail-meta {
+              font-size: 12px;
+              color: #94a3b8;
+              line-height: 1.35;
+            }
+            .cgpt-prompt-detail-content {
+              flex: 1 1 auto;
+              min-height: 260px;
+              resize: none;
+              overflow: auto;
+              line-height: 1.5;
+              font-size: 13px;
+              white-space: pre-wrap;
+            }
+            .cgpt-prompt-detail-actions {
+              display: flex;
+              align-items: center;
+              flex-wrap: wrap;
+              gap: 8px;
+              flex: 0 0 auto;
+            }
+            .cgpt-prompt-detail-empty {
+              padding: 18px;
+              border: 1px dashed rgba(148, 163, 184, 0.35);
+              border-radius: 10px;
+              color: #94a3b8;
+            }
+            @media (max-width: 760px) {
+              .cgpt-prompt-body {
+                grid-template-columns: 1fr;
+              }
+              .cgpt-prompt-detail-content {
+                min-height: 180px;
+              }
+            }
+          </style>
           <div id="cgpt-prompt-subtabs" class="cgpt-prompt-subtabs">
             <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="manage">Prompt 列表</button>
             <button type="button" class="cgpt-prompt-subtab" data-prompt-subtab="display">展示预览</button>
@@ -2607,20 +3234,25 @@
             </div>
 
             <div class="cgpt-prompt-body">
-              <aside class="cgpt-prompt-category-panel" id="cgpt-prompt-category-manager">
-                <div class="cgpt-panel-title">类别管理</div>
-                <div class="cgpt-category-create-row cgpt-prompt-category-edit-row">
-                  <input class="cgpt-input" id="cgpt-prompt-category-name" placeholder="输入类别名称">
-                  <button type="button" class="cgpt-btn primary" id="cgpt-prompt-category-add">新建</button>
-                </div>
-                <div id="cgpt-prompt-category-manage-list" class="cgpt-category-list cgpt-prompt-category-manage-list"></div>
-              </aside>
-
               <main class="cgpt-prompt-list-panel">
-                <div id="cgpt-prompt-category-bar" class="cgpt-prompt-filter-row cgpt-prompt-category-bar"></div>
+                <div class="cgpt-prompt-filter-row cgpt-prompt-category-row" style="display:flex; align-items:flex-start; gap:10px; position:relative;">
+                  <div id="cgpt-prompt-category-bar" class="cgpt-prompt-category-bar" style="flex:1 1 auto; min-width:0;"></div>
+                  <button type="button" class="cgpt-btn compact" id="cgpt-prompt-category-manage-btn" style="flex:0 0 auto;">管理分类</button>
+
+                  <div id="cgpt-prompt-category-popover"
+                    style="display:none; position:absolute; top:calc(100% + 8px); right:0; width:380px; max-width:min(92vw, 420px); z-index:9999; padding:10px; border-radius:12px; border:1px solid #2f3542; background:#0f131a; box-shadow: 0 18px 60px rgba(0,0,0,.55);">
+                    <div class="cgpt-panel-title" style="margin:0 0 8px 0;">分类管理</div>
+                    <div class="cgpt-category-create-row cgpt-prompt-category-edit-row" style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+                      <input class="cgpt-input" id="cgpt-prompt-category-name" placeholder="输入分类名称" style="flex:1 1 auto; min-width:0;">
+                      <button type="button" class="cgpt-btn primary" id="cgpt-prompt-category-add" style="flex:0 0 auto;">新建</button>
+                    </div>
+                    <div id="cgpt-prompt-category-manage-list" class="cgpt-category-list cgpt-prompt-category-manage-list"></div>
+                  </div>
+                </div>
                 <input id="cgpt-prompt-search" class="cgpt-prompt-search cgpt-input" placeholder="搜索标题、分类或内容...">
                 <div id="cgpt-prompt-list" class="cgpt-prompt-list"></div>
               </main>
+              <aside id="cgpt-prompt-detail-panel" class="cgpt-prompt-detail-panel"></aside>
             </div>
 
             <div id="cgpt-prompt-status" class="cgpt-hint" style="margin-top:8px; display:none;"></div>
@@ -2683,6 +3315,7 @@
           searchEl = qs('#cgpt-prompt-search', root);
           statusEl = qs('#cgpt-prompt-status', root);
           importFileEl = qs('#cgpt-prompt-import-file', root);
+          categoryManagerOverlay = qs('#cgpt-prompt-category-popover', root);
         },
         onBind: () => {
           createEditorModal();

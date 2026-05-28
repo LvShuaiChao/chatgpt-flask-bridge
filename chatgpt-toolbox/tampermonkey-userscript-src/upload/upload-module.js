@@ -1,4 +1,4 @@
-  /********************************************************************
+﻿  /********************************************************************
    * 3. UploadModule：多文件上传模块
    ********************************************************************/
 
@@ -1171,6 +1171,59 @@
       }
     }
 
+    function appendClosedLoopTrace(event, fields = {}) {
+      try {
+        const e = String(event || '').trim() || 'unknown';
+        const f = fields && typeof fields === 'object' ? fields : {};
+        const runId = f.runId != null ? String(f.runId) : String(closedLoopContinueState.runId || '-');
+        const round = f.round != null ? String(f.round) : String(closedLoopContinueState.round || '-');
+        const source = String(f.source || closedLoopContinueState.mode || '-');
+        const expectedLen = f.expectedLen != null ? String(f.expectedLen) : '-';
+        const actualLen = f.actualLen != null ? String(f.actualLen) : '-';
+        const deltaLen = f.deltaLen != null ? String(f.deltaLen) : '-';
+        const normalizedMatch = f.normalizedMatch != null ? String(f.normalizedMatch ? 1 : 0) : '-';
+        const sendable = f.sendable != null ? String(f.sendable ? 1 : 0) : '-';
+        const inputable = f.inputable != null ? String(f.inputable ? 1 : 0) : '-';
+        const responseState = f.responseState != null ? String(f.responseState) : '-';
+        const sendPhase = f.sendPhase != null ? String(f.sendPhase) : '-';
+        const decision = f.decision != null ? String(f.decision) : '-';
+        const reason = f.reason != null ? String(f.reason) : '-';
+        const cancelFlags = f.cancelFlags != null ? String(f.cancelFlags) : '-';
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP_TRACE] event=${e} runId=${runId} round=${round} source=${source} `
+          + `expectedLen=${expectedLen} actualLen=${actualLen} deltaLen=${deltaLen} normalizedMatch=${normalizedMatch} `
+          + `sendable=${sendable} inputable=${inputable} responseState=${responseState} sendPhase=${sendPhase} `
+          + `cancelFlags=${cancelFlags} decision=${decision} reason=${reason}`,
+        );
+      } catch (err) {
+        // best-effort trace only
+      }
+    }
+
+    function appendClosedLoopSimple(event, fields = {}) {
+      try {
+        const e = String(event || '').trim() || 'unknown';
+        const f = fields && typeof fields === 'object' ? fields : {};
+        const round = f.round != null ? String(f.round) : String(closedLoopContinueState.round || '-');
+        const matchedDone = f.matchedDone != null ? String(f.matchedDone ? 1 : 0) : '-';
+        const replyLen = f.replyLen != null ? String(f.replyLen) : '-';
+        const promptLen = f.promptLen != null ? String(f.promptLen) : '-';
+        const composerLen = f.composerLen != null ? String(f.composerLen) : '-';
+        const lenDiff = f.lenDiff != null ? String(f.lenDiff) : '-';
+        const action = f.action != null ? String(f.action) : '-';
+        const sendReady = f.sendReady != null ? String(f.sendReady ? 1 : 0) : '-';
+        const buttonFound = f.buttonFound != null ? String(f.buttonFound ? 1 : 0) : '-';
+        const reason = f.reason != null ? String(f.reason) : '-';
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP_SIMPLE] event=${e} round=${round} matchedDone=${matchedDone} replyLen=${replyLen} `
+          + `promptLen=${promptLen} composerLen=${composerLen} lenDiff=${lenDiff} action=${action} `
+          + `sendReady=${sendReady} buttonFound=${buttonFound} reason=${reason}`,
+        );
+      } catch (err) {
+        // best-effort
+      }
+    }
+
     function isClosedLoopRetryablePauseReason(reason) {
       const text = String(reason || '').trim();
 
@@ -1193,6 +1246,52 @@
         || text.includes('assistant_busy')
         || text.includes('send_not_confirmed')
         || text.includes('stable_send_timeout')
+      );
+    }
+
+    function isClosedLoopFatalSendPayloadInvalidReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) return false;
+      return (
+        // Only treat truly unrecoverable / programmer errors as fatal.
+        // Closed-loop send uses a loose strategy and should never be blocked by payload diffs.
+        text.includes('composer-api-missing')
+        || text.includes('composer-api-missing')
+        || text.includes('empty-payload')
+        || text.includes('empty-content')
+      );
+    }
+
+    function isClosedLoopLimitedRetrySendFailureReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) return false;
+      return (
+        text === 'payload_dropped'
+        || text.includes('payload_dropped')
+        || text === 'composer_empty'
+        || text.includes('composer_empty')
+        || text.includes('textLen=0')
+        || text.includes('waiting_payload')
+        || text.includes('cancelled-after-send')
+        || text.includes('cancelled-after-claim')
+        || text === 'cancelled'
+        || text.includes('cancelled')
+        || text.includes('continue-send-failed')
+      );
+    }
+
+    function shouldClosedLoopPauseAfterSendFailed(reason) {
+      const text = String(reason || '').trim();
+      if (!text) return false;
+      return (
+        text === 'payload_dropped'
+        || text === 'cancelled'
+        || text === 'cancelled-after-send'
+        || text === 'composer_empty'
+        || text === 'waiting_payload'
+        || text.includes('payload_dropped')
+        || text.includes('composer_empty')
+        || text.includes('waiting_payload')
       );
     }
 
@@ -1231,11 +1330,20 @@
           const currentRound = closedLoopContinueState.round;
           if (!closedLoopContinueState.homeNavigationRunning) {
             closedLoopContinueState.homeNavigationRunning = true;
+            const recoverMode = closedLoopContinueState.mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+            const recoverAction = recoverMode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+              ? CLOSED_LOOP_ACTIONS.WITHOUT_HOTKEY.action
+              : CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action;
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][RETRY_RECOVER_ACTION] mode=${recoverMode} action=${recoverAction}`,
+            );
             ToolboxShell.appendLog(
               `[CLOSED_LOOP][RETRY_HOME_RECOVER] runId=${runId} round=${currentRound} attempts=${closedLoopContinueState.retryAttempts} reason=${reasonText}`,
             );
             void runUnifiedContinueHomeNavigation(
-              CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action,
+              recoverAction,
               currentRound,
               'retry-recover',
             ).then((homeResult) => {
@@ -1433,6 +1541,41 @@
         return false;
       }
 
+      if (isClosedLoopFatalSendPayloadInvalidReason(recoverReason)) {
+        const msg = '继续指令发送失败：输入框内容校验失败，已暂停，禁止空转';
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][FATAL_SEND_PAYLOAD_INVALID] runId=${runId} reason=${recoverReason}`,
+        );
+        pauseClosedLoopContinue(`failed-paused:${recoverReason}`, {
+          level: 'warn',
+          message: msg,
+        });
+        setStatus(msg, 'warn');
+        renderClosedLoopContinueButtons();
+        return false;
+      }
+
+      // Prevent endless recover loop for common send-stage failures.
+      if (isClosedLoopLimitedRetrySendFailureReason(recoverReason)) {
+        const streak = Math.max(0, Number(closedLoopContinueState.sendFailedStreak || 0));
+        if (streak >= 1) {
+          const pauseMsg = '继续发送失败，已暂停，请手动检查输入框或点击重新发送继续指令。';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][PAUSE_AFTER_SEND_FAILED] runId=${runId} reason=${recoverReason} streak=${streak + 1}`,
+          );
+          pauseClosedLoopContinue(`send-failed-paused:${recoverReason}`, {
+            level: 'warn',
+            message: pauseMsg,
+          });
+          setStatus(pauseMsg, 'warn');
+          renderClosedLoopContinueButtons();
+          return false;
+        }
+        closedLoopContinueState.sendFailedStreak = streak + 1;
+      } else {
+        closedLoopContinueState.sendFailedStreak = 0;
+      }
+
       closedLoopContinueState.stopping = false;
       closedLoopContinueState.lastReason = recoverReason;
 
@@ -1540,13 +1683,13 @@
       loopTask.lastError = src;
       loopTask.currentSubtask = 'paused';
 
-      setCopyHotkeyUploadVerifyLoopPhase('running', `paused:${src}`, {
+      setCopyHotkeyUploadVerifyLoopPhase('paused', `paused:${src}`, {
         cycleIndex: closedLoopContinueState.round,
         currentSubtask: 'paused',
       });
 
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][PAUSED_KEEP_RUNNING] reason=${src} round=${closedLoopContinueState.round} retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} retryable=${isClosedLoopRetryablePauseReason(src) ? 1 : 0}`,
+        `[CLOSED_LOOP][PAUSED] reason=${src} round=${closedLoopContinueState.round} retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} retryable=${isClosedLoopRetryablePauseReason(src) ? 1 : 0}`,
       );
 
       setStatus(message, level);
@@ -1628,14 +1771,51 @@
       });
     }
 
+    function readComposerTextFallback() {
+      const selectors = [
+        'textarea[data-testid="composer-text-input"]',
+        'textarea#prompt-textarea',
+        '#prompt-textarea',
+        'div.ProseMirror[contenteditable="true"]',
+        'form [contenteditable="true"]',
+        '[role="textbox"][contenteditable="true"]',
+        '[contenteditable="true"][id="prompt-textarea"]',
+      ];
+      for (const selector of selectors) {
+        const nodes = Array.from(document.querySelectorAll(selector));
+        for (const node of nodes) {
+          if (!(node instanceof HTMLElement)) {
+            continue;
+          }
+          if (rootElRef && rootElRef.contains(node)) {
+            continue;
+          }
+          const rect = node.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) {
+            continue;
+          }
+          const value = typeof node.value === 'string' ? node.value : '';
+          const text = String(value || node.innerText || node.textContent || '').trim();
+          if (text) {
+            return text;
+          }
+        }
+      }
+      return '';
+    }
+
     function getComposerPayloadStateForInitialSend() {
-      const composerText = (
+      let composerText = '';
+      if (
         typeof ComposerApi !== 'undefined'
         && ComposerApi
         && typeof ComposerApi.getComposerText === 'function'
-      )
-        ? String(ComposerApi.getComposerText() || '').trim()
-        : '';
+      ) {
+        composerText = String(ComposerApi.getComposerText() || '').trim();
+      }
+      if (!composerText) {
+        composerText = readComposerTextFallback();
+      }
 
       const hasAttachment = (
         typeof ComposerApi !== 'undefined'
@@ -1659,6 +1839,14 @@
       ) {
         hasVisiblePayloadText = !!ComposerApi.hasComposerDraftPayload();
       }
+
+      if (!hasVisiblePayloadText && composerText) {
+        hasVisiblePayloadText = true;
+      }
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][INITIAL_PAYLOAD_STATE] textLen=${composerText.length} hasAttachment=${hasAttachment ? 1 : 0} hasVisiblePayloadText=${hasVisiblePayloadText ? 1 : 0}`,
+      );
 
       return {
         composerText,
@@ -2014,6 +2202,23 @@
       try {
         if (shouldStop()) {
           cancelCurrentUploadSend(`shared-send-cancelled:${source}`);
+          const sendPhase = typeof getSendTaskPhase === 'function' ? String(getSendTaskPhase() || '') : '';
+          const uploadPhase = typeof getUploadTaskState === 'function'
+            ? String((getUploadTaskState() || {}).phase || '')
+            : String(state && state.uploadPhase ? state.uploadPhase : '');
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][CANCEL_AFTER_CLAIM_DETAIL] source=${source} runId=${runId} autoSendRunId=${state.autoSendRunId || 0} `
+            + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0} `
+            + `waitingSend=${state.waitingSend ? 1 : 0} waitingReply=${state.waitingReply ? 1 : 0} messageSending=${state.messageSending ? 1 : 0} `
+            + `sendPhase=${sendPhase || '-'} uploadPhase=${uploadPhase || '-'} flowCancelled=${currentUploadSendFlowRun && currentUploadSendFlowRun.cancelled ? 1 : 0} `
+            + `flowReason=${currentUploadSendFlowRun && currentUploadSendFlowRun.cancelReason ? String(currentUploadSendFlowRun.cancelReason) : '-'}`,
+          );
+          if (String(source || '') === 'quick-prompt-click' || String(source || '').startsWith('quick-prompt')) {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE_SHARED][UNEXPECTED_CANCEL_AFTER_CLAIM] source=${source} runId=${runId} `
+              + `hint=quick-prompt-shouldStop-true check_cancel_flags_above`,
+            );
+          }
           ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-claim`);
           return {
             ok: false,
@@ -2025,10 +2230,24 @@
           text: unifiedText,
           rawSource: options.rawSource || source,
           manualSend: isManualSend,
+          singleShot: options.singleShot === true,
+          maxStableAttempts: options.maxStableAttempts,
           sendDeadlineMs: isManualSend ? resolveManualSendDeadlineMs() : Date.now() + timeoutMs,
+          payloadVerify: options.payloadVerify || null,
         });
 
         if (shouldStop()) {
+          const sendPhase = typeof getSendTaskPhase === 'function' ? String(getSendTaskPhase() || '') : '';
+          const uploadPhase = typeof getUploadTaskState === 'function'
+            ? String((getUploadTaskState() || {}).phase || '')
+            : String(state && state.uploadPhase ? state.uploadPhase : '');
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_SHARED][CANCEL_AFTER_SEND_DETAIL] source=${source} runId=${runId} `
+            + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0} `
+            + `currentFlowCancelled=${currentUploadSendFlowRun && currentUploadSendFlowRun.cancelled ? 1 : 0} `
+            + `currentFlowReason=${currentUploadSendFlowRun && currentUploadSendFlowRun.cancelReason ? String(currentUploadSendFlowRun.cancelReason) : '-'} `
+            + `sendPhase=${sendPhase || '-'} uploadPhase=${uploadPhase || '-'}`,
+          );
           ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-send`);
           return {
             ok: false,
@@ -2164,9 +2383,15 @@
 
       return sendExistingComposerBySendMessageButtonCore({
         source,
+        rawSource: options.rawSource || source,
         shouldStop,
+        manualSend: options.manualSend === true,
+        singleShot: options.singleShot === true,
+        maxStableAttempts: options.maxStableAttempts,
         timeoutMs: Number(options.timeoutMs || SEND_WAIT_TIMEOUT_MS || 120000),
         text: content,
+        allowReplaceDraft,
+        payloadVerify: options.payloadVerify || null,
       });
     }
 
@@ -2176,6 +2401,17 @@
         ? options.shouldStop
         : () => false;
 
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_SEND_CURRENT][REAL_CANCEL_DETECTED] source=${source} cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      resetSendCancelStateForNewRun('sendCurrentComposerMessage', { source });
       ToolboxShell.appendLog(`[COMPOSER_SEND_CURRENT][DELEGATE_TO_SEND_BUTTON_CORE] source=${source}`);
 
       const result = await sendExistingComposerBySendMessageButtonCore({
@@ -2308,10 +2544,62 @@
       };
     }
 
+    function repairStaleClosedLoopRunningBeforeClick(reason = 'closed-loop-click') {
+      const src = String(reason || 'closed-loop-click').trim() || 'closed-loop-click';
+      if (!closedLoopContinueState.running) {
+        return false;
+      }
+      const task = ensureCopyHotkeyUploadVerifyLoopTask();
+      const taskPhase = String(task && task.phase ? task.phase : 'idle').trim().toLowerCase();
+      const activeTaskPhases = new Set([
+        'running',
+        'copying',
+        'sending_hotkey',
+        'sending_continue',
+        'waiting_next_reply',
+        'auto_uploading',
+        'home_navigation',
+        'paused',
+        'stopping',
+        'cancelling',
+      ]);
+      const hasTimer = !!closedLoopContinueState.timerId || !!closedLoopContinueState.retryTimerId;
+      const hasBusyRuntime = !!(
+        state.running
+        || state.waitingReply
+        || state.messageSending
+        || state.pendingSendAfterReply
+        || closedLoopContinueState.doneVerificationRunning
+        || closedLoopContinueState.homeNavigationRunning
+      );
+      if (activeTaskPhases.has(taskPhase) || hasTimer || hasBusyRuntime) {
+        return false;
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STALE_RUNNING_REPAIR] reason=${src} `
+        + `taskPhase=${taskPhase || '-'} hasTimer=${hasTimer ? 1 : 0} hasBusyRuntime=${hasBusyRuntime ? 1 : 0}`,
+      );
+      closedLoopContinueState.running = false;
+      closedLoopContinueState.stopping = false;
+      copyHotkeyUploadVerifyLoopRunning = false;
+      copyHotkeyUploadVerifyLoopStopRequested = false;
+      task.stopRequested = false;
+      task.currentSubtask = '';
+      task.lastError = null;
+      setCopyHotkeyUploadVerifyLoopPhase('idle', `stale-running-repair:${src}`, {
+        cycleIndex: closedLoopContinueState.round || 0,
+        currentSubtask: '',
+      });
+      renderClosedLoopContinueButtons();
+      return true;
+    }
+
     async function handleClosedLoopContinueModeClick(mode, source = 'button') {
       const normalizedMode = mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
         ? CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
         : CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+
+      repairStaleClosedLoopRunningBeforeClick(`mode-click:${normalizedMode}`);
 
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][MODE_CLICK] mode=${normalizedMode} running=${closedLoopContinueState.running ? 1 : 0} activeMode=${closedLoopContinueState.mode || '-'}`,
@@ -2319,6 +2607,31 @@
       ToolboxShell.appendLog('[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][click]');
 
       if (closedLoopContinueState.running) {
+        const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+        const phase = String(loopTask && loopTask.phase ? loopTask.phase : '').trim().toLowerCase();
+        if (phase === 'paused' || loopTask.currentSubtask === 'paused') {
+          const runId = closedLoopContinueState.runId;
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][RESUME_BY_BUTTON] reason=button-toggle:${normalizedMode} runId=${runId} round=${closedLoopContinueState.round}`,
+          );
+          loopTask.stopRequested = false;
+          loopTask.lastError = null;
+          loopTask.currentSubtask = 'resume';
+          closedLoopContinueState.stopping = false;
+          closedLoopContinueState.lastReason = `resume-by-button:${normalizedMode}`;
+          setCopyHotkeyUploadVerifyLoopPhase('running', `resume-by-button:${normalizedMode}`, {
+            cycleIndex: closedLoopContinueState.round,
+            currentSubtask: 'resume',
+          });
+          setStatus('闭环继续已恢复运行', 'running');
+          renderClosedLoopContinueButtons();
+          scheduleClosedLoopContinueNextStep(runId, 0, `resume-by-button:${normalizedMode}`, {
+            retryCurrentRound: true,
+          });
+          return;
+        }
+
+        ToolboxShell.appendLog(`[CLOSED_LOOP][USER_STOP_BY_BUTTON] reason=button-toggle:${normalizedMode}`);
         stopClosedLoopContinue(`button-toggle:${normalizedMode}`);
         return;
       }
@@ -2327,6 +2640,34 @@
         reason: source,
         mode: normalizedMode,
       });
+    }
+
+    function resetClosedLoopStartCancelFlags(reason = 'closed-loop-start') {
+      const src = String(reason || 'closed-loop-start').trim() || 'closed-loop-start';
+      const oldCancelWaitingSend = !!state.cancelWaitingSend;
+      const oldMessageSendCancelRequested = !!state.messageSendCancelRequested;
+      const oldUploadCancelRequested = !!state.uploadCancelRequested;
+      state.cancelWaitingSend = false;
+      state.messageSendCancelRequested = false;
+      state.uploadCancelRequested = false;
+      if (state.sendTask && typeof state.sendTask === 'object' && state.sendTask.phase === 'idle') {
+        state.sendTask.cancelRequested = false;
+      }
+      if (
+        state.uploadTask
+        && typeof state.uploadTask === 'object'
+        && state.uploadTask.phase !== 'uploading'
+        && state.uploadTask.phase !== 'cancelling'
+      ) {
+        state.uploadTask.cancelRequested = false;
+        state.uploadTask.abortController = null;
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][START_CANCEL_FLAGS_RESET] reason=${src} `
+        + `oldCancelWaitingSend=${oldCancelWaitingSend ? 1 : 0} `
+        + `oldMessageSendCancelRequested=${oldMessageSendCancelRequested ? 1 : 0} `
+        + `oldUploadCancelRequested=${oldUploadCancelRequested ? 1 : 0}`,
+      );
     }
 
     async function startClosedLoopContinue(options = {}) {
@@ -2352,6 +2693,8 @@
         );
         return;
       }
+
+      resetClosedLoopStartCancelFlags(`closed-loop-start:${src}`);
 
       closedLoopContinueState.running = true;
       closedLoopContinueState.stopping = false;
@@ -2514,6 +2857,9 @@
 
         const previousKey = getLastAssistantMessageKeySafe();
         const verifyPrompt = buildClosedLoopDoneVerificationPrompt();
+        const doneSignal = resolveDefaultDoneSignal();
+        const blockedSignal = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+        const noMoreSignal = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
 
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][DONE_VERIFY_SEND_START] runId=${runId} round=${round} promptLen=${verifyPrompt.length}`,
@@ -2524,11 +2870,21 @@
           {
             continuePrompt: verifyPrompt,
             shouldStop,
-            doneSignal: resolveDefaultDoneSignal(),
+            doneSignal,
             strictDoneSignal: true,
             disableBatchTextTerminalStop: true,
             skipDoneSignalBeforeSendCheck: true,
             allowSendAfterDoneSignal: true,
+            payloadVerify: {
+              allowLenDelta: 20,
+              allowCoreContains: true,
+              requiredIncludes: [
+                '判断闭环任务是否已经进入可停止状态',
+                doneSignal,
+                blockedSignal,
+                noMoreSignal,
+              ],
+            },
           },
         );
 
@@ -2537,6 +2893,20 @@
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][DONE_VERIFY_SEND_FAILED] runId=${runId} round=${round} reason=${reason}`,
           );
+          if (reason === 'payload_dropped' || reason === 'composer_empty') {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DONE_VERIFY_SEND_PAYLOAD_FAILED_PAUSE] runId=${runId} round=${round} reason=${reason}`,
+            );
+            pauseClosedLoopContinue(`done-verify-send-failed:${reason}`, {
+              level: 'warn',
+              message: '终止符已出现，但二次确认 Prompt 未成功发送，闭环已暂停，请手动检查输入框。',
+            });
+            return {
+              ok: false,
+              reason: `verify-send-failed-paused:${reason}`,
+              terminalVerifySendFailed: true,
+            };
+          }
           return {
             ok: false,
             reason,
@@ -2658,6 +3028,28 @@
       return result;
     }
 
+    function shouldUploadBeforeClosedLoopSend(round, interval = 5) {
+      const n = Number(round || 0);
+      if (!Number.isFinite(n) || n <= 1) {
+        return false;
+      }
+      const completedReplyCount = n - 1;
+      return completedReplyCount > 0 && completedReplyCount % interval === 0;
+    }
+
+    const closedLoopUploadDedupState = {
+      runId: null,
+      lastUploadRound: 0,
+      lastUploadReason: '',
+    };
+
+    function shouldSkipDuplicateClosedLoopUpload(runId, round) {
+      return (
+        closedLoopUploadDedupState.runId === runId
+        && closedLoopUploadDedupState.lastUploadRound === round
+      );
+    }
+
     async function runClosedLoopContinueStep(runId, options = {}) {
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(
@@ -2765,59 +3157,82 @@
             `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][initial-upload] round=${round} reason=no-composer-attachment-active-group-pending groupId=${activeUploadGroupId || '-'}`,
           );
         }
-      } else if (isCopyHotkeyLoopIntervalHit(
-        round,
-        closedLoopCfg.autoUploadEnabled,
-        closedLoopCfg.autoUploadInterval,
-      )) {
-        needUpload = true;
+      } else {
+        const enabled = closedLoopCfg.autoUploadEnabled === true;
+        const interval = Number(closedLoopCfg.autoUploadInterval || 5);
+        const safeInterval = Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 5;
+        const completedReplyCount = Math.max(0, Number(round || 0) - 1);
+        const shouldUpload = enabled && shouldUploadBeforeClosedLoopSend(round, safeInterval);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][UPLOAD_POLICY_CHECK] runId=${runId} round=${round} completedReplyCount=${completedReplyCount} `
+          + `shouldUpload=${shouldUpload ? 1 : 0} reason=${shouldUpload ? 'after-5-replies' : 'not-due'}`,
+        );
+        if (shouldUpload) {
+          needUpload = true;
+        }
       }
 
       if (needUpload) {
-        ToolboxShell.appendLog(`[CLOSED_LOOP][UPLOAD_BEFORE_STEP] runId=${runId} round=${round}`);
-
-        setCopyHotkeyUploadVerifyLoopPhase('auto_uploading', `round-${round}-upload`, {
-          cycleIndex: round,
-          currentSubtask: 'auto_upload',
-        });
-        renderClosedLoopContinueButton();
-
-        const uploadResult = await runClosedLoopSharedUpload(round, runId, {
-          useHotkey,
-          shouldStop,
-          groupId: activeUploadGroupId,
-        });
-
-        if (!uploadResult || uploadResult.ok !== true) {
-          const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
-          const uploadSharedSource = useHotkey
-            ? (round === 1 ? 'closed-loop-hotkey-initial-upload' : 'closed-loop-hotkey-every5-upload')
-            : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
+        if (shouldSkipDuplicateClosedLoopUpload(runId, round)) {
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][UPLOAD_FAILED] source=${uploadSharedSource} runId=${runId} round=${round} reason=${reason}`,
+            `[CLOSED_LOOP][UPLOAD_SKIP_DUPLICATE] runId=${runId} round=${round} reason=same-round-already-uploaded`,
           );
-          if (isClosedLoopUserCancelledReason(reason)) {
-            stopClosedLoopContinue(`upload-failed:${reason}`);
-          } else {
-            setStatus(`闭环上传失败，准备恢复：${reason}`, 'error');
-            recoverClosedLoopContinue(runId, `upload-failed:${reason}`, {
-              delayMs: 5000,
-            });
+        } else if (round > 1) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][UPLOAD_POLICY_HIT] runId=${runId} round=${round} reason=after-5-replies`,
+          );
+        }
+
+        if (!shouldSkipDuplicateClosedLoopUpload(runId, round)) {
+          ToolboxShell.appendLog(`[CLOSED_LOOP][UPLOAD_BEFORE_STEP] runId=${runId} round=${round}`);
+
+          setCopyHotkeyUploadVerifyLoopPhase('auto_uploading', `round-${round}-upload`, {
+            cycleIndex: round,
+            currentSubtask: 'auto_upload',
+          });
+          renderClosedLoopContinueButton();
+
+          const uploadResult = await runClosedLoopSharedUpload(round, runId, {
+            useHotkey,
+            shouldStop,
+            groupId: activeUploadGroupId,
+          });
+
+          if (!uploadResult || uploadResult.ok !== true) {
+            const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
+            const uploadSharedSource = useHotkey
+              ? (round === 1 ? 'closed-loop-hotkey-initial-upload' : 'closed-loop-hotkey-every5-upload')
+              : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][UPLOAD_FAILED] source=${uploadSharedSource} runId=${runId} round=${round} reason=${reason}`,
+            );
+            if (isClosedLoopUserCancelledReason(reason)) {
+              stopClosedLoopContinue(`upload-failed:${reason}`);
+            } else {
+              setStatus(`闭环上传失败，准备恢复：${reason}`, 'error');
+              recoverClosedLoopContinue(runId, `upload-failed:${reason}`, {
+                delayMs: 5000,
+              });
+            }
+            return;
           }
-          return;
-        }
 
-        if (!isClosedLoopRunActive(runId)) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][STEP_ABORT] reason=inactive-after-upload runId=${runId}`,
-          );
-          return;
-        }
+          if (!isClosedLoopRunActive(runId)) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][STEP_ABORT] reason=inactive-after-upload runId=${runId}`,
+            );
+            return;
+          }
 
-        setCopyHotkeyUploadVerifyLoopPhase('running', `round-${round}-upload-done`, {
-          cycleIndex: round,
-        });
-        renderClosedLoopContinueButton();
+          setCopyHotkeyUploadVerifyLoopPhase('running', `round-${round}-upload-done`, {
+            cycleIndex: round,
+          });
+          renderClosedLoopContinueButton();
+
+          closedLoopUploadDedupState.runId = runId;
+          closedLoopUploadDedupState.lastUploadRound = round;
+          closedLoopUploadDedupState.lastUploadReason = (round === 1 ? 'closed-loop-initial' : 'closed-loop-every5');
+        }
       }
 
       const previousKeyBeforeStep = getLastAssistantMessageKeySafe();
@@ -2862,7 +3277,68 @@
           cycleIndex: round,
           currentSubtask: useHotkey ? 'copy_hotkey_continue' : 'copy_continue',
         });
-        result = await runClosedLoopContinueOnce(`closed-loop-every5-${round}`, closedLoopFlowOptions);
+        if (useHotkey) {
+          result = await runClosedLoopContinueOnce(`closed-loop-every5-${round}`, closedLoopFlowOptions);
+        } else {
+          const continuePromptText = getCopyHotkeyContinuePromptText(closedLoopFlowOptions);
+          appendClosedLoopTrace('CONTINUE_PAYLOAD_PREPARED', {
+            runId,
+            round,
+            source: `closed-loop-every5-${round}`,
+            expectedLen: continuePromptText.length,
+          });
+          appendClosedLoopSimple('LAST_REPLY_CHECK', {
+            round,
+            matchedDone: false,
+          });
+          appendClosedLoopSimple('CONTINUE_PREPARE', {
+            round,
+            promptLen: continuePromptText.length,
+          });
+
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][AFTER_UPLOAD_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=closed-loop-every5-${round}`,
+          );
+
+          const sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
+            ...closedLoopFlowOptions,
+            source: `closed-loop-every5-${round}`,
+            shouldStop,
+          });
+          appendClosedLoopTrace(sendResult && sendResult.ok ? 'CONTINUE_SENT' : 'SEND_FAILED', {
+            runId,
+            round,
+            source: `closed-loop-every5-${round}`,
+            expectedLen: continuePromptText.length,
+            decision: sendResult && sendResult.ok ? 'sent' : 'failed',
+            reason: sendResult && sendResult.reason ? sendResult.reason : (sendResult && sendResult.ok ? 'ok' : 'send-failed'),
+          });
+          result = sendResult && typeof sendResult === 'object'
+            ? {
+              ok: !!sendResult.ok,
+              reason: sendResult.ok ? (sendResult.reason || 'closed-loop-continue-sent') : (sendResult.reason || 'continue-send-failed'),
+              assistantDoneSignal: false,
+              assistantBatchTerminalStop: false,
+              source: `closed-loop-every5-${round}`,
+              loopMode: true,
+              copied: false,
+              hotkeySent: false,
+              continueSent: !!sendResult.ok,
+              assistantMessageKey: '',
+            }
+            : {
+              ok: false,
+              reason: 'continue-send-failed',
+              assistantDoneSignal: false,
+              assistantBatchTerminalStop: false,
+              source: `closed-loop-every5-${round}`,
+              loopMode: true,
+              copied: false,
+              hotkeySent: false,
+              continueSent: false,
+              assistantMessageKey: '',
+            };
+        }
       }
 
       if (!isClosedLoopRunActive(runId)) {
@@ -2917,6 +3393,12 @@
           );
           return;
         }
+        if (verifyResult && verifyResult.terminalVerifySendFailed) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][TERMINAL_VERIFY_SEND_PAYLOAD_FAILED_PAUSE] source=before-send-check runId=${runId} round=${round} reason=${verifyResult.reason || '-'}`,
+          );
+          return;
+        }
         const verifyFailReason = `terminal-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`;
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][TERMINAL_VERIFY_FAILED_CONTINUE] source=before-send-check runId=${runId} round=${round} reason=${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
@@ -2940,7 +3422,50 @@
           return;
         }
 
+        if (shouldClosedLoopPauseAfterSendFailed(failReason)) {
+          const msg = '继续发送失败，已暂停，请手动检查输入框或点击重新发送继续指令。';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][PAUSE_AFTER_SEND_FAILED] runId=${runId} round=${round} reason=${failReason}`,
+          );
+          appendClosedLoopSimple('SEND_FAILED', { round, reason: failReason });
+          pauseClosedLoopContinue(`paused-after-send-failed:${failReason}`, {
+            level: 'warn',
+            message: msg,
+          });
+          setStatus(msg, 'warn');
+          renderClosedLoopContinueButtons();
+          return;
+        }
+
+        if (isClosedLoopFatalSendPayloadInvalidReason(failReason)) {
+          const msg = '继续指令发送失败：输入框内容校验失败，已暂停，禁止空转';
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][FATAL_SEND_PAYLOAD_INVALID] runId=${runId} round=${round} reason=${failReason}`,
+          );
+          appendClosedLoopTrace('RECOVER_DECIDE', {
+            runId,
+            round,
+            source: `closed-loop-every5-${round}`,
+            decision: 'fatal-pause',
+            reason: failReason,
+          });
+          pauseClosedLoopContinue(`failed-paused:${failReason}`, {
+            level: 'warn',
+            message: msg,
+          });
+          setStatus(msg, 'warn');
+          renderClosedLoopContinueButtons();
+          return;
+        }
+
         const recoverReason = `cycle-failed:${failReason}`;
+        appendClosedLoopTrace('RECOVER_DECIDE', {
+          runId,
+          round,
+          source: `closed-loop-every5-${round}`,
+          decision: 'recover-schedule',
+          reason: recoverReason,
+        });
         setStatus(`闭环第 ${round} 轮暂时失败，准备恢复：${failReason}`, 'warn');
         recoverClosedLoopContinue(runId, recoverReason, {
           delayMs: 3000,
@@ -3007,6 +3532,12 @@
           );
           return;
         }
+        if (verifyResult && verifyResult.terminalVerifySendFailed) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][TERMINAL_VERIFY_SEND_PAYLOAD_FAILED_PAUSE] source=after-wait-check runId=${runId} round=${round} reason=${verifyResult.reason || '-'}`,
+          );
+          return;
+        }
         const verifyFailReasonAfterWait = `terminal-verification-failed:${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`;
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][TERMINAL_VERIFY_FAILED_CONTINUE] source=after-wait-check runId=${runId} round=${round} reason=${verifyResult && verifyResult.reason ? verifyResult.reason : 'unknown'}`,
@@ -3070,6 +3601,97 @@
       });
     }
 
+    function bindClosedLoopButtonDirect(btn, actionDef, reason = '') {
+      if (!(btn instanceof HTMLElement) || !actionDef) {
+        return false;
+      }
+      const action = String(actionDef.action || '').trim();
+      const mode = actionDef.mode;
+      if (!action || !mode) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][DIRECT_BIND_SKIP] reason=missing-action-or-mode id=${btn.id || '-'} action=${action || '-'} mode=${mode || '-'}`,
+        );
+        return false;
+      }
+      // 每次绑定/重绑都先修复按钮动作字段，避免 render 后 data-action/runtime/baseAction 不一致。
+      applyClosedLoopContinueButtonDef(btn, actionDef);
+
+      const invokeClosedLoop = (event, trigger) => {
+        const normalizedTrigger = String(trigger || '').trim().toLowerCase();
+        const isPointerDown = normalizedTrigger === 'pointerdown';
+        const triggerTag = isPointerDown ? 'POINTERDOWN' : 'CLICK';
+        const triggerReason = normalizedTrigger === 'pointerdown'
+          ? `direct-pointerdown:${action}`
+          : `direct-click:${action}`;
+
+        if (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+          event.cgptUploadUiActionHandled = true;
+        }
+
+        if (btn.disabled) {
+          if (isPointerDown) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DIRECT_POINTERDOWN_SKIP] reason=disabled id=${btn.id || '-'} action=${action}`,
+            );
+          } else {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=disabled id=${btn.id || '-'} action=${action}`,
+            );
+          }
+          return;
+        }
+
+        const now = Date.now();
+        const lastInvokeAt = Number(btn.dataset.closedLoopLastInvokeAt || 0);
+        if (now - lastInvokeAt < 500) {
+          if (isPointerDown) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DIRECT_POINTERDOWN_SKIP] reason=dedupe id=${btn.id || '-'} action=${action} gap=${now - lastInvokeAt}`,
+            );
+          } else {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DIRECT_CLICK_SKIP] reason=dedupe id=${btn.id || '-'} action=${action} gap=${now - lastInvokeAt}`,
+            );
+          }
+          return;
+        }
+        btn.dataset.closedLoopLastInvokeAt = String(now);
+
+        if (isPointerDown) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_POINTERDOWN] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_CLICK] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'}`,
+          );
+        }
+
+        Promise.resolve(handleClosedLoopContinueModeClick(mode, triggerReason)).catch((error) => {
+          const errText = formatToolboxError(error);
+          console.error('[CLOSED_LOOP][DIRECT_TRIGGER_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_TRIGGER_FAILED] trigger=${triggerTag} action=${action} error=${errText}`,
+          );
+          setStatus(`闭环继续启动失败：${errText}`, 'error');
+        });
+      };
+
+      if (btn.dataset.closedLoopDirectClickBound !== '1') {
+        btn.dataset.closedLoopDirectClickBound = '1';
+        btn.addEventListener('click', (event) => {
+          invokeClosedLoop(event, 'click');
+        });
+      }
+
+      return true;
+    }
+
     function bindClosedLoopContinueButtons(rootEl, reason = '') {
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][BIND_ENTER] reason=${reason || '-'} root=${rootEl && rootEl.id ? rootEl.id : '-'}`,
@@ -3099,23 +3721,22 @@
         }
         const bindKey = `closedLoopModeBound_${mode}`;
         if (btn.dataset[bindKey] === '1') {
+          const actionDef = getClosedLoopContinueActionDef(mode);
+          applyClosedLoopContinueButtonDef(btn, actionDef);
+          bindClosedLoopButtonDirect(btn, actionDef, reason);
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][BIND_SKIP] mode=${mode} id=${btn.id || '-'} reason=already-bound`,
+            `[CLOSED_LOOP][BIND_HEAL] mode=${mode} id=${btn.id || '-'} action=${btn.dataset.action || '-'} reason=already-bound-heal`,
           );
           return;
         }
 
         btn.dataset[bindKey] = '1';
         const actionDef = getClosedLoopContinueActionDef(mode);
-        btn.id = actionDef.id;
-        btn.dataset.action = actionDef.action;
-        if (actionDef.datasetClosedLoopMode) {
-          btn.dataset.closedLoopMode = actionDef.datasetClosedLoopMode;
-        }
-        btn.title = actionDef.title;
+        applyClosedLoopContinueButtonDef(btn, actionDef);
 
+        const directBound = bindClosedLoopButtonDirect(btn, actionDef, reason);
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][BIND_ONE] mode=${mode} id=${btn.id || '-'} action=${btn.dataset.action || '-'} directClick=0`,
+          `[CLOSED_LOOP][BIND_ONE] mode=${mode} id=${btn.id || '-'} action=${btn.dataset.action || '-'} directClick=${directBound ? 1 : 0}`,
         );
       };
 
@@ -11308,9 +11929,20 @@
       };
     }
 
-    function recordMessageSentAfterConfirmed() {
+    function recordMessageSentAfterConfirmed(source = '') {
+      const sourceText = String(source || '').trim();
       ChatRateLimiter.recordSend();
-      UploadCadencePolicy.recordMessageSent();
+      if (
+        isClosedLoopSource(sourceText)
+        || (closedLoopContinueState && closedLoopContinueState.running)
+        || copyHotkeyUploadVerifyLoopRunning
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_CADENCE][COUNT_SKIP] reason=closed-loop-message source=${sourceText || '-'}`,
+        );
+      } else {
+        UploadCadencePolicy.recordMessageSent();
+      }
       const vm = ChatRateLimiter.toViewModel();
       ToolboxShell.appendLog(
         `[RATE_LIMIT][RECORD] used=${vm.used}/${vm.maxMessages} remaining=${vm.remaining}`,
@@ -11353,7 +11985,35 @@
       },
     };
 
-    async function prepareUploadByCadenceIfNeeded() {
+    function isClosedLoopSource(source) {
+      const text = String(source || '');
+      return (
+        text.includes('closed-loop')
+        || text.includes('closedLoopContinue')
+        || /^closed-loop-every5-\d+$/.test(text)
+      );
+    }
+
+    async function prepareUploadByCadenceIfNeeded(context = {}) {
+      const source = context && typeof context === 'object' ? context.source : '';
+      const round = context && typeof context === 'object' ? context.round : 0;
+      const closedLoopContinueRunning = !!(closedLoopContinueState && closedLoopContinueState.running);
+
+      if (
+        isClosedLoopSource(source)
+        || closedLoopContinueRunning
+        || copyHotkeyUploadVerifyLoopRunning
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_CADENCE][SKIP] reason=closed-loop-owns-upload source=${source || '-'} round=${round || '-'}`,
+        );
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'closed-loop-owns-upload',
+        };
+      }
+
       if (!UploadCadencePolicy.shouldUploadBeforeNextSend()) {
         return { ok: true, skipped: true, reason: 'cadence_not_reached' };
       }
@@ -11564,9 +12224,20 @@
           { shouldStop },
         );
         if (!synced || !synced.ok) {
-          const reason = synced && synced.reason ? synced.reason : 'composer-text-not-synced';
-          ToolboxShell.appendLog(`[COMPOSER_DRAFT][SYNC_FAILED] source=${source} reason=${reason}`);
-          return { ok: false, reason };
+          const syncReason = synced && synced.reason ? synced.reason : 'composer-text-not-synced';
+          const actualText = typeof ComposerApi.getComposerText === 'function'
+            ? String(ComposerApi.getComposerText() || '').trim()
+            : '';
+          if (actualText.length > 0) {
+            ToolboxShell.appendLog(
+              `[COMPOSER_DRAFT][SYNC_MISMATCH_ALLOWED] source=${source} reason=${syncReason} actualLen=${actualText.length} expectedLen=${content.length}`,
+            );
+            return { ok: true, reason: 'composer-sync-mismatch-allowed' };
+          }
+          ToolboxShell.appendLog(
+            `[COMPOSER_DRAFT][SYNC_FAILED_EMPTY] source=${source} reason=${syncReason}`,
+          );
+          return { ok: false, reason: 'composer-empty-after-write' };
         }
       } else {
         await sleep(300);
@@ -11574,6 +12245,409 @@
 
       ToolboxShell.appendLog(`[COMPOSER_DRAFT][WRITE_OK] source=${source} chars=${content.length}`);
       return { ok: true, reason: 'ok' };
+    }
+
+    function buildPromptSendTraceContext(rawText, options = {}) {
+      const source = String(options.source || 'quick-prompt').trim() || 'quick-prompt';
+      const promptTitle = String(options.promptTitle || '').trim() || '-';
+      const composerTextRaw = (typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function')
+        ? String(ComposerApi.getComposerText() || '')
+        : '';
+      const composerTextLen = String(composerTextRaw || '').trim().length;
+      const cap = typeof getUploadPageCapabilityLight === 'function'
+        ? getUploadPageCapabilityLight()
+        : {};
+      const clickState = typeof resolveComposerSendClickState === 'function'
+        ? resolveComposerSendClickState(source, cap)
+        : null;
+      const sendReady = clickState
+        ? !!clickState.sendReady
+        : (getUploadNativeSendButtonReadyState().ready === true);
+      const responseState = String(cap && cap.response_state ? cap.response_state : '');
+      const sendPhase = typeof getSendTaskPhase === 'function' ? String(getSendTaskPhase() || '') : '';
+      const uploadPhase = typeof getUploadTaskState === 'function'
+        ? String((getUploadTaskState() || {}).phase || '')
+        : String(state && state.uploadPhase ? state.uploadPhase : '');
+
+      return {
+        source,
+        promptTitle,
+        rawTextLen: String(rawText || '').length,
+        composerTextLen,
+        sendReady,
+        responseState,
+        sendPhase,
+        uploadPhase,
+        waitingSend: !!state.waitingSend,
+        waitingReply: !!state.waitingReply,
+        cancelWaitingSend: !!state.cancelWaitingSend,
+        messageSendCancelRequested: !!state.messageSendCancelRequested,
+      };
+    }
+
+    function logPromptSendTrace(event, rawText, options = {}) {
+      const ev = String(event || '').trim() || '-';
+      const ctx = buildPromptSendTraceContext(rawText, options);
+      const reason = options && options.reason ? String(options.reason) : '';
+      const extra = reason ? ` reason=${reason}` : '';
+      ToolboxShell.appendLog(
+        `[PROMPT_SEND_TRACE] event=${ev} source=${ctx.source} promptTitle=${ctx.promptTitle} `
+        + `rawTextLen=${ctx.rawTextLen} composerTextLen=${ctx.composerTextLen} sendReady=${ctx.sendReady ? 1 : 0} `
+        + `responseState=${ctx.responseState || '-'} sendPhase=${ctx.sendPhase || '-'} uploadPhase=${ctx.uploadPhase || '-'} `
+        + `waitingSend=${ctx.waitingSend ? 1 : 0} waitingReply=${ctx.waitingReply ? 1 : 0} `
+        + `cancelWaitingSend=${ctx.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${ctx.messageSendCancelRequested ? 1 : 0}${extra}`,
+      );
+      return ctx;
+    }
+
+    function clearQuickPromptStaleCancelStateIfSafe(rawText, options = {}) {
+      const source = String(options.source || 'quick-prompt-click').trim() || 'quick-prompt-click';
+      const promptTitle = String(options.promptTitle || '').trim() || '-';
+
+      if (isSendPipelineBusy()) {
+        return false;
+      }
+
+      const changed = resetSendCancelStateForNewRun('quick-prompt-prepare', { source });
+
+      // If the send phase is idle but the action lock is somehow still held, release it proactively.
+      if (typeof getSendTaskPhase === 'function') {
+        const sendPhaseNow = String(getSendTaskPhase() || '').trim() || 'idle';
+        const sendPhaseIdle = sendPhaseNow === 'idle'
+          || sendPhaseNow === 'failed'
+          || sendPhaseNow === 'cancelled'
+          || sendPhaseNow === 'completed'
+          || sendPhaseNow === 'success';
+        if (sendPhaseIdle) {
+          releaseUploadActionLock('send-message');
+        }
+      }
+
+      if (changed) {
+        ToolboxShell.appendLog(
+          `[PROMPT][SEND_PREPARE_CLEAN_STALE_STATE] source=${source} title=${promptTitle} cleared=1 via=resetSendCancelStateForNewRun`,
+        );
+      }
+      logPromptSendTrace('SEND_PREPARE_CLEAN_STALE_STATE', rawText, {
+        source,
+        promptTitle,
+        reason: changed ? 'cleared' : 'noop',
+      });
+      return changed;
+    }
+
+    function normalizeQuickPromptComposerText(value) {
+      return String(value || '')
+        .replace(/\u00A0/g, ' ')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+    }
+
+    async function waitQuickPromptSendReady(rawText, options = {}) {
+      const source = String(options.source || 'quick-prompt-click').trim() || 'quick-prompt-click';
+      const promptTitle = String(options.promptTitle || '').trim() || '-';
+      const timeoutMs = Math.max(500, Number(options.timeoutMs || 5000));
+      const pollMs = Math.max(60, Number(options.pollMs || 120));
+
+      const expected = String(rawText ?? '');
+      const expectedLen = expected.length;
+      const expectedTrimLen = expected.trim().length;
+      const expectedNorm = normalizeQuickPromptComposerText(expected);
+      const startedAt = Date.now();
+      let lastLogAt = 0;
+      let lastStateKey = '';
+
+      while (Date.now() - startedAt <= timeoutMs) {
+        const composerTextRaw = (typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerText === 'function')
+          ? String(ComposerApi.getComposerText() || '')
+          : '';
+        const composerTextTrim = String(composerTextRaw || '').trim();
+        const composerLen = composerTextTrim.length;
+        const composerNorm = normalizeQuickPromptComposerText(composerTextRaw);
+
+        const nativeReadyProbe = getUploadNativeSendButtonReadyState();
+        const sendReady = !!(nativeReadyProbe && nativeReadyProbe.ready);
+
+        const cap = typeof getUploadPageCapabilityLight === 'function'
+          ? getUploadPageCapabilityLight()
+          : {};
+        const responseState = String(cap && cap.response_state ? cap.response_state : '');
+        const isGenerating = responseState === 'generating';
+
+        let apiSynced = false;
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.isComposerTextSynced === 'function'
+        ) {
+          apiSynced = ComposerApi.isComposerTextSynced(expected);
+        }
+
+        const normalizedSynced = composerNorm === expectedNorm
+          || (
+            expectedNorm.length >= 8
+            && composerNorm.length >= 8
+            && (
+              composerNorm.includes(expectedNorm.slice(0, 120))
+              || expectedNorm.includes(composerNorm.slice(0, 120))
+            )
+          );
+
+        const strictSynced = !!(apiSynced || normalizedSynced);
+        const expectedHead = expectedNorm.slice(0, Math.min(80, expectedNorm.length));
+        const expectedTail = expectedNorm.slice(Math.max(0, expectedNorm.length - 80));
+        const lenDelta = Math.abs(composerNorm.length - expectedNorm.length);
+        const allowedLenDelta = Math.max(8, Math.ceil(expectedNorm.length * 0.05));
+        const relaxedSynced = (
+          expectedNorm.length > 0
+          && composerNorm.length > 0
+          && (
+            composerNorm === expectedNorm
+            || (expectedHead && composerNorm.includes(expectedHead))
+            || (expectedTail && composerNorm.includes(expectedTail))
+            || lenDelta <= allowedLenDelta
+          )
+        );
+
+        const textSynced = !!(strictSynced || relaxedSynced);
+
+        const textMismatchButSendable = sendReady
+          && !isGenerating
+          && composerLen > 0
+          && expectedTrimLen > 0
+          && !textSynced;
+        const ok = sendReady
+          && !isGenerating
+          && composerLen > 0
+          && expectedTrimLen > 0;
+
+        const now = Date.now();
+        const stateKey = [
+          sendReady ? '1' : '0',
+          isGenerating ? '1' : '0',
+          composerLen > 0 ? '1' : '0',
+          expectedTrimLen > 0 ? '1' : '0',
+          textSynced ? '1' : '0',
+        ].join('');
+
+        const shouldLog = (stateKey !== lastStateKey) || (now - lastLogAt >= 2000);
+        if (shouldLog) {
+          lastStateKey = stateKey;
+          lastLogAt = now;
+          ToolboxShell.appendLog(
+            `[PROMPT][SEND_READY_WAIT] source=${source} title=${promptTitle} `
+            + `textLen=${composerLen} expectedLen=${expectedLen} expectedTrimLen=${expectedTrimLen} `
+            + `actualNormLen=${composerNorm.length} expectedNormLen=${expectedNorm.length} `
+            + `sendReady=${sendReady ? 1 : 0} responseState=${responseState || '-'} `
+            + `textSynced=${textSynced ? 1 : 0} strictSynced=${strictSynced ? 1 : 0} relaxedSynced=${relaxedSynced ? 1 : 0} `
+            + `textMismatchButSendable=${textMismatchButSendable ? 1 : 0} `
+            + `isGenerating=${isGenerating ? 1 : 0} readySource=${nativeReadyProbe && nativeReadyProbe.source ? nativeReadyProbe.source : '-'}`,
+          );
+          logPromptSendTrace('SEND_READY_WAIT', rawText, {
+            source,
+            promptTitle,
+            reason: ok ? 'ready' : 'waiting',
+            textSynced,
+            textMismatchButSendable,
+            composerLen,
+            expectedTrimLen,
+          });
+        }
+
+        if (ok) {
+          return {
+            ok: true,
+            reason: textMismatchButSendable
+              ? 'send-ready-text-sync-mismatch-allowed'
+              : 'send-ready',
+            waitedMs: now - startedAt,
+            textSynced,
+            textMismatchButSendable,
+            composerLen,
+            expectedTrimLen,
+          };
+        }
+
+        // Nudge React/composer state by re-setting draft value (idempotent).
+        if (typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.setComposerValue === 'function'
+          && (now - startedAt) > 200
+          && composerLen < expectedTrimLen
+        ) {
+          try {
+            ComposerApi.setComposerValue(expected);
+          } catch (e) {
+            console.warn('[ChatGPT toolbox] quick prompt composer nudge failed', e);
+            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+              ToolboxShell.appendLog(
+                `[PROMPT][COMPOSER_NUDGE_FAILED] source=${source} title=${promptTitle} error=${e && e.message ? e.message : String(e)}`,
+              );
+            }
+          }
+        }
+
+        await sleep(pollMs);
+      }
+
+      ToolboxShell.appendLog(
+        `[PROMPT][AUTO_SEND_TIMEOUT] source=${source} title=${promptTitle} reason=send-button-not-ready-after-draft-sync timeoutMs=${timeoutMs}`,
+      );
+      logPromptSendTrace('AUTO_SEND_TIMEOUT', rawText, {
+        source,
+        promptTitle,
+        reason: 'send-button-not-ready-after-draft-sync',
+      });
+      return { ok: false, reason: 'send-button-not-ready-after-draft-sync', waitedMs: Date.now() - startedAt };
+    }
+
+    async function sendCurrentComposerMessageLight(options = {}) {
+      const source = String(options.source || 'send-current-composer-light').trim() || 'send-current-composer-light';
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const timeoutMs = Math.max(200, Number(options.timeoutMs || 5000));
+      const pollMs = Math.max(60, Number(options.pollMs || 120));
+      const startedAt = Date.now();
+
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled' };
+      }
+      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_SEND_CURRENT_LIGHT][REAL_CANCEL_DETECTED] source=${source} cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      while (Date.now() - startedAt <= timeoutMs) {
+        if (shouldStop()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+        if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+          return { ok: false, reason: 'cancelled' };
+        }
+
+        const cap = typeof getUploadPageCapabilityLight === 'function'
+          ? getUploadPageCapabilityLight()
+          : (typeof getUploadPageCapability === 'function' ? getUploadPageCapability({ heavy: false }) : {});
+        const responseState = String(cap && cap.response_state ? cap.response_state : '');
+        const isGenerating = responseState === 'generating'
+          || Boolean(cap && (cap.isResponding || cap.is_responding));
+        if (isGenerating) {
+          return { ok: false, reason: 'assistant_busy' };
+        }
+
+        const composerText = (typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerText === 'function')
+          ? String(ComposerApi.getComposerText() || '').trim()
+          : '';
+        if (!composerText) {
+          return { ok: false, reason: 'composer_empty' };
+        }
+
+        const clickState = resolveComposerSendClickState(source, cap);
+
+        if (clickState.canDirectClick) {
+          try {
+            clickState.btn.click();
+          } catch (e) {
+            ToolboxShell.appendLog(
+              `[COMPOSER_SEND_CURRENT_LIGHT][CLICK_FAILED] source=${source} error=${e && e.message ? e.message : String(e)}`,
+            );
+            return { ok: false, reason: 'send_click_failed' };
+          }
+          return {
+            ok: true,
+            reason: clickState.nativeReady && !clickState.enabled
+              ? 'clicked-by-native-ready'
+              : 'clicked-enabled-button',
+            waitedMs: Date.now() - startedAt,
+          };
+        }
+
+        if (clickState.canFallback && typeof sendCurrentComposerMessage === 'function') {
+          ToolboxShell.appendLog(
+            `[COMPOSER_SEND_CURRENT_LIGHT][FALLBACK] source=${source} reason=${clickState.reason} `
+            + `enabled=${clickState.enabled ? 1 : 0} nativeReady=${clickState.nativeReady ? 1 : 0} `
+            + `capReady=${clickState.capReady ? 1 : 0} sendReady=${clickState.sendReady ? 1 : 0} `
+            + `canDirectClick=${clickState.canDirectClick ? 1 : 0} canFallback=${clickState.canFallback ? 1 : 0}`,
+          );
+          const fallback = await sendCurrentComposerMessage({
+            source,
+            shouldStop,
+            timeoutMs: Math.max(timeoutMs, 8000),
+          });
+          if (fallback && fallback.ok) {
+            return {
+              ok: true,
+              reason: 'fallback-send-current-composer',
+              waitedMs: Date.now() - startedAt,
+            };
+          }
+        }
+
+        if (clickState.capReady && Date.now() - startedAt >= 600) {
+          ToolboxShell.appendLog(
+            `[COMPOSER_SEND_CURRENT_LIGHT][WAIT_NOT_CLICKABLE] source=${source} reason=${clickState.reason} `
+            + `buttonFound=${clickState.btn ? 1 : 0} enabled=${clickState.enabled ? 1 : 0} `
+            + `nativeReady=${clickState.nativeReady ? 1 : 0} capReady=${clickState.capReady ? 1 : 0} `
+            + `sendReady=${clickState.sendReady ? 1 : 0} canDirectClick=${clickState.canDirectClick ? 1 : 0} `
+            + `canFallback=${clickState.canFallback ? 1 : 0}`,
+          );
+        }
+
+        await sleep(pollMs);
+      }
+
+      return { ok: false, reason: 'send_button_not_ready', waitedMs: Date.now() - startedAt };
+    }
+
+    async function sendTextOnlyMessage(text, options = {}) {
+      const source = String(options.source || 'text-only-send').trim() || 'text-only-send';
+      const title = String(options.title || '').trim() || '-';
+      const rawText = String(text ?? '');
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+
+      if (!rawText.trim()) {
+        return { ok: false, reason: 'empty_text', sent: false };
+      }
+
+      ToolboxShell.appendLog(`[PROMPT][WRITE_START] source=${source} title=${title} chars=${rawText.length}`);
+      const draft = await writeComposerDraftCore(rawText, { source });
+      if (!draft || !draft.ok) {
+        return { ok: false, reason: (draft && draft.reason) || 'composer_not_found', sent: false };
+      }
+      ToolboxShell.appendLog(`[PROMPT][WRITE_OK] source=${source} title=${title} chars=${rawText.length}`);
+
+      const readyWait = await waitQuickPromptSendReady(rawText, {
+        source,
+        promptTitle: title,
+        timeoutMs: Math.max(500, Number(options.timeoutMs || 5000)),
+      });
+      if (!readyWait || readyWait.ok !== true) {
+        return { ok: false, reason: readyWait && readyWait.reason ? readyWait.reason : 'send-ready-timeout', sent: false };
+      }
+
+      ToolboxShell.appendLog(`[PROMPT][SEND_ATTEMPT] source=${source} title=${title}`);
+      const result = await sendCurrentComposerMessageLight({
+        source,
+        timeoutMs: 6000,
+        shouldStop,
+      });
+      ToolboxShell.appendLog(
+        `[PROMPT][SEND_RESULT] source=${source} title=${title} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+      );
+      return { ok: !!(result && result.ok), reason: result && result.reason ? result.reason : 'send_failed', sent: !!(result && result.ok) };
     }
 
     async function sendOrFillQuickPrompt(prompt, options = {}) {
@@ -11597,17 +12671,19 @@
       ToolboxShell.appendLog(
         `[PROMPT][CLICK] source=${source} title=${title} text_len=${rawText.length} action=${action} auto_send=${shouldSend ? 1 : 0} sendBusy=${isSendPipelineBusy() ? 1 : 0}`,
       );
+      logPromptSendTrace('CLICK', rawText, { source, promptTitle: title, reason: action });
 
       if (payload.isEmpty) {
         setStatus(`Prompt 内容为空：${title}`, 'warn');
         ToolboxShell.appendLog(`[PROMPT][CLICK][SKIP] source=${source} reason=empty_prompt`);
+        logPromptSendTrace('SEND_FAILED', rawText, { source, promptTitle: title, reason: 'empty_prompt' });
         return;
       }
 
       if (shouldSend && isSendPipelineBusy()) {
-        setStatus('当前已有发送任务进行中，请稍后再点击 Prompt', 'warn');
-        ToolboxShell.appendLog(`[PROMPT][CLICK][SKIP] source=${source} reason=waiting_send_active`);
-        return;
+        shouldSend = false;
+        ToolboxShell.appendLog(`[PROMPT][CLICK][BUSY_FALLBACK_FILL] source=${source} reason=send_pipeline_busy`);
+        logPromptSendTrace('SEND_FAILED', rawText, { source, promptTitle: title, reason: 'send_pipeline_busy_fallback_fill' });
       }
 
       const existingRawText = typeof ComposerApi.getComposerText === 'function'
@@ -11632,34 +12708,57 @@
         );
       }
 
+      setStatus(shouldSend ? `正在写入并准备发送 Prompt：${title}` : '正在写入 Prompt...', 'running');
+      ToolboxShell.appendLog(`[PROMPT][WRITE_START] source=${source} title=${title} chars=${rawText.length}`);
+      logPromptSendTrace('WRITE_START', rawText, { source, promptTitle: title });
+
+      const draft = await writeComposerDraftCore(rawText, { source });
+      if (!draft.ok) {
+        console.warn('[ChatGPT toolbox] quick prompt: write draft failed', { prompt, draft });
+        setStatus('Prompt 写入失败：未找到或无法同步 ChatGPT 输入框', 'error');
+        ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=${draft.reason || 'composer_not_found'}`);
+        logPromptSendTrace('WRITE_FAILED', rawText, { source, promptTitle: title, reason: draft.reason || 'composer_not_found' });
+        return {
+          ok: false,
+          reason: draft.reason || 'composer_not_found',
+          sent: false,
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[PROMPT][FILL] id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length} send=${shouldSend ? 1 : 0}`,
+      );
+      logPromptSendTrace('WRITE_OK', rawText, { source, promptTitle: title, reason: 'draft_write_ok' });
+
       if (!shouldSend) {
-        setStatus('正在写入 Prompt...', 'running');
-
-        const draft = await writeComposerDraftCore(rawText, { source });
-        if (!draft.ok) {
-          console.warn('[ChatGPT toolbox] quick prompt: write draft failed', { prompt, draft });
-          setStatus('未找到 ChatGPT 输入框，无法填入 Prompt', 'error');
-          ToolboxShell.appendLog(`[PROMPT][CLICK][WRITE_FAILED] source=${source} reason=${draft.reason || 'composer_not_found'}`);
-          return {
-            ok: false,
-            reason: draft.reason || 'composer_not_found',
-            sent: false,
-          };
-        }
-
-        ToolboxShell.appendLog(`[PROMPT][FILL] id=${prompt && prompt.id ? prompt.id : '-'} chars=${rawText.length} send=0`);
         setStatus(`已填入 Prompt：${title}`, 'success');
+        logPromptSendTrace('DRAFT_SYNC_OK', rawText, { source, promptTitle: title, reason: 'filled_only' });
         return { ok: true, reason: 'filled', sent: false };
       }
 
-      setStatus(`正在写入并发送 Prompt：${title}`, 'running');
+      clearQuickPromptStaleCancelStateIfSafe(rawText, { source, promptTitle: title });
 
-      ToolboxShell.appendLog(`[PROMPT][SEND_VIA_SEND_TEXT_CORE] source=${source} title=${title} chars=${rawText.length}`);
-
-      const result = await sendTextBySendMessageButtonCore(rawText, {
+      logPromptSendTrace('SEND_READY_WAIT', rawText, { source, promptTitle: title, reason: 'enter' });
+      const readyWait = await waitQuickPromptSendReady(rawText, {
         source,
-        allowReplaceDraft: true,
-        shouldStop: () => isSendPipelineBusy(),
+        promptTitle: title,
+        timeoutMs: 5000,
+      });
+      if (!readyWait || readyWait.ok !== true) {
+        setStatus('Prompt 已填入，但发送按钮短时间内不可用，未自动发送', 'warn');
+        logPromptSendTrace('SEND_FAILED', rawText, {
+          source,
+          promptTitle: title,
+          reason: readyWait && readyWait.reason ? readyWait.reason : 'send-ready-timeout',
+        });
+        return { ok: true, reason: 'filled_send_not_ready_timeout', sent: false };
+      }
+
+      logPromptSendTrace('SEND_ATTEMPT', rawText, { source, promptTitle: title });
+      const result = await sendCurrentComposerMessageLight({
+        source,
+        timeoutMs: 6000,
+        shouldStop: () => false,
       });
 
       const sentOk = !!(result && result.ok);
@@ -11669,11 +12768,19 @@
 
       if (sentOk) {
         setStatus(`Prompt 已发送：${title}`, 'success');
-        return { ok: true, reason: 'sent_by_send_text_core', sent: true };
+        logPromptSendTrace('SEND_SUCCESS', rawText, { source, promptTitle: title, reason: result && result.reason ? result.reason : 'ok' });
+        return { ok: true, reason: 'sent_by_send_current_composer', sent: true };
       }
 
-      setStatus('Prompt 已写入，但发送失败：发送按钮不可用', 'warn');
-      return { ok: false, reason: (result && result.reason) || 'send_text_core_failed', sent: false };
+      if (result && result.reason === 'cancelled') {
+        setStatus('Prompt 已填入，但自动发送被取消', 'warn');
+        logPromptSendTrace('SEND_FAILED', rawText, { source, promptTitle: title, reason: 'cancelled' });
+        return { ok: false, reason: 'cancelled', sent: false };
+      }
+
+      setStatus(`Prompt 已填入，但自动发送失败：${result && result.reason ? result.reason : 'unknown'}`, 'warn');
+      logPromptSendTrace('SEND_FAILED', rawText, { source, promptTitle: title, reason: result && result.reason ? result.reason : 'unknown' });
+      return { ok: false, reason: (result && result.reason) || 'send_current_composer_failed', sent: false };
     }
 
     function isInsideToolboxOrPanel(el) {
@@ -12776,6 +13883,20 @@
       }
     }
 
+    function isCurrentClosedLoopSendTask() {
+      const task = state && state.sendTask ? state.sendTask : null;
+      const source = String(task && task.source ? task.source : '');
+      if (!closedLoopContinueState || !closedLoopContinueState.running) {
+        return false;
+      }
+      return (
+        source.startsWith('closed-loop-every5-')
+        || source.startsWith('upload-verify-loop-')
+        || source.includes('closed-loop')
+        || source.includes('continue')
+      );
+    }
+
     async function sendContinueMessageOnly(source = 'button', options = {}) {
       const sourceText = String(source || '');
       const isLoopMode = sourceText.startsWith('loop-');
@@ -12833,6 +13954,18 @@
       }
 
       if (isSendTaskBusy() || isWaitingSendButton()) {
+        if (isCurrentClosedLoopSendTask()) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_CONTINUE][BUSY_SKIP_CANCEL_SELF] source=${sourceText}`,
+            'warn',
+          );
+          return {
+            ok: false,
+            reason: 'send-task-busy-same-closed-loop',
+            assistantDoneSignal: false,
+            retryable: true,
+          };
+        }
         cancelWaitingSend('copy-continue');
       }
 
@@ -12959,6 +14092,7 @@
           allowReplaceDraft: true,
           shouldStop,
           timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+          payloadVerify: options.payloadVerify || null,
         });
 
         if (shouldStop()) {
@@ -13009,6 +14143,441 @@
           reason: errText,
         };
       }
+    }
+
+    async function focusComposerForClosedLoop(source = '') {
+      const sourceText = String(source || '').trim() || '-';
+      const selectors = [
+        'textarea[data-testid="composer-text-input"]',
+        'textarea#prompt-textarea',
+        '#prompt-textarea',
+        'div.ProseMirror[contenteditable="true"]',
+        'form [contenteditable="true"]',
+        '[role="textbox"][contenteditable="true"]',
+        '[contenteditable="true"][id="prompt-textarea"]',
+      ];
+
+      let focused = false;
+
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.focusComposer === 'function'
+      ) {
+        try {
+          ComposerApi.focusComposer();
+          focused = true;
+        } catch (error) {
+          const errText = formatToolboxError(error);
+          console.error('[CLOSED_LOOP][FOCUS_COMPOSER_API_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][FOCUS_COMPOSER_API_FAILED] source=${sourceText} error=${errText}`,
+          );
+        }
+      }
+
+      if (!focused && typeof document !== 'undefined') {
+        for (const selector of selectors) {
+          const nodes = Array.from(document.querySelectorAll(selector));
+          for (const node of nodes) {
+            if (!(node instanceof HTMLElement)) {
+              continue;
+            }
+            if (rootElRef && rootElRef.contains(node)) {
+              continue;
+            }
+            const rect = node.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+              continue;
+            }
+            try {
+              node.focus();
+              focused = true;
+              break;
+            } catch (error) {
+              const errText = formatToolboxError(error);
+              console.error('[CLOSED_LOOP][FOCUS_COMPOSER_DOM_FAILED]', error);
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][FOCUS_COMPOSER_DOM_FAILED] source=${sourceText} selector=${selector} error=${errText}`,
+              );
+            }
+          }
+          if (focused) {
+            break;
+          }
+        }
+      }
+
+      const hidden = typeof document !== 'undefined' && !!document.hidden;
+      const hasFocus = typeof document === 'undefined'
+        ? true
+        : (!document.hasFocus || document.hasFocus());
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][FOCUS_COMPOSER] source=${sourceText} focused=${focused ? 1 : 0} hidden=${hidden ? 1 : 0} hasFocus=${hasFocus ? 1 : 0}`,
+      );
+      return focused;
+    }
+
+    async function sendClosedLoopContinuePrompt(promptText, context = {}) {
+      const sourceText = String(context.source || 'closed-loop-continue').trim() || 'closed-loop-continue';
+      const shouldStop = typeof context.shouldStop === 'function' ? context.shouldStop : () => false;
+      const doneSignal = getCopyHotkeyContinueStopSignal(context);
+      const blockedSignal = typeof DEFAULT_BATCH_BLOCKED_SIGNAL !== 'undefined'
+        ? DEFAULT_BATCH_BLOCKED_SIGNAL
+        : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+
+      if (shouldStop()) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter shouldStop=1`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter `
+          + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      if (typeof document !== 'undefined') {
+        const hasFocus = !document.hasFocus || document.hasFocus();
+        const hidden = !!document.hidden;
+        if (hidden) {
+          return { ok: false, reason: 'page-hidden' };
+        }
+        if (!hasFocus) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][FOCUS_SOFT_RECOVER] source=${sourceText || '-'} hidden=${hidden ? 1 : 0} hasFocus=${hasFocus ? 1 : 0}`,
+          );
+          await focusComposerForClosedLoop(sourceText);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+
+      const text = String(promptText || '');
+      return sendTextBySendMessageButtonCore(text, {
+        source: sourceText,
+        rawSource: sourceText,
+        allowReplaceDraft: true,
+        shouldStop,
+        timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+        payloadVerify: {
+          allowLenDelta: 10,
+          allowCoreContains: true,
+          requiredIncludes: [
+            '请继续完成上一个任务',
+            doneSignal,
+            blockedSignal,
+          ].filter(Boolean),
+        },
+      });
+    }
+
+    function resolveComposerSendClickState(source, capability) {
+      const sourceText = String(source || '-').trim() || '-';
+      const cap = capability && typeof capability === 'object'
+        ? capability
+        : (typeof getUploadPageCapability === 'function' ? getUploadPageCapability({ heavy: false }) : {});
+
+      const helperBtn = (typeof findUploadComposerSendButton === 'function')
+        ? findUploadComposerSendButton()
+        : null;
+      const directBtn = typeof document !== 'undefined'
+        ? document.querySelector('button#composer-submit-button, button[data-testid="send-button"]')
+        : null;
+      const btn = helperBtn instanceof HTMLButtonElement
+        ? helperBtn
+        : (directBtn instanceof HTMLButtonElement ? directBtn : null);
+
+      const nativeReadyState = typeof getUploadNativeSendButtonReadyState === 'function'
+        ? getUploadNativeSendButtonReadyState()
+        : null;
+      const nativeReady = !!(nativeReadyState && nativeReadyState.ready === true);
+      const capReady = !!(cap && (cap.canSendNow || cap.can_send_now));
+
+      const enabled = btn instanceof HTMLButtonElement
+        ? (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.isSendButtonReady === 'function'
+            ? ComposerApi.isSendButtonReady(btn)
+            : (!btn.disabled && btn.getAttribute('aria-disabled') !== 'true')
+        )
+        : false;
+
+      const sendReady = enabled || nativeReady || capReady;
+      const canDirectClick = btn instanceof HTMLButtonElement && (enabled || nativeReady);
+      const canFallback = sendReady && !canDirectClick;
+
+      const reason = canDirectClick
+        ? (enabled ? 'click_enabled' : 'click_native_ready')
+        : (btn ? (capReady ? 'cap_ready_but_button_disabled' : 'button_disabled') : (sendReady ? 'send_ready_but_button_missing' : 'send_not_ready'));
+
+      return {
+        btn,
+        enabled,
+        nativeReady,
+        capReady,
+        sendReady,
+        canDirectClick,
+        canFallback,
+        reason,
+        source: sourceText,
+      };
+    }
+
+    async function sendClosedLoopContinuePromptLoose(promptText, context = {}) {
+      const sourceText = String(context.source || 'closed-loop-continue-loose').trim() || 'closed-loop-continue-loose';
+      const shouldStop = typeof context.shouldStop === 'function' ? context.shouldStop : () => false;
+      const prompt = String(promptText || '');
+
+      if (!prompt.trim()) {
+        ToolboxShell.appendLog(`[CLOSED_LOOP][CONTINUE_PROMPT_EMPTY] source=${sourceText}`);
+        appendClosedLoopSimple('CONTINUE_PREPARE', { round: closedLoopContinueState.round, promptLen: 0, reason: 'empty' });
+        return { ok: false, reason: 'continue_prompt_empty' };
+      }
+
+      if (shouldStop()) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter shouldStop=1`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=enter `
+          + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+        );
+        return { ok: false, reason: 'cancelled' };
+      }
+
+      // Wait assistant not generating.
+      for (let i = 0; i < 40; i += 1) {
+        if (shouldStop()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+        const cap = getUploadPageCapability({ heavy: false });
+        const isGenerating = !!(cap && (cap.isResponding || String(cap.response_state || '') === 'generating'));
+        if (!isGenerating) break;
+        appendClosedLoopSimple('WAIT_ASSISTANT_BUSY', {
+          round: closedLoopContinueState.round,
+          reason: String(cap && cap.response_state_reason ? cap.response_state_reason : 'assistant_busy'),
+        });
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      // Write composer (no strict verify, only ensure non-empty).
+      let wroteOk = false;
+      for (let w = 0; w < 2; w += 1) {
+        if (shouldStop()) return { ok: false, reason: 'cancelled' };
+        if (!ComposerApi || typeof ComposerApi.setComposerValue !== 'function' || typeof ComposerApi.getComposerText !== 'function') {
+          ToolboxShell.appendLog(`[CLOSED_LOOP][SEND_FAILED] source=${sourceText} reason=composer-api-missing`);
+          return { ok: false, reason: 'composer-api-missing' };
+        }
+
+        ComposerApi.setComposerValue(prompt);
+
+        // Trigger common composer events (best-effort).
+        const composerEl = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], main form [contenteditable="true"], main form textarea, main [role="textbox"]');
+        if (composerEl) {
+          try { composerEl.focus(); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=focus error=${errText}`);
+          }
+          try { composerEl.dispatchEvent(new Event('beforeinput', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=beforeinput error=${errText}`);
+          }
+          try { composerEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=input error=${errText}`);
+          }
+          try { composerEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=change error=${errText}`);
+          }
+          try { composerEl.dispatchEvent(new Event('compositionend', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=compositionend error=${errText}`);
+          }
+        }
+
+        const waitMs = 300 + Math.floor(Math.random() * 500);
+        await new Promise((r) => setTimeout(r, waitMs));
+
+        const actual = String(ComposerApi.getComposerText() || '').trim();
+        const actualLen = actual.length;
+        const expectedLen = prompt.length;
+        const lenDiff = expectedLen - actualLen;
+        appendClosedLoopSimple('COMPOSER_WRITE', {
+          round: closedLoopContinueState.round,
+          promptLen: expectedLen,
+          composerLen: actualLen,
+          lenDiff,
+          action: actualLen > 0 ? 'send-anyway' : 'rewrite',
+        });
+
+        if (actualLen > 0) {
+          // Ignore any len/hash/whitespace diffs; only log if differs.
+          if (expectedLen !== actualLen) {
+            ToolboxShell.appendLog(
+              `[SEND_PAYLOAD][LEN_DIFF_IGNORED] source=${sourceText} expectedLen=${expectedLen} actualLen=${actualLen} action=continue-anyway`,
+            );
+          }
+          wroteOk = true;
+          break;
+        }
+      }
+
+      if (!wroteOk) {
+        ToolboxShell.appendLog(`[CLOSED_LOOP][SEND_FAILED] source=${sourceText} reason=composer_empty`);
+        return { ok: false, reason: 'composer_empty' };
+      }
+
+      // Find send button and click when ready (wait up to 60s).
+      const startTs = Date.now();
+      let lastWaitLogTs = 0;
+      for (;;) {
+        if (shouldStop()) return { ok: false, reason: 'cancelled' };
+        if (state && (state.cancelWaitingSend || state.messageSendCancelRequested)) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][REAL_CANCEL_DETECTED] source=${sourceText} stage=send-wait `
+            + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+          );
+          return { ok: false, reason: 'cancelled' };
+        }
+        const elapsedMs = Date.now() - startTs;
+        if (elapsedMs > 60000) break;
+
+        const capNow = getUploadPageCapability({ heavy: false });
+        const isGenerating = !!(capNow && (capNow.isResponding || String(capNow.response_state || '') === 'generating'));
+        if (isGenerating) {
+          appendClosedLoopSimple('SEND_FAILED', { round: closedLoopContinueState.round, reason: 'assistant_busy' });
+          return { ok: false, reason: 'assistant_busy' };
+        }
+
+        const clickState = resolveComposerSendClickState(sourceText, capNow);
+        const btn = clickState.btn;
+        const enabled = clickState.enabled;
+        const nativeReady = clickState.nativeReady;
+        const capReady = clickState.capReady;
+        const sendReady = clickState.sendReady;
+
+        if (clickState.canDirectClick) {
+          appendClosedLoopSimple('SEND_CLICK', {
+            round: closedLoopContinueState.round,
+            sendReady: true,
+            buttonFound: true,
+          });
+          ToolboxShell.appendLog('[CLOSED_LOOP][CONTINUE_SEND_CLICK]');
+          try { btn.click(); } catch (e) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][CONTINUE_SEND_CLICK_FAILED] source=${sourceText} error=${e && e.message ? e.message : String(e)}`,
+            );
+          }
+          appendClosedLoopSimple('WAIT_REPLY', { round: closedLoopContinueState.round });
+          return {
+            ok: true,
+            sent: true,
+            reason: (nativeReady && !enabled) ? 'clicked-by-native-ready' : 'clicked-enabled-button',
+          };
+        }
+
+        let waitReason = clickState.reason || (btn
+          ? (enabled ? 'ready-but-not-clicked' : 'button-disabled')
+          : (nativeReady ? 'button-not-found-native-ready' : 'button-not-found'));
+        if (capNow && capNow.response_state_reason) {
+          waitReason = String(capNow.response_state_reason);
+        }
+        try {
+          const payload = typeof getComposerPayloadStateForInitialSend === 'function'
+            ? getComposerPayloadStateForInitialSend()
+            : null;
+          if (payload && payload.hasAttachment) {
+            if (waitReason === 'button-disabled') {
+              waitReason = 'send_button_disabled_with_payload';
+            }
+          }
+        } catch (e) {
+          const errText = e && e.message ? e.message : String(e);
+          console.warn('[CLOSED_LOOP][PAYLOAD_STATE_READ_FAILED]', e);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][PAYLOAD_STATE_READ_FAILED] source=${sourceText} error=${errText}`,
+          );
+        }
+
+        if (Date.now() - lastWaitLogTs >= 1000) {
+          lastWaitLogTs = Date.now();
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][SEND_BUTTON_WAIT_AFTER_UPLOAD] round=${closedLoopContinueState.round} elapsedMs=${elapsedMs} reason=${waitReason} `
+            + `enabled=${enabled ? 1 : 0} nativeReady=${nativeReady ? 1 : 0} capReady=${capReady ? 1 : 0} `
+            + `sendReady=${sendReady ? 1 : 0} canDirectClick=${clickState.canDirectClick ? 1 : 0} `
+            + `canFallback=${clickState.canFallback ? 1 : 0} clickReason=${clickState.reason}`,
+          );
+        }
+
+        appendClosedLoopSimple('SEND_CLICK', {
+          round: closedLoopContinueState.round,
+          sendReady,
+          buttonFound: btn ? 1 : 0,
+          reason: waitReason,
+        });
+
+        // If we believe it's sendable (nativeReady/capReady) but cannot click directly,
+        // fall back to unified send helper when available (including: button exists but disabled).
+        if (clickState.canFallback) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][SEND_FALLBACK] source=${sourceText} reason=${clickState.reason} `
+            + `buttonFound=${btn ? 1 : 0} enabled=${enabled ? 1 : 0} nativeReady=${nativeReady ? 1 : 0} capReady=${capReady ? 1 : 0} `
+            + `sendReady=${sendReady ? 1 : 0} canDirectClick=${clickState.canDirectClick ? 1 : 0} canFallback=${clickState.canFallback ? 1 : 0}`,
+          );
+          let fallback = null;
+          if (typeof sendCurrentComposerMessage === 'function') {
+            fallback = await sendCurrentComposerMessage({
+              source: sourceText,
+              timeoutMs: 8000,
+              shouldStop,
+            });
+          } else if (typeof sendCurrentComposerMessageLight === 'function') {
+            fallback = await sendCurrentComposerMessageLight({
+              source: sourceText,
+              timeoutMs: 8000,
+              shouldStop,
+            });
+          }
+          if (fallback && fallback.ok) {
+            appendClosedLoopSimple('WAIT_REPLY', { round: closedLoopContinueState.round, reason: 'fallback_send_current_composer_ok' });
+            return { ok: true, sent: true, reason: 'fallback_send_current_composer' };
+          }
+        }
+
+        // Re-dispatch input/change to wake sendability, then wait.
+        const composerEl = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], main form [contenteditable="true"], main form textarea, main [role="textbox"]');
+        if (composerEl) {
+          try { composerEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=input_retry error=${errText}`);
+          }
+          try { composerEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {
+            const errText = e && e.message ? e.message : String(e);
+            console.warn('[CLOSED_LOOP][COMPOSER_EVENT_FAILED]', e);
+            ToolboxShell.appendLog(`[CLOSED_LOOP][COMPOSER_EVENT_FAILED] source=${sourceText} event=change_retry error=${errText}`);
+          }
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      ToolboxShell.appendLog(`[CLOSED_LOOP][PAUSE_AFTER_SEND_FAILED] source=${sourceText} reason=send_button_not_ready`);
+      return { ok: false, reason: 'send_button_not_ready' };
     }
 
     function getLastAssistantMessageTextForStopSignal() {
@@ -19525,18 +21094,121 @@
           has_composer_payload: false,
         };
 
+      // Unified reconcile: prefer DOM "remove file" evidence when module snapshot says 0.
+      // This prevents split-brain logs like:
+      // - [COMPOSER][ATTACHMENT_DETECT] fileCount=1 ready=1
+      // - [UPLOAD_TASK][EVIDENCE] ... composer=0 ready=0
+      const snapshot = stateSnapshot && typeof stateSnapshot === 'object'
+        ? stateSnapshot
+        : {};
+      const moduleFileCount = Number(
+        snapshot.uniqueCount != null ? snapshot.uniqueCount : snapshot.attachmentCount,
+      ) || 0;
+      snapshot._moduleFileCount = moduleFileCount;
+      snapshot._moduleCountBeforeDom = moduleFileCount;
+      let domRemoveCount = 0;
+      try {
+        domRemoveCount = typeof document !== 'undefined'
+          ? Array.from(document.querySelectorAll('[aria-label*="移除文件"]')).filter((node) => {
+            if (!(node instanceof Element)) return false;
+            const label = String(node.getAttribute('aria-label') || '');
+            if (/添加文件|Add file|Attach/i.test(label)) return false;
+            return true;
+          }).length
+          : 0;
+      } catch (err) {
+        console.error('[ChatGPT toolbox] composer attachment DOM scan failed', err);
+      }
+
+      const nativeUploading = (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading()
+      );
+      const domWins = domRemoveCount > 0 && moduleFileCount <= 0;
+      const reconciled = domWins
+        ? {
+          ...snapshot,
+          _unified_source: 'dom-remove-file',
+          totalCount: Math.max(Number(snapshot.totalCount || 0) || 0, domRemoveCount),
+          uniqueCount: Math.max(Number(snapshot.uniqueCount || 0) || 0, domRemoveCount),
+          rawCount: Math.max(Number(snapshot.rawCount || 0) || 0, domRemoveCount),
+          attachmentCount: Math.max(Number(snapshot.attachmentCount || 0) || 0, domRemoveCount),
+          fileCount: Math.max(Number(snapshot.fileCount || 0) || 0, domRemoveCount),
+          count: Math.max(Number(snapshot.count || 0) || 0, domRemoveCount),
+          attachment_count: Math.max(Number(snapshot.attachment_count || 0) || 0, domRemoveCount),
+          hasAny: true,
+          hasAttachment: true,
+          hasComposerPayload: true,
+          has_composer_payload: true,
+          uploadingCount: nativeUploading ? Math.max(Number(snapshot.uploadingCount || 0) || 0, 1) : (Number(snapshot.uploadingCount || 0) || 0),
+          attachmentUploading: !!nativeUploading,
+          readyCount: nativeUploading ? 0 : Math.max(Number(snapshot.readyCount || 0) || 0, domRemoveCount),
+          hasReady: nativeUploading ? false : true,
+        }
+        : {
+          ...snapshot,
+          _unified_source: 'composer-attachments-module',
+        };
+
+      if (domWins && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${options && options.reason ? String(options.reason) : '-'}`,
+        );
+      }
+
       updateUploadTaskEvidence({
         source: 'composer-attachments-module',
-        composerCount: Number(stateSnapshot && stateSnapshot.uniqueCount != null
-          ? stateSnapshot.uniqueCount
-          : stateSnapshot && stateSnapshot.attachmentCount),
-        uploadingCount: Number(stateSnapshot && stateSnapshot.uploadingCount || 0),
-        readyCount: Number(stateSnapshot && stateSnapshot.readyCount || 0),
-        nativeUploading: !!(stateSnapshot && stateSnapshot.attachmentUploading),
+        composerCount: Number(reconciled && reconciled.uniqueCount != null
+          ? reconciled.uniqueCount
+          : reconciled && reconciled.attachmentCount),
+        uploadingCount: Number(reconciled && reconciled.uploadingCount || 0),
+        readyCount: Number(reconciled && reconciled.readyCount || 0),
+        nativeUploading: !!(reconciled && reconciled.attachmentUploading),
         reason: options && options.reason ? String(options.reason) : '',
       }, 'getComposerAttachmentState:module');
 
-      return stateSnapshot;
+      return reconciled;
+    }
+
+    function getUnifiedComposerAttachmentState(reason = '', options = {}) {
+      const reasonText = String(reason || options.reason || '').trim() || '-';
+      const snap = getComposerAttachmentState({ ...options, reason: reasonText });
+      const moduleCount = Math.max(
+        0,
+        Number(
+          snap && snap._moduleCountBeforeDom != null
+            ? snap._moduleCountBeforeDom
+            : (snap && snap._moduleFileCount != null ? snap._moduleFileCount : 0),
+        ) || 0,
+      );
+      const fileCount = Math.max(
+        0,
+        Number(
+          snap && (snap.uniqueCount != null ? snap.uniqueCount : snap.attachmentCount),
+        ) || 0,
+      );
+      const uploading = !!(snap && snap.attachmentUploading)
+        || (Number(snap && snap.uploadingCount || 0) || 0) > 0;
+      const ready = fileCount > 0 && !uploading;
+      const unifiedSource = (snap && snap._unified_source)
+        ? String(snap._unified_source)
+        : (fileCount > moduleCount ? 'dom-remove-file' : 'composer-attachments-module+dom');
+      const unified = {
+        hasAttachment: fileCount > 0 || !!(snap && snap.hasAttachment),
+        fileCount,
+        uploading,
+        ready,
+        filenames: Array.isArray(snap && snap.filenames) ? snap.filenames : [],
+        source: unifiedSource,
+      };
+      if (moduleCount !== fileCount && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] reason=${reasonText} moduleCount=${moduleCount} unifiedCount=${fileCount} uploading=${uploading ? 1 : 0} ready=${ready ? 1 : 0} source=${unifiedSource}`,
+        );
+      }
+      return unified;
     }
 
     function getUploadPageCapabilityLight() {
@@ -19652,9 +21324,9 @@
       }
 
       // Minimal fallback: combine attachment state + response state (no DOM scanning).
-      const attachmentState = getComposerAttachmentState({ heavy: true });
-      let attachmentCount = Number(attachmentState.attachmentCount || 0) || 0;
-      let hasComposerPayload = !!attachmentState.hasComposerPayload;
+      const attachmentUnified = getUnifiedComposerAttachmentState('capability-heavy-fallback', { heavy: true });
+      let attachmentCount = Number(attachmentUnified.fileCount || 0) || 0;
+      let hasComposerPayload = !!attachmentUnified.hasAttachment;
 
       let responseState = {};
       try {
@@ -19834,6 +21506,12 @@
         ToolboxShell.appendLog(`[UPLOAD_BUTTON][STATE] phase=${stateText} reason=${reason || '-'} via=vm`);
         return;
       }
+
+      // Hard guard: legacy DOM path should not run in normal builds.
+      console.error('[UPLOAD_BUTTON][LEGACY_DOM_SHOULD_NOT_RUN]', { stateText, reason });
+      ToolboxShell.appendLog(
+        `[UPLOAD_BUTTON][LEGACY_DOM_SHOULD_NOT_RUN] phase=${stateText} reason=${reason || '-'}`,
+      );
 
       const btn = document.querySelector(UploadSelectors.startBtn);
       if (!(btn instanceof HTMLButtonElement)) {
@@ -20139,7 +21817,7 @@
         ? String(state.uploadSendSuccessHint)
         : '';
 
-      const buttonAttachmentState = getComposerAttachmentState();
+      const buttonAttachmentState = getUnifiedComposerAttachmentState('send-button-state', { heavy: false });
       const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
         buttonAttachmentState,
         capability,
@@ -20487,7 +22165,7 @@
               ? String(snapshot.sendTask.phase || 'idle')
               : 'idle';
 
-            const buttonAttachmentState = getComposerAttachmentState();
+            const buttonAttachmentState = getUnifiedComposerAttachmentState('send-button-vm', { heavy: false });
             const hasAttachmentPayloadToWait = detectAttachmentPayloadToWaitForSend(
               buttonAttachmentState,
               sendCapability,
@@ -21202,10 +22880,10 @@
 
       try {
         cap = getUploadPageCapability({ heavy: true });
-        const attachmentState = getComposerAttachmentState();
+        const attachmentState = getUnifiedComposerAttachmentState('send-ui-state', { heavy: false });
         attachmentCount = Math.max(
           Number(cap.attachmentCount || 0),
-          Number(attachmentState.attachmentCount || 0),
+          Number(attachmentState.fileCount || 0),
         );
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
@@ -21428,7 +23106,7 @@
           ? getUploadPageCapability({ heavy: true })
           : null;
         const hasPendingAttachmentPayload = detectAttachmentPayloadToWaitForSend(
-          getComposerAttachmentState({ heavy: true }),
+          getUnifiedComposerAttachmentState('heal-waiting-reply', { heavy: true }),
           healCapability,
         );
 
@@ -22248,7 +23926,6 @@
       try {
         state.uploadCancelRequested = false;
         state.uploadAbortController = state.uploadAbortController || new AbortController();
-        state.running = true;
         setAuthoritativeUploadTaskState({
           phase: 'uploading',
           owner: 'manual',
@@ -22746,8 +24423,65 @@
       return triggerSendFromToolbox(source);
     }
 
-    function cancelWaitingSend(reason = 'user-click') {
+    function resetSendCancelStateForNewRun(reason = 'new-send-run', options = {}) {
+      if (!state) {
+        return false;
+      }
+      const resetReason = String(reason || 'new-send-run').trim() || 'new-send-run';
+      const opts = options && typeof options === 'object' ? options : {};
+      const source = String(opts.source || '').trim() || '-';
+
+      // Do not clear real active cancels while a send task is running.
+      if (isSendTaskBusy() || isWaitingSendButton() || state.waitingReply || state.pendingSendAfterReply) {
+        ToolboxShell.appendLog(
+          `[SEND_CANCEL][RESET_FOR_NEW_RUN_SKIP] source=${source} reason=${resetReason} sendBusy=${isSendTaskBusy() ? 1 : 0} waitingSend=${isWaitingSendButton() ? 1 : 0} waitingReply=${state.waitingReply ? 1 : 0} pendingAfterReply=${state.pendingSendAfterReply ? 1 : 0}`,
+        );
+        return false;
+      }
+
+      const changed = !!(state.cancelWaitingSend || state.messageSendCancelRequested);
+      state.cancelWaitingSend = false;
+      state.messageSendCancelRequested = false;
+      if (state.sendTask && typeof state.sendTask === 'object' && state.sendTask.phase === 'idle') {
+        state.sendTask.cancelRequested = false;
+      }
+
+      ToolboxShell.appendLog(
+        `[SEND_CANCEL][RESET_FOR_NEW_RUN] source=${source} reason=${resetReason} cleared=${changed ? 1 : 0}`,
+      );
+      return changed;
+    }
+
+    function cancelWaitingSend(reason = 'user-click', options = {}) {
       if (!isSendTaskBusy() && !isWaitingSendButton() && !state.waitingReply && !state.pendingSendAfterReply) {
+        return false;
+      }
+
+      const cancelReason = String(reason || 'user-click').trim() || 'user-click';
+      const opts = options && typeof options === 'object' ? options : {};
+      const currentRunId = state && state.sendTask && state.sendTask.runId != null
+        ? String(state.sendTask.runId)
+        : '';
+      const currentSource = state && state.sendTask && state.sendTask.source != null
+        ? String(state.sendTask.source)
+        : '';
+      const requestCancelRunId = opts.cancelRunId != null ? String(opts.cancelRunId) : '';
+
+      if (requestCancelRunId && currentRunId && requestCancelRunId !== currentRunId) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[SEND_CANCEL][SKIP] reason=${cancelReason} currentRunId=${currentRunId} cancelRunId=${requestCancelRunId} detail=runId_mismatch`,
+          );
+        }
+        return false;
+      }
+
+      if (cancelReason === 'copy-continue' && isCurrentClosedLoopSendTask()) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[SEND_CANCEL][SKIP_CURRENT_CLOSED_LOOP] source=${currentSource} reason=${cancelReason} currentRunId=${currentRunId || '-'} cancelRunId=${requestCancelRunId || '-'}`,
+          );
+        }
         return false;
       }
 
@@ -22781,6 +24515,7 @@
           runId: id,
           cancelRequested: false,
           subphase: 'claim-waiting-send',
+          source: String(source || '').trim() || '-',
         },
         `wait-send:claim:${source || '-'}`,
       );
@@ -22865,7 +24600,7 @@
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][send-message-button:sent] runId=${runId} source=${source || '-'}`,
       );
-      recordMessageSentAfterConfirmed();
+      recordMessageSentAfterConfirmed(source);
       logUploadSendUiState('sent', 'waiting-reply', runId);
       updateChatInputStateBadge();
       startWaitingReplyCheck(runId, Date.now());
@@ -22965,9 +24700,8 @@
       const composerText = typeof ComposerApi.getComposerText === 'function'
         ? String(ComposerApi.getComposerText() || '')
         : '';
-      const hasAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-        ? ComposerApi.hasComposerAttachmentUnified()
-        : false;
+      const attachment = getUnifiedComposerAttachmentState('pending-composer-payload', { heavy: false });
+      const hasAttachment = !!attachment.hasAttachment;
       const sendButton = findUploadComposerSendButton();
       const realSendButtonEnabled = sendButton instanceof HTMLButtonElement
         && typeof ComposerApi.isSendButtonReady === 'function'
@@ -22987,23 +24721,27 @@
     function detectAttachmentPayloadToWaitForSend(attachmentState, capability) {
       const cap = capability && typeof capability === 'object' ? capability : {};
       const att = attachmentState && typeof attachmentState === 'object' ? attachmentState : {};
-      const attCount = Number(att.attachmentCount || 0);
+      const attCount = Number(
+        att.fileCount != null ? att.fileCount : (att.attachmentCount != null ? att.attachmentCount : 0),
+      ) || 0;
       const capCount = Number(cap.attachmentCount || 0);
-      const unifiedHasAttachment = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-        && ComposerApi.hasComposerAttachmentUnified();
-      const stillUploading = typeof ComposerApi.isAttachmentStillUploading === 'function'
-        && ComposerApi.isAttachmentStillUploading();
+      const stillUploading = !!(
+        att.uploading
+        || att.attachmentUploading
+        || (
+          typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading()
+        )
+      );
 
       // attachmentCount 只能来自真实附件信号；纯文本 payload 不得触发附件等待。
       return !!(
         att.hasAttachment
         || attCount > 0
-        || att.attachmentUploading
         || stillUploading
-        || unifiedHasAttachment
         || (
           capCount > 0
-          && (att.hasAttachment || attCount > 0 || unifiedHasAttachment || stillUploading)
+          && (att.hasAttachment || attCount > 0 || stillUploading)
         )
       );
     }
@@ -23013,21 +24751,12 @@
         attachmentState,
         capability,
       );
+      const unified = getUnifiedComposerAttachmentState('before-send-wait', { heavy: true });
 
       return !!(
         hasAttachmentPayloadToWait
-        || (
-          typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-          && ComposerApi.hasComposerAttachmentUnified()
-        )
-        || (
-          typeof ComposerApi.countAttachmentChips === 'function'
-          && ComposerApi.countAttachmentChips() > 0
-        )
-        || (
-          typeof ComposerApi.isAttachmentStillUploading === 'function'
-          && ComposerApi.isAttachmentStillUploading()
-        )
+        || unified.hasAttachment
+        || unified.uploading
       );
     }
 
@@ -23367,6 +25096,198 @@
       };
     }
 
+    function previewSendPayloadText(text, maxLen = 110) {
+      return String(text || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, Math.max(30, Number(maxLen) || 110));
+    }
+
+    function normalizeComposerTextForCompare(text) {
+      const raw = String(text == null ? '' : text);
+      if (!raw) return '';
+
+      let normalized = raw.replace(/\r\n/g, '\n');
+
+      // Remove common zero-width chars and normalize NBSP-like spaces.
+      normalized = normalized
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g, ' ');
+
+      normalized = normalized
+        .split('\n')
+        .map((line) => String(line || '').replace(/[ \t]+$/g, ''))
+        .join('\n')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trimEnd();
+
+      return normalized;
+    }
+
+    function hashStringTiny(text) {
+      const str = String(text == null ? '' : text);
+      let h = 5381;
+      for (let i = 0; i < str.length; i += 1) {
+        h = ((h << 5) + h) ^ str.charCodeAt(i);
+      }
+      return (h >>> 0).toString(16);
+    }
+
+    function payloadContainsAll(text, requiredList) {
+      if (!Array.isArray(requiredList) || requiredList.length === 0) return true;
+      const hay = String(text || '');
+      return requiredList.every((needle) => {
+        const n = String(needle || '');
+        return n ? hay.includes(n) : true;
+      });
+    }
+
+    async function writeTextPayloadToComposerAndVerify(text, source, options = {}) {
+      const payload = String(text || '');
+      const normalized = payload.trim();
+      const opts = options && typeof options === 'object' ? options : {};
+      const allowReplaceDraft = opts.allowReplaceDraft !== false;
+      const payloadVerify = opts.payloadVerify && typeof opts.payloadVerify === 'object'
+        ? opts.payloadVerify
+        : null;
+      const expectedLen = payload.length;
+      const expectedPreview = previewSendPayloadText(payload, 110);
+
+      if (!normalized) {
+        ToolboxShell.appendLog(`[SEND_PAYLOAD][EMPTY] source=${source || '-'} expectedLen=${expectedLen}`);
+        return { ok: false, reason: 'empty-payload', expectedLen, actualLen: 0 };
+      }
+
+      ToolboxShell.appendLog(
+        `[SEND_PAYLOAD][WRITE_START] source=${source || '-'} expectedLen=${expectedLen} expectedPreview=${expectedPreview}`,
+      );
+
+      if (
+        typeof ComposerApi === 'undefined'
+        || !ComposerApi
+        || typeof ComposerApi.setComposerValue !== 'function'
+        || typeof ComposerApi.getComposerText !== 'function'
+      ) {
+        ToolboxShell.appendLog(`[SEND_PAYLOAD][WRITE_FAILED] source=${source || '-'} reason=composer-api-missing`);
+        return { ok: false, reason: 'composer-api-missing', expectedLen, actualLen: 0 };
+      }
+
+      const existingText = String(ComposerApi.getComposerText() || '').trim();
+      if (existingText && existingText !== normalized && !allowReplaceDraft) {
+        ToolboxShell.appendLog(
+          `[SEND_PAYLOAD][WRITE_BLOCKED] source=${source || '-'} reason=composer-has-existing-text existingLen=${existingText.length} expectedLen=${expectedLen}`,
+        );
+        return { ok: false, reason: 'composer-has-existing-text', expectedLen, actualLen: existingText.length };
+      }
+
+      const okSet = ComposerApi.setComposerValue(payload);
+      if (!okSet) {
+        ToolboxShell.appendLog(
+          `[SEND_PAYLOAD][WRITE_FAILED] source=${source || '-'} reason=composer_set_failed expectedLen=${expectedLen}`,
+        );
+        return { ok: false, reason: 'composer_set_failed', expectedLen, actualLen: 0 };
+      }
+
+      const maxAttempts = Math.max(30, Number(opts.maxAttempts || 30));
+      const intervalMs = Math.max(60, Number(opts.intervalMs || 100));
+      let lastActual = '';
+      const expectedNorm = normalizeComposerTextForCompare(payload);
+      const expectedNormHash = hashStringTiny(expectedNorm);
+      const requiredIncludes = payloadVerify && Array.isArray(payloadVerify.requiredIncludes)
+        ? payloadVerify.requiredIncludes
+        : [];
+      const allowLenDelta = payloadVerify && typeof payloadVerify.allowLenDelta === 'number'
+        ? Math.max(0, Number(payloadVerify.allowLenDelta))
+        : 0;
+      const allowCoreContains = payloadVerify && payloadVerify.allowCoreContains === true;
+
+      const sourceText = String(source || '');
+      const isClosedLoopFinalVerify = sourceText.startsWith('closed-loop-final-verify-');
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (typeof opts.shouldStop === 'function' && opts.shouldStop()) {
+          ToolboxShell.appendLog(`[SEND_PAYLOAD][WRITE_CANCELLED] source=${source || '-'} attempt=${attempt}`);
+          return { ok: false, reason: 'cancelled', expectedLen, actualLen: 0 };
+        }
+
+        lastActual = String(ComposerApi.getComposerText() || '');
+        const actualTrim = lastActual.trim();
+        const actualLen = actualTrim.length;
+        const actualPreview = previewSendPayloadText(actualTrim, 110);
+
+        const actualNorm = normalizeComposerTextForCompare(actualTrim);
+        const actualNormHash = hashStringTiny(actualNorm);
+        const exact = actualTrim === normalized;
+        const normalizedExact = actualNorm && expectedNorm && actualNorm === expectedNorm;
+        const expectedProbe = previewSendPayloadText(expectedNorm || normalized, 90);
+        const containsProbe = !!(actualNorm && expectedProbe && actualNorm.includes(expectedProbe));
+        const deltaLen = Math.abs(expectedLen - actualLen);
+        const requiredOk = payloadContainsAll(actualTrim, requiredIncludes) || payloadContainsAll(actualNorm, requiredIncludes);
+        const coreOk = allowCoreContains
+          ? (requiredOk && deltaLen <= allowLenDelta)
+          : false;
+
+        if (actualLen > 0 && (exact || normalizedExact || containsProbe || coreOk)) {
+          const acceptedBy = exact
+            ? 'exact'
+            : (normalizedExact ? 'normalized-exact' : (coreOk ? 'core-contains' : 'probe-contains'));
+          if (isClosedLoopFinalVerify && coreOk && requiredOk && deltaLen <= 20) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][DONE_VERIFY_PAYLOAD_RELAXED_OK] source=${sourceText || '-'} expectedLen=${expectedLen} actualLen=${actualLen} delta=${deltaLen} attempt=${attempt}`,
+            );
+          }
+          if (acceptedBy !== 'exact') {
+            ToolboxShell.appendLog(
+              `[SEND_PAYLOAD][ACCEPT_NORMALIZED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${actualLen} delta=${deltaLen} `
+              + `acceptedBy=${acceptedBy} normalizedMatch=${normalizedExact ? 1 : 0} `
+              + `expectedHash=${expectedNormHash} actualHash=${actualNormHash} requiredOk=${requiredOk ? 1 : 0}`,
+            );
+          }
+          ToolboxShell.appendLog(
+            `[SEND_PAYLOAD][WRITE_OK] source=${source || '-'} expectedLen=${expectedLen} actualLen=${actualLen} expectedPreview=${expectedPreview} actualPreview=${actualPreview}`,
+          );
+          return { ok: true, reason: 'write-ok', expectedLen, actualLen };
+        }
+
+        if (typeof sleep === 'function') {
+          await sleep(intervalMs);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+      }
+
+      const finalActual = String(lastActual || '').trim();
+      const finalLen = finalActual.length;
+      const finalPreview = previewSendPayloadText(finalActual, 110);
+      const finalNorm = normalizeComposerTextForCompare(finalActual);
+      const finalDelta = Math.abs(expectedLen - finalLen);
+      const finalRequiredOk = payloadContainsAll(finalActual, requiredIncludes) || payloadContainsAll(finalNorm, requiredIncludes);
+      const finalNormalizedExact = finalNorm && expectedNorm && finalNorm === expectedNorm;
+
+      if (finalLen > 0 && (finalNormalizedExact || (allowCoreContains && finalDelta <= allowLenDelta && finalRequiredOk))) {
+        if (isClosedLoopFinalVerify && !finalNormalizedExact && finalDelta <= 20 && finalRequiredOk) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DONE_VERIFY_PAYLOAD_RELAXED_OK] source=${sourceText || '-'} expectedLen=${expectedLen} actualLen=${finalLen} delta=${finalDelta} attempt=final`,
+          );
+        }
+        ToolboxShell.appendLog(
+          `[SEND_PAYLOAD][ACCEPT_NORMALIZED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} delta=${finalDelta} `
+          + `acceptedBy=${finalNormalizedExact ? 'normalized-exact' : 'core-contains'} normalizedMatch=${finalNormalizedExact ? 1 : 0} `
+          + `expectedHash=${expectedNormHash} actualHash=${hashStringTiny(finalNorm)} requiredOk=${finalRequiredOk ? 1 : 0}`,
+        );
+        ToolboxShell.appendLog(
+          `[SEND_PAYLOAD][WRITE_OK] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} expectedPreview=${expectedPreview} actualPreview=${finalPreview}`,
+        );
+        return { ok: true, reason: isClosedLoopFinalVerify ? 'write-ok-relaxed' : 'write-ok-normalized', expectedLen, actualLen: finalLen };
+      }
+
+      ToolboxShell.appendLog(
+        `[SEND_PAYLOAD][DROPPED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} expectedPreview=${expectedPreview} actualPreview=${finalPreview}`,
+      );
+      return { ok: false, reason: finalLen <= 0 ? 'composer_empty' : 'payload_dropped', expectedLen, actualLen: finalLen };
+    }
+
     async function sendCurrentMessageFromUploadPanel(triggerSource, presetRunId, flowRun = null, sendPayload = null) {
       lastUploadSendPanelFailReason = '';
       const source = triggerSource || 'button';
@@ -23379,7 +25300,11 @@
       const shouldInjectText = !!String(unifiedText || '').trim();
       const rawSource = String(payloadOpts.rawSource || source || '').trim() || source;
       const isManualSend = payloadOpts.manualSend === true || isManualSendMessageSource(source);
+      const normalizedSource = String(source || '').trim();
+      const isQuickPromptSend = normalizedSource === 'quick-prompt-click'
+        || normalizedSource.startsWith('quick-prompt');
       const sendDeadlineMs = resolveSendDeadlineMs(payloadOpts.sendDeadlineMs, isManualSend);
+      const allowReplaceDraft = payloadOpts.allowReplaceDraft !== false;
 
       const runId = usePresetRunId
         ? Number(presetRunId)
@@ -23395,6 +25320,22 @@
       clearStaleBusySendStateOnHomeReady('send-panel-click');
 
       let sendFailureHandled = false;
+
+      if (shouldInjectText) {
+        const injectResult = await writeTextPayloadToComposerAndVerify(unifiedText, source, {
+          shouldStop: () => uploadSendFlowCancelCheck('payload-inject'),
+          allowReplaceDraft,
+          payloadVerify: payloadOpts.payloadVerify || null,
+          maxAttempts: 30,
+          intervalMs: 100,
+        });
+        if (!injectResult.ok) {
+          lastUploadSendPanelFailReason = injectResult.reason || 'payload-inject-failed';
+          setStatus(`发送失败：${lastUploadSendPanelFailReason}`, 'warn');
+          sendFailureHandled = true;
+          return false;
+        }
+      }
 
       if (isManualSend && hasLocalQueueFilesWithoutComposerAttachment()) {
         const composerStateEarly = logSendMessageComposerState(source, 'reason=local_queue_no_composer_attachment');
@@ -23477,8 +25418,11 @@
           return false;
         }
 
-        if (!isManualSend) {
-          const cadenceResult = await prepareUploadByCadenceIfNeeded();
+        if (!isManualSend && !isQuickPromptSend) {
+          const cadenceResult = await prepareUploadByCadenceIfNeeded({
+            source,
+            round: (closedLoopContinueState && closedLoopContinueState.round) ? closedLoopContinueState.round : 0,
+          });
           if (!assertUploadSendFlowAlive(activeFlowRun, 'after-cadence')) {
             sendFailureHandled = true;
             return false;
@@ -23489,6 +25433,8 @@
             sendFailureHandled = true;
             return false;
           }
+        } else if (!isManualSend && isQuickPromptSend) {
+          ToolboxShell.appendLog(`[UPLOAD_SEND][SKIP_CADENCE_FOR_QUICK_PROMPT] source=${normalizedSource || '-'}`);
         }
 
         if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
@@ -23501,7 +25447,7 @@
         const homeReadyToSend = typeof isHomeNewChatReadyToSendNow === 'function'
           && isHomeNewChatReadyToSendNow();
 
-        const sendAttachmentState = getComposerAttachmentState();
+        const sendAttachmentState = getUnifiedComposerAttachmentState('send-flow', { heavy: false });
         const composerTextNow = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim()
           : '';
@@ -25030,11 +26976,19 @@
 
       startDuplicateWatcher();
 
-      state.running = true;
       state.cancelled = false;
       state.runId += 1;
       const runId = state.runId;
       state.uploadAbortController = new AbortController();
+      setAuthoritativeUploadTaskState({
+        phase: 'uploading',
+        owner: 'legacy-startUpload',
+        source: 'startUpload',
+        runId: createUploadTaskRunId('legacy_startUpload'),
+        cancelRequested: false,
+        cancelable: true,
+        startedAt: Date.now(),
+      }, 'legacy-startUpload:start-upload');
       setUploadButtonState('uploading', 'start-upload');
 
       scheduleRenderUpload('startUpload:before-loop');
@@ -26339,7 +28293,6 @@
       if (!isChildUpload) {
         state.uploadCancelRequested = false;
         state.uploadAbortController = new AbortController();
-        state.running = true;
         setAuthoritativeUploadTaskState({
           phase: 'uploading',
           source: uploadSource,
@@ -28362,7 +30315,6 @@
 
       await sendOrFillQuickPrompt(prompt, {
         source: 'quick-prompt-click',
-        send: true,
       });
 
       return true;
@@ -30424,6 +32376,7 @@
       syncSendTaskPhase,
       getSendTaskPhase,
       getSendTaskState,
+      getUnifiedComposerAttachmentState,
       syncCopyTaskPhase,
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,
@@ -30446,22 +32399,29 @@
             ? parseConversationIdFromPath(location.pathname || '')
             : '';
           const sendPhase = getSendTaskPhase();
-          if (
-            ['waiting_send', 'sending', 'waiting_reply'].includes(sendPhase)
-            && (
-              (responseState && responseState.is_responding)
-              || ['generating', 'streaming', 'responding'].includes(String(responseState.response_state || '').toLowerCase())
-              || conversationId
-            )
-          ) {
-            setAuthoritativeSendTaskState(
-              { phase: 'waiting_reply', runId: state.sendTask && state.sendTask.runId ? state.sendTask.runId : '' },
-              `foreground-post-send-accepted:${tag}`,
-            );
-            ToolboxShell.appendLog(
-              `[SEND_MESSAGE][ACCEPTED] reason=foreground_catch_up conversationChanged=${conversationId ? 1 : 0} generating=${responseState && responseState.is_responding ? 1 : 0} composerCleared=-`,
-            );
-            setStatus('已发送，等待回复', 'running');
+          if (['waiting_send', 'sending', 'waiting_reply'].includes(sendPhase)) {
+            const responseStateValue = String(responseState && responseState.response_state ? responseState.response_state : '')
+              .toLowerCase();
+            const responseStateReason = String(responseState && responseState.response_state_reason ? responseState.response_state_reason : '')
+              .toLowerCase();
+            const isResponding = !!(responseState && responseState.is_responding);
+            const isGenerating = ['generating', 'streaming', 'responding'].includes(responseStateValue);
+            const isReady = responseStateValue === 'ready' || responseStateReason === 'payload_ready';
+
+            if (isReady) {
+              ToolboxShell.appendLog(
+                `[SEND_MESSAGE][FOREGROUND_CATCHUP_SKIP_READY] response_state=${responseStateValue || '-'} response_state_reason=${responseStateReason || '-'} conversationId=${conversationId || '-'}`,
+              );
+            } else if (isResponding || isGenerating) {
+              setAuthoritativeSendTaskState(
+                { phase: 'waiting_reply', runId: state.sendTask && state.sendTask.runId ? state.sendTask.runId : '' },
+                `foreground-post-send-accepted:${tag}`,
+              );
+              ToolboxShell.appendLog(
+                `[SEND_MESSAGE][ACCEPTED] reason=foreground_catch_up conversationChanged=${conversationId ? 1 : 0} generating=${isResponding ? 1 : 0} composerCleared=-`,
+              );
+              setStatus('已发送，等待回复', 'running');
+            }
           }
         } catch (err) {
           const errText = err && err.message ? err.message : String(err);

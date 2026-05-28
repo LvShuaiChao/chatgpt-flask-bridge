@@ -513,6 +513,20 @@
               && ComposerApi.isComposerTextSynced(expectedText),
           };
         if (!syncCheck.ok) {
+          const nativeButtonReady = sendPipelineIsNativeSendButtonReady(sendSnap, capability);
+          if (nativeButtonReady && hasComposerText) {
+            sendPipelineLog('[SEND_PIPELINE][TEXT_SYNC_MISMATCH_ALLOWED]', Object.assign({}, ctx, {
+              reason: String(syncCheck.reason || 'composer_text_not_synced'),
+              composer_len: composerText.length,
+              expected_len: String(expectedText || '').length,
+            }));
+            return {
+              ok: true,
+              reason: 'send-button-ready-text-sync-mismatch-allowed',
+              useEnterFallback: false,
+              textSynced: false,
+            };
+          }
           return {
             ok: false,
             reason: String(syncCheck.reason || 'composer_text_not_synced'),

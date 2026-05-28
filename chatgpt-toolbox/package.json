@@ -5,8 +5,9 @@
   "scripts": {
     "build": "node build.userjs.mjs",
     "watch": "node build.userjs.mjs --watch",
+    "check:encoding": "node scripts/check-encoding.mjs",
     "check:dist": "node --check dist/client.user.js",
-    "rebuild": "node build.userjs.mjs && node --check dist/client.user.js"
+    "rebuild": "node scripts/check-encoding.mjs && node build.userjs.mjs && node --check dist/client.user.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

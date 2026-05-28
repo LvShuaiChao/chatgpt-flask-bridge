@@ -26,6 +26,7 @@
     DANGER: 'danger',
     CANCELLED: 'cancelled',
     DISABLED: 'disabled',
+    PAUSED: 'paused',
   });
 
   const BUTTON_PHASE_ALLOW_CANCEL = new Set([
@@ -208,6 +209,7 @@
     completed: ButtonPhase.COMPLETED,
     danger: ButtonPhase.DANGER,
     disabled: ButtonPhase.DISABLED,
+    paused: ButtonPhase.PAUSED,
   });
 
   const HOME_PAGE_BUTTON_COLOR_AUDIT_SELECTOR = [

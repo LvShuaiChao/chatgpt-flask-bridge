@@ -1,4 +1,4 @@
-﻿# ChatGPT Toolbox — Tampermonkey build
+# ChatGPT Toolbox — Tampermonkey build
 
 ## 目录说明
 

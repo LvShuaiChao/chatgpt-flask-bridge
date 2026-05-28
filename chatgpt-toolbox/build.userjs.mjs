@@ -1,4 +1,4 @@
-﻿import fs from 'node:fs';
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -36,13 +36,16 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-function buildGeneratedNotice() {
-  const now = new Date();
-  const buildTime = [
+function getBuildTimeString(now = new Date()) {
+  return [
     now.getFullYear(),
     pad2(now.getMonth() + 1),
     pad2(now.getDate()),
   ].join('-') + ' ' + pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + ':' + pad2(now.getSeconds());
+}
+
+function buildGeneratedNotice(buildTime) {
+  const safeBuildTime = String(buildTime || '').trim() || 'unknown';
 
   return [
     '// =============================================================================',
@@ -59,7 +62,7 @@ function buildGeneratedNotice() {
     '//',
     '// Generated JS body is ASCII-escaped to avoid Windows/clipboard encoding damage.',
     '//',
-    '// Generated at: ' + buildTime,
+    '// Generated at: ' + safeBuildTime,
     '// =============================================================================',
   ].join('\n');
 }
@@ -76,7 +79,9 @@ function extractHeader(mainText) {
 }
 
 function readUtf8File(filePath) {
-  return fs.readFileSync(filePath, 'utf8');
+  const content = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  assertNoBadControlChars(content, filePath);
+  return content;
 }
 
 function readPart(name) {
@@ -85,6 +90,77 @@ function readPart(name) {
     throw new Error('Missing source part: ' + filePath);
   }
   return readUtf8File(filePath);
+}
+
+function findFirstBadControlChar(text) {
+  let line = 1;
+  let column = 0;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (char === '\n') {
+      line += 1;
+      column = 0;
+      continue;
+    }
+
+    column += 1;
+
+    const codePoint = char.codePointAt(0);
+    const isAllowedWhitespace = codePoint === 0x09 || codePoint === 0x0d;
+
+    if (isAllowedWhitespace) continue;
+
+    if (codePoint < 0x20 || codePoint === 0x7f) {
+      return {
+        line,
+        column,
+        char,
+        charCode: codePoint,
+      };
+    }
+  }
+
+  return null;
+}
+
+function snippetAt(text, idx, radius = 30) {
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + radius);
+  return text.slice(start, end);
+}
+
+function assertNoBadControlChars(text, filePath) {
+  if (text.startsWith('\uFEFF')) {
+    throw new Error(
+      [
+        '[ENCODING][BAD_CHAR]',
+        'file=' + filePath,
+        'line=1',
+        'column=1',
+        'char_code=0xfeff',
+        'snippet=' + JSON.stringify(snippetAt(text, 0)),
+      ].join(' '),
+    );
+  }
+
+  const bad = findFirstBadControlChar(text);
+  if (!bad) return;
+
+  const idx = text.indexOf(bad.char);
+  const snippet = snippetAt(text, idx);
+
+  throw new Error(
+    [
+      '[ENCODING][BAD_CHAR]',
+      'file=' + filePath,
+      'line=' + bad.line,
+      'column=' + bad.column,
+      'char_code=0x' + bad.charCode.toString(16),
+      'snippet=' + JSON.stringify(snippet),
+    ].join(' '),
+  );
 }
 
 function findMojibakeMarkers(text) {
@@ -141,6 +217,7 @@ function assembleUserscript() {
   const config = loadBuildConfig();
   const allParts = config.parts || [];
   const marker = config.uploadInsertMarker || '/*__UPLOAD_MODULES__*/';
+  const buildTime = getBuildTimeString();
 
   if (!allParts.length) {
     throw new Error('.build-order.json is missing "parts" array');
@@ -169,14 +246,23 @@ function assembleUserscript() {
   });
 
   const body = bodyParts.join('');
+  assertNoBadControlChars(body, 'assembled-source-body');
   assertNoMojibake(body, 'assembled-source-body');
 
-  const bundled = '(function () {\n  \'use strict\';\n\n' + body + '})();';
+  const runtimeBuildBanner = [
+    "try {",
+    `  console.log('[TOOLBOX][BUILD] generatedAt=${buildTime}');`,
+    "} catch (e) {}",
+    "",
+  ].join('\n');
+
+  const bundled = '(function () {\n  \'use strict\';\n\n' + runtimeBuildBanner + body + '})();';
   const bundledSanitized = bundled.replace(/\uFEFF/g, '');
+  assertNoBadControlChars(bundledSanitized, 'bundled-sanitized');
 
   const asciiBundled = escapeNonAsciiForJsSource(bundledSanitized);
 
-  return [header, buildGeneratedNotice(), asciiBundled, ''].join('\n\n');
+  return [header, buildGeneratedNotice(buildTime), asciiBundled, ''].join('\n\n');
 }
 
 function checkJavaScriptSyntax(filePath) {

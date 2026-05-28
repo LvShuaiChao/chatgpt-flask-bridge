@@ -1600,6 +1600,10 @@
           margin-left: auto;
         }
 
+        #cgpt-log-copy-errors {
+          min-width: 112px;
+        }
+
         #cgpt-log-module {
           height: 100%;
           min-height: 0;
@@ -3419,6 +3423,84 @@
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 8px;
+        }
+
+        /* ===== 自动指令设置区：修复 checkbox / label 重叠 ===== */
+        .cgpt-autoq-task-profile-defaults {
+          container-type: inline-size;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid {
+          grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+          gap: 10px 12px;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid .cgpt-autoq-batch-rules-inline-row {
+          grid-column: span 1;
+          grid-template-columns: minmax(150px, 42%) minmax(0, 1fr);
+          column-gap: 12px;
+          align-items: center;
+          min-width: 0;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid
+          .cgpt-autoq-batch-rules-inline-row
+          > label:first-child {
+          min-width: 0;
+          max-width: 100%;
+          white-space: normal;
+          line-height: 1.35;
+          overflow-wrap: break-word;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid .cgpt-checkbox-row {
+          display: inline-flex;
+          align-items: center;
+          justify-self: start;
+          gap: 6px;
+          min-width: 0;
+          max-width: 100%;
+          white-space: nowrap;
+          line-height: 1.35;
+        }
+
+        .cgpt-autoq-task-profile-defaults-grid
+          .cgpt-checkbox-row
+          input[type='checkbox'] {
+          flex: 0 0 auto;
+          width: 16px;
+          height: 16px;
+          margin: 0;
+        }
+
+        /* checkbox 类型的行：左边文字占剩余空间，右边只放 checkbox + 启用 */
+        .cgpt-autoq-task-profile-defaults-grid
+          .cgpt-autoq-batch-rules-inline-row:has(.cgpt-checkbox-row) {
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+
+        /* 说明文字占满右侧区域，不要被压缩到 checkbox 附近 */
+        .cgpt-autoq-task-profile-defaults-grid .cgpt-hint {
+          min-width: 0;
+          white-space: normal;
+          overflow-wrap: break-word;
+          line-height: 1.45;
+        }
+
+        /* 容器较窄时自动变成单列，彻底避免两列互相挤压 */
+        @container (max-width: 900px) {
+          .cgpt-autoq-task-profile-defaults-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .cgpt-autoq-task-profile-defaults-grid .cgpt-autoq-batch-rules-inline-row {
+            grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+          }
+
+          .cgpt-autoq-task-profile-defaults-grid
+            .cgpt-autoq-batch-rules-inline-row:has(.cgpt-checkbox-row) {
+            grid-template-columns: minmax(0, 1fr) auto;
+          }
         }
 
         .cgpt-autoq-continue-preview {
@@ -9466,7 +9548,10 @@
     }
 
     function inferStatusType(text, type) {
-      const normalizedType = String(type || '').trim().toLowerCase();
+      const rawType = String(type || '').trim().toLowerCase();
+      const normalizedType = rawType === 'warning'
+        ? 'warn'
+        : (rawType === 'ok' ? 'success' : rawType);
       if ([
         'idle',
         'running',
@@ -9481,14 +9566,18 @@
         return normalizedType;
       }
       const value = String(text || '');
-      if (/失败|错误|异常|超时|缺少|不可用|无法|未找到/.test(value)) {
+      if (/失败|错误|异常|超时|缺少|不可用|无法|未找到|error|failed|timeout/i.test(value)) {
         return 'error';
       }
-      if (/离线|未绑定|需要重新绑定|需要重新授权|暂无|未知/.test(value)) {
+      if (/警告|取消|跳过|warning|warn|skipped|cancel/i.test(value)) {
         return 'warn';
       }
+      if (/离线|未绑定|需要重新绑定|需要重新授权|暂无|未知|offline/i.test(value)) {
+        return 'warn';
+      }
+      // Waiting for reply / in-progress states are normal running, not danger.
       if (/等待回答|正在等待回答|正在等待回复|等待回复|回答中/.test(value)) {
-        return 'danger';
+        return 'running';
       }
       if (/等待|正在|上传中|复制中|同步中|处理中|轮询中/.test(value)) {
         return 'running';

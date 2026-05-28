@@ -1,5 +1,5 @@
   /********************************************************************
-   * 4. AutoQueueModule：自动指令队列模块
+   * 4. AutoQueueModule?????????
    ********************************************************************/
 
 const AutoQueueModule = (() => {
@@ -12,10 +12,10 @@ const AutoQueueModule = (() => {
       const continueText = String(config.continuePromptsText || '').trim();
       const listText = String(config.listPromptsText || '').trim();
 
-      if (continueText === '继续' && listText === '继续') {
+      if (continueText === '??' && listText === '??') {
         config.listPromptsText = getDefaultAutoListPromptsText();
         saveConfig();
-        ToolboxShell.appendLog('[自动指令] 已修复被污染的列表模式默认指令');
+        ToolboxShell.appendLog('[????] ???????????????');
       }
 
       if (typeof migrateContinuePromptTextIfNeeded === 'function') {
@@ -33,13 +33,13 @@ const AutoQueueModule = (() => {
     function getDefaultContinuePromptTextForUi() {
       const template = typeof getDefaultContinuePromptText === 'function'
         ? getDefaultContinuePromptText()
-        : '继续';
+        : '??';
 
       if (typeof renderContinuePromptTemplate === 'function') {
         return renderContinuePromptTemplate(template, TASK_DONE_SIGNAL);
       }
 
-      return String(template || '继续')
+      return String(template || '??')
         .replaceAll('{{DONE_SIGNAL}}', TASK_DONE_SIGNAL)
         .replaceAll('{{BLOCKED_SIGNAL}}', DEFAULT_BATCH_BLOCKED_SIGNAL)
         .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL);
@@ -49,7 +49,7 @@ const AutoQueueModule = (() => {
       if (typeof getDefaultTaskContinuePromptText === 'function') {
         return getDefaultTaskContinuePromptText();
       }
-      return '请继续完成上一个任务。';
+      return '???????????';
     }
 
     function normalizeListProfiles() {
@@ -62,7 +62,7 @@ const AutoQueueModule = (() => {
         .map((item) => {
           const base = normalizeNamedEntity(item, {
             prefix: 'autoq_list',
-            fallbackName: '未命名列表',
+            fallbackName: '?????',
             maxNameLength: 24,
           });
 
@@ -76,7 +76,7 @@ const AutoQueueModule = (() => {
         config.listProfiles.push({
           ...normalizeNamedEntity(null, {
             prefix: 'autoq_list',
-            fallbackName: '默认列表',
+            fallbackName: '????',
             maxNameLength: 24,
           }),
           text: String(config.listPromptsText || getDefaultAutoListPromptsText()),
@@ -106,7 +106,7 @@ const AutoQueueModule = (() => {
 
     function buildAutoQueueListName() {
       const d = new Date();
-      const base = `列表_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+      const base = `??_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
 
       const names = new Set(config.listProfiles.map((item) => item.name));
 
@@ -138,7 +138,7 @@ const AutoQueueModule = (() => {
 
     function isExampleTask(task) {
       const title = String(task && task.title || '');
-      return title.startsWith('示例：') || title.startsWith('示例:');
+      return title.startsWith('???') || title.startsWith('??:');
     }
 
     function isOnlyExampleTasks(tasks) {
@@ -189,7 +189,7 @@ const AutoQueueModule = (() => {
             );
           }
           return {
-            title: String(prompt.title || task.title || '未命名任务'),
+            title: String(prompt.title || task.title || '?????'),
             initialPrompt: String(prompt.content || task.initialPrompt || ''),
           };
         }
@@ -200,58 +200,58 @@ const AutoQueueModule = (() => {
           );
         }
         return {
-          title: String(task.title || '未命名任务'),
+          title: String(task.title || '?????'),
           initialPrompt: String(task.initialPrompt || ''),
         };
       }
 
       return {
-        title: task ? String(task.title || '未命名任务') : '',
+        title: task ? String(task.title || '?????') : '',
         initialPrompt: task ? String(task.initialPrompt || '') : '',
       };
     }
 
     const TASK_RUN_STEP_LABELS = Object.freeze({
-      idle: '待开始',
-      'write-initial': '正在写入初始指令',
-      'composer-sync-retry': '正在同步输入框',
-      'send-retry': '正在重试发送',
-      'send-initial': '正在发送初始指令',
-      'send-initial-wait-retry': '等待发送重试',
-      'send-wait-retry': '等待发送重试',
-      'send-initial-failed': '发送初始指令失败',
-      'wait-initial-reply': '等待初始回复',
-      'initial-reply-done': '初始回复完成',
-      'wait-current-reply': '等待当前回复结束',
-      'wait-reply': '等待回复完成',
-      'wait-task-verify': '等待答案验证',
-      'check-done-signal': '检查终止信号',
-      'copy-last-reply': '复制最后回复',
-      'send-hotkey': '发送 Ctrl+Alt+I',
-      'send-continue': '发送继续指令',
-      'wait-next-reply': '等待下一轮回复',
-      'verify-upload': '正在上传校验文件',
-      'verify-send': '正在发送校验指令',
-      'wait-verify-reply': '等待校验回复',
-      'verify-reply-done': '校验回复完成',
-      'verify-after-done-signal': '终止信号后二次校验',
-      'verify-upload-file': '重新上传文件校验',
-      'verify-send-prompt': '发送完成校验',
-      'verify-wait-reply': '等待校验回复',
-      'new-chat-switch': '正在切换到新聊天',
-      'new-chat-wait': '等待新聊天页面就绪',
-      'new-chat-ready': '新聊天已就绪',
-      'next-task': '进入下一个任务',
-      'all-done': '已完成',
-      'quota-wait': '等待额度恢复',
-      'rate-limit-wait': '发送限速等待',
-      'upload-rate-limit-wait': '上传限速等待',
-      'task-rate-limit-wait': '等待消息额度恢复',
-      'task-upload-rate-limit-wait': '等待上传额度恢复',
-      'auto-upload-before-send': '发送前自动上传',
-      'new-chat-rotate': '页面轮次达上限，切换新聊天',
-      'page-rotate-reentry-sent': '换页后已重发任务内容',
-      stopped: '已停止',
+      idle: '???',
+      'write-initial': '????????',
+      'composer-sync-retry': '???????',
+      'send-retry': '??????',
+      'send-initial': '????????',
+      'send-initial-wait-retry': '??????',
+      'send-wait-retry': '??????',
+      'send-initial-failed': '????????',
+      'wait-initial-reply': '??????',
+      'initial-reply-done': '??????',
+      'wait-current-reply': '????????',
+      'wait-reply': '??????',
+      'wait-task-verify': '??????',
+      'check-done-signal': '??????',
+      'copy-last-reply': '??????',
+      'send-hotkey': '?? Ctrl+Alt+I',
+      'send-continue': '??????',
+      'wait-next-reply': '???????',
+      'verify-upload': '????????',
+      'verify-send': '????????',
+      'wait-verify-reply': '??????',
+      'verify-reply-done': '??????',
+      'verify-after-done-signal': '?????????',
+      'verify-upload-file': '????????',
+      'verify-send-prompt': '??????',
+      'verify-wait-reply': '??????',
+      'new-chat-switch': '????????',
+      'new-chat-wait': '?????????',
+      'new-chat-ready': '??????',
+      'next-task': '???????',
+      'all-done': '???',
+      'quota-wait': '??????',
+      'rate-limit-wait': '??????',
+      'upload-rate-limit-wait': '??????',
+      'task-rate-limit-wait': '????????',
+      'task-upload-rate-limit-wait': '????????',
+      'auto-upload-before-send': '???????',
+      'new-chat-rotate': '?????????????',
+      'page-rotate-reentry-sent': '??????????',
+      stopped: '???',
     });
 
     function migrateTaskDoneSignalForAutoQueue(value) {
@@ -406,16 +406,50 @@ const AutoQueueModule = (() => {
       if (!text || text === '-') {
         return '';
       }
-      if (/可发送|可上传|已完成|成功/.test(text)) {
+
+      const containsAny = (haystack, needles) => {
+        const str = String(haystack || '');
+        return Array.isArray(needles) && needles.some((needle) => needle && str.includes(String(needle)));
+      };
+
+      if (containsAny(lower, [
+        'success',
+        'ok',
+        'done',
+        'completed',
+        'finished',
+        'pass',
+        'passed',
+      ]) || containsAny(text, [
+        '\u6210\u529f', // ??
+        '\u5b8c\u6210', // ??
+        '\u5df2\u5b8c\u6210', // ???
+      ])) {
         return 'is-ok';
       }
-      if (/failed|失败|clipboard_read_verify_failed|missing|error|blocked|no-more-content/.test(lower)) {
+      if (/failed|clipboard_read_verify_failed|missing|error|blocked|no-more-content/.test(lower)) {
         return 'is-error';
       }
-      if (/等待发送|运行中|等待回复|发送中|上传中|回答中|复核中|发送重试|等待终止|已发送等待/.test(text)) {
+      if (containsAny(lower, [
+        'wait',
+        'waiting',
+        'queue',
+        'queued',
+        'pending',
+        'retry',
+        'rate limit',
+        'quota',
+        'throttle',
+      ]) || containsAny(text, [
+        '\u7b49\u5f85', // ??
+        '\u6392\u961f', // ??
+        '\u91cd\u8bd5', // ??
+        '\u9650\u989d', // ??
+        '\u9650\u5236', // ??
+      ])) {
         return 'is-warn';
       }
-      if (/已停止|停止/.test(text) && options.allowStopWarn) {
+      if (options.allowStopWarn && (containsAny(lower, ['stop', 'stopped']) || containsAny(text, ['\u505c\u6b62']))) {
         return 'is-warn';
       }
       return '';
@@ -436,7 +470,7 @@ const AutoQueueModule = (() => {
         : 'cgpt-autoq-status-item';
 
       return `
-        <div class="${itemClass}" title="${safeLabel}：${safeValue}">
+        <div class="${itemClass}" title="${safeLabel}?${safeValue}">
           <span class="cgpt-autoq-status-label">${safeLabel}</span>
           <span class="${valueClass}"${valueId}>${safeValue}</span>
         </div>`;
@@ -462,7 +496,7 @@ const AutoQueueModule = (() => {
         : null;
 
       if (!rotationSettings || !rotationSettings.enabled) {
-        return '未启用';
+        return '???';
       }
 
       const threshold = Math.max(1, Number(rotationSettings.threshold) || 20);
@@ -470,10 +504,10 @@ const AutoQueueModule = (() => {
       const displayCurrent = Math.min(current, threshold);
 
       if (current >= threshold) {
-        return `当前 ${displayCurrent}/${threshold}｜下次发送前进入主页`;
+        return `?? ${displayCurrent}/${threshold}??????????`;
       }
 
-      return `当前 ${displayCurrent}/${threshold}｜达到 ${threshold} 次后进入主页`;
+      return `?? ${displayCurrent}/${threshold}??? ${threshold} ??????`;
     }
 
     function buildBatchTaskStatusPanelHtml(options) {
@@ -497,13 +531,13 @@ const AutoQueueModule = (() => {
 
       const strategy = progressSnapshot.autoUploadStrategy;
       const autoUploadText = strategy && strategy.enabled
-        ? `首次已上传；下次第 ${progressSnapshot.taskAutoUploadNextAt} 轮（已计入 ${progressSnapshot.autoUploadCount} 次）；${strategy.summary}`
-        : (strategy ? strategy.summary : '未启用');
+        ? `????????? ${progressSnapshot.taskAutoUploadNextAt} ????? ${progressSnapshot.autoUploadCount} ???${strategy.summary}`
+        : (strategy ? strategy.summary : '???');
 
       const rotateProgressText = buildTaskPageRotateProgressText(progressSnapshot);
 
       const replyClassifyText = replyClassifyReason && replyClassifyReason !== '-'
-        ? `${replyClassifyStatus}（${replyClassifyReason}）`
+        ? `${replyClassifyStatus}?${replyClassifyReason}?`
         : replyClassifyStatus;
 
       const stopReasonValue = lastStopReasonText !== '-'
@@ -511,30 +545,30 @@ const AutoQueueModule = (() => {
         : '-';
 
       return renderAutoqStatusItems([
-        { label: '任务进度', value: taskProgress },
-        { label: '页面轮次', value: pageTurnText },
-        { label: '状态', value: runStateText, allowStopWarn: true },
-        { label: '已发送', value: taskSentDialogueDisplay },
+        { label: '????', value: taskProgress },
+        { label: '????', value: pageTurnText },
+        { label: '??', value: runStateText, allowStopWarn: true },
+        { label: '???', value: taskSentDialogueDisplay },
 
-        { label: '发送额度', value: formatQuotaDisplayText(rateLimitDisplay), className: 'wide' },
-        { label: '上传额度', value: formatQuotaDisplayText(uploadRateLimitDisplay), className: 'wide' },
+        { label: '????', value: formatQuotaDisplayText(rateLimitDisplay), className: 'wide' },
+        { label: '????', value: formatQuotaDisplayText(uploadRateLimitDisplay), className: 'wide' },
 
-        { label: '任务', value: taskName, className: 'wide' },
-        { label: '上传', value: uploadStatusText },
-        { label: '追问', value: continueDisplay },
+        { label: '??', value: taskName, className: 'wide' },
+        { label: '??', value: uploadStatusText },
+        { label: '??', value: continueDisplay },
 
-        { label: '当前步骤', value: taskStepText, className: 'wide' },
+        { label: '????', value: taskStepText, className: 'wide' },
         {
-          label: '终态识别',
+          label: '????',
           value: replyClassifyText,
           className: 'wide',
           tone: replyClassifyText !== '-' ? resolveAutoqStatusValueTone(replyClassifyText) : '',
         },
 
-        { label: '自动上传', value: autoUploadText, className: 'full' },
-        { label: '回首页进度', value: rotateProgressText, className: 'full' },
+        { label: '????', value: autoUploadText, className: 'full' },
+        { label: '?????', value: rotateProgressText, className: 'full' },
         {
-          label: '停止原因',
+          label: '????',
           value: stopReasonValue,
           className: 'full',
           tone: stopReasonValue !== '-' ? 'is-error' : '',
@@ -551,12 +585,12 @@ const AutoQueueModule = (() => {
       } = options;
 
       return renderAutoqStatusItems([
-        { label: '模式', value: modeText },
-        { label: '页面轮次', value: pageTurnText },
-        { label: '列表', value: listName || '-' },
-        { label: '状态', value: running ? '运行中' : '已停止', allowStopWarn: true },
-        { label: '追问', value: '-' },
-        { label: '当前步骤', value: '-' },
+        { label: '??', value: modeText },
+        { label: '????', value: pageTurnText },
+        { label: '??', value: listName || '-' },
+        { label: '??', value: running ? '???' : '???', allowStopWarn: true },
+        { label: '??', value: '-' },
+        { label: '????', value: '-' },
       ]);
     }
 
@@ -588,15 +622,15 @@ const AutoQueueModule = (() => {
 
     function formatContinueRoundLimit(value) {
       if (isUnlimitedMaxContinueRounds(value)) {
-        return '无限';
+        return '??';
       }
       const n = normalizeContinueRoundLimit(value, UNLIMITED_CONTINUE_ROUNDS);
-      return n > 0 ? String(n) : '无限';
+      return n > 0 ? String(n) : '??';
     }
 
     function formatMaxContinueRoundsForStatus(value) {
       if (isUnlimitedMaxContinueRounds(value)) {
-        return '无限';
+        return '??';
       }
       return String(Math.max(0, Math.floor(Number(value))));
     }
@@ -614,7 +648,7 @@ const AutoQueueModule = (() => {
       const ts = nowMs();
       const base = {
         id: createTaskId(),
-        title: '新任务',
+        title: '???',
         enabled: true,
         initialPrompt: '',
         continuePromptTemplate: '',
@@ -633,19 +667,19 @@ const AutoQueueModule = (() => {
       return Object.assign(base, overrides && typeof overrides === 'object' ? overrides : {});
     }
 
-    const DEFAULT_SINGLE_QUESTION_STEP_TASK_PROMPT = `做下面题目，一次只回答一道题，分多次回答。
+    const DEFAULT_SINGLE_QUESTION_STEP_TASK_PROMPT = `?????????????????????
 
-硬性规则：
-1. 本次回复只回答当前尚未回答的第一道题。
-2. 禁止一次性回答多道题。
-3. 禁止把所有题目一次性列出答案。
-4. 禁止输出解释、分析、总结、寒暄。
-5. 回答格式固定为：原题=答案
-6. 回答完当前这一道题后立刻停止，等待下一次继续指令。
-7. 下一次收到继续指令时，再回答下一道尚未回答的题。
-8. 只有当下面所有题目都已经逐题回答完成后，才允许回复终止信号。
+?????
+1. ???????????????????
+2. ???????????
+3. ???????????????
+4. ????????????????
+5. ??????????=??
+6. ?????????????????????????
+7. ????????????????????????
+8. ??????????????????????????????
 
-题目：
+???
 1+1=
 2+2=
 3+3=
@@ -653,25 +687,25 @@ const AutoQueueModule = (() => {
 5+5=
 6+6=`;
 
-    const DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT = `请继续完成上一个“分轮答题”任务。
+    const DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT = `?????????????????
 
-你必须先回顾上文已经回答过哪些题目，然后只回答当前尚未回答的第一道题。
+???????????????????????????????????
 
-继续规则：
-1. 本次回复只回答一道题。
-2. 禁止一次性回答多道题。
-3. 禁止重复已经回答过的题。
-4. 禁止输出解释、分析、总结、寒暄。
-5. 回答格式固定为：原题=答案
-6. 如果 1+1、2+2、3+3、4+4、5+5、6+6 已经全部回答完成，只输出下面这一行：
+?????
+1. ???????????
+2. ???????????
+3. ????????????
+4. ????????????????
+5. ??????????=??
+6. ?? 1+1?2+2?3+3?4+4?5+5?6+6 ??????????????????
 {{DONE_SIGNAL}}
 
-如果还有题目没有回答，不要输出终止信号，只回答下一道尚未回答的题。`;
+?????????????????????????????????`;
 
     function createDefaultExampleTasks() {
       return [
         createDefaultTaskItem({
-          title: '示例：分轮答题测试',
+          title: '?????????',
           initialPrompt: DEFAULT_SINGLE_QUESTION_STEP_PROMPT,
           continuePromptTemplate: DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT,
         }),
@@ -687,10 +721,10 @@ const AutoQueueModule = (() => {
       const second = tasks[1] || {};
 
       return (
-        String(first.title || '') === '示例：自我介绍'
-        && String(first.initialPrompt || '') === '请用三句话介绍你自己。'
-        && String(second.title || '') === '示例：总结能力'
-        && String(second.initialPrompt || '') === '请列出你最擅长的 3 项能力。'
+        String(first.title || '') === '???????'
+        && String(first.initialPrompt || '') === '???????????'
+        && String(second.title || '') === '???????'
+        && String(second.initialPrompt || '') === '???????? 3 ????'
       );
     }
 
@@ -711,7 +745,7 @@ const AutoQueueModule = (() => {
 
       return {
         id,
-        title: String(raw.title || '未命名任务').trim() || '未命名任务',
+        title: String(raw.title || '?????').trim() || '?????',
         enabled: raw.enabled !== false,
         initialPrompt: String(raw.initialPrompt || ''),
         continuePromptTemplate: String(legacyTemplate || ''),
@@ -927,7 +961,7 @@ const AutoQueueModule = (() => {
         .map((profile) => {
           const base = normalizeNamedEntity(profile, {
             prefix: 'autoq_task_profile',
-            fallbackName: '默认任务组',
+            fallbackName: '?????',
             maxNameLength: 24,
           });
 
@@ -998,7 +1032,7 @@ const AutoQueueModule = (() => {
 
         config.taskProfiles.push({
           id: profileId,
-          name: '默认任务组',
+          name: '?????',
           ...createDefaultTaskProfileDefaults(),
           tasks: createDefaultExampleTasks(),
           createdAt: ts,
@@ -1044,9 +1078,9 @@ const AutoQueueModule = (() => {
 
         const oldVerifyPrompt = String(rawTaskQueue.verifyAfterDoneSignalPrompt || '');
         const shouldMigrateVerifyPrompt = (
-          oldVerifyPrompt.includes('当前任务内容：')
+          oldVerifyPrompt.includes('???????')
           || oldVerifyPrompt.includes('{{taskContent}}')
-          || oldVerifyPrompt.includes('请根据我刚才上传的代码文件和当前任务要求')
+          || oldVerifyPrompt.includes('????????????????????')
         );
         if (shouldMigrateVerifyPrompt) {
           repairChanged = true;
@@ -1221,7 +1255,7 @@ const AutoQueueModule = (() => {
 
     function buildAutoQueueTaskProfileName() {
       const d = new Date();
-      const base = `任务组_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+      const base = `???_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
       const names = new Set(config.taskProfiles.map((item) => item.name));
 
       return buildUniqueName(base, names);
@@ -1408,7 +1442,7 @@ const AutoQueueModule = (() => {
       }
 
       readPanelConfig(prevMode);
-      log(`已保：${prevMode} 模式设置`);
+      log(`???${prevMode} ????`);
 
       config.promptMode = normalizedNext;
       normalizeAutoConfig(config);
@@ -1425,15 +1459,15 @@ const AutoQueueModule = (() => {
       saveConfig();
       updateStatus();
 
-      log(`已切换到 ${normalizedNext} 模式`);
-      log(`已恢：${normalizedNext} 模式设置`);
+      log(`???? ${normalizedNext} ??`);
+      log(`???${normalizedNext} ????`);
 
       if (normalizedNext === 'list') {
-        ToolboxShell.setStatus('已切换到列表模式');
+        ToolboxShell.setStatus('????????');
       } else if (normalizedNext === 'task') {
-        ToolboxShell.setStatus('已切换到批量任务');
+        ToolboxShell.setStatus('????????');
       } else {
-        ToolboxShell.setStatus('已切换到继续模式');
+        ToolboxShell.setStatus('????????');
       }
 
       logAutoQueueActionButtonDomState('switchPromptMode');
@@ -1577,17 +1611,17 @@ const AutoQueueModule = (() => {
     const TASK_REPLY_STABLE_HASH_ROUNDS = 2;
 
     const BATCH_TASK_GROUP_DISPLAY_STATE_LABELS = Object.freeze({
-      starting_upload: '启动中（自动上传初始附件）',
-      running: '运行中',
-      waiting_reply: '等待回复',
-      stopping: '正在停止',
-      waiting_composer_idle: '等待输入框空闲',
-      uploading: '上传中',
-      recovering: '失败恢复中',
-      paused: '已暂停',
-      stopped: '已停止',
-      completed: '已完成',
-      failed: '调度异常',
+      starting_upload: '?????????????',
+      running: '???',
+      waiting_reply: '????',
+      stopping: '????',
+      waiting_composer_idle: '???????',
+      uploading: '???',
+      recovering: '?????',
+      paused: '???',
+      stopped: '???',
+      completed: '???',
+      failed: '????',
     });
 
     const AUTO_QUEUE_PHASE_TRANSITIONS = Object.freeze({
@@ -1950,6 +1984,7 @@ const AutoQueueModule = (() => {
     let listProfileDeleteConfirmUntil = 0;
     let taskPanelEl = null;
     let taskProfilesEl = null;
+    let taskProfileSelectEl = null;
     let taskProfileNameEl = null;
     let taskListEl = null;
     let taskEditorEl = null;
@@ -1980,10 +2015,10 @@ const AutoQueueModule = (() => {
     let batchSubTabContentEl = null;
 
     const BATCH_SUB_TABS = [
-      { id: 'tasks', label: '任务列表' },
-      { id: 'current', label: '当前任务编辑' },
-      { id: 'rules', label: '默认规则' },
-      { id: 'settings', label: '执行设置' },
+      { id: 'tasks', label: '????' },
+      { id: 'current', label: '??????' },
+      { id: 'rules', label: '????' },
+      { id: 'settings', label: '????' },
     ];
 
     function normalizeBatchSubtab(value) {
@@ -2237,6 +2272,7 @@ const AutoQueueModule = (() => {
       batchSubTabsEl = qs('#cgpt-autoq-batch-subtabs', taskPanelEl);
       batchSubTabContentEl = qs('#cgpt-autoq-batch-subtab-content', taskPanelEl);
       taskProfilesEl = qs('#cgpt-autoq-task-profile-chips', taskPanelEl);
+      taskProfileSelectEl = qs('#cgpt-autoq-task-profile-select', taskPanelEl);
       taskProfileNameEl = qs('#cgpt-autoq-task-profile-name', taskPanelEl);
       taskListEl = qs('#cgpt-autoq-task-list', taskPanelEl);
       taskEditorEl = qs('#cgpt-autoq-task-editor', taskPanelEl);
@@ -2265,20 +2301,21 @@ const AutoQueueModule = (() => {
           <div class="cgpt-autoq-batch-tab-panel-scroll">
             <div class="cgpt-autoq-list-header cgpt-autoq-batch-tasks-profile-header">
               <div class="cgpt-autoq-list-profile-chips cgpt-autoq-task-profile-chips" id="cgpt-autoq-task-profile-chips"></div>
-              <button type="button" class="cgpt-toolbox-small-btn cgpt-autoq-import-prompt-btn" id="cgpt-autoq-task-import-prompts-top">导入 Prompt</button>
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-new">新建任务组</button>
+              <button type="button" class="cgpt-toolbox-small-btn cgpt-autoq-import-prompt-btn" id="cgpt-autoq-task-import-prompts-top">?? Prompt</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-new">?????</button>
             </div>
             <div class="cgpt-autoq-list-name-row">
-              <input class="cgpt-input" id="cgpt-autoq-task-profile-name" placeholder="任务组名称">
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-save-name">保存名称</button>
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-delete">删除任务组</button>
+              <select id="cgpt-autoq-task-profile-select" class="cgpt-input cgpt-autoq-task-profile-select" title="切换任务组"></select>
+              <input class="cgpt-input" id="cgpt-autoq-task-profile-name" placeholder="?????">
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-save-name">????</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-profile-delete">?????</button>
             </div>
             <div class="cgpt-autoq-task-list-toolbar">
-              <span class="cgpt-autoq-label">任务列表</span>
+              <span class="cgpt-autoq-label">????</span>
               <div class="cgpt-autoq-task-list-toolbar-actions">
-                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-add">新增任务</button>
-                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-pick-prompts">从 Prompt 导入</button>
-                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-clear-examples">清空示例任务</button>
+                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-add">????</button>
+                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-pick-prompts">? Prompt ??</button>
+                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-clear-examples">??????</button>
               </div>
             </div>
             <div class="cgpt-autoq-task-list" id="cgpt-autoq-task-list"></div>
@@ -2510,8 +2547,16 @@ const AutoQueueModule = (() => {
             return;
           }
 
-          switchTaskProfile(id);
+          switchTaskProfile(id, { source: 'profile-chip' });
         }, 'autoq-task-profiles-click');
+      }
+
+      if (taskProfileSelectEl) {
+        bindOnce(taskProfileSelectEl, 'change', () => {
+          const id = String(taskProfileSelectEl.value || '').trim();
+          if (!id) return;
+          switchTaskProfile(id, { source: 'profile-select' });
+        }, 'autoq-task-profile-select-change');
       }
 
       const newTaskProfileBtn = qs('#cgpt-autoq-task-profile-new', root);
@@ -2677,7 +2722,7 @@ const AutoQueueModule = (() => {
 
       const resolved = resolveTaskInitialPrompt(task, { log: false });
 
-      task.title = String(resolved.title || task.title || '未命名任务');
+      task.title = String(resolved.title || task.title || '?????');
       task.initialPrompt = String(resolved.initialPrompt || task.initialPrompt || '');
       task.sourceType = 'manual';
       delete task.promptId;
@@ -2720,7 +2765,7 @@ const AutoQueueModule = (() => {
           }
 
           const nextPromptId = String(prompt.id || task.promptId);
-          const nextTitle = String(prompt.title || task.title || '未命名任务');
+          const nextTitle = String(prompt.title || task.title || '?????');
           const nextInitialPrompt = String(prompt.content || task.initialPrompt || '');
 
           let taskChanged = false;
@@ -2774,7 +2819,7 @@ const AutoQueueModule = (() => {
     function getPromptPickerCategories(promptList) {
       const categories = new Set();
       (Array.isArray(promptList) ? promptList : []).forEach((prompt) => {
-        categories.add(String(prompt && prompt.category ? prompt.category : '默认'));
+        categories.add(String(prompt && prompt.category ? prompt.category : '??'));
       });
       return Array.from(categories).sort((a, b) => a.localeCompare(b, 'zh-CN'));
     }
@@ -2787,7 +2832,7 @@ const AutoQueueModule = (() => {
       return list.filter((prompt) => {
         const title = String(prompt && prompt.title ? prompt.title : '');
         const content = String(prompt && prompt.content ? prompt.content : '');
-        const cat = String(prompt && prompt.category ? prompt.category : '默认');
+        const cat = String(prompt && prompt.category ? prompt.category : '??');
 
         if (categoryFilter && categoryFilter !== '__all__' && cat !== categoryFilter) {
           return false;
@@ -2806,17 +2851,17 @@ const AutoQueueModule = (() => {
     }
 
     function formatTaskListSourceText(task) {
-      if (!task) return '来源：手动';
+      if (!task) return '?????';
       if (task.sourceType === 'prompt-manager') {
-        return '来源：Prompt 管理';
+        return '???Prompt ??';
       }
-      return '来源：手动';
+      return '?????';
     }
 
     function formatTaskListCategoryText(task) {
-      if (!task) return '分类：默认';
+      if (!task) return '?????';
       if (task.sourceType !== 'prompt-manager') {
-        return '分类：默认';
+        return '?????';
       }
       if (task.promptId) {
         const result = findPromptForLinkedTask(task);
@@ -2824,13 +2869,13 @@ const AutoQueueModule = (() => {
         if (prompt) {
           const category = typeof PromptManagerModule.getPromptCategoryName === 'function'
             ? PromptManagerModule.getPromptCategoryName(prompt)
-            : String(prompt.category || '默认');
-          const relinkHint = result.relinked ? '（已重新关联）' : '';
-          return `分类：${category}${relinkHint}`;
+            : String(prompt.category || '??');
+          const relinkHint = result.relinked ? '???????' : '';
+          return `???${category}${relinkHint}`;
         }
-        return '分类：原 Prompt 已删除，使用快照';
+        return '???? Prompt ????????';
       }
-      return '分类：默认';
+      return '?????';
     }
 
     function addPromptBatchTask(promptId) {
@@ -2838,7 +2883,7 @@ const AutoQueueModule = (() => {
         typeof PromptManagerModule === 'undefined'
         || typeof PromptManagerModule.getPromptById !== 'function'
       ) {
-        ToolboxShell.setStatus('Prompt 管理模块未就绪');
+        ToolboxShell.setStatus('Prompt ???????');
         return false;
       }
 
@@ -2846,7 +2891,7 @@ const AutoQueueModule = (() => {
 
       if (!prompt) {
         ToolboxShell.appendLog(`[AUTOQ][PROMPT_TASK][MISSING] promptId=${promptId}`);
-        ToolboxShell.setStatus('Prompt 不存在');
+        ToolboxShell.setStatus('Prompt ???');
         return false;
       }
 
@@ -2869,7 +2914,7 @@ const AutoQueueModule = (() => {
 
       if (task) {
         task.enabled = true;
-        task.title = String(prompt.title || task.title || '未命名任务');
+        task.title = String(prompt.title || task.title || '?????');
         task.initialPrompt = String(prompt.content || task.initialPrompt || '');
         task.sourceType = 'prompt-manager';
         task.promptId = String(prompt.id || promptId);
@@ -2896,7 +2941,7 @@ const AutoQueueModule = (() => {
       renderTaskEditor();
       renderTaskProfileDefaults();
       updateStatus();
-      ToolboxShell.setStatus(`${isUpdate ? '已更新' : '已导入'}批量任务：${prompt.title}`);
+      ToolboxShell.setStatus(`${isUpdate ? '???' : '???'}?????${prompt.title}`);
       return true;
     }
 
@@ -2937,13 +2982,13 @@ const AutoQueueModule = (() => {
       );
 
       if (!list.length) {
-        return '<div class="cgpt-log-empty">暂无 Prompt，请先在 Prompt 管理中添加</div>';
+        return '<div class="cgpt-log-empty">?? Prompt???? Prompt ?????</div>';
       }
 
       return list.map((prompt) => {
         const id = String(prompt && prompt.id ? prompt.id : '');
-        const title = String(prompt && prompt.title ? prompt.title : '未命名');
-        const category = String(prompt && prompt.category ? prompt.category : '默认');
+        const title = String(prompt && prompt.title ? prompt.title : '???');
+        const category = String(prompt && prompt.category ? prompt.category : '??');
         const contentPreview = String(prompt && prompt.content ? prompt.content : '')
           .replace(/\s+/g, ' ')
           .slice(0, 80);
@@ -2953,7 +2998,7 @@ const AutoQueueModule = (() => {
       <label class="cgpt-setting-prompt-checkbox cgpt-autoq-prompt-picker-item">
         <input type="checkbox" data-autoq-prompt-pick-id="${escapeHtml(id)}"${checked}>
         <span class="cgpt-autoq-prompt-picker-item-title">${escapeHtml(title)}</span>
-        <small class="cgpt-autoq-prompt-picker-item-meta">${escapeHtml(category)}${contentPreview ? ` · ${escapeHtml(contentPreview)}` : ''}</small>
+        <small class="cgpt-autoq-prompt-picker-item-meta">${escapeHtml(category)}${contentPreview ? ` ? ${escapeHtml(contentPreview)}` : ''}</small>
       </label>
     `;
       }).join('');
@@ -3007,7 +3052,7 @@ const AutoQueueModule = (() => {
         const categories = getPromptPickerCategories(promptList);
         const current = promptPickerFilterCategory || '__all__';
         categoryEl.innerHTML = [
-          '<option value="__all__">全部分类</option>',
+          '<option value="__all__">????</option>',
           ...categories.map((cat) => `<option value="${escapeHtml(cat)}">${escapeHtml(cat)}</option>`),
         ].join('');
         categoryEl.value = categories.includes(current) || current === '__all__'
@@ -3129,23 +3174,23 @@ const AutoQueueModule = (() => {
       promptPickerOverlay.innerHTML = `
         <div class="cgpt-modal cgpt-autoq-prompt-picker-modal">
           <div class="cgpt-modal-header">
-            <div class="cgpt-modal-title">从 Prompt 管理导入 Prompt</div>
-            <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-close">关闭</button>
+            <div class="cgpt-modal-title">? Prompt ???? Prompt</div>
+            <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-close">??</button>
           </div>
           <div class="cgpt-modal-body">
-            <div class="cgpt-hint">勾选 Prompt 后点击「导入到当前任务组」，每个 Prompt 会生成一个任务组内的任务。已存在的 Prompt 任务会更新标题和内容快照，不会重复创建。</div>
+            <div class="cgpt-hint">?? Prompt ???????????????? Prompt ????????????????? Prompt ????????????????????</div>
             <div class="cgpt-autoq-prompt-picker-toolbar">
-              <input class="cgpt-input" id="cgpt-autoq-prompt-picker-search" type="search" placeholder="搜索标题、分类、内容…">
+              <input class="cgpt-input" id="cgpt-autoq-prompt-picker-search" type="search" placeholder="???????????">
               <select class="cgpt-input" id="cgpt-autoq-prompt-picker-category">
-                <option value="__all__">全部分类</option>
+                <option value="__all__">????</option>
               </select>
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-select-visible">全选当前显示</button>
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-clear-visible">取消全选当前显示</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-select-visible">??????</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-prompt-picker-clear-visible">????????</button>
             </div>
             <div class="cgpt-autoq-prompt-picker-list" id="cgpt-autoq-prompt-picker-list"></div>
           </div>
           <div class="cgpt-modal-footer cgpt-row">
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-prompt-picker-apply">导入到当前任务组</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-prompt-picker-apply">????????</button>
           </div>
         </div>`;
 
@@ -3233,7 +3278,7 @@ const AutoQueueModule = (() => {
           });
 
           promptPickerOverlay.style.display = 'none';
-          ToolboxShell.setStatus(`已导入 ${importCount} 个 Prompt 到当前任务组`);
+          ToolboxShell.setStatus(`??? ${importCount} ? Prompt ??????`);
         });
       }
 
@@ -3267,7 +3312,7 @@ const AutoQueueModule = (() => {
         typeof PromptManagerModule === 'undefined'
         || typeof PromptManagerModule.getPrompts !== 'function'
       ) {
-        ToolboxShell.setStatus('Prompt 管理模块未就绪');
+        ToolboxShell.setStatus('Prompt ???????');
         return;
       }
 
@@ -3301,7 +3346,7 @@ const AutoQueueModule = (() => {
       const profile = getActiveTaskProfile();
 
       if (!profile) {
-        ToolboxShell.setStatus('当前没有任务组');
+        ToolboxShell.setStatus('???????');
         return;
       }
 
@@ -3311,11 +3356,11 @@ const AutoQueueModule = (() => {
         saveConfig();
         renderTaskList();
         renderTaskEditor();
-        ToolboxShell.setStatus('已清空示例任务');
+        ToolboxShell.setStatus('???????');
         return;
       }
 
-      ToolboxShell.setStatus('当前没有示例任务');
+      ToolboxShell.setStatus('????????');
     }
 
     function saveConfig() {
@@ -3410,9 +3455,9 @@ const AutoQueueModule = (() => {
     function getAutoQueueModeLabel(mode) {
       const m = normalizeAutoMode(mode);
 
-      if (m === 'list') return '列表模式';
-      if (m === 'task') return '批量任务';
-      return '继续模式';
+      if (m === 'list') return '????';
+      if (m === 'task') return '????';
+      return '????';
     }
 
     function getModeDisplayText(mode) {
@@ -3476,10 +3521,10 @@ const AutoQueueModule = (() => {
         currentTaskReplyMessageId: '',
         verifyReplyTextForResend: '',
 
-        // 当前批量任务组本次运行中，实际成功发送到 ChatGPT 的总对话次数。
+        // ???????????????????? ChatGPT ???????
         totalSentDialogueCount: 0,
 
-        // 自动上传节奏计数。这个值用于“每 N 次对话自动上传”，不要当作总发送次数展示。
+        // ???????????????? N ?????????????????????
         sentMessageCount: 0,
         completedAnswerCount: 0,
         assistantReplyCountForUpload: 0,
@@ -4861,7 +4906,7 @@ const AutoQueueModule = (() => {
           sendReason: 'strict-done-signal',
         });
 
-        ToolboxShell.setStatus('自动继续直到完成：检测到完成信号，已停止', 'success');
+        ToolboxShell.setStatus('????????????????????', 'success');
         updateStatus('until-done-terminal-stop');
         updateChatInputStateBadge();
         return true;
@@ -4897,8 +4942,8 @@ const AutoQueueModule = (() => {
         : (status === 'no_more_content' ? 'reply-classify-no-more-content' : 'reply-classify-blocked');
       const finalStep = stopReason === 'all-done' ? 'all-done' : 'stopped';
       const statusText = status === 'done'
-        ? '自动继续已完成'
-        : (status === 'no_more_content' ? '自动继续已停止：没有可继续输出内容' : '自动继续已停止：需要人工处理');
+        ? '???????'
+        : (status === 'no_more_content' ? '?????????????????' : '??????????????');
 
       recordReplyClassifyDecision({
         shouldStop: true,
@@ -4960,8 +5005,8 @@ const AutoQueueModule = (() => {
 
       if (typeof switchToNewChatUnified === 'function') {
         return switchToNewChatUnified(reasonText, {
-          statusOnReady: '新聊天已就绪，准备发送下一个任务',
-          statusOnTimeout: '切换新聊天超时，已停止批量任务组',
+          statusOnReady: '????????????????',
+          statusOnTimeout: '????????????????',
         });
       }
 
@@ -4999,7 +5044,7 @@ const AutoQueueModule = (() => {
       const enabled = getEnabledTasksFromProfile(profile);
 
       if (!enabled.length) {
-        log('没有已启用的任务，无法开始');
+        log('?????????????');
         ToolboxShell.appendLog('[AUTOQ][TASK][FAILED] reason=no-enabled-tasks');
         return false;
       }
@@ -5023,7 +5068,7 @@ const AutoQueueModule = (() => {
       const runnable = enabled.filter((task) => task.status !== 'failed');
 
       if (!runnable.length) {
-        log('没有可运行的任务（Prompt 缺失或内容为空）');
+        log('?????????Prompt ????????');
         ToolboxShell.appendLog('[AUTOQ][TASK][FAILED] reason=no-runnable-tasks');
         saveConfig();
         renderTaskList();
@@ -5059,10 +5104,10 @@ const AutoQueueModule = (() => {
         currentTaskReplyHashStableCount: 0,
         currentTaskReplyMessageId: '',
 
-        // 当前批量任务组本次运行中，实际成功发送到 ChatGPT 的总对话次数。
+        // ???????????????????? ChatGPT ???????
         totalSentDialogueCount: 0,
 
-        // 自动上传节奏计数。
+        // ?????????
         sentMessageCount: 0,
         completedAnswerCount: 0,
         assistantReplyCountForUpload: 0,
@@ -5095,7 +5140,7 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
       ToolboxShell.appendLog(`[AUTOQ][TASK][START] profile=${profile ? profile.name : '-'} tasks=${runnable.length}`);
       ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
-      log(`批量任务组任务开始，共 ${runnable.length} 个任务`);
+      log(`??????????? ${runnable.length} ???`);
       syncCurrentTaskVerificationContext(runnable[0] || null, { resetState: true });
       setTaskBatchStep('send-initial', runnable[0] || null);
       touchBatchTaskGroupActivity('prepare-queue');
@@ -5131,7 +5176,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog('[BATCH_TASK_GROUP][DONE] reason=all-tasks-finished');
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][STEP] task=- step=all-done');
         ToolboxShell.appendLog('[AUTOQ][TASK][ALL_DONE]');
-        log('全部任务完成');
+        log('??????');
         setBatchTaskGroupDisplayState('completed', 'all-done');
         abortBatchTaskGroupScheduledTimer('all-done');
         if (config.taskQueueSettings && config.taskQueueSettings.switchNewChatAfterAllDone === true) {
@@ -5178,7 +5223,7 @@ const AutoQueueModule = (() => {
             ToolboxShell.appendLog(
               `[AUTOQ][TASK_BATCH][NEW_CHAT_FAILED_CONTINUE_CURRENT] reason=${failReason}`,
             );
-            ToolboxShell.setStatus('切换新聊天失败，继续在当前对话发送下一个任务');
+            ToolboxShell.setStatus('??????????????????????');
           } else {
             setTaskBatchStep('new-chat-ready', nextTask, { log: false });
             run.forceUploadBeforeNextSend = true;
@@ -5238,7 +5283,7 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_START]');
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][NEXT_TASK] index=${nextIndex + 1} total=${run.enabledTaskIds.length}`);
       ToolboxShell.appendLog(`[AUTOQ][TASK][NEXT] index=${nextIndex + 1}/${run.enabledTaskIds.length}`);
-      log(`进入下一个任务 (${nextIndex + 1}/${run.enabledTaskIds.length})`);
+      log(`??????? (${nextIndex + 1}/${run.enabledTaskIds.length})`);
       touchBatchTaskGroupActivity('next-task');
       renderTaskList();
       updateStatus('next-task');
@@ -5410,7 +5455,7 @@ const AutoQueueModule = (() => {
         + `buttonWait=${isButtonWaitReason ? 1 : 0} task=${task ? task.title : '-'}`,
       );
 
-      ToolboxShell.setStatus(`发送暂不可用，继续重试：${reason}`);
+      ToolboxShell.setStatus(`????????????${reason}`);
 
       updateStatus('send-wait-retry');
 
@@ -5557,7 +5602,7 @@ const AutoQueueModule = (() => {
         `[AUTOQ][SEND_GIVE_UP] task=${taskName} taskId=${taskId} reason=${reasonText}`,
       );
       ToolboxShell.appendLog(`[AUTOQ][TASK][FAILED] task=${taskName} reason=${reasonText}`);
-      log(`任务发送失败：${taskName} (${reasonText})`);
+      log(`???????${taskName} (${reasonText})`);
       notifyRuntimeTaskSendFail(task, reasonText);
 
       if (shouldStopBatchOnTaskSendFailure()) {
@@ -5930,14 +5975,14 @@ const AutoQueueModule = (() => {
       if (!reasonText) {
         return false;
       }
-      // 避免 quota 等待超时后仍被当成“正常等待中”继续尝试下一步。
+      // ?? quota ????????????????????????
       if (reasonText.includes('quota-wait-timeout')) {
         return true;
       }
       if (reasonText.includes('wait-timeout')) {
         return true;
       }
-      // stop_on_limit 模式：额度/限速没法继续时需要立即终止批量任务组。
+      // stop_on_limit ?????/???????????????????
       if (reasonText.includes('stop-on-limit') || reasonText.includes('stop_on_limit') || reasonText.includes('quota-stop-on-limit')) {
         return true;
       }
@@ -5972,13 +6017,13 @@ const AutoQueueModule = (() => {
       const quota = getBatchTaskGroupQuotaSnapshot();
       if (!quota.messageCanSend) {
         setBatchTaskGroupDisplayState('stopped', 'message-quota-exhausted');
-        ToolboxShell.setStatus('批量任务组已停止：消息额度不足');
+        ToolboxShell.setStatus('???????????????');
       } else if (!quota.uploadCanUpload && reasonText.includes('upload')) {
         setBatchTaskGroupDisplayState('stopped', 'upload-quota-exhausted');
-        ToolboxShell.setStatus('批量任务组已停止：上传额度不足');
+        ToolboxShell.setStatus('???????????????');
       } else {
         setBatchTaskGroupDisplayState('stopped', reasonText);
-        ToolboxShell.setStatus(`批量任务组已停止：${reasonText}`);
+        ToolboxShell.setStatus(`?????????${reasonText}`);
       }
       abortBatchTaskGroupScheduledTimer('stop-entire-batch');
       stop({
@@ -6007,8 +6052,8 @@ const AutoQueueModule = (() => {
         `[BATCH_TASK_GROUP][SKIP_TASK] task=${task ? task.title : '-'} reason=${reasonText} `
         + `taskIndex=${Number(run.currentIndex) + 1}`,
       );
-      log(`任务失败，跳过并继续下一个：${task ? task.title : '-'} (${reasonText})`);
-      ToolboxShell.setStatus(`任务失败，继续下一个：${reasonText}`);
+      log(`??????????????${task ? task.title : '-'} (${reasonText})`);
+      ToolboxShell.setStatus(`???????????${reasonText}`);
 
       logBatchTaskGroupStepEnd('skip-task', 'move-next', 0, { reason: reasonText });
 
@@ -6164,8 +6209,8 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      // quota-wait / rate-limit-wait 期间不允许触发 watchdog 恢复。
-      // 这些等待是“正常等待额度恢复”，不应该被误判为卡死。
+      // quota-wait / rate-limit-wait ??????? watchdog ???
+      // ??????????????????????????
       const currentStep = state.taskRun && state.taskRun.currentStep
         ? String(state.taskRun.currentStep)
         : '';
@@ -6333,12 +6378,12 @@ const AutoQueueModule = (() => {
         `[AUTOQ][TASK][FAILED] task=${task ? task.title : '-'} reason=${reasonText} `
         + `failCount=${run.currentTaskFailCount}/${BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES}`,
       );
-      log(`任务失败：${task ? task.title : '-'} (${reasonText})`);
+      log(`?????${task ? task.title : '-'} (${reasonText})`);
 
       if (run.currentTaskFailCount < BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES) {
         ToolboxShell.setStatus(
-          `任务失败，${BATCH_TASK_GROUP_RECOVER_DELAY_MS / 1000} 秒后重试 `
-          + `(${run.currentTaskFailCount}/${BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES})：${reasonText}`,
+          `?????${BATCH_TASK_GROUP_RECOVER_DELAY_MS / 1000} ???? `
+          + `(${run.currentTaskFailCount}/${BATCH_TASK_GROUP_MAX_TASK_FAIL_RETRIES})?${reasonText}`,
         );
         recoverBatchTaskGroup(getBatchTaskGroupRunId(), reasonText, {
           action: failPhase === 'continue' || failPhase === 'verification'
@@ -6413,7 +6458,7 @@ const AutoQueueModule = (() => {
       ).trim();
 
       if (!content) {
-        return '当前批量任务';
+        return '??????';
       }
 
       const oneLine = content
@@ -6437,7 +6482,7 @@ const AutoQueueModule = (() => {
         (task && (task.content || task.prompt || task.initialPrompt || task.title || task.name)) || '',
       ).trim();
 
-      return fallback || '当前任务内容为空，请结合刚刚重新上传的文件/附件进行完成状态确认。';
+      return fallback || '?????????????????????/???????????';
     }
 
     function buildVerifyAfterDoneSignalPrompt(task, resolved, replyText) {
@@ -7001,9 +7046,9 @@ const AutoQueueModule = (() => {
     }
 
     function getTaskAutoUploadCountModeLabel(mode) {
-      if (mode === 'message') return '发送消息';
-      if (mode === 'assistantAnswer') return '助手回答';
-      return '任务项';
+      if (mode === 'message') return '????';
+      if (mode === 'assistantAnswer') return '????';
+      return '???';
     }
 
     function shouldCountTaskSendKindForAutoUpload(kind) {
@@ -7343,18 +7388,18 @@ const AutoQueueModule = (() => {
         );
 
       return [
-        '当前批量任务组因为原 ChatGPT 页面对话轮次达到上限，已经自动切换到新聊天。',
-        '请基于本页面刚刚上传的代码文件，继续完成同一个任务。',
+        '?????????? ChatGPT ??????????????????????',
+        '??????????????????????????',
         '',
-        `任务标题：${task && task.title ? task.title : '-'}`,
+        `?????${task && task.title ? task.title : '-'}`,
         '',
-        '任务内容：',
-        initialPrompt || '当前任务内容为空，请根据刚上传的代码文件继续完成当前批量任务组任务。',
+        '?????',
+        initialPrompt || '??????????????????????????????????',
         '',
-        '继续规则：',
+        '?????',
         continuePrompt,
         '',
-        `本次发送来源：page-rotate-${String(kind || 'send')}`,
+        `???????page-rotate-${String(kind || 'send')}`,
       ].join('\n');
     }
 
@@ -7364,8 +7409,8 @@ const AutoQueueModule = (() => {
       const countMode = normalizeTaskAutoUploadCountMode(settings.countMode);
       const countModeLabel = getTaskAutoUploadCountModeLabel(countMode);
       const unitText = countMode === 'taskItem'
-        ? '个任务项'
-        : (countMode === 'assistantAnswer' ? '次助手回答' : '条发送消息');
+        ? '????'
+        : (countMode === 'assistantAnswer' ? '?????' : '?????');
 
       if (!settings.enabled) {
         return {
@@ -7373,7 +7418,7 @@ const AutoQueueModule = (() => {
           countMode,
           countModeLabel,
           enabled: false,
-          summary: '未启用',
+          summary: '???',
           patternText: '-',
         };
       }
@@ -7389,15 +7434,15 @@ const AutoQueueModule = (() => {
       }
 
       const patternText = examples.length
-        ? `${examples.join('、')}...`
-        : `每 ${interval} 次`;
+        ? `${examples.join('?')}...`
+        : `? ${interval} ?`;
 
       return {
         interval,
         countMode,
         countModeLabel,
         enabled: true,
-        summary: `上传规则：首次上传，之后每 ${interval}${unitText}再次上传；当前策略：第 ${patternText}${unitText}发送前强制重传（计数口径：${countModeLabel}）`,
+        summary: `????????????? ${interval}${unitText}??????????? ${patternText}${unitText}?????????????${countModeLabel}?`,
         patternText,
       };
     }
@@ -7507,7 +7552,7 @@ const AutoQueueModule = (() => {
         skipReason = 'should-upload';
       }
 
-      // 关键：pendingFiles=0 只能说明内部队列没有 pending 状态文件，不能阻止命中上传间隔时的强制重传策略
+      // ???pendingFiles=0 ?????????? pending ???????????????????????
       const shouldUpload = (
         skipReason === 'initial-upload'
         || skipReason === 'force-upload'
@@ -7606,7 +7651,10 @@ const AutoQueueModule = (() => {
 
       let composerHasUploadPayload = false;
 
-      if (typeof UploadModule.detectComposerHasUploadPayload === 'function') {
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.getUnifiedComposerAttachmentState === 'function') {
+        const unified = UploadModule.getUnifiedComposerAttachmentState('autoq-task-auto-upload-precheck');
+        composerHasUploadPayload = !!(unified && unified.hasAttachment);
+      } else if (typeof UploadModule.detectComposerHasUploadPayload === 'function') {
         composerHasUploadPayload = !!UploadModule.detectComposerHasUploadPayload();
       } else if (typeof ComposerApi !== 'undefined') {
         if (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function') {
@@ -7670,9 +7718,9 @@ const AutoQueueModule = (() => {
       setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: true });
       if (isInitialSend) {
         ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][INITIAL_UPLOAD]');
-        ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+        ToolboxShell.setStatus('?????????????????????????');
       } else {
-        ToolboxShell.setStatus(`批量任务组：第 ${uploadSlotNo} 次发送前自动上传文件`);
+        ToolboxShell.setStatus(`??????? ${uploadSlotNo} ??????????`);
       }
       ToolboxShell.appendLog(
         `[AUTOQ][TASK_AUTO_UPLOAD][START] kind=${kind || '-'} countMode=${decision.countMode} currentCount=${currentCount} forceUpload=${forceUpload ? 1 : 0}`,
@@ -7931,7 +7979,7 @@ const AutoQueueModule = (() => {
 
       if (!task) {
         console.error('[ChatGPT toolbox] handleTaskReplyReady: no current task');
-        log('当前无运行中任务');
+        log('????????');
         return;
       }
 
@@ -7949,7 +7997,7 @@ const AutoQueueModule = (() => {
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] handleTaskReplyReady get reply failed', err);
-        log(`读取回复异常：${errText}`);
+        log(`???????${errText}`);
         recoverBatchTaskGroup(getBatchTaskGroupRunId(), errText || 'get-reply-failed', {
           action: 'reply-ready-retry',
           clearStepRunning: true,
@@ -8441,7 +8489,7 @@ const AutoQueueModule = (() => {
         state.waitingStartedAt = Date.now();
         state.taskRun.pendingSendKind = null;
         setTaskBatchStep('wait-next-reply', task);
-        log(`已执行复制+快捷键+继续，等待下一轮回复 (${task.continueCount}/${formatContinueRoundLimit(maxRounds)})`);
+        log(`?????+???+?????????? (${task.continueCount}/${formatContinueRoundLimit(maxRounds)})`);
         updateStatus('continue-sent');
         updateChatInputStateBadge();
       } catch (err) {
@@ -8545,7 +8593,7 @@ const AutoQueueModule = (() => {
     }
 
     function log(text) {
-      ToolboxShell.appendLog(`[自动指令] ${text}`);
+      ToolboxShell.appendLog(`[????] ${text}`);
       const modeSettings = getModeSettings(config.promptMode);
 
       if (modeSettings.autoScrollPanel && root) {
@@ -8614,7 +8662,7 @@ const AutoQueueModule = (() => {
 
       if (!target) {
         console.warn('[ChatGPT toolbox] switchListProfile: profile not found', profileId);
-        ToolboxShell.setStatus('列表模板不存在');
+        ToolboxShell.setStatus('???????');
         return;
       }
 
@@ -8630,8 +8678,8 @@ const AutoQueueModule = (() => {
       saveConfig();
       updateStatus();
 
-      ToolboxShell.setStatus(`已切换列表：${target.name}`);
-      ToolboxShell.appendLog(`[自动指令] 已切换列表模板：${target.name}`);
+      ToolboxShell.setStatus(`??????${target.name}`);
+      ToolboxShell.appendLog(`[????] ????????${target.name}`);
     }
 
     function createListProfileInline() {
@@ -8664,8 +8712,8 @@ const AutoQueueModule = (() => {
         listProfileNameEl.select();
       }
 
-      ToolboxShell.setStatus(`已新建列表：${profile.name}`);
-      ToolboxShell.appendLog(`[自动指令] 已新建列表：${profile.name}`);
+      ToolboxShell.setStatus(`??????${profile.name}`);
+      ToolboxShell.appendLog(`[????] ??????${profile.name}`);
     }
 
     function renameActiveListProfileInline() {
@@ -8674,14 +8722,14 @@ const AutoQueueModule = (() => {
       const active = getActiveListProfile();
 
       if (!active) {
-        ToolboxShell.setStatus('当前没有可重命名的列表');
+        ToolboxShell.setStatus('???????????');
         return;
       }
 
       const text = String(listProfileNameEl ? listProfileNameEl.value : '').trim();
 
       if (!text) {
-        ToolboxShell.setStatus('列表名称不能为空');
+        ToolboxShell.setStatus('????????');
         console.warn('[ChatGPT toolbox] renameActiveListProfileInline: empty name');
         return;
       }
@@ -8689,7 +8737,7 @@ const AutoQueueModule = (() => {
       const nextName = text.slice(0, 24);
 
       if (config.listProfiles.some((item) => item.id !== active.id && item.name === nextName)) {
-        ToolboxShell.setStatus('列表名称已存在');
+        ToolboxShell.setStatus('???????');
         return;
       }
 
@@ -8699,7 +8747,7 @@ const AutoQueueModule = (() => {
       renderListProfiles();
       saveConfig();
 
-      ToolboxShell.setStatus(`已保存列表名称：${active.name}`);
+      ToolboxShell.setStatus(`????????${active.name}`);
     }
 
     function deleteActiveListProfileInline(button) {
@@ -8708,14 +8756,14 @@ const AutoQueueModule = (() => {
         normalizeListProfiles();
 
         if (config.listProfiles.length <= 1) {
-          ToolboxShell.setStatus('至少保留一个列表');
+          ToolboxShell.setStatus('????????');
           return;
         }
 
         const active = getActiveListProfile();
 
         if (!active) {
-          ToolboxShell.setStatus('当前没有可删除的列表');
+          ToolboxShell.setStatus('??????????');
           return;
         }
 
@@ -8725,10 +8773,10 @@ const AutoQueueModule = (() => {
           listProfileDeleteConfirmUntil = now + 3000;
 
           if (button) {
-            setButtonDanger(button, '再次点击删除', { reason: 'list-delete-confirm', permanentDanger: true });
+            setButtonDanger(button, '??????', { reason: 'list-delete-confirm', permanentDanger: true });
           }
 
-          ToolboxShell.setStatus('再次点击确认删除当前列表');
+          ToolboxShell.setStatus('????????????');
           return;
         }
 
@@ -8748,25 +8796,25 @@ const AutoQueueModule = (() => {
         refreshPromptTextareaForMode('list');
 
         if (button) {
-          setButtonIdle(button, '删除列表', { reason: 'list-delete-done' });
+          setButtonIdle(button, '????', { reason: 'list-delete-done' });
         }
 
         renderListProfiles();
         saveConfig();
         updateStatus();
 
-        ToolboxShell.setStatus(`已删除列表：${deletedName}`);
+        ToolboxShell.setStatus(`??????${deletedName}`);
       } catch (error) {
         console.error('[AUTOQ][LIST_DELETE_FAILED]', error);
         if (button) {
-          setButtonFailed(button, '删除失败', { reason: 'list-delete-failed' });
+          setButtonFailed(button, '????', { reason: 'list-delete-failed' });
           window.setTimeout(() => {
             if (button.isConnected) {
-              setButtonIdle(button, '删除列表', { reason: 'list-delete-restore' });
+              setButtonIdle(button, '????', { reason: 'list-delete-restore' });
             }
           }, 1200);
         }
-        ToolboxShell.setStatus('删除列表失败', 'error');
+        ToolboxShell.setStatus('??????', 'error');
       }
     }
 
@@ -8810,6 +8858,13 @@ const AutoQueueModule = (() => {
       </button>
     `;
       }).join('');
+
+      if (taskProfileSelectEl) {
+        taskProfileSelectEl.innerHTML = config.taskProfiles.map((item) => (
+          `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`
+        )).join('');
+        taskProfileSelectEl.value = String(config.activeTaskProfileId || '');
+      }
 
       const active = getActiveTaskProfile();
 
@@ -9008,7 +9063,7 @@ const AutoQueueModule = (() => {
       const profile = getActiveTaskProfile();
 
       if (!profile) {
-        taskProfileDefaultsEl.innerHTML = '<div class="cgpt-hint">暂无任务组</div>';
+        taskProfileDefaultsEl.innerHTML = '<div class="cgpt-hint">?????</div>';
         return;
       }
 
@@ -9037,143 +9092,143 @@ const AutoQueueModule = (() => {
         : templateText;
 
       taskProfileDefaultsEl.innerHTML = `
-        <div class="cgpt-hint cgpt-autoq-task-batch-hint">统一继续指令与默认终止信号将应用于本任务组内所有任务（除非任务单独覆盖）。</div>
+        <div class="cgpt-hint cgpt-autoq-task-batch-hint">?????????????????????????????????????</div>
         <div class="cgpt-autoq-task-profile-defaults-grid">
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
-            <label for="cgpt-autoq-profile-default-continue">统一继续指令（模板，使用 {{DONE_SIGNAL}} 占位符）</label>
+            <label for="cgpt-autoq-profile-default-continue">???????????? {{DONE_SIGNAL}} ????</label>
             <textarea class="cgpt-textarea cgpt-autoq-batch-rules-continue" id="cgpt-autoq-profile-default-continue" rows="5">${escapeHtml(templateText)}</textarea>
           </div>
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
-            <label>实际发送预览</label>
+            <label>??????</label>
             <pre class="cgpt-autoq-continue-preview cgpt-autoq-batch-rules-preview" id="cgpt-autoq-profile-continue-preview">${escapeHtml(previewText)}</pre>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-profile-default-done-signal">默认终止信号</label>
+            <label for="cgpt-autoq-profile-default-done-signal">??????</label>
             <input class="cgpt-input" id="cgpt-autoq-profile-default-done-signal" value="${escapeHtml(displayDoneSignal)}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-profile-default-max-rounds">默认最大继续次数（0 表示无限）</label>
-            <input class="cgpt-input" id="cgpt-autoq-profile-default-max-rounds" type="number" data-no-wheel-number="1" min="0" value="${normalizeContinueRoundLimit(profile.defaultMaxContinueRounds, UNLIMITED_CONTINUE_ROUNDS)}" placeholder="0 = 无限">
+            <label for="cgpt-autoq-profile-default-max-rounds">?????????0 ?????</label>
+            <input class="cgpt-input" id="cgpt-autoq-profile-default-max-rounds" type="number" data-no-wheel-number="1" min="0" value="${normalizeContinueRoundLimit(profile.defaultMaxContinueRounds, UNLIMITED_CONTINUE_ROUNDS)}" placeholder="0 = ??">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rate-limit-enabled">批量发送限速</label>
+            <label for="cgpt-autoq-task-rate-limit-enabled">??????</label>
             <label class="cgpt-checkbox-row">
               <input id="cgpt-autoq-task-rate-limit-enabled" type="checkbox" ${(config.taskQueueSettings && config.taskQueueSettings.taskSendRateLimitEnabled !== false) ? 'checked' : ''}>
-              启用
+              ??
             </label>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rate-limit-window-minutes">限速窗口（分钟）</label>
+            <label for="cgpt-autoq-task-rate-limit-window-minutes">????????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-rate-limit-window-minutes" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskSendRateLimitWindowMinutes) || 180))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rate-limit-max-messages">窗口内最多发送条数</label>
+            <label for="cgpt-autoq-task-rate-limit-max-messages">?????????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-rate-limit-max-messages" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskSendRateLimitMaxMessages) || 150))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>限速说明</label>
-            <div class="cgpt-hint">默认 180 分钟最多 150 条，平均约 72 秒/条，低于 3 小时 160 条上限。</div>
+            <label>????</label>
+            <div class="cgpt-hint">?? 180 ???? 150 ????? 72 ?/???? 3 ?? 160 ????</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-upload-rate-limit-enabled">批量上传限速</label>
+            <label for="cgpt-autoq-task-upload-rate-limit-enabled">??????</label>
             <label class="cgpt-checkbox-row">
               <input id="cgpt-autoq-task-upload-rate-limit-enabled" type="checkbox" ${(config.taskQueueSettings && config.taskQueueSettings.taskUploadRateLimitEnabled !== false) ? 'checked' : ''}>
-              启用
+              ??
             </label>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-upload-rate-limit-window-minutes">上传限速窗口（分钟）</label>
+            <label for="cgpt-autoq-task-upload-rate-limit-window-minutes">??????????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-upload-rate-limit-window-minutes" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskUploadRateLimitWindowMinutes) || 180))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-upload-rate-limit-max-files">窗口内最多上传文件数</label>
+            <label for="cgpt-autoq-task-upload-rate-limit-max-files">??????????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-upload-rate-limit-max-files" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskUploadRateLimitMaxFiles) || 80))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>上传限速说明</label>
-            <div class="cgpt-hint">默认 180 分钟最多 80 个文件，平均约 135 秒/文件。自动上传会按剩余额度拆分上传队列。</div>
+            <label>??????</label>
+            <div class="cgpt-hint">?? 180 ???? 80 ??????? 135 ?/????????????????????</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-quota-wait-mode">额度等待策略（额度/限速不足时）</label>
+            <label for="cgpt-autoq-task-quota-wait-mode">?????????/??????</label>
             <select class="cgpt-input" id="cgpt-autoq-task-quota-wait-mode">
               ${(() => {
     const currentMode = normalizeTaskQuotaWaitMode(
       config.taskQueueSettings && config.taskQueueSettings.taskQuotaWaitMode,
     );
     const options = [
-      { value: 'wait_until_available', label: '一直等待直到额度恢复（推荐）' },
-      { value: 'stop_on_limit', label: '额度满立即停止本次批量任务组' },
-      { value: 'wait_max_then_stop', label: '最多等待指定时间后停止' },
+      { value: 'wait_until_available', label: '??????????????' },
+      { value: 'stop_on_limit', label: '??????????????' },
+      { value: 'wait_max_then_stop', label: '???????????' },
     ];
     return options.map((option) => `<option value="${option.value}" ${currentMode === option.value ? 'selected' : ''}>${option.label}</option>`).join('');
   })()}
             </select>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-quota-max-wait-minutes">最多等待时间（分钟）</label>
+            <label for="cgpt-autoq-task-quota-max-wait-minutes">??????????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-quota-max-wait-minutes" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskQuotaMaxWaitMinutes) || 30))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>额度等待说明</label>
-            <div class="cgpt-hint">当上传额度或消息额度不足时，批量任务会进入等待状态并每 30 秒检测一次；当模式为“最多等待后停止”会自动超时终止。</div>
+            <label>??????</label>
+            <div class="cgpt-hint">??????????????????????????? 30 ???????????????????????????</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-auto-upload-enabled">每 N 次自动上传</label>
+            <label for="cgpt-autoq-task-auto-upload-enabled">? N ?????</label>
             <label class="cgpt-checkbox-row">
               <input id="cgpt-autoq-task-auto-upload-enabled" type="checkbox" ${(config.taskQueueSettings && config.taskQueueSettings.taskAutoUploadEveryNMessagesEnabled !== false) ? 'checked' : ''}>
-              启用
+              ??
             </label>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-auto-upload-count-mode">自动上传计数口径</label>
+            <label for="cgpt-autoq-task-auto-upload-count-mode">????????</label>
             <select class="cgpt-input" id="cgpt-autoq-task-auto-upload-count-mode">
               ${(() => {
     const currentCountMode = normalizeTaskAutoUploadCountMode(
       config.taskQueueSettings && config.taskQueueSettings.taskAutoUploadCountMode,
     );
     const options = [
-      { value: 'message', label: '按发送 Prompt 次数（推荐）' },
-      { value: 'taskItem', label: '按任务项序号' },
-      { value: 'assistantAnswer', label: '按助手回答次数' },
+      { value: 'message', label: '??? Prompt ??????' },
+      { value: 'taskItem', label: '??????' },
+      { value: 'assistantAnswer', label: '???????' },
     ];
     return options.map((option) => `<option value="${option.value}" ${currentCountMode === option.value ? 'selected' : ''}>${option.label}</option>`).join('');
   })()}
             </select>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-auto-upload-interval">自动上传间隔</label>
+            <label for="cgpt-autoq-task-auto-upload-interval">??????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-auto-upload-interval" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskAutoUploadEveryNMessages) || 5))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>自动上传说明</label>
-            <div class="cgpt-hint">默认每 5 次发送 Prompt 前上传一次文件，策略为第 1、6、11... 次发送前强制重传。可切换为按任务项序号或按助手回答次数计数。</div>
+            <label>??????</label>
+            <div class="cgpt-hint">??? 5 ??? Prompt ???????????? 1?6?11... ??????????????????????????????</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rotate-new-chat-enabled">页面过长自动换新聊天</label>
+            <label for="cgpt-autoq-task-rotate-new-chat-enabled">??????????</label>
             <label class="cgpt-checkbox-row">
               <input id="cgpt-autoq-task-rotate-new-chat-enabled" type="checkbox" ${(config.taskQueueSettings && config.taskQueueSettings.taskRotateNewChatByPageTurnEnabled !== false) ? 'checked' : ''}>
-              启用
+              ??
             </label>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rotate-new-chat-threshold">换新聊天阈值</label>
+            <label for="cgpt-autoq-task-rotate-new-chat-threshold">??????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-rotate-new-chat-threshold" type="number" data-no-wheel-number="1" min="1" value="${escapeHtml(String((config.taskQueueSettings && config.taskQueueSettings.taskRotateNewChatPageTurnThreshold) || 30))}">
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label for="cgpt-autoq-task-rotate-force-upload">换新聊天后先上传</label>
+            <label for="cgpt-autoq-task-rotate-force-upload">????????</label>
             <label class="cgpt-checkbox-row">
               <input id="cgpt-autoq-task-rotate-force-upload" type="checkbox" ${(config.taskQueueSettings && config.taskQueueSettings.taskRotateForceUploadAfterNewChat !== false) ? 'checked' : ''}>
-              启用
+              ??
             </label>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>换新聊天说明</label>
-            <div class="cgpt-hint">默认当前页面达到 30 轮后，下一次发送前自动切到新聊天，先上传文件，再重新发送当前任务问题，避免长页面卡顿。</div>
+            <label>??????</label>
+            <div class="cgpt-hint">???????? 30 ???????????????????????????????????????????</div>
           </div>
           <div class="cgpt-kv cgpt-autoq-batch-rules-inline-row">
-            <label>限速记录</label>
-            <button type="button" class="cgpt-btn cgpt-btn-secondary" id="cgpt-autoq-task-rate-limit-clear">清空发送限速记录</button>
-            <button type="button" class="cgpt-btn cgpt-btn-secondary" id="cgpt-autoq-task-upload-rate-limit-clear">清空上传限速记录</button>
+            <label>????</label>
+            <button type="button" class="cgpt-btn cgpt-btn-secondary" id="cgpt-autoq-task-rate-limit-clear">????????</button>
+            <button type="button" class="cgpt-btn cgpt-btn-secondary" id="cgpt-autoq-task-upload-rate-limit-clear">????????</button>
           </div>
         </div>`;
 
@@ -9265,21 +9320,21 @@ const AutoQueueModule = (() => {
       const profile = getActiveTaskProfile();
 
       if (!profile) {
-        taskListEl.innerHTML = '<div class="cgpt-hint">暂无任务组</div>';
+        taskListEl.innerHTML = '<div class="cgpt-hint">?????</div>';
         return;
       }
 
       ensureSelectedTaskId(profile);
 
       if (!profile.tasks.length) {
-        taskListEl.innerHTML = '<div class="cgpt-hint">暂无任务，请点击「新增任务」</div>';
+        taskListEl.innerHTML = '<div class="cgpt-hint">??????????????</div>';
         return;
       }
 
       taskListEl.innerHTML = profile.tasks.map((task, index) => {
         const selected = task.id === selectedTaskId ? ' active' : '';
-        const enabledMark = task.enabled ? '' : '（禁用）';
-        const titleText = `${String(task.title || '未命名任务')}${enabledMark}`;
+        const enabledMark = task.enabled ? '' : '????';
+        const titleText = `${String(task.title || '?????')}${enabledMark}`;
         const statusLabel = String(task.status || 'pending');
         const resolved = resolveTaskContinueSettings(task, profile);
         const maxRounds = normalizeContinueRoundLimit(
@@ -9287,7 +9342,7 @@ const AutoQueueModule = (() => {
           UNLIMITED_CONTINUE_ROUNDS,
         );
         const maxRoundsText = formatContinueRoundLimit(maxRounds);
-        const metaText = `${statusLabel} · 继续 ${Number(task.continueCount) || 0}/${maxRoundsText}`;
+        const metaText = `${statusLabel} ? ?? ${Number(task.continueCount) || 0}/${maxRoundsText}`;
         const sourceText = formatTaskListSourceText(task);
         const categoryText = formatTaskListCategoryText(task);
 
@@ -9300,13 +9355,13 @@ const AutoQueueModule = (() => {
           <span class="cgpt-autoq-task-item-category">${escapeHtml(categoryText)}</span>
         </div>
         <div class="cgpt-autoq-task-item-actions">
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="edit" data-task-id="${escapeHtml(task.id)}">编辑</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="top" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>置顶</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="up" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>上移</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="down" data-task-id="${escapeHtml(task.id)}" ${index === profile.tasks.length - 1 ? 'disabled' : ''}>下移</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="bottom" data-task-id="${escapeHtml(task.id)}" ${index === profile.tasks.length - 1 ? 'disabled' : ''}>置底</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="toggle" data-task-id="${escapeHtml(task.id)}">${task.enabled ? '禁用' : '启用'}</button>
-          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="delete" data-task-id="${escapeHtml(task.id)}">删除</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="edit" data-task-id="${escapeHtml(task.id)}">??</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="top" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>??</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="up" data-task-id="${escapeHtml(task.id)}" ${index === 0 ? 'disabled' : ''}>??</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="down" data-task-id="${escapeHtml(task.id)}" ${index === profile.tasks.length - 1 ? 'disabled' : ''}>??</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="bottom" data-task-id="${escapeHtml(task.id)}" ${index === profile.tasks.length - 1 ? 'disabled' : ''}>??</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="toggle" data-task-id="${escapeHtml(task.id)}">${task.enabled ? '??' : '??'}</button>
+          <button type="button" class="cgpt-toolbox-small-btn" data-task-action="delete" data-task-id="${escapeHtml(task.id)}">??</button>
         </div>
       </div>`;
       }).join('');
@@ -9338,7 +9393,7 @@ const AutoQueueModule = (() => {
         const promptLinkState = getPromptTaskLinkState(task);
         const isPromptLinkedTask = promptLinkState.isPromptTask && promptLinkState.linked;
 
-        if (titleEl) task.title = String(titleEl.value || '').trim() || '未命名任务';
+        if (titleEl) task.title = String(titleEl.value || '').trim() || '?????';
         if (initialEl && !isPromptLinkedTask) {
           task.initialPrompt = String(initialEl.value || '');
         }
@@ -9364,7 +9419,7 @@ const AutoQueueModule = (() => {
         const errText = getErrorText(error);
         console.error('[AUTOQ][TASK][SAVE_EDITOR]', error);
         ToolboxShell.appendLog(`[AUTOQ][TASK][SAVE_EDITOR] error=${errText}`);
-        ToolboxShell.setStatus(`保存任务失败：${errText}`);
+        ToolboxShell.setStatus(`???????${errText}`);
       }
     }
 
@@ -9375,7 +9430,7 @@ const AutoQueueModule = (() => {
       const task = getSelectedTask(profile);
 
       if (!task) {
-        taskEditorEl.innerHTML = '<div class="cgpt-hint">请先在任务列表中选择一个任务</div>';
+        taskEditorEl.innerHTML = '<div class="cgpt-hint">??????????????</div>';
         return;
       }
 
@@ -9399,46 +9454,46 @@ const AutoQueueModule = (() => {
       const initialReadonly = isPromptLinkedTask ? ' readonly' : '';
 
       const initialLabelSuffix = isPromptLinkedTask
-        ? '（来自 Prompt 管理，运行前自动同步；如需修改，请到 Prompt 管理中编辑，或先转为独立任务）'
+        ? '??? Prompt ?????????????????? Prompt ???????????????'
         : (isPromptSnapshotTask
-          ? '（原 Prompt 已删除，当前为快照，可直接编辑）'
+          ? '?? Prompt ????????????????'
           : '');
 
       const detachBtnHtml = (isPromptLinkedTask || isPromptSnapshotTask)
-        ? `<button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-detach-prompt">${isPromptLinkedTask ? '转为独立任务' : '解除失效关联'}</button>`
+        ? `<button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-detach-prompt">${isPromptLinkedTask ? '??????' : '??????'}</button>`
         : '';
 
       taskEditorEl.innerHTML = `
         <div class="cgpt-autoq-task-editor-grid">
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
-            <label for="cgpt-autoq-task-title">任务名称</label>
+            <label for="cgpt-autoq-task-title">????</label>
             <input class="cgpt-input" id="cgpt-autoq-task-title" value="${escapeHtml(resolvedInitial.title || task.title)}">
           </div>
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
-            <label for="cgpt-autoq-task-initial">初始指令${escapeHtml(initialLabelSuffix)}</label>
+            <label for="cgpt-autoq-task-initial">????${escapeHtml(initialLabelSuffix)}</label>
             <textarea class="cgpt-textarea cgpt-autoq-task-initial-field" id="cgpt-autoq-task-initial" rows="6"${initialReadonly}>${escapeHtml(initialFieldValue)}</textarea>
           </div>
           <label class="cgpt-checkbox-line cgpt-autoq-task-editor-full">
             <input type="checkbox" id="cgpt-autoq-task-enabled" ${task.enabled ? 'checked' : ''}>
-            启用此任务
+            ?????
           </label>
           <details class="cgpt-autoq-task-advanced cgpt-autoq-task-editor-full" open>
-            <summary class="cgpt-autoq-task-advanced-summary">高级设置</summary>
+            <summary class="cgpt-autoq-task-advanced-summary">????</summary>
             <div class="cgpt-autoq-task-advanced-body">
               <label class="cgpt-checkbox-line cgpt-autoq-task-editor-full">
                 <input type="checkbox" id="cgpt-autoq-task-continue-override" ${hasContinueOverride ? 'checked' : ''}>
-                为此任务单独设置继续指令
+                ????????????
               </label>
               <div class="cgpt-kv cgpt-autoq-task-editor-full cgpt-autoq-task-continue-wrap${hasContinueOverride ? '' : ' cgpt-toolbox-hidden'}">
-                <label for="cgpt-autoq-task-continue">任务级继续指令</label>
+                <label for="cgpt-autoq-task-continue">???????</label>
                 <textarea class="cgpt-textarea" id="cgpt-autoq-task-continue" rows="4">${escapeHtml(task.continuePromptTemplate || '')}</textarea>
               </div>
               <div class="cgpt-kv">
-                <label for="cgpt-autoq-task-done-signal">单独终止信号（留空继承任务组：${escapeHtml(profileDoneSignal)}）</label>
-                <input class="cgpt-input" id="cgpt-autoq-task-done-signal" value="${escapeHtml(task.doneSignal)}" placeholder="留空继承任务组：${escapeHtml(profileDoneSignal)}">
+                <label for="cgpt-autoq-task-done-signal">???????????????${escapeHtml(profileDoneSignal)}?</label>
+                <input class="cgpt-input" id="cgpt-autoq-task-done-signal" value="${escapeHtml(task.doneSignal)}" placeholder="????????${escapeHtml(profileDoneSignal)}">
               </div>
               <div class="cgpt-kv">
-                <label for="cgpt-autoq-task-max-rounds">单独最大继续次数（0 继承任务组：${profileMaxRounds}）</label>
+                <label for="cgpt-autoq-task-max-rounds">?????????0 ??????${profileMaxRounds}?</label>
                 <input class="cgpt-input" id="cgpt-autoq-task-max-rounds" type="number" data-no-wheel-number="1" min="0" value="${Number(task.maxContinueRounds) || 0}">
               </div>
             </div>
@@ -9446,7 +9501,7 @@ const AutoQueueModule = (() => {
         </div>
         <div class="cgpt-row cgpt-autoq-task-editor-actions">
           ${detachBtnHtml}
-          <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-save">保存任务</button>
+          <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-task-save">????</button>
         </div>`;
 
       const detachBtn = qs('#cgpt-autoq-task-detach-prompt', taskEditorEl);
@@ -9461,7 +9516,7 @@ const AutoQueueModule = (() => {
           if (!result || !result.ok) {
             const reason = result && result.reason ? result.reason : 'unknown';
             ToolboxShell.appendLog(`[AUTOQ][PROMPT_TASK][DETACH_FAILED] reason=${reason}`);
-            ToolboxShell.setStatus(`解除关联失败：${reason}`);
+            ToolboxShell.setStatus(`???????${reason}`);
             return;
           }
 
@@ -9469,7 +9524,7 @@ const AutoQueueModule = (() => {
           renderTaskList();
           renderTaskEditor();
           updateStatus();
-          ToolboxShell.setStatus('已转为独立任务，可以直接编辑');
+          ToolboxShell.setStatus('??????????????');
         });
       }
 
@@ -9507,13 +9562,14 @@ const AutoQueueModule = (() => {
       if (saveBtn) {
         bindOnce(saveBtn, 'click', () => {
           readTaskEditorIntoSelected();
-          log(`已保存任务：${task.title}`);
-          ToolboxShell.setStatus(`已保存任务：${task.title}`);
+          log(`??????${task.title}`);
+          ToolboxShell.setStatus(`??????${task.title}`);
         });
       }
     }
 
-    function switchTaskProfile(profileId) {
+    function switchTaskProfile(profileId, options = {}) {
+      const source = String(options && options.source ? options.source : 'profile-chip').trim() || 'profile-chip';
       normalizeTaskProfiles();
 
       const target = config.taskProfiles.find((item) => item.id === profileId);
@@ -9521,18 +9577,32 @@ const AutoQueueModule = (() => {
       if (!target) {
         console.warn('[ChatGPT toolbox] switchTaskProfile: profile not found', profileId);
         ToolboxShell.setStatus('任务组不存在');
+        renderTaskProfiles();
+        return;
+      }
+
+      if (state.running || state.batchTaskRunning || state.waitingReply) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_PROFILE][SWITCH_BLOCKED] id=${target.id} source=${source} running=${state.running ? 1 : 0} batchTaskRunning=${state.batchTaskRunning ? 1 : 0} waitingReply=${state.waitingReply ? 1 : 0}`,
+        );
+        ToolboxShell.setStatus('运行中无法切换任务组');
+        renderTaskProfiles();
         return;
       }
 
       readTaskEditorIntoSelected();
       readTaskProfileDefaultsIntoActive();
       config.activeTaskProfileId = target.id;
-      selectedTaskId = '';
+      selectedTaskId = Array.isArray(target.tasks) && target.tasks[0] ? target.tasks[0].id : '';
       renderTaskProfiles();
       renderTaskList();
       renderTaskEditor();
+      renderTaskProfileDefaults();
       saveConfig();
       updateStatus();
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_PROFILE][SWITCH] id=${target.id} name=${target.name} source=${source} selectedTaskId=${selectedTaskId || '-'}`,
+      );
       ToolboxShell.setStatus(`已切换任务组：${target.name}`);
     }
 
@@ -9559,7 +9629,7 @@ const AutoQueueModule = (() => {
       renderTaskEditor();
       saveConfig();
       updateStatus();
-      ToolboxShell.setStatus(`已新建任务组：${profile.name}`);
+      ToolboxShell.setStatus(`???????${profile.name}`);
     }
 
     function renameActiveTaskProfileInline() {
@@ -9567,19 +9637,19 @@ const AutoQueueModule = (() => {
       const active = getActiveTaskProfile();
 
       if (!active || !taskProfileNameEl) {
-        ToolboxShell.setStatus('当前没有可保存的任务组');
+        ToolboxShell.setStatus('???????????');
         return;
       }
 
       const nextName = String(taskProfileNameEl.value || '').trim();
 
       if (!nextName) {
-        ToolboxShell.setStatus('任务组名称不能为空');
+        ToolboxShell.setStatus('?????????');
         return;
       }
 
       if (config.taskProfiles.some((item) => item.id !== active.id && item.name === nextName)) {
-        ToolboxShell.setStatus('任务组名称已存在');
+        ToolboxShell.setStatus('????????');
         return;
       }
 
@@ -9588,7 +9658,7 @@ const AutoQueueModule = (() => {
       renderTaskProfiles();
       saveConfig();
       updateStatus();
-      ToolboxShell.setStatus(`已保存任务组名称：${active.name}`);
+      ToolboxShell.setStatus(`?????????${active.name}`);
     }
 
     function deleteActiveTaskProfileInline(button) {
@@ -9596,14 +9666,14 @@ const AutoQueueModule = (() => {
       normalizeTaskProfiles();
 
       if (config.taskProfiles.length <= 1) {
-        ToolboxShell.setStatus('至少保留一个任务组');
+        ToolboxShell.setStatus('?????????');
         return;
       }
 
       const active = getActiveTaskProfile();
 
       if (!active) {
-        ToolboxShell.setStatus('当前没有可删除的任务组');
+        ToolboxShell.setStatus('???????????');
         return;
       }
 
@@ -9613,10 +9683,10 @@ const AutoQueueModule = (() => {
         taskProfileDeleteConfirmUntil = now + 3000;
 
         if (button) {
-          button.textContent = '再次点击删除';
+          button.textContent = '??????';
         }
 
-        ToolboxShell.setStatus('再次点击确认删除当前任务组');
+        ToolboxShell.setStatus('?????????????');
         return;
       }
 
@@ -9628,7 +9698,7 @@ const AutoQueueModule = (() => {
       selectedTaskId = '';
 
       if (button) {
-        button.textContent = '删除任务组';
+        button.textContent = '?????';
       }
 
       renderTaskProfiles();
@@ -9636,7 +9706,7 @@ const AutoQueueModule = (() => {
       renderTaskEditor();
       saveConfig();
       updateStatus();
-      ToolboxShell.setStatus(`已删除任务组：${deletedName}`);
+      ToolboxShell.setStatus(`???????${deletedName}`);
     }
 
     function addTaskInline() {
@@ -9647,14 +9717,14 @@ const AutoQueueModule = (() => {
 
         if (!profile) {
           ToolboxShell.appendLog('[AUTOQ][TASK][ADD] failed: no active profile');
-          ToolboxShell.setStatus('新增任务失败：未找到当前任务组');
+          ToolboxShell.setStatus('???????????????');
           return;
         }
 
         const beforeCount = profile.tasks.length;
         const task = createDefaultTaskItem({
           id: createTaskId(),
-          title: `任务 ${beforeCount + 1}`,
+          title: `?? ${beforeCount + 1}`,
         });
 
         profile.tasks.push(task);
@@ -9669,12 +9739,12 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(
           `[AUTOQ][TASK][ADD] profileId=${profile.id} taskId=${task.id} taskTitle=${task.title} beforeCount=${beforeCount} afterCount=${afterCount}`,
         );
-        ToolboxShell.setStatus(`已新增任务：${task.title}`);
+        ToolboxShell.setStatus(`??????${task.title}`);
       } catch (error) {
         const errText = getErrorText(error);
         console.error('[AUTOQ][TASK][ADD]', error);
         ToolboxShell.appendLog(`[AUTOQ][TASK][ADD] error=${errText}`);
-        ToolboxShell.setStatus(`新增任务失败：${errText}`);
+        ToolboxShell.setStatus(`???????${errText}`);
       }
     }
 
@@ -9698,7 +9768,7 @@ const AutoQueueModule = (() => {
       renderTaskEditor();
       saveConfig();
       updateStatus();
-      ToolboxShell.setStatus(`已删除任务：${target.title}`);
+      ToolboxShell.setStatus(`??????${target.title}`);
     }
 
     function getCurrentTaskGroupTasks() {
@@ -9994,7 +10064,7 @@ const AutoQueueModule = (() => {
         renderTaskList();
         renderTaskEditor();
         switchBatchSubTab('current');
-        ToolboxShell.setStatus('已打开任务编辑');
+        ToolboxShell.setStatus('???????');
         return;
       }
 
@@ -10044,43 +10114,43 @@ const AutoQueueModule = (() => {
       if (status === 'uploading') {
         const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && attachSnap.uploadingCount > 0) {
-          return `上传中 ${attachSnap.uploadingCount} 个`;
+          return `??? ${attachSnap.uploadingCount} ?`;
         }
-        return '上传中';
+        return '???';
       }
       if (status === 'done') {
         const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && !attachSnap.hasAnyAttachment) {
-          return `上传完成，成功 ${Number(stats.uploaded) || 0} 个，失败 ${Number(stats.failed) || 0} 个（本轮未检测到附件）`;
+          return `??????? ${Number(stats.uploaded) || 0} ???? ${Number(stats.failed) || 0} ???????????`;
         }
         if (attachSnap && attachSnap.hasReadyAttachment) {
-          return `已加入输入框 ${attachSnap.readyCount} 个`;
+          return `?????? ${attachSnap.readyCount} ?`;
         }
-        return `上传完成，成功 ${Number(stats.uploaded) || 0} 个，失败 ${Number(stats.failed) || 0} 个`;
+        return `??????? ${Number(stats.uploaded) || 0} ???? ${Number(stats.failed) || 0} ?`;
       }
       if (status === 'failed') {
         const reason = String(stats.reason || '').trim();
-        return reason ? `上传失败：${reason}` : '上传失败';
+        return reason ? `?????${reason}` : '????';
       }
       if (status === 'blocked') {
         const reason = String(stats.reason || '').trim();
-        return reason ? `暂不可上传：${reason}` : '暂不可上传';
+        return reason ? `??????${reason}` : '?????';
       }
       if (status === 'no-files') {
-        return '无文件';
+        return '???';
       }
 
       if (status === 'idle' || status === 'cancelled') {
         const attachSnap = resolveAutoQueueAttachmentSnapshot();
         if (attachSnap && attachSnap.hasReadyAttachment) {
-          return `已加入输入框 ${attachSnap.readyCount} 个`;
+          return `?????? ${attachSnap.readyCount} ?`;
         }
         if (attachSnap && !attachSnap.hasAnyAttachment && (state.running || state.batchTaskRunning)) {
-          return '本轮未检测到附件';
+          return '????????';
         }
       }
 
-      return '未上传';
+      return '???';
     }
 
     function resolveAutoQueueUploadTaskState() {
@@ -10159,21 +10229,11 @@ const AutoQueueModule = (() => {
       }
 
       const status = String(state.autoQueueUploadStatus || 'idle').trim().toLowerCase();
-      if (status === 'uploading' || status === 'cancelling') {
+      if (!taskPhase && (status === 'uploading' || status === 'cancelling')) {
         return status;
       }
-      if (status === 'failed') {
+      if (!taskPhase && status === 'failed') {
         return 'failed';
-      }
-
-      if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.getButtonTask === 'function') {
-        const uploadTask = ButtonTasks.getButtonTask('upload');
-        if (uploadTask && uploadTask.phase) {
-          const taskPhase = String(uploadTask.phase || 'idle').trim().toLowerCase();
-          if (taskPhase === 'failed') {
-            return 'failed';
-          }
-        }
       }
 
       return 'idle';
@@ -10294,8 +10354,8 @@ const AutoQueueModule = (() => {
       state.autoQueueUploadStatus = 'uploading';
       logUploadEntry('IMMEDIATE_BUSY', { source: safeSource, buttonId: 'cgpt-autoq-start-upload' });
       if (uploadBtn && typeof setButtonDanger === 'function') {
-        setButtonDanger(uploadBtn, '上传中', {
-          title: '上传中',
+        setButtonDanger(uploadBtn, '???', {
+          title: '???',
           allowCancel: true,
           reason: 'manual-upload-click-immediate',
         });
@@ -10556,7 +10616,7 @@ const AutoQueueModule = (() => {
         maxRaw,
         classifyStatus,
         classifyReason,
-        display: `${continueCount}/${maxText} · 终态 ${classifyStatus}`,
+        display: `${continueCount}/${maxText} ? ?? ${classifyStatus}`,
       };
     }
 
@@ -10582,7 +10642,7 @@ const AutoQueueModule = (() => {
             Math.max(1, Number(taskInfo.progressIndex) || taskDoneCount + 1),
           );
 
-          taskProgress = `${taskCurrentIndex}/${taskTotal}（已完成 ${taskDoneCount}）`;
+          taskProgress = `${taskCurrentIndex}/${taskTotal}???? ${taskDoneCount}?`;
         } else {
           taskCurrentIndex = taskDoneCount;
           taskProgress = `${taskDoneCount}/${taskTotal}`;
@@ -10615,12 +10675,12 @@ const AutoQueueModule = (() => {
         const retryReason = String(state.taskRun.lastSendRetryReason || '-');
         const nextAt = Number(state.taskRun.nextSendRetryAt) || 0;
         const secsLeft = nextAt > 0 ? Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)) : 0;
-        taskStepText = `${taskStepText}；发送重试：第 ${retryCount} 次，原因 ${retryReason}，下次重试 ${secsLeft} 秒后`;
+        taskStepText = `${taskStepText}??????? ${retryCount} ???? ${retryReason}????? ${secsLeft} ??`;
       }
       const messageRateLimitStatus = taskMode ? getTaskSendRateLimitStatus({ logSnapshot: true }) : null;
       const uploadRateLimitStatus = taskMode ? getTaskUploadRateLimitStatus(1, { logSnapshot: true }) : null;
 
-      // 等待额度恢复时：避免“运行中但像卡死”，在当前步骤里给出明确预计恢复时间与策略模式。
+      // ??????????????????????????????????????????
       if (taskMode) {
         const waitingSteps = new Set([
           'quota-wait',
@@ -10645,38 +10705,38 @@ const AutoQueueModule = (() => {
             reasonText = String(quotaCheck && quotaCheck.reason ? quotaCheck.reason : '-');
 
             if (quotaCheck && quotaCheck.ok === false && quotaCheck.reason === 'upload-quota-exceeded') {
-              waitKindText = '上传额度';
+              waitKindText = '????';
               const uploadQuota = getPanelUploadQuotaState({ logSnapshot: false });
               const needed = Math.max(1, Number(quotaCheck.fileCount) || 1);
               const nextReleaseAt = computeNextReleaseAtForQuotaState(uploadQuota, needed);
               waitMs = Math.max(0, nextReleaseAt - now);
             } else if (quotaCheck && quotaCheck.ok === false && quotaCheck.reason === 'message-quota-exceeded') {
-              waitKindText = '消息额度';
+              waitKindText = '????';
               const messageQuota = getPanelMessageQuotaState({ logSnapshot: false });
               const needed = 1;
               const nextReleaseAt = computeNextReleaseAtForQuotaState(messageQuota, needed);
               waitMs = Math.max(0, nextReleaseAt - now);
             }
           } else if (taskStepKey === 'rate-limit-wait') {
-            waitKindText = '消息额度';
+            waitKindText = '????';
             waitMs = Math.max(0, Number(messageRateLimitStatus && messageRateLimitStatus.waitMs) || 0);
           } else if (taskStepKey === 'upload-rate-limit-wait') {
-            waitKindText = '上传额度';
+            waitKindText = '????';
             waitMs = Math.max(0, Number(uploadRateLimitStatus && uploadRateLimitStatus.waitMs) || 0);
           } else if (taskStepKey === 'task-rate-limit-wait') {
-            waitKindText = '消息额度';
+            waitKindText = '????';
             waitMs = Math.max(0, Number(messageRateLimitStatus && messageRateLimitStatus.waitMs) || 0);
           } else if (taskStepKey === 'task-upload-rate-limit-wait') {
-            waitKindText = '上传额度';
+            waitKindText = '????';
             waitMs = Math.max(0, Number(uploadRateLimitStatus && uploadRateLimitStatus.waitMs) || 0);
           }
 
           const waitText = formatDurationForTaskRateLimit(waitMs);
-          const modePart = quotaModeLabel ? `（模式：${quotaModeLabel}）` : '';
+          const modePart = quotaModeLabel ? `????${quotaModeLabel}?` : '';
           if (waitKindText) {
-            taskStepText = `批量任务暂停：等待${waitKindText}恢复，预计 ${waitText} 后可继续 ${modePart}`.trim();
+            taskStepText = `?????????${waitKindText}????? ${waitText} ???? ${modePart}`.trim();
           } else {
-            taskStepText = `批量任务暂停：等待额度恢复（模式：${quotaModeLabel}）`;
+            taskStepText = `?????????????????${quotaModeLabel}?`;
           }
           void reasonText;
         }
@@ -10830,6 +10890,34 @@ const AutoQueueModule = (() => {
       ].join('|');
     }
 
+    function isAutoqOwnedSendTaskSource(sourceText, ownerText) {
+      const foreignMarkers = [
+        'closed-loop',
+        'quick-prompt',
+        'foreground',
+        'upload',
+        'manual-send',
+        'copy-continue',
+        'copy-hotkey',
+        'send-message',
+      ];
+      const haystack = `${String(sourceText || '')}|${String(ownerText || '')}`.trim().toLowerCase();
+      if (!haystack || haystack === '|') {
+        return false;
+      }
+      if (foreignMarkers.some((marker) => haystack.includes(marker))) {
+        return false;
+      }
+      const ownMarkers = ['autoq', 'autoqueue', 'batch', 'task-queue'];
+      return ownMarkers.some((marker) => (
+        haystack === marker
+        || haystack.startsWith(`${marker}:`)
+        || haystack.startsWith(`${marker}-`)
+        || haystack.includes(`|${marker}`)
+        || haystack.includes(`${marker}|`)
+      ));
+    }
+
     function shouldSkipAutoqUnrelatedButtonRefresh(refreshReason = '') {
       const refreshReasonText = String(refreshReason || '').trim();
       const forceRefreshReasons = new Set([
@@ -10899,10 +10987,35 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      // Only block unrelated button refresh when the busy send task is owned by AutoQueue itself.
+      // Foreign send flows (closed-loop / upload / quick-prompt / foreground-catch-up, etc.) must not
+      // prevent AutoQueue buttons from refreshing when AutoQueue is idle.
+      let sendTask = null;
+      if (typeof UploadModule.getSendTaskState === 'function') {
+        try {
+          sendTask = UploadModule.getSendTaskState();
+        } catch (err) {
+          console.error('[ChatGPT toolbox] autoq read sendTaskState failed', err);
+          sendTask = null;
+        }
+      }
+      const sendTaskSourceRaw = sendTask && sendTask.source != null ? String(sendTask.source) : '';
+      const sendTaskOwnerRaw = sendTask && sendTask.owner != null ? String(sendTask.owner) : '';
+      const sendTaskSource = sendTaskSourceRaw.trim().toLowerCase();
+      const sendTaskOwner = sendTaskOwnerRaw.trim().toLowerCase();
+      const isOwnAutoqSendTask = isAutoqOwnedSendTaskSource(sendTaskSource, sendTaskOwner);
+
+      if (isOwnAutoqSendTask) {
+        ToolboxShell.appendLog(
+          `[AUTOQ_BUTTON][SKIP_REFRESH_BY_OWN_SEND_TASK] reason=${refreshReasonText || '-'} sendPhase=${sendPhase} source=${sendTaskSource || '-'} owner=${sendTaskOwner || '-'}`,
+        );
+        return true;
+      }
+
       ToolboxShell.appendLog(
-        `[AUTOQ_BUTTON][SKIP_REFRESH_PAGE_BUSY_ONLY] reason=${refreshReasonText || '-'} sendPhase=${sendPhase}`,
+        `[AUTOQ_BUTTON][NO_SKIP_FOREIGN_SEND_TASK] reason=${refreshReasonText || '-'} sendPhase=${sendPhase} source=${sendTaskSource || '-'} owner=${sendTaskOwner || '-'} autoqRunning=${state.running ? 1 : 0} autoqWaitingReply=${state.waitingReply ? 1 : 0}`,
       );
-      return true;
+      return false;
     }
 
     function updateStatus(refreshReason = '') {
@@ -10972,7 +11085,7 @@ const AutoQueueModule = (() => {
         lastStopReasonText === 'reply-classify-blocked'
         || lastStopReasonText === 'reply-classify-no-more-content'
       )
-        ? `（终态 ${replyClassifyStatus}）`
+        ? `??? ${replyClassifyStatus}?`
         : '';
       const taskStepText = progressSnapshot.taskStepText;
       const messageRateLimit = progressSnapshot.messageRateLimitStatus
@@ -10988,7 +11101,7 @@ const AutoQueueModule = (() => {
         0,
         Number(progressSnapshot.taskTotalSentDialogueCount) || 0,
       );
-      const taskSentDialogueDisplay = `${taskTotalSentDialogueCount} 次`;
+      const taskSentDialogueDisplay = `${taskTotalSentDialogueCount} ?`;
       const sendRetryStepKeys = new Set(['send-wait-retry', 'send-initial-wait-retry']);
       const taskStepKeyForStatus = progressSnapshot.taskStepKey || 'idle';
       const inSendRetry = running && sendRetryStepKeys.has(taskStepKeyForStatus);
@@ -11001,25 +11114,25 @@ const AutoQueueModule = (() => {
         runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS[batchDisplayState]
           || batchDisplayState;
       } else if (phase === AUTO_QUEUE_PHASES.DONE) {
-        runStateText = '已完成';
+        runStateText = '???';
       } else if (phase === AUTO_QUEUE_PHASES.FAILED) {
-        runStateText = '调度异常';
+        runStateText = '????';
       } else if (phase === 'uploading' || state.uploadingFromAutoQueue || state.batchAutoUploading) {
-        runStateText = '上传中';
+        runStateText = '???';
       } else if (phase === 'waiting_reply' || phase === 'reply_ready') {
-        runStateText = '等待回复';
+        runStateText = '????';
       } else if (phase === 'sending' || phase === 'sent') {
-        runStateText = '发送中';
+        runStateText = '???';
       } else if (running) {
         if (inSendRetry) {
-          runStateText = '发送重试中';
+          runStateText = '?????';
         } else if (state.waitingReply) {
-          runStateText = '等待回复';
+          runStateText = '????';
         } else {
-          runStateText = '运行中';
+          runStateText = '???';
         }
       } else {
-        runStateText = '已停止';
+        runStateText = '???';
       }
 
       if (config.promptMode === 'task' && running) {
@@ -11031,12 +11144,12 @@ const AutoQueueModule = (() => {
           'task-upload-rate-limit-wait',
         ]);
         if (waitingSteps.has(taskStepKeyForStatus)) {
-          runStateText = '等待额度恢复';
+          runStateText = '??????';
         } else if (phase === 'uploading' || state.uploadingFromAutoQueue || state.batchAutoUploading) {
           if (taskStepKeyForStatus === 'auto-upload-before-send' && state.batchAutoUploading) {
             setBatchTaskGroupDisplayState('starting_upload', 'phase-initial-auto-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.starting_upload;
-            ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+            ToolboxShell.setStatus('?????????????????????????');
           } else {
             setBatchTaskGroupDisplayState('uploading', 'phase-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.uploading;
@@ -11266,20 +11379,20 @@ const AutoQueueModule = (() => {
     }
 
     function getAutoQueueStartIdleText() {
-      return config.promptMode === 'task' ? '开始批量任务组' : '开始';
+      return config.promptMode === 'task' ? '???????' : '??';
     }
 
     function getAutoQueueSendOnceIdleText() {
       if (config.promptMode !== 'task') {
-        return '发送一次';
+        return '????';
       }
 
       const profile = getActiveTaskProfile();
       const task = getSelectedTask(profile);
 
       return shouldSendTaskContinueFromSendOnce(task, { allowDomProbe: false })
-        ? '继续当前任务一次'
-        : '只发送初始指令一次';
+        ? '????????'
+        : '?????????';
     }
 
     function isAutoQueueWaitingDelay() {
@@ -11304,8 +11417,8 @@ const AutoQueueModule = (() => {
       sendOnceBtn.dataset.cgptIdleText = idleText;
 
       if (phase === 'sending') {
-        setButtonSending(sendOnceBtn, '发送中...', {
-          title: '正在发送一次，请勿重复点击',
+        setButtonSending(sendOnceBtn, '???...', {
+          title: '?????????????',
           allowCancel: false,
           disabled: true,
           reason,
@@ -11314,8 +11427,8 @@ const AutoQueueModule = (() => {
       }
 
       if (phase === 'waiting_reply') {
-        setButtonWaiting(sendOnceBtn, '等待回复', {
-          title: '已发送，等待助手回复',
+        setButtonWaiting(sendOnceBtn, '????', {
+          title: '??????????',
           allowCancel: false,
           disabled: true,
           reason,
@@ -11325,7 +11438,7 @@ const AutoQueueModule = (() => {
 
       if (phase === 'success') {
         setButtonIdle(sendOnceBtn, idleText, {
-          title: '发送一次已完成',
+          title: '???????',
           disabled: false,
           reason,
         });
@@ -11334,8 +11447,8 @@ const AutoQueueModule = (() => {
 
       if (phase === 'failed') {
         const errHint = task.lastError ? String(task.lastError).slice(0, 40) : '';
-        setButtonFailed(sendOnceBtn, errHint ? `失败：${errHint}` : '发送失败', {
-          title: '发送一次失败',
+        setButtonFailed(sendOnceBtn, errHint ? `???${errHint}` : '????', {
+          title: '??????',
           disabled: false,
           reason,
         });
@@ -11343,7 +11456,7 @@ const AutoQueueModule = (() => {
       }
 
       setButtonIdle(sendOnceBtn, idleText, {
-        title: '发送当前模式的第一条指令一次',
+        title: '??????????????',
         reason,
       });
     }
@@ -11463,24 +11576,24 @@ const AutoQueueModule = (() => {
       if (startBtn) {
         startBtn.classList.remove('cgpt-task-running-indicator');
 
-        // 仅手动上传（uploadingFromAutoQueue）时，批量按钮保持空闲态，不与上传按钮重复「上传中」
+        // ??????uploadingFromAutoQueue??????????????????????????
         if (!batchRunning) {
           const assistantBusyForStart = config.promptMode === 'task'
             && isChatGPTActuallyBusyForTaskQueue();
 
           if (phase === AUTO_QUEUE_PHASES.FAILED) {
             setButtonFailed(startBtn, idleStartText, {
-              title: `失败：${phaseStatusText}`,
+              title: `???${phaseStatusText}`,
               disabled: false,
               reason,
             });
           } else if (phase === AUTO_QUEUE_PHASES.DONE) {
-            setButtonIdle(startBtn, idleStartText, { title: '已完成', reason });
+            setButtonIdle(startBtn, idleStartText, { title: '???', reason });
           } else {
             setButtonIdle(startBtn, idleStartText, {
               title: assistantBusyForStart
-                ? '当前可能仍在回答；按钮保持可点击，点击后由启动逻辑判断是否等待或拦截'
-                : '点击开始自动指令队列',
+                ? '??????????????????????????????????'
+                : '??????????',
               disabled: false,
               reason,
             });
@@ -11491,23 +11604,23 @@ const AutoQueueModule = (() => {
           }
         } else {
           if (stopRequested || phase === AUTO_QUEUE_PHASES.CANCELLED) {
-            setButtonDanger(startBtn, '正在停止', {
-              title: '停止请求已提交，可再次点击强制停止',
+            setButtonDanger(startBtn, '????', {
+              title: '?????????????????',
               allowCancel: true,
               disabled: false,
               reason,
             });
           } else if (inStartupUpload) {
             if (inStartupGuard) {
-              setButtonWaiting(startBtn, '正在启动/自动上传…', {
-                title: '正在上传初始附件，短暂防抖以避免误触停止',
+              setButtonWaiting(startBtn, '????/?????', {
+                title: '????????????????????',
                 allowCancel: false,
                 disabled: true,
                 reason,
               });
             } else {
-              setButtonWaiting(startBtn, '上传初始附件', {
-                title: '当前处于启动阶段，可取消启动与自动上传',
+              setButtonWaiting(startBtn, '??????', {
+                title: '???????????????????',
                 allowCancel: true,
                 disabled: false,
                 reason,
@@ -11521,14 +11634,14 @@ const AutoQueueModule = (() => {
             'task-upload-rate-limit-wait',
           ].includes(String(taskStep || '').trim().toLowerCase())) {
             const modeLabel = getTaskQuotaWaitModeLabel();
-            setButtonWaiting(startBtn, '额度等待中', {
-              title: `${phaseStatusText}（模式：${modeLabel}）`,
+            setButtonWaiting(startBtn, '?????', {
+              title: `${phaseStatusText}????${modeLabel}?`,
               allowCancel: true,
               disabled: false,
               reason,
             });
           } else if (phase === AUTO_QUEUE_PHASES.WAITING_REPLY || state.waitingReply) {
-            const waitingReplyText = '等待回复';
+            const waitingReplyText = '????';
             const waitingReplyPhase = getAutoQueueMainButtonVisualState({
               text: waitingReplyText,
               running: !!state.running,
@@ -11538,21 +11651,21 @@ const AutoQueueModule = (() => {
             });
             if (waitingReplyPhase === 'danger') {
               setButtonDanger(startBtn, waitingReplyText, {
-                title: `阶段：${phaseStatusText}`,
+                title: `???${phaseStatusText}`,
                 allowCancel: true,
                 disabled: false,
                 reason,
               });
             } else {
               setButtonWaiting(startBtn, waitingReplyText, {
-                title: `阶段：${phaseStatusText}`,
+                title: `???${phaseStatusText}`,
                 allowCancel: true,
                 disabled: false,
                 reason,
               });
             }
           } else if (isAutoQueueWaitingDelay()) {
-            const waitDelayText = '等待下次发送';
+            const waitDelayText = '??????';
             const waitDelayPhase = getAutoQueueMainButtonVisualState({
               text: waitDelayText,
               running: !!state.running,
@@ -11562,14 +11675,14 @@ const AutoQueueModule = (() => {
             });
             if (waitDelayPhase === 'danger') {
               setButtonDanger(startBtn, waitDelayText, {
-                title: `下次发送：${new Date(state.nextSendAt).toLocaleTimeString()}`,
+                title: `?????${new Date(state.nextSendAt).toLocaleTimeString()}`,
                 allowCancel: true,
                 disabled: false,
                 reason,
               });
             } else {
               setButtonWaiting(startBtn, waitDelayText, {
-                title: `下次发送：${new Date(state.nextSendAt).toLocaleTimeString()}`,
+                title: `?????${new Date(state.nextSendAt).toLocaleTimeString()}`,
                 allowCancel: true,
                 disabled: false,
                 reason,
@@ -11579,15 +11692,15 @@ const AutoQueueModule = (() => {
             phase === AUTO_QUEUE_PHASES.SENDING
             || phase === AUTO_QUEUE_PHASES.SENT
           ) {
-            setButtonSending(startBtn, '发送中', {
-              title: `阶段：${phaseStatusText}`,
+            setButtonSending(startBtn, '???', {
+              title: `???${phaseStatusText}`,
               allowCancel: true,
               disabled: false,
               reason,
             });
           } else {
-            setButtonDanger(startBtn, '停止批量任务组', {
-              title: `阶段：${phaseStatusText}`,
+            setButtonDanger(startBtn, '???????', {
+              title: `???${phaseStatusText}`,
               allowCancel: true,
               disabled: false,
               reason,
@@ -11605,8 +11718,8 @@ const AutoQueueModule = (() => {
         if (state.batchAutoUploading) {
           setToolboxButtonState(startUploadBtn, {
             phase: ButtonState.Phase.DISABLED,
-            text: '批量上传中',
-            title: '批量任务正在自动上传初始附件，普通上传按钮暂不可用',
+            text: '?????',
+            title: '?????????????????????????',
             disabled: true,
             allowCancel: false,
             ariaBusy: false,
@@ -11621,8 +11734,8 @@ const AutoQueueModule = (() => {
             ignoreAutoQueueRunning: true,
           });
         } else {
-          setButtonIdle(startUploadBtn, '开始上传', {
-            title: '只上传/绑定文件，不自动发送',
+          setButtonIdle(startUploadBtn, '????', {
+            title: '???/??????????',
             reason,
           });
         }
@@ -11647,7 +11760,7 @@ const AutoQueueModule = (() => {
           `[BUTTON_RENDER][BATCH_TASK] text=${batchBtnText || '-'} batchTaskRunning=${batchRunning ? 1 : 0} batchAutoUploading=${state.batchAutoUploading ? 1 : 0}`,
         );
       }
-      if (startUploadBtn && uploadBtnText.includes('批量任务运行中')) {
+      if (startUploadBtn && uploadBtnText.includes('???????')) {
         console.error('[BUTTON_COUPLING][UPLOAD_TEXT_POLLUTED]', {
           uploadBtnText,
           batchBtnText,
@@ -11674,7 +11787,7 @@ const AutoQueueModule = (() => {
         const uploadStopLikeButtons = Array.from(root.querySelectorAll('button'))
           .filter((btn) => {
             const text = String(btn.textContent || '');
-            return text.includes('上传中') && !text.includes('自动上传中');
+            return text.includes('???') && !text.includes('?????');
           });
 
         if (uploadStopLikeButtons.length > 1) {
@@ -11713,7 +11826,7 @@ const AutoQueueModule = (() => {
       const prompts = buildQueuePromptsByMode(config.promptMode);
 
       if (!prompts.length) {
-        log('指令为空，无法开始');
+        log('?????????');
         return false;
       }
 
@@ -11787,7 +11900,7 @@ const AutoQueueModule = (() => {
 
       if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
         ToolboxShell.appendLog('[AUTOQ][START_BLOCKED] reason=assistant-busy');
-        ToolboxShell.setStatus('当前 ChatGPT 仍在回答，请等待上一条回答结束后再开始批量任务', 'warning');
+        ToolboxShell.setStatus('?? ChatGPT ???????????????????????', 'warning');
         updateStatus('start-blocked-assistant-busy');
         return;
       }
@@ -11839,13 +11952,13 @@ const AutoQueueModule = (() => {
         if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.onBatchStart === 'function') {
           RuntimeStatsModule.onBatchStart(total);
         }
-        log(`开始运行批量任务组，共 ${total} 条`);
+        log(`??????????? ${total} ?`);
         ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][START] total=${total}`);
         ToolboxShell.appendLog(
           `[AUTO_QUEUE][BATCH_START_CLICK] mode=task group_id=${profile ? profile.id : '-'} `
           + `task_id=${task ? task.id : '-'} task_title=${task ? task.title : '-'}`,
         );
-        ToolboxShell.setStatus('批量任务已启动');
+        ToolboxShell.setStatus('???????');
         state.batchTaskRunning = true;
         state.batchTask.lastActiveAt = Date.now();
         state.batchTask.watchdogRecoverStreak = 0;
@@ -11857,8 +11970,8 @@ const AutoQueueModule = (() => {
           `[BATCH_TASK_STATE][SET] batchTaskRunning=1 manualUploadRunning=${state.manualUploadRunning ? 1 : 0} batchAutoUploading=${state.batchAutoUploading ? 1 : 0}`,
         );
       } else {
-        log(`开始运行，队列 ${state.queue.length} 条`);
-        ToolboxShell.setStatus('自动指令队列已开启');
+        log(`??????? ${state.queue.length} ?`);
+        ToolboxShell.setStatus('?????????');
       }
 
       ensureTicker();
@@ -11933,8 +12046,8 @@ const AutoQueueModule = (() => {
       state.batchTask.stopRequested = true;
       state.batchTask.forceStopRequested = false;
       state.batchTask.stopFinalUploadRunning = true;
-      // 不允许在 composer 仍忙（assistant 正在回答）时立刻触发 uploading。
-      // 先进入 stopping -> waiting_composer_idle，等 composer ready 后才进入 uploading。
+      // ???? composer ???assistant ?????????? uploading?
+      // ??? stopping -> waiting_composer_idle?? composer ready ???? uploading?
       state.batchAutoUploading = false;
       setBatchTaskGroupDisplayState('stopping', 'stop-final-upload-start');
       updateStatus('stop-final-upload-start');
@@ -11944,7 +12057,7 @@ const AutoQueueModule = (() => {
           typeof UploadModule !== 'undefined'
           && typeof UploadModule.startUploadForAutoQueue === 'function'
         ) {
-          // 等待 composer 空闲：避免旧版 input change 路径抢时机 + 误判 native-upload-failed
+          // ?? composer ??????? input change ????? + ?? native-upload-failed
           if (typeof UploadModule.waitChatGPTComposerReadyForUpload === 'function') {
             setBatchTaskGroupDisplayState(
               'waiting_composer_idle',
@@ -12076,18 +12189,18 @@ const AutoQueueModule = (() => {
       }
 
       if (logStop) {
-        log('已停止');
+        log('???');
       }
 
       if (wasRunning && isTaskMode) {
         if (reason === 'all-done') {
-          ToolboxShell.setStatus('全部任务组任务完成');
+          ToolboxShell.setStatus('?????????');
         } else {
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][STOPPED] reason=${reason || 'user-stop'}`);
-          ToolboxShell.setStatus('批量任务组已停止');
+          ToolboxShell.setStatus('????????');
         }
       } else if (wasRunning) {
-        ToolboxShell.setStatus('自动指令队列已停止');
+        ToolboxShell.setStatus('?????????');
       }
 
       if (isTaskMode && state.taskRun && (wasRunning || hasFinalStep)) {
@@ -12135,7 +12248,7 @@ const AutoQueueModule = (() => {
       }
 
       if (shouldFinishAllLoops()) {
-        log('队列已全部完成');
+        log('???????');
         stop();
         return;
       }
@@ -12182,7 +12295,7 @@ const AutoQueueModule = (() => {
           ToolboxShell.appendLog(`[AUTO_QUEUE][BACKGROUND_THROTTLED] action=${actionName}`);
         }
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
-          ToolboxShell.setStatus('页面后台限速中，等待恢复可见后继续', 'warning');
+          ToolboxShell.setStatus('?????????????????', 'warning');
         }
       }
       return true;
@@ -12294,7 +12407,7 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      // 10 秒内未开始 stable send：强制触发恢复。
+      // 10 ????? stable send????????
       if (!options.force && pendingMs >= 10000 && pendingMs < hardTimeoutMs) {
         const sendInProgress = typeof ChatInputStateRuntime !== 'undefined'
           && !!ChatInputStateRuntime
@@ -12328,7 +12441,7 @@ const AutoQueueModule = (() => {
         }
       }
 
-      // 到达硬超时：执行 processing 卡死恢复。
+      // ???????? processing ?????
       if (pendingMs < hardTimeoutMs) {
         return false;
       }
@@ -12351,7 +12464,7 @@ const AutoQueueModule = (() => {
         && expectedInitial
         && isComposerTextMatchingExpectedPrompt(evidence.composerText, expectedInitial);
 
-      // 只有附件、没有本轮 prompt：回到 initial 并重写 prompt。
+      // ????????? prompt??? initial ??? prompt?
       if (evidence.hasAttachment && evidence.textLen <= 0) {
         ToolboxShell.appendLog(
           `[AUTOQ][PROCESSING_STALE_RECOVER_RETRY] kind=initial task=${task.title || '-'} pendingMs=${pendingMs} `
@@ -12382,7 +12495,7 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      // 附件 + 本轮 prompt，且发送按钮可用：直接用 sendExistingComposer 发送。
+      // ?? + ?? prompt???????????? sendExistingComposer ???
       if (evidence.hasAttachment && hasExpectedPrompt && evidence.sendButtonEnabled) {
         ToolboxShell.appendLog(
           `[AUTOQ][PROCESSING_STALE_RECOVER_RETRY] kind=initial task=${task.title || '-'} pendingMs=${pendingMs} `
@@ -12442,7 +12555,7 @@ const AutoQueueModule = (() => {
                 updateChatInputStateBadge();
               }
             } else {
-              // 发送失败：回到 initial，交给正常写入链路重试。
+              // ??????? initial????????????
               run.pendingSendKind = 'initial';
               run.pendingSendStartedAt = 0;
               run.lastPendingSendKindBeforeProcessing = 'initial';
@@ -12489,7 +12602,7 @@ const AutoQueueModule = (() => {
         return true;
       }
 
-      // payload 残留/非当前 prompt：回到 initial 重写 prompt。
+      // payload ??/??? prompt??? initial ?? prompt?
       ToolboxShell.appendLog(
         `[AUTOQ][PROCESSING_STALE_RECOVER_RETRY] kind=initial task=${task.title || '-'} pendingMs=${pendingMs} `
         + `currentStep=${currentStep} action=replace-prompt`,
@@ -12594,7 +12707,7 @@ const AutoQueueModule = (() => {
         }
 
         if (state.waitingStartedAt && waitedMs >= maxWaitMs) {
-          log(`等待回复超时，继续下一条：${Math.round(waitedMs / 1000)}s`);
+          log(`?????????????${Math.round(waitedMs / 1000)}s`);
           state.waitingReply = false;
           state.replyBecameBusy = false;
           state.idleSince = 0;
@@ -12712,14 +12825,14 @@ const AutoQueueModule = (() => {
       const seconds = totalSeconds % 60;
 
       if (hours > 0) {
-        return `${hours}小时${minutes}分${seconds}秒`;
+        return `${hours}??${minutes}?${seconds}?`;
       }
 
       if (minutes > 0) {
-        return `${minutes}分${seconds}秒`;
+        return `${minutes}?${seconds}?`;
       }
 
-      return `${seconds}秒`;
+      return `${seconds}?`;
     }
 
     function normalizeTaskQuotaWaitMode(raw) {
@@ -12757,19 +12870,19 @@ const AutoQueueModule = (() => {
     function getTaskQuotaWaitModeLabel() {
       const cfg = getTaskQuotaWaitModeConfig();
       if (cfg.mode === 'wait_until_available') {
-        return 'wait_until_available（一直等待）';
+        return 'wait_until_available??????';
       }
       if (cfg.mode === 'stop_on_limit') {
-        return 'stop_on_limit（额度满立即停止）';
+        return 'stop_on_limit?????????';
       }
       if (cfg.mode === 'wait_max_then_stop') {
-        return `wait_max_then_stop（最多${cfg.maxWaitMinutes}分钟后停止）`;
+        return `wait_max_then_stop???${cfg.maxWaitMinutes}??????`;
       }
-      return `wait_until_available（一直等待）`;
+      return `wait_until_available??????`;
     }
 
     function computeNextReleaseAtForQuotaState(quotaState, neededCount = 1) {
-      // quotaState.records 里每条记录一般包含 ts/tsMs 和 count（count=上传文件数或1）
+      // quotaState.records ????????? ts/tsMs ? count?count=??????1?
       const quota = quotaState || {};
       const records = Array.isArray(quota.records) ? quota.records.slice() : [];
       const windowMs = Math.max(0, Number(quota.windowMs) || 0);
@@ -12795,7 +12908,7 @@ const AutoQueueModule = (() => {
         }
       }
 
-      // 理论上不会走到这里，但兜底返回 0 表示无法估算
+      // ??????????????? 0 ??????
       return 0;
     }
 
@@ -12869,7 +12982,7 @@ const AutoQueueModule = (() => {
       const records = Array.isArray(quota.records) ? quota.records : [];
 
       if (!settings.enabled) {
-        const sendDisplay = `${used}/${max}，可发送`;
+        const sendDisplay = `${used}/${max}????`;
 
         return {
           enabled: false,
@@ -12887,7 +13000,7 @@ const AutoQueueModule = (() => {
       }
 
       if (canSend) {
-        const sendDisplay = `${used}/${max}，可发送`;
+        const sendDisplay = `${used}/${max}????`;
 
         return {
           enabled: true,
@@ -12922,7 +13035,7 @@ const AutoQueueModule = (() => {
         windowMinutes: settings.windowMinutes,
         records,
         source: quota.source || 'message-quota',
-        display: `${used}/${max}，等待 ${formatDurationForTaskRateLimit(waitMs)}`,
+        display: `${used}/${max}??? ${formatDurationForTaskRateLimit(waitMs)}`,
       };
     }
 
@@ -12959,7 +13072,7 @@ const AutoQueueModule = (() => {
         const uploadRemaining = quotaCheck.uploadRemaining ?? '-';
         const messageRemaining = quotaCheck.messageRemaining ?? '-';
 
-        // 估算：下一次能满足“当前任务所需额度”的释放时间点。
+        // ??????????????????????????
         let nextReleaseAt = 0;
         let waitText = '-';
         if (quotaCheck.reason === 'upload-quota-exceeded') {
@@ -12980,7 +13093,7 @@ const AutoQueueModule = (() => {
           + `mode=${mode}`,
         );
 
-        // stop_on_limit：直接停止，不进入等待循环
+        // stop_on_limit?????????????
         if (mode === 'stop_on_limit') {
           setTaskBatchStep('quota-wait', task || getCurrentRunningTask(), { log: false });
           updateStatus('quota-wait');
@@ -13061,7 +13174,7 @@ const AutoQueueModule = (() => {
         const nextReleaseAt = now + waitMs;
         const waitText = formatDurationForTaskRateLimit(waitMs);
 
-        // stop_on_limit：额度/限速到不了就直接停，不继续等待
+        // stop_on_limit???/???????????????
         if (mode === 'stop_on_limit') {
           touchBatchTaskGroupActivity('rate-limit-stop-on-limit');
           return {
@@ -13071,7 +13184,7 @@ const AutoQueueModule = (() => {
         }
 
         setTaskBatchStep('rate-limit-wait', getCurrentRunningTask(), { log: false });
-        ToolboxShell.setStatus(`批量任务组发送限速中：${status.display}`);
+        ToolboxShell.setStatus(`???????????${status.display}`);
 
         state.taskRateLimitLastLogAt = now;
         ToolboxShell.appendLog(
@@ -13153,7 +13266,7 @@ const AutoQueueModule = (() => {
       const need = Math.max(1, Math.floor(Number(neededCount) || 1));
 
       if (!settings.enabled) {
-        const uploadDisplay = `${used}/${max}，可上传 ${remaining} 个`;
+        const uploadDisplay = `${used}/${max}???? ${remaining} ?`;
 
         return {
           enabled: false,
@@ -13172,7 +13285,7 @@ const AutoQueueModule = (() => {
       }
 
       if (canUpload) {
-        const uploadDisplay = `${used}/${max}，可上传 ${remaining} 个`;
+        const uploadDisplay = `${used}/${max}???? ${remaining} ?`;
 
         return {
           enabled: true,
@@ -13209,7 +13322,7 @@ const AutoQueueModule = (() => {
         windowMinutes: settings.windowMinutes,
         records,
         source: quota.source || 'upload-quota',
-        display: `${used}/${max}，等待 ${formatDurationForTaskRateLimit(waitMs)}`,
+        display: `${used}/${max}??? ${formatDurationForTaskRateLimit(waitMs)}`,
       };
     }
 
@@ -13254,7 +13367,7 @@ const AutoQueueModule = (() => {
         const nextReleaseAt = now + waitMs;
         const waitText = formatDurationForTaskRateLimit(waitMs);
 
-        // stop_on_limit：额度/限速到不了就直接停，不继续等待
+        // stop_on_limit???/???????????????
         if (mode === 'stop_on_limit') {
           touchBatchTaskGroupActivity('task-upload-rate-limit-stop-on-limit');
           return {
@@ -13264,7 +13377,7 @@ const AutoQueueModule = (() => {
         }
 
         setTaskBatchStep('upload-rate-limit-wait', getCurrentRunningTask(), { log: false });
-        ToolboxShell.setStatus(`批量任务组上传限速中：${status.display}`);
+        ToolboxShell.setStatus(`???????????${status.display}`);
 
         state.taskUploadRateLimitLastLogAt = now;
         ToolboxShell.appendLog(
@@ -13777,7 +13890,7 @@ const AutoQueueModule = (() => {
       }
 
       setTaskBatchStep('send-initial', getCurrentRunningTask(), { log: false });
-      ToolboxShell.setStatus('正在发送初始指令…');
+      ToolboxShell.setStatus('?????????');
       ToolboxShell.appendLog('[AUTO_QUEUE][BATCH][INITIAL_SEND_START]');
 
       {
@@ -13914,7 +14027,7 @@ const AutoQueueModule = (() => {
       const safeSendKind = String(sendKind || 'initial');
 
       if (!prompt) {
-        log('任务指令为空，跳过发送');
+        log('???????????');
         return { ok: false, reason: 'empty-prompt' };
       }
 
@@ -13935,9 +14048,9 @@ const AutoQueueModule = (() => {
       state.sendingNow = true;
 
       try {
-        // 自动上传后的关键顺序校验：
-        // 1) 输入框若只有附件（textLen=0），必须记录并确保后续流程重写 prompt + 发送。
-        // 2) 上传后附件若仍在 processing，则先 waitAttachmentsStableForSend，再进入 unified 发送链路。
+        // ?????????????
+        // 1) ?????????textLen=0??????????????? prompt + ???
+        // 2) ???????? processing??? waitAttachmentsStableForSend???? unified ?????
         const task = getCurrentRunningTask();
         const taskTitle = task && task.title ? task.title : '-';
         const composerTextTrimmed = typeof ComposerApi.getComposerText === 'function'
@@ -14025,8 +14138,8 @@ const AutoQueueModule = (() => {
           }
 
           const failLabel = reason === 'send_button_not_found'
-            ? '发送失败：找不到可用发送按钮'
-            : `发送失败：${reason}`;
+            ? '??????????????'
+            : `?????${reason}`;
           log(failLabel);
           ToolboxShell.appendLog(`${logTag} failed reason=${reason}`);
           ToolboxShell.appendLog(`[AUTO_QUEUE][BATCH][INITIAL_SEND_FAILED] reason=${reason}`);
@@ -14060,7 +14173,7 @@ const AutoQueueModule = (() => {
         setTaskBatchStep('wait-initial-reply', runningTask, { log: false });
         ToolboxShell.appendLog(`${logTag} task=${runningTask ? runningTask.title : '-'}`);
         ToolboxShell.appendLog('[AUTOQ][TASK][WAIT_REPLY]');
-        log(`已发送：${prompt.slice(0, 80)}`);
+        log(`????${prompt.slice(0, 80)}`);
         updateStatus();
         updateChatInputStateBadge();
         return sendResult;
@@ -14075,8 +14188,8 @@ const AutoQueueModule = (() => {
           ? 'verification'
           : (safeSendKind === 'continue' ? null : 'initial');
         setTaskBatchStep('send-initial-failed', getCurrentRunningTask(), { log: false });
-        log(`发送异常：${errText}`);
-        ToolboxShell.setStatus(`发送失败：${errText}`, 'error');
+        log(`?????${errText}`);
+        ToolboxShell.setStatus(`?????${errText}`, 'error');
         ToolboxShell.appendLog(`${logTag} error=${errText}`);
         ToolboxShell.appendLog(`[AUTO_QUEUE][BATCH][INITIAL_SEND_FAILED] reason=${errText}`);
         return { ok: false, reason: errText };
@@ -14315,14 +14428,14 @@ const AutoQueueModule = (() => {
         const initial = String(resolvedInitial.initialPrompt || '').trim();
 
         if (currentTask.sourceType === 'prompt-manager' && currentTask.promptId && !initial) {
-          log(`任务「${currentTask.title}」关联的 Prompt 不存在或内容为空`);
+          log(`???${currentTask.title}???? Prompt ????????`);
           markTaskStatus(currentTask, 'failed');
           void moveToNextTask('prompt-missing-initial', { skipGate: true }).catch(handleMoveToNextTaskError);
           return;
         }
 
         if (!initial) {
-          log(`任务「${currentTask.title}」缺少初始指令，跳过`);
+          log(`???${currentTask.title}??????????`);
           markTaskStatus(currentTask, 'skipped');
           void moveToNextTask('initial-empty-skip', { skipGate: true }).catch(handleMoveToNextTaskError);
           return;
@@ -14404,7 +14517,7 @@ const AutoQueueModule = (() => {
                 `[AUTOQ][TASK_BATCH][SEND_FAILED] phase=initial task=${currentTask.title} reason=${reason}`,
               );
               ToolboxShell.appendLog(`[AUTO_QUEUE][BATCH_INITIAL_SEND_FAILED] reason=${reason}`);
-              log(`批量任务组初始指令发送失败：${reason}`);
+              log(`??????????????${reason}`);
               handleTaskInitialSendFailure(reason);
               return;
             }
@@ -14478,7 +14591,7 @@ const AutoQueueModule = (() => {
           return;
         }
         if (!sendResult.ok) {
-          log(`发送失败：${sendResult.reason || 'unknown'}`);
+          log(`?????${sendResult.reason || 'unknown'}`);
           setAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, sendResult.reason || 'send-failed');
           return;
         }
@@ -14491,13 +14604,13 @@ const AutoQueueModule = (() => {
         state.replyBecameBusy = false;
         state.idleSince = 0;
         state.waitingStartedAt = Date.now();
-        log(`已发送：${prompt.slice(0, 80)} reason=${sendResult.reason || '-'}`);
+        log(`????${prompt.slice(0, 80)} reason=${sendResult.reason || '-'}`);
         updateStatus();
         updateChatInputStateBadge();
       }).catch((err) => {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] auto queue send failed', err);
-        log(`发送异常：${errText}`);
+        log(`?????${errText}`);
       }).finally(() => {
         state.sendingNow = false;
       });
@@ -14566,7 +14679,7 @@ const AutoQueueModule = (() => {
         updateStatus();
       } catch (e) {
         console.warn('[ChatGPT toolbox] auto queue tick failed', e);
-        log(`运行异常：${e && e.message ? e.message : String(e)}`);
+        log(`?????${e && e.message ? e.message : String(e)}`);
         if (config.promptMode === 'task' && (state.running || state.waitingReply)) {
           recoverBatchTaskGroup(getBatchTaskGroupRunId(), `tick-error:${e && e.message ? e.message : String(e)}`, {
             clearStepRunning: true,
@@ -14615,7 +14728,7 @@ const AutoQueueModule = (() => {
 
     async function sendTaskInitialOnce() {
       if (state.running) {
-        log('批量任务组运行中，请先停止再使用「只发送初始指令一次」');
+        log('???????????????????????????');
         return false;
       }
 
@@ -14625,7 +14738,7 @@ const AutoQueueModule = (() => {
       const task = getSelectedTask(profile);
 
       if (!task) {
-        log('请先选择任务');
+        log('??????');
         return false;
       }
 
@@ -14633,12 +14746,12 @@ const AutoQueueModule = (() => {
       const initial = String(resolvedInitial.initialPrompt || '').trim();
 
       if (task.sourceType === 'prompt-manager' && task.promptId && !initial) {
-        log('关联的 Prompt 不存在或内容为空，无法发送');
+        log('??? Prompt ?????????????');
         return false;
       }
 
       if (!initial) {
-        log('初始指令为空，无法发送');
+        log('???????????');
         return false;
       }
 
@@ -14656,7 +14769,7 @@ const AutoQueueModule = (() => {
         );
 
         if (!sendResult.ok) {
-          log(`发送失败：${sendResult.reason || 'unknown'}`);
+          log(`?????${sendResult.reason || 'unknown'}`);
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_SINGLE][SEND_INITIAL_ONLY] failed task=${task.title} reason=${sendResult.reason || 'unknown'}`,
           );
@@ -14674,12 +14787,12 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_SINGLE][INITIAL_MARK_SENT] task=${task.title} manualInitialSentAt=${task.manualInitialSentAt}`,
         );
 
-        log(`已发送初始指令（仅一次）：${initial.slice(0, 80)}`);
+        log(`?????????????${initial.slice(0, 80)}`);
         return true;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] send task initial once failed', err);
-        log(`发送异常：${errText}`);
+        log(`?????${errText}`);
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_SINGLE][SEND_INITIAL_ONLY] error task=${task.title} error=${errText}`,
         );
@@ -14768,7 +14881,7 @@ const AutoQueueModule = (() => {
 
     async function sendTaskContinueOnce() {
       if (state.running) {
-        log('批量任务组运行中，请先停止再手动发送继续指令');
+        log('??????????????????????');
         return false;
       }
 
@@ -14778,7 +14891,7 @@ const AutoQueueModule = (() => {
       const task = getSelectedTask(profile);
 
       if (!task) {
-        log('请先选择任务');
+        log('??????');
         return false;
       }
 
@@ -14786,13 +14899,13 @@ const AutoQueueModule = (() => {
       const prompt = String(built.prompt || '').trim();
 
       if (!prompt) {
-        log('继续指令为空，无法发送');
+        log('???????????');
         ToolboxShell.appendLog(`[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][FAILED] task=${task.title} reason=empty-continue-prompt`);
         return false;
       }
 
       if (state.sendingNow) {
-        log('正在发送中，请稍候');
+        log('?????????');
         return false;
       }
 
@@ -14810,7 +14923,7 @@ const AutoQueueModule = (() => {
 
         if (!sendResult || sendResult.ok !== true) {
           const reason = String((sendResult && sendResult.reason) || 'unknown');
-          log(`发送继续指令失败：${reason}`);
+          log(`?????????${reason}`);
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][FAILED] task=${task.title} reason=${reason}`,
           );
@@ -14827,7 +14940,7 @@ const AutoQueueModule = (() => {
         renderTaskList();
         renderTaskEditor();
 
-        log(`已发送继续指令（仅一次）：${prompt.slice(0, 80)}`);
+        log(`?????????????${prompt.slice(0, 80)}`);
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][DONE] task=${task.title} continueCount=${task.continueCount}`,
         );
@@ -14836,7 +14949,7 @@ const AutoQueueModule = (() => {
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] send task continue once failed', err);
-        log(`发送继续指令异常：${errText}`);
+        log(`?????????${errText}`);
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_SINGLE][SEND_CONTINUE_ONLY][ERROR] task=${task.title} error=${errText}`,
         );
@@ -14910,7 +15023,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(
           `[AUTOQ][SEND_ONCE][WAIT_RETRY] reason=${reason} retryCount=${retryCount} delayMs=${delayMs}`,
         );
-        ToolboxShell.setStatus(`发送暂不可用，继续重试：${reason}`);
+        ToolboxShell.setStatus(`????????????${reason}`);
 
         await sleepMs(delayMs);
       }
@@ -14939,24 +15052,24 @@ const AutoQueueModule = (() => {
 
     function getContinueUntilDonePromptText() {
       return [
-        '请继续完成上一个任务。',
+        '???????????',
         '',
-        '你现在必须和“最开始的任务要求”进行对照判断。',
+        '???????????????????????',
         '',
-        '停止规则：',
-        '1. 只有当你能明确确认最开始的任务目标已经完整完成，所有要求都已经覆盖，没有剩余内容、遗漏检查项、遗漏代码、遗漏结论、遗漏 Cursor 指令时，才允许停止。',
-        '2. 如果已经完整完成，只能回复下面这一行，不能有任何其他文字：',
+        '?????',
+        '1. ??????????????????????????????????????????????????????????? Cursor ??????????',
+        '2. ?????????????????????????????',
         '{{DONE_SIGNAL}}',
         '',
-        '继续规则：',
-        '1. 如果还有任何未完成、未覆盖、未输出完、被截断、代码块未闭合、列表未完成、编号未结束的内容，必须继续输出。',
-        '2. 如果不确定是否已经完整完成，必须继续输出，不能回复终止信号。',
-        '3. 不要重复已经输出过的内容。',
-        '4. 不要重新开始整个任务。',
-        '5. 不要扩展到新任务。',
-        '6. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。',
+        '?????',
+        '1. ????????????????????????????????????????????????????',
+        '2. ??????????????????????????????',
+        '3. ?????????????',
+        '4. ???????????',
+        '5. ?????????',
+        '6. ?????????????????????????',
         '',
-        '请直接继续输出剩余内容。',
+        '????????????',
       ].join('\n');
     }
 
@@ -15070,7 +15183,7 @@ const AutoQueueModule = (() => {
         `[UPLOAD_AUTO_CONTINUE_UNTIL_DONE][toggle-start] source=${tag} phase=${uiAfter.phase} loop=1 maxLoop=unlimited strictDone=1`,
       );
 
-      ToolboxShell.setStatus('自动继续直到完成已开启，检测到严格终止信号后停止', 'success');
+      ToolboxShell.setStatus('????????????????????????', 'success');
 
       return Object.assign({ ok: true, toggled: 'start', strictDone: true }, uiAfter);
     }
@@ -15079,7 +15192,7 @@ const AutoQueueModule = (() => {
       readPanelConfig();
 
       if (state.sendOnceTask && state.sendOnceTask.phase !== 'idle') {
-        log('发送一次正在执行，请稍候');
+        log('????????????');
         ToolboxShell.appendLog(
           `[AUTOQ][SEND_ONCE][IGNORED] phase=${state.sendOnceTask.phase}`,
         );
@@ -15106,26 +15219,26 @@ const AutoQueueModule = (() => {
             ? await sendTaskContinueOnce()
             : await sendTaskInitialOnce();
           if (ok) {
-            flashSendOnceThenIdle('success', '已发送');
+            flashSendOnceThenIdle('success', '???');
           } else {
-            flashSendOnceThenIdle('failed', '发送失败', 1400);
+            flashSendOnceThenIdle('failed', '????', 1400);
           }
           return ok;
         } catch (err) {
           const errText = err && err.message ? err.message : String(err);
           console.error('[AUTOQ][SEND_ONCE][TASK_FAILED]', err);
           setSendOnceTaskPhase('failed', { lastError: errText });
-          flashSendOnceThenIdle('failed', '发送失败', 1400);
+          flashSendOnceThenIdle('failed', '????', 1400);
           return false;
         }
       }
 
       const prompts = buildQueuePromptsByMode(config.promptMode);
-      const prompt = prompts[0] || '继续';
+      const prompt = prompts[0] || '??';
       const source = 'auto-queue-send-once';
 
       if (state.sendingNow) {
-        log('正在发送中，请稍候');
+        log('?????????');
         return false;
       }
 
@@ -15140,25 +15253,25 @@ const AutoQueueModule = (() => {
 
         if (sendResult && sendResult.ok === true) {
           const doneReason = String(sendResult.reason || 'ok');
-          log(`手动发送成功：${prompt.slice(0, 80)}`);
+          log(`???????${prompt.slice(0, 80)}`);
           ToolboxShell.appendLog(`[AUTOQ][SEND_ONCE][DONE] reason=${doneReason}`);
-          flashSendOnceThenIdle('success', '已发送');
+          flashSendOnceThenIdle('success', '???');
           return true;
         }
 
         const failReason = String((sendResult && sendResult.reason) || 'unknown');
-        log(`手动发送失败：${failReason}`);
+        log(`???????${failReason}`);
         ToolboxShell.appendLog(`[AUTOQ][SEND_ONCE][FAILED] reason=${failReason}`);
         setSendOnceTaskPhase('failed', { lastError: failReason });
-        flashSendOnceThenIdle('failed', '发送失败', 1400);
+        flashSendOnceThenIdle('failed', '????', 1400);
         return false;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] triggerContinueOnce failed', err);
         ToolboxShell.appendLog(`[AUTOQ][SEND_ONCE][FAILED] reason=exception error=${errText}`);
-        log(`发送异常：${errText}`);
+        log(`?????${errText}`);
         setSendOnceTaskPhase('failed', { lastError: errText });
-        flashSendOnceThenIdle('failed', '发送失败', 1400);
+        flashSendOnceThenIdle('failed', '????', 1400);
         return false;
       } finally {
         state.sendingNow = false;
@@ -15217,6 +15330,36 @@ const AutoQueueModule = (() => {
       });
     }
 
+    function isElementIntentionallyHidden(el) {
+      if (!el || !(el instanceof Element)) {
+        return true;
+      }
+      if (el.hidden) {
+        return true;
+      }
+      if (el.classList && el.classList.contains('cgpt-toolbox-hidden')) {
+        return true;
+      }
+      const hiddenAncestor = el.closest('[hidden], .cgpt-toolbox-hidden');
+      if (hiddenAncestor && hiddenAncestor !== el) {
+        return true;
+      }
+      let node = el;
+      while (node && node instanceof Element) {
+        try {
+          const style = window.getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return true;
+          }
+        } catch (err) {
+          console.error('[ChatGPT toolbox] isElementIntentionallyHidden style read failed', err);
+          break;
+        }
+        node = node.parentElement;
+      }
+      return false;
+    }
+
     function logAutoQueueUploadButtonReady(reason = '') {
       const why = String(reason || '-');
       const btn = root ? qs('#cgpt-autoq-start-upload', root) : null;
@@ -15247,8 +15390,9 @@ const AutoQueueModule = (() => {
       );
 
       if (zeroRect) {
-        const isIntentionallyHidden = btn.classList.contains('cgpt-toolbox-hidden');
-        if (!isIntentionallyHidden) {
+        if (isElementIntentionallyHidden(btn)) {
+          ToolboxShell.appendLog('[AUTOQ][UPLOAD_BUTTON_READY][INFO] reason=zero-rect-hidden');
+        } else {
           ToolboxShell.appendLog('[AUTOQ][UPLOAD_BUTTON_READY][WARN] reason=zero-rect');
         }
       }
@@ -15295,7 +15439,7 @@ const AutoQueueModule = (() => {
         console.error('[BATCH_TASK_BUTTON][START_CALL_ERROR]', error);
         ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][START_CALL_ERROR] ${message}`);
         if (typeof ToolboxShell.setStatus === 'function') {
-          ToolboxShell.setStatus('启动批量任务失败，请查看日志', 'error');
+          ToolboxShell.setStatus('??????????????', 'error');
         }
         updateStatus('batch-start-error');
       }
@@ -15377,7 +15521,7 @@ const AutoQueueModule = (() => {
         console.error('[BATCH_TASK_BUTTON][CLICK_HANDLER_ERROR]', error);
         ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_HANDLER_ERROR] source=${source || '-'} error=${message}`);
         if (typeof ToolboxShell.setStatus === 'function') {
-          ToolboxShell.setStatus('启动批量任务失败，请查看日志', 'error');
+          ToolboxShell.setStatus('??????????????', 'error');
         }
         updateStatus('batch-task-click-handler-error');
       }
@@ -15559,7 +15703,7 @@ const AutoQueueModule = (() => {
           config.continuePromptsText = '';
           saveConfig();
           refreshPromptTextareaForMode('continue');
-          log('已恢复默认继续指令');
+          log('?????????');
           ToolboxShell.appendLog('[AUTOQ][continue-prompt-reset-defaults]');
         });
       }
@@ -15650,14 +15794,14 @@ const AutoQueueModule = (() => {
       btn.className = 'cgpt-btn cgpt-btn-idle';
       btn.id = 'cgpt-autoq-start-upload';
       syncAutoQueueStartUploadButtonMeta(btn);
-      btn.textContent = '开始上传';
+      btn.textContent = '????';
       actionsEl.insertBefore(btn, batchStartBtn);
       return btn;
     }
 
     function mount(targetHost) {
       if (!targetHost) {
-        console.error('[ChatGPT toolbox] AutoQueueModule.mount: targetHost 为空');
+        console.error('[ChatGPT toolbox] AutoQueueModule.mount: targetHost ??');
         ToolboxShell.appendLog('[AUTOQ][mount-failed] targetHost empty');
         return;
       }
@@ -15700,9 +15844,9 @@ const AutoQueueModule = (() => {
       root.innerHTML = `
         <div class="cgpt-section cgpt-autoq-section">
           <div class="cgpt-autoq-mode-tabs">
-            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'continue' ? ' active' : ''}" data-autoq-mode="continue">继续模式</button>
-            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'list' ? ' active' : ''}" data-autoq-mode="list">列表模式</button>
-            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'task' ? ' active' : ''}" data-autoq-mode="task">批量任务</button>
+            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'continue' ? ' active' : ''}" data-autoq-mode="continue">????</button>
+            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'list' ? ' active' : ''}" data-autoq-mode="list">????</button>
+            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'task' ? ' active' : ''}" data-autoq-mode="task">????</button>
           </div>
 
           <div class="cgpt-autoq-main-lite" id="cgpt-autoq-main-lite"></div>
@@ -15710,72 +15854,72 @@ const AutoQueueModule = (() => {
           <div class="cgpt-autoq-list-panel${config.promptMode === 'list' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-list-panel">
             <div class="cgpt-autoq-list-header">
               <div class="cgpt-autoq-list-profile-chips" id="cgpt-autoq-list-profile-chips"></div>
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-list-new">新建列表</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-list-new">????</button>
             </div>
 
             <div class="cgpt-autoq-list-name-row">
-              <input class="cgpt-input" id="cgpt-autoq-list-name" placeholder="列表名称">
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-list-save-name">保存名称</button>
-              <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-autoq-list-delete">删除列表</button>
+              <input class="cgpt-input" id="cgpt-autoq-list-name" placeholder="????">
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-list-save-name">????</button>
+              <button type="button" class="cgpt-toolbox-small-btn danger" id="cgpt-autoq-list-delete">????</button>
             </div>
           </div>
 
           <div class="cgpt-autoq-task-panel${config.promptMode === 'task' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-task-panel">
             <div class="cgpt-autoq-batch-subtabs" id="cgpt-autoq-batch-subtabs">
-              <button type="button" class="cgpt-autoq-batch-subtab active" data-batch-subtab="tasks" aria-selected="true">任务列表</button>
-              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="current" aria-selected="false">当前任务编辑</button>
-              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="rules" aria-selected="false">默认规则</button>
-              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="settings" aria-selected="false">执行设置</button>
+              <button type="button" class="cgpt-autoq-batch-subtab active" data-batch-subtab="tasks" aria-selected="true">????</button>
+              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="current" aria-selected="false">??????</button>
+              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="rules" aria-selected="false">????</button>
+              <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="settings" aria-selected="false">????</button>
             </div>
             <div class="cgpt-autoq-batch-subtab-content" id="cgpt-autoq-batch-subtab-content"></div>
           </div>
 
           <div class="cgpt-autoq-editor-block">
-            <label class="cgpt-autoq-label" for="cgpt-autoq-prompts">指令内容</label>
-            <textarea class="cgpt-textarea" id="cgpt-autoq-prompts" placeholder="继续模式留空则使用内置默认继续指令。"></textarea>
+            <label class="cgpt-autoq-label" for="cgpt-autoq-prompts">????</label>
+            <textarea class="cgpt-textarea" id="cgpt-autoq-prompts" placeholder="??????????????????"></textarea>
             <div class="cgpt-row" style="margin-top: 6px;">
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-continue-prompt-reset">恢复默认继续指令</button>
+              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-autoq-continue-prompt-reset">????????</button>
             </div>
           </div>
 
           <div class="cgpt-autoq-actions">
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="start-upload" data-button-role="start-upload">开始上传</button>
+            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="start-upload" data-button-role="start-upload">????</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">${getAutoQueueStartIdleText()}</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">${getAutoQueueSendOnceIdleText()}</button>
           </div>
         </div>
 
         <div class="cgpt-section cgpt-autoq-settings-section">
-          <div class="cgpt-section-title">执行设置</div>
+          <div class="cgpt-section-title">????</div>
 
           <div class="cgpt-autoq-settings-grid">
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-autoq-loop" ${uiModeSettings.loopMode ? 'checked' : ''}>
-              循环模式
+              ????
             </label>
 
             <div class="cgpt-kv">
-              <label for="cgpt-autoq-min-sec">最小间隔（秒）</label>
+              <label for="cgpt-autoq-min-sec">???????</label>
               <input class="cgpt-input" id="cgpt-autoq-min-sec" type="number" data-no-wheel-number="1" min="1" value="${Number(uiModeSettings.randomMinSec) || 3}">
             </div>
 
             <div class="cgpt-kv">
-              <label for="cgpt-autoq-max-sec">最大间隔（秒）</label>
+              <label for="cgpt-autoq-max-sec">???????</label>
               <input class="cgpt-input" id="cgpt-autoq-max-sec" type="number" data-no-wheel-number="1" min="1" value="${Number(uiModeSettings.randomMaxSec) || 20}">
             </div>
 
             <div class="cgpt-kv">
-              <label for="cgpt-autoq-max-loop">最大循环次数</label>
+              <label for="cgpt-autoq-max-loop">??????</label>
               <input class="cgpt-input" id="cgpt-autoq-max-loop" type="number" data-no-wheel-number="1" min="0" value="${Number(uiModeSettings.maxLoopCount) || 0}">
             </div>
 
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-autoq-auto-scroll" ${uiModeSettings.autoScrollPanel ? 'checked' : ''}>
-              自动滚动面板
+              ??????
             </label>
           </div>
 
-          <div class="cgpt-hint">最大循环次数为 0 表示不限制。</div>
+          <div class="cgpt-hint">??????? 0 ??????</div>
         </div>
       `
 
@@ -15899,14 +16043,14 @@ const AutoQueueModule = (() => {
 
   function renderPromptCategoryChips(categoryNames, activeName, countGetter, dataAttrName) {
     const names = Array.isArray(categoryNames) ? categoryNames : [];
-    const current = String(activeName || '全部').trim() || '全部';
+    const current = String(activeName || '??').trim() || '??';
     const attrName = String(dataAttrName || 'data-prompt-category').trim() || 'data-prompt-category';
     const getCount = typeof countGetter === 'function'
       ? countGetter
       : () => 0;
 
     return names.map((name) => {
-      const text = String(name || '').trim() || '默认';
+      const text = String(name || '').trim() || '??';
       const count = Number(getCount(text)) || 0;
       const activeClass = text === current ? ' active' : '';
 

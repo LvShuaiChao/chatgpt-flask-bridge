@@ -14,8 +14,6 @@
     const TOOLBOX_MAX_LOG_TEXT_LEN = 3000;
     // 默认显示条数
     const DEFAULT_LOG_RENDER_LIMIT = 100;
-    // 持久化存储上限
-    const PERSIST_MAX_LINES = 300;
 
     const state = {
       lines: [],
@@ -24,14 +22,14 @@
     };
 
     let mounted = false;
+    let rootEl = null;
     let listEl = null;
-    let hintEl = null;
     let toggleBtnEl = null;
-    let lastPersistLogAt = 0;
     const logBuffer = [];
     const logTimers = createTimerRegistry('LOG');
     let logDomDirty = false;
     let renderScheduled = false;
+    let errorLogCountRefreshTimer = 0;
 
     function setLogStatus(text, type, options = {}) {
       if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
@@ -49,46 +47,6 @@
         return raw;
       }
       return `${raw.slice(0, TOOLBOX_MAX_LOG_TEXT_LEN)} ...[truncated ${raw.length - TOOLBOX_MAX_LOG_TEXT_LEN}]`;
-    }
-
-    function isLogPersistEnabled() {
-      return !!MemoryManager.get(MemoryManager.KEYS.logPersistEnabled, false);
-    }
-
-    function persistLogLines() {
-      if (!isLogPersistEnabled()) return;
-      const now = Date.now();
-      if (now - lastPersistLogAt < 4000) {
-        return;
-      }
-      lastPersistLogAt = now;
-
-      MemoryManager.set(MemoryManager.KEYS.logPersistLines, state.lines.slice(0, PERSIST_MAX_LINES));
-    }
-
-    function loadPersistedLogLines() {
-      if (!isLogPersistEnabled()) return;
-
-      const lines = MemoryManager.get(MemoryManager.KEYS.logPersistLines, []);
-
-      if (Array.isArray(lines)) {
-        state.lines = lines.slice(0, PERSIST_MAX_LINES);
-      }
-    }
-
-    function bindLogPersist(root) {
-      const persistEl = qs('#cgpt-log-persist', root);
-      if (!persistEl) return;
-
-      bindOnce(persistEl, 'change', () => {
-        MemoryManager.set(MemoryManager.KEYS.logPersistEnabled, !!persistEl.checked);
-
-        if (!persistEl.checked) {
-          MemoryManager.remove(MemoryManager.KEYS.logPersistLines);
-        } else {
-          persistLogLines();
-        }
-      });
     }
 
     async function copyAllLogs(source = 'log-module') {
@@ -132,9 +90,11 @@
         logTimers.clearTimeout('log-flush');
 
         state.lines = [];
+        MemoryManager.remove(MemoryManager.KEYS.logPersistEnabled);
+        MemoryManager.remove(MemoryManager.KEYS.logPersistLines);
         logDomDirty = false;
         render();
-        persistLogLines();
+        updateCopyErrorLogButtonCount(root);
         setLogStatus('已清空日志');
       }, {
         moduleName: 'LogModule',
@@ -151,6 +111,7 @@
         state.visible = !state.visible;
         updateToggleBtn();
         render();
+        updateCopyErrorLogButtonCount(root);
       });
     }
 
@@ -212,11 +173,42 @@
       return errorKeywords.some((kw) => lower.includes(kw));
     }
 
+    function collectCopyableErrorLogLines() {
+      flushLogBufferSync();
+      return state.lines.filter((line) => isCopyableErrorLogLine(line));
+    }
+
+    function getErrorLogCount() {
+      return collectCopyableErrorLogLines().length;
+    }
+
+    function updateCopyErrorLogButtonCount(root) {
+      const scope = root || rootEl || document;
+      const btn = qs('#cgpt-log-copy-errors', scope);
+      if (!(btn instanceof HTMLButtonElement)) {
+        return;
+      }
+      const count = getErrorLogCount();
+      btn.textContent = `复制错误日志（${count}）`;
+      btn.title = `复制错误日志，共 ${count} 条`;
+      btn.dataset.errorLogCount = String(count);
+    }
+
+    function scheduleUpdateCopyErrorLogButtonCount(root) {
+      if (errorLogCountRefreshTimer) {
+        clearTimeout(errorLogCountRefreshTimer);
+      }
+      errorLogCountRefreshTimer = setTimeout(() => {
+        errorLogCountRefreshTimer = 0;
+        updateCopyErrorLogButtonCount(root);
+      }, 80);
+    }
+
     function bindLogCopyErrors(root) {
       bindClick(root, '#cgpt-log-copy-errors', () => {
-        flushLogBufferSync();
+        updateCopyErrorLogButtonCount(root);
 
-        const errorLines = state.lines.filter((line) => isCopyableErrorLogLine(line));
+        const errorLines = collectCopyableErrorLogLines();
 
         const text = errorLines.length > 0
           ? errorLines.join('\n')
@@ -231,6 +223,8 @@
           playSuccessBeep: false,
           statusOwner: 'logger',
         });
+
+        updateCopyErrorLogButtonCount(root);
       }, {
         moduleName: 'LogModule',
         bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-copy-errors',
@@ -239,7 +233,6 @@
     }
 
     function bindEvents(root) {
-      bindLogPersist(root);
       bindLogCopy(root);
       bindLogClear(root);
       bindLogToggle(root);
@@ -250,16 +243,9 @@
         <div class="cgpt-log-panel">
           <div class="cgpt-log-actions">
             <button type="button" class="cgpt-btn" id="cgpt-log-copy">复制日志</button>
-            <button type="button" class="cgpt-btn" id="cgpt-log-copy-errors">复制错误日志</button>
+            <button type="button" class="cgpt-btn" id="cgpt-log-copy-errors">复制错误日志（0）</button>
             <button type="button" class="cgpt-btn" id="cgpt-log-toggle">显示最近日志</button>
             <button type="button" class="cgpt-btn danger cgpt-log-clear-right" id="cgpt-log-clear">清空日志</button>
-          </div>
-          <label class="cgpt-checkbox-line cgpt-log-advanced" style="margin:6px 0 0;">
-            <input type="checkbox" id="cgpt-log-persist">
-            刷新后保留日志（默认关闭）
-          </label>
-          <div class="cgpt-log-hint" id="cgpt-log-hint" style="padding:12px 8px;color:#94a3b8;font-size:12px;line-height:1.6;">
-            日志已在后台记录，默认不实时显示以避免卡顿。需要查看时点击"显示最近日志"，需要排查时点击"复制日志"。
           </div>
           <div class="cgpt-log-list" id="cgpt-log-list" style="display:none;"></div>
         </div>
@@ -273,32 +259,27 @@
         html: LOG_MODULE_HTML,
         onRefs: (mountedRoot) => {
           mounted = true;
+          rootEl = mountedRoot;
           const logRefs = collectDomRefs(mountedRoot, {
             list: '#cgpt-log-list',
-            hint: '#cgpt-log-hint',
             toggle: '#cgpt-log-toggle',
-            persist: {
-              selector: '#cgpt-log-persist',
-              required: false,
-            },
           }, {
             moduleName: 'LOG',
           });
           listEl = logRefs.list;
-          hintEl = logRefs.hint;
           toggleBtnEl = logRefs.toggle;
-          if (logRefs.persist) {
-            logRefs.persist.checked = isLogPersistEnabled();
-          }
-          loadPersistedLogLines();
+          MemoryManager.remove(MemoryManager.KEYS.logPersistEnabled);
+          MemoryManager.remove(MemoryManager.KEYS.logPersistLines);
           updateToggleBtn();
+          updateCopyErrorLogButtonCount(mountedRoot);
         },
         onBind: (mountedRoot) => {
           bindEvents(mountedRoot);
         },
         onRender: () => {
-          // 初始化时不渲染日志内容，只显示提示
+          // 初始化时不渲染日志内容
           render();
+          updateCopyErrorLogButtonCount(rootEl);
         },
       });
     }
@@ -327,6 +308,7 @@
       }
 
       logDomDirty = true;
+      scheduleUpdateCopyErrorLogButtonCount(rootEl);
     }
 
     function flushLogBuffer() {
@@ -371,24 +353,26 @@
       if (!logTimers.has('log-flush')) {
         logTimers.timeout('log-flush', flushLogBuffer, 200);
       }
+
+      scheduleUpdateCopyErrorLogButtonCount(rootEl);
     }
 
     function render() {
-      if (!listEl || !hintEl) return;
+      if (!listEl) return;
 
-      // 隐藏状态：只显示提示，不渲染日志内容
+      // 隐藏状态：不渲染日志内容
       if (!state.visible) {
         listEl.style.display = 'none';
-        hintEl.style.display = 'block';
+        updateCopyErrorLogButtonCount(rootEl);
         return;
       }
 
       // 显示状态：渲染最近 N 条日志
-      hintEl.style.display = 'none';
       listEl.style.display = 'block';
 
       if (!state.lines.length) {
         listEl.innerHTML = renderEmptyState('暂无日志', 'cgpt-log-empty cgpt-empty-state');
+        updateCopyErrorLogButtonCount(rootEl);
         return;
       }
 
@@ -401,6 +385,7 @@
         .join('');
 
       logDomDirty = false;
+      updateCopyErrorLogButtonCount(rootEl);
     }
 
     return {
