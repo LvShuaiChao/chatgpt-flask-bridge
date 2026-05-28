@@ -177,6 +177,24 @@ const AutoQueueModule = (() => {
     function resolveTaskInitialPrompt(task, options = {}) {
       const shouldLog = !!(options && options.log);
 
+      if (task && !isCurrentRunInitialMessageStrict()) {
+        const continueText = resolveBatchContinuePromptForCurrentTask(
+          task,
+          'use-task-initial-prompt-blocked-after-initial',
+        );
+        if (shouldLog) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][PROMPT_TASK][BLOCK_USE_INITIAL_AFTER_INITIAL] task=${task && (task.title || task.name) || '-'} `
+            + `currentRunSentCount=${Number(state.currentRunSentCount || 0)} `
+            + `continueLen=${String(continueText || '').length}`,
+          );
+        }
+        return {
+          title: String(task.title || task.name || '未命名任务'),
+          initialPrompt: String(continueText || ''),
+        };
+      }
+
       if (task && task.sourceType === 'prompt-manager' && task.promptId) {
         const result = findPromptForLinkedTask(task);
         const prompt = result.prompt;
@@ -1523,6 +1541,11 @@ const AutoQueueModule = (() => {
       taskBatchStepRunning: false,
       taskBatchStepRunningSince: 0,
       batchInitialWaitLoggedAt: 0,
+      currentRunSentCount: 0,
+      currentRunUploadCount: 0,
+      currentRunAutoUploadMessageCount: 0,
+      lastContinueSendFailedAt: 0,
+      lastContinueSendFailedReason: '',
       batchTask: {
         phase: 'idle',
         currentTaskIndex: -1,
@@ -5619,6 +5642,11 @@ const AutoQueueModule = (() => {
         ? 'wait-verification-reply'
         : (safeSendKind === 'continue' ? 'wait-continue-reply' : 'wait-initial-reply');
       setTaskBatchStep(waitStep, task, { log: false });
+      if (safeSendKind === 'initial') {
+        markCurrentRunInitialSent('enter-waiting-reply');
+      } else {
+        syncBatchRunStateFromTask(task, 'enter-waiting-reply');
+      }
       state.replyBecameBusy = false;
       state.idleSince = 0;
       state.waitingStartedAt = Date.now();
@@ -5788,6 +5816,13 @@ const AutoQueueModule = (() => {
       const run = state.taskRun;
 
       if (!task || !run) {
+        return false;
+      }
+
+      if (isCurrentRunFirstMessage()) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][WAITING_REPLY_REPAIR_SKIP] reason=current-run-first-message task=${task.title || '-'}`,
+        );
         return false;
       }
 
@@ -6889,6 +6924,14 @@ const AutoQueueModule = (() => {
       state.waitingStartedAt = 0;
       state.sendingNow = false;
 
+      const batchStartRunId = getBatchTaskGroupRunId() || state.currentRunId || '';
+      resetBatchRunStateForCurrentTask(runnable[0] || null, {
+        runId: batchStartRunId,
+        conversationId: typeof getAutoQueueConversationIdSafe === 'function'
+          ? getAutoQueueConversationIdSafe()
+          : '',
+      });
+      resetBatchRunScopedCountersForNewRun('batch-start');
       ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
       ToolboxShell.appendLog(`[AUTOQ][TASK][START] profile=${profile ? profile.name : '-'} tasks=${runnable.length}`);
       ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][START] total=${runnable.length} profile=${profile ? profile.name : '-'}`);
@@ -7030,6 +7073,13 @@ const AutoQueueModule = (() => {
       state.waitingStartedAt = 0;
 
       const activeNextTask = getCurrentRunningTask();
+      resetBatchRunStateForCurrentTask(activeNextTask, {
+        runId: getBatchTaskGroupRunId() || state.currentRunId || '',
+        conversationId: typeof getAutoQueueConversationIdSafe === 'function'
+          ? getAutoQueueConversationIdSafe()
+          : '',
+      });
+      resetBatchRunScopedCountersForNewRun('next-task');
       setTaskBatchStep('auto-upload-before-send', activeNextTask);
       state.nextSendAt = Date.now() + getRandomDelayMs();
       ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][NEXT_TASK_START]');
@@ -7278,8 +7328,7 @@ const AutoQueueModule = (() => {
       }
 
       if (run.pendingSendKind === 'continue') {
-        void handleTaskReplyReady();
-        return true;
+        return await retryBatchContinueDirectOnly(task);
       }
 
       maybeSendNextTask();
@@ -7677,6 +7726,21 @@ const AutoQueueModule = (() => {
       const currentTask = task || getCurrentRunningTask();
       if (!currentTask) {
         ToolboxShell.appendLog(`[AUTOQ][IMMEDIATE_PROMPT_WRITE_SKIP] reason=${reason} no-task`);
+        return;
+      }
+
+      if (blockInitialOnlyPathAfterInitial('post-upload-immediate-prompt-write-schedule', reason || 'auto-upload-done')) {
+        return {
+          ok: false,
+          reason: 'initial_immediate_prompt_write_blocked_after_initial',
+          blocked: true,
+        };
+      }
+
+      if (isBatchAfterInitialRound()) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][IMMEDIATE_PROMPT_WRITE_SKIP] reason=${reason} after-initial-round=1`,
+        );
         return;
       }
 
@@ -9476,7 +9540,16 @@ const AutoQueueModule = (() => {
       } else if (!state.taskRun) {
         skipReason = 'no-task-run';
       } else if (shouldUploadInitial) {
-        skipReason = 'initial-upload';
+        if (!isCurrentRunInitialMessageStrict()) {
+          skipReason = 'block-initial-upload-after-initial';
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_AUTO_UPLOAD][BLOCK_INITIAL_AFTER_INITIAL] `
+            + `currentRunSentCount=${Number(state.currentRunSentCount || 0)} `
+            + `kind=${kind || '-'} nextMessageNo=${nextMessageNo || '-'} currentCount=${currentCount || '-'}`,
+          );
+        } else {
+          skipReason = 'initial-upload';
+        }
       } else if (force) {
         skipReason = 'force-upload';
       } else if (!settings.enabled) {
@@ -9549,6 +9622,12 @@ const AutoQueueModule = (() => {
     function markBatchAutoUploadReadyToSend(kind = 'initial', task = null, uploadResult = null) {
       const safeKind = String(kind || 'initial').trim() || 'initial';
       const currentTask = task || getCurrentRunningTask();
+      if (safeKind === 'initial' && isBatchAfterInitialRound()) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][POST_UPLOAD_SKIP_INITIAL_REWRITE] task=${currentTask ? currentTask.title : '-'} reason=after-initial-round`,
+        );
+        return;
+      }
       const run = state.taskRun || {};
 
       state.batchAutoUploading = false;
@@ -9586,6 +9665,9 @@ const AutoQueueModule = (() => {
       );
 
       if (safeKind === 'initial') {
+        if (blockInitialOnlyPathAfterInitial('post-upload-immediate-prompt-write-schedule', 'auto-upload-done')) {
+          return;
+        }
         ToolboxShell.appendLog(
           `[AUTOQ][POST_UPLOAD_IMMEDIATE_PROMPT_WRITE_SCHEDULED] task=${currentTask ? currentTask.title : '-'} kind=initial delayMs=0`,
         );
@@ -9629,6 +9711,12 @@ const AutoQueueModule = (() => {
       if (config.promptMode !== 'task' || !state.running) {
         return false;
       }
+      if (!isCurrentRunInitialMessageStrict()) {
+        return false;
+      }
+      if (isBatchAfterInitialRound()) {
+        return false;
+      }
       const currentTask = task || getCurrentRunningTask();
       if (!currentTask) {
         return false;
@@ -9660,6 +9748,19 @@ const AutoQueueModule = (() => {
       const currentTask = task || getCurrentRunningTask();
       if (!currentTask || !state.running || state.waitingReply || state.sendingNow) {
         return { ok: false, reason: 'not-ready' };
+      }
+      if (blockInitialOnlyPathAfterInitial('write-prompt-immediately-after-upload', logTag || 'after-upload-immediate')) {
+        return {
+          ok: false,
+          reason: 'write_initial_prompt_after_initial_blocked',
+          blocked: true,
+        };
+      }
+      if (isBatchAfterInitialRound()) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][IMMEDIATE_AFTER_UPLOAD_SKIP] reason=after-initial-round task=${currentTask.title || '-'}`,
+        );
+        return { ok: false, reason: 'after-initial-round', blocked: true };
       }
 
       const resolvedInitial = resolveTaskInitialPrompt(currentTask, { log: true });
@@ -9700,6 +9801,17 @@ const AutoQueueModule = (() => {
       const isInitialSend = normalizedKind === 'initial';
       const runAtStart = state.taskRun || {};
       const pendingAtStart = String(runAtStart.pendingSendKind || '');
+
+      if (!isInitialSend && isBatchAfterInitialRound() && !decision.shouldUpload) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_AUTO_UPLOAD][SKIP] kind=${normalizedKind || '-'} reason=after-initial-no-upload-slot`,
+        );
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'after-initial-no-upload-slot',
+        };
+      }
 
       if (
         state.waitingReply === true
@@ -9922,7 +10034,15 @@ const AutoQueueModule = (() => {
       setTaskBatchStep('auto-upload-before-send', task || getCurrentRunningTask(), { log: isInitialSend ? false : true });
       if (isInitialSend) {
         ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][INITIAL_UPLOAD]');
-        ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+        if (
+          state.phase === 'waiting_reply'
+          || state.waitingReply
+          || isChatGPTActuallyBusyForTaskQueue()
+        ) {
+          ToolboxShell.setStatus('批量任务：等待当前回复完成');
+        } else if (isCurrentRunFirstMessage()) {
+          ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+        }
         logInitialUploadPhaseGuard(task, { tag: 'upload-start' });
       } else {
         ToolboxShell.setStatus(`批量任务组：第 ${uploadSlotNo} 次发送前自动上传文件`);
@@ -10288,6 +10408,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][VERIFY_CONTINUE_REQUIRED] task=${task.title}`);
         ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][VERIFY_CONTINUE_REQUIRED] task=${task.title}`);
         task.continueCount = Number(task.continueCount || 0) + 1;
+        syncBatchRunStateFromTask(task, 'verify-continue-increment');
         saveConfig();
         renderTaskList();
 
@@ -10626,8 +10747,40 @@ const AutoQueueModule = (() => {
           return;
         }
 
+        const continueSource = `autoq-task-${task.id}-${round}`;
+        const nextMessageNo = round + 1;
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][TASK_BATCH][SEND_CONTINUE] task=${task.title} nextMessageNo=${nextMessageNo}`,
+        );
+
+        const directResult = await sendBatchContinueDirectly(actualContinuePrompt, continueSource);
+
+        if (directResult && directResult.deferred) {
+          return;
+        }
+
+        if (directResult && directResult.ok) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][CONTINUE_DIRECT_PATH_USED] task=${task.title || task.name || '-'} nextMessageNo=${nextMessageNo}`,
+          );
+          await finishBatchContinueDirectSuccess(
+            task,
+            actualContinuePrompt,
+            round,
+            `autoq-task-continue-${task.id}-${round}`,
+            '[AUTOQ][CONTINUE_SEND]',
+          );
+          return;
+        }
+
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CONTINUE_DIRECT_FALLBACK_HOTKEY] task=${task.title || task.name || '-'} `
+          + `nextMessageNo=${nextMessageNo} reason=${directResult && directResult.reason ? directResult.reason : '-'}`,
+        );
+
         const result = await UploadModule.runCopyHotkeyContinueOnceForTaskQueue({
-          source: `autoq-task-${task.id}-${round}`,
+          source: continueSource,
           continuePrompt: actualContinuePrompt,
           doneSignal: actualDoneSignal,
           shouldStop: () => !state.running,
@@ -10686,6 +10839,9 @@ const AutoQueueModule = (() => {
         }
 
         if (!result.ok) {
+          if (failReason === 'continue-send-failed') {
+            resetBatchContinueSendFailedState('continue-send-failed');
+          }
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][FAILED] task=${task.title} reason=${failReason || 'copy-hotkey-continue-failed'}`);
           failCurrentTask(failReason || 'copy-hotkey-continue-failed', {
             detail: result && result.detail ? result.detail : '',
@@ -13410,7 +13566,15 @@ const AutoQueueModule = (() => {
           } else if (taskStepKeyForStatus === 'auto-upload-before-send' && state.batchAutoUploading) {
             setBatchTaskGroupDisplayState('starting_upload', 'phase-initial-auto-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.starting_upload;
-            ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+            if (
+              phase === 'waiting_reply'
+              || state.waitingReply
+              || isChatGPTActuallyBusyForTaskQueue()
+            ) {
+              ToolboxShell.setStatus('批量任务：等待当前回复完成');
+            } else if (isCurrentRunFirstMessage()) {
+              ToolboxShell.setStatus('批量任务：正在上传初始附件，上传完成后发送初始指令');
+            }
           } else {
             setBatchTaskGroupDisplayState('uploading', 'phase-uploading');
             runStateText = BATCH_TASK_GROUP_DISPLAY_STATE_LABELS.uploading;
@@ -15876,6 +16040,14 @@ const AutoQueueModule = (() => {
     async function writeAndVerifyComposerForBatch(prompt, source, retryIndex) {
       const { taskName, taskId } = getBatchSendTaskMeta();
       const text = String(prompt || '');
+      const currentTask = getCurrentBatchTaskSafe();
+      const originalBlock = blockOriginalPromptAfterInitial(text, currentTask, `writeAndVerifyComposerForBatch:${source || '-'}`);
+      if (originalBlock.blocked) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][BLOCK_WRITE_ORIGINAL_AFTER_INITIAL] source=${source || '-'} chars=${text.length}`,
+        );
+        return { ok: false, reason: 'original_prompt_after_initial_blocked', blocked: true };
+      }
       const beforeSendable = typeof ComposerApi.canSendNow === 'function'
         ? (ComposerApi.canSendNow() ? 1 : 0)
         : 0;
@@ -16469,7 +16641,772 @@ const AutoQueueModule = (() => {
       );
     }
 
+
+    function isBatchTaskFlowActive() {
+      return config.promptMode === 'task'
+        && (state.running || state.batchTaskRunning);
+    }
+
+    function ensureBatchRunState() {
+      if (!state.batchRunState || typeof state.batchRunState !== 'object') {
+        state.batchRunState = {
+          runId: '',
+          taskId: '',
+          roundIndex: 1,
+          initialPromptSent: false,
+          initialUploadDone: false,
+          initialPayloadConsumed: false,
+          initialConversationPending: false,
+          initialSendStartedAt: 0,
+          conversationId: '',
+          lastSentKind: '',
+          waitingReply: false,
+          blockedReason: '',
+          blockedAt: 0,
+          lastBlockedLogAt: 0,
+          lastUploadRoundIndex: 0,
+        };
+      }
+      return state.batchRunState;
+    }
+
+    function resetBatchRunState(options = {}) {
+      const task = getCurrentBatchTaskSafe();
+      return resetBatchRunStateForCurrentTask(task, options);
+    }
+
+    function resetBatchRunStateForCurrentTask(task, options = {}) {
+      const runId = String(options.runId || getBatchTaskGroupRunId() || state.currentRunId || '').trim();
+      const conversationId = String(
+        options.conversationId
+        || (typeof getAutoQueueConversationIdSafe === 'function' ? getAutoQueueConversationIdSafe() : '')
+        || '',
+      ).trim();
+      const taskId = task && task.id ? String(task.id) : '';
+      state.batchRunState = {
+        runId,
+        taskId,
+        roundIndex: 1,
+        initialPromptSent: false,
+        initialUploadDone: false,
+        initialPayloadConsumed: false,
+        initialConversationPending: false,
+        initialSendStartedAt: 0,
+        conversationId,
+        lastSentKind: '',
+        waitingReply: false,
+        blockedReason: '',
+        blockedAt: 0,
+        lastBlockedLogAt: 0,
+        lastUploadRoundIndex: 0,
+      };
+      return state.batchRunState;
+    }
+
+    function resetBatchRunScopedCountersForNewRun(source) {
+      const brs = ensureBatchRunState();
+      brs.roundIndex = 1;
+      brs.initialPromptSent = false;
+      brs.initialUploadDone = false;
+      brs.initialPayloadConsumed = false;
+      brs.initialConversationPending = false;
+      brs.initialSendStartedAt = 0;
+      brs.lastSentKind = '';
+      brs.waitingReply = false;
+      brs.blockedReason = '';
+      brs.blockedAt = 0;
+      brs.lastBlockedLogAt = 0;
+      brs.lastUploadRoundIndex = 0;
+      state.batchRunState = brs;
+      state.currentRunSentCount = 0;
+      state.currentRunUploadCount = 0;
+      state.currentRunAutoUploadMessageCount = 0;
+      state.lastContinueSendFailedAt = 0;
+      state.lastContinueSendFailedReason = '';
+      state.waitingReply = false;
+      state.phase = 'running';
+      if (state.taskRun && typeof state.taskRun === 'object') {
+        state.taskRun.currentStep = 'auto-upload-before-send';
+      }
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][RESET_RUN_SCOPED_STATE] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+        + `roundIndex=${brs.roundIndex} initialPromptSent=0 initialPayloadConsumed=0 `
+        + `currentRunSentCount=0 currentRunUploadCount=0 source=${source || '-'}`,
+      );
+      return brs;
+    }
+
+    function syncBatchRunStateFromRuntime() {
+      const brs = ensureBatchRunState();
+      brs.runId = String(brs.runId || getBatchTaskGroupRunId() || state.currentRunId || '').trim();
+      brs.waitingReply = !!state.waitingReply;
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      if (currentRunSentCount > 0) {
+        const currentTask = getCurrentBatchTaskSafe();
+        const continueCount = Math.max(0, Number(currentTask && currentTask.continueCount) || 0);
+        brs.roundIndex = Math.max(1, continueCount + 1);
+      } else {
+        brs.roundIndex = 1;
+      }
+      state.batchRunState = brs;
+      return brs;
+    }
+
+    function isCurrentRunFirstMessage() {
+      const brs = ensureBatchRunState();
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      return !!(
+        currentRunSentCount <= 0
+        && !brs.initialPromptSent
+        && !brs.initialPayloadConsumed
+        && Number(brs.roundIndex || 1) === 1
+      );
+    }
+
+    function isCurrentRunInitialMessageStrict() {
+      const brs = ensureBatchRunState();
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      return !!(
+        currentRunSentCount <= 0
+        && Number(brs.roundIndex || 1) === 1
+        && brs.initialPromptSent !== true
+        && brs.initialPayloadConsumed !== true
+        && brs.lastSentKind !== 'initial'
+      );
+    }
+
+    function isCurrentRunAfterInitialStrict() {
+      return !isCurrentRunInitialMessageStrict();
+    }
+
+    function blockInitialOnlyPathAfterInitial(pathName, source) {
+      if (isCurrentRunInitialMessageStrict()) {
+        return false;
+      }
+      const brs = ensureBatchRunState();
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][BLOCK_INITIAL_ONLY_PATH_AFTER_INITIAL] path=${pathName || '-'} `
+        + `source=${source || '-'} runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+        + `roundIndex=${brs.roundIndex || '-'} currentRunSentCount=${Number(state.currentRunSentCount || 0)} `
+        + `initialPromptSent=${brs.initialPromptSent ? 1 : 0} initialPayloadConsumed=${brs.initialPayloadConsumed ? 1 : 0} `
+        + `lastSentKind=${brs.lastSentKind || '-'}`,
+      );
+      return true;
+    }
+
+    function resolveBatchSendKind(requestedKind, source) {
+      const pageTurn = readPageTurnCount();
+      const pageTurnText = pageTurn === null ? '-' : String(pageTurn);
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      let sendKind = currentRunSentCount > 0 ? 'continue' : 'initial';
+      if (isCurrentRunFirstMessage()) {
+        sendKind = 'initial';
+      } else {
+        const requested = String(requestedKind || '').trim();
+        if (requested === 'continue' || requested === 'verify-continue' || requested === 'verification') {
+          sendKind = requested;
+        }
+      }
+      ToolboxShell.appendLog(
+        `[AUTOQ][SEND_KIND_DECISION] currentRunSentCount=${currentRunSentCount} pageTurn=${pageTurnText} `
+        + `pageTurnIgnored=1 sendKind=${sendKind} source=${source || '-'}`,
+      );
+      return sendKind;
+    }
+
+    function decideNextBatchAction(batchStateOverride) {
+      const brs = batchStateOverride || syncBatchRunStateFromRuntime();
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      const isCurrentRunFirstMessageDecision = currentRunSentCount <= 0
+        && !brs.initialPromptSent
+        && !brs.initialPayloadConsumed
+        && Number(brs.roundIndex || 1) === 1;
+      if (isCurrentRunFirstMessageDecision) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][DECIDE_INITIAL_BY_RUN_STATE] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+          + `roundIndex=${brs.roundIndex || 1} currentRunSentCount=${currentRunSentCount} `
+          + `pageTurnIgnored=1 reason=current_run_first_message`,
+        );
+        return {
+          action: 'send_initial_with_upload',
+          reason: 'current_run_first_message',
+          promptKind: 'initial',
+          upload: true,
+        };
+      }
+      const run = state.taskRun || {};
+      const pendingKind = String(run.pendingSendKind || '').trim();
+      return {
+        action: pendingKind === 'continue' || pendingKind === 'verify-continue'
+          ? 'send_continue'
+          : 'send_initial',
+        reason: pendingKind || 'pending-send-kind',
+        promptKind: pendingKind === 'continue' || pendingKind === 'verify-continue' ? 'continue' : 'initial',
+        upload: pendingKind !== 'continue',
+      };
+    }
+
+    function markCurrentRunInitialSent(source) {
+      state.currentRunSentCount = Math.max(1, Number(state.currentRunSentCount || 0) + 1);
+      const brs = ensureBatchRunState();
+      brs.initialPromptSent = true;
+      brs.initialUploadDone = true;
+      brs.initialPayloadConsumed = true;
+      brs.lastSentKind = 'initial';
+      brs.waitingReply = true;
+      state.batchRunState = brs;
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CURRENT_RUN_INITIAL_SENT] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+        + `currentRunSentCount=${state.currentRunSentCount} initialPayloadConsumed=1 source=${source || '-'}`,
+      );
+      markBatchInitialPromptSent(source);
+    }
+
+    function syncBatchRunStateFromTask(task, source) {
+      const brs = ensureBatchRunState();
+      const currentTask = task || getCurrentBatchTaskSafe();
+      if (currentTask && currentTask.id) {
+        brs.taskId = String(currentTask.id);
+      }
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      if (currentRunSentCount > 0) {
+        const continueCount = Math.max(0, Number(currentTask && currentTask.continueCount) || 0);
+        brs.roundIndex = Math.max(1, continueCount + 1);
+      } else {
+        brs.roundIndex = 1;
+      }
+      brs.waitingReply = !!state.waitingReply;
+      state.batchRunState = brs;
+      if (source) {
+        void source;
+      }
+      return brs;
+    }
+
+    function markBatchInitialPayloadConsumed(source) {
+      const brs = ensureBatchRunState();
+      if (!brs.initialPayloadConsumed) {
+        brs.initialPayloadConsumed = true;
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][INITIAL_PAYLOAD_CONSUMED] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} source=${source || '-'}`,
+        );
+      }
+    }
+
+    function markBatchInitialPromptSent(source) {
+      const brs = ensureBatchRunState();
+      if (!brs.initialPromptSent) {
+        brs.initialPromptSent = true;
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][INITIAL_PROMPT_SENT] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} source=${source || '-'}`,
+        );
+      }
+    }
+
+    function getCurrentBatchTaskSafe() {
+      const run = state.taskRun || {};
+      const profile = getActiveTaskProfile();
+      const enabled = profile ? getEnabledTasksFromProfile(profile) : [];
+      const tasks = Array.isArray(run.enabledTaskIds) && run.enabledTaskIds.length
+        ? run.enabledTaskIds.map((id) => enabled.find((item) => item && item.id === id)).filter(Boolean)
+        : enabled;
+      const index = Math.max(0, Number(run.currentIndex) || 0);
+      return tasks[index] || getCurrentRunningTask() || null;
+    }
+
+    function resolveBatchContinuePromptForCurrentTask(task, source) {
+      const currentTask = task || getCurrentBatchTaskSafe();
+      if (!currentTask) {
+        return '';
+      }
+      const profile = getActiveTaskProfile();
+      const resolved = resolveTaskContinueSettings(currentTask, profile, { log: false });
+      const template = resolved.actualContinuePromptTemplate || BATCH_CONTINUE_TEMPLATE;
+      const doneSignal = resolved.actualDoneSignal || TASK_DONE_SIGNAL;
+      if (typeof renderContinuePromptTemplate === 'function') {
+        return renderContinuePromptTemplate(template, doneSignal);
+      }
+      if (source) {
+        void source;
+      }
+      return String(template || '');
+    }
+
+    function isLikelyOriginalTaskPromptText(text, task) {
+      const value = String(text || '').trim();
+      if (!value) {
+        return false;
+      }
+      const taskPrompt = String(
+        task && (
+          task.prompt
+          || task.content
+          || task.text
+          || task.originalPrompt
+          || task.initialPrompt
+          || ''
+        ) || '',
+      ).trim();
+      if (!taskPrompt) {
+        const resolved = resolveTaskInitialPrompt(task || getCurrentBatchTaskSafe(), { log: false });
+        const fromResolved = String(resolved && resolved.initialPrompt ? resolved.initialPrompt : '').trim();
+        if (fromResolved && value === fromResolved) {
+          return true;
+        }
+        if (fromResolved && value.includes(fromResolved.slice(0, Math.min(80, fromResolved.length)))) {
+          return true;
+        }
+      }
+      if (taskPrompt && value === taskPrompt) {
+        return true;
+      }
+      if (taskPrompt && value.includes(taskPrompt.slice(0, Math.min(80, taskPrompt.length)))) {
+        return true;
+      }
+      const markers = [
+        '一次输入就是一次输出一道题',
+        '每次的话每次回答啊',
+        '只回答了其中一道题目',
+        '1+1=',
+        '2+2=',
+        '3+3=',
+        '4+4=',
+        '5+5=',
+        '6+6=',
+      ];
+      let hit = 0;
+      for (const marker of markers) {
+        if (value.includes(marker)) {
+          hit += 1;
+        }
+      }
+      return hit >= 3;
+    }
+
+    function isBatchAfterInitialRound() {
+      const brs = ensureBatchRunState();
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      return !!(
+        currentRunSentCount > 0
+        && brs.initialPromptSent
+        && brs.initialPayloadConsumed
+        && Number(brs.roundIndex || 1) > 1
+      );
+    }
+
+    function blockOriginalPromptAfterInitial(text, task, source) {
+      if (!isBatchTaskFlowActive()) {
+        return {
+          blocked: false,
+          reason: 'batch-not-active',
+        };
+      }
+      const brs = ensureBatchRunState();
+      const currentRunSentCount = Number(state.currentRunSentCount || 0);
+      if (
+        currentRunSentCount <= 0
+        && !brs.initialPromptSent
+        && !brs.initialPayloadConsumed
+        && Number(brs.roundIndex || 1) === 1
+      ) {
+        return {
+          blocked: false,
+          reason: 'current_run_first_message_allow_initial_prompt',
+        };
+      }
+      if (!isBatchAfterInitialRound()) {
+        return {
+          blocked: false,
+          reason: 'initial-round',
+        };
+      }
+      if (!isLikelyOriginalTaskPromptText(text, task)) {
+        return {
+          blocked: false,
+          reason: 'not-original-prompt',
+        };
+      }
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][BLOCK_ORIGINAL_PROMPT_AFTER_INITIAL] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+        + `roundIndex=${brs.roundIndex || '-'} initialPromptSent=${brs.initialPromptSent ? 1 : 0} `
+        + `initialPayloadConsumed=${brs.initialPayloadConsumed ? 1 : 0} chars=${String(text || '').length} source=${source || '-'}`,
+      );
+      return {
+        blocked: true,
+        reason: 'original_prompt_after_initial_blocked',
+      };
+    }
+
+    function readCurrentComposerText() {
+      if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.getComposerText === 'function') {
+        return String(ComposerApi.getComposerText() || '');
+      }
+      return '';
+    }
+
+    async function clearComposerAttachments(source) {
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.clearAttachments === 'function'
+      ) {
+        return ComposerApi.clearAttachments(String(source || 'batch-clear-attachments'));
+      }
+      return { ok: false, reason: 'clearAttachments-unavailable' };
+    }
+
+    function setChatGPTComposerTextDirect(text, source) {
+      const value = String(text || '');
+      if (blockOriginalPromptAfterInitial(value, getCurrentBatchTaskSafe(), source).blocked) {
+        return false;
+      }
+      if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.setComposerValue === 'function') {
+        return ComposerApi.setComposerValue(value);
+      }
+      return false;
+    }
+
+    async function sanitizeComposerBeforeBatchSend(expectedKind, source) {
+      if (!isBatchTaskFlowActive()) {
+        return {
+          ok: true,
+          reason: 'batch-not-active',
+        };
+      }
+      const brs = ensureBatchRunState();
+      const task = getCurrentBatchTaskSafe();
+      const text = readCurrentComposerText();
+      const hasAttachment = typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+        ? ComposerAttachments.getSharedComposerAttachmentEvidence(`sanitize-before-send:${source || '-'}`).hasAttachment
+        : false;
+      const afterInitial = isCurrentRunAfterInitialStrict();
+      if (!afterInitial) {
+        return {
+          ok: true,
+          reason: 'initial-round',
+        };
+      }
+      if (hasAttachment && (expectedKind === 'continue' || expectedKind === 'verify-continue')) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][CLEAR_ATTACHMENT_BEFORE_CONTINUE] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+          + `roundIndex=${brs.roundIndex || '-'} source=${source || '-'}`,
+        );
+        const clearResult = await clearComposerAttachments(`batch-continue:${source || '-'}`);
+        if (!clearResult || clearResult.ok !== true) {
+          return {
+            ok: false,
+            reason: 'attachment_present_clear_failed',
+          };
+        }
+      }
+      if (isLikelyOriginalTaskPromptText(text, task)) {
+        const continueText = resolveBatchContinuePromptForCurrentTask(task, `sanitize-before-send:${source || '-'}`);
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][REWRITE_COMPOSER_ORIGINAL_TO_CONTINUE] runId=${brs.runId || '-'} taskId=${brs.taskId || '-'} `
+          + `roundIndex=${brs.roundIndex || '-'} oldChars=${String(text || '').length} newChars=${String(continueText || '').length} `
+          + `source=${source || '-'} expectedKind=${expectedKind || '-'}`,
+        );
+        const ok = setChatGPTComposerTextDirect(String(continueText || ''), `rewrite-original-to-continue:${source || '-'}`);
+        return {
+          ok: !!ok,
+          reason: ok ? 'rewritten' : 'rewrite_failed',
+        };
+      }
+      return {
+        ok: true,
+        reason: 'clean',
+      };
+    }
+
+    function getBatchContinueDirectContext() {
+      const run = state.taskRun || {};
+      const task = getCurrentRunningTask();
+      return {
+        runId: String(state.currentRunId || run.runId || '-'),
+        taskId: task && task.id ? task.id : '-',
+        roundIndex: Math.max(0, Number(task && task.continueCount) || 0),
+      };
+    }
+
+    function scheduleSendNextBatchTask(delayMs, source) {
+      const safeDelayMs = Math.max(0, Number(delayMs) || 0);
+      state.nextSendAt = Date.now() + safeDelayMs;
+      return scheduleNextBatchTaskStep('continue-after-keep-current-task', safeDelayMs, {
+        reason: String(source || 'defer-continue').trim() || 'defer-continue',
+      });
+    }
+
+    function shouldDeferBatchContinueSend(source) {
+      if (typeof document !== 'undefined' && document.hidden) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][DEFER_CONTINUE_BACKGROUND_HIDDEN] source=${source || '-'}`,
+        );
+        scheduleSendNextBatchTask(1200, 'defer-continue-background-hidden');
+        return {
+          deferred: true,
+          reason: 'background_hidden_deferred',
+        };
+      }
+
+      const isThrottled = typeof BrowserRuntimeHealth !== 'undefined'
+        && BrowserRuntimeHealth
+        && typeof BrowserRuntimeHealth.isProbablyThrottled === 'function'
+        && BrowserRuntimeHealth.isProbablyThrottled();
+
+      if (isThrottled) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][DEFER_CONTINUE_BACKGROUND_THROTTLED] source=${source || '-'}`,
+        );
+        scheduleSendNextBatchTask(1200, 'defer-continue-background-throttled');
+        return {
+          deferred: true,
+          reason: 'background_throttled_deferred',
+        };
+      }
+
+      return null;
+    }
+
+    function resetBatchContinueSendFailedState(reason) {
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.idleSince = 0;
+      state.waitingStartedAt = 0;
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING, 'continue-send-failed-state-reset');
+
+      state.lastContinueSendFailedReason = 'continue-send-failed';
+      state.lastContinueSendFailedAt = Date.now();
+
+      setTaskBatchStep('send-continue', getCurrentRunningTask(), { log: false });
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CONTINUE_SEND_FAILED_STATE_RESET] waitingReply=0 phase=running step=send-continue reason=${reason || '-'}`,
+      );
+    }
+
+    function markContinueSendFailedRetryOnly() {
+      state.lastContinueSendFailedAt = Date.now();
+      state.lastContinueSendFailedReason = 'continue-send-failed';
+      state.waitingReply = false;
+
+      const ctx = getBatchContinueDirectContext();
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][CONTINUE_SEND_FAILED_RETRY_ONLY] runId=${ctx.runId} taskId=${ctx.taskId} `
+        + `roundIndex=${ctx.roundIndex} retryOnly=1 upload=0 reason=continue-send-failed`,
+      );
+    }
+
+    function applyRetryContinueOnlyBatchFlags(source) {
+      if (String(state.lastContinueSendFailedReason || '').trim() !== 'continue-send-failed') {
+        return false;
+      }
+
+      const ctx = getBatchContinueDirectContext();
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][RETRY_CONTINUE_ONLY] runId=${ctx.runId} taskId=${ctx.taskId} `
+        + `roundIndex=${ctx.roundIndex} upload=0 promptKind=continue source=${source || '-'}`,
+      );
+      return true;
+    }
+
+    async function sendBatchContinueDirectly(continueText, source) {
+      const text = String(continueText || '').trim();
+
+      if (!text) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][SEND_CONTINUE_DIRECT_BLOCKED] reason=empty_continue_text source=${source || '-'}`,
+        );
+        return {
+          ok: false,
+          reason: 'empty_continue_text',
+        };
+      }
+
+      const deferResult = shouldDeferBatchContinueSend(source);
+      if (deferResult) {
+        return {
+          ok: false,
+          reason: deferResult.reason,
+          deferred: true,
+        };
+      }
+
+      const ctx = getBatchContinueDirectContext();
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][SEND_CONTINUE_DIRECT_START] runId=${ctx.runId} taskId=${ctx.taskId} `
+        + `roundIndex=${ctx.roundIndex} chars=${text.length} source=${source || '-'}`,
+      );
+
+      const beforeAttachment = getAutoQueueComposerAttachmentEvidence(`before-send-continue-direct:${source || '-'}`);
+
+      if (beforeAttachment && beforeAttachment.hasAttachment) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][SEND_CONTINUE_DIRECT_ATTACHMENT_PRESENT] count=${beforeAttachment.count || 0} `
+          + `ready=${beforeAttachment.readyCount || 0} source=${source || '-'}`,
+        );
+      }
+
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.sendTextToChatGPTComposerDirectly !== 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][SEND_CONTINUE_DIRECT_FAILED] runId=${ctx.runId} taskId=${ctx.taskId} `
+          + `roundIndex=${ctx.roundIndex} reason=direct-send-unavailable source=${source || '-'}`,
+        );
+        return {
+          ok: false,
+          reason: 'direct_send_unavailable',
+        };
+      }
+
+      const result = await UploadModule.sendTextToChatGPTComposerDirectly(text, {
+        source: source || 'batch-continue-direct',
+        requireNoAttachment: false,
+        clickSend: true,
+      });
+
+      if (result && result.ok) {
+        state.waitingReply = true;
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, 'batch-continue-direct-sent');
+        setTaskBatchStep('wait-reply', getCurrentRunningTask(), { log: false });
+
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][SEND_CONTINUE_DIRECT_OK] runId=${ctx.runId} taskId=${ctx.taskId} `
+          + `roundIndex=${ctx.roundIndex} source=${source || '-'}`,
+        );
+
+        return {
+          ok: true,
+          reason: 'sent_continue_direct',
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][SEND_CONTINUE_DIRECT_FAILED] runId=${ctx.runId} taskId=${ctx.taskId} `
+        + `roundIndex=${ctx.roundIndex} reason=${result && result.reason ? result.reason : 'unknown'} `
+        + `source=${source || '-'}`,
+      );
+
+      return {
+        ok: false,
+        reason: result && result.reason ? result.reason : 'direct_continue_send_failed',
+      };
+    }
+
+    async function finishBatchContinueDirectSuccess(task, actualContinuePrompt, round, source, logTag) {
+      recordTaskSendRateLimitHit('continue');
+      recordTaskBatchMessageSent('continue');
+      ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][SEND_CONTINUE] task=${task.title} round=${round}`);
+      ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][CONTINUE_SEND] task=${task.title} kind=continue round=${round}`);
+
+      task.continueCount = round;
+      task.updatedAt = nowMs();
+      saveConfig();
+      renderTaskList();
+      renderTaskEditor();
+
+      const enteredWaiting = await enterAutoQueueWaitingReplyAfterConfirm({
+        sendKind: 'continue',
+        task,
+        taskTitle: task.title || '-',
+        prompt: actualContinuePrompt,
+        source,
+        logTag,
+        timeoutMs: 2000,
+      });
+      if (!enteredWaiting || enteredWaiting.ok !== true) {
+        state.taskRun.pendingSendKind = 'continue';
+        state.taskRun.pendingSendStartedAt = Date.now();
+        updateStatus('continue-send-not-verified');
+      } else {
+        state.taskRun.pendingSendKind = null;
+        setTaskBatchStep('wait-next-reply', task, { log: false });
+        const maxRounds = normalizeContinueRoundLimit(
+          resolveTaskContinueSettings(task, getActiveTaskProfile(), { log: false }).actualMaxContinueRounds,
+          UNLIMITED_CONTINUE_ROUNDS,
+        );
+        log(`已直接发送继续指令，等待下一轮回复 (${task.continueCount}/${formatContinueRoundLimit(maxRounds)})`);
+        updateStatus('continue-sent');
+      }
+      updateChatInputStateBadge();
+    }
+
+    async function retryBatchContinueDirectOnly(task) {
+      if (!task || !state.running) {
+        return false;
+      }
+
+      applyRetryContinueOnlyBatchFlags('retry-continue-direct');
+
+      const ctx = getBatchContinueDirectContext();
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][RETRY_CONTINUE_DIRECT_START] runId=${ctx.runId} taskId=${ctx.taskId} `
+        + `roundIndex=${ctx.roundIndex} upload=0 promptKind=continue`,
+      );
+
+      const built = buildManualTaskContinuePrompt(task, getActiveTaskProfile());
+      const prompt = String(built.prompt || '').trim();
+
+      if (!prompt) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][RETRY_CONTINUE_DIRECT_FAILED] reason=empty_continue_prompt`,
+        );
+        return false;
+      }
+
+      const directResult = await sendBatchContinueDirectly(prompt, 'retry-continue-direct');
+
+      if (directResult && directResult.deferred) {
+        return true;
+      }
+
+      if (directResult && directResult.ok) {
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][RETRY_CONTINUE_DIRECT_OK] runId=${ctx.runId} taskId=${ctx.taskId} `
+          + `roundIndex=${ctx.roundIndex}`,
+        );
+        clearRelentlessSendRetryState();
+        state.lastContinueSendFailedReason = '';
+        state.lastContinueSendFailedAt = 0;
+        const round = Number(task.continueCount || 0) + 1;
+        await finishBatchContinueDirectSuccess(
+          task,
+          prompt,
+          round,
+          'retry-continue-direct',
+          '[AUTOQ][CONTINUE_SEND_RETRY]',
+        );
+        return true;
+      }
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][RETRY_CONTINUE_DIRECT_FAILED] reason=${directResult && directResult.reason ? directResult.reason : 'unknown'}`,
+      );
+
+      resetBatchContinueSendFailedState('continue-send-failed');
+      markContinueSendFailedRetryOnly();
+      scheduleRelentlessSendRetry('continue-send-failed', 'continue', task);
+      return false;
+    }
+
     async function sendTaskPrompt(content, logTag, sendKind = 'initial', options = {}) {
+      if (sendKind === 'initial' && !isCurrentRunInitialMessageStrict()) {
+        const task = getCurrentBatchTaskSafe();
+        const continueText = resolveBatchContinuePromptForCurrentTask(task, 'sendTaskPrompt-initial-blocked-after-initial');
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][REWRITE_SENDTASK_INITIAL_TO_CONTINUE] `
+          + `oldKind=initial newKind=continue currentRunSentCount=${Number(state.currentRunSentCount || 0)} `
+          + `oldTextLen=${String(content || '').length} continueLen=${String(continueText || '').length} `
+          + `source=${logTag || '-'}`,
+        );
+        content = continueText;
+        sendKind = 'continue';
+      }
+
       const opts = options && typeof options === 'object' ? options : {};
       const taskForPrompt = getCurrentRunningTask();
       const expectedPromptFromRun = String(opts.expectedPrompt || '').trim()
@@ -16478,11 +17415,35 @@ const AutoQueueModule = (() => {
       if (!prompt && opts.sendExistingComposer === true) {
         prompt = expectedPromptFromRun;
       }
-      const safeSendKind = String(sendKind || 'initial');
+      let safeSendKind = String(sendKind || 'initial');
+      if (isBatchTaskFlowActive()) {
+        safeSendKind = resolveBatchSendKind(safeSendKind, `sendTaskPrompt:${safeSendKind}`);
+      }
 
       if (!prompt) {
         log('任务指令为空，跳过发送');
         return { ok: false, reason: 'empty-prompt' };
+      }
+
+      const currentTask = getCurrentBatchTaskSafe() || taskForPrompt;
+      const originalBlock = blockOriginalPromptAfterInitial(prompt, currentTask, `sendTaskPrompt:${safeSendKind}`);
+      if (originalBlock.blocked) {
+        const continueText = resolveBatchContinuePromptForCurrentTask(currentTask, 'blocked-original-before-send');
+        if (!continueText || !String(continueText).trim()) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][BLOCK_ORIGINAL_PROMPT_NO_CONTINUE_TEXT] source=sendTaskPrompt kind=${safeSendKind}`,
+          );
+          return {
+            ok: false,
+            reason: 'original_prompt_blocked_no_continue_text',
+            blocked: true,
+          };
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][REPLACE_ORIGINAL_WITH_CONTINUE_BEFORE_SEND] source=sendTaskPrompt kind=${safeSendKind} continueChars=${String(continueText).length}`,
+        );
+        prompt = String(continueText).trim();
+        safeSendKind = 'continue';
       }
 
       if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
@@ -16637,6 +17598,18 @@ const AutoQueueModule = (() => {
 
         if (guardAutoQueueBackgroundThrottle('send-task-prompt')) {
           return { ok: false, reason: 'background-throttled', wait: true };
+        }
+
+        const sanitize = await sanitizeComposerBeforeBatchSend(safeSendKind, 'before-click-send');
+        if (!sanitize.ok) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][SEND_BLOCKED_BY_SANITIZE] reason=${sanitize.reason} kind=${safeSendKind}`,
+          );
+          return {
+            ok: false,
+            reason: sanitize.reason,
+            blocked: true,
+          };
         }
 
         const sendVerifyBefore = captureAutoQueueSendVerifyBefore(run);
@@ -16922,6 +17895,9 @@ const AutoQueueModule = (() => {
       }
 
       if (shouldWriteInitialPromptImmediatelyAfterUpload(currentTaskForSendCheck)) {
+        if (blockInitialOnlyPathAfterInitial('write-prompt-immediately-after-upload', 'after-upload-immediate')) {
+          return;
+        }
         ToolboxShell.appendLog(
           `[AUTOQ][WRITE_PROMPT_IMMEDIATELY_AFTER_UPLOAD] task=${currentTaskForSendCheck ? currentTaskForSendCheck.title || '-' : '-'}`,
         );
@@ -17139,7 +18115,28 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      const kind = run.pendingSendKind || 'initial';
+      const batchDecision = decideNextBatchAction();
+      if (batchDecision && batchDecision.promptKind === 'initial' && isCurrentRunFirstMessage()) {
+        if (String(run.pendingSendKind || '') === 'continue') {
+          run.pendingSendKind = 'initial';
+          state.taskRun = run;
+          ToolboxShell.appendLog(
+            '[BATCH_FLOW][FORCE_INITIAL_PENDING_KIND] reason=current_run_first_message',
+          );
+        }
+        if (state.waitingReply && !isChatGPTActuallyBusyForTaskQueue()) {
+          state.waitingReply = false;
+          state.replyBecameBusy = false;
+          state.waitingStartedAt = 0;
+          ToolboxShell.appendLog(
+            '[BATCH_FLOW][CLEAR_FALSE_WAITING_FOR_FIRST_MESSAGE] reason=current_run_first_message',
+          );
+        }
+      }
+
+      const kind = (batchDecision && batchDecision.promptKind === 'initial')
+        ? 'initial'
+        : (run.pendingSendKind || 'initial');
 
       if (kind === 'initial') {
         const resolvedInitial = resolveTaskInitialPrompt(currentTask, { log: true });
@@ -19213,9 +20210,21 @@ const AutoQueueModule = (() => {
       },
       exportConfig,
       snapshotConfig,
-      getState: () => Object.assign({}, state, buildAutoContinueUiState(), {
-        queue: state.queue.slice(),
-      }),
+      getState: () => {
+        const brs = ensureBatchRunState();
+        syncBatchRunStateFromTask(getCurrentBatchTaskSafe(), 'getState');
+        return Object.assign({}, state, buildAutoContinueUiState(), {
+          queue: state.queue.slice(),
+          batchRunState: Object.assign({}, brs),
+          currentTask: getCurrentBatchTaskSafe(),
+        });
+      },
+      blockOriginalPromptAfterInitial,
+      isBatchAfterInitialRound,
+      isCurrentRunFirstMessage,
+      isCurrentRunInitialMessageStrict,
+      isCurrentRunAfterInitialStrict,
+      decideNextBatchAction,
       applyConfig,
       addPromptBatchTask,
       removePromptBatchTask,

@@ -255,6 +255,46 @@
       return view;
     }
 
+    const autoState = (
+      typeof AutoQueueModule !== 'undefined'
+      && AutoQueueModule
+      && typeof AutoQueueModule.getState === 'function'
+    )
+      ? (AutoQueueModule.getState() || {})
+      : {};
+    const autoQueueWaitingReply = (
+      normalizeTaskPhase(String(autoState.phase || '').trim().toLowerCase()) === TaskPhase.WAITING_REPLY
+      || autoState.waitingReply === true
+    );
+    const autoQueueRunning = !!(autoState.running || autoState.batchTaskRunning);
+    const preserveAutoQueueWaitingReply = (
+      autoQueueRunning
+      && autoQueueWaitingReply
+      && (
+        action === 'auto-continue'
+        || action === 'auto-continue-until-done'
+      )
+      && owner === 'send-message'
+    );
+
+    if (preserveAutoQueueWaitingReply) {
+      const preservedLine = `[BUTTON_VIEW][WAITING_REPLY_NON_OWNER_PRESERVED] button=${action || '-'} owner=${owner}`
+        + ` reason=${reason || '-'}`;
+      console.log(preservedLine);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(preservedLine);
+      }
+      return {
+        ...view,
+        phase: TaskPhase.WAITING_REPLY,
+        buttonPhase: 'waiting',
+        disabled: false,
+        allowCancel: true,
+        action: 'stop',
+        suppressedWaitingReply: false,
+      };
+    }
+
     const idleText = resolveIdleBusinessTextForAction(action, snapshot, button);
     const line = `[BUTTON_VIEW][WAITING_REPLY_NON_OWNER_SUPPRESSED] button=${action || '-'} owner=${owner}`
       + ` oldPhase=${String(view.phase || '-')} oldText=${String(view.text || '-')} reason=${reason || '-'}`;
@@ -467,6 +507,63 @@
 
   function getUploadButtonViewState(snapshot = {}) {
     // 仅依据 uploadTask / uploadRunning / activeFilesCount，禁止读取 waitingSend / waitingReply / messageSending。
+    const batchUploadForbiddenReason = String(snapshot.batchUploadForbiddenReason || '').trim();
+    if (batchUploadForbiddenReason) {
+      const afterInitialManualForbidden = batchUploadForbiddenReason === 'batch-after-initial-manual-upload-forbidden';
+      return {
+        phase: TaskPhase.DISABLED,
+        text: afterInitialManualForbidden ? '继续轮次中' : '批量任务中',
+        title: afterInitialManualForbidden
+          ? '首轮已发送，批量继续轮次由 AutoQueue 自动调度上传，请勿手动点上传'
+          : `当前批量任务状态禁止上传：${batchUploadForbiddenReason}`,
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'disabled',
+        preserveBaseColorWhenDisabled: true,
+      };
+    }
+
+    if (
+      snapshot.batchTaskRunning === true
+      && snapshot.batchAfterInitialStrict === true
+      && !snapshot.batchAutoUploading
+      && Number(snapshot.currentRunSentCount || 0) > 0
+    ) {
+      return {
+        phase: TaskPhase.DISABLED,
+        text: '继续轮次中',
+        title: '首轮已发送，批量继续轮次由 AutoQueue 自动调度上传，请勿手动点上传',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'disabled',
+        preserveBaseColorWhenDisabled: true,
+      };
+    }
+
+    const legacyWaitingReply = !!(
+      snapshot.legacyFlags
+      && snapshot.legacyFlags.waitingReply
+    );
+
+    const sendPhaseWaitingReply = String(
+      snapshot.sendTask && snapshot.sendTask.phase || '',
+    ).trim() === 'waiting_reply';
+
+    if (legacyWaitingReply || sendPhaseWaitingReply) {
+      return {
+        phase: TaskPhase.DISABLED,
+        text: '等待回复',
+        title: '当前正在等待回复，禁止上传，避免打断批量任务',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'disabled',
+        preserveBaseColorWhenDisabled: true,
+      };
+    }
+
     const task = snapshot.uploadTask && typeof snapshot.uploadTask === 'object'
       ? snapshot.uploadTask
       : {};
@@ -474,6 +571,28 @@
     const uploadRunning = phase === TaskPhase.UPLOADING || phase === TaskPhase.CANCELLING;
     const moduleInitState = String(snapshot.moduleInitState || '').trim().toLowerCase();
     const moduleInitError = String(snapshot.moduleInitError || '').trim();
+
+    const batchBlockedReason = String(snapshot.batchBlockedReason || '').trim();
+    const batchTaskRunning = snapshot.batchTaskRunning === true;
+    const batchBlocksUpload = batchTaskRunning && (
+      batchBlockedReason === 'conversation_id_lost'
+      || batchBlockedReason === 'batch_conversation_id_not_initialized'
+    );
+
+    if (batchBlocksUpload) {
+      return {
+        phase: TaskPhase.IDLE,
+        text: '开始上传',
+        title: batchBlockedReason === 'conversation_id_lost'
+          ? '批量任务会话已丢失，已禁止上传，避免在首页误发'
+          : '批量任务尚未初始化会话，已禁止上传',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'idle',
+        preserveBaseColorWhenDisabled: true,
+      };
+    }
 
     if (moduleInitState === 'initializing') {
       return {
@@ -1439,6 +1558,27 @@
 
   function computeUploadActionDisabled(action, snapshot = {}) {
     const normalized = String(action || '').trim();
+
+    const batchUploadForbiddenReason = String(snapshot.batchUploadForbiddenReason || '').trim();
+    if (normalized === 'start-upload' && batchUploadForbiddenReason) {
+      const sendPhase = getActionPhaseFromSnapshot('send-message', snapshot);
+      const sendHotkeyPhase = getActionPhaseFromSnapshot('send-hotkey', snapshot);
+      const copyPhase = getActionPhaseFromSnapshot('copy-only', snapshot);
+      const copyHotkeyPhase = getActionPhaseFromSnapshot('copy-hotkey-continue', snapshot);
+      const waitContinuePhase = getActionPhaseFromSnapshot('copy-and-continue', snapshot);
+      const pageReplyStatus = getPageReplyStatus(snapshot);
+      return {
+        disabled: true,
+        reason: `batch-upload-forbidden:${batchUploadForbiddenReason}`,
+        sendPhase,
+        sendHotkeyPhase,
+        copyPhase,
+        copyHotkeyPhase,
+        waitContinuePhase,
+        pageReplyStatus,
+      };
+    }
+
     const globalDisabledActions = new Set([
       'send-message',
       'start-upload',
@@ -1475,6 +1615,26 @@
 
     let disabled = false;
     let reason = 'ok';
+
+    const batchBlockedReason = String(snapshot.batchBlockedReason || '').trim();
+    const batchTaskRunning = snapshot.batchTaskRunning === true;
+    const batchBlocksUpload = batchTaskRunning && (
+      batchBlockedReason === 'conversation_id_lost'
+      || batchBlockedReason === 'batch_conversation_id_not_initialized'
+    );
+
+    if (normalized === 'start-upload' && batchBlocksUpload) {
+      return {
+        disabled: true,
+        reason: `start-upload-blocked-${batchBlockedReason}`,
+        sendPhase,
+        sendHotkeyPhase,
+        copyPhase,
+        copyHotkeyPhase,
+        waitContinuePhase,
+        pageReplyStatus,
+      };
+    }
 
     // Most composite/loop tasks manage their own enable/disable state in getXXXButtonViewState().
     // computeUploadActionDisabled should not act as a global gate for them.

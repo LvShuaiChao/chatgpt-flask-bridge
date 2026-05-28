@@ -2399,6 +2399,14 @@
         `[SEND_MESSAGE_SHARED][TEXT_ENTER] source=${source} chars=${content.length}`,
       );
 
+      if (blockComposerWriteIfOriginalAfterInitial(content, source)) {
+        return {
+          ok: false,
+          reason: 'original_prompt_after_initial_blocked',
+          blocked: true,
+        };
+      }
+
       if (shouldStop()) {
         return {
           ok: false,
@@ -3141,6 +3149,27 @@
       const source = useHotkey
         ? (round === 1 ? 'closed-loop-hotkey-initial-upload' : 'closed-loop-hotkey-every5-upload')
         : (round === 1 ? 'closed-loop-initial-upload' : 'closed-loop-every5-upload');
+
+      if (typeof globalThis.__cgptShouldSkipBatchUpload === 'function' && round > 1) {
+        try {
+          const batchUploadSkip = globalThis.__cgptShouldSkipBatchUpload(source);
+          if (batchUploadSkip && batchUploadSkip.skip === true && batchUploadSkip.reason === 'not-upload-round') {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][SHARED_UPLOAD_SKIP] runId=${runId || '-'} round=${round} reason=${batchUploadSkip.reason}`,
+            );
+            return {
+              ok: true,
+              skipped: true,
+              reason: batchUploadSkip.reason,
+              uploadedCount: 0,
+              failedCount: 0,
+              skippedCount: 0,
+            };
+          }
+        } catch (closedLoopUploadGuardErr) {
+          console.error('[CLOSED_LOOP][SHARED_UPLOAD_GUARD_FAILED]', closedLoopUploadGuardErr);
+        }
+      }
 
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][SHARED_UPLOAD_ENTER] runId=${runId || '-'} round=${round} source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`,
@@ -5790,6 +5819,16 @@
     }
 
     async function prepareVirtualUploadFileForItem(item, source = 'upload-timestamp-wrapper') {
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(source);
+      if (afterInitialUploadBlock.blocked) {
+        const err = new Error('upload-blocked-after-initial');
+        console.error('[ChatGPT toolbox] prepareVirtualUploadFileForItem blocked after initial', {
+          source,
+          reason: afterInitialUploadBlock.reason,
+        });
+        throw err;
+      }
+
       if (!item) {
         const err = new Error('prepareVirtualUploadFileForItem: empty item');
         console.error('[ChatGPT toolbox] prepareVirtualUploadFileForItem: empty item', err);
@@ -12201,6 +12240,14 @@
       const src = String(source || 'unknown');
       const rid = String(runId || '');
 
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(src);
+      if (afterInitialUploadBlock.blocked) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_QUOTA][SKIP_RECORD_BLOCKED_AFTER_INITIAL] source=${src || '-'} runId=${rid || '-'}`,
+        );
+        return;
+      }
+
       if (!Number.isFinite(count) || count <= 0) {
         return;
       }
@@ -12581,6 +12628,10 @@
       const shouldStop = typeof options.shouldStop === 'function'
         ? options.shouldStop
         : () => false;
+
+      if (blockComposerWriteIfOriginalAfterInitial(content, source)) {
+        return { ok: false, reason: 'original_prompt_after_initial_blocked', blocked: true };
+      }
 
       if (shouldStop()) {
         return { ok: false, reason: 'cancelled' };
@@ -14280,6 +14331,31 @@
       );
     }
 
+    function isSameAutoQueueContinueSendTask(sourceText) {
+      const currentSource = state && state.sendTask && state.sendTask.source
+        ? String(state.sendTask.source)
+        : '';
+      const nextSource = String(sourceText || '');
+
+      if (!currentSource || !nextSource) {
+        return false;
+      }
+
+      if (currentSource === nextSource) {
+        return true;
+      }
+
+      if (currentSource.startsWith('autoq-task-') && nextSource.startsWith('autoq-task-')) {
+        return true;
+      }
+
+      if (currentSource.includes('autoq-task') && nextSource.includes('autoq-task')) {
+        return true;
+      }
+
+      return false;
+    }
+
     async function sendContinueMessageOnly(source = 'button', options = {}) {
       const sourceText = String(source || '');
       const isLoopMode = sourceText.startsWith('loop-');
@@ -14337,16 +14413,19 @@
       }
 
       if (isSendTaskBusy() || isWaitingSendButton()) {
-        if (isCurrentClosedLoopSendTask()) {
+        if (isCurrentClosedLoopSendTask() || isSameAutoQueueContinueSendTask(sourceText)) {
           ToolboxShell.appendLog(
-            `[UPLOAD_CONTINUE][BUSY_SKIP_CANCEL_SELF] source=${sourceText}`,
+            `[UPLOAD_CONTINUE][BUSY_SKIP_CANCEL_SELF] source=${sourceText} reason=${isCurrentClosedLoopSendTask() ? 'same-closed-loop-send-task' : 'same-autoq-send-task'}`,
             'warn',
           );
           return {
             ok: false,
-            reason: 'send-task-busy-same-closed-loop',
+            reason: isCurrentClosedLoopSendTask()
+              ? 'send-task-busy-same-closed-loop'
+              : 'send-task-busy-same-autoq',
             assistantDoneSignal: false,
             retryable: true,
+            wait: true,
           };
         }
         cancelWaitingSend('copy-continue');
@@ -14457,6 +14536,15 @@
         : () => false;
       const text = getCopyHotkeyContinuePromptText(options);
       const stopSignal = getCopyHotkeyContinueStopSignal(options);
+      const continuePayloadVerify = options.payloadVerify || {
+        allowCoreContains: true,
+        allowLenDelta: 80,
+        requiredIncludes: [
+          '请继续完成上一个任务',
+          stopSignal,
+          '不要重复已经输出过的内容',
+        ],
+      };
 
       if (shouldStop()) {
         return {
@@ -14475,7 +14563,7 @@
           allowReplaceDraft: true,
           shouldStop,
           timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
-          payloadVerify: options.payloadVerify || null,
+          payloadVerify: continuePayloadVerify,
         });
 
         if (shouldStop()) {
@@ -14618,6 +14706,260 @@
       );
     }
 
+    function sleepMs(ms) {
+      return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+    }
+
+    function findChatGPTComposerEditor() {
+      const selectors = [
+        '#prompt-textarea',
+        'div#prompt-textarea[contenteditable="true"]',
+        'div[contenteditable="true"][data-testid="prompt-textarea"]',
+        'div[contenteditable="true"][role="textbox"]',
+        'textarea[data-testid="prompt-textarea"]',
+        'textarea#prompt-textarea',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el) {
+          return el;
+        }
+      }
+
+      const candidates = Array.from(document.querySelectorAll('textarea, div[contenteditable="true"], [role="textbox"]'));
+      for (const el of candidates) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 100 && rect.height > 20) {
+          return el;
+        }
+      }
+
+      return null;
+    }
+
+    function focusChatGPTComposerEditor(editor, source) {
+      if (!editor) {
+        return false;
+      }
+
+      editor.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+      });
+
+      editor.focus();
+
+      const active = document.activeElement;
+      const ok = active === editor || editor.contains(active);
+
+      ToolboxShell.appendLog(
+        `[COMPOSER_DIRECT_SEND][FOCUS] source=${source || '-'} ok=${ok ? 1 : 0} tag=${editor.tagName || '-'} id=${editor.id || '-'}`,
+      );
+
+      return ok;
+    }
+
+    function setChatGPTComposerText(editor, text, source) {
+      const value = String(text || '');
+
+      if (blockComposerWriteIfOriginalAfterInitial(value, source)) {
+        return false;
+      }
+
+      if (!editor) {
+        return false;
+      }
+
+      if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
+          || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+
+        if (setter && setter.set) {
+          setter.set.call(editor, value);
+        } else {
+          editor.value = value;
+        }
+
+        editor.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: value,
+        }));
+
+        editor.dispatchEvent(new Event('change', {
+          bubbles: true,
+        }));
+
+        return true;
+      }
+
+      if (editor.isContentEditable || editor.getAttribute('contenteditable') === 'true') {
+        editor.focus();
+
+        editor.textContent = value;
+
+        editor.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: value,
+        }));
+
+        editor.dispatchEvent(new Event('change', {
+          bubbles: true,
+        }));
+
+        return true;
+      }
+
+      ToolboxShell.appendLog(
+        `[COMPOSER_DIRECT_SEND][UNSUPPORTED_EDITOR] source=${source || '-'} tag=${editor.tagName || '-'} id=${editor.id || '-'}`,
+      );
+
+      return false;
+    }
+
+    function readChatGPTComposerText(editor) {
+      if (!editor) {
+        return '';
+      }
+
+      if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
+        return String(editor.value || '');
+      }
+
+      return String(editor.innerText || editor.textContent || '');
+    }
+
+    async function sendTextToChatGPTComposerDirectly(text, options = {}) {
+      const source = String(options.source || 'direct-send').trim();
+      const value = String(text || '').trim();
+
+      if (blockComposerWriteIfOriginalAfterInitial(value, source)) {
+        return {
+          ok: false,
+          reason: 'original_prompt_after_initial_blocked',
+          blocked: true,
+        };
+      }
+
+      if (!value) {
+        return {
+          ok: false,
+          reason: 'empty_text',
+        };
+      }
+
+      const editor = findChatGPTComposerEditor();
+      if (!editor) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][EDITOR_NOT_FOUND] source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'composer_editor_not_found',
+        };
+      }
+
+      const focusOk = focusChatGPTComposerEditor(editor, source);
+      if (!focusOk) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][FOCUS_FAILED] source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'composer_focus_failed',
+        };
+      }
+
+      const setOk = setChatGPTComposerText(editor, value, source);
+      if (!setOk) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][SET_TEXT_FAILED] source=${source} chars=${value.length}`,
+        );
+        return {
+          ok: false,
+          reason: 'composer_set_text_failed',
+        };
+      }
+
+      await sleepMs(120);
+
+      const actualText = readChatGPTComposerText(editor);
+      if (!actualText || !actualText.includes(value.slice(0, Math.min(30, value.length)))) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][VERIFY_TEXT_FAILED] source=${source} expectedChars=${value.length} actualChars=${actualText ? actualText.length : 0}`,
+        );
+        return {
+          ok: false,
+          reason: 'composer_verify_text_failed',
+        };
+      }
+
+      const sendButton = typeof findRealChatGPTSendButton === 'function'
+        ? findRealChatGPTSendButton()
+        : null;
+      if (!sendButton) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][SEND_BUTTON_NOT_FOUND] source=${source}`,
+        );
+        return {
+          ok: false,
+          reason: 'send_button_not_found',
+        };
+      }
+
+      if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][SEND_BUTTON_DISABLED] source=${source} textChars=${actualText.length}`,
+        );
+        return {
+          ok: false,
+          reason: 'send_button_disabled',
+        };
+      }
+
+      sendButton.click();
+
+      await sleepMs(300);
+
+      ToolboxShell.appendLog(
+        `[COMPOSER_DIRECT_SEND][CLICK_SEND_OK] source=${source} chars=${value.length}`,
+      );
+
+      await sleepMs(500);
+
+      const afterText = readChatGPTComposerText(editor);
+      const assistantBusy = typeof isAssistantBusy === 'function'
+        ? isAssistantBusy()
+        : (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          && ComposerApi.isAssistantLikelyBusy()
+        );
+      const stopButton = document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+
+      if (!afterText.trim() || assistantBusy || stopButton) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][VERIFY_SEND_OK] source=${source} afterTextChars=${afterText.trim().length} assistantBusy=${assistantBusy ? 1 : 0} stopButton=${stopButton ? 1 : 0}`,
+        );
+        return {
+          ok: true,
+          reason: 'send_verified',
+        };
+      }
+
+      ToolboxShell.appendLog(
+        `[COMPOSER_DIRECT_SEND][VERIFY_SEND_FAILED] source=${source} afterTextChars=${afterText.trim().length}`,
+      );
+
+      return {
+        ok: false,
+        reason: 'send_not_verified',
+      };
+    }
+
     async function focusComposerForClosedLoop(source = '') {
       const sourceText = String(source || '').trim() || '-';
       const selectors = [
@@ -14695,6 +15037,18 @@
       const sourceText = String(options.source || 'shared-composer-send').trim() || 'shared-composer-send';
       const logPrefix = String(options.logPrefix || 'SHARED_COMPOSER').trim() || 'SHARED_COMPOSER';
       const promptText = String(options.promptText || '');
+      if (promptText.trim() && blockComposerWriteIfOriginalAfterInitial(promptText, sourceText)) {
+        return {
+          ok: false,
+          reason: 'original_prompt_after_initial_blocked',
+          detail: '',
+          sent: false,
+          attachmentReady: false,
+          textLen: promptText.length,
+          source: sourceText,
+          blocked: true,
+        };
+      }
       const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
       const uploadBeforeSend = options.uploadBeforeSend === true;
       const waitAttachmentStable = options.waitAttachmentStable === true;
@@ -21042,6 +21396,270 @@
       }
     }
 
+    function getAutoQueueUploadForbiddenReason(source) {
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return '';
+      }
+
+      const autoState = AutoQueueModule.getState() || {};
+      const brs = autoState.batchRunState && typeof autoState.batchRunState === 'object'
+        ? autoState.batchRunState
+        : {};
+
+      const sourceText = String(source || '').trim();
+      const phase = String(autoState.phase || '').trim();
+      const step = String(autoState.step || '').trim();
+      const batchTask = autoState.batchTask && typeof autoState.batchTask === 'object'
+        ? autoState.batchTask
+        : {};
+      const displayState = String(
+        batchTask.displayState || autoState.batchTaskGroupDisplayState || '',
+      ).trim();
+
+      if (String(autoState.lastContinueSendFailedReason || '').trim() === 'continue-send-failed') {
+        return 'continue-send-failed-retry';
+      }
+
+      const batchActive = !!(
+        autoState.running
+        || autoState.batchTaskRunning
+        || displayState === 'running'
+        || displayState === 'uploading'
+        || displayState === 'waiting_reply'
+        || displayState === 'waiting_composer_idle'
+        || displayState === 'recovering'
+        || displayState === 'stopping'
+      );
+
+      if (!batchActive) {
+        return '';
+      }
+
+      if (brs.blockedReason) {
+        return `batch-blocked-${brs.blockedReason}`;
+      }
+
+      if (autoState.waitingReply || brs.waitingReply || phase === 'waiting_reply' || step === 'waiting_reply') {
+        return 'batch-waiting-reply';
+      }
+
+      if (
+        phase === 'cancelled'
+        || step === 'stopped'
+        || displayState === 'stopped'
+        || displayState === 'stopping'
+      ) {
+        return 'batch-stopping-or-stopped';
+      }
+
+      if (
+        sourceText.includes('autoq-stop-final-upload')
+        || sourceText.includes('start-button-force-stop')
+        || sourceText.includes('batch-force-stop')
+        || sourceText.includes('batch-stop')
+        || sourceText.includes('stop-final-upload')
+        || sourceText.includes('force-stop')
+      ) {
+        return `forbidden-upload-source:${sourceText}`;
+      }
+
+      const isButtonSnapshotSource = (
+        sourceText === 'button-snapshot'
+        || sourceText.includes('renderUploadButtonsOnly')
+      );
+      const afterInitialStrict = (
+        typeof AutoQueueModule.isCurrentRunAfterInitialStrict === 'function'
+        && AutoQueueModule.isCurrentRunAfterInitialStrict()
+      ) || Number(autoState.currentRunSentCount || 0) > 0;
+      if (
+        isButtonSnapshotSource
+        && afterInitialStrict
+        && !autoState.batchAutoUploading
+        && !autoState.uploadingFromAutoQueue
+      ) {
+        return 'batch-after-initial-manual-upload-forbidden';
+      }
+
+      return '';
+    }
+
+    function blockUploadIfBatchForbidden(source) {
+      const forbiddenReason = getAutoQueueUploadForbiddenReason(source);
+      if (!forbiddenReason) {
+        return null;
+      }
+      ToolboxShell.appendLog(
+        `[UPLOAD][BLOCKED_BY_BATCH_STATE] source=${source || '-'} reason=${forbiddenReason}`,
+      );
+      return {
+        ok: false,
+        reason: forbiddenReason,
+        blocked: true,
+        uploaded: 0,
+        failed: 0,
+        skipped: 0,
+        uploadedCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+      };
+    }
+
+    function isCurrentBatchRunFirstMessageForUpload() {
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.isCurrentRunInitialMessageStrict === 'function'
+      ) {
+        return AutoQueueModule.isCurrentRunInitialMessageStrict();
+      }
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return false;
+      }
+      const autoState = AutoQueueModule.getState() || {};
+      const brs = autoState.batchRunState && typeof autoState.batchRunState === 'object'
+        ? autoState.batchRunState
+        : {};
+      const currentRunSentCount = Number(autoState.currentRunSentCount || 0);
+      return !!(
+        autoState.running
+        && currentRunSentCount <= 0
+        && brs.initialPromptSent !== true
+        && brs.initialPayloadConsumed !== true
+        && brs.lastSentKind !== 'initial'
+        && Number(brs.roundIndex || 1) === 1
+      );
+    }
+
+    function isBatchAfterInitialUploadConsumedForUploadModule() {
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.isCurrentRunAfterInitialStrict === 'function'
+      ) {
+        return AutoQueueModule.isCurrentRunAfterInitialStrict();
+      }
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return false;
+      }
+      const autoState = AutoQueueModule.getState() || {};
+      return !!(autoState.running && Number(autoState.currentRunSentCount || 0) > 0);
+    }
+
+    function blockUploadAfterInitialIfNeeded(source) {
+      if (isCurrentBatchRunFirstMessageForUpload()) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][ALLOW_INITIAL_UPLOAD_BY_RUN_STATE] source=${source || '-'} currentRunSentCount=0`,
+        );
+        return {
+          blocked: false,
+          reason: 'current_run_first_message',
+        };
+      }
+      if (!isBatchAfterInitialUploadConsumedForUploadModule()) {
+        return {
+          blocked: false,
+          reason: 'not-after-initial',
+        };
+      }
+      const sourceText = String(source || '').trim();
+      const allowedEveryN = sourceText.includes('send_continue_with_upload')
+        || sourceText.includes('auto-upload-every-n')
+        || sourceText.includes('continue-with-upload')
+        || sourceText.includes('closed-loop-every5-upload')
+        || sourceText.includes('closed-loop-hotkey-every5-upload');
+      if (allowedEveryN) {
+        return {
+          blocked: false,
+          reason: 'allowed-continue-with-upload',
+        };
+      }
+      ToolboxShell.appendLog(
+        `[UPLOAD][BLOCK_AFTER_INITIAL_ATTACHMENT_REWRITE] source=${sourceText || '-'} reason=initial_payload_consumed`,
+      );
+      return {
+        blocked: true,
+        reason: 'initial_payload_consumed',
+      };
+    }
+
+    function blockComposerWriteIfOriginalAfterInitial(value, source) {
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.blockOriginalPromptAfterInitial !== 'function'
+      ) {
+        return false;
+      }
+      const autoState = typeof AutoQueueModule.getState === 'function'
+        ? AutoQueueModule.getState()
+        : null;
+      const currentTask = autoState && typeof autoState.currentTask === 'object'
+        ? autoState.currentTask
+        : null;
+      const block = AutoQueueModule.blockOriginalPromptAfterInitial(
+        value,
+        currentTask,
+        `composer-write:${source || '-'}`,
+      );
+      if (block && block.blocked) {
+        ToolboxShell.appendLog(
+          `[COMPOSER_DIRECT_SEND][BLOCK_WRITE_ORIGINAL_AFTER_INITIAL] source=${source || '-'} chars=${String(value || '').length}`,
+        );
+        return true;
+      }
+      return false;
+    }
+
+    function getAutoQueueBatchRunSnapshotForUploadButtons() {
+      const empty = {
+        batchTaskRunning: false,
+        batchBlockedReason: '',
+        batchUploadForbiddenReason: '',
+        batchInitialPromptSent: false,
+        batchInitialPayloadConsumed: false,
+        batchInitialConversationPending: false,
+        batchConversationId: '',
+      };
+
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return empty;
+      }
+
+      const autoState = AutoQueueModule.getState() || {};
+      const brs = autoState.batchRunState && typeof autoState.batchRunState === 'object'
+        ? autoState.batchRunState
+        : {};
+
+      return {
+        batchTaskRunning: !!(autoState.running || autoState.batchTaskRunning),
+        batchBlockedReason: String(brs.blockedReason || '').trim(),
+        batchUploadForbiddenReason: getAutoQueueUploadForbiddenReason('button-snapshot'),
+        batchInitialPromptSent: brs.initialPromptSent === true,
+        batchInitialPayloadConsumed: brs.initialPayloadConsumed === true,
+        batchInitialConversationPending: brs.initialConversationPending === true,
+        batchConversationId: String(brs.conversationId || '').trim(),
+        currentRunSentCount: Number(autoState.currentRunSentCount || 0),
+        batchAutoUploading: !!autoState.batchAutoUploading,
+        batchAfterInitialStrict: isBatchAfterInitialUploadConsumedForUploadModule(),
+      };
+    }
+
     function buildUploadOnlyButtonSnapshot() {
       syncUploadTaskFromLegacyState();
       const runtime = getUnifiedRuntimeStatus('buildUploadOnlyButtonSnapshot');
@@ -21056,6 +21674,7 @@
         moduleInitError: String(state.moduleInitError || ''),
         uploadRunning: isUploadRunActuallyActive(),
         activeFilesCount: getActiveGroupFiles().length,
+        ...getAutoQueueBatchRunSnapshotForUploadButtons(),
       };
     }
 
@@ -21074,6 +21693,7 @@
         uploadTask: runtime.uploadTask,
         moduleInitState: getUploadModuleInitState(),
         moduleInitError: String(state.moduleInitError || ''),
+        ...getAutoQueueBatchRunSnapshotForUploadButtons(),
         sendTask: runtime.sendTask,
         copyTask: runtime.copyTask,
         uploadRunning: isUploadRunActuallyActive(),
@@ -23124,7 +23744,6 @@
           ) {
             applyStartUploadButtonState(autoqStartUploadBtnCritical, {
               reason: 'renderUploadButtonsOnly:critical-upload-only:autoq-mirror',
-              ignoreAutoQueueRunning: true,
             });
           }
 
@@ -23204,7 +23823,6 @@
           && autoqStartUploadBtn !== currentStartBtn
           && applyStartUploadButtonState(autoqStartUploadBtn, {
             reason: 'renderUploadButtonsOnly:autoq-mirror',
-            ignoreAutoQueueRunning: true,
           })
         ) {
           changedButtons += 1;
@@ -25487,6 +26105,68 @@
       const scopeGroupId = getActiveUploadScopeGroupId(options);
       const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
 
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(source);
+      if (afterInitialUploadBlock.blocked) {
+        return {
+          ok: false,
+          blocked: true,
+          reason: afterInitialUploadBlock.reason,
+          uploaded: 0,
+          failed: 0,
+          skipped: 0,
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+
+      const batchUploadBlock = blockUploadIfBatchForbidden(source);
+      if (batchUploadBlock) {
+        return batchUploadBlock;
+      }
+
+      if (typeof globalThis.__cgptShouldSkipBatchUpload === 'function') {
+        try {
+          const batchUploadSkip = globalThis.__cgptShouldSkipBatchUpload(source);
+          if (batchUploadSkip && batchUploadSkip.skip === true) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_SHARED][SKIP] source=${source} reason=${batchUploadSkip.reason || 'batch-skip-upload'}`,
+            );
+            return {
+              ok: batchUploadSkip.blocked === true ? false : true,
+              skipped: true,
+              reason: batchUploadSkip.reason || 'batch-skip-upload',
+              uploadedCount: 0,
+              failedCount: 0,
+              skippedCount: 0,
+            };
+          }
+        } catch (batchUploadGuardErr) {
+          console.error('[UPLOAD_SHARED][BATCH_UPLOAD_GUARD_FAILED]', batchUploadGuardErr);
+        }
+      }
+
+      const sendPhaseForUpload = typeof getSendTaskPhase === 'function'
+        ? String(getSendTaskPhase() || '')
+        : '';
+      if (
+        sendPhaseForUpload === 'waiting_reply'
+        && typeof globalThis.__cgptIsBatchTaskFlowActive === 'function'
+        && globalThis.__cgptIsBatchTaskFlowActive() === true
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_SHARED][SKIP] source=${source} reason=waiting_reply sendPhase=${sendPhaseForUpload}`,
+        );
+        return {
+          ok: false,
+          skipped: true,
+          reason: 'waiting-reply',
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+
       ToolboxShell.appendLog(`[UPLOAD_SHARED][ENTER] source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`);
 
       if (!state.moduleReady) {
@@ -26394,6 +27074,17 @@
       return normalized;
     }
 
+    function compactPayloadTextForCompare(value) {
+      return String(value || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
     function hashStringTiny(text) {
       const str = String(text == null ? '' : text);
       let h = 5381;
@@ -26417,6 +27108,10 @@
       const normalized = payload.trim();
       const opts = options && typeof options === 'object' ? options : {};
       const allowReplaceDraft = opts.allowReplaceDraft !== false;
+
+      if (blockComposerWriteIfOriginalAfterInitial(payload, source)) {
+        return { ok: false, reason: 'original_prompt_after_initial_blocked', blocked: true };
+      }
       const payloadVerify = opts.payloadVerify && typeof opts.payloadVerify === 'object'
         ? opts.payloadVerify
         : null;
@@ -26462,6 +27157,7 @@
       const intervalMs = Math.max(60, Number(opts.intervalMs || 100));
       let lastActual = '';
       const expectedNorm = normalizeComposerTextForCompare(payload);
+      const compactExpected = compactPayloadTextForCompare(payload);
       const expectedNormHash = hashStringTiny(expectedNorm);
       const requiredIncludes = payloadVerify && Array.isArray(payloadVerify.requiredIncludes)
         ? payloadVerify.requiredIncludes
@@ -26486,9 +27182,13 @@
         const actualPreview = previewSendPayloadText(actualTrim, 110);
 
         const actualNorm = normalizeComposerTextForCompare(actualTrim);
+        const compactActual = compactPayloadTextForCompare(actualTrim);
         const actualNormHash = hashStringTiny(actualNorm);
         const exact = actualTrim === normalized;
         const normalizedExact = actualNorm && expectedNorm && actualNorm === expectedNorm;
+        const compactExact = compactExpected && compactActual && compactExpected === compactActual;
+        const compactProbe = compactExpected.slice(0, Math.min(120, compactExpected.length));
+        const compactContains = !!(compactProbe && compactActual.includes(compactProbe));
         const expectedProbe = previewSendPayloadText(expectedNorm || normalized, 90);
         const containsProbe = !!(actualNorm && expectedProbe && actualNorm.includes(expectedProbe));
         const deltaLen = Math.abs(expectedLen - actualLen);
@@ -26497,13 +27197,30 @@
           ? (requiredOk && deltaLen <= allowLenDelta)
           : false;
 
-        if (actualLen > 0 && (exact || normalizedExact || containsProbe || coreOk)) {
+        if (actualLen > 0 && (exact || normalizedExact || compactExact || compactContains || containsProbe || coreOk)) {
           const acceptedBy = exact
             ? 'exact'
-            : (normalizedExact ? 'normalized-exact' : (coreOk ? 'core-contains' : 'probe-contains'));
+            : (
+              normalizedExact
+                ? 'normalized-exact'
+                : (
+                  compactExact
+                    ? 'compact-exact'
+                    : (
+                      compactContains
+                        ? 'compact-contains'
+                        : (coreOk ? 'core-contains' : 'probe-contains')
+                    )
+                )
+            );
           if (isClosedLoopFinalVerify && coreOk && requiredOk && deltaLen <= 20) {
             ToolboxShell.appendLog(
               `[CLOSED_LOOP][DONE_VERIFY_PAYLOAD_RELAXED_OK] source=${sourceText || '-'} expectedLen=${expectedLen} actualLen=${actualLen} delta=${deltaLen} attempt=${attempt}`,
+            );
+          }
+          if (compactExact || compactContains) {
+            ToolboxShell.appendLog(
+              `[SEND_PAYLOAD][ACCEPT_COMPACT_NORMALIZED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${actualLen} delta=${deltaLen}`,
             );
           }
           if (acceptedBy !== 'exact') {
@@ -26530,19 +27247,44 @@
       const finalLen = finalActual.length;
       const finalPreview = previewSendPayloadText(finalActual, 110);
       const finalNorm = normalizeComposerTextForCompare(finalActual);
+      const finalCompact = compactPayloadTextForCompare(finalActual);
       const finalDelta = Math.abs(expectedLen - finalLen);
       const finalRequiredOk = payloadContainsAll(finalActual, requiredIncludes) || payloadContainsAll(finalNorm, requiredIncludes);
       const finalNormalizedExact = finalNorm && expectedNorm && finalNorm === expectedNorm;
+      const finalCompactExact = compactExpected && finalCompact && compactExpected === finalCompact;
+      const finalCompactProbe = compactExpected.slice(0, Math.min(120, compactExpected.length));
+      const finalCompactContains = !!(finalCompactProbe && finalCompact.includes(finalCompactProbe));
 
-      if (finalLen > 0 && (finalNormalizedExact || (allowCoreContains && finalDelta <= allowLenDelta && finalRequiredOk))) {
+      if (
+        finalLen > 0
+        && (
+          finalNormalizedExact
+          || finalCompactExact
+          || finalCompactContains
+          || (allowCoreContains && finalDelta <= allowLenDelta && finalRequiredOk)
+        )
+      ) {
         if (isClosedLoopFinalVerify && !finalNormalizedExact && finalDelta <= 20 && finalRequiredOk) {
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][DONE_VERIFY_PAYLOAD_RELAXED_OK] source=${sourceText || '-'} expectedLen=${expectedLen} actualLen=${finalLen} delta=${finalDelta} attempt=final`,
           );
         }
+        if (finalCompactExact || finalCompactContains) {
+          ToolboxShell.appendLog(
+            `[SEND_PAYLOAD][ACCEPT_COMPACT_NORMALIZED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} delta=${finalDelta}`,
+          );
+        }
         ToolboxShell.appendLog(
           `[SEND_PAYLOAD][ACCEPT_NORMALIZED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} delta=${finalDelta} `
-          + `acceptedBy=${finalNormalizedExact ? 'normalized-exact' : 'core-contains'} normalizedMatch=${finalNormalizedExact ? 1 : 0} `
+          + `acceptedBy=${
+            finalNormalizedExact
+              ? 'normalized-exact'
+              : (
+                finalCompactExact
+                  ? 'compact-exact'
+                  : (finalCompactContains ? 'compact-contains' : 'core-contains')
+              )
+          } normalizedMatch=${finalNormalizedExact ? 1 : 0} `
           + `expectedHash=${expectedNormHash} actualHash=${hashStringTiny(finalNorm)} requiredOk=${finalRequiredOk ? 1 : 0}`,
         );
         ToolboxShell.appendLog(
@@ -29190,6 +29932,14 @@
 
       const opts = options && typeof options === 'object' ? options : {};
       const attachSource = String(opts.source || '').trim() || 'uploadFilesToChatGPT';
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(attachSource);
+      if (afterInitialUploadBlock.blocked) {
+        return false;
+      }
+      const batchUploadBlock = blockUploadIfBatchForbidden(attachSource);
+      if (batchUploadBlock) {
+        return false;
+      }
       const signal = opts.signal || null;
       const isCancelled = typeof opts.isCancelled === 'function'
         ? opts.isCancelled
@@ -29546,6 +30296,26 @@
         ? Math.floor(maxFilesRaw)
         : 0;
 
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(uploadSource);
+      if (afterInitialUploadBlock.blocked) {
+        return {
+          ok: false,
+          blocked: true,
+          reason: afterInitialUploadBlock.reason,
+          uploaded: 0,
+          failed: 0,
+          skipped: 0,
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+
+      const batchUploadBlock = blockUploadIfBatchForbidden(uploadSource);
+      if (batchUploadBlock) {
+        return batchUploadBlock;
+      }
+
       ToolboxShell.appendLog(
         `[UPLOAD][AUTOQ_START] source=${uploadSource} groupId=${scopeGroupId || '-'} forceReupload=${forceReupload ? 1 : 0} maxFiles=${maxFiles || '-'}`,
       );
@@ -29711,6 +30481,24 @@
     async function startUploadFromCurrentQueue(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const uploadSource = String(opts.source || 'button').trim() || 'button';
+      const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(uploadSource);
+      if (afterInitialUploadBlock.blocked) {
+        return {
+          ok: false,
+          blocked: true,
+          reason: afterInitialUploadBlock.reason,
+          uploaded: 0,
+          failed: 0,
+          skipped: 0,
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+      const batchUploadBlock = blockUploadIfBatchForbidden(uploadSource);
+      if (batchUploadBlock) {
+        return batchUploadBlock;
+      }
       const parentTask = String(opts.parentTask || '').trim();
       const cycleIndex = Number(opts.cycleIndex) || 0;
       const isChildUpload = parentTask.length > 0;
@@ -34050,10 +34838,12 @@
       syncUploadTaskPhase,
       getUploadTaskState,
       syncSendTaskPhase,
+      setAuthoritativeSendTaskState,
       getSendTaskPhase,
       getSendTaskState,
       getUnifiedComposerAttachmentState,
       runSharedComposerSendFlow,
+      sendTextToChatGPTComposerDirectly,
       runSharedSendAndWaitEntryFlow,
       confirmSharedMessageSubmitted,
       writeTextPayloadToComposerAndVerify,

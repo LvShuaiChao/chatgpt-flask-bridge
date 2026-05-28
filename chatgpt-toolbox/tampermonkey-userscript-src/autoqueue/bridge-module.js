@@ -3247,6 +3247,13 @@
         return;
       }
       reportIdentityChanged(latest, oldKey, newKey, reason);
+      if (typeof globalThis.__cgptHandleBatchFlowIdentityChange === 'function') {
+        try {
+          globalThis.__cgptHandleBatchFlowIdentityChange(oldKey, newKey, reason);
+        } catch (batchIdentityErr) {
+          console.error('[BRIDGE][BATCH_FLOW_IDENTITY_CHANGE_FAILED]', batchIdentityErr);
+        }
+      }
       const becameConversation = (
         (latest.page_type || '') === 'conversation'
         && Boolean((latest.conversation_id || '').trim())

@@ -209,13 +209,50 @@ async function switchToNewChatUnified(reason, options) {
       : '';
 
     const inputable = capability && capability.can_accept_input ? true : false;
+    const sendable = capability && capability.can_send_now ? true : false;
+    const responseReason = capability && capability.response_state_reason
+      ? String(capability.response_state_reason)
+      : '';
     const leftOldConversation = currentKey !== beforeKey;
+    const alreadyHomeReady = (
+      currentKey === beforeKey
+      && currentKey === 'path:/'
+      && inputable
+      && sendable
+      && responseState !== 'generating'
+      && responseReason === 'home_new_chat_composer_ready_override'
+    );
+
+    if (alreadyHomeReady) {
+      if (append) {
+        append(`[NEW_CHAT][READY_ALREADY_HOME] url=${location.href} conversation_id=-`);
+        append(
+          `[NEW_CHAT][READY] reason=${reasonText} before=${beforeKey} after=${currentKey} `
+          + `inputable=${inputable} sendable=${sendable} response_state=${responseState} `
+          + `method=${lastSuccessfulClickMethod || '-'} ready=already-home`,
+        );
+      }
+
+      if (readyStatusText && setStatusFn) {
+        setStatusFn(readyStatusText);
+      }
+
+      return {
+        ok: true,
+        beforeKey,
+        afterKey: currentKey,
+        reason: reasonText,
+        method: lastSuccessfulClickMethod || '',
+        sawButtonDuringAttempts,
+        alreadyHomeReady: true,
+      };
+    }
 
     if (leftOldConversation && inputable && responseState !== 'generating') {
       if (append) {
         append(
           `[NEW_CHAT][READY] reason=${reasonText} before=${beforeKey} after=${currentKey} `
-          + `inputable=${inputable} response_state=${responseState} method=${lastSuccessfulClickMethod || '-'}`,
+          + `inputable=${inputable} sendable=${sendable} response_state=${responseState} method=${lastSuccessfulClickMethod || '-'}`,
         );
       }
 
