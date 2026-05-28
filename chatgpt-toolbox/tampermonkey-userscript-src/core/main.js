@@ -4473,9 +4473,24 @@
       };
 
       if (reasonText) {
-        ToolboxShell.appendLog(
-          `[COMPOSER][ATTACHMENT_SNAPSHOT] reason=${reasonText} count=${snapshot.count} names=${(snapshot.items || []).map((x) => x.name).filter(Boolean).join(',') || '-'}`,
-        );
+        let debugMode = false;
+        try {
+          if (
+            typeof AutoQueueModule !== 'undefined'
+            && AutoQueueModule
+            && typeof AutoQueueModule.getConfig === 'function'
+          ) {
+            const cfg = AutoQueueModule.getConfig() || {};
+            debugMode = !!(cfg.taskQueueSettings && cfg.taskQueueSettings.debugMode);
+          }
+        } catch (err) {
+          console.error('[ChatGPT toolbox] getComposerAttachmentSnapshot debugMode check failed', err);
+        }
+        if (debugMode) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_SNAPSHOT] reason=${reasonText} count=${snapshot.count} names=${(snapshot.items || []).map((x) => x.name).filter(Boolean).join(',') || '-'}`,
+          );
+        }
       }
 
       return snapshot;
@@ -7256,7 +7271,25 @@
   }
 
   let detectComposerResponseStateDepth = 0;
+  let composerDetecting = false;
   const MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH = 6;
+
+  function buildDetectReenterSkipState(reasonText) {
+    return {
+      is_responding: false,
+      response_state: 'unknown',
+      response_state_reason: 'detect-reenter-skip',
+      reason: 'detect-reenter-skip',
+      can_accept_input: false,
+      can_send_now: false,
+      has_composer: false,
+      has_composer_payload: false,
+      attachment_count: 0,
+      response_state_at: Date.now(),
+      _detect_reenter_skip: true,
+      _detect_reason: reasonText,
+    };
+  }
 
   function detectComposerResponseState(options = {}) {
     const perfStartedAt = (typeof performance !== 'undefined' && performance.now)
@@ -7278,6 +7311,12 @@
     ) {
       return responseStateCache.value;
     }
+    if (composerDetecting) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[COMPOSER][DETECT_REENTER_SKIP] reason=${reasonText}`);
+      }
+      return buildDetectReenterSkipState(reasonText);
+    }
     if (detectComposerResponseStateDepth >= MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH) {
       const line = `[COMPOSER][RECURSION_GUARD] scope=detectComposerResponseState depth=${detectComposerResponseStateDepth} max=${MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH}`;
       console.error('[ChatGPT toolbox] detectComposerResponseState recursion guard triggered', {
@@ -7292,6 +7331,7 @@
     }
 
     detectComposerResponseStateDepth += 1;
+    composerDetecting = true;
     try {
     if (options && options.light === true) {
       return detectComposerResponseStateLight();
@@ -7535,6 +7575,34 @@
           console.warn(line);
         }
       }
+    }
+  }
+
+  function safeDetectComposerResponseState(options = {}) {
+    try {
+      return detectComposerResponseState(options);
+    } catch (error) {
+      console.error('[COMPOSER][DETECT_ERROR]', error);
+      const errText = error && error.message ? error.message : String(error);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][DETECT_ERROR] reason=${String(options && options.reason ? options.reason : '-')} `
+          + `type=${error && error.name ? error.name : 'Error'} error=${errText}`,
+        );
+      }
+      return {
+        is_responding: false,
+        response_state: 'unknown',
+        response_state_reason: 'detect-error',
+        reason: 'detect-error',
+        can_accept_input: false,
+        can_send_now: false,
+        has_composer: false,
+        has_composer_payload: false,
+        attachment_count: 0,
+        error: errText,
+        response_state_at: Date.now(),
+      };
     }
   }
 

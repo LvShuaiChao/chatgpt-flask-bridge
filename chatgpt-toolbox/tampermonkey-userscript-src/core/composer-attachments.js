@@ -1,6 +1,114 @@
 const ComposerAttachments = (() => {
   const deprecatedHitOnce = new Set();
   let composerAttachmentCanonicalLogKey = '';
+  const attachmentEvidenceCache = {
+    ts: 0,
+    result: null,
+    reason: '',
+    logKey: '',
+  };
+  let attachmentDirty = true;
+  let attachmentMutationObserver = null;
+  let attachmentMutationObserverRoot = null;
+  let lastAttachmentHeavyScanAt = 0;
+  let sharedEvidenceInFlight = false;
+  const UPLOAD_EVIDENCE_CACHE_MS = 500;
+  const UPLOAD_HEAVY_SCAN_MIN_MS = 500;
+  const UPLOAD_ATTACHMENT_DIRTY_FALLBACK_MS = 1000;
+
+  function isUploadLightModeActive() {
+    return (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.isUploadLightMode === 'function'
+      && UploadCriticalRuntime.isUploadLightMode()
+    );
+  }
+
+  function isUploadInProgressActive() {
+    return (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.isUploadInProgress === 'function'
+      && UploadCriticalRuntime.isUploadInProgress()
+    );
+  }
+
+  function markAttachmentDirty(reason = '') {
+    attachmentDirty = true;
+    attachmentEvidenceCache.ts = 0;
+    if (
+      reason
+      && isUploadLightModeActive()
+      && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+    ) {
+      UploadCriticalRuntime.logUploadTagThrottled(
+        'COMPOSER:ATTACHMENT_DIRTY',
+        `[COMPOSER][ATTACHMENT_DIRTY] reason=${String(reason || '-')}`,
+        1500,
+      );
+    }
+  }
+
+  function ensureAttachmentMutationObserver() {
+    if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+    let composerRoot = null;
+    try {
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerRoot === 'function'
+      ) {
+        composerRoot = ComposerApi.getComposerRoot();
+      }
+    } catch (err) {
+      console.error('[ChatGPT toolbox] ensureAttachmentMutationObserver getComposerRoot failed', err);
+    }
+    if (!(composerRoot instanceof HTMLElement)) {
+      return;
+    }
+    if (attachmentMutationObserver && attachmentMutationObserverRoot === composerRoot) {
+      return;
+    }
+    if (attachmentMutationObserver) {
+      try {
+        attachmentMutationObserver.disconnect();
+      } catch (disconnectErr) {
+        console.error('[ChatGPT toolbox] attachmentMutationObserver disconnect failed', disconnectErr);
+      }
+      attachmentMutationObserver = null;
+      attachmentMutationObserverRoot = null;
+    }
+    attachmentMutationObserverRoot = composerRoot;
+    attachmentMutationObserver = new MutationObserver(() => {
+      markAttachmentDirty('mutation-observer');
+    });
+    attachmentMutationObserver.observe(composerRoot, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['aria-label', 'data-state', 'class'],
+    });
+  }
+
+  function shouldRunHeavyAttachmentScan(options = {}) {
+    const forceHeavy = options.heavy === true;
+    if (!isUploadInProgressActive()) {
+      return forceHeavy;
+    }
+    const now = Date.now();
+    if (attachmentDirty || forceHeavy) {
+      if (now - lastAttachmentHeavyScanAt >= UPLOAD_HEAVY_SCAN_MIN_MS) {
+        return true;
+      }
+    }
+    if (now - lastAttachmentHeavyScanAt >= UPLOAD_ATTACHMENT_DIRTY_FALLBACK_MS) {
+      return true;
+    }
+    return false;
+  }
   function appendDeprecatedHit(tag, detail = '') {
     const key = `${String(tag || '').trim()}|${String(detail || '').trim()}`;
     if (deprecatedHitOnce.has(key)) {
@@ -142,13 +250,77 @@ const ComposerAttachments = (() => {
       attachment_count: uniqueCount,
       has_composer_payload: hasComposerPayload,
     };
-    logCanonicalComposerAttachmentState(canonical);
     return canonical;
   }
 
+  function applyCanonicalAttachmentNormalization(canonical, snap = {}) {
+    const base = canonical && typeof canonical === 'object' ? canonical : {};
+    const snapInput = snap && typeof snap === 'object' ? snap : {};
+    const rawDiagnostic = Math.max(
+      0,
+      Number(base._rawDomCount) || 0,
+      Number(base.rawCount) || 0,
+      Number(base.totalCount) || 0,
+      Number(snapInput.rawCount) || 0,
+      Number(snapInput.count) || 0,
+      Number(snapInput.fileCount) || 0,
+    );
+    const normalizedMeta = normalizeSharedAttachmentCount(rawDiagnostic, base, snapInput);
+    const normalized = Math.max(0, Number(normalizedMeta.normalizedCount) || 0);
+    if (normalized <= 0 && rawDiagnostic <= 0) {
+      return base;
+    }
+
+    const uploadingCount = Math.max(0, Number(base.uploadingCount) || 0);
+    const readyCount = uploadingCount > 0
+      ? 0
+      : Math.max(normalized, Number(base.readyCount) || 0);
+
+    const next = buildCanonicalComposerAttachmentState({
+      ...base,
+      totalCount: normalized,
+      uniqueCount: normalized,
+      attachmentCount: normalized,
+      fileCount: normalized,
+      count: normalized,
+      attachment_count: normalized,
+      uploadingCount,
+      readyCount,
+      hasAny: normalized > 0,
+      hasAttachment: normalized > 0,
+      hasReady: readyCount > 0,
+      rawCount: rawDiagnostic,
+      _rawDomCount: rawDiagnostic,
+    });
+
+    if (rawDiagnostic !== normalized) {
+      const line = `[STATE_SCHEMA][COMPOSER_ATTACHMENT_CANONICAL_NORMALIZED] raw=${rawDiagnostic} normalized=${normalized} totalCount=${next.totalCount} readyCount=${next.readyCount} hasAny=${next.hasAny ? 1 : 0} hasReady=${next.hasReady ? 1 : 0}`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(
+          'STATE_SCHEMA:COMPOSER_ATTACHMENT_CANONICAL_NORMALIZED',
+          `${rawDiagnostic}|${normalized}|${next.readyCount}`,
+          line,
+          1500,
+        );
+      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      } else {
+        console.log(line);
+      }
+    }
+
+    return next;
+  }
+
   function getComposerAttachmentState(options = {}) {
-    const useHeavy = options && options.heavy === true;
+    ensureAttachmentMutationObserver();
+    const requestedHeavy = options && options.heavy === true;
+    const useHeavy = shouldRunHeavyAttachmentScan({ heavy: requestedHeavy });
+    const scanStartedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
     let canonical = buildCanonicalComposerAttachmentState();
+    let snapForNormalize = {};
 
     try {
       if (
@@ -160,6 +332,7 @@ const ComposerAttachments = (() => {
           heavy: useHeavy,
           reason: 'composer-attachments-state',
         }) || {};
+        snapForNormalize = snap;
         canonical = buildCanonicalComposerAttachmentState(snap);
       } else if (
         typeof ComposerApi !== 'undefined'
@@ -170,6 +343,7 @@ const ComposerAttachments = (() => {
           requireSendReady: false,
           expectedNames: Array.isArray(options.expectedNames) ? options.expectedNames : [],
         }) || {};
+        snapForNormalize = snap;
         canonical = buildCanonicalComposerAttachmentState({
           totalCount: Array.isArray(snap.cards) ? snap.cards.length : 0,
           uniqueCount: Array.isArray(snap.cards) ? snap.cards.length : 0,
@@ -191,6 +365,7 @@ const ComposerAttachments = (() => {
             attachmentCount = Number(ComposerApi.countAttachmentChips()) || 0;
           }
         }
+        snapForNormalize = { count: attachmentCount, fileCount: attachmentCount };
         canonical = buildCanonicalComposerAttachmentState({
           totalCount: attachmentCount,
           uniqueCount: attachmentCount,
@@ -206,6 +381,26 @@ const ComposerAttachments = (() => {
       }
     }
 
+    canonical = applyCanonicalAttachmentNormalization(canonical, snapForNormalize);
+    if (!isUploadLightModeActive()) {
+      logCanonicalComposerAttachmentState(canonical);
+    }
+    if (useHeavy) {
+      lastAttachmentHeavyScanAt = Date.now();
+      attachmentDirty = false;
+    }
+    const scanCost = (
+      (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now()
+    ) - scanStartedAt;
+    if (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.recordUploadPerfBlock === 'function'
+    ) {
+      UploadCriticalRuntime.recordUploadPerfBlock('attachment-scan', scanCost);
+    }
     return canonical;
   }
 
@@ -257,9 +452,155 @@ const ComposerAttachments = (() => {
     return getComposerAttachmentState(options);
   }
 
+  function collectComposerAttachmentCardsNormalized(root) {
+    const cards = new Set();
+    const scope = root instanceof HTMLElement
+      ? root
+      : (typeof document !== 'undefined' ? document : null);
+
+    if (!scope) {
+      return [];
+    }
+
+    const removeButtons = scope.querySelectorAll(
+      '[aria-label*="移除文件"], [aria-label*="Remove file"], [aria-label*="remove file"], [aria-label*="删除文件"]',
+    );
+
+    for (const btn of removeButtons) {
+      if (!(btn instanceof HTMLElement)) {
+        continue;
+      }
+      const card = btn.closest('[data-testid], li, article, [role="listitem"]');
+      if (card instanceof HTMLElement) {
+        cards.add(card);
+      }
+    }
+
+    if (cards.size > 0) {
+      return Array.from(cards);
+    }
+
+    if (removeButtons.length > 0) {
+      return Array.from(removeButtons);
+    }
+
+    return [];
+  }
+
+  function normalizeSharedAttachmentCount(rawCount, canonical = {}, snapshot = {}) {
+    const raw = Math.max(
+      0,
+      Number(rawCount) || 0,
+      Number(canonical.rawCount) || 0,
+      Number(canonical.totalCount) || 0,
+      Number(snapshot.rawCount) || 0,
+      Number(snapshot.count) || 0,
+      Number(snapshot.fileCount) || 0,
+    );
+
+    let normalized = Math.max(
+      0,
+      Number(canonical.uniqueCount) || 0,
+      Number(canonical.fileCount) || 0,
+      Number(snapshot.uniqueCount) || 0,
+      Number(snapshot.fileCount) || 0,
+    );
+
+    let method = 'canonical-snapshot';
+
+    try {
+      const composerRoot = typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerRoot === 'function'
+          ? ComposerApi.getComposerRoot()
+          : null;
+      const dedupedCards = collectComposerAttachmentCardsNormalized(composerRoot);
+      if (dedupedCards.length > 0) {
+        normalized = dedupedCards.length;
+        method = 'remove-button-card-dedupe';
+      } else if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.countAttachmentChipsFast === 'function'
+      ) {
+        const fastCount = Number(ComposerApi.countAttachmentChipsFast()) || 0;
+        if (fastCount > 0) {
+          normalized = fastCount;
+          method = 'countAttachmentChipsFast';
+        }
+      }
+    } catch (err) {
+      console.error('[ChatGPT toolbox] normalizeSharedAttachmentCount failed', err);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_COUNT_NORMALIZE_FAILED] error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (normalized <= 0 && raw > 0) {
+      normalized = 1;
+      method = `${method}-fallback-single`;
+    }
+
+    normalized = Math.max(0, Math.min(normalized, raw > 0 ? raw : normalized));
+
+    return {
+      rawCount: raw,
+      normalizedCount: normalized,
+      method,
+    };
+  }
+
   function getSharedComposerAttachmentEvidence(reason = '', options = {}) {
     const reasonText = String(reason || options.reason || '').trim() || '-';
-    const useHeavy = options.heavy === true;
+    if (sharedEvidenceInFlight) {
+      if (attachmentEvidenceCache.result) {
+        return attachmentEvidenceCache.result;
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_REENTER_SKIP] reason=${reasonText}`);
+      }
+      return {
+        hasAttachment: false,
+        count: 0,
+        rawCount: 0,
+        normalizedCount: 0,
+        readyCount: 0,
+        uploadingCount: 0,
+        textLen: 0,
+        filenames: [],
+        source: 'reenter-skip',
+      };
+    }
+    const uploadInProgress = isUploadInProgressActive();
+    const requestedHeavy = options.heavy === true;
+    const useHeavy = shouldRunHeavyAttachmentScan({ heavy: requestedHeavy });
+    const now = Date.now();
+
+    if (uploadInProgress && attachmentEvidenceCache.result) {
+      const ageMs = now - Number(attachmentEvidenceCache.ts || 0);
+      if (ageMs >= 0 && ageMs < UPLOAD_EVIDENCE_CACHE_MS) {
+        if (
+          typeof UploadCriticalRuntime !== 'undefined'
+          && UploadCriticalRuntime
+          && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+        ) {
+          UploadCriticalRuntime.logUploadTagThrottled(
+            `SHARED_COMPOSER:ATTACHMENT_EVIDENCE_CACHE_HIT:${reasonText}`,
+            `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_CACHE_HIT] reason=${reasonText} ageMs=${ageMs}`,
+            1000,
+          );
+        }
+        return attachmentEvidenceCache.result;
+      }
+    }
+
+    sharedEvidenceInFlight = true;
+    const evidenceStartedAt = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    try {
     const canonical = getComposerAttachmentState({ heavy: useHeavy, reason: reasonText });
 
     let filenames = [];
@@ -269,7 +610,8 @@ const ComposerAttachments = (() => {
     let snapshotHasAttachment = false;
     try {
       if (
-        typeof ComposerApi !== 'undefined'
+        (useHeavy || !uploadInProgress)
+        && typeof ComposerApi !== 'undefined'
         && ComposerApi
         && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
       ) {
@@ -319,26 +661,36 @@ const ComposerAttachments = (() => {
       }
     }
 
-    const count = Math.max(
+    const rawCount = Math.max(
       0,
-      Math.max(
-        Number(
-          canonical.uniqueCount != null
-            ? canonical.uniqueCount
-            : (canonical.attachmentCount != null ? canonical.attachmentCount : canonical.count)
-        ) || 0,
-        snapshotCount,
-        Array.isArray(filenames) ? filenames.length : 0,
-      ),
+      Number(canonical._rawDomCount) || 0,
+      Number(canonical.rawCount) || 0,
+      snapshotCount,
+      Array.isArray(filenames) ? filenames.length : 0,
     );
-    const uploadingCount = Math.max(
+    const normalizedMeta = normalizeSharedAttachmentCount(rawCount, canonical, {
+      rawCount: snapshotCount,
+      count: snapshotCount,
+      fileCount: snapshotCount,
+      uniqueCount: snapshotReadyCount,
+    });
+    const count = normalizedMeta.normalizedCount;
+    const rawReadyCount = Math.max(
       0,
-      Math.max(Number(canonical.uploadingCount) || 0, snapshotUploadingCount),
+      Number(canonical.readyCount) || 0,
+      snapshotReadyCount,
     );
-    const readyCount = Math.max(
+    const rawUploadingCount = Math.max(
       0,
-      Math.max(Number(canonical.readyCount) || 0, snapshotReadyCount, count > 0 && uploadingCount === 0 ? count : 0),
+      Number(canonical.uploadingCount) || 0,
+      snapshotUploadingCount,
     );
+    const normalizedUploadingCount = count > 0
+      ? Math.min(rawUploadingCount, count)
+      : rawUploadingCount;
+    const normalizedReadyCount = count > 0 && normalizedUploadingCount === 0
+      ? count
+      : 0;
     const hasAttachment = count > 0
       || canonical.hasAttachment === true
       || canonical.hasAny === true
@@ -353,16 +705,25 @@ const ComposerAttachments = (() => {
       console.error('[ChatGPT toolbox] getSharedComposerAttachmentEvidence textLen failed', err);
     }
 
+    const businessCount = normalizedMeta.normalizedCount;
     const evidence = {
-      hasAttachment,
-      count,
-      readyCount: hasAttachment && uploadingCount === 0 ? Math.max(readyCount, count) : readyCount,
-      uploadingCount,
+      hasAttachment: businessCount > 0 || hasAttachment,
+      count: businessCount,
+      rawCount: normalizedMeta.rawCount,
+      normalizedCount: businessCount,
+      countMethod: normalizedMeta.method,
+      ready: normalizedReadyCount,
+      readyCount: normalizedReadyCount,
+      rawReadyCount,
+      uploading: normalizedUploadingCount,
+      uploadingCount: normalizedUploadingCount,
       textLen,
       filenames,
       source: String(canonical._unified_source || canonical.source || 'composer-attachments'),
     };
 
+    const normalizedChanged = normalizedMeta.rawCount > 1
+      && normalizedMeta.normalizedCount !== normalizedMeta.rawCount;
     const logKey = [
       reasonText,
       evidence.count,
@@ -372,26 +733,105 @@ const ComposerAttachments = (() => {
       evidence.hasAttachment ? 1 : 0,
     ].join('|');
 
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      if (typeof ToolboxShell.appendLogIfChanged === 'function') {
+    if (normalizedChanged) {
+      const normalizedLine = `[SHARED_COMPOSER][ATTACHMENT_COUNT_NORMALIZED] raw=${normalizedMeta.rawCount} `
+        + `normalized=${normalizedMeta.normalizedCount} method=${normalizedMeta.method}`;
+      if (
+        uploadInProgress
+        && typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        UploadCriticalRuntime.logUploadTagThrottled(
+          `SHARED_COMPOSER:ATTACHMENT_COUNT_NORMALIZED:${reasonText}`,
+          normalizedLine,
+          1000,
+        );
+      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
         ToolboxShell.appendLogIfChanged(
-          `SHARED_COMPOSER:ATTACHMENT_EVIDENCE:${reasonText}`,
-          logKey,
-          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE] reason=${reasonText} count=${evidence.count} `
-          + `ready=${evidence.readyCount} uploading=${evidence.uploadingCount} textLen=${evidence.textLen} `
-          + `hasAttachment=${evidence.hasAttachment ? 1 : 0}`,
-          1200,
+          `SHARED_COMPOSER:ATTACHMENT_COUNT_NORMALIZED:${reasonText}`,
+          `${normalizedMeta.rawCount}|${normalizedMeta.normalizedCount}`,
+          normalizedLine,
+          1500,
         );
-      } else {
-        ToolboxShell.appendLog(
-          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE] reason=${reasonText} count=${evidence.count} `
-          + `ready=${evidence.readyCount} uploading=${evidence.uploadingCount} textLen=${evidence.textLen} `
-          + `hasAttachment=${evidence.hasAttachment ? 1 : 0}`,
-        );
+      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(normalizedLine);
       }
     }
 
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      const evidenceLine = `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE] reason=${reasonText} count=${evidence.count} `
+        + `ready=${evidence.ready} uploading=${evidence.uploading} textLen=${evidence.textLen} `
+        + `hasAttachment=${evidence.hasAttachment ? 1 : 0}`
+        + (normalizedMeta.rawCount > evidence.count
+          ? ` rawCount=${normalizedMeta.rawCount} rawReady=${rawReadyCount}`
+          : '');
+      if (
+        uploadInProgress
+        && typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        if (logKey !== attachmentEvidenceCache.logKey) {
+          UploadCriticalRuntime.logUploadTagThrottled(
+            `SHARED_COMPOSER:ATTACHMENT_EVIDENCE:${reasonText}`,
+            evidenceLine,
+            1000,
+          );
+          attachmentEvidenceCache.logKey = logKey;
+        }
+      } else if (typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(
+          `SHARED_COMPOSER:ATTACHMENT_EVIDENCE:${reasonText}`,
+          logKey,
+          evidenceLine,
+          1200,
+        );
+      } else {
+        ToolboxShell.appendLog(evidenceLine);
+      }
+    }
+
+    attachmentEvidenceCache.ts = now;
+    attachmentEvidenceCache.result = evidence;
+    attachmentEvidenceCache.reason = reasonText;
+
+    const evidenceCost = (
+      (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now()
+    ) - evidenceStartedAt;
+    if (
+      typeof UploadCriticalRuntime !== 'undefined'
+      && UploadCriticalRuntime
+      && typeof UploadCriticalRuntime.recordUploadPerfBlock === 'function'
+    ) {
+      UploadCriticalRuntime.recordUploadPerfBlock('attachment-evidence', evidenceCost);
+    }
+
     return evidence;
+    } catch (err) {
+      console.error('[ChatGPT toolbox] getSharedComposerAttachmentEvidence failed', err);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE][FAILED] reason=${reasonText} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+      return {
+        hasAttachment: false,
+        count: 0,
+        rawCount: 0,
+        normalizedCount: 0,
+        readyCount: 0,
+        uploadingCount: 0,
+        textLen: 0,
+        filenames: [],
+        source: 'evidence-error',
+      };
+    } finally {
+      sharedEvidenceInFlight = false;
+    }
   }
 
   return {

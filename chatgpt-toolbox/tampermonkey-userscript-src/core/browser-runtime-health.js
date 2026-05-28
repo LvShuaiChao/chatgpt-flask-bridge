@@ -27,8 +27,11 @@ function buildBrowserRuntimeFields(reason = '-') {
 function getForegroundCapabilityLight(reason = '-') {
   const safeReason = String(reason || '-').trim() || '-';
   try {
-    if (typeof detectComposerResponseState === 'function') {
-      const state = detectComposerResponseState({ light: true });
+    const detectFn = typeof safeDetectComposerResponseState === 'function'
+      ? safeDetectComposerResponseState
+      : (typeof detectComposerResponseState === 'function' ? detectComposerResponseState : null);
+    if (detectFn) {
+      const state = detectFn({ light: true, reason: `foreground-capability:${safeReason}` });
       return {
         inputable: !!(state && state.can_accept_input),
         sendable: !!(state && state.can_send_now),

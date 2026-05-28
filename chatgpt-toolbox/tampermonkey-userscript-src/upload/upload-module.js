@@ -257,6 +257,9 @@
     let waitingReplyConversationDirty = true;
     let waitingReplyConversationObserver = null;
     let waitingReplyLatestAssistantTextCache = null;
+    let reconciledComposerAttachmentSticky = null;
+    let reconciledComposerAttachmentStickyAt = 0;
+    const RECONCILED_COMPOSER_ATTACHMENT_STICKY_MS = 15000;
 
     const isPlainObject = (value) => {
       return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -8358,21 +8361,37 @@
 
           console.warn('[ChatGPT toolbox] schedulePersistQueue failed or timeout', e);
 
+          let composerAttachmentReady = false;
+          try {
+            composerAttachmentReady = isComposerAttachmentReadyForUserVisibleUpload();
+          } catch (readyCheckErr) {
+            console.error('[ChatGPT toolbox] persist timeout composer attachment ready check failed', readyCheckErr);
+            ToolboxShell.appendLog(
+              `[UPLOAD_PERSIST][READY_CHECK_FAILED] error=${readyCheckErr && readyCheckErr.message ? readyCheckErr.message : String(readyCheckErr)}`,
+            );
+          }
+
           ToolboxShell.appendLog(
-            `[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] type=${errName} timeoutMs=${UPLOAD_PERSIST_TIMEOUT_MS} note=timeout-does-not-cancel-indexeddb-write error=${errText}`,
+            `[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] type=${errName} timeoutMs=${UPLOAD_PERSIST_TIMEOUT_MS} composerAttachmentReady=${composerAttachmentReady ? 1 : 0} note=timeout-does-not-cancel-indexeddb-write error=${errText}`,
           );
 
-          // 持久化慢/超时不应阻塞上传主流程；只做节流提示，避免刷屏。
-          const now = Date.now();
-          if (!lastPersistUserNotifyAt || now - lastPersistUserNotifyAt >= 10000) {
-            lastPersistUserNotifyAt = now;
-            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.showToast === 'function') {
-              ToolboxShell.showToast(
-                `上传队列保存较慢/超时（不影响本次上传）：${errText}`,
-                'warn',
-                2600,
-              );
+          // 持久化慢/超时不应阻塞上传主流程；附件已在输入框时只记日志，不弹 warn。
+          if (!composerAttachmentReady) {
+            const now = Date.now();
+            if (!lastPersistUserNotifyAt || now - lastPersistUserNotifyAt >= 10000) {
+              lastPersistUserNotifyAt = now;
+              if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.showToast === 'function') {
+                ToolboxShell.showToast(
+                  '本地队列保存较慢；附件已在输入框，不影响发送',
+                  'info',
+                  2600,
+                );
+              }
             }
+          } else {
+            ToolboxShell.appendLog(
+              `[UPLOAD_PERSIST][TOAST_SUPPRESSED] reason=composer-attachment-ready error=${errText}`,
+            );
           }
 
           // 永不向外抛出：避免 await schedulePersistQueue 导致 UI/流程卡死。
@@ -9193,13 +9212,72 @@
       ].filter(Boolean);
     }
 
+    const UPLOAD_VERIFY_ACCEPT_CACHE_MS = 10000;
+    const UPLOAD_VERIFY_CACHE_LOG_MS = 2000;
+    const uploadVerifyCacheLogLastAt = Object.create(null);
+
+    function isUploadItemComposerAcceptedCached(q) {
+      if (!q || q.uploadReadyAccepted !== true) {
+        return false;
+      }
+      const acceptedAt = Number(q.uploadAcceptedAt) || 0;
+      return acceptedAt > 0 && Date.now() - acceptedAt < UPLOAD_VERIFY_ACCEPT_CACHE_MS;
+    }
+
+    function markUploadItemComposerAccepted(q, presence = 'composer-attached') {
+      if (!q) {
+        return;
+      }
+      q.uploadAcceptedAt = Date.now();
+      q.uploadPresence = String(presence || 'composer-attached');
+      q.uploadReadyAccepted = true;
+      if (q.id && typeof updateItem === 'function') {
+        updateItem(q.id, {
+          uploadAcceptedAt: q.uploadAcceptedAt,
+          uploadPresence: q.uploadPresence,
+          uploadReadyAccepted: true,
+        });
+      }
+    }
+
+    function logUploadVerifyCacheHit(fileKey, line) {
+      const key = String(fileKey || '-');
+      const now = Date.now();
+      const lastAt = Number(uploadVerifyCacheLogLastAt[key]) || 0;
+      if (now - lastAt < UPLOAD_VERIFY_CACHE_LOG_MS) {
+        return;
+      }
+      uploadVerifyCacheLogLastAt[key] = now;
+      if (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        UploadCriticalRuntime.logUploadTagThrottled(`UPLOAD_VERIFY_CACHE:${key}`, line, UPLOAD_VERIFY_CACHE_LOG_MS);
+      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      }
+    }
+
     function composerHasAttachmentEvidenceForItem(q) {
       if (!q || !ComposerApi || typeof ComposerApi.collectAttachmentChipText !== 'function') {
         return false;
       }
+      const fileKey = String(q.originalName || q.name || q.id || '-');
+      if (isUploadItemComposerAcceptedCached(q)) {
+        logUploadVerifyCacheHit(
+          fileKey,
+          `[UPLOAD_VERIFY][COMPOSER_ATTACHED_CACHE_HIT] file=${fileKey} action=accept-upload-ready`,
+        );
+        return true;
+      }
       const haystack = ComposerApi.collectAttachmentChipText();
       const names = getUploadAttachmentMatchNames(q);
-      return names.some((name) => ComposerApi.fileNameEvidence(name, haystack));
+      const matched = names.some((name) => ComposerApi.fileNameEvidence(name, haystack));
+      if (matched) {
+        markUploadItemComposerAccepted(q, 'composer-attached');
+      }
+      return matched;
     }
 
     function conversationHistoryHasAttachmentEvidenceForItem(q) {
@@ -9247,6 +9325,9 @@
     function resolveUploadAttachmentPresenceLevel(q) {
       if (!q) {
         return 'unbound';
+      }
+      if (isUploadItemComposerAcceptedCached(q)) {
+        return 'composer-attached';
       }
       if (composerHasAttachmentEvidenceForItem(q)) {
         return 'composer-attached';
@@ -9297,9 +9378,34 @@
       const canonical = typeof ComposerApi.canonicalFileName === 'function'
         ? ComposerApi.canonicalFileName(q.originalName || q.name || '')
         : '';
-      ToolboxShell.appendLog(
-        `[UPLOAD][MATCH] original=${q.originalName || q.name || '-'} display=${q.displayName || q.name || '-'} canonical=${canonical || q.canonicalName || '-'} matched=${matched ? 1 : 0} presence=${presence} composer=${presence === 'composer-attached' ? 1 : 0} conversation=${presence === 'conversation-sent' ? 1 : 0} local-bound=${presence === 'local-bound' ? 1 : 0}`,
-      );
+      const matchLine = `[UPLOAD][MATCH] original=${q.originalName || q.name || '-'} display=${q.displayName || q.name || '-'} canonical=${canonical || q.canonicalName || '-'} matched=${matched ? 1 : 0} presence=${presence} composer=${presence === 'composer-attached' ? 1 : 0} conversation=${presence === 'conversation-sent' ? 1 : 0} local-bound=${presence === 'local-bound' ? 1 : 0}`;
+      const verifyLine = `[UPLOAD_VERIFY][COMPOSER_ATTACHED_OK] file=${q.originalName || q.name || '-'} composer=1 conversation=0 localBound=0 action=accept-upload-ready`;
+      const fileKey = String(q.originalName || q.name || q.id || '-');
+      if (isUploadItemComposerAcceptedCached(q) && presence === 'composer-attached') {
+        logUploadVerifyCacheHit(
+          fileKey,
+          `[UPLOAD_VERIFY][COMPOSER_ATTACHED_CACHE_HIT] file=${fileKey} action=accept-upload-ready`,
+        );
+        return matched;
+      }
+      if (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadInProgress === 'function'
+        && UploadCriticalRuntime.isUploadInProgress()
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        UploadCriticalRuntime.logUploadTagThrottled(`UPLOAD_MATCH:${fileKey}`, matchLine, 1000);
+        if (presence === 'composer-attached') {
+          UploadCriticalRuntime.logUploadTagThrottled(`UPLOAD_VERIFY:${fileKey}`, verifyLine, 1000);
+          UploadCriticalRuntime.bumpUploadPerfCounter('verifyCount');
+        }
+      } else {
+        ToolboxShell.appendLog(matchLine);
+        if (presence === 'composer-attached') {
+          ToolboxShell.appendLog(verifyLine);
+        }
+      }
       return matched;
     }
 
@@ -11365,14 +11471,19 @@
         && ComposerApi.isAttachmentStillUploading({ expectedNames })
       );
 
-      const pickAttachmentReady = () => !!(
-        typeof ComposerApi !== 'undefined'
-        && typeof ComposerApi.isAttachmentReadyInComposer === 'function'
-        && ComposerApi.isAttachmentReadyInComposer({
-          expectedNames,
-          requireSendReady: false,
-        })
-      );
+      const pickAttachmentReady = () => {
+        if (isUploadActuallyReadyInComposer(`wait-composer-attachment:${String(options.source || '-')}`)) {
+          return true;
+        }
+        return !!(
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAttachmentReadyInComposer === 'function'
+          && ComposerApi.isAttachmentReadyInComposer({
+            expectedNames,
+            requireSendReady: false,
+          })
+        );
+      };
 
       const pickHasAttachment = () => !!(
         (typeof ComposerApi !== 'undefined'
@@ -14589,6 +14700,9 @@
       const waitAttachmentStable = options.waitAttachmentStable === true;
       const requireAttachmentReady = options.requireAttachmentReady === true;
       const allowReplaceDraft = options.allowReplaceDraft !== false;
+      const sendExistingComposer = options.sendExistingComposer === true;
+      const promptAlreadyWritten = options.promptAlreadyWritten === true;
+      const attachmentAlreadyReady = options.attachmentAlreadyReady === true;
       const onPhase = typeof options.onPhase === 'function' ? options.onPhase : null;
       const payloadVerify = options.payloadVerify || null;
 
@@ -14682,13 +14796,30 @@
 
       attachmentEvidence = readAttachmentEvidence(`pre-send:${sourceText}`);
 
-      if (attachmentEvidence.count > 1) {
+      const rawAttachCount = Math.max(
+        0,
+        Number(attachmentEvidence.rawCount != null ? attachmentEvidence.rawCount : attachmentEvidence.count) || 0,
+      );
+      const normalizedAttachCount = Math.max(
+        0,
+        Number(attachmentEvidence.normalizedCount != null ? attachmentEvidence.normalizedCount : attachmentEvidence.count) || 0,
+      );
+      if (rawAttachCount > 1 && normalizedAttachCount <= 1) {
         ToolboxShell.appendLog(
-          `[${logPrefix}][DUPLICATE_ATTACHMENT_DETECTED] count=${attachmentEvidence.count} action=skip-reupload source=${sourceText}`,
+          `[${logPrefix}][DUPLICATE_ATTACHMENT_RAW_IGNORED] raw=${rawAttachCount} normalized=${normalizedAttachCount} source=${sourceText}`,
+        );
+      }
+      if (normalizedAttachCount > 1) {
+        ToolboxShell.appendLog(
+          `[${logPrefix}][DUPLICATE_ATTACHMENT_DETECTED] count=${normalizedAttachCount} raw=${rawAttachCount} action=skip-reupload source=${sourceText}`,
         );
       }
 
-      if (waitAttachmentStable && attachmentEvidence.count > 0) {
+      if (attachmentAlreadyReady) {
+        ToolboxShell.appendLog(
+          `[SHARED_SEND][SKIP_ATTACHMENT_WAIT_ALREADY_READY] source=${sourceText} reason=autoq-initial-fast-path`,
+        );
+      } else if (waitAttachmentStable && normalizedAttachCount > 0) {
         emitPhase('wait-attachment-stable', { count: attachmentEvidence.count });
         if (typeof waitAttachmentsStableForSend === 'function') {
           const attachWaitMs = typeof MAX_ATTACHMENT_SEND_WAIT_MS === 'number'
@@ -14703,10 +14834,11 @@
         attachmentEvidence = readAttachmentEvidence(`post-attach-wait:${sourceText}`);
       }
 
-      const attachmentReady = attachmentEvidence.count > 0 && attachmentEvidence.uploadingCount === 0;
-      if (requireAttachmentReady && attachmentEvidence.count > 0 && !attachmentReady) {
+      const attachmentReady = attachmentAlreadyReady
+        || (normalizedAttachCount > 0 && attachmentEvidence.uploadingCount === 0);
+      if (requireAttachmentReady && normalizedAttachCount > 0 && !attachmentReady) {
         ToolboxShell.appendLog(
-          `[${logPrefix}][SEND_FLOW][ATTACHMENT_NOT_READY] source=${sourceText} count=${attachmentEvidence.count} `
+          `[${logPrefix}][SEND_FLOW][ATTACHMENT_NOT_READY] source=${sourceText} count=${normalizedAttachCount} `
           + `uploading=${attachmentEvidence.uploadingCount}`,
         );
         return {
@@ -14722,7 +14854,7 @@
         };
       }
 
-      if (!promptText.trim()) {
+      if (!promptText.trim() && !sendExistingComposer && !promptAlreadyWritten) {
         ToolboxShell.appendLog(`[${logPrefix}][SEND_FLOW][EMPTY_PROMPT] source=${sourceText}`);
         return {
           ok: false,
@@ -14736,18 +14868,56 @@
       }
 
       emitPhase('write-and-send', { textLen: promptText.length, attachmentReady: attachmentReady ? 1 : 0 });
-      const sendCoreResult = await sendTextBySendMessageButtonCore(promptText, {
-        source: sourceText,
-        rawSource: sourceText,
-        allowReplaceDraft,
-        shouldStop,
-        timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
-        payloadVerify,
-      });
+      const sendCoreResult = sendExistingComposer || promptAlreadyWritten
+        ? await sendExistingComposerBySendMessageButtonCore({
+          source: sourceText,
+          rawSource: sourceText,
+          shouldStop,
+          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+          text: '',
+          allowReplaceDraft: false,
+          payloadVerify,
+        })
+        : await sendTextBySendMessageButtonCore(promptText, {
+          source: sourceText,
+          rawSource: sourceText,
+          allowReplaceDraft,
+          shouldStop,
+          timeoutMs: typeof SEND_WAIT_TIMEOUT_MS === 'number' ? SEND_WAIT_TIMEOUT_MS : 120000,
+          payloadVerify,
+        });
 
-      const ok = !!(sendCoreResult && sendCoreResult.ok === true);
-      const reason = String((sendCoreResult && sendCoreResult.reason) || (ok ? 'sent' : 'send-failed'));
+      let ok = !!(sendCoreResult && sendCoreResult.ok === true);
+      let reason = String((sendCoreResult && sendCoreResult.reason) || (ok ? 'sent' : 'send-failed'));
       const detail = String((sendCoreResult && sendCoreResult.detail) || '');
+
+      if (
+        !ok
+        && (
+          reason === 'composer_empty'
+          || reason === 'payload_dropped'
+          || reason === 'empty-prompt'
+          || reason === 'send_not_confirmed_composer_still_has_payload'
+        )
+        && typeof confirmSharedMessageSubmitted === 'function'
+      ) {
+        const submitted = await confirmSharedMessageSubmitted(
+          sourceText,
+          promptText || options.expectedPromptText || '',
+          Object.assign({}, options.sendVerifyBefore || {}, {
+            timeoutMs: 1500,
+            sendKind: options.sendKind,
+          }),
+        );
+        if (submitted && submitted.ok === true) {
+          ok = true;
+          reason = submitted.reason || 'message-submitted-composer-cleared';
+          ToolboxShell.appendLog(
+            `[${logPrefix}][SEND_FLOW][COMPOSER_EMPTY_ACCEPTED] source=${sourceText} reason=${reason} `
+            + `detail=${submitted.detailReason || '-'}`,
+          );
+        }
+      }
 
       ToolboxShell.appendLog(
         `[${logPrefix}][SEND_FLOW][DONE] source=${sourceText} ok=${ok ? 1 : 0} reason=${reason} `
@@ -14762,8 +14932,156 @@
         attachmentReady,
         textLen: promptText.length,
         source: sourceText,
-        wait: sendCoreResult && sendCoreResult.wait === true,
-        retryable: sendCoreResult && sendCoreResult.retryable === true,
+        wait: !ok && sendCoreResult && sendCoreResult.wait === true,
+        retryable: !ok && sendCoreResult && sendCoreResult.retryable === true,
+        shouldWaitReply: ok && (options.sendKind === 'initial' || options.sendKind === 'continue' || options.sendKind === 'verification'),
+      };
+    }
+
+    async function runSharedSendAndWaitEntryFlow(options = {}) {
+      const sourceText = String(options.source || 'shared-send-wait-entry').trim() || 'shared-send-wait-entry';
+      const logPrefix = String(options.logPrefix || 'SHARED_SEND').trim() || 'SHARED_SEND';
+      const promptText = String(options.promptText || '');
+      const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+      const confirmTimeoutMs = Math.max(1500, Number(options.confirmTimeoutMs || options.timeoutMs) || 3000);
+
+      const readAttachmentEvidence = () => {
+        if (
+          typeof ComposerAttachments !== 'undefined'
+          && ComposerAttachments
+          && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+        ) {
+          return ComposerAttachments.getSharedComposerAttachmentEvidence(sourceText, { heavy: true });
+        }
+        if (typeof getUnifiedComposerAttachmentState === 'function') {
+          const unified = getUnifiedComposerAttachmentState(sourceText, { heavy: true });
+          const fileCount = Math.max(0, Number(unified.fileCount) || 0);
+          return {
+            hasAttachment: !!unified.hasAttachment,
+            count: fileCount,
+            normalizedCount: fileCount,
+            readyCount: unified.ready ? fileCount : 0,
+            uploadingCount: unified.uploading ? 1 : 0,
+          };
+        }
+        return {
+          hasAttachment: false,
+          count: 0,
+          normalizedCount: 0,
+          readyCount: 0,
+          uploadingCount: 0,
+        };
+      };
+
+      const attachmentEvidence = readAttachmentEvidence();
+      const normalizedCount = Math.max(
+        0,
+        Number(attachmentEvidence.normalizedCount != null ? attachmentEvidence.normalizedCount : attachmentEvidence.count) || 0,
+      );
+      const composerAttached = normalizedCount > 0 && Number(attachmentEvidence.uploadingCount || 0) === 0;
+
+      const sendResult = await runSharedComposerSendFlow(Object.assign({}, options, {
+        source: sourceText,
+        promptText,
+        shouldStop,
+        logPrefix,
+      }));
+
+      const readConversationId = () => {
+        if (typeof parseConversationIdFromPath === 'function') {
+          return String(parseConversationIdFromPath(location.pathname || '') || '').trim();
+        }
+        return '';
+      };
+      const readTurnCount = () => {
+        if (typeof getCurrentPageTurnCountSafe === 'function') {
+          const turn = Number(getCurrentPageTurnCountSafe());
+          return Number.isFinite(turn) ? turn : 0;
+        }
+        return 0;
+      };
+
+      let submitted = null;
+      let conversationSent = false;
+      let canEnterWaitingReply = false;
+
+      if (sendResult && sendResult.ok === true) {
+        try {
+          submitted = await confirmSharedMessageSubmitted(
+            sourceText,
+            promptText || options.expectedPromptText || '',
+            Object.assign({}, options.sendVerifyBefore || {}, {
+              timeoutMs: confirmTimeoutMs,
+              sendKind: options.sendKind,
+              turnCountBefore: options.turnCountBefore || options.beforeTurnCount,
+              beforeTurnCount: options.beforeTurnCount || options.turnCountBefore,
+              beforeConversationId: options.beforeConversationId || options.conversationIdBefore,
+              conversationIdBefore: options.conversationIdBefore || options.beforeConversationId,
+              taskTitle: options.expectedTaskTitle || options.taskTitle,
+            }),
+          );
+        } catch (confirmErr) {
+          console.error(`[${logPrefix}][SEND_WAIT_ENTRY][CONFIRM_FAILED]`, confirmErr);
+          const errText = confirmErr && confirmErr.message ? confirmErr.message : String(confirmErr);
+          ToolboxShell.appendLog(
+            `[${logPrefix}][SEND_WAIT_ENTRY][CONFIRM_FAILED] source=${sourceText} error=${errText}`,
+          );
+          submitted = {
+            ok: false,
+            reason: errText || 'confirm-failed',
+          };
+        }
+
+        canEnterWaitingReply = !!(submitted && submitted.ok === true);
+        conversationSent = canEnterWaitingReply || !!(submitted && submitted.attachmentInConversation);
+
+        if (canEnterWaitingReply) {
+          ToolboxShell.appendLog(
+            `[SEND_VERIFY][CONVERSATION_SUBMITTED_OK] source=${sourceText} reason=${submitted.reason || '-'} `
+            + `detail=${submitted.detailReason || '-'} kind=${options.sendKind || '-'}`,
+          );
+        }
+      }
+
+      let composerTextLen = 0;
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function'
+      ) {
+        composerTextLen = String(ComposerApi.getComposerText() || '').trim().length;
+      }
+
+      const conversationId = readConversationId();
+      const turnCount = readTurnCount();
+      const flowOk = !!(sendResult && sendResult.ok === true && canEnterWaitingReply);
+      const flowReason = flowOk
+        ? String((submitted && submitted.reason) || 'submitted-confirmed')
+        : String(
+          (submitted && submitted.reason)
+          || (sendResult && sendResult.reason)
+          || 'not-submitted',
+        );
+
+      ToolboxShell.appendLog(
+        `[${logPrefix}][SEND_WAIT_ENTRY][DONE] source=${sourceText} ok=${flowOk ? 1 : 0} `
+        + `submitted=${canEnterWaitingReply ? 1 : 0} composerAttached=${composerAttached ? 1 : 0} `
+        + `conversationId=${conversationId || '-'} turnCount=${turnCount}`,
+      );
+
+      return {
+        ok: flowOk,
+        reason: flowReason,
+        submitted: canEnterWaitingReply,
+        composerAttached,
+        conversationSent,
+        canEnterWaitingReply,
+        composerTextLen,
+        attachmentCount: normalizedCount,
+        conversationId,
+        turnCount,
+        sendResult,
+        submittedDetail: submitted,
       };
     }
 
@@ -20025,9 +20343,35 @@
         reason: String(reason || evidence.reason || ''),
       };
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_TASK][EVIDENCE] source=${state.uploadTask.lastEvidence.source || '-'} composer=${composerCount} uploading=${uploadingCount} ready=${readyCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${reason || '-'}`,
-      );
+      const evidenceLine = `[UPLOAD_TASK][EVIDENCE] source=${state.uploadTask.lastEvidence.source || '-'} composer=${composerCount} uploading=${uploadingCount} ready=${readyCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${reason || '-'}`;
+      if (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadLightMode === 'function'
+        && UploadCriticalRuntime.isUploadLightMode()
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        UploadCriticalRuntime.logUploadTagThrottled(
+          'UPLOAD_TASK:EVIDENCE',
+          evidenceLine,
+          1000,
+        );
+      } else {
+        ToolboxShell.appendLog(evidenceLine);
+      }
+    }
+
+    function syncUploadLightModeFromTaskPhase(oldPhase, nextPhase, reason = '') {
+      const activePhases = new Set(['uploading', 'preparing', 'verifying', 'cancelling']);
+      const wasActive = activePhases.has(String(oldPhase || '').trim().toLowerCase());
+      const isActive = activePhases.has(String(nextPhase || '').trim().toLowerCase());
+      if (!wasActive && isActive) {
+        setUploadCriticalModeOn(`upload-task:${reason || nextPhase || 'active'}`);
+        return;
+      }
+      if (wasActive && !isActive) {
+        clearUploadCriticalMode(`upload-task:${reason || nextPhase || 'idle'}`);
+      }
     }
 
     function setAuthoritativeUploadTaskState(next = {}, reason = '') {
@@ -20120,6 +20464,7 @@
       // - state.uploadPhase: legacy string phase used by reconcileUploadPhase()
       state.running = !!phaseImpliesRunning;
       state.uploadPhase = task.phase || 'idle';
+      syncUploadLightModeFromTaskPhase(oldPhase, nextPhase, reason);
 
       return task;
     }
@@ -21235,6 +21580,64 @@
 
     let pendingUploadRenderReasonText = '';
     let pendingUploadRenderNeedsSend = false;
+    let lastUploadUiRefreshAt = 0;
+    let uploadUiLightRefreshTimer = null;
+
+    function updateUploadStatusTextOnly(reason = '') {
+      const task = state.uploadTask && typeof state.uploadTask === 'object'
+        ? state.uploadTask
+        : {};
+      const phase = String(task.phase || 'idle').trim().toLowerCase();
+      if (phase === 'uploading') {
+        setStatus('上传中…', 'running');
+      } else if (phase === 'cancelling') {
+        setStatus('取消上传…', 'running');
+      } else if (phase === 'verifying' || phase === 'preparing') {
+        setStatus('准备上传…', 'running');
+      }
+      if (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.bumpUploadPerfCounter === 'function'
+      ) {
+        UploadCriticalRuntime.bumpUploadPerfCounter('statusUpdateCount');
+      }
+      if (
+        reason
+        && typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.logUploadTagThrottled === 'function'
+      ) {
+        UploadCriticalRuntime.logUploadTagThrottled(
+          'UPLOAD_UI:LIGHT_STATUS',
+          `[UPLOAD_UI][LIGHT_STATUS] phase=${phase} reason=${String(reason || '-')}`,
+          1000,
+        );
+      }
+    }
+
+    function scheduleUploadUiLightRefresh(reason = '') {
+      const reasonText = String(reason || '').trim();
+      const now = Date.now();
+      if (now - lastUploadUiRefreshAt < 500) {
+        return;
+      }
+      if (uploadUiLightRefreshTimer) {
+        return;
+      }
+      const waitMs = Math.max(0, 500 - (now - lastUploadUiRefreshAt));
+      uploadUiLightRefreshTimer = window.setTimeout(() => {
+        uploadUiLightRefreshTimer = null;
+        lastUploadUiRefreshAt = Date.now();
+        updateUploadStatusTextOnly(reasonText);
+        renderUploadButtonsOnly({
+          heavy: false,
+          skipCapabilityScan: true,
+          scope: 'upload-only',
+          buttonTasksReason: `light:${reasonText || 'upload'}`,
+        });
+      }, waitMs);
+    }
 
     function isUploadCriticalNow() {
       return (
@@ -21385,6 +21788,11 @@
     function scheduleRenderUpload(reason = '') {
       const reasonText = String(reason || '').trim();
       const reasonNeedsSend = isSendRelatedUploadRenderReason(reasonText);
+
+      if (isUploadCriticalNow() && !reasonNeedsSend) {
+        scheduleUploadUiLightRefresh(reasonText);
+        return;
+      }
 
       if (reasonText) {
         pendingUploadRenderReasonText = reasonText;
@@ -21608,6 +22016,136 @@
       ].join('|');
     }
 
+    function countComposerDomRemoveFileButtons() {
+      if (typeof document === 'undefined') {
+        return 0;
+      }
+      try {
+        return Array.from(document.querySelectorAll(
+          '[aria-label*="移除文件"], [aria-label*="Remove file"], [aria-label*="remove file"], [aria-label*="删除文件"]',
+        )).filter((node) => {
+          if (!(node instanceof Element)) return false;
+          const label = String(node.getAttribute('aria-label') || '');
+          if (/添加文件|Add file|Attach/i.test(label)) return false;
+          return true;
+        }).length;
+      } catch (err) {
+        console.error('[ChatGPT toolbox] composer attachment DOM scan failed', err);
+        return 0;
+      }
+    }
+
+    function isComposerAttachmentReadyForUserVisibleUpload() {
+      let snapshot = null;
+      try {
+        snapshot = getComposerAttachmentState({ heavy: true, reason: 'persist-timeout-check' });
+      } catch (err) {
+        console.error('[ChatGPT toolbox] isComposerAttachmentReadyForUserVisibleUpload failed', err);
+        return false;
+      }
+      const readyCount = Number(snapshot && (snapshot.readyCount || snapshot.attachmentCount || snapshot.fileCount || snapshot.uniqueCount)) || 0;
+      const uploadingCount = Number(snapshot && snapshot.uploadingCount) || 0;
+      const hasReady = !!(
+        snapshot
+        && (
+          snapshot.hasReady
+          || snapshot.hasAttachment
+          || snapshot.hasAny
+          || snapshot.hasComposerPayload
+          || snapshot.has_composer_payload
+          || readyCount > 0
+        )
+      );
+      return hasReady && uploadingCount <= 0;
+    }
+
+    function isUploadActuallyReadyInComposer(reason = '') {
+      let snapshot = null;
+      try {
+        snapshot = getComposerAttachmentState({ heavy: true, reason: reason || 'upload-actually-ready' });
+      } catch (err) {
+        console.error('[ChatGPT toolbox] isUploadActuallyReadyInComposer failed', err);
+        return false;
+      }
+      const readyCount = Number(snapshot && (snapshot.readyCount || snapshot.uniqueCount || snapshot.attachmentCount || snapshot.fileCount)) || 0;
+      const uploadingCount = Number(snapshot && snapshot.uploadingCount) || 0;
+      return readyCount > 0 && uploadingCount <= 0;
+    }
+
+    function applyReconciledComposerAttachmentSticky(reconciled, domRemoveCount, nativeUploading) {
+      const now = Date.now();
+      const readyNow = !!(
+        reconciled
+        && (
+          reconciled.hasReady
+          || (Number(reconciled.readyCount || 0) > 0 && !nativeUploading)
+        )
+      );
+
+      if (readyNow && domRemoveCount > 0) {
+        reconciledComposerAttachmentSticky = reconciled;
+        reconciledComposerAttachmentStickyAt = now;
+        return reconciled;
+      }
+
+      if (
+        reconciledComposerAttachmentSticky
+        && domRemoveCount > 0
+        && !nativeUploading
+        && (now - reconciledComposerAttachmentStickyAt) < RECONCILED_COMPOSER_ATTACHMENT_STICKY_MS
+      ) {
+        const stickyReady = Number(reconciledComposerAttachmentSticky.readyCount || 0) > 0
+          || reconciledComposerAttachmentSticky.hasReady === true;
+        const currentReady = Number(reconciled && reconciled.readyCount || 0) > 0
+          || (reconciled && reconciled.hasReady === true);
+        if (stickyReady && !currentReady) {
+          return {
+            ...reconciledComposerAttachmentSticky,
+            ...reconciled,
+            _unified_source: 'dom-remove-file-sticky',
+            totalCount: Math.max(
+              Number(reconciledComposerAttachmentSticky.totalCount || 0),
+              Number(reconciled && reconciled.totalCount || 0),
+              domRemoveCount,
+            ),
+            uniqueCount: Math.max(
+              Number(reconciledComposerAttachmentSticky.uniqueCount || 0),
+              Number(reconciled && reconciled.uniqueCount || 0),
+              domRemoveCount,
+            ),
+            attachmentCount: Math.max(
+              Number(reconciledComposerAttachmentSticky.attachmentCount || 0),
+              Number(reconciled && reconciled.attachmentCount || 0),
+              domRemoveCount,
+            ),
+            fileCount: Math.max(
+              Number(reconciledComposerAttachmentSticky.fileCount || 0),
+              Number(reconciled && reconciled.fileCount || 0),
+              domRemoveCount,
+            ),
+            readyCount: Math.max(
+              Number(reconciledComposerAttachmentSticky.readyCount || 0),
+              domRemoveCount,
+            ),
+            hasAny: true,
+            hasAttachment: true,
+            hasReady: true,
+            hasComposerPayload: true,
+            has_composer_payload: true,
+            uploadingCount: 0,
+            attachmentUploading: false,
+          };
+        }
+      }
+
+      if (!domRemoveCount) {
+        reconciledComposerAttachmentSticky = null;
+        reconciledComposerAttachmentStickyAt = 0;
+      }
+
+      return reconciled;
+    }
+
     function getComposerAttachmentState(options = {}) {
       const stateSnapshot = (
         typeof ComposerAttachments !== 'undefined'
@@ -21635,19 +22173,7 @@
       ) || 0;
       snapshot._moduleFileCount = moduleFileCount;
       snapshot._moduleCountBeforeDom = moduleFileCount;
-      let domRemoveCount = 0;
-      try {
-        domRemoveCount = typeof document !== 'undefined'
-          ? Array.from(document.querySelectorAll('[aria-label*="移除文件"]')).filter((node) => {
-            if (!(node instanceof Element)) return false;
-            const label = String(node.getAttribute('aria-label') || '');
-            if (/添加文件|Add file|Attach/i.test(label)) return false;
-            return true;
-          }).length
-          : 0;
-      } catch (err) {
-        console.error('[ChatGPT toolbox] composer attachment DOM scan failed', err);
-      }
+      const domRemoveCount = countComposerDomRemoveFileButtons();
 
       const nativeUploading = (
         typeof ComposerApi !== 'undefined'
@@ -21655,8 +22181,8 @@
         && typeof ComposerApi.isAttachmentStillUploading === 'function'
         && ComposerApi.isAttachmentStillUploading()
       );
-      const domWins = domRemoveCount > 0 && moduleFileCount <= 0;
-      const reconciled = domWins
+      const domWins = domRemoveCount > 0 && (moduleFileCount <= 0 || !snapshot.hasReady);
+      let reconciled = domWins
         ? {
           ...snapshot,
           _unified_source: 'dom-remove-file',
@@ -21681,10 +22207,25 @@
           _unified_source: 'composer-attachments-module',
         };
 
+      reconciled = applyReconciledComposerAttachmentSticky(reconciled, domRemoveCount, nativeUploading);
+
+      const reasonText = options && options.reason ? String(options.reason) : '-';
       if (domWins && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${options && options.reason ? String(options.reason) : '-'}`,
+          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${reasonText}`,
         );
+      }
+
+      const reconciledLogLine = `[COMPOSER][ATTACHMENT_RECONCILED] reason=${reasonText} moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} ready=${reconciled.hasReady ? 1 : 0} source=${reconciled._unified_source || '-'}`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(
+          'COMPOSER:ATTACHMENT_RECONCILED',
+          `${reasonText}|${moduleFileCount}|${domRemoveCount}|${nativeUploading ? 1 : 0}|${reconciled.hasReady ? 1 : 0}|${reconciled._unified_source || '-'}`,
+          reconciledLogLine,
+          800,
+        );
+      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(reconciledLogLine);
       }
 
       updateUploadTaskEvidence({
@@ -22560,8 +23101,10 @@
           );
         }
 
-        reconcileUploadPhase(renderReason);
-        syncButtonTasksFromModuleState(renderReason);
+        if (!critical) {
+          reconcileUploadPhase(renderReason);
+          syncButtonTasksFromModuleState(renderReason);
+        }
 
         if (critical) {
           const currentStartBtnCritical = rootElRef
@@ -22989,6 +23532,18 @@
         }
         rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
       } finally {
+        const renderCostMs = (
+          (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()
+        ) - startedAt;
+        if (
+          typeof UploadCriticalRuntime !== 'undefined'
+          && UploadCriticalRuntime
+          && typeof UploadCriticalRuntime.recordUploadPerfBlock === 'function'
+        ) {
+          UploadCriticalRuntime.recordUploadPerfBlock('render', renderCostMs);
+        }
         uploadButtonsRendering = false;
 
         if (uploadButtonsRenderPending) {
@@ -24202,7 +24757,130 @@
         ].includes(sendPhase);
     }
 
+    function shouldSkipResetRuntimeDuringUpload(reason = '') {
+      const uploadInProgress = (
+        typeof UploadCriticalRuntime !== 'undefined'
+        && UploadCriticalRuntime
+        && typeof UploadCriticalRuntime.isUploadInProgress === 'function'
+        && UploadCriticalRuntime.isUploadInProgress()
+      );
+      if (!uploadInProgress) {
+        return false;
+      }
+      let autoPhase = '-';
+      let autoStep = '-';
+      try {
+        if (
+          typeof AutoQueueModule !== 'undefined'
+          && AutoQueueModule
+          && typeof AutoQueueModule.getState === 'function'
+        ) {
+          const autoState = AutoQueueModule.getState() || {};
+          autoPhase = String(autoState.phase || '-');
+          const taskRun = autoState.taskRun && typeof autoState.taskRun === 'object'
+            ? autoState.taskRun
+            : {};
+          autoStep = String(taskRun.currentStep || taskRun.batchStep || '-');
+        }
+      } catch (err) {
+        console.error('[ChatGPT toolbox] shouldSkipResetRuntimeDuringUpload autoq read failed', err);
+        ToolboxShell.appendLog(
+          `[SEND][RESET_RUNTIME_SKIP_CHECK_FAILED] reason=${reason || '-'} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+      const uploadPhase = getUploadTaskState().phase;
+      ToolboxShell.appendLog(
+        `[SEND][RESET_RUNTIME_SKIP_UPLOAD_OR_AUTOQ_ACTIVE] reason=${reason || '-'} `
+        + `uploadPhase=${uploadPhase || '-'} phase=${autoPhase} step=${autoStep}`,
+      );
+      return true;
+    }
+
+    function isAutoQueueActiveSendProtected(reason = '') {
+      if (shouldSkipResetRuntimeDuringUpload(reason)) {
+        return true;
+      }
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return false;
+      }
+      try {
+        const autoState = AutoQueueModule.getState() || {};
+        const phase = String(autoState.phase || '');
+        const taskRun = autoState.taskRun && typeof autoState.taskRun === 'object'
+          ? autoState.taskRun
+          : {};
+        const pendingSendKind = String(taskRun.pendingSendKind || '');
+        const currentStep = String(taskRun.currentStep || taskRun.batchStep || '');
+        let composerHasAttachment = false;
+        let composerUploadingCount = 0;
+        if (
+          typeof ComposerAttachments !== 'undefined'
+          && ComposerAttachments
+          && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+        ) {
+          const evidence = ComposerAttachments.getSharedComposerAttachmentEvidence(
+            `reset-runtime-guard:${reason || '-'}`,
+          ) || {};
+          composerHasAttachment = evidence.hasAttachment === true
+            || Number(evidence.count || evidence.normalizedCount || 0) > 0;
+          composerUploadingCount = Math.max(0, Number(evidence.uploadingCount || 0));
+        }
+        if (
+          autoState.running === true
+          && autoState.waitingReply !== true
+          && pendingSendKind === 'initial'
+          && ['send-initial', 'prompt-ready', 'send-wait-button', 'sending'].includes(currentStep)
+          && composerHasAttachment
+          && composerUploadingCount === 0
+        ) {
+          ToolboxShell.appendLog(
+            `[SEND][RESET_RUNTIME_SKIP_ACTIVE_AUTOQ_INITIAL_SEND] reason=${reason || '-'} phase=${phase} `
+            + `step=${currentStep} pendingSendKind=${pendingSendKind}`,
+          );
+          return true;
+        }
+        if (
+          autoState.running === true
+          && ['initial', 'processing'].includes(pendingSendKind)
+          && ['send-initial', 'prompt-ready', 'send-wait-button', 'sending'].includes(currentStep)
+          && (
+            phase === 'upload_attached'
+            || phase === 'sending'
+            || phase === 'uploading'
+          )
+        ) {
+          ToolboxShell.appendLog(
+            `[SEND][RESET_RUNTIME_SKIP_ACTIVE_AUTOQ_SEND] reason=${reason || '-'} phase=${phase} `
+            + `step=${currentStep} pendingSendKind=${pendingSendKind}`,
+          );
+          return true;
+        }
+        if (phase === 'sending' && pendingSendKind === 'processing') {
+          ToolboxShell.appendLog(
+            `[SEND][RESET_RUNTIME_SKIP_ACTIVE_AUTOQ_SEND] reason=${reason || '-'} phase=${phase} pendingSendKind=${pendingSendKind}`,
+          );
+          return true;
+        }
+      } catch (err) {
+        console.error('[ChatGPT toolbox] isAutoQueueActiveSendProtected failed', err);
+        ToolboxShell.appendLog(
+          `[SEND][RESET_RUNTIME_SKIP_CHECK_FAILED] reason=${reason || '-'} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+      return false;
+    }
+
     function resetRuntimeStateOnBoot(reason) {
+      if (isAutoQueueActiveSendProtected(reason)) {
+        scheduleRenderUpload(`reset-runtime-skip:${reason || 'boot'}`);
+        return;
+      }
       if (isForegroundResumeProtectedBusyState(reason)) {
         ToolboxShell.appendLog(`[SEND][RESET_RUNTIME_STATE_ON_BOOT_SKIP] reason=${reason || 'boot'} cause=foreground-busy`);
         scheduleRenderUpload(`reset-runtime-skip:${reason || 'boot'}`);
@@ -24227,6 +24905,9 @@
     }
 
     function clearStaleBusySendStateOnHomeReady(reason) {
+      if (isAutoQueueActiveSendProtected(reason)) {
+        return false;
+      }
       if (isForegroundResumeProtectedBusyState(reason)) {
         ToolboxShell.appendLog(`[SEND][CLEAR_STALE_BUSY_STATE_SKIP] reason=${reason || 'home-ready'} cause=foreground-busy`);
         return false;
@@ -25870,6 +26551,32 @@
         return { ok: true, reason: isClosedLoopFinalVerify ? 'write-ok-relaxed' : 'write-ok-normalized', expectedLen, actualLen: finalLen };
       }
 
+      if (finalLen <= 0) {
+        const clearedSubmit = await confirmSharedMessageSubmitted(
+          source || 'send-payload-dropped',
+          payload,
+          {
+            timeoutMs: 800,
+            turnCountBefore: opts.turnCountBefore,
+            beforeConversationId: opts.beforeConversationId,
+            beforeLatestKey: opts.beforeLatestKey,
+          },
+        );
+        if (clearedSubmit && clearedSubmit.ok === true) {
+          ToolboxShell.appendLog(
+            `[SEND_PAYLOAD][COMPOSER_CLEARED_AFTER_SEND] source=${source || '-'} expectedLen=${expectedLen} `
+            + `action=accept-as-submitted reason=${clearedSubmit.reason || clearedSubmit.detailReason || '-'}`,
+          );
+          return {
+            ok: true,
+            reason: clearedSubmit.reason || 'message-submitted-composer-cleared',
+            expectedLen,
+            actualLen: finalLen,
+            submitted: true,
+          };
+        }
+      }
+
       ToolboxShell.appendLog(
         `[SEND_PAYLOAD][DROPPED] source=${source || '-'} expectedLen=${expectedLen} actualLen=${finalLen} expectedPreview=${expectedPreview} actualPreview=${finalPreview}`,
       );
@@ -25948,6 +26655,170 @@
         );
       }
       return null;
+    }
+
+    function getSharedSendConversationPresence(options = {}) {
+      const scopeGroupId = String(options.scopeGroupId || '').trim();
+      let attachmentInConversation = false;
+      let conversationSentCount = 0;
+
+      try {
+        if (typeof summarizeUploadAttachmentPresenceForScope === 'function') {
+          const summary = summarizeUploadAttachmentPresenceForScope(scopeGroupId);
+          conversationSentCount = Math.max(0, Number(summary.conversationSent) || 0);
+          attachmentInConversation = conversationSentCount > 0;
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] getSharedSendConversationPresence failed', err);
+        ToolboxShell.appendLog(
+          `[SEND][CONFIRM_SHARED_PRESENCE_FAILED] error=${errText}`,
+        );
+      }
+
+      return {
+        attachmentInConversation,
+        conversationSentCount,
+      };
+    }
+
+    async function confirmSharedMessageSubmitted(source, expectedText, options = {}) {
+      const sourceText = String(source || 'confirm-shared-send').trim() || 'confirm-shared-send';
+      const expected = String(expectedText || '').trim();
+      const opts = options && typeof options === 'object' ? options : {};
+      const timeoutMs = Math.max(0, Number(opts.timeoutMs) || 1200);
+
+      const conversationId = getCurrentPageConversationIdSafe();
+      const turnCountAfter = getCurrentPageTurnCountSafe();
+      const turnCountBefore = Number.isFinite(Number(opts.turnCountBefore))
+        ? Number(opts.turnCountBefore)
+        : (Number.isFinite(Number(opts.beforeTurnCount)) ? Number(opts.beforeTurnCount) : null);
+      const beforeConversationId = String(
+        opts.beforeConversationId != null
+          ? opts.beforeConversationId
+          : (opts.conversationIdBefore != null ? opts.conversationIdBefore : ''),
+      ).trim();
+
+      const attachmentEvidence = typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+          ? ComposerAttachments.getSharedComposerAttachmentEvidence(`confirm-send:${sourceText}`, { heavy: true })
+          : null;
+      const normalizedAttach = attachmentEvidence
+        ? Math.max(
+          0,
+          Number(attachmentEvidence.normalizedCount != null ? attachmentEvidence.normalizedCount : attachmentEvidence.count) || 0,
+        )
+        : 0;
+      const composerTextLen = getSharedComposerTextTrimmed().length;
+      const attachmentInComposer = normalizedAttach > 0;
+      const presence = getSharedSendConversationPresence(opts);
+
+      const turnCountIncreased = turnCountBefore != null
+        && turnCountAfter != null
+        && Number(turnCountAfter) > Number(turnCountBefore);
+      const conversationAppeared = !beforeConversationId && !!conversationId;
+      const conversationChanged = !!beforeConversationId
+        && !!conversationId
+        && conversationId !== beforeConversationId;
+      const firstTurnEstablished = turnCountAfter != null
+        && Number(turnCountAfter) >= 1
+        && composerTextLen === 0
+        && !attachmentInComposer;
+
+      const quickAccepted = composerTextLen === 0 && (
+        turnCountIncreased
+        || conversationAppeared
+        || conversationChanged
+        || presence.attachmentInConversation
+        || firstTurnEstablished
+      );
+
+      if (quickAccepted) {
+        const acceptReason = turnCountIncreased
+          ? 'turn-count-increased'
+          : (presence.attachmentInConversation
+            ? 'conversation-sent-attachment'
+            : (conversationAppeared || conversationChanged
+              ? 'conversation-established'
+              : 'message-submitted-composer-cleared'));
+        ToolboxShell.appendLog(
+          `[SEND][CONFIRM_SHARED_SUBMITTED] source=${sourceText} ok=1 reason=${acceptReason} `
+          + `composerTextLen=${composerTextLen} turnBefore=${turnCountBefore == null ? '-' : turnCountBefore} `
+          + `turnAfter=${turnCountAfter == null ? '-' : turnCountAfter} conversationId=${conversationId || '-'} `
+          + `conversationSent=${presence.conversationSentCount}`,
+        );
+        return {
+          ok: true,
+          reason: 'message-submitted-composer-cleared',
+          detailReason: acceptReason,
+          conversationId,
+          turnCountBefore,
+          turnCountAfter,
+          composerTextLen,
+          attachmentInComposer,
+          attachmentInConversation: presence.attachmentInConversation,
+          messageAccepted: true,
+          shouldWaitReply: true,
+        };
+      }
+
+      if (timeoutMs > 0) {
+        const verifyResult = await verifyMessageActuallyLeftComposerAfterSend(
+          sourceText,
+          expected,
+          timeoutMs,
+          {
+            beforeLatestKey: opts.beforeLatestKey,
+            beforeConversationId,
+            beforeTurnCount: turnCountBefore,
+          },
+        );
+        if (verifyResult && verifyResult.ok === true) {
+          return {
+            ok: true,
+            reason: verifyResult.reason || 'message-submitted-composer-cleared',
+            detailReason: verifyResult.reason || 'verified-after-send',
+            conversationId,
+            turnCountBefore,
+            turnCountAfter,
+            composerTextLen: Number.isFinite(Number(verifyResult.composerTextLen))
+              ? Number(verifyResult.composerTextLen)
+              : composerTextLen,
+            attachmentInComposer,
+            attachmentInConversation: presence.attachmentInConversation,
+            messageAccepted: true,
+            shouldWaitReply: true,
+          };
+        }
+      }
+
+      const noSubmitEvidence = composerTextLen === 0
+        && !turnCountIncreased
+        && !conversationAppeared
+        && !conversationChanged
+        && !presence.attachmentInConversation
+        && !(turnCountAfter != null && Number(turnCountAfter) >= 1);
+
+      ToolboxShell.appendLog(
+        `[SEND][CONFIRM_SHARED_NOT_SUBMITTED] source=${sourceText} ok=0 `
+        + `composerTextLen=${composerTextLen} turnBefore=${turnCountBefore == null ? '-' : turnCountBefore} `
+        + `turnAfter=${turnCountAfter == null ? '-' : turnCountAfter} conversationId=${conversationId || '-'} `
+        + `conversationSent=${presence.conversationSentCount} noSubmitEvidence=${noSubmitEvidence ? 1 : 0}`,
+      );
+
+      return {
+        ok: false,
+        reason: noSubmitEvidence ? 'composer_empty' : 'send-not-confirmed',
+        conversationId,
+        turnCountBefore,
+        turnCountAfter,
+        composerTextLen,
+        attachmentInComposer,
+        attachmentInConversation: presence.attachmentInConversation,
+        messageAccepted: false,
+        shouldWaitReply: false,
+      };
     }
 
     async function verifyMessageActuallyLeftComposerAfterSend(source, expectedText, timeoutMs = 5000, options = {}) {
@@ -29550,9 +30421,9 @@
               );
               ToolboxShell.showToast(
                 hasPayload
-                  ? '文件已绑定到输入框（等待发送就绪）'
-                  : '上传等待超时：页面较重或状态检测超时，文件可能仍在处理中',
-                hasPayload ? 'success' : 'warn',
+                  ? '附件已进入输入框，等待发送后绑定到会话'
+                  : '附件已进入输入框，但未检测到发送成功，请检查是否已点击发送',
+                hasPayload ? 'info' : 'warn',
                 3200,
               );
               scheduleRenderUpload('startUploadFromCurrentQueue:timeout-wait-ready');
@@ -33183,6 +34054,9 @@
       getSendTaskState,
       getUnifiedComposerAttachmentState,
       runSharedComposerSendFlow,
+      runSharedSendAndWaitEntryFlow,
+      confirmSharedMessageSubmitted,
+      writeTextPayloadToComposerAndVerify,
       syncCopyTaskPhase,
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,
