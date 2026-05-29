@@ -1830,6 +1830,11 @@ const AutoQueueModule = (() => {
     const BATCH_TASK_GROUP_STEP_RUNNING_HARD_TIMEOUT_MS = 120000;
     const BATCH_TASK_GROUP_STUCK_SKIP_TIMEOUT_MS = 30 * 60 * 1000;
     const BATCH_TASK_GROUP_STUCK_SKIP_CHECK_MIN_MS = 10 * 1000;
+    const VERIFICATION_WATCHDOG_CONSUME_MS = 180 * 1000;
+    const VERIFICATION_WATCHDOG_REPAIR_MS = 300 * 1000;
+    const VERIFICATION_WATCHDOG_TIMEOUT_MS = 600 * 1000;
+    const VERIFICATION_RESEND_COOLDOWN_MS = 120 * 1000;
+    const VERIFICATION_MAX_SEND_COUNT = 2;
     const BATCH_TASK_STARTUP_GUARD_MS = 1200;
     const TASK_REPLY_STABLE_HASH_ROUNDS = 2;
 
@@ -2406,12 +2411,28 @@ const AutoQueueModule = (() => {
         && runtime.beforeSendLatestAssistantTextHash
         && textHash === runtime.beforeSendLatestAssistantTextHash
       ) {
-        logTaskTurnBindFail('same-text-hash-as-before-send', runtime, { messageId, textHash });
-        ToolboxShell.appendLog(
-          `[TERMINAL_SIGNAL][STALE_REJECT] reason=same-text-hash-as-before-send `
-          + `taskIndex=${Number(runtime.taskIndex || 0) + 1} signal=- textHash=${textHash}`,
-        );
-        return false;
+        const assistantTurnCount = snapshot.turnCount != null ? Number(snapshot.turnCount) : -1;
+        const expectedAfter = runtime.expectedAssistantAfterTurnCount != null
+          ? Number(runtime.expectedAssistantAfterTurnCount)
+          : -1;
+        if (expectedAfter >= 0 && assistantTurnCount >= expectedAfter) {
+          ToolboxShell.appendLog(
+            `[TERMINAL_SIGNAL][TEXT_HASH_SAME_BUT_TURN_OK] `
+            + `taskIndex=${Number(runtime.taskIndex || 0) + 1} `
+            + `textHash=${textHash} `
+            + `assistantTurnCount=${assistantTurnCount} `
+            + `expectedAssistantAfterTurnCount=${expectedAfter}`,
+          );
+        } else {
+          logTaskTurnBindFail('same-text-hash-and-not-new-turn', runtime, { messageId, textHash });
+          ToolboxShell.appendLog(
+            `[TERMINAL_SIGNAL][STALE_REJECT] reason=same-text-hash-and-not-new-turn `
+            + `taskIndex=${Number(runtime.taskIndex || 0) + 1} signal=- textHash=${textHash} `
+            + `assistantTurnCount=${assistantTurnCount} `
+            + `expectedAssistantAfterTurnCount=${expectedAfter}`,
+          );
+          return false;
+        }
       }
 
       if (
@@ -4388,6 +4409,31 @@ const AutoQueueModule = (() => {
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentAt')) target.verifyPromptSentAt = 0;
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTurnCount')) target.verifyPromptSentTurnCount = -1;
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTurnNo')) target.verifyPromptSentTurnNo = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptBeforeAssistantTurnNo')) target.verifyPromptBeforeAssistantTurnNo = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptBeforeAssistantTurnId')) target.verifyPromptBeforeAssistantTurnId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptBeforeAssistantTextHash')) target.verifyPromptBeforeAssistantTextHash = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptBeforeAssistantTextLen')) target.verifyPromptBeforeAssistantTextLen = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'terminalVerifyBoundaryBeforeTurnNo')) target.terminalVerifyBoundaryBeforeTurnNo = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'doneSignalVerificationSendCount')) target.doneSignalVerificationSendCount = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastConsumedVerificationTurnId')) target.lastConsumedVerificationTurnId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastConsumedVerificationTurnNo')) target.lastConsumedVerificationTurnNo = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastConsumedVerificationTextHash')) target.lastConsumedVerificationTextHash = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastConsumedVerificationAt')) target.lastConsumedVerificationAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationSendInFlight')) target.verificationSendInFlight = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationUploadInFlight')) target.verificationUploadInFlight = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationRepairInFlight')) target.verificationRepairInFlight = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationConsumeInFlight')) target.verificationConsumeInFlight = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationUploadCompleted')) target.verificationUploadCompleted = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationUploadCompletedAt')) target.verificationUploadCompletedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationUploadGroupId')) target.verificationUploadGroupId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationUploadFileCount')) target.verificationUploadFileCount = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationPromptSendStartedAt')) target.verificationPromptSendStartedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationPromptSendFinishedAt')) target.verificationPromptSendFinishedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationPromptSendResult')) target.verificationPromptSendResult = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationSendLastError')) target.verificationSendLastError = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationForceRetryAllowed')) target.verificationForceRetryAllowed = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationSendRetrying')) target.verificationSendRetrying = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verificationWaitReplyStartedAt')) target.verificationWaitReplyStartedAt = 0;
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentConversationId')) target.verifyPromptSentConversationId = '';
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTaskId')) target.verifyPromptSentTaskId = '';
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTaskIndex')) target.verifyPromptSentTaskIndex = -1;
@@ -7876,6 +7922,35 @@ const AutoQueueModule = (() => {
         .trim();
     }
 
+    function normalizeTerminalStatusText(text) {
+      return String(text || '')
+        .replace(/\u200b/g, '')
+        .replace(/\u200c/g, '')
+        .replace(/\u200d/g, '')
+        .replace(/\u00A0/g, ' ')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .trim();
+    }
+
+    function parseTerminalStatusReplyText(text) {
+      const normalized = normalizeTerminalStatusText(text);
+      if (normalized === TERMINAL_CONFIRM_SIGNAL_DONE) {
+        return 'done';
+      }
+      if (normalized === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
+        return 'blocked_need_input';
+      }
+      if (normalized === TERMINAL_CONFIRM_SIGNAL_NO_MORE) {
+        return 'no_more_content';
+      }
+      return '';
+    }
+
+    function isTerminalStatusReplyText(text) {
+      return !!parseTerminalStatusReplyText(text);
+    }
+
     const STRICT_TERMINAL_SIGNALS = Object.freeze([
       TERMINAL_CONFIRM_SIGNAL_DONE,
       TERMINAL_CONFIRM_SIGNAL_BLOCKED,
@@ -8166,14 +8241,33 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      if (snapshot.textHash && boundary.beforeAssistantTextHash && snapshot.textHash === boundary.beforeAssistantTextHash) {
-        ToolboxShell.appendLog(
-          `[TASK_VERIFY][TURN_BIND_FAIL] reason=same-text-hash-as-before-send`
-          + ` taskIndex=${Number(boundary.taskIndex) + 1}`
-          + ` textHash=${snapshot.textHash}`
-          + ` source=${source}`,
-        );
-        return false;
+      const sameTextHash = !!(
+        snapshot.textHash
+        && boundary.beforeAssistantTextHash
+        && snapshot.textHash === boundary.beforeAssistantTextHash
+      );
+      if (sameTextHash) {
+        if (snapshotTurnNo >= 0 && beforeTurnNo >= 0 && snapshotTurnNo > beforeTurnNo) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY][TURN_BIND_TEXT_HASH_SAME_BUT_NEW_TURN_ALLOW]`
+            + ` taskIndex=${Number(boundary.taskIndex) + 1}`
+            + ` textHash=${snapshot.textHash}`
+            + ` beforeTurnNo=${beforeTurnNo}`
+            + ` assistantTurnNo=${snapshotTurnNo}`
+            + ` turnId=${snapshot.turnId || '-'}`
+            + ` source=${source}`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY][TURN_BIND_FAIL] reason=same-text-hash-and-not-new-turn`
+            + ` taskIndex=${Number(boundary.taskIndex) + 1}`
+            + ` textHash=${snapshot.textHash}`
+            + ` beforeTurnNo=${beforeTurnNo}`
+            + ` assistantTurnNo=${snapshotTurnNo}`
+            + ` source=${source}`,
+          );
+          return false;
+        }
       }
 
       if (snapshotTurnNo >= 0 && beforeTurnNo >= 0 && snapshotTurnNo <= beforeTurnNo) {
@@ -8597,6 +8691,17 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      const verifyBeforeTurnNo = Number(run.verifyPromptBeforeAssistantTurnNo || -1);
+      if (verifyBeforeTurnNo >= 0 && snapTurnNo > verifyBeforeTurnNo) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_OK] reason=after-verify-before-turn`
+          + ` verifyBeforeTurnNo=${verifyBeforeTurnNo}`
+          + ` assistantTurnNo=${snapTurnNo}`
+          + ` source=${source}`,
+        );
+        return true;
+      }
+
       const verifySentTurnNo = Number(run.verifyPromptSentTurnNo);
       if (verifySentTurnNo >= 0 && snapTurnNo > verifySentTurnNo) {
         ToolboxShell.appendLog(
@@ -8609,6 +8714,15 @@ const AutoQueueModule = (() => {
       }
 
       if (isAssistantSnapshotBelongsToCurrentTask(snapshot, source)) {
+        if (verifyBeforeTurnNo >= 0 && snapTurnNo <= verifyBeforeTurnNo) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=same-or-before-verify-before-turn`
+            + ` verifyBeforeTurnNo=${verifyBeforeTurnNo}`
+            + ` assistantTurnNo=${snapTurnNo}`
+            + ` source=${source}`,
+          );
+          return false;
+        }
         if (verifySentTurnNo >= 0 && snapTurnNo <= verifySentTurnNo) {
           ToolboxShell.appendLog(
             `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=same-or-before-verify-prompt-turn`
@@ -8624,6 +8738,9 @@ const AutoQueueModule = (() => {
       const boundary = run.currentTaskSendBoundary || null;
       const beforeTurnNo = boundary ? Number(boundary.beforeAssistantTurnNo || -1) : -1;
       if (snapTurnNo >= 0 && beforeTurnNo >= 0 && snapTurnNo > beforeTurnNo) {
+        if (verifyBeforeTurnNo >= 0 && snapTurnNo <= verifyBeforeTurnNo) {
+          return false;
+        }
         if (verifySentTurnNo >= 0 && snapTurnNo <= verifySentTurnNo) {
           return false;
         }
@@ -8657,34 +8774,86 @@ const AutoQueueModule = (() => {
         return null;
       }
 
-      if (state.waitingReply || isChatGPTActuallyBusyForTaskQueue()) {
-        return null;
-      }
-
       const step = String(run.currentStep || '');
       if (!VERIFICATION_CONSUME_STEPS.has(step)) {
         return null;
       }
 
-      const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`consumable-verify-reply:${source}`);
-      if (!latest || latest.ok !== true || !String(latest.text || '').trim()) {
+      const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`verification-consume:${source}`);
+      if (!latest || latest.ok !== true) {
+        ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][CONSUME_SKIP_NO_LATEST] source=${source}`);
         return null;
       }
 
-      const task = getCurrentRunningTask();
-      const profile = getActiveTaskProfile ? getActiveTaskProfile() : null;
-      const resolved = task
-        ? resolveTaskContinueSettings(task, profile, { log: false })
-        : { actualDoneSignal: TASK_DONE_SIGNAL };
-      const doneCheck = isTaskDoneSignalMatched(latest.text, resolved.actualDoneSignal);
+      const latestTurnId = String(latest.turnId || '').trim();
+      const latestTurnNo = Number(latest.turnNo || -1);
+      const latestText = String(latest.text || '').trim();
+      const latestTextHash = String(latest.textHash || '');
 
-      if (!doneCheck.matched || doneCheck.corrupted) {
+      if (!isTerminalStatusReplyText(latestText)) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_SKIP_NOT_TERMINAL_TEXT] source=${source}`
+          + ` latestTurnNo=${latestTurnNo}`
+          + ` textHash=${latestTextHash}`
+          + ` textLen=${latestText.length}`,
+        );
+        return null;
+      }
+
+      const lastConsumedTurnId = String(run.lastConsumedVerificationTurnId || '').trim();
+      const lastConsumedTurnNo = Number(run.lastConsumedVerificationTurnNo || -1);
+
+      if (latestTurnId && latestTurnId === lastConsumedTurnId) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_SKIP_ALREADY_CONSUMED_TURN_ID] source=${source}`
+          + ` latestTurnNo=${latestTurnNo}`
+          + ` latestTurnId=${latestTurnId}`,
+        );
+        return null;
+      }
+
+      if (lastConsumedTurnNo >= 0 && latestTurnNo >= 0 && latestTurnNo <= lastConsumedTurnNo) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_SKIP_ALREADY_CONSUMED_TURN_NO] source=${source}`
+          + ` latestTurnNo=${latestTurnNo}`,
+        );
+        return null;
+      }
+
+      const verifyBeforeTurnNo = Number(run.verifyPromptBeforeAssistantTurnNo || -1);
+      const boundaryBeforeTurnNo = Number(run.terminalVerifyBoundaryBeforeTurnNo || -1);
+      const boundary = run.currentTaskSendBoundary || null;
+      const taskBoundaryBeforeTurnNo = boundary ? Number(boundary.beforeAssistantTurnNo || -1) : -1;
+      const minAfterTurnNo = Math.max(verifyBeforeTurnNo, boundaryBeforeTurnNo, taskBoundaryBeforeTurnNo);
+
+      if (minAfterTurnNo >= 0 && latestTurnNo >= 0 && latestTurnNo <= minAfterTurnNo) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_SKIP_NOT_NEW_TURN] source=${source}`
+          + ` latestTurnNo=${latestTurnNo}`
+          + ` minAfterTurnNo=${minAfterTurnNo}`
+          + ` verifyBeforeTurnNo=${verifyBeforeTurnNo}`
+          + ` boundaryBeforeTurnNo=${boundaryBeforeTurnNo}`
+          + ` verifyPromptSentTurnNo_ignored=${Number(run.verifyPromptSentTurnNo || -1)}`
+          + ` latestTurnId=${latestTurnId}`
+          + ` beforeTurnId=${String(run.verifyPromptBeforeAssistantTurnId || '')}`
+          + ` textHash=${latestTextHash}`,
+        );
         return null;
       }
 
       if (!isVerificationReplySnapshotBelongsToCurrentTask(latest, run, source)) {
         return null;
       }
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][CONSUME_SNAPSHOT_OK] source=${source}`
+        + ` latestTurnNo=${latestTurnNo}`
+        + ` minAfterTurnNo=${minAfterTurnNo}`
+        + ` latestTurnId=${latestTurnId}`
+        + ` textHash=${latestTextHash}`
+        + ` textLen=${latestText.length}`
+        + ` status=${parseTerminalStatusReplyText(latestText)}`,
+      );
 
       return latest;
     }
@@ -8697,138 +8866,195 @@ const AutoQueueModule = (() => {
     function tryConsumeReadyVerificationReplyBeforeLock(source) {
       const sourceText = String(source || '-');
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
+
+      if (run.verificationConsumeInFlight === true) {
+        return false;
+      }
+
       const latest = getConsumableVerificationReplySnapshot(run, sourceText);
 
       if (!latest) {
         return false;
       }
 
-      const task = getCurrentRunningTask();
-      if (!task) {
-        return false;
-      }
-
-      const step = String(run.currentStep || '-');
-      const phase = String(state.phase || '-');
-
-      ToolboxShell.appendLog(
-        `[TASK_VERIFY_FINAL][CONSUME_READY_BEFORE_LOCK] source=${sourceText}`
-        + ` turnId=${latest.turnId || '-'}`
-        + ` turnNo=${Number(latest.turnNo || -1)}`
-        + ` step=${step}`
-        + ` phase=${phase}`,
-      );
-
-      run.pendingSendKind = null;
-      run.pendingReplyKind = null;
-      run.doneSignalVerificationRunning = false;
-      run.afterTerminalConfirmWaitingVerify = false;
-      run.verifyReplyTextForResend = '';
+      run.verificationConsumeInFlight = true;
       state.taskRun = run;
-      state.waitingReply = false;
-      state.replyBecameBusy = false;
-      state.waitingStartedAt = 0;
-      state.idleSince = 0;
 
-      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING || 'running', 'verification-reply-consumed-before-lock', { force: true });
+      try {
+        const latestTurnId = String(latest.turnId || '').trim();
+        if (
+          latestTurnId
+          && latestTurnId === String(run.lastConsumedVerificationTurnId || '').trim()
+        ) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][SKIP_ALREADY_CONSUMED] source=${sourceText}`
+            + ` turnId=${latestTurnId}`
+            + ` turnNo=${Number(latest.turnNo || -1)}`,
+          );
+          return true;
+        }
 
-      const beginResult = beginTerminalConfirm({
-        source: `verification-reply-before-lock:${sourceText}`,
-        taskIndex: Number(run.currentIndex || 0),
-        taskId: task.id || '',
-        replyText: latest.text,
-      });
+        const task = getCurrentRunningTask();
+        if (!task) {
+          return false;
+        }
 
-      if (beginResult && beginResult.ok === true) {
-        return true;
-      }
+        const step = String(run.currentStep || '-');
+        const phase = String(state.phase || '-');
+        const consumedStatus = parseTerminalStatusReplyText(latest.text);
 
-      const beginReason = beginResult && beginResult.reason
-        ? String(beginResult.reason)
-        : 'begin-terminal-confirm-failed';
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_READY_BEFORE_LOCK] source=${sourceText}`
+          + ` status=${consumedStatus}`
+          + ` turnId=${latest.turnId || '-'}`
+          + ` turnNo=${Number(latest.turnNo || -1)}`
+          + ` textHash=${latest.textHash || '-'}`
+          + ` step=${step}`
+          + ` phase=${phase}`,
+        );
 
-      ToolboxShell.appendLog(
-        `[TASK_VERIFY_FINAL][CONSUME_BEFORE_LOCK_RETRY] source=${sourceText} reason=${beginReason}`,
-      );
+        run.pendingSendKind = null;
+        run.pendingReplyKind = null;
+        run.doneSignalVerificationRunning = false;
+        run.afterTerminalConfirmWaitingVerify = false;
+        run.verifyReplyTextForResend = '';
+        run.verificationSendInFlight = false;
+        run.verificationUploadInFlight = false;
+        run.verificationRepairInFlight = false;
+        run.verificationSendRetrying = false;
+        run.lastConsumedVerificationTurnId = latestTurnId;
+        run.lastConsumedVerificationTurnNo = Number(latest.turnNo || -1);
+        run.lastConsumedVerificationTextHash = String(latest.textHash || '');
+        run.lastConsumedVerificationAt = Date.now();
+        state.taskRun = run;
+        state.waitingReply = false;
+        state.replyBecameBusy = false;
+        state.waitingStartedAt = 0;
+        state.idleSince = 0;
 
-      if (beginReason === 'stale-or-unbound-terminal' || beginReason === 'not-exact-terminal') {
-        scheduleNextBatchTaskStep('reply-ready-retry', 0, {
-          reason: beginReason,
-          source: `verification-reply-before-lock:${sourceText}`,
+        setAutoQueuePhase('terminal_confirming', 'terminal-verification-consumed', { force: true });
+        setTaskBatchStep('terminal-confirm-begin', task, { log: false });
+
+        const beginResult = beginTerminalConfirm({
+          source: `verification-consumed:${sourceText}`,
+          taskIndex: Number(run.currentIndex || 0),
+          taskId: task.id || '',
+          replyText: latest.text,
         });
-      }
 
-      return beginReason !== 'already-confirming';
+        if (beginResult && beginResult.ok === true) {
+          return true;
+        }
+
+        const beginReason = beginResult && beginResult.reason
+          ? String(beginResult.reason)
+          : 'begin-terminal-confirm-failed';
+
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][CONSUME_BEFORE_LOCK_RETRY] source=${sourceText} reason=${beginReason}`,
+        );
+
+        if (beginReason === 'stale-or-unbound-terminal' || beginReason === 'not-exact-terminal') {
+          scheduleNextBatchTaskStep('reply-ready-retry', 0, {
+            reason: beginReason,
+            source: `verification-reply-before-lock:${sourceText}`,
+          });
+        }
+
+        return beginReason !== 'already-confirming';
+      } catch (error) {
+        console.error('[TASK_VERIFY_FINAL][ERROR]', error);
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][ERROR] ${error && error.stack ? error.stack : String(error)}`,
+        );
+        return false;
+      } finally {
+        const runAfter = ensureTaskRunVerificationFields(state.taskRun || {});
+        runAfter.verificationConsumeInFlight = false;
+        state.taskRun = runAfter;
+      }
     }
 
     function repairVerificationSendWaitButtonStaleState(source) {
       const sourceText = String(source || '-');
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
-      const step = String(run.currentStep || '');
-      const phase = String(state.phase || '');
 
-      if (String(run.pendingSendKind || '') !== 'verification') {
-        return false;
-      }
-      if (String(run.pendingReplyKind || '') !== 'verification') {
-        return false;
-      }
-      if (run.doneSignalVerificationRunning !== true) {
-        return false;
-      }
-      if (phase !== AUTO_QUEUE_PHASES.UPLOAD_ATTACHED && phase !== 'upload_attached') {
-        return false;
-      }
-      if (step !== 'send-wait-button') {
+      if (run.verificationRepairInFlight === true) {
         return false;
       }
 
-      const payload = getAutoQueueComposerPayloadState(`repair-verification-send-wait:${sourceText}`);
-      if (Number(payload.textLen || 0) !== 0) {
-        return false;
-      }
-      if (Number(payload.readyCount || 0) !== 0) {
-        return false;
-      }
-      if (Number(payload.uploadingCount || 0) !== 0) {
-        return false;
-      }
-      if (isChatGPTActuallyBusyForTaskQueue()) {
-        return false;
-      }
+      run.verificationRepairInFlight = true;
+      state.taskRun = run;
 
-      const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`repair-verification-send-wait:${sourceText}`);
-      if (!latest || !String(latest.text || '').trim()) {
-        return false;
-      }
+      try {
+        const step = String(run.currentStep || '');
+        const phase = String(state.phase || '');
 
-      if (tryConsumeReadyVerificationReplyBeforeLock(`repair-verification-send-wait:${sourceText}`)) {
-        ToolboxShell.appendLog(
-          `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_BUTTON] source=${sourceText} action=consumed-ready-verification-reply`,
+        const isVerifySendWaitStale = !!(
+          String(run.pendingReplyKind || '') === 'verification'
+          && run.doneSignalVerificationRunning === true
+          && (
+            (phase === AUTO_QUEUE_PHASES.UPLOAD_ATTACHED || phase === 'upload_attached')
+            && step === 'send-wait-button'
+          )
         );
-        return true;
-      }
 
-      const task = getCurrentRunningTask();
-      if (!task) {
+        if (!isVerifySendWaitStale && String(run.pendingSendKind || '') !== 'verification') {
+          return false;
+        }
+        if (!isVerifySendWaitStale && step !== 'send-wait-button') {
+          return false;
+        }
+
+        if (tryConsumeReadyVerificationReplyBeforeLock(`repair-send-wait:${sourceText}`)) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_CONSUMED_EXISTING_REPLY] source=${sourceText}`,
+          );
+          return true;
+        }
+
+        const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`repair-send-wait-diagnose:${sourceText}`);
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_BUTTON_NOT_CONSUMED] source=${sourceText}`
+          + ` phase=${phase}`
+          + ` step=${step}`
+          + ` pendingSendKind=${String(run.pendingSendKind || '')}`
+          + ` pendingReplyKind=${String(run.pendingReplyKind || '')}`
+          + ` latestTurnNo=${Number(latest && latest.turnNo || -1)}`
+          + ` verifyPromptBeforeAssistantTurnNo=${Number(run.verifyPromptBeforeAssistantTurnNo || -1)}`
+          + ` verifyPromptSentTurnNo_ignored=${Number(run.verifyPromptSentTurnNo || -1)}`
+          + ` lastConsumedVerificationTurnNo=${Number(run.lastConsumedVerificationTurnNo || -1)}`
+          + ` doneSignalVerificationRunning=${run.doneSignalVerificationRunning ? 1 : 0}`
+          + ` afterTerminalConfirmWaitingVerify=${run.afterTerminalConfirmWaitingVerify ? 1 : 0}`,
+        );
+
+        if (Number(run.doneSignalVerificationSendCount || 0) >= 1 && !run.verificationSendInFlight) {
+          run.pendingSendKind = null;
+          run.pendingReplyKind = 'verification';
+          state.taskRun = run;
+          setTaskBatchStep('verify-wait-reply', getCurrentRunningTask(), { log: false });
+          setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY || 'waiting_reply', 'repair-send-wait-to-wait-reply', { force: true });
+          state.waitingReply = true;
+          run.verificationWaitReplyStartedAt = Number(run.verificationWaitReplyStartedAt || Date.now());
+          state.taskRun = run;
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_TO_WAIT_REPLY] source=${sourceText}`,
+          );
+          return true;
+        }
+
         return false;
-      }
-
-      const profile = getActiveTaskProfile ? getActiveTaskProfile() : null;
-      const resolved = resolveTaskContinueSettings(task, profile, { log: false });
-      const doneCheck = isTaskDoneSignalMatched(latest.text, resolved.actualDoneSignal);
-
-      if (doneCheck.matched) {
+      } catch (error) {
+        console.error('[TASK_VERIFY_FINAL][ERROR]', error);
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][ERROR] ${error && error.stack ? error.stack : String(error)}`,
+        );
         return false;
+      } finally {
+        const runAfter = ensureTaskRunVerificationFields(state.taskRun || {});
+        runAfter.verificationRepairInFlight = false;
+        state.taskRun = runAfter;
       }
-
-      ToolboxShell.appendLog(
-        `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_BUTTON] source=${sourceText} action=switch-verify-wait-reply chars=${String(latest.text || '').length}`,
-      );
-      setTaskBatchStep('verify-wait-reply', task, { log: false });
-      setAutoQueuePhase('waiting_reply', 'repair-verification-send-wait-button', { force: true });
-      state.waitingReply = true;
-      return true;
     }
 
     function isTerminalFinalVerificationFlowActive() {
@@ -8933,6 +9159,10 @@ const AutoQueueModule = (() => {
         return false;
       }
 
+      if (tryConsumeReadyVerificationReplyBeforeLock(`resume-stale:${source}`)) {
+        return true;
+      }
+
       const stale = isStaleVerificationPendingState();
       const anyVerify = hasAnyVerificationPendingState();
 
@@ -8968,10 +9198,16 @@ const AutoQueueModule = (() => {
       }
 
       const stuckStartedAt = Number(run.terminalVerificationStartedAt || run.pendingSendStartedAt || now);
-      const maxStuckMs = Math.max(
-        60_000,
-        Number(config.taskQueueSettings && config.taskQueueSettings.taskVerificationMaxStuckMs) || 30 * 60 * 1000,
-      );
+      const step = String(run.currentStep || '');
+      const isVerifyWait = step === 'verify-wait-reply'
+        || step === 'wait-verification-reply'
+        || String(run.pendingReplyKind || '') === 'verification';
+      const maxStuckMs = isVerifyWait
+        ? VERIFICATION_WATCHDOG_TIMEOUT_MS
+        : Math.max(
+          60_000,
+          Number(config.taskQueueSettings && config.taskQueueSettings.taskVerificationMaxStuckMs) || 30 * 60 * 1000,
+        );
 
       if (now - stuckStartedAt > maxStuckMs) {
         ToolboxShell.appendLog(
@@ -9005,6 +9241,35 @@ const AutoQueueModule = (() => {
         `[TASK_VERIFY_FINAL][RESUME_STALE] source=${source} force=${force ? 1 : 0} task=${task.title || '-'} `
         + `currentIndex=${currentIndex} nextIndex=${nextIndex} replyLen=${replyText.length}`,
       );
+
+      const resendGuard = shouldBlockDoneSignalVerificationResend(run, `resume-stale:${source}`);
+      if (resendGuard.block) {
+        if (resendGuard.consumed) {
+          return true;
+        }
+        if (resendGuard.reason === 'verify-resend-limit' || resendGuard.reason === 'cooldown') {
+          return true;
+        }
+      }
+
+      if (Number(run.doneSignalVerificationSendCount || 0) >= 1) {
+        if (repairVerificationSendWaitButtonStaleState(`resume-stale:${source}`)) {
+          return true;
+        }
+        run.pendingSendKind = null;
+        run.pendingReplyKind = 'verification';
+        run.verificationWaitReplyStartedAt = Number(run.verificationWaitReplyStartedAt || Date.now());
+        state.taskRun = run;
+        setTaskBatchStep('verify-wait-reply', task, { log: false });
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY || 'waiting_reply', 'resume-stale-wait-reply', { force: true });
+        state.waitingReply = true;
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][RESUME_WAIT_REPLY] source=${source}`
+          + ` sendCount=${Number(run.doneSignalVerificationSendCount || 0)}`
+          + ` beforeTurnNo=${Number(run.verifyPromptBeforeAssistantTurnNo || -1)}`,
+        );
+        return true;
+      }
 
       setTaskBatchStep('verify-send-prompt', task, { log: false });
       setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING || 'running', 'resume-stale-verification', { force: true });
@@ -9225,8 +9490,10 @@ const AutoQueueModule = (() => {
       if (isTerminalFinalVerificationAllowedAction(actionName)) {
         return false;
       }
-      const run = state.taskRun || {};
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
       const runtimeState = getAutoQueueRuntimeState();
+      const latestDiag = getLatestAssistantSnapshotForAutoQueueBoundary(`terminal-verify-lock:${actionText}`);
+      const latestText = String(latestDiag && latestDiag.text || '');
       ToolboxShell.appendLog(
         `[TERMINAL_VERIFY_LOCK][BLOCK] action=${String(actionName || '-')} `
         + `phase=${String(state.phase || '-')} `
@@ -9235,7 +9502,15 @@ const AutoQueueModule = (() => {
         + `pendingReplyKind=${String(run.pendingReplyKind || '-')} `
         + `terminalConfirming=${runtimeState && runtimeState.terminalConfirming ? 1 : 0} `
         + `afterTerminalConfirmWaitingVerify=${run.afterTerminalConfirmWaitingVerify ? 1 : 0} `
-        + `doneSignalVerificationRunning=${run.doneSignalVerificationRunning ? 1 : 0}`,
+        + `doneSignalVerificationRunning=${run.doneSignalVerificationRunning ? 1 : 0} `
+        + `verificationSendCount=${Number(run.doneSignalVerificationSendCount || 0)} `
+        + `verifyPromptBeforeAssistantTurnNo=${Number(run.verifyPromptBeforeAssistantTurnNo || -1)} `
+        + `verifyPromptSentTurnNo_ignored=${Number(run.verifyPromptSentTurnNo || -1)} `
+        + `lastConsumedVerificationTurnNo=${Number(run.lastConsumedVerificationTurnNo || -1)} `
+        + `latestTurnNo=${Number(latestDiag && latestDiag.turnNo || -1)} `
+        + `latestTextHash=${String(latestDiag && latestDiag.textHash || '-')} `
+        + `latestTextLen=${latestText.length} `
+        + `latestIsTerminalText=${isTerminalStatusReplyText(latestText) ? 1 : 0}`,
       );
       return true;
     }
@@ -9717,6 +9992,22 @@ const AutoQueueModule = (() => {
       run.verifyReplyTextForResend = '';
       run.pendingSendKind = null;
       run.pendingReplyKind = null;
+      run.doneSignalVerificationSendCount = 0;
+      run.verifyPromptBeforeAssistantTurnNo = -1;
+      run.verifyPromptBeforeAssistantTurnId = '';
+      run.verifyPromptBeforeAssistantTextHash = '';
+      run.verifyPromptBeforeAssistantTextLen = 0;
+      run.terminalVerifyBoundaryBeforeTurnNo = -1;
+      run.lastConsumedVerificationTurnId = '';
+      run.lastConsumedVerificationTurnNo = -1;
+      run.lastConsumedVerificationTextHash = '';
+      run.lastConsumedVerificationAt = 0;
+      run.verificationUploadCompleted = false;
+      run.verificationUploadCompletedAt = 0;
+      run.verificationUploadGroupId = '';
+      run.verificationUploadFileCount = 0;
+      run.verificationPromptSendResult = '';
+      run.verificationWaitReplyStartedAt = 0;
       state.taskRun = run;
 
       const runtimeState = getAutoQueueRuntimeState();
@@ -9736,6 +10027,9 @@ const AutoQueueModule = (() => {
 
       ToolboxShell.appendLog(
         `[TASK_VERIFY_FINAL][PASS] nextIndex=${nextIndex + 1} reason=${reason}`,
+      );
+      ToolboxShell.appendLog(
+        `[AUTOQ][NEXT_TASK_AFTER_TERMINAL_VERIFY] nextIndex=${nextIndex + 1} reason=${reason}`,
       );
 
       const moved = await moveToNextTask('terminal-final-verified', {
@@ -9932,6 +10226,22 @@ const AutoQueueModule = (() => {
       run.lastTerminalConsumedTurnId = '';
       run.lastTerminalConsumedTextHash = '';
       run.terminalSignalConsumedAt = 0;
+      run.doneSignalVerificationSendCount = 0;
+      run.verifyPromptBeforeAssistantTurnNo = -1;
+      run.verifyPromptBeforeAssistantTurnId = '';
+      run.verifyPromptBeforeAssistantTextHash = '';
+      run.verifyPromptBeforeAssistantTextLen = 0;
+      run.terminalVerifyBoundaryBeforeTurnNo = -1;
+      run.lastConsumedVerificationTurnId = '';
+      run.lastConsumedVerificationTurnNo = -1;
+      run.lastConsumedVerificationTextHash = '';
+      run.lastConsumedVerificationAt = 0;
+      run.verificationUploadCompleted = false;
+      run.verificationUploadCompletedAt = 0;
+      run.verificationUploadGroupId = '';
+      run.verificationUploadFileCount = 0;
+      run.verificationPromptSendResult = '';
+      run.verificationWaitReplyStartedAt = 0;
       state.taskRun = run;
 
       runtimeState.terminalConfirming = false;
@@ -12096,6 +12406,74 @@ const AutoQueueModule = (() => {
       };
     }
 
+    function checkVerificationWatchdog(reason = 'tick') {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const step = String(run.currentStep || '');
+      const isVerifyWaitStep = step === 'verify-wait-reply'
+        || step === 'wait-verification-reply'
+        || step === 'verification-send-retry';
+
+      if (!isVerifyWaitStep && String(run.pendingReplyKind || '') !== 'verification') {
+        return false;
+      }
+
+      if (Number(run.doneSignalVerificationSendCount || 0) < 1) {
+        return false;
+      }
+
+      const waitStartedAt = Number(
+        run.verificationWaitReplyStartedAt
+        || run.verifyPromptSentAt
+        || run.terminalVerificationStartedAt
+        || 0,
+      );
+      if (!waitStartedAt) {
+        return false;
+      }
+
+      const elapsedMs = Date.now() - waitStartedAt;
+      logAutoQueueDebugThrottled(
+        'verify-watchdog-tick',
+        `[TASK_VERIFY_FINAL][VERIFY_WATCHDOG_TICK] source=${reason}`
+        + ` step=${step}`
+        + ` elapsedMs=${elapsedMs}`
+        + ` sendCount=${Number(run.doneSignalVerificationSendCount || 0)}`
+        + ` beforeTurnNo=${Number(run.verifyPromptBeforeAssistantTurnNo || -1)}`,
+        15000,
+      );
+
+      if (elapsedMs >= VERIFICATION_WATCHDOG_CONSUME_MS) {
+        if (tryConsumeReadyVerificationReplyBeforeLock(`verify-watchdog:${reason}`)) {
+          ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][VERIFY_WATCHDOG_CONSUMED] source=${reason}`);
+          return true;
+        }
+      }
+
+      if (elapsedMs >= VERIFICATION_WATCHDOG_REPAIR_MS) {
+        if (repairVerificationSendWaitButtonStaleState(`verify-watchdog:${reason}`)) {
+          ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][VERIFY_WATCHDOG_REPAIR] source=${reason}`);
+          return true;
+        }
+      }
+
+      if (elapsedMs >= VERIFICATION_WATCHDOG_TIMEOUT_MS) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_WATCHDOG_TIMEOUT] source=${reason}`
+          + ` elapsedMs=${elapsedMs}`
+          + ` sendCount=${Number(run.doneSignalVerificationSendCount || 0)}`
+          + ` action=fail-and-next`,
+        );
+        clearOrphanTerminalVerifyLock(`verify-watchdog:${reason}`, {
+          nextStep: 'task-failed-skip-next',
+        });
+        failCurrentTask('verification-timeout');
+        void moveToNextTask('verification-timeout', { skipGate: true }).catch(handleMoveToNextTaskError);
+        return true;
+      }
+
+      return false;
+    }
+
     function checkBatchTaskGroupStuckSkip(reason = 'tick') {
       if (config.promptMode !== 'task') {
         return false;
@@ -12870,6 +13248,91 @@ const AutoQueueModule = (() => {
       return !!(verifyResult && verifyResult.ok);
     }
 
+    function canAllowVerificationSend(run, source = '-') {
+      const sourceText = String(source || '-');
+      const sendCount = Number(run.doneSignalVerificationSendCount || 0);
+
+      if (sendCount === 0) {
+        ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][VERIFY_SEND_ALLOWED_FIRST] source=${sourceText}`);
+        return { allowed: true, reason: 'first-send' };
+      }
+
+      if (sendCount >= VERIFICATION_MAX_SEND_COUNT) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_SEND_BLOCKED_MAX_RETRY] source=${sourceText} sendCount=${sendCount}`,
+        );
+        return { allowed: false, reason: 'max-retry' };
+      }
+
+      const consumable = getConsumableVerificationReplySnapshot(run, `send-guard:${sourceText}`);
+      if (consumable) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_SEND_BLOCKED_ALREADY_SENT] source=${sourceText}`
+          + ` reason=consumable-reply-exists turnNo=${Number(consumable.turnNo || -1)}`,
+        );
+        return { allowed: false, reason: 'consumable-reply-exists' };
+      }
+
+      const lastResult = String(run.verificationPromptSendResult || '');
+      if (lastResult !== 'failed' && !run.verificationForceRetryAllowed) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_SEND_BLOCKED_ALREADY_SENT] source=${sourceText} sendCount=${sendCount}`,
+        );
+        return { allowed: false, reason: 'already-sent' };
+      }
+
+      const elapsedMs = Date.now() - Number(run.verifyPromptSentAt || 0);
+      if (elapsedMs < VERIFICATION_RESEND_COOLDOWN_MS) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_RESEND_BLOCKED_BY_COOLDOWN] source=${sourceText}`
+          + ` sendCount=${sendCount} elapsedMs=${elapsedMs}`,
+        );
+        return { allowed: false, reason: 'cooldown' };
+      }
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][VERIFY_SEND_ALLOWED_RETRY_AFTER_EXPLICIT_FAILURE] source=${sourceText} sendCount=${sendCount}`,
+      );
+      return { allowed: true, reason: 'retry-after-failure' };
+    }
+
+    function shouldBlockDoneSignalVerificationResend(run, source = '-') {
+      const sendCount = Number(run.doneSignalVerificationSendCount || 0);
+      const sourceText = String(source || '-');
+
+      const consumable = getConsumableVerificationReplySnapshot(run, `resend-guard:${sourceText}`);
+      if (consumable) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_RESEND_BLOCKED_BY_EXISTING_TERMINAL_REPLY] source=${sourceText}`
+          + ` turnNo=${Number(consumable.turnNo || -1)}`
+          + ` turnId=${String(consumable.turnId || '')}`
+          + ` textHash=${String(consumable.textHash || '')}`,
+        );
+        if (tryConsumeReadyVerificationReplyBeforeLock(`resend-guard:${sourceText}`)) {
+          return { block: true, consumed: true, reason: 'consumable-reply-consumed' };
+        }
+        return { block: true, consumed: false, reason: 'consumable-reply-ready' };
+      }
+
+      const elapsedMs = Date.now() - Number(run.verifyPromptSentAt || 0);
+      if (sendCount >= 1 && elapsedMs < VERIFICATION_RESEND_COOLDOWN_MS) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_RESEND_BLOCKED_BY_COOLDOWN] source=${sourceText}`
+          + ` sendCount=${sendCount} elapsedMs=${elapsedMs}`,
+        );
+        return { block: true, consumed: false, reason: 'cooldown' };
+      }
+
+      if (sendCount >= VERIFICATION_MAX_SEND_COUNT) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_RESEND_BLOCKED_MAX_SEND_COUNT] source=${sourceText} sendCount=${sendCount}`,
+        );
+        return { block: true, consumed: false, reason: 'verify-resend-limit' };
+      }
+
+      return { block: false, consumed: false, reason: '' };
+    }
+
     async function runDoneSignalVerification(task, profile, resolved, replyText) {
       void profile;
 
@@ -12885,6 +13348,28 @@ const AutoQueueModule = (() => {
       }
 
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const resendGuard = shouldBlockDoneSignalVerificationResend(run, 'runDoneSignalVerification');
+      if (resendGuard.block) {
+        if (resendGuard.consumed) {
+          return { ok: true, reason: resendGuard.reason };
+        }
+        return { ok: false, reason: resendGuard.reason };
+      }
+
+      if (run.verificationSendInFlight === true) {
+        ToolboxShell.appendLog('[TASK_VERIFY_FINAL][VERIFY_SEND_BLOCKED] reason=verification-send-in-flight');
+        return { ok: false, reason: 'verification-send-in-flight' };
+      }
+
+      const sendAllow = canAllowVerificationSend(run, 'runDoneSignalVerification');
+      if (!sendAllow.allowed) {
+        if (sendAllow.reason === 'consumable-reply-exists') {
+          tryConsumeReadyVerificationReplyBeforeLock('runDoneSignalVerification-send-guard');
+          return { ok: true, reason: 'consumable-reply-consumed' };
+        }
+        return { ok: false, reason: sendAllow.reason };
+      }
+
       run.doneSignalVerificationRunning = true;
       run.pendingSendKind = 'verification';
       run.pendingReplyKind = 'verification';
@@ -12910,7 +13395,13 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_VERIFY][UPLOAD_POLICY] enabled=${shouldUploadFile ? 1 : 0} source=verify-after-done-signal`,
         );
 
-        if (shouldUploadFile) {
+        if (shouldUploadFile && run.verificationUploadCompleted === true) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][VERIFY_RETRY_REUSE_UPLOADED_ATTACHMENT] task=${task.title || '-'}`
+            + ` fileCount=${Number(run.verificationUploadFileCount || 0)}`,
+          );
+          setTaskBatchStep('verify-upload-file', task, { log: false });
+        } else if (shouldUploadFile) {
           if (
             typeof UploadModule === 'undefined'
             || (
@@ -12927,6 +13418,8 @@ const AutoQueueModule = (() => {
           }
 
           setTaskBatchStep('verify-upload-file', task);
+          run.verificationUploadInFlight = true;
+          state.taskRun = run;
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_START] task=${task.title}`);
           ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][VERIFY_UPLOAD_START] task=${task.title || '-'}`);
 
@@ -12990,6 +13483,8 @@ const AutoQueueModule = (() => {
           } finally {
             state.batchAutoUploading = false;
             state.uploadingFromAutoQueue = false;
+            run.verificationUploadInFlight = false;
+            state.taskRun = run;
             logUploadBatchState('batch-verify-auto-upload-done');
             ToolboxShell.appendLog('[BATCH_AUTO_UPLOAD][DONE] manualUploadRunning=0 batchTaskRunning=1 batchAutoUploading=0');
             updateStatus('verify-upload-done');
@@ -13039,11 +13534,16 @@ const AutoQueueModule = (() => {
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_BATCH][VERIFY_UPLOAD_DONE] task=${task.title} uploaded=${uploadedCount} failed=${failedCount}`,
           );
+          run.verificationUploadCompleted = true;
+          run.verificationUploadCompletedAt = Date.now();
+          run.verificationUploadFileCount = uploadedCount;
+          state.taskRun = run;
         }
 
         const verifyPrompt = buildVerifyAfterDoneSignalPrompt(task, resolved, replyText);
 
         setTaskBatchStep('verify-send-prompt', task);
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.SENDING || 'sending', 'verify-send-prompt', { force: true });
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_BATCH][VERIFY_SEND] task=${task.title} text_len=${verifyPrompt.length}`,
         );
@@ -13061,11 +13561,58 @@ const AutoQueueModule = (() => {
           return { ok: false, reason };
         }
 
-        const sendResult = await sendTaskPrompt(
-          verifyPrompt,
-          '[AUTOQ][TASK_BATCH][VERIFY_SEND_PROMPT]',
-          'verification',
+        const verifyBeforeSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary('verify-prompt-before-send-boundary');
+        run.verifyPromptBeforeAssistantTurnNo = verifyBeforeSnapshot && verifyBeforeSnapshot.ok
+          ? Number(verifyBeforeSnapshot.turnNo || -1)
+          : -1;
+        run.verifyPromptBeforeAssistantTurnId = verifyBeforeSnapshot && verifyBeforeSnapshot.ok
+          ? String(verifyBeforeSnapshot.turnId || '')
+          : '';
+        run.verifyPromptBeforeAssistantTextHash = verifyBeforeSnapshot && verifyBeforeSnapshot.ok
+          ? String(verifyBeforeSnapshot.textHash || '')
+          : '';
+        run.verifyPromptBeforeAssistantTextLen = verifyBeforeSnapshot && verifyBeforeSnapshot.ok
+          ? Number(verifyBeforeSnapshot.textLen || verifyBeforeSnapshot.chars || 0)
+          : 0;
+        run.terminalVerifyBoundaryBeforeTurnNo = run.verifyPromptBeforeAssistantTurnNo;
+        run.verifyPromptSentAt = Date.now();
+        run.verifyPromptSentConversationId = getAutoQueueConversationIdSafe();
+        run.verifyPromptSentTaskIndex = Number(run.currentIndex || 0);
+        run.verifyPromptSentTaskId = task && task.id ? String(task.id) : '';
+        run.doneSignalVerificationSendCount = Number(run.doneSignalVerificationSendCount || 0) + 1;
+        state.taskRun = run;
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_PROMPT_BEFORE_BOUNDARY] taskIndex=${run.verifyPromptSentTaskIndex + 1}`
+          + ` taskId=${run.verifyPromptSentTaskId}`
+          + ` beforeTurnNo=${run.verifyPromptBeforeAssistantTurnNo}`
+          + ` beforeTurnId=${run.verifyPromptBeforeAssistantTurnId}`
+          + ` beforeTextHash=${run.verifyPromptBeforeAssistantTextHash}`
+          + ` beforeTextLen=${run.verifyPromptBeforeAssistantTextLen}`
+          + ` conversationId=${run.verifyPromptSentConversationId || '-'}`
+          + ` sendCount=${run.doneSignalVerificationSendCount}`,
         );
+
+        run.verificationSendInFlight = true;
+        run.verificationPromptSendStartedAt = Date.now();
+        state.taskRun = run;
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_SEND_START] taskIndex=${run.verifyPromptSentTaskIndex + 1}`
+          + ` taskId=${run.verifyPromptSentTaskId}`
+          + ` sendCount=${run.doneSignalVerificationSendCount}`,
+        );
+
+        let sendResult = null;
+        try {
+          sendResult = await sendTaskPrompt(
+            verifyPrompt,
+            '[AUTOQ][TASK_BATCH][VERIFY_SEND_PROMPT]',
+            'verification',
+          );
+        } finally {
+          run.verificationSendInFlight = false;
+          run.verificationPromptSendFinishedAt = Date.now();
+          state.taskRun = run;
+        }
 
         if (!sendResult || sendResult.ok !== true) {
           const reason = String((sendResult && sendResult.reason) || 'verify-send-failed');
@@ -13075,14 +13622,22 @@ const AutoQueueModule = (() => {
           run.doneSignalVerificationRunning = true;
           run.afterTerminalConfirmWaitingVerify = true;
           run.terminalVerificationStartedAt = Number(run.terminalVerificationStartedAt || Date.now());
+          run.verificationPromptSendResult = 'failed';
+          run.verificationSendLastError = reason;
           state.taskRun = run;
 
           const classified = logSendFailureClassified('verification', task, reason, sendResult);
 
           if (classified.action === 'retry') {
+            run.verificationForceRetryAllowed = true;
+            run.verificationSendRetrying = true;
+            state.taskRun = run;
             scheduleRelentlessSendRetry(reason, 'verification', task);
             ToolboxShell.appendLog(
               `[AUTOQ][TASK_BATCH][VERIFY_SEND_RETRY_SCHEDULED] task=${task.title || '-'} reason=${reason}`,
+            );
+            ToolboxShell.appendLog(
+              `[TASK_VERIFY_FINAL][VERIFY_SEND_FAIL] task=${task.title || '-'} reason=${reason} retryable=1`,
             );
             return {
               ok: false,
@@ -13094,6 +13649,9 @@ const AutoQueueModule = (() => {
           }
 
           ToolboxShell.appendLog(`[AUTOQ][TASK_BATCH][VERIFY_SEND_FAILED] task=${task.title} reason=${reason}`);
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][VERIFY_SEND_FAIL] task=${task.title || '-'} reason=${reason} retryable=0`,
+          );
           run.pendingSendKind = null;
           run.pendingReplyKind = null;
           run.doneSignalVerificationRunning = false;
@@ -13109,22 +13667,30 @@ const AutoQueueModule = (() => {
         verificationPromptSent = true;
         recordTaskBatchMessageSent('verification');
 
-        const verifySentSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary('verify-prompt-sent-boundary');
-        run.verifyPromptSentAt = Date.now();
+        run.verificationPromptSendResult = 'sent';
+        run.verificationForceRetryAllowed = false;
+        run.verificationSendRetrying = false;
         run.verifyPromptSentTurnCount = getCurrentTurnCountSafe();
-        run.verifyPromptSentTurnNo = verifySentSnapshot.ok
-          ? Number(verifySentSnapshot.turnNo || -1)
-          : -1;
-        run.verifyPromptSentConversationId = getAutoQueueConversationIdSafe();
-        run.verifyPromptSentTaskId = task.id || '';
-        run.verifyPromptSentTaskIndex = Number(run.currentIndex || 0);
+        run.verifyPromptSentTurnNo = run.verifyPromptBeforeAssistantTurnNo;
+        run.pendingSendKind = null;
+        run.pendingReplyKind = 'verification';
+        run.verificationWaitReplyStartedAt = Date.now();
         state.taskRun = run;
         ToolboxShell.appendLog(
-          `[TASK_VERIFY_FINAL][VERIFY_PROMPT_SENT_BOUNDARY] task=${task.title || '-'}`
-          + ` turnCount=${run.verifyPromptSentTurnCount}`
-          + ` turnNo=${run.verifyPromptSentTurnNo}`
-          + ` conversationId=${run.verifyPromptSentConversationId || '-'}`,
+          `[TASK_VERIFY_FINAL][VERIFY_SEND_OK] task=${task.title || '-'}`
+          + ` sendCount=${run.doneSignalVerificationSendCount}`
+          + ` beforeTurnNo=${run.verifyPromptBeforeAssistantTurnNo}`,
         );
+
+        const verifyAttachmentPayload = getAutoQueueComposerPayloadState('verify-wait-attachment-check');
+        if (
+          Number(verifyAttachmentPayload.readyCount || 0) === 0
+          && run.verificationUploadCompleted === true
+        ) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][VERIFY_WAIT_WITHOUT_ATTACHMENT_OK] task=${task.title || '-'}`,
+          );
+        }
 
         if (!state.waitingReply) {
           return blockAutoQueueWaitingReplyNotSubmitted(
@@ -13136,7 +13702,13 @@ const AutoQueueModule = (() => {
           );
         }
         setTaskBatchStep('verify-wait-reply', task, { log: false });
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY || 'waiting_reply', 'verify-wait-reply', { force: true });
         updateStatus('verify-wait-reply');
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_WAIT_REPLY] taskIndex=${Number(run.currentIndex || 0) + 1}`
+          + ` sendCount=${run.doneSignalVerificationSendCount}`
+          + ` beforeTurnNo=${run.verifyPromptBeforeAssistantTurnNo}`,
+        );
 
         return { ok: true };
       } catch (error) {
@@ -24409,6 +24981,9 @@ const AutoQueueModule = (() => {
         }
 
         if (config.promptMode === 'task') {
+          if (checkVerificationWatchdog('batch-watchdog-tick')) {
+            return;
+          }
           if (checkBatchTaskGroupStuckSkip('batch-watchdog-tick')) {
             return;
           }
