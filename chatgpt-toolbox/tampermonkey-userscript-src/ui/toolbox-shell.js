@@ -9,10 +9,12 @@
     const TOOLBOX_MIN_VISIBLE_HEIGHT = 34;
 
     const PANEL_DEFAULT_SIZE = Object.freeze({
-      width: 520,
+      width: 640,
       height: 500,
-      minWidth: 300,
+      minWidth: 560,
       minHeight: 240,
+      maxWidth: 860,
+      maxHeight: 760,
     });
 
     const PANEL_COMPACT_DEFAULT_SIZE = Object.freeze({
@@ -156,6 +158,8 @@
     let lastStatusLogKey = '';
     let lastStatusLogAt = 0;
     let compactMode = false;
+    let layoutCompactAuto = false;
+    let layoutModeBound = false;
     let panelResizeObserver = null;
     let clampViewportTimer = 0;
     let panelPositionSaveDebounceTimer = 0;
@@ -548,6 +552,12 @@
           border-color: #3b82f6;
         }
 
+        #${APP.panelId},
+        #${APP.rootId}.cgpt-toolbox-root #${APP.panelId},
+        .cgpt-toolbox-panel {
+          --cgpt-toolbox-width: 640px;
+        }
+
         #${APP.panelId} {
           display: flex;
           flex-direction: column;
@@ -556,17 +566,18 @@
           top: 80px;
           right: auto;
           bottom: auto;
-          width: 520px;
-          height: 500px;
-          min-width: 300px;
-          min-height: 240px;
-          max-width: calc(100vw - 32px);
-          max-height: calc(100vh - 82px);
+          width: var(--cgpt-toolbox-width, 640px);
+          height: min(500px, calc(100vh - 32px));
+          min-width: min(560px, calc(100vw - 24px));
+          min-height: min(240px, calc(100vh - 32px));
+          max-width: min(860px, calc(100vw - 24px));
+          max-height: min(760px, calc(100vh - 32px));
+          box-sizing: border-box;
+          overflow: hidden;
           background: #0f1115;
           color: #f2f2f2;
           border: 1px solid #2f3542;
           border-radius: 14px;
-          overflow: hidden;
           resize: none;
           box-shadow: 0 14px 36px rgba(0,0,0,0.42);
           pointer-events: auto;
@@ -694,10 +705,40 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact {
-          width: 340px;
-          min-width: 280px;
-          min-height: 180px;
-          max-height: calc(100vh - 82px);
+          width: min(340px, calc(100vw - 32px));
+          min-width: min(280px, calc(100vw - 32px));
+          min-height: min(180px, calc(100vh - 32px));
+          max-width: calc(100vw - 32px);
+          max-height: calc(100vh - 32px);
+        }
+
+        #${APP.panelId}.cgpt-toolbox-layout-compact {
+          max-width: calc(100vw - 20px) !important;
+          max-height: calc(100vh - 20px) !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-status-panel,
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-main-lite,
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-status-card {
+          max-height: 130px;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-editor-block #cgpt-autoq-prompts,
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-command-textarea {
+          height: clamp(100px, 22vh, 200px) !important;
+          max-height: 220px !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-task-list,
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-task-list {
+          max-height: min(220px, 28vh) !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-btn,
+        #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-toolbox-small-btn {
+          min-height: 30px;
+          padding-left: 8px;
+          padding-right: 8px;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-tabs {
@@ -1000,6 +1041,7 @@
           gap: 6px;
           flex: 1 1 auto;
           justify-content: flex-end;
+          flex-wrap: wrap;
           min-width: 0;
         }
 
@@ -1269,21 +1311,24 @@
         .cgpt-toolbox-tabs {
           flex: 0 0 auto;
           display: flex;
-          flex-wrap: wrap;
+          flex-wrap: nowrap;
           gap: 6px;
-          padding: 8px 10px;
+          padding: 6px 12px;
           min-width: 0;
           max-width: 100%;
-          overflow-x: hidden !important;
-          overflow-y: visible;
+          overflow-x: auto;
+          overflow-y: hidden;
+          white-space: nowrap;
+          scrollbar-width: thin;
           background: #0f1115;
           border-bottom: 1px solid #2f3542;
+          box-sizing: border-box;
         }
 
         .cgpt-toolbox-tab {
-          flex: 0 1 auto;
+          flex: 0 0 auto;
           min-width: 0;
-          max-width: 120px;
+          max-width: none;
           height: 32px;
           border: 1px solid #3f4655;
           background: #171b22;
@@ -1563,6 +1608,16 @@
           color: #dbeafe;
           font-weight: 650;
           box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.10);
+        }
+
+        .cgpt-toolbox-content,
+        .cgpt-toolbox-body,
+        .cgpt-tab-content {
+          box-sizing: border-box;
+          width: 100%;
+          min-width: 0;
+          max-width: 100%;
+          overflow-x: hidden;
         }
 
         .cgpt-toolbox-content {
@@ -2356,6 +2411,27 @@
           font-family: Consolas, "SFMono-Regular", monospace;
         }
 
+        .cgpt-task-editor,
+        .cgpt-task-editor textarea,
+        .cgpt-task-name-input,
+        .cgpt-task-prompt-input,
+        .cgpt-autoq-task-panel textarea,
+        .cgpt-autoq-task-panel .cgpt-textarea {
+          box-sizing: border-box;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+        }
+
+        .cgpt-task-editor textarea,
+        .cgpt-task-prompt-input,
+        .cgpt-autoq-task-panel textarea {
+          resize: vertical;
+          white-space: pre-wrap;
+          word-break: normal;
+          overflow-wrap: break-word;
+        }
+
         .cgpt-hint {
           color: #94a3b8;
           font-size: 12px;
@@ -2876,12 +2952,21 @@
           margin-top: 0 !important;
         }
 
-        .cgpt-autoq-mode-tabs {
+        .cgpt-autoq-mode-tabs,
+        .cgpt-mode-tabs {
           display: flex;
-          flex-wrap: nowrap;
-          gap: 6px;
+          flex-wrap: wrap;
+          gap: 8px;
           align-items: center;
-          margin-bottom: 8px;
+          margin-bottom: 10px;
+        }
+
+        .cgpt-autoq-mode-tabs button,
+        .cgpt-autoq-mode-tab,
+        .cgpt-mode-tabs button {
+          flex: 0 0 auto;
+          min-height: 30px;
+          white-space: nowrap;
         }
 
         .cgpt-autoq-mode-tab {
@@ -2945,11 +3030,18 @@
           font-weight: 650;
         }
 
-        .cgpt-autoq-editor-block #cgpt-autoq-prompts {
+        .cgpt-autoq-editor-block #cgpt-autoq-prompts,
+        .cgpt-command-textarea,
+        textarea[data-role="command-content"] {
           width: 100%;
-          min-height: 140px;
-          max-height: 180px;
+          min-height: 120px;
+          height: clamp(120px, 24vh, 260px);
+          max-height: 320px;
+          overflow: auto;
           resize: vertical;
+          box-sizing: border-box;
+          line-height: 1.5;
+          white-space: pre-wrap;
         }
 
         .cgpt-autoq-actions {
@@ -3021,11 +3113,26 @@
           pointer-events: auto !important;
         }
 
-        .cgpt-autoq-settings-grid {
+        .cgpt-autoq-settings-grid,
+        .cgpt-settings-grid {
           display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px 12px;
+          grid-template-columns: repeat(2, minmax(220px, 1fr));
+          gap: 10px 16px;
           align-items: center;
+        }
+
+        .cgpt-autoq-settings-grid input,
+        .cgpt-settings-grid input {
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+        }
+
+        @media (max-width: 860px) {
+          .cgpt-autoq-settings-grid,
+          .cgpt-settings-grid {
+            grid-template-columns: 1fr;
+          }
         }
 
         .cgpt-autoq-settings-grid .cgpt-kv {
@@ -3043,14 +3150,25 @@
           align-items: center;
         }
 
-        .cgpt-autoq-status-panel {
+        .cgpt-autoq-status-panel,
+        .cgpt-status-card,
+        .cgpt-batch-status-card,
+        .cgpt-autoq-status-card,
+        .cgpt-task-status-card {
           border: 1px solid #2f3542;
           background: #111827;
           border-radius: 8px;
-          padding: 6px 8px;
+          padding: 10px;
           color: #e5e7eb;
           font-size: 11px;
-          line-height: 1.2;
+          line-height: 1.45;
+          max-height: 160px;
+          overflow: auto;
+          box-sizing: border-box;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          overflow-x: hidden;
         }
 
         .cgpt-autoq-status-section {
@@ -3066,10 +3184,10 @@
           min-width: 0;
           min-height: 18px;
           display: flex;
-          align-items: center;
+          align-items: flex-start;
           gap: 4px;
-          overflow: hidden;
-          white-space: nowrap;
+          overflow: visible;
+          white-space: normal;
         }
 
         .cgpt-autoq-status-item.wide {
@@ -3092,13 +3210,17 @@
           color: #e5e7eb;
         }
 
-        .cgpt-autoq-status-value {
+        .cgpt-autoq-status-value,
+        .cgpt-status-value,
+        .cgpt-batch-status-value,
+        .cgpt-task-status-value {
           min-width: 0;
           color: #ffffff;
           font-weight: 650;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          overflow-wrap: break-word;
+          word-break: normal;
+          white-space: normal;
+          writing-mode: horizontal-tb;
         }
 
         .cgpt-autoq-status-value.is-ok {
@@ -3180,42 +3302,106 @@
           white-space: nowrap;
         }
 
-        .cgpt-autoq-user-summary {
+        #cgpt-autoq-status-panel-content,
+        .cgpt-autoq-status-panel-content {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+        }
+
+        .cgpt-autoq-user-summary,
+        .cgpt-batch-status-card,
+        .cgpt-autoq-status-card {
           display: flex;
           flex-direction: column;
           gap: 6px;
           margin-bottom: 8px;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
         }
 
-        .cgpt-autoq-status-row {
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
+        .cgpt-autoq-status-row,
+        .cgpt-status-row,
+        .cgpt-batch-status-row,
+        .cgpt-task-status-row {
+          box-sizing: border-box;
+          display: grid;
+          grid-template-columns: 92px minmax(0, 1fr);
+          column-gap: 8px;
+          row-gap: 6px;
+          align-items: start;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          margin-bottom: 6px;
           font-size: 13px;
           line-height: 1.5;
         }
 
-        .cgpt-autoq-status-row .cgpt-autoq-status-label {
-          flex: 0 0 auto;
-          min-width: 72px;
-          color: #94a3b8;
+        .cgpt-autoq-status-row .cgpt-autoq-status-label,
+        .cgpt-status-label,
+        .cgpt-batch-status-label,
+        .cgpt-task-status-label {
+          box-sizing: border-box;
+          width: 92px;
+          min-width: 92px;
+          max-width: 92px;
+          flex: 0 0 92px;
+          white-space: nowrap;
+          text-align: right;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          color: #93a4bd;
         }
 
-        .cgpt-autoq-status-row .cgpt-autoq-status-value {
-          flex: 1 1 auto;
+        .cgpt-autoq-status-row .cgpt-autoq-status-value,
+        .cgpt-status-row .cgpt-status-value,
+        .cgpt-batch-status-row .cgpt-batch-status-value,
+        .cgpt-task-status-row .cgpt-task-status-value {
+          box-sizing: border-box;
+          min-width: 0;
+          width: 100%;
+          max-width: 100%;
           color: #e5e7eb;
-          word-break: break-word;
+          white-space: normal;
+          word-break: normal;
+          overflow-wrap: break-word;
+          writing-mode: horizontal-tb;
+          text-align: left;
+        }
+
+        .cgpt-status-advice,
+        .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-autoq-user-hint-row .cgpt-autoq-user-hint {
+          max-height: 72px;
+          overflow: auto;
+          white-space: pre-wrap;
+          overflow-wrap: break-word;
+          word-break: normal;
+          line-height: 1.45;
         }
 
         .cgpt-autoq-user-hint-row {
           color: #fde68a;
         }
 
+        .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
         .cgpt-autoq-user-hint {
           color: #fde68a;
           font-weight: 600;
-          flex: 1 1 auto;
-          word-break: break-word;
+        }
+
+        .cgpt-autoq-debug-detail-grid {
+          grid-column: 1 / -1;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
         }
 
         .cgpt-autoq-failure-row .cgpt-autoq-status-value {
@@ -3286,11 +3472,16 @@
           background: rgba(250, 204, 21, 0.08);
         }
 
+        .cgpt-log-line {
+          overflow-wrap: anywhere;
+        }
+
         .cgpt-autoq-log {
           margin-top: 8px;
-          max-height: 120px;
+          max-height: min(360px, 45vh);
           min-height: 60px;
-          overflow-y: auto;
+          overflow: auto;
+          overflow-wrap: anywhere;
           border: 1px solid #2f3542;
           border-radius: 10px;
           background: #0f1115;
@@ -3298,6 +3489,7 @@
           font-family: Consolas, "SFMono-Regular", monospace;
           font-size: 11px;
           white-space: pre-wrap;
+          line-height: 1.45;
         }
 
         @media (max-width: 620px) {
@@ -3359,6 +3551,9 @@
           border: 1px solid #2f3542;
           border-radius: 8px;
           background: #111827;
+          max-height: min(200px, 28vh);
+          overflow: auto;
+          box-sizing: border-box;
         }
 
         .cgpt-autoq-main-lite > .cgpt-autoq-status-panel {
@@ -3368,13 +3563,20 @@
           background: transparent;
         }
 
-        .cgpt-autoq-main-lite > .cgpt-autoq-status-grid {
+        .cgpt-autoq-main-lite > .cgpt-autoq-status-grid,
+        .cgpt-autoq-main-lite > .cgpt-autoq-status-panel-content {
           margin: 0;
           padding: 0;
         }
 
         .cgpt-autoq-main-lite-grid {
           grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .cgpt-autoq-main-lite > .cgpt-autoq-status-panel-content {
+          border: 0;
+          background: transparent;
+          max-height: none;
         }
 
         .cgpt-autoq-runtime-stats-line {
@@ -3509,11 +3711,12 @@
           margin: 8px 0;
         }
 
-        .cgpt-autoq-task-list {
+        .cgpt-autoq-task-list,
+        .cgpt-task-list {
           display: flex;
           flex-direction: column;
           gap: 6px;
-          max-height: 260px;
+          max-height: min(260px, 32vh);
           overflow-y: auto;
           overflow-x: hidden;
           border: 1px solid #2f3542;
@@ -4424,6 +4627,31 @@
           transform: none !important;
         }
 
+        .cgpt-action-row,
+        .cgpt-autoq-actions,
+        .cgpt-autoq-top-action-bar,
+        .cgpt-upload-main-action-row,
+        .cgpt-upload-action-row,
+        .cgpt-log-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          min-width: 0;
+        }
+
+        .cgpt-action-row button,
+        .cgpt-autoq-actions button,
+        .cgpt-upload-main-action-row .cgpt-btn,
+        .cgpt-upload-main-action-row button {
+          flex: 0 0 auto;
+          min-height: 32px;
+          max-width: 180px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
         /* 工具箱内部禁止横向滚动（完整模式 + 精简模式） */
         #${APP.panelId},
         #${APP.panelId} .cgpt-toolbox-content,
@@ -4721,6 +4949,7 @@
           syncToolboxFloatingLayout('window-resize');
           repairInvisibleToolboxState('window-resize');
           updateFloatingTitlePosition('window-resize');
+          updateToolboxLayoutMode();
         }, 80);
       });
 
@@ -5678,6 +5907,7 @@
       scheduleToolboxHorizontalOverflowLog('create', 300);
 
         bindViewportGuard();
+        bindLayoutModeWatcher();
 
         return root;
       } finally {
@@ -5998,11 +6228,188 @@
       return compactMode ? PANEL_COMPACT_DEFAULT_SIZE : PANEL_DEFAULT_SIZE;
     }
 
-    function getPanelMaxSize() {
+    function getViewportMetrics() {
+      const vv = window.visualViewport;
       return {
-        width: Math.max(PANEL_DEFAULT_SIZE.minWidth, window.innerWidth - PANEL_VIEWPORT_MARGIN * 2),
-        height: Math.max(PANEL_DEFAULT_SIZE.minHeight, window.innerHeight - 82),
+        width: vv && vv.width > 0 ? vv.width : window.innerWidth,
+        height: vv && vv.height > 0 ? vv.height : window.innerHeight,
+        visualViewportWidth: vv ? Math.round(vv.width) : null,
+        visualViewportHeight: vv ? Math.round(vv.height) : null,
       };
+    }
+
+    function getPanelMaxSize() {
+      const viewport = getViewportMetrics();
+      const maxWidthCap = PANEL_DEFAULT_SIZE.maxWidth || 1120;
+      const maxHeightCap = PANEL_DEFAULT_SIZE.maxHeight || 760;
+
+      return {
+        width: Math.max(
+          PANEL_DEFAULT_SIZE.minWidth,
+          Math.min(maxWidthCap, viewport.width - 32),
+        ),
+        height: Math.max(
+          PANEL_DEFAULT_SIZE.minHeight,
+          Math.min(maxHeightCap, viewport.height - 32),
+        ),
+      };
+    }
+
+    function collectLayoutDebugInfo() {
+      const panelEl = panel || document.querySelector(`#${APP.panelId}`);
+      const rect = panelEl ? panelEl.getBoundingClientRect() : null;
+      const panelStyle = panelEl ? window.getComputedStyle(panelEl) : null;
+      const bodyStyle = window.getComputedStyle(document.body);
+      const viewport = getViewportMetrics();
+      const innerWidth = window.innerWidth;
+      const innerHeight = window.innerHeight;
+      const outerWidth = window.outerWidth;
+      const browserZoomMaybe = innerWidth > 0
+        ? `${Math.round((outerWidth / innerWidth) * 100)}%`
+        : '-';
+
+      return {
+        viewportWidth: Math.round(viewport.width),
+        viewportHeight: Math.round(viewport.height),
+        innerWidth,
+        innerHeight,
+        outerWidth,
+        outerHeight: window.outerHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        visualViewportWidth: viewport.visualViewportWidth,
+        visualViewportHeight: viewport.visualViewportHeight,
+        panelWidth: rect ? Math.round(rect.width) : 0,
+        panelHeight: rect ? Math.round(rect.height) : 0,
+        compactMode: panelEl ? panelEl.classList.contains('cgpt-toolbox-layout-compact') : false,
+        uiCompactMode: !!compactMode,
+        layoutCompactAuto: !!layoutCompactAuto,
+        bodyFontSize: bodyStyle.fontSize,
+        panelFontSize: panelStyle ? panelStyle.fontSize : '',
+        browserZoomMaybe,
+      };
+    }
+
+    function ensurePanelSizeWithinViewport() {
+      if (!panel) {
+        return;
+      }
+
+      const rect = panel.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      const next = normalizePanelSize({
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+
+      if (
+        Math.abs(next.width - rect.width) > 1
+        || Math.abs(next.height - rect.height) > 1
+      ) {
+        applyPanelSize(next);
+      }
+    }
+
+    function updateToolboxLayoutMode() {
+      if (!panel) {
+        console.warn('[TOOLBOX][LAYOUT][PANEL_NOT_FOUND]');
+        return;
+      }
+
+      const viewport = getViewportMetrics();
+      const viewportWidth = viewport.width;
+      const viewportHeight = viewport.height;
+      const dpr = window.devicePixelRatio || 1;
+      const compact = viewportWidth < 1000 || viewportHeight < 720 || dpr >= 1.5;
+
+      layoutCompactAuto = compact;
+      panel.classList.toggle('cgpt-toolbox-layout-compact', compact);
+
+      ensurePanelSizeWithinViewport();
+      keepPanelInViewport({ save: false, reason: 'layout-mode' });
+
+      const rect = panel.getBoundingClientRect();
+      const innerWidth = window.innerWidth;
+      const browserZoomMaybe = innerWidth > 0
+        ? `${Math.round((window.outerWidth / innerWidth) * 100)}%`
+        : '-';
+
+      console.log('[TOOLBOX][LAYOUT][MODE]', {
+        viewportWidth: Math.round(viewportWidth),
+        viewportHeight: Math.round(viewportHeight),
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        devicePixelRatio: dpr,
+        compact,
+        uiCompactMode: compactMode,
+        panelWidth: Math.round(rect.width),
+        panelHeight: Math.round(rect.height),
+        browserZoomMaybe,
+      });
+    }
+
+    function renderLayoutDebugInfo(container) {
+      if (!container) {
+        console.warn('[TOOLBOX][LAYOUT_DEBUG][CONTAINER_MISSING]');
+        return;
+      }
+
+      try {
+        const info = collectLayoutDebugInfo();
+        container.textContent = JSON.stringify(info, null, 2);
+      } catch (error) {
+        console.error('[TOOLBOX][LAYOUT_DEBUG][RENDER_FAILED]', {
+          message: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? error.stack : '',
+        });
+      }
+    }
+
+    function bindLayoutModeWatcher() {
+      if (layoutModeBound) {
+        return;
+      }
+
+      layoutModeBound = true;
+
+      const scheduleLayoutModeUpdate = () => {
+        window.requestAnimationFrame(() => {
+          try {
+            updateToolboxLayoutMode();
+          } catch (error) {
+            console.error('[TOOLBOX][LAYOUT][MODE_UPDATE_FAILED]', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+        });
+      };
+
+      window.addEventListener('resize', scheduleLayoutModeUpdate);
+      window.addEventListener('orientationchange', scheduleLayoutModeUpdate);
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', scheduleLayoutModeUpdate);
+        window.visualViewport.addEventListener('scroll', scheduleLayoutModeUpdate);
+      }
+
+      window.setTimeout(scheduleLayoutModeUpdate, 0);
+      window.setTimeout(scheduleLayoutModeUpdate, 500);
+    }
+
+    function clampToolboxWidth(width) {
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
+      const defaults = getCurrentPanelDefaultSize();
+      const minWidth = defaults.minWidth || 560;
+      const maxWidthCap = defaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860;
+      const maxWidth = Math.max(minWidth, Math.min(maxWidthCap, viewportWidth - 24));
+      const numericWidth = Number(width);
+      if (!Number.isFinite(numericWidth)) {
+        return defaults.width || 640;
+      }
+      return Math.max(minWidth, Math.min(maxWidth, numericWidth));
     }
 
     function normalizePanelSize(size) {
@@ -6010,7 +6417,11 @@
       const maxSize = getPanelMaxSize();
 
       return {
-        width: clampNumber(size && size.width, defaults.minWidth, maxSize.width),
+        width: clampToolboxWidth(
+          size && size.width != null
+            ? size.width
+            : defaults.width,
+        ),
         height: clampNumber(size && size.height, defaults.minHeight, maxSize.height),
       };
     }
@@ -6119,9 +6530,10 @@
         const rect = panel.getBoundingClientRect();
         const startWidth = rect.width;
         const startHeight = rect.height;
-        const minWidth = 260;
-        const minHeight = 220;
-        const maxWidth = Math.max(minWidth, window.innerWidth - 24);
+        const panelMins = getPanelMinSize();
+        const minWidth = panelMins.minWidth;
+        const minHeight = panelMins.minHeight;
+        const maxWidth = Math.max(minWidth, Math.min(PANEL_DEFAULT_SIZE.maxWidth || 860, window.innerWidth - 24));
         const maxHeight = Math.max(minHeight, window.innerHeight - 24);
 
         panel.dataset.resizing = '1';
@@ -8186,20 +8598,24 @@
       let nextLeft = rect.left;
       let nextTop = rect.top;
 
+      const viewport = getViewportMetrics();
+      const viewportWidth = viewport.width;
+      const viewportHeight = viewport.height;
+
       if (rect.left < PANEL_VIEWPORT_MARGIN) {
         nextLeft = PANEL_VIEWPORT_MARGIN;
       }
 
-      if (rect.right > window.innerWidth - PANEL_VIEWPORT_MARGIN) {
-        nextLeft = window.innerWidth - rect.width - PANEL_VIEWPORT_MARGIN;
+      if (rect.right > viewportWidth - PANEL_VIEWPORT_MARGIN) {
+        nextLeft = viewportWidth - rect.width - PANEL_VIEWPORT_MARGIN;
       }
 
       if (rect.top < PANEL_VIEWPORT_MARGIN) {
         nextTop = PANEL_VIEWPORT_MARGIN;
       }
 
-      if (rect.bottom > window.innerHeight - PANEL_VIEWPORT_MARGIN) {
-        nextTop = window.innerHeight - rect.height - PANEL_VIEWPORT_MARGIN;
+      if (rect.bottom > viewportHeight - PANEL_VIEWPORT_MARGIN) {
+        nextTop = viewportHeight - rect.height - PANEL_VIEWPORT_MARGIN;
       }
 
       nextLeft = Math.max(PANEL_VIEWPORT_MARGIN, nextLeft);
@@ -10602,6 +11018,63 @@
       return true;
     }
 
+    function logBatchStatusLayoutDebug(reason = '-', options = {}) {
+      if (!options || options.debugEnabled !== true) {
+        return;
+      }
+
+      const rootEl = document.querySelector(`#${APP.rootId}, .cgpt-toolbox-root, .cgpt-toolbox-panel`);
+      const card = document.querySelector('.cgpt-batch-status-card, .cgpt-autoq-status-card, .cgpt-autoq-user-summary');
+      const row = document.querySelector('.cgpt-batch-status-row, .cgpt-autoq-status-row, .cgpt-status-row');
+      const value = document.querySelector('.cgpt-batch-status-value, .cgpt-autoq-status-row .cgpt-autoq-status-value, .cgpt-autoq-status-value');
+
+      const getRectText = (el) => {
+        if (!(el instanceof HTMLElement)) {
+          return '-';
+        }
+        const rect = el.getBoundingClientRect();
+        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      };
+
+      const zoomPercent = Math.round((window.devicePixelRatio || 1) * 100);
+
+      appendLog(
+        '[UI_LAYOUT][BATCH_STATUS] '
+        + `reason=${reason} `
+        + `zoom=${zoomPercent} `
+        + `viewport=${window.innerWidth}x${window.innerHeight} `
+        + `root=${getRectText(rootEl)} `
+        + `card=${getRectText(card)} `
+        + `row=${getRectText(row)} `
+        + `value=${getRectText(value)}`,
+      );
+    }
+
+    function repairToolboxLayoutIfCompressed(reason = '-') {
+      const valueEl = document.querySelector(
+        '.cgpt-batch-status-value, .cgpt-autoq-status-row .cgpt-autoq-status-value, .cgpt-autoq-user-hint-row .cgpt-autoq-status-value',
+      );
+      const rootEl = panel || document.querySelector(`#${APP.panelId}, .cgpt-toolbox-panel`);
+
+      if (!(valueEl instanceof HTMLElement) || !(rootEl instanceof HTMLElement)) {
+        return;
+      }
+
+      const valueRect = valueEl.getBoundingClientRect();
+      if (valueRect.width >= 220) {
+        return;
+      }
+
+      const fixedWidth = clampToolboxWidth(680);
+      rootEl.style.setProperty('--cgpt-toolbox-width', `${fixedWidth}px`);
+      rootEl.style.width = `${fixedWidth}px`;
+
+      appendLog(
+        '[UI_LAYOUT][COMPRESSED_REPAIR] '
+        + `reason=${reason} valueWidth=${Math.round(valueRect.width)} fixedWidth=${fixedWidth}`,
+      );
+    }
+
     function appendLogIfChanged(key, value, text, throttleMsIfSame = 0) {
       const k = String(key || 'default');
       const v = value == null ? '' : String(value);
@@ -10824,6 +11297,12 @@
       clearViewportTimers,
       flashHeaderTitleOnce,
       stopHeaderTitleFlash,
+      collectLayoutDebugInfo,
+      updateToolboxLayoutMode,
+      renderLayoutDebugInfo,
+      clampToolboxWidth,
+      logBatchStatusLayoutDebug,
+      repairToolboxLayoutIfCompressed,
     };
   })();
 

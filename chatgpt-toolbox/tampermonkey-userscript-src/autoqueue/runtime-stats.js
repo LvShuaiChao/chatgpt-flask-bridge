@@ -221,7 +221,11 @@
       const stoppedBefore = runtimeStats.stoppedTaskCount;
       const total = Number(calculated.totalTaskCount || 0);
 
-      runtimeStats.completedTaskCount = Number(calculated.completedTaskCount || 0);
+      runtimeStats.completedTaskCount = Number(
+        calculated.finishedTaskCount != null
+          ? calculated.finishedTaskCount
+          : calculated.completedTaskCount || 0,
+      );
       runtimeStats.failedTaskCount = Number(calculated.failedTaskCount || 0);
       runtimeStats.stoppedTaskCount = Number(calculated.stoppedTaskCount || 0);
 
@@ -234,34 +238,56 @@
         const stillRunning = !!(
           autoState.running
           || autoState.waitingReply
+          || autoState.batchTaskRunning
           || phase === 'running'
           || phase === 'waiting_reply'
           || phase === 'terminal_confirming'
           || step === 'wait-current-reply'
           || step === 'reply-ready'
+          || step === 'check-done-signal'
           || step === 'send-continue'
+          || step === 'verify-upload-file'
+          || step === 'verify-send-prompt'
+          || step === 'verify-wait-reply'
+          || step === 'verify-after-done-signal'
+          || step === 'terminal-confirm-second-read'
         );
 
-        if (
-          stillRunning
-          && runtimeStats.completedTaskCount >= total
-          && (
+        if (stillRunning && runtimeStats.completedTaskCount >= total && total > 0) {
+          const cappedCompleted = Math.max(0, total - 1);
+          if (runtimeStats.completedTaskCount > cappedCompleted) {
+            const completedAfterCap = cappedCompleted;
+            logRuntime('STATS_CORRECTED_RUNNING_TASK', {
+              completedBefore: runtimeStats.completedTaskCount,
+              completedAfter: completedAfterCap,
+              failedBefore,
+              failedAfter: runtimeStats.failedTaskCount,
+              stoppedBefore,
+              stoppedAfter: runtimeStats.stoppedTaskCount,
+              totalTaskCount: total,
+              phase,
+              currentStep: step,
+              reason: 'cap-while-current-task-active',
+            });
+            runtimeStats.completedTaskCount = completedAfterCap;
+          } else if (
             completedBefore !== runtimeStats.completedTaskCount
             || failedBefore !== runtimeStats.failedTaskCount
             || stoppedBefore !== runtimeStats.stoppedTaskCount
-          )
-        ) {
-          logRuntime('STATS_CORRECTED_RUNNING_TASK', {
-            completedBefore,
-            completedAfter: runtimeStats.completedTaskCount,
-            failedBefore,
-            failedAfter: runtimeStats.failedTaskCount,
-            stoppedBefore,
-            stoppedAfter: runtimeStats.stoppedTaskCount,
-            totalTaskCount: total,
-            phase,
-            currentStep: step,
-          });
+          ) {
+            logRuntime('STATS_CORRECTED_RUNNING_TASK', {
+              completedBefore,
+              completedAfter: runtimeStats.completedTaskCount,
+              failedBefore,
+              failedAfter: runtimeStats.failedTaskCount,
+              stoppedBefore,
+              stoppedAfter: runtimeStats.stoppedTaskCount,
+              totalTaskCount: total,
+              phase,
+              currentStep: step,
+              reason: 'running-task-still-active',
+            });
+          }
         }
       }
 

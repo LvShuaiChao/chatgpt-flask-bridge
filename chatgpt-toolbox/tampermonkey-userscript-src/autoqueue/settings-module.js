@@ -415,7 +415,7 @@
       const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
       if (promptTextEl) {
         promptTextEl.value = String(cfg.copyHotkeyContinuePromptText || '').trim();
-        promptTextEl.placeholder = '留空则使用内置默认继续指令（完成时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>）。';
+        promptTextEl.placeholder = '留空则使用内置默认继续指令（不需继续时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>）。';
       }
 
       const runtimeStatsCfg = getAutoQueueTaskQueueSettings();
@@ -1225,7 +1225,7 @@
                 type="text"
                 class="cgpt-input"
                 id="cgpt-setting-copy-hotkey-continue-stop-signal"
-                placeholder="<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>"
+                placeholder="<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>"
               >
             </div>
 
@@ -1236,7 +1236,7 @@
                 id="cgpt-setting-copy-hotkey-continue-prompt-text"
                 rows="12"
                 style="width: 100%; resize: vertical;"
-                placeholder="留空则使用内置默认继续指令（完成时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>）。"
+                placeholder="留空则使用内置默认继续指令（不需继续时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>）。"
               ></textarea>
             </div>
 

@@ -4348,7 +4348,20 @@
       ToolboxShell.appendLog(`[CLOSED_LOOP][DOCUMENT_FALLBACK_BOUND] reason=${reason || '-'}`);
     }
 
+    function shouldRunClosedLoopDiagnostics(reason = '-') {
+      const reasonText = String(reason || '-');
+      if (typeof isAdvancedDebugEnabled === 'function' && isAdvancedDebugEnabled()) {
+        return true;
+      }
+      return reasonText === 'initial-render'
+        || reasonText === 'manual-debug'
+        || reasonText.includes('mount-upload-module');
+    }
+
     function rebindClosedLoopContinueUi(rootEl, reason = 'after-render') {
+      if (!shouldRunClosedLoopDiagnostics(reason)) {
+        return;
+      }
       bindClosedLoopContinueButtons(rootEl || rootElRef || document, reason);
       bindClosedLoopDocumentClickFallback(reason);
       renderClosedLoopContinueButtons();
@@ -25486,10 +25499,60 @@
       ].join('|');
     }
 
+    let renderUploadButtonsOnlyTimer = null;
+    let renderUploadButtonsOnlyPendingOptions = null;
+
+    function scheduleRenderUploadButtonsOnly(options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      if (opts.immediate === true) {
+        renderUploadButtonsOnly(Object.assign({}, opts, { _fromSchedule: true }));
+        return;
+      }
+      renderUploadButtonsOnlyPendingOptions = opts;
+      if (renderUploadButtonsOnlyTimer) {
+        return;
+      }
+      renderUploadButtonsOnlyTimer = window.setTimeout(() => {
+        renderUploadButtonsOnlyTimer = null;
+        const finalOptions = Object.assign(
+          {},
+          renderUploadButtonsOnlyPendingOptions || {},
+          { _fromSchedule: true },
+        );
+        renderUploadButtonsOnlyPendingOptions = null;
+        try {
+          renderUploadButtonsOnly(finalOptions);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          const errStack = error && error.stack ? error.stack : '';
+          console.error('[UPLOAD_RENDER][ERROR]', error);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(
+              `[UPLOAD_RENDER][ERROR] error=${errText} stack=${errStack.slice(0, 1200)}`,
+            );
+          }
+        }
+      }, 150);
+    }
+
     function renderUploadButtonsOnly(options = {}) {
-      const renderScope = resolveUploadButtonRenderScope(options);
-      const renderReason = String(options && options.buttonTasksReason
-        ? options.buttonTasksReason
+      const opts = options && typeof options === 'object' ? options : {};
+      if (!opts.immediate && !opts._fromSchedule && !opts.heavy) {
+        const criticalEarly = (
+          typeof UploadCriticalRuntime !== 'undefined'
+          && UploadCriticalRuntime
+          && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
+          && UploadCriticalRuntime.isUploadCriticalMode()
+        );
+        if (!criticalEarly) {
+          scheduleRenderUploadButtonsOnly(opts);
+          return;
+        }
+      }
+
+      const renderScope = resolveUploadButtonRenderScope(opts);
+      const renderReason = String(opts.buttonTasksReason
+        ? opts.buttonTasksReason
         : 'renderUploadButtonsOnly').trim() || 'renderUploadButtonsOnly';
 
       if (uploadButtonsRendering) {
@@ -25510,8 +25573,8 @@
         ? performance.now()
         : Date.now();
       let changedButtons = 0;
-      const useHeavy = options && options.heavy === true;
-      const skipCapabilityScan = !!(options && options.skipCapabilityScan);
+      const useHeavy = opts.heavy === true;
+      const skipCapabilityScan = !!opts.skipCapabilityScan;
       const scopeSendOnly = renderScope === 'send-only';
       const scopeUploadOnly = renderScope === 'upload-only';
       const skipUnrelatedForSend = scopeSendOnly;
@@ -25622,7 +25685,7 @@
 
         const renderSignature = buildUploadButtonRenderSignature(renderSnapshot, capability, renderScope);
         const signatureNow = Date.now();
-        const forceRender = options && options.force === true;
+        const forceRender = opts.force === true;
         const allowSkip = !forceRender && !useHeavy && !debugEnabled;
         if (
           allowSkip
@@ -25986,7 +26049,9 @@
         if (typeof ButtonState !== 'undefined' && typeof ButtonState.auditHomePageButtonColors === 'function') {
           ButtonState.auditHomePageButtonColors(rootElRef || document);
         }
-        rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
+        if (shouldRunClosedLoopDiagnostics('after-render-upload-buttons')) {
+          rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
+        }
       } finally {
         const renderCostMs = (
           (typeof performance !== 'undefined' && performance.now)
@@ -26007,7 +26072,7 @@
           const flushOptions = {
             heavy: false,
             skipCapabilityScan: true,
-            scope: options && options.scope ? options.scope : (renderScope || 'upload-only'),
+            scope: opts.scope ? opts.scope : (renderScope || 'upload-only'),
             buttonTasksReason: 'upload-render-reentry-flush',
           };
           const rafFn = uploadTimers && typeof uploadTimers.raf === 'function'
@@ -26018,7 +26083,7 @@
           if (rafFn) {
             rafFn(() => {
               try {
-                renderUploadButtonsOnly(flushOptions);
+                renderUploadButtonsOnly(Object.assign({}, flushOptions, { immediate: true }));
               } catch (err) {
                 const errText = err && err.message ? err.message : String(err);
                 console.error('[STACK_OVERFLOW][UPLOAD_RENDER] flush-render failed', err);
@@ -26061,12 +26126,14 @@
         && UploadCriticalRuntime.isUploadCriticalMode()
       );
       syncButtonTasksFromModuleState(options.buttonTasksReason || 'renderAllButtonStates');
-      renderUploadButtonsOnly(critical
+      const renderFn = critical ? renderUploadButtonsOnly : scheduleRenderUploadButtonsOnly;
+      renderFn(critical
         ? Object.assign({}, options, {
           heavy: false,
           skipCapabilityScan: true,
           scope: 'upload-only',
           buttonTasksReason: options.buttonTasksReason || 'renderAllButtonStates:critical-upload-only',
+          immediate: true,
         })
         : options);
       if (critical) {
@@ -37949,7 +38016,7 @@
             ensureActiveUploadGroupIdValid('refreshToolboxTurnStatus');
             renderToolboxTopStatus({ heavy: true });
             syncUploadGroupAppState();
-            renderUploadButtonsOnly({ heavy: true });
+            renderUploadButtonsOnly({ heavy: true, immediate: true });
             return;
           }
 
@@ -37967,6 +38034,7 @@
           });
       },
       renderUploadButtonsOnly,
+      scheduleRenderUploadButtonsOnly,
       renderAllButtonStates,
       findAutoContinueButton,
       resolveAutoContinueButton,

@@ -320,10 +320,15 @@
     };
   }
 
-  const DEFAULT_BATCH_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
-  const DEFAULT_BATCH_BLOCKED_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
-  const DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
-  const DEFAULT_TASK_DONE_SIGNAL = DEFAULT_BATCH_DONE_SIGNAL;
+  const DEFAULT_BATCH_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
+  // 旧停止符仅保留兼容解析，新逻辑只输出 DEFAULT_BATCH_STOP_SIGNAL。
+  const LEGACY_BATCH_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+  const LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
+  const LEGACY_BATCH_BLOCKED_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+  const DEFAULT_BATCH_DONE_SIGNAL = DEFAULT_BATCH_STOP_SIGNAL;
+  const DEFAULT_BATCH_BLOCKED_SIGNAL = LEGACY_BATCH_BLOCKED_SIGNAL;
+  const DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL = LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL;
+  const DEFAULT_TASK_DONE_SIGNAL = DEFAULT_BATCH_STOP_SIGNAL;
 
   const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V2 = `请继续完成上一个任务。
 
@@ -352,18 +357,12 @@
 4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
 5. 如果上一轮回答像是被截断，请从中断位置继续。`;
 
-  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成上一个任务。
+  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成当前任务。
 
 如果还有未输出完的内容，请继续输出剩余内容。
 
-如果已经没有可继续输出的内容，但由于缺少源码、日志、构建结果、测试结果、用户确认等外部材料，无法判断任务是否真实完成，请只输出：
-{{BLOCKED_SIGNAL}}
-
-如果你非常确定任务已经完整完成，并且没有任何剩余内容，只输出：
-{{DONE_SIGNAL}}
-
-如果你确定当前回复内容已经输出完，但不能证明工程任务真实完成，只输出：
-{{NO_MORE_CONTENT_SIGNAL}}
+如果当前任务已经不需要继续输出，或者你无法继续推进当前任务，请只输出：
+{{STOP_SIGNAL}}
 
 继续输出时必须遵守：
 1. 不要重复已经输出过的内容。
@@ -489,6 +488,71 @@
     return lines.length === 1 && lines[0] === expected;
   }
 
+  function normalizeBatchSignalText(text) {
+    return String(text || '')
+      .replace(/\u200b/g, '')
+      .replace(/\u200c/g, '')
+      .replace(/\u200d/g, '')
+      .replace(/\ufeff/g, '')
+      .replace(/\r\n/g, '\n')
+      .trim();
+  }
+
+  function isExactBatchStopSignalText(text) {
+    const raw = normalizeBatchSignalText(text);
+    return raw === DEFAULT_BATCH_STOP_SIGNAL
+      || raw === LEGACY_BATCH_DONE_SIGNAL
+      || raw === LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL
+      || raw === LEGACY_BATCH_BLOCKED_SIGNAL;
+  }
+
+  function parseBatchStopSignal(text, source = '-') {
+    const raw = normalizeBatchSignalText(text);
+    if (raw === DEFAULT_BATCH_STOP_SIGNAL) {
+      return {
+        matched: true,
+        terminal: true,
+        shouldContinue: false,
+        type: 'stop',
+        reason: 'model-stop-signal',
+        signal: DEFAULT_BATCH_STOP_SIGNAL,
+        legacy: false,
+        source,
+      };
+    }
+    if (
+      raw === LEGACY_BATCH_DONE_SIGNAL
+      || raw === LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL
+      || raw === LEGACY_BATCH_BLOCKED_SIGNAL
+    ) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[AUTOQ][LEGACY_STOP_SIGNAL_COMPAT] signal=${raw} action=treat-as-model-stop source=${String(source || '-')}`,
+        );
+      }
+      return {
+        matched: true,
+        terminal: true,
+        shouldContinue: false,
+        type: 'stop',
+        reason: 'legacy-model-stop-signal',
+        signal: raw,
+        legacy: true,
+        source,
+      };
+    }
+    return {
+      matched: false,
+      terminal: false,
+      shouldContinue: true,
+      type: 'continue',
+      reason: 'no-stop-signal',
+      signal: '',
+      legacy: false,
+      source,
+    };
+  }
+
   const BATCH_REPLY_BLOCKED_TEXT_PATTERNS = [
     /当前没有新的?剩余内容可以继续输出/,
     /当前没有可继续补充的剩余内容/,
@@ -520,38 +584,15 @@
       };
     }
 
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_DONE_SIGNAL)) {
+    const stopParsed = parseBatchStopSignal(text, 'classifyReplyState');
+    if (stopParsed.terminal) {
       return {
-        type: 'done',
+        type: 'stop',
         done: true,
-        reason: 'terminal-done',
+        reason: stopParsed.reason,
+        legacy: stopParsed.legacy,
+        signal: stopParsed.signal,
       };
-    }
-
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_BLOCKED_SIGNAL)) {
-      return {
-        type: 'blocked',
-        done: true,
-        reason: 'terminal-blocked',
-      };
-    }
-
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
-      return {
-        type: 'no_more_content',
-        done: true,
-        reason: 'terminal-no-more-content',
-      };
-    }
-
-    for (const pattern of BATCH_REPLY_BLOCKED_TEXT_PATTERNS) {
-      if (pattern.test(text)) {
-        return {
-          type: 'blocked',
-          done: true,
-          reason: 'blocked-text-detected',
-        };
-      }
     }
 
     return {
@@ -565,26 +606,10 @@
     const stateType = replyState && replyState.type ? String(replyState.type) : 'continue';
     const reason = replyState && replyState.reason ? String(replyState.reason) : 'unknown-reply-state';
 
-    if (stateType === 'done') {
+    if (stateType === 'stop' || stateType === 'done' || stateType === 'blocked' || stateType === 'no_more_content') {
       return {
         shouldStop: true,
-        status: 'done',
-        reason,
-      };
-    }
-
-    if (stateType === 'blocked') {
-      return {
-        shouldStop: true,
-        status: 'blocked',
-        reason,
-      };
-    }
-
-    if (stateType === 'no_more_content') {
-      return {
-        shouldStop: true,
-        status: 'no_more_content',
+        status: 'stop',
         reason,
       };
     }
@@ -628,38 +653,13 @@
       };
     }
 
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_DONE_SIGNAL)) {
+    const stopParsed = parseBatchStopSignal(text, 'classifyBatchReply');
+    if (stopParsed.terminal) {
       return {
         shouldStop: true,
-        status: 'done',
-        reason: 'done-marker-detected',
+        status: 'stop',
+        reason: stopParsed.reason,
       };
-    }
-
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_BLOCKED_SIGNAL)) {
-      return {
-        shouldStop: true,
-        status: 'blocked',
-        reason: 'blocked-marker-detected',
-      };
-    }
-
-    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
-      return {
-        shouldStop: true,
-        status: 'no_more_content',
-        reason: 'no-more-content-marker-detected',
-      };
-    }
-
-    for (const pattern of BATCH_REPLY_BLOCKED_TEXT_PATTERNS) {
-      if (pattern.test(text)) {
-        return {
-          shouldStop: true,
-          status: 'blocked',
-          reason: 'blocked-text-detected',
-        };
-      }
     }
 
     return {
@@ -673,10 +673,14 @@
     const text = String(value || '').trim();
 
     if (!text) {
-      return DEFAULT_BATCH_DONE_SIGNAL;
+      return DEFAULT_BATCH_STOP_SIGNAL;
     }
 
     const knownGood = [
+      DEFAULT_BATCH_STOP_SIGNAL,
+      LEGACY_BATCH_DONE_SIGNAL,
+      LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL,
+      LEGACY_BATCH_BLOCKED_SIGNAL,
       '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>',
       'CHATGPT_TOOLBOX_DONE',
       '__CHATGPT_TOOLBOX_DONE__',
@@ -686,12 +690,12 @@
     ];
 
     if (knownGood.includes(text)) {
-      if (text !== DEFAULT_BATCH_DONE_SIGNAL && typeof logFn === 'function') {
+      if (text !== DEFAULT_BATCH_STOP_SIGNAL && typeof logFn === 'function') {
         logFn(
-          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_DONE_SIGNAL}`,
+          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_STOP_SIGNAL}`,
         );
       }
-      return DEFAULT_BATCH_DONE_SIGNAL;
+      return text === DEFAULT_BATCH_STOP_SIGNAL ? text : DEFAULT_BATCH_STOP_SIGNAL;
     }
 
     if (
@@ -701,10 +705,10 @@
     ) {
       if (typeof logFn === 'function') {
         logFn(
-          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_DONE_SIGNAL}`,
+          `[AUTOQ][TASK_SIGNAL][REPAIR_CORRUPTED] field=doneSignal oldLength=${text.length} new=${DEFAULT_BATCH_STOP_SIGNAL}`,
         );
       }
-      return DEFAULT_BATCH_DONE_SIGNAL;
+      return DEFAULT_BATCH_STOP_SIGNAL;
     }
 
     return text;
@@ -802,11 +806,12 @@
 
   function renderContinuePromptTemplate(template, doneSignal) {
     const safeTemplate = String(template || DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
-    const safeDoneSignal = normalizeDoneSignal(doneSignal || DEFAULT_BATCH_DONE_SIGNAL);
+    const safeStopSignal = normalizeDoneSignal(doneSignal || DEFAULT_BATCH_STOP_SIGNAL);
     return safeTemplate
-      .replaceAll('{{DONE_SIGNAL}}', safeDoneSignal)
-      .replaceAll('{{BLOCKED_SIGNAL}}', DEFAULT_BATCH_BLOCKED_SIGNAL)
-      .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL);
+      .replaceAll('{{STOP_SIGNAL}}', safeStopSignal)
+      .replaceAll('{{DONE_SIGNAL}}', safeStopSignal)
+      .replaceAll('{{BLOCKED_SIGNAL}}', safeStopSignal)
+      .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', safeStopSignal);
   }
 
   function getContinuePromptTemplateForDisplay(value, logFn, fieldName) {
@@ -834,8 +839,8 @@
       switchNewChatAfterAllDone: false,
       /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
       stopBatchOnTaskSendFailure: false,
-      verifyAfterDoneSignal: true,
-      verifyAfterDoneSignalUploadFile: true,
+      verifyAfterDoneSignal: false,
+      verifyAfterDoneSignalUploadFile: false,
 
       // 批量任务组：每 N 次对话自动上传一次文件
       taskAutoUploadEveryNMessagesEnabled: true,
@@ -911,10 +916,10 @@
     return cloneDefaultModeSettings();
   }
 
-  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = DEFAULT_BATCH_DONE_SIGNAL;
+  const DEFAULT_COPY_HOTKEY_CONTINUE_STOP_SIGNAL = DEFAULT_BATCH_STOP_SIGNAL;
 
   function getDefaultDoneSignal() {
-    return DEFAULT_BATCH_DONE_SIGNAL;
+    return DEFAULT_BATCH_STOP_SIGNAL;
   }
 
   function getLegacyShortContinuePromptText() {

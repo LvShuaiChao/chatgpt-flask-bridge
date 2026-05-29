@@ -40,9 +40,10 @@ const AutoQueueModule = (() => {
       }
 
       return String(template || '继续')
+        .replaceAll('{{STOP_SIGNAL}}', TASK_DONE_SIGNAL)
         .replaceAll('{{DONE_SIGNAL}}', TASK_DONE_SIGNAL)
-        .replaceAll('{{BLOCKED_SIGNAL}}', DEFAULT_BATCH_BLOCKED_SIGNAL)
-        .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL);
+        .replaceAll('{{BLOCKED_SIGNAL}}', TASK_DONE_SIGNAL)
+        .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', TASK_DONE_SIGNAL);
     }
 
     function getDefaultTaskContinuePromptTextForUi() {
@@ -113,11 +114,11 @@ const AutoQueueModule = (() => {
       return buildUniqueName(base, names);
     }
 
-    const TASK_DONE_SIGNAL = (typeof DEFAULT_BATCH_DONE_SIGNAL === 'string' && DEFAULT_BATCH_DONE_SIGNAL)
-      ? DEFAULT_BATCH_DONE_SIGNAL
-      : ((typeof DEFAULT_TASK_DONE_SIGNAL === 'string' && DEFAULT_TASK_DONE_SIGNAL)
-        ? DEFAULT_TASK_DONE_SIGNAL
-        : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>');
+    const TASK_DONE_SIGNAL = (typeof DEFAULT_BATCH_STOP_SIGNAL === 'string' && DEFAULT_BATCH_STOP_SIGNAL)
+      ? DEFAULT_BATCH_STOP_SIGNAL
+      : ((typeof DEFAULT_BATCH_DONE_SIGNAL === 'string' && DEFAULT_BATCH_DONE_SIGNAL)
+        ? DEFAULT_BATCH_DONE_SIGNAL
+        : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
 
     const BATCH_CONTINUE_TEMPLATE = (typeof DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE === 'string'
       && DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE)
@@ -361,6 +362,9 @@ const AutoQueueModule = (() => {
       );
 
       if (isCurrentTask) {
+        if (state.waitingReply) {
+          return false;
+        }
         if (
           phase === 'running'
           || phase === 'waiting_reply'
@@ -373,25 +377,55 @@ const AutoQueueModule = (() => {
           || step === 'verify-upload-file'
           || step === 'verify-send-prompt'
           || step === 'verify-wait-reply'
+          || step === 'verify-after-done-signal'
+          || step === 'terminal-confirm-begin'
+          || step === 'terminal-confirm-second-read'
+          || step === 'task-completed-moving-next'
           || step === 'wait-reply'
           || step === 'wait-next-reply'
         ) {
           return false;
         }
+        const status = String(task.status || '');
+        const terminalStatuses = new Set([
+          'completed',
+          'failed',
+          'timeout',
+          'no_more_content',
+          'blocked',
+          'stopped',
+          'skipped',
+        ]);
+        if (!terminalStatuses.has(status)) {
+          return false;
+        }
       }
 
-      return task.completed === true || task.status === 'completed';
+      return task.completed === true
+        || task.status === 'completed'
+        || task.status === 'finished_by_model_stop'
+        || task.finished === true;
+    }
+
+    function isTaskFinishedForBatch(task) {
+      if (!task) {
+        return false;
+      }
+      return Boolean(
+        task.status === 'completed'
+        || task.status === 'finished_by_model_stop'
+        || task.finished === true,
+      );
     }
 
     function calculateBatchRuntimeStats() {
       const run = state.taskRun || {};
       const group = getCurrentBatchTaskGroup();
       const tasks = Array.isArray(group && group.tasks) ? group.tasks : [];
+      let finished = 0;
       let completed = 0;
       let failed = 0;
       let stopped = 0;
-      let blocked = 0;
-      let noMoreContentCount = 0;
 
       for (const task of tasks) {
         if (!task) {
@@ -399,24 +433,24 @@ const AutoQueueModule = (() => {
         }
         if (task.status === 'failed' || task.status === 'timeout') {
           failed += 1;
-        } else if (task.status === 'blocked') {
-          blocked += 1;
-        } else if (task.status === 'no_more_content') {
-          noMoreContentCount += 1;
-        } else if (task.status === 'stopped') {
+        } else if (task.status === 'stopped' || task.stopped === true) {
           stopped += 1;
-        } else if (isTaskActuallyCompleted(task, run)) {
-          completed += 1;
+        } else if (isTaskFinishedForBatch(task) || isTaskActuallyCompleted(task, run)) {
+          finished += 1;
+          if (task.status === 'completed' || task.completed === true) {
+            completed += 1;
+          }
         }
       }
 
       return {
+        finishedTaskCount: finished,
         completedTaskCount: completed,
         failedTaskCount: failed,
         stoppedTaskCount: stopped,
-        blockedTaskCount: blocked,
-        noMoreContentTaskCount: noMoreContentCount,
         totalTaskCount: tasks.length,
+        blockedTaskCount: 0,
+        noMoreContentTaskCount: 0,
       };
     }
 
@@ -709,9 +743,9 @@ const AutoQueueModule = (() => {
       const safeValue = escapeHtml(value == null || value === '' ? '-' : String(value));
       const extraClass = options.className ? ` ${options.className}` : '';
       return `
-        <div class="cgpt-autoq-status-row${extraClass}">
-          <span class="cgpt-autoq-status-label">${safeLabel}</span>
-          <span class="cgpt-autoq-status-value">${safeValue}</span>
+        <div class="cgpt-autoq-status-row cgpt-batch-status-row${extraClass}">
+          <span class="cgpt-autoq-status-label cgpt-batch-status-label">${safeLabel}</span>
+          <span class="cgpt-autoq-status-value cgpt-batch-status-value">${safeValue}</span>
         </div>`;
     }
 
@@ -733,7 +767,7 @@ const AutoQueueModule = (() => {
       const timingText = buildAutoQueueTimingSummaryText();
 
       let html = `
-        <div class="cgpt-autoq-user-summary">
+        <div class="cgpt-autoq-user-summary cgpt-autoq-status-card cgpt-batch-status-card">
           ${renderAutoQueueUserStatusRow('当前状态', runStateText || (state.running ? '运行中' : '已停止'))}`;
 
       if (failureText) {
@@ -742,9 +776,9 @@ const AutoQueueModule = (() => {
 
       if (userActionHint) {
         html += `
-          <div class="cgpt-autoq-status-row cgpt-autoq-user-hint-row">
-            <span class="cgpt-autoq-status-label">建议处理：</span>
-            <span class="cgpt-autoq-user-hint">${escapeHtml(userActionHint)}</span>
+          <div class="cgpt-autoq-status-row cgpt-batch-status-row cgpt-autoq-user-hint-row">
+            <span class="cgpt-autoq-status-label cgpt-batch-status-label">建议处理</span>
+            <span class="cgpt-autoq-status-value cgpt-batch-status-value cgpt-autoq-user-hint">${escapeHtml(userActionHint)}</span>
           </div>`;
       }
 
@@ -801,7 +835,18 @@ const AutoQueueModule = (() => {
       const pageVisible = page.visibilityState === 'visible' && !document.hidden;
       const pageThrottled = document.hidden || page.visibilityState === 'hidden' || !page.hasFocus;
 
+      const layoutInfo = snapshot.layout && typeof snapshot.layout === 'object'
+        ? snapshot.layout
+        : {};
+      const layoutRows = Object.keys(layoutInfo).map((key) => ({
+        label: key,
+        value: layoutInfo[key] == null ? '-' : String(layoutInfo[key]),
+      }));
+
       const sections = [
+        renderAutoQueueAdvancedDebugSection('布局诊断', layoutRows.length > 0 ? layoutRows : [
+          { label: '状态', value: '暂无布局数据' },
+        ]),
         renderAutoQueueAdvancedDebugSection('页面状态', [
           { label: '页面是否可见', value: pageVisible ? '是' : '否' },
           { label: '窗口是否聚焦', value: page.hasFocus ? '是' : '否' },
@@ -964,7 +1009,7 @@ const AutoQueueModule = (() => {
       let panelRoot = qs('#cgpt-autoq-status-panel-content', mainLiteEl);
       if (!panelRoot) {
         mainLiteEl.innerHTML = `
-          <div class="cgpt-autoq-status-grid cgpt-autoq-main-lite-grid" id="cgpt-autoq-status-panel-content"></div>
+          <div class="cgpt-autoq-status-panel-content" id="cgpt-autoq-status-panel-content"></div>
           <div id="cgpt-autoq-runtime-stats-line-1" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden" aria-hidden="true"></div>
           <div id="cgpt-autoq-runtime-stats-line-2" class="cgpt-autoq-runtime-stats-line cgpt-toolbox-hidden" aria-hidden="true"></div>
           <div id="cgpt-autoq-runtime-phase-line" class="cgpt-autoq-runtime-stats-line cgpt-autoq-runtime-stats-phase cgpt-toolbox-hidden" aria-hidden="true"></div>
@@ -1366,14 +1411,8 @@ const AutoQueueModule = (() => {
       if (type === 'normal_reply_done') {
         return options.waitingReply ? 'send-next' : 'continue-current-task';
       }
-      if (type === 'done') {
-        return 'terminal-done';
-      }
-      if (type === 'blocked') {
-        return 'terminal-blocked';
-      }
-      if (type === 'no_more_content') {
-        return 'terminal-no-more-content';
+      if (type === 'stop' || type === 'done' || type === 'blocked' || type === 'no_more_content') {
+        return 'model-stop-signal';
       }
       if (type === 'empty') {
         return 'continue-wait';
@@ -1386,10 +1425,10 @@ const AutoQueueModule = (() => {
         return;
       }
       const type = String(replyState.type || '-');
-      const shouldStop = type === 'done' || type === 'blocked' || type === 'no_more_content';
+      const shouldStop = type === 'stop' || type === 'done' || type === 'blocked' || type === 'no_more_content';
       recordReplyClassifyDecision({
         shouldStop,
-        status: type,
+        status: shouldStop ? 'stop' : type,
         reason: String(replyState.reason || '-'),
       });
     }
@@ -1430,10 +1469,11 @@ const AutoQueueModule = (() => {
         };
       }
       const replyState = classifyReplyState(replyText, isGenerating);
-      const detectedTerminal = replyState.type === 'done'
+      const detectedTerminal = replyState.type === 'stop'
+        || replyState.type === 'done'
         || replyState.type === 'blocked'
         || replyState.type === 'no_more_content'
-        ? replyState.type
+        ? (replyState.type === 'stop' ? 'stop' : replyState.type)
         : 'none';
       const nextAction = getReplyStateNextAction(replyState, { waitingReply: !!state.waitingReply });
       return {
@@ -1652,6 +1692,16 @@ const AutoQueueModule = (() => {
         quota: collectSectionSafe('quota', collectQuotaDebugState),
         timers: collectSectionSafe('timers', collectTimerDebugState),
       };
+      snapshot.layout = collectSectionSafe('layout', () => {
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.collectLayoutDebugInfo === 'function'
+        ) {
+          return ToolboxShell.collectLayoutDebugInfo();
+        }
+        return { error: 'ToolboxShell.collectLayoutDebugInfo unavailable' };
+      });
+
       if (full) {
         snapshot.composer = collectSectionSafe('composer', collectComposerDebugState);
         snapshot.buttons = collectSectionSafe('buttons', collectButtonDebugState);
@@ -1671,6 +1721,9 @@ const AutoQueueModule = (() => {
         `更新时间：${snapshot.time}`,
         `来源：${snapshot.source}`,
         `URL：${snapshot.url}`,
+        '',
+        '【布局诊断】',
+        JSON.stringify(snapshot.layout, null, 2),
         '',
         '【页面状态】',
         JSON.stringify(snapshot.page, null, 2),
@@ -2763,7 +2816,8 @@ const AutoQueueModule = (() => {
         }
 
         const oldVerifyPrompt = String(rawTaskQueue.verifyAfterDoneSignalPrompt || '');
-        const shouldMigrateVerifyPrompt = (
+        const verifyPromptAlreadyMigrated = rawTaskQueue.verifyAfterDoneSignalPromptMigratedFromFullTask === true;
+        const shouldMigrateVerifyPrompt = !verifyPromptAlreadyMigrated && (
           oldVerifyPrompt.includes('当前任务内容：')
           || oldVerifyPrompt.includes('{{taskContent}}')
           || oldVerifyPrompt.includes('请根据我刚才上传的代码文件和当前任务要求')
@@ -2884,6 +2938,9 @@ const AutoQueueModule = (() => {
               || taskQueueDefaults.verifyAfterDoneSignalPrompt
               || '',
             ),
+
+          verifyAfterDoneSignalPromptMigratedFromFullTask:
+            verifyPromptAlreadyMigrated || shouldMigrateVerifyPrompt,
 
           showRuntimeStats: rawTaskQueue.showRuntimeStats !== false,
           preserveRuntimeStatsAverage: rawTaskQueue.preserveRuntimeStatsAverage === true,
@@ -3348,9 +3405,17 @@ const AutoQueueModule = (() => {
     const TERMINAL_CONFIRM_MIN_STABLE_MS = 1200;
     const TERMINAL_CONFIRM_MAX_WAIT_MS = 15000;
     const TERMINAL_CONFIRM_STUCK_RECOVER_MS = 15000;
-    const TERMINAL_CONFIRM_SIGNAL_DONE = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
-    const TERMINAL_CONFIRM_SIGNAL_BLOCKED = '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
-    const TERMINAL_CONFIRM_SIGNAL_NO_MORE = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
+    const TERMINAL_CONFIRM_DEGRADE_TIMEOUT_MS = 30000;
+    const TERMINAL_CONFIRM_SIGNAL_STOP = TASK_DONE_SIGNAL;
+    const TERMINAL_CONFIRM_SIGNAL_DONE = typeof LEGACY_BATCH_DONE_SIGNAL === 'string'
+      ? LEGACY_BATCH_DONE_SIGNAL
+      : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+    const TERMINAL_CONFIRM_SIGNAL_BLOCKED = typeof LEGACY_BATCH_BLOCKED_SIGNAL === 'string'
+      ? LEGACY_BATCH_BLOCKED_SIGNAL
+      : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+    const TERMINAL_CONFIRM_SIGNAL_NO_MORE = typeof LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL === 'string'
+      ? LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL
+      : '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
 
     const TASK_TERMINAL_KIND = Object.freeze({
       DONE: 'done',
@@ -10212,7 +10277,7 @@ const AutoQueueModule = (() => {
     }
 
     function isTaskDoneSignalMatched(replyText, doneSignal) {
-      const signal = String(doneSignal || TASK_DONE_SIGNAL).trim();
+      void doneSignal;
 
       if (typeof isCorruptedBatchSignalText === 'function' && isCorruptedBatchSignalText(replyText)) {
         ToolboxShell.appendLog(
@@ -10224,11 +10289,12 @@ const AutoQueueModule = (() => {
         };
       }
 
-      const classified = classifyTerminalSignal(replyText);
-      if (classified.matched && signal) {
-        const exactForConfigured = isExactSingleLineTerminalSignal(replyText, signal);
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, 'isTaskDoneSignalMatched')
+        : null;
+      if (stopParsed && stopParsed.terminal) {
         return {
-          matched: exactForConfigured,
+          matched: true,
           corrupted: false,
         };
       }
@@ -10240,25 +10306,14 @@ const AutoQueueModule = (() => {
     }
 
     function isExactBatchDoneSignalText(text, doneSignal) {
-      const signal = String(
-        doneSignal
-        || TASK_DONE_SIGNAL
-        || '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'
-      ).trim();
-      const value = String(text || '')
-        .replace(/\r\n/g, '\n')
-        .trim();
-
-      if (!value || !signal) {
-        return false;
+      void doneSignal;
+      if (typeof isExactBatchStopSignalText === 'function') {
+        return isExactBatchStopSignalText(text);
       }
-
-      const lines = value
-        .split('\n')
-        .map((line) => String(line || '').trim())
-        .filter(Boolean);
-
-      return lines.length === 1 && lines[0] === signal;
+      if (typeof parseBatchStopSignal === 'function') {
+        return parseBatchStopSignal(text, 'isExactBatchDoneSignalText').terminal === true;
+      }
+      return false;
     }
 
     function normalizeTerminalReplyText(text) {
@@ -10281,15 +10336,18 @@ const AutoQueueModule = (() => {
     }
 
     function parseTerminalStatusReplyText(text) {
+      if (typeof parseBatchStopSignal === 'function') {
+        const parsed = parseBatchStopSignal(text, 'parseTerminalStatusReplyText');
+        return parsed.terminal ? 'stop' : '';
+      }
       const normalized = normalizeTerminalStatusText(text);
-      if (normalized === TERMINAL_CONFIRM_SIGNAL_DONE) {
-        return 'done';
-      }
-      if (normalized === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
-        return 'blocked_need_input';
-      }
-      if (normalized === TERMINAL_CONFIRM_SIGNAL_NO_MORE) {
-        return 'no_more_content';
+      if (
+        normalized === TERMINAL_CONFIRM_SIGNAL_STOP
+        || normalized === TERMINAL_CONFIRM_SIGNAL_DONE
+        || normalized === TERMINAL_CONFIRM_SIGNAL_BLOCKED
+        || normalized === TERMINAL_CONFIRM_SIGNAL_NO_MORE
+      ) {
+        return 'stop';
       }
       return '';
     }
@@ -10299,6 +10357,7 @@ const AutoQueueModule = (() => {
     }
 
     const STRICT_TERMINAL_SIGNALS = Object.freeze([
+      TERMINAL_CONFIRM_SIGNAL_STOP,
       TERMINAL_CONFIRM_SIGNAL_DONE,
       TERMINAL_CONFIRM_SIGNAL_BLOCKED,
       TERMINAL_CONFIRM_SIGNAL_NO_MORE,
@@ -10312,14 +10371,13 @@ const AutoQueueModule = (() => {
     }
 
     function resolveStrictTerminalSignalType(signal) {
-      if (signal === TERMINAL_CONFIRM_SIGNAL_DONE) {
-        return 'done';
-      }
-      if (signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
-        return 'blocked';
-      }
-      if (signal === TERMINAL_CONFIRM_SIGNAL_NO_MORE) {
-        return 'no_more';
+      if (
+        signal === TERMINAL_CONFIRM_SIGNAL_STOP
+        || signal === TERMINAL_CONFIRM_SIGNAL_DONE
+        || signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED
+        || signal === TERMINAL_CONFIRM_SIGNAL_NO_MORE
+      ) {
+        return 'stop';
       }
       return '';
     }
@@ -10333,6 +10391,144 @@ const AutoQueueModule = (() => {
         || (typeof localStorage !== 'undefined'
           && localStorage.getItem('cgpt_toolbox_debug_terminal_signal') === '1')
       );
+    }
+
+    /** 统一 STOP 模式：默认关闭二次确认/verification 主流程（仅高级设置显式开启时恢复）。 */
+    function isLegacyTerminalVerificationEnabled() {
+      return Boolean(
+        config
+        && config.taskQueueSettings
+        && config.taskQueueSettings.verifyAfterDoneSignal === true,
+      );
+    }
+
+    function clearTerminalVerificationStateIfStale(source = '-') {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const phase = String(state.phase || '');
+      const hasVerifyState = !!(
+        run.doneSignalVerificationRunning
+        || run.afterTerminalConfirmWaitingVerify
+        || String(run.pendingSendKind || '') === 'verification'
+        || String(run.pendingReplyKind || '') === 'verification'
+        || phase === 'terminal_confirming'
+        || state.terminalConfirming
+      );
+      if (hasVerifyState) {
+        clearTerminalVerificationState(`stale-cleanup:${source}`);
+      }
+    }
+
+    function isAssistantBusyNow(source = '-') {
+      const busy = isChatGPTActuallyBusyForTaskQueue({
+        source,
+        skipDetectComposerState: true,
+      });
+      appendAutoQueuePollLogThrottled(
+        `assistant-busy:${source}`,
+        `[AUTOQ][ASSISTANT_BUSY] source=${source} busy=${busy ? 1 : 0}`,
+      );
+      return busy;
+    }
+
+    function getComposerLightState(source = '-') {
+      const bridgeState = typeof BridgeState !== 'undefined' && BridgeState ? BridgeState : null;
+      return {
+        source,
+        responseState: bridgeState ? String(bridgeState.response_state || '-') : '-',
+        responseReason: bridgeState ? String(bridgeState.response_state_reason || '-') : '-',
+        inputable: bridgeState ? bridgeState.inputable === true : false,
+        sendable: bridgeState ? bridgeState.sendable === true : false,
+      };
+    }
+
+    function logStopSignalDecision(matched, source, extra = {}) {
+      if (isAdvancedDebugEnabled()) {
+        return;
+      }
+      const signal = extra.signal ? String(extra.signal) : '-';
+      const reason = extra.reason ? String(extra.reason) : '-';
+      appendAutoQueuePollLogThrottled(
+        matched ? `stop-signal-match:${source}` : `stop-signal-no-match:${source}`,
+        matched
+          ? `[STOP_SIGNAL][MATCH] source=${source} signal=${signal}`
+          : `[STOP_SIGNAL][NO_MATCH] source=${source} reason=${reason}`,
+      );
+    }
+
+    function getAttachmentStateForUpload(source = '-') {
+      if (
+        typeof ComposerAttachments === 'undefined'
+        || !ComposerAttachments
+        || typeof ComposerAttachments.getSharedComposerAttachmentEvidence !== 'function'
+      ) {
+        return null;
+      }
+      return ComposerAttachments.getSharedComposerAttachmentEvidence(`upload:${source}`, {
+        heavy: true,
+        allowCache: true,
+      });
+    }
+
+    function getAttachmentStateForSend(source = '-') {
+      if (
+        typeof ComposerAttachments === 'undefined'
+        || !ComposerAttachments
+        || typeof ComposerAttachments.getSharedComposerAttachmentEvidence !== 'function'
+      ) {
+        return null;
+      }
+      return ComposerAttachments.getSharedComposerAttachmentEvidence(`send:${source}`, {
+        heavy: true,
+        allowCache: true,
+      });
+    }
+
+    function getAttachmentStateForDebug(source = '-') {
+      if (!isAdvancedDebugEnabled()) {
+        return {
+          count: 0,
+          ready: false,
+          uploading: false,
+          skipped: true,
+          reason: 'debug-disabled',
+        };
+      }
+      if (
+        typeof ComposerAttachments === 'undefined'
+        || !ComposerAttachments
+        || typeof ComposerAttachments.getSharedComposerAttachmentEvidence !== 'function'
+      ) {
+        return null;
+      }
+      return ComposerAttachments.getSharedComposerAttachmentEvidence(`debug:${source}`, {
+        heavy: false,
+        allowCache: true,
+      });
+    }
+
+    let foregroundCatchUpTimer = null;
+
+    function scheduleLightForegroundCatchUp(reason = '-') {
+      if (foregroundCatchUpTimer) {
+        return;
+      }
+      foregroundCatchUpTimer = window.setTimeout(() => {
+        foregroundCatchUpTimer = null;
+        const light = getComposerLightState(`foreground:${reason}`);
+        ToolboxShell.appendLog(
+          `[FOREGROUND_CATCH_UP][LIGHT] reason=${reason} `
+          + `responseState=${light.responseState} `
+          + `inputable=${light.inputable ? 1 : 0} `
+          + `sendable=${light.sendable ? 1 : 0}`,
+        );
+        updateStatus(`foreground-light:${reason}`);
+        if (typeof updateChatInputStateBadge === 'function') {
+          updateChatInputStateBadge();
+        }
+        if (state.running || state.batchTaskRunning) {
+          maybeSendNextTask();
+        }
+      }, 300);
     }
 
     function logTerminalSignalNoMatchDetail(rawText, normalized, reason, source) {
@@ -10375,7 +10571,10 @@ const AutoQueueModule = (() => {
       const source = String(meta && meta.source ? meta.source : '-');
 
       if (!normalized) {
-        ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=empty-text');
+        if (isAdvancedDebugEnabled()) {
+          ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=empty-text');
+        }
+        logStopSignalDecision(false, source, { reason: 'empty-text' });
         logTerminalSignalNoMatchDetail(text, normalized, 'empty-text', source);
         return {
           matched: false,
@@ -10388,9 +10587,12 @@ const AutoQueueModule = (() => {
       for (let i = 0; i < STRICT_TERMINAL_SIGNALS.length; i += 1) {
         const signal = STRICT_TERMINAL_SIGNALS[i];
         if (normalized === signal) {
-          ToolboxShell.appendLog(
-            `[TERMINAL_SIGNAL][MATCH] reason=exact-text signal=${signal}`,
-          );
+          if (isAdvancedDebugEnabled()) {
+            ToolboxShell.appendLog(
+              `[TERMINAL_SIGNAL][MATCH] reason=exact-text signal=${signal}`,
+            );
+          }
+          logStopSignalDecision(true, source, { signal, reason: 'exact-text' });
           return {
             matched: true,
             signal,
@@ -10410,9 +10612,12 @@ const AutoQueueModule = (() => {
         for (let j = 0; j < STRICT_TERMINAL_SIGNALS.length; j += 1) {
           const signal = STRICT_TERMINAL_SIGNALS[j];
           if (lastLine === signal) {
-            ToolboxShell.appendLog(
-              `[TERMINAL_SIGNAL][MATCH] reason=last-non-empty-line signal=${signal}`,
-            );
+            if (isAdvancedDebugEnabled()) {
+              ToolboxShell.appendLog(
+                `[TERMINAL_SIGNAL][MATCH] reason=last-non-empty-line signal=${signal}`,
+              );
+            }
+            logStopSignalDecision(true, source, { signal, reason: 'last-non-empty-line' });
             return {
               matched: true,
               signal,
@@ -10422,7 +10627,10 @@ const AutoQueueModule = (() => {
           }
         }
 
-        ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=mixed-content-rejected');
+        if (isAdvancedDebugEnabled()) {
+          ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=mixed-content-rejected');
+        }
+        logStopSignalDecision(false, source, { reason: 'mixed-content-rejected' });
         logTerminalSignalNoMatchDetail(text, normalized, 'mixed-content-rejected', source);
         return {
           matched: false,
@@ -10432,7 +10640,10 @@ const AutoQueueModule = (() => {
         };
       }
 
-      ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=no-terminal');
+      if (isAdvancedDebugEnabled()) {
+        ToolboxShell.appendLog('[TERMINAL_SIGNAL][NO_MATCH] reason=no-terminal');
+      }
+      logStopSignalDecision(false, source, { reason: 'no-terminal' });
       logTerminalSignalNoMatchDetail(text, normalized, 'no-terminal', source);
       return {
         matched: false,
@@ -10481,27 +10692,11 @@ const AutoQueueModule = (() => {
         };
       }
 
-      if (strict.signal === TERMINAL_CONFIRM_SIGNAL_DONE) {
+      if (strict.matched && strict.signal) {
         return {
           matched: true,
-          type: 'done',
-          signal: TERMINAL_CONFIRM_SIGNAL_DONE,
-        };
-      }
-
-      if (strict.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
-        return {
-          matched: true,
-          type: 'blocked',
-          signal: TERMINAL_CONFIRM_SIGNAL_BLOCKED,
-        };
-      }
-
-      if (strict.signal === TERMINAL_CONFIRM_SIGNAL_NO_MORE) {
-        return {
-          matched: true,
-          type: 'no_more',
-          signal: TERMINAL_CONFIRM_SIGNAL_NO_MORE,
+          type: 'stop',
+          signal: strict.signal,
         };
       }
 
@@ -10543,13 +10738,40 @@ const AutoQueueModule = (() => {
       abortBatchTaskGroupScheduledTimer(source || 'terminal-confirm');
     }
 
-    function getComposerAttachmentEvidence(source) {
+    function getComposerAttachmentEvidence(source, options = {}) {
+      const src = String(source || '-');
+      const opts = options && typeof options === 'object' ? options : {};
+      if (opts.forUpload === true) {
+        return getAttachmentStateForUpload(src);
+      }
+      if (opts.forSend === true) {
+        return getAttachmentStateForSend(src);
+      }
+      if (opts.forDebug === true) {
+        return getAttachmentStateForDebug(src);
+      }
+      if (
+        !opts.force
+        && !isLegacyTerminalVerificationEnabled()
+        && (
+          src.includes('verify-stale')
+          || src.includes('maybe-send-next-precheck')
+          || src.includes('false-waiting')
+          || src.includes('stale-waiting')
+          || src.includes('send-success-evidence')
+          || src.includes('terminal-confirm')
+          || src.includes('reply-ready')
+          || src.includes('status-')
+        )
+      ) {
+        return null;
+      }
       if (
         typeof ComposerAttachments !== 'undefined'
         && ComposerAttachments
         && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
       ) {
-        return ComposerAttachments.getSharedComposerAttachmentEvidence(source, { heavy: true });
+        return ComposerAttachments.getSharedComposerAttachmentEvidence(src, { heavy: true });
       }
       return null;
     }
@@ -10830,6 +11052,14 @@ const AutoQueueModule = (() => {
 
     async function continueBatchAfterMoveNext(moved, reasonText, continueAction) {
       if (!moved) {
+        const allDoneBlock = shouldBlockBatchAllDoneStop('all-done');
+        if (allDoneBlock.blocked) {
+          scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+            reason: `continue-after-move-next-blocked:${reasonText || '-'}`,
+            source: 'continueBatchAfterMoveNext',
+          });
+          return;
+        }
         ToolboxShell.appendLog(
           `[BATCH_TASK_GROUP][MOVE_NEXT][NO_NEXT] reason=${reasonText} action=complete-batch`,
         );
@@ -10911,19 +11141,13 @@ const AutoQueueModule = (() => {
       const idx = getTaskIndexLogFields(run);
       const terminal = detectStrictTerminalSignal(replyText, { source });
       const latestSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary(`terminal-decision:${source || '-'}`);
-      let decision = 'continue-current-task';
-      if (terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
-        decision = 'block-current-task';
-      } else if (terminal.matched) {
-        decision = 'finish-current-task';
-      }
+      const decision = terminal.matched ? 'finish-current-task-stop' : 'continue-current-task';
       ToolboxShell.appendLog(
         '[AUTOQ][TERMINAL_DECISION] '
         + `taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} taskTotal=${idx.taskTotal} `
         + `taskId=${task && task.id ? task.id : '-'} `
         + `latestTurnId=${latestSnapshot.turnId || '-'} textLen=${String(replyText || '').length} `
-        + `hasDone=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_DONE ? 1 : 0} `
-        + `hasBlocked=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED ? 1 : 0} `
+        + `hasStop=${terminal.matched ? 1 : 0} `
         + `decision=${decision} source=${source || '-'} `
         + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} `
         + `pendingSendKind=${String(run.pendingSendKind || '-')}`,
@@ -10934,8 +11158,7 @@ const AutoQueueModule = (() => {
           + `taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} taskTotal=${idx.taskTotal} `
           + `taskId=${task && task.id ? task.id : '-'} `
           + `latestTurnId=${latestSnapshot.turnId || '-'} latestTextLen=${String(replyText || '').length} `
-          + `hasDone=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_DONE ? 1 : 0} `
-          + `hasBlocked=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED ? 1 : 0} `
+          + `hasStop=${terminal.matched ? 1 : 0} `
           + `route=${extra.route} source=${source || '-'}`,
         );
       }
@@ -11824,6 +12047,16 @@ const AutoQueueModule = (() => {
         const nextIndex = currentIndex + 1;
         const tasks = getCurrentAutoQueueTasksSafe();
         if (!tasks.length || nextIndex >= tasks.length) {
+          const allDoneBlock = shouldBlockBatchAllDoneStop('all-done');
+          if (allDoneBlock.blocked) {
+            run.nextTaskTransitionInFlight = false;
+            state.taskRun = run;
+            scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+              reason: `advance-after-terminal-blocked:${source || '-'}`,
+              source: 'advanceToNextTaskAfterTerminalConfirm',
+            });
+            return false;
+          }
           run.currentStep = 'all-tasks-done';
           run.pendingSendKind = '';
           run.pendingReplyKind = null;
@@ -11847,8 +12080,7 @@ const AutoQueueModule = (() => {
         }
         const nextTask = tasks[nextIndex];
         run.currentIndex = nextIndex;
-        run.currentTaskId = String(nextTask && nextTask.id ? nextTask.id : nextIndex);
-        run.currentTaskTitle = String(nextTask && nextTask.title ? nextTask.title : '');
+        syncRunCurrentTaskIdFromIndex(run, 'advanceToNextTaskAfterTerminalConfirm');
         run.pendingSendKind = 'prepare-next-task';
         run.pendingReplyKind = null;
         state.waitingReply = false;
@@ -12321,20 +12553,22 @@ const AutoQueueModule = (() => {
       );
 
       state.terminalBusyOverrideInFlight = true;
-      void runTaskTerminalVerification({
-        source: `busy-override-terminal:${source || '-'}`,
-        signal: terminal.signal,
-        signalType: terminal.type,
-        initialText: replyText,
-      }).catch((err) => {
+      const task = getCurrentRunningTask();
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, `busy-override:${source || '-'}`)
+        : { terminal: true, signal: terminal.signal, reason: 'busy-override', legacy: false };
+      try {
+        handleBatchStopSignal(task, stopParsed, { source: `busy-override:${source || '-'}` });
+      } catch (err) {
         const errText = err && err.message ? err.message : String(err);
+        const errStack = err && err.stack ? err.stack : '';
         console.error('[AUTOQ][TERMINAL_BUSY_OVERRIDE][ERROR]', err);
         ToolboxShell.appendLog(
-          `[AUTOQ][TERMINAL_BUSY_OVERRIDE][ERROR] source=${source || '-'} error=${errText}`,
+          `[AUTOQ][TERMINAL_BUSY_OVERRIDE][ERROR] source=${source || '-'} error=${errText} stack=${errStack.slice(0, 1200)}`,
         );
-      }).finally(() => {
+      } finally {
         state.terminalBusyOverrideInFlight = false;
-      });
+      }
 
       return true;
     }
@@ -12537,6 +12771,9 @@ const AutoQueueModule = (() => {
 
     function blockNavigationDuringTerminalConfirm(actionName) {
       const runtimeState = getAutoQueueRuntimeState();
+      const run = state.taskRun || {};
+      const phase = String(state.phase || '');
+      const step = String(run.currentStep || '');
 
       if (runtimeState && runtimeState.terminalConfirming) {
         const ctx = getTerminalConfirmPageContext();
@@ -12547,6 +12784,26 @@ const AutoQueueModule = (() => {
           + ` source=${runtimeState.terminalConfirmSource || '-'}`
           + ` signal=${runtimeState.terminalConfirmSignal || '-'}`
           + ` pendingSendKind=${state.taskRun && state.taskRun.pendingSendKind ? state.taskRun.pendingSendKind : '-'}`
+          + ` page_type=${ctx.pageType} conversation_id=${ctx.conversationId}`,
+        );
+        return true;
+      }
+
+      if (
+        phase === 'terminal_confirming'
+        || step === 'verify-upload-file'
+        || step === 'verify-send-prompt'
+        || step === 'verify-wait-reply'
+        || step === 'verify-after-done-signal'
+        || step === 'terminal-confirm-second-read'
+        || run.doneSignalVerificationRunning === true
+        || run.afterTerminalConfirmWaitingVerify === true
+      ) {
+        const ctx = getTerminalConfirmPageContext();
+        ToolboxShell.appendLog(
+          `[TERMINAL_CONFIRM][NAV_BLOCKED] action=${actionName}`
+          + ` reason=phase-or-verify-active phase=${phase || '-'} step=${step || '-'}`
+          + ` pendingSendKind=${run.pendingSendKind || '-'}`
           + ` page_type=${ctx.pageType} conversation_id=${ctx.conversationId}`,
         );
         return true;
@@ -12575,6 +12832,139 @@ const AutoQueueModule = (() => {
         || step === 'verify-wait-reply'
         || step === 'terminal-confirm-second-read'
       );
+    }
+
+    function isCurrentBatchTaskStillActive() {
+      if (!state.running && !state.batchTaskRunning) {
+        return false;
+      }
+
+      const run = state.taskRun || {};
+      const phase = String(state.phase || '');
+      const step = String(run.currentStep || '');
+
+      if (
+        state.waitingReply
+        || phase === 'running'
+        || phase === 'waiting_reply'
+        || phase === 'terminal_confirming'
+        || isTerminalConfirmOrVerificationActive()
+      ) {
+        return true;
+      }
+
+      const activeSteps = new Set([
+        'wait-current-reply',
+        'reply-ready',
+        'check-done-signal',
+        'copy-last-reply',
+        'send-continue',
+        'verify-upload-file',
+        'verify-send-prompt',
+        'verify-wait-reply',
+        'verify-after-done-signal',
+        'wait-reply',
+        'wait-next-reply',
+        'terminal-confirm-begin',
+        'terminal-confirm-second-read',
+        'task-completed-moving-next',
+      ]);
+      if (activeSteps.has(step)) {
+        return true;
+      }
+
+      if (run.movingToNextTask || run.skippingCurrentTask || run.failingCurrentTask) {
+        return true;
+      }
+
+      const task = getCurrentTaskStrict('isCurrentBatchTaskStillActive');
+      if (task) {
+        const terminalStatuses = new Set([
+          'completed',
+          'failed',
+          'timeout',
+          'no_more_content',
+          'blocked',
+          'stopped',
+          'skipped',
+        ]);
+        if (!terminalStatuses.has(String(task.status || ''))) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function shouldBlockBatchAllDoneStop(reason, options = {}) {
+      if (options && options.allowAllDoneWhileRunning === true) {
+        return { blocked: false };
+      }
+
+      const reasonText = String(reason || '').trim();
+      const countsAsAllDone = (
+        reasonText === 'all-done'
+        || reasonText === 'all-done-after-failures'
+        || reasonText === 'all-tasks-done'
+        || reasonText === 'all-tasks-confirmed-after-verify'
+        || reasonText === 'batch-done-signal-confirmed'
+      );
+
+      if (!countsAsAllDone) {
+        const stopMeta = resolveBatchStopDisplayMeta(reasonText);
+        if (!stopMeta.countsAsAllDone) {
+          return { blocked: false };
+        }
+      }
+
+      if (!isCurrentBatchTaskStillActive()) {
+        return { blocked: false };
+      }
+
+      const run = state.taskRun || {};
+      const task = getCurrentTaskStrict('shouldBlockBatchAllDoneStop');
+      ToolboxShell.appendLog(
+        '[BATCH_TASK_GROUP][STOP_BLOCKED_RUNNING_TASK] '
+        + `reason=${reasonText || '-'} `
+        + `phase=${String(state.phase || '-')} `
+        + `step=${String(run.currentStep || '-')} `
+        + `taskIndex=${Number(run.currentIndex || 0)} `
+        + `task=${task ? task.title : '-'} `
+        + `waitingReply=${state.waitingReply ? 1 : 0}`,
+      );
+
+      return {
+        blocked: true,
+        reason: reasonText,
+      };
+    }
+
+    function syncRunCurrentTaskIdFromIndex(run, source = '-') {
+      if (!run || typeof run !== 'object') {
+        return run;
+      }
+      const index = Number(run.currentIndex || 0);
+      if (!Array.isArray(run.enabledTaskIds) || index < 0 || index >= run.enabledTaskIds.length) {
+        return run;
+      }
+      const profile = getActiveTaskProfile();
+      const taskId = run.enabledTaskIds[index];
+      const task = profile && Array.isArray(profile.tasks)
+        ? profile.tasks.find((item) => item && item.id === taskId) || null
+        : null;
+      const nextTaskId = String(task && task.id ? task.id : taskId || '');
+      if (nextTaskId && String(run.currentTaskId || '') !== nextTaskId) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][CURRENT_TASK_ID_SYNC] '
+          + `source=${String(source || '-')} `
+          + `index=${index} `
+          + `from=${String(run.currentTaskId || '-')} `
+          + `to=${nextTaskId}`,
+        );
+        run.currentTaskId = nextTaskId;
+        run.currentTaskTitle = String(task && task.title ? task.title : '');
+      }
+      return run;
     }
 
     function getCurrentTurnCountSafe() {
@@ -12815,10 +13205,195 @@ const AutoQueueModule = (() => {
       return !!getConsumableVerificationReplySnapshot(run, source);
     }
 
-    function isTerminalConfirmAlreadyConsumedButStillBlocking(run, latest) {
+    const TERMINAL_CONFIRM_CONSUMED_RELEASE_STEPS = new Set([
+      'terminal-confirm-begin',
+      'terminal-confirm-second-read',
+      'task-completed-moving-next',
+      'verify-wait-reply',
+      'wait-verification-reply',
+    ]);
+
+    function isVerificationReplyAlreadyConsumed(run) {
+      const latestDiag = getLatestAssistantSnapshotForAutoQueueBoundary('verification-reply-consumed-check');
+      const latestTurnNo = Number(
+        latestDiag && latestDiag.turnNo != null
+          ? latestDiag.turnNo
+          : run.latestTurnNo || run.lastLatestTurnNo || 0,
+      );
+      const consumedTurnNo = Number(run.lastConsumedVerificationTurnNo || 0);
+      return Boolean(
+        latestTurnNo > 0
+        && consumedTurnNo > 0
+        && latestTurnNo <= consumedTurnNo,
+      );
+    }
+
+    function releaseTerminalVerificationLock(reason = '-') {
+      return clearTerminalVerificationState(reason);
+    }
+
+    function clearTerminalVerificationState(reason = '-') {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const runtimeState = getAutoQueueRuntimeState();
+
+      run.doneSignalVerificationRunning = false;
+      run.afterTerminalConfirmWaitingVerify = false;
+      run.verificationUploadInFlight = false;
+      run.verificationSendInFlight = false;
+      run.verificationRepairInFlight = false;
+      run.verificationSendRetrying = false;
+      run.verificationConsumeInFlight = false;
+      run.verificationReplyConsumed = false;
+      run.pendingSendKind = null;
+      run.pendingReplyKind = null;
+      run.terminalVerifyLockBlockCount = 0;
+      if (String(run.currentStep || '') === 'task-completed-moving-next') {
+        run.currentStep = 'model-stop-moving-next';
+      }
+      state.taskRun = run;
+
+      if (runtimeState) {
+        runtimeState.terminalConfirming = false;
+        runtimeState.terminalConfirmPassed = false;
+        runtimeState.terminalConfirmSignal = '';
+        runtimeState.terminalConfirmFirstText = '';
+        runtimeState.terminalConfirmSecondText = '';
+      }
+      state.terminalConfirming = false;
+      state.terminalConfirmPassed = false;
+
+      if (String(state.phase || '') === 'terminal_confirming') {
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING || 'running', `clear-terminal-verification:${reason}`, {
+          force: true,
+        });
+      }
+
+      ToolboxShell.appendLog(
+        `[TERMINAL_VERIFY_LOCK][CLEAR] reason=${String(reason || '-')} `
+        + `phase=${String(state.phase || '-')} `
+        + `step=${String(run.currentStep || '-')}`,
+      );
+      return true;
+    }
+
+    function markTaskFinishedByModelStop(task, options = {}) {
+      if (!task) {
+        return;
+      }
+      task.status = 'finished_by_model_stop';
+      task.finished = true;
+      task.completed = true;
+      task.failed = false;
+      task.blocked = false;
+      task.noMoreContent = false;
+      task.finishedAt = Date.now();
+      task.finishReason = options.reason || 'model-stop-signal';
+      task.stopSignal = options.signal || TASK_DONE_SIGNAL;
+      markTaskStatus(task, 'finished_by_model_stop');
+      ToolboxShell.appendLog(
+        '[AUTOQ][TASK_STATUS] '
+        + `task=${task.title || '-'} `
+        + `taskId=${task.id || '-'} `
+        + 'status=finished_by_model_stop '
+        + `reason=${task.finishReason}`,
+      );
+    }
+
+    function moveToNextTaskOrStopAfterModelStop(reason = 'model-stop-signal') {
+      const run = state.taskRun || {};
+      const currentIndex = Number(run.currentIndex || 0);
+      const group = getCurrentBatchTaskGroup();
+      const total = Number(
+        group && group.totalTaskCount
+          ? group.totalTaskCount
+          : (Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0),
+      );
+      if (currentIndex + 1 < total) {
+        ToolboxShell.appendLog(
+          '[BATCH_TASK_GROUP][MOVE_NEXT_AFTER_MODEL_STOP] '
+          + `currentIndex=${currentIndex} total=${total} reason=${reason}`,
+        );
+        void completeCurrentTaskAndMoveNextOnce(reason, {
+          source: 'moveToNextTaskOrStopAfterModelStop',
+        });
+        return true;
+      }
+      ToolboxShell.appendLog(
+        '[BATCH_TASK_GROUP][ALL_DONE_AFTER_MODEL_STOP] '
+        + `currentIndex=${currentIndex} total=${total} reason=${reason}`,
+      );
+      stopEntireBatchTaskGroup('all-tasks-finished-by-model-stop', {
+        finalStep: 'all-done',
+        markCurrent: false,
+        logStop: true,
+      });
+      return false;
+    }
+
+    function handleBatchStopSignal(task, parsed, options = {}) {
+      if (!task || !parsed || parsed.terminal !== true) {
+        return false;
+      }
+      const run = state.taskRun || {};
+      const currentIndex = Number(run.currentIndex || 0);
+      const group = getCurrentBatchTaskGroup();
+      const total = Number(
+        group && group.totalTaskCount
+          ? group.totalTaskCount
+          : (Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0),
+      );
+      const hasNextTask = currentIndex + 1 < total;
+
+      if (parsed.legacy) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][LEGACY_STOP_SIGNAL_COMPAT] signal=${parsed.signal || '-'} action=treat-as-model-stop`,
+        );
+      }
+
+      markTaskFinishedByModelStop(task, {
+        reason: parsed.reason || 'model-stop-signal',
+        signal: parsed.signal || TASK_DONE_SIGNAL,
+        source: options.source || parsed.source || '-',
+      });
+
+      ToolboxShell.appendLog(
+        '[AUTOQ][TASK][MODEL_STOP_SIGNAL] '
+        + `task=${task.title || '-'} `
+        + `taskId=${task.id || '-'} `
+        + `index=${currentIndex} `
+        + `total=${total} `
+        + `hasNextTask=${hasNextTask ? 1 : 0} `
+        + `reason=${parsed.reason || '-'} `
+        + `legacy=${parsed.legacy ? 1 : 0}`,
+      );
+
+      clearTerminalVerificationState('model-stop-signal');
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.waitingStartedAt = 0;
+      state.idleSince = 0;
+
+      if (hasNextTask) {
+        moveToNextTaskOrStopAfterModelStop('model-stop-signal');
+        return true;
+      }
+
+      stopEntireBatchTaskGroup('all-tasks-finished-by-model-stop', {
+        finalStep: 'all-done',
+        markCurrent: false,
+        logStop: true,
+      });
+      return true;
+    }
+
+    function shouldForceReleaseConsumedVerificationLock(run, latest) {
       if (!run || !latest) return false;
       const phase = String(state.phase || '');
       const step = String(run.currentStep || '');
+      if (phase !== 'terminal_confirming') return false;
+      if (!TERMINAL_CONFIRM_CONSUMED_RELEASE_STEPS.has(step)) return false;
+      const terminalStatus = parseTerminalStatusReplyText(latest.text || '');
+      if (!terminalStatus) return false;
       const latestTurnNo = Number(latest.turnNo || -1);
       const consumedTurnNo = Number(run.lastConsumedVerificationTurnNo || -2);
       const latestTextHash = String(latest.textHash || latest.hash || '').trim();
@@ -12826,24 +13401,115 @@ const AutoQueueModule = (() => {
       const sameTurn =
         latestTurnNo >= 0
         && consumedTurnNo >= 0
-        && latestTurnNo === consumedTurnNo;
+        && latestTurnNo <= consumedTurnNo;
       const sameHash =
         latestTextHash
         && consumedTextHash
         && latestTextHash === consumedTextHash;
-      const terminalStatus = parseTerminalStatusReplyText(latest.text || '');
-      const idle =
-        !state.waitingReply
+      return sameTurn || sameHash || isVerificationReplyAlreadyConsumed(run);
+    }
+
+    function isTerminalConfirmAlreadyConsumedButStillBlocking(run, latest) {
+      return shouldForceReleaseConsumedVerificationLock(run, latest)
+        && !state.waitingReply
         && !state.sendingNow
         && !state.taskBatchStepRunning
         && !isChatGPTActuallyBusyForTaskQueue();
-      return !!(
-        terminalStatus
-        && idle
-        && phase === 'terminal_confirming'
-        && step === 'terminal-confirm-begin'
-        && (sameTurn || sameHash)
+    }
+
+    function shouldTimeoutTerminalConfirm(run) {
+      const runtimeState = getAutoQueueRuntimeState();
+      const startedAt = Number(
+        run.terminalConfirmStartedAt
+        || (runtimeState && runtimeState.terminalConfirmStartedAt)
+        || state.terminalConfirmStartedAt
+        || 0,
       );
+      if (!startedAt) return false;
+      return Date.now() - startedAt > TERMINAL_CONFIRM_DEGRADE_TIMEOUT_MS;
+    }
+
+    function tryTerminalConfirmTimeoutDegrade(source = '-') {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        return false;
+      }
+      if (String(state.phase || '') !== 'terminal_confirming') {
+        return false;
+      }
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      if (!shouldTimeoutTerminalConfirm(run)) {
+        return false;
+      }
+      const task = getCurrentRunningTask();
+      const startedAt = Number(
+        run.terminalConfirmStartedAt
+        || (getAutoQueueRuntimeState() && getAutoQueueRuntimeState().terminalConfirmStartedAt)
+        || state.terminalConfirmStartedAt
+        || 0,
+      );
+      const elapsedMs = startedAt > 0 ? Date.now() - startedAt : 0;
+      ToolboxShell.appendLog(
+        '[TERMINAL_CONFIRM][TIMEOUT_DEGRADE_MOVE_NEXT] '
+        + `task=${task ? task.title : '-'} `
+        + `elapsedMs=${elapsedMs} source=${String(source || '-')}`,
+      );
+      releaseTerminalVerificationLock('terminal-confirm-timeout-degrade');
+      if (task && task.status !== 'completed') {
+        markTaskStatus(task, 'completed');
+        task.finishReason = 'terminal-confirm-timeout-degraded';
+      }
+      scheduleNextBatchTaskStep('move-next-after-terminal-confirm-timeout', 200, {
+        reason: 'terminal-confirm-timeout-degraded',
+        source: String(source || '-'),
+      });
+      return true;
+    }
+
+    function tryAutoReleaseConsumedTerminalVerificationLock(actionName = '-') {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        return false;
+      }
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const latestDiag = getLatestAssistantSnapshotForAutoQueueBoundary(
+        `auto-release-consumed-terminal:${actionName}`,
+      );
+      const latestText = String(latestDiag && latestDiag.text || '');
+      const latestIsTerminal = isTerminalStatusReplyText(latestText);
+      const pendingVerification = String(run.pendingSendKind || '') === 'verification'
+        || String(run.pendingReplyKind || '') === 'verification';
+
+      if (
+        !pendingVerification
+        && !run.afterTerminalConfirmWaitingVerify
+        && !run.doneSignalVerificationRunning
+      ) {
+        return false;
+      }
+
+      if (
+        pendingVerification
+        && (run.latestIsTerminalText === true || latestIsTerminal)
+        && isVerificationReplyAlreadyConsumed(run)
+      ) {
+        ToolboxShell.appendLog(
+          '[TERMINAL_VERIFY_LOCK][AUTO_RELEASE_CONSUMED_TERMINAL] '
+          + `action=${String(actionName || '-')} `
+          + `latestTurnNo=${Number(latestDiag && latestDiag.turnNo || run.latestTurnNo || -1)} `
+          + `lastConsumedVerificationTurnNo=${Number(run.lastConsumedVerificationTurnNo || -1)}`,
+        );
+        releaseTerminalVerificationLock('consumed-terminal-verification-reply');
+        scheduleNextBatchTaskStep('move-next-after-terminal-verification', 200, {
+          reason: 'consumed-terminal-verification-reply',
+          source: String(actionName || '-'),
+        });
+        return true;
+      }
+
+      if (latestDiag && shouldForceReleaseConsumedVerificationLock(run, latestDiag)) {
+        return finalizeAlreadyConsumedTerminalConfirm(run, latestDiag, `auto-release:${actionName}`);
+      }
+
+      return false;
     }
 
     function finalizeAlreadyConsumedTerminalConfirm(run, latest, source = '-') {
@@ -12855,18 +13521,10 @@ const AutoQueueModule = (() => {
         + `turnNo=${Number(latest && latest.turnNo || -1)} `
         + `textLen=${String(latest && latest.text || '').length}`,
       );
-      run.pendingSendKind = null;
-      run.pendingReplyKind = null;
-      run.doneSignalVerificationRunning = false;
-      run.afterTerminalConfirmWaitingVerify = false;
-      run.verificationSendInFlight = false;
-      run.verificationUploadInFlight = false;
-      run.verificationRepairInFlight = false;
+      releaseTerminalVerificationLock('already-consumed-terminal-finalize');
+      run = ensureTaskRunVerificationFields(state.taskRun || {});
       run.verificationSendRetrying = false;
-      run.terminalVerifyLockBlockCount = 0;
-      run.terminalConfirming = false;
       state.taskRun = run;
-      state.terminalConfirming = false;
       state.waitingReply = false;
       state.sendingNow = false;
       state.replyBecameBusy = false;
@@ -12884,6 +13542,9 @@ const AutoQueueModule = (() => {
     }
 
     function tryRecoverTerminalConfirmBeginStuck(source = '-') {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        return false;
+      }
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
       const phase = String(state.phase || '');
       const step = String(run.currentStep || '');
@@ -12982,8 +13643,12 @@ const AutoQueueModule = (() => {
     }
 
     function tryConsumeReadyVerificationReplyBeforeLock(source) {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        clearTerminalVerificationStateIfStale(source);
+        return false;
+      }
       const sourceText = String(source || '-');
-      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      let run = ensureTaskRunVerificationFields(state.taskRun || {});
 
       if (run.verificationConsumeInFlight === true) {
         return false;
@@ -13023,7 +13688,7 @@ const AutoQueueModule = (() => {
           if (isTerminalConfirmAlreadyConsumedButStillBlocking(run, latest)) {
             return finalizeAlreadyConsumedTerminalConfirm(run, latest, sourceText);
           }
-          return true;
+          return false;
         }
 
         const task = getCurrentRunningTask();
@@ -13045,15 +13710,9 @@ const AutoQueueModule = (() => {
           + ` phase=${phase}`,
         );
 
-        run.pendingSendKind = null;
-        run.pendingReplyKind = null;
-        run.doneSignalVerificationRunning = false;
-        run.afterTerminalConfirmWaitingVerify = false;
+        releaseTerminalVerificationLock('verification-reply-consumed');
+        run = ensureTaskRunVerificationFields(state.taskRun || {});
         run.verifyReplyTextForResend = '';
-        run.verificationSendInFlight = false;
-        run.verificationUploadInFlight = false;
-        run.verificationRepairInFlight = false;
-        run.verificationSendRetrying = false;
         run.lastConsumedVerificationTurnId = latestTurnId;
         run.lastConsumedVerificationTurnNo = Number(latest.turnNo || -1);
         run.lastConsumedVerificationTextHash = String(latest.textHash || '');
@@ -13108,6 +13767,9 @@ const AutoQueueModule = (() => {
     }
 
     function repairVerificationSendWaitButtonStaleState(source) {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        return false;
+      }
       const sourceText = String(source || '-');
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
 
@@ -13602,7 +14264,19 @@ const AutoQueueModule = (() => {
     }
 
     function blockTaskAdvanceDuringTerminalVerification(actionName) {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        clearTerminalVerificationStateIfStale(actionName);
+        return false;
+      }
       const actionText = String(actionName || '-');
+
+      if (tryTerminalConfirmTimeoutDegrade(`block:${actionText}`)) {
+        return false;
+      }
+
+      if (tryAutoReleaseConsumedTerminalVerificationLock(actionText)) {
+        return false;
+      }
 
       if (tryConsumeReadyVerificationReplyBeforeLock(`blockTaskAdvanceDuringTerminalVerification:${actionText}`)) {
         return false;
@@ -13647,7 +14321,7 @@ const AutoQueueModule = (() => {
     }
 
     function markCurrentTaskCompleted(options = {}) {
-      const task = getCurrentRunningTask();
+      const task = getCurrentTaskStrict('markCurrentTaskCompleted');
       if (!task) {
         return false;
       }
@@ -13676,10 +14350,18 @@ const AutoQueueModule = (() => {
       return true;
     }
 
+    /** @deprecated 统一 STOP 模式请使用 markTaskFinishedByModelStop。 */
     function markCurrentTaskNoMoreContent(options = {}) {
       const task = getCurrentRunningTask();
       if (!task) {
         return false;
+      }
+      if (!isLegacyTerminalVerificationEnabled()) {
+        const replyText = getLastAssistantReplyText();
+        const stopParsed = typeof parseBatchStopSignal === 'function'
+          ? parseBatchStopSignal(replyText, 'markCurrentTaskNoMoreContent-deprecated')
+          : { terminal: true, reason: 'legacy-no-more-as-stop', signal: TASK_DONE_SIGNAL, legacy: true };
+        return handleBatchStopSignal(task, stopParsed, { source: 'markCurrentTaskNoMoreContent-deprecated' });
       }
 
       const finishReason = String(options.reason || 'no-more-content');
@@ -13698,10 +14380,18 @@ const AutoQueueModule = (() => {
       return true;
     }
 
+    /** @deprecated 统一 STOP 模式请使用 markTaskFinishedByModelStop。 */
     function markCurrentTaskBlocked(options = {}) {
       const task = getCurrentRunningTask();
       if (!task) {
         return false;
+      }
+      if (!isLegacyTerminalVerificationEnabled()) {
+        const replyText = getLastAssistantReplyText();
+        const stopParsed = typeof parseBatchStopSignal === 'function'
+          ? parseBatchStopSignal(replyText, 'markCurrentTaskBlocked-deprecated')
+          : { terminal: true, reason: 'legacy-blocked-as-stop', signal: TASK_DONE_SIGNAL, legacy: true };
+        return handleBatchStopSignal(task, stopParsed, { source: 'markCurrentTaskBlocked-deprecated' });
       }
 
       const finishReason = String(options.reason || 'need-input');
@@ -13736,7 +14426,22 @@ const AutoQueueModule = (() => {
       return result.passed === true;
     }
 
+    /** @deprecated 统一 STOP 模式下不再使用；仅 verifyAfterDoneSignal=true 时保留。 */
     function beginTerminalConfirm(options) {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        const opts = options && typeof options === 'object' ? options : {};
+        const task = getCurrentRunningTask();
+        const replyText = String(opts.replyText || '');
+        const stopParsed = typeof parseBatchStopSignal === 'function'
+          ? parseBatchStopSignal(replyText, `begin-terminal-confirm-deprecated:${opts.source || '-'}`)
+          : null;
+        if (task && stopParsed && stopParsed.terminal) {
+          handleBatchStopSignal(task, stopParsed, { source: `begin-terminal-confirm-deprecated:${opts.source || '-'}` });
+          return { ok: true, reason: 'unified-stop-handled' };
+        }
+        clearTerminalVerificationState('begin-terminal-confirm-deprecated');
+        return { ok: false, reason: 'deprecated-unified-stop' };
+      }
       const runtimeState = getAutoQueueRuntimeState();
       const opts = options && typeof options === 'object' ? options : {};
 
@@ -13809,6 +14514,9 @@ const AutoQueueModule = (() => {
 
       runtimeState.terminalConfirming = true;
       runtimeState.terminalConfirmStartedAt = Date.now();
+      run.terminalConfirmStartedAt = runtimeState.terminalConfirmStartedAt;
+      state.terminalConfirmStartedAt = runtimeState.terminalConfirmStartedAt;
+      state.taskRun = run;
       runtimeState.terminalConfirmSignal = signalInfo.signal;
       runtimeState.terminalConfirmFirstText = normalizeTerminalReplyText(opts.replyText);
       runtimeState.terminalConfirmSecondText = '';
@@ -14434,6 +15142,15 @@ const AutoQueueModule = (() => {
     function stopBatchTaskGroupAfterTerminalConfirm(options) {
       const runtimeState = getAutoQueueRuntimeState();
       const opts = options && typeof options === 'object' ? options : {};
+      const stopReasonPreview = String(opts.reason || 'terminal-confirm-stop');
+      const allDoneBlock = shouldBlockBatchAllDoneStop(stopReasonPreview);
+      if (allDoneBlock.blocked) {
+        scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+          reason: `terminal-confirm-stop-blocked:${stopReasonPreview}`,
+          source: 'stopBatchTaskGroupAfterTerminalConfirm',
+        });
+        return;
+      }
 
       if (!runtimeState) {
         ToolboxShell.appendLog('[TERMINAL_CONFIRM][STOP_FAILED] reason=missing-state');
@@ -14535,35 +15252,20 @@ const AutoQueueModule = (() => {
       }
 
       const task = getCurrentRunningTask();
-      const profile = getActiveTaskProfile();
-      const resolved = task
-        ? resolveTaskContinueSettings(task, profile, { log: false })
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, `force-stop:${source || '-'}`)
         : null;
-      const doneSignal = resolved && resolved.actualDoneSignal
-        ? resolved.actualDoneSignal
-        : TERMINAL_CONFIRM_SIGNAL_DONE;
-
-      if (!isExactBatchDoneSignalText(replyText, doneSignal)) {
+      if (!stopParsed || !stopParsed.terminal) {
         return false;
       }
 
-      const run = ensureTaskRunVerificationFields(state.taskRun || {});
-      state.taskRun = run;
       const sourceText = String(source || '-');
-
-      if (state.terminalConfirming) {
-        ToolboxShell.appendLog(
-          `[BATCH_FLOW][DONE_SIGNAL_DURING_TERMINAL_CONFIRM] task=${task && task.title ? task.title : '-'} source=${sourceText}`,
-        );
-        return false;
-      }
-
       ToolboxShell.appendLog(
-        `[BATCH_FLOW][DONE_SIGNAL_FIRST_SEEN_REQUIRE_TERMINAL_CONFIRM] task=${task && task.title ? task.title : '-'} source=${sourceText}`,
+        `[BATCH_FLOW][MODEL_STOP_SIGNAL] task=${task && task.title ? task.title : '-'} source=${sourceText}`,
       );
 
       if (!task) {
-        failCurrentTask('done-signal-without-current-task');
+        failCurrentTask('stop-signal-without-current-task');
         return true;
       }
 
@@ -14572,14 +15274,7 @@ const AutoQueueModule = (() => {
       state.waitingStartedAt = 0;
       state.idleSince = 0;
 
-      const beginResult = beginTerminalConfirm({
-        source: 'batch-done-signal-intercept:' + sourceText,
-        taskIndex: Number(run.currentIndex || 0),
-        taskId: task.id || '',
-        replyText,
-      });
-
-      return !!(beginResult && beginResult.ok);
+      return handleBatchStopSignal(task, stopParsed, { source: `force-stop:${sourceText}` });
     }
 
     function recordReplyClassifyDecision(decision) {
@@ -14639,30 +15334,21 @@ const AutoQueueModule = (() => {
     }
 
     function tryStopBatchOnReplyClassify(replyText, task) {
-      if (typeof classifyBatchReply !== 'function') {
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, 'tryStopBatchOnReplyClassify')
+        : null;
+      if (!stopParsed || !stopParsed.terminal) {
         return false;
       }
-
-      const isGenerating = isRawAssistantGeneratingSignals();
-      const decision = typeof classifyReplyState === 'function'
-        ? mapReplyStateToBatchDecision(classifyReplyState(replyText, isGenerating))
-        : classifyBatchReply(replyText, { isGenerating });
-      recordReplyClassifyDecision(decision);
-
+      recordReplyClassifyDecision({
+        shouldStop: true,
+        status: 'stop',
+        reason: stopParsed.reason,
+      });
       ToolboxShell.appendLog(
-        `[BATCH][REPLY_CLASSIFY] shouldStop=${decision.shouldStop ? 1 : 0} `
-        + `status=${decision.status} reason=${decision.reason}`,
+        `[BATCH][REPLY_CLASSIFY] shouldStop=1 status=stop reason=${stopParsed.reason}`,
       );
-
-      if (!decision.shouldStop) {
-        return false;
-      }
-
-      if (decision.status === 'done') {
-        return false;
-      }
-
-      return beginTerminalConfirmForReplyClassify(replyText, task, decision, 'reply-classify');
+      return handleBatchStopSignal(task, stopParsed, { source: 'reply-classify' });
     }
 
     function tryStopBatchOnCopyHotkeyTerminalResult(result, task) {
@@ -14670,23 +15356,18 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      const status = String(result.batchReplyClassifyStatus || 'blocked');
-      const classifyReason = String(result.batchReplyClassifyReason || result.reason || '-');
-      const decision = {
+      const replyText = getCurrentTaskReplyTextForVerify(task, getLastAssistantReplyText(), {
+        preferOriginalTaskReply: true,
+      });
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, 'copy-hotkey')
+        : { terminal: true, reason: 'copy-hotkey-terminal', signal: TASK_DONE_SIGNAL, legacy: false };
+      recordReplyClassifyDecision({
         shouldStop: true,
-        status,
-        reason: classifyReason,
-      };
-      recordReplyClassifyDecision(decision);
-
-      return beginTerminalConfirmForReplyClassify(
-        getCurrentTaskReplyTextForVerify(task, getLastAssistantReplyText(), {
-          preferOriginalTaskReply: true,
-        }),
-        task,
-        decision,
-        'copy-hotkey',
-      );
+        status: 'stop',
+        reason: stopParsed.reason || 'copy-hotkey',
+      });
+      return handleBatchStopSignal(task, stopParsed, { source: 'copy-hotkey' });
     }
 
     function tryStopNonTaskAutoQueueOnTerminalReply(replyText, source = 'reply-settled') {
@@ -14916,7 +15597,7 @@ const AutoQueueModule = (() => {
 
     async function completeCurrentTaskAndMoveNextOnce(reason = 'terminal-done', options = {}) {
       const run = ensureBatchTransitionFlags();
-      const task = getCurrentRunningTask();
+      const task = getCurrentTaskStrict('completeCurrentTaskAndMoveNextOnce');
       const taskId = task && task.id ? String(task.id) : '';
       const taskName = task && task.title ? task.title : '-';
       const reasonText = String(reason || 'terminal-done');
@@ -14967,7 +15648,7 @@ const AutoQueueModule = (() => {
         );
         setBatchTaskGroupDisplayState('running', 'terminal-confirm-done-moving-next');
         if (task) {
-          if (task.status !== 'completed') {
+          if (task.status !== 'completed' && task.status !== 'finished_by_model_stop') {
             markCurrentTaskCompleted({
               taskIndex: Number(run.currentIndex || 0),
               taskId: task.id || '',
@@ -14984,6 +15665,14 @@ const AutoQueueModule = (() => {
           deferContinueSchedule: true,
         });
         if (!moved) {
+          const allDoneBlock = shouldBlockBatchAllDoneStop('all-done');
+          if (allDoneBlock.blocked) {
+            scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+              reason: `complete-move-next-all-done-blocked:${reasonText || '-'}`,
+              source: 'completeCurrentTaskAndMoveNextOnce',
+            });
+            return false;
+          }
           ToolboxShell.appendLog(
             `[BATCH_TASK_GROUP][COMPLETE_MOVE_NEXT][NO_NEXT] task=${taskName} reason=${reasonText}`,
           );
@@ -14998,7 +15687,7 @@ const AutoQueueModule = (() => {
           return false;
         }
 
-        const nextTask = getCurrentRunningTask();
+        const nextTask = getCurrentTaskStrict('completeCurrentTaskAndMoveNextOnce:after-move');
         const homeOk = await ensureHomeBeforeBatchTaskStart(nextTask, 'after-terminal-done-move-next');
         if (!homeOk) {
           ToolboxShell.appendLog(
@@ -15399,6 +16088,14 @@ const AutoQueueModule = (() => {
       );
 
       if (!Array.isArray(run.enabledTaskIds) || nextIndex >= run.enabledTaskIds.length) {
+        const allDoneBlock = shouldBlockBatchAllDoneStop('all-done');
+        if (allDoneBlock.blocked) {
+          scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+            reason: `move-to-next-all-done-blocked:${fromReason || '-'}`,
+            source: 'moveToNextTask',
+          });
+          return false;
+        }
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][ALL_DONE]');
         ToolboxShell.appendLog('[BATCH_TASK_GROUP][DONE] reason=all-tasks-finished');
         ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][STEP] task=- step=all-done');
@@ -15487,6 +16184,7 @@ const AutoQueueModule = (() => {
       syncCurrentTaskVerificationContext(nextTask, { resetState: true });
       clearBatchTaskStuckWatch(run, 'next-task');
       run.currentIndex = nextIndex;
+      syncRunCurrentTaskIdFromIndex(run, 'moveToNextTask');
       run.currentTaskFailCount = 0;
       run.currentQuestionText = '';
       run.currentExpectedAnswer = '';
@@ -17144,6 +17842,20 @@ const AutoQueueModule = (() => {
       log(`任务失败，跳过并继续下一个：${task ? task.title : '-'} (${reasonText})`);
       ToolboxShell.setStatus(`任务失败，继续下一个：${reasonText}`);
 
+      const runAfterFail = state.taskRun || {};
+      const nextIndexAfterFail = Number(runAfterFail.currentIndex || 0) + 1;
+      const hasNextTaskAfterFail = Array.isArray(runAfterFail.enabledTaskIds)
+        && nextIndexAfterFail < runAfterFail.enabledTaskIds.length;
+      if (hasNextTaskAfterFail) {
+        ToolboxShell.appendLog(
+          '[BATCH_TASK_GROUP][CONTINUE_NEXT_AFTER_FAILURE] '
+          + `reason=${reasonText || '-'} `
+          + `fromIndex=${Number(runAfterFail.currentIndex || 0)} `
+          + `toIndex=${nextIndexAfterFail} `
+          + `task=${task ? task.title : '-'}`,
+        );
+      }
+
       logBatchTaskGroupStepEnd('skip-task', 'move-next', 0, { reason: reasonText });
 
       setTimeout(() => {
@@ -17157,6 +17869,14 @@ const AutoQueueModule = (() => {
               deferContinueSchedule: true,
             });
             if (!moved) {
+              const allDoneBlock = shouldBlockBatchAllDoneStop('all-done-after-failures');
+              if (allDoneBlock.blocked) {
+                scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+                  reason: `skip-task-all-done-blocked:${reasonText || '-'}`,
+                  source: 'skipCurrentTaskWithFailure',
+                });
+                return;
+              }
               ToolboxShell.appendLog(
                 `[BATCH_TASK_GROUP][SKIP_TASK][NO_NEXT] reason=${reasonText} action=complete-batch`,
               );
@@ -17460,6 +18180,9 @@ const AutoQueueModule = (() => {
     }
 
     function checkVerificationWatchdog(reason = 'tick') {
+      if (!isLegacyTerminalVerificationEnabled()) {
+        return false;
+      }
       const run = ensureTaskRunVerificationFields(state.taskRun || {});
       const step = String(run.currentStep || '');
       const isVerifyWaitStep = step === 'verify-wait-reply'
@@ -18239,114 +18962,38 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      const run = state.taskRun;
       const latestSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary(`task-done:${source}`);
       const answerReplyText = normalizeTerminalReplyText(
         latestSnapshot.ok ? latestSnapshot.text : getCurrentTaskReplyTextForVerify(task, replyText, {
           preferOriginalTaskReply: true,
         }),
       );
-      const signalInfo = detectStrictTerminalSignal(answerReplyText);
+      const stopParsed = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(answerReplyText, `task-done:${source}`)
+        : null;
 
       ToolboxShell.appendLog(
         `[AUTOQ][TASK_DONE][ENTER] source=${source} task=${task.title || '-'} `
-        + `terminalMatched=${signalInfo.matched ? 1 : 0} terminalConfirming=${state.terminalConfirming ? 1 : 0} `
-        + `terminalConfirmPassed=${state.terminalConfirmPassed ? 1 : 0} running=${state.running ? 1 : 0} `
+        + `stopMatched=${stopParsed && stopParsed.terminal ? 1 : 0} running=${state.running ? 1 : 0} `
         + `turnId=${latestSnapshot.turnId || '-'} turnNo=${Number(latestSnapshot.turnNo || -1)}`,
       );
 
-      if (!signalInfo.matched) {
+      if (!stopParsed || !stopParsed.terminal) {
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_DONE][SKIP] source=${source} reason=not-exact-terminal`,
+          `[AUTOQ][TASK_DONE][SKIP] source=${source} reason=not-exact-stop-signal`,
         );
         return false;
       }
 
       if (!isAssistantSnapshotBelongsToCurrentTask(latestSnapshot, `task-done:${source}`)) {
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_DONE][SKIP] source=${source} reason=stale-terminal-signal `
-          + `taskIndex=${Number(run.currentIndex || 0) + 1}`,
+          `[AUTOQ][TASK_DONE][SKIP] source=${source} reason=stale-stop-signal `
+          + `taskIndex=${Number(state.taskRun.currentIndex || 0) + 1}`,
         );
         return false;
       }
 
-      syncCurrentTaskVerificationContext(task, { resetState: false, keepRetryCount: true });
-
-      const profileForVerify = profile || (typeof getActiveTaskProfile === 'function' ? getActiveTaskProfile() : null);
-      const resolvedForVerify = resolved || resolveTaskContinueSettings(task, profileForVerify, { log: false });
-
-      if (state.terminalConfirmPassed) {
-        if (run.afterTerminalConfirmWaitingVerify) {
-          ToolboxShell.appendLog(
-            `[AUTOQ][TASK_DONE][SKIP] source=${source} reason=waiting-final-verification-reply`,
-          );
-          return false;
-        }
-
-        return completeTerminalConfirm({
-          source: `task-done:${source}`,
-          signal: signalInfo.signal,
-          signalType: signalInfo.type || classifyTerminalSignal(signalInfo.signal).type,
-          taskIndex: Number(run.currentIndex || 0),
-          taskId: task.id || '',
-        });
-      }
-
-      if (run.doneSignalVerificationRunning) {
-        const doneCheck = isTaskDoneSignalMatched(answerReplyText, resolvedForVerify.actualDoneSignal);
-
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_BATCH][VERIFY_REPLY_READY] task=${task.title || '-'} matched=${doneCheck.matched ? 1 : 0} source=${source}`,
-        );
-
-        if (!doneCheck.matched) {
-          return false;
-        }
-
-        if (isChatGPTActuallyBusyForTaskQueue()) {
-          return runTaskTerminalVerification({
-            source: `task-done-busy-after-verify:${source || '-'}`,
-            signal: signalInfo.signal,
-            signalType: signalInfo.type,
-            initialText: answerReplyText,
-          });
-        }
-
-        const beginResult = beginTerminalConfirm({
-          source: `verify-reply:${source || 'done-signal-check'}`,
-          taskIndex: Number(run.currentIndex || 0),
-          taskId: task.id || '',
-          signal: signalInfo.signal,
-          signalType: signalInfo.type,
-          replyText: answerReplyText,
-        });
-
-        return !!(beginResult && beginResult.ok);
-      }
-
-      ToolboxShell.appendLog(
-        `[AUTOQ][TASK_DONE][VERIFY_REQUIRED] source=${source} task=${task.title || '-'}`,
-      );
-
-      if (isChatGPTActuallyBusyForTaskQueue()) {
-        ToolboxShell.appendLog(
-          `[AUTOQ][TASK_DONE][VERIFY_DEFER] source=${source} reason=assistant-busy`,
-        );
-        scheduleNextBatchTaskStep('verify-after-done-signal-busy', 1200, {
-          reason: 'assistant-busy-before-verify',
-          source: `task-done-busy:${source || '-'}`,
-        });
-        return false;
-      }
-
-      const verifyResult = await runDoneSignalVerification(
-        task,
-        profileForVerify,
-        resolvedForVerify,
-        answerReplyText,
-      );
-
-      return !!(verifyResult && verifyResult.ok);
+      return handleBatchStopSignal(task, stopParsed, { source: `task-done:${source}` });
     }
 
     function canAllowVerificationSend(run, source = '-') {
@@ -18434,8 +19081,22 @@ const AutoQueueModule = (() => {
       return { block: false, consumed: false, reason: '' };
     }
 
+    /** @deprecated 统一 STOP 模式下不再使用；仅 verifyAfterDoneSignal=true 时保留。 */
     async function runDoneSignalVerification(task, profile, resolved, replyText) {
       void profile;
+      void resolved;
+
+      if (!isLegacyTerminalVerificationEnabled()) {
+        clearTerminalVerificationState('runDoneSignalVerification-deprecated');
+        const stopParsed = typeof parseBatchStopSignal === 'function'
+          ? parseBatchStopSignal(replyText, 'runDoneSignalVerification-deprecated')
+          : null;
+        if (task && stopParsed && stopParsed.terminal) {
+          handleBatchStopSignal(task, stopParsed, { source: 'runDoneSignalVerification-deprecated' });
+          return { ok: true, reason: 'unified-stop-handled' };
+        }
+        return { ok: false, reason: 'deprecated-unified-stop' };
+      }
 
       if (!task) {
         return { ok: false, reason: 'missing-task' };
@@ -21382,6 +22043,14 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      const stopParsedEarly = typeof parseBatchStopSignal === 'function'
+        ? parseBatchStopSignal(replyText, 'handle-task-reply-ready')
+        : null;
+      if (stopParsedEarly && stopParsedEarly.terminal === true) {
+        handleBatchStopSignal(task, stopParsedEarly, { source: 'handle-task-reply-ready' });
+        return;
+      }
+
       if (tryStopBatchOnReplyClassify(replyText, task)) {
         return;
       }
@@ -21391,11 +22060,7 @@ const AutoQueueModule = (() => {
         logReplyStateDecision('handle-task-reply-ready', {
           replyLength: String(replyText || '').length,
           isGenerating: isRawAssistantGeneratingSignals(),
-          detectedTerminal: replyState.type === 'done'
-            || replyState.type === 'blocked'
-            || replyState.type === 'no_more_content'
-            ? replyState.type
-            : 'none',
+          detectedTerminal: replyState.type === 'stop' ? 'stop' : 'none',
           stateType: replyState.type,
           reason: replyState.reason,
           nextAction: getReplyStateNextAction(replyState, { waitingReply: false }),
@@ -21409,7 +22074,7 @@ const AutoQueueModule = (() => {
         resolved.actualDoneSignal,
       );
 
-      if (state.terminalConfirming) {
+      if (isLegacyTerminalVerificationEnabled() && state.terminalConfirming) {
         void runTerminalConfirmSecondRead('wait-reply-recover').catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] terminal confirm during reply-ready failed', err);
@@ -21420,7 +22085,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (state.taskRun && state.taskRun.afterTerminalConfirmWaitingVerify) {
+      if (isLegacyTerminalVerificationEnabled() && state.taskRun && state.taskRun.afterTerminalConfirmWaitingVerify) {
         const verifyRun = ensureTaskRunVerificationFields(state.taskRun);
         const stableState = updateCurrentTaskReplyStableState(replyText);
 
@@ -21475,7 +22140,7 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (state.taskRun && state.taskRun.doneSignalVerificationRunning) {
+      if (isLegacyTerminalVerificationEnabled() && state.taskRun && state.taskRun.doneSignalVerificationRunning) {
         const doneCheck = isTaskDoneSignalMatched(replyText, resolved.actualDoneSignal);
 
         ToolboxShell.appendLog(
@@ -21732,6 +22397,11 @@ const AutoQueueModule = (() => {
 
         return;
       }
+
+      if (!isLegacyTerminalVerificationEnabled()) {
+        clearTerminalVerificationStateIfStale('handle-task-reply-ready-after-verify-skip');
+      }
+
       setTaskBatchStep('initial-reply-done', task, { log: false });
       ToolboxShell.appendLog('[AUTO_QUEUE][BATCH][INITIAL_REPLY_DONE]');
       setTaskBatchStep('check-done-signal', task);
@@ -21754,12 +22424,12 @@ const AutoQueueModule = (() => {
 
       if (!matched) {
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_BATCH][CONTINUE_REQUIRED] task=${task.title || '-'} reason=no-done-signal action=send-continue-current-task`,
+          `[AUTOQ][TASK_BATCH][CONTINUE_REQUIRED] task=${task.title || '-'} reason=no-stop-signal action=send-continue-current-task`,
         );
         ToolboxShell.appendLog(
           '[AUTOQ][SEND_CONTINUE_DECISION] '
           + `taskId=${task.id || '-'} sentCount=${Number(state.sentCount || 0)} `
-          + `latestAssistantLen=${String(replyText || '').length} reason=no-terminal`,
+          + `latestAssistantLen=${String(replyText || '').length} reason=no-stop-signal`,
         );
       }
 
@@ -25128,6 +25798,19 @@ const AutoQueueModule = (() => {
         }
       }
 
+      if (typeof ToolboxShell !== 'undefined') {
+        if (typeof ToolboxShell.logBatchStatusLayoutDebug === 'function') {
+          ToolboxShell.logBatchStatusLayoutDebug('after-render-batch-status', {
+            debugEnabled: typeof isAdvancedDebugEnabled === 'function' && isAdvancedDebugEnabled(),
+          });
+        }
+        if (typeof ToolboxShell.repairToolboxLayoutIfCompressed === 'function') {
+          window.setTimeout(() => {
+            ToolboxShell.repairToolboxLayoutIfCompressed('after-render-batch-status');
+          }, 50);
+        }
+      }
+
       syncRuntimeTaskPhase();
       if (typeof UploadModule !== 'undefined' && typeof UploadModule.renderToolboxTopStatus === 'function') {
         UploadModule.renderToolboxTopStatus({ heavy: false });
@@ -26149,6 +26832,17 @@ const AutoQueueModule = (() => {
       const isTaskMode = config.promptMode === 'task';
       const opts = options && typeof options === 'object' ? options : {};
       const reason = String(opts.reason || '').trim();
+      const allDoneBlock = shouldBlockBatchAllDoneStop(
+        reason || (opts.finalStep === 'all-done' ? 'all-done' : ''),
+        opts,
+      );
+      if (allDoneBlock.blocked) {
+        scheduleNextBatchTaskStep('all-done-blocked-running-task', 800, {
+          reason: `stop-all-done-blocked:${reason || '-'}`,
+          source: 'stop',
+        });
+        return;
+      }
       const markCurrent = opts.markCurrent !== false;
       const logStop = opts.logStop !== false;
       const stopMeta = resolveBatchStopDisplayMeta(reason);
@@ -29917,7 +30611,7 @@ const AutoQueueModule = (() => {
         ToolboxShell.appendLog('[AUTOQ][MAYBE_SEND_NEXT_BLOCKED_TRANSITION_IN_FLIGHT] source=maybe-send-next');
         return;
       }
-      if (tryRecoverTerminalConfirmBeginStuck('maybeSendNextTask')) {
+      if (isLegacyTerminalVerificationEnabled() && tryRecoverTerminalConfirmBeginStuck('maybeSendNextTask')) {
         return;
       }
       if (deferBatchSendBecauseBackgroundThrottled('maybeSendNextTask')) {
@@ -29963,105 +30657,119 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      const verifyPayload = getAutoQueueComposerPayloadState('verify-stale-check');
-      if (
-        isStaleVerificationPendingState()
-        && verifyPayload.textLen === 0
-        && Number(verifyPayload.readyCount || 0) === 0
-        && Number(verifyPayload.uploadingCount || 0) === 0
-      ) {
-        ToolboxShell.appendLog(
-          '[TASK_VERIFY_FINAL][EMPTY_COMPOSER_DURING_VERIFY] action=resend-verification source=maybeSendNextTask',
-        );
-      }
-
-      if (isStaleVerificationPendingState()) {
-        void resumeStaleVerificationPendingState('maybeSendNextTask').catch((error) => {
-          const errText = error && error.message ? error.message : String(error);
-          console.error('[ChatGPT toolbox] resumeStaleVerificationPendingState failed', error);
-          if (error && error.stack) {
-            console.error(error.stack);
-          }
-          ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][RESUME_ERROR] source=maybeSendNextTask error=${errText}`);
-        });
-        logBatchPendingCheck('resume-stale-verification');
-        return;
-      }
-
-      const runForVerifyResume = state.taskRun || {};
-      const stepForVerifyResume = String(runForVerifyResume.currentStep || '');
-
-      if (
-        hasAnyVerificationPendingState()
-        && stepForVerifyResume === 'verification-send-retry'
-        && !state.waitingReply
-        && !isChatGPTActuallyBusyForTaskQueue()
-      ) {
-        void resumeStaleVerificationPendingState('maybeSendNextTask:active-verification-retry', {
-          force: true,
-        }).catch((error) => {
-          const errText = error && error.message ? error.message : String(error);
-          console.error('[ChatGPT toolbox] active verification retry failed', error);
-          if (error && error.stack) {
-            console.error(error.stack);
-          }
-          ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][ACTIVE_RETRY_ERROR] source=maybeSendNextTask error=${errText}`);
-        });
-        logBatchPendingCheck('active-verification-retry');
-        return;
-      }
-
-      if (repairVerificationSendWaitButtonStaleState('maybeSendNextTask')) {
-        logBatchPendingCheck('repair-verification-send-wait-button');
-        return;
-      }
-
-      if (tryConsumeReadyVerificationReplyBeforeLock('maybeSendNextTask')) {
-        logBatchPendingCheck('consume-ready-verification-before-lock');
-        return;
-      }
-
-      if (blockTaskAdvanceDuringTerminalVerification('maybeSendNextTask')) {
-        const runForVerifyLock = ensureTaskRunVerificationFields(state.taskRun || {});
-        const runtimeStateForLock = getAutoQueueRuntimeState();
-        const staleLikeVerifyLock = String(runForVerifyLock.pendingSendKind || '') === 'verification'
-          && String(runForVerifyLock.pendingReplyKind || '') === 'verification'
-          && !(runtimeStateForLock && runtimeStateForLock.terminalConfirming === true)
-          && runForVerifyLock.afterTerminalConfirmWaitingVerify !== true
-          && runForVerifyLock.doneSignalVerificationRunning !== true;
-
-        runForVerifyLock.terminalVerifyLockBlockCount = Number(runForVerifyLock.terminalVerifyLockBlockCount || 0) + 1;
-        state.taskRun = runForVerifyLock;
-
+      if (isLegacyTerminalVerificationEnabled()) {
+        const verifyPayload = getAutoQueueComposerPayloadState('verify-stale-check');
         if (
-          staleLikeVerifyLock
-          && runForVerifyLock.terminalVerifyLockBlockCount >= 3
+          isStaleVerificationPendingState()
+          && verifyPayload.textLen === 0
+          && Number(verifyPayload.readyCount || 0) === 0
+          && Number(verifyPayload.uploadingCount || 0) === 0
         ) {
           ToolboxShell.appendLog(
-            `[TASK_VERIFY_FINAL][VERIFY_LOCK_STUCK_RESUME] count=${runForVerifyLock.terminalVerifyLockBlockCount} action=resume-stale`,
+            '[TASK_VERIFY_FINAL][EMPTY_COMPOSER_DURING_VERIFY] action=resend-verification source=maybeSendNextTask',
           );
-          void resumeStaleVerificationPendingState('maybeSendNextTask:verify-lock-stuck').catch((error) => {
+        }
+
+        if (isStaleVerificationPendingState()) {
+          void resumeStaleVerificationPendingState('maybeSendNextTask').catch((error) => {
             const errText = error && error.message ? error.message : String(error);
-            console.error('[ChatGPT toolbox] verify-lock-stuck resume failed', error);
+            console.error('[ChatGPT toolbox] resumeStaleVerificationPendingState failed', error);
             if (error && error.stack) {
               console.error(error.stack);
             }
-            ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][VERIFY_LOCK_STUCK_ERROR] error=${errText}`);
+            ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][RESUME_ERROR] source=maybeSendNextTask error=${errText}`);
           });
-          logBatchPendingCheck('resume-stale-verification-on-lock');
+          logBatchPendingCheck('resume-stale-verification');
           return;
         }
 
-        logBatchPendingCheck('wait-terminal-final-verification');
-        return;
-      }
+        const runForVerifyResume = state.taskRun || {};
+        const stepForVerifyResume = String(runForVerifyResume.currentStep || '');
 
-      if (state.taskRun) {
-        const runAfterVerifyLock = ensureTaskRunVerificationFields(state.taskRun);
-        if (Number(runAfterVerifyLock.terminalVerifyLockBlockCount || 0) > 0) {
-          runAfterVerifyLock.terminalVerifyLockBlockCount = 0;
-          state.taskRun = runAfterVerifyLock;
+        if (
+          hasAnyVerificationPendingState()
+          && stepForVerifyResume === 'verification-send-retry'
+          && !state.waitingReply
+          && !isChatGPTActuallyBusyForTaskQueue()
+        ) {
+          void resumeStaleVerificationPendingState('maybeSendNextTask:active-verification-retry', {
+            force: true,
+          }).catch((error) => {
+            const errText = error && error.message ? error.message : String(error);
+            console.error('[ChatGPT toolbox] active verification retry failed', error);
+            if (error && error.stack) {
+              console.error(error.stack);
+            }
+            ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][ACTIVE_RETRY_ERROR] source=maybeSendNextTask error=${errText}`);
+          });
+          logBatchPendingCheck('active-verification-retry');
+          return;
         }
+
+        if (repairVerificationSendWaitButtonStaleState('maybeSendNextTask')) {
+          logBatchPendingCheck('repair-verification-send-wait-button');
+          return;
+        }
+
+        if (tryTerminalConfirmTimeoutDegrade('maybeSendNextTask')) {
+          logBatchPendingCheck('terminal-confirm-timeout-degrade');
+          return;
+        }
+
+        if (tryAutoReleaseConsumedTerminalVerificationLock('maybeSendNextTask')) {
+          logBatchPendingCheck('auto-release-consumed-terminal-verification');
+          return;
+        }
+
+        if (tryConsumeReadyVerificationReplyBeforeLock('maybeSendNextTask')) {
+          logBatchPendingCheck('consume-ready-verification-before-lock');
+          return;
+        }
+
+        if (blockTaskAdvanceDuringTerminalVerification('maybeSendNextTask')) {
+          const runForVerifyLock = ensureTaskRunVerificationFields(state.taskRun || {});
+          const runtimeStateForLock = getAutoQueueRuntimeState();
+          const staleLikeVerifyLock = String(runForVerifyLock.pendingSendKind || '') === 'verification'
+            && String(runForVerifyLock.pendingReplyKind || '') === 'verification'
+            && !(runtimeStateForLock && runtimeStateForLock.terminalConfirming === true)
+            && runForVerifyLock.afterTerminalConfirmWaitingVerify !== true
+            && runForVerifyLock.doneSignalVerificationRunning !== true;
+
+          runForVerifyLock.terminalVerifyLockBlockCount = Number(runForVerifyLock.terminalVerifyLockBlockCount || 0) + 1;
+          state.taskRun = runForVerifyLock;
+
+          if (
+            staleLikeVerifyLock
+            && runForVerifyLock.terminalVerifyLockBlockCount >= 3
+          ) {
+            ToolboxShell.appendLog(
+              `[TASK_VERIFY_FINAL][VERIFY_LOCK_STUCK_RESUME] count=${runForVerifyLock.terminalVerifyLockBlockCount} action=resume-stale`,
+            );
+            void resumeStaleVerificationPendingState('maybeSendNextTask:verify-lock-stuck').catch((error) => {
+              const errText = error && error.message ? error.message : String(error);
+              console.error('[ChatGPT toolbox] verify-lock-stuck resume failed', error);
+              if (error && error.stack) {
+                console.error(error.stack);
+              }
+              ToolboxShell.appendLog(`[TASK_VERIFY_FINAL][VERIFY_LOCK_STUCK_ERROR] error=${errText}`);
+            });
+            logBatchPendingCheck('resume-stale-verification-on-lock');
+            return;
+          }
+
+          logBatchPendingCheck('wait-terminal-final-verification');
+          return;
+        }
+
+        if (state.taskRun) {
+          const runAfterVerifyLock = ensureTaskRunVerificationFields(state.taskRun);
+          if (Number(runAfterVerifyLock.terminalVerifyLockBlockCount || 0) > 0) {
+            runAfterVerifyLock.terminalVerifyLockBlockCount = 0;
+            state.taskRun = runAfterVerifyLock;
+          }
+        }
+      } else {
+        clearTerminalVerificationStateIfStale('maybeSendNextTask');
       }
 
       const payloadAtSendCheck = getAutoQueueComposerPayloadState('maybe-send-next-precheck');
@@ -30132,10 +30840,8 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue({
-        source: 'maybe-send-next-busy',
-      })) {
-        if (tryScheduleTerminalBusyOverride('maybe-send-next-busy')) {
+      if (config.promptMode === 'task' && isAssistantBusyNow('maybe-send-next-busy')) {
+        if (isLegacyTerminalVerificationEnabled() && tryScheduleTerminalBusyOverride('maybe-send-next-busy')) {
           logBatchPendingCheck('wait-terminal-verify');
           return;
         }
@@ -30986,11 +31692,11 @@ const AutoQueueModule = (() => {
         }
 
         if (config.promptMode === 'task') {
-          if (tryRecoverTerminalConfirmBeginStuck('tick')) {
+          if (isLegacyTerminalVerificationEnabled() && tryRecoverTerminalConfirmBeginStuck('tick')) {
             ensureTicker();
             return;
           }
-          if (checkVerificationWatchdog('batch-watchdog-tick')) {
+          if (isLegacyTerminalVerificationEnabled() && checkVerificationWatchdog('batch-watchdog-tick')) {
             return;
           }
           if (checkBatchTaskGroupStuckSkip('batch-watchdog-tick')) {
@@ -31016,13 +31722,25 @@ const AutoQueueModule = (() => {
             }
             return;
           }
-          if (repairVerificationSendWaitButtonStaleState('tick')) {
-            updateStatus('repair-verification-send-wait-button');
-            return;
-          }
-          if (tryConsumeReadyVerificationReplyBeforeLock('tick')) {
-            updateStatus('consume-ready-verification-before-lock');
-            return;
+          if (isLegacyTerminalVerificationEnabled()) {
+            if (repairVerificationSendWaitButtonStaleState('tick')) {
+              updateStatus('repair-verification-send-wait-button');
+              return;
+            }
+            if (tryTerminalConfirmTimeoutDegrade('tick')) {
+              updateStatus('terminal-confirm-timeout-degrade');
+              return;
+            }
+            if (tryAutoReleaseConsumedTerminalVerificationLock('tick')) {
+              updateStatus('auto-release-consumed-terminal-verification');
+              return;
+            }
+            if (tryConsumeReadyVerificationReplyBeforeLock('tick')) {
+              updateStatus('consume-ready-verification-before-lock');
+              return;
+            }
+          } else {
+            clearTerminalVerificationStateIfStale('tick');
           }
         }
 
@@ -32649,6 +33367,13 @@ const AutoQueueModule = (() => {
         updateChatInputStateBadge();
       }
 
+      if (!isLegacyTerminalVerificationEnabled()) {
+        repairIllegalWaitingReplyPendingSendState('foreground-resume');
+        clearTerminalVerificationStateIfStale('foreground-resume');
+        scheduleLightForegroundCatchUp(tag);
+        return;
+      }
+
       repairIllegalWaitingReplyPendingSendState('foreground-resume');
       void maybeRepairStaleBatchWaitingReply('foreground-catch-up');
       if (!state.running && isTaskBatchGroupRuntimeActive()) {
@@ -32669,6 +33394,12 @@ const AutoQueueModule = (() => {
       }
 
       if (repairVerificationSendWaitButtonStaleState('foreground-resume')) {
+        return;
+      }
+      if (tryTerminalConfirmTimeoutDegrade('foreground-resume')) {
+        return;
+      }
+      if (tryAutoReleaseConsumedTerminalVerificationLock('foreground-resume')) {
         return;
       }
       if (tryConsumeReadyVerificationReplyBeforeLock('foreground-resume')) {
