@@ -203,6 +203,71 @@
       return formatDuration(etaMs);
     }
 
+    function applyCalculatedBatchCountsFromAutoQueue() {
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || typeof AutoQueueModule.calculateBatchRuntimeStats !== 'function'
+      ) {
+        return null;
+      }
+
+      const calculated = AutoQueueModule.calculateBatchRuntimeStats();
+      if (!calculated || typeof calculated !== 'object') {
+        return null;
+      }
+
+      const completedBefore = runtimeStats.completedTaskCount;
+      const failedBefore = runtimeStats.failedTaskCount;
+      const stoppedBefore = runtimeStats.stoppedTaskCount;
+      const total = Number(calculated.totalTaskCount || 0);
+
+      runtimeStats.completedTaskCount = Number(calculated.completedTaskCount || 0);
+      runtimeStats.failedTaskCount = Number(calculated.failedTaskCount || 0);
+      runtimeStats.stoppedTaskCount = Number(calculated.stoppedTaskCount || 0);
+
+      if (total > 0 && runtimeStats.running) {
+        const autoState = typeof AutoQueueModule.getState === 'function'
+          ? AutoQueueModule.getState() || {}
+          : {};
+        const phase = String(autoState.phase || '');
+        const step = String((autoState.taskRun && autoState.taskRun.currentStep) || '');
+        const stillRunning = !!(
+          autoState.running
+          || autoState.waitingReply
+          || phase === 'running'
+          || phase === 'waiting_reply'
+          || phase === 'terminal_confirming'
+          || step === 'wait-current-reply'
+          || step === 'reply-ready'
+          || step === 'send-continue'
+        );
+
+        if (
+          stillRunning
+          && runtimeStats.completedTaskCount >= total
+          && (
+            completedBefore !== runtimeStats.completedTaskCount
+            || failedBefore !== runtimeStats.failedTaskCount
+            || stoppedBefore !== runtimeStats.stoppedTaskCount
+          )
+        ) {
+          logRuntime('STATS_CORRECTED_RUNNING_TASK', {
+            completedBefore,
+            completedAfter: runtimeStats.completedTaskCount,
+            failedBefore,
+            failedAfter: runtimeStats.failedTaskCount,
+            stoppedBefore,
+            stoppedAfter: runtimeStats.stoppedTaskCount,
+            totalTaskCount: total,
+            phase,
+            currentStep: step,
+          });
+        }
+      }
+
+      return calculated;
+    }
+
     function getAverageDurationMs() {
       const count = runtimeStats.completedTaskCount;
       if (!count) {
@@ -368,6 +433,8 @@
       }
       lastRenderKey = renderKey;
 
+      applyCalculatedBatchCountsFromAutoQueue();
+
       const appMs = runtimeStats.appStartedAt > 0 ? now - runtimeStats.appStartedAt : 0;
       const batchMs = runtimeStats.batchStartedAt > 0
         ? (runtimeStats.running
@@ -506,9 +573,16 @@
       if (runtimeStats.currentTaskStartedAt > 0) {
         const durationMs = Date.now() - runtimeStats.currentTaskStartedAt;
         runtimeStats.lastTaskDurationMs = durationMs;
-        if (stopReason === 'all-done') {
+        if (stopReason === 'all-done' || stopReason === 'all-tasks-done') {
           runtimeStats.failedRuns += 0;
-        } else if (stopReason.includes('stop') || stopReason.includes('cancel')) {
+        } else if (
+          stopReason === 'reply-classify-no-more-content'
+          || stopReason.includes('no-more-content')
+          || stopReason === 'reply-classify-blocked'
+          || stopReason.includes('need-input')
+          || stopReason.includes('stop')
+          || stopReason.includes('cancel')
+        ) {
           runtimeStats.stoppedTaskCount += 1;
         } else {
           runtimeStats.failedTaskCount += 1;
@@ -572,7 +646,24 @@
 
     function onTaskComplete(taskId, taskTitle) {
       if (!runtimeStats.currentTaskStartedAt) {
-        return;
+        logRuntime('TASK_DONE_SKIP', {
+          taskId,
+          taskTitle,
+          reason: 'no-active-task-timer',
+        });
+        return false;
+      }
+
+      const expectedTaskId = String(runtimeStats.currentTaskId || '').trim();
+      const incomingTaskId = String(taskId || '').trim();
+      if (expectedTaskId && incomingTaskId && expectedTaskId !== incomingTaskId) {
+        logRuntime('TASK_DONE_SKIP', {
+          taskId: incomingTaskId,
+          taskTitle,
+          reason: 'task-id-mismatch',
+          expectedTaskId,
+        });
+        return false;
       }
 
       const durationMs = Date.now() - runtimeStats.currentTaskStartedAt;
@@ -590,7 +681,9 @@
         taskTitle,
         durationMs,
       });
+      applyCalculatedBatchCountsFromAutoQueue();
       renderRuntimeStats(true);
+      return true;
     }
 
     function toViewModel() {

@@ -5427,6 +5427,48 @@
       return !!(nextPanel && nextToggle && nextHeader && nextContent);
     }
 
+    function findToolboxMountRoot() {
+      const selectors = [
+        'main',
+        'body',
+        '#__next',
+        '[data-testid="composer-root"]',
+        'form',
+      ];
+
+      let detectedSelector = '';
+
+      for (const selector of selectors) {
+        const node = document.querySelector(selector);
+        if (node) {
+          detectedSelector = selector;
+          console.log('[TOOLBOX][PANEL][MOUNT_ROOT_FOUND]', { selector });
+          break;
+        }
+      }
+
+      if (!detectedSelector) {
+        console.error('[TOOLBOX][PANEL][MOUNT_ROOT_NOT_FOUND]', {
+          href: location.href,
+          bodyReady: !!document.body,
+        });
+      }
+
+      // 固定定位面板始终挂到 documentElement，避免 main 等容器 overflow/transform 导致不可见。
+      if (!document.documentElement) {
+        return document.body || null;
+      }
+
+      if (detectedSelector) {
+        console.log('[TOOLBOX][PANEL][MOUNT_APPEND_TARGET]', {
+          detectedSelector,
+          appendTarget: 'documentElement',
+        });
+      }
+
+      return document.documentElement;
+    }
+
     function create() {
       if (creatingToolbox && root) {
         return root;
@@ -5444,7 +5486,7 @@
         if (root) {
           if (!document.documentElement.contains(root)) {
             try {
-              document.documentElement.appendChild(root);
+              findToolboxMountRoot().appendChild(root);
               panel = qs(`#${APP.panelId}`, root);
               titleEl = qs('.cgpt-toolbox-title', root);
               migrateToolboxToastToPanel('create-existing-root-detached');
@@ -5591,7 +5633,7 @@
         </div>
       `;
 
-      document.documentElement.appendChild(root);
+      findToolboxMountRoot().appendChild(root);
       purgeForbiddenStatusBadge('create-new-root');
 
       panel = qs(`#${APP.panelId}`, root);
@@ -10397,7 +10439,7 @@
           }
 
           if (root && !document.documentElement.contains(root)) {
-            document.documentElement.appendChild(root);
+            findToolboxMountRoot().appendChild(root);
             panel = qs(`#${APP.panelId}`, root);
             titleEl = qs('.cgpt-toolbox-title', root);
             bindEvents();

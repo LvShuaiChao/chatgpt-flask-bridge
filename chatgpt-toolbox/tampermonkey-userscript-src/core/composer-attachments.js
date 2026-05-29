@@ -696,7 +696,7 @@ const ComposerAttachments = (() => {
           UploadCriticalRuntime.logUploadTagThrottled(
             `SHARED_COMPOSER:ATTACHMENT_EVIDENCE_CACHE_HIT:${reasonText}`,
             `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_CACHE_HIT] reason=${reasonText} ageMs=${ageMs}`,
-            1000,
+            3000,
           );
         }
         return attachmentEvidenceCache.result;

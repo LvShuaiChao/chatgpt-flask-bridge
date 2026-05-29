@@ -627,7 +627,20 @@
       return records[records.length - 1] || null;
     }
 
-    let stableCheckLogAt = 0;
+    const stableCheckLogMap = new Map();
+
+    function logStableCheckThrottled(key, message) {
+      const now = Date.now();
+      const finalKey = String(key || '-');
+      const last = stableCheckLogMap.get(finalKey) || 0;
+      if (now - last < 2000) {
+        return;
+      }
+      stableCheckLogMap.set(finalKey, now);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(message);
+      }
+    }
 
     function parseTurnIdForStableCompare(turnId) {
       const raw = String(turnId || '').trim();
@@ -700,7 +713,10 @@
           stableCount = 0;
           lastSignature = '';
           lastTextChangedAt = 0;
-          ToolboxShell.appendLog('[CHAT_PAGE][copy-last-message:stable-check] state=generating');
+          logStableCheckThrottled(
+            'copy-last-message:stable-check:generating',
+            '[CHAT_PAGE][copy-last-message:stable-check] state=generating',
+          );
           await sleep(intervalMs);
           continue;
         }
@@ -715,13 +731,10 @@
           stableCount = 0;
           lastSignature = '';
           lastTextChangedAt = 0;
-          const nowNoPick = Date.now();
-          if (nowNoPick - stableCheckLogAt >= 3000) {
-            stableCheckLogAt = nowNoPick;
-            ToolboxShell.appendLog(
-              `[CHAT_PAGE][copy-last-message:stable-check] state=${picked.reason || 'no-assistant'} mode=fast`,
-            );
-          }
+          logStableCheckThrottled(
+            `copy-last-message:stable-check:no-assistant:${picked.reason || 'no-assistant'}`,
+            `[CHAT_PAGE][copy-last-message:stable-check] state=${picked.reason || 'no-assistant'} mode=fast`,
+          );
           await sleep(intervalMs);
           continue;
         }
@@ -733,7 +746,8 @@
           stableCount = 0;
           lastSignature = '';
           lastTextChangedAt = 0;
-          ToolboxShell.appendLog(
+          logStableCheckThrottled(
+            `copy-last-message:stable-check:assistant-before-baseline:${baselineTurnId}:${assistantTurnId}`,
             `[CHAT_PAGE][copy-last-message:stable-check] state=assistant-before-baseline baseline=${baselineTurnId} current=${assistantTurnId}`,
           );
           await sleep(intervalMs);
@@ -748,12 +762,10 @@
           lastTextChangedAt = nowStable;
         }
 
-        if (nowStable - stableCheckLogAt >= 3000) {
-          stableCheckLogAt = nowStable;
-          ToolboxShell.appendLog(
-            `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count || record.charCount || 0} mode=fast turn=${record.turn_id || record.turnId || '-'} quietMs=${lastTextChangedAt ? nowStable - lastTextChangedAt : 0}`,
-          );
-        }
+        logStableCheckThrottled(
+          `copy-last-message:stable-check:progress:${stableCount}:${stableRounds}`,
+          `[CHAT_PAGE][copy-last-message:stable-check] stable=${stableCount}/${stableRounds} chars=${record.char_count || record.charCount || 0} mode=fast turn=${record.turn_id || record.turnId || '-'} quietMs=${lastTextChangedAt ? nowStable - lastTextChangedAt : 0}`,
+        );
 
         if (signature && signature === lastSignature) {
           stableCount += 1;
@@ -1869,17 +1881,36 @@
 
   let composerDetectDepth = 0;
   const MAX_COMPOSER_DETECT_DEPTH = 3;
+  const composerGuardLogMap = new Map();
+
+  function logComposerRecursionGuardThrottled(scope, depth, max) {
+    const now = Date.now();
+    const key = String(scope || '-');
+    const last = composerGuardLogMap.get(key) || 0;
+    if (now - last < 3000) {
+      return;
+    }
+    composerGuardLogMap.set(key, now);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[COMPOSER][RECURSION_GUARD] scope=${key} depth=${depth} max=${max}`,
+      );
+    }
+  }
 
   function withComposerDetectGuard(scope, fallbackValue, fn) {
     if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
       const fallback = fallbackValue === undefined ? null : fallbackValue;
-      const line = `[COMPOSER][RECURSION_GUARD] scope=${String(scope || '-')} depth=${composerDetectDepth} max=${MAX_COMPOSER_DETECT_DEPTH}`;
       console.error('[ChatGPT toolbox] composer recursion guard triggered', {
         scope: String(scope || '-'),
         depth: composerDetectDepth,
         maxDepth: MAX_COMPOSER_DETECT_DEPTH,
       });
-      ToolboxShell.appendLog(line);
+      logComposerRecursionGuardThrottled(
+        String(scope || '-'),
+        composerDetectDepth,
+        MAX_COMPOSER_DETECT_DEPTH,
+      );
       return fallback;
     }
 
@@ -1941,13 +1972,18 @@
     function getComposerRoot() {
       return withComposerDetectGuard('ComposerApi.getComposerRoot', null, () => {
         const c = qs(SELECTORS.composer);
-        if (c instanceof HTMLElement && !isInToolbox(c)) return c;
+        if (c instanceof HTMLElement && !isInToolbox(c)) {
+          return c;
+        }
 
-        const editor = getComposer();
-        if (editor) {
-          const form = editor.closest('form');
-          if (form instanceof HTMLElement) return form;
-          return editor;
+        const unifiedForm = document.querySelector('form[data-type="unified-composer"]');
+        if (unifiedForm instanceof HTMLElement && !isInToolbox(unifiedForm)) {
+          return unifiedForm;
+        }
+
+        const genericForm = document.querySelector('form');
+        if (genericForm instanceof HTMLElement && !isInToolbox(genericForm)) {
+          return genericForm;
         }
 
         return null;
@@ -7211,25 +7247,10 @@
         && typeof findRealChatGPTSendButton === 'function'
       ) {
         let helperScope = null;
-        if (!skipNestedComposerResolve) {
-          if (
-            typeof ComposerApi !== 'undefined'
-            && typeof ComposerApi.getComposer === 'function'
-          ) {
-            const composer = ComposerApi.getComposer();
-            const composerRoot = typeof ComposerApi.getComposerRoot === 'function'
-              ? ComposerApi.getComposerRoot()
-              : null;
-            const composerForm = composer instanceof HTMLElement
-              ? composer.closest('form')
-              : null;
-            helperScope = composerForm || composerRoot || composer;
-          }
-        } else {
-          helperScope = document.querySelector('[data-testid="composer"]')
-            || document.querySelector('form')
-            || document.body;
-        }
+        helperScope = document.querySelector('[data-testid="composer"]')
+          || document.querySelector('form[data-type="unified-composer"]')
+          || document.querySelector('form')
+          || document.body;
 
         if (helperScope instanceof HTMLElement) {
           button = findRealChatGPTSendButton({ scope: helperScope });
@@ -7373,7 +7394,7 @@
   let lightComposerEverFound = false;
 
   function detectComposerResponseStateLight(options = {}) {
-    const skipSendButtonSnapshot = options.skipSendButtonSnapshot === true;
+    const skipSendButtonSnapshot = options.skipSendButtonSnapshot !== false;
     const now = Date.now();
     if (!(lightComposerDetectStartedAt > 0)) {
       lightComposerDetectStartedAt = now;
@@ -7397,15 +7418,7 @@
         const composerRoot = typeof ComposerApi.getComposerRoot === 'function'
           ? ComposerApi.getComposerRoot()
           : null;
-        sendButton = (
-          !skipSendButtonSnapshot
-          && typeof ComposerApi.findSendButton === 'function'
-        )
-          ? ComposerApi.findSendButton({
-            silent: true,
-            skipNestedComposerResolve: skipSendButtonSnapshot,
-          })
-          : null;
+        sendButton = null;
         isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
           ? !!ComposerApi.isAssistantLikelyBusy()
           : false;
@@ -7678,23 +7691,28 @@
       return getCachedResponseStateForReenter(reasonText);
     }
     if (detectComposerResponseStateDepth >= MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH) {
-      const line = `[COMPOSER][RECURSION_GUARD] scope=detectComposerResponseState depth=${detectComposerResponseStateDepth} max=${MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH}`;
       console.error('[ChatGPT toolbox] detectComposerResponseState recursion guard triggered', {
         depth: detectComposerResponseStateDepth,
         maxDepth: MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH,
         options,
       });
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(line);
-      }
-      return rememberResponseState(responseCacheKey, detectComposerResponseStateLight());
+      logComposerRecursionGuardThrottled(
+        'detectComposerResponseState',
+        detectComposerResponseStateDepth,
+        MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH,
+      );
+      return rememberResponseState(responseCacheKey, detectComposerResponseStateLight({
+        skipSendButtonSnapshot: true,
+      }));
     }
 
     detectComposerResponseStateDepth += 1;
     composerDetecting = true;
     try {
     if (options && options.light === true) {
-      const lightResult = detectComposerResponseStateLight(options);
+      const lightResult = detectComposerResponseStateLight(Object.assign({
+        skipSendButtonSnapshot: true,
+      }, options || {}));
       return rememberResponseState(responseCacheKey, lightResult);
     }
 

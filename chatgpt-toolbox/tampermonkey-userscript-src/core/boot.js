@@ -398,6 +398,15 @@ async function mountAllModules(reason = 'init') {
 }
 
 async function initToolbox() {
+  console.log('[TOOLBOX][INIT][START]');
+  console.log('[TOOLBOX][ENV]', {
+    href: location.href,
+    userAgent: navigator.userAgent,
+    tampermonkey: typeof GM_info !== 'undefined' ? GM_info.scriptHandler : 'unknown',
+    scriptName: typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.name : 'unknown',
+    scriptVersion: typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.version : 'unknown',
+    hasAutoQueueModule: typeof AutoQueueModule !== 'undefined',
+  });
   console.info('[TOOLBOX][BOOT_START] initToolbox called');
   console.info(`[TOOLBOX][VERSION] ${TOOLBOX_SCRIPT_VERSION}`);
   console.info('[BOOTSTRAP][START]');
@@ -419,6 +428,10 @@ async function initToolbox() {
       return;
     }
     console.info('[SHELL][MOUNT_OK]');
+    console.log('[TOOLBOX][PANEL][MOUNTED]', {
+      root: !!rootEl,
+      panel: !!document.querySelector('#cgpt-toolbox-panel'),
+    });
     console.info('[TOOLBOX][SHELL_CREATED] root created', {
       root: !!rootEl,
       panel: !!document.querySelector('#cgpt-toolbox-panel'),
@@ -452,6 +465,31 @@ async function initToolbox() {
 
   await safeInitStep('ReplyDoneTitleFlashWatcher.start', () => {
     ReplyDoneTitleFlashWatcher.start();
+  });
+
+  await safeInitStep('AutoQueueModule.taskProfiles', () => {
+    if (typeof AutoQueueModule === 'undefined') {
+      console.error('[TOOLBOX][TASK_PROFILE][INIT_FAILED]', {
+        message: 'AutoQueueModule is not defined',
+        stack: '',
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog('[TOOLBOX][TASK_PROFILE][INIT_FAILED] AutoQueueModule is not defined');
+      }
+      return;
+    }
+
+    if (typeof AutoQueueModule.getConfig !== 'function') {
+      console.error('[TOOLBOX][TASK_PROFILE][INIT_FAILED]', {
+        message: 'AutoQueueModule.getConfig is not a function',
+        stack: '',
+      });
+      return;
+    }
+
+    const cfg = AutoQueueModule.getConfig() || {};
+    const profileCount = Array.isArray(cfg.taskProfiles) ? cfg.taskProfiles.length : 0;
+    console.log('[TOOLBOX][TASK_PROFILE][READY]', { count: profileCount });
   });
 
   await mountAllModules('init');
@@ -538,6 +576,7 @@ async function initToolbox() {
   });
 
   console.info('[TOOLBOX][BOOT_DONE] initToolbox completed');
+  console.log('[TOOLBOX][INIT][DONE]');
   console.info(`[TOOLBOX][VERSION_OK] ${TOOLBOX_SCRIPT_VERSION}`);
 }
 
