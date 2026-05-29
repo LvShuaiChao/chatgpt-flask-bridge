@@ -5335,6 +5335,14 @@
         || sourceText.includes('send_continue_with_upload');
     }
 
+    function isVerificationUploadSource(source) {
+      const sourceText = String(source || '');
+      return sourceText.includes('autoq-task-verify-')
+        || sourceText.includes('verify-after-done-signal')
+        || sourceText.includes('task-verify')
+        || sourceText.includes('done-signal-verification');
+    }
+
     function resolveEffectiveUploadSource(source, options = {}) {
       const rawSource = String(source || '').trim();
       const opts = options && typeof options === 'object' ? options : {};
@@ -5354,7 +5362,10 @@
 
     function buildVirtualFilePrepareSource(source, options = {}) {
       const effectiveSource = resolveEffectiveUploadSource(source, options);
-      if (isCadenceUploadSource(effectiveSource)) {
+      if (
+        isCadenceUploadSource(effectiveSource)
+        || isVerificationUploadSource(effectiveSource)
+      ) {
         return `${effectiveSource}:upload-timestamp-wrapper`;
       }
       return 'upload-timestamp-wrapper';
@@ -22835,10 +22846,7 @@
         };
       }
       const sourceText = String(source || '').trim();
-      const isVerifyUploadSource = sourceText.includes('autoq-task-verify-')
-        || sourceText.includes('verify-after-done-signal')
-        || sourceText.includes('task-verify')
-        || sourceText.includes('done-signal-verification');
+      const isVerifyUploadSource = isVerificationUploadSource(sourceText);
       const allowedEveryN = sourceText.includes('send_continue_with_upload')
         || sourceText.includes('auto-upload-every-n')
         || sourceText.includes('continue-with-upload')

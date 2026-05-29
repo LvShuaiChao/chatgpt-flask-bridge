@@ -16194,21 +16194,34 @@ const AutoQueueModule = (() => {
               });
               const uploadRateStatus = uploadPlan.status;
               const maxFilesForThisUpload = uploadPlan.maxFilesForThisUpload;
+              const pendingUploadCount = Number(uploadPlan.pendingUploadCount || 0);
 
-              if (uploadRateStatus.enabled && maxFilesForThisUpload <= 0) {
+              if (pendingUploadCount <= 0) {
+                ToolboxShell.appendLog(
+                  `[AUTOQ][TASK_VERIFY][UPLOAD_SKIP_NO_PENDING] task=${task.title || '-'} source=${verifyUploadSource} reason=verify-upload-no-pending-files remaining=${uploadRateStatus && uploadRateStatus.remaining != null ? uploadRateStatus.remaining : '-'}`,
+                );
+                uploadResult = {
+                  ok: true,
+                  skipped: true,
+                  reason: 'verify-upload-no-pending-files',
+                  uploadedCount: 0,
+                  failedCount: 0,
+                  skippedCount: 0,
+                };
+              } else if (uploadRateStatus.enabled && maxFilesForThisUpload <= 0) {
                 uploadResult = {
                   ok: false,
                   reason: 'no-upload-quota',
                   uploadedCount: 0,
                   failedCount: 0,
-                  skippedCount: 0,
+                  skippedCount: pendingUploadCount,
                 };
               } else {
                 uploadResult = await UploadModule.startUploadForAutoQueue({
-                  source: `autoq-task-verify-${task.id}`,
+                  source: verifyUploadSource,
                   forceReupload: true,
                   shouldStop: () => !state.running,
-                  maxFiles: maxFilesForThisUpload,
+                  maxFiles: uploadRateStatus.enabled ? maxFilesForThisUpload : undefined,
                 });
               }
             } else {
