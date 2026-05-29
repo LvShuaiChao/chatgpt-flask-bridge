@@ -17,11 +17,16 @@
       maxHeight: 760,
     });
 
+    const DEFAULT_COMPACT_WIDTH = 484;
+    const MIN_COMPACT_WIDTH = 280;
+    const MAX_COMPACT_WIDTH = 680;
+
     const PANEL_COMPACT_DEFAULT_SIZE = Object.freeze({
-      width: 340,
+      width: DEFAULT_COMPACT_WIDTH,
       height: 280,
-      minWidth: 280,
+      minWidth: MIN_COMPACT_WIDTH,
       minHeight: 180,
+      maxWidth: MAX_COMPACT_WIDTH,
     });
 
     const PANEL_VIEWPORT_MARGIN = 8;
@@ -99,6 +104,27 @@
     let forceShowingUntil = 0;
     let isDraggingToolbox = false;
     let isResizingToolbox = false;
+
+    const USER_PANEL_RESIZE_PROTECT_MS = 30 * 60 * 1000;
+    const USER_SIZE_LOCK_STORAGE_KEY = 'panelUserSizeLock';
+    const COMPRESSED_REPAIR_MAX_DEFER_ATTEMPTS = 3;
+    const AUTO_SIZE_SAVE_BLOCKED_REASON_FRAGMENTS = Object.freeze([
+      'after-render-batch-status',
+      'foreground-catch-up',
+      'applyToolboxUiState',
+      'restore-position',
+      'create-late',
+      'poll',
+      'render',
+      'applyPanelPosition',
+      'layout-mode',
+      'panel-resize-observer',
+      'sync-ui-state',
+    ]);
+    let lastUserPanelResizeAt = 0;
+    let lastUserPanelResizeSize = null;
+    let compressedRepairDeferCount = 0;
+    let compressedRepairDeferTimer = 0;
 
     const EDGE_HIDE_VISIBLE_SIZE = 18;
 
@@ -720,7 +746,8 @@
         #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-status-panel,
         #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-main-lite,
         #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-status-card {
-          max-height: 130px;
+          max-height: none;
+          overflow: visible;
         }
 
         #${APP.panelId}.cgpt-toolbox-layout-compact .cgpt-autoq-editor-block #cgpt-autoq-prompts,
@@ -754,9 +781,30 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header {
-          height: 34px;
-          flex-basis: 34px;
-          padding: 0 8px;
+          min-height: 34px;
+          padding: 4px 8px;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row {
+          justify-content: flex-start;
+          flex-wrap: wrap;
+          row-gap: 3px;
+          max-height: 42px;
+          overflow: hidden;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
+          min-height: 22px;
+          line-height: 22px;
+          font-size: 11px;
+          padding: 2px 6px;
+          border-radius: 11px;
+          max-width: 120px;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-upload-quota-badge,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-message-quota-badge {
+          display: none !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-title {
@@ -901,14 +949,6 @@
           display: none !important;
         }
 
-        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
-          min-height: 22px !important;
-          line-height: 22px !important;
-          padding: 0 8px !important;
-          border-radius: 11px !important;
-          font-size: 11px !important;
-        }
-
         #cgpt-upload-module .cgpt-upload-item.flask-local-direct {
           border-left: 3px solid #0ea5e9;
         }
@@ -1009,13 +1049,14 @@
         }
 
         .cgpt-toolbox-header {
-          flex: 0 0 42px;
-          height: 42px;
-          padding: 0 10px 0 12px;
+          flex: 0 0 auto;
+          min-height: 42px;
+          padding: 6px 10px 6px 12px;
           display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 8px;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 4px;
+          overflow: hidden;
           background: #111827;
           border-bottom: 1px solid #2f3542;
           cursor: move;
@@ -1023,8 +1064,16 @@
           touch-action: none;
         }
 
+        .cgpt-toolbox-title-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          min-width: 0;
+          gap: 8px;
+        }
+
         .cgpt-toolbox-title {
-          flex: 0 0 auto;
+          flex: 1 1 auto;
           min-width: 0;
           font-size: 13px;
           font-weight: 800;
@@ -1035,17 +1084,24 @@
           letter-spacing: 0.2px;
         }
 
-        .cgpt-toolbox-header-status-row {
+        #${APP.panelId} .cgpt-toolbox-header-status-row {
+          position: static !important;
+          inset: auto !important;
+          transform: none !important;
           display: flex;
-          align-items: center;
-          gap: 6px;
-          flex: 1 1 auto;
-          justify-content: flex-end;
           flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 4px;
+          max-width: 100%;
           min-width: 0;
+          overflow: hidden;
+          box-sizing: border-box;
+          padding: 0 2px;
         }
 
-        .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-status-pill {
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -1058,7 +1114,11 @@
           letter-spacing: 0;
           box-sizing: border-box;
           border: 1px solid transparent;
+          max-width: 100%;
+          min-width: 0;
           white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-id-badge {
@@ -3162,13 +3222,14 @@
           color: #e5e7eb;
           font-size: 11px;
           line-height: 1.45;
-          max-height: 160px;
-          overflow: auto;
           box-sizing: border-box;
           width: 100%;
           max-width: 100%;
           min-width: 0;
+          max-height: none;
+          overflow: visible;
           overflow-x: hidden;
+          overflow-y: visible;
         }
 
         .cgpt-autoq-status-section {
@@ -3379,8 +3440,9 @@
         .cgpt-status-advice,
         .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
         .cgpt-autoq-user-hint-row .cgpt-autoq-user-hint {
-          max-height: 72px;
-          overflow: auto;
+          max-height: none;
+          overflow: visible;
+          overflow-y: visible;
           white-space: pre-wrap;
           overflow-wrap: break-word;
           word-break: normal;
@@ -3391,10 +3453,74 @@
           color: #fde68a;
         }
 
+        .cgpt-status-card[data-state="idle"] .cgpt-autoq-user-hint-row,
+        .cgpt-status-card[data-state="idle"] .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-status-card[data-state="idle"] .cgpt-autoq-user-hint {
+          color: #cbd5e1;
+          font-weight: 500;
+        }
+
+        .cgpt-status-card[data-severity="warning"] .cgpt-autoq-user-hint-row,
+        .cgpt-status-card[data-severity="warning"] .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-status-card[data-severity="warning"] .cgpt-autoq-user-hint,
+        .cgpt-status-card[data-state="stopped"] .cgpt-autoq-user-hint-row,
+        .cgpt-status-card[data-state="stopped"] .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-status-card[data-state="stopped"] .cgpt-autoq-user-hint {
+          color: #facc15;
+          font-weight: 700;
+        }
+
         .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
         .cgpt-autoq-user-hint {
           color: #fde68a;
           font-weight: 600;
+        }
+
+        .cgpt-current-task-row,
+        .cgpt-current-task-meta-row {
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+        }
+
+        .cgpt-current-task-value,
+        .cgpt-current-task-meta-value {
+          min-width: 0;
+          width: 100%;
+          max-width: 100%;
+          white-space: normal;
+          word-break: normal;
+          overflow-wrap: break-word;
+          line-height: 1.45;
+        }
+
+        .cgpt-current-task-value {
+          font-weight: 700;
+          color: #e5f0ff;
+        }
+
+        .cgpt-current-task-meta-value {
+          font-size: 12px;
+          opacity: 0.9;
+          color: #aeb9cc;
+        }
+
+        .cgpt-task-edit-mismatch-hint {
+          margin-top: 6px;
+          padding: 6px 8px;
+          border: 1px solid rgba(245, 158, 11, 0.55);
+          border-radius: 6px;
+          background: rgba(245, 158, 11, 0.12);
+          color: #facc15;
+          font-size: 12px;
+          line-height: 1.45;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-top-badge-task,
+        #${APP.panelId} .cgpt-toolbox-header-status-row #cgpt-top-current-task-badge {
+          background: #1d4ed8;
+          color: #ffffff;
+          border: 1px solid rgba(147, 197, 253, 0.65);
         }
 
         .cgpt-autoq-debug-detail-grid {
@@ -3551,9 +3677,11 @@
           border: 1px solid #2f3542;
           border-radius: 8px;
           background: #111827;
-          max-height: min(200px, 28vh);
-          overflow: auto;
           box-sizing: border-box;
+          max-height: none;
+          overflow: visible;
+          overflow-y: visible;
+          overflow-x: hidden;
         }
 
         .cgpt-autoq-main-lite > .cgpt-autoq-status-panel {
@@ -4712,6 +4840,31 @@
           opacity: 1 !important;
         }
 
+        /* 防止状态摘要区产生嵌套滚动条：仅工具箱主内容区滚动 */
+        [data-page="autoq"] .cgpt-autoq-main-lite,
+        [data-page="autoq"] .cgpt-autoq-user-summary,
+        [data-page="autoq"] .cgpt-batch-status-card,
+        [data-page="autoq"] .cgpt-autoq-status-card,
+        [data-page="autoq"] .cgpt-status-card,
+        [data-page="autoq"] .cgpt-task-status-card,
+        [data-page="autoq"] .cgpt-autoq-user-hint,
+        [data-page="autoq"] .cgpt-autoq-user-hint-row,
+        [data-page="autoq"] .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-autoq-user-summary,
+        .cgpt-batch-status-card,
+        .cgpt-autoq-status-card,
+        .cgpt-status-card,
+        .cgpt-task-status-card,
+        .cgpt-autoq-user-hint,
+        .cgpt-autoq-user-hint-row,
+        .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-autoq-main-lite,
+        .cgpt-status-advice {
+          max-height: none !important;
+          overflow-y: visible !important;
+          overflow: visible !important;
+        }
+
     `;
 
     function injectStyle() {
@@ -5038,6 +5191,7 @@
       }
 
       compactMode = nextCompactMode;
+      clearUserPanelSizeLock(options.reason || 'compact-mode-change');
 
       if (options.saveGlobal !== false) {
         MemoryManager.set(MemoryManager.KEYS.compactMode, compactMode);
@@ -5057,6 +5211,7 @@
         reason: options.reason || 'write-compact-mode',
         anchor: options.anchor || null,
         restoreAnchor: options.restoreAnchor === true,
+        restoreSize: true,
       });
 
       if (options.save !== false) {
@@ -5190,6 +5345,138 @@
       return getPanelSizeMemoryKeyForMode(compactMode);
     }
 
+    function isAutoSizeSaveBlockedReason(reason) {
+      const text = String(reason || '').trim().toLowerCase();
+      if (!text) {
+        return false;
+      }
+      return AUTO_SIZE_SAVE_BLOCKED_REASON_FRAGMENTS.some((fragment) => (
+        text.includes(String(fragment).toLowerCase())
+      ));
+    }
+
+    function getUserPanelSizeLockState() {
+      const persisted = MemoryManager.get(USER_SIZE_LOCK_STORAGE_KEY, null);
+      if (persisted && persisted.locked === true) {
+        return persisted;
+      }
+
+      if (lastUserPanelResizeAt > 0 && lastUserPanelResizeSize) {
+        return {
+          locked: true,
+          lockedAt: lastUserPanelResizeAt,
+          width: lastUserPanelResizeSize.width,
+          height: lastUserPanelResizeSize.height,
+          mode: compactMode ? 'compact' : 'normal',
+        };
+      }
+
+      return {
+        locked: false,
+      };
+    }
+
+    function isUserPanelSizeLocked() {
+      return getUserPanelSizeLockState().locked === true;
+    }
+
+    function isUserPanelSizeProtected() {
+      if (isUserPanelSizeLocked()) {
+        return true;
+      }
+      return isRecentUserPanelResize();
+    }
+
+    function hydrateUserPanelSizeLock() {
+      const lock = MemoryManager.get(USER_SIZE_LOCK_STORAGE_KEY, null);
+      if (!(lock && lock.locked === true)) {
+        return;
+      }
+
+      lastUserPanelResizeAt = Number(lock.lockedAt || 0) || Date.now();
+      lastUserPanelResizeSize = {
+        width: Number(lock.width || 0),
+        height: Number(lock.height || 0),
+      };
+
+      appendLog(
+        `[TOOLBOX_SIZE][USER_LOCK_KEEP] width=${lock.width || 0} height=${lock.height || 0} mode=${lock.mode || '-'}`,
+      );
+    }
+
+    function setUserPanelSizeLock(width, height, mode) {
+      const lockMode = mode || (compactMode ? 'compact' : 'normal');
+      const lock = {
+        locked: true,
+        lockedAt: Date.now(),
+        width: Math.round(width),
+        height: Math.round(height),
+        mode: lockMode,
+      };
+
+      lastUserPanelResizeAt = lock.lockedAt;
+      lastUserPanelResizeSize = {
+        width: lock.width,
+        height: lock.height,
+      };
+
+      MemoryManager.set(USER_SIZE_LOCK_STORAGE_KEY, lock);
+
+      saveToolboxPageStatePatch(
+        {
+          layoutState: {
+            userSizeLocked: true,
+            userSizeLockedAt: lock.lockedAt,
+            userPanelWidth: lock.width,
+            userPanelHeight: lock.height,
+            userPanelMode: lockMode,
+          },
+        },
+        'user-size-lock-set',
+      );
+
+      appendLog(
+        `[TOOLBOX_SIZE][USER_LOCK_SET] width=${lock.width} height=${lock.height} mode=${lockMode}`,
+      );
+    }
+
+    function clearUserPanelSizeLock(reason = '') {
+      lastUserPanelResizeAt = 0;
+      lastUserPanelResizeSize = null;
+      MemoryManager.set(USER_SIZE_LOCK_STORAGE_KEY, null);
+
+      appendLog(`[TOOLBOX_SIZE][USER_LOCK_CLEAR] reason=${String(reason || '-').trim() || '-'}`);
+    }
+
+    function getCompressedRepairTargetWidth() {
+      const lock = getUserPanelSizeLockState();
+      if (lock.locked && lock.width > 0) {
+        return clampToolboxWidth(lock.width);
+      }
+
+      const saved = MemoryManager.get(getPanelSizeMemoryKey(), null);
+      if (saved && saved.width > 0) {
+        return clampToolboxWidth(saved.width);
+      }
+
+      if (compactMode) {
+        return clampToolboxWidth(DEFAULT_COMPACT_WIDTH);
+      }
+
+      return clampToolboxWidth(PANEL_DEFAULT_SIZE.width);
+    }
+
+    function scheduleCompressedRepairRecheck(reason, delayMs = 300) {
+      if (compressedRepairDeferTimer) {
+        window.clearTimeout(compressedRepairDeferTimer);
+      }
+
+      compressedRepairDeferTimer = window.setTimeout(() => {
+        compressedRepairDeferTimer = 0;
+        repairToolboxLayoutIfCompressed(reason);
+      }, Math.max(0, Number(delayMs) || 0));
+    }
+
     function normalizeTab(tab) {
       const text = String(tab || '').trim();
       return VALID_TABS.includes(text) ? text : 'upload';
@@ -5197,6 +5484,8 @@
 
     function applyToolboxUiState(options = {}) {
       create();
+
+      hydrateUserPanelSizeLock();
 
       const mem = MemoryManager.getToolboxState();
 
@@ -5342,6 +5631,65 @@
         width: PANEL_DEFAULT_SIZE.width,
         height: PANEL_DEFAULT_SIZE.height,
       };
+    }
+
+    const EXPLICIT_PANEL_SIZE_RESTORE_REASONS = Object.freeze([
+      'init',
+      'compact-button-click',
+      'explicit-reset',
+      'write-compact-mode',
+    ]);
+
+    function isExplicitPanelSizeRestoreReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) {
+        return false;
+      }
+
+      if (EXPLICIT_PANEL_SIZE_RESTORE_REASONS.includes(text)) {
+        return true;
+      }
+
+      if (text.startsWith('compact-button') || text.includes('explicit-reset')) {
+        return true;
+      }
+
+      return false;
+    }
+
+    function isRecentUserPanelResize() {
+      return (
+        lastUserPanelResizeAt > 0
+        && (Date.now() - lastUserPanelResizeAt) < USER_PANEL_RESIZE_PROTECT_MS
+      );
+    }
+
+    function getPanelDomSize() {
+      if (!panel) {
+        return null;
+      }
+
+      const rect = panel.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return null;
+      }
+
+      return {
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    }
+
+    function shouldAllowPanelSizeFallback(reason, options = {}) {
+      if (options.force === true) {
+        return true;
+      }
+
+      if (isUserPanelSizeProtected()) {
+        return false;
+      }
+
+      return isExplicitPanelSizeRestoreReason(reason);
     }
 
     function logToolboxHorizontalOverflow(reason = '') {
@@ -5505,7 +5853,18 @@
         appendLog(`[TOOLBOX_COMPACT][exit] reason=${reason}`);
       }
 
-      restorePanelSize();
+      const shouldRestorePanelSize = options.restoreSize === true
+        || isExplicitPanelSizeRestoreReason(reason);
+
+      if (shouldRestorePanelSize) {
+        restorePanelSize(reason, {
+          force: options.forceSize === true,
+        });
+      } else {
+        appendLog(
+          `[TOOLBOX_SIZE][restore-skip] reason=${reason || '-'} because=compact-mode-auto-keep-current`,
+        );
+      }
 
       window.requestAnimationFrame(() => {
         if (shouldRestoreAnchor && anchor) {
@@ -5519,6 +5878,7 @@
             save: shouldSave,
             reason: `compact-mode:${reason}`,
           });
+          syncToolboxHeaderLayout(`compact-mode:${reason}`);
 
           if (shouldSave) {
             savePanelPositionFromDom(`compact-mode:${reason}`);
@@ -5582,6 +5942,47 @@
       updateFloatingTitlePosition('ensure-new-floating-title');
     }
 
+    function ensureToolboxTitleRow() {
+      create();
+      if (!root) {
+        return null;
+      }
+
+      const header = qs('.cgpt-toolbox-header', root);
+      if (!header) {
+        return null;
+      }
+
+      let titleRow = qs('.cgpt-toolbox-title-row', header);
+      const title = qs('.cgpt-toolbox-title', header);
+      const actions = qs('.cgpt-toolbox-header-actions', header);
+
+      if (!titleRow) {
+        titleRow = document.createElement('div');
+        titleRow.className = 'cgpt-toolbox-title-row';
+
+        if (title) {
+          header.insertBefore(titleRow, title);
+          titleRow.appendChild(title);
+        } else {
+          header.insertBefore(titleRow, header.firstChild);
+        }
+
+        if (actions && !titleRow.contains(actions)) {
+          titleRow.appendChild(actions);
+        }
+      } else {
+        if (title && title.parentElement !== titleRow) {
+          titleRow.appendChild(title);
+        }
+        if (actions && actions.parentElement !== titleRow) {
+          titleRow.appendChild(actions);
+        }
+      }
+
+      return titleRow;
+    }
+
     function ensureToolboxHeaderPageStatusRow() {
       create();
       if (!root) {
@@ -5592,6 +5993,8 @@
       if (!header) {
         return null;
       }
+
+      const titleRow = ensureToolboxTitleRow();
 
       let pageStatusRowEl = qs('#cgpt-toolbox-page-status-row', root);
 
@@ -5605,23 +6008,21 @@
         pageStatusRowEl.id = 'cgpt-toolbox-page-status-row';
         pageStatusRowEl.className = 'cgpt-toolbox-header-status-row';
 
-        const actions = qs('.cgpt-toolbox-header-actions', header);
-        if (actions) {
-          header.insertBefore(pageStatusRowEl, actions);
+        if (titleRow) {
+          header.insertBefore(pageStatusRowEl, titleRow.nextElementSibling);
         } else {
           header.appendChild(pageStatusRowEl);
         }
       } else {
         pageStatusRowEl.className = 'cgpt-toolbox-header-status-row';
-        const actions = qs('.cgpt-toolbox-header-actions', header);
         if (!header.contains(pageStatusRowEl)) {
-          if (actions) {
-            header.insertBefore(pageStatusRowEl, actions);
+          if (titleRow) {
+            header.insertBefore(pageStatusRowEl, titleRow.nextElementSibling);
           } else {
             header.appendChild(pageStatusRowEl);
           }
-        } else if (actions && pageStatusRowEl.nextElementSibling !== actions) {
-          header.insertBefore(pageStatusRowEl, actions);
+        } else if (titleRow && pageStatusRowEl.previousElementSibling !== titleRow) {
+          header.insertBefore(pageStatusRowEl, titleRow.nextElementSibling);
         }
       }
 
@@ -5810,11 +6211,13 @@
         </div>
         <div id="${APP.panelId}">
           <div class="cgpt-toolbox-header" id="cgpt-toolbox-drag-handle">
-            <div class="cgpt-toolbox-title">小张工具箱</div>
-            <div class="cgpt-toolbox-header-status-row" id="cgpt-toolbox-page-status-row"></div>
-            <div class="cgpt-toolbox-header-actions">
-              <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact">简洁</button>
+            <div class="cgpt-toolbox-title-row">
+              <div class="cgpt-toolbox-title">小张工具箱</div>
+              <div class="cgpt-toolbox-header-actions">
+                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact">简洁</button>
+              </div>
             </div>
+            <div class="cgpt-toolbox-header-status-row" id="cgpt-toolbox-page-status-row"></div>
           </div>
 
           <div class="cgpt-toolbox-tabs">
@@ -5876,6 +6279,7 @@
       applyToolboxUiState({
         restoreTab: false,
       });
+      restorePanelSize('init');
 
       ensureRestoreHandleElement();
 
@@ -5905,6 +6309,7 @@
       }, 500);
 
       scheduleToolboxHorizontalOverflowLog('create', 300);
+      syncToolboxHeaderLayout('panel-create');
 
         bindViewportGuard();
         bindLayoutModeWatcher();
@@ -6239,17 +6644,18 @@
     }
 
     function getPanelMaxSize() {
+      const defaults = getCurrentPanelDefaultSize();
       const viewport = getViewportMetrics();
-      const maxWidthCap = PANEL_DEFAULT_SIZE.maxWidth || 1120;
-      const maxHeightCap = PANEL_DEFAULT_SIZE.maxHeight || 760;
+      const maxWidthCap = defaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860;
+      const maxHeightCap = defaults.maxHeight || PANEL_DEFAULT_SIZE.maxHeight || 760;
 
       return {
         width: Math.max(
-          PANEL_DEFAULT_SIZE.minWidth,
+          defaults.minWidth,
           Math.min(maxWidthCap, viewport.width - 32),
         ),
         height: Math.max(
-          PANEL_DEFAULT_SIZE.minHeight,
+          defaults.minHeight,
           Math.min(maxHeightCap, viewport.height - 32),
         ),
       };
@@ -6294,6 +6700,10 @@
         return;
       }
 
+      if (isUserPanelSizeProtected()) {
+        return;
+      }
+
       const rect = panel.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) {
         return;
@@ -6308,7 +6718,9 @@
         Math.abs(next.width - rect.width) > 1
         || Math.abs(next.height - rect.height) > 1
       ) {
-        applyPanelSize(next);
+        applyPanelSize(next, {
+          reason: 'layout-mode-clamp',
+        });
       }
     }
 
@@ -6443,10 +6855,43 @@
       return fallback;
     }
 
-    function applyPanelSize(size) {
+    function applyPanelSize(size, options = {}) {
       if (!panel) return;
 
-      const next = normalizePanelSize(size || getCurrentPanelDefaultSize());
+      const reason = String(options.reason || '').trim() || 'unspecified';
+      const force = options.force === true;
+      const userAction = options.userAction === true;
+      const oldRect = panel.getBoundingClientRect();
+      const oldWidth = oldRect.width > 0 ? Math.round(oldRect.width) : 0;
+      const oldHeight = oldRect.height > 0 ? Math.round(oldRect.height) : 0;
+      const currentDom = getPanelDomSize();
+
+      let next = normalizePanelSize(size || getCurrentPanelDefaultSize());
+
+      if (
+        isUserPanelSizeProtected()
+        && !force
+        && !userAction
+        && !isExplicitPanelSizeRestoreReason(reason)
+        && currentDom
+        && (next.width > currentDom.width + 1 || next.height > currentDom.height + 1)
+      ) {
+        appendLog(
+          `[TOOLBOX_SIZE][apply-skip] reason=${reason} because=user-size-protected ` +
+          `oldWidth=${oldWidth} oldHeight=${oldHeight} ` +
+          `blockedWidth=${next.width} blockedHeight=${next.height} ` +
+          `keepWidth=${currentDom.width} keepHeight=${currentDom.height} ` +
+          `compact=${compactMode ? 1 : 0}`,
+        );
+        return;
+      }
+
+      appendLog(
+        `[TOOLBOX_SIZE][apply] reason=${reason} ` +
+        `oldWidth=${oldWidth} oldHeight=${oldHeight} ` +
+        `nextWidth=${next.width} nextHeight=${next.height} ` +
+        `compact=${compactMode ? 1 : 0} force=${force ? 1 : 0} userAction=${userAction ? 1 : 0}`,
+      );
 
       panel.style.width = `${next.width}px`;
       panel.style.height = `${next.height}px`;
@@ -6533,7 +6978,11 @@
         const panelMins = getPanelMinSize();
         const minWidth = panelMins.minWidth;
         const minHeight = panelMins.minHeight;
-        const maxWidth = Math.max(minWidth, Math.min(PANEL_DEFAULT_SIZE.maxWidth || 860, window.innerWidth - 24));
+        const panelDefaults = getCurrentPanelDefaultSize();
+        const maxWidth = Math.max(
+          minWidth,
+          Math.min(panelDefaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860, window.innerWidth - 24),
+        );
         const maxHeight = Math.max(minHeight, window.innerHeight - 24);
 
         panel.dataset.resizing = '1';
@@ -6565,10 +7014,13 @@
           applyPanelSize({
             width: nextWidth,
             height: nextHeight,
+          }, {
+            reason: 'toolbox-resize-handle-move',
+            userAction: true,
           });
         };
 
-        const onPointerUp = (upEvent) => {
+        const finishToolboxResize = (upEvent, endReason) => {
           upEvent.preventDefault();
           upEvent.stopPropagation();
 
@@ -6578,7 +7030,7 @@
 
           window.removeEventListener('pointermove', onPointerMove, true);
           window.removeEventListener('pointerup', onPointerUp, true);
-          window.removeEventListener('pointercancel', onPointerUp, true);
+          window.removeEventListener('pointercancel', onPointerCancel, true);
 
           try {
             handle.releasePointerCapture(event.pointerId);
@@ -6595,6 +7047,7 @@
               allowEdgeHidden: false,
             });
             syncToolboxFloatingLayout('toolbox-resize-end');
+            syncToolboxHeaderLayout('toolbox-resize-handle-pointerup');
 
             if (isPanelVisibleNow()) {
               savePanelPositionFromDom('toolbox-resize-end');
@@ -6603,16 +7056,24 @@
 
           savePanelSizeFromDom({
             userAction: true,
-            reason: 'toolbox-resize-handle-pointerup',
+            reason: endReason,
           });
 
           rememberLastPanelVisibleRect('toolbox-resize-end');
           updateRestoreHotzone('toolbox-resize-end');
         };
 
+        const onPointerUp = (upEvent) => {
+          finishToolboxResize(upEvent, 'toolbox-resize-handle-pointerup');
+        };
+
+        const onPointerCancel = (upEvent) => {
+          finishToolboxResize(upEvent, 'toolbox-resize-handle-pointercancel');
+        };
+
         window.addEventListener('pointermove', onPointerMove, true);
         window.addEventListener('pointerup', onPointerUp, true);
-        window.addEventListener('pointercancel', onPointerUp, true);
+        window.addEventListener('pointercancel', onPointerCancel, true);
       }, true);
     }
 
@@ -6828,6 +7289,92 @@
       return true;
     }
 
+    function updateToolboxNarrowClass(reason = '-') {
+      if (!panel) {
+        return;
+      }
+
+      const width = Math.round(panel.getBoundingClientRect().width || panel.offsetWidth || 0);
+      const narrow = width > 0 && width < 420;
+      panel.classList.toggle('cgpt-toolbox-narrow', narrow);
+
+      appendLog(
+        `[TOOLBOX_LAYOUT][NARROW_CLASS] reason=${reason} width=${width} narrow=${narrow ? 1 : 0}`,
+      );
+    }
+
+    function detectTopBadgeOverflow(reason = '-', options = {}) {
+      if (!panel) {
+        return false;
+      }
+
+      const row = panel.querySelector('.cgpt-toolbox-header-status-row');
+      if (!row) {
+        return false;
+      }
+
+      const panelRect = panel.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      const overflowTop = rowRect.top < panelRect.top - 1;
+      const overflowLeft = rowRect.left < panelRect.left - 1;
+      const overflowRight = rowRect.right > panelRect.right + 1;
+      const hasOverflow = overflowTop || overflowLeft || overflowRight;
+
+      if (hasOverflow) {
+        if (options.log !== false) {
+          appendLog(
+            `[TOOLBOX_LAYOUT][TOP_BADGE_OVERFLOW] reason=${reason} overflowTop=${overflowTop ? 1 : 0} overflowLeft=${overflowLeft ? 1 : 0} overflowRight=${overflowRight ? 1 : 0} panel=${Math.round(panelRect.left)}/${Math.round(panelRect.top)}/${Math.round(panelRect.width)}/${Math.round(panelRect.height)} row=${Math.round(rowRect.left)}/${Math.round(rowRect.top)}/${Math.round(rowRect.width)}/${Math.round(rowRect.height)}`,
+          );
+        }
+
+        if (options.fix !== false) {
+          updateToolboxNarrowClass(`overflow-fix:${reason}`);
+        }
+      }
+
+      return hasOverflow;
+    }
+
+    function syncToolboxHeaderLayout(reason = '-') {
+      updateToolboxNarrowClass(reason);
+      detectTopBadgeOverflow(reason);
+    }
+
+    function clampToolboxPanelToViewport(targetPanel, reason = '-') {
+      const panelEl = targetPanel || panel;
+      if (!panelEl) {
+        return;
+      }
+
+      const rect = panelEl.getBoundingClientRect();
+      const margin = PANEL_VIEWPORT_MARGIN;
+      let left = rect.left;
+      let top = rect.top;
+
+      if (top < margin) {
+        top = margin;
+      }
+
+      if (left < margin) {
+        left = margin;
+      }
+
+      if (left + rect.width > window.innerWidth - margin) {
+        left = Math.max(margin, window.innerWidth - rect.width - margin);
+      }
+
+      if (top + rect.height > window.innerHeight - margin) {
+        top = Math.max(margin, window.innerHeight - rect.height - margin);
+      }
+
+      panelEl.style.left = `${Math.round(left)}px`;
+      panelEl.style.top = `${Math.round(top)}px`;
+
+      appendLog(
+        `[TOOLBOX_POSITION][CLAMP_VIEWPORT] reason=${reason} left=${Math.round(left)} top=${Math.round(top)} width=${Math.round(rect.width)} height=${Math.round(rect.height)}`,
+      );
+    }
+
     function clampPanelPosition(pos) {
       if (!panel) {
         return {
@@ -6854,11 +7401,13 @@
       };
     }
 
-    function applyPanelPosition(left, top) {
+    function applyPanelPosition(left, top, options = {}) {
       if (!panel) {
         console.warn('[ChatGPT toolbox] applyPanelPosition: panel 未初始化');
         return;
       }
+
+      const reason = String(options.reason || 'applyPanelPosition').trim() || 'applyPanelPosition';
 
       const safe = clampPanelPosition({
         left,
@@ -6883,7 +7432,9 @@
       }
 
       window.requestAnimationFrame(() => {
-        rememberLastPanelVisibleRect('applyPanelPosition');
+        clampToolboxPanelToViewport(panel, reason);
+        updateToolboxNarrowClass(reason);
+        rememberLastPanelVisibleRect(reason);
       });
     }
 
@@ -7452,7 +8003,9 @@
         Math.min(window.innerHeight - size.height - PANEL_VIEWPORT_MARGIN, top),
       );
 
-      applyPanelSize(size);
+      applyPanelSize(size, {
+        reason: `restore-from-hidden:${reason || '-'}`,
+      });
       applyPanelPosition(left, top);
 
       hideRestoreHotzone(`restore:${reason || '-'}`);
@@ -7612,7 +8165,9 @@
 
           applyPanelSize(normalizePanelSize(
             MemoryManager.get(getPanelSizeMemoryKey(), null) || getPanelSizeFallback()
-          ));
+          ), {
+            reason: 'console-force-show',
+          });
           applyPanelPosition(80, 80);
           hideRestoreHotzone('console-force-show');
           hideRestoreHandle('console-force-show');
@@ -7638,9 +8193,13 @@
 
           clearRootEdgeState('console-clear-position');
           forcePanelVisible('console-clear-position');
+          clearUserPanelSizeLock('explicit-reset');
 
           if (panel) {
-            applyPanelSize(getPanelSizeFallback());
+            applyPanelSize(getPanelSizeFallback(), {
+              reason: 'explicit-reset',
+              force: true,
+            });
             applyPanelPosition(80, 80);
           }
 
@@ -7864,7 +8423,9 @@
         MemoryManager.get(getPanelSizeMemoryKey(), null) || getPanelSizeFallback(),
       );
 
-      applyPanelSize(size);
+      applyPanelSize(size, {
+        reason: `edge-reveal-position:${reasonText}`,
+      });
 
       panel.classList.remove('cgpt-toolbox-hidden');
       root.classList.add('cgpt-toolbox-edge-revealed');
@@ -7990,7 +8551,9 @@
 
       normalizeEdgeVisualState(`restore:${reasonText}`);
 
-      applyPanelSize(size);
+      applyPanelSize(size, {
+        reason: `edge-restore:${reasonText}`,
+      });
 
       const skipReposition = reasonText.includes('toggle-drag-out') || reasonText.includes('drag-out');
 
@@ -8181,6 +8744,8 @@
 
       panel.style.width = `${Math.round(rect.width)}px`;
       panel.style.height = `${Math.round(rect.height)}px`;
+      panel.style.setProperty('--cgpt-toolbox-width', `${Math.round(rect.width)}px`);
+      panel.style.setProperty('--cgpt-toolbox-height', `${Math.round(rect.height)}px`);
 
       applyPanelPosition(rect.left, rect.top);
     }
@@ -8295,7 +8860,7 @@
         resizePanelByPointer(dir, start, moveEvent.clientX, moveEvent.clientY);
       };
 
-      const onUp = (upEvent) => {
+      const finishPanelResize = (upEvent, endReason) => {
         if (upEvent.pointerId !== activePointerId) return;
 
         panel.classList.remove('cgpt-resizing');
@@ -8303,8 +8868,8 @@
         isResizingToolbox = false;
 
         window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onUp);
+        window.removeEventListener('pointerup', onPointerUp);
+        window.removeEventListener('pointercancel', onPointerCancel);
 
         schedulePostDragLayout(() => {
           keepPanelInViewport({
@@ -8315,6 +8880,7 @@
             allowEdgeHidden: false,
           });
           syncToolboxFloatingLayout('panel-resize-end');
+          syncToolboxHeaderLayout('resize-handle-pointerup');
 
           if (isPanelVisibleNow()) {
             savePanelPositionFromDom('resize-end');
@@ -8323,7 +8889,7 @@
 
         savePanelSizeFromDom({
           userAction: true,
-          reason: 'resize-handle-pointerup',
+          reason: endReason,
         });
 
         if (isEdgeHidden() && root.classList.contains('cgpt-toolbox-edge-revealed')) {
@@ -8346,9 +8912,17 @@
         }
       };
 
+      const onPointerUp = (upEvent) => {
+        finishPanelResize(upEvent, 'resize-handle-pointerup');
+      };
+
+      const onPointerCancel = (upEvent) => {
+        finishPanelResize(upEvent, 'resize-pointercancel');
+      };
+
       window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
+      window.addEventListener('pointerup', onPointerUp);
+      window.addEventListener('pointercancel', onPointerCancel);
 
       try {
         e.currentTarget.setPointerCapture(activePointerId);
@@ -8396,7 +8970,9 @@
       };
     }
 
-    function collectToolboxLayoutState() {
+    function collectToolboxLayoutState(options = {}) {
+      const positionOnly = options.positionOnly === true;
+      const includeSize = options.includeSize !== false && !positionOnly;
       const flags = readToolboxLayoutFlagsFromDom();
       const layout = {
         mode: compactMode ? 'compact' : 'full',
@@ -8413,24 +8989,30 @@
         const rect = panel.getBoundingClientRect();
         layout.x = Math.round(rect.left);
         layout.y = Math.round(rect.top);
-        layout.width = Math.round(rect.width);
-        layout.height = Math.round(rect.height);
+        if (includeSize) {
+          layout.width = Math.round(rect.width);
+          layout.height = Math.round(rect.height);
+        }
       }
       return layout;
     }
 
-    function saveToolboxLayoutState(reason = '') {
-      const layout = collectToolboxLayoutState();
+    function saveToolboxLayoutState(reason = '', options = {}) {
+      const reasonText = String(reason || '').trim();
+      const positionOnly = options.positionOnly === true
+        || isAutoSizeSaveBlockedReason(reasonText);
+      const layout = collectToolboxLayoutState({ positionOnly });
       saveToolboxPageStatePatch(
         { layoutState: layout },
-        reason || 'save-toolbox-layout',
+        reasonText || 'save-toolbox-layout',
       );
       appendLog(
-        `[TOOLBOX][LAYOUT][save] reason=${reason || '-'} `
+        `[TOOLBOX][LAYOUT][save] reason=${reasonText || '-'} `
           + `panel_hidden=${layout.panel_hidden ? 1 : 0} `
           + `edge_docked=${layout.edge_docked ? 1 : 0} `
           + `edge_revealed=${layout.edge_revealed ? 1 : 0} `
-          + `floating_hidden=${layout.floating_hidden ? 1 : 0} mode=${layout.mode}`,
+          + `floating_hidden=${layout.floating_hidden ? 1 : 0} mode=${layout.mode} `
+          + `positionOnly=${positionOnly ? 1 : 0}`,
       );
     }
 
@@ -8488,17 +9070,16 @@
       return true;
     }
 
-    function savePanelPositionFromDomNow(reason = '') {
+    function savePanelPositionOnly(reason, left, top) {
       if (!panel) {
-        console.warn('[ChatGPT toolbox] savePanelPositionFromDom: panel 未初始化');
+        console.warn('[ChatGPT toolbox] savePanelPositionOnly: panel 未初始化');
         return;
       }
 
-      const rect = panel.getBoundingClientRect();
-
+      const reasonText = String(reason || '').trim() || 'panel-position-only';
       const pos = clampPanelPosition({
-        left: Math.round(rect.left),
-        top: Math.round(rect.top),
+        left: Math.round(left),
+        top: Math.round(top),
       });
 
       const panelPosition = {
@@ -8516,12 +9097,51 @@
 
       MemoryManager.set(MemoryManager.KEYS.panelPosition, panelPosition);
 
-      saveToolboxLayoutState(reason || 'panel-drag-end');
-      saveCurrentToolboxBaseState(reason || 'panel-drag-end');
+      saveToolboxLayoutState(reasonText, { positionOnly: true });
+      saveCurrentToolboxBaseState(reasonText);
 
       appendLog(
-        `[TOOLBOX_POSITION][SAVE_PANEL] reason=${reason || '-'} left=${pos.left} top=${pos.top}`,
+        `[TOOLBOX_POSITION][SAVE_POSITION_ONLY] reason=${reasonText} left=${pos.left} top=${pos.top}`,
       );
+    }
+
+    function savePanelSizeOnly(reason, width, height, isCompact) {
+      const reasonText = String(reason || '').trim() || 'panel-size-only';
+
+      if (isAutoSizeSaveBlockedReason(reasonText)) {
+        appendLog(
+          `[TOOLBOX_SIZE][BLOCK_AUTO_SIZE_SAVE] reason=${reasonText} width=${width} height=${height} compact=${typeof isCompact === 'boolean' ? (isCompact ? 1 : 0) : (compactMode ? 1 : 0)}`,
+        );
+        return;
+      }
+
+      const compactFlag = typeof isCompact === 'boolean' ? isCompact : compactMode;
+      const next = normalizePanelSize({
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+
+      const key = getPanelSizeMemoryKeyForMode(compactFlag);
+      MemoryManager.set(key, next);
+      setUserPanelSizeLock(next.width, next.height, compactFlag ? 'compact' : 'normal');
+
+      appendLog(
+        `[TOOLBOX_SIZE][SAVE_SIZE_ONLY] reason=${reasonText} key=${key} width=${next.width} height=${next.height} compact=${compactFlag ? 1 : 0}`,
+      );
+
+      keepPanelInViewport({
+        save: false,
+      });
+    }
+
+    function savePanelPositionFromDomNow(reason = '') {
+      if (!panel) {
+        console.warn('[ChatGPT toolbox] savePanelPositionFromDom: panel 未初始化');
+        return;
+      }
+
+      const rect = panel.getBoundingClientRect();
+      savePanelPositionOnly(reason, rect.left, rect.top);
     }
 
     function savePanelPositionFromDom(reason = '') {
@@ -8625,7 +9245,11 @@
         Math.abs(nextLeft - rect.left) > 0.5 ||
         Math.abs(nextTop - rect.top) > 0.5
       ) {
-        applyPanelPosition(nextLeft, nextTop);
+        applyPanelPosition(nextLeft, nextTop, {
+          reason: options.reason || 'keepPanelInViewport',
+        });
+      } else {
+        updateToolboxNarrowClass(options.reason || 'keepPanelInViewport');
       }
 
       if (shouldSave) {
@@ -9146,27 +9770,78 @@
       updateFloatingTitlePosition(reason || 'sync');
     }
 
-    function restorePanelSize() {
+    function restorePanelSize(reason = '', options = {}) {
+      const reasonText = String(reason || '').trim() || 'unspecified';
       const key = getPanelSizeMemoryKey();
       const saved = MemoryManager.get(key, null);
       const fallback = getPanelSizeFallback();
+      const currentDom = getPanelDomSize();
+      const hasSaved = !!(saved && saved.width && saved.height);
+      const force = options.force === true;
+      const explicitRestore = isExplicitPanelSizeRestoreReason(reasonText);
 
-      if (saved && saved.width && saved.height) {
-        applyPanelSize(saved);
+      appendLog(
+        `[TOOLBOX_SIZE][restore-check] reason=${reasonText} key=${key} ` +
+        `hasSaved=${hasSaved ? 1 : 0} compact=${compactMode ? 1 : 0} ` +
+        `currentWidth=${currentDom ? currentDom.width : 0} currentHeight=${currentDom ? currentDom.height : 0} ` +
+        `savedWidth=${hasSaved ? saved.width : 0} savedHeight=${hasSaved ? saved.height : 0}`,
+      );
+
+      if (isUserPanelSizeProtected() && !explicitRestore && !force) {
+        appendLog(
+          `[TOOLBOX_SIZE][restore-skip] reason=${reasonText} because=user-size-protected`,
+        );
+        return;
+      }
+
+      if (!explicitRestore && !force && currentDom) {
+        appendLog(
+          `[TOOLBOX_SIZE][restore-skip] reason=${reasonText} because=current-valid-rect ` +
+          `width=${currentDom.width} height=${currentDom.height}`,
+        );
+        return;
+      }
+
+      const scheduleViewportKeep = () => {
         window.setTimeout(() => {
           keepPanelInViewport({
             save: false,
           });
         }, 0);
+      };
+
+      if (hasSaved) {
+        appendLog(
+          `[TOOLBOX_SIZE][restore-saved] reason=${reasonText} key=${key} ` +
+          `width=${saved.width} height=${saved.height} compact=${compactMode ? 1 : 0}`,
+        );
+        applyPanelSize(saved, {
+          reason: reasonText,
+          force,
+        });
+        scheduleViewportKeep();
         return;
       }
 
-      applyPanelSize(fallback);
-      window.setTimeout(() => {
-        keepPanelInViewport({
-          save: false,
-        });
-      }, 0);
+      if (!shouldAllowPanelSizeFallback(reasonText, options)) {
+        if (currentDom) {
+          appendLog(
+            `[TOOLBOX_SIZE][restore-skip] reason=${reasonText} because=no-saved-and-fallback-blocked ` +
+            `width=${currentDom.width} height=${currentDom.height}`,
+          );
+          return;
+        }
+      }
+
+      appendLog(
+        `[TOOLBOX_SIZE][restore-fallback] reason=${reasonText} key=${key} ` +
+        `width=${fallback.width} height=${fallback.height} compact=${compactMode ? 1 : 0}`,
+      );
+      applyPanelSize(fallback, {
+        reason: reasonText,
+        force,
+      });
+      scheduleViewportKeep();
     }
 
     function savePanelSizeFromDom(options = {}) {
@@ -9188,22 +9863,16 @@
         return;
       }
 
-      const next = normalizePanelSize({
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      });
+      const isCompact = options.key
+        ? options.key === MemoryManager.KEYS.panelSizeCompact
+        : compactMode;
 
-      const key = options.key || getPanelSizeMemoryKey();
-
-      MemoryManager.set(key, next);
-
-      appendLog(
-        `[TOOLBOX_SIZE][save] reason=${options.reason || '-'} key=${key} width=${next.width} height=${next.height} compact=${compactMode ? 1 : 0}`,
+      savePanelSizeOnly(
+        options.reason || 'resize-handle-pointerup',
+        rect.width,
+        rect.height,
+        isCompact,
       );
-
-      keepPanelInViewport({
-        save: false,
-      });
     }
 
     function bindPanelResizePersistence() {
@@ -9223,6 +9892,7 @@
           save: false,
         });
 
+        syncToolboxHeaderLayout('panel-resize-observer');
         syncToolboxFloatingLayout('panel-resize-observer');
       });
 
@@ -11018,6 +11688,53 @@
       return true;
     }
 
+    function logNestedScrollContainers(reason = '-', options = {}) {
+      if (!options || options.debugEnabled !== true) {
+        return;
+      }
+
+      const root = document.querySelector(`#${APP.rootId}, .cgpt-toolbox-root, .cgpt-toolbox-panel`);
+      if (!(root instanceof HTMLElement)) {
+        return;
+      }
+
+      const scrollables = [];
+      const nodes = root.querySelectorAll('*');
+      nodes.forEach((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return;
+        }
+        const style = window.getComputedStyle(node);
+        const overflowY = style.overflowY;
+        const canScroll = (
+          (overflowY === 'auto' || overflowY === 'scroll')
+          && node.scrollHeight > node.clientHeight + 2
+        );
+        if (canScroll) {
+          scrollables.push({
+            tag: node.tagName,
+            id: node.id || '-',
+            cls: String(node.className || '-').slice(0, 120),
+            clientHeight: node.clientHeight,
+            scrollHeight: node.scrollHeight,
+            overflowY,
+          });
+        }
+      });
+
+      appendLog(
+        '[UI_LAYOUT][SCROLL_CONTAINERS] '
+        + `reason=${reason} count=${scrollables.length} `
+        + scrollables
+          .slice(0, 8)
+          .map((item, index) => (
+            `#${index + 1}:${item.tag}#${item.id}.${item.cls} `
+            + `${item.clientHeight}/${item.scrollHeight} overflowY=${item.overflowY}`
+          ))
+          .join(' || '),
+      );
+    }
+
     function logBatchStatusLayoutDebug(reason = '-', options = {}) {
       if (!options || options.debugEnabled !== true) {
         return;
@@ -11061,17 +11778,62 @@
       }
 
       const valueRect = valueEl.getBoundingClientRect();
+      const currentPanelWidth = rootEl.getBoundingClientRect().width;
+      const lock = getUserPanelSizeLockState();
+      const userSizeLocked = lock.locked === true;
+      const recentUserResize = lastUserPanelResizeAt > 0
+        && (Date.now() - lastUserPanelResizeAt) < USER_PANEL_RESIZE_PROTECT_MS;
+
+      if (userSizeLocked || recentUserResize) {
+        appendLog(
+          '[UI_LAYOUT][COMPRESSED_REPAIR_SKIP_USER_SIZE] '
+          + `reason=${reason} currentWidth=${Math.round(currentPanelWidth)} `
+          + `savedWidth=${lock.width || lastUserPanelResizeSize?.width || 0} `
+          + `valueWidth=${Math.round(valueRect.width)} userSizeLocked=${userSizeLocked ? 1 : 0} `
+          + `recentUserResize=${recentUserResize ? 1 : 0}`,
+        );
+        return;
+      }
+
+      if (detectTopBadgeOverflow(`compressed-repair-check:${reason}`, { log: false, fix: true })) {
+        appendLog(
+          '[UI_LAYOUT][COMPRESSED_REPAIR_SKIP_TOP_BADGE] '
+          + `reason=${reason} currentWidth=${Math.round(currentPanelWidth)} `
+          + `valueWidth=${Math.round(valueRect.width)} action=narrow-wrap-not-resize`,
+        );
+        return;
+      }
+
+      if (valueRect.width <= 0) {
+        compressedRepairDeferCount += 1;
+        appendLog(
+          '[UI_LAYOUT][COMPRESSED_REPAIR_DEFER] '
+          + `reason=${reason} valueWidth=${Math.round(valueRect.width)} `
+          + `currentPanelWidth=${Math.round(currentPanelWidth)} attempt=${compressedRepairDeferCount}`,
+        );
+
+        if (compressedRepairDeferCount < COMPRESSED_REPAIR_MAX_DEFER_ATTEMPTS) {
+          scheduleCompressedRepairRecheck(reason, 300);
+          return;
+        }
+
+        compressedRepairDeferCount = 0;
+        return;
+      }
+
+      compressedRepairDeferCount = 0;
+
       if (valueRect.width >= 220) {
         return;
       }
 
-      const fixedWidth = clampToolboxWidth(680);
+      const fixedWidth = getCompressedRepairTargetWidth();
       rootEl.style.setProperty('--cgpt-toolbox-width', `${fixedWidth}px`);
       rootEl.style.width = `${fixedWidth}px`;
 
       appendLog(
         '[UI_LAYOUT][COMPRESSED_REPAIR] '
-        + `reason=${reason} valueWidth=${Math.round(valueRect.width)} fixedWidth=${fixedWidth}`,
+        + `reason=${reason} valueWidth=${Math.round(valueRect.width)} fixedWidth=${fixedWidth} compact=${compactMode ? 1 : 0}`,
       );
     }
 
@@ -11284,6 +12046,11 @@
       isUserScrollingNow,
       purgeForbiddenStatusBadge,
       ensureToolboxHeaderPageStatusRow,
+      ensureToolboxTitleRow,
+      updateToolboxNarrowClass,
+      detectTopBadgeOverflow,
+      syncToolboxHeaderLayout,
+      clampToolboxPanelToViewport,
       switchTab,
       restoreActiveTab,
       getActiveTab,
@@ -11302,6 +12069,7 @@
       renderLayoutDebugInfo,
       clampToolboxWidth,
       logBatchStatusLayoutDebug,
+      logNestedScrollContainers,
       repairToolboxLayoutIfCompressed,
     };
   })();

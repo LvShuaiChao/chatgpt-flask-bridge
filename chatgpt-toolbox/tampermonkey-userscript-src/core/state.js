@@ -56,6 +56,7 @@
     FAILED: 'FAILED',
     CANCELLED: 'CANCELLED',
     MISSING_FILE: 'MISSING_FILE',
+    NEEDS_REBIND: 'NEEDS_REBIND',
   });
 
   const UploadStateLegacyAliases = Object.freeze({
@@ -97,6 +98,7 @@
       UploadState.FAILED,
       UploadState.CANCELLED,
       UploadState.MISSING_FILE,
+      UploadState.NEEDS_REBIND,
     ]);
 
     function normalize(state) {
@@ -144,7 +146,7 @@
           acc.cancelled += 1;
         }
 
-        if (state === UploadState.MISSING_FILE) {
+        if (state === UploadState.MISSING_FILE || state === UploadState.NEEDS_REBIND) {
           acc.missing += 1;
         }
 

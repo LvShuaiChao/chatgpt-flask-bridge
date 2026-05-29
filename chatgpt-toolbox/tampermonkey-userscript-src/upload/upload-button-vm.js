@@ -57,9 +57,13 @@
     'copy-continue': ['copy-and-continue'],
     'copy-only': ['copy-last-reply'],
     'copy-last-reply': ['copy-only'],
-    'auto-continue': ['auto-continue-until-done'],
-    'auto-continue-until-done': ['auto-continue'],
   });
+
+  const OWNER_SENSITIVE_BUSY_ACTIONS = new Set([
+    'send-message',
+    'auto-continue',
+    'auto-continue-until-done',
+  ]);
 
   function actionsMatchWaitingReplyOwner(action, owner) {
     const normalizedAction = String(action || '').trim();
@@ -78,6 +82,118 @@
     const phase = normalizeTaskPhase(view.phase);
     const text = String(view.text || '').trim();
     return phase === TaskPhase.WAITING_REPLY || text === '等待回复';
+  }
+
+  function isViewShowingOwnerExclusiveBusy(view = {}) {
+    if (isViewShowingWaitingReply(view)) {
+      return true;
+    }
+    const phase = normalizeTaskPhase(view.phase);
+    const buttonPhase = String(view.buttonPhase || 'idle').trim().toLowerCase();
+    const busyTaskPhases = new Set([
+      TaskPhase.CANCELLING,
+      TaskPhase.RUNNING,
+      TaskPhase.SENDING,
+      TaskPhase.WAITING_SEND,
+      TaskPhase.WAITING_REPLY,
+      TaskPhase.WAITING_PAGE_REPLY_TO_SEND,
+    ]);
+    if (busyTaskPhases.has(phase)) {
+      return true;
+    }
+    const busyButtonPhases = new Set([
+      'waiting',
+      'running',
+      'sending',
+      'waiting_reply',
+      'cancelling',
+    ]);
+    if (busyButtonPhases.has(buttonPhase)) {
+      return true;
+    }
+    if (
+      view.allowCancel === true
+      && (
+        view.action === 'stop'
+        || view.action === 'cancel-wait-reply'
+        || view.action === 'cancel-send'
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function logButtonOwnerResolve(owner, phase, source) {
+    const line = `[BUTTON_OWNER][RESOLVE] owner=${owner || '-'} phase=${phase || '-'} source=${source || '-'}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function logButtonOwnerSuppress(action, owner, reason) {
+    const line = `[BUTTON_OWNER][SUPPRESS] action=${action || '-'} owner=${owner || '-'} reason=${reason || '-'}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function isAutoQueueActiveForUploadButton(autoState = {}) {
+    const rawPhase = String(autoState.phase || '').trim().toLowerCase();
+    const phase = normalizeTaskPhase(rawPhase);
+    return !!(
+      autoState.running
+      || autoState.waitingReply
+      || autoState.cancelling
+      || autoState.stopRequested
+      || phase === TaskPhase.WAITING_REPLY
+      || phase === TaskPhase.RUNNING
+      || phase === TaskPhase.SENDING
+      || phase === TaskPhase.WAITING_SEND
+      || [
+        'preparing',
+        'uploading',
+        'upload_attached',
+        'sent',
+        'reply_ready',
+      ].includes(rawPhase)
+    );
+  }
+
+  function resolveAutoQueueOwnerAction(autoState = {}) {
+    if (!isAutoQueueActiveForUploadButton(autoState)) {
+      return '';
+    }
+    return autoState.continueUntilDoneStrict === true
+      ? 'auto-continue-until-done'
+      : 'auto-continue';
+  }
+
+  function getCurrentAutoQueueOwnerAction() {
+    if (
+      typeof AutoQueueModule === 'undefined'
+      || !AutoQueueModule
+      || typeof AutoQueueModule.getState !== 'function'
+    ) {
+      return '';
+    }
+    const autoState = AutoQueueModule.getState() || {};
+    return resolveAutoQueueOwnerAction(autoState);
+  }
+
+  function createIdleBlockedAutoContinueView(text, title) {
+    return {
+      phase: TaskPhase.IDLE,
+      text,
+      title,
+      disabled: true,
+      allowCancel: false,
+      action: 'none',
+      buttonPhase: 'idle',
+      preserveBaseColorWhenDisabled: true,
+    };
   }
 
   function resolveIdleBusinessTextForAction(action, snapshot = {}, button = null) {
@@ -197,6 +313,20 @@
 
   function resolveWaitingReplyOwner(snapshot = {}, capability = {}) {
     void capability;
+    const autoQueueOwner = getCurrentAutoQueueOwnerAction();
+    if (autoQueueOwner) {
+      const autoState = (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getState === 'function'
+      )
+        ? (AutoQueueModule.getState() || {})
+        : {};
+      const autoPhase = String(autoState.phase || 'running').trim().toLowerCase();
+      logButtonOwnerResolve(autoQueueOwner, autoPhase, 'autoqueue');
+      return autoQueueOwner;
+    }
+
     const sendPhase = getNormalizedSendTaskPhase(snapshot);
     // waiting_reply: 已发送，等待 ChatGPT 回复
     // waiting_page_reply_to_send: 页面正在回复，消息尚未真正发送，等待页面空闲后再发
@@ -205,6 +335,7 @@
       || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
       || isLegacySendPending(snapshot)
     ) {
+      logButtonOwnerResolve('send-message', sendPhase, 'manual-send');
       return 'send-message';
     }
 
@@ -232,7 +363,10 @@
 
     if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getState === 'function') {
       if (isAutoQueueWaitingReplyPhase()) {
-        return 'auto-continue';
+        const autoState = AutoQueueModule.getState() || {};
+        const resolved = resolveAutoQueueOwnerAction(autoState) || 'auto-continue';
+        logButtonOwnerResolve(resolved, TaskPhase.WAITING_REPLY, 'autoqueue');
+        return resolved;
       }
     }
 
@@ -245,63 +379,30 @@
   }
 
   function suppressNonOwnerWaitingReplyView(action, view, snapshot = {}, button = null, reason = '') {
-    if (!isViewShowingWaitingReply(view)) {
+    const normalizedAction = String(action || '').trim();
+    const needsOwnerCheck = OWNER_SENSITIVE_BUSY_ACTIONS.has(normalizedAction)
+      ? isViewShowingOwnerExclusiveBusy(view)
+      : isViewShowingWaitingReply(view);
+    if (!needsOwnerCheck) {
       return view;
     }
 
     const owner = String(snapshot.waitingReplyOwner || '').trim()
       || resolveWaitingReplyOwner(snapshot, snapshot.capability);
-    if (!owner || actionsMatchWaitingReplyOwner(action, owner)) {
+    const isStrictOwnerMatch = owner && normalizedAction === owner;
+    const isAliasOwnerMatch = !OWNER_SENSITIVE_BUSY_ACTIONS.has(normalizedAction)
+      && owner
+      && actionsMatchWaitingReplyOwner(normalizedAction, owner);
+    if (!owner || isStrictOwnerMatch || isAliasOwnerMatch) {
       return view;
     }
 
-    const autoState = (
-      typeof AutoQueueModule !== 'undefined'
-      && AutoQueueModule
-      && typeof AutoQueueModule.getState === 'function'
-    )
-      ? (AutoQueueModule.getState() || {})
-      : {};
-    const autoQueueWaitingReply = (
-      normalizeTaskPhase(String(autoState.phase || '').trim().toLowerCase()) === TaskPhase.WAITING_REPLY
-      || autoState.waitingReply === true
-    );
-    const autoQueueRunning = !!(autoState.running || autoState.batchTaskRunning);
-    const preserveAutoQueueWaitingReply = (
-      autoQueueRunning
-      && autoQueueWaitingReply
-      && (
-        action === 'auto-continue'
-        || action === 'auto-continue-until-done'
-      )
-      && owner === 'send-message'
-    );
-
-    if (preserveAutoQueueWaitingReply) {
-      const preservedLine = `[BUTTON_VIEW][WAITING_REPLY_NON_OWNER_PRESERVED] button=${action || '-'} owner=${owner}`
-        + ` reason=${reason || '-'}`;
-      console.log(preservedLine);
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(preservedLine);
-      }
-      return {
-        ...view,
-        phase: TaskPhase.WAITING_REPLY,
-        buttonPhase: 'waiting',
-        disabled: false,
-        allowCancel: true,
-        action: 'stop',
-        suppressedWaitingReply: false,
-      };
-    }
-
     const idleText = resolveIdleBusinessTextForAction(action, snapshot, button);
-    const line = `[BUTTON_VIEW][WAITING_REPLY_NON_OWNER_SUPPRESSED] button=${action || '-'} owner=${owner}`
-      + ` oldPhase=${String(view.phase || '-')} oldText=${String(view.text || '-')} reason=${reason || '-'}`;
-    console.log(line);
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
-    }
+    logButtonOwnerSuppress(
+      normalizedAction,
+      owner,
+      reason || 'non-owner-waiting-reply',
+    );
 
     return {
       ...view,
@@ -312,7 +413,7 @@
       action: 'none',
       preserveBaseColorWhenDisabled: true,
       text: idleText,
-      title: view.title || '当前有其他任务正在等待回复，暂不可用',
+      title: view.title || '当前有其他任务正在运行，暂不可用',
       suppressedWaitingReply: true,
     };
   }
@@ -1291,6 +1392,14 @@
       };
     }
 
+    const autoOwner = resolveAutoQueueOwnerAction(autoState);
+    if (autoOwner && autoOwner !== 'auto-continue') {
+      return createIdleBlockedAutoContinueView(
+        '无限继续',
+        '智能继续正在运行；当前按钮暂不可用',
+      );
+    }
+
     const phase = String(autoState.phase || TaskPhase.IDLE).trim().toLowerCase();
     const stopRequested = !!autoState.stopRequested;
     const activePhases = new Set([
@@ -1332,11 +1441,11 @@
       };
     }
 
-    if (phase === TaskPhase.WAITING_REPLY || isAutoQueueWaitingReplyPhase()) {
+    if (phase === TaskPhase.WAITING_REPLY || phase === 'waiting_reply' || autoState.waitingReply) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '等待回复',
-        title: '正在等待 ChatGPT 回复完成',
+        title: '正在等待 ChatGPT 回复完成，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
@@ -1368,28 +1477,122 @@
   }
 
   function getAutoContinueUntilDoneButtonViewState(autoState) {
-    const shared = getAutoContinueButtonViewState(autoState);
-    const autoQueueSharedHint = '（与「无限继续」共用 AutoQueue 运行态）';
-    const running = shared.phase !== TaskPhase.IDLE
-      && shared.phase !== TaskPhase.SUCCESS
-      && shared.phase !== TaskPhase.FAILED
-      && shared.phase !== TaskPhase.CANCELLED;
-
-    if (running) {
+    if (!autoState || typeof autoState !== 'object') {
       return {
-        ...shared,
-        text: shared.action === 'stop' ? '停止智能继续' : shared.text,
-        title: shared.title
-          ? `${shared.title}${autoQueueSharedHint}`
-          : `当前自动继续任务正在运行${autoQueueSharedHint}`,
-        buttonPhase: shared.buttonPhase === 'idle' ? 'running' : shared.buttonPhase,
+        phase: TaskPhase.IDLE,
+        text: '无限继续直到完成',
+        title: '持续自动继续，直到检测到任务完成',
+        disabled: false,
+        allowCancel: false,
+        action: 'start',
+        buttonPhase: 'idle',
+      };
+    }
+
+    const autoOwner = resolveAutoQueueOwnerAction(autoState);
+    if (!autoOwner) {
+      return {
+        phase: TaskPhase.IDLE,
+        text: '无限继续直到完成',
+        title: '持续自动继续，直到检测到任务完成',
+        disabled: false,
+        allowCancel: false,
+        action: 'start',
+        buttonPhase: 'idle',
+      };
+    }
+
+    if (autoOwner !== 'auto-continue-until-done') {
+      return createIdleBlockedAutoContinueView(
+        '无限继续直到完成',
+        '无限继续正在运行；当前按钮暂不可用',
+      );
+    }
+
+    const rawPhase = String(autoState.phase || TaskPhase.IDLE).trim().toLowerCase();
+    const phase = normalizeTaskPhase(rawPhase);
+    const stopRequested = !!autoState.stopRequested;
+    const activePhases = new Set([
+      TaskPhase.PREPARING,
+      TaskPhase.UPLOADING,
+      TaskPhase.UPLOAD_ATTACHED,
+      TaskPhase.SENDING,
+      TaskPhase.SENT,
+      TaskPhase.WAITING_SEND,
+      TaskPhase.WAITING_REPLY,
+      TaskPhase.REPLY_READY,
+      TaskPhase.RUNNING,
+      'preparing',
+      'uploading',
+      'upload_attached',
+      'sending',
+      'sent',
+      'waiting_send',
+      'waiting_reply',
+      'reply_ready',
+      'running',
+    ]);
+    const cancelling = !!(
+      autoState.cancelling
+      || (stopRequested && activePhases.has(phase))
+    );
+
+    if (cancelling) {
+      return {
+        phase: TaskPhase.CANCELLING,
+        text: '停止中',
+        title: '停止请求已提交，正在等待当前步骤退出',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'cancelled',
+      };
+    }
+
+    if (phase === TaskPhase.FAILED || autoState.failed) {
+      return {
+        phase: TaskPhase.FAILED,
+        text: '智能继续失败',
+        title: '智能继续失败，请查看日志',
+        disabled: false,
+        allowCancel: false,
+        action: 'start',
+        buttonPhase: 'failed',
+      };
+    }
+
+    if (
+      phase === TaskPhase.WAITING_REPLY
+      || rawPhase === 'waiting_reply'
+      || autoState.waitingReply
+    ) {
+      return {
+        phase: TaskPhase.WAITING_REPLY,
+        text: '等待回复',
+        title: '智能继续正在等待 ChatGPT 回复完成，点击可停止',
+        disabled: false,
+        allowCancel: true,
+        action: 'stop',
+        buttonPhase: 'waiting',
+      };
+    }
+
+    if (activePhases.has(phase) || autoState.running) {
+      return {
+        phase: TaskPhase.RUNNING,
+        text: '停止智能继续',
+        title: '智能继续正在运行，点击可停止',
+        disabled: false,
+        allowCancel: true,
+        action: 'stop',
+        buttonPhase: 'running',
       };
     }
 
     return {
       phase: TaskPhase.IDLE,
       text: '无限继续直到完成',
-      title: '循环发送强约束继续指令；只有检测到严格完成信号才停止',
+      title: '持续自动继续，直到检测到任务完成',
       disabled: false,
       allowCancel: false,
       action: 'start',
@@ -2525,6 +2728,8 @@
     isBlockedByPageReplyBusyReason,
     isButtonOwnTaskActive,
     resolveWaitingReplyOwner,
+    getCurrentAutoQueueOwnerAction,
+    resolveAutoQueueOwnerAction,
     actionsMatchWaitingReplyOwner,
     isViewShowingWaitingReply,
     suppressNonOwnerWaitingReplyView,

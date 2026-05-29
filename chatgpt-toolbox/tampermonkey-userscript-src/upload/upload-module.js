@@ -5788,6 +5788,19 @@
       target.state = target.attachState || target.state || UploadState.IDLE;
       target.status = target.registryStatus || target.status || 'pending';
       target.download_url = target.downloadUrl || target.download_url || '';
+      const restoreStateText = String(target.restoreState || '').trim().toLowerCase();
+      const registryStatusText = String(target.registryStatus || target.status || '').trim().toLowerCase();
+      const attachStateText = String(target.attachState || target.state || '').trim();
+      target.needsRebind = !!(
+        target.needsRebind === true
+        || restoreStateText === UploadRestoreState.NEEDS_REBIND
+        || registryStatusText === 'needs_rebind'
+        || attachStateText === UploadState.NEEDS_REBIND
+        || attachStateText === UploadState.MISSING_FILE
+      );
+      if (!String(target.missingReason || '').trim() && target.needsRebind) {
+        target.missingReason = String(target.message || '').trim() || 'page-reloaded-file-object-lost';
+      }
       return target;
     }
 
@@ -6580,11 +6593,13 @@
 
       const reasonText = String(reason || 'file-handle-unavailable').trim() || 'file-handle-unavailable';
 
-      item.state = UploadState.MISSING_FILE;
-      item.attachState = UploadState.MISSING_FILE;
+      item.state = UploadState.NEEDS_REBIND;
+      item.attachState = UploadState.NEEDS_REBIND;
       item.status = 'needs_rebind';
       item.registryStatus = 'needs_rebind';
       item.restoreState = UploadRestoreState.NEEDS_REBIND;
+      item.needsRebind = true;
+      item.missingReason = reasonText;
       item.sourceKind = 'missing-file';
       item.readMode = '';
       item.localReadable = false;
@@ -6721,9 +6736,10 @@
         if (!item) continue;
         if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
 
-        if (item.restoreState === UploadRestoreState.NEEDS_REBIND) {
+        if (item.restoreState === UploadRestoreState.NEEDS_REBIND || item.needsRebind === true) {
           ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][NEEDS_REBIND] id=${item.id || '-'} name=${item.name || item.filename || '-'}`
+            `[UPLOAD_RESTORE][NEEDS_REBIND] id=${item.id || '-'} name=${item.name || item.filename || '-'} `
+            + `reason=${String(item.missingReason || 'page-reloaded-file-object-lost').trim()}`,
           );
           continue;
         }
@@ -6977,18 +6993,18 @@
       }
       if (summary.totalItems > 0 && summary.pendingCount === 0 && summary.needsRebindCount > 0) {
         ToolboxShell.appendLog(
-          `[UPLOAD_START][NO_PENDING_REASON] reason=needs-rebind totalItems=${summary.totalItems} needsRebind=${summary.needsRebindCount} missing=${summary.missingCount || 0}`,
+          `[UPLOAD_START][NO_PENDING_REASON] reason=missing-local-file-needs-rebind totalItems=${summary.totalItems} needsRebind=${summary.needsRebindCount} missing=${summary.missingCount || 0}`,
         );
         return {
-          reason: 'needs-rebind',
-          message: '上传队列中有文件记录，但真实文件源已失效，请点击「重新绑定」或删除后重新拖入文件。',
+          reason: 'missing-local-file-needs-rebind',
+          message: '刷新页面或换电脑后，浏览器不会保留本地文件读取权限。请点击「重新绑定」重新选择同名文件。',
           shouldOpenPicker: false,
         };
       }
       if (summary.missingSourceCount > 0) {
         return {
-          reason: 'missing-source',
-          message: '当前组文件源已失效，请重新拖入或重新绑定文件',
+          reason: 'missing-local-file-needs-rebind',
+          message: '当前组文件源已失效。刷新/换电脑后需重新绑定，请点击「重新绑定」或重新拖入文件。',
           shouldOpenPicker: false,
         };
       }
@@ -7022,33 +7038,57 @@
       );
     }
 
-    function hasAttemptableUploadSource(q) {
-      if (!q || isUploadSourceCacheForbidden(q)) {
+    function isUploadItemAttemptable(item) {
+      if (!item || isUploadSourceCacheForbidden(item)) {
         return false;
       }
 
       if (
-        q.restoreState === UploadRestoreState.NEEDS_REBIND
-        || q.restoreState === UploadRestoreState.MISSING
-        || q.state === UploadState.MISSING_FILE
-        || q.registryStatus === 'needs_rebind'
-        || String(q.status || '').trim().toLowerCase() === 'needs_rebind'
+        item.needsRebind === true
+        || item.restoreState === UploadRestoreState.NEEDS_REBIND
+        || item.restoreState === UploadRestoreState.MISSING
+        || item.state === UploadState.MISSING_FILE
+        || item.state === UploadState.NEEDS_REBIND
+        || item.attachState === UploadState.MISSING_FILE
+        || item.attachState === UploadState.NEEDS_REBIND
+        || item.registryStatus === 'needs_rebind'
+        || String(item.status || '').trim().toLowerCase() === 'needs_rebind'
       ) {
         return false;
       }
 
-      if (hasLocalReadableHandle(q)) {
+      if (isFileLike(item.file) || isFileLike(item.sourceFile) || isFileLike(item.originalFile)) {
         return true;
       }
 
-      if (isFlaskLocalDirectSource(q)) {
+      if (isBlobLike(item.blob) || isBlobLike(item.sourceBlob)) {
+        return true;
+      }
+
+      if (hasLocalReadableHandle(item)) {
+        return true;
+      }
+
+      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
+        return true;
+      }
+
+      if (isFlaskLocalDirectSource(item)) {
         return !!(
-          String(typeof q.download_url === 'string' ? q.download_url : '').trim()
-          || String(q.file_id || '').trim()
+          String(typeof item.download_url === 'string' ? item.download_url : '').trim()
+          || String(item.file_id || '').trim()
         );
       }
 
       return false;
+    }
+
+    function hasAttemptableUploadSource(q) {
+      return isUploadItemAttemptable(q);
+    }
+
+    function getUploadLocalFileDiagnostics(scopeGroupId = '', pendingItems = []) {
+      return diagnoseNoPendingUploadItems(scopeGroupId, pendingItems);
     }
 
     function hasReadableFreshLocalSource(q) {
@@ -7155,7 +7195,10 @@
         || q.restoreState === UploadRestoreState.MISSING
         || q.registryStatus === 'needs_rebind'
         || normalizedStatus === 'needs_rebind'
+        || q.needsRebind === true
         || q.state === UploadState.MISSING_FILE
+        || q.state === UploadState.NEEDS_REBIND
+        || q.attachState === UploadState.NEEDS_REBIND
         || q.sourceKind === 'missing-file'
         || q.sourceKind === 'missing-local'
         || isUploadSourceCacheForbidden(q)
@@ -7906,8 +7949,11 @@
         q.restoreState === UploadRestoreState.NEEDS_REBIND
         || q.registryStatus === 'needs_rebind'
         || normalizedStatus === 'needs_rebind'
+        || q.needsRebind === true
+        || q.state === UploadState.NEEDS_REBIND
+        || q.attachState === UploadState.NEEDS_REBIND
       ) {
-        return '本地不可读 · 需要重新绑定';
+        return '本地不可读：刷新/换电脑后需要重新绑定';
       }
       if (
         q.restoreState === UploadRestoreState.MISSING
@@ -7931,10 +7977,19 @@
         || normalizedStatus === 'uploaded'
         || normalizedStatus === 'pending_confirm'
       ) {
-        return '本地可读 · 已绑定';
+        if (q.state === UploadState.ATTACHED) {
+          if (isUploadItemSentWithMessage(q)) {
+            return '本地可读 · 已发送';
+          }
+          if (hasAttachmentEvidenceForItem(q)) {
+            return '本地可读 · 已添加到输入框';
+          }
+          return '本地可读 · 已绑定';
+        }
+        return '本地可读 · 已上传';
       }
       if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
-        return '本地可读 · 已绑定';
+        return '本地可读 · 待上传';
       }
       return '本地不可读 · 需要重新绑定';
     }
@@ -7965,10 +8020,23 @@
         lines.push('提示：本地句柄可读，每次上传都会从磁盘重新读取最新文件。');
       } else if (isFlaskLocalDirectSource(q) && hasAttemptableUploadSource(q)) {
         lines.push('提示：本地直读，每次上传都会由 Flask 从真实路径重新读取文件。');
+      }
+
+      const normalizedStatus = String(q && q.status ? q.status : '').trim().toLowerCase();
+      const isRowUploadPending = (
+        q.state !== UploadState.ATTACHED
+        && q.state !== UploadState.READING
+        && q.state !== UploadState.ATTACHING
+        && normalizedStatus !== 'uploaded'
+        && normalizedStatus !== 'pending_confirm'
+        && (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q))
+      );
+      if (isRowUploadPending) {
+        lines.push('提示：点击文件行可上传当前文件；点击「开始上传」可上传当前分组全部可上传文件。');
       } else if (isUploadSourceCacheForbidden(q)) {
         lines.push('说明：缓存快照不可上传，请点击“重新绑定”选择真实本地文件。');
       } else if (isUploadItemLocallyUnreadable(q)) {
-        lines.push('说明：本地文件不可读，请点击“重新绑定”。');
+        lines.push('说明：刷新页面或换电脑后，浏览器不会保留本地文件读取权限。请点击「重新绑定」重新选择同名文件。');
       }
 
       const showMessage = !!String(q.message || '').trim()
@@ -11818,7 +11886,41 @@
         `;
     }
 
+    function shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply(reason = '-') {
+      try {
+        if (
+          typeof AutoQueueModule === 'undefined'
+          || !AutoQueueModule
+          || typeof AutoQueueModule.getState !== 'function'
+        ) {
+          return false;
+        }
+        const autoState = AutoQueueModule.getState() || {};
+        const phase = String(autoState.phase || '');
+        const step = autoState.taskRun && autoState.taskRun.currentStep
+          ? String(autoState.taskRun.currentStep)
+          : '';
+        return Boolean(
+          phase === 'waiting_reply'
+          || step === 'wait-current-reply'
+          || step === 'wait-reply'
+          || step === 'wait-next-reply'
+        );
+      } catch (err) {
+        console.error('[UPLOAD_GROUP][WAITING_REPLY_SKIP_CHECK_FAILED]', err);
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][WAITING_REPLY_SKIP_CHECK_FAILED] reason=${reason} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+        return false;
+      }
+    }
+
     function renderProjectCategoryChips() {
+      if (shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply('render-chips')) {
+        appendUploadGroupLog('RENDER_SKIP', { phase: 'waiting-reply' });
+        return;
+      }
       if (!groupListEl) {
         ToolboxShell.appendLog('[UPLOAD_GROUP_UI][render-skip] reason=groupListEl-missing');
         return;
@@ -12034,6 +12136,15 @@
     let lastToolboxTopStatusSignature = '';
     let lastToolboxTopStatusHeavyAt = 0;
 
+    function syncToolboxHeaderLayoutFromUpload(reason = 'renderToolboxTopStatus') {
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && typeof ToolboxShell.syncToolboxHeaderLayout === 'function'
+      ) {
+        ToolboxShell.syncToolboxHeaderLayout(reason);
+      }
+    }
+
     function renderToolboxPageStatusRow(options = {}) {
       let pageStatusRowEl = document.getElementById('cgpt-toolbox-page-status-row');
 
@@ -12150,9 +12261,35 @@
       const uploadQuotaTitle = `本地上传统计（非官方额度）：已用：${uploadQuota.used}/${uploadQuota.maxFiles}；剩余：${uploadQuotaRemaining}；窗口：${uploadWindowMinutes} 分钟；下一条释放：${uploadNextReleaseTitle}；状态：${uploadStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
       const messageQuotaTitle = `本地消息统计（非官方额度）：已用：${messageQuota.used}/${messageQuota.maxMessages}；剩余：${messageQuotaRemaining}；窗口：${messageWindowMinutes} 分钟；下一条释放：${messageNextReleaseTitle}；状态：${messageStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
 
+      const taskBadgeText = (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getCurrentTaskBadgeText === 'function'
+      )
+        ? String(AutoQueueModule.getCurrentTaskBadgeText() || '').trim()
+        : '';
+      const taskBadgeTitle = (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getCurrentBatchTaskInfo === 'function'
+      )
+        ? (() => {
+          const info = AutoQueueModule.getCurrentBatchTaskInfo('top-badge-title');
+          if (!info || !info.title || info.title === '-') {
+            return taskBadgeText;
+          }
+          return [
+            info.title,
+            info.taskId && info.taskId !== '-' ? `taskId: ${info.taskId}` : '',
+            info.step && info.step !== '-' ? `step: ${info.step}` : '',
+          ].filter(Boolean).join(' | ');
+        })()
+        : taskBadgeText;
+
       const signature = [
         pageIdText,
         roundText,
+        taskBadgeText,
         uploadQuotaText,
         messageQuotaText,
         uploadBadgeStateClass,
@@ -12161,14 +12298,16 @@
 
       if (signature === lastToolboxTopStatusSignature) {
         updateChatInputStateBadge();
+        syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-skip');
         return;
       }
       lastToolboxTopStatusSignature = signature;
 
       const pageIdBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-page-id-badge');
       const turnBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-turn-count-badge');
+      let taskBadgeEl = pageStatusRowEl.querySelector('#cgpt-top-current-task-badge');
       const quotaBadges = pageStatusRowEl.querySelectorAll(
-        '.cgpt-toolbox-top-status-badge:not(#cgpt-page-input-state):not(.cgpt-toolbox-page-id-badge):not(.cgpt-toolbox-turn-count-badge)',
+        '.cgpt-toolbox-upload-quota-badge, .cgpt-toolbox-message-quota-badge',
       );
 
       if (pageIdBadge && turnBadge && quotaBadges.length >= 2) {
@@ -12176,35 +12315,66 @@
         pageIdBadge.title = pageIdText;
         turnBadge.textContent = roundText;
         turnBadge.title = `${roundText}（当前对话已完成轮数）`;
+        if (taskBadgeText) {
+          if (!taskBadgeEl) {
+            taskBadgeEl = document.createElement('span');
+            taskBadgeEl.id = 'cgpt-top-current-task-badge';
+            taskBadgeEl.className = 'cgpt-toolbox-top-status-badge cgpt-top-badge cgpt-top-badge-task';
+            turnBadge.insertAdjacentElement('afterend', taskBadgeEl);
+          }
+          taskBadgeEl.textContent = taskBadgeText;
+          taskBadgeEl.title = taskBadgeTitle || taskBadgeText;
+          taskBadgeEl.className = 'cgpt-toolbox-top-status-badge cgpt-top-badge cgpt-top-badge-task';
+          taskBadgeEl.hidden = false;
+        } else if (taskBadgeEl) {
+          taskBadgeEl.hidden = true;
+          taskBadgeEl.textContent = '';
+          taskBadgeEl.title = '';
+        }
         const uploadBadgeEl = quotaBadges[0];
         const messageBadgeEl = quotaBadges[1];
-        uploadBadgeEl.className = `cgpt-toolbox-top-status-badge ${uploadBadgeStateClass}`.trim();
+        uploadBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge ${uploadBadgeStateClass}`.trim();
         uploadBadgeEl.textContent = uploadQuotaText;
         uploadBadgeEl.title = uploadQuotaTitle;
-        messageBadgeEl.className = `cgpt-toolbox-top-status-badge ${messageBadgeStateClass}`.trim();
+        messageBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge ${messageBadgeStateClass}`.trim();
         messageBadgeEl.textContent = messageQuotaText;
         messageBadgeEl.title = messageQuotaTitle;
         updateChatInputStateBadge();
+        syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-patch');
         return;
       }
+
+      const taskBadgeHtml = taskBadgeText
+        ? `<span id="cgpt-top-current-task-badge" class="cgpt-toolbox-top-status-badge cgpt-top-badge cgpt-top-badge-task" title="${escapeHtml(taskBadgeTitle || taskBadgeText)}">${escapeHtml(taskBadgeText)}</span>`
+        : '';
 
       pageStatusRowEl.innerHTML = `
         <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge" title="${escapeHtml(roundText)}（当前对话已完成轮数）">${escapeHtml(roundText)}</span>
-        <span class="cgpt-toolbox-top-status-badge ${uploadBadgeStateClass}" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
-        <span class="cgpt-toolbox-top-status-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
+        ${taskBadgeHtml}
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge ${uploadBadgeStateClass}" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
       `;
       updateChatInputStateBadge();
+      syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-full');
     }
 
     function renderToolboxTopStatus(options = {}) {
       const heavy = options && options.heavy === true;
       const force = options && options.force === true;
+      const reason = options && options.reason ? String(options.reason) : '-';
+      if (heavy && shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply(reason)) {
+        renderToolboxPageStatusRow({ heavy: false });
+        updateChatInputStateBadge();
+        syncToolboxHeaderLayoutFromUpload(`renderToolboxTopStatus-skip-heavy:${reason}`);
+        return;
+      }
       const now = Date.now();
       if (heavy && !force && now - lastToolboxTopStatusHeavyAt < 3000) {
         renderToolboxPageStatusRow({ heavy: false });
         updateChatInputStateBadge();
+        syncToolboxHeaderLayoutFromUpload(`renderToolboxTopStatus-throttle:${reason}`);
         return;
       }
       renderToolboxPageStatusRow({ heavy });
@@ -12213,6 +12383,7 @@
         renderProjectCategoryChips();
       }
       updateChatInputStateBadge();
+      syncToolboxHeaderLayoutFromUpload(`renderToolboxTopStatus:${reason}`);
     }
 
     function setStatus(text, type, options) {
@@ -20999,6 +21170,84 @@
       return pickOneLocalFileWithHandle();
     }
 
+    function validateRebindFile(oldItem, newFile) {
+      if (!(newFile instanceof File) && !isFileLike(newFile)) {
+        return {
+          ok: false,
+          reason: 'not-file',
+        };
+      }
+      const expectedName = String(oldItem && (oldItem.name || oldItem.filename) || '').trim();
+      const actualName = String(newFile.name || '').trim();
+      if (expectedName && actualName && expectedName !== actualName) {
+        return {
+          ok: false,
+          reason: 'filename-mismatch',
+          detail: `expected=${expectedName} actual=${actualName}`,
+        };
+      }
+      const expectedSize = Number(oldItem && oldItem.size) || 0;
+      const actualSize = Number(newFile.size) || 0;
+      if (expectedSize > 0 && actualSize > 0 && expectedSize !== actualSize) {
+        return {
+          ok: false,
+          reason: 'filesize-mismatch',
+          detail: `expected=${expectedSize} actual=${actualSize}`,
+        };
+      }
+      return {
+        ok: true,
+        reason: 'ok',
+      };
+    }
+
+    function applyReboundFile(item, file, handle) {
+      if (!item || !isFileLike(file)) {
+        return false;
+      }
+      const hasHandle = isFileHandleLike(handle);
+      item.file = file;
+      item.sourceFile = file;
+      item.originalFile = file;
+      item.blob = file;
+      item.sourceBlob = file;
+      item.name = file.name || item.name || 'unknown';
+      item.size = file.size || 0;
+      item.type = file.type || item.type || 'application/octet-stream';
+      item.lastModified = file.lastModified || Date.now();
+      item.state = UploadState.IDLE;
+      item.attachState = UploadState.IDLE;
+      item.status = 'ready';
+      item.registryStatus = 'ready';
+      item.needsRebind = false;
+      item.missingReason = '';
+      item.message = '';
+      item.error = '';
+      item.lastError = '';
+      if (hasHandle) {
+        item.fileHandle = handle;
+        item.sourceKind = 'local-handle';
+        item.readMode = 'handle';
+        item.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
+        item.handleKey = buildUploadHandleKey(item);
+      } else {
+        item.fileHandle = null;
+        item.sourceKind = 'browser_file';
+        item.readMode = 'file';
+        item.persistedKind = UploadPersistedKind.METADATA_ONLY;
+        item.handleKey = '';
+      }
+      safeAssignRestoreState(item, UploadRestoreState.READY, 'rebind:applyReboundFile');
+      item.uploadName = '';
+      item.persistedAttached = false;
+      item.attachedInSession = false;
+      clearStaleUnreadableFlagsForReadableItem(item, 'applyReboundFile');
+      syncUploadItemSchemaInPlace(item);
+      ToolboxShell.appendLog(
+        `[UPLOAD_REBIND][OK] id=${item.id || '-'} name=${item.name || '-'} size=${item.size || 0}`,
+      );
+      return true;
+    }
 
     async function rebindUploadFile(id) {
       ToolboxShell.appendLog(`[UPLOAD_REBIND][START] id=${id || '-'}`);
@@ -21018,7 +21267,6 @@
       }
 
       try {
-        const oldName = q.name || '';
         const picked = await pickOneLocalFileForRebind();
         const file = picked.file;
         const handle = picked.handle;
@@ -21027,25 +21275,30 @@
           throw new Error('重新绑定文件为空');
         }
 
-        if (oldName && file.name && oldName !== file.name) {
-          const ok = window.confirm(
-            `重新选择的文件名和原缓存文件不同。\n\n原文件：${oldName}\n新文件：${file.name}\n\n是否继续绑定？`,
-          );
-
-          if (!ok) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][rebind-file:cancel-name-mismatch] id=${id || '-'} old=${oldName} next=${file.name}`,
+        const validation = validateRebindFile(q, file);
+        if (!validation.ok) {
+          if (validation.reason === 'filename-mismatch') {
+            const oldName = q.name || '';
+            const ok = window.confirm(
+              `重新选择的文件名和原记录不同。\n\n原文件：${oldName}\n新文件：${file.name}\n\n是否继续绑定？`,
             );
-            setStatus('已取消重新绑定');
+            if (!ok) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
+              );
+              setStatus('已取消重新绑定');
+              return;
+            }
+          } else {
+            ToolboxShell.appendLog(
+              `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
+            );
+            setStatus(`重新绑定失败：${validation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
             return;
           }
         }
 
         const hasHandle = isFileHandleLike(handle);
-        const sameSize = Number(q.size || 0) === Number(file.size || 0);
-        if (!sameSize) {
-          ToolboxShell.appendLog(`[UPLOAD_REBIND][SIZE_MISMATCH] id=${id || '-'} old=${q.size || 0} next=${file.size || 0}`);
-        }
 
         if (!hasHandle) {
           q.fileHandle = null;
@@ -21085,13 +21338,13 @@
           freshFile = await handle.getFile();
         } catch (readErr) {
           const errText = readErr && readErr.message ? readErr.message : String(readErr);
-          console.error('[UPLOAD_REBIND][READ_AFTER_BIND_FAILED]', readErr);
-          ToolboxShell.appendLog(`[UPLOAD_REBIND][READ_AFTER_BIND_FAILED] id=${id || '-'} error=${errText}`);
-          q.state = UploadState.MISSING_FILE;
-          q.status = 'needs_rebind';
-          q.registryStatus = 'needs_rebind';
+          const errStack = readErr && readErr.stack ? readErr.stack : '';
+          console.error('[UPLOAD_REBIND][ERROR]', readErr);
+          ToolboxShell.appendLog(
+            `[UPLOAD_REBIND][ERROR] id=${id || '-'} error=${errText} stack=${String(errStack).slice(0, 1200)}`,
+          );
+          markUploadItemNeedsRebind(q, errText, 'rebind:read-after-bind-failed');
           q.message = `重新绑定后读取失败：${errText}`;
-          safeAssignRestoreState(q, UploadRestoreState.NEEDS_REBIND, 'rebind:read-after-bind-failed');
           await awaitPersistQueueBriefly('rebindUploadFile:read-after-bind-failed', 300);
           await refreshUploadGroupCounts();
           render();
@@ -21099,11 +21352,8 @@
           return;
         }
         if (!freshFile || Number(freshFile.size || 0) <= 0) {
-          q.state = UploadState.MISSING_FILE;
-          q.status = 'needs_rebind';
-          q.registryStatus = 'needs_rebind';
+          markUploadItemNeedsRebind(q, 'empty-after-bind', 'rebind:empty-after-bind');
           q.message = '重新绑定后文件为空或不可读';
-          safeAssignRestoreState(q, UploadRestoreState.NEEDS_REBIND, 'rebind:empty-after-bind');
           await awaitPersistQueueBriefly('rebindUploadFile:empty-after-bind', 300);
           await refreshUploadGroupCounts();
           render();
@@ -21112,31 +21362,16 @@
           return;
         }
 
-        q.name = freshFile.name || q.name || 'unknown';
-        q.size = freshFile.size || 0;
-        q.type = freshFile.type || q.type || 'application/octet-stream';
-        q.lastModified = freshFile.lastModified || Date.now();
-        q.file = freshFile;
-        q.sourceFile = freshFile;
-        q.originalFile = freshFile;
-        q.blob = freshFile;
-        q.sourceBlob = freshFile;
+        const reboundValidation = validateRebindFile(q, freshFile);
+        if (!reboundValidation.ok && reboundValidation.reason !== 'filename-mismatch') {
+          ToolboxShell.appendLog(
+            `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${reboundValidation.reason} detail=${reboundValidation.detail || '-'}`,
+          );
+          setStatus(`重新绑定失败：${reboundValidation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
+          return;
+        }
 
-        q.sourceKind = 'local-handle';
-        q.readMode = 'handle';
-        q.message = '';
-        q.error = '';
-        q.lastError = '';
-        q.state = UploadState.IDLE;
-        q.status = 'ready';
-        q.registryStatus = 'ready';
-        q.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
-        safeAssignRestoreState(q, UploadRestoreState.READY, 'rebind:file-ready');
-        q.handleKey = buildUploadHandleKey(q);
-        q.uploadName = '';
-        q.persistedAttached = false;
-        q.attachedInSession = false;
-        clearStaleUnreadableFlagsForReadableItem(q, 'rebindUploadFile:success');
+        applyReboundFile(q, freshFile, handle);
         ToolboxShell.appendLog(
           `[UPLOAD_REBIND][STATE_READY] id=${id || '-'} name=${q.name || '-'} `
           + `sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'} `
@@ -22864,6 +23099,9 @@
       }
 
       const view = getAutoContinueButtonView(autoState);
+      const snapshot = typeof buildUploadButtonRenderSnapshot === 'function'
+        ? buildUploadButtonRenderSnapshot()
+        : {};
 
       if (
         typeof UploadButtonVm !== 'undefined'
@@ -22871,6 +23109,7 @@
       ) {
         return UploadButtonVm.applyUploadButtonViewState(button, view, reason, {
           buttonName: 'auto-continue',
+          snapshot,
         });
       }
 
@@ -23851,7 +24090,7 @@
       const queueHintHtml = `
         <div class="cgpt-upload-item empty toolbox-upload-queue-hint" data-no-row-upload="1">
           <div class="cgpt-upload-meta">
-            本地队列 · 点击文件上传
+            本地队列 · 点击文件行上传当前文件 · 点击「开始上传」批量上传当前分组
           </div>
         </div>
       `;
@@ -25026,7 +25265,7 @@
         btn.dataset.cgptButtonPhase = 'idle';
         btn.setAttribute('aria-busy', 'false');
         btn.textContent = '开始上传';
-        btn.title = '开始上传';
+        btn.title = '上传当前分组全部可上传文件（点击文件行可单独上传当前文件）';
         btn.removeAttribute('data-danger-enter-block');
       }
 
@@ -25283,6 +25522,57 @@
       );
     }
 
+    function resolveAutoQueuePreSendSendButtonText() {
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return '';
+      }
+      try {
+        const autoState = AutoQueueModule.getState() || {};
+        if (autoState.running !== true && autoState.batchTaskRunning !== true) {
+          return '';
+        }
+        const taskRun = autoState.taskRun && typeof autoState.taskRun === 'object'
+          ? autoState.taskRun
+          : {};
+        const step = String(taskRun.currentStep || taskRun.batchStep || '').trim();
+        const preSendSteps = new Set([
+          'auto-upload-before-send',
+          'send-initial',
+          'prompt-ready',
+          'send-wait-button',
+          'send-wait-foreground',
+          'send-wait-retry',
+          'send-initial-wait-retry',
+        ]);
+        if (!preSendSteps.has(step)) {
+          return '';
+        }
+        if (step === 'auto-upload-before-send') {
+          return autoState.batchAutoUploading ? '正在上传附件' : '准备上传附件';
+        }
+        if (step === 'send-wait-button') {
+          return '等待发送按钮';
+        }
+        if (step === 'send-initial' || step === 'prompt-ready') {
+          return '准备发送';
+        }
+        if (step === 'send-wait-foreground') {
+          return '等待前台发送';
+        }
+        if (step === 'send-wait-retry' || step === 'send-initial-wait-retry') {
+          return '发送重试中';
+        }
+        return '等待发送按钮';
+      } catch (err) {
+        console.error('[ChatGPT toolbox] resolveAutoQueuePreSendSendButtonText failed', err);
+        return '';
+      }
+    }
+
     function applySendMessageButtonState(button, capability, options = {}) {
       if (!button) {
         return false;
@@ -25305,6 +25595,59 @@
       const reason = String(options.reason || 'render');
 
       logSendButtonStateSource(sendPhase, reason);
+
+      function resolveAutoQueueOwnerForSendMessageSuppression() {
+        if (
+          typeof UploadButtonVm === 'undefined'
+          || typeof UploadButtonVm.getCurrentAutoQueueOwnerAction !== 'function'
+        ) {
+          return '';
+        }
+        return UploadButtonVm.getCurrentAutoQueueOwnerAction();
+      }
+
+      function applySendMessageSuppressedForAutoQueueOwner(autoQueueOwner) {
+        const ownerTitle = autoQueueOwner === 'auto-continue-until-done'
+          ? '智能继续正在运行；当前按钮暂不可用'
+          : '无限继续正在运行；当前按钮暂不可用';
+        const line = `[BUTTON_OWNER][SUPPRESS] action=send-message owner=${autoQueueOwner} reason=non-owner-busy-send-phase`;
+        console.log(line);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        }
+        button.dataset.action = 'send-message';
+        if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
+          ButtonState.setButtonRuntimeAction(button, 'none');
+        } else {
+          delete button.dataset.cgptRuntimeAction;
+        }
+        setSendMessageButtonVisualState(button, false);
+        const suppressedResult = setToolboxButtonState(button, {
+          phase: ButtonPhase.IDLE,
+          text: '发送消息',
+          title: ownerTitle,
+          disabled: true,
+          preserveBaseColorWhenDisabled: true,
+          reason,
+        });
+        finalizeSendButtonStateFromTask(reason);
+        return suppressedResult;
+      }
+
+      const busySendPhases = new Set([
+        'cancelling',
+        'waiting_send',
+        'waiting_ready',
+        'sending',
+        'waiting_page_reply_to_send',
+        'waiting_reply',
+      ]);
+      if (busySendPhases.has(sendPhase)) {
+        const autoQueueOwner = resolveAutoQueueOwnerForSendMessageSuppression();
+        if (autoQueueOwner) {
+          return applySendMessageSuppressedForAutoQueueOwner(autoQueueOwner);
+        }
+      }
 
       const failureHint = state.uploadSendFailureHint
         && (Date.now() - Number(state.uploadSendFailureHintAt || 0) < 12000)
@@ -25394,6 +25737,27 @@
         });
         finalizeSendButtonStateFromTask(reason);
         return waitingReplyToSendResult;
+      }
+
+      const autoQueuePreSendText = resolveAutoQueuePreSendSendButtonText();
+      if (autoQueuePreSendText) {
+        button.dataset.action = 'send-message';
+        if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
+          ButtonState.setButtonRuntimeAction(button, 'cancel-wait-reply');
+        } else {
+          button.dataset.cgptRuntimeAction = 'cancel-wait-reply';
+        }
+        setSendMessageButtonVisualState(button, true, 'autoqueue-pre-send');
+        const preSendResult = setToolboxButtonState(button, {
+          phase: ButtonPhase.WAITING_SEND,
+          text: autoQueuePreSendText,
+          title: autoQueuePreSendText,
+          allowCancel: true,
+          ariaBusy: true,
+          reason,
+        });
+        finalizeSendButtonStateFromTask(reason);
+        return preSendResult;
       }
 
       if (sendPhase === 'waiting_reply') {
@@ -33323,16 +33687,27 @@
           });
         }
 
+        const summary = diagnoseNoPendingUploadItems(scopeGroupId, pendingItems);
+        const noPendingResult = resolveNoPendingUploadResult(summary);
+        const failReason = noPendingResult.reason === 'missing-local-file-needs-rebind'
+          || noPendingResult.reason === 'needs-rebind'
+          || noPendingResult.reason === 'missing-source'
+          ? 'missing-local-file-needs-rebind'
+          : 'no-readable-files-after-force-reset';
+
         ToolboxShell.appendLog(
-          `[UPLOAD][AUTOQ_NO_FILES_AFTER_RESET] source=${uploadSource} reason=no-readable-files-after-force-reset`,
+          `[UPLOAD][AUTOQ_NO_FILES_AFTER_RESET] source=${uploadSource} reason=${failReason} `
+          + `needsRebind=${summary.needsRebindCount || 0} missingSource=${summary.missingSourceCount || 0}`,
         );
 
         return buildQueueUploadResult({
           ok: false,
-          reason: 'no-readable-files-after-force-reset',
+          reason: failReason,
           uploadedCount: 0,
           failedCount: 0,
           skippedCount: 0,
+          needsRebindCount: summary.needsRebindCount || 0,
+          missingSourceCount: summary.missingSourceCount || 0,
         });
       }
 
@@ -38166,6 +38541,10 @@
       applyBridgeUploadFiles,
       getPendingUploadItems,
       getUploadCountStats,
+      diagnoseNoPendingUploadItems,
+      getUploadLocalFileDiagnostics,
+      isUploadItemAttemptable,
+      validateRebindFile,
       runCopyHotkeyContinueOnceForTaskQueue,
       uploadFilesToChatGPT,
       clearUploadPendingTimersOnBatchDoneSignal,

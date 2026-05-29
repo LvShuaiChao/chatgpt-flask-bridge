@@ -376,6 +376,16 @@
     return SEND_MESSAGE_BUTTON_IDS.has(String(button.id || '').trim());
   }
 
+  function isBatchTaskMainButton(button) {
+    if (!button) {
+      return false;
+    }
+    return (
+      button.getAttribute('data-fixed-label-owner') === 'batch-task'
+      || button.getAttribute('data-role') === 'batch-task-main-button'
+    );
+  }
+
   function isSendMessageButtonBusy(phase, extra = {}) {
     return SEND_BTN_BUSY_PHASES.has(phase)
       || extra.allowCancel === true
@@ -697,6 +707,22 @@
       nextText = sanitizeSendMessageButtonText(nextText);
     }
 
+    if (isBatchTaskMainButton(button) && nextText) {
+      const attemptedText = nextText;
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.updateBatchTaskMainButton === 'function'
+      ) {
+        AutoQueueModule.updateBatchTaskMainButton(`skip-generic-button-update:${reason || '-'}`);
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BATCH_BUTTON][GENERIC_UPDATE_BLOCKED] id=${button.id || '-'} attempted=${attemptedText} reason=${reason || '-'}`,
+        );
+      }
+      nextText = String(button.textContent || '').trim();
+    }
+
     const isBusyState = isSendBtn
       ? isSendMessageButtonBusy(phase, { allowCancel, busy })
       : isButtonBusyPhase(phase, { busy });
@@ -704,11 +730,20 @@
     const preserveDisabledIdleColor = preserveBaseColorWhenDisabled === true
       && phase === ButtonPhase.IDLE
       && disabled === true;
+    const allowBusyClass = isBusyState && !preserveDisabledIdleColor;
 
-    if (!preserveDisabledIdleColor) {
+    if (preserveDisabledIdleColor) {
+      button.classList.remove('cgpt-btn-busy');
+      BUTTON_STATE_LEGACY_LEAK_CLASSES.forEach((cls) => {
+        button.classList.remove(cls);
+      });
+      ['cgpt-btn-waiting', 'cgpt-btn-running', 'cgpt-btn-sending', 'cgpt-btn-danger'].forEach((cls) => {
+        button.classList.remove(cls);
+      });
+    } else {
       clearButtonStateColorClasses(button);
       if (!isSendBtn) {
-        button.classList.toggle('cgpt-btn-busy', isBusyState && !usePermanentDanger);
+        button.classList.toggle('cgpt-btn-busy', allowBusyClass && !usePermanentDanger);
         if (usePermanentDanger) {
           button.classList.add('cgpt-btn-danger');
         }
@@ -1064,6 +1099,7 @@
     SendBtnAllowedColorClasses: SEND_BTN_ALLOWED_COLOR_CLASSES,
     SendBtnLegacyColorClasses: SEND_BTN_LEGACY_COLOR_CLASSES,
     isSendMessageToolboxButton,
+    isBatchTaskMainButton,
     mapTaskPhaseToButtonPhase,
     mirrorSendButtonLegacyDataset,
     clearButtonStateClasses,

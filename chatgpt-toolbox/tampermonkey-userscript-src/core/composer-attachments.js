@@ -578,8 +578,59 @@ const ComposerAttachments = (() => {
     };
   }
 
+  function shouldSkipAttachmentEvidenceDuringAutoQueueWaitingReply(reasonText = '-') {
+    try {
+      if (
+        typeof AutoQueueModule === 'undefined'
+        || !AutoQueueModule
+        || typeof AutoQueueModule.getState !== 'function'
+      ) {
+        return false;
+      }
+      const autoState = AutoQueueModule.getState() || {};
+      const phase = String(autoState.phase || '');
+      const step = autoState.taskRun && autoState.taskRun.currentStep
+        ? String(autoState.taskRun.currentStep)
+        : '';
+      return Boolean(
+        phase === 'waiting_reply'
+        || step === 'wait-current-reply'
+        || step === 'wait-reply'
+        || step === 'wait-next-reply'
+      );
+    } catch (err) {
+      console.error('[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_SKIP_CHECK_FAILED]', err);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_SKIP_CHECK_FAILED] reason=${reasonText} `
+          + `error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
+      return false;
+    }
+  }
+
   function getSharedComposerAttachmentEvidence(reason = '', options = {}) {
     const reasonText = String(reason || options.reason || '').trim() || '-';
+    if (shouldSkipAttachmentEvidenceDuringAutoQueueWaitingReply(reasonText)) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_SKIP_WAITING_REPLY] reason=${reasonText}`,
+        );
+      }
+      return {
+        count: 0,
+        ready: false,
+        uploading: false,
+        hasAttachment: false,
+        readyCount: 0,
+        uploadingCount: 0,
+        textLen: 0,
+        skipped: true,
+        reason: 'waiting-reply-skip',
+        source: 'waiting-reply-skip',
+      };
+    }
     if (sharedEvidenceInFlight) {
       if (attachmentEvidenceCache.result) {
         return attachmentEvidenceCache.result;
