@@ -93,21 +93,25 @@
       }
     }
 
-    const CGPT_TIME_EMPTY_PLACEHOLDER = '\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0';
-
-    function formatTimeTextForUi(value) {
+    function formatTimeTextForUi(value, fallback = '00:00:00') {
       if (value === null || value === undefined) {
-        return CGPT_TIME_EMPTY_PLACEHOLDER;
+        return fallback;
       }
       const text = String(value).trim();
       if (!text) {
-        return CGPT_TIME_EMPTY_PLACEHOLDER;
+        return fallback;
       }
-      if (text === '-' || text === '--' || text === '--:--' || text === '--:--:--') {
-        return CGPT_TIME_EMPTY_PLACEHOLDER;
-      }
-      if (text === 'null' || text === 'undefined' || text === 'NaN' || text === 'NaN:NaN:NaN') {
-        return CGPT_TIME_EMPTY_PLACEHOLDER;
+      if (
+        text === '-'
+        || text === '--'
+        || text === '--:--'
+        || text === '--:--:--'
+        || text === 'null'
+        || text === 'undefined'
+        || text === 'NaN'
+        || text === 'NaN:NaN:NaN'
+      ) {
+        return fallback;
       }
       return text;
     }
@@ -137,8 +141,11 @@
     }
 
     function formatDurationDisplay(ms, options = {}) {
-      if (options.notStarted || options.pending) {
-        return '';
+      if (options.notStarted) {
+        return '00:00:00';
+      }
+      if (options.pending) {
+        return options.pendingText || '00:00:00';
       }
       return formatDuration(ms);
     }
@@ -152,12 +159,57 @@
       return Math.round(total / count);
     }
 
+    function resolveDisplayTotalTaskCount() {
+      if (runtimeStats.totalTaskCount > 0) {
+        return runtimeStats.totalTaskCount;
+      }
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.getState === 'function'
+      ) {
+        const autoState = AutoQueueModule.getState() || {};
+        const run = autoState.taskRun || {};
+        if (Array.isArray(run.enabledTaskIds) && run.enabledTaskIds.length > 0) {
+          return run.enabledTaskIds.length;
+        }
+        const currentTask = autoState.currentTask || null;
+        if (
+          currentTask
+          && Array.isArray(autoState.taskRun && autoState.taskRun.enabledTaskIds)
+          && autoState.taskRun.enabledTaskIds.length > 0
+        ) {
+          return autoState.taskRun.enabledTaskIds.length;
+        }
+      }
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && typeof AutoQueueModule.getConfig === 'function'
+      ) {
+        const cfg = AutoQueueModule.getConfig() || {};
+        const profiles = Array.isArray(cfg.taskProfiles) ? cfg.taskProfiles : [];
+        const activeProfileId = String(cfg.activeTaskProfileId || '');
+        const profile = profiles.find((item) => String(item.id || '') === activeProfileId) || profiles[0];
+        if (profile && Array.isArray(profile.tasks)) {
+          return profile.tasks.filter((task) => {
+            if (!task) return false;
+            if (task.enabled === false) return false;
+            if (task.disabled === true) return false;
+            const title = String(task.title || '');
+            if (title.startsWith('示例：') || title.startsWith('示例:')) return false;
+            return true;
+          }).length;
+        }
+      }
+      return 0;
+    }
+
     function getEstimatedRemainingMs() {
       const avg = getAverageDurationMs();
-      if (!avg || !runtimeStats.totalTaskCount) {
+      const total = resolveDisplayTotalTaskCount();
+      if (!avg || !total) {
         return 0;
       }
-      const remaining = Math.max(0, runtimeStats.totalTaskCount - runtimeStats.completedTaskCount);
+      const remaining = Math.max(0, total - runtimeStats.completedTaskCount);
       return avg * remaining;
     }
 
@@ -239,7 +291,7 @@
         runtimeStats.currentTaskStartedAt,
         runtimeStats.lastTaskDurationMs,
         runtimeStats.completedTaskCount,
-        runtimeStats.totalTaskCount,
+        resolveDisplayTotalTaskCount(),
         runtimeStats.currentPhase,
         isShowRuntimeStatsEnabled() ? 1 : 0,
       ];
@@ -278,7 +330,19 @@
       const etaMs = getEstimatedRemainingMs();
 
       const line1 = `计时：运行 ${formatTimeTextForUi(formatDuration(appMs))}｜批量 ${formatTimeTextForUi(formatDurationDisplay(batchMs, { notStarted: !runtimeStats.batchStartedAt }))}｜当前 ${formatTimeTextForUi(formatDurationDisplay(currentMs, { pending: !runtimeStats.currentTaskStartedAt }))}`;
-      const line2 = `耗时：上次 ${formatTimeTextForUi(formatDurationDisplay(runtimeStats.lastTaskDurationMs, { pending: !runtimeStats.lastTaskDurationMs }))}｜平均 ${formatTimeTextForUi(formatDurationDisplay(avgMs, { pending: !runtimeStats.completedTaskCount }))}｜预计剩余 ${formatTimeTextForUi(formatDurationDisplay(etaMs, { pending: !runtimeStats.completedTaskCount }))}｜完成 ${runtimeStats.completedTaskCount}/${runtimeStats.totalTaskCount || 0}`;
+      const hasCompletedTask = runtimeStats.completedTaskCount > 0;
+      const hasLastTaskDuration = runtimeStats.lastTaskDurationMs > 0;
+      const lastDurationText = hasLastTaskDuration
+        ? formatDuration(runtimeStats.lastTaskDurationMs)
+        : '00:00:00';
+      const averageDurationText = hasCompletedTask
+        ? formatDuration(avgMs)
+        : '统计中';
+      const etaText = hasCompletedTask
+        ? formatDuration(etaMs)
+        : '统计中';
+      const displayTotalTaskCount = resolveDisplayTotalTaskCount();
+      const line2 = `耗时：当前 ${formatDuration(currentMs)}｜上次 ${lastDurationText}｜平均 ${averageDurationText}｜预计剩余 ${etaText}｜完成 ${runtimeStats.completedTaskCount}/${displayTotalTaskCount}`;
       const phaseLine = `当前任务阶段：${runtimeStats.currentPhase || '等待发送'}`;
 
       if (statsLine1El) {
@@ -296,6 +360,8 @@
         lastStatsLogKey = statsLogKey;
         logRuntime('STATS_RENDER', {
           durationMs: currentMs,
+          completedTaskCount: runtimeStats.completedTaskCount,
+          totalTaskCount: displayTotalTaskCount,
           averageDurationMs: avgMs,
           estimatedRemainingMs: etaMs,
         });

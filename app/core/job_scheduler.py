@@ -1,9 +1,4 @@
-"""旧版 ChatGPT -> Cursor 自动任务调度（孤儿模块候选）。"""
-
-# @deprecated-candidate
-# 当前源码中未发现 app.core.job_scheduler 的真实业务 import。
-# 该模块疑似旧版 ChatGPT -> Cursor 自动任务调度残留。
-# 暂保留一个版本观察；若确认没有 UI、server route、外部脚本依赖，再整文件删除。
+"""ChatGPT -> Cursor 自动任务调度模块。"""
 
 import threading
 import time

@@ -143,6 +143,18 @@ function clickElementLikeUserUnified(el, reason) {
  * @param {string|false|null} [options.statusOnTimeout] — undefined: default timeout message; null/false: skip
  */
 async function switchToNewChatUnified(reason, options) {
+  if (
+    typeof AutoQueueModule !== 'undefined'
+    && AutoQueueModule
+    && typeof AutoQueueModule.blockNavigationDuringTerminalConfirm === 'function'
+    && AutoQueueModule.blockNavigationDuringTerminalConfirm('switchToNewChatUnified:' + (reason || 'new-chat'))
+  ) {
+    return {
+      ok: false,
+      reason: 'terminal-confirming',
+    };
+  }
+
   const opts = options && typeof options === 'object' ? options : {};
   const reasonText = reason || 'new-chat';
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 15000;

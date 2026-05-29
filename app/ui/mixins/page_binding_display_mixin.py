@@ -6,7 +6,6 @@ from app.constants import (
     BOUND_PAGE_OFFLINE_GRACE_SECONDS,
     STATUS_CHIP_SESSION_BIND_PREFIX,
     STATUS_CHIP_SESSION_BIND_TOOLTIP,
-    status_chip_text,
 )
 from app.models import (
     remote_binding_enabled,
@@ -654,9 +653,7 @@ class PageBindingDisplayMixin:
                 else:
                     verbose_state = "未绑定"
                     verbose_chip = "warn"
-                chip_text = status_chip_text(
-                    STATUS_CHIP_SESSION_BIND_PREFIX, verbose_state
-                )
+                chip_text = f"{STATUS_CHIP_SESSION_BIND_PREFIX}：{verbose_state}"
                 chip_state = verbose_chip
                 chip_tip = STATUS_CHIP_SESSION_BIND_TOOLTIP
                 if bound_url:

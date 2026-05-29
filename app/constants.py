@@ -274,11 +274,6 @@ STATUS_DETAIL_TECH_HINT = (
 )
 
 
-def status_chip_text(prefix, state):
-    """顶部状态芯片：「前缀：状态」。"""
-    return f"{prefix}：{state}"
-
-
 DEFAULT_APP_SETTINGS = {
     "host": "127.0.0.1",
     "port": "5000",

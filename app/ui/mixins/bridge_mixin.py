@@ -942,12 +942,6 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         elif hasattr(self, "schedule_page_registry_refresh"):
             self.schedule_page_registry_refresh(reason=reason, status=status)
 
-    def _apply_bridge_status(self, status, reason="", force=False):
-        """兼容入口，统一走 StatusScheduler。"""
-        if reason:
-            self._bridge_ui.pending_status_apply_reason = reason
-        self._schedule_status_apply(status=status, reason=reason or "direct", force=force)
-
     @staticmethod
     def _refresh_status_chip(label, state=""):
         state = state or ""

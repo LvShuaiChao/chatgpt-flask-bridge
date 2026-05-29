@@ -9732,7 +9732,10 @@
       const canonical = typeof ComposerApi.canonicalFileName === 'function'
         ? ComposerApi.canonicalFileName(q.originalName || q.name || '')
         : '';
-      const matchLine = `[UPLOAD][MATCH] original=${q.originalName || q.name || '-'} display=${q.displayName || q.name || '-'} canonical=${canonical || q.canonicalName || '-'} matched=${matched ? 1 : 0} presence=${presence} composer=${presence === 'composer-attached' ? 1 : 0} conversation=${presence === 'conversation-sent' ? 1 : 0} local-bound=${presence === 'local-bound' ? 1 : 0}`;
+      const composerReady = presence === 'composer-attached' ? 1 : 0;
+      const conversationMatched = presence === 'conversation-sent' ? 1 : 0;
+      const reallyAttached = matched && (composerReady || conversationMatched);
+      const matchLine = `[UPLOAD][MATCH] original=${q.originalName || q.name || '-'} display=${q.displayName || q.name || '-'} canonical=${canonical || q.canonicalName || '-'} matched=${reallyAttached ? 1 : 0} presence=${presence} composer=${composerReady} conversation=${conversationMatched} local-bound=${presence === 'local-bound' ? 1 : 0}`;
       const verifyLine = `[UPLOAD_VERIFY][COMPOSER_ATTACHED_OK] file=${q.originalName || q.name || '-'} composer=1 conversation=0 localBound=0 action=accept-upload-ready`;
       const fileKey = String(q.originalName || q.name || q.id || '-');
       if (isUploadItemComposerAcceptedCached(q) && presence === 'composer-attached') {
@@ -9740,7 +9743,15 @@
           fileKey,
           `[UPLOAD_VERIFY][COMPOSER_ATTACHED_CACHE_HIT] file=${fileKey} action=accept-upload-ready`,
         );
-        return matched;
+        return reallyAttached;
+      }
+      if (presence === 'local-bound' && !reallyAttached) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[UPLOAD][MATCH_REJECT_LOCAL_BOUND] original=${q.originalName || q.name || '-'} presence=${presence}`,
+          );
+        }
+        return false;
       }
       if (
         typeof UploadCriticalRuntime !== 'undefined'
@@ -9756,11 +9767,11 @@
         }
       } else {
         ToolboxShell.appendLog(matchLine);
-        if (presence === 'composer-attached') {
+        if (presence === 'composer-attached' && reallyAttached) {
           ToolboxShell.appendLog(verifyLine);
         }
       }
-      return matched;
+      return reallyAttached;
     }
 
     async function reconcileFailedItems() {
@@ -19593,6 +19604,97 @@
       return `${name}::${size}`;
     }
 
+    function getExistingComposerAttachmentNameSizeKeys(source) {
+      const nameKeys = new Set();
+      const nameSizeKeys = new Set();
+      const sourceText = String(source || 'unknown');
+
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+      ) {
+        try {
+          const snap = ComposerApi.getComposerAttachmentSnapshot(`existing-attach:${sourceText}`) || {};
+          const items = Array.isArray(snap.items) ? snap.items : [];
+          for (const item of items) {
+            const name = String(item && item.name || '').trim().toLowerCase();
+            if (name) {
+              nameKeys.add(name);
+            }
+          }
+        } catch (err) {
+          console.error('[ChatGPT toolbox] getExistingComposerAttachmentNameSizeKeys snapshot failed', err);
+        }
+      }
+
+      if (
+        typeof ComposerAttachments !== 'undefined'
+        && ComposerAttachments
+        && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
+      ) {
+        try {
+          const evidence = ComposerAttachments.getSharedComposerAttachmentEvidence(`existing-attach:${sourceText}`) || {};
+          const filenames = Array.isArray(evidence.filenames) ? evidence.filenames : [];
+          filenames.forEach((rawName) => {
+            const name = String(rawName || '').trim().toLowerCase();
+            if (name) {
+              nameKeys.add(name);
+            }
+          });
+        } catch (err) {
+          console.error('[ChatGPT toolbox] getExistingComposerAttachmentNameSizeKeys evidence failed', err);
+        }
+      }
+
+      return { nameKeys, nameSizeKeys };
+    }
+
+    function isFileAlreadyAttachedInComposer(file, existing) {
+      if (!file || !existing) {
+        return false;
+      }
+
+      const looseKey = buildQueueLooseFileKey(file);
+      if (looseKey && existing.nameSizeKeys.has(looseKey)) {
+        return true;
+      }
+
+      const name = String(file.name || '').trim().toLowerCase();
+      return !!(name && existing.nameKeys.has(name));
+    }
+
+    function filterFilesForComposerAttach(files, source) {
+      const existing = getExistingComposerAttachmentNameSizeKeys(source);
+      const toAttach = [];
+      const skipped = [];
+
+      for (const file of files || []) {
+        if (!file) {
+          continue;
+        }
+        if (isFileAlreadyAttachedInComposer(file, existing)) {
+          skipped.push(file);
+          continue;
+        }
+        toAttach.push(file);
+        const looseKey = buildQueueLooseFileKey(file);
+        const name = String(file.name || '').trim().toLowerCase();
+        if (looseKey) {
+          existing.nameSizeKeys.add(looseKey);
+        }
+        if (name) {
+          existing.nameKeys.add(name);
+        }
+      }
+
+      return {
+        toAttach,
+        skipped,
+        existingCount: existing.nameKeys.size,
+      };
+    }
+
     function dedupeActiveGroupQueue(reason) {
       const groupId = state.activeGroupId;
       if (!groupId || !Array.isArray(state.queue)) return;
@@ -22291,6 +22393,10 @@
         };
       }
       const sourceText = String(source || '').trim();
+      const isVerifyUploadSource = sourceText.includes('autoq-task-verify-')
+        || sourceText.includes('verify-after-done-signal')
+        || sourceText.includes('task-verify')
+        || sourceText.includes('done-signal-verification');
       const allowedEveryN = sourceText.includes('send_continue_with_upload')
         || sourceText.includes('auto-upload-every-n')
         || sourceText.includes('continue-with-upload')
@@ -22298,7 +22404,18 @@
         || sourceText.includes('closed-loop-hotkey-every5-upload')
         || sourceText.includes('upload-cadence-policy')
         || sourceText.includes('cadence-upload')
-        || sourceText.includes('auto-upload-cadence');
+        || sourceText.includes('auto-upload-cadence')
+        || sourceText.includes('autoq-rebuilt-after-initial-payload-consumed')
+        || isVerifyUploadSource;
+      if (isVerifyUploadSource) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][ALLOW_VERIFY_UPLOAD_AFTER_INITIAL] source=${sourceText || '-'} reason=terminal-final-verification`,
+        );
+        return {
+          blocked: false,
+          reason: 'verify-upload-after-terminal',
+        };
+      }
       if (allowedEveryN) {
         ToolboxShell.appendLog(
           `[UPLOAD][ALLOW_CADENCE_UPLOAD_AFTER_INITIAL] source=${sourceText || '-'} reason=continue_upload_cadence`,
@@ -30744,14 +30861,34 @@
       const composerPayloadSnapshotBeforeAttach = getComposerUploadPayloadSnapshot(
         `before-attach:${attachSource || 'unknown'}`,
       );
-      if (
-        !allowDuplicateComposerAttachments
-        && composerPayloadSnapshotBeforeAttach.normalizedCount > 0
-      ) {
+      let filesToAttach = cleanFiles;
+
+      if (!allowDuplicateComposerAttachments && composerPayloadSnapshotBeforeAttach.normalizedCount > 0) {
+        const filtered = filterFilesForComposerAttach(cleanFiles, attachSource);
         ToolboxShell.appendLog(
-          `[UPLOAD][BLOCK_ATTACH_ALREADY_HAS_PAYLOAD] source=${attachSource || '-'} raw=${composerPayloadSnapshotBeforeAttach.rawCount} normalized=${composerPayloadSnapshotBeforeAttach.normalizedCount} ready=${composerPayloadSnapshotBeforeAttach.readyCount} action=skip-attach`,
+          `[UPLOAD][COMPOSER_EXISTING_ATTACHMENTS] source=${attachSource || '-'} raw=${composerPayloadSnapshotBeforeAttach.rawCount} normalized=${composerPayloadSnapshotBeforeAttach.normalizedCount} ready=${composerPayloadSnapshotBeforeAttach.readyCount} existing=${filtered.existingCount} incoming=${cleanFiles.length}`,
         );
-        return true;
+
+        if (filtered.skipped.length > 0) {
+          const skippedNames = filtered.skipped
+            .map((file) => `${file.name || '-'}:${Number(file.size) || 0}`)
+            .join(',');
+          ToolboxShell.appendLog(
+            `[UPLOAD][ATTACH_FILTERED_FILES] source=${attachSource || '-'} skipped=${filtered.skipped.length} names=${skippedNames || '-'}`,
+          );
+        }
+
+        if (!filtered.toAttach.length) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][SKIP_ALL_ALREADY_ATTACHED] source=${attachSource || '-'} incoming=${cleanFiles.length} action=skip-attach`,
+          );
+          return true;
+        }
+
+        filesToAttach = filtered.toAttach;
+        ToolboxShell.appendLog(
+          `[UPLOAD][ATTACH_FILTERED_FILES] source=${attachSource || '-'} attach=${filesToAttach.length} skipped=${filtered.skipped.length}`,
+        );
       }
 
       if (
@@ -30788,7 +30925,7 @@
           `[UPLOAD][ATTACH_OPTIONS] mode=${mode} uploadOnly=${isUploadOnly ? 1 : 0} requireSendReady=${isUploadOnly ? 0 : 1} openLoop=${attachOptions.openLoop ? 1 : 0} timeoutMs=${attachTimeoutMs} strategy=${uploadAttachStrategy}`,
         );
 
-        const preparedFiles = await prepareFilesForAttach(cleanFiles, attachSource);
+        const preparedFiles = await prepareFilesForAttach(filesToAttach, attachSource);
         const uploadResult = await ComposerApi.attachFilesByFileInput(
           preparedFiles,
           attachTimeoutMs,
@@ -31599,13 +31736,32 @@
       );
 
       if (pendingCount <= 0) {
+        const isCadenceNoFiles = isCadenceUploadSource(uploadSource);
+        const isVerifyUploadSource = String(uploadSource || '').includes('autoq-task-verify')
+          || String(uploadSource || '').includes('verify-after-done-signal');
+
+        if (isCadenceNoFiles || isVerifyUploadSource) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][AUTOQ_NO_FILES_AFTER_RESET] source=${uploadSource} reason=no-files skipped=1 `
+            + `cadence=${isCadenceNoFiles ? 1 : 0} verify=${isVerifyUploadSource ? 1 : 0}`,
+          );
+
+          return buildQueueUploadResult({
+            ok: true,
+            reason: 'no-files',
+            uploadedCount: 0,
+            failedCount: 0,
+            skippedCount: 1,
+          });
+        }
+
         ToolboxShell.appendLog(
           `[UPLOAD][AUTOQ_NO_FILES_AFTER_RESET] source=${uploadSource} reason=no-readable-files-after-force-reset`,
         );
 
         return buildQueueUploadResult({
           ok: false,
-          reason: isCadenceUploadSource(uploadSource) ? 'no-files' : 'no-readable-files-after-force-reset',
+          reason: 'no-readable-files-after-force-reset',
           uploadedCount: 0,
           failedCount: 0,
           skippedCount: 0,
@@ -36251,6 +36407,7 @@
       getPendingUploadItems,
       getUploadCountStats,
       runCopyHotkeyContinueOnceForTaskQueue,
+      uploadFilesToChatGPT,
       clearUploadPendingTimersOnBatchDoneSignal,
       stopUploadSendTask,
       stopUploadTask,

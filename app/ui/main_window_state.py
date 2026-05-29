@@ -81,12 +81,3 @@ class ServerUiState:
     start_failed: bool = False
     start_error: str = ""
 
-
-@dataclass
-class LogUiState:
-    """UI 日志领域状态（测试桩与 MainWindow 初始化共享）。"""
-
-    last_log_at: float = 0.0
-    last_log_level: str = ""
-    last_log_text: str = ""
-

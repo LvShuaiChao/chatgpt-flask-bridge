@@ -474,6 +474,20 @@
       .trim();
   }
 
+  function isExactSingleLineBatchSignalText(text, signal) {
+    const expected = String(signal || '').trim();
+    const normalized = normalizeReplyText(text);
+    if (!expected || !normalized) {
+      return false;
+    }
+    const lines = normalized
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+      .map((line) => String(line || '').trim())
+      .filter(Boolean);
+    return lines.length === 1 && lines[0] === expected;
+  }
+
   const BATCH_REPLY_BLOCKED_TEXT_PATTERNS = [
     /当前没有新的?剩余内容可以继续输出/,
     /当前没有可继续补充的剩余内容/,
@@ -497,7 +511,7 @@
       };
     }
 
-    if (text.includes(DEFAULT_BATCH_DONE_SIGNAL)) {
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_DONE_SIGNAL)) {
       return {
         shouldStop: true,
         status: 'done',
@@ -505,7 +519,7 @@
       };
     }
 
-    if (text.includes(DEFAULT_BATCH_BLOCKED_SIGNAL)) {
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_BLOCKED_SIGNAL)) {
       return {
         shouldStop: true,
         status: 'blocked',
@@ -513,7 +527,7 @@
       };
     }
 
-    if (text.includes(DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
       return {
         shouldStop: true,
         status: 'no_more_content',
