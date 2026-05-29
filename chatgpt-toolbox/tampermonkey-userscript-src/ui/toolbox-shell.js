@@ -1343,6 +1343,10 @@
           transform: translateX(-50%) translateY(0);
         }
 
+        .cgpt-toolbox-toast[hidden] {
+          display: none !important;
+        }
+
         .cgpt-toast-success,
         .cgpt-toast-online {
           background: rgba(22, 101, 52, 0.96);
@@ -12097,9 +12101,20 @@
           box = document.createElement('div');
           box.id = 'cgpt-toolbox-toast';
           box.className = 'cgpt-toolbox-toast';
+          box.hidden = true;
+          box.setAttribute('aria-hidden', 'true');
           panel.appendChild(box);
         }
       }
+
+      const duplicateToasts = root
+        ? Array.from(root.querySelectorAll('#cgpt-toolbox-toast')).filter((node) => node !== box)
+        : [];
+      duplicateToasts.forEach((node) => {
+        if (node && node.parentElement) {
+          node.parentElement.removeChild(node);
+        }
+      });
 
       return box;
     }
@@ -12108,12 +12123,32 @@
       create();
       const toastType = inferStatusType(text, type);
       const box = ensureToolboxToast();
-
       if (!box) {
         return;
       }
-
-      box.textContent = String(text || '');
+      const safeText = String(text || '');
+      const normalizedTimeoutMs = Number(timeoutMs);
+      const visibleMs = Number.isFinite(normalizedTimeoutMs) && normalizedTimeoutMs > 0
+        ? Math.max(800, normalizedTimeoutMs)
+        : 1400;
+      const fadeOutMs = 180;
+      const nextSeq = Number(box.__cgptToastSeq || 0) + 1;
+      box.__cgptToastSeq = nextSeq;
+      if (box.__cgptToastTimer) {
+        window.clearTimeout(box.__cgptToastTimer);
+        box.__cgptToastTimer = 0;
+      }
+      if (box.__cgptToastCleanupTimer) {
+        window.clearTimeout(box.__cgptToastCleanupTimer);
+        box.__cgptToastCleanupTimer = 0;
+      }
+      if (box.__cgptToastRaf) {
+        window.cancelAnimationFrame(box.__cgptToastRaf);
+        box.__cgptToastRaf = 0;
+      }
+      box.hidden = false;
+      box.setAttribute('aria-hidden', 'false');
+      box.textContent = safeText;
       box.classList.remove(
         'cgpt-toast-idle',
         'cgpt-toast-running',
@@ -12127,16 +12162,42 @@
         'show',
       );
       box.classList.add(`cgpt-toast-${toastType}`);
-      window.clearTimeout(box.__cgptToastTimer || 0);
-      requestAnimationFrame(() => {
+      box.__cgptToastRaf = window.requestAnimationFrame(() => {
+        if (Number(box.__cgptToastSeq || 0) !== nextSeq) {
+          return;
+        }
         box.classList.add('show');
+        box.__cgptToastRaf = 0;
       });
       box.__cgptToastTimer = window.setTimeout(() => {
+        if (Number(box.__cgptToastSeq || 0) !== nextSeq) {
+          return;
+        }
         box.classList.remove('show');
-      }, timeoutMs);
-
+        box.__cgptToastCleanupTimer = window.setTimeout(() => {
+          if (Number(box.__cgptToastSeq || 0) !== nextSeq) {
+            return;
+          }
+          box.hidden = true;
+          box.setAttribute('aria-hidden', 'true');
+          box.textContent = '';
+          box.classList.remove(
+            'cgpt-toast-idle',
+            'cgpt-toast-running',
+            'cgpt-toast-success',
+            'cgpt-toast-warn',
+            'cgpt-toast-error',
+            'cgpt-toast-danger',
+            'cgpt-toast-offline',
+            'cgpt-toast-online',
+            'cgpt-toast-boot-ready',
+          );
+          box.__cgptToastTimer = 0;
+          box.__cgptToastCleanupTimer = 0;
+        }, fadeOutMs);
+      }, visibleMs);
       appendLog(
-        `[TOOLBOX_TOAST][show] type=${toastType} text=${String(text || '').slice(0, 40)} host=panel`,
+        `[TOOLBOX_TOAST][show] type=${toastType} timeoutMs=${visibleMs} text=${safeText.slice(0, 40)} host=panel`,
       );
     }
 

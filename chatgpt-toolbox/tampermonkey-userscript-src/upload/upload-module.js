@@ -5238,7 +5238,6 @@
       const startedAt = Date.now();
       const reasonText = String(reason || '-').trim() || '-';
       const beforeCount = getLocalUploadFileCount();
-      const uploadTask = state.uploadTask || {};
 
       state.uploadCancelRequested = false;
       state.manualUploadImmediateBusy = false;

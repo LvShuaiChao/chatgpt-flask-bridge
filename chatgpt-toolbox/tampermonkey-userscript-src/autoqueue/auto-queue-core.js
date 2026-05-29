@@ -921,7 +921,9 @@ const AutoQueueModule = (() => {
               severity: 'normal',
             };
           }
-          const activeLabel = String(runStateTextOverride || listSnap && listSnap.displayMessage || '').trim() || '运行中';
+          const activeLabel = String(
+            runStateTextOverride || (listSnap && listSnap.displayMessage) || '',
+          ).trim() || '运行中';
           return {
             state: 'running',
             statusText: `列表模式 · ${activeLabel}`,
@@ -1255,6 +1257,44 @@ const AutoQueueModule = (() => {
         ? stateInput
         : buildBatchTaskGroupButtonStateInput();
 
+      if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
+        const listRunState = typeof ListModeRunner.getAutoqListRunState === 'function'
+          ? ListModeRunner.getAutoqListRunState()
+          : state.listRunState;
+        if (listRunState && listRunState.stopRequested) {
+          return {
+            phase: 'cancelling',
+            buttonPhase: 'cancelling',
+            text: '停止中',
+            title: '正在停止列表任务',
+            disabled: true,
+            action: 'none',
+            allowCancel: false,
+          };
+        }
+        if (listRunState && listRunState.running) {
+          return {
+            phase: 'running',
+            buttonPhase: 'running',
+            text: '停止批量任务组',
+            title: '列表模式正在运行，点击停止',
+            disabled: false,
+            action: 'stop',
+            allowCancel: true,
+          };
+        }
+        const hasRunBefore = !!(listRunState && listRunState.completedAt > 0);
+        return {
+          phase: 'idle',
+          buttonPhase: 'idle',
+          text: hasRunBefore ? '重新开始批量任务组' : '开始批量任务组',
+          title: '开始按列表顺序执行任务',
+          disabled: false,
+          action: 'start',
+          allowCancel: false,
+        };
+      }
+
       if (isBatchTaskGroupStopping(input)) {
         return {
           phase: 'cancelling',
@@ -1537,7 +1577,10 @@ const AutoQueueModule = (() => {
         pending: '等待发送',
       };
       const stepText = stepLabels[listSnap.step] || listSnap.displayMessage || listSnap.step || '-';
-      const metaValue = `step=${listSnap.step || '-'} | status=${listSnap.currentTaskStatus || '-'} | initialSent=${listSnap.initialSent || 0} | batchSent=${listSnap.batchSent || 0}`;
+      const statsSuffix = listSnap.stats
+        ? ` | 已完成 ${listSnap.stats.done} | 待执行 ${listSnap.stats.pending} | 失败 ${listSnap.stats.failed}`
+        : '';
+      const metaValue = `step=${listSnap.step || '-'} | status=${listSnap.currentTaskStatus || '-'} | initialSent=${listSnap.initialSent || 0} | batchSent=${listSnap.batchSent || 0}${statsSuffix}`;
       let html = renderAutoQueueUserStatusRow('当前任务', taskLineValue, {
         className: 'cgpt-current-task-row',
         valueClassName: 'cgpt-current-task-value',
@@ -4200,6 +4243,7 @@ const AutoQueueModule = (() => {
       running: false,
       batchTaskRunning: false,
       listModeRunning: false,
+      listRunState: null,
       batchModeActive: false,
       terminalConfirming: false,
       terminalConfirmStartedAt: 0,
@@ -4316,6 +4360,25 @@ const AutoQueueModule = (() => {
         phase: 'idle',
         runId: '',
         lastError: null,
+      },
+      listRunState: {
+        running: false,
+        mode: 'list',
+        runId: '',
+        activeListId: '',
+        currentTaskIndex: -1,
+        currentTaskId: '',
+        runQueue: [],
+        sendingNow: false,
+        waitingReply: false,
+        stopRequested: false,
+        startedAt: 0,
+        updatedAt: 0,
+        completedAt: 0,
+        lastFailureReason: '',
+        lastFailureDetail: '',
+        liveSyncEnabled: true,
+        lockQueueOnStart: false,
       },
       advancedDebugVisible: false,
       advancedDebugLastSnapshot: null,
@@ -4886,12 +4949,194 @@ const AutoQueueModule = (() => {
     let lastWaitingReplyRepairAt = 0;
     let lastWaitingReplyRepairKey = '';
 
+    function isListStatusActiveForCore(status) {
+      return [
+        'preparing',
+        'sending',
+        'waiting_reply',
+        'reply_ready',
+        'delay_next',
+      ].includes(String(status || ''));
+    }
+
+    function isListModeRunnerActive() {
+      if (config.promptMode !== 'list') {
+        return false;
+      }
+      if (
+        typeof ListModeRunner === 'undefined'
+        || typeof ListModeRunner.getAutoqListRunState !== 'function'
+      ) {
+        return false;
+      }
+      const listState = ListModeRunner.getAutoqListRunState();
+      if (!listState) {
+        return false;
+      }
+      if (
+        typeof ListModeRunner.isListRunActiveStatus === 'function'
+        && ListModeRunner.isListRunActiveStatus(listState.status)
+      ) {
+        return true;
+      }
+      return listState.running === true || isListStatusActiveForCore(listState.status);
+    }
+
+    function logBatchFlowSkipForListMode(source) {
+      ToolboxShell.appendLog(
+        '[AUTOQ][BATCH_FLOW][SKIP_LIST_MODE] '
+        + `source=${source || '-'} `
+        + 'reason=list-mode-runner-active',
+      );
+    }
+
     function syncWaitingReplyFlagFromPhase(reason = '-') {
       const phase = String(state.phase || '');
+      const phaseText = phase;
+      const isTerminalPhase = (
+        phaseText === AUTO_QUEUE_PHASES.DONE
+        || phaseText === 'done'
+        || phaseText === AUTO_QUEUE_PHASES.IDLE
+        || phaseText === 'idle'
+        || phaseText === AUTO_QUEUE_PHASES.FAILED
+        || phaseText === 'failed'
+        || phaseText === AUTO_QUEUE_PHASES.CANCELLED
+        || phaseText === 'cancelled'
+        || phaseText === 'stopped'
+      );
+      if (isTerminalPhase) {
+        let listStillRunning = false;
+        if (config.promptMode === 'list') {
+          let listRunStateForTerminal = null;
+          if (
+            typeof ListModeRunner !== 'undefined'
+            && typeof ListModeRunner.getAutoqListRunState === 'function'
+          ) {
+            listRunStateForTerminal = ListModeRunner.getAutoqListRunState();
+          } else if (state.listRunState && typeof state.listRunState === 'object') {
+            listRunStateForTerminal = state.listRunState;
+          }
+          listStillRunning = Boolean(
+            listRunStateForTerminal
+            && (
+              listRunStateForTerminal.running === true
+              || isListStatusActiveForCore(listRunStateForTerminal.status)
+            ),
+          );
+        }
+        if (state.waitingReply) {
+          ToolboxShell.appendLog(
+            '[AUTOQ][WAITING_REPLY_FLAG_CLEAR_TERMINAL] '
+            + `reason=${reason} `
+            + `phase=${phaseText || '-'} `
+            + `old=1 `
+            + `listStillRunning=${listStillRunning ? 1 : 0}`,
+          );
+        }
+        state.waitingReply = false;
+        if (!listStillRunning && state.taskRun && typeof state.taskRun === 'object') {
+          const terminalStep = String(state.taskRun.currentStep || '');
+          if (
+            terminalStep === 'wait-reply'
+            || terminalStep === 'wait-current-reply'
+            || terminalStep === 'wait-next-reply'
+            || terminalStep === 'await-assistant'
+          ) {
+            state.taskRun.currentStep = 'done';
+            state.taskRun.pendingReplyKind = '';
+          }
+        }
+        return;
+      }
       const run = state.taskRun || {};
       const step = String(run.currentStep || '');
+      let listRunState = null;
+      let listModeRunStep = '';
+      if (config.promptMode === 'list') {
+        if (
+          typeof ListModeRunner !== 'undefined'
+          && typeof ListModeRunner.getAutoqListRunState === 'function'
+        ) {
+          listRunState = ListModeRunner.getAutoqListRunState();
+        } else if (state.listRunState && typeof state.listRunState === 'object') {
+          listRunState = state.listRunState;
+        }
+        if (state.listModeRun && typeof state.listModeRun === 'object') {
+          listModeRunStep = String(state.listModeRun.step || '');
+        }
+      }
+      if (config.promptMode === 'list' && listRunState) {
+        const listActive = Boolean(
+          listRunState.running === true
+          || isListStatusActiveForCore(listRunState.status)
+        );
+        if (listActive) {
+          const shouldBeWaiting = String(listRunState.status || '') === 'waiting_reply';
+          if (state.waitingReply !== shouldBeWaiting) {
+            ToolboxShell.appendLog(
+              '[AUTOQ][WAITING_REPLY_FLAG_SYNC_LIST_STATUS] '
+              + `reason=${reason} `
+              + `old=${state.waitingReply ? 1 : 0} `
+              + `next=${shouldBeWaiting ? 1 : 0} `
+              + `listStatus=${String(listRunState.status || '-')}`,
+            );
+          }
+          state.waitingReply = shouldBeWaiting;
+          return;
+        }
+      }
+
+      const listModeActive = Boolean(
+        config.promptMode === 'list'
+        && (
+          state.listModeRunning === true
+          || state.running === true
+          || (listRunState && listRunState.running === true)
+        )
+      );
+      let listTaskWaitingReply = false;
+      if (listModeActive && listRunState && Array.isArray(listRunState.runQueue)) {
+        const listTaskIndex = Number(listRunState.currentTaskIndex);
+        const listTask = listTaskIndex >= 0 && listTaskIndex < listRunState.runQueue.length
+          ? listRunState.runQueue[listTaskIndex]
+          : null;
+        if (listTask) {
+          const runtimeStatus = String(listTask.runtimeStatus || '').trim();
+          listTaskWaitingReply = runtimeStatus === 'waiting-reply'
+            || (
+              listTask.initialSent === true
+              && runtimeStatus !== 'done'
+              && runtimeStatus !== 'failed'
+              && runtimeStatus !== 'pending'
+              && runtimeStatus !== 'sending'
+            );
+        }
+      }
+      const listModeWaiting = Boolean(
+        listModeActive
+        && (
+          (listRunState && listRunState.waitingReply === true)
+          || listModeRunStep === 'waiting-reply'
+          || listModeRunStep === 'wait-reply'
+          || listTaskWaitingReply
+        )
+      );
+      if (listModeWaiting && state.waitingReply !== true) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][WAITING_REPLY_FLAG_SYNC] '
+          + `reason=${reason} `
+          + `old=${state.waitingReply ? 1 : 0} `
+          + `new=1 `
+          + `phase=${phase || '-'} `
+          + `step=${step || '-'} `
+          + 'listMode=1',
+        );
+        state.waitingReply = true;
+        return;
+      }
       const shouldBeWaiting = Boolean(
-        phase === AUTO_QUEUE_PHASES.WAITING_REPLY
+        listModeWaiting
+        || phase === AUTO_QUEUE_PHASES.WAITING_REPLY
         || phase === 'waiting_reply'
         || step === 'wait-current-reply'
         || step === 'wait-reply'
@@ -8227,19 +8472,53 @@ const AutoQueueModule = (() => {
       if (tryStopNonTaskAutoQueueOnTerminalReply(text, reason)) {
         return true;
       }
-      setAutoQueuePhase(AUTO_QUEUE_PHASES.REPLY_READY, 'list-assistant-reply-ready');
-      state.waitingReply = false;
       state.replyBecameBusy = false;
       state.idleSince = 0;
       state.waitingStartedAt = 0;
       resetListModeWaitTracking();
-      setAutoQueuePhase(AUTO_QUEUE_PHASES.DONE, 'list-reply-ready');
-      advanceAfterSend({ markReplyDone: true });
+      if (typeof ListModeRunner !== 'undefined') {
+        if (typeof ListModeRunner.setListRunStatus === 'function') {
+          ListModeRunner.setListRunStatus('reply_ready', 'list-assistant-reply-ready');
+        } else {
+          setAutoQueuePhase(AUTO_QUEUE_PHASES.REPLY_READY, 'list-assistant-reply-ready');
+        }
+        if (typeof ListModeRunner.handleListReplyComplete === 'function') {
+          ListModeRunner.handleListReplyComplete(reason || 'reply-complete', {
+            delayMs: getAutoqNextTaskDelayMs(),
+          });
+        } else if (typeof ListModeRunner.settleListReplyAndAdvance === 'function') {
+          ListModeRunner.settleListReplyAndAdvance({
+            reason: reason || 'reply-complete',
+            delayMs: getAutoqNextTaskDelayMs(),
+          });
+        }
+      } else {
+        setAutoQueuePhase(AUTO_QUEUE_PHASES.REPLY_READY, 'list-assistant-reply-ready');
+        advanceAfterSend({ markReplyDone: true });
+      }
+      syncWaitingReplyFlagFromPhase('list-reply-settled');
       updateStatus();
       if (typeof updateChatInputStateBadge === 'function') {
         updateChatInputStateBadge();
       }
       return true;
+    }
+
+    function getAutoqNextTaskDelayMs() {
+      const modeSettings = getModeSettings('list');
+      const minSeconds = Number(modeSettings.randomMinSec);
+      const maxSeconds = Number(modeSettings.randomMaxSec);
+      const minMs = Math.max(0, (Number.isFinite(minSeconds) ? Math.max(1, minSeconds) : 3) * 1000);
+      const maxMs = Math.max(
+        minMs,
+        (Number.isFinite(maxSeconds) ? Math.max(minSeconds || 3, maxSeconds) : 20) * 1000,
+      );
+      const delayMs = minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
+      ToolboxShell.appendLog(
+        `[AUTOQ][LIST_MODE][NEXT_DELAY] minSeconds=${Number.isFinite(minSeconds) ? minSeconds : 3} `
+        + `maxSeconds=${Number.isFinite(maxSeconds) ? maxSeconds : 20} delayMs=${delayMs}`,
+      );
+      return delayMs;
     }
 
     function handleListModeNoProgressFailure(source = 'tick') {
@@ -11317,6 +11596,9 @@ const AutoQueueModule = (() => {
     }
 
     function repairAutoQueueFalseWaitingReply(reason = 'autoq-false-waiting-reply') {
+      if (config.promptMode === 'list') {
+        return false;
+      }
       if (!state.running) {
         return false;
       }
@@ -18714,6 +18996,79 @@ const AutoQueueModule = (() => {
     }
 
     function getCurrentBatchTaskInfo(source = '-') {
+      if (config.promptMode === 'list') {
+        let listRunState = null;
+        if (
+          typeof ListModeRunner !== 'undefined'
+          && typeof ListModeRunner.getAutoqListRunState === 'function'
+        ) {
+          listRunState = ListModeRunner.getAutoqListRunState();
+        }
+        if (
+          listRunState
+          && (
+            listRunState.running === true
+            || isListStatusActiveForCore(listRunState.status)
+          )
+          && Array.isArray(listRunState.runQueue)
+          && listRunState.runQueue.length > 0
+        ) {
+          const listIndex = Number.isFinite(Number(listRunState.currentTaskIndex))
+            ? Number(listRunState.currentTaskIndex)
+            : 0;
+          const listTask = listIndex >= 0 && listIndex < listRunState.runQueue.length
+            ? listRunState.runQueue[listIndex]
+            : null;
+          if (listTask) {
+            const listTotal = listRunState.runQueue.length;
+            const listTitle = String(listTask.title || `任务 ${listIndex + 1}`);
+            const listModeRunStep = state.listModeRun && typeof state.listModeRun === 'object'
+              ? String(state.listModeRun.step || '')
+              : '';
+            const listStep = state.taskRun && typeof state.taskRun === 'object'
+              ? String(state.taskRun.currentStep || listModeRunStep || '-')
+              : (listModeRunStep || '-');
+            let replyWaitText = '-';
+            if (state.waitingReply || listRunState.waitingReply) {
+              const startedAt = Number(state.waitingStartedAt || 0);
+              if (startedAt > 0) {
+                const elapsedMs = Math.max(0, Date.now() - startedAt);
+                const totalSec = Math.floor(elapsedMs / 1000);
+                const mins = Math.floor(totalSec / 60);
+                const secs = totalSec % 60;
+                replyWaitText = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+              }
+            }
+            return {
+              source,
+              currentIndex: listIndex,
+              displayIndex: listIndex + 1,
+              total: listTotal,
+              task: listTask,
+              taskId: String(listTask.id || ''),
+              title: listTitle,
+              taskStatus: String(listTask.runtimeStatus || 'pending'),
+              phase: String(state.phase || '-'),
+              step: listStep,
+              pendingSendKind: 'list',
+              pendingReplyKind: state.taskRun && typeof state.taskRun === 'object'
+                ? String(state.taskRun.pendingReplyKind || '')
+                : '',
+              sentCount: listTask.initialSent ? 1 : 0,
+              businessSentCount: 0,
+              batchTotalSentCount: 0,
+              totalSentCount: 0,
+              verifySentCount: 0,
+              currentTaskInitialSent: !!listTask.initialSent,
+              currentTaskContinueCount: 0,
+              continueCount: 0,
+              replyWaitText,
+              waitingReply: state.waitingReply === true || listRunState.waitingReply === true,
+              batchRunning: true,
+            };
+          }
+        }
+      }
       repairBatchTaskStateInconsistency(source);
       const run = ensureTaskRunUploadCadenceFields(state.taskRun || {});
       const enabledTasks = getBatchEnabledTasks();
@@ -18971,6 +19326,10 @@ const AutoQueueModule = (() => {
     }
 
     async function completeCurrentTaskAndMoveNextOnce(reason = 'terminal-done', options = {}) {
+      if (isListModeRunnerActive()) {
+        logBatchFlowSkipForListMode('completeCurrentTaskAndMoveNextOnce');
+        return false;
+      }
       const run = ensureBatchTransitionFlags();
       const task = getCurrentTaskStrict('completeCurrentTaskAndMoveNextOnce');
       const taskId = task && task.id ? String(task.id) : '';
@@ -19364,6 +19723,10 @@ const AutoQueueModule = (() => {
     }
 
     async function moveToNextTask(reason = 'move-to-next-task', options = {}) {
+      if (isListModeRunnerActive()) {
+        logBatchFlowSkipForListMode('moveToNextTask');
+        return false;
+      }
       const reasonTextForMove = String(reason || 'move-to-next-task');
       const skipGateUnlockReasons = [
         'stuck-timeout-30min',
@@ -25721,17 +26084,12 @@ const AutoQueueModule = (() => {
           }
         }
         logUploadBatchState('batch-auto-upload-done');
-        const localFilesAfterBatch = (
-          typeof UploadModule !== 'undefined'
-          && typeof UploadModule.getActiveGroupFiles === 'function'
-        )
-          ? UploadModule.getActiveGroupFiles().length
-          : '-';
+        const localFilesAfterBatch = resolveActiveUploadFileCountForLog();
         ToolboxShell.appendLog(
           '[BATCH_AUTO_UPLOAD][DONE] manualUploadRunning=0 batchTaskRunning=1 batchAutoUploading=0',
         );
         ToolboxShell.appendLog(
-          `[UPLOAD_DONE][PRESERVE_LOCAL_FILES] uploaded=- reason=batch-auto-upload-done activeFiles=${localFilesAfterBatch}`,
+          `[UPLOAD_DONE][PRESERVE_LOCAL_FILES] uploaded=- reason=batch-auto-upload-done activeFiles=${localFilesAfterBatch == null ? '-' : localFilesAfterBatch}`,
         );
         setTimeout(() => {
           try {
@@ -30628,6 +30986,30 @@ const AutoQueueModule = (() => {
         return prepareTaskQueue();
       }
 
+      if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
+        const prepared = typeof ListModeRunner.prepareListRunQueueFromEditor === 'function'
+          ? ListModeRunner.prepareListRunQueueFromEditor()
+          : { ok: false };
+        if (!prepared.ok) {
+          log('指令为空，无法开始');
+          return false;
+        }
+        resetTaskRunState();
+        state.queue = Array.isArray(prepared.queueTexts) ? prepared.queueTexts : [];
+        state.idx = -1;
+        state.sentCount = 0;
+        state.completedLoops = 0;
+        state.nextSendAt = 0;
+        state.waitingReply = false;
+        state.replyBecameBusy = false;
+        state.idleSince = 0;
+        state.waitingStartedAt = 0;
+        state.sendingNow = false;
+        state.listModeRun = null;
+        resetListModeWaitTracking();
+        return true;
+      }
+
       const prompts = buildQueuePromptsByMode(config.promptMode);
 
       if (!prompts.length) {
@@ -30648,10 +31030,6 @@ const AutoQueueModule = (() => {
       state.sendingNow = false;
       state.listModeRun = null;
       resetListModeWaitTracking();
-
-      if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
-        ListModeRunner.syncListModeTasksFromQueue();
-      }
 
       return true;
     }
@@ -30801,7 +31179,20 @@ const AutoQueueModule = (() => {
           `[BATCH_TASK_GROUP][START_CLICK] mode=${config.promptMode || '-'} taskCount=${listTaskCount}`,
         );
         if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
-          ListModeRunner.initListModeStart();
+          const started = typeof ListModeRunner.startAutoqListModeRun === 'function'
+            ? ListModeRunner.startAutoqListModeRun({
+              liveSyncEnabled: true,
+              lockQueueOnStart: false,
+            })
+            : ListModeRunner.initListModeStart();
+          if (started === false) {
+            transitionAutoQueuePhase(AUTO_QUEUE_PHASES.FAILED, 'empty list run queue', { force: true });
+            invalidateAutoQueueRun('list-run-empty');
+            state.listModeRunning = false;
+            state.running = false;
+            updateStatus('list-start-empty');
+            return;
+          }
         }
       }
 
@@ -30983,10 +31374,20 @@ const AutoQueueModule = (() => {
     }
 
     function stop(options = {}) {
+      const stopOpts = options && typeof options === 'object' ? options : {};
       if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
         ListModeRunner.clearListModeTimers();
+        if (
+          typeof ListModeRunner.getAutoqListRunState === 'function'
+          && (stopOpts.manualStop || stopOpts.userStop || stopOpts.fromUser)
+        ) {
+          const listRunState = ListModeRunner.getAutoqListRunState();
+          if (listRunState) {
+            listRunState.stopRequested = true;
+            listRunState.running = false;
+          }
+        }
       }
-      const stopOpts = options && typeof options === 'object' ? options : {};
       if (
         config.promptMode === 'list'
         && (stopOpts.manualStop || stopOpts.userStop || stopOpts.fromUser)
@@ -31132,12 +31533,16 @@ const AutoQueueModule = (() => {
     }
 
     function advanceAfterSend(options = {}) {
+      if (
+        config.promptMode === 'list'
+        && state.listRunState
+        && state.listRunState.running === true
+      ) {
+        return;
+      }
+
       const modeSettings = getModeSettings(config.promptMode);
       const markReplyDone = options && options.markReplyDone !== false;
-
-      if (config.promptMode === 'list' && markReplyDone && typeof ListModeRunner !== 'undefined') {
-        ListModeRunner.onListTaskReplyDone('reply-complete');
-      }
 
       state.idx += 1;
 
@@ -31150,26 +31555,12 @@ const AutoQueueModule = (() => {
       }
 
       if (shouldFinishAllLoops()) {
-        if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
-          ListModeRunner.finishListMode({ reason: 'all-tasks-processed' });
-          return;
-        }
         log('队列已全部完成');
         stop();
         return;
       }
 
-      const nextDelayMs = getRandomDelayMs();
-      if (config.promptMode === 'list') {
-        resetListModeWaitTracking();
-        const modeSettings = getModeSettings(config.promptMode);
-        ToolboxShell.appendLog(
-          `[AUTOQ][LIST_MODE][NEXT_DELAY] minSeconds=${Number(modeSettings.randomMinSec) || 3} `
-          + `maxSeconds=${Number(modeSettings.randomMaxSec) || 20} delayMs=${nextDelayMs}`,
-        );
-      }
-
-      state.nextSendAt = Date.now() + nextDelayMs;
+      state.nextSendAt = Date.now() + getRandomDelayMs();
     }
 
     function guardAutoQueueBackgroundThrottle(action) {
@@ -31576,6 +31967,22 @@ const AutoQueueModule = (() => {
       ) {
         repairWaitingReplyForAssistantBusy('reply-ready-phase-busy');
         return;
+      }
+
+      if (config.promptMode === 'list') {
+        if (isListModeRunnerActive()) {
+          if (
+            state.waitingReply
+            || (
+              typeof ListModeRunner !== 'undefined'
+              && typeof ListModeRunner.getAutoqListRunState === 'function'
+              && ListModeRunner.getAutoqListRunState().status === 'waiting_reply'
+            )
+          ) {
+            maybeUpdateListModeWaitingState();
+          }
+          return;
+        }
       }
 
       if (!state.waitingReply) {
@@ -35456,6 +35863,10 @@ const AutoQueueModule = (() => {
     }
 
     function maybeSendNextTask() {
+      if (isListModeRunnerActive()) {
+        logBatchFlowSkipForListMode('maybeSendNextTask');
+        return;
+      }
       const run = ensureBatchTransitionFlags();
       if (run.maybeSendNextTaskInFlight === true) {
         ToolboxShell.appendLog(
@@ -36754,6 +37165,37 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
+        const listRunState = typeof ListModeRunner.getAutoqListRunState === 'function'
+          ? ListModeRunner.getAutoqListRunState()
+          : state.listRunState;
+        if (!listRunState || listRunState.running !== true) {
+          return;
+        }
+        const listModeRun = state.listModeRun && typeof state.listModeRun === 'object'
+          ? state.listModeRun
+          : null;
+        if (listModeRun && (listModeRun.nextTaskTimerId || listModeRun.retryTimerId)) {
+          return;
+        }
+        if (
+          listRunState.waitingReply
+          || listRunState.sendingNow
+          || state.sendingNow
+          || state.waitingReply
+        ) {
+          return;
+        }
+        if (Date.now() < state.nextSendAt) {
+          return;
+        }
+        if (ComposerApi.isAssistantLikelyBusy()) {
+          return;
+        }
+        void ListModeRunner.runCurrentListRunTask({ source: 'maybe-send-next' });
+        return;
+      }
+
       if (!state.queue.length) return;
       if (Date.now() < state.nextSendAt) return;
       if (ComposerApi.isAssistantLikelyBusy()) return;
@@ -36767,11 +37209,6 @@ const AutoQueueModule = (() => {
       }
 
       if (state.sendingNow) {
-        return;
-      }
-
-      if (config.promptMode === 'list' && typeof ListModeRunner !== 'undefined') {
-        void ListModeRunner.runCurrentListTask({ source: 'maybe-send-next' });
         return;
       }
 
@@ -36883,8 +37320,10 @@ const AutoQueueModule = (() => {
           return;
         }
 
-        if (config.promptMode === 'task') {
+        if (config.promptMode === 'list' || config.promptMode === 'task') {
           syncWaitingReplyFlagFromPhase('tick-sync');
+        }
+        if (config.promptMode === 'task') {
           if (isStopSignalVerificationActive() && tryRecoverTerminalConfirmBeginStuck('tick')) {
             ensureTicker();
             return;
@@ -38024,6 +38463,33 @@ const AutoQueueModule = (() => {
             return;
           }
 
+          if (config.promptMode === 'list') {
+            ToolboxShell.appendLog('[BATCH_TASK_GROUP][STOP_CLICK]', {
+              mode: 'list',
+              runId: state.listRunState ? state.listRunState.runId : '-',
+              currentTaskIndex: state.listRunState ? state.listRunState.currentTaskIndex : -1,
+              currentTaskId: state.listRunState ? state.listRunState.currentTaskId : '',
+            });
+            if (state.listRunState && typeof state.listRunState === 'object') {
+              state.listRunState.stopRequested = true;
+            }
+            if (typeof ListModeRunner !== 'undefined' && typeof ListModeRunner.stopAutoqListModeRun === 'function') {
+              ListModeRunner.stopAutoqListModeRun({
+                reason: 'manual-stop',
+                detail: 'user clicked stop batch task group',
+              });
+            } else {
+              stop({
+                reason: 'manual-stop',
+                logStop: true,
+                manualStop: true,
+                userStop: true,
+                fromUser: true,
+              });
+            }
+            return;
+          }
+
           ToolboxShell.appendLog('[BATCH_TASK_GROUP][STOP_CLICK] reason=user-click-stop');
           ToolboxShell.appendLog(`[BATCH_TASK_BUTTON][CLICK_${source}] action=stop-with-final-upload`);
           void stopTaskBatchWithFinalUpload('start-button-toggle').catch((error) => {
@@ -38878,14 +39344,30 @@ const AutoQueueModule = (() => {
         tick,
         updateStatus,
         setAutoQueuePhase,
+        syncWaitingReplyFlagFromPhase,
         captureAutoQueueRunId,
         isStaleAutoQueueRun,
         advanceAfterSend,
         guardAutoQueueBackgroundThrottle,
+        getListModeTimeoutSettings,
+        getAutoqNextTaskDelayMs,
         sendTextThroughComposer: typeof sendTextThroughComposer === 'function' ? sendTextThroughComposer : null,
         sendContentViaComposer: typeof sendContentViaComposer === 'function' ? sendContentViaComposer : null,
         updateChatInputStateBadge: typeof updateChatInputStateBadge === 'function' ? updateChatInputStateBadge : null,
         saveWaitingReplyContext,
+        startListModeWaitReplyTracking,
+        getActiveAutoqTaskList: () => {
+          const profile = getActiveListProfile();
+          if (!profile) {
+            return null;
+          }
+          return {
+            id: profile.id,
+            name: profile.name,
+            text: String(profile.text || ''),
+            tasks: Array.isArray(profile.tasks) ? profile.tasks : [],
+          };
+        },
         AUTO_QUEUE_PHASES,
       });
     }

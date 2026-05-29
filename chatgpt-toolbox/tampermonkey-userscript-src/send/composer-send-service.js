@@ -3,6 +3,13 @@
   const COMPOSER_SEND_TEXT_SYNC_DELAYS_MS = [300, 600, 1000, 1500, 2000];
   const COMPOSER_SEND_TEXT_SYNC_MAX = 5;
 
+  const composerSendCoreState = {
+    running: false,
+    owner: '',
+    startedAt: 0,
+    reason: '',
+  };
+
   const COMPOSER_SEND_REASON_ZH = {
     'empty-text': '发送文本为空',
     'composer-not-found': '未找到 ChatGPT 输入框',
@@ -286,6 +293,14 @@
       sendExistingComposer: sendExistingComposer ? 1 : 0,
     }));
 
+    let sendStarted = false;
+    try {
+      sendStarted = true;
+      composerSendCoreState.running = true;
+      composerSendCoreState.owner = source;
+      composerSendCoreState.startedAt = Date.now();
+      composerSendCoreState.reason = 'send-text-through-composer';
+
     if (!sendExistingComposer && !text.trim()) {
       const fail = buildComposerSendResult(ctx, {
         ok: false,
@@ -564,6 +579,28 @@
       composerSendLog('[COMPOSER_SEND][FAILED]', success);
     }
     return success;
+    } catch (error) {
+      console.error('[COMPOSER_SEND][ERROR]', error, ctx);
+      const fail = buildComposerSendResult(ctx, {
+        ok: false,
+        reason: 'send-exception',
+        detail: error && error.message ? error.message : String(error),
+        elapsedMs: Date.now() - startedAt,
+      });
+      composerSendLog('[COMPOSER_SEND][FAILED]', fail);
+      return fail;
+    } finally {
+      if (sendStarted) {
+        composerSendCoreState.running = false;
+        composerSendCoreState.owner = '';
+        composerSendCoreState.startedAt = 0;
+        composerSendCoreState.reason = '';
+        composerSendLog('[COMPOSER_SEND][CLEANUP]', {
+          reason: 'finally',
+          source,
+        });
+      }
+    }
   }
 
   if (typeof globalThis !== 'undefined') {
