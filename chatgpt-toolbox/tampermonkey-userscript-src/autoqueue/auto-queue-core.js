@@ -4385,6 +4385,12 @@ const AutoQueueModule = (() => {
       if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyHashStableCount')) target.currentTaskReplyHashStableCount = 0;
       if (!Object.prototype.hasOwnProperty.call(target, 'currentTaskReplyMessageId')) target.currentTaskReplyMessageId = '';
       if (!Object.prototype.hasOwnProperty.call(target, 'verifyReplyTextForResend')) target.verifyReplyTextForResend = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentAt')) target.verifyPromptSentAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTurnCount')) target.verifyPromptSentTurnCount = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTurnNo')) target.verifyPromptSentTurnNo = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentConversationId')) target.verifyPromptSentConversationId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTaskId')) target.verifyPromptSentTaskId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'verifyPromptSentTaskIndex')) target.verifyPromptSentTaskIndex = -1;
       if (!Object.prototype.hasOwnProperty.call(target, 'afterTerminalConfirmWaitingVerify')) target.afterTerminalConfirmWaitingVerify = false;
       if (!Object.prototype.hasOwnProperty.call(target, 'afterTerminalConfirmNextIndex')) target.afterTerminalConfirmNextIndex = -1;
       if (!Object.prototype.hasOwnProperty.call(target, 'terminalVerificationStartedAt')) target.terminalVerificationStartedAt = 0;
@@ -8525,7 +8531,311 @@ const AutoQueueModule = (() => {
       return false;
     }
 
+    function getCurrentTurnCountSafe() {
+      if (typeof getAutoQueuePageTurnCount === 'function') {
+        const fromAutoQueue = Number(getAutoQueuePageTurnCount());
+        if (Number.isFinite(fromAutoQueue)) {
+          return fromAutoQueue;
+        }
+      }
+      if (typeof getCurrentPageTurnCount === 'function') {
+        const fromPage = Number(getCurrentPageTurnCount());
+        if (Number.isFinite(fromPage)) {
+          return fromPage;
+        }
+      }
+      if (typeof getCurrentPageTurnCountSafe === 'function') {
+        const fromSafe = Number(getCurrentPageTurnCountSafe());
+        if (Number.isFinite(fromSafe)) {
+          return fromSafe;
+        }
+      }
+      return -1;
+    }
+
+    const VERIFICATION_CONSUME_STEPS = new Set([
+      'send-wait-button',
+      'verify-wait-reply',
+      'wait-verification-reply',
+      'verification-send-retry',
+      'verify-send-prompt',
+      'verify-after-done-signal',
+      'verify-upload-file',
+    ]);
+
+    function isVerificationReplySnapshotBelongsToCurrentTask(snapshot, run, source = '-') {
+      if (!snapshot || snapshot.ok !== true) {
+        return false;
+      }
+
+      const task = getCurrentRunningTask();
+      const snapTurnNo = Number(snapshot.turnNo || -1);
+
+      if (run.verifyPromptSentTaskId && task && task.id && String(run.verifyPromptSentTaskId) !== String(task.id)) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=task-id-mismatch source=${source}`,
+        );
+        return false;
+      }
+
+      if (run.verifyPromptSentTaskIndex >= 0 && Number(run.currentIndex || 0) !== Number(run.verifyPromptSentTaskIndex)) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=task-index-mismatch source=${source}`,
+        );
+        return false;
+      }
+
+      const currentConversationId = getAutoQueueConversationIdSafe();
+      if (
+        run.verifyPromptSentConversationId
+        && currentConversationId
+        && String(run.verifyPromptSentConversationId) !== String(currentConversationId)
+      ) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=conversation-id-mismatch source=${source}`,
+        );
+        return false;
+      }
+
+      const verifySentTurnNo = Number(run.verifyPromptSentTurnNo);
+      if (verifySentTurnNo >= 0 && snapTurnNo > verifySentTurnNo) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_OK] reason=after-verify-prompt-turn`
+          + ` verifySentTurnNo=${verifySentTurnNo}`
+          + ` assistantTurnNo=${snapTurnNo}`
+          + ` source=${source}`,
+        );
+        return true;
+      }
+
+      if (isAssistantSnapshotBelongsToCurrentTask(snapshot, source)) {
+        if (verifySentTurnNo >= 0 && snapTurnNo <= verifySentTurnNo) {
+          ToolboxShell.appendLog(
+            `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=same-or-before-verify-prompt-turn`
+            + ` verifySentTurnNo=${verifySentTurnNo}`
+            + ` assistantTurnNo=${snapTurnNo}`
+            + ` source=${source}`,
+          );
+          return false;
+        }
+        return true;
+      }
+
+      const boundary = run.currentTaskSendBoundary || null;
+      const beforeTurnNo = boundary ? Number(boundary.beforeAssistantTurnNo || -1) : -1;
+      if (snapTurnNo >= 0 && beforeTurnNo >= 0 && snapTurnNo > beforeTurnNo) {
+        if (verifySentTurnNo >= 0 && snapTurnNo <= verifySentTurnNo) {
+          return false;
+        }
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][TURN_BIND_OK] reason=after-send-boundary-turn`
+          + ` beforeTurnNo=${beforeTurnNo}`
+          + ` assistantTurnNo=${snapTurnNo}`
+          + ` source=${source}`,
+        );
+        return true;
+      }
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][TURN_BIND_FAIL] reason=unbound-verification-reply source=${source}`,
+      );
+      return false;
+    }
+
+    function getConsumableVerificationReplySnapshot(run, source = '-') {
+      if (!state.running || config.promptMode !== 'task') {
+        return null;
+      }
+
+      const hasVerificationPending = !!(
+        run.doneSignalVerificationRunning === true
+        || String(run.pendingSendKind || '') === 'verification'
+        || String(run.pendingReplyKind || '') === 'verification'
+      );
+
+      if (!hasVerificationPending) {
+        return null;
+      }
+
+      if (state.waitingReply || isChatGPTActuallyBusyForTaskQueue()) {
+        return null;
+      }
+
+      const step = String(run.currentStep || '');
+      if (!VERIFICATION_CONSUME_STEPS.has(step)) {
+        return null;
+      }
+
+      const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`consumable-verify-reply:${source}`);
+      if (!latest || latest.ok !== true || !String(latest.text || '').trim()) {
+        return null;
+      }
+
+      const task = getCurrentRunningTask();
+      const profile = getActiveTaskProfile ? getActiveTaskProfile() : null;
+      const resolved = task
+        ? resolveTaskContinueSettings(task, profile, { log: false })
+        : { actualDoneSignal: TASK_DONE_SIGNAL };
+      const doneCheck = isTaskDoneSignalMatched(latest.text, resolved.actualDoneSignal);
+
+      if (!doneCheck.matched || doneCheck.corrupted) {
+        return null;
+      }
+
+      if (!isVerificationReplySnapshotBelongsToCurrentTask(latest, run, source)) {
+        return null;
+      }
+
+      return latest;
+    }
+
+    function isConsumableVerificationReplyReady(source = '-') {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      return !!getConsumableVerificationReplySnapshot(run, source);
+    }
+
+    function tryConsumeReadyVerificationReplyBeforeLock(source) {
+      const sourceText = String(source || '-');
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const latest = getConsumableVerificationReplySnapshot(run, sourceText);
+
+      if (!latest) {
+        return false;
+      }
+
+      const task = getCurrentRunningTask();
+      if (!task) {
+        return false;
+      }
+
+      const step = String(run.currentStep || '-');
+      const phase = String(state.phase || '-');
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][CONSUME_READY_BEFORE_LOCK] source=${sourceText}`
+        + ` turnId=${latest.turnId || '-'}`
+        + ` turnNo=${Number(latest.turnNo || -1)}`
+        + ` step=${step}`
+        + ` phase=${phase}`,
+      );
+
+      run.pendingSendKind = null;
+      run.pendingReplyKind = null;
+      run.doneSignalVerificationRunning = false;
+      run.afterTerminalConfirmWaitingVerify = false;
+      run.verifyReplyTextForResend = '';
+      state.taskRun = run;
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.waitingStartedAt = 0;
+      state.idleSince = 0;
+
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING || 'running', 'verification-reply-consumed-before-lock', { force: true });
+
+      const beginResult = beginTerminalConfirm({
+        source: `verification-reply-before-lock:${sourceText}`,
+        taskIndex: Number(run.currentIndex || 0),
+        taskId: task.id || '',
+        replyText: latest.text,
+      });
+
+      if (beginResult && beginResult.ok === true) {
+        return true;
+      }
+
+      const beginReason = beginResult && beginResult.reason
+        ? String(beginResult.reason)
+        : 'begin-terminal-confirm-failed';
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][CONSUME_BEFORE_LOCK_RETRY] source=${sourceText} reason=${beginReason}`,
+      );
+
+      if (beginReason === 'stale-or-unbound-terminal' || beginReason === 'not-exact-terminal') {
+        scheduleNextBatchTaskStep('reply-ready-retry', 0, {
+          reason: beginReason,
+          source: `verification-reply-before-lock:${sourceText}`,
+        });
+      }
+
+      return beginReason !== 'already-confirming';
+    }
+
+    function repairVerificationSendWaitButtonStaleState(source) {
+      const sourceText = String(source || '-');
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const step = String(run.currentStep || '');
+      const phase = String(state.phase || '');
+
+      if (String(run.pendingSendKind || '') !== 'verification') {
+        return false;
+      }
+      if (String(run.pendingReplyKind || '') !== 'verification') {
+        return false;
+      }
+      if (run.doneSignalVerificationRunning !== true) {
+        return false;
+      }
+      if (phase !== AUTO_QUEUE_PHASES.UPLOAD_ATTACHED && phase !== 'upload_attached') {
+        return false;
+      }
+      if (step !== 'send-wait-button') {
+        return false;
+      }
+
+      const payload = getAutoQueueComposerPayloadState(`repair-verification-send-wait:${sourceText}`);
+      if (Number(payload.textLen || 0) !== 0) {
+        return false;
+      }
+      if (Number(payload.readyCount || 0) !== 0) {
+        return false;
+      }
+      if (Number(payload.uploadingCount || 0) !== 0) {
+        return false;
+      }
+      if (isChatGPTActuallyBusyForTaskQueue()) {
+        return false;
+      }
+
+      const latest = getLatestAssistantSnapshotForAutoQueueBoundary(`repair-verification-send-wait:${sourceText}`);
+      if (!latest || !String(latest.text || '').trim()) {
+        return false;
+      }
+
+      if (tryConsumeReadyVerificationReplyBeforeLock(`repair-verification-send-wait:${sourceText}`)) {
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_BUTTON] source=${sourceText} action=consumed-ready-verification-reply`,
+        );
+        return true;
+      }
+
+      const task = getCurrentRunningTask();
+      if (!task) {
+        return false;
+      }
+
+      const profile = getActiveTaskProfile ? getActiveTaskProfile() : null;
+      const resolved = resolveTaskContinueSettings(task, profile, { log: false });
+      const doneCheck = isTaskDoneSignalMatched(latest.text, resolved.actualDoneSignal);
+
+      if (doneCheck.matched) {
+        return false;
+      }
+
+      ToolboxShell.appendLog(
+        `[TASK_VERIFY_FINAL][REPAIR_SEND_WAIT_BUTTON] source=${sourceText} action=switch-verify-wait-reply chars=${String(latest.text || '').length}`,
+      );
+      setTaskBatchStep('verify-wait-reply', task, { log: false });
+      setAutoQueuePhase('waiting_reply', 'repair-verification-send-wait-button', { force: true });
+      state.waitingReply = true;
+      return true;
+    }
+
     function isTerminalFinalVerificationFlowActive() {
+      if (isConsumableVerificationReplyReady('isTerminalFinalVerificationFlowActive')) {
+        return false;
+      }
+
       const runtimeState = getAutoQueueRuntimeState();
       const run = state.taskRun || {};
       const phase = String(state.phase || '');
@@ -8735,7 +9045,10 @@ const AutoQueueModule = (() => {
         || action.includes('active-verification-retry')
         || action.includes('verify-lock-stuck')
         || action.includes('verify-send-retry')
-        || action.includes('runDoneSignalVerification');
+        || action.includes('runDoneSignalVerification')
+        || action.includes('consume-ready-before-lock')
+        || action.includes('verification-reply-before-lock')
+        || action.includes('repair-verification-send-wait-button');
     }
 
     const ORPHAN_TERMINAL_VERIFY_STEPS = new Set([
@@ -8894,6 +9207,10 @@ const AutoQueueModule = (() => {
 
     function blockTaskAdvanceDuringTerminalVerification(actionName) {
       const actionText = String(actionName || '-');
+
+      if (tryConsumeReadyVerificationReplyBeforeLock(`blockTaskAdvanceDuringTerminalVerification:${actionText}`)) {
+        return false;
+      }
 
       if (detectOrphanTerminalVerifyLock(`blockTaskAdvanceDuringTerminalVerification:${actionText}`)) {
         clearOrphanTerminalVerifyLock(`blockTaskAdvanceDuringTerminalVerification:${actionText}`, {
@@ -11043,6 +11360,13 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (tryConsumeReadyVerificationReplyBeforeLock(`timer:${String(action || '-')}`)) {
+        logBatchTaskGroupStepEnd('consumed', action, 0, {
+          reason: 'verification-reply-consumed-before-lock',
+        });
+        return;
+      }
+
       if (blockTaskAdvanceDuringTerminalVerification(`timer:${String(action || '-')}`)) {
         logBatchTaskGroupStepEnd('blocked', action, 0, {
           reason: 'terminal-final-verification-active',
@@ -12784,6 +13108,23 @@ const AutoQueueModule = (() => {
 
         verificationPromptSent = true;
         recordTaskBatchMessageSent('verification');
+
+        const verifySentSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary('verify-prompt-sent-boundary');
+        run.verifyPromptSentAt = Date.now();
+        run.verifyPromptSentTurnCount = getCurrentTurnCountSafe();
+        run.verifyPromptSentTurnNo = verifySentSnapshot.ok
+          ? Number(verifySentSnapshot.turnNo || -1)
+          : -1;
+        run.verifyPromptSentConversationId = getAutoQueueConversationIdSafe();
+        run.verifyPromptSentTaskId = task.id || '';
+        run.verifyPromptSentTaskIndex = Number(run.currentIndex || 0);
+        state.taskRun = run;
+        ToolboxShell.appendLog(
+          `[TASK_VERIFY_FINAL][VERIFY_PROMPT_SENT_BOUNDARY] task=${task.title || '-'}`
+          + ` turnCount=${run.verifyPromptSentTurnCount}`
+          + ` turnNo=${run.verifyPromptSentTurnNo}`
+          + ` conversationId=${run.verifyPromptSentConversationId || '-'}`,
+        );
 
         if (!state.waitingReply) {
           return blockAutoQueueWaitingReplyNotSubmitted(
@@ -15070,6 +15411,10 @@ const AutoQueueModule = (() => {
 
     async function handleTaskReplyReady() {
       if (state.taskBatchStepRunning) {
+        return;
+      }
+
+      if (tryConsumeReadyVerificationReplyBeforeLock('handleTaskReplyReady')) {
         return;
       }
 
@@ -23160,6 +23505,16 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (repairVerificationSendWaitButtonStaleState('maybeSendNextTask')) {
+        logBatchPendingCheck('repair-verification-send-wait-button');
+        return;
+      }
+
+      if (tryConsumeReadyVerificationReplyBeforeLock('maybeSendNextTask')) {
+        logBatchPendingCheck('consume-ready-verification-before-lock');
+        return;
+      }
+
       if (blockTaskAdvanceDuringTerminalVerification('maybeSendNextTask')) {
         const runForVerifyLock = ensureTaskRunVerificationFields(state.taskRun || {});
         const runtimeStateForLock = getAutoQueueRuntimeState();
@@ -24075,6 +24430,14 @@ const AutoQueueModule = (() => {
             if (typeof updateChatInputStateBadge === 'function') {
               updateChatInputStateBadge();
             }
+            return;
+          }
+          if (repairVerificationSendWaitButtonStaleState('tick')) {
+            updateStatus('repair-verification-send-wait-button');
+            return;
+          }
+          if (tryConsumeReadyVerificationReplyBeforeLock('tick')) {
+            updateStatus('consume-ready-verification-before-lock');
             return;
           }
         }
@@ -25571,6 +25934,13 @@ const AutoQueueModule = (() => {
           `[AUTOQ][VERIFY_STATE] foreground=1 recovered=1 running=${state.running ? 1 : 0} `
           + `waitingReply=${state.waitingReply ? 1 : 0}`,
         );
+        return;
+      }
+
+      if (repairVerificationSendWaitButtonStaleState('foreground-resume')) {
+        return;
+      }
+      if (tryConsumeReadyVerificationReplyBeforeLock('foreground-resume')) {
         return;
       }
 
