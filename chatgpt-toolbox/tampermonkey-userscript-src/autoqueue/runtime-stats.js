@@ -150,6 +150,59 @@
       return formatDuration(ms);
     }
 
+    function normalizeAutoQueueDurationSeconds(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) {
+        return null;
+      }
+      return Math.floor(n / 1000);
+    }
+
+    function isAutoQueueDurationMsActive(ms) {
+      const seconds = normalizeAutoQueueDurationSeconds(ms);
+      return seconds != null && seconds > 0;
+    }
+
+    /** 当前任务耗时：仅在 currentTaskStartedAt 有效且计时进行中显示时钟，否则 "-" */
+    function formatCurrentTaskElapsedForPanel(currentMs, isTaskTimerActive) {
+      if (!isTaskTimerActive || !isAutoQueueDurationMsActive(currentMs)) {
+        return '-';
+      }
+      return formatDuration(currentMs);
+    }
+
+    /** 本次回复耗时：进行中用 currentMs，已结束则回退 lastTaskDurationMs */
+    function formatCurrentReplyElapsedForPanel(currentMs, lastTaskDurationMs, isTaskTimerActive) {
+      if (isTaskTimerActive && isAutoQueueDurationMsActive(currentMs)) {
+        return formatDuration(currentMs);
+      }
+      if (isAutoQueueDurationMsActive(lastTaskDurationMs)) {
+        return formatDuration(lastTaskDurationMs);
+      }
+      return '-';
+    }
+
+    function formatLastReplyDurationForPanel(lastTaskDurationMs) {
+      if (!isAutoQueueDurationMsActive(lastTaskDurationMs)) {
+        return '-';
+      }
+      return formatDuration(lastTaskDurationMs);
+    }
+
+    function formatAverageReplyForPanel(avgMs, hasCompletedTask) {
+      if (!hasCompletedTask) {
+        return '统计中';
+      }
+      return formatDuration(avgMs);
+    }
+
+    function formatEstimatedRemainingForPanel(etaMs, hasCompletedTask) {
+      if (!hasCompletedTask) {
+        return '统计中';
+      }
+      return formatDuration(etaMs);
+    }
+
     function getAverageDurationMs() {
       const count = runtimeStats.completedTaskCount;
       if (!count) {
@@ -329,20 +382,23 @@
       const avgMs = getAverageDurationMs();
       const etaMs = getEstimatedRemainingMs();
 
-      const line1 = `计时：运行 ${formatTimeTextForUi(formatDuration(appMs))}｜批量 ${formatTimeTextForUi(formatDurationDisplay(batchMs, { notStarted: !runtimeStats.batchStartedAt }))}｜当前 ${formatTimeTextForUi(formatDurationDisplay(currentMs, { pending: !runtimeStats.currentTaskStartedAt }))}`;
+      const isCurrentTaskTimerActive = runtimeStats.currentTaskStartedAt > 0;
+      const totalRunText = formatTimeTextForUi(formatDuration(appMs));
+      const batchRunText = formatTimeTextForUi(formatDurationDisplay(batchMs, { notStarted: !runtimeStats.batchStartedAt }));
+      const currentTaskText = formatCurrentTaskElapsedForPanel(currentMs, isCurrentTaskTimerActive);
+      const currentReplyText = formatCurrentReplyElapsedForPanel(
+        currentMs,
+        runtimeStats.lastTaskDurationMs,
+        isCurrentTaskTimerActive,
+      );
+      const line1 = `耗时：总运行 ${totalRunText} | 本轮批量 ${batchRunText} | 当前任务 ${currentTaskText} | 本次回复 ${currentReplyText}`;
+
       const hasCompletedTask = runtimeStats.completedTaskCount > 0;
-      const hasLastTaskDuration = runtimeStats.lastTaskDurationMs > 0;
-      const lastDurationText = hasLastTaskDuration
-        ? formatDuration(runtimeStats.lastTaskDurationMs)
-        : '00:00:00';
-      const averageDurationText = hasCompletedTask
-        ? formatDuration(avgMs)
-        : '统计中';
-      const etaText = hasCompletedTask
-        ? formatDuration(etaMs)
-        : '统计中';
+      const lastReplyText = formatLastReplyDurationForPanel(runtimeStats.lastTaskDurationMs);
+      const averageReplyText = formatAverageReplyForPanel(avgMs, hasCompletedTask);
+      const etaText = formatEstimatedRemainingForPanel(etaMs, hasCompletedTask);
       const displayTotalTaskCount = resolveDisplayTotalTaskCount();
-      const line2 = `耗时：当前 ${formatDuration(currentMs)}｜上次 ${lastDurationText}｜平均 ${averageDurationText}｜预计剩余 ${etaText}｜完成 ${runtimeStats.completedTaskCount}/${displayTotalTaskCount}`;
+      const line2 = `统计：上次回复 ${lastReplyText} | 平均回复 ${averageReplyText} | 预计剩余 ${etaText}`;
       const phaseLine = `当前任务阶段：${runtimeStats.currentPhase || '等待发送'}`;
 
       if (statsLine1El) {

@@ -325,6 +325,12 @@
     const startedAt = Date.now();
     let useEnterFallback = false;
     let lastBackgroundWaitLogAt = 0;
+    const returnOnBackgroundThrottled = options.returnOnBackgroundThrottled === true;
+    const maxBackgroundWaitMs = Math.max(
+      0,
+      Number(options.maxBackgroundWaitMs || 0) || 0,
+    );
+    let backgroundWaitStartedAt = 0;
 
     if (typeof invalidateComposerResponseStateCache === 'function') {
       invalidateComposerResponseStateCache();
@@ -341,13 +347,42 @@
       if (throttled) {
         attempt -= 1;
         const now = Date.now();
-        if (now - lastBackgroundWaitLogAt >= 2000) {
+        if (!backgroundWaitStartedAt) {
+          backgroundWaitStartedAt = now;
+        }
+        const backgroundWaitMs = now - backgroundWaitStartedAt;
+        if (now - lastBackgroundWaitLogAt >= 3000) {
           lastBackgroundWaitLogAt = now;
           sendPipelineLog('[SEND_PIPELINE][WAIT_BACKGROUND]', Object.assign({}, ctx, {
             reason: 'browser-throttled',
             retryable: true,
             wait_send: true,
+            wait_background: true,
+            backgroundWaitMs,
+            returnOnBackgroundThrottled: returnOnBackgroundThrottled ? 1 : 0,
+            maxBackgroundWaitMs,
           }));
+        }
+        if (
+          returnOnBackgroundThrottled
+          && maxBackgroundWaitMs > 0
+          && backgroundWaitMs >= maxBackgroundWaitMs
+        ) {
+          sendPipelineLog('[SEND_PIPELINE][DEFER_BACKGROUND]', Object.assign({}, ctx, {
+            reason: 'browser-throttled',
+            retryable: true,
+            wait_send: true,
+            wait_background: true,
+            backgroundWaitMs,
+          }));
+          return {
+            ok: false,
+            reason: 'browser-throttled',
+            retryable: true,
+            wait_send: true,
+            wait_background: true,
+            backgroundWaitMs,
+          };
         }
         await sendPipelineSleep(intervalMs);
         continue;
@@ -1198,10 +1233,13 @@
         }
       }
 
+      const isAutoQueueSend = /autoq|batch|task/i.test(String(ctx.source || ''));
       const buttonWaitOptions = {
         requireText: !sendExistingComposer || !!text,
         expectedText: text && !sendExistingComposer ? text : '',
         allowDisabledWithText: allowEnterFallback,
+        returnOnBackgroundThrottled: isAutoQueueSend,
+        maxBackgroundWaitMs: isAutoQueueSend ? 1200 : 0,
       };
 
       if (buttonMaxAttempts > 0) {
@@ -1271,6 +1309,9 @@
         }
         if (buttonWait.wait_send) {
           result.wait_send = true;
+        }
+        if (buttonWait.wait_background) {
+          result.wait_background = true;
         }
         result.retryable = buttonWait.retryable === true
           || sendPipelineIsRetryableReason(result.reason);

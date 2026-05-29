@@ -1867,16 +1867,49 @@
    * 2. ComposerApi：ChatGPT 页面操作隔离
    ********************************************************************/
 
+  let composerDetectDepth = 0;
+  const MAX_COMPOSER_DETECT_DEPTH = 3;
+
+  function withComposerDetectGuard(scope, fallbackValue, fn) {
+    if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
+      const fallback = fallbackValue === undefined ? null : fallbackValue;
+      const line = `[COMPOSER][RECURSION_GUARD] scope=${String(scope || '-')} depth=${composerDetectDepth} max=${MAX_COMPOSER_DETECT_DEPTH}`;
+      console.error('[ChatGPT toolbox] composer recursion guard triggered', {
+        scope: String(scope || '-'),
+        depth: composerDetectDepth,
+        maxDepth: MAX_COMPOSER_DETECT_DEPTH,
+      });
+      ToolboxShell.appendLog(line);
+      return fallback;
+    }
+
+    composerDetectDepth += 1;
+    try {
+      return fn();
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[ChatGPT toolbox] composer detect failed', error);
+      ToolboxShell.appendLog(
+        `[COMPOSER][DETECT_ERROR] scope=${String(scope || '-')} error=${errText}`,
+      );
+      return fallbackValue;
+    } finally {
+      composerDetectDepth = Math.max(0, composerDetectDepth - 1);
+    }
+  }
+
   const ComposerApi = (() => {
     function getComposer() {
-      for (const sel of SELECTORS.composerTextarea) {
-        const el = qs(sel);
-        if (el instanceof HTMLElement && !isInToolbox(el) && isElementVisible(el)) {
-          return el;
+      return withComposerDetectGuard('ComposerApi.getComposer', null, () => {
+        for (const sel of SELECTORS.composerTextarea) {
+          const el = qs(sel);
+          if (el instanceof HTMLElement && !isInToolbox(el) && isElementVisible(el)) {
+            return el;
+          }
         }
-      }
 
-      return null;
+        return null;
+      });
     }
 
     function hasComposer() {
@@ -1906,17 +1939,19 @@
     }
 
     function getComposerRoot() {
-      const c = qs(SELECTORS.composer);
-      if (c instanceof HTMLElement && !isInToolbox(c)) return c;
+      return withComposerDetectGuard('ComposerApi.getComposerRoot', null, () => {
+        const c = qs(SELECTORS.composer);
+        if (c instanceof HTMLElement && !isInToolbox(c)) return c;
 
-      const editor = getComposer();
-      if (editor) {
-        const form = editor.closest('form');
-        if (form instanceof HTMLElement) return form;
-        return editor;
-      }
+        const editor = getComposer();
+        if (editor) {
+          const form = editor.closest('form');
+          if (form instanceof HTMLElement) return form;
+          return editor;
+        }
 
-      return null;
+        return null;
+      });
     }
 
     function isButtonBelongsToComposer(btn, composer, composerRoot, composerForm) {
@@ -1972,8 +2007,6 @@
     }
 
     const composerLogThrottle = new Map();
-    let composerDetectDepth = 0;
-    const MAX_COMPOSER_DETECT_DEPTH = 8;
 
     function getComposerPollLogThrottleMs() {
       return isComposerDebugEnabled() ? 1000 : 3000;
@@ -2005,34 +2038,6 @@
         return;
       }
       appendComposerLogThrottled(key, text, getComposerPollLogThrottleMs());
-    }
-
-    function withComposerDetectGuard(scope, fallbackValue, fn) {
-      if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
-        const fallback = fallbackValue === undefined ? null : fallbackValue;
-        const line = `[COMPOSER][RECURSION_GUARD] scope=${String(scope || '-')} depth=${composerDetectDepth} max=${MAX_COMPOSER_DETECT_DEPTH}`;
-        console.error('[ChatGPT toolbox] composer recursion guard triggered', {
-          scope: String(scope || '-'),
-          depth: composerDetectDepth,
-          maxDepth: MAX_COMPOSER_DETECT_DEPTH,
-        });
-        ToolboxShell.appendLog(line);
-        return fallback;
-      }
-
-      composerDetectDepth += 1;
-      try {
-        return fn();
-      } catch (error) {
-        const errText = error && error.message ? error.message : String(error);
-        console.error('[ChatGPT toolbox] composer detect failed', error);
-        ToolboxShell.appendLog(
-          `[COMPOSER][DETECT_ERROR] scope=${String(scope || '-')} error=${errText}`,
-        );
-        return fallbackValue;
-      } finally {
-        composerDetectDepth = Math.max(0, composerDetectDepth - 1);
-      }
     }
 
     const SEND_ARIA_POSITIVE = /(?:^|\b)(?:send(?:\s+(?:message|prompt))?|发送(?:消息|提示)?)(?:\b|$)/i;
@@ -2754,7 +2759,26 @@
 
     function findSendButton(options = {}) {
       const silent = options.silent === true;
-      const composer = getComposer();
+      const skipNestedComposerResolve = options.skipNestedComposerResolve === true;
+
+      if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
+        if (!silent) {
+          appendComposerLogThrottled(
+            'find-send-button:reenter-skip',
+            `[COMPOSER][find-send-button:skip] reason=reenter depth=${composerDetectDepth}`,
+          );
+        }
+        return null;
+      }
+
+      const composer = skipNestedComposerResolve
+        ? (
+          document.querySelector('#prompt-textarea')
+          || document.querySelector('[data-testid="composer-textarea"]')
+          || document.querySelector('[contenteditable="true"][data-lexical-editor="true"]')
+          || document.querySelector('div[contenteditable="true"][role="textbox"]')
+        )
+        : getComposer();
       if (!(composer instanceof HTMLElement)) {
         logSendButtonScan(0, 0, 'composer-not-found', silent);
         if (!silent) {
@@ -2766,7 +2790,13 @@
         return null;
       }
 
-      const composerRoot = getComposerRoot();
+      const composerRoot = skipNestedComposerResolve
+        ? (
+          document.querySelector('[data-testid="composer"]')
+          || composer.closest('form')
+          || composer
+        )
+        : getComposerRoot();
       const composerForm = composer.closest('form');
       const scopes = buildComposerSendButtonScopes(composer, composerRoot, composerForm);
 
@@ -7134,83 +7164,119 @@
 
   function getComposerSendButtonSnapshot(options = {}) {
     const silent = options && options.silent === true;
-    let button = null;
-    let source = '';
-
-    if (
-      typeof ComposerApi !== 'undefined'
-      && typeof ComposerApi.findSendButton === 'function'
-    ) {
-      button = ComposerApi.findSendButton({ silent: true });
-      if (button instanceof HTMLButtonElement) {
-        source = 'ComposerApi.findSendButton';
-      }
-    }
-
-    if (
-      !(button instanceof HTMLButtonElement)
-      && typeof findRealChatGPTSendButton === 'function'
-    ) {
-      let helperScope = null;
-      if (
-        typeof ComposerApi !== 'undefined'
-        && typeof ComposerApi.getComposer === 'function'
-      ) {
-        const composer = ComposerApi.getComposer();
-        const composerRoot = typeof ComposerApi.getComposerRoot === 'function'
-          ? ComposerApi.getComposerRoot()
-          : null;
-        const composerForm = composer instanceof HTMLElement
-          ? composer.closest('form')
-          : null;
-        helperScope = composerForm || composerRoot || composer;
-      }
-
-      if (helperScope instanceof HTMLElement) {
-        button = findRealChatGPTSendButton({ scope: helperScope });
-        if (button instanceof HTMLButtonElement) {
-          source = 'findRealChatGPTSendButton';
-        }
-      }
-    }
-
-    const found = button instanceof HTMLButtonElement;
-    const ready = !!(
-      found
-      && !button.disabled
-      && button.getAttribute('aria-disabled') !== 'true'
-      && (
-        typeof ComposerApi === 'undefined'
-        || typeof ComposerApi.isSendButtonReady !== 'function'
-        || ComposerApi.isSendButtonReady(button)
-      )
-    );
-    const rect = found ? button.getBoundingClientRect() : null;
-    const snapshot = {
-      found,
-      ready,
-      button: found ? button : null,
-      visible: !!(rect && rect.width > 0 && rect.height > 0),
-      disabled: found ? !!button.disabled : true,
-      aria: found ? String(button.getAttribute('aria-label') || '') : '',
-      testid: found ? String(button.getAttribute('data-testid') || '') : '',
-      id: found ? String(button.id || '') : '',
-      source,
-      reason: found
-        ? (ready ? 'send_button_ready' : 'send_button_disabled')
-        : 'button-not-found',
+    const source = String(options.source || '-');
+    const skipNestedComposerResolve = options && options.skipNestedComposerResolve === true;
+    const fallbackSnapshot = {
+      found: false,
+      ready: false,
+      button: null,
+      visible: false,
+      disabled: true,
+      aria: '',
+      testid: '',
+      id: '',
+      source: 'fallback',
+      reason: 'snapshot-guarded',
     };
 
-    if (!silent && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(
-        `[COMPOSER][SEND_BUTTON_SNAPSHOT] found=${snapshot.found ? 1 : 0} `
-        + `ready=${snapshot.ready ? 1 : 0} visible=${snapshot.visible ? 1 : 0} `
-        + `source=${snapshot.source || '-'} aria=${snapshot.aria || '-'} `
-        + `testid=${snapshot.testid || '-'} reason=${snapshot.reason}`,
-      );
+    if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
+      if (!silent && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_SNAPSHOT_REENTER_SKIP] depth=${composerDetectDepth} source=${source}`,
+        );
+      }
+      return fallbackSnapshot;
     }
 
-    return snapshot;
+    return withComposerDetectGuard('getComposerSendButtonSnapshot', fallbackSnapshot, () => {
+      let button = null;
+      let foundSource = '';
+
+      if (
+        !skipNestedComposerResolve
+        && typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.findSendButton === 'function'
+      ) {
+        button = ComposerApi.findSendButton({
+          silent: true,
+          skipNestedComposerResolve: true,
+        });
+        if (button instanceof HTMLButtonElement) {
+          foundSource = 'ComposerApi.findSendButton';
+        }
+      }
+
+      if (
+        !(button instanceof HTMLButtonElement)
+        && typeof findRealChatGPTSendButton === 'function'
+      ) {
+        let helperScope = null;
+        if (!skipNestedComposerResolve) {
+          if (
+            typeof ComposerApi !== 'undefined'
+            && typeof ComposerApi.getComposer === 'function'
+          ) {
+            const composer = ComposerApi.getComposer();
+            const composerRoot = typeof ComposerApi.getComposerRoot === 'function'
+              ? ComposerApi.getComposerRoot()
+              : null;
+            const composerForm = composer instanceof HTMLElement
+              ? composer.closest('form')
+              : null;
+            helperScope = composerForm || composerRoot || composer;
+          }
+        } else {
+          helperScope = document.querySelector('[data-testid="composer"]')
+            || document.querySelector('form')
+            || document.body;
+        }
+
+        if (helperScope instanceof HTMLElement) {
+          button = findRealChatGPTSendButton({ scope: helperScope });
+          if (button instanceof HTMLButtonElement) {
+            foundSource = 'findRealChatGPTSendButton';
+          }
+        }
+      }
+
+      const found = button instanceof HTMLButtonElement;
+      const ready = !!(
+        found
+        && !button.disabled
+        && button.getAttribute('aria-disabled') !== 'true'
+        && (
+          typeof ComposerApi === 'undefined'
+          || typeof ComposerApi.isSendButtonReady !== 'function'
+          || ComposerApi.isSendButtonReady(button)
+        )
+      );
+      const rect = found ? button.getBoundingClientRect() : null;
+      const snapshot = {
+        found,
+        ready,
+        button: found ? button : null,
+        visible: !!(rect && rect.width > 0 && rect.height > 0),
+        disabled: found ? !!button.disabled : true,
+        aria: found ? String(button.getAttribute('aria-label') || '') : '',
+        testid: found ? String(button.getAttribute('data-testid') || '') : '',
+        id: found ? String(button.id || '') : '',
+        source: foundSource,
+        reason: found
+          ? (ready ? 'send_button_ready' : 'send_button_disabled')
+          : 'button-not-found',
+      };
+
+      if (!silent && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][SEND_BUTTON_SNAPSHOT] found=${snapshot.found ? 1 : 0} `
+          + `ready=${snapshot.ready ? 1 : 0} visible=${snapshot.visible ? 1 : 0} `
+          + `source=${snapshot.source || '-'} aria=${snapshot.aria || '-'} `
+          + `testid=${snapshot.testid || '-'} reason=${snapshot.reason}`,
+        );
+      }
+
+      return snapshot;
+    });
   }
 
   function logSendPreSendGate(extra) {
@@ -7306,7 +7372,8 @@
   let lightComposerNotFoundStreak = 0;
   let lightComposerEverFound = false;
 
-  function detectComposerResponseStateLight() {
+  function detectComposerResponseStateLight(options = {}) {
+    const skipSendButtonSnapshot = options.skipSendButtonSnapshot === true;
     const now = Date.now();
     if (!(lightComposerDetectStartedAt > 0)) {
       lightComposerDetectStartedAt = now;
@@ -7324,10 +7391,20 @@
 
     if (hasComposerApi) {
       try {
-        const composer = typeof ComposerApi.getComposer === 'function' ? ComposerApi.getComposer() : null;
-        const composerRoot = typeof ComposerApi.getComposerRoot === 'function' ? ComposerApi.getComposerRoot() : null;
-        sendButton = typeof ComposerApi.findSendButton === 'function'
-          ? ComposerApi.findSendButton({ silent: true })
+        const composer = typeof ComposerApi.getComposer === 'function'
+          ? ComposerApi.getComposer()
+          : null;
+        const composerRoot = typeof ComposerApi.getComposerRoot === 'function'
+          ? ComposerApi.getComposerRoot()
+          : null;
+        sendButton = (
+          !skipSendButtonSnapshot
+          && typeof ComposerApi.findSendButton === 'function'
+        )
+          ? ComposerApi.findSendButton({
+            silent: true,
+            skipNestedComposerResolve: skipSendButtonSnapshot,
+          })
           : null;
         isResponding = typeof ComposerApi.isAssistantLikelyBusy === 'function'
           ? !!ComposerApi.isAssistantLikelyBusy()
@@ -7617,7 +7694,7 @@
     composerDetecting = true;
     try {
     if (options && options.light === true) {
-      const lightResult = detectComposerResponseStateLight();
+      const lightResult = detectComposerResponseStateLight(options);
       return rememberResponseState(responseCacheKey, lightResult);
     }
 

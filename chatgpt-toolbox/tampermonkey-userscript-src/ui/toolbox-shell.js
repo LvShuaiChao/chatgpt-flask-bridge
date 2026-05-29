@@ -1625,7 +1625,9 @@
           margin-left: auto;
         }
 
-        #cgpt-log-copy-errors {
+        #cgpt-log-copy-errors,
+        #cgpt-autoq-copy-errors,
+        .cgpt-log-copy-errors-btn {
           min-width: 112px;
         }
 
@@ -1862,6 +1864,7 @@
         .cgpt-btn[data-action="copy-only"],
         .cgpt-btn[data-action="copy-last-reply"],
         .cgpt-btn[data-action="copy-log"],
+        .cgpt-btn[data-action="copy-error-log"],
         .cgpt-btn[data-action="copy-and-hotkey"],
         .cgpt-btn[data-action="copy-shortcut"],
         .cgpt-btn[data-action="copy-and-continue"],
@@ -1876,7 +1879,8 @@
         }
 
         #cgpt-copy-toolbox-log.cgpt-btn,
-        .cgpt-btn[data-action="copy-log"] {
+        .cgpt-btn[data-action="copy-log"],
+        .cgpt-btn[data-action="copy-error-log"] {
           --cgpt-btn-bg: linear-gradient(135deg, #2563eb, #4f46e5);
           --cgpt-btn-border: rgba(147, 197, 253, 0.75);
           --cgpt-btn-hover-bg: linear-gradient(135deg, #3b82f6, #6366f1);
@@ -1889,7 +1893,8 @@
         }
 
         #cgpt-copy-toolbox-log.cgpt-btn:hover,
-        .cgpt-btn[data-action="copy-log"]:hover {
+        .cgpt-btn[data-action="copy-log"]:hover,
+        .cgpt-btn[data-action="copy-error-log"]:hover {
           background: var(--cgpt-btn-hover-bg);
           border-color: var(--cgpt-btn-hover-border, var(--cgpt-btn-border));
           color: var(--cgpt-btn-hover-text, var(--cgpt-btn-text));
@@ -2544,6 +2549,97 @@
           border-left-color: #f87171;
         }
 
+        .cgpt-upload-item.local-readable {
+          background: rgba(34, 197, 94, 0.10);
+          border-left: 3px solid rgba(34, 197, 94, 0.75);
+        }
+
+        .cgpt-upload-item.local-readable:hover {
+          background: rgba(34, 197, 94, 0.16);
+        }
+
+        .cgpt-upload-item.local-readable.active {
+          background: rgba(34, 197, 94, 0.20);
+          border-left-color: #22c55e;
+        }
+
+        .cgpt-upload-item.local-attached {
+          background: rgba(20, 184, 166, 0.12);
+          border-left: 3px solid rgba(20, 184, 166, 0.80);
+        }
+
+        .cgpt-upload-item.local-attached:hover {
+          background: rgba(20, 184, 166, 0.18);
+        }
+
+        .cgpt-upload-item.local-attached.active {
+          background: rgba(20, 184, 166, 0.22);
+          border-left-color: #14b8a6;
+        }
+
+        .cgpt-upload-item.local-unreadable {
+          background: rgba(239, 68, 68, 0.10);
+          border-left: 3px solid rgba(248, 113, 113, 0.75);
+        }
+
+        .cgpt-upload-item.local-unreadable:hover {
+          background: rgba(239, 68, 68, 0.16);
+        }
+
+        .cgpt-upload-item.local-unreadable.active {
+          background: rgba(239, 68, 68, 0.20);
+          border-left-color: #f87171;
+        }
+
+        .cgpt-upload-item.permission-required {
+          background: rgba(245, 158, 11, 0.12);
+          border-left: 3px solid rgba(245, 158, 11, 0.80);
+        }
+
+        .cgpt-upload-item.permission-required:hover {
+          background: rgba(245, 158, 11, 0.18);
+        }
+
+        .cgpt-upload-item.permission-required.active {
+          background: rgba(245, 158, 11, 0.22);
+          border-left-color: #f59e0b;
+        }
+
+        .cgpt-upload-item.uploading {
+          background: rgba(59, 130, 246, 0.12);
+          border-left: 3px solid rgba(96, 165, 250, 0.80);
+        }
+
+        .cgpt-upload-item.uploading:hover {
+          background: rgba(59, 130, 246, 0.18);
+        }
+
+        .cgpt-upload-item.uploading.active {
+          background: rgba(59, 130, 246, 0.22);
+          border-left-color: #60a5fa;
+        }
+
+        .cgpt-upload-source-label.status-local-readable,
+        .cgpt-upload-source-label.status-local-attached {
+          color: #bbf7d0;
+          font-weight: 700;
+        }
+
+        .cgpt-upload-source-label.status-local-unreadable {
+          color: #fecaca;
+          font-weight: 700;
+        }
+
+        .cgpt-upload-source-label.status-permission-required {
+          color: #fde68a;
+          font-weight: 700;
+        }
+
+        .cgpt-upload-source-label.status-uploading {
+          color: #bfdbfe;
+          font-weight: 700;
+        }
+
         .cgpt-upload-source-label.cached-source {
           color: #fecaca;
           font-weight: 700;
@@ -3064,23 +3160,123 @@
         }
 
         .xz-autoq-advanced-debug-content {
-          max-height: 300px;
+          max-height: 360px;
+          overflow: auto;
+          font-size: 12px;
+          line-height: 1.45;
+          color: #e5e7eb;
+          padding: 2px 0;
+        }
+
+        .xz-autoq-advanced-debug-meta {
+          color: #94a3b8;
+          font-size: 11px;
+          margin-bottom: 6px;
+        }
+
+        .xz-autoq-advanced-debug-toggle-btn,
+        #xz-autoq-advanced-debug-toggle-btn {
+          min-width: 96px;
+          white-space: nowrap;
+        }
+
+        .cgpt-autoq-user-summary {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          margin-bottom: 8px;
+        }
+
+        .cgpt-autoq-status-row {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        .cgpt-autoq-status-row .cgpt-autoq-status-label {
+          flex: 0 0 auto;
+          min-width: 72px;
+          color: #94a3b8;
+        }
+
+        .cgpt-autoq-status-row .cgpt-autoq-status-value {
+          flex: 1 1 auto;
+          color: #e5e7eb;
+          word-break: break-word;
+        }
+
+        .cgpt-autoq-user-hint-row {
+          color: #fde68a;
+        }
+
+        .cgpt-autoq-user-hint {
+          color: #fde68a;
+          font-weight: 600;
+          flex: 1 1 auto;
+          word-break: break-word;
+        }
+
+        .cgpt-autoq-failure-row .cgpt-autoq-status-value {
+          color: #fca5a5;
+        }
+
+        .cgpt-autoq-debug-detail-grid {
+          margin-top: 4px;
+        }
+
+        .xz-autoq-debug-section {
+          border: 1px solid rgba(148, 163, 184, 0.28);
+          border-radius: 8px;
+          padding: 8px 10px;
+          margin-top: 8px;
+          background: rgba(15, 23, 42, 0.55);
+        }
+
+        .xz-autoq-debug-section-title {
+          font-weight: 700;
+          color: #bfdbfe;
+          margin-bottom: 6px;
+        }
+
+        .xz-autoq-debug-section-body {
+          display: grid;
+          grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
+          row-gap: 4px;
+          column-gap: 8px;
+        }
+
+        .xz-autoq-debug-row {
+          display: contents;
+        }
+
+        .xz-autoq-debug-key {
+          color: #cbd5e1;
+          white-space: nowrap;
+        }
+
+        .xz-autoq-debug-value {
+          color: #e5e7eb;
+          word-break: break-all;
+        }
+
+        .xz-autoq-debug-raw {
+          margin-top: 8px;
+        }
+
+        .xz-autoq-debug-raw pre {
+          max-height: 180px;
           overflow: auto;
           white-space: pre-wrap;
-          word-break: break-word;
+          word-break: break-all;
+          font-size: 12px;
           font-family: Consolas, Monaco, monospace;
-          font-size: 11px;
-          line-height: 1.45;
           color: #dbeafe;
           background: rgba(0, 0, 0, 0.25);
           border-radius: 6px;
           padding: 8px;
-          margin: 0;
-        }
-
-        #xz-autoq-advanced-debug-toggle-btn {
-          min-width: 88px;
-          white-space: nowrap;
+          margin: 4px 0 0;
         }
 
         #xz-autoq-advanced-debug-toggle-btn.active,
@@ -6648,7 +6844,11 @@
         height: '',
       });
 
-      appendLog(`[TOOLBOX_RESTORE_HOTZONE][hide] reason=${reason || '-'}`);
+      appendLogThrottled(
+        `TOOLBOX_RESTORE_HOTZONE_HIDE:${reason || '-'}`,
+        `[TOOLBOX_RESTORE_HOTZONE][hide] reason=${reason || '-'}`,
+        5000,
+      );
     }
 
     function ensureRestoreHandleElement() {
@@ -6726,7 +6926,11 @@
       restoreHandle.classList.remove('active');
       restoreHandle.style.display = 'none';
 
-      appendLog(`[TOOLBOX_RESTORE_HANDLE][hide] reason=${reason || '-'}`);
+      appendLogThrottled(
+        `TOOLBOX_RESTORE_HANDLE_HIDE:${reason || '-'}`,
+        `[TOOLBOX_RESTORE_HANDLE][hide] reason=${reason || '-'}`,
+        5000,
+      );
     }
 
     function bindRestoreHandleEvents() {

@@ -210,7 +210,80 @@
     // deprecated: only used for compatibility, do not use as render source
     let uploadSendShortcutRunning = false;
     let lastUploadSendPanelFailReason = '';
+    let lastSharedSendOutcome = null;
     let uploadSendTaskStartedAt = 0;
+
+    function noteSharedSendOutcome(patch = {}) {
+      const base = lastSharedSendOutcome && typeof lastSharedSendOutcome === 'object'
+        ? lastSharedSendOutcome
+        : {
+          ok: false,
+          sent: false,
+          verified: false,
+          cancelled: false,
+          cancelledAfterSend: false,
+          reason: '',
+          verifyReason: '',
+          turnCountBefore: null,
+          turnCountAfter: null,
+          composerCleared: false,
+          stopButtonVisible: false,
+          responseState: '',
+        };
+      lastSharedSendOutcome = Object.assign({}, base, patch);
+      return lastSharedSendOutcome;
+    }
+
+    function isRealSendConfirmed(result) {
+      if (!result) return false;
+      const verifyReason = String(result.verifyReason || '').trim();
+      const reason = String(result.reason || '').trim();
+      return Boolean(
+        result.sent === true
+        || result.verified === true
+        || (result.ok === true && (
+          reason === 'send-message-button-core'
+          || reason === 'sent-before-cancelled'
+          || reason === 'sent_by_click'
+        ))
+        || reason === 'sent_by_click'
+        || reason === 'sent-before-cancelled'
+        || verifyReason === 'turn_count_increased'
+        || verifyReason.includes('turn_count_increased')
+        || result.composerCleared === true
+        || result.stopButtonVisible === true
+        || result.responseState === 'generating'
+        || reason.includes('turn-count-increased')
+        || reason.includes('composer-cleared-after-send')
+        || reason.includes('user-message-appeared-after-send')
+        || reason.includes('payload-left-composer-after-send')
+        || reason.includes('conversation-changed-after-send')
+      );
+    }
+
+    function isSendResultAcceptable(sendResult) {
+      if (!sendResult) return false;
+      if (sendResult.ok === true) return true;
+      if (isRealSendConfirmed(sendResult)) return true;
+      if (sendResult.sent === true) return true;
+      if (sendResult.verified === true) return true;
+      if (sendResult.reason === 'sent-before-cancelled') return true;
+      if (sendResult.reason === 'sent_by_click') return true;
+      if (String(sendResult.verifyReason || '').includes('turn_count_increased')) return true;
+      return false;
+    }
+
+    function canOverrideSendSuccess(oldPhase, newPhase, result) {
+      const old = String(oldPhase || '').trim().toLowerCase();
+      const next = String(newPhase || '').trim().toLowerCase();
+      if (next !== 'failed' && next !== 'cancelled') {
+        return true;
+      }
+      if (old !== 'waiting_reply' && old !== 'sent' && old !== 'sending') {
+        return true;
+      }
+      return !isSendResultAcceptable(result) && !isRealSendConfirmed(result);
+    }
     let lastWaitRealSendButtonLogAt = 0;
     let lastHealStaleDelegateAutoqAt = 0;
     const WAIT_REAL_SEND_BUTTON_POLL_MS = 400;
@@ -2268,16 +2341,27 @@
           `[SEND_MESSAGE_SHARED][DUPLICATE_RAW_IGNORED] source=${source || '-'} raw=${duplicateSnapshotBeforeSend.rawCount} normalized=${duplicateSnapshotBeforeSend.normalizedCount} ready=${duplicateSnapshotBeforeSend.readyCount} action=continue-send`,
         );
       } else if (duplicateSnapshotBeforeSend.normalizedCount > 1) {
-        const cleanResult = await removeDuplicateComposerAttachmentsBeforeSend(`send-before:${source || 'unknown'}`);
-        if (!cleanResult || cleanResult.ok !== true) {
-          ToolboxShell.appendLog(
-            `[SEND_MESSAGE_SHARED][BLOCKED_DUPLICATE_ATTACHMENTS] source=${source || '-'} raw=${cleanResult && cleanResult.rawCount != null ? cleanResult.rawCount : duplicateSnapshotBeforeSend.rawCount} normalized=${cleanResult && cleanResult.normalizedCount != null ? cleanResult.normalizedCount : duplicateSnapshotBeforeSend.normalizedCount} reason=${cleanResult && cleanResult.reason ? cleanResult.reason : 'clean-failed'}`,
-          );
-          return {
-            ok: false,
-            reason: 'duplicate-composer-attachments',
-          };
-        }
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][MULTI_ATTACHMENTS_KEEP] source=${source || '-'} raw=${duplicateSnapshotBeforeSend.rawCount} normalized=${duplicateSnapshotBeforeSend.normalizedCount} ready=${duplicateSnapshotBeforeSend.readyCount} visibleRemoveButtons=${duplicateSnapshotBeforeSend.visibleRemoveButtonCount || 0} action=continue-send reason=multi-file-is-valid`,
+        );
+      }
+
+      const activeGroupIdForSendCheck = typeof getActiveUploadScopeGroupId === 'function'
+        ? getActiveUploadScopeGroupId({})
+        : '';
+      const activeFilesForSendCheck = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles()
+        : [];
+      const activeFileCountForSendCheck = Array.isArray(activeFilesForSendCheck)
+        ? activeFilesForSendCheck.length
+        : 0;
+      if (
+        activeFileCountForSendCheck > 0
+        && duplicateSnapshotBeforeSend.normalizedCount > activeFileCountForSendCheck
+      ) {
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][WARN_COMPOSER_MORE_THAN_QUEUE] source=${source || '-'} groupId=${activeGroupIdForSendCheck || '-'} composer=${duplicateSnapshotBeforeSend.normalizedCount} queue=${activeFileCountForSendCheck} action=warn-only reason=possible-stale-composer-attachment`,
+        );
       }
 
       if (shouldStop()) {
@@ -2365,6 +2449,17 @@
         typeof options.runId !== 'undefined' ? options.runId : Date.now(),
       );
 
+      let sharedSendOutcome = noteSharedSendOutcome({
+        ok: false,
+        sent: false,
+        verified: false,
+        cancelled: false,
+        cancelledAfterSend: false,
+        reason: '',
+        verifyReason: '',
+        source,
+      });
+
       try {
         if (shouldStop()) {
           cancelCurrentUploadSend(`shared-send-cancelled:${source}`);
@@ -2403,11 +2498,54 @@
           payloadVerify: options.payloadVerify || null,
         });
 
+        if (ok === true) {
+          const sendPhaseAfterOk = typeof getSendTaskPhase === 'function'
+            ? String(getSendTaskPhase() || '')
+            : '';
+          let responseStateAfterOk = '';
+          if (typeof detectComposerResponseState === 'function') {
+            const responseSnap = detectComposerResponseState();
+            responseStateAfterOk = responseSnap && responseSnap.state
+              ? String(responseSnap.state)
+              : '';
+          }
+          sharedSendOutcome = noteSharedSendOutcome({
+            ok: true,
+            sent: true,
+            verified: true,
+            reason: 'send-message-button-core',
+            verifyReason: String(lastUploadSendPanelFailReason || '').includes('turn_count')
+              ? lastUploadSendPanelFailReason
+              : (sendPhaseAfterOk === 'waiting_reply' ? 'turn_count_increased' : ''),
+            responseState: responseStateAfterOk,
+            sendPhase: sendPhaseAfterOk,
+          });
+        }
+
         if (shouldStop()) {
           const sendPhase = typeof getSendTaskPhase === 'function' ? String(getSendTaskPhase() || '') : '';
           const uploadPhase = typeof getUploadTaskState === 'function'
             ? String((getUploadTaskState() || {}).phase || '')
             : String(state && state.uploadPhase ? state.uploadPhase : '');
+          const alreadySent = ok === true || isRealSendConfirmed(sharedSendOutcome) || isRealSendConfirmed(lastSharedSendOutcome);
+          if (alreadySent) {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE_SHARED][CANCEL_AFTER_SEND_IGNORED] source=${source || '-'} reason=already-sent `
+              + `verifyReason=${sharedSendOutcome.verifyReason || lastSharedSendOutcome && lastSharedSendOutcome.verifyReason ? lastSharedSendOutcome.verifyReason : '-'} `
+              + `sent=${sharedSendOutcome.sent ? 1 : 0} verified=${sharedSendOutcome.verified ? 1 : 0} `
+              + `composerCleared=${sharedSendOutcome.composerCleared ? 1 : 0} `
+              + `stopButtonVisible=${sharedSendOutcome.stopButtonVisible ? 1 : 0} `
+              + `responseState=${sharedSendOutcome.responseState || '-'} sendPhase=${sendPhase || '-'}`,
+            );
+            return {
+              ok: true,
+              sent: true,
+              verified: true,
+              cancelledAfterSend: true,
+              reason: 'sent-before-cancelled',
+              verifyReason: sharedSendOutcome.verifyReason || 'already-sent',
+            };
+          }
           ToolboxShell.appendLog(
             `[SEND_MESSAGE_SHARED][CANCEL_AFTER_SEND_DETAIL] source=${source} runId=${runId} `
             + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0} `
@@ -2415,10 +2553,13 @@
             + `currentFlowReason=${currentUploadSendFlowRun && currentUploadSendFlowRun.cancelReason ? String(currentUploadSendFlowRun.cancelReason) : '-'} `
             + `sendPhase=${sendPhase || '-'} uploadPhase=${uploadPhase || '-'}`,
           );
-          ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-after-send`);
+          ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=cancelled-before-send`);
           return {
             ok: false,
-            reason: 'cancelled',
+            sent: false,
+            verified: false,
+            cancelled: true,
+            reason: 'cancelled-before-send',
           };
         }
 
@@ -2470,14 +2611,18 @@
           };
         }
 
-        return {
+        return Object.assign({}, sharedSendOutcome, {
           ok: true,
+          sent: true,
+          verified: true,
           reason: 'send-message-button-core',
-        };
+        });
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] shared send message core failed', err);
-        ToolboxShell.appendLog(`[SEND_MESSAGE_SHARED][FAILED] source=${source} error=${errText}`);
+        console.error('[SEND_MESSAGE_SHARED][ERROR]', err);
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_SHARED][ERROR] source=${source} error=${err && err.stack ? err.stack : errText}`,
+        );
         setStatus(`发送消息失败：${errText}`, 'error');
         return {
           ok: false,
@@ -6893,6 +7038,160 @@
       return false;
     }
 
+    function hasReadableFreshLocalSource(q) {
+      if (!q) {
+        return false;
+      }
+      if (hasLocalReadableHandle(q)) {
+        return true;
+      }
+      if (isFlaskLocalDirectSource(q) && hasAttemptableUploadSource(q)) {
+        return true;
+      }
+      return false;
+    }
+
+    function clearStaleUnreadableFlagsForReadableItem(q, reason = '') {
+      if (!q || !hasReadableFreshLocalSource(q)) {
+        return false;
+      }
+      let changed = false;
+      const oldRestoreState = q.restoreState;
+      const oldRegistryStatus = q.registryStatus;
+      const oldStatus = q.status;
+      const oldSourceKind = q.sourceKind;
+      const oldState = q.state;
+      const oldMessage = q.message;
+
+      if (
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.restoreState === UploadRestoreState.MISSING
+        || q.restoreState === UploadRestoreState.PERMISSION_REQUIRED
+      ) {
+        q.restoreState = UploadRestoreState.READY;
+        changed = true;
+      }
+      if (String(q.registryStatus || '').trim().toLowerCase() === 'needs_rebind') {
+        q.registryStatus = 'ready';
+        changed = true;
+      }
+      if (String(q.status || '').trim().toLowerCase() === 'needs_rebind') {
+        q.status = 'ready';
+        changed = true;
+      }
+      if (
+        q.sourceKind === 'missing-file'
+        || q.sourceKind === 'missing-local'
+        || q.sourceKind === 'cached-snapshot'
+        || q.sourceKind === 'cached-only'
+        || q.sourceKind === 'indexeddb-blob'
+        || q.sourceKind === 'session-file'
+        || q.sourceKind === 'session-blob'
+      ) {
+        q.sourceKind = hasLocalReadableHandle(q) ? 'local-handle' : q.sourceKind;
+        changed = true;
+      }
+      if (q.state === UploadState.MISSING_FILE) {
+        q.state = UploadState.IDLE;
+        changed = true;
+      }
+      if (
+        String(q.message || '').includes('重新绑定')
+        || String(q.message || '').includes('重新选择')
+        || String(q.message || '').includes('文件源已失效')
+        || String(q.message || '').includes('本地不可读')
+        || String(q.message || '').includes('缺少文件')
+        || String(q.message || '').includes('缓存快照')
+      ) {
+        q.message = '';
+        changed = true;
+      }
+      if (String(q.error || '').trim()) {
+        q.error = '';
+        changed = true;
+      }
+      if (String(q.lastError || '').trim()) {
+        q.lastError = '';
+        changed = true;
+      }
+      if (changed) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_UI][READABLE_STATE_FIX] reason=${reason || '-'} `
+          + `name=${q.name || '-'} `
+          + `restoreState=${oldRestoreState || '-'}=>${q.restoreState || '-'} `
+          + `registryStatus=${oldRegistryStatus || '-'}=>${q.registryStatus || '-'} `
+          + `status=${oldStatus || '-'}=>${q.status || '-'} `
+          + `sourceKind=${oldSourceKind || '-'}=>${q.sourceKind || '-'} `
+          + `state=${oldState || '-'}=>${q.state || '-'} `
+          + `message=${oldMessage ? 1 : 0}=>${q.message ? 1 : 0}`,
+        );
+      }
+      return changed;
+    }
+
+    function getUploadItemVisualState(q) {
+      if (!q) {
+        return 'unknown';
+      }
+      const normalizedStatus = String(q.status || '').trim().toLowerCase();
+      if (q.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
+        return 'permission-required';
+      }
+      if (
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.restoreState === UploadRestoreState.MISSING
+        || q.registryStatus === 'needs_rebind'
+        || normalizedStatus === 'needs_rebind'
+        || q.state === UploadState.MISSING_FILE
+        || q.sourceKind === 'missing-file'
+        || q.sourceKind === 'missing-local'
+        || isUploadSourceCacheForbidden(q)
+      ) {
+        return 'unreadable';
+      }
+      if (
+        q.state === UploadState.READING
+        || q.state === UploadState.ATTACHING
+        || (
+          state.running
+          && q.id === state.activeId
+        )
+      ) {
+        return 'uploading';
+      }
+      if (
+        q.state === UploadState.ATTACHED
+        || normalizedStatus === 'uploaded'
+        || normalizedStatus === 'pending_confirm'
+      ) {
+        return 'attached';
+      }
+      if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
+        return 'readable';
+      }
+      return 'unreadable';
+    }
+
+    function getUploadItemVisualClass(q) {
+      const visualState = getUploadItemVisualState(q);
+      if (visualState === 'readable') {
+        return 'local-readable';
+      }
+      if (visualState === 'attached') {
+        return 'local-attached';
+      }
+      if (visualState === 'uploading') {
+        return 'uploading';
+      }
+      if (visualState === 'permission-required') {
+        return 'permission-required';
+      }
+      if (visualState === 'unreadable') {
+        return 'local-unreadable';
+      }
+      return '';
+    }
+
     function isHandleReadFailureMessage(message) {
       const text = String(message || '');
 
@@ -7139,19 +7438,25 @@
 
     function shouldShowRebindButton(q) {
       if (!q) return false;
+      clearStaleUnreadableFlagsForReadableItem(q, 'shouldShowRebindButton');
+      if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
+        return false;
+      }
       if (q.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
         return false;
       }
-
       if (isUploadSourceCacheForbidden(q)) {
         return true;
       }
-
       return (
-        q.state === UploadState.MISSING_FILE ||
-        q.sourceKind === 'missing-file' ||
-        q.sourceKind === 'missing-local' ||
-        !hasAttemptableUploadSource(q)
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.restoreState === UploadRestoreState.MISSING
+        || q.registryStatus === 'needs_rebind'
+        || String(q.status || '').trim().toLowerCase() === 'needs_rebind'
+        || q.state === UploadState.MISSING_FILE
+        || q.sourceKind === 'missing-file'
+        || q.sourceKind === 'missing-local'
+        || !hasAttemptableUploadSource(q)
       );
     }
 
@@ -7263,10 +7568,11 @@
       if (!q) {
         return false;
       }
-
+      if (hasLocalReadableHandle(q) || isFlaskLocalDirectSource(q)) {
+        return false;
+      }
       const kind = String(q.sourceKind || '').trim();
       const readMode = String(q.readMode || '').trim();
-
       if (
         kind === 'cached-snapshot'
         || kind === 'cached-only'
@@ -7279,11 +7585,6 @@
       ) {
         return true;
       }
-
-      if (hasLocalReadableHandle(q) || isFlaskLocalDirectSource(q)) {
-        return false;
-      }
-
       return !!(
         isFileLike(q.file)
         || isFileLike(q.sourceFile)
@@ -7440,6 +7741,10 @@
         return true;
       }
 
+      if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
+        return false;
+      }
+
       if (isUploadSourceCacheForbidden(q)) {
         return true;
       }
@@ -7574,46 +7879,51 @@
     }
 
     function getUploadInlineStatusText(q) {
-      const normalizedStatus = String(q && q.status ? q.status : '').trim().toLowerCase();
-
-      if (
-        q
-        && (
-          q.restoreState === UploadRestoreState.NEEDS_REBIND
-          || q.registryStatus === 'needs_rebind'
-          || normalizedStatus === 'needs_rebind'
-        )
-      ) {
-        return '本地不可读 · 需要重新选择';
+      if (!q) {
+        return '未知';
       }
-
-      if (q && q.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
+      clearStaleUnreadableFlagsForReadableItem(q, 'inline-status');
+      const normalizedStatus = String(q && q.status ? q.status : '').trim().toLowerCase();
+      if (
+        q.restoreState === UploadRestoreState.PERMISSION_REQUIRED
+      ) {
         return '本地不可读 · 需要重新授权';
       }
-
       if (
-        q
-        && (
-          q.restoreState === UploadRestoreState.MISSING
-          || q.state === UploadState.MISSING_FILE
-          || q.sourceKind === 'missing-file'
-          || q.sourceKind === 'missing-local'
-        )
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.registryStatus === 'needs_rebind'
+        || normalizedStatus === 'needs_rebind'
+      ) {
+        return '本地不可读 · 需要重新绑定';
+      }
+      if (
+        q.restoreState === UploadRestoreState.MISSING
+        || q.state === UploadState.MISSING_FILE
+        || q.sourceKind === 'missing-file'
+        || q.sourceKind === 'missing-local'
       ) {
         return '本地不可读 · 文件源失效';
       }
-
-      const localReadable = !isUploadItemLocallyUnreadable(q);
-      const localText = localReadable ? '本地可读' : '本地不可读';
-
-      let chatgptBound = false;
-      if (normalizedStatus === 'uploaded' || normalizedStatus === 'pending_confirm') {
-        chatgptBound = true;
-      } else if (q && q.state === UploadState.ATTACHED) {
-        chatgptBound = true;
+      if (isUploadSourceCacheForbidden(q)) {
+        return '本地不可读 · 缓存快照需重新绑定';
       }
-      const bindText = chatgptBound ? '已绑定' : '未绑定';
-      return `${localText} · ${bindText}`;
+      if (
+        q.state === UploadState.READING
+        || q.state === UploadState.ATTACHING
+      ) {
+        return '本地可读 · 上传中';
+      }
+      if (
+        q.state === UploadState.ATTACHED
+        || normalizedStatus === 'uploaded'
+        || normalizedStatus === 'pending_confirm'
+      ) {
+        return '本地可读 · 已绑定';
+      }
+      if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
+        return '本地可读 · 已绑定';
+      }
+      return '本地不可读 · 需要重新绑定';
     }
 
     function buildUploadItemTitle(q) {
@@ -15401,9 +15711,13 @@
       let result = await sendContinueMessageOnceOnly(sourceText, options);
       let reason = result && result.reason ? result.reason : '';
 
-      if (result && result.ok) {
-        safeAppendLog(`[UPLOAD_CONTINUE][SEND_OK] source=${sourceText} reason=${reason || '-'}`);
-        return result;
+      if (isSendResultAcceptable(result)) {
+        safeAppendLog(
+          `[UPLOAD_CONTINUE][SEND_OK] source=${sourceText || '-'} reason=${reason || '-'} `
+          + `sent=${result && result.sent ? 1 : 0} verified=${result && result.verified ? 1 : 0} `
+          + `cancelledAfterSend=${result && result.cancelledAfterSend ? 1 : 0}`,
+        );
+        return Object.assign({}, result, { ok: true });
       }
 
       if (
@@ -15481,7 +15795,11 @@
         };
       }
 
-      safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${reason || 'unknown'}`);
+      safeAppendLog(
+        `[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText || '-'} reason=${reason || 'unknown'} `
+        + `sent=${result && result.sent ? 1 : 0} verified=${result && result.verified ? 1 : 0} `
+        + `verifyReason=${result && result.verifyReason ? result.verifyReason : '-'}`,
+      );
       console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', {
         source: sourceText,
         reason,
@@ -15560,13 +15878,24 @@
         });
 
         if (shouldStop()) {
+          if (isSendResultAcceptable(result)) {
+            return {
+              ok: true,
+              sent: true,
+              verified: true,
+              cancelledAfterSend: true,
+              reason: 'sent-before-cancelled',
+              verifyReason: result && result.verifyReason ? result.verifyReason : 'already-sent',
+            };
+          }
           return {
             ok: false,
             reason: 'cancelled',
+            cancelled: true,
           };
         }
 
-        if (!result || !result.ok) {
+        if (!isSendResultAcceptable(result)) {
           const reason = result && result.reason ? result.reason : 'send-message-button-core-failed';
 
           setStatus(`发送继续失败，准备尝试直写输入框兜底：${reason}`, 'warn');
@@ -16305,11 +16634,24 @@
         + `attachmentReady=${attachmentReady ? 1 : 0} textLen=${promptText.length}`,
       );
 
+      const acceptable = isSendResultAcceptable(sendCoreResult) || ok;
+      if (acceptable && !ok) {
+        ok = true;
+        if (sendCoreResult && sendCoreResult.reason) {
+          reason = sendCoreResult.reason;
+        } else {
+          reason = 'sent-before-cancelled';
+        }
+      }
+
       return {
         ok,
         reason,
         detail,
-        sent: ok,
+        sent: ok || !!(sendCoreResult && sendCoreResult.sent),
+        verified: ok || !!(sendCoreResult && sendCoreResult.verified),
+        cancelledAfterSend: !!(sendCoreResult && sendCoreResult.cancelledAfterSend),
+        verifyReason: sendCoreResult && sendCoreResult.verifyReason ? sendCoreResult.verifyReason : '',
         attachmentReady,
         textLen: promptText.length,
         source: sourceText,
@@ -17901,7 +18243,7 @@
       safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
       const continueResult = await sendContinuePromptFromUnifiedPipeline(continueSource, flowOptions);
 
-      if (!continueResult || !continueResult.ok) {
+      if (!isSendResultAcceptable(continueResult)) {
         const detail = continueResult && continueResult.reason ? continueResult.reason : '';
         if (
           detail === 'assistant-done-signal-before-send'
@@ -20692,16 +21034,6 @@
           ToolboxShell.appendLog(`[UPLOAD_REBIND][SIZE_MISMATCH] id=${id || '-'} old=${q.size || 0} next=${file.size || 0}`);
         }
 
-        q.name = file.name || q.name || 'unknown';
-        q.size = file.size || 0;
-        q.type = file.type || q.type || 'application/octet-stream';
-        q.lastModified = file.lastModified || Date.now();
-        q.file = file;
-        q.sourceFile = file;
-        q.originalFile = file;
-        q.blob = file;
-        q.sourceBlob = file;
-
         if (!hasHandle) {
           q.fileHandle = null;
           q.file = null;
@@ -20734,15 +21066,70 @@
         }
 
         q.fileHandle = handle;
+
+        let freshFile = null;
+        try {
+          freshFile = await handle.getFile();
+        } catch (readErr) {
+          const errText = readErr && readErr.message ? readErr.message : String(readErr);
+          console.error('[UPLOAD_REBIND][READ_AFTER_BIND_FAILED]', readErr);
+          ToolboxShell.appendLog(`[UPLOAD_REBIND][READ_AFTER_BIND_FAILED] id=${id || '-'} error=${errText}`);
+          q.state = UploadState.MISSING_FILE;
+          q.status = 'needs_rebind';
+          q.registryStatus = 'needs_rebind';
+          q.message = `重新绑定后读取失败：${errText}`;
+          safeAssignRestoreState(q, UploadRestoreState.NEEDS_REBIND, 'rebind:read-after-bind-failed');
+          await awaitPersistQueueBriefly('rebindUploadFile:read-after-bind-failed', 300);
+          await refreshUploadGroupCounts();
+          render();
+          setStatus(`重新绑定后读取失败：${errText}`);
+          return;
+        }
+        if (!freshFile || Number(freshFile.size || 0) <= 0) {
+          q.state = UploadState.MISSING_FILE;
+          q.status = 'needs_rebind';
+          q.registryStatus = 'needs_rebind';
+          q.message = '重新绑定后文件为空或不可读';
+          safeAssignRestoreState(q, UploadRestoreState.NEEDS_REBIND, 'rebind:empty-after-bind');
+          await awaitPersistQueueBriefly('rebindUploadFile:empty-after-bind', 300);
+          await refreshUploadGroupCounts();
+          render();
+          setStatus('重新绑定失败：文件为空或不可读');
+          ToolboxShell.appendLog(`[UPLOAD_REBIND][EMPTY_AFTER_BIND] id=${id || '-'} name=${q.name || '-'}`);
+          return;
+        }
+
+        q.name = freshFile.name || q.name || 'unknown';
+        q.size = freshFile.size || 0;
+        q.type = freshFile.type || q.type || 'application/octet-stream';
+        q.lastModified = freshFile.lastModified || Date.now();
+        q.file = freshFile;
+        q.sourceFile = freshFile;
+        q.originalFile = freshFile;
+        q.blob = freshFile;
+        q.sourceBlob = freshFile;
+
         q.sourceKind = 'local-handle';
         q.readMode = 'handle';
         q.message = '';
+        q.error = '';
+        q.lastError = '';
         q.state = UploadState.IDLE;
+        q.status = 'ready';
+        q.registryStatus = 'ready';
         q.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
         safeAssignRestoreState(q, UploadRestoreState.READY, 'rebind:file-ready');
         q.handleKey = buildUploadHandleKey(q);
         q.uploadName = '';
         q.persistedAttached = false;
+        q.attachedInSession = false;
+        clearStaleUnreadableFlagsForReadableItem(q, 'rebindUploadFile:success');
+        ToolboxShell.appendLog(
+          `[UPLOAD_REBIND][STATE_READY] id=${id || '-'} name=${q.name || '-'} `
+          + `sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'} `
+          + `state=${q.state || '-'} status=${q.status || '-'} `
+          + `restoreState=${q.restoreState || '-'} handle=${hasLocalReadableHandle(q) ? 1 : 0}`,
+        );
 
         await awaitPersistQueueBriefly('rebindUploadFile:ok', 300);
         await refreshUploadGroupCounts();
@@ -22133,6 +22520,18 @@
         nextPhase = 'waiting_send';
       }
 
+      if (
+        !canOverrideSendSuccess(oldPhase, nextPhase, lastSharedSendOutcome)
+        && (nextPhase === 'failed' || nextPhase === 'cancelled')
+      ) {
+        const blockedResult = lastSharedSendOutcome || {};
+        ToolboxShell.appendLog(
+          `[SEND_STATE][OVERRIDE_BLOCKED] oldPhase=${oldPhase || '-'} newPhase=${nextPhase || '-'} `
+          + `reason=already-sent verifyReason=${blockedResult.verifyReason || blockedResult.reason || '-'}`,
+        );
+        return task;
+      }
+
       Object.assign(task, next);
       task.phase = nextPhase;
       task._authoritative = true;
@@ -22860,9 +23259,7 @@
         || sourceText.includes('next-task')
         || isVerifyUploadSource;
       if (isVerifyUploadSource) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][ALLOW_VERIFY_UPLOAD_AFTER_INITIAL] source=${sourceText || '-'} reason=terminal-final-verification`,
-        );
+        ToolboxShell.appendLog('[UPLOAD][ALLOW_VERIFY_UPLOAD_AFTER_INITIAL]');
         return {
           blocked: false,
           reason: 'verify-upload-after-terminal',
@@ -23257,9 +23654,27 @@
       if (!q || !q.id) {
         return '';
       }
+      clearStaleUnreadableFlagsForReadableItem(q, 'buildUploadQueueItemHtml');
       const activeClass = selectedFileId === q.id ? 'active' : '';
+      const visualClass = getUploadItemVisualClass(q);
       const cachedClass = isUploadSourceCacheForbidden(q) ? 'cached-snapshot' : '';
       const sourceText = getUploadInlineStatusText(q);
+      if (isUploadDebugEnabled()) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_UI][ITEM_STATE] name=${q.name || '-'} `
+          + `text=${sourceText || '-'} `
+          + `visual=${visualClass || '-'} `
+          + `state=${q.state || '-'} `
+          + `status=${q.status || '-'} `
+          + `registryStatus=${q.registryStatus || '-'} `
+          + `restoreState=${q.restoreState || '-'} `
+          + `sourceKind=${q.sourceKind || '-'} `
+          + `readMode=${q.readMode || '-'} `
+          + `handle=${hasLocalReadableHandle(q) ? 1 : 0} `
+          + `attemptable=${hasAttemptableUploadSource(q) ? 1 : 0} `
+          + `cacheForbidden=${isUploadSourceCacheForbidden(q) ? 1 : 0}`,
+        );
+      }
       const itemTitle = escapeHtml(buildUploadItemTitle(q));
       const normalizedState = String(q.state || '').trim().toLowerCase();
       const removeDisabled = normalizedState === 'uploading' || normalizedState === 'cancelling';
@@ -23301,7 +23716,7 @@
         : '';
 
       return `
-            <div class="cgpt-upload-item ${activeClass} ${cachedClass}"
+            <div class="cgpt-upload-item ${activeClass} ${visualClass} ${cachedClass}"
               data-id="${q.id}"
               data-group-id="${escapeHtml(activeGroupId)}"
               data-file-id="${escapeHtml(q.id)}"
@@ -23314,7 +23729,7 @@
                 <div class="cgpt-upload-meta">
                   ${escapeHtml(formatBytes(q.size))}
                   <span class="cgpt-upload-dot">·</span>
-                  <span class="cgpt-upload-source-label ${isUploadSourceCacheForbidden(q) ? 'cached-source' : ''}">
+                  <span class="cgpt-upload-source-label ${visualClass ? `status-${visualClass}` : ''} ${isUploadSourceCacheForbidden(q) ? 'cached-source' : ''}">
                     ${escapeHtml(sourceText)}
                   </span>
                   ${rebindButtonHtml}
@@ -27997,6 +28412,14 @@
     }
 
     function enterUploadWaitingReplyAfterSend(runId, source) {
+      noteSharedSendOutcome({
+        ok: true,
+        sent: true,
+        verified: true,
+        reason: 'waiting_reply-entered',
+        verifyReason: 'turn_count_increased',
+        responseState: 'generating',
+      });
       state.waitingRealSendButton = false;
       uploadSendShortcutRunning = false;
       uploadSendTaskStartedAt = 0;
@@ -29090,9 +29513,28 @@
             + `latestRole=${latestRole || '-'} turnCountNow=${turnCountNow == null ? '-' : turnCountNow} `
             + `conversationIdNow=${conversationIdNow || '-'}`,
           );
+          noteSharedSendOutcome({
+            ok: true,
+            sent: true,
+            verified: true,
+            reason: confirmReason,
+            verifyReason: confirmReason.includes('turn-count')
+              ? 'turn_count_increased'
+              : confirmReason,
+            composerCleared: composerCleared === true,
+            turnCountBefore: beforeTurnCount,
+            turnCountAfter: turnCountNow,
+            composerTextLen: currentText.length,
+            attachCount,
+          });
           return {
             ok: true,
             reason: confirmReason,
+            sent: true,
+            verified: true,
+            verifyReason: confirmReason.includes('turn-count')
+              ? 'turn_count_increased'
+              : confirmReason,
             composerTextLen: currentText.length,
             attachCount,
           };
@@ -32234,7 +32676,8 @@
         visibleRemoveButtonCount,
         hasAny: normalizedCount > 0 || readyCount > 0 || uploadingCount > 0,
         hasReady: normalizedCount > 0 || readyCount > 0,
-        duplicated: normalizedCount > 1,
+        multiAttachment: normalizedCount > 1,
+        duplicated: rawCount > 1 && normalizedCount === 1,
         method: evidence.method || 'fallback',
       };
       if (snapshot.rawCount > 1 && snapshot.normalizedCount === 1) {
@@ -32243,7 +32686,7 @@
         );
       }
       appendUploadAttachmentCanonicalLog(
-        `[UPLOAD][ATTACHMENT_CANONICAL_SNAPSHOT] source=${snapshot.source} raw=${snapshot.rawCount} normalized=${snapshot.normalizedCount} ready=${snapshot.readyCount} uploading=${snapshot.uploadingCount} duplicated=${snapshot.duplicated ? 1 : 0} method=${snapshot.method}`,
+        `[UPLOAD][ATTACHMENT_CANONICAL_SNAPSHOT] source=${snapshot.source} raw=${snapshot.rawCount} normalized=${snapshot.normalizedCount} ready=${snapshot.readyCount} uploading=${snapshot.uploadingCount} duplicated=${snapshot.duplicated ? 1 : 0} multiAttachment=${snapshot.multiAttachment ? 1 : 0} method=${snapshot.method}`,
       );
       return snapshot;
     }
@@ -32256,8 +32699,215 @@
       return getComposerUploadPayloadSnapshot(source).duplicated;
     }
 
+    function getComposerAttachmentNamesForUploadReconcile(source = 'unknown') {
+      const names = [];
+      const sourceText = String(source || 'unknown');
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+      ) {
+        try {
+          const snapshot = ComposerApi.getComposerAttachmentSnapshot(`reconcile-names:${sourceText}`) || {};
+          const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+          for (const item of items) {
+            const name = String(item && item.name ? item.name : '').trim();
+            if (name) {
+              names.push(name);
+            }
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[UPLOAD_RECONCILE][READ_COMPOSER_NAMES_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][READ_COMPOSER_NAMES_FAILED] source=${sourceText} error=${errText}`,
+          );
+        }
+      }
+      if (!names.length) {
+        const cards = Array.from(document.querySelectorAll('[data-testid*="attachment"], [class*="attachment"]'));
+        for (const card of cards) {
+          const text = String(card && card.textContent ? card.textContent : '').trim();
+          if (!text) {
+            continue;
+          }
+          const matched = text.match(/[^\s]+\.(zip|txt|py|js|json|md|csv|xlsx|docx|pdf|png|jpg|jpeg|webp)/i);
+          if (matched && matched[0]) {
+            names.push(matched[0].trim());
+          }
+        }
+      }
+      return Array.from(new Set(names.map((name) => String(name || '').trim()).filter(Boolean)));
+    }
+
+    async function removeAllVisibleComposerAttachmentsForFreshUpload(source = 'unknown') {
+      const sourceText = String(source || 'unknown');
+      const beforeSnapshot = getComposerUploadPayloadSnapshot(`fresh-upload-clean-before:${sourceText}`);
+      const beforeNames = getComposerAttachmentNamesForUploadReconcile(`fresh-upload-clean-before:${sourceText}`);
+      const removeButtons = Array.from(document.querySelectorAll(
+        [
+          '[aria-label*="移除文件"]',
+          '[aria-label*="Remove file"]',
+          'button[aria-label*="移除文件"]',
+          'button[aria-label*="Remove file"]',
+        ].join(','),
+      )).filter((btn) => {
+        if (!btn || typeof btn.getBoundingClientRect !== 'function') {
+          return false;
+        }
+        const rect = btn.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      ToolboxShell.appendLog(
+        `[UPLOAD_RECONCILE][CLEAR_COMPOSER_ATTACHMENTS_START] source=${sourceText} raw=${beforeSnapshot.rawCount} normalized=${beforeSnapshot.normalizedCount} ready=${beforeSnapshot.readyCount} removeButtons=${removeButtons.length} names=${beforeNames.join('|') || '-'}`,
+      );
+      if (!removeButtons.length) {
+        return {
+          ok: beforeSnapshot.normalizedCount <= 0,
+          removed: 0,
+          beforeCount: beforeSnapshot.normalizedCount,
+          afterCount: beforeSnapshot.normalizedCount,
+          reason: 'no-remove-buttons',
+        };
+      }
+      let removed = 0;
+      for (let i = removeButtons.length - 1; i >= 0; i -= 1) {
+        const btn = removeButtons[i];
+        try {
+          btn.click();
+          removed += 1;
+          await sleep(180);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[UPLOAD_RECONCILE][CLEAR_COMPOSER_ATTACHMENTS_CLICK_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][CLEAR_COMPOSER_ATTACHMENTS_CLICK_FAILED] source=${sourceText} index=${i} error=${errText}`,
+          );
+        }
+      }
+      await sleep(500);
+      const afterSnapshot = getComposerUploadPayloadSnapshot(`fresh-upload-clean-after:${sourceText}`);
+      const afterNames = getComposerAttachmentNamesForUploadReconcile(`fresh-upload-clean-after:${sourceText}`);
+      ToolboxShell.appendLog(
+        `[UPLOAD_RECONCILE][CLEAR_COMPOSER_ATTACHMENTS_DONE] source=${sourceText} before=${beforeSnapshot.normalizedCount} after=${afterSnapshot.normalizedCount} removed=${removed} afterNames=${afterNames.join('|') || '-'}`,
+      );
+      return {
+        ok: afterSnapshot.normalizedCount <= 0,
+        removed,
+        beforeCount: beforeSnapshot.normalizedCount,
+        afterCount: afterSnapshot.normalizedCount,
+        reason: afterSnapshot.normalizedCount <= 0 ? 'cleared' : 'still-has-attachments',
+      };
+    }
+
+    function normalizeUploadCompareName(value) {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+    }
+
+    function areComposerAttachmentsSameAsUploadFiles(composerNames, files) {
+      const composerList = Array.from(new Set(
+        (composerNames || [])
+          .map((name) => normalizeUploadCompareName(name))
+          .filter(Boolean),
+      )).sort();
+      const fileList = Array.from(new Set(
+        (files || [])
+          .map((file) => normalizeUploadCompareName(file && file.name ? file.name : ''))
+          .filter(Boolean),
+      )).sort();
+      if (composerList.length !== fileList.length) {
+        return false;
+      }
+      for (let i = 0; i < fileList.length; i += 1) {
+        if (composerList[i] !== fileList[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    async function reconcileComposerAttachmentsBeforeFreshUpload(files, options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const source = String(opts.source || 'fresh-upload').trim() || 'fresh-upload';
+      const uploadOnly = opts.uploadOnly === true;
+      const filesList = Array.isArray(files) ? files.filter(Boolean) : [];
+      const beforeSnapshot = getComposerUploadPayloadSnapshot(`fresh-upload-reconcile-before:${source}`);
+      const composerNames = getComposerAttachmentNamesForUploadReconcile(`fresh-upload-reconcile-before:${source}`);
+      const fileNames = filesList.map((file) => (file && file.name ? String(file.name) : '')).filter(Boolean);
+      const same = areComposerAttachmentsSameAsUploadFiles(composerNames, filesList);
+      ToolboxShell.appendLog(
+        `[UPLOAD_RECONCILE][CHECK] source=${source} uploadOnly=${uploadOnly ? 1 : 0} queueFiles=${filesList.length} composerRaw=${beforeSnapshot.rawCount} composerNormalized=${beforeSnapshot.normalizedCount} composerReady=${beforeSnapshot.readyCount} same=${same ? 1 : 0} fileNames=${fileNames.join('|') || '-'} composerNames=${composerNames.join('|') || '-'}`,
+      );
+      if (!filesList.length) {
+        return {
+          ok: true,
+          cleaned: false,
+          reason: 'no-files',
+        };
+      }
+      if (beforeSnapshot.normalizedCount <= 0 && beforeSnapshot.readyCount <= 0) {
+        return {
+          ok: true,
+          cleaned: false,
+          reason: 'composer-empty',
+        };
+      }
+      if (same) {
+        return {
+          ok: true,
+          cleaned: false,
+          reason: 'same-as-current-upload-files',
+        };
+      }
+      const clearResult = await removeAllVisibleComposerAttachmentsForFreshUpload(source);
+      if (!clearResult || clearResult.ok !== true) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_RECONCILE][BLOCKED] source=${source} reason=${clearResult && clearResult.reason ? clearResult.reason : 'clear-failed'} before=${clearResult && clearResult.beforeCount != null ? clearResult.beforeCount : beforeSnapshot.normalizedCount} after=${clearResult && clearResult.afterCount != null ? clearResult.afterCount : '-'} queueFiles=${filesList.length}`,
+        );
+        if (opts.allowProceedOnClearFailure === true) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][DEGRADED_CONTINUE] source=${source} reason=clear-failed action=continue-without-upload`,
+          );
+          return {
+            ok: true,
+            cleaned: false,
+            skipped: true,
+            degraded: true,
+            reason: 'stale-clear-failed-degraded',
+          };
+        }
+        return {
+          ok: false,
+          cleaned: false,
+          reason: 'composer-stale-attachments-clear-failed',
+          detail: clearResult && clearResult.reason ? clearResult.reason : 'clear-failed',
+        };
+      }
+      return {
+        ok: true,
+        cleaned: true,
+        reason: 'stale-composer-attachments-cleared',
+      };
+    }
+
     async function removeDuplicateComposerAttachmentsBeforeSend(source = 'unknown') {
       const snapshot = getComposerUploadPayloadSnapshot(`clean-before-send:${source || 'unknown'}`);
+      if (snapshot.normalizedCount > 1) {
+        appendUploadAttachmentCanonicalLog(
+          `[UPLOAD][DUPLICATE_ATTACHMENTS][CLEAN_BLOCKED_FOR_MULTI] source=${source || '-'} raw=${snapshot.rawCount} normalized=${snapshot.normalizedCount} ready=${snapshot.readyCount} reason=normalized-count-may-be-real-multi-files`,
+        );
+        return {
+          ok: true,
+          removed: 0,
+          count: snapshot.normalizedCount,
+          rawCount: snapshot.rawCount,
+          normalizedCount: snapshot.normalizedCount,
+          reason: 'multi-attachments-kept',
+        };
+      }
       if (snapshot.rawCount > 1 && snapshot.normalizedCount === 1) {
         appendUploadAttachmentCanonicalLog(
           `[UPLOAD][DUPLICATE_ATTACHMENTS][RAW_IGNORED] source=${source || '-'} raw=${snapshot.rawCount} normalized=${snapshot.normalizedCount} ready=${snapshot.readyCount} action=skip-clean`,
@@ -32339,6 +32989,21 @@
       const scopeGroupId = getActiveUploadScopeGroupId(opts);
       const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
       const forceReupload = opts.forceReupload === true;
+      const safeAutoQueueUpload = opts.safeAutoQueueUpload !== false;
+      const forceResetAttachedForAutoq =
+        opts.forceResetAttached === true
+        || (!safeAutoQueueUpload && forceReupload);
+      const forceResetUploadedForAutoq =
+        opts.forceResetUploaded === true
+        || (!safeAutoQueueUpload && forceReupload);
+      const forceResetDoneForAutoq =
+        opts.forceResetDone === true
+        || (!safeAutoQueueUpload && forceReupload);
+      const needsForceReset = !!(
+        forceResetAttachedForAutoq
+        || forceResetUploadedForAutoq
+        || forceResetDoneForAutoq
+      );
       const allowDuplicateComposerAttachments = opts.allowDuplicateComposerAttachments === true;
       const composerPayloadCountAtEntry = getComposerUploadPayloadCount();
       if (!allowDuplicateComposerAttachments && composerPayloadCountAtEntry > 0) {
@@ -32395,13 +33060,15 @@
       }
 
       ToolboxShell.appendLog(
-        `[UPLOAD][AUTOQ_START] source=${uploadSource} groupId=${scopeGroupId || '-'} forceReupload=${forceReupload ? 1 : 0} maxFiles=${maxFiles || '-'}`,
+        `[UPLOAD][AUTOQ_START] source=${uploadSource} groupId=${scopeGroupId || '-'} `
+        + `forceReupload=${forceReupload ? 1 : 0} safe=${safeAutoQueueUpload ? 1 : 0} `
+        + `needsForceReset=${needsForceReset ? 1 : 0} maxFiles=${maxFiles || '-'}`,
       );
 
-      if (!forceReupload) {
-        // 兼容旧行为：仅重置已绑定，避免影响其它入口调用
+      if (!needsForceReset && !forceReupload) {
         resetQueueItemsForUpload({
           forceResetAttached: true,
+          preserveAttached: true,
           groupId: scopeGroupId,
           reason: uploadSource,
         });
@@ -32409,21 +33076,24 @@
           groupId: scopeGroupId,
         });
 
-        const pendingItems = getPendingUploadItems({ groupId: scopeGroupId });
-        const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+        const pendingItemsLegacy = getPendingUploadItems({ groupId: scopeGroupId });
+        const pendingCountLegacy = Array.isArray(pendingItemsLegacy) ? pendingItemsLegacy.length : 0;
 
-        if (pendingCount > 0) {
+        if (pendingCountLegacy > 0) {
           return startUploadFromCurrentQueue({
             source: uploadSource,
             groupId: scopeGroupId,
             shouldStop,
             maxFiles,
+            parentTask: opts.parentTask || 'batch-auto-upload',
+            cycleIndex: Number(opts.cycleIndex || 0) || 0,
             mode: 'upload_only',
             uploadOnly: true,
             requireSendReady: false,
             cadenceUpload: isCadenceUploadSource(uploadSource),
             continueWithUpload: isCadenceUploadSource(uploadSource),
             forceReupload: isCadenceUploadSource(uploadSource),
+            preserveAttached: true,
           });
         }
 
@@ -32448,8 +33118,8 @@
         });
       }
 
-      if (forceReupload) {
-        if (forceReupload && !allowDuplicateComposerAttachments && detectComposerHasUploadPayload()) {
+      if (needsForceReset) {
+        if (!allowDuplicateComposerAttachments && detectComposerHasUploadPayload()) {
           ToolboxShell.appendLog(
             `[UPLOAD][AUTOQ_SKIP_FORCE_REUPLOAD] source=${uploadSource} reason=composer-already-has-upload-payload`,
           );
@@ -32462,39 +33132,57 @@
           });
         }
         const resetCount = Number(resetQueueItemsForUpload({
-          forceResetAttached: true,
-          forceResetUploaded: true,
-          forceResetDone: true,
+          forceResetAttached: forceResetAttachedForAutoq,
+          forceResetUploaded: forceResetUploadedForAutoq,
+          forceResetDone: forceResetDoneForAutoq,
+          preserveAttached: true,
           groupId: scopeGroupId,
           reason: uploadSource,
         })) || 0;
 
-        const activeGroupResetCount = Number(
-          forceResetActiveGroupFilesForUpload(uploadSource),
-        ) || 0;
+        let activeGroupResetCount = 0;
+        if (forceResetAttachedForAutoq || forceResetUploadedForAutoq || forceResetDoneForAutoq) {
+          activeGroupResetCount = Number(
+            forceResetActiveGroupFilesForUpload(uploadSource),
+          ) || 0;
+        }
 
         let flaskResetCount = 0;
-        try {
-          if (typeof resetFlaskFilesForUpload === 'function') {
-            flaskResetCount = resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`, {
-              groupId: scopeGroupId,
-            }) ? 1 : 0;
+        if (forceResetAttachedForAutoq || forceResetUploadedForAutoq || forceResetDoneForAutoq) {
+          try {
+            if (typeof resetFlaskFilesForUpload === 'function') {
+              flaskResetCount = resetFlaskFilesForUpload(`startUploadForAutoQueue:${uploadSource}`, {
+                groupId: scopeGroupId,
+                forceResetAttached: forceResetAttachedForAutoq,
+                forceResetUploaded: forceResetUploadedForAutoq,
+                forceResetDone: forceResetDoneForAutoq,
+              }) ? 1 : 0;
+            }
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            console.error('[ChatGPT toolbox] resetFlaskFilesForUpload failed', error);
+            ToolboxShell.appendLog(`[UPLOAD][AUTOQ_FORCE_RESET][FLASK_FAILED] source=${uploadSource} error=${errText}`);
           }
-        } catch (error) {
-          const errText = error && error.message ? error.message : String(error);
-          console.error('[ChatGPT toolbox] resetFlaskFilesForUpload failed', error);
-          ToolboxShell.appendLog(`[UPLOAD][AUTOQ_FORCE_RESET][FLASK_FAILED] source=${uploadSource} error=${errText}`);
         }
 
         ToolboxShell.appendLog(
-          `[UPLOAD][AUTOQ_FORCE_RESET] source=${uploadSource} resetCount=${resetCount} activeGroupResetCount=${activeGroupResetCount} flaskReset=${flaskResetCount}`,
+          `[UPLOAD][AUTOQ_FORCE_RESET] source=${uploadSource} resetCount=${resetCount} `
+          + `activeGroupResetCount=${activeGroupResetCount} flaskReset=${flaskResetCount}`,
+        );
+      } else {
+        ToolboxShell.appendLog(
+          `[UPLOAD][AUTOQ][SAFE_RESET] source=${uploadSource} `
+          + `safe=${safeAutoQueueUpload ? 1 : 0} `
+          + `forceResetAttached=${forceResetAttachedForAutoq ? 1 : 0} `
+          + `forceResetUploaded=${forceResetUploadedForAutoq ? 1 : 0} `
+          + `forceResetDone=${forceResetDoneForAutoq ? 1 : 0}`,
         );
       }
 
       const isCadenceAutoq = isCadenceUploadSource(uploadSource);
       let pendingItems = await getPendingUploadItemsForStart(uploadSource, {
         groupId: scopeGroupId,
-        forceReupload: true,
+        forceReupload: needsForceReset,
         source: uploadSource,
         parentSource: uploadSource,
         cadenceUpload: isCadenceAutoq,
@@ -32524,6 +33212,31 @@
       );
 
       if (pendingCount <= 0) {
+        if (!needsForceReset && safeAutoQueueUpload) {
+          if (detectComposerHasUploadPayload()) {
+            ToolboxShell.appendLog(
+              `[UPLOAD][AUTOQ_SKIP] source=${uploadSource} reason=composer-already-has-file safe=1`,
+            );
+            return buildQueueUploadResult({
+              ok: true,
+              reason: 'composer-already-has-file',
+              uploadedCount: 0,
+              failedCount: 0,
+              skippedCount: 0,
+            });
+          }
+          ToolboxShell.appendLog(
+            `[UPLOAD][AUTOQ_SKIP] source=${uploadSource} reason=no-files safe=1 pending=0`,
+          );
+          return buildQueueUploadResult({
+            ok: true,
+            reason: 'no-files',
+            uploadedCount: 0,
+            failedCount: 0,
+            skippedCount: 0,
+          });
+        }
+
         const isCadenceNoFiles = isCadenceUploadSource(uploadSource);
         const isVerifyUploadSource = String(uploadSource || '').includes('autoq-task-verify')
           || String(uploadSource || '').includes('verify-after-done-signal');
@@ -32561,7 +33274,14 @@
         groupId: scopeGroupId,
         shouldStop,
         maxFiles,
-        forceReupload: true,
+        parentTask: opts.parentTask || 'batch-auto-upload',
+        cycleIndex: Number(opts.cycleIndex || 0) || 0,
+        forceReupload: needsForceReset,
+        forceResetAttached: forceResetAttachedForAutoq,
+        forceResetUploaded: forceResetUploadedForAutoq,
+        forceResetDone: forceResetDoneForAutoq,
+        preserveAttached: true,
+        allowProceedOnClearFailure: opts.allowProceedOnClearFailure === true,
         mode: 'upload_only',
         uploadOnly: true,
         requireSendReady: false,
@@ -33144,6 +33864,59 @@
             reason: 'cancelled',
             cancelled: true,
           });
+        }
+
+        const reconcileBeforeUpload = await reconcileComposerAttachmentsBeforeFreshUpload(files, {
+          source: uploadSource,
+          uploadOnly: uploadOnlyMode,
+          groupId: scopeGroupId,
+          allowProceedOnClearFailure: opts.allowProceedOnClearFailure === true,
+        });
+        if (
+          reconcileBeforeUpload
+          && reconcileBeforeUpload.degraded === true
+          && reconcileBeforeUpload.reason === 'stale-clear-failed-degraded'
+        ) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][DEGRADED_SKIP_ATTACH] source=${uploadSource} reason=${reconcileBeforeUpload.reason}`,
+          );
+          return buildQueueUploadResult({
+            ok: true,
+            skipped: true,
+            degraded: true,
+            reason: 'stale-clear-failed-degraded',
+            uploadedCount: 0,
+            failedCount: 0,
+            skippedCount: files.length,
+          });
+        }
+        if (!reconcileBeforeUpload || reconcileBeforeUpload.ok !== true) {
+          const reconcileReason = reconcileBeforeUpload && reconcileBeforeUpload.reason
+            ? reconcileBeforeUpload.reason
+            : 'composer-reconcile-failed';
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][FAILED_BEFORE_ATTACH] source=${uploadSource} reason=${reconcileReason} files=${files.length}`,
+          );
+          if (!isChildUpload) {
+            resetUploadStateAfterReadyTimeout(reconcileReason, uploadSource);
+            setStatus('上传前发现输入框存在无法清理的旧附件，已停止上传，避免多发文件', 'error');
+            setLastRealUploadError('上传前发现输入框存在无法清理的旧附件，已停止上传，避免多发文件', {
+              clearStatus: false,
+              source: 'real-upload',
+            });
+          }
+          return buildQueueUploadResult({
+            ok: false,
+            uploadedCount: 0,
+            failedCount: files.length,
+            skippedCount: skippedByMaxFiles,
+            reason: reconcileReason,
+          });
+        }
+        if (reconcileBeforeUpload.cleaned === true) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_RECONCILE][STALE_CLEARED_BEFORE_ATTACH] source=${uploadSource} files=${files.length} action=continue-upload-current-queue`,
+          );
         }
 
         const uploadSignal = resolveUploadAbortSignal();
@@ -37218,6 +37991,8 @@
       getSendTaskState,
       getUnifiedComposerAttachmentState,
       runSharedComposerSendFlow,
+      isRealSendConfirmed,
+      isSendResultAcceptable,
       sendTextToChatGPTComposerDirectly,
       runSharedSendAndWaitEntryFlow,
       confirmSharedMessageSubmitted,
@@ -37307,6 +38082,9 @@
       getComposerUploadPayloadSnapshot,
       getComposerUploadPayloadCount,
       isComposerUploadPayloadDuplicated,
+      getComposerAttachmentNamesForUploadReconcile,
+      removeAllVisibleComposerAttachmentsForFreshUpload,
+      reconcileComposerAttachmentsBeforeFreshUpload,
       removeDuplicateComposerAttachmentsBeforeSend,
       triggerStartUpload,
       handleStartUploadClick,

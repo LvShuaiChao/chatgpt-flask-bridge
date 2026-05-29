@@ -342,6 +342,7 @@
     'copy-hotkey-once',
     'copy-continue',
     'copy-log',
+    'copy-error-log',
   ]);
 
   function isUploadButtonBusinessAction(action) {
@@ -1606,6 +1607,7 @@
       'cancel-wait-reply',
       'cancel-upload',
       'copy-log',
+      'copy-error-log',
     ]);
 
     const sendPhase = getActionPhaseFromSnapshot('send-message', snapshot);
@@ -1690,7 +1692,7 @@
           ? 'send-message-blocked-assistant-answering'
           : `send-message-blocked-${sendPhase || pageReplyStatus}`)
         : 'ok';
-    } else if (normalized === 'copy-log') {
+    } else if (normalized === 'copy-log' || normalized === 'copy-error-log') {
       disabled = false;
       reason = 'ok';
     }
@@ -2317,14 +2319,14 @@
       reason,
     );
 
-    if (action === 'copy-log') {
+    if (action === 'copy-log' || action === 'copy-error-log') {
       resolvedView = {
         ...resolvedView,
         phase: TaskPhase.IDLE,
         buttonPhase: 'idle',
         disabled: false,
         allowCancel: false,
-        action: 'copy-log',
+        action,
         preserveBaseColorWhenDisabled: false,
       };
     }
@@ -2384,6 +2386,7 @@
         || action === 'cancel-wait-reply'
         || action === 'cancel-upload'
         || action === 'copy-log'
+        || action === 'copy-error-log'
       ) {
         if (decideForRuntime.disabled !== viewDisabled) {
           const keepIdleColor = ownPhase === TaskPhase.IDLE
@@ -2419,6 +2422,7 @@
         || action === 'cancel-wait-reply'
         || action === 'cancel-upload'
         || action === 'copy-log'
+        || action === 'copy-error-log'
         || decide.disabled
         || decideForRuntime.disabled
       ) {

@@ -34,14 +34,70 @@
     let errorLogCountDirty = true;
     let lastErrorLogCountComputeAt = 0;
 
+    const COPY_ERROR_LOG_BUTTON_SELECTOR = '#cgpt-log-copy-errors, #cgpt-autoq-copy-errors, [data-action="copy-error-log"], .cgpt-log-copy-errors-btn';
+
+    function collectCopyErrorLogButtons(root) {
+      const scopes = [];
+      const seen = new Set();
+      const buttons = [];
+      if (root && typeof root.querySelectorAll === 'function') {
+        scopes.push(root);
+      }
+      if (rootEl && rootEl !== root && typeof rootEl.querySelectorAll === 'function') {
+        scopes.push(rootEl);
+      }
+      if (typeof document !== 'undefined' && document && typeof document.querySelectorAll === 'function') {
+        scopes.push(document);
+      }
+      scopes.forEach((scope) => {
+        scope.querySelectorAll(COPY_ERROR_LOG_BUTTON_SELECTOR).forEach((btn) => {
+          if (!(btn instanceof HTMLButtonElement)) {
+            return;
+          }
+          if (seen.has(btn)) {
+            return;
+          }
+          seen.add(btn);
+          buttons.push(btn);
+        });
+      });
+      return buttons;
+    }
+
+    function applyCopyErrorLogButtonCount(btn, count) {
+      if (!(btn instanceof HTMLButtonElement)) {
+        return;
+      }
+      btn.textContent = `复制错误日志（${count}）`;
+      btn.title = `复制错误日志，共 ${count} 条`;
+      btn.dataset.errorLogCount = String(count);
+    }
+
+    function renderCopyErrorLogButtonHtml(options = {}) {
+      const id = String(options.id || 'cgpt-log-copy-errors').trim() || 'cgpt-log-copy-errors';
+      const extraClass = String(options.extraClass || '').trim();
+      const action = String(options.action || 'copy-error-log').trim() || 'copy-error-log';
+      const buttonRole = String(options.buttonRole || 'copy-error-log').trim() || 'copy-error-log';
+      const source = String(options.source || 'log-tab').trim() || 'log-tab';
+      const className = `cgpt-btn cgpt-log-copy-errors-btn${extraClass ? ` ${extraClass}` : ''}`;
+      return [
+        '<button type="button"',
+        ` class="${escapeHtml(className)}"`,
+        ` id="${escapeHtml(id)}"`,
+        ` data-action="${escapeHtml(action)}"`,
+        ` data-button-role="${escapeHtml(buttonRole)}"`,
+        ` data-copy-error-log-source="${escapeHtml(source)}"`,
+        ' title="复制错误日志，共 0 条"',
+        '>复制错误日志（0）</button>',
+      ].join('');
+    }
+
     function markErrorLogCountDirty() {
       errorLogCountDirty = true;
     }
 
     function shouldRefreshErrorLogCountNow() {
-      const activeLogTab = isLogTabVisible();
-      const btnVisible = rootEl && qs('#cgpt-log-copy-errors', rootEl);
-      return !!activeLogTab && !!btnVisible;
+      return collectCopyErrorLogButtons(document).some((btn) => btn.isConnected);
     }
 
     function setLogStatus(text, type, options = {}) {
@@ -230,15 +286,10 @@
     }
 
     function updateCopyErrorLogButtonCount(root) {
-      const scope = root || rootEl || document;
-      const btn = qs('#cgpt-log-copy-errors', scope);
-      if (!(btn instanceof HTMLButtonElement)) {
-        return;
-      }
       const count = getErrorLogCount();
-      btn.textContent = `复制错误日志（${count}）`;
-      btn.title = `复制错误日志，共 ${count} 条`;
-      btn.dataset.errorLogCount = String(count);
+      collectCopyErrorLogButtons(root || document).forEach((btn) => {
+        applyCopyErrorLogButtonCount(btn, count);
+      });
     }
 
     function scheduleUpdateCopyErrorLogButtonCount(root) {
@@ -251,31 +302,71 @@
       }, 80);
     }
 
+    async function copyErrorLogs(source = 'log-module') {
+      flushLogBufferSync();
+      updateCopyErrorLogButtonCount(document);
+      const errorLines = collectCopyableErrorLogLines();
+      const text = errorLines.length > 0
+        ? errorLines.join('\n')
+        : '未发现错误日志。';
+      const ok = await copyWithStatus({
+        text,
+        successText: `已复制错误日志（${errorLines.length} 条）`,
+        failedPrefix: '复制错误日志失败',
+        logPrefix: 'LOG_COPY_ERRORS',
+        emptyText: '未发现错误日志',
+        playSuccessBeep: false,
+        statusOwner: 'logger',
+      });
+      ToolboxShell.appendLog(
+        `[LOG_COPY_ERRORS][${ok ? 'ok' : 'failed'}] source=${String(source || '-')} lines=${errorLines.length} chars=${text.length}`,
+      );
+      updateCopyErrorLogButtonCount(document);
+      return ok;
+    }
+
+    function handleCopyErrorLogs(source = 'log-module') {
+      void copyErrorLogs(source).catch((err) => {
+        const errText = err && err.stack ? err.stack : String(err);
+        console.error('[ChatGPT toolbox] copy error logs failed', err);
+        setLogStatus(`复制错误日志失败：${err && err.message ? err.message : String(err)}`, 'error');
+        ToolboxShell.appendLog(`[LOG_COPY_ERRORS][failed] source=${String(source || '-')} error=${errText}`);
+      });
+    }
+
+    function invokeCopyErrorLogs(source = 'manual') {
+      const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
+      if (!logModule || typeof logModule.copyErrorLogs !== 'function') {
+        const msg = '日志模块未就绪，无法复制错误日志';
+        console.error('[ChatGPT toolbox] copy error logs skipped: LogModule not ready');
+        setLogStatus(msg, 'warn');
+        ToolboxShell.appendLog(`[LOG_COPY_ERRORS][skip] source=${String(source || '-')} reason=log_module_not_ready`);
+        return false;
+      }
+      if (typeof logModule.handleCopyErrorLogs === 'function') {
+        logModule.handleCopyErrorLogs(source);
+        return true;
+      }
+      void logModule.copyErrorLogs(source).catch((err) => {
+        const errText = err && err.stack ? err.stack : String(err);
+        console.error('[ChatGPT toolbox] copy error logs failed', err);
+        setLogStatus(`复制错误日志失败：${err && err.message ? err.message : String(err)}`, 'error');
+        ToolboxShell.appendLog(`[LOG_COPY_ERRORS][failed] source=${String(source || '-')} error=${errText}`);
+      });
+      return true;
+    }
+
     function bindLogCopyErrors(root) {
-      bindClick(root, '#cgpt-log-copy-errors', () => {
-        updateCopyErrorLogButtonCount(root);
-
-        const errorLines = collectCopyableErrorLogLines();
-
-        const text = errorLines.length > 0
-          ? errorLines.join('\n')
-          : '未发现错误日志。';
-
-        void copyWithStatus({
-          text,
-          successText: `已复制错误日志（${errorLines.length} 条）`,
-          failedPrefix: '复制错误日志失败',
-          logPrefix: 'LOG_COPY_ERRORS',
-          emptyText: '未发现错误日志',
-          playSuccessBeep: false,
-          statusOwner: 'logger',
-        });
-
-        updateCopyErrorLogButtonCount(root);
+      bindClick(root, COPY_ERROR_LOG_BUTTON_SELECTOR, (event, el) => {
+        const source = el && el.dataset && el.dataset.copyErrorLogSource
+          ? el.dataset.copyErrorLogSource
+          : 'log-tab-button';
+        handleCopyErrorLogs(source);
       }, {
         moduleName: 'LogModule',
-        bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-copy-errors',
-        bindMissingLog: '[LOG][bind-missing] #cgpt-log-copy-errors',
+        bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少复制错误日志按钮',
+        bindMissingLog: '[LOG][bind-missing] copy-error-log-button',
+        key: 'click:copy-error-log-buttons',
       });
     }
 
@@ -290,7 +381,10 @@
         <div class="cgpt-log-panel">
           <div class="cgpt-log-actions">
             <button type="button" class="cgpt-btn" id="cgpt-log-copy">复制日志</button>
-            <button type="button" class="cgpt-btn" id="cgpt-log-copy-errors">复制错误日志（0）</button>
+            ${renderCopyErrorLogButtonHtml({
+              id: 'cgpt-log-copy-errors',
+              source: 'log-tab-button',
+            })}
             <button type="button" class="cgpt-btn" id="cgpt-log-toggle">显示最近日志</button>
             <button type="button" class="cgpt-btn danger cgpt-log-clear-right" id="cgpt-log-clear">清空日志</button>
           </div>
@@ -448,6 +542,11 @@
       copyAllLogs,
       handleCopyToolboxLog,
       invokeCopyToolboxLog,
+      copyErrorLogs,
+      handleCopyErrorLogs,
+      invokeCopyErrorLogs,
+      updateCopyErrorLogButtonCount,
+      renderCopyErrorLogButtonHtml,
     };
   })();
 

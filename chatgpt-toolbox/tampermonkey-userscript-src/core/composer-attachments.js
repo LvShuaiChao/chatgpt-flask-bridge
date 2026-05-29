@@ -15,6 +15,32 @@ const ComposerAttachments = (() => {
   const UPLOAD_EVIDENCE_CACHE_MS = 500;
   const UPLOAD_HEAVY_SCAN_MIN_MS = 500;
   const UPLOAD_ATTACHMENT_DIRTY_FALLBACK_MS = 1000;
+  const ATTACHMENT_EVIDENCE_FAST_CACHE_MS = 800;
+  const ATTACHMENT_EVIDENCE_BACKGROUND_CACHE_MS = 2500;
+
+  function shouldUseCachedAttachmentEvidence(reason, options = {}) {
+    if (options && options.forceRefresh === true) {
+      return false;
+    }
+    const reasonText = String(reason || '');
+    if (
+      reasonText.includes('after-send')
+      || reasonText.includes('confirm-send')
+      || reasonText.includes('upload-start')
+      || reasonText.includes('upload-finish')
+      || reasonText.includes('autoq-bypass-pre-send-button-wait')
+      || reasonText.includes('send-initial-composer-stage')
+      || reasonText.includes('autoq-payload')
+      || reasonText.includes('before-write')
+      || reasonText.includes('after-write')
+      || reasonText.includes('immediate-prompt-write')
+      || reasonText.includes('send-button-wait')
+      || reasonText.includes('real-upload-running-check')
+    ) {
+      return false;
+    }
+    return true;
+  }
 
   function isUploadLightModeActive() {
     return (
@@ -577,6 +603,87 @@ const ComposerAttachments = (() => {
     const requestedHeavy = options.heavy === true;
     const useHeavy = shouldRunHeavyAttachmentScan({ heavy: requestedHeavy });
     const now = Date.now();
+    const throttled = !!(
+      (typeof BrowserRuntimeHealth !== 'undefined'
+        && BrowserRuntimeHealth
+        && typeof BrowserRuntimeHealth.isProbablyThrottled === 'function'
+        && BrowserRuntimeHealth.isProbablyThrottled())
+      || (typeof document !== 'undefined' && document.hidden)
+    );
+    const cacheTtl = throttled
+      ? ATTACHMENT_EVIDENCE_BACKGROUND_CACHE_MS
+      : ATTACHMENT_EVIDENCE_FAST_CACHE_MS;
+
+    if (
+      shouldUseCachedAttachmentEvidence(reasonText, options)
+      && attachmentEvidenceCache
+      && attachmentEvidenceCache.result
+      && now - Number(attachmentEvidenceCache.ts || 0) <= cacheTtl
+    ) {
+      const cached = Object.assign({}, attachmentEvidenceCache.result);
+      cached.reason = String(reasonText || cached.reason || '');
+      cached.cacheHit = true;
+
+      let domAttachCount = -1;
+      try {
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.countAttachmentChipsFast === 'function'
+        ) {
+          domAttachCount = Math.max(0, Number(ComposerApi.countAttachmentChipsFast()) || 0);
+        } else if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.countAttachmentChips === 'function'
+        ) {
+          domAttachCount = Math.max(0, Number(ComposerApi.countAttachmentChips()) || 0);
+        }
+      } catch (domCountErr) {
+        console.error('[ChatGPT toolbox] attachment cache stale DOM recount failed', domCountErr);
+      }
+
+      if (
+        domAttachCount >= 0
+        && Number(cached.count || 0) > 0
+        && domAttachCount === 0
+      ) {
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_CACHE_STALE_IGNORED] reason=${reasonText} `
+            + `cachedCount=${cached.count} domCount=${domAttachCount} action=clear-cache-before-send`,
+          );
+        }
+        attachmentEvidenceCache.ts = 0;
+        attachmentEvidenceCache.result = null;
+        attachmentEvidenceCache.reason = '';
+        cached.count = 0;
+        cached.rawCount = 0;
+        cached.normalizedCount = 0;
+        cached.readyCount = 0;
+        cached.uploadingCount = 0;
+        cached.hasAttachment = false;
+        cached.filenames = [];
+        cached.source = `${cached.source || 'cache'}-stale-dom-cleared`;
+        attachmentEvidenceCache.result = Object.assign({}, cached);
+        attachmentEvidenceCache.ts = now;
+      }
+
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          `SHARED_COMPOSER:ATTACHMENT_EVIDENCE_CACHE:${reasonText}`,
+          `${cached.count}|${cached.readyCount}|${cached.uploadingCount}|${cached.textLen}|${cached.hasAttachment ? 1 : 0}`,
+          `[SHARED_COMPOSER][ATTACHMENT_EVIDENCE_CACHE_HIT] reason=${reasonText} `
+          + `count=${cached.count} ready=${cached.readyCount} uploading=${cached.uploadingCount} `
+          + `textLen=${cached.textLen} hasAttachment=${cached.hasAttachment ? 1 : 0} ttl=${cacheTtl}`,
+          3000,
+        );
+      }
+      return cached;
+    }
 
     if (uploadInProgress && attachmentEvidenceCache.result) {
       const ageMs = now - Number(attachmentEvidenceCache.ts || 0);

@@ -829,6 +829,8 @@
       skipFailedTasks: false,
       /** true = 每个任务完成后点击 ChatGPT 新聊天再发下一个；false = 在当前对话继续 */
       switchNewChatBetweenTasks: true,
+      /** true = 批量任务每个任务开始前强制回主页/新会话（优先于 30 轮阈值） */
+      forceHomeBeforeEachBatchTask: true,
       switchNewChatAfterAllDone: false,
       /** false = 单任务发送失败后继续下一个；true = 立即停止整个批量任务组 */
       stopBatchOnTaskSendFailure: false,
@@ -872,7 +874,7 @@
       debugAutoQueueTrace: true,
       debugMode: false,
       advancedDebugAutoRefresh: false,
-      advancedDebugRefreshIntervalMs: 5000,
+      advancedDebugRefreshIntervalMs: 1500,
 
       taskRelentlessSendRetryEnabled: true,
       taskRelentlessSendRetryIntervalMs: 1500,
