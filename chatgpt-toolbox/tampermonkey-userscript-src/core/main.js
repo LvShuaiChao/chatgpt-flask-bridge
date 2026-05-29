@@ -8369,6 +8369,14 @@
   }
 
   function applyBridgeStateFromPollResult(result, reason = '') {
+    if (
+      typeof AutoQueueModule !== 'undefined'
+      && typeof AutoQueueModule.shouldPauseWaitingReplyForInvalidPageContext === 'function'
+      && AutoQueueModule.shouldPauseWaitingReplyForInvalidPageContext('bridge-poll')
+    ) {
+      return;
+    }
+
     if (!result || typeof result !== 'object') {
       return;
     }
@@ -9881,6 +9889,7 @@
 
     badge.textContent = info.text;
     badge.title = info.title || info.text;
+    badge.classList.add('cgpt-toolbox-status-primary-badge');
 
     badge.classList.remove(
       'cgpt-state-ready',
@@ -12402,8 +12411,54 @@
     const timeoutMs = Number(options.timeoutMs || 60000);
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
-    // Unify: prefer the unified send pipeline to avoid divergent composer/write/wait/stable-send flows.
-    // Fallback to legacy behavior if sendUnifiedMessage isn't available.
+    // Unify: prefer composer send service for all text-through-composer sends.
+    if (typeof sendTextThroughComposer === 'function') {
+      const startedAt = Date.now();
+      const unifiedShouldStop = () => (
+        shouldStop()
+        || (Number.isFinite(timeoutMs) && timeoutMs > 0 && (Date.now() - startedAt) >= timeoutMs)
+      );
+
+      if (!sendExistingComposer && !content.trim()) {
+        return { ok: false, reason: 'empty_content', source };
+      }
+
+      if (!sendExistingComposer) {
+        const existingText = typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '').trim()
+          : '';
+
+        if (existingText && existingText !== String(content || '').trim() && !allowReplaceDraft) {
+          return {
+            ok: false,
+            reason: 'composer_has_existing_text',
+            source,
+          };
+        }
+      }
+
+      const composerResult = await sendTextThroughComposer({
+        text: sendExistingComposer ? '' : content,
+        sendExistingComposer,
+        source,
+        mode: String(options.mode || 'send-content-via-composer'),
+        requireTextWritten: !sendExistingComposer,
+        waitButtonTimeoutMs: timeoutMs,
+        shouldStop: unifiedShouldStop,
+        waitForReplyIdle: blockWhenResponding,
+      });
+
+      return {
+        ok: composerResult && composerResult.ok === true,
+        reason: String((composerResult && composerResult.reason) || 'send_failed'),
+        source,
+        detail: composerResult && composerResult.detail ? composerResult.detail : '',
+      };
+    }
+
+    // Fallback: unified send pipeline when composer send service is unavailable.
     if (typeof sendUnifiedMessage === 'function') {
       const startedAt = Date.now();
       const unifiedShouldStop = () => (

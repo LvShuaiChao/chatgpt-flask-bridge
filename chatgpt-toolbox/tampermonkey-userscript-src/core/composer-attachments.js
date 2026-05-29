@@ -35,6 +35,8 @@ const ComposerAttachments = (() => {
       || reasonText.includes('after-write')
       || reasonText.includes('immediate-prompt-write')
       || reasonText.includes('send-button-wait')
+      || reasonText.includes('pre-send-wait-entry')
+      || reasonText.includes('post-send-wait-entry')
       || reasonText.includes('real-upload-running-check')
     ) {
       return false;

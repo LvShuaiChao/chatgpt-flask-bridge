@@ -103,30 +103,6 @@ class ChatScrollPolicyTests(unittest.TestCase):
         )
         self.assertEqual(len(_WAITING_ELAPSED_IN_HTML_RE.findall(html)), 2)
 
-    def test_patch_waiting_elapsed_uses_cached_html(self):
-        host = _ScrollHost(value=480, maximum=500)
-        transcript = host.chat_transcript
-        transcript.setHtml_calls = []
-
-        def setHtml(doc):
-            transcript.setHtml_calls.append(doc)
-
-        transcript.setHtml = setHtml
-        host._current_session_id = "s1"
-        host._last_chat_render_session_id = "s1"
-        host._last_chat_render_html = (
-            "<body><table><tr><td>等待回复... 00:10</td></tr></table></body>"
-        )
-
-        session = type("S", (), {"session_id": "s1"})()
-        host._session_is_waiting_reply = lambda _s: True
-        host._session_pending_elapsed_sec = lambda _s: 17
-        host._format_elapsed_mmss = lambda sec: f"{sec // 60:02d}:{sec % 60:02d}"
-
-        self.assertTrue(host._patch_waiting_elapsed_in_transcript(session))
-        self.assertIn("等待回复... 00:17", host._last_chat_render_html)
-        self.assertEqual(len(transcript.setHtml_calls), 1)
-
 
 if __name__ == "__main__":
     unittest.main()

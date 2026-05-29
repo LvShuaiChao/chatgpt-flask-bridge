@@ -952,17 +952,6 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         style.unpolish(label)
         style.polish(label)
 
-    def _show_status_bar_message_throttled(self, text, timeout_ms=0):
-        text = str(text or "").strip()
-        now = time.time()
-        last_text = getattr(self, "_status_bar_message_text", "")
-        last_at = float(getattr(self, "_status_bar_message_at", 0) or 0)
-        if text == last_text and now - last_at < 0.8:
-            return
-        self._status_bar_message_text = text
-        self._status_bar_message_at = now
-        self.statusBar().showMessage(text, int(timeout_ms or 0))
-
     def _refresh_page_selector_after_heavy_skip(self, status=None):
         del status
         if getattr(self._session_ui, "switching", False):

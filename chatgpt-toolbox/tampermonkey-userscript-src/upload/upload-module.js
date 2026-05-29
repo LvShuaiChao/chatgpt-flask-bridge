@@ -935,8 +935,9 @@
       scheduleRenderUpload(`home:${normalized}:${reason || '-'}`);
     }
 
-    async function runGoHomeOnce(source = 'unknown') {
+    async function runGoHomeOnce(source = 'unknown', navOptions = {}) {
       const src = String(source || 'unknown').trim() || 'unknown';
+      const navOpts = navOptions && typeof navOptions === 'object' ? navOptions : {};
       const task = ensureHomeTask();
 
       if (task.phase === 'running') {
@@ -950,7 +951,7 @@
       setHomePhase('running', src);
 
       try {
-        const result = await goHomeByClickNewChat(src);
+        const result = await goHomeByClickNewChat(src, navOpts);
         if (task.runId !== runId) {
           return result;
         }
@@ -994,11 +995,20 @@
       }
     }
 
-    async function runJumpHome(source = 'unknown') {
+    async function runJumpHome(source = 'unknown', navOptions = {}) {
       const src = String(source || 'unknown').trim() || 'unknown';
+      const navOpts = navOptions && typeof navOptions === 'object' ? navOptions : {};
       ToolboxShell.appendLog(`[HOME][RUN] source=${src}`);
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.blockNavigationDuringWaitingReply === 'function'
+        && AutoQueueModule.blockNavigationDuringWaitingReply(`runJumpHome:${src}`, navOpts)
+      ) {
+        return { ok: false, reason: 'blocked-waiting-reply' };
+      }
       try {
-        return await runGoHomeOnce(src);
+        return await runGoHomeOnce(src, navOpts);
       } catch (error) {
         console.error('[UPLOAD_UI_ACTION][jump-home:failed]', error);
         throw error;
@@ -2303,6 +2313,55 @@
       );
     }
 
+    function resolveSendLockOwnerContext(source) {
+      const src = String(source || '').trim();
+      let currentRunId = '';
+      let currentTaskId = '';
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getState === 'function'
+      ) {
+        const autoState = AutoQueueModule.getState() || {};
+        const run = autoState.taskRun || {};
+        currentRunId = String(run.runId || autoState.currentRunId || '').trim();
+        currentTaskId = String(
+          run.currentTaskId
+          || run.taskId
+          || autoState.currentTaskId
+          || (autoState.currentTask && autoState.currentTask.id)
+          || '',
+        ).trim();
+      }
+      return {
+        source: src,
+        currentRunId,
+        currentTaskId,
+      };
+    }
+
+    function getSendActionLockOwnerSnapshot() {
+      if (
+        typeof ActionRuntime !== 'undefined'
+        && ActionRuntime
+        && typeof ActionRuntime.getActionLockOwner === 'function'
+      ) {
+        return ActionRuntime.getActionLockOwner('send-message');
+      }
+      return { taskId: '', runId: '', source: '' };
+    }
+
+    function logSendLockCheck(decision, reason, ownerCtx, lockOwner) {
+      const owner = ownerCtx || resolveSendLockOwnerContext('');
+      const lock = lockOwner || getSendActionLockOwnerSnapshot();
+      ToolboxShell.appendLog(
+        `[SEND_LOCK][CHECK] decision=${decision} reason=${reason || '-'} `
+        + `currentRunId=${owner.currentRunId || '-'} lockRunId=${lock.runId || '-'} `
+        + `currentTaskId=${owner.currentTaskId || '-'} lockTaskId=${lock.taskId || '-'} `
+        + `source=${owner.source || '-'} lockSource=${lock.source || '-'}`,
+      );
+    }
+
     function shouldForceReleaseSendLockForAutoQueue(source) {
       if (!isAutoQueueInternalSendSource(source)) {
         return false;
@@ -2317,6 +2376,32 @@
       );
       const composerCount = getComposerUploadPayloadCount();
       return sendPhaseIdle && composerCount > 0;
+    }
+
+    function shouldForceReleaseStaleSendLockForDifferentAutoQueueTask(source, lockOwner) {
+      if (!isAutoQueueInternalSendSource(source)) {
+        return false;
+      }
+      const ownerCtx = resolveSendLockOwnerContext(source);
+      const lock = lockOwner || getSendActionLockOwnerSnapshot();
+      if (!ownerCtx.currentTaskId || !lock.taskId || ownerCtx.currentTaskId === lock.taskId) {
+        return false;
+      }
+      const sendPhaseNow = typeof getSendTaskPhase === 'function' ? String(getSendTaskPhase() || '') : 'idle';
+      const sendPhaseIdle = (
+        sendPhaseNow === 'idle'
+        || sendPhaseNow === 'failed'
+        || sendPhaseNow === 'cancelled'
+        || sendPhaseNow === 'completed'
+        || sendPhaseNow === 'success'
+      );
+      const flowRunActive = !!(currentUploadSendFlowRun && !currentUploadSendFlowRun.cancelled);
+      const stateActive = !!(
+        state.waitingSend
+        || state.autoSendWaiting
+        || state.messageSending
+      );
+      return sendPhaseIdle && !flowRunActive && !stateActive;
     }
 
     async function sendExistingComposerBySendMessageButtonCore(options = {}) {
@@ -2372,23 +2457,35 @@
         };
       }
 
-      let sendLock = claimUploadActionLock('send-message', {
+      const sendLockOwnerCtx = resolveSendLockOwnerContext(source);
+      const sendLockClaimOptions = {
         timeoutMs,
-      });
+        taskId: sendLockOwnerCtx.currentTaskId,
+        runId: sendLockOwnerCtx.currentRunId,
+        source,
+      };
+
+      let sendLock = claimUploadActionLock('send-message', sendLockClaimOptions);
+
+      if (sendLock && sendLock.ok && sendLock.reason === 'same-owner-reuse') {
+        logSendLockCheck('allow', 'same-owner-reuse', sendLockOwnerCtx, sendLock.lockOwner);
+      } else if (sendLock && sendLock.ok) {
+        logSendLockCheck('allow', 'claimed', sendLockOwnerCtx, sendLock.lockOwner);
+      }
 
       if (
         !sendLock.ok
         && sendLock.reason === 'task-running'
         && shouldForceReleaseSendLockForAutoQueue(source)
       ) {
+        logSendLockCheck('allow', 'autoq-force-release-ready-attachment', sendLockOwnerCtx, sendLock.lockOwner);
         ToolboxShell.appendLog(
           `[SEND_LOCK][AUTOQ_FORCE_RELEASE] key=send-message source=${source} reason=autoq-internal-send-with-ready-attachment`,
         );
         releaseUploadActionLock('send-message');
-        sendLock = claimUploadActionLock('send-message', {
-          timeoutMs,
+        sendLock = claimUploadActionLock('send-message', Object.assign({}, sendLockClaimOptions, {
           forceRelease: true,
-        });
+        }));
       }
 
       if (!sendLock.ok && sendLock.reason === 'task-running') {
@@ -2407,17 +2504,28 @@
           || state.messageSending
         );
         const isStale = sendPhaseIdle && !flowRunActive && !stateActive;
+        const isDifferentTaskStale = shouldForceReleaseStaleSendLockForDifferentAutoQueueTask(
+          source,
+          sendLock.lockOwner,
+        );
 
-        if (isStale) {
+        if (isStale || isDifferentTaskStale) {
+          logSendLockCheck(
+            'allow',
+            isDifferentTaskStale ? 'stale-release-different-task' : 'stale-release-idle',
+            sendLockOwnerCtx,
+            sendLock.lockOwner,
+          );
           ToolboxShell.appendLog(
-            `[SEND_LOCK][STALE_RELEASE] key=send-message reason=task-running-but-send-task-idle source=${source} sendPhase=${sendPhaseNow}`,
+            `[SEND_LOCK][STALE_RELEASE] key=send-message reason=${isDifferentTaskStale ? 'different-task-stale-lock' : 'task-running-but-send-task-idle'} source=${source} sendPhase=${sendPhaseNow}`,
           );
           releaseUploadActionLock('send-message');
-          sendLock = claimUploadActionLock('send-message', { timeoutMs });
+          sendLock = claimUploadActionLock('send-message', sendLockClaimOptions);
         }
       }
 
       if (!sendLock.ok) {
+        logSendLockCheck('reject', sendLock.reason || 'task-running', sendLockOwnerCtx, sendLock.lockOwner);
         ToolboxShell.appendLog(
           `[SEND_MESSAGE_SHARED][FAILED] source=${source} reason=send-action-lock detail=${sendLock.reason || '-'}`,
         );
@@ -2427,9 +2535,13 @@
         state.uploadSendFailureHint = failMsg;
         state.uploadSendFailureHintAt = Date.now();
         scheduleRenderUpload('send-message:lock-blocked');
+        const lockReason = sendLock.reason || 'locked';
         return {
           ok: false,
-          reason: `send-action-lock:${sendLock.reason || 'locked'}`,
+          reason: `send-action-lock:${lockReason}`,
+          retryable: lockReason === 'task-running' || String(lockReason).includes('task-running'),
+          wait: true,
+          wait_send: true,
         };
       }
 
@@ -3900,8 +4012,10 @@
         && (
           result.assistantDoneSignal === true
           || result.assistantBatchTerminalStop === true
+          || result.reason === 'task-done-signal'
           || result.reason === 'assistant-done-signal'
           || result.reason === 'assistant-done-signal-before-send'
+          || result.reason === 'task-done-signal-before-send'
           || String(result.reason || '').startsWith('batch-reply-')
         )
       );
@@ -4932,11 +5046,15 @@
         };
       }
       const line = lines[0];
-      if (line === configuredDoneSignal || line === defaultDoneSignal) {
+      if (
+        (typeof hasBatchTaskDoneSignal === 'function' && hasBatchTaskDoneSignal(line))
+        || line === configuredDoneSignal
+        || line === defaultDoneSignal
+      ) {
         return {
           matched: true,
           status: 'done',
-          reason: 'done-marker-detected',
+          reason: 'task-done-signal',
           lineCount: 1,
           line,
         };
@@ -5072,6 +5190,152 @@
       ToolboxShell.appendLog(`[UPLOAD_GROUP][${tag}] ${formatUploadGroupDiagFields(extra)}`);
     }
 
+    function appendUploadLog(message) {
+      const line = String(message || '').trim();
+      if (!line) {
+        return;
+      }
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+        return;
+      }
+      console.log(line);
+    }
+
+    function getLocalUploadFileCount() {
+      const activeFiles = getActiveGroupFiles().length;
+      const uploadItems = Array.isArray(state.queue) ? state.queue.length : 0;
+      const groupFiles = getActiveGroupFiles().length;
+      return Math.max(activeFiles, uploadItems, groupFiles);
+    }
+
+    function formatUploadQueueDiagExtra() {
+      const uploadTask = state.uploadTask || {};
+      return [
+        `activeFiles=${getActiveGroupFiles().length}`,
+        `uploadItems=${Array.isArray(state.queue) ? state.queue.length : 0}`,
+        `currentGroupFileCount=${getActiveGroupFiles().length}`,
+        `totalUploadItems=${Array.isArray(state.queue) ? state.queue.length : 0}`,
+        `uploadRunning=${state.running ? 1 : 0}`,
+        `uploadPhase=${String(uploadTask.phase || state.uploadPhase || 'idle')}`,
+      ].join(' ');
+    }
+
+    function assertUploadFilesNotClearedUnexpectedly(beforeCount, afterCount, reason = '-') {
+      const before = Number(beforeCount) || 0;
+      const after = Number(afterCount) || 0;
+      if (before > 0 && after === 0) {
+        appendUploadLog(
+          `[UPLOAD_FILES][UNEXPECTED_CLEAR_DETECTED] reason=${String(reason || '-').trim() || '-'} before=${before} after=${after} ${formatUploadQueueDiagExtra()}`,
+        );
+        console.warn(
+          `[UPLOAD_FILES][UNEXPECTED_CLEAR_DETECTED] reason=${String(reason || '-').trim() || '-'} before=${before} after=${after}`,
+        );
+      }
+    }
+
+    function resetUploadRuntimeState(reason = '-') {
+      const startedAt = Date.now();
+      const reasonText = String(reason || '-').trim() || '-';
+      const beforeCount = getLocalUploadFileCount();
+      const uploadTask = state.uploadTask || {};
+
+      state.uploadCancelRequested = false;
+      state.manualUploadImmediateBusy = false;
+      state.manualUploadImmediateBusySource = '';
+
+      if (!isUploadRunning()) {
+        state.running = false;
+        state.activeId = '';
+        state.uploadAbortController = null;
+        setAuthoritativeUploadTaskState({
+          phase: 'idle',
+          owner: '',
+          source: '',
+          parentTask: '',
+          cycleIndex: 0,
+          runId: '',
+          cancelRequested: false,
+          cancelable: false,
+        }, `reset-upload-runtime:${reasonText}`);
+        setUploadButtonState('idle', `reset-upload-runtime:${reasonText}`);
+      }
+
+      const afterCount = getLocalUploadFileCount();
+      appendUploadLog(
+        `[UPLOAD_STATE][RESET_RUNTIME_ONLY] reason=${reasonText} beforeActiveFiles=${beforeCount} afterActiveFiles=${afterCount} beforeItems=${beforeCount} afterItems=${afterCount} costMs=${Date.now() - startedAt} ${formatUploadQueueDiagExtra()}`,
+      );
+      assertUploadFilesNotClearedUnexpectedly(beforeCount, afterCount, reasonText);
+      return { beforeCount, afterCount };
+    }
+
+    function clearUploadFilesByUserAction(reason = '-') {
+      const reasonText = String(reason || '-').trim() || '-';
+      const allowReasons = new Set([
+        'user-click-clear-files',
+        'user-click-delete-file',
+        'user-click-delete-upload-group',
+        'user-click-reset-upload-group',
+        'user-confirm-clear-before-new-group',
+        'clear-active-group-inline',
+        'remove-file-from-current-group',
+        'delete-active-group-inline',
+      ]);
+
+      if (!allowReasons.has(reasonText)) {
+        appendUploadLog(
+          `[UPLOAD_FILES][CLEAR_BLOCKED] reason=${reasonText} message=clear-files-must-be-user-action ${formatUploadQueueDiagExtra()}`,
+        );
+        return false;
+      }
+
+      const beforeCount = getLocalUploadFileCount();
+      appendUploadLog(
+        `[UPLOAD_FILES][CLEAR_BY_USER] reason=${reasonText} beforeActiveFiles=${beforeCount} beforeItems=${beforeCount} ${formatUploadQueueDiagExtra()}`,
+      );
+      return true;
+    }
+
+    function mergeActiveGroupQueueFromMemory(restoredQueue, reason = '-') {
+      const groupId = getActiveGroupId();
+      if (!groupId) {
+        return Array.isArray(restoredQueue) ? restoredQueue : [];
+      }
+
+      const memoryItems = (state.queue || []).filter(
+        (item) => item && String(item.groupId || '').trim() === groupId,
+      );
+      if (!memoryItems.length) {
+        return Array.isArray(restoredQueue) ? restoredQueue : [];
+      }
+
+      const merged = Array.isArray(restoredQueue) ? restoredQueue.slice() : [];
+      const restoredIds = new Set(
+        merged.map((item) => String(item && item.id || '').trim()).filter(Boolean),
+      );
+      let mergedCount = 0;
+
+      memoryItems.forEach((item) => {
+        const id = String(item && item.id || '').trim();
+        if (id && restoredIds.has(id)) {
+          return;
+        }
+        merged.push(item);
+        mergedCount += 1;
+        if (id) {
+          restoredIds.add(id);
+        }
+      });
+
+      if (mergedCount > 0) {
+        appendUploadLog(
+          `[UPLOAD_RESTORE][MERGE_MEMORY_QUEUE] reason=${String(reason || '-').trim() || '-'} merged=${mergedCount} memory=${memoryItems.length} restored=${Array.isArray(restoredQueue) ? restoredQueue.length : 0} ${formatUploadQueueDiagExtra()}`,
+        );
+      }
+
+      return merged;
+    }
+
     function getQueueRestorePhase() {
       return String(state.queueRestorePhase || 'idle').trim() || 'idle';
     }
@@ -5189,16 +5453,32 @@
       if (!state.activeGroupId) {
         return false;
       }
+      const reasonText = String(reason || '-').trim() || '-';
       const phase = getQueueRestorePhase();
       const memoryCount = getActiveGroupFiles().length;
       const dbCount = getActiveGroupDbCount();
+
+      if (memoryCount > 0 && !reasonText.includes('force-reload-queue')) {
+        appendUploadLog(
+          `[UPLOAD_RESTORE][SKIP_RELOAD_HAS_MEMORY] reason=${reasonText} queueRestorePhase=${phase} dbCount=${dbCount} memoryCount=${memoryCount} ${formatUploadQueueDiagExtra()}`,
+        );
+        if (phase !== 'ready') {
+          setQueueRestorePhase('ready', {
+            groupId: state.activeGroupId,
+            loadedOnce: true,
+            reason: `skip-reload-has-memory:${reasonText}`,
+          });
+        }
+        return false;
+      }
+
       const needByPhase = phase !== 'ready';
       const needByMismatch = dbCount > 0 && memoryCount === 0;
       const should = needByPhase || needByMismatch;
 
-      if (should && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[UPLOAD_RESTORE][SHOULD_RELOAD] reason=${String(reason || '-').trim() || '-'} activeGroupId=${state.activeGroupId || '-'} queueRestorePhase=${phase} dbCount=${dbCount} memoryCount=${memoryCount} queueLoadedOnce=${state.queueLoadedOnce ? 1 : 0}`,
+      if (should) {
+        appendUploadLog(
+          `[UPLOAD_RESTORE][SHOULD_RELOAD] reason=${reasonText} activeGroupId=${state.activeGroupId || '-'} queueRestorePhase=${phase} dbCount=${dbCount} memoryCount=${memoryCount} queueLoadedOnce=${state.queueLoadedOnce ? 1 : 0}`,
         );
       }
 
@@ -10066,7 +10346,8 @@
             }
           })
         );
-        state.queue = normalizeRestoreArray(restoredItems, 'loadQueueForActiveGroup.restoredItems').filter(Boolean);
+        const restoredBase = normalizeRestoreArray(restoredItems, 'loadQueueForActiveGroup.restoredItems').filter(Boolean);
+        state.queue = mergeActiveGroupQueueFromMemory(restoredBase, 'loadQueueForActiveGroup');
         const invalidRestoredItems = state.queue.filter((item) => !isPlainObject(item));
         if (invalidRestoredItems.length > 0) {
           invalidRestoredItems.forEach((item, index) => {
@@ -11364,6 +11645,10 @@
 
       clearConfirmUntil = 0;
 
+      if (!clearUploadFilesByUserAction('clear-active-group-inline')) {
+        return;
+      }
+
       const prevQueue = state.queue.slice();
       const groupId = String(group.id || '').trim();
 
@@ -11596,6 +11881,10 @@
         ToolboxShell.appendLog(
           `[UPLOAD_DIAG][remove-file:missing] id=${fileId} activeGroupId=${getActiveGroupId() || '-'}`,
         );
+        return false;
+      }
+
+      if (!clearUploadFilesByUserAction('remove-file-from-current-group')) {
         return false;
       }
 
@@ -12184,8 +12473,10 @@
         }
       }
 
-      const pageIdText = `页面ID:${pageDisplayId}`;
-      const roundText = `页面轮数:${roundCount}`;
+      const pageIdText = `页ID:${pageDisplayId}`;
+      const pageIdTitle = `页面ID:${pageDisplayId}`;
+      const roundText = `轮数:${roundCount}`;
+      const roundTitle = `页面轮数:${roundCount}（当前对话已完成轮数）`;
 
       const runtimeSnapshot = (
         typeof getUnifiedRuntimeStatus === 'function'
@@ -12232,13 +12523,9 @@
         ? 'cgpt-state-blocked'
         : (messageIsWarn ? 'cgpt-state-waiting' : '');
 
-      const uploadQuotaText = (uploadIsWarn || uploadIsFullWait)
-        ? `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}，仅剩 ${uploadQuotaRemaining}`
-        : `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}`;
+      const uploadQuotaText = `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}`;
 
-      const messageQuotaText = (messageIsWarn || messageIsFullWait)
-        ? `本地消息:${messageQuota.used}/${messageQuota.maxMessages}，仅剩 ${messageQuotaRemaining}`
-        : `本地消息:${messageQuota.used}/${messageQuota.maxMessages}`;
+      const messageQuotaText = `本地消息:${messageQuota.used}/${messageQuota.maxMessages}`;
 
       const uploadReleaseText = uploadQuota.remaining <= 0
         ? formatQuotaReleaseCountdown(uploadQuota.nextReleaseAt)
@@ -12304,7 +12591,7 @@
       lastToolboxTopStatusSignature = signature;
 
       const pageIdBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-page-id-badge');
-      const turnBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-turn-count-badge');
+      const turnBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-page-turn-badge, .cgpt-toolbox-turn-count-badge');
       let taskBadgeEl = pageStatusRowEl.querySelector('#cgpt-top-current-task-badge');
       const quotaBadges = pageStatusRowEl.querySelectorAll(
         '.cgpt-toolbox-upload-quota-badge, .cgpt-toolbox-message-quota-badge',
@@ -12312,9 +12599,10 @@
 
       if (pageIdBadge && turnBadge && quotaBadges.length >= 2) {
         pageIdBadge.textContent = pageIdText;
-        pageIdBadge.title = pageIdText;
+        pageIdBadge.title = pageIdTitle;
         turnBadge.textContent = roundText;
-        turnBadge.title = `${roundText}（当前对话已完成轮数）`;
+        turnBadge.title = roundTitle;
+        turnBadge.classList.add('cgpt-toolbox-page-turn-badge', 'cgpt-toolbox-must-show-badge');
         if (taskBadgeText) {
           if (!taskBadgeEl) {
             taskBadgeEl = document.createElement('span');
@@ -12333,10 +12621,10 @@
         }
         const uploadBadgeEl = quotaBadges[0];
         const messageBadgeEl = quotaBadges[1];
-        uploadBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge ${uploadBadgeStateClass}`.trim();
+        uploadBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge cgpt-toolbox-low-priority-badge ${uploadBadgeStateClass}`.trim();
         uploadBadgeEl.textContent = uploadQuotaText;
         uploadBadgeEl.title = uploadQuotaTitle;
-        messageBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge ${messageBadgeStateClass}`.trim();
+        messageBadgeEl.className = `cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge cgpt-toolbox-low-priority-badge ${messageBadgeStateClass}`.trim();
         messageBadgeEl.textContent = messageQuotaText;
         messageBadgeEl.title = messageQuotaTitle;
         updateChatInputStateBadge();
@@ -12349,12 +12637,12 @@
         : '';
 
       pageStatusRowEl.innerHTML = `
-        <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
-        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
-        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge" title="${escapeHtml(roundText)}（当前对话已完成轮数）">${escapeHtml(roundText)}</span>
+        <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-toolbox-status-primary-badge cgpt-state-unknown">未知</span>
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdTitle)}">${escapeHtml(pageIdText)}</span>
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-turn-count-badge cgpt-toolbox-page-turn-badge cgpt-toolbox-must-show-badge cgpt-page-count-badge" title="${escapeHtml(roundTitle)}">${escapeHtml(roundText)}</span>
         ${taskBadgeHtml}
-        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge ${uploadBadgeStateClass}" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
-        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-upload-quota-badge cgpt-toolbox-low-priority-badge cgpt-top-stat-secondary cgpt-local-upload-badge ${uploadBadgeStateClass}" title="${escapeHtml(uploadQuotaTitle)}">${escapeHtml(uploadQuotaText)}</span>
+        <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge cgpt-toolbox-low-priority-badge cgpt-top-stat-secondary cgpt-local-message-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
       `;
       updateChatInputStateBadge();
       syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-full');
@@ -15841,19 +16129,19 @@
 
         if (doneBeforeSend) {
           const preview = formatDoneSignalPreview(assistantRawBeforeSend);
-          const skipLine = `[UPLOAD_CONTINUE][skip] reason=assistant-done-signal-before-send source=${sourceText} preview=${preview}`;
+          const skipLine = `[UPLOAD_CONTINUE][skip] reason=task-done-signal-before-send source=${sourceText} preview=${preview}`;
           safeAppendLog(skipLine);
           if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
             ToolboxShell.appendLog(skipLine);
           }
           console.warn('[UPLOAD_CONTINUE][skip]', {
             source: sourceText,
-            reason: 'assistant-done-signal-before-send',
+            reason: 'task-done-signal-before-send',
             preview,
           });
           return {
             ok: false,
-            reason: 'assistant-done-signal-before-send',
+            reason: 'task-done-signal-before-send',
             assistantDoneSignal: true,
           };
         }
@@ -16656,7 +16944,10 @@
           && ComposerAttachments
           && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
         ) {
-          return ComposerAttachments.getSharedComposerAttachmentEvidence(tag || sourceText, { heavy: true });
+          return ComposerAttachments.getSharedComposerAttachmentEvidence(tag || sourceText, {
+            heavy: true,
+            forceRefresh: true,
+          });
         }
         if (typeof getUnifiedComposerAttachmentState === 'function') {
           const unified = getUnifiedComposerAttachmentState(tag || sourceText, { heavy: true });
@@ -16813,9 +17104,53 @@
         }
       }
 
+      const reportTextLen = (() => {
+        if (promptText.length > 0) {
+          return promptText.length;
+        }
+        const evidenceTextLen = Math.max(0, Number(attachmentEvidence && attachmentEvidence.textLen) || 0);
+        if (evidenceTextLen > 0) {
+          return evidenceTextLen;
+        }
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerText === 'function'
+        ) {
+          return String(ComposerApi.getComposerText() || '').trim().length;
+        }
+        return 0;
+      })();
+
+      if (
+        promptAlreadyWritten
+        && promptText.length === 0
+        && reportTextLen > 0
+      ) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][SEND_TEXTLEN_INCONSISTENT] source=${sourceText} promptTextLen=0 composerTextLen=${reportTextLen} `
+          + `action=use-composer-text-len`,
+        );
+      }
+
+      if (
+        (promptAlreadyWritten || sendExistingComposer)
+        && reportTextLen === 0
+        && !ok
+      ) {
+        const postFailEvidence = readAttachmentEvidence(`post-send-fail:${sourceText}`);
+        const postFailTextLen = Math.max(0, Number(postFailEvidence && postFailEvidence.textLen) || 0);
+        if (postFailTextLen > 0) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][SEND_TEXTLEN_INCONSISTENT] source=${sourceText} promptTextLen=0 composerTextLen=${postFailTextLen} `
+            + `reason=${reason || '-'} action=report-composer-len`,
+          );
+        }
+      }
+
       ToolboxShell.appendLog(
         `[${logPrefix}][SEND_FLOW][DONE] source=${sourceText} ok=${ok ? 1 : 0} reason=${reason} `
-        + `attachmentReady=${attachmentReady ? 1 : 0} textLen=${promptText.length}`,
+        + `attachmentReady=${attachmentReady ? 1 : 0} textLen=${reportTextLen}`,
       );
 
       const acceptable = isSendResultAcceptable(sendCoreResult) || ok;
@@ -16837,10 +17172,13 @@
         cancelledAfterSend: !!(sendCoreResult && sendCoreResult.cancelledAfterSend),
         verifyReason: sendCoreResult && sendCoreResult.verifyReason ? sendCoreResult.verifyReason : '',
         attachmentReady,
-        textLen: promptText.length,
+        textLen: reportTextLen,
         source: sourceText,
         wait: !ok && sendCoreResult && sendCoreResult.wait === true,
-        retryable: !ok && sendCoreResult && sendCoreResult.retryable === true,
+        retryable: !ok && (
+          (sendCoreResult && sendCoreResult.retryable === true)
+          || String(reason || '').startsWith('send-action-lock:')
+        ),
         shouldWaitReply: ok && (options.sendKind === 'initial' || options.sendKind === 'continue' || options.sendKind === 'verification'),
       };
     }
@@ -16852,16 +17190,19 @@
       const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
       const confirmTimeoutMs = Math.max(1500, Number(options.confirmTimeoutMs || options.timeoutMs) || 3000);
 
-      const readAttachmentEvidence = () => {
+      const readAttachmentEvidence = (tag) => {
         if (
           typeof ComposerAttachments !== 'undefined'
           && ComposerAttachments
           && typeof ComposerAttachments.getSharedComposerAttachmentEvidence === 'function'
         ) {
-          return ComposerAttachments.getSharedComposerAttachmentEvidence(sourceText, { heavy: true });
+          return ComposerAttachments.getSharedComposerAttachmentEvidence(tag || sourceText, {
+            heavy: true,
+            forceRefresh: true,
+          });
         }
         if (typeof getUnifiedComposerAttachmentState === 'function') {
-          const unified = getUnifiedComposerAttachmentState(sourceText, { heavy: true });
+          const unified = getUnifiedComposerAttachmentState(tag || sourceText, { heavy: true });
           const fileCount = Math.max(0, Number(unified.fileCount) || 0);
           return {
             hasAttachment: !!unified.hasAttachment,
@@ -16880,12 +17221,12 @@
         };
       };
 
-      const attachmentEvidence = readAttachmentEvidence();
-      const normalizedCount = Math.max(
+      let attachmentEvidence = readAttachmentEvidence(`pre-send-wait-entry:${sourceText}`);
+      let normalizedCount = Math.max(
         0,
         Number(attachmentEvidence.normalizedCount != null ? attachmentEvidence.normalizedCount : attachmentEvidence.count) || 0,
       );
-      const composerAttached = normalizedCount > 0 && Number(attachmentEvidence.uploadingCount || 0) === 0;
+      let composerAttached = normalizedCount > 0 && Number(attachmentEvidence.uploadingCount || 0) === 0;
 
       const sendResult = await runSharedComposerSendFlow(Object.assign({}, options, {
         source: sourceText,
@@ -16950,13 +17291,29 @@
         }
       }
 
-      let composerTextLen = 0;
+      attachmentEvidence = readAttachmentEvidence(`post-send-wait-entry:${sourceText}`);
+      normalizedCount = Math.max(
+        0,
+        Number(attachmentEvidence.normalizedCount != null ? attachmentEvidence.normalizedCount : attachmentEvidence.count) || 0,
+      );
+      composerAttached = normalizedCount > 0 && Number(attachmentEvidence.uploadingCount || 0) === 0;
+      if (!composerAttached && sendResult && sendResult.attachmentReady === true) {
+        composerAttached = true;
+        if (normalizedCount <= 0) {
+          normalizedCount = 1;
+        }
+      }
+
+      let composerTextLen = Math.max(0, Number(sendResult && sendResult.textLen) || 0);
       if (
         typeof ComposerApi !== 'undefined'
         && ComposerApi
         && typeof ComposerApi.getComposerText === 'function'
       ) {
-        composerTextLen = String(ComposerApi.getComposerText() || '').trim().length;
+        composerTextLen = Math.max(
+          composerTextLen,
+          String(ComposerApi.getComposerText() || '').trim().length,
+        );
       }
 
       const conversationId = readConversationId();
@@ -16970,9 +17327,13 @@
           || 'not-submitted',
         );
 
+      const composerAttachedCount = composerAttached
+        ? Math.max(normalizedCount, 1)
+        : 0;
+
       ToolboxShell.appendLog(
         `[${logPrefix}][SEND_WAIT_ENTRY][DONE] source=${sourceText} ok=${flowOk ? 1 : 0} `
-        + `submitted=${canEnterWaitingReply ? 1 : 0} composerAttached=${composerAttached ? 1 : 0} `
+        + `submitted=${canEnterWaitingReply ? 1 : 0} composerAttached=${composerAttachedCount} `
         + `conversationId=${conversationId || '-'} turnCount=${turnCount}`,
       );
 
@@ -16980,7 +17341,7 @@
         ok: flowOk,
         reason: flowReason,
         submitted: canEnterWaitingReply,
-        composerAttached,
+        composerAttached: composerAttachedCount > 0,
         conversationSent,
         canEnterWaitingReply,
         composerTextLen,
@@ -18149,7 +18510,7 @@
           assistantBatchTerminalStop: !isDone,
           batchReplyClassifyStatus: strictTerminal.status || 'done',
           batchReplyClassifyReason: strictTerminal.reason || 'terminal-signal-detected',
-          reason: isDone ? 'assistant-done-signal' : `batch-reply-${strictTerminal.status || 'blocked'}`,
+          reason: isDone ? 'task-done-signal' : `batch-reply-${strictTerminal.status || 'blocked'}`,
           source: sourceText,
           loopMode: isLoopMode,
           copied: !!waitCopyResult.copied,
@@ -18212,9 +18573,9 @@
       );
 
       if (assistantDoneSignalMatched) {
-        const doneSignalLine = `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} key=${assistantMessageKey || '-'}`;
+        const doneSignalLine = `[COPY_HOTKEY_CONTINUE][task-done-signal] source=${sourceText || '-'} key=${assistantMessageKey || '-'}`;
         safeAppendLog(doneSignalLine);
-        console.warn('[COPY_HOTKEY_CONTINUE][assistant-done-signal]', {
+        console.warn('[COPY_HOTKEY_CONTINUE][task-done-signal]', {
           source: sourceText || '-',
           key: assistantMessageKey || '-',
           preview: formatDoneSignalPreview(assistantRawText),
@@ -18228,7 +18589,7 @@
         return {
           ok: true,
           assistantDoneSignal: true,
-          reason: 'assistant-done-signal',
+          reason: 'task-done-signal',
           source: sourceText,
           loopMode: isLoopMode,
           copied: !!waitCopyResult.copied,
@@ -18430,17 +18791,18 @@
       if (!isSendResultAcceptable(continueResult)) {
         const detail = continueResult && continueResult.reason ? continueResult.reason : '';
         if (
-          detail === 'assistant-done-signal-before-send'
+          detail === 'task-done-signal-before-send'
+          || detail === 'assistant-done-signal-before-send'
           || (continueResult && continueResult.assistantDoneSignal === true)
         ) {
           safeAppendLog(
-            `[COPY_HOTKEY_CONTINUE][assistant-done-signal] source=${sourceText || '-'} reason=${detail || 'assistant-done-signal-before-send'}`,
+            `[COPY_HOTKEY_CONTINUE][task-done-signal] source=${sourceText || '-'} reason=${detail || 'task-done-signal-before-send'}`,
           );
-          setStatus('检测到终止信号，任务已完成，不再继续', 'success');
+          setStatus('检测到完成标记，任务已完成，不再继续', 'success');
           return {
             ok: true,
             assistantDoneSignal: true,
-            reason: detail || 'assistant-done-signal-before-send',
+            reason: detail || 'task-done-signal-before-send',
             source: sourceText,
             loopMode: isLoopMode,
             copied: !!copiedText,
@@ -19535,16 +19897,18 @@
             result
             && (
               result.assistantDoneSignal === true
+              || result.reason === 'task-done-signal'
               || result.reason === 'assistant-done-signal'
+              || result.reason === 'task-done-signal-before-send'
               || result.reason === 'assistant-done-signal-before-send'
             )
           ) {
-            loopStopReason = 'assistant-done-signal';
+            loopStopReason = 'task-done-signal';
             safeAppendLog(
-              `[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=assistant-done-signal index=${copyHotkeyContinueLoopCount}`,
+              `[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=task-done-signal index=${copyHotkeyContinueLoopCount}`,
             );
             console.warn('[COPY_HOTKEY_CONTINUE_LOOP][stop]', {
-              reason: 'assistant-done-signal',
+              reason: 'task-done-signal',
               index: copyHotkeyContinueLoopCount,
             });
             break;
@@ -19611,7 +19975,7 @@
           const stopSignalResult = detectCopyHotkeyLoopStopSignal(copyHotkeyContinueLoopCount);
 
           if (stopSignalResult && stopSignalResult.matched) {
-            loopStopReason = stopSignalResult.reason || 'assistant-done-signal';
+            loopStopReason = stopSignalResult.reason || 'task-done-signal';
 
             safeAppendLog(
               `[COPY_HOTKEY_CONTINUE_LOOP][stop] reason=${loopStopReason} index=${copyHotkeyContinueLoopCount}`,
@@ -19676,7 +20040,7 @@
         if (stoppedByUser && loopStopReason === 'natural-end') {
           loopStopReason = 'user-stop';
         }
-        if (loopStopReason === 'assistant-done-signal') {
+        if (loopStopReason === 'task-done-signal' || loopStopReason === 'assistant-done-signal') {
           setStatus(
             `检测到终止信号，连续复制+快捷键+继续已结束，共执行 ${copyHotkeyContinueLoopCount} 轮`,
             'success',
@@ -20788,6 +21152,12 @@
 
       dedupeActiveGroupQueue('add-files');
       syncActiveGroupCountInCache();
+
+      setQueueRestorePhase('ready', {
+        groupId: state.activeGroupId,
+        loadedOnce: true,
+        reason: 'add-files',
+      });
 
       schedulePersistQueueLight('addFiles', 1500);
       scheduleRefreshUploadGroupCountsLight('addFiles', 2000);
@@ -22719,6 +23089,7 @@
         }
       }
 
+      const beforeFileCount = getLocalUploadFileCount();
       renderUploadButtonsOnly({
         heavy: false,
         skipCapabilityScan: true,
@@ -22726,8 +23097,13 @@
         buttonTasksReason: reasonText,
       });
       scheduleRenderUpload(reasonText);
+      assertUploadFilesNotClearedUnexpectedly(
+        beforeFileCount,
+        getLocalUploadFileCount(),
+        `resetMainUploadRuntime:${reasonText}`,
+      );
       ToolboxShell.appendLog(
-        `[UPLOAD_RESET][MAIN] reason=${reasonText}`,
+        `[UPLOAD_RESET][MAIN] reason=${reasonText} activeFiles=${getActiveGroupFiles().length}`,
       );
     }
 
@@ -24449,6 +24825,28 @@
     function scheduleRenderUpload(reason = '') {
       const reasonText = String(reason || '').trim();
       const reasonNeedsSend = isSendRelatedUploadRenderReason(reasonText);
+      const isSuccessResetRender = /success-reset|failed-reset|home:success:/i.test(reasonText);
+
+      if (isSuccessResetRender) {
+        const beforeCount = getLocalUploadFileCount();
+        if (reasonText.includes('success-reset')) {
+          appendUploadLog(
+            `[UPLOAD_RENDER][SUCCESS_RESET_RUNTIME_ONLY] reason=${reasonText} ${formatUploadQueueDiagExtra()}`,
+          );
+        } else if (reasonText.includes('home:success:')) {
+          appendUploadLog(
+            `[UPLOAD_RENDER][HOME_SUCCESS_PRESERVE_FILES] reason=${reasonText} ${formatUploadQueueDiagExtra()}`,
+          );
+        }
+        if (!isUploadRunning()) {
+          resetUploadRuntimeState(`render:${reasonText}`);
+        }
+        assertUploadFilesNotClearedUnexpectedly(
+          beforeCount,
+          getLocalUploadFileCount(),
+          reasonText,
+        );
+      }
 
       if (isUploadCriticalNow() && !reasonNeedsSend) {
         scheduleUploadUiLightRefresh(reasonText);
@@ -28359,7 +28757,10 @@
         }
 
         setLastRealUploadError('', { reason: `manual-upload-success:${source}` });
-        setStatus('文件已上传到输入框', 'success');
+        appendUploadLog(
+          `[UPLOAD_DONE][PRESERVE_LOCAL_FILES] uploaded=${Number(result.uploadedCount) || 0} reason=${source} ${formatUploadQueueDiagExtra()}`,
+        );
+        setStatus('上传完成，本地文件队列已保留，可继续复用或手动清空。', 'success');
         ToolboxShell.appendLog(
           `[UPLOAD][DONE] source=${source} uploaded=${result.uploadedCount || 0} failed=${result.failedCount || 0} skipped=${result.skippedCount || 0}`,
         );
@@ -28409,8 +28810,35 @@
 
     async function runStartUploadButtonCore(options = {}) {
       const source = String(options.source || 'manual-start-upload').trim() || 'manual-start-upload';
+      const preserveFiles = options.preserveFiles !== false;
       const scopeGroupId = getActiveUploadScopeGroupId(options);
       const scopeGroupName = getActiveGroupName ? getActiveGroupName() : '';
+      const beforeFileCount = getLocalUploadFileCount();
+
+      appendUploadLog(
+        `[UPLOAD_START][BEGIN] reason=${source} preserveFiles=${preserveFiles ? 1 : 0} ${formatUploadQueueDiagExtra()}`,
+      );
+
+      if (beforeFileCount <= 0) {
+        appendUploadLog(
+          `[UPLOAD_START][BLOCKED_NO_FILES] ${formatUploadQueueDiagExtra()}`,
+        );
+        setStatus('当前没有可上传文件，请先选择文件。', 'warning', {
+          owner: 'upload',
+          shortText: '无文件',
+        });
+        return {
+          ok: false,
+          reason: 'no-local-files',
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+
+      if (preserveFiles) {
+        resetUploadRuntimeState(`start-upload:${source}`);
+      }
 
       const stopFinalUploadBlock = blockStopFinalUploadBySource(source);
       if (stopFinalUploadBlock) {
@@ -28518,10 +28946,30 @@
           `[UPLOAD_SHARED][DONE] source=${source} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
         );
 
+        assertUploadFilesNotClearedUnexpectedly(
+          beforeFileCount,
+          getLocalUploadFileCount(),
+          `runStartUploadButtonCore:done:${source}`,
+        );
+
+        if (result && result.ok && preserveFiles) {
+          const uploadedCount = Number(result.uploadedCount) || 0;
+          appendUploadLog(
+            `[UPLOAD_DONE][PRESERVE_LOCAL_FILES] uploaded=${uploadedCount} reason=${source} ${formatUploadQueueDiagExtra()}`,
+          );
+          setStatus('上传完成，本地文件队列已保留，可继续复用或手动清空。', 'success', {
+            owner: 'upload',
+            shortText: '上传完成',
+          });
+        }
+
         return result;
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] shared start upload failed', err);
+        appendUploadLog(
+          `[UPLOAD_START][ERROR] error=${errText} stack=${err && err.stack ? String(err.stack).slice(0, 400) : '-'}`,
+        );
         ToolboxShell.appendLog(`[UPLOAD_SHARED][FAILED] source=${source} error=${errText}`);
         setLastRealUploadError(`上传失败：${errText}`, { clearStatus: false, source: 'real-upload' });
         setStatus(`上传失败：${errText}`, 'error');
@@ -30506,8 +30954,8 @@
           }
 
           sendResult = await sendUnifiedMessage({
-            source: stableSendSource,
-            mode: isManualSend ? 'upload-panel-send-manual' : 'upload-panel-send',
+            source: isManualSend ? 'manual-send-message' : stableSendSource,
+            mode: isManualSend ? 'manual' : 'upload-panel-send',
             sendExistingComposer: true,
             text: '',
             waitForReplyIdle: true,
@@ -33949,9 +34397,16 @@
         });
       }
 
+      const fileCountBeforeRestore = getLocalUploadFileCount();
       if (shouldAttemptQueueRestore(`startUploadFromCurrentQueue:${uploadSource}`)) {
         const restored = await ensureQueueReadyForVisibleUploadList(
           `startUploadFromCurrentQueue:${uploadSource}`,
+        );
+
+        assertUploadFilesNotClearedUnexpectedly(
+          fileCountBeforeRestore,
+          getLocalUploadFileCount(),
+          `startUploadFromCurrentQueue:restore:${uploadSource}`,
         );
 
         ToolboxShell.appendLog(
@@ -35511,6 +35966,24 @@
       },
       'click-new-chat': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
+        if (
+          typeof AutoQueueModule !== 'undefined'
+          && AutoQueueModule
+          && typeof AutoQueueModule.isAutoQueueWaitingReply === 'function'
+          && AutoQueueModule.isAutoQueueWaitingReply()
+        ) {
+          const appendLog = typeof AutoQueueModule.appendAutoQueueLog === 'function'
+            ? AutoQueueModule.appendAutoQueueLog
+            : ToolboxShell.appendLog.bind(ToolboxShell);
+          appendLog(
+            `[AUTOQ][GO_HOME_BLOCKED_WAITING_REPLY] source=upload-click-new-chat targetId=cgpt-open-chatgpt-home`,
+          );
+          if (typeof AutoQueueModule.blockNavigationDuringWaitingReply === 'function') {
+            AutoQueueModule.blockNavigationDuringWaitingReply('upload-click-new-chat', {});
+          }
+          setStatus('当前批量任务正在等待回复，已阻止跳转到新聊天页，避免丢失任务上下文。', 'warn');
+          return true;
+        }
         void runJumpHome(src).catch((err) => {
           const errText = formatToolboxError(err);
           console.error('[UPLOAD_UI_ACTION][jump-home:failed]', err);
@@ -35537,9 +36010,16 @@
         if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.logButtonTaskClick === 'function') {
           ButtonTasks.logButtonTaskClick('start-upload', 'upload', uploadTask.phase, uploadTask.runId);
         }
+        appendUploadLog(
+          `[UPLOAD_START][CLICK] ${formatUploadQueueDiagExtra()}`,
+        );
         ToolboxShell.appendLog('[UPLOAD][START_CLICK]');
         ToolboxShell.appendLog('[UPLOAD_UI_ACTION][hit] action=start-upload source=multi-upload-start-button');
-        void runStartUploadButtonCore({ source: 'multi-upload-start-button' }).catch((err) => {
+        void runStartUploadButtonCore({
+          source: 'multi-upload-start-button',
+          preserveFiles: true,
+          reason: 'user-click-start-upload',
+        }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] start upload UI action failed', err);
           setStatus(`上传失败：${errText}`, 'error');
@@ -35972,9 +36452,10 @@
       });
     }
 
-    async function goHomeByClickNewChat(source) {
+    async function goHomeByClickNewChat(source, navOptions = {}) {
       try {
         const src = source || '-';
+        const navOpts = navOptions && typeof navOptions === 'object' ? navOptions : {};
         const canSwitch = typeof switchToNewChatUnified === 'function';
 
         if (!canSwitch) {
@@ -35986,11 +36467,20 @@
           };
         }
 
+        if (
+          typeof AutoQueueModule !== 'undefined'
+          && AutoQueueModule
+          && typeof AutoQueueModule.blockNavigationDuringWaitingReply === 'function'
+          && AutoQueueModule.blockNavigationDuringWaitingReply(`goHomeByClickNewChat:${src}`, navOpts)
+        ) {
+          return { ok: false, reason: 'blocked-waiting-reply' };
+        }
+
         setStatus('正在打开新聊天...', 'running');
-        const switchResult = await switchToNewChatUnified(`go-home:${src}`, {
+        const switchResult = await switchToNewChatUnified(`go-home:${src}`, Object.assign({
           statusOnReady: '新聊天已就绪',
           statusOnTimeout: null,
-        });
+        }, navOpts));
 
         if (switchResult && switchResult.ok === true) {
           ToolboxShell.appendLog('[HOME][NEW_CHAT_CLICKED]');

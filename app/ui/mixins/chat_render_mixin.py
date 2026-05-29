@@ -459,9 +459,6 @@ class ChatRenderMixin:
         self._schedule_save_sessions_to_disk()
         return True
 
-    def _patch_waiting_elapsed_in_transcript(self, session):
-        return self._update_waiting_status_label(session)
-
     def _update_waiting_status_label(self, session):
         label = getattr(self, "waiting_status_label", None)
         if label is None:

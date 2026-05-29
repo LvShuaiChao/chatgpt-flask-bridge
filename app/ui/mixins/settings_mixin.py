@@ -1,9 +1,4 @@
-from app.server import (
-    get_server_port,
-    get_server_public_host,
-    is_server_running,
-    set_debug_mode,
-)
+from app.server import set_debug_mode
 
 import traceback
 
@@ -195,18 +190,6 @@ class SettingsMixin:
         self._apply_fixed_bridge_behavior_settings()
     def _resolve_listen_host(self):
         return "127.0.0.1"
-
-    def _service_host_port_for_display(self, status=None):
-        status = status or {}
-        if status.get("server_running") and status.get("server_port"):
-            return (
-                status.get("server_host") or get_server_public_host(),
-                str(status.get("server_port")),
-            )
-        if is_server_running():
-            return get_server_public_host(), str(get_server_port() or "")
-        port = getattr(self, "_port_text", None) or "5000"
-        return "127.0.0.1", str(port)
 
     def _load_app_settings_values(self):
         defaults = DEFAULT_APP_SETTINGS

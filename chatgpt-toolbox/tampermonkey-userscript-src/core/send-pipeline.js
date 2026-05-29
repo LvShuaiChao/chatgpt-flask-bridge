@@ -21,6 +21,82 @@
     });
   }
 
+  function sendPipelineCreatePipelineState() {
+    return {
+      composerReady: false,
+      promptWritten: false,
+      sendButtonReady: false,
+    };
+  }
+
+  function sendPipelineBuildCancelledDetail(ctx, shouldStopFn) {
+    const ps = ctx && ctx._pipelineState ? ctx._pipelineState : {};
+    const mode = String((ctx && ctx.mode) || '');
+    let userCancelled = false;
+    let staleRun = false;
+    let anotherSendRunning = false;
+
+    if (typeof state !== 'undefined' && state) {
+      if (state.stopRequested === true) {
+        userCancelled = true;
+      }
+      if (mode !== 'autoqueue-single-initial' && state.running !== true) {
+        staleRun = true;
+      }
+      if (state.sendingNow === true && ctx && ctx._singleInitialSendLock !== true) {
+        anotherSendRunning = false;
+      }
+    }
+
+    let reason = 'stale-run-cancelled';
+    if (userCancelled) {
+      reason = 'user-cancelled';
+    } else if (anotherSendRunning) {
+      reason = 'another-send-running';
+    } else if (!ps.composerReady) {
+      reason = 'composer-not-ready';
+    } else if (!ps.promptWritten && mode === 'autoqueue-single-initial') {
+      reason = 'prompt-write-failed';
+    } else if (!ps.sendButtonReady && mode === 'autoqueue-single-initial') {
+      reason = 'send-button-timeout';
+    }
+
+    return {
+      reason,
+      cancelToken: String((ctx && ctx.cancelTokenId) || '-'),
+      userCancelled: userCancelled ? 1 : 0,
+      staleRun: staleRun ? 1 : 0,
+      anotherSendRunning: anotherSendRunning ? 1 : 0,
+      composerReady: ps.composerReady ? 1 : 0,
+      promptWritten: ps.promptWritten ? 1 : 0,
+      sendButtonReady: ps.sendButtonReady ? 1 : 0,
+    };
+  }
+
+  function sendPipelineFailIfStopped(result, ctx, shouldStopFn) {
+    if (typeof shouldStopFn !== 'function' || !shouldStopFn()) {
+      return false;
+    }
+    const detail = sendPipelineBuildCancelledDetail(ctx, shouldStopFn);
+    result.reason = detail.reason;
+    sendPipelineLog('[SEND_PIPELINE][CANCELLED_DETAIL]', Object.assign({}, ctx, detail));
+    sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: detail.reason }));
+    return true;
+  }
+
+  function sendPipelineMapSingleInitialButtonFailure(reason) {
+    const raw = String(reason || '').trim();
+    if (
+      raw === 'send_button_not_found'
+      || raw === 'send_button_wait_timeout'
+      || raw === 'send_button_not_ready_after_text'
+      || raw === 'single-initial-send-button-timeout'
+    ) {
+      return 'send-button-timeout';
+    }
+    return raw;
+  }
+
   function sendPipelineLog(tag, fields) {
     const extra = fields && typeof fields === 'object' ? fields : {};
     const parts = [
@@ -34,6 +110,13 @@
       `wait_send=${extra.wait_send ? 1 : 0}`,
       `wait_reply=${extra.wait_reply ? 1 : 0}`,
     ];
+
+    if (extra.taskId) {
+      parts.push(`taskId=${String(extra.taskId)}`);
+    }
+    if (extra.taskTitle) {
+      parts.push(`taskTitle=${String(extra.taskTitle)}`);
+    }
 
     const line = parts.join(' ');
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
@@ -152,6 +235,7 @@
       'composer_text_lost_after_attachment',
       'composer_text_lost_after_rewrite',
       'send_button_not_found',
+      'send-button-not-found',
       'send_button_not_ready_after_text',
       'send_button_not_ready_with_attachment',
       'waiting_attachment_upload_done',
@@ -174,8 +258,11 @@
       'stable_send_timeout',
       'enter_fallback_failed',
       'send_button_not_found_enter_fallback_failed',
+      'send-action-lock',
+      'send-action-lock:task-running',
     ].includes(normalized)
-      || raw.startsWith('send_not_confirmed:');
+      || raw.startsWith('send_not_confirmed:')
+      || raw.startsWith('send-action-lock:');
     return retryable;
   }
 
@@ -389,7 +476,8 @@
       }
 
       if (typeof ctx.shouldStop === 'function' && ctx.shouldStop()) {
-        return { ok: false, reason: 'cancelled' };
+        const detail = sendPipelineBuildCancelledDetail(ctx, ctx.shouldStop);
+        return { ok: false, reason: detail.reason };
       }
 
       const capability = typeof getPageCapability === 'function'
@@ -756,6 +844,12 @@
       }
     }
 
+    const pipelineState = sendPipelineCreatePipelineState();
+    const isSingleInitialMode = mode === 'autoqueue-single-initial';
+    const composerReadyTimeoutMs = Number(opts.composerReadyTimeoutMs || 0) > 0
+      ? Number(opts.composerReadyTimeoutMs)
+      : (isSingleInitialMode ? 15000 : SEND_PIPELINE_COMPOSER_READY_TIMEOUT_MS);
+
     const ctx = {
       source,
       mode,
@@ -763,6 +857,11 @@
       sendExistingComposer,
       waitForReplyIdle,
       shouldStop,
+      taskId: String(opts.taskId || '-').trim() || '-',
+      taskTitle: String(opts.taskTitle || '-').trim() || '-',
+      cancelTokenId: String(opts.cancelTokenId || '-').trim() || '-',
+      _pipelineState: pipelineState,
+      _singleInitialSendLock: isSingleInitialMode,
     };
 
     const result = sendPipelineBuildResult({
@@ -797,6 +896,8 @@
     sendPipelineLog('[SEND_PIPELINE][START]', {
       source,
       mode,
+      taskId: ctx.taskId,
+      taskTitle: ctx.taskTitle,
       text_len: sendExistingComposer
         ? (typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim().length
@@ -852,9 +953,7 @@
     }
 
     try {
-      if (shouldStop()) {
-        result.reason = 'cancelled';
-        sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+      if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
         return result;
       }
 
@@ -866,12 +965,12 @@
 
       if (typeof waitUntilComposerReady === 'function') {
         const composerReady = await waitUntilComposerReady({
-          timeoutMs: SEND_PIPELINE_COMPOSER_READY_TIMEOUT_MS,
+          timeoutMs: composerReadyTimeoutMs,
           intervalMs: 200,
           source,
         });
         if (!composerReady) {
-          result.reason = 'composer_not_ready';
+          result.reason = isSingleInitialMode ? 'composer-not-ready' : 'composer_not_ready';
           result.retryable = true;
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
@@ -879,7 +978,10 @@
           }));
           return result;
         }
+        pipelineState.composerReady = true;
         sendPipelineLog('[SEND_PIPELINE][COMPOSER_READY]', Object.assign({}, ctx, { reason: '-' }));
+      } else {
+        pipelineState.composerReady = true;
       }
 
       if (waitForReplyIdle && typeof detectComposerResponseState === 'function') {
@@ -929,15 +1031,14 @@
         && !sendExistingComposer
       ) {
         for (let retryIndex = 0; retryIndex < SEND_PIPELINE_COMPOSER_SYNC_MAX_RETRIES; retryIndex += 1) {
-          if (shouldStop()) {
-            result.reason = 'cancelled';
-            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
             return result;
           }
 
           const syncCheck = await sendPipelineWriteAndVerifyText(text, source, retryIndex, ctx);
           if (syncCheck.ok) {
             textAlreadySynced = true;
+            pipelineState.promptWritten = true;
             sendPipelineLog('[SEND_PIPELINE][EARLY_TEXT_SYNC_OK]', Object.assign({}, ctx, {
               reason: 'write-before-attachment-wait',
             }));
@@ -951,7 +1052,9 @@
         }
 
         if (!textAlreadySynced) {
-          result.reason = 'composer_text_not_ready_before_attachment_wait';
+          result.reason = isSingleInitialMode
+            ? 'prompt-write-failed'
+            : 'composer_text_not_ready_before_attachment_wait';
           result.retryable = true;
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
@@ -1020,9 +1123,7 @@
         && text
         && !sendExistingComposer
       ) {
-        if (shouldStop()) {
-          result.reason = 'cancelled';
-          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+        if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
           return result;
         }
 
@@ -1040,9 +1141,7 @@
             retryable: true,
           }));
 
-          if (shouldStop()) {
-            result.reason = 'cancelled';
-            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
             return result;
           }
 
@@ -1054,7 +1153,9 @@
           );
 
           if (!rewriteCheck.ok) {
-            result.reason = String(rewriteCheck.reason || 'composer_text_lost_after_attachment_wait');
+            result.reason = isSingleInitialMode
+              ? 'prompt-write-failed'
+              : String(rewriteCheck.reason || 'composer_text_lost_after_attachment_wait');
             result.retryable = true;
             sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
               reason: result.reason,
@@ -1062,6 +1163,7 @@
             }));
             return result;
           }
+          pipelineState.promptWritten = true;
         }
       }
 
@@ -1072,24 +1174,25 @@
         let lastSyncReason = 'composer_text_not_synced';
 
         for (let retryIndex = 0; retryIndex < SEND_PIPELINE_COMPOSER_SYNC_MAX_RETRIES; retryIndex += 1) {
-          if (shouldStop()) {
-            result.reason = 'cancelled';
-            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
             return result;
           }
 
           const syncCheck = await sendPipelineWriteAndVerifyText(text, source, retryIndex, ctx);
           if (syncCheck.ok) {
             syncOk = true;
+            pipelineState.promptWritten = true;
             break;
           }
           lastSyncReason = String(syncCheck.reason || 'composer_text_not_synced');
         }
 
         if (!syncOk) {
-          result.reason = lastSyncReason === 'composer_text_not_synced'
-            ? 'composer_text_not_ready'
-            : lastSyncReason;
+          result.reason = isSingleInitialMode
+            ? 'prompt-write-failed'
+            : (lastSyncReason === 'composer_text_not_synced'
+              ? 'composer_text_not_ready'
+              : lastSyncReason);
           result.retryable = true;
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
@@ -1234,6 +1337,65 @@
       }
 
       const isAutoQueueSend = /autoq|batch|task/i.test(String(ctx.source || ''));
+      const waitTimeoutMs = buttonMaxAttempts > 0 && buttonIntervalMs > 0
+        ? buttonMaxAttempts * buttonIntervalMs
+        : 15000;
+
+      if (typeof sendTextThroughComposer === 'function') {
+        const textAlreadyInComposer = sendExistingComposer === true
+          || textAlreadySynced === true
+          || pipelineState.promptWritten === true;
+
+        const composerSendResult = await sendTextThroughComposer({
+          text: textAlreadyInComposer ? '' : text,
+          sendExistingComposer: textAlreadyInComposer,
+          source,
+          mode,
+          taskId: ctx.taskId,
+          taskTitle: ctx.taskTitle,
+          requireTextWritten: !textAlreadyInComposer && !!text,
+          waitButtonTimeoutMs: waitTimeoutMs,
+          shouldStop,
+          waitForReplyIdle,
+          allowEnterFallback,
+          maxStableAttempts: maxAttempts,
+        });
+
+        result.ok = composerSendResult.ok === true;
+        result.reason = String(composerSendResult.reason || '');
+        if (isSingleInitialMode && !result.ok) {
+          result.reason = sendPipelineMapSingleInitialButtonFailure(result.reason);
+        }
+        result.retryable = sendPipelineIsRetryableReason(result.reason);
+        if (!result.ok && composerSendResult.reason === 'assistant-busy') {
+          result.wait_reply = true;
+        }
+        if (!result.ok && (
+          composerSendResult.reason === 'send-button-not-found'
+          || composerSendResult.reason === 'send-button-disabled'
+          || composerSendResult.reason === 'page-throttled'
+        )) {
+          result.wait_send = true;
+        }
+
+        if (result.ok) {
+          pipelineState.sendButtonReady = true;
+          sendPipelineLog('[SEND_PIPELINE][DONE]', Object.assign({}, ctx, {
+            reason: result.reason || 'sent',
+            retryable: result.retryable,
+            wait_reply: result.wait_reply,
+          }));
+        } else {
+          sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
+            reason: result.reason || 'unknown',
+            retryable: result.retryable,
+            wait_send: result.wait_send ? 1 : 0,
+            wait_reply: result.wait_reply,
+          }));
+        }
+        return result;
+      }
+
       const buttonWaitOptions = {
         requireText: !sendExistingComposer || !!text,
         expectedText: text && !sendExistingComposer ? text : '',
@@ -1257,9 +1419,7 @@
       if (buttonWait.needRewriteText && text && !sendExistingComposer) {
         let rewriteOk = false;
         for (let rewriteIndex = 0; rewriteIndex < SEND_PIPELINE_TEXT_REWRITE_MAX; rewriteIndex += 1) {
-          if (shouldStop()) {
-            result.reason = 'cancelled';
-            sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, { reason: result.reason }));
+          if (sendPipelineFailIfStopped(result, ctx, shouldStop)) {
             return result;
           }
           const syncCheck = await sendPipelineWriteAndVerifyText(
@@ -1270,13 +1430,16 @@
           );
           if (syncCheck.ok) {
             rewriteOk = true;
+            pipelineState.promptWritten = true;
             break;
           }
           await sendPipelineSleep(SEND_PIPELINE_COMPOSER_SYNC_DELAYS_MS[rewriteIndex] || 500);
         }
 
         if (!rewriteOk) {
-          result.reason = 'composer_text_lost_after_rewrite';
+          result.reason = isSingleInitialMode
+            ? 'prompt-write-failed'
+            : 'composer_text_lost_after_rewrite';
           result.retryable = true;
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
@@ -1304,6 +1467,9 @@
 
       if (!buttonWait.ok) {
         result.reason = String(buttonWait.reason || 'send_button_not_found');
+        if (isSingleInitialMode) {
+          result.reason = sendPipelineMapSingleInitialButtonFailure(result.reason);
+        }
         if (buttonWait.wait_reply) {
           result.wait_reply = true;
         }
@@ -1353,6 +1519,8 @@
         }));
         return result;
       }
+
+      pipelineState.sendButtonReady = true;
 
       useEnterFallback = allowEnterFallback && buttonWait.useEnterFallback === true;
 

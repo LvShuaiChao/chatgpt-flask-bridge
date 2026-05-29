@@ -143,11 +143,14 @@ function clickElementLikeUserUnified(el, reason) {
  * @param {string|false|null} [options.statusOnTimeout] — undefined: default timeout message; null/false: skip
  */
 async function switchToNewChatUnified(reason, options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const reasonText = reason || 'new-chat';
+
   if (
     typeof AutoQueueModule !== 'undefined'
     && AutoQueueModule
     && typeof AutoQueueModule.blockNavigationDuringTerminalConfirm === 'function'
-    && AutoQueueModule.blockNavigationDuringTerminalConfirm('switchToNewChatUnified:' + (reason || 'new-chat'))
+    && AutoQueueModule.blockNavigationDuringTerminalConfirm('switchToNewChatUnified:' + reasonText)
   ) {
     return {
       ok: false,
@@ -155,8 +158,46 @@ async function switchToNewChatUnified(reason, options) {
     };
   }
 
-  const opts = options && typeof options === 'object' ? options : {};
-  const reasonText = reason || 'new-chat';
+  if (
+    typeof AutoQueueModule !== 'undefined'
+    && AutoQueueModule
+    && typeof AutoQueueModule.blockNavigationDuringWaitingReply === 'function'
+    && AutoQueueModule.blockNavigationDuringWaitingReply('switchToNewChatUnified:' + reasonText, opts)
+  ) {
+    if (
+      typeof AutoQueueModule.appendAutoQueueLog === 'function'
+    ) {
+      AutoQueueModule.appendAutoQueueLog(
+        `[AUTOQ][NEW_CHAT_BLOCKED_WAITING_REPLY] source=${reasonText}`,
+      );
+    }
+    return {
+      ok: false,
+      reason: 'blocked-waiting-reply',
+    };
+  }
+
+  if (
+    !opts.afterTaskCompleted
+    && !opts.forceByUserStop
+    && !opts.afterFailureSkip
+    && !opts.userConfirmed
+    && typeof AutoQueueModule !== 'undefined'
+    && AutoQueueModule
+    && typeof AutoQueueModule.isAutoQueueWaitingReply === 'function'
+    && AutoQueueModule.isAutoQueueWaitingReply()
+  ) {
+    if (typeof AutoQueueModule.appendAutoQueueLog === 'function') {
+      AutoQueueModule.appendAutoQueueLog(
+        `[AUTOQ][OPEN_HOME_BLOCKED_WAITING_REPLY] source=${reasonText}`,
+      );
+    }
+    return {
+      ok: false,
+      reason: 'blocked-waiting-reply',
+    };
+  }
+
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 15000;
 
   const defaultReadyMsg = '新聊天已就绪，准备发送下一个任务';

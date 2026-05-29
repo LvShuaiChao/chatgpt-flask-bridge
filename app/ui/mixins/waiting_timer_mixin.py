@@ -116,26 +116,6 @@ class WaitingTimerMixin:
 
         return is_waiting_placeholder_message(message)
 
-    def _display_text_for_message(self, message, session):
-        plain = getattr(message, "text", "") or getattr(message, "content", "") or ""
-
-        role = (getattr(message, "role", "") or "").strip().lower()
-        if role != "assistant":
-            return plain
-
-        if not session or not self._session_is_waiting_reply(session):
-            return plain
-
-        if not self._is_pending_wait_display_message(message):
-            return plain
-
-        base = self._waiting_reply_display_base(plain)
-        elapsed = self._format_elapsed_mmss(self._session_pending_elapsed_sec(session))
-        page_hint = self._reply_wait_page_hint_for_session(session)
-        if page_hint:
-            return f"{base} {elapsed}｜{page_hint}"
-        return f"{base} {elapsed}"
-
     def _bound_page_info_for_reply_wait(self, session):
         if session is None or not hasattr(self, "_resolve_bound_page_info"):
             return None

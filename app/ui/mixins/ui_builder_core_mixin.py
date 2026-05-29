@@ -195,53 +195,6 @@ class UiBuilderCoreMixin:
         row.addStretch()
         return row
 
-    def _build_debug_page(self):
-        """调试页：集中放置危险操作、测试操作、诊断操作。"""
-        self._ensure_tm_action_buttons()
-
-        page = QWidget()
-        page.setObjectName("DebugPage")
-
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
-
-        title = QLabel("调试工具")
-        title.setObjectName("SectionTitle")
-        outer.addWidget(title)
-
-        page_group, page_layout = self._make_group_vbox("页面调试")
-        page_layout.setSpacing(8)
-
-        hint = self._make_hint_label(
-            "这里放置调试、诊断、危险操作按钮。普通聊天主页不显示这些按钮，避免误操作。"
-        )
-        page_layout.addWidget(hint)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-
-        self.close_other_pages_btn.setObjectName("DangerButton")
-        self.close_other_pages_btn.setFixedHeight(30)
-        self.close_other_pages_btn.setMinimumHeight(30)
-        self.close_other_pages_btn.setMaximumHeight(30)
-        row.addWidget(self.close_other_pages_btn)
-
-        self.close_bound_page_btn.setObjectName("DangerButton")
-        self.close_bound_page_btn.setFixedHeight(30)
-        self.close_bound_page_btn.setMinimumHeight(30)
-        self.close_bound_page_btn.setMaximumHeight(30)
-        row.addWidget(self.close_bound_page_btn)
-
-        row.addStretch()
-
-        page_layout.addLayout(row)
-        outer.addWidget(page_group)
-
-        outer.addStretch()
-        return page
-
     def _on_main_tab_changed(self, index):
         if index < 0:
             return
@@ -272,7 +225,6 @@ class UiBuilderCoreMixin:
         self.chat_page = self._build_chat_page()
         self.cursor_code_page = self._build_cursor_code_page()
         self.settings_page = self._build_settings_page()
-        # 调试页仅在显式启用调试模式时再挂载，默认不在主界面展示
 
         self.main_tabs.addTab(self.chat_page, "聊天")
         self.main_tabs.addTab(self.cursor_code_page, "Cursor代码")

@@ -3101,6 +3101,15 @@
     async function pollBridge() {
       const cfg = getConfig();
 
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.shouldPauseWaitingReplyForInvalidPageContext === 'function'
+        && AutoQueueModule.shouldPauseWaitingReplyForInvalidPageContext('bridge-poll')
+      ) {
+        return true;
+      }
+
       if (!cfg.bridgeEnabled || state.polling) {
         return true;
       }

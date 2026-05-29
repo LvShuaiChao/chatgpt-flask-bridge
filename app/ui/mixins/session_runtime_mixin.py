@@ -24,24 +24,6 @@ class SessionRuntimeMixin:
             store[session_id] = entry
         return entry
 
-    def _session_message_records(self, session):
-        if session is None:
-            return []
-        runtime = self._session_runtime_entry(session)
-        raw_messages = runtime.get("all_messages_raw")
-        if isinstance(raw_messages, list) and raw_messages:
-            return list(raw_messages)
-        records = []
-        for message in getattr(session, "messages", []) or []:
-            try:
-                records.append(self._message_to_dict(message))
-            except Exception:
-                logger.exception(
-                    "[SESSION][MESSAGE_RECORD_BUILD_FAILED] session_id=%s",
-                    getattr(session, "session_id", "-"),
-                )
-        return records
-
     def _session_all_messages_loaded(self, session) -> bool:
         runtime = self._session_runtime_entry(session)
         if runtime.get("all_messages_loaded") is True:

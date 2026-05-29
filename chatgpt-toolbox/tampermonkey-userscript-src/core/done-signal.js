@@ -44,6 +44,9 @@
   }
 
   function hasAssistantDoneSignalInText(text, options = {}) {
+    if (typeof hasBatchTaskDoneSignal === 'function' && hasBatchTaskDoneSignal(text)) {
+      return true;
+    }
     if (typeof analyzeDoneSignalText === 'function') {
       return Boolean(analyzeDoneSignalText(text, options).matched);
     }

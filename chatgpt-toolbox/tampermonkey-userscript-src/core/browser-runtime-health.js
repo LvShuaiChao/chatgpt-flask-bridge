@@ -239,6 +239,13 @@ async function executeForegroundResume(reason = '-') {
       updateChatInputStateBadge();
     }
 
+    if (
+      typeof ToolboxShell !== 'undefined'
+      && typeof ToolboxShell.syncToolboxHeaderLayout === 'function'
+    ) {
+      ToolboxShell.syncToolboxHeaderLayout(`foreground-catch-up:${catchReason}`);
+    }
+
     const cap = getForegroundCapabilityLight(catchReason);
     if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
       ToolboxShell.appendLog(

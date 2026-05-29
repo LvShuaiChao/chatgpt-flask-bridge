@@ -8,17 +8,20 @@
     const TOOLBOX_MIN_VISIBLE_WIDTH = 64;
     const TOOLBOX_MIN_VISIBLE_HEIGHT = 34;
 
+    const TOOLBOX_MIN_WIDTH_FULL = 260;
+    const TOOLBOX_MIN_WIDTH_COMPACT = 220;
+
     const PANEL_DEFAULT_SIZE = Object.freeze({
       width: 640,
       height: 500,
-      minWidth: 560,
+      minWidth: TOOLBOX_MIN_WIDTH_FULL,
       minHeight: 240,
       maxWidth: 860,
       maxHeight: 760,
     });
 
     const DEFAULT_COMPACT_WIDTH = 484;
-    const MIN_COMPACT_WIDTH = 280;
+    const MIN_COMPACT_WIDTH = TOOLBOX_MIN_WIDTH_COMPACT;
     const MAX_COMPACT_WIDTH = 680;
 
     const PANEL_COMPACT_DEFAULT_SIZE = Object.freeze({
@@ -187,6 +190,8 @@
     let layoutCompactAuto = false;
     let layoutModeBound = false;
     let panelResizeObserver = null;
+    let toolboxResponsiveObserver = null;
+    let toolboxResponsiveWindowBound = false;
     let clampViewportTimer = 0;
     let panelPositionSaveDebounceTimer = 0;
     let panelPositionSavePendingReason = '';
@@ -594,7 +599,7 @@
           bottom: auto;
           width: var(--cgpt-toolbox-width, 640px);
           height: min(500px, calc(100vh - 32px));
-          min-width: min(560px, calc(100vw - 24px));
+          min-width: min(${TOOLBOX_MIN_WIDTH_FULL}px, calc(100vw - 24px));
           min-height: min(240px, calc(100vh - 32px));
           max-width: min(860px, calc(100vw - 24px));
           max-height: min(760px, calc(100vh - 32px));
@@ -732,7 +737,7 @@
 
         #${APP.panelId}.cgpt-toolbox-compact {
           width: min(340px, calc(100vw - 32px));
-          min-width: min(280px, calc(100vw - 32px));
+          min-width: min(${TOOLBOX_MIN_WIDTH_COMPACT}px, calc(100vw - 32px));
           min-height: min(180px, calc(100vh - 32px));
           max-width: calc(100vw - 32px);
           max-height: calc(100vh - 32px);
@@ -803,8 +808,31 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-upload-quota-badge,
-        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-message-quota-badge {
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-message-quota-badge,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-upload-quota-badge,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-message-quota-badge {
           display: none !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-page-id-badge {
+          max-width: 92px;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-status-primary-badge {
+          max-width: 88px;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-page-turn-badge,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-turn-count-badge {
+          max-width: 120px;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-must-show-badge,
+        #${APP.panelId} .cgpt-toolbox-page-turn-badge {
+          display: inline-flex !important;
+          flex: 0 0 auto !important;
+          visibility: visible !important;
+          opacity: 1 !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-title {
@@ -1119,6 +1147,7 @@
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+          flex: 0 1 auto;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-id-badge {
@@ -1128,7 +1157,8 @@
           box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
         }
 
-        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge {
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-turn-badge {
           color: #ffffff;
           background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
           border-color: rgba(147, 197, 253, 0.70);
@@ -1137,7 +1167,8 @@
             inset 0 1px 0 rgba(255, 255, 255, 0.12);
         }
 
-        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge.cgpt-toolbox-turn-count-warning {
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-turn-count-badge.cgpt-toolbox-turn-count-warning,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-turn-badge.cgpt-toolbox-turn-count-warning {
           color: #ffffff;
           background: linear-gradient(180deg, #ef4444 0%, #b91c1c 100%);
           border-color: rgba(248, 113, 113, 0.85);
@@ -1368,18 +1399,19 @@
           background: #273449;
         }
 
-        .cgpt-toolbox-tabs {
+        .cgpt-toolbox-tabs,
+        .cgpt-top-tabs,
+        .cgpt-sub-tabs {
           flex: 0 0 auto;
           display: flex;
-          flex-wrap: nowrap;
+          flex-wrap: wrap;
+          align-items: center;
           gap: 6px;
           padding: 6px 12px;
           min-width: 0;
           max-width: 100%;
-          overflow-x: auto;
+          overflow-x: hidden;
           overflow-y: hidden;
-          white-space: nowrap;
-          scrollbar-width: thin;
           background: #0f1115;
           border-bottom: 1px solid #2f3542;
           box-sizing: border-box;
@@ -3181,8 +3213,8 @@
           align-items: center;
         }
 
-        .cgpt-autoq-settings-grid input,
-        .cgpt-settings-grid input {
+        .cgpt-autoq-settings-grid input:not([type="checkbox"]),
+        .cgpt-settings-grid input:not([type="checkbox"]) {
           width: 100%;
           min-width: 0;
           box-sizing: border-box;
@@ -3198,6 +3230,118 @@
         .cgpt-autoq-settings-grid .cgpt-kv {
           grid-template-columns: 110px 1fr;
           margin-top: 0;
+        }
+
+        .cgpt-autoq-exec-settings {
+          display: grid !important;
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          gap: 10px 14px !important;
+          align-items: start !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+
+        .cgpt-autoq-exec-settings,
+        .cgpt-autoq-exec-settings * {
+          box-sizing: border-box !important;
+        }
+
+        .cgpt-setting-field {
+          display: flex !important;
+          flex-direction: column !important;
+          gap: 6px !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+        }
+
+        .cgpt-setting-label {
+          display: block !important;
+          width: auto !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          font-size: 12px !important;
+          line-height: 1.4 !important;
+          color: #dbeafe !important;
+          white-space: normal !important;
+          word-break: normal !important;
+          overflow-wrap: anywhere !important;
+          writing-mode: horizontal-tb !important;
+          text-orientation: mixed !important;
+        }
+
+        .cgpt-setting-input,
+        .cgpt-setting-field input:not([type="checkbox"]),
+        .cgpt-setting-field select,
+        .cgpt-setting-field textarea {
+          width: 100% !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 34px !important;
+          padding: 6px 10px !important;
+          border-radius: 8px !important;
+          border: 1px solid rgba(148, 163, 184, 0.35) !important;
+          background: #0f172a !important;
+          color: #e5e7eb !important;
+          outline: none !important;
+        }
+
+        .cgpt-setting-input:focus,
+        .cgpt-setting-field input:not([type="checkbox"]):focus,
+        .cgpt-setting-field select:focus,
+        .cgpt-setting-field textarea:focus {
+          border-color: #3b82f6 !important;
+          box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.45) !important;
+        }
+
+        .cgpt-setting-check {
+          display: flex !important;
+          flex-direction: row !important;
+          align-items: center !important;
+          justify-content: flex-start !important;
+          gap: 8px !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          width: auto !important;
+          padding: 6px 8px !important;
+          border-radius: 8px !important;
+          color: #e5e7eb !important;
+          line-height: 1.4 !important;
+          white-space: normal !important;
+          word-break: normal !important;
+          overflow-wrap: anywhere !important;
+          background: transparent !important;
+          cursor: pointer !important;
+          writing-mode: horizontal-tb !important;
+          text-orientation: mixed !important;
+        }
+
+        .cgpt-setting-check:hover {
+          background: rgba(30, 41, 59, 0.85) !important;
+        }
+
+        .cgpt-setting-checkbox,
+        .cgpt-setting-check input[type="checkbox"] {
+          flex: 0 0 auto !important;
+          width: 16px !important;
+          height: 16px !important;
+          min-width: 16px !important;
+          max-width: 16px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          accent-color: #2563eb !important;
+          appearance: auto !important;
+        }
+
+        .cgpt-setting-check-text {
+          display: inline-block !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          white-space: normal !important;
+          word-break: normal !important;
+          overflow-wrap: anywhere !important;
+          writing-mode: horizontal-tb !important;
+          text-orientation: mixed !important;
         }
 
         .cgpt-autoq-status-grid {
@@ -3634,6 +3778,24 @@
           }
         }
 
+        .cgpt-autoq-list-select-row {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+
+        .cgpt-autoq-list-select-row .cgpt-autoq-label {
+          margin: 0;
+          white-space: nowrap;
+        }
+
+        .cgpt-autoq-list-select {
+          width: 100%;
+          min-width: 0;
+        }
+
         .cgpt-autoq-list-profile-chips {
           flex: 1 1 auto;
           display: flex;
@@ -3898,14 +4060,16 @@
           display: none !important;
         }
 
-        .cgpt-autoq-task-item-actions {
+        .cgpt-autoq-task-item-actions,
+        .cgpt-task-row-actions {
           display: flex !important;
           flex-direction: row !important;
           align-items: center !important;
           justify-content: flex-end !important;
-          gap: 5px !important;
-          flex-wrap: nowrap !important;
-          min-width: max-content !important;
+          gap: 4px !important;
+          flex-wrap: wrap !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
         }
 
         @container autoq-task-list (max-width: 520px) {
@@ -4789,8 +4953,250 @@
         }
 
         #${APP.panelId} {
-          min-width: 300px;
+          min-width: ${TOOLBOX_MIN_WIDTH_COMPACT}px !important;
+          max-width: calc(100vw - 12px) !important;
           overflow: hidden;
+        }
+
+        #${APP.rootId},
+        #${APP.rootId}.cgpt-toolbox-root,
+        #${APP.panelId},
+        .cgpt-toolbox-panel,
+        .cgpt-toolbox-shell {
+          box-sizing: border-box !important;
+        }
+
+        #${APP.rootId} *,
+        #${APP.rootId}.cgpt-toolbox-root *,
+        #${APP.panelId} *,
+        .cgpt-toolbox-panel *,
+        .cgpt-toolbox-shell * {
+          box-sizing: border-box !important;
+        }
+
+        #${APP.panelId}:not(.cgpt-toolbox-compact) {
+          min-width: ${TOOLBOX_MIN_WIDTH_FULL}px !important;
+        }
+
+        .cgpt-toolbox-shell,
+        .cgpt-toolbox-main,
+        .cgpt-toolbox-body,
+        .cgpt-toolbox-panel,
+        .cgpt-panel,
+        .cgpt-row,
+        .cgpt-toolbar,
+        .cgpt-button-row,
+        .cgpt-actions-row,
+        .cgpt-status-panel,
+        .cgpt-task-panel,
+        .cgpt-autoq-task-item,
+        .cgpt-task-row,
+        .cgpt-task-content,
+        .cgpt-task-title,
+        .cgpt-task-detail,
+        .cgpt-form-row,
+        .cgpt-tab-content,
+        .cgpt-autoq-panel,
+        .cgpt-autoq-body {
+          min-width: 0 !important;
+          max-width: 100% !important;
+        }
+
+        .cgpt-toolbar,
+        .cgpt-button-row,
+        .cgpt-actions-row,
+        .cgpt-autoq-actions,
+        .cgpt-upload-actions,
+        .cgpt-action-row,
+        .cgpt-autoq-top-action-bar,
+        .cgpt-upload-main-action-row,
+        .cgpt-upload-action-row,
+        .cgpt-log-actions {
+          display: flex !important;
+          flex-wrap: wrap !important;
+          align-items: center !important;
+          gap: 6px !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+        }
+
+        .cgpt-btn,
+        .cgpt-toolbox-small-btn {
+          max-width: 100% !important;
+          min-width: 0 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-btn,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-toolbox-small-btn {
+          padding: 4px 6px !important;
+          font-size: 12px !important;
+          line-height: 1.2 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-button-row,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-actions-row,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-actions,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-action-row {
+          gap: 4px !important;
+        }
+
+        .cgpt-status-text,
+        .cgpt-task-title,
+        .cgpt-task-step,
+        .cgpt-task-detail,
+        .cgpt-current-task-meta-value.cgpt-autoq-step,
+        .cgpt-autoq-step,
+        .cgpt-log-line {
+          min-width: 0 !important;
+          max-width: 100% !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          white-space: nowrap !important;
+        }
+
+        .cgpt-multiline,
+        .cgpt-task-message,
+        .cgpt-status-message,
+        .cgpt-autoq-user-hint,
+        .cgpt-autoq-user-hint-row .cgpt-autoq-status-value,
+        .cgpt-status-advice {
+          white-space: normal !important;
+          overflow-wrap: anywhere !important;
+          word-break: break-word !important;
+          min-width: 0 !important;
+          overflow: visible !important;
+          text-overflow: clip !important;
+        }
+
+        #${APP.panelId} input:not([type="checkbox"]):not([type="radio"]),
+        #${APP.panelId} textarea,
+        #${APP.panelId} select,
+        .cgpt-toolbox input:not([type="checkbox"]):not([type="radio"]),
+        .cgpt-toolbox textarea,
+        .cgpt-toolbox select {
+          min-width: 0 !important;
+          max-width: 100% !important;
+          width: 100% !important;
+        }
+
+        .cgpt-form-row {
+          display: grid !important;
+          grid-template-columns: minmax(0, 1fr) !important;
+          gap: 6px !important;
+          min-width: 0 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-normal .cgpt-form-row.cgpt-two-col {
+          grid-template-columns: auto minmax(0, 1fr) !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-top-stat-secondary,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-page-count-badge,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-local-upload-badge,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-local-message-badge,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-debug-only,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-export-tab,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-log-tab {
+          display: none !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-top-badge-task {
+          display: none !important;
+        }
+
+        .cgpt-autoq-task-item-main,
+        .cgpt-autoq-task-item-main-inline,
+        .cgpt-task-row-main {
+          flex: 1 1 180px !important;
+          min-width: 0 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-task-item,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-task-row {
+          display: block !important;
+          grid-template-columns: none !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-task-item-actions,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-task-row-actions {
+          margin-top: 6px !important;
+          justify-content: flex-start !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-task-action-secondary {
+          display: none !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-settings-grid,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-settings-grid,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-settings-grid,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-settings-grid,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-task-profile-defaults-grid,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-task-profile-defaults-grid {
+          grid-template-columns: 1fr !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-exec-settings,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-autoq-exec-settings {
+          gap: 10px !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-setting-label,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-setting-label,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-setting-label,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-setting-label {
+          font-size: 12px !important;
+          white-space: normal !important;
+          writing-mode: horizontal-tb !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-setting-check,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-setting-check,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-setting-check,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-setting-check {
+          width: 100% !important;
+          align-items: flex-start !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-status-row,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-status-row,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-batch-status-row,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-batch-status-row,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-task-status-row,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-task-status-row {
+          grid-template-columns: minmax(0, 1fr) !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-autoq-status-row .cgpt-autoq-status-label,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-autoq-status-row .cgpt-autoq-status-label,
+        #${APP.panelId}.cgpt-toolbox-sm .cgpt-batch-status-row .cgpt-batch-status-label,
+        #${APP.panelId}.cgpt-toolbox-xs .cgpt-batch-status-row .cgpt-batch-status-label {
+          width: auto !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          text-align: left !important;
+        }
+
+        .cgpt-toolbox-body,
+        .cgpt-tab-content,
+        .cgpt-autoq-body {
+          overflow-x: hidden !important;
+          overflow-y: auto !important;
+        }
+
+        .cgpt-log-code,
+        .cgpt-raw-json,
+        .cgpt-debug-pre,
+        .xz-autoq-debug-raw pre {
+          overflow-x: auto !important;
+          white-space: pre !important;
+          max-width: 100% !important;
         }
 
         #${APP.panelId} *,
@@ -4820,6 +5226,9 @@
         #${APP.panelId} .cgpt-prompt-batch-check,
         #${APP.panelId} .cgpt-kv label,
         #${APP.panelId} .cgpt-checkbox-line,
+        #${APP.panelId} .cgpt-setting-label,
+        #${APP.panelId} .cgpt-setting-check,
+        #${APP.panelId} .cgpt-setting-check-text,
         #${APP.panelId} .cgpt-autoq-label,
         #${APP.panelId} .cgpt-autoq-continue-preview,
         #${APP.panelId} .cgpt-modal-field label {
@@ -5833,6 +6242,7 @@
         : null;
 
       panel.classList.toggle('cgpt-toolbox-compact', compactMode);
+      applyToolboxPanelMinWidthMode();
 
       const compactBtn = qs('#cgpt-toolbox-compact', root);
       if (compactBtn) {
@@ -6099,6 +6509,33 @@
       return document.documentElement;
     }
 
+    function ensurePanelShellClasses() {
+      if (!panel) {
+        return;
+      }
+
+      panel.classList.add('cgpt-toolbox-panel', 'cgpt-toolbox-shell');
+      applyToolboxPanelMinWidthMode();
+    }
+
+    function ensureTabResponsiveClasses() {
+      if (!root) {
+        return;
+      }
+
+      const tabsWrap = qs('.cgpt-toolbox-tabs', root);
+      if (tabsWrap) {
+        tabsWrap.classList.add('cgpt-top-tabs');
+      }
+
+      qsa('.cgpt-toolbox-tab[data-tab="export"]', root).forEach((btn) => {
+        btn.classList.add('cgpt-export-tab');
+      });
+      qsa('.cgpt-toolbox-tab[data-tab="log"]', root).forEach((btn) => {
+        btn.classList.add('cgpt-log-tab');
+      });
+    }
+
     function create() {
       if (creatingToolbox && root) {
         return root;
@@ -6209,7 +6646,7 @@
         <div id="cgpt-toolbox-floating-title" class="cgpt-toolbox-floating-title">
           小张工具箱
         </div>
-        <div id="${APP.panelId}">
+        <div id="${APP.panelId}" class="cgpt-toolbox-panel cgpt-toolbox-shell">
           <div class="cgpt-toolbox-header" id="cgpt-toolbox-drag-handle">
             <div class="cgpt-toolbox-title-row">
               <div class="cgpt-toolbox-title">小张工具箱</div>
@@ -6220,13 +6657,13 @@
             <div class="cgpt-toolbox-header-status-row" id="cgpt-toolbox-page-status-row"></div>
           </div>
 
-          <div class="cgpt-toolbox-tabs">
+          <div class="cgpt-toolbox-tabs cgpt-top-tabs">
             <button type="button" class="cgpt-toolbox-tab active" data-tab="upload" data-full-label="多文件上传" data-short-label="上传">多文件上传</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="autoq" data-full-label="自动指令" data-short-label="指令">自动指令</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="prompt" data-full-label="Prompt 管理" data-short-label="Prompt">Prompt 管理</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="bridge" data-full-label="浏览器桥接" data-short-label="桥接">浏览器桥接</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="export" data-full-label="导出统计" data-short-label="导出">导出统计</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="log" data-full-label="日志" data-short-label="日志">日志</button>
+            <button type="button" class="cgpt-toolbox-tab cgpt-export-tab" data-tab="export" data-full-label="导出统计" data-short-label="导出">导出统计</button>
+            <button type="button" class="cgpt-toolbox-tab cgpt-log-tab" data-tab="log" data-full-label="日志" data-short-label="日志">日志</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="settings" data-full-label="设置" data-short-label="设置">设置</button>
           </div>
 
@@ -6270,6 +6707,8 @@
 
       panel = qs(`#${APP.panelId}`, root);
       titleEl = qs('.cgpt-toolbox-title', root);
+      ensurePanelShellClasses();
+      ensureTabResponsiveClasses();
       ensureToolboxHeaderPageStatusRow();
 
       migrateToolboxToastToPanel('create-new-root');
@@ -6434,6 +6873,9 @@
         return;
       }
 
+      ensurePanelShellClasses();
+      ensureTabResponsiveClasses();
+
       if (!toggle) {
         console.warn('[ChatGPT toolbox] bindEvents: toggle 不存在，取消绑定');
         return;
@@ -6487,6 +6929,8 @@
       bindDrag();
       bindPanelResizeHandles();
       bindPanelResizePersistence();
+      bindToolboxResponsiveWatcher();
+      applyToolboxPanelMinWidthMode();
 
       window.addEventListener('resize', () => {
         appendLog('[TOOLBOX_LAYOUT][window-resize-clamp-only]');
@@ -6609,6 +7053,7 @@
       }
 
       scheduleToolboxHorizontalOverflowLog(`switch-tab:${nextTab}`, 0);
+      syncToolboxHeaderLayout(`switch-tab:${nextTab}`);
     }
 
     function restoreActiveTab() {
@@ -6814,7 +7259,7 @@
     function clampToolboxWidth(width) {
       const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
       const defaults = getCurrentPanelDefaultSize();
-      const minWidth = defaults.minWidth || 560;
+      const minWidth = defaults.minWidth || TOOLBOX_MIN_WIDTH_FULL;
       const maxWidthCap = defaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860;
       const maxWidth = Math.max(minWidth, Math.min(maxWidthCap, viewportWidth - 24));
       const numericWidth = Number(width);
@@ -6886,6 +7331,9 @@
         return;
       }
 
+      const requestedWidth = size && size.width != null ? Number(size.width) : null;
+      const panelMins = getPanelMinSize();
+
       appendLog(
         `[TOOLBOX_SIZE][apply] reason=${reason} ` +
         `oldWidth=${oldWidth} oldHeight=${oldHeight} ` +
@@ -6893,10 +7341,20 @@
         `compact=${compactMode ? 1 : 0} force=${force ? 1 : 0} userAction=${userAction ? 1 : 0}`,
       );
 
+      console.log('[TOOLBOX_RESIZE][APPLY]', {
+        requestedWidth,
+        appliedWidth: next.width,
+        minWidth: panelMins.minWidth,
+        mode: compactMode ? 'compact' : 'full',
+        reason,
+      });
+
       panel.style.width = `${next.width}px`;
       panel.style.height = `${next.height}px`;
       panel.style.setProperty('--cgpt-toolbox-width', `${next.width}px`);
       panel.style.setProperty('--cgpt-toolbox-height', `${next.height}px`);
+
+      updateToolboxResponsiveClass(panel, reason);
 
       window.setTimeout(() => {
         keepPanelInViewport({
@@ -7010,6 +7468,14 @@
             minHeight,
             maxHeight,
           );
+
+          console.log('[TOOLBOX_RESIZE][APPLY]', {
+            requestedWidth: Math.round(startWidth + moveEvent.clientX - startX),
+            appliedWidth: nextWidth,
+            minWidth,
+            mode: compactMode ? 'compact' : 'full',
+            reason: 'toolbox-resize-handle-move',
+          });
 
           applyPanelSize({
             width: nextWidth,
@@ -7289,21 +7755,165 @@
       return true;
     }
 
-    function updateToolboxNarrowClass(reason = '-') {
+    function updateToolboxResponsiveClass(targetPanel, reason = '-') {
+      const panelEl = targetPanel || panel;
+      if (!panelEl) {
+        return;
+      }
+
+      const width = Math.round(panelEl.getBoundingClientRect().width || panelEl.offsetWidth || 0);
+      const xs = width > 0 && width < 360;
+      const sm = width >= 360 && width < 520;
+      const normal = width >= 520;
+
+      const targets = [panelEl];
+      if (root && root !== panelEl) {
+        targets.push(root);
+      }
+
+      targets.forEach((el) => {
+        el.classList.toggle('cgpt-toolbox-xs', xs);
+        el.classList.toggle('cgpt-toolbox-sm', sm);
+        el.classList.toggle('cgpt-toolbox-normal', normal);
+        el.dataset.cgptPanelWidth = String(width);
+      });
+
+      console.log('[TOOLBOX_RESPONSIVE][CLASS]', {
+        reason,
+        width,
+        xs,
+        sm,
+        normal,
+      });
+    }
+
+    function bindToolboxResponsiveWatcher() {
+      if (!panel) {
+        return;
+      }
+
+      updateToolboxResponsiveClass(panel, 'bind-init');
+
+      if (typeof ResizeObserver === 'function' && !toolboxResponsiveObserver) {
+        toolboxResponsiveObserver = new ResizeObserver(() => {
+          try {
+            updateToolboxResponsiveClass(panel, 'resize-observer');
+          } catch (error) {
+            console.error('[TOOLBOX_RESPONSIVE][OBSERVER_FAILED]', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+        });
+
+        try {
+          toolboxResponsiveObserver.observe(panel);
+        } catch (error) {
+          console.error('[TOOLBOX_RESPONSIVE][OBSERVE_FAILED]', {
+            message: error && error.message ? error.message : String(error),
+            stack: error && error.stack ? error.stack : '',
+          });
+        }
+      }
+
+      if (toolboxResponsiveWindowBound) {
+        return;
+      }
+
+      toolboxResponsiveWindowBound = true;
+
+      const scheduleResponsiveUpdate = () => {
+        window.requestAnimationFrame(() => {
+          try {
+            updateToolboxResponsiveClass(panel, 'window-resize');
+          } catch (error) {
+            console.error('[TOOLBOX_RESPONSIVE][WINDOW_RESIZE_FAILED]', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+        });
+      };
+
+      window.addEventListener('resize', scheduleResponsiveUpdate);
+      window.addEventListener('orientationchange', scheduleResponsiveUpdate);
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', scheduleResponsiveUpdate);
+      }
+    }
+
+    function applyToolboxPanelMinWidthMode() {
+      if (!panel) {
+        return;
+      }
+
+      if (compactMode) {
+        panel.classList.remove('cgpt-mode-complete');
+        panel.style.minWidth = `${TOOLBOX_MIN_WIDTH_COMPACT}px`;
+      } else {
+        panel.classList.add('cgpt-mode-complete');
+        panel.style.minWidth = `${TOOLBOX_MIN_WIDTH_FULL}px`;
+      }
+    }
+
+    function shouldHideTopStatusBadge(badge, panelWidth) {
+      if (!badge) {
+        return false;
+      }
+      if (
+        badge.classList.contains('cgpt-toolbox-must-show-badge')
+        || badge.classList.contains('cgpt-toolbox-page-turn-badge')
+        || badge.classList.contains('cgpt-toolbox-turn-count-badge')
+      ) {
+        return false;
+      }
+      if (panelWidth < 620) {
+        return (
+          badge.classList.contains('cgpt-toolbox-upload-quota-badge')
+          || badge.classList.contains('cgpt-toolbox-message-quota-badge')
+        );
+      }
+      return false;
+    }
+
+    function updateToolboxStatusVisibilityClass(reason = '-') {
       if (!panel) {
         return;
       }
 
       const width = Math.round(panel.getBoundingClientRect().width || panel.offsetWidth || 0);
-      const narrow = width > 0 && width < 420;
+      const narrow = width > 0 && width < 620;
+      const extraNarrow = width > 0 && width < 460;
       panel.classList.toggle('cgpt-toolbox-narrow', narrow);
+      panel.classList.toggle('cgpt-toolbox-extra-narrow', extraNarrow);
+
+      const row = panel.querySelector('.cgpt-toolbox-header-status-row');
+      if (row) {
+        row.querySelectorAll('.cgpt-toolbox-top-status-badge, .cgpt-status-pill').forEach((badge) => {
+          if (shouldHideTopStatusBadge(badge, width)) {
+            badge.style.display = 'none';
+            return;
+          }
+          if (
+            badge.classList.contains('cgpt-toolbox-upload-quota-badge')
+            || badge.classList.contains('cgpt-toolbox-message-quota-badge')
+          ) {
+            badge.style.display = '';
+          }
+        });
+      }
 
       appendLog(
-        `[TOOLBOX_LAYOUT][NARROW_CLASS] reason=${reason} width=${width} narrow=${narrow ? 1 : 0}`,
+        `[TOOLBOX_LAYOUT][STATUS_VISIBILITY] reason=${reason} width=${width} narrow=${narrow ? 1 : 0} extraNarrow=${extraNarrow ? 1 : 0}`,
       );
     }
 
-    function detectTopBadgeOverflow(reason = '-', options = {}) {
+    function updateToolboxNarrowClass(reason = '-') {
+      updateToolboxStatusVisibilityClass(reason);
+    }
+
+    function detectTopStatusOverflow(reason = '-', options = {}) {
       if (!panel) {
         return false;
       }
@@ -7323,21 +7933,26 @@
       if (hasOverflow) {
         if (options.log !== false) {
           appendLog(
-            `[TOOLBOX_LAYOUT][TOP_BADGE_OVERFLOW] reason=${reason} overflowTop=${overflowTop ? 1 : 0} overflowLeft=${overflowLeft ? 1 : 0} overflowRight=${overflowRight ? 1 : 0} panel=${Math.round(panelRect.left)}/${Math.round(panelRect.top)}/${Math.round(panelRect.width)}/${Math.round(panelRect.height)} row=${Math.round(rowRect.left)}/${Math.round(rowRect.top)}/${Math.round(rowRect.width)}/${Math.round(rowRect.height)}`,
+            `[TOOLBOX_LAYOUT][TOP_STATUS_OVERFLOW] reason=${reason} overflowRight=${overflowRight ? 1 : 0} overflowLeft=${overflowLeft ? 1 : 0} overflowTop=${overflowTop ? 1 : 0} panel=${Math.round(panelRect.width)} row=${Math.round(rowRect.width)}`,
           );
         }
 
         if (options.fix !== false) {
-          updateToolboxNarrowClass(`overflow-fix:${reason}`);
+          updateToolboxStatusVisibilityClass(`overflow:${reason}`);
         }
       }
 
       return hasOverflow;
     }
 
+    function detectTopBadgeOverflow(reason = '-', options = {}) {
+      return detectTopStatusOverflow(reason, options);
+    }
+
     function syncToolboxHeaderLayout(reason = '-') {
-      updateToolboxNarrowClass(reason);
-      detectTopBadgeOverflow(reason);
+      updateToolboxResponsiveClass(panel, reason);
+      updateToolboxStatusVisibilityClass(reason);
+      detectTopStatusOverflow(reason);
     }
 
     function clampToolboxPanelToViewport(targetPanel, reason = '-') {
@@ -7433,7 +8048,7 @@
 
       window.requestAnimationFrame(() => {
         clampToolboxPanelToViewport(panel, reason);
-        updateToolboxNarrowClass(reason);
+        updateToolboxStatusVisibilityClass(reason);
         rememberLastPanelVisibleRect(reason);
       });
     }
@@ -9788,6 +10403,11 @@
       );
 
       if (isUserPanelSizeProtected() && !explicitRestore && !force) {
+        console.log('[TOOLBOX_WIDTH][KEEP_USER_WIDTH]', {
+          reason: reasonText,
+          width: currentDom ? currentDom.width : 0,
+          height: currentDom ? currentDom.height : 0,
+        });
         appendLog(
           `[TOOLBOX_SIZE][restore-skip] reason=${reasonText} because=user-size-protected`,
         );
@@ -9795,6 +10415,11 @@
       }
 
       if (!explicitRestore && !force && currentDom) {
+        console.log('[TOOLBOX_WIDTH][SKIP_RESET]', {
+          reason: reasonText,
+          width: currentDom.width,
+          height: currentDom.height,
+        });
         appendLog(
           `[TOOLBOX_SIZE][restore-skip] reason=${reasonText} because=current-valid-rect ` +
           `width=${currentDom.width} height=${currentDom.height}`,
@@ -9811,6 +10436,12 @@
       };
 
       if (hasSaved) {
+        console.log('[TOOLBOX_WIDTH][DEFAULT_APPLY]', {
+          reason: reasonText,
+          source: 'saved',
+          width: saved.width,
+          height: saved.height,
+        });
         appendLog(
           `[TOOLBOX_SIZE][restore-saved] reason=${reasonText} key=${key} ` +
           `width=${saved.width} height=${saved.height} compact=${compactMode ? 1 : 0}`,
@@ -9833,6 +10464,12 @@
         }
       }
 
+      console.log('[TOOLBOX_WIDTH][DEFAULT_APPLY]', {
+        reason: reasonText,
+        source: 'fallback',
+        width: fallback.width,
+        height: fallback.height,
+      });
       appendLog(
         `[TOOLBOX_SIZE][restore-fallback] reason=${reasonText} key=${key} ` +
         `width=${fallback.width} height=${fallback.height} compact=${compactMode ? 1 : 0}`,
@@ -12048,7 +12685,11 @@
       ensureToolboxHeaderPageStatusRow,
       ensureToolboxTitleRow,
       updateToolboxNarrowClass,
+      updateToolboxResponsiveClass,
+      updateToolboxStatusVisibilityClass,
+      shouldHideTopStatusBadge,
       detectTopBadgeOverflow,
+      detectTopStatusOverflow,
       syncToolboxHeaderLayout,
       clampToolboxPanelToViewport,
       switchTab,

@@ -322,7 +322,9 @@
     };
   }
 
-  const DEFAULT_BATCH_STOP_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
+  const DEFAULT_BATCH_STOP_SIGNAL = typeof BATCH_TASK_DONE_SIGNAL === 'string'
+    ? BATCH_TASK_DONE_SIGNAL
+    : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
   // 旧停止符仅保留兼容解析，新逻辑只输出 DEFAULT_BATCH_STOP_SIGNAL。
   const LEGACY_BATCH_DONE_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
   const LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL = '<<<XZ_TOOLBOX_BATCH_TASK_NO_MORE_CONTENT_7F3B9C>>>';
@@ -516,7 +518,7 @@
         terminal: true,
         shouldContinue: false,
         type: 'stop',
-        reason: 'model-stop-signal',
+        reason: 'task-done-signal',
         signal: DEFAULT_BATCH_STOP_SIGNAL,
         legacy: false,
         source,
@@ -888,6 +890,19 @@
       taskRelentlessSendRetryMaxIntervalMs: 10000,
       taskRelentlessSendRetryBackoffEnabled: true,
 
+      /** 列表模式：单任务发送失败后继续下一个（默认开启） */
+      listContinueOnTaskFailure: true,
+      /** 列表模式：发送按钮找不到时尝试键盘发送兜底 */
+      listEnableKeyboardSendFallback: true,
+      /** 列表模式：单任务最大发送重试次数 */
+      listMaxSendRetry: 3,
+      /** 列表模式：单任务等待回复最长时间（毫秒），0 = 不限制 */
+      listReplyWaitTimeoutMs: 0,
+      /** 列表模式：等待发送按钮最长时间（毫秒） */
+      listSendButtonWaitTimeoutMs: 60000,
+      /** 列表模式：无进展检测时间（毫秒） */
+      listNoProgressTimeoutMs: 300000,
+
       verifyAfterDoneSignalPrompt: [
         '这是一次“完成状态二次确认”，不是重新执行任务。',
         '已重新上传当前项目文件/附件，请结合附件、原始任务内容和上一轮助手回复判断当前任务是否真的已经完整完成。',
@@ -1033,6 +1048,7 @@
       promptMode: 'continue',
       listProfiles: [],
       activeListProfileId: '',
+      lastSelectedListProfileId: '',
       taskProfiles: [],
       activeTaskProfileId: '',
       taskQueueSettings: createDefaultTaskQueueSettings(),
