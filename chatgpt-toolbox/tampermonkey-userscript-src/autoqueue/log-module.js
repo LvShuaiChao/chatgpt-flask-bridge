@@ -30,6 +30,19 @@
     let logDomDirty = false;
     let renderScheduled = false;
     let errorLogCountRefreshTimer = 0;
+    let cachedErrorLogCount = 0;
+    let errorLogCountDirty = true;
+    let lastErrorLogCountComputeAt = 0;
+
+    function markErrorLogCountDirty() {
+      errorLogCountDirty = true;
+    }
+
+    function shouldRefreshErrorLogCountNow() {
+      const activeLogTab = isLogTabVisible();
+      const btnVisible = rootEl && qs('#cgpt-log-copy-errors', rootEl);
+      return !!activeLogTab && !!btnVisible;
+    }
 
     function setLogStatus(text, type, options = {}) {
       if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.setStatus !== 'function') {
@@ -205,7 +218,15 @@
     }
 
     function getErrorLogCount() {
-      return collectCopyableErrorLogLines().length;
+      const now = Date.now();
+      if (!errorLogCountDirty && now - lastErrorLogCountComputeAt < 5000) {
+        return cachedErrorLogCount;
+      }
+      const lines = collectCopyableErrorLogLines();
+      cachedErrorLogCount = lines.length;
+      errorLogCountDirty = false;
+      lastErrorLogCountComputeAt = now;
+      return cachedErrorLogCount;
     }
 
     function updateCopyErrorLogButtonCount(root) {
@@ -334,7 +355,10 @@
       }
 
       logDomDirty = true;
-      scheduleUpdateCopyErrorLogButtonCount(rootEl);
+      markErrorLogCountDirty();
+      if (shouldRefreshErrorLogCountNow()) {
+        scheduleUpdateCopyErrorLogButtonCount(rootEl);
+      }
     }
 
     function flushLogBuffer() {
@@ -380,7 +404,10 @@
         logTimers.timeout('log-flush', flushLogBuffer, 200);
       }
 
-      scheduleUpdateCopyErrorLogButtonCount(rootEl);
+      markErrorLogCountDirty();
+      if (shouldRefreshErrorLogCountNow()) {
+        scheduleUpdateCopyErrorLogButtonCount(rootEl);
+      }
     }
 
     function render() {

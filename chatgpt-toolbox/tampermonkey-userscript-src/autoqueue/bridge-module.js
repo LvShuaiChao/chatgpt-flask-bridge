@@ -2997,6 +2997,20 @@
       return reason ? ` (${reason})` : '';
     }
 
+    function isBridgeCapabilityDetecting(capability, reasonText) {
+      if (!capability || typeof capability !== 'object') {
+        return false;
+      }
+
+      const stateText = String(capability.response_state || '').trim();
+      const reason = String(reasonText || capability.response_state_reason || '').trim();
+
+      return capability._detect_reenter_skip === true
+        || stateText === 'detecting'
+        || reason === 'detect-reenter-skip'
+        || reason === 'detect_in_progress';
+    }
+
     function getBridgePollStatusPresentation() {
       const capability = getPageCapability('bridge-poll');
       logPageCapability(capability, '[BRIDGE][POLL]');
@@ -3016,6 +3030,14 @@
           text: `Bridge 离线：${pollError}`,
           type: 'offline',
           shortText: '离线',
+        };
+      }
+
+      if (isBridgeCapabilityDetecting(capability, reasonText)) {
+        return {
+          text: 'Bridge 已连接 · 检测中',
+          type: 'running',
+          shortText: '检测中',
         };
       }
 

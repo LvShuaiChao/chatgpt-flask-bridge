@@ -1737,7 +1737,7 @@
     const value = `${payload.disabled}|${payload.reason}|${payload.sendPhase}|${payload.sendHotkeyPhase}|${payload.copyPhase}|${payload.copyHotkeyPhase}|${payload.waitContinuePhase}|${payload.pageReplyStatus}|${payload.viewDisabled}`;
     const hasDedupe = typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function';
     const emitted = hasDedupe
-      ? ToolboxShell.appendLogIfChanged(key, value, line, 5000)
+      ? ToolboxShell.appendLogIfChanged(key, value, line, 10000)
       : (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function'
         ? (ToolboxShell.appendLog(line), true)
         : false);
@@ -2189,6 +2189,13 @@
   }
 
   function logButtonRenderChange(button, before, reason, buttonName = '') {
+    const debugEnabled = (
+      (typeof isUploadDebugEnabled === 'function' && isUploadDebugEnabled())
+      || (typeof getCompactUiConfig === 'function' && (getCompactUiConfig() || {}).debugMode === true)
+    );
+    if (!debugEnabled) {
+      return;
+    }
     if (!button) {
       return;
     }
@@ -2199,13 +2206,23 @@
     }
     const line = `[BUTTON_RENDER][CHANGE] button=${name} oldPhase=${before.phase} newPhase=${after.phase}`
       + ` oldText=${before.text} newText=${after.text} reason=${reason || '-'}`;
-    console.log(line);
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
+    const key = `BUTTON_RENDER:CHANGE:${name}`;
+    const value = `${before.phase}|${before.text}|${after.phase}|${after.text}`;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
+      ToolboxShell.appendLogIfChanged(key, value, line, 10000);
+    } else {
+      console.log(line);
     }
   }
 
   function logButtonActionState(button, resolvedView, reason = '') {
+    const debugEnabled = (
+      (typeof isUploadDebugEnabled === 'function' && isUploadDebugEnabled())
+      || (typeof getCompactUiConfig === 'function' && (getCompactUiConfig() || {}).debugMode === true)
+    );
+    if (!debugEnabled) {
+      return;
+    }
     if (!button) {
       return;
     }
@@ -2224,10 +2241,10 @@
     ).trim() || '-';
     const line = `[STATE_SCHEMA][BUTTON_ACTION_RESOLVED] id=${id} data-action=${domAction} runtimeAction=${runtimeAction} resolvedAction=${resolvedAction} phase=${phase} subPhase=${subPhase} disabled=${disabled} text=${text} baseAction=${baseAction} reason=${reason || '-'}`;
     const key = `BUTTON_ACTION:STATE:${id || baseAction || domAction || '-'}`;
-    const value = `${domAction}|${runtimeAction}|${resolvedAction}|${phase}|${subPhase}|${disabled}|${reason || '-'}`;
+    const value = `${domAction}|${runtimeAction}|${resolvedAction}|${phase}|${subPhase}|${disabled}`;
     const hasDedupe = typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function';
     const emitted = hasDedupe
-      ? ToolboxShell.appendLogIfChanged(key, value, line, 5000)
+      ? ToolboxShell.appendLogIfChanged(key, value, line, 10000)
       : (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function'
         ? (ToolboxShell.appendLog(line), true)
         : false);

@@ -42,7 +42,8 @@
     ),
     uploadDbName: 'cgpt-toolbox-upload-db-v32',
     uploadDbVersion: 1,
-    uploadBlobMaxBytes: 20 * 1024 * 1024,
+    uploadBlobMaxBytes: 0,
+    persistUploadBlobEnabled: false,
     uploadStore: 'queue',
     uploadGroupStore: 'groups',
   });
@@ -500,7 +501,123 @@
     /需要用户提供/,
   ];
 
-  function classifyBatchReply(replyText) {
+  function classifyReplyState(replyText, isGenerating) {
+    if (isGenerating === true) {
+      return {
+        type: 'generating',
+        done: false,
+        reason: 'assistant-generating',
+      };
+    }
+
+    const text = normalizeReplyText(replyText);
+
+    if (!text) {
+      return {
+        type: 'empty',
+        done: false,
+        reason: 'empty-reply',
+      };
+    }
+
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_DONE_SIGNAL)) {
+      return {
+        type: 'done',
+        done: true,
+        reason: 'terminal-done',
+      };
+    }
+
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_BLOCKED_SIGNAL)) {
+      return {
+        type: 'blocked',
+        done: true,
+        reason: 'terminal-blocked',
+      };
+    }
+
+    if (isExactSingleLineBatchSignalText(text, DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)) {
+      return {
+        type: 'no_more_content',
+        done: true,
+        reason: 'terminal-no-more-content',
+      };
+    }
+
+    for (const pattern of BATCH_REPLY_BLOCKED_TEXT_PATTERNS) {
+      if (pattern.test(text)) {
+        return {
+          type: 'blocked',
+          done: true,
+          reason: 'blocked-text-detected',
+        };
+      }
+    }
+
+    return {
+      type: 'normal_reply_done',
+      done: true,
+      reason: 'reply-stopped-without-terminal-marker',
+    };
+  }
+
+  function mapReplyStateToBatchDecision(replyState) {
+    const stateType = replyState && replyState.type ? String(replyState.type) : 'continue';
+    const reason = replyState && replyState.reason ? String(replyState.reason) : 'unknown-reply-state';
+
+    if (stateType === 'done') {
+      return {
+        shouldStop: true,
+        status: 'done',
+        reason,
+      };
+    }
+
+    if (stateType === 'blocked') {
+      return {
+        shouldStop: true,
+        status: 'blocked',
+        reason,
+      };
+    }
+
+    if (stateType === 'no_more_content') {
+      return {
+        shouldStop: true,
+        status: 'no_more_content',
+        reason,
+      };
+    }
+
+    if (stateType === 'empty') {
+      return {
+        shouldStop: false,
+        status: 'empty',
+        reason,
+      };
+    }
+
+    if (stateType === 'generating') {
+      return {
+        shouldStop: false,
+        status: 'generating',
+        reason,
+      };
+    }
+
+    return {
+      shouldStop: false,
+      status: 'normal_reply_done',
+      reason,
+    };
+  }
+
+  function classifyBatchReply(replyText, options) {
+    const isGenerating = options && typeof options === 'object' && options.isGenerating === true;
+    if (options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'isGenerating')) {
+      return mapReplyStateToBatchDecision(classifyReplyState(replyText, isGenerating));
+    }
+
     const text = normalizeReplyText(replyText);
 
     if (!text) {
@@ -547,8 +664,8 @@
 
     return {
       shouldStop: false,
-      status: 'continue',
-      reason: 'no-terminal-state-detected',
+      status: 'normal_reply_done',
+      reason: 'reply-stopped-without-terminal-marker',
     };
   }
 
@@ -753,6 +870,9 @@
       preserveRuntimeStatsAverage: false,
       runtimeStatsRefreshIntervalMs: 1000,
       debugAutoQueueTrace: true,
+      debugMode: false,
+      advancedDebugAutoRefresh: false,
+      advancedDebugRefreshIntervalMs: 5000,
 
       taskRelentlessSendRetryEnabled: true,
       taskRelentlessSendRetryIntervalMs: 1500,

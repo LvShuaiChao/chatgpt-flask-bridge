@@ -30,6 +30,27 @@
     const EDGE_RESTORE_OFFSET = 24;
     const SHELL_EVENTS_VERSION = 'resize-drag-split-v1-panel-handle';
 
+    let lastUserScrollAt = 0;
+    const USER_SCROLL_SILENCE_MS = 700;
+    let userScrollListenersAttached = false;
+
+    function attachUserScrollListeners() {
+      if (userScrollListenersAttached || typeof window === 'undefined') {
+        return;
+      }
+      userScrollListenersAttached = true;
+      const markScroll = () => {
+        lastUserScrollAt = Date.now();
+      };
+      window.addEventListener('scroll', markScroll, { passive: true, capture: true });
+      window.addEventListener('wheel', markScroll, { passive: true, capture: true });
+    }
+
+    function isUserScrollingNow() {
+      attachUserScrollListeners();
+      return lastUserScrollAt > 0 && (Date.now() - lastUserScrollAt) < USER_SCROLL_SILENCE_MS;
+    }
+
     const EDGE_HANDLE_SIZE = Object.freeze({
       width: 110,
       height: 34,
@@ -130,6 +151,10 @@
     let titleEl = null;
     let currentActiveTab = 'upload';
     let latestStatusText = '';
+    let lastStatusApplyKey = '';
+    let lastStatusApplyAt = 0;
+    let lastStatusLogKey = '';
+    let lastStatusLogAt = 0;
     let compactMode = false;
     let panelResizeObserver = null;
     let clampViewportTimer = 0;
@@ -3010,6 +3035,59 @@
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+        }
+
+        .xz-autoq-advanced-debug-panel {
+          margin-top: 8px;
+          border: 1px solid rgba(80, 140, 255, 0.45);
+          border-radius: 8px;
+          background: rgba(6, 12, 24, 0.92);
+          padding: 8px;
+        }
+
+        .xz-autoq-advanced-debug-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 6px;
+          color: #dbeafe;
+          font-size: 12px;
+          font-weight: 650;
+        }
+
+        .xz-autoq-advanced-debug-header-actions {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+
+        .xz-autoq-advanced-debug-content {
+          max-height: 300px;
+          overflow: auto;
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-family: Consolas, Monaco, monospace;
+          font-size: 11px;
+          line-height: 1.45;
+          color: #dbeafe;
+          background: rgba(0, 0, 0, 0.25);
+          border-radius: 6px;
+          padding: 8px;
+          margin: 0;
+        }
+
+        #xz-autoq-advanced-debug-toggle-btn {
+          min-width: 88px;
+          white-space: nowrap;
+        }
+
+        #xz-autoq-advanced-debug-toggle-btn.active,
+        .xz-autoq-advanced-debug-toggle-btn.active {
+          border-color: #facc15;
+          color: #facc15;
+          background: rgba(250, 204, 21, 0.08);
         }
 
         .cgpt-autoq-log {
@@ -9831,6 +9909,38 @@
       },
     };
 
+    function shouldSkipDuplicateStatus(owner, statusType, rawStatusText, opts = {}) {
+      const now = Date.now();
+      const key = [
+        String(owner || 'ui'),
+        String(statusType || ''),
+        String(rawStatusText || ''),
+        String(opts.priority || ''),
+      ].join('|');
+      const force = opts.force === true || opts.forceRender === true;
+      if (!force && key === lastStatusApplyKey && now - lastStatusApplyAt < 1200) {
+        return true;
+      }
+      lastStatusApplyKey = key;
+      lastStatusApplyAt = now;
+      return false;
+    }
+
+    function shouldLogStatusLine(owner, statusType, rawStatusText) {
+      const now = Date.now();
+      const key = [
+        String(owner || 'ui'),
+        String(statusType || ''),
+        String(rawStatusText || ''),
+      ].join('|');
+      if (key === lastStatusLogKey && now - lastStatusLogAt < 5000) {
+        return false;
+      }
+      lastStatusLogKey = key;
+      lastStatusLogAt = now;
+      return true;
+    }
+
     function applyTopStatusEntry(entry) {
       if (!entry) {
         latestStatusText = '';
@@ -9904,7 +10014,7 @@
           : getToolboxTitle();
       }
 
-      if (latestStatusText) {
+      if (latestStatusText && shouldLogStatusLine(opts.owner || 'ui', statusType, latestStatusText)) {
         const logModuleRef = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
         if (logModuleRef && typeof logModuleRef.add === 'function') {
           logModuleRef.add(`[状态][${statusType}] ${latestStatusText}`);
@@ -9939,8 +10049,11 @@
           `[STATUS_ARBITER][UPLOAD_ERROR_SUPPRESSED] owner=${owner} text=${rawStatusText || '-'} source=${String(opts.source || '-')} reason=${String(opts.reason || '-')}`,
         );
       }
-      if (!opts.owner) {
+      if (!opts.owner && typeof isPerfDebugEnabled === 'function' && isPerfDebugEnabled()) {
         appendLog(`[STATUS_ARBITER][MISSING_OWNER] text=${rawStatusText || '-'} type=${statusType || '-'} fallback=ui`);
+      }
+      if (shouldSkipDuplicateStatus(owner, statusType, rawStatusText, opts)) {
+        return;
       }
       const now = Date.now();
       const ttlMs = Number(opts.ttlMs || 0);
@@ -10449,6 +10562,7 @@
       appendLog,
       appendLogThrottled,
       appendLogIfChanged,
+      isUserScrollingNow,
       purgeForbiddenStatusBadge,
       ensureToolboxHeaderPageStatusRow,
       switchTab,

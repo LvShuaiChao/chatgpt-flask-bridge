@@ -488,9 +488,9 @@
     }
     if (typeof ToolboxShell !== 'undefined') {
       const key = `BUTTON_COLOR:STATE:${id}`;
-      const value = `${text}|${phase || '-'}|${isBusyState ? 1 : 0}|${classNames}|${reason || '-'}`;
+      const value = `${text}|${phase || '-'}|${isBusyState ? 1 : 0}|${classNames}`;
       if (typeof ToolboxShell.appendLogIfChanged === 'function') {
-        ToolboxShell.appendLogIfChanged(key, value, line, 5000);
+        ToolboxShell.appendLogIfChanged(key, value, line, 10000);
       } else if (typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(line);
       }

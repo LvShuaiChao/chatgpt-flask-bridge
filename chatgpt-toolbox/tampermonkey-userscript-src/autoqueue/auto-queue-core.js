@@ -392,7 +392,77 @@ const AutoQueueModule = (() => {
       );
     }
 
+    function getAdvancedDebugHostElement() {
+      if (mainLiteEl) {
+        return mainLiteEl;
+      }
+      if (root) {
+        const byRoot = qs('#cgpt-autoq-main-lite', root);
+        if (byRoot) {
+          mainLiteEl = byRoot;
+          return byRoot;
+        }
+      }
+      const byDoc = document.querySelector('#cgpt-autoq-main-lite');
+      if (byDoc) {
+        mainLiteEl = byDoc;
+        return byDoc;
+      }
+      const panelContent = document.querySelector('#cgpt-autoq-status-panel-content');
+      if (panelContent && panelContent.parentElement) {
+        return panelContent.parentElement;
+      }
+      return null;
+    }
+
+    function ensureAdvancedDebugToggleButtonDom() {
+      const actionsHost = root
+        ? qs('.cgpt-autoq-actions', root)
+        : document.querySelector('.cgpt-autoq-actions');
+      if (!actionsHost) {
+        logAutoQueueDebugThrottled(
+          'adv-debug-btn-host-missing',
+          '[ADV_DEBUG][BTN_ENSURE_SKIP] reason=actions-host-missing',
+          3000,
+        );
+        return null;
+      }
+      let button = qs('#xz-autoq-advanced-debug-toggle-btn', actionsHost);
+      if (!button) {
+        button = document.querySelector('#xz-autoq-advanced-debug-toggle-btn');
+      }
+      let inserted = false;
+      if (!button) {
+        button = document.createElement('button');
+        inserted = true;
+      }
+      button.type = 'button';
+      button.id = 'xz-autoq-advanced-debug-toggle-btn';
+      button.dataset.action = 'advanced-debug';
+      button.dataset.buttonRole = 'advanced-debug';
+      button.title = '展开批量任务高级状态：按钮检测、输入框状态、上传状态、终止符识别、二次验证状态、定时器状态';
+      button.classList.add('cgpt-btn');
+      button.classList.add('xz-autoq-advanced-debug-toggle-btn');
+      if (button.parentElement !== actionsHost) {
+        const copyLogBtn = qs('#cgpt-autoq-copy-log', actionsHost);
+        if (copyLogBtn && copyLogBtn.parentElement === actionsHost) {
+          copyLogBtn.insertAdjacentElement('afterend', button);
+        } else {
+          actionsHost.appendChild(button);
+        }
+        inserted = true;
+      }
+      syncAdvancedDebugToggleButton();
+      if (inserted) {
+        ToolboxShell.appendLog('[ADV_DEBUG][BTN_ENSURE] inserted=1');
+      }
+      return button;
+    }
+
     function ensureMainLiteStructure() {
+      if (!mainLiteEl) {
+        mainLiteEl = getAdvancedDebugHostElement();
+      }
       if (!mainLiteEl) {
         return;
       }
@@ -408,6 +478,840 @@ const AutoQueueModule = (() => {
         if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.bindDom === 'function') {
           RuntimeStatsModule.bindDom(mainLiteEl);
         }
+      }
+      ensureAdvancedDebugPanelDom(mainLiteEl);
+      ensureAdvancedDebugToggleButtonDom();
+    }
+
+    function syncAdvancedDebugToggleButton() {
+      const button = root
+        ? qs('#xz-autoq-advanced-debug-toggle-btn', root)
+        : document.querySelector('#xz-autoq-advanced-debug-toggle-btn');
+      if (!button) {
+        return;
+      }
+      button.textContent = state.advancedDebugVisible ? '隐藏调试' : '高级调试';
+      button.classList.toggle('active', !!state.advancedDebugVisible);
+      button.setAttribute('aria-pressed', state.advancedDebugVisible ? 'true' : 'false');
+    }
+
+    function ensureAdvancedDebugPanelDom(hostEl) {
+      if (!hostEl) {
+        return null;
+      }
+
+      let panel = qs('#xz-autoq-advanced-debug-panel', hostEl);
+      if (panel) {
+        panel.style.display = state.advancedDebugVisible ? 'block' : 'none';
+        syncAdvancedDebugAutoRefreshButton();
+        return panel;
+      }
+
+      panel = document.createElement('div');
+      panel.id = 'xz-autoq-advanced-debug-panel';
+      panel.className = 'xz-autoq-advanced-debug-panel';
+      panel.style.display = state.advancedDebugVisible ? 'block' : 'none';
+      panel.innerHTML = `
+        <div class="xz-autoq-advanced-debug-header">
+          <span>高级状态显示</span>
+          <div class="xz-autoq-advanced-debug-header-actions">
+            <button type="button" class="cgpt-toolbox-small-btn" id="xz-autoq-advanced-debug-refresh-btn">刷新状态</button>
+            <button type="button" class="cgpt-toolbox-small-btn" id="xz-autoq-advanced-debug-auto-refresh-btn">自动刷新：关</button>
+            <button type="button" class="cgpt-toolbox-small-btn" id="xz-autoq-advanced-debug-copy-btn">复制状态</button>
+          </div>
+        </div>
+        <pre class="xz-autoq-advanced-debug-content"></pre>
+      `;
+      hostEl.appendChild(panel);
+      syncAdvancedDebugAutoRefreshButton();
+      return panel;
+    }
+
+    function collectSectionSafe(sectionName, collector) {
+      try {
+        return collector();
+      } catch (error) {
+        const message = error && error.stack ? error.stack : String(error);
+        ToolboxShell.appendLog(`[ADV_DEBUG][COLLECT_ERROR] section=${sectionName} error=${message}`);
+        console.error('[ADV_DEBUG][COLLECT_ERROR]', sectionName, error);
+        return { error: message };
+      }
+    }
+
+    function extractConversationIdFromUrl() {
+      const match = String(location.href).match(/\/c\/([^/?#]+)/);
+      return match ? match[1] : '';
+    }
+
+    function describeElementSafe(el) {
+      if (!el) {
+        return { found: false };
+      }
+      const rect = el.getBoundingClientRect();
+      return {
+        found: true,
+        tag: el.tagName,
+        text: String(el.innerText || el.textContent || '').trim().slice(0, 80),
+        ariaLabel: String(el.getAttribute('aria-label') || '').slice(0, 80),
+        title: String(el.getAttribute('title') || '').slice(0, 80),
+        disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+        visible: rect.width > 0 && rect.height > 0,
+        rect: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        },
+      };
+    }
+
+    function findComposerElementSafe() {
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposer === 'function') {
+        return ComposerApi.getComposer();
+      }
+      return document.querySelector('[data-testid="composer"] [contenteditable="true"], #prompt-textarea, textarea[name="prompt-textarea"]');
+    }
+
+    function getComposerTextSafe(composer) {
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerText === 'function') {
+        return String(ComposerApi.getComposerText() || '');
+      }
+      if (composer && 'value' in composer) {
+        return String(composer.value || '');
+      }
+      return composer ? String(composer.textContent || '') : '';
+    }
+
+    function getComposerAttachmentSnapshotSafe() {
+      const snap = resolveAutoQueueAttachmentSnapshot({ detailed: true });
+      if (!snap || typeof snap !== 'object') {
+        return {
+          rawCount: 0,
+          normalizedCount: 0,
+          readyCount: 0,
+        };
+      }
+      return {
+        rawCount: Number(snap.rawCount || snap.totalCount || snap.chipCount || 0) || 0,
+        normalizedCount: Number(snap.normalizedCount || snap.uniqueCount || snap.totalCount || 0) || 0,
+        readyCount: Number(snap.readyCount || snap.readyAttachmentCount || 0) || 0,
+      };
+    }
+
+    function isComposerDisabledSafe(composer) {
+      if (!composer) {
+        return true;
+      }
+      if (composer.disabled || composer.getAttribute('aria-disabled') === 'true') {
+        return true;
+      }
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.canAcceptInput === 'function') {
+        return !ComposerApi.canAcceptInput();
+      }
+      return false;
+    }
+
+    function detectCanSendSafe() {
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.canSendNow === 'function') {
+        return !!ComposerApi.canSendNow();
+      }
+      const sendBtn = typeof ComposerApi !== 'undefined' && typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
+      return !!sendBtn && !sendBtn.disabled;
+    }
+
+    function detectIsGeneratingSafe() {
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.isAssistantLikelyBusy === 'function') {
+        return !!ComposerApi.isAssistantLikelyBusy();
+      }
+      if (typeof hasRealChatGPTStopGeneratingButton === 'function') {
+        return hasRealChatGPTStopGeneratingButton();
+      }
+      return !!document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+    }
+
+    function findSendButtonSafe() {
+      if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.findSendButton === 'function') {
+        return ComposerApi.findSendButton({ silent: true });
+      }
+      return null;
+    }
+
+    function findStopButtonSafe() {
+      if (typeof findRealChatGPTStopGeneratingButton === 'function') {
+        return findRealChatGPTStopGeneratingButton();
+      }
+      return document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+    }
+
+    function findContinueButtonSafe() {
+      const selectors = [
+        'button[data-testid*="continue"]',
+        'button[aria-label*="Continue"]',
+        'button[aria-label*="继续"]',
+      ];
+      for (const selector of selectors) {
+        const hit = document.querySelector(selector);
+        if (hit) {
+          return hit;
+        }
+      }
+      const buttons = Array.from(document.querySelectorAll('button'));
+      return buttons.find((btn) => /继续生成|Continue generating/i.test(String(btn.innerText || btn.textContent || ''))) || null;
+    }
+
+    function findAttachButtonSafe() {
+      const selectors = [
+        'button[data-testid="composer-plus-btn"]',
+        'button[aria-label*="Attach"]',
+        'button[aria-label*="附加"]',
+        'button[aria-label*="上传"]',
+      ];
+      for (const selector of selectors) {
+        const hit = document.querySelector(selector);
+        if (hit) {
+          return hit;
+        }
+      }
+      return null;
+    }
+
+    function findFileInputSafe() {
+      const composerRoot = typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerRoot === 'function'
+        ? ComposerApi.getComposerRoot()
+        : null;
+      const scope = composerRoot instanceof HTMLElement ? composerRoot : document;
+      return scope.querySelector('input[type="file"]');
+    }
+
+    function findRegenerateButtonSafe() {
+      return document.querySelector('[data-testid*="regenerate"], button[aria-label*="Regenerate"], button[aria-label*="重新生成"]');
+    }
+
+    function findVoiceButtonSafe() {
+      const selectors = [
+        'button[data-testid*="voice"]',
+        'button[aria-label*="Voice"]',
+        'button[aria-label*="语音"]',
+        'button[aria-label*="Dictate"]',
+      ];
+      for (const selector of selectors) {
+        const hit = document.querySelector(selector);
+        if (hit) {
+          return hit;
+        }
+      }
+      return null;
+    }
+
+    function getLastAssistantReplyTextSafe() {
+      if (typeof getLastAssistantReplyText === 'function') {
+        return String(getLastAssistantReplyText() || '');
+      }
+      const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+      const lastNode = nodes.length > 0 ? nodes[nodes.length - 1] : null;
+      return lastNode ? String(lastNode.innerText || lastNode.textContent || '').trim() : '';
+    }
+
+    function collectPageDebugState() {
+      return {
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus(),
+        readyState: document.readyState,
+        scrollY: window.scrollY,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        conversationId: extractConversationIdFromUrl(),
+        pageDisplayId: typeof getBridgePageDisplayIdText === 'function'
+          ? String(getBridgePageDisplayIdText() || '')
+          : '',
+      };
+    }
+
+    function collectComposerDebugState() {
+      const composer = findComposerElementSafe();
+      const text = getComposerTextSafe(composer);
+      const attachments = getComposerAttachmentSnapshotSafe();
+      return {
+        composerFound: !!composer,
+        composerDisabled: isComposerDisabledSafe(composer),
+        composerTextLength: text.length,
+        composerTextPreview: text.slice(0, 80),
+        attachmentRawCount: attachments.rawCount,
+        attachmentNormalizedCount: attachments.normalizedCount,
+        attachmentReadyCount: attachments.readyCount,
+        canSend: detectCanSendSafe(),
+        isGenerating: detectIsGeneratingSafe(),
+      };
+    }
+
+    function collectButtonDebugState() {
+      return {
+        chatgpt: {
+          sendButton: describeElementSafe(findSendButtonSafe()),
+          stopButton: describeElementSafe(findStopButtonSafe()),
+          continueButton: describeElementSafe(findContinueButtonSafe()),
+          attachButton: describeElementSafe(findAttachButtonSafe()),
+          fileInput: describeElementSafe(findFileInputSafe()),
+          voiceButton: describeElementSafe(findVoiceButtonSafe()),
+          regenerateButton: describeElementSafe(findRegenerateButtonSafe()),
+        },
+        toolbox: {
+          startUploadButton: describeElementSafe(document.querySelector('#cgpt-autoq-start-upload')),
+          startBatchButton: describeElementSafe(document.querySelector('#cgpt-autoq-start')),
+          sendInitialOnlyButton: describeElementSafe(document.querySelector('#cgpt-autoq-send-once')),
+          copyLogButton: describeElementSafe(document.querySelector('#cgpt-autoq-copy-log')),
+          advancedDebugButton: describeElementSafe(document.querySelector('#xz-autoq-advanced-debug-toggle-btn')),
+        },
+      };
+    }
+
+    function collectAutoQueueDebugState() {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const profile = typeof getActiveTaskProfile === 'function' ? getActiveTaskProfile() : null;
+      const currentTask = typeof getCurrentRunningTask === 'function' ? getCurrentRunningTask() : null;
+      const taskInfo = config.promptMode === 'task' && typeof getCurrentTaskRunInfo === 'function'
+        ? getCurrentTaskRunInfo()
+        : null;
+      const completedCount = taskInfo
+        ? Math.max(0, Number(taskInfo.doneCount) || 0)
+        : 0;
+
+      return {
+        mode: config.promptMode || '',
+        phase: String(state.phase || ''),
+        batchDisplayState: state.batchTask ? String(state.batchTask.displayState || '') : '',
+        status: state.running ? 'running' : 'stopped',
+        currentStep: run.currentStep || '',
+        currentIndex: run.currentIndex,
+        total: Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds.length : 0,
+        sentCount: Number(run.totalSentDialogueCount || state.sentCount || 0) || 0,
+        completedCount,
+        activeProfileId: config.activeTaskProfileId || '',
+        activeProfileName: profile ? profile.name : '',
+        currentTaskId: run.currentTaskId || state.currentTaskId || (currentTask ? currentTask.id : ''),
+        currentTaskTitle: run.currentTaskTitle || (currentTask ? currentTask.title : ''),
+        isRunning: !!state.running,
+        isPaused: false,
+        isStopping: !!(state.batchTask && state.batchTask.stopRequested),
+        waitingForReply: !!state.waitingReply,
+        waitingForUpload: !!(run.waitingUpload || state.uploadingFromAutoQueue || state.batchAutoUploading),
+        doneSignalVerificationRunning: !!run.doneSignalVerificationRunning,
+        terminalConfirmPending: !!state.terminalConfirming,
+        terminalConfirmSource: state.terminalConfirmSource || '',
+        lastError: getTaskBatchFailureDisplayText(),
+        lastReason: String(run.lastReplyClassifyReason || run.lastSendRetryReason || ''),
+        lastReplyClassifyStatus: String(run.lastReplyClassifyStatus || ''),
+        phaseReason: String(state.phaseReason || ''),
+        displayReason: state.batchTask ? String(state.batchTask.displayReason || '') : '',
+        lastFailure: state.lastTaskBatchFailureReason || null,
+        lastStop: state.lastTaskBatchStopReason || null,
+        pendingSendKind: String(run.pendingSendKind || ''),
+      };
+    }
+
+    function collectUploadDebugState() {
+      let uploadStatus = {};
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.getStatus === 'function') {
+        uploadStatus = UploadModule.getStatus();
+      } else if (typeof UploadModule !== 'undefined' && typeof UploadModule.getUnifiedRuntimeStatus === 'function') {
+        const runtime = UploadModule.getUnifiedRuntimeStatus('adv-debug');
+        uploadStatus = runtime && runtime.uploadQueue ? runtime.uploadQueue : {};
+      }
+
+      const messageQuota = getPanelMessageQuotaState({ logSnapshot: false });
+      const uploadQuota = getPanelUploadQuotaState({ logSnapshot: false });
+      const attachSnap = getComposerAttachmentSnapshotSafe();
+      const stats = state.autoQueueUploadStats || {};
+
+      return {
+        queueTotal: Number(uploadStatus.totalUploadItems || uploadStatus.total || 0) || 0,
+        attached: Number(uploadStatus.attached || 0) || 0,
+        failed: Number(uploadStatus.failed || 0) || 0,
+        missing: Number(uploadStatus.missing || 0) || 0,
+        isUploading: !!(uploadStatus.running || uploadStatus.uploadRunning || state.uploadingFromAutoQueue),
+        autoQueueUploadStatus: String(state.autoQueueUploadStatus || ''),
+        lastUploadSource: String(uploadStatus.lastRealUploadErrorSource || stats.reason || ''),
+        lastUploadError: String(uploadStatus.lastRealUploadError || stats.reason || '').slice(0, 200),
+        localUploadUsed: Number(uploadQuota.used || 0) || 0,
+        localUploadLimit: Number(uploadQuota.limit || uploadQuota.maxFiles || 0) || 0,
+        localEnhanceUsed: Number(messageQuota.used || 0) || 0,
+        localEnhanceLimit: Number(messageQuota.limit || messageQuota.maxMessages || 0) || 0,
+        composerAttachmentCount: attachSnap.normalizedCount,
+        pendingUploadFileCount: Number(runPendingUploadCountSafe()),
+      };
+    }
+
+    function runPendingUploadCountSafe() {
+      const run = state.taskRun || {};
+      return Number(run.uploadFileCountForCurrentTask || 0) || 0;
+    }
+
+    const NORMAL_REPLY_SETTLE_STABLE_MS = 800;
+    const NORMAL_REPLY_SETTLE_MIN_COUNT = 2;
+
+    function getReplyStateNextAction(replyState, options = {}) {
+      const type = replyState && replyState.type ? String(replyState.type) : '';
+      if (type === 'generating') {
+        return 'continue-wait';
+      }
+      if (type === 'normal_reply_done') {
+        return options.waitingReply ? 'send-next' : 'continue-current-task';
+      }
+      if (type === 'done') {
+        return 'terminal-done';
+      }
+      if (type === 'blocked') {
+        return 'terminal-blocked';
+      }
+      if (type === 'no_more_content') {
+        return 'terminal-no-more-content';
+      }
+      if (type === 'empty') {
+        return 'continue-wait';
+      }
+      return 'continue-wait';
+    }
+
+    function recordReplyClassifyFromReplyState(replyState) {
+      if (!state.taskRun || !replyState) {
+        return;
+      }
+      const type = String(replyState.type || '-');
+      const shouldStop = type === 'done' || type === 'blocked' || type === 'no_more_content';
+      recordReplyClassifyDecision({
+        shouldStop,
+        status: type,
+        reason: String(replyState.reason || '-'),
+      });
+    }
+
+    function logReplyStateDecision(source, payload = {}) {
+      const run = state.taskRun || {};
+      const pageRound = typeof readPageTurnCount === 'function' ? readPageTurnCount() : null;
+      const taskIndex = Number(run.currentIndex || 0);
+      const logPayload = {
+        pageRound: pageRound == null ? '-' : pageRound,
+        taskIndex: taskIndex + 1,
+        replyLength: Number(payload.replyLength || 0),
+        isGenerating: !!payload.isGenerating,
+        detectedTerminal: payload.detectedTerminal || '-',
+        stateType: payload.stateType || '-',
+        reason: payload.reason || '-',
+        nextAction: payload.nextAction || '-',
+        source: source || '-',
+      };
+      console.log('[AUTOQ][REPLY_STATE]', logPayload);
+      ToolboxShell.appendLog(
+        `[AUTOQ][REPLY_STATE] pageRound=${logPayload.pageRound} taskIndex=${logPayload.taskIndex} `
+        + `replyLength=${logPayload.replyLength} isGenerating=${logPayload.isGenerating ? 1 : 0} `
+        + `detectedTerminal=${logPayload.detectedTerminal} stateType=${logPayload.stateType} `
+        + `reason=${logPayload.reason} nextAction=${logPayload.nextAction} source=${logPayload.source}`,
+      );
+    }
+
+    function evaluateWaitingReplyState(source) {
+      const replyText = getLatestAssistantReplyTextForBatchSafe(source || 'waiting-reply-state');
+      const isGenerating = isRawAssistantGeneratingSignals();
+      if (typeof classifyReplyState !== 'function') {
+        return {
+          replyText,
+          isGenerating,
+          replyState: null,
+          nextAction: isGenerating ? 'continue-wait' : 'send-next',
+        };
+      }
+      const replyState = classifyReplyState(replyText, isGenerating);
+      const detectedTerminal = replyState.type === 'done'
+        || replyState.type === 'blocked'
+        || replyState.type === 'no_more_content'
+        ? replyState.type
+        : 'none';
+      const nextAction = getReplyStateNextAction(replyState, { waitingReply: !!state.waitingReply });
+      return {
+        replyText,
+        isGenerating,
+        replyState,
+        detectedTerminal,
+        nextAction,
+      };
+    }
+
+    function trySettleWaitingReplyByReplyState(source) {
+      if (!state.waitingReply || config.promptMode !== 'task') {
+        return false;
+      }
+
+      const evaluated = evaluateWaitingReplyState(source);
+      const {
+        replyText,
+        isGenerating,
+        replyState,
+        detectedTerminal,
+        nextAction,
+      } = evaluated;
+
+      if (!replyState) {
+        return false;
+      }
+
+      recordReplyClassifyFromReplyState(replyState);
+      logReplyStateDecision(source, {
+        replyLength: String(replyText || '').length,
+        isGenerating,
+        detectedTerminal,
+        stateType: replyState.type,
+        reason: replyState.reason,
+        nextAction,
+      });
+
+      if (replyState.type === 'generating' || replyState.type === 'empty') {
+        return false;
+      }
+
+      const stableSnap = getBatchReplyStableSnapshot(source || 'reply-state-settle');
+      const mergedText = String(stableSnap.text || replyText || '').trim();
+      if (!mergedText) {
+        return false;
+      }
+
+      if (replyState.type === 'normal_reply_done') {
+        if (isGenerating) {
+          return false;
+        }
+        if (
+          stableSnap.stableMs < NORMAL_REPLY_SETTLE_STABLE_MS
+          || stableSnap.count < NORMAL_REPLY_SETTLE_MIN_COUNT
+        ) {
+          return false;
+        }
+      }
+
+      const validation = validateAssistantReplyForRun(
+        { runId: state.currentRunId },
+        {
+          text: mergedText,
+          isStreaming: false,
+          parentMessageId: '',
+        },
+      );
+
+      if (!validation.ok) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][REPLY_STATE][SETTLE_BLOCKED] source=${source || '-'} reason=${validation.reason || 'validation-failed'} `
+          + `stateType=${replyState.type}`,
+        );
+        return false;
+      }
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][REPLY_STATE][SETTLE] source=${source || '-'} stateType=${replyState.type} `
+        + `reason=${replyState.reason} nextAction=${nextAction}`,
+      );
+      void onAssistantReplySettled(mergedText, {
+        reason: `reply-state-${replyState.reason}`,
+        replyState,
+      });
+      updateStatus('reply-state-settled');
+      updateChatInputStateBadge();
+      return true;
+    }
+
+    function collectReplyDebugState(options = {}) {
+      const full = options && options.full === true;
+      const replyText = getLastAssistantReplyTextSafe();
+      const isGenerating = isRawAssistantGeneratingSignals();
+      const replyState = typeof classifyReplyState === 'function'
+        ? classifyReplyState(replyText, isGenerating)
+        : null;
+      const classify = full && typeof classifyBatchReply === 'function'
+        ? classifyBatchReply(replyText, { isGenerating })
+        : null;
+      const stableSnap = getBatchReplyStableSnapshot('adv-debug-reply');
+      const nextAction = replyState ? getReplyStateNextAction(replyState, {
+        waitingReply: !!state.waitingReply,
+      }) : '';
+      return {
+        lastReplyLength: replyText.length,
+        lastReplyPreview: replyText.slice(0, 160),
+        isGenerating,
+        stableMs: stableSnap.stableMs,
+        stableCount: stableSnap.count,
+        replyStateType: replyState ? replyState.type : '',
+        replyStateReason: replyState ? replyState.reason : '',
+        replyStateDone: replyState ? !!replyState.done : false,
+        nextAction,
+        classifyStatus: classify ? classify.status : (replyState ? replyState.type : ''),
+        classifyReason: classify ? classify.reason : (replyState ? replyState.reason : ''),
+        exactDoneSignal: full && typeof isExactSingleLineBatchSignalText === 'function'
+          ? isExactSingleLineBatchSignalText(replyText, DEFAULT_BATCH_DONE_SIGNAL)
+          : false,
+        exactBlockedSignal: full && typeof isExactSingleLineBatchSignalText === 'function'
+          ? isExactSingleLineBatchSignalText(replyText, DEFAULT_BATCH_BLOCKED_SIGNAL)
+          : false,
+        exactNoMoreContentSignal: full && typeof isExactSingleLineBatchSignalText === 'function'
+          ? isExactSingleLineBatchSignalText(replyText, DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL)
+          : false,
+        normalReplyDoneWithoutTerminal: replyState
+          ? replyState.type === 'normal_reply_done'
+          : false,
+      };
+    }
+
+    function collectTerminalDebugState() {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      return {
+        terminalConfirmPending: !!state.terminalConfirming,
+        terminalConfirmStartedAt: Number(state.terminalConfirmStartedAt || 0) || 0,
+        terminalConfirmSource: state.terminalConfirmSource || '',
+        terminalConfirmTaskIndex: state.terminalConfirmTaskIndex,
+        terminalConfirmSignalType: state.terminalConfirmSignal || '',
+        terminalConfirmPassed: !!state.terminalConfirmPassed,
+        doneSignalVerificationRunning: !!run.doneSignalVerificationRunning,
+        doneSignalVerificationStartedAt: Number(run.terminalVerificationStartedAt || run.verificationPromptSentAt || 0) || 0,
+        doneSignalVerificationRound: Number(run.doneSignalVerificationSendCount || 0) || 0,
+        lastTerminalSignalText: String(run.visibleDoneSignalText || state.terminalConfirmFirstText || '').slice(0, 120),
+        afterTerminalConfirmWaitingVerify: !!run.afterTerminalConfirmWaitingVerify,
+      };
+    }
+
+    function collectQuotaDebugState() {
+      const messageQuota = getPanelMessageQuotaState({ logSnapshot: false });
+      const uploadQuota = getPanelUploadQuotaState({ logSnapshot: false });
+      const pageTurn = typeof readPageTurnCount === 'function' ? readPageTurnCount() : null;
+      return {
+        pageId: typeof getBridgePageDisplayIdText === 'function'
+          ? String(getBridgePageDisplayIdText() || '')
+          : '',
+        pageRoundCount: pageTurn == null ? 0 : Number(pageTurn) || 0,
+        pageRoundLimit: 0,
+        localUploadUsed: Number(uploadQuota.used || 0) || 0,
+        localUploadLimit: Number(uploadQuota.limit || uploadQuota.maxFiles || 0) || 0,
+        localEnhanceUsed: Number(messageQuota.used || 0) || 0,
+        localEnhanceLimit: Number(messageQuota.limit || messageQuota.maxMessages || 0) || 0,
+        pageError: String(state.phase || '') === AUTO_QUEUE_PHASES.FAILED,
+        canSend: messageQuota.canSend !== false,
+        canUpload: uploadQuota.canUpload !== false,
+        quotaStatusText: [
+          `消息 ${messageQuota.used}/${messageQuota.limit}`,
+          `上传 ${uploadQuota.used}/${uploadQuota.limit}`,
+        ].join(' | '),
+      };
+    }
+
+    function collectTimerDebugState() {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const now = Date.now();
+      const runtimeStats = typeof RuntimeStatsModule !== 'undefined' && RuntimeStatsModule.getStats
+        ? RuntimeStatsModule.getStats()
+        : null;
+      const batchStartedAt = runtimeStats && runtimeStats.batchStartedAt
+        ? Number(runtimeStats.batchStartedAt) || 0
+        : Number(state.startedAt || 0) || 0;
+      const currentTaskStartedAt = runtimeStats && runtimeStats.currentTaskStartedAt
+        ? Number(runtimeStats.currentTaskStartedAt) || 0
+        : Number(run.taskPromptSentAt || 0) || 0;
+      const lastSendAt = Number(run.taskPromptSentAt || run.pendingSendStartedAt || 0) || 0;
+      const lastReplyAt = Number(run.terminalSignalConsumedAt || run.lastConsumedVerificationAt || 0) || 0;
+      const nextActionAt = Number(state.nextSendAt || run.nextSendRetryAt || 0) || 0;
+
+      return {
+        now,
+        batchStartedAt,
+        currentTaskStartedAt,
+        lastSendAt,
+        lastReplyAt,
+        nextActionAt,
+        waitingStartedAt: Number(state.waitingStartedAt || 0) || 0,
+        batchElapsedMs: batchStartedAt ? now - batchStartedAt : 0,
+        currentTaskElapsedMs: currentTaskStartedAt ? now - currentTaskStartedAt : 0,
+        waitReplyElapsedMs: lastSendAt && !lastReplyAt && state.waitingReply ? now - lastSendAt : 0,
+      };
+    }
+
+    function collectAdvancedDebugSnapshot(source = 'manual', options = {}) {
+      const full = options.full === true;
+      const now = Date.now();
+      const snapshot = {
+        source,
+        time: new Date(now).toLocaleString(),
+        url: location.href,
+        title: document.title,
+        page: collectSectionSafe('page', collectPageDebugState),
+        autoQueue: collectSectionSafe('autoQueue', collectAutoQueueDebugState),
+        upload: collectSectionSafe('upload', collectUploadDebugState),
+        terminal: collectSectionSafe('terminal', collectTerminalDebugState),
+        quota: collectSectionSafe('quota', collectQuotaDebugState),
+        timers: collectSectionSafe('timers', collectTimerDebugState),
+      };
+      if (full) {
+        snapshot.composer = collectSectionSafe('composer', collectComposerDebugState);
+        snapshot.buttons = collectSectionSafe('buttons', collectButtonDebugState);
+        snapshot.reply = collectSectionSafe('reply', () => collectReplyDebugState({ full: true }));
+      } else {
+        snapshot.composer = { skipped: true, reason: 'light-mode' };
+        snapshot.buttons = { skipped: true, reason: 'light-mode' };
+        snapshot.reply = collectSectionSafe('reply', () => collectReplyDebugState({ full: false }));
+      }
+      state.advancedDebugLastSnapshot = snapshot;
+      state.advancedDebugLastUpdatedAt = now;
+      return snapshot;
+    }
+
+    function formatAdvancedDebugSnapshot(snapshot) {
+      return [
+        `更新时间：${snapshot.time}`,
+        `来源：${snapshot.source}`,
+        `URL：${snapshot.url}`,
+        '',
+        '【页面状态】',
+        JSON.stringify(snapshot.page, null, 2),
+        '',
+        '【Composer 状态】',
+        JSON.stringify(snapshot.composer, null, 2),
+        '',
+        '【按钮检测】',
+        JSON.stringify(snapshot.buttons, null, 2),
+        '',
+        '【批量任务状态】',
+        JSON.stringify(snapshot.autoQueue, null, 2),
+        '',
+        '【上传状态】',
+        JSON.stringify(snapshot.upload, null, 2),
+        '',
+        '【回复识别】',
+        JSON.stringify(snapshot.reply, null, 2),
+        '',
+        '【终止/二次验证状态】',
+        JSON.stringify(snapshot.terminal, null, 2),
+        '',
+        '【限额状态】',
+        JSON.stringify(snapshot.quota, null, 2),
+        '',
+        '【定时器状态】',
+        JSON.stringify(snapshot.timers, null, 2),
+      ].join('\n');
+    }
+
+    function refreshAdvancedDebugPanel(source = 'manual', options = {}) {
+      const panel = document.querySelector('#xz-autoq-advanced-debug-panel');
+      const content = panel ? panel.querySelector('.xz-autoq-advanced-debug-content') : null;
+      if (!panel || !content) {
+        return;
+      }
+      const snapshot = collectAdvancedDebugSnapshot(source, options);
+      content.textContent = formatAdvancedDebugSnapshot(snapshot);
+      syncAdvancedDebugAutoRefreshButton();
+      if (source !== 'status-render') {
+        ToolboxShell.appendLog(`[ADV_DEBUG][REFRESH] source=${source}`);
+      }
+    }
+
+    function maybeRefreshAdvancedDebugPanel(source = 'render') {
+      if (!state.advancedDebugVisible) {
+        return;
+      }
+      const settings = config && config.taskQueueSettings ? config.taskQueueSettings : {};
+      const autoRefresh = settings.advancedDebugAutoRefresh === true;
+      if (!autoRefresh) {
+        return;
+      }
+      const now = Date.now();
+      const intervalMs = Math.max(3000, Number(settings.advancedDebugRefreshIntervalMs || 5000) || 5000);
+      if (now - Number(state.advancedDebugLastUpdatedAt || 0) < intervalMs) {
+        return;
+      }
+      refreshAdvancedDebugPanel(source);
+    }
+
+    function syncAdvancedDebugAutoRefreshButton() {
+      const btn = document.querySelector('#xz-autoq-advanced-debug-auto-refresh-btn');
+      if (!btn) {
+        return;
+      }
+      const settings = config && config.taskQueueSettings ? config.taskQueueSettings : {};
+      const enabled = settings.advancedDebugAutoRefresh === true;
+      btn.textContent = enabled ? '自动刷新：开' : '自动刷新：关';
+      btn.classList.toggle('active', enabled);
+      btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+
+    function toggleAdvancedDebugAutoRefresh() {
+      if (!config.taskQueueSettings || typeof config.taskQueueSettings !== 'object') {
+        config.taskQueueSettings = createDefaultTaskQueueSettings();
+      }
+      config.taskQueueSettings.advancedDebugAutoRefresh = !config.taskQueueSettings.advancedDebugAutoRefresh;
+      saveConfig();
+      syncAdvancedDebugAutoRefreshButton();
+      ToolboxShell.appendLog(
+        `[ADV_DEBUG][AUTO_REFRESH_TOGGLE] enabled=${config.taskQueueSettings.advancedDebugAutoRefresh ? 1 : 0}`,
+      );
+    }
+
+    function toggleAdvancedDebugPanel() {
+      state.advancedDebugVisible = !state.advancedDebugVisible;
+      const host = getAdvancedDebugHostElement();
+      if (host) {
+        ensureAdvancedDebugPanelDom(host);
+      } else {
+        ToolboxShell.appendLog('[ADV_DEBUG][TOGGLE_WARN] reason=debug-host-missing');
+      }
+      const resolvedPanel = document.querySelector('#xz-autoq-advanced-debug-panel');
+      if (resolvedPanel) {
+        resolvedPanel.style.display = state.advancedDebugVisible ? 'block' : 'none';
+      } else {
+        ToolboxShell.appendLog('[ADV_DEBUG][TOGGLE_WARN] reason=panel-missing-after-ensure');
+      }
+      ensureAdvancedDebugToggleButtonDom();
+      syncAdvancedDebugToggleButton();
+      ToolboxShell.appendLog(`[ADV_DEBUG][TOGGLE] visible=${state.advancedDebugVisible ? 1 : 0}`);
+      if (state.advancedDebugVisible) {
+        refreshAdvancedDebugPanel('toggle-open', { full: true });
+      }
+    }
+
+    async function copyAdvancedDebugPanelState() {
+      const snapshot = collectAdvancedDebugSnapshot('copy', { full: true });
+      const text = formatAdvancedDebugSnapshot(snapshot);
+      try {
+        if (typeof copyWithStatus === 'function') {
+          const ok = await copyWithStatus({
+            text,
+            successText: '已复制高级状态',
+            failedPrefix: '复制高级状态失败',
+            logPrefix: 'ADV_DEBUG_COPY',
+            playSuccessBeep: false,
+            statusOwner: 'autoq-adv-debug',
+          });
+          ToolboxShell.appendLog(`[ADV_DEBUG][COPY] ok=${ok ? 1 : 0} length=${text.length}`);
+          return ok;
+        }
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+          throw new Error('clipboard API unavailable');
+        }
+        await navigator.clipboard.writeText(text);
+        ToolboxShell.appendLog(`[ADV_DEBUG][COPY] ok=1 length=${text.length}`);
+        return true;
+      } catch (error) {
+        const message = error && error.stack ? error.stack : String(error);
+        ToolboxShell.appendLog(`[ADV_DEBUG][COPY_ERROR] error=${message}`);
+        console.error('[ADV_DEBUG][COPY_ERROR]', error);
+        return false;
+      }
+    }
+
+    function handleAdvancedDebugPanelAction(action) {
+      if (action === 'refresh') {
+        refreshAdvancedDebugPanel('manual-refresh', { full: true });
+        return;
+      }
+      if (action === 'toggle-auto-refresh') {
+        toggleAdvancedDebugAutoRefresh();
+        return;
+      }
+      if (action === 'copy') {
+        void copyAdvancedDebugPanelState();
       }
     }
 
@@ -522,6 +1426,8 @@ const AutoQueueModule = (() => {
         taskStepText,
         lastStopReasonText,
         lastStopClassifyHint,
+        lastFailureReasonText,
+        batchDisplayReasonText,
         rateLimitDisplay,
         uploadRateLimitDisplay,
         progressSnapshot,
@@ -550,7 +1456,7 @@ const AutoQueueModule = (() => {
         ? `${lastStopReasonText}${lastStopClassifyHint || ''}`
         : '-';
 
-      return renderAutoqStatusItems([
+      const items = [
         { label: '任务进度', value: taskProgress },
         { label: '页面轮次', value: pageTurnText },
         { label: '状态', value: runStateText, allowStopWarn: true },
@@ -570,7 +1476,37 @@ const AutoQueueModule = (() => {
           className: 'wide',
           tone: replyClassifyText !== '-' ? resolveAutoqStatusValueTone(replyClassifyText) : '',
         },
+      ];
 
+      const shouldShowFailureReason = (
+        lastFailureReasonText
+        && lastFailureReasonText !== '-'
+        && (
+          /失败|异常|恢复|停止/.test(String(runStateText || ''))
+          || String(state.phase || '') === AUTO_QUEUE_PHASES.FAILED
+          || (state.batchTask && ['failed', 'recovering', 'next_task_upload_failed', 'stopped'].includes(String(state.batchTask.displayState || '')))
+        )
+      );
+
+      if (shouldShowFailureReason) {
+        items.push({
+          label: '失败原因',
+          value: lastFailureReasonText,
+          className: 'full',
+          tone: 'is-error',
+        });
+      }
+
+      if (batchDisplayReasonText && batchDisplayReasonText !== '-') {
+        items.push({
+          label: '状态原因',
+          value: batchDisplayReasonText,
+          className: 'full',
+          tone: shouldShowFailureReason ? 'is-warning' : '',
+        });
+      }
+
+      items.push(
         { label: '自动上传', value: autoUploadText, className: 'full' },
         { label: '回首页进度', value: rotateProgressText, className: 'full' },
         {
@@ -579,7 +1515,9 @@ const AutoQueueModule = (() => {
           className: 'full',
           tone: stopReasonValue !== '-' ? 'is-error' : '',
         },
-      ]);
+      );
+
+      return renderAutoqStatusItems(items);
     }
 
     function buildLiteStatusPanelHtml(options) {
@@ -1596,11 +2534,15 @@ const AutoQueueModule = (() => {
       taskUploadRateLimitLastLogAt: 0,
       lastSendNextBlockedLogAt: 0,
       lastTaskBatchStopReason: null,
+      lastTaskBatchFailureReason: null,
       sendOnceTask: {
         phase: 'idle',
         runId: '',
         lastError: null,
       },
+      advancedDebugVisible: false,
+      advancedDebugLastSnapshot: null,
+      advancedDebugLastUpdatedAt: 0,
     };
 
     const AUTO_QUEUE_PHASES = Object.freeze({
@@ -1631,6 +2573,14 @@ const AutoQueueModule = (() => {
       AUTO_QUEUE_PHASES.SENT,
       AUTO_QUEUE_PHASES.WAITING_REPLY,
       AUTO_QUEUE_PHASES.REPLY_READY,
+      'terminal_confirmed',
+      'next_task_prepare',
+      'next_task_navigate_home',
+      'next_task_wait_home_ready',
+      'next_task_uploading',
+      'next_task_wait_upload_ready',
+      'next_task_upload_attached',
+      'next_task_sending',
     ]);
 
     const BATCH_TASK_GROUP_RECOVER_DELAY_MS = 5000;
@@ -1842,6 +2792,9 @@ const AutoQueueModule = (() => {
       starting_upload: '启动中（自动上传初始附件）',
       running: '运行中',
       waiting_reply: '等待回复',
+      waiting_next_task_upload: '等待下一任务附件上传',
+      next_task_upload_failed: '下一任务附件上传失败',
+      preparing_next_task: '正在准备下一任务',
       stopping: '正在停止',
       waiting_composer_idle: '等待输入框空闲',
       uploading: '上传中',
@@ -1916,6 +2869,79 @@ const AutoQueueModule = (() => {
         'running',
         'failed',
         'cancelled',
+        'terminal_confirmed',
+        'next_task_prepare',
+        'next_task_navigate_home',
+        'next_task_wait_home_ready',
+        'next_task_reset_composer',
+        'next_task_uploading',
+        'next_task_wait_upload_ready',
+        'next_task_upload_attached',
+        'next_task_prompt_ready',
+        'next_task_sending',
+        'next_task_failed',
+      ]),
+      terminal_confirmed: new Set([
+        'next_task_prepare',
+        'preparing_next_task',
+        'failed',
+        'cancelled',
+      ]),
+      next_task_prepare: new Set([
+        'next_task_navigate_home',
+        'next_task_uploading',
+        'next_task_prompt_ready',
+        'next_task_sending',
+        'next_task_failed',
+        'failed',
+      ]),
+      next_task_navigate_home: new Set([
+        'next_task_wait_home_ready',
+        'next_task_failed',
+        'failed',
+      ]),
+      next_task_wait_home_ready: new Set([
+        'next_task_uploading',
+        'next_task_prompt_ready',
+        'next_task_failed',
+        'failed',
+      ]),
+      next_task_uploading: new Set([
+        'next_task_wait_upload_ready',
+        'next_task_upload_attached',
+        'next_task_failed',
+        'failed',
+      ]),
+      next_task_wait_upload_ready: new Set([
+        'next_task_upload_attached',
+        'next_task_sending',
+        'next_task_failed',
+        'failed',
+      ]),
+      next_task_upload_attached: new Set([
+        'next_task_sending',
+        'waiting_reply',
+        'failed',
+      ]),
+      next_task_sending: new Set([
+        'waiting_reply',
+        'failed',
+      ]),
+      next_task_failed: new Set([
+        'next_task_prepare',
+        'next_task_upload_retry',
+        'next_task_uploading',
+        'next_task_wait_upload_ready',
+        'failed',
+        'cancelled',
+      ]),
+      next_task_upload_retry: new Set([
+        'next_task_uploading',
+        'next_task_wait_upload_ready',
+        'next_task_upload_attached',
+        'next_task_sending',
+        'next_task_failed',
+        'failed',
       ]),
       completed: new Set(['idle', 'done']),
       done: new Set(['idle']),
@@ -1928,7 +2954,8 @@ const AutoQueueModule = (() => {
       state.running = (
         !AUTO_QUEUE_TERMINAL_PHASES.has(phase)
         && phase !== AUTO_QUEUE_PHASES.IDLE
-      );
+        && phase !== 'next_task_failed'
+      ) || isNextTaskTransitionPhase(phase);
       if (phase === AUTO_QUEUE_PHASES.WAITING_REPLY) {
         if (canEnterAutoQueueWaitingReply()) {
           state.waitingReply = true;
@@ -2180,7 +3207,7 @@ const AutoQueueModule = (() => {
         isStreaming: false,
       };
 
-      reply.isStreaming = isChatGPTActuallyBusyForTaskQueue();
+      reply.isStreaming = isRawAssistantGeneratingSignals();
 
       if (
         typeof ChatMessageExtractor !== 'undefined'
@@ -2545,8 +3572,57 @@ const AutoQueueModule = (() => {
 
     function validateAssistantReplyForRun(run, reply) {
       const snapshot = reply && typeof reply === 'object' ? reply : buildAssistantReplySnapshot();
+      const replyText = String(snapshot && snapshot.text ? snapshot.text : '').trim();
+      const isGenerating = typeof snapshot.isStreaming === 'boolean'
+        ? snapshot.isStreaming
+        : isRawAssistantGeneratingSignals();
 
-      if (!snapshot || !String(snapshot.text || '').trim()) {
+      if (typeof classifyReplyState === 'function') {
+        const replyState = classifyReplyState(replyText, isGenerating);
+        snapshot.replyState = replyState;
+
+        if (replyState.type === 'generating') {
+          ToolboxShell.appendLog('[AUTO_QUEUE][REPLY_WAIT] reason=reply is still streaming');
+          return {
+            ok: false,
+            reason: 'reply is still streaming',
+            reply: snapshot,
+            replyState,
+          };
+        }
+
+        if (!replyText) {
+          return {
+            ok: false,
+            reason: 'reply text is empty',
+            reply: snapshot,
+            replyState,
+          };
+        }
+
+        const currentMessageId = String(state.currentMessageId || '').trim();
+        if (
+          snapshot.parentMessageId
+          && currentMessageId
+          && snapshot.parentMessageId !== currentMessageId
+        ) {
+          return {
+            ok: false,
+            reason: 'reply parent message mismatch',
+            reply: snapshot,
+            replyState,
+          };
+        }
+
+        return {
+          ok: true,
+          reason: replyState.reason || 'reply valid',
+          reply: snapshot,
+          replyState,
+        };
+      }
+
+      if (!snapshot || !replyText) {
         return { ok: false, reason: 'reply text is empty', reply: snapshot };
       }
 
@@ -2666,6 +3742,12 @@ const AutoQueueModule = (() => {
         && guardBeforeMarkAutoQueueFailed(reason || 'phase-failed')
       ) {
         return false;
+      }
+
+      if (normalizedNext === AUTO_QUEUE_PHASES.FAILED) {
+        recordTaskBatchFailureReason(reason || 'phase-failed', {
+          source: 'transitionAutoQueuePhase',
+        });
       }
 
       state.phase = normalizedNext;
@@ -2972,9 +4054,15 @@ const AutoQueueModule = (() => {
         }
 
         const scrollReason = String(reason || '-');
+        const debugEnabled = !!(
+          config
+          && config.taskQueueSettings
+          && config.taskQueueSettings.debugMode
+        );
         const throttleScrollLogs = isAutoQueueInitialSendUiThrottleStage();
         if (
-          typeof ToolboxShell !== 'undefined'
+          debugEnabled
+          && typeof ToolboxShell !== 'undefined'
           && typeof ToolboxShell.appendLog === 'function'
           && (!throttleScrollLogs || !shouldThrottleUiReason(`toolbox-scroll-restore:${scrollReason}`, 800))
         ) {
@@ -2986,11 +4074,31 @@ const AutoQueueModule = (() => {
     }
 
     function saveAndRestoreScrollAroundRender(reason, renderFn, opts = {}) {
+      const preserveScroll = opts.preserveScroll === true;
+      const recentlyUserScrolled = typeof _isUserScrollProtected === 'function' && _isUserScrollProtected();
+      if (!preserveScroll && !recentlyUserScrolled) {
+        try {
+          renderFn();
+        } catch (err) {
+          console.error('[AutoQueue] saveAndRestoreScrollAroundRender renderFn failed', err);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[TOOLBOX_SCROLL][RENDER_ERROR] reason=${reason} error=${err && err.message ? err.message : String(err)}`);
+          }
+        }
+        return;
+      }
+
       const snapshot = snapshotBatchScrollState();
       const scrollReason = String(reason || '-');
+      const debugEnabled = !!(
+        config
+        && config.taskQueueSettings
+        && config.taskQueueSettings.debugMode
+      );
       const throttleScrollLogs = isAutoQueueInitialSendUiThrottleStage();
       if (
-        typeof ToolboxShell !== 'undefined'
+        debugEnabled
+        && typeof ToolboxShell !== 'undefined'
         && typeof ToolboxShell.appendLog === 'function'
         && (!throttleScrollLogs || !shouldThrottleUiReason(`toolbox-scroll-save:${scrollReason}`, 800))
       ) {
@@ -4317,6 +5425,10 @@ const AutoQueueModule = (() => {
         currentTaskAnswerVerified: false,
         currentTaskVerifyError: '',
         currentTaskVerifyAttempt: 0,
+        currentTaskFailureReason: '',
+        currentTaskFailureDetail: '',
+        currentTaskFailureSource: '',
+        currentTaskFailureAt: 0,
         lastVerifiedTaskIndex: -1,
         lastCompletedAnswerTaskIndex: -1,
         currentTaskRetryCount: 0,
@@ -4440,6 +5552,26 @@ const AutoQueueModule = (() => {
       if (!Object.prototype.hasOwnProperty.call(target, 'afterTerminalConfirmWaitingVerify')) target.afterTerminalConfirmWaitingVerify = false;
       if (!Object.prototype.hasOwnProperty.call(target, 'afterTerminalConfirmNextIndex')) target.afterTerminalConfirmNextIndex = -1;
       if (!Object.prototype.hasOwnProperty.call(target, 'terminalVerificationStartedAt')) target.terminalVerificationStartedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'nextTaskTransitionInFlight')) target.nextTaskTransitionInFlight = false;
+      if (!Object.prototype.hasOwnProperty.call(target, 'nextTaskHomeReadyAt')) target.nextTaskHomeReadyAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'nextTaskHomeReadyConversationId')) target.nextTaskHomeReadyConversationId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'activeUploadGroupId')) target.activeUploadGroupId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'currentUploadGroupId')) target.currentUploadGroupId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadConsumedTaskId')) target.uploadConsumedTaskId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadAttachedForTaskId')) target.uploadAttachedForTaskId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadAttachedForTaskIndex')) target.uploadAttachedForTaskIndex = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadReadyForTaskId')) target.uploadReadyForTaskId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadReadyForTaskIndex')) target.uploadReadyForTaskIndex = -1;
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadStartedAt')) target.uploadStartedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadStartedForTaskId')) target.uploadStartedForTaskId = '';
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadFinishedAt')) target.uploadFinishedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'nextTaskUploadRetryCount')) target.nextTaskUploadRetryCount = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'nextTaskSwitchStartedAt')) target.nextTaskSwitchStartedAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadFileCountForCurrentTask')) target.uploadFileCountForCurrentTask = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'uploadAttachmentReadyEvidence')) target.uploadAttachmentReadyEvidence = null;
+      if (!Object.prototype.hasOwnProperty.call(target, 'lastComposerAttachmentState')) target.lastComposerAttachmentState = null;
+      if (!Object.prototype.hasOwnProperty.call(target, 'taskPromptSentAt')) target.taskPromptSentAt = 0;
+      if (!Object.prototype.hasOwnProperty.call(target, 'taskPromptSentConversationId')) target.taskPromptSentConversationId = '';
       if (!Object.prototype.hasOwnProperty.call(target, 'lastVerificationResumeAt')) target.lastVerificationResumeAt = 0;
       if (!Object.prototype.hasOwnProperty.call(target, 'assistantReplyCountForUpload')) target.assistantReplyCountForUpload = 0;
       if (!Object.prototype.hasOwnProperty.call(target, 'lastAssistantReplyCountedHash')) target.lastAssistantReplyCountedHash = '';
@@ -4653,6 +5785,9 @@ const AutoQueueModule = (() => {
     }
 
     const VISIBLE_DONE_SIGNAL_STABLE_MS = 1200;
+    const REPLY_COMPLETE_STABLE_MS = 3000;
+    const REPLY_COMPLETE_STABLE_MIN_COUNT = 2;
+    const WAIT_CURRENT_REPLY_FORCE_SETTLE_MS = 45000;
 
     const WAIT_REPLY_REPAIR_STEPS = new Set([
       'wait-current-reply',
@@ -4674,6 +5809,52 @@ const AutoQueueModule = (() => {
       }
       autoQueuePollLogThrottle.set(key, now);
       ToolboxShell.appendLog(text);
+    }
+
+    function isRawAssistantGeneratingSignals() {
+      const assistantBusy = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+        && ComposerApi.isAssistantLikelyBusy();
+      const stopButton = typeof hasRealChatGPTStopGeneratingButton === 'function'
+        && hasRealChatGPTStopGeneratingButton();
+      let bridgeGenerating = false;
+      if (typeof BridgeState !== 'undefined' && BridgeState) {
+        bridgeGenerating = BridgeState.response_state === 'generating'
+          || BridgeState.response_state === 'streaming';
+      }
+      return Boolean(assistantBusy || stopButton || bridgeGenerating);
+    }
+
+    function getReplyCompleteStableFallback(source) {
+      const snap = getBatchReplyStableSnapshot(source || 'reply-complete-fallback');
+      const rawIdle = !isRawAssistantGeneratingSignals();
+      const stableEnough = !!(
+        snap.text
+        && snap.stableMs >= REPLY_COMPLETE_STABLE_MS
+        && snap.count >= REPLY_COMPLETE_STABLE_MIN_COUNT
+      );
+      return {
+        ok: rawIdle && stableEnough,
+        snap,
+        rawIdle,
+        stableEnough,
+      };
+    }
+
+    function canSettleWaitingReplyByStableAssistantFallback(source) {
+      if (!state.waitingReply) {
+        return null;
+      }
+      const fallback = getReplyCompleteStableFallback(source || 'reply-complete-fallback');
+      if (!fallback.ok) {
+        return null;
+      }
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][REPLY_COMPLETE_FALLBACK] source=${source || '-'} `
+        + `stableMs=${fallback.snap.stableMs} count=${fallback.snap.count} `
+        + `chars=${fallback.snap.text.length}`,
+      );
+      return fallback;
     }
 
     function isChatGPTActuallyBusyForTaskQueue() {
@@ -4718,15 +5899,77 @@ const AutoQueueModule = (() => {
         }
       }
 
-      const composerSendButtonWait = isComposerSendButtonWaitBlocking();
+      const composerSendButtonWait = state.waitingReply
+        ? false
+        : isComposerSendButtonWaitBlocking();
+
+      let unknownSettledNotBusy = false;
+      if (state.waitingReply) {
+        const waitingFallback = getReplyCompleteStableFallback('busy-check-waiting-reply');
+        if (waitingFallback.ok) {
+          unknownSettledNotBusy = true;
+          state.unknownResponseStateCount = 0;
+          appendAutoQueuePollLogThrottled(
+            'waiting-reply-stable-settle',
+            '[BATCH_FLOW][WAITING_REPLY_STABLE_NOT_BUSY] '
+            + `stableMs=${waitingFallback.snap.stableMs} `
+            + `count=${waitingFallback.snap.count} `
+            + `chars=${waitingFallback.snap.text.length}`,
+          );
+        } else if (
+          (responseStateText === 'unknown' || responseReasonText === 'detect-reenter-skip')
+          && !assistantBusy
+          && !hasStopButton
+          && !bridgeGenerating
+          && !bridgeAssistantBusy
+          && waitingFallback.snap
+          && waitingFallback.snap.text
+          && waitingFallback.snap.stableMs >= 1500
+          && waitingFallback.snap.count >= 2
+        ) {
+          unknownSettledNotBusy = true;
+          state.unknownResponseStateCount = 0;
+          appendAutoQueuePollLogThrottled(
+            'unknown-response-settle-waiting',
+            '[COMPOSER][UNKNOWN_RESPONSE_STATE_SETTLED_WHILE_WAITING] '
+            + `reason=${responseReasonText || responseStateText} `
+            + `stableMs=${waitingFallback.snap.stableMs} `
+            + `chars=${waitingFallback.snap.text.length}`,
+          );
+        }
+      } else if (
+        responseStateText === 'unknown'
+        && !assistantBusy
+        && !hasStopButton
+        && !bridgeGenerating
+        && !bridgeAssistantBusy
+      ) {
+        const replySnap = getBatchReplyStableSnapshot('unknown-response-settle');
+        if (replySnap && replySnap.text && replySnap.stableMs >= 800 && replySnap.count >= 2) {
+          state.unknownResponseStateCount = Number(state.unknownResponseStateCount || 0) + 1;
+          if (state.unknownResponseStateCount >= 3) {
+            unknownSettledNotBusy = true;
+            ToolboxShell.appendLog(
+              '[COMPOSER][UNKNOWN_RESPONSE_STATE_SETTLED_BY_STABLE_ASSISTANT] '
+              + `unknownCount=${state.unknownResponseStateCount} stableMs=${replySnap.stableMs} `
+              + `latestTextLen=${replySnap.text.length} latestTurnId=${replySnap.turnId || '-'}`,
+            );
+          }
+        }
+      } else {
+        state.unknownResponseStateCount = 0;
+      }
 
       const busy = Boolean(
-        assistantBusy
-        || hasStopButton
-        || bridgeGenerating
-        || bridgeAssistantBusy
-        || detectBusy
-        || composerSendButtonWait
+        !unknownSettledNotBusy
+        && (
+          assistantBusy
+          || hasStopButton
+          || bridgeGenerating
+          || bridgeAssistantBusy
+          || detectBusy
+          || composerSendButtonWait
+        )
       );
 
       appendAutoQueuePollLogThrottled(
@@ -6686,11 +7929,16 @@ const AutoQueueModule = (() => {
       const stableCount = Number(replySnapshot && replySnapshot.count || 0);
 
       const stableReplyReady = !!replyText && stableMs >= 3500 && stableCount >= 3;
+      const stableNormalReplyReady = !!replyText
+        && !isRawAssistantGeneratingSignals()
+        && stableMs >= NORMAL_REPLY_SETTLE_STABLE_MS
+        && stableCount >= NORMAL_REPLY_SETTLE_MIN_COUNT;
       const strictTerminalVisible = !!replyText && detectStrictTerminalSignal(replyText).matched;
 
       const forceIdleByStableReply = !uploading
         && (
           (stableReplyReady && (assistantBusy || stopButton))
+          || (stableNormalReplyReady && (assistantBusy || stopButton))
           || (strictTerminalVisible && (assistantBusy || stopButton))
         );
 
@@ -6723,6 +7971,14 @@ const AutoQueueModule = (() => {
       }
       state.batchWaitingReplyRepairRunning = true;
       try {
+        const runForUploadRepair = ensureTaskRunVerificationFields(state.taskRun || {});
+        // 仅在下一任务切换阶段才允许上传修复；等待当前任务回复时禁止误触发上传等待。
+        if (
+          isNextTaskTransitionPhase(String(state.phase || ''))
+          && repairWaitingReplyState(runForUploadRepair, source || 'next-task-upload-repair')
+        ) {
+          return true;
+        }
         if (!isAutoQueueWaitingReplyStepStale()) {
           return false;
         }
@@ -6749,13 +8005,19 @@ const AutoQueueModule = (() => {
           );
           return false;
         }
-        if (reply.stableMs < 800 || reply.count < 2) {
+        if (reply.stableMs < REPLY_COMPLETE_STABLE_MS || reply.count < REPLY_COMPLETE_STABLE_MIN_COUNT) {
           ToolboxShell.appendLog(
             `[BATCH_FLOW][WAITING_REPLY_REPAIR_WAIT_STABLE] source=${source || '-'} `
-            + `stableMs=${reply.stableMs} count=${reply.count} chars=${reply.text.length}`,
+            + `stableMs=${reply.stableMs} count=${reply.count} chars=${reply.text.length} `
+            + `requiredMs=${REPLY_COMPLETE_STABLE_MS}`,
           );
           return false;
         }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][WAITING_REPLY_FORCE_SETTLE] source=${source || '-'} `
+          + `reason=response-state-unknown-but-assistant-stable chars=${reply.text.length} stableMs=${reply.stableMs} count=${reply.count} `
+          + `oldPhase=${state.phase || '-'} oldStep=${getAutoQueueBatchStepKey() || '-'}`,
+        );
         ToolboxShell.appendLog(
           `[BATCH_FLOW][WAITING_REPLY_REPAIR_FORCE_SETTLE] source=${source || '-'} `
           + `chars=${reply.text.length} stableMs=${reply.stableMs} count=${reply.count} `
@@ -8182,6 +9444,1315 @@ const AutoQueueModule = (() => {
         return ComposerAttachments.getSharedComposerAttachmentEvidence(source, { heavy: true });
       }
       return null;
+    }
+
+    function saveAutoQueueStateSoon(reason = '-') {
+      state.updatedAt = Date.now();
+      saveConfig();
+      touchBatchTaskGroupActivity(String(reason || 'autoq-state-save'));
+      if (typeof updateChatInputStateBadge === 'function') {
+        updateChatInputStateBadge();
+      }
+    }
+
+    function isNextTaskTransitionPhase(phase) {
+      const text = String(phase || '');
+      return text === 'terminal_confirmed' || text.startsWith('next_task_');
+    }
+
+    function getComposerAttachmentState(reason = 'autoq-attachment-state') {
+      const payload = getAutoQueueComposerPayloadState(reason);
+      const evidence = getComposerAttachmentEvidence(reason);
+      const fileCount = Math.max(
+        0,
+        Number(payload.attachmentCount || 0),
+        Number(evidence && evidence.count != null ? evidence.count : 0),
+      );
+      const ready = Math.max(
+        0,
+        Number(payload.readyCount || 0),
+        Number(evidence && evidence.readyCount != null ? evidence.readyCount : 0),
+      );
+      const uploading = Math.max(
+        0,
+        Number(payload.uploadingCount || 0),
+        Number(evidence && evidence.uploadingCount != null ? evidence.uploadingCount : 0),
+      );
+      const hasAttachment = Boolean(
+        payload.hasAttachment
+        || ready > 0
+        || (fileCount > 0 && uploading <= 0),
+      );
+      return {
+        fileCount,
+        count: fileCount,
+        ready,
+        uploading,
+        hasAttachment,
+        payload,
+        evidence,
+      };
+    }
+
+    function getCurrentAutoQueueTasksSafe() {
+      const run = state.taskRun || {};
+      const enabledTaskIds = Array.isArray(run.enabledTaskIds) ? run.enabledTaskIds : [];
+      return enabledTaskIds
+        .map((id) => getTaskById(id))
+        .filter(Boolean);
+    }
+
+    function getCurrentTaskByRun(run) {
+      const tasks = getCurrentAutoQueueTasksSafe();
+      const index = Number(run && run.currentIndex != null ? run.currentIndex : -1);
+      if (!Number.isFinite(index) || index < 0 || index >= tasks.length) {
+        return null;
+      }
+      return tasks[index] || null;
+    }
+
+    function shouldOpenNewChatForTask(task, run) {
+      void task;
+      void run;
+      return !(
+        config.taskQueueSettings
+        && config.taskQueueSettings.switchNewChatBetweenTasks === false
+      );
+    }
+
+    function taskHasPendingUploadFiles(task) {
+      const pendingItems = typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getPendingUploadItems === 'function'
+        ? UploadModule.getPendingUploadItems()
+        : [];
+      const pendingCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+      if (pendingCount > 0) {
+        return true;
+      }
+      if (task && Array.isArray(task.uploadFileIds) && task.uploadFileIds.length > 0) {
+        return true;
+      }
+      if (task && Array.isArray(task.files) && task.files.length > 0) {
+        return true;
+      }
+      return false;
+    }
+
+    function isCurrentTaskWaitingForAssistantReply(run, phase) {
+      const runRef = run || state.taskRun || {};
+      const step = String(runRef.currentStep || '').trim();
+      const phaseText = String(phase != null ? phase : state.phase || '').trim();
+      const pendingKind = String(runRef.pendingSendKind || '').trim();
+      return !!(
+        state.waitingReply
+        || phaseText === AUTO_QUEUE_PHASES.WAITING_REPLY
+        || step === 'wait-current-reply'
+        || step === 'wait-next-reply'
+        || step === 'wait-initial-reply'
+        || step === 'wait-reply'
+        || pendingKind === 'continue'
+        || pendingKind === 'processing'
+      );
+    }
+
+    function getTaskIndexLogFields(run) {
+      const runRef = run || state.taskRun || {};
+      const taskIndex0 = Number(runRef.currentIndex || 0);
+      const taskTotal = Array.isArray(runRef.enabledTaskIds) ? runRef.enabledTaskIds.length : 0;
+      return {
+        taskIndex0,
+        taskDisplayIndex: taskIndex0 + 1,
+        taskTotal,
+      };
+    }
+
+    function logTerminalDecision(task, replyText, source, extra = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const idx = getTaskIndexLogFields(run);
+      const terminal = detectStrictTerminalSignal(replyText, { source });
+      const latestSnapshot = getLatestAssistantSnapshotForAutoQueueBoundary(`terminal-decision:${source || '-'}`);
+      let decision = 'continue-current-task';
+      if (terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED) {
+        decision = 'block-current-task';
+      } else if (terminal.matched) {
+        decision = 'finish-current-task';
+      }
+      ToolboxShell.appendLog(
+        '[AUTOQ][TERMINAL_DECISION] '
+        + `taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} taskTotal=${idx.taskTotal} `
+        + `taskId=${task && task.id ? task.id : '-'} `
+        + `latestTurnId=${latestSnapshot.turnId || '-'} textLen=${String(replyText || '').length} `
+        + `hasDone=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_DONE ? 1 : 0} `
+        + `hasBlocked=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED ? 1 : 0} `
+        + `decision=${decision} source=${source || '-'} `
+        + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} `
+        + `pendingSendKind=${String(run.pendingSendKind || '-')}`,
+      );
+      if (extra.route) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][AFTER_REPLY_ROUTE_DECISION] '
+          + `taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} taskTotal=${idx.taskTotal} `
+          + `taskId=${task && task.id ? task.id : '-'} `
+          + `latestTurnId=${latestSnapshot.turnId || '-'} latestTextLen=${String(replyText || '').length} `
+          + `hasDone=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_DONE ? 1 : 0} `
+          + `hasBlocked=${terminal.matched && terminal.signal === TERMINAL_CONFIRM_SIGNAL_BLOCKED ? 1 : 0} `
+          + `route=${extra.route} source=${source || '-'}`,
+        );
+      }
+      return terminal;
+    }
+
+    function getNextTaskPhaseStatusText(phaseName) {
+      const phase = String(phaseName || state.phase || '');
+      if (phase === 'next_task_wait_upload_ready' || phase === 'next_task_uploading' || phase === 'next_task_upload_retry') {
+        return '批量任务：等待下一任务附件上传';
+      }
+      if (phase === 'next_task_failed') {
+        const run = state.taskRun || {};
+        const retryCount = Number(run.nextTaskUploadRetryCount || 0);
+        if (retryCount > 0) {
+          return `批量任务：下一任务附件上传失败，已重试 ${retryCount}/2`;
+        }
+        return '批量任务：下一任务附件上传失败';
+      }
+      if (phase === 'next_task_prepare' || phase === 'next_task_navigate_home' || phase === 'next_task_wait_home_ready') {
+        return '批量任务：正在准备下一任务';
+      }
+      if (phase === 'next_task_sending') {
+        return '批量任务：正在发送下一任务';
+      }
+      return '批量任务：正在准备下一任务';
+    }
+
+    function logLocalUploadComposerMismatch(task, source, action) {
+      const run = state.taskRun || {};
+      const pendingItems = typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function'
+        ? UploadModule.getPendingUploadItems()
+        : [];
+      const localCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+      const attachmentState = getComposerAttachmentState('local-not-bound-to-composer');
+      const composerCount = Number(attachmentState.fileCount || 0);
+      const groupId = typeof UploadModule !== 'undefined' && typeof UploadModule.getActiveGroupId === 'function'
+        ? String(UploadModule.getActiveGroupId() || '')
+        : '';
+      ToolboxShell.appendLog(
+        '[UPLOAD_GROUP][LOCAL_NOT_BOUND_TO_COMPOSER] '
+        + `groupId=${groupId || '-'} localCount=${localCount} composerCount=${composerCount} `
+        + `currentTaskId=${String(run.currentTaskId || (task && task.id) || '-')} `
+        + `action=${action || '-'} source=${source || '-'} `
+        + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} `
+        + `pendingSendKind=${String(run.pendingSendKind || '-')}`,
+      );
+    }
+
+    function shouldUploadForTask(task, run, options = {}) {
+      void run;
+      if (!task) {
+        return false;
+      }
+      const context = String(options.context || 'default');
+      if (
+        context !== 'next-task'
+        && isBatchAfterInitialRound()
+        && isCurrentTaskWaitingForAssistantReply(run, state.phase)
+      ) {
+        return false;
+      }
+      if (taskHasPendingUploadFiles(task)) {
+        return true;
+      }
+      const decision = getTaskAutoUploadDecision(context === 'next-task' ? 'initial' : 'initial');
+      return !!(decision && decision.shouldUpload && decision.pendingFiles > 0);
+    }
+
+    function shouldUploadForTerminalVerification(run, task) {
+      return !!(
+        run.enableUploadForTerminalVerification
+        || (task && task.verifyUploadRequired)
+        || (config.taskQueueSettings && config.taskQueueSettings.verify_upload_required === true)
+      );
+    }
+
+    function clearTerminalVerificationRuntimeFields(run) {
+      const target = ensureTaskRunVerificationFields(run || state.taskRun || {});
+      target.afterTerminalConfirmWaitingVerify = false;
+      target.afterTerminalConfirmNextIndex = -1;
+      target.doneSignalVerificationRunning = false;
+      target.verifyReplyTextForResend = '';
+      target.pendingSendKind = null;
+      target.pendingReplyKind = null;
+      target.verificationUploadInFlight = false;
+      target.verificationUploadCompleted = false;
+      target.verificationUploadCompletedAt = 0;
+      target.verificationUploadGroupId = '';
+      target.verificationUploadFileCount = 0;
+      target.verificationPromptSendResult = '';
+      target.verificationWaitReplyStartedAt = 0;
+      state.taskRun = target;
+      const runtimeState = getAutoQueueRuntimeState();
+      if (runtimeState) {
+        runtimeState.terminalConfirming = false;
+        runtimeState.terminalConfirmPassed = false;
+        runtimeState.terminalConfirmSignal = '';
+        runtimeState.terminalConfirmFirstText = '';
+        runtimeState.terminalConfirmSecondText = '';
+        runtimeState.terminalConfirmFirstAt = 0;
+        runtimeState.terminalConfirmSecondAt = 0;
+        runtimeState.terminalConfirmTaskIndex = -1;
+        runtimeState.terminalConfirmTaskId = '';
+        runtimeState.terminalConfirmSource = '';
+        runtimeState.terminalConfirmFailedReason = '';
+      }
+      return target;
+    }
+
+    function clearPerTaskUploadRuntimeState(run, source) {
+      const target = ensureTaskRunVerificationFields(run || state.taskRun || {});
+      target.activeUploadGroupId = '';
+      target.currentUploadGroupId = '';
+      target.uploadConsumedTaskId = '';
+      target.uploadAttachedForTaskId = '';
+      target.uploadAttachedForTaskIndex = -1;
+      target.uploadReadyForTaskId = '';
+      target.uploadReadyForTaskIndex = -1;
+      target.uploadStartedForTaskId = '';
+      target.uploadStartedAt = 0;
+      target.uploadFinishedAt = 0;
+      target.uploadFileCountForCurrentTask = 0;
+      target.uploadAttachmentReadyEvidence = null;
+      target.lastComposerAttachmentState = null;
+      state.taskRun = target;
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_UPLOAD_STATE_RESET] '
+        + 'source=' + String(source || '-')
+        + ' taskIndex=' + Number(target.currentIndex || 0)
+        + ' taskId=' + String(target.currentTaskId || (getCurrentTaskByRun(target) && getCurrentTaskByRun(target).id) || ''),
+      );
+      return target;
+    }
+
+    function buildPromptForTask(task) {
+      if (!task) {
+        return '';
+      }
+      const resolved = resolveTaskInitialPrompt(task, { log: false });
+      return String(resolved.initialPrompt || task.initialPrompt || task.prompt || '').trim();
+    }
+
+    function getPageCapabilityLight(source) {
+      if (typeof getPageCapability === 'function') {
+        try {
+          return getPageCapability(source || 'next-task-home-ready');
+        } catch (error) {
+          console.error('[AUTOQ][NEXT_TASK_HOME_CAP_ERROR]', error);
+          if (error && error.stack) {
+            console.error(error.stack);
+          }
+        }
+      }
+      return detectAutoQueueComposerSendableLight(source || 'next-task-home-ready');
+    }
+
+    function isChatGptHomeOrNewChatPage(url, conversationId) {
+      const href = String(url || location.href || '');
+      const conv = String(conversationId || '').trim();
+      if (conv && conv !== '-') {
+        return false;
+      }
+      if (typeof getCurrentConversationKeyUnified === 'function') {
+        const key = String(getCurrentConversationKeyUnified() || '');
+        if (key === 'path:/' || key.startsWith('path:/?')) {
+          return true;
+        }
+      }
+      try {
+        const parsed = new URL(href);
+        return parsed.pathname === '/' || parsed.pathname === '';
+      } catch (urlErr) {
+        console.error('[AUTOQ][HOME_PAGE_DETECT_ERROR]', urlErr);
+        return !/\/c\//.test(href);
+      }
+    }
+
+    async function clickChatGptHomeOrNewChatButton(source) {
+      const reasonText = String(source || 'next-task');
+      const result = await clickChatGPTNewChatInPage(reasonText);
+      if (result && result.ok === true) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_HOME_NAV_CLICK_OK] source=' + reasonText
+          + ' before=' + String(result.beforeKey || '-')
+          + ' after=' + String(result.afterKey || '-')
+          + ' method=' + String(result.method || '-'),
+        );
+        return true;
+      }
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_HOME_NAV_CLICK_FAIL] source=' + reasonText
+        + ' reason=' + String(result && result.reason ? result.reason : 'unknown'),
+      );
+      return false;
+    }
+
+    function isCurrentPageReadyForNewTaskConversation(run, task) {
+      void task;
+      const targetRun = run || state.taskRun || {};
+      if (!shouldOpenNewChatForTask(task, targetRun)) {
+        return true;
+      }
+      const readyConversationId = String(targetRun.nextTaskHomeReadyConversationId || '').trim();
+      const nowConversationId = String(getAutoQueueConversationIdSafe() || '').trim();
+      if (targetRun.nextTaskHomeReadyAt > 0 && readyConversationId && readyConversationId === nowConversationId) {
+        return true;
+      }
+      const cap = getPageCapabilityLight('next-task-send-blocked');
+      return !!(cap && (cap.can_accept_input || cap.inputable || cap.sendable || cap.can_send_now));
+    }
+
+    async function waitComposerAttachmentReadyForCurrentTask(task, run, options) {
+      const source = options && options.source ? options.source : 'next-task';
+      const minCount = Math.max(1, Number(options && options.minCount || 1));
+      const timeoutMs = Math.max(1000, Number(options && options.timeoutMs || 90000));
+      const taskId = String(run.currentTaskId || (task && task.id) || Number(run.currentIndex || 0));
+      const uploadStartedForTaskId = String(run.uploadStartedForTaskId || '');
+
+      if (!uploadStartedForTaskId || uploadStartedForTaskId !== taskId || Number(run.uploadStartedAt || 0) <= 0) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][WAIT_UPLOAD_READY_WITHOUT_UPLOAD_START] '
+          + `taskId=${taskId} phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} `
+          + `pendingSendKind=${String(run.pendingSendKind || '-')} uploadStartedForTaskId=${uploadStartedForTaskId || '-'} `
+          + `localFileCount=${(typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function' ? UploadModule.getPendingUploadItems() : []).length} `
+          + `composerFileCount=${Number(getComposerAttachmentState('wait-without-upload-start').fileCount || 0)}`,
+        );
+        logLocalUploadComposerMismatch(task, source, 'start-upload');
+        const repairStart = await startNextTaskUpload(task, 'repair-before-wait-upload-ready', {
+          forceRestart: true,
+          skipWaitPhase: true,
+        });
+        if (!repairStart || repairStart.ok !== true) {
+          return {
+            ok: false,
+            reason: repairStart && repairStart.reason ? repairStart.reason : 'upload-not-started-before-wait',
+          };
+        }
+      }
+
+      const deadline = Date.now() + timeoutMs;
+      let lastState = null;
+      let repairAttempted = false;
+      while (Date.now() < deadline) {
+        await sleepMs(500);
+        const attachmentState = getComposerAttachmentState('next-task-upload-ready-check');
+        lastState = attachmentState;
+        if (run) {
+          run.lastComposerAttachmentState = attachmentState;
+          state.taskRun = run;
+        }
+        const fileCount = Number(attachmentState.fileCount || attachmentState.count || 0);
+        const ready = Number(attachmentState.ready || 0);
+        const uploading = Number(attachmentState.uploading || 0);
+        const hasAttachment = !!attachmentState.hasAttachment;
+        const idx = getTaskIndexLogFields(run);
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_UPLOAD_READY_CHECK] '
+          + 'source=' + source
+          + ' taskIndex0=' + idx.taskIndex0
+          + ' taskDisplayIndex=' + idx.taskDisplayIndex
+          + ' fileCount=' + fileCount
+          + ' ready=' + ready
+          + ' uploading=' + uploading
+          + ' hasAttachment=' + Number(hasAttachment),
+        );
+        if ((ready >= minCount || fileCount >= minCount || hasAttachment) && uploading <= 0) {
+          ToolboxShell.appendLog(
+            '[AUTOQ][UPLOAD_READY_CONFIRMED] '
+            + `taskId=${taskId} composerFileCount=${fileCount} readyCount=${ready} source=${source}`,
+          );
+          return {
+            ok: true,
+            fileCount,
+            ready,
+            uploading,
+            hasAttachment,
+            state: attachmentState,
+          };
+        }
+
+        const pendingItems = typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function'
+          ? UploadModule.getPendingUploadItems()
+          : [];
+        const localFileCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+        if (
+          !repairAttempted
+          && fileCount <= 0
+          && ready <= 0
+          && !hasAttachment
+          && uploading <= 0
+          && localFileCount > 0
+        ) {
+          repairAttempted = true;
+          logLocalUploadComposerMismatch(task, source, 'repair-upload');
+          ToolboxShell.appendLog(
+            '[AUTOQ][UPLOAD_READY_REPAIR] '
+            + `taskId=${taskId} reason=composer-empty-local-files-exist retryCount=${Number(run.nextTaskUploadRetryCount || 0)}`,
+          );
+          const repairStart = await startNextTaskUpload(task, 'repair-composer-empty-local-files-exist', {
+            forceRestart: true,
+            skipWaitPhase: true,
+          });
+          if (!repairStart || repairStart.ok !== true) {
+            return {
+              ok: false,
+              reason: repairStart && repairStart.reason ? repairStart.reason : 'repair-upload-failed',
+              lastState,
+            };
+          }
+          continue;
+        }
+
+        if (fileCount <= 0 && ready <= 0 && !hasAttachment && localFileCount <= 0) {
+          return {
+            ok: false,
+            reason: 'no-local-files-for-task',
+            lastState,
+          };
+        }
+      }
+      return {
+        ok: false,
+        reason: 'composer-attachment-ready-timeout',
+        lastState,
+      };
+    }
+
+    async function navigateHomeAndWaitNewComposerReady(task, run, source) {
+      const beforeUrl = location.href;
+      const beforeConversationId = getAutoQueueConversationIdSafe();
+      run.currentStep = 'click-home';
+      run.pendingSendKind = 'navigate-home';
+      run.pendingReplyKind = null;
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_navigate_home', 'next-task-click-home', { force: true });
+      saveAutoQueueStateSoon('next-task-click-home');
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_HOME_NAV_START] '
+        + 'source=' + source
+        + ' beforeUrl=' + beforeUrl
+        + ' beforeConversationId=' + beforeConversationId
+        + ' taskIndex=' + Number(run.currentIndex || 0),
+      );
+      const clicked = await clickChatGptHomeOrNewChatButton('next-task');
+      if (!clicked) {
+        return false;
+      }
+      run.currentStep = 'wait-home-composer-ready';
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_wait_home_ready', 'next-task-wait-home-ready', { force: true });
+      saveAutoQueueStateSoon('next-task-wait-home-ready');
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        await sleepMs(300);
+        const nowUrl = location.href;
+        const nowConversationId = getAutoQueueConversationIdSafe();
+        const cap = getPageCapabilityLight('next-task-home-ready');
+        const urlChanged = nowUrl !== beforeUrl;
+        const conversationChanged = !!(nowConversationId && nowConversationId !== beforeConversationId);
+        const isNewChatPage = isChatGptHomeOrNewChatPage(nowUrl, nowConversationId);
+        const inputable = !!(cap && (cap.can_accept_input || cap.inputable));
+        const sendable = !!(cap && (cap.can_send_now || cap.sendable));
+        if ((urlChanged || conversationChanged || isNewChatPage) && inputable) {
+          run.nextTaskHomeReadyAt = Date.now();
+          run.nextTaskHomeReadyConversationId = String(nowConversationId || '');
+          run.forceUploadBeforeNextSend = true;
+          state.taskRun = run;
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_HOME_READY] '
+            + 'source=' + source
+            + ' nowUrl=' + nowUrl
+            + ' beforeUrl=' + beforeUrl
+            + ' nowConversationId=' + nowConversationId
+            + ' beforeConversationId=' + beforeConversationId
+            + ' inputable=' + Number(inputable)
+            + ' sendable=' + Number(sendable),
+          );
+          return true;
+        }
+      }
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_HOME_READY_TIMEOUT] '
+        + 'source=' + source
+        + ' beforeUrl=' + beforeUrl
+        + ' nowUrl=' + location.href
+        + ' beforeConversationId=' + beforeConversationId
+        + ' nowConversationId=' + getAutoQueueConversationIdSafe(),
+      );
+      return false;
+    }
+
+    async function invokeDirectAutoQueueUpload(task, source, options = {}) {
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.startUploadForAutoQueue !== 'function'
+      ) {
+        return {
+          ok: false,
+          reason: 'upload-module-missing',
+        };
+      }
+
+      const uploadSource = `autoq-next-task-direct:${String(source || 'next-task')}`;
+      const uploadRateLimitResult = await waitForTaskUploadRateLimit(uploadSource, {
+        shouldStop: () => !state.running,
+      });
+      if (!uploadRateLimitResult || uploadRateLimitResult.ok !== true) {
+        return {
+          ok: false,
+          reason: uploadRateLimitResult && uploadRateLimitResult.reason
+            ? uploadRateLimitResult.reason
+            : 'upload-rate-limit-cancelled',
+        };
+      }
+
+      const uploadPlan = await resolveTaskUploadPlan(uploadSource, 'next-task-direct', {
+        forceReupload: true,
+        groupId: options.groupId,
+      });
+      const maxFilesForThisUpload = uploadPlan.maxFilesForThisUpload;
+
+      if (uploadPlan.pendingUploadCount <= 0) {
+        return {
+          ok: true,
+          reason: 'no-files',
+          groupId: options.groupId || '',
+          fileCount: 0,
+        };
+      }
+
+      if (uploadPlan.status.enabled && maxFilesForThisUpload <= 0) {
+        return {
+          ok: false,
+          reason: 'no-upload-quota',
+        };
+      }
+
+      try {
+        const uploadResult = await UploadModule.startUploadForAutoQueue({
+          source: uploadSource,
+          forceReupload: true,
+          shouldStop: () => !state.running,
+          maxFiles: uploadPlan.status.enabled ? maxFilesForThisUpload : undefined,
+          groupId: options.groupId,
+        });
+        if (!uploadResult || uploadResult.ok !== true) {
+          const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'direct-upload-failed';
+          console.error('[AUTOQ][NEXT_TASK_DIRECT_UPLOAD_FAIL]', uploadResult);
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_DIRECT_UPLOAD_FAIL] '
+            + `source=${uploadSource} reason=${reason}`,
+          );
+          return {
+            ok: false,
+            reason,
+            uploadResult,
+          };
+        }
+        const groupId = typeof UploadModule.getActiveGroupId === 'function'
+          ? String(UploadModule.getActiveGroupId() || '').trim()
+          : '';
+        const pendingItems = typeof UploadModule.getPendingUploadItems === 'function'
+          ? UploadModule.getPendingUploadItems()
+          : [];
+        const fileCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+        return {
+          ok: true,
+          reason: uploadResult.reason || 'direct-upload-started',
+          groupId,
+          fileCount: Math.max(fileCount, Number(uploadResult.uploadedCount || 0) || 1),
+          uploadResult,
+          uploadActuallyStarted: true,
+        };
+      } catch (error) {
+        console.error('[AUTOQ][NEXT_TASK_DIRECT_UPLOAD_ERROR]', error);
+        if (error && error.stack) {
+          console.error(error.stack);
+        }
+        return {
+          ok: false,
+          reason: error && error.message ? error.message : String(error),
+        };
+      }
+    }
+
+    async function startUploadForTaskFiles(task, options) {
+      const source = options && options.source ? options.source : 'next-task';
+      const taskIndex = Number(options && options.taskIndex != null ? options.taskIndex : (state.taskRun && state.taskRun.currentIndex) || 0);
+      const taskId = String(options && options.taskId ? options.taskId : (task && task.id) || taskIndex);
+      const requireActualUpload = options && options.requireActualUpload === true;
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      if (options && options.clearOldGroup === true) {
+        clearPerTaskUploadRuntimeState(run, source + ':clear-old-group');
+        await clearComposerDuplicateAttachmentsBeforeUpload(source + ':before-next-task-upload');
+      }
+      run.forceUploadBeforeNextSend = true;
+      run.currentTaskId = taskId;
+      state.taskRun = run;
+      let uploadResult = await runTaskAutoUploadBeforeNextSend('initial', task);
+      const groupId = typeof UploadModule !== 'undefined' && typeof UploadModule.getActiveGroupId === 'function'
+        ? String(UploadModule.getActiveGroupId() || '').trim()
+        : '';
+      const pendingItems = typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function'
+        ? UploadModule.getPendingUploadItems()
+        : [];
+      const fileCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+      const attachmentAfter = getComposerAttachmentState('next-task-upload-after-start');
+      const composerHasPayload = attachmentAfter.fileCount > 0 || attachmentAfter.hasAttachment || attachmentAfter.uploading > 0;
+      const uploadActuallyStarted = !!(uploadResult && uploadResult.ok === true && uploadResult.skipped !== true);
+
+      if (!uploadResult || uploadResult.ok !== true) {
+        if (requireActualUpload && fileCount > 0) {
+          uploadResult = await invokeDirectAutoQueueUpload(task, source, { groupId });
+        }
+        if (!uploadResult || uploadResult.ok !== true) {
+          return {
+            ok: false,
+            reason: uploadResult && uploadResult.reason ? uploadResult.reason : 'upload-start-failed',
+            groupId,
+            fileCount,
+          };
+        }
+      } else if (requireActualUpload && uploadResult.skipped === true && !composerHasPayload) {
+        if (fileCount > 0) {
+          logLocalUploadComposerMismatch(task, source, 'direct-upload-after-skip');
+          uploadResult = await invokeDirectAutoQueueUpload(task, source, { groupId });
+        }
+        if (!uploadResult || uploadResult.ok !== true) {
+          return {
+            ok: false,
+            reason: uploadResult && uploadResult.reason
+              ? uploadResult.reason
+              : 'upload-skipped-without-composer-attachment',
+            groupId,
+            fileCount,
+          };
+        }
+      }
+
+      if (groupId || (uploadResult && uploadResult.groupId)) {
+        run.activeUploadGroupId = String(groupId || uploadResult.groupId || '');
+        run.currentUploadGroupId = String(groupId || uploadResult.groupId || '');
+      }
+      if (uploadActuallyStarted || uploadResult.uploadActuallyStarted || composerHasPayload) {
+        run.uploadStartedForTaskId = taskId;
+        run.uploadStartedAt = Date.now();
+      }
+      state.taskRun = run;
+
+      return {
+        ok: true,
+        reason: uploadResult.reason || 'upload-started',
+        groupId: String(groupId || uploadResult.groupId || ''),
+        fileCount: Math.max(fileCount, Number(uploadResult.uploadedCount || 0) || 1),
+        uploadResult,
+        uploadActuallyStarted: !!(uploadActuallyStarted || uploadResult.uploadActuallyStarted || composerHasPayload),
+      };
+    }
+
+    async function startNextTaskUpload(task, source, options = {}) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      const taskIndex0 = Number(options.taskIndex != null ? options.taskIndex : run.currentIndex || 0);
+      const taskId = String(options.taskId || run.currentTaskId || (task && task.id) || taskIndex0);
+      const idx = getTaskIndexLogFields(run);
+      const pendingItems = typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function'
+        ? UploadModule.getPendingUploadItems()
+        : [];
+      const localFileCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+
+      if (localFileCount <= 0 && !taskHasPendingUploadFiles(task)) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_UPLOAD_FAIL] '
+          + `source=${source} taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} `
+          + `taskId=${taskId} reason=no-local-files-for-task`,
+        );
+        return {
+          ok: false,
+          reason: 'no-local-files-for-task',
+          localFileCount: 0,
+        };
+      }
+
+      const uploadStartedFor = String(run.uploadStartedForTaskId || '');
+      const composerNow = getComposerAttachmentState('next-task-upload-start-check');
+      const composerReadyNow = composerNow.fileCount > 0 || composerNow.hasAttachment || composerNow.uploading > 0;
+      if (
+        !options.forceRestart
+        && uploadStartedFor === taskId
+        && Number(run.uploadStartedAt || 0) > 0
+        && composerReadyNow
+      ) {
+        return {
+          ok: true,
+          alreadyStarted: true,
+          taskId,
+          localFileCount,
+          fileCount: Number(composerNow.fileCount || 0),
+        };
+      }
+
+      run.currentStep = 'upload-files';
+      run.pendingSendKind = 'upload';
+      run.pendingReplyKind = null;
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_uploading', `next-task-upload-start:${source}`, { force: true });
+      saveAutoQueueStateSoon('next-task-upload-start');
+
+      const groupId = typeof UploadModule !== 'undefined' && typeof UploadModule.getActiveGroupId === 'function'
+        ? String(UploadModule.getActiveGroupId() || '').trim()
+        : '';
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_UPLOAD_START] '
+        + `source=${source} taskIndex0=${idx.taskIndex0} taskDisplayIndex=${idx.taskDisplayIndex} taskTotal=${idx.taskTotal} `
+        + `taskId=${taskId} fileCount=${localFileCount} groupId=${groupId || '-'} `
+        + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')} pendingSendKind=${String(run.pendingSendKind || '-')}`,
+      );
+
+      const uploadResult = await startUploadForTaskFiles(task, {
+        source,
+        taskIndex: taskIndex0,
+        taskId,
+        forceNewGroup: true,
+        clearOldGroup: options.clearOldGroup !== false,
+        requireActualUpload: true,
+      });
+
+      if (!uploadResult || uploadResult.ok !== true) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_UPLOAD_FAIL] '
+          + `source=${source} taskIndex0=${idx.taskIndex0} taskId=${taskId} `
+          + `reason=${String(uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown')}`,
+        );
+        return {
+          ok: false,
+          reason: uploadResult && uploadResult.reason ? uploadResult.reason : 'upload-start-failed',
+        };
+      }
+
+      if (!uploadResult.uploadActuallyStarted) {
+        const attach = getComposerAttachmentState('next-task-upload-started-verify');
+        if (!(attach.fileCount > 0 || attach.hasAttachment || attach.uploading > 0)) {
+          return {
+            ok: false,
+            reason: 'upload-not-started-no-composer-attachment',
+          };
+        }
+      }
+
+      run.uploadStartedForTaskId = taskId;
+      run.uploadStartedAt = Date.now();
+      run.activeUploadGroupId = String(uploadResult.groupId || '');
+      run.currentStep = options.skipWaitPhase ? 'upload-files' : 'wait-upload-ready';
+      state.taskRun = run;
+
+      if (!options.skipWaitPhase) {
+        setAutoQueuePhase('next_task_wait_upload_ready', 'next-task-wait-upload-ready', { force: true });
+        saveAutoQueueStateSoon('next-task-wait-upload-ready');
+      }
+
+      return {
+        ok: true,
+        taskId,
+        localFileCount,
+        fileCount: Number(uploadResult.fileCount || localFileCount),
+        groupId: String(uploadResult.groupId || ''),
+        uploadResult,
+      };
+    }
+
+    async function uploadFilesForNextTaskAndWaitReady(task, run, source) {
+      const taskIndex0 = Number(run.currentIndex || 0);
+      const taskId = String(run.currentTaskId || (task && task.id) || taskIndex0);
+      const idx = getTaskIndexLogFields(run);
+
+      const startResult = await startNextTaskUpload(task, source, { skipWaitPhase: true });
+      if (!startResult || startResult.ok !== true) {
+        const failReason = startResult && startResult.reason ? startResult.reason : 'upload-start-failed';
+        if (failReason === 'no-local-files-for-task') {
+          setAutoQueuePhase('next_task_failed', 'next-task-no-local-files', { force: true });
+        } else {
+          setAutoQueuePhase('next_task_failed', 'next-task-upload-failed', { force: true });
+        }
+        return false;
+      }
+
+      run.currentStep = 'wait-upload-ready';
+      run.pendingSendKind = 'upload';
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_wait_upload_ready', 'next-task-wait-upload-ready', { force: true });
+      saveAutoQueueStateSoon('next-task-wait-upload-ready');
+
+      const ready = await waitComposerAttachmentReadyForCurrentTask(task, run, {
+        source: 'next-task',
+        minCount: Number(startResult.fileCount || 1),
+        timeoutMs: 90000,
+      });
+      if (!ready || !ready.ok) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_UPLOAD_READY_FAIL] '
+          + 'source=' + source
+          + ' taskIndex0=' + idx.taskIndex0
+          + ' taskDisplayIndex=' + idx.taskDisplayIndex
+          + ' taskId=' + taskId
+          + ' reason=' + String(ready && ready.reason ? ready.reason : 'unknown')
+          + ' phase=' + String(state.phase || '-')
+          + ' step=' + String(run.currentStep || '-')
+          + ' pendingSendKind=' + String(run.pendingSendKind || '-'),
+        );
+        setAutoQueuePhase('next_task_failed', 'next-task-upload-ready-failed', { force: true });
+        return false;
+      }
+      run.uploadFinishedAt = Date.now();
+      run.uploadAttachedForTaskId = taskId;
+      run.uploadAttachedForTaskIndex = taskIndex0;
+      run.uploadReadyForTaskId = taskId;
+      run.uploadReadyForTaskIndex = taskIndex0;
+      run.uploadFileCountForCurrentTask = Number(ready.fileCount || 0);
+      run.uploadAttachmentReadyEvidence = ready;
+      run.currentStep = 'upload-ready';
+      run.pendingSendKind = '';
+      run.pendingReplyKind = '';
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_upload_attached', 'next-task-upload-ready', { force: true });
+      saveAutoQueueStateSoon('next-task-upload-ready');
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_UPLOAD_READY] '
+        + 'source=' + source
+        + ' taskIndex0=' + idx.taskIndex0
+        + ' taskDisplayIndex=' + idx.taskDisplayIndex
+        + ' taskId=' + taskId
+        + ' groupId=' + String(startResult.groupId || '')
+        + ' fileCount=' + Number(ready.fileCount || 0)
+        + ' ready=' + Number(!!ready.ready),
+      );
+      return true;
+    }
+
+    async function sendNextTaskPromptAfterPrepare(task, run, source) {
+      const taskIndex = Number(run.currentIndex || 0);
+      const taskId = String(run.currentTaskId || (task && task.id) || taskIndex);
+      if (shouldOpenNewChatForTask(task, run)) {
+        const conversationOk = isCurrentPageReadyForNewTaskConversation(run, task);
+        if (!conversationOk) {
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_SEND_BLOCKED_NO_NEW_CHAT] '
+            + 'source=' + source
+            + ' taskIndex=' + taskIndex
+            + ' taskId=' + taskId
+            + ' url=' + location.href
+            + ' conversationId=' + getAutoQueueConversationIdSafe(),
+          );
+          return false;
+        }
+      }
+      if (shouldUploadForTask(task, run)) {
+        const attachmentState = getComposerAttachmentState('before-next-task-send');
+        const fileCount = Number(attachmentState.fileCount || attachmentState.count || 0);
+        const ready = Number(attachmentState.ready || 0);
+        const uploading = Number(attachmentState.uploading || 0);
+        const hasAttachment = !!attachmentState.hasAttachment;
+        const uploadBelongsToCurrentTask = Number(run.uploadReadyForTaskIndex || -1) === taskIndex
+          && String(run.uploadReadyForTaskId || '') === taskId;
+        if (
+          !uploadBelongsToCurrentTask
+          || ((fileCount <= 0 && ready <= 0 && !hasAttachment) || uploading > 0)
+        ) {
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_SEND_BLOCKED_UPLOAD_NOT_READY] '
+            + 'source=' + source
+            + ' taskIndex=' + taskIndex
+            + ' taskId=' + taskId
+            + ' fileCount=' + fileCount
+            + ' ready=' + ready
+            + ' uploading=' + uploading
+            + ' hasAttachment=' + Number(hasAttachment)
+            + ' uploadReadyForTaskIndex=' + Number(run.uploadReadyForTaskIndex || -1),
+          );
+          return false;
+        }
+      }
+      const prompt = buildPromptForTask(task);
+      if (!prompt) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_SEND_FAIL] '
+          + 'source=' + source
+          + ' taskIndex=' + taskIndex
+          + ' taskId=' + taskId
+          + ' reason=empty-prompt',
+        );
+        return false;
+      }
+      run.currentStep = 'send-next-task-prompt';
+      run.pendingSendKind = 'processing';
+      run.pendingReplyKind = 'task';
+      state.waitingReply = false;
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_sending', 'next-task-send-start', { force: true });
+      saveAutoQueueStateSoon('next-task-send-start');
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_SEND_START] '
+        + 'source=' + source
+        + ' taskIndex=' + taskIndex
+        + ' taskId=' + taskId
+        + ' title=' + String(task && task.title ? task.title : '')
+        + ' promptLen=' + String(prompt || '').length,
+      );
+      saveCurrentExpectedPromptToTaskRun(prompt, task);
+      markTaskBatchStepRunning(true);
+      let sendResult = null;
+      try {
+        const prepareResult = await prepareTaskPageBeforeNextSend('initial', task);
+        if (!prepareResult || prepareResult.ok !== true) {
+          const prepareReason = prepareResult && prepareResult.reason
+            ? prepareResult.reason
+            : 'prepare-before-send-failed';
+          sendResult = { ok: false, reason: prepareReason };
+        } else {
+          sendResult = await sendTaskPrompt(prompt, '[AUTOQ][NEXT_TASK_SEND]', 'initial');
+        }
+      } finally {
+        markTaskBatchStepRunning(false);
+      }
+      if (!sendResult || sendResult.ok !== true) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_SEND_FAIL] '
+          + 'source=' + source
+          + ' taskIndex=' + taskIndex
+          + ' taskId=' + taskId
+          + ' reason=' + String(sendResult && sendResult.reason ? sendResult.reason : 'unknown'),
+        );
+        setAutoQueuePhase('next_task_failed', 'next-task-send-failed', { force: true });
+        return false;
+      }
+      run.taskPromptSentAt = Date.now();
+      run.taskPromptSentConversationId = getAutoQueueConversationIdSafe();
+      run.currentStep = 'wait-current-reply';
+      run.pendingSendKind = 'processing';
+      run.pendingReplyKind = 'task';
+      state.taskRun = run;
+      state.waitingReply = true;
+      state.replyBecameBusy = false;
+      state.waitingStartedAt = Date.now();
+      setTaskBatchStep('wait-current-reply', task, { log: false });
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.WAITING_REPLY, 'next-task-send-ok', {
+        force: true,
+        submittedConfirmed: true,
+        submittedEvidence: sendResult,
+      });
+      saveAutoQueueStateSoon('next-task-send-ok');
+      ToolboxShell.appendLog(
+        '[AUTOQ][NEXT_TASK_SEND_OK] '
+        + 'source=' + source
+        + ' taskIndex=' + taskIndex
+        + ' taskId=' + taskId
+        + ' conversationId=' + String(run.taskPromptSentConversationId || ''),
+      );
+      updateStatus('next-task-sent');
+      return true;
+    }
+
+    async function advanceToNextTaskAfterTerminalConfirm(source) {
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      if (run.nextTaskTransitionInFlight) {
+        ToolboxShell.appendLog('[AUTOQ][NEXT_TASK_TRANSITION_SKIP_IN_FLIGHT] source=' + source);
+        return false;
+      }
+      run.nextTaskTransitionInFlight = true;
+      state.taskRun = run;
+      saveAutoQueueStateSoon('next-task-transition-start');
+      try {
+        const currentIndex = Number(run.currentIndex || 0);
+        const nextIndex = currentIndex + 1;
+        const tasks = getCurrentAutoQueueTasksSafe();
+        if (!tasks.length || nextIndex >= tasks.length) {
+          run.currentStep = 'all-tasks-done';
+          run.pendingSendKind = '';
+          run.pendingReplyKind = null;
+          run.nextTaskTransitionInFlight = false;
+          state.taskRun = run;
+          setAutoQueuePhase(AUTO_QUEUE_PHASES.DONE, 'all-tasks-done', { force: true });
+          saveAutoQueueStateSoon('all-tasks-done');
+          ToolboxShell.appendLog(
+            '[AUTOQ][ALL_TASKS_DONE] '
+            + 'source=' + source
+            + ' currentIndex=' + currentIndex
+            + ' total=' + tasks.length,
+          );
+          stop({
+            reason: 'all-done',
+            finalStep: 'all-tasks-done',
+            markCurrent: false,
+            logStop: false,
+          });
+          return true;
+        }
+        const nextTask = tasks[nextIndex];
+        run.currentIndex = nextIndex;
+        run.currentTaskId = String(nextTask && nextTask.id ? nextTask.id : nextIndex);
+        run.currentTaskTitle = String(nextTask && nextTask.title ? nextTask.title : '');
+        run.pendingSendKind = 'prepare-next-task';
+        run.pendingReplyKind = null;
+        state.waitingReply = false;
+        state.replyBecameBusy = false;
+        state.waitingStartedAt = 0;
+        state.idleSince = 0;
+        clearPerTaskUploadRuntimeState(run, 'next-task-prepare');
+        clearVisibleDoneSignalTracking();
+        if (state.batchTask && state.batchTask.watchdogRecoverStreakPerTaskIndex) {
+          state.batchTask.watchdogRecoverStreakPerTaskIndex = {};
+        }
+        syncCurrentTaskVerificationContext(nextTask, { resetState: true });
+        clearBatchTaskStuckWatch(run, 'next-task-prepare');
+        run.currentTaskFailCount = 0;
+        run.currentQuestionText = '';
+        run.currentExpectedAnswer = '';
+        run.currentReplyText = '';
+        run.currentReplyStable = false;
+        run.currentAnswerVerified = false;
+        run.currentVerifyError = '';
+        run.currentVerifyAttempt = 0;
+        run.currentTaskQuestionText = '';
+        run.currentTaskExpectedAnswer = '';
+        run.currentTaskReplyText = '';
+        run.currentTaskReplyStable = false;
+        run.currentTaskAnswerVerified = false;
+        run.currentTaskVerifyError = '';
+        run.currentTaskVerifyAttempt = 0;
+        run.currentTaskSendBoundary = null;
+        run.nextTaskHomeReadyAt = 0;
+        run.nextTaskHomeReadyConversationId = '';
+        run.nextTaskUploadRetryCount = 0;
+        run.nextTaskSwitchStartedAt = Date.now();
+        state.taskRun = run;
+        setAutoQueuePhase('next_task_prepare', 'next-task-prepare', { force: true });
+        saveAutoQueueStateSoon('next-task-prepare');
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_PREPARE] '
+          + 'fromTaskId=' + String(tasks[currentIndex] && tasks[currentIndex].id ? tasks[currentIndex].id : currentIndex)
+          + ' toTaskId=' + String(nextTask && nextTask.id ? nextTask.id : nextIndex)
+          + ' needNewChat=' + Number(shouldOpenNewChatForTask(nextTask, run))
+          + ' needUpload=' + Number(shouldUploadForTask(nextTask, run, { context: 'next-task' }))
+          + ' fileCount=' + (typeof UploadModule !== 'undefined' && typeof UploadModule.getPendingUploadItems === 'function'
+            ? UploadModule.getPendingUploadItems().length
+            : 0),
+        );
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_AFTER_TERMINAL_VERIFY] '
+          + 'source=' + source
+          + ' nextIndex=' + nextIndex
+          + ' total=' + tasks.length
+          + ' title=' + String(nextTask && nextTask.title ? nextTask.title : '')
+          + ' requireNewChat=' + Number(shouldOpenNewChatForTask(nextTask, run))
+          + ' requireUpload=' + Number(shouldUploadForTask(nextTask, run, { context: 'next-task' })),
+        );
+        renderTaskList();
+        resetBatchRunStateForCurrentTask(nextTask, {
+          runId: getBatchTaskGroupRunId() || state.currentRunId || '',
+          conversationId: getAutoQueueConversationIdSafe(),
+        });
+        resetBatchRunScopedCountersForNewRun('next-task-after-terminal');
+        if (shouldOpenNewChatForTask(nextTask, run)) {
+          const navOk = await navigateHomeAndWaitNewComposerReady(nextTask, run, 'next-task');
+          if (!navOk) {
+            throw new Error('next-task-home-navigation-failed');
+          }
+        }
+        const uploadRequired = shouldUploadForTask(nextTask, run, { context: 'next-task' });
+        if (uploadRequired) {
+          const uploadOk = await uploadFilesForNextTaskAndWaitReady(nextTask, run, 'next-task');
+          if (!uploadOk) {
+            throw new Error('next-task-upload-not-ready');
+          }
+        } else {
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_UPLOAD_SKIP] '
+            + 'reason=task-not-require-upload'
+            + ' nextIndex=' + nextIndex
+            + ' title=' + String(nextTask && nextTask.title ? nextTask.title : ''),
+          );
+        }
+        const sendOk = await sendNextTaskPromptAfterPrepare(nextTask, run, 'next-task-ready');
+        if (!sendOk) {
+          throw new Error('next-task-prompt-send-failed');
+        }
+        return true;
+      } catch (err) {
+        console.error('[AUTOQ][NEXT_TASK_TRANSITION_ERROR]', err);
+        ToolboxShell.appendLog(
+          '[AUTOQ][NEXT_TASK_TRANSITION_ERROR] '
+          + 'source=' + source
+          + ' error=' + (err && err.stack ? err.stack : String(err)),
+        );
+        const latestRun = ensureTaskRunVerificationFields(state.taskRun || {});
+        latestRun.currentStep = 'next-task-transition-error';
+        latestRun.pendingSendKind = '';
+        latestRun.pendingReplyKind = null;
+        state.taskRun = latestRun;
+        setAutoQueuePhase('next_task_failed', 'next-task-transition-error', { force: true });
+        saveAutoQueueStateSoon('next-task-transition-error');
+        recoverBatchTaskGroup(getBatchTaskGroupRunId(), err && err.message ? err.message : 'next-task-transition-error', {
+          action: 'recover',
+          clearStepRunning: true,
+        });
+        return false;
+      } finally {
+        const latestRun = ensureTaskRunVerificationFields(state.taskRun || {});
+        latestRun.nextTaskTransitionInFlight = false;
+        state.taskRun = latestRun;
+        saveAutoQueueStateSoon('next-task-transition-finally');
+      }
+    }
+
+    async function onTerminalConfirmPassed(run, status, source) {
+      const activeRun = clearTerminalVerificationRuntimeFields(run || state.taskRun || {});
+      ToolboxShell.appendLog(
+        '[TERMINAL_CONFIRM][PASSED] '
+        + 'source=' + String(source || '-')
+        + ' taskIndex=' + Number(activeRun.currentIndex || 0)
+        + ' status=' + String(status || '')
+        + ' conversationId=' + getAutoQueueConversationIdSafe(),
+      );
+      state.waitingReply = false;
+      state.replyBecameBusy = false;
+      state.waitingStartedAt = 0;
+      state.idleSince = 0;
+      activeRun.currentStep = 'terminal-confirm-passed';
+      activeRun.pendingSendKind = '';
+      activeRun.pendingReplyKind = null;
+      state.taskRun = activeRun;
+      setAutoQueuePhase('terminal_confirmed', String(source || 'terminal-confirm-passed'), { force: true });
+      saveAutoQueueStateSoon('terminal-confirm-passed');
+      return advanceToNextTaskAfterTerminalConfirm(String(source || 'terminal-confirm-passed'));
+    }
+
+    function repairWaitingReplyState(run, source) {
+      if (!isNextTaskTransitionPhase(String(state.phase || ''))) {
+        return false;
+      }
+      if (isCurrentTaskWaitingForAssistantReply(run, state.phase)) {
+        return false;
+      }
+      const task = getCurrentTaskByRun(run);
+      if (!shouldUploadForTask(task, run, { context: 'next-task' })) {
+        return false;
+      }
+      const attachmentState = getComposerAttachmentState('waiting-reply-repair-upload-check');
+      const fileCount = Number(attachmentState.fileCount || attachmentState.count || 0);
+      const ready = Number(attachmentState.ready || 0);
+      const hasAttachment = !!attachmentState.hasAttachment;
+      const uploadBelongsToCurrentTask = Number(run.uploadReadyForTaskIndex || -1) === Number(run.currentIndex || 0)
+        && String(run.uploadReadyForTaskId || '') === String(run.currentTaskId || (task && task.id) || '');
+      if (!uploadBelongsToCurrentTask || (fileCount <= 0 && ready <= 0 && !hasAttachment)) {
+        logLocalUploadComposerMismatch(task, source, 'start-upload');
+        ToolboxShell.appendLog(
+          '[AUTOQ][WAITING_REPLY_REPAIR_INVALID_NO_UPLOAD_FOR_CURRENT_TASK] '
+          + 'source=' + source
+          + ' taskIndex0=' + Number(run.currentIndex || 0)
+          + ' taskDisplayIndex=' + (Number(run.currentIndex || 0) + 1)
+          + ' taskId=' + String(run.currentTaskId || (task && task.id) || '')
+          + ' uploadReadyForTaskIndex=' + Number(run.uploadReadyForTaskIndex || -1)
+          + ' uploadReadyForTaskId=' + String(run.uploadReadyForTaskId || '')
+          + ' composerFileCount=' + fileCount
+          + ' composerReady=' + ready
+          + ' composerHasAttachment=' + Number(hasAttachment),
+        );
+        const repairRun = ensureTaskRunVerificationFields(run);
+        repairRun.currentStep = 'repair-upload-before-send';
+        repairRun.pendingSendKind = 'upload';
+        repairRun.pendingReplyKind = null;
+        state.waitingReply = false;
+        state.taskRun = repairRun;
+        setAutoQueuePhase('next_task_uploading', 'repair-waiting-reply-no-current-upload', { force: true });
+        saveAutoQueueStateSoon('repair-waiting-reply-no-current-upload');
+        void uploadFilesForNextTaskAndWaitReady(task, repairRun, 'repair-waiting-reply-no-current-upload')
+          .then((ok) => {
+            if (ok) {
+              return sendNextTaskPromptAfterPrepare(task, repairRun, 'repair-after-upload-ready');
+            }
+            return false;
+          })
+          .catch((err) => {
+            console.error('[AUTOQ][WAITING_REPLY_REPAIR_UPLOAD_ERROR]', err);
+            if (err && err.stack) {
+              console.error(err.stack);
+            }
+            ToolboxShell.appendLog(
+              '[AUTOQ][WAITING_REPLY_REPAIR_UPLOAD_ERROR] '
+              + (err && err.stack ? err.stack : String(err)),
+            );
+          });
+        return true;
+      }
+      return false;
+    }
+
+    function tryRecoverNextTaskUploadFailure(source) {
+      const phase = String(state.phase || '');
+      if (phase !== 'next_task_failed') {
+        return false;
+      }
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      if (run.nextTaskTransitionInFlight) {
+        return false;
+      }
+      const retryCount = Number(run.nextTaskUploadRetryCount || 0);
+      if (retryCount >= 2) {
+        return false;
+      }
+      const task = getCurrentTaskByRun(run);
+      if (!task || !taskHasPendingUploadFiles(task)) {
+        return false;
+      }
+      const phaseReason = String(state.phaseReason || '');
+      const step = String(run.currentStep || '');
+      const canRetry = phaseReason.includes('upload')
+        || step === 'wait-upload-ready'
+        || step === 'upload-files'
+        || step === 'next-task-transition-error';
+      if (!canRetry) {
+        return false;
+      }
+
+      run.nextTaskUploadRetryCount = retryCount + 1;
+      run.pendingSendKind = 'upload';
+      state.waitingReply = false;
+      state.taskRun = run;
+      setAutoQueuePhase('next_task_upload_retry', 'next-task-upload-retry', { force: true });
+      setBatchTaskGroupDisplayState('waiting_next_task_upload', 'next-task-upload-retry');
+      ToolboxShell.appendLog(
+        '[AUTOQ][UPLOAD_READY_REPAIR] '
+        + `taskId=${String(run.currentTaskId || task.id || '-')} reason=next-task-failed-auto-retry `
+        + `retryCount=${run.nextTaskUploadRetryCount} source=${source || '-'}`,
+      );
+
+      void (async () => {
+        try {
+          const uploadOk = await uploadFilesForNextTaskAndWaitReady(task, run, `retry-${source || 'next-task-failed'}`);
+          if (uploadOk) {
+            await sendNextTaskPromptAfterPrepare(task, run, 'retry-after-upload-ready');
+            return;
+          }
+          if (Number(run.nextTaskUploadRetryCount || 0) >= 2) {
+            failCurrentTask('next-task-upload-retry-exhausted');
+          }
+        } catch (err) {
+          console.error('[AUTOQ][NEXT_TASK_UPLOAD_RETRY_ERROR]', err);
+          if (err && err.stack) {
+            console.error(err.stack);
+          }
+          ToolboxShell.appendLog(
+            '[AUTOQ][NEXT_TASK_UPLOAD_RETRY_ERROR] '
+            + (err && err.stack ? err.stack : String(err)),
+          );
+        }
+      })();
+      return true;
     }
 
     async function getAssistantBusyStateForAutoQueue(source) {
@@ -9986,59 +12557,16 @@ const AutoQueueModule = (() => {
         reason: 'terminal-final-verified',
       });
 
-      run.afterTerminalConfirmWaitingVerify = false;
-      run.afterTerminalConfirmNextIndex = -1;
-      run.doneSignalVerificationRunning = false;
-      run.verifyReplyTextForResend = '';
-      run.pendingSendKind = null;
-      run.pendingReplyKind = null;
-      run.doneSignalVerificationSendCount = 0;
-      run.verifyPromptBeforeAssistantTurnNo = -1;
-      run.verifyPromptBeforeAssistantTurnId = '';
-      run.verifyPromptBeforeAssistantTextHash = '';
-      run.verifyPromptBeforeAssistantTextLen = 0;
-      run.terminalVerifyBoundaryBeforeTurnNo = -1;
-      run.lastConsumedVerificationTurnId = '';
-      run.lastConsumedVerificationTurnNo = -1;
-      run.lastConsumedVerificationTextHash = '';
-      run.lastConsumedVerificationAt = 0;
-      run.verificationUploadCompleted = false;
-      run.verificationUploadCompletedAt = 0;
-      run.verificationUploadGroupId = '';
-      run.verificationUploadFileCount = 0;
-      run.verificationPromptSendResult = '';
-      run.verificationWaitReplyStartedAt = 0;
-      state.taskRun = run;
-
-      const runtimeState = getAutoQueueRuntimeState();
-      if (runtimeState) {
-        runtimeState.terminalConfirming = false;
-        runtimeState.terminalConfirmPassed = false;
-        runtimeState.terminalConfirmSignal = '';
-        runtimeState.terminalConfirmFirstText = '';
-        runtimeState.terminalConfirmSecondText = '';
-        runtimeState.terminalConfirmFirstAt = 0;
-        runtimeState.terminalConfirmSecondAt = 0;
-        runtimeState.terminalConfirmTaskIndex = -1;
-        runtimeState.terminalConfirmTaskId = '';
-        runtimeState.terminalConfirmSource = '';
-        runtimeState.terminalConfirmFailedReason = '';
-      }
-
       ToolboxShell.appendLog(
         `[TASK_VERIFY_FINAL][PASS] nextIndex=${nextIndex + 1} reason=${reason}`,
       );
-      ToolboxShell.appendLog(
-        `[AUTOQ][NEXT_TASK_AFTER_TERMINAL_VERIFY] nextIndex=${nextIndex + 1} reason=${reason}`,
+
+      const advanced = await advanceToNextTaskAfterTerminalConfirm(
+        'verification-reply-passed:' + String(reason || '-'),
       );
-
-      const moved = await moveToNextTask('terminal-final-verified', {
-        skipGate: true,
-      });
-
-      if (!moved) {
-        ToolboxShell.appendLog('[TASK_VERIFY_FINAL][ADVANCE_FAILED] reason=move-to-next-task-failed');
-        return { ok: false, reason: 'move-to-next-task-failed' };
+      if (!advanced) {
+        ToolboxShell.appendLog('[TASK_VERIFY_FINAL][ADVANCE_FAILED] reason=next-task-transition-failed');
+        return { ok: false, reason: 'next-task-transition-failed' };
       }
 
       return { ok: true, reason: 'advanced' };
@@ -10174,10 +12702,37 @@ const AutoQueueModule = (() => {
 
       if (hasNextTask) {
         const nextIndex = currentIndex + 1;
-        advanceBatchTaskAfterTerminalConfirm(nextIndex);
+        const settings = config.taskQueueSettings || {};
+        const verifyEnabled = settings.verifyAfterDoneSignal !== false;
+        if (verifyEnabled) {
+          void startTerminalConfirmedVerificationBeforeNextTask({
+            taskIndex: currentIndex,
+            nextIndex,
+          }).catch((err) => {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] startTerminalConfirmedVerificationBeforeNextTask failed', err);
+            if (err && err.stack) {
+              console.error(err.stack);
+            }
+            ToolboxShell.appendLog('[TASK_VERIFY_FINAL][START_ERROR] error=' + errText);
+          });
+          return {
+            ok: true,
+            action: 'start-final-verification-before-next-task',
+            reason: 'terminal-confirm-verify-before-advance',
+          };
+        }
+        void onTerminalConfirmPassed(run, signalType || 'done', opts.source || 'terminal-confirm-complete').catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] onTerminalConfirmPassed failed', err);
+          if (err && err.stack) {
+            console.error(err.stack);
+          }
+          ToolboxShell.appendLog('[TERMINAL_CONFIRM][NEXT_TASK_TRANSITION_ERROR] error=' + errText);
+        });
         return {
           ok: true,
-          action: 'advance-next-task',
+          action: 'advance-next-task-transition',
           reason: 'terminal-confirm-advance',
         };
       }
@@ -10208,87 +12763,16 @@ const AutoQueueModule = (() => {
     }
 
     function advanceBatchTaskAfterTerminalConfirm(nextIndex) {
-      const runtimeState = getAutoQueueRuntimeState();
-      const group = getCurrentBatchTaskGroup();
-
-      if (!runtimeState || !group) {
-        ToolboxShell.appendLog('[TERMINAL_CONFIRM][ADVANCE_FAILED] reason=missing-state-or-group');
-        return;
-      }
-
-      const run = clearBatchTaskStuckWatch(state.taskRun || {}, 'terminal-confirm-next-task');
-      run.currentIndex = nextIndex;
-      run.pendingSendKind = 'initial';
-      run.pendingReplyKind = null;
-      run.doneSignalVerificationRunning = false;
-      run.verifyReplyTextForResend = '';
-      run.currentTaskSendBoundary = null;
-      run.lastTerminalConsumedTurnId = '';
-      run.lastTerminalConsumedTextHash = '';
-      run.terminalSignalConsumedAt = 0;
-      run.doneSignalVerificationSendCount = 0;
-      run.verifyPromptBeforeAssistantTurnNo = -1;
-      run.verifyPromptBeforeAssistantTurnId = '';
-      run.verifyPromptBeforeAssistantTextHash = '';
-      run.verifyPromptBeforeAssistantTextLen = 0;
-      run.terminalVerifyBoundaryBeforeTurnNo = -1;
-      run.lastConsumedVerificationTurnId = '';
-      run.lastConsumedVerificationTurnNo = -1;
-      run.lastConsumedVerificationTextHash = '';
-      run.lastConsumedVerificationAt = 0;
-      run.verificationUploadCompleted = false;
-      run.verificationUploadCompletedAt = 0;
-      run.verificationUploadGroupId = '';
-      run.verificationUploadFileCount = 0;
-      run.verificationPromptSendResult = '';
-      run.verificationWaitReplyStartedAt = 0;
-      state.taskRun = run;
-
-      runtimeState.terminalConfirming = false;
-      runtimeState.terminalConfirmPassed = false;
-      runtimeState.terminalConfirmSignal = '';
-      runtimeState.terminalConfirmFirstText = '';
-      runtimeState.terminalConfirmSecondText = '';
-      runtimeState.terminalConfirmFirstAt = 0;
-      runtimeState.terminalConfirmSecondAt = 0;
-      runtimeState.terminalConfirmTaskIndex = -1;
-      runtimeState.terminalConfirmTaskId = '';
-      runtimeState.terminalConfirmSource = '';
-      runtimeState.terminalConfirmFailedReason = '';
-      runtimeState.waitingReply = false;
-
-      ToolboxShell.appendLog(
-        `[TERMINAL_SIGNAL][RESET_FOR_NEXT_TASK] nextIndex=${nextIndex}`
-        + ` pendingSendKind=${run.pendingSendKind || '-'}`,
-      );
-
-      const nextTaskId = Array.isArray(group.enabledTaskIds)
-        ? group.enabledTaskIds[nextIndex]
-        : '';
-      const nextTask = getTaskById(nextTaskId);
-
-      syncCurrentTaskVerificationContext(nextTask, { resetState: true });
-      resetBatchRunStateForCurrentTask(nextTask, {
-        runId: getBatchTaskGroupRunId() || state.currentRunId || '',
-        conversationId: typeof getAutoQueueConversationIdSafe === 'function'
-          ? getAutoQueueConversationIdSafe()
-          : '',
+      void nextIndex;
+      const run = ensureTaskRunVerificationFields(state.taskRun || {});
+      void onTerminalConfirmPassed(run, 'done', 'advance-batch-task-after-terminal-confirm').catch((err) => {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] advanceBatchTaskAfterTerminalConfirm failed', err);
+        if (err && err.stack) {
+          console.error(err.stack);
+        }
+        ToolboxShell.appendLog('[TERMINAL_CONFIRM][NEXT_TASK_TRANSITION_ERROR] error=' + errText);
       });
-      resetBatchRunScopedCountersForNewRun('terminal-confirm-next-task');
-
-      setAutoQueuePhase('preparing_next_task', 'terminal-confirm-next-task', { force: true });
-
-      ToolboxShell.appendLog(
-        '[TERMINAL_CONFIRM][ADVANCE] nextIndex=' + nextIndex
-        + ' pendingSendKind=' + run.pendingSendKind
-        + ' taskId=' + (nextTask && nextTask.id ? nextTask.id : '-'),
-      );
-
-      scheduleBatchTaskGroupNext('prepare-next-task-after-terminal-confirm', 1000, {
-        reason: 'terminal-confirm-next-task',
-      });
-
-      updateAutoQueueStatus('terminal-confirm-next-task');
     }
 
     function stopBatchTaskGroupAfterTerminalConfirm(options) {
@@ -10493,7 +12977,10 @@ const AutoQueueModule = (() => {
         return false;
       }
 
-      const decision = classifyBatchReply(replyText);
+      const isGenerating = isRawAssistantGeneratingSignals();
+      const decision = typeof classifyReplyState === 'function'
+        ? mapReplyStateToBatchDecision(classifyReplyState(replyText, isGenerating))
+        : classifyBatchReply(replyText, { isGenerating });
       recordReplyClassifyDecision(decision);
 
       ToolboxShell.appendLog(
@@ -10580,16 +13067,19 @@ const AutoQueueModule = (() => {
       }
 
       let decision = null;
-      if (typeof classifyBatchReply === 'function') {
-        decision = classifyBatchReply(text);
+      const isGenerating = isRawAssistantGeneratingSignals();
+      if (typeof classifyReplyState === 'function') {
+        decision = mapReplyStateToBatchDecision(classifyReplyState(text, isGenerating));
+      } else if (typeof classifyBatchReply === 'function') {
+        decision = classifyBatchReply(text, { isGenerating });
       }
 
       if (!decision || typeof decision !== 'object') {
         const doneCheck = isTaskDoneSignalMatched(text, TASK_DONE_SIGNAL);
         decision = {
           shouldStop: !!doneCheck.matched,
-          status: doneCheck.matched ? 'done' : 'continue',
-          reason: doneCheck.matched ? 'done-signal-detected' : 'no-terminal-state-detected',
+          status: doneCheck.matched ? 'done' : 'normal_reply_done',
+          reason: doneCheck.matched ? 'done-signal-detected' : 'reply-stopped-without-terminal-marker',
         };
       }
 
@@ -11107,6 +13597,197 @@ const AutoQueueModule = (() => {
       return !!(config.taskQueueSettings && config.taskQueueSettings.stopBatchOnTaskSendFailure === true);
     }
 
+    function humanizeBatchFailureReason(reason) {
+      const text = String(reason || '').trim();
+
+      if (!text || text === '-') {
+        return '';
+      }
+
+      const lower = text.toLowerCase();
+
+      if (lower.includes('no-terminal-state-detected')) {
+        return '没有检测到终态标记；普通分步任务不应直接判定失败。';
+      }
+
+      if (lower.includes('wait-reply-recover')) {
+        return '等待回复恢复中：当前回复尚未被判定为可进入下一步。';
+      }
+
+      if (lower.includes('answer-mismatch')) {
+        return '答案校验不通过：助手回复与预期答案不一致。';
+      }
+
+      if (lower.includes('reply-invalid')) {
+        return '回复校验失败：当前回复可能不属于本轮任务，或回复内容为空/异常。';
+      }
+
+      if (lower.includes('upload-precheck')) {
+        return '上传预检查失败：发送前附件状态不满足要求。';
+      }
+
+      if (lower.includes('next-task-upload-retry-exhausted')) {
+        return '下一任务附件上传多次重试失败。';
+      }
+
+      if (lower.includes('upload-module-missing')) {
+        return '上传模块不可用：UploadModule 未加载或初始化失败。';
+      }
+
+      if (lower.includes('continue-send-failed')) {
+        return '继续指令发送失败。';
+      }
+
+      if (lower.includes('initial-send')) {
+        return '初始指令发送失败。';
+      }
+
+      if (lower.includes('waiting_payload')) {
+        return '发送后输入框仍残留待发送内容，系统未确认消息真正发出。';
+      }
+
+      if (lower.includes('composer-text-not-current-task')) {
+        return '输入框内容不是当前任务内容，发送前校验被拦截。';
+      }
+
+      if (lower.includes('empty-composer-text')) {
+        return '输入框为空，无法发送。';
+      }
+
+      if (lower.includes('timeout')) {
+        return '等待回复超时。';
+      }
+
+      if (lower.includes('quota')) {
+        return '额度不足或额度等待失败。';
+      }
+
+      if (lower.includes('recover-limit-reached')) {
+        return '自动恢复次数达到上限，系统停止继续恢复。';
+      }
+
+      if (lower.includes('corrupted')) {
+        return '检测到异常或损坏的终态标记/回复信号。';
+      }
+
+      return '';
+    }
+
+    function recordTaskBatchFailureReason(reason, extra = {}) {
+      const reasonText = String(reason || 'failed').trim() || 'failed';
+      const detailText = String(extra.detail || '').trim();
+      const sourceText = String(extra.source || '').trim() || 'unknown';
+      const run = state.taskRun || {};
+      const task = typeof getCurrentRunningTask === 'function'
+        ? getCurrentRunningTask()
+        : null;
+
+      const payload = {
+        reason: reasonText,
+        detail: detailText,
+        explain: humanizeBatchFailureReason(reasonText),
+        source: sourceText,
+        at: Date.now(),
+        phase: String(state.phase || ''),
+        phaseReason: String(state.phaseReason || ''),
+        displayState: state.batchTask ? String(state.batchTask.displayState || '') : '',
+        taskTitle: task ? String(task.title || '-') : '-',
+        taskId: task ? String(task.id || '-') : '-',
+        step: String(run.currentStep || '-'),
+        pendingSendKind: String(run.pendingSendKind || '-'),
+        retryCount: Number(run.currentTaskFailCount || 0) || 0,
+      };
+
+      state.lastTaskBatchFailureReason = payload;
+
+      if (state.batchTask) {
+        state.batchTask.lastFailureReason = payload.reason;
+        state.batchTask.lastFailureDetail = payload.detail || payload.explain || '';
+        state.batchTask.lastFailureSource = payload.source;
+        state.batchTask.lastFailureAt = payload.at;
+      }
+
+      if (state.taskRun) {
+        state.taskRun.currentTaskFailureReason = payload.reason;
+        state.taskRun.currentTaskFailureDetail = payload.detail || payload.explain || '';
+        state.taskRun.currentTaskFailureSource = payload.source;
+        state.taskRun.currentTaskFailureAt = payload.at;
+      }
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][FAIL_REASON] reason=${payload.reason} `
+        + `explain=${payload.explain || '-'} `
+        + `detail=${payload.detail || '-'} `
+        + `source=${payload.source} `
+        + `task=${payload.taskTitle} `
+        + `taskId=${payload.taskId} `
+        + `step=${payload.step} `
+        + `phase=${payload.phase} `
+        + `displayState=${payload.displayState}`,
+      );
+
+      return payload;
+    }
+
+    function getTaskBatchFailureDisplayText() {
+      const failure = state.lastTaskBatchFailureReason;
+      const stopReason = state.lastTaskBatchStopReason;
+      const batchTask = state.batchTask || {};
+      const run = state.taskRun || {};
+
+      const reason = failure && failure.reason
+        ? String(failure.reason)
+        : (
+          batchTask.lastFailureReason
+            ? String(batchTask.lastFailureReason)
+            : (
+              run.currentTaskFailureReason
+                ? String(run.currentTaskFailureReason)
+                : ''
+            )
+        );
+
+      if (!reason) {
+        const phaseReason = String(state.phaseReason || '').trim();
+        if (phaseReason) {
+          const explain = humanizeBatchFailureReason(phaseReason);
+          return explain
+            ? `${phaseReason}｜${explain}`
+            : phaseReason;
+        }
+
+        if (stopReason && stopReason.reason) {
+          const stopText = String(stopReason.reason || '').trim();
+          const explain = humanizeBatchFailureReason(stopText);
+          return explain
+            ? `${stopText}｜${explain}`
+            : stopText;
+        }
+
+        return '-';
+      }
+
+      const detail = failure && failure.detail
+        ? String(failure.detail)
+        : String(batchTask.lastFailureDetail || run.currentTaskFailureDetail || '');
+
+      const explain = failure && failure.explain
+        ? String(failure.explain)
+        : humanizeBatchFailureReason(reason);
+
+      const parts = [reason];
+
+      if (explain) {
+        parts.push(explain);
+      }
+
+      if (detail && detail !== explain && detail !== reason) {
+        parts.push(detail);
+      }
+
+      return parts.join('｜');
+    }
+
     function recordTaskBatchStopReason(reason, extra = {}) {
       const task = getCurrentRunningTask();
       const run = state.taskRun || {};
@@ -11420,6 +14101,10 @@ const AutoQueueModule = (() => {
       const taskName = task ? task.title : '-';
       const taskId = task ? task.id : '-';
 
+      recordTaskBatchFailureReason(reasonText, {
+        source: 'handleTaskInitialSendFailure',
+      });
+
       if (guardBeforeMarkAutoQueueFailed(`handle-initial-send-failure:${reasonText}`)) {
         return;
       }
@@ -11469,6 +14154,23 @@ const AutoQueueModule = (() => {
         );
       }
       state.batchTask.displayState = next;
+      state.batchTask.displayReason = String(reason || '');
+      state.batchTask.displayReasonAt = Date.now();
+
+      if (
+        next === 'failed'
+        || next === 'recovering'
+        || next === 'next_task_upload_failed'
+        || String(reason || '').toLowerCase().includes('failed')
+        || String(reason || '').toLowerCase().includes('error')
+        || String(reason || '').toLowerCase().includes('timeout')
+        || String(reason || '').toLowerCase().includes('mismatch')
+      ) {
+        recordTaskBatchFailureReason(reason || next, {
+          source: `display-state:${next}`,
+        });
+      }
+
       syncBatchTaskPhase();
     }
 
@@ -11719,10 +14421,27 @@ const AutoQueueModule = (() => {
       }
 
       if (action === 'prepare-next-task-after-terminal-confirm') {
-        const nextTask = getCurrentRunningTask();
-        setTaskBatchStep('auto-upload-before-send', nextTask);
-        state.nextSendAt = Date.now() + getRandomDelayMs();
-        maybeSendNextTask();
+        const run = ensureTaskRunVerificationFields(state.taskRun || {});
+        if (run.nextTaskTransitionInFlight || isNextTaskTransitionPhase(state.phase)) {
+          ToolboxShell.appendLog(
+            '[AUTOQ][MAYBE_SEND_NEXT_BLOCKED_NEXT_TASK_PHASE] '
+            + 'source=prepare-next-task-after-terminal-confirm'
+            + ' phase=' + String(state.phase || '')
+            + ' step=' + String(run.currentStep || '')
+            + ' pendingSendKind=' + String(run.pendingSendKind || ''),
+          );
+          logBatchTaskGroupStepEnd('pending', action, 0, meta);
+          updateStatus('terminal-confirm-prepare-next-task-blocked');
+          return;
+        }
+        void advanceToNextTaskAfterTerminalConfirm('prepare-next-task-after-terminal-confirm').catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] prepare-next-task-after-terminal-confirm failed', err);
+          if (err && err.stack) {
+            console.error(err.stack);
+          }
+          ToolboxShell.appendLog('[AUTOQ][NEXT_TASK_TRANSITION_ERROR] error=' + errText);
+        });
         logBatchTaskGroupStepEnd('ok', action, 0, meta);
         updateStatus('terminal-confirm-prepare-next-task');
         return;
@@ -12167,6 +14886,12 @@ const AutoQueueModule = (() => {
     function stopEntireBatchTaskGroup(reason, options = {}) {
       clearInitialSendSchedulingLock('stop-entire-batch');
       const reasonText = String(reason || 'stopped');
+
+      recordTaskBatchFailureReason(reasonText, {
+        detail: options && options.detail ? String(options.detail) : '',
+        source: 'stopEntireBatchTaskGroup',
+      });
+
       const quota = getBatchTaskGroupQuotaSnapshot();
       if (!quota.messageCanSend) {
         setBatchTaskGroupDisplayState('stopped', 'message-quota-exhausted');
@@ -12191,6 +14916,12 @@ const AutoQueueModule = (() => {
     function skipCurrentTaskWithFailure(reason, options = {}) {
       const task = getCurrentRunningTask();
       const reasonText = String(reason || 'failed');
+
+      recordTaskBatchFailureReason(reasonText, {
+        detail: options && options.detail ? String(options.detail) : '',
+        source: 'skipCurrentTaskWithFailure',
+      });
+
       const run = clearBatchTaskStuckWatch(state.taskRun || {}, 'skip-task');
       run.currentTaskFailCount = 0;
       state.taskRun = run;
@@ -12751,6 +15482,11 @@ const AutoQueueModule = (() => {
       const task = getCurrentRunningTask();
       const reasonText = String(reason || 'failed');
       const detailText = String(options && options.detail ? options.detail : '').trim();
+
+      recordTaskBatchFailureReason(reasonText, {
+        detail: detailText,
+        source: 'failCurrentTask',
+      });
 
       if (guardBeforeMarkAutoQueueFailed(`fail-current-task:${reasonText}`)) {
         return;
@@ -13452,10 +16188,12 @@ const AutoQueueModule = (() => {
                 skippedCount: 0,
               };
             } else if (typeof UploadModule.startUploadForAutoQueue === 'function') {
-              const uploadRateStatus = getTaskUploadRateLimitStatus(1);
-              const maxFilesForThisUpload = uploadRateStatus.enabled
-                ? Math.max(0, Number(uploadRateStatus.remaining) || 0)
-                : 0;
+              const verifyUploadSource = `autoq-task-verify-${task.id}`;
+              const uploadPlan = await resolveTaskUploadPlan(verifyUploadSource, 'verify-upload', {
+                forceReupload: true,
+              });
+              const uploadRateStatus = uploadPlan.status;
+              const maxFilesForThisUpload = uploadPlan.maxFilesForThisUpload;
 
               if (uploadRateStatus.enabled && maxFilesForThisUpload <= 0) {
                 uploadResult = {
@@ -15237,7 +17975,7 @@ const AutoQueueModule = (() => {
         };
       }
 
-      const uploaded = await UploadModule.uploadFilesToChatGPT(rebuiltFiles, {
+      const uploadResult = await UploadModule.uploadFilesToChatGPT(rebuiltFiles, {
         source: source || 'autoq-rebuilt-after-initial-payload-consumed',
         forceReupload: true,
         cadenceUpload: true,
@@ -15248,8 +17986,11 @@ const AutoQueueModule = (() => {
       });
 
       return {
-        ok: !!uploaded,
-        reason: uploaded ? 'rebuilt-uploaded' : 'rebuilt-upload-failed',
+        ok: !!(uploadResult && uploadResult.ok),
+        reason: uploadResult && uploadResult.ok
+          ? 'rebuilt-uploaded'
+          : (uploadResult && uploadResult.reason) || 'rebuilt-upload-failed',
+        uploadResult,
       };
     }
 
@@ -15613,10 +18354,15 @@ const AutoQueueModule = (() => {
           };
         }
 
-        const uploadRateStatus = getTaskUploadRateLimitStatus(1);
-        const maxFilesForThisUpload = uploadRateStatus.enabled
-          ? Math.max(0, Number(uploadRateStatus.remaining) || 0)
-          : 0;
+        const uploadSource = normalizedKind === 'continue_with_upload'
+          ? 'upload-cadence-policy'
+          : `autoq-task-${String(normalizedKind || '-').trim() || '-'}-${uploadSlotNo}`;
+
+        const uploadPlan = await resolveTaskUploadPlan(uploadSource, normalizedKind || 'auto-upload', {
+          forceReupload: true,
+        });
+        const uploadRateStatus = uploadPlan.status;
+        const maxFilesForThisUpload = uploadPlan.maxFilesForThisUpload;
 
         if (uploadRateStatus.enabled && maxFilesForThisUpload <= 0) {
           ToolboxShell.appendLog(
@@ -15629,9 +18375,15 @@ const AutoQueueModule = (() => {
           };
         }
 
+        if (uploadRateStatus.enabled && maxFilesForThisUpload > 0 && maxFilesForThisUpload < uploadPlan.pendingUploadCount) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][PARTIAL] source=${uploadSource} kind=${normalizedKind || '-'} pending=${uploadPlan.pendingUploadCount} allowed=${maxFilesForThisUpload} used=${uploadRateStatus.used}/${uploadRateStatus.max}`,
+          );
+        }
+
         if (uploadRateStatus.enabled && maxFilesForThisUpload > 0) {
           ToolboxShell.appendLog(
-            `[AUTOQ][TASK_AUTO_UPLOAD][RATE_LIMIT] sentMessageCount=${currentCount} preResetPending=${pendingUploadCount} `
+            `[AUTOQ][TASK_AUTO_UPLOAD][RATE_LIMIT] sentMessageCount=${currentCount} preResetPending=${uploadPlan.pendingUploadCount} `
             + `allowed=${maxFilesForThisUpload} reason=upload-rate-limit`,
           );
         }
@@ -15646,15 +18398,11 @@ const AutoQueueModule = (() => {
           `[AUTOQ][TASK_AUTO_UPLOAD][FORCE_REUPLOAD_START] kind=${kind || '-'} nextMessageNo=${nextMessageNo} uploadSlotNo=${uploadSlotNo} interval=${decision.interval} force=${forceUpload ? 1 : 0}`,
         );
 
-        const uploadSource = normalizedKind === 'continue_with_upload'
-          ? 'upload-cadence-policy'
-          : `autoq-task-${String(normalizedKind || '-').trim() || '-'}-${uploadSlotNo}`;
-
         const uploadResult = await UploadModule.startUploadForAutoQueue({
           source: uploadSource,
           forceReupload: true,
           shouldStop: () => !state.running,
-          maxFiles: maxFilesForThisUpload,
+          maxFiles: uploadRateStatus.enabled ? maxFilesForThisUpload : undefined,
         });
 
         const uploadedCount = Number(uploadResult && uploadResult.uploadedCount) || 0;
@@ -16046,6 +18794,23 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      if (typeof classifyReplyState === 'function') {
+        const replyState = classifyReplyState(replyText, isRawAssistantGeneratingSignals());
+        logReplyStateDecision('handle-task-reply-ready', {
+          replyLength: String(replyText || '').length,
+          isGenerating: isRawAssistantGeneratingSignals(),
+          detectedTerminal: replyState.type === 'done'
+            || replyState.type === 'blocked'
+            || replyState.type === 'no_more_content'
+            ? replyState.type
+            : 'none',
+          stateType: replyState.type,
+          reason: replyState.reason,
+          nextAction: getReplyStateNextAction(replyState, { waitingReply: false }),
+        });
+        recordReplyClassifyFromReplyState(replyState);
+      }
+
       recordAssistantReplyForUploadCounter(
         replyText,
         state.taskRun && state.taskRun.doneSignalVerificationRunning ? 'verification-reply' : 'reply-ready',
@@ -16369,6 +19134,9 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog('[AUTO_QUEUE][BATCH][INITIAL_REPLY_DONE]');
       setTaskBatchStep('check-done-signal', task);
       const doneCheck = isTaskDoneSignalMatched(replyText, resolved.actualDoneSignal);
+      logTerminalDecision(task, replyText, 'handle-task-reply-ready', {
+        route: doneCheck.matched ? 'next-task' : 'continue-current',
+      });
 
       if (doneCheck.corrupted) {
         failCurrentTask('corrupted-assistant-signal');
@@ -16385,6 +19153,11 @@ const AutoQueueModule = (() => {
       if (!matched) {
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_BATCH][CONTINUE_REQUIRED] task=${task.title || '-'} reason=no-done-signal action=send-continue-current-task`,
+        );
+        ToolboxShell.appendLog(
+          '[AUTOQ][SEND_CONTINUE_DECISION] '
+          + `taskId=${task.id || '-'} sentCount=${Number(state.sentCount || 0)} `
+          + `latestAssistantLen=${String(replyText || '').length} reason=no-terminal`,
         );
       }
 
@@ -18771,6 +21544,14 @@ const AutoQueueModule = (() => {
     // Status-panel throttling (reduce long-run UI/DOM re-render + log overhead)
     let lastStatusRenderKey = '';
     let lastStatusRenderAt = 0;
+    let lastLightStatusKey = '';
+    let lastHeavyStatusRenderAt = 0;
+    let lastQueueButtonRenderKey = '';
+    let lastQueueButtonRenderAt = 0;
+    let lastRuntimeStatsRenderAt = 0;
+    let autoQueueDelegatedActionsBound = false;
+    let autoQueueDirectActionButtonsBound = false;
+    let lastUploadButtonReadyDiagAt = 0;
     let lastButtonHitTestAt = 0;
     let lastButtonDomStateLogAt = 0;
     let lastStatusPanelLogAt = 0;
@@ -18881,6 +21662,23 @@ const AutoQueueModule = (() => {
         ? String(state.taskRun.lastReplyClassifyReason)
         : '-';
 
+      if (state.waitingReply && typeof classifyReplyState === 'function') {
+        const liveReplyText = getLatestAssistantReplyTextForBatchSafe('status-panel-live');
+        const liveGenerating = isRawAssistantGeneratingSignals();
+        const liveReplyState = classifyReplyState(liveReplyText, liveGenerating);
+        return {
+          continueCount,
+          maxText,
+          maxRaw,
+          classifyStatus: liveReplyState.type || classifyStatus,
+          classifyReason: liveReplyState.reason || classifyReason,
+          display: `${continueCount}/${maxText} · 终态 ${liveReplyState.type || classifyStatus}`,
+          liveIsGenerating: liveGenerating,
+          liveReplyLength: String(liveReplyText || '').length,
+          liveNextAction: getReplyStateNextAction(liveReplyState, { waitingReply: true }),
+        };
+      }
+
       return {
         continueCount,
         maxText,
@@ -18891,7 +21689,8 @@ const AutoQueueModule = (() => {
       };
     }
 
-    function buildProgressStatusSnapshot() {
+    function buildProgressStatusSnapshot(options = {}) {
+      const logQuotaSnapshot = options.logQuotaSnapshot === true;
       const taskMode = config.promptMode === 'task';
       const taskInfo = taskMode ? getCurrentTaskRunInfo() : null;
 
@@ -18948,8 +21747,8 @@ const AutoQueueModule = (() => {
         const secsLeft = nextAt > 0 ? Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)) : 0;
         taskStepText = `${taskStepText}；发送重试：第 ${retryCount} 次，原因 ${retryReason}，下次重试 ${secsLeft} 秒后`;
       }
-      const messageRateLimitStatus = taskMode ? getTaskSendRateLimitStatus({ logSnapshot: true }) : null;
-      const uploadRateLimitStatus = taskMode ? getTaskUploadRateLimitStatus(1, { logSnapshot: true }) : null;
+      const messageRateLimitStatus = taskMode ? getTaskSendRateLimitStatus({ logSnapshot: logQuotaSnapshot }) : null;
+      const uploadRateLimitStatus = taskMode ? getTaskUploadRateLimitStatus(1, { logSnapshot: logQuotaSnapshot }) : null;
 
       // 等待额度恢复时：避免“运行中但像卡死”，在当前步骤里给出明确预计恢复时间与策略模式。
       if (taskMode) {
@@ -19168,8 +21967,53 @@ const AutoQueueModule = (() => {
         messageRateLimit ? messageRateLimit.display : '-',
         uploadRateLimit ? uploadRateLimit.display : '-',
         state.taskRun && state.taskRun.currentStep ? state.taskRun.currentStep : '-',
-        refreshReason || '-',
       ].join('|');
+    }
+
+    function buildLightStatusKey(snapshot, phase, running) {
+      return [
+        phase,
+        running ? 1 : 0,
+        snapshot && snapshot.taskProgress ? snapshot.taskProgress : '-',
+        snapshot && snapshot.pageTurnText ? snapshot.pageTurnText : '-',
+        snapshot && snapshot.taskStepKey ? snapshot.taskStepKey : '-',
+        snapshot && snapshot.continueStatus ? snapshot.continueStatus.display : '-',
+        state.waitingReply ? 1 : 0,
+        state.uploadingFromAutoQueue ? 1 : 0,
+        state.batchAutoUploading ? 1 : 0,
+      ].join('|');
+    }
+
+    function shouldDoHeavyStatusRender(snapshot, phase, running, refreshReason) {
+      const now = Date.now();
+      const reason = String(refreshReason || '');
+      const forceReasons = new Set([
+        'batch-start',
+        'batch-stop',
+        'batch-start-error',
+        'stop-final-upload-start',
+        'stop-final-upload-done',
+        'start-upload-click-handler-error',
+        'manual-refresh',
+        'advanced-debug-toggle',
+      ]);
+      const key = buildLightStatusKey(snapshot, phase, running);
+      const force = forceReasons.has(reason);
+      if (force) {
+        lastLightStatusKey = key;
+        lastHeavyStatusRenderAt = now;
+        return true;
+      }
+      if (key !== lastLightStatusKey) {
+        lastLightStatusKey = key;
+        lastHeavyStatusRenderAt = now;
+        return true;
+      }
+      if (now - lastHeavyStatusRenderAt >= 3000) {
+        lastHeavyStatusRenderAt = now;
+        return true;
+      }
+      return false;
     }
 
     function shouldSkipAutoqUnrelatedButtonRefresh(refreshReason = '') {
@@ -19247,11 +22091,63 @@ const AutoQueueModule = (() => {
       return true;
     }
 
+    function isToolboxUploadCriticalNow() {
+      const runtime = typeof window !== 'undefined'
+        ? (window.UploadCriticalRuntime || window.CGPT_UPLOAD_CRITICAL_RUNTIME)
+        : null;
+      if (runtime && typeof runtime.isUploadCriticalMode === 'function') {
+        return !!runtime.isUploadCriticalMode();
+      }
+
+      const uploadModule = typeof window !== 'undefined'
+        ? (window.CGPT_UPLOAD_MODULE || window.UploadModule)
+        : null;
+      if (uploadModule && typeof uploadModule.isUploadCriticalNow === 'function') {
+        return !!uploadModule.isUploadCriticalNow();
+      }
+
+      return false;
+    }
+
+    function shouldSkipHeavyAutoqStatusRender(refreshReason = '', shouldForceRender = false) {
+      if (shouldForceRender) {
+        return false;
+      }
+      if (isToolboxUploadCriticalNow()) {
+        return true;
+      }
+      return !!(
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.isUserScrollingNow === 'function'
+        && ToolboxShell.isUserScrollingNow()
+      );
+    }
+
+    function renderAutoqLightTopStatusOnly(reason = '') {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.renderToolboxTopStatus === 'function'
+      ) {
+        UploadModule.renderToolboxTopStatus({
+          heavy: false,
+          reason: reason || 'autoq-light-only',
+        });
+      }
+    }
+
     function updateStatus(refreshReason = '') {
       if (!isUploadInProgressForAutoQueue()) {
         repairAutoQueueFalseWaitingReply(`update-status:${String(refreshReason || '-')}`);
       }
-      if (config.promptMode === 'task' && isAutoQueueWaitingReplyStepStale()) {
+      if (config.promptMode === 'task' && isNextTaskTransitionPhase(String(state.phase || ''))) {
+        ToolboxShell.setStatus(getNextTaskPhaseStatusText(state.phase), 'running');
+      } else if (
+        config.promptMode === 'task'
+        && isAutoQueueWaitingReplyStepStale()
+        && (state.waitingReply || isChatGPTActuallyBusyForTaskQueue())
+      ) {
         ToolboxShell.setStatus('批量任务：等待当前回复完成', 'running');
       }
       ensureTicker();
@@ -19260,17 +22156,31 @@ const AutoQueueModule = (() => {
       const phase = String(state.phase || 'idle');
       const modeText = getModeDisplayText(config.promptMode);
       const listName = config.promptMode === 'list' ? getActiveListProfileName() : '';
-      const progressSnapshot = buildProgressStatusSnapshot();
+      const waitingQuotaSteps = new Set([
+        'quota-wait',
+        'rate-limit-wait',
+        'upload-rate-limit-wait',
+        'task-rate-limit-wait',
+        'task-upload-rate-limit-wait',
+      ]);
+      const taskStepKeyEarly = state.taskRun && state.taskRun.currentStep
+        ? String(state.taskRun.currentStep)
+        : '';
+      const forceQuotaLogReasons = new Set([
+        'manual-refresh',
+        'batch-start',
+        'batch-stop',
+        'batch-start-error',
+        'stop-final-upload-start',
+        'stop-final-upload-done',
+      ]);
+      const logQuotaSnapshot = forceQuotaLogReasons.has(String(refreshReason || ''))
+        || waitingQuotaSteps.has(taskStepKeyEarly);
+      const progressSnapshot = buildProgressStatusSnapshot({
+        logQuotaSnapshot,
+      });
       logAutoqProgressStatusIfChanged(progressSnapshot, refreshReason);
 
-      const now = Date.now();
-      const renderKey = buildStatusRenderKey(progressSnapshot, refreshReason);
-      const activeNow = !!(
-        running
-        || state.waitingReply
-        || state.uploadingFromAutoQueue
-        || state.batchAutoUploading
-      );
       const forceRenderReasons = new Set([
         'batch-start',
         'batch-stop',
@@ -19278,32 +22188,28 @@ const AutoQueueModule = (() => {
         'stop-final-upload-done',
         'batch-start-error',
         'start-upload-click-handler-error',
+        'manual-refresh',
+        'advanced-debug-toggle',
       ]);
       const shouldForceRender = forceRenderReasons.has(String(refreshReason || ''));
-      const shouldRenderStatus =
-        shouldForceRender
-        || renderKey !== lastStatusRenderKey
-        || now - lastStatusRenderAt >= 1500;
 
-      if (!shouldRenderStatus) {
-        if (activeNow && !shouldSkipAutoqUnrelatedButtonRefresh(refreshReason)) {
-          if (
-            typeof UploadModule !== 'undefined'
-            && typeof UploadModule.refreshUploadAutoContinueButton === 'function'
-          ) {
-            UploadModule.refreshUploadAutoContinueButton(refreshReason || 'autoq-status-skip');
-          }
-          if (
-            typeof UploadModule !== 'undefined'
-            && typeof UploadModule.refreshUploadAutoContinueUntilDoneButton === 'function'
-          ) {
-            UploadModule.refreshUploadAutoContinueUntilDoneButton(refreshReason || 'autoq-status-skip');
-          }
-        }
+      if (shouldSkipHeavyAutoqStatusRender(refreshReason, shouldForceRender)) {
+        renderAutoqLightTopStatusOnly(
+          isToolboxUploadCriticalNow()
+            ? 'autoq-skip-heavy-during-upload'
+            : 'autoq-skip-heavy-during-scroll',
+        );
         return;
       }
 
-      lastStatusRenderKey = renderKey;
+      const shouldRenderStatus = shouldDoHeavyStatusRender(progressSnapshot, phase, running, refreshReason);
+
+      if (!shouldRenderStatus) {
+        return;
+      }
+
+      const now = Date.now();
+      lastStatusRenderKey = buildStatusRenderKey(progressSnapshot, refreshReason);
       lastStatusRenderAt = now;
 
       const taskInfo = progressSnapshot.taskInfo;
@@ -19315,6 +22221,10 @@ const AutoQueueModule = (() => {
       const replyClassifyReason = continueStatus.classifyReason || '-';
       const lastStopReasonText = state.lastTaskBatchStopReason
         ? String(state.lastTaskBatchStopReason.reason || '-')
+        : '-';
+      const lastFailureReasonText = getTaskBatchFailureDisplayText();
+      const batchDisplayReasonText = state.batchTask && state.batchTask.displayReason
+        ? String(state.batchTask.displayReason || '-')
         : '-';
       const lastStopClassifyHint = (
         lastStopReasonText === 'reply-classify-blocked'
@@ -19493,6 +22403,8 @@ const AutoQueueModule = (() => {
           taskStepText,
           lastStopReasonText,
           lastStopClassifyHint,
+          lastFailureReasonText,
+          batchDisplayReasonText,
           rateLimitDisplay,
           uploadRateLimitDisplay,
           progressSnapshot,
@@ -19518,7 +22430,7 @@ const AutoQueueModule = (() => {
 
       syncRuntimeTaskPhase();
       if (typeof UploadModule !== 'undefined' && typeof UploadModule.renderToolboxTopStatus === 'function') {
-        UploadModule.renderToolboxTopStatus();
+        UploadModule.renderToolboxTopStatus({ heavy: false });
       }
 
       const messageUsed = messageRateLimit ? Number(messageRateLimit.used) || 0 : '-';
@@ -19542,8 +22454,14 @@ const AutoQueueModule = (() => {
         );
       }
 
-      if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.renderRuntimeStats === 'function') {
-        RuntimeStatsModule.renderRuntimeStats(false);
+      if (
+        typeof RuntimeStatsModule !== 'undefined'
+        && typeof RuntimeStatsModule.renderRuntimeStats === 'function'
+      ) {
+        if (now - lastRuntimeStatsRenderAt >= 3000 || shouldForceRender) {
+          lastRuntimeStatsRenderAt = now;
+          RuntimeStatsModule.renderRuntimeStats(false);
+        }
       }
 
       saveAndRestoreScrollAroundRender(
@@ -19567,10 +22485,16 @@ const AutoQueueModule = (() => {
             }
           }
         },
-        { isAutoRefresh: true },
+        {
+          isAutoRefresh: true,
+          preserveScroll: false,
+        },
       );
 
       renderSendOnceButton({ refreshReason });
+      ensureAdvancedDebugToggleButtonDom();
+      syncAdvancedDebugToggleButton();
+      maybeRefreshAdvancedDebugPanel('status-render');
     }
 
     function syncBatchTaskPhase() {
@@ -19612,11 +22536,44 @@ const AutoQueueModule = (() => {
 
       if (phaseName === AUTO_QUEUE_PHASES.UPLOADING || state.uploadingFromAutoQueue) {
         task.phase = 'running';
+        task.displayState = 'uploading';
+        return task.phase;
+      }
+
+      if (isNextTaskTransitionPhase(phaseName)) {
+        task.phase = 'running';
+        if (phaseName === 'next_task_failed') {
+          task.displayState = 'next_task_upload_failed';
+        } else if (
+          phaseName === 'next_task_wait_upload_ready'
+          || phaseName === 'next_task_uploading'
+          || phaseName === 'next_task_upload_retry'
+        ) {
+          task.displayState = 'waiting_next_task_upload';
+        } else if (
+          phaseName === 'next_task_prepare'
+          || phaseName === 'next_task_navigate_home'
+          || phaseName === 'next_task_wait_home_ready'
+        ) {
+          task.displayState = 'preparing_next_task';
+        } else {
+          task.displayState = 'running';
+        }
         return task.phase;
       }
 
       if (phaseName === AUTO_QUEUE_PHASES.WAITING_REPLY || state.waitingReply) {
+        if (
+          !isChatGPTActuallyBusyForTaskQueue()
+          && !state.waitingReply
+          && isAutoQueueWaitingReplyStepStale()
+        ) {
+          task.phase = 'running';
+          task.displayState = 'running';
+          return task.phase;
+        }
         task.phase = 'waiting_reply';
+        task.displayState = 'waiting_reply';
         return task.phase;
       }
 
@@ -19810,6 +22767,34 @@ const AutoQueueModule = (() => {
     }
 
     function renderQueueActionButtons(context = {}) {
+      const buttonRenderKey = [
+        String(state.phase || ''),
+        state.running ? 1 : 0,
+        state.waitingReply ? 1 : 0,
+        state.batchAutoUploading ? 1 : 0,
+        state.uploadingFromAutoQueue ? 1 : 0,
+        state.batchTask && state.batchTask.stopRequested ? 1 : 0,
+        state.taskRun && state.taskRun.currentStep ? state.taskRun.currentStep : '',
+      ].join('|');
+      const buttonRenderNow = Date.now();
+      const forceButtonRenderReasons = new Set([
+        'batch-start',
+        'batch-stop',
+        'manual-refresh',
+        'button-click',
+        'task-selected',
+        'task-list-changed',
+      ]);
+      if (
+        buttonRenderKey === lastQueueButtonRenderKey
+        && buttonRenderNow - lastQueueButtonRenderAt < 1500
+        && !forceButtonRenderReasons.has(String(context.refreshReason || ''))
+      ) {
+        return;
+      }
+      lastQueueButtonRenderKey = buttonRenderKey;
+      lastQueueButtonRenderAt = buttonRenderNow;
+
       refreshAutoQueueActionButtonRefs();
 
       const debugEnabled = !!(
@@ -20083,10 +23068,23 @@ const AutoQueueModule = (() => {
         }
       }
 
-      bindAutoQueueDelegatedActions('renderQueueActionButtons');
-      bindDirectAutoQueueActionButtons('renderQueueActionButtons');
+      if (delegatedBoundRoot !== root) {
+        autoQueueDelegatedActionsBound = false;
+        autoQueueDirectActionButtonsBound = false;
+      }
+      if (!autoQueueDelegatedActionsBound) {
+        bindAutoQueueDelegatedActions('renderQueueActionButtons:first-bind');
+        autoQueueDelegatedActionsBound = true;
+      }
+      if (!autoQueueDirectActionButtonsBound) {
+        bindDirectAutoQueueActionButtons('renderQueueActionButtons:first-bind');
+        autoQueueDirectActionButtonsBound = true;
+      }
 
-      logAutoQueueUploadButtonReady('after-renderQueueActionButtons');
+      if (debugEnabled && Date.now() - lastUploadButtonReadyDiagAt >= 5000) {
+        lastUploadButtonReadyDiagAt = Date.now();
+        logAutoQueueUploadButtonReady('after-renderQueueActionButtons');
+      }
 
       const now = Date.now();
       if (debugEnabled && now - lastButtonHitTestAt >= 5000) {
@@ -20939,11 +23937,6 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (isComposerSendButtonWaitBlocking()) {
-        holdTaskUntilSendButtonReady(getCurrentRunningTask(), 'composer-send-button-wait');
-        return;
-      }
-
       if (
         config.promptMode === 'task'
         && state.phase === AUTO_QUEUE_PHASES.REPLY_READY
@@ -20953,7 +23946,56 @@ const AutoQueueModule = (() => {
         return;
       }
 
-      if (!state.waitingReply) return;
+      if (!state.waitingReply) {
+        if (isComposerSendButtonWaitBlocking()) {
+          holdTaskUntilSendButtonReady(getCurrentRunningTask(), 'composer-send-button-wait');
+        }
+        return;
+      }
+
+      if (trySettleWaitingReplyByReplyState('maybe-update-waiting')) {
+        return;
+      }
+
+      const stableReplyFallback = canSettleWaitingReplyByStableAssistantFallback('maybe-update-waiting');
+      if (stableReplyFallback) {
+        const replySnapshot = buildAssistantReplySnapshot();
+        const mergedText = String(stableReplyFallback.snap.text || replySnapshot.text || '').trim();
+        const validation = validateAssistantReplyForRun(
+          { runId: state.currentRunId },
+          { ...replySnapshot, text: mergedText, isStreaming: false },
+        );
+        if (validation.ok) {
+          void onAssistantReplySettled(mergedText, { reason: 'stable-reply-complete-fallback' });
+          updateStatus();
+          updateChatInputStateBadge();
+          return;
+        }
+        ToolboxShell.appendLog(
+          `[BATCH_FLOW][REPLY_COMPLETE_FALLBACK_BLOCKED] reason=${validation.reason || 'validation-failed'} `
+          + `textLen=${mergedText.length}`,
+        );
+      }
+
+      const waitedMsForStep = Date.now() - Number(state.waitingStartedAt || 0);
+      const currentWaitStep = getAutoQueueBatchStepKey();
+      if (
+        currentWaitStep === 'wait-current-reply'
+        && waitedMsForStep >= WAIT_CURRENT_REPLY_FORCE_SETTLE_MS
+        && !isRawAssistantGeneratingSignals()
+      ) {
+        const timeoutSnap = getBatchReplyStableSnapshot('wait-current-reply-timeout');
+        if (timeoutSnap.text && timeoutSnap.stableMs >= 1500 && timeoutSnap.count >= 2) {
+          ToolboxShell.appendLog(
+            `[BATCH_FLOW][WAIT_CURRENT_REPLY_TIMEOUT_SETTLE] waitedMs=${waitedMsForStep} `
+            + `stableMs=${timeoutSnap.stableMs} chars=${timeoutSnap.text.length}`,
+          );
+          void onAssistantReplySettled(timeoutSnap.text, { reason: 'wait-current-reply-timeout-fallback' });
+          updateStatus();
+          updateChatInputStateBadge();
+          return;
+        }
+      }
 
       if (guardAutoQueueBackgroundThrottle('wait-reply')) {
         return;
@@ -20970,6 +24012,11 @@ const AutoQueueModule = (() => {
         if (config.promptMode === 'task') {
           if (!tryScheduleTerminalBusyOverride('wait-reply-busy')) {
             maybeSettleTaskReplyByVisibleDoneSignal('wait-reply-busy');
+            if (trySettleWaitingReplyByReplyState('wait-reply-busy')) {
+              updateStatus();
+              updateChatInputStateBadge();
+              return;
+            }
           }
         }
         updateStatus();
@@ -21704,6 +24751,47 @@ const AutoQueueModule = (() => {
       }
     }
 
+    async function resolveTaskUploadPlan(source, kind, options = {}) {
+      const uploadSource = String(source || 'autoq-upload-plan').trim() || 'autoq-upload-plan';
+      const uploadKind = String(kind || 'task-upload').trim() || 'task-upload';
+      let pendingItems = [];
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getPendingUploadItemsForStart === 'function'
+      ) {
+        pendingItems = await UploadModule.getPendingUploadItemsForStart(uploadSource, {
+          source: uploadSource,
+          forceReupload: options.forceReupload === true,
+          groupId: options.groupId,
+        });
+      } else if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.getPendingUploadItems === 'function'
+      ) {
+        pendingItems = UploadModule.getPendingUploadItems({
+          groupId: options.groupId,
+        });
+      }
+
+      const pendingUploadCount = Array.isArray(pendingItems) ? pendingItems.length : 0;
+      const status = getTaskUploadRateLimitStatus(Math.max(1, pendingUploadCount));
+      const maxFilesForThisUpload = status.enabled
+        ? Math.max(0, Math.min(pendingUploadCount, Number(status.remaining) || 0))
+        : pendingUploadCount;
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][PLAN] source=${uploadSource} kind=${uploadKind} pendingUploadCount=${pendingUploadCount} remaining=${status.remaining} maxFilesForThisUpload=${maxFilesForThisUpload} rateLimitEnabled=${status.enabled ? 1 : 0}`,
+      );
+
+      return {
+        pendingItems,
+        pendingUploadCount,
+        status,
+        maxFilesForThisUpload,
+      };
+    }
+
     async function startUploadFromCurrentQueueWithTaskUploadRateLimit(options = {}) {
       const opts = options && typeof options === 'object' ? options : {};
       const source = String(opts.source || 'autoq-upload-rate-guarded').trim() || 'autoq-upload-rate-guarded';
@@ -21789,10 +24877,12 @@ const AutoQueueModule = (() => {
         };
       }
 
-      const status = getTaskUploadRateLimitStatus(pendingUploadCount);
-      const maxFilesForThisUpload = status.enabled
-        ? Math.max(0, Math.min(pendingUploadCount, Number(status.remaining) || 0))
-        : pendingUploadCount;
+      const uploadPlan = await resolveTaskUploadPlan(source, kind, {
+        forceReupload: true,
+      });
+      const status = uploadPlan.status;
+      const maxFilesForThisUpload = uploadPlan.maxFilesForThisUpload;
+      const pendingUploadCountFromPlan = uploadPlan.pendingUploadCount;
 
       if (maxFilesForThisUpload <= 0) {
         ToolboxShell.appendLog(
@@ -21808,14 +24898,14 @@ const AutoQueueModule = (() => {
         };
       }
 
-      if (maxFilesForThisUpload < pendingUploadCount) {
+      if (maxFilesForThisUpload < pendingUploadCountFromPlan) {
         ToolboxShell.appendLog(
-          `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][PARTIAL] source=${source} kind=${kind} pending=${pendingUploadCount} allowed=${maxFilesForThisUpload} used=${status.used}/${status.max}`,
+          `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][PARTIAL] source=${source} kind=${kind} pending=${pendingUploadCountFromPlan} allowed=${maxFilesForThisUpload} used=${status.used}/${status.max}`,
         );
       }
 
       ToolboxShell.appendLog(
-        `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][UPLOAD_START] source=${source} kind=${kind} pending=${pendingUploadCount} maxFiles=${maxFilesForThisUpload}`,
+        `[AUTOQ][TASK_UPLOAD_RATE_LIMIT][UPLOAD_START] source=${source} kind=${kind} pending=${pendingUploadCountFromPlan} maxFiles=${maxFilesForThisUpload}`,
       );
 
       const result = await UploadModule.startUploadFromCurrentQueue({
@@ -22887,13 +25977,20 @@ const AutoQueueModule = (() => {
           upload: true,
         };
       }
-      const pendingKind = String(run.pendingSendKind || '').trim();
+      const pendingKind = String(cadenceRun.pendingSendKind || '').trim();
       const effectivePending = (
         (pendingKind === 'initial' || !pendingKind)
         && isCurrentRunAfterInitialStrict()
       )
         ? 'continue'
         : (pendingKind || 'continue');
+
+      ToolboxShell.appendLog(
+        `[BATCH_FLOW][DECIDE_NEXT] pendingKind=${pendingKind || '-'} `
+        + `effectivePending=${effectivePending} businessNo=${businessNo} `
+        + `currentRunSentCount=${currentRunSentCount} upload=0`,
+      );
+
       return {
         action: effectivePending === 'continue' || effectivePending === 'verify-continue'
           ? 'send_continue'
@@ -24014,6 +27111,36 @@ const AutoQueueModule = (() => {
     }
 
     function maybeSendNextTask() {
+      const runGuard = ensureTaskRunVerificationFields(state.taskRun || {});
+      if (runGuard.nextTaskTransitionInFlight) {
+        ToolboxShell.appendLog('[AUTOQ][MAYBE_SEND_NEXT_BLOCKED_TRANSITION_IN_FLIGHT] source=maybe-send-next');
+        return;
+      }
+      if (String(state.phase || '') === 'terminal_confirmed') {
+        ToolboxShell.appendLog('[AUTOQ][MAYBE_SEND_NEXT_REDIRECT_TO_TRANSITION] source=maybe-send-next');
+        void advanceToNextTaskAfterTerminalConfirm('maybe-send-next').catch((err) => {
+          console.error('[AUTOQ][MAYBE_SEND_NEXT_REDIRECT_ERROR]', err);
+          ToolboxShell.appendLog(
+            '[AUTOQ][MAYBE_SEND_NEXT_REDIRECT_ERROR] '
+            + (err && err.stack ? err.stack : String(err)),
+          );
+        });
+        return;
+      }
+      if (tryRecoverNextTaskUploadFailure('maybe-send-next')) {
+        return;
+      }
+      if (isNextTaskTransitionPhase(state.phase)) {
+        ToolboxShell.appendLog(
+          '[AUTOQ][MAYBE_SEND_NEXT_BLOCKED_NEXT_TASK_PHASE] '
+          + 'source=maybe-send-next'
+          + ' phase=' + String(state.phase || '')
+          + ' step=' + String(runGuard.currentStep || '')
+          + ' pendingSendKind=' + String(runGuard.pendingSendKind || ''),
+        );
+        return;
+      }
+
       if (repairIllegalWaitingReplyPendingSendState('maybe-send-next')) {
         return;
       }
@@ -25058,7 +28185,38 @@ const AutoQueueModule = (() => {
         return 0;
       }
 
-      return document.hidden ? 3000 : 1000;
+      if (document.hidden) {
+        return 3000;
+      }
+
+      if (isToolboxUploadCriticalNow()) {
+        return 3000;
+      }
+
+      const step = state.taskRun && state.taskRun.currentStep
+        ? String(state.taskRun.currentStep)
+        : '';
+
+      if (
+        state.uploadingFromAutoQueue
+        || state.batchAutoUploading
+        || state.phase === AUTO_QUEUE_PHASES.SENDING
+        || step === 'send-wait-button'
+        || step === 'verification-send-retry'
+        || step === 'next_task_wait_upload_ready'
+      ) {
+        return 2000;
+      }
+
+      if (state.waitingReply || state.phase === AUTO_QUEUE_PHASES.WAITING_REPLY) {
+        return 3000;
+      }
+
+      if (state.phase === AUTO_QUEUE_PHASES.IDLE) {
+        return 5000;
+      }
+
+      return 2000;
     }
 
     function ensureTicker() {
@@ -26109,6 +29267,46 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      const advDebugToggleBtn = target.closest('[data-action="advanced-debug"]');
+      if (advDebugToggleBtn && syncAutoQueueRootFromActionButton(advDebugToggleBtn)) {
+        event.autoqDelegatedHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+        ToolboxShell.appendLog('[ADV_DEBUG][TOGGLE_CLICK]');
+        toggleAdvancedDebugPanel();
+        return;
+      }
+
+      const advDebugRefreshBtn = target.closest('#xz-autoq-advanced-debug-refresh-btn');
+      if (advDebugRefreshBtn && root && root.contains(advDebugRefreshBtn)) {
+        event.autoqDelegatedHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        handleAdvancedDebugPanelAction('refresh');
+        return;
+      }
+
+      const advDebugAutoRefreshBtn = target.closest('#xz-autoq-advanced-debug-auto-refresh-btn');
+      if (advDebugAutoRefreshBtn && root && root.contains(advDebugAutoRefreshBtn)) {
+        event.autoqDelegatedHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        handleAdvancedDebugPanelAction('toggle-auto-refresh');
+        return;
+      }
+
+      const advDebugCopyBtn = target.closest('#xz-autoq-advanced-debug-copy-btn');
+      if (advDebugCopyBtn && root && root.contains(advDebugCopyBtn)) {
+        event.autoqDelegatedHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        handleAdvancedDebugPanelAction('copy');
+        return;
+      }
+
       const copyLogBtn = target.closest('[data-action="copy-log"]');
       if (copyLogBtn && root && root.contains(copyLogBtn) && syncAutoQueueRootFromActionButton(copyLogBtn)) {
         event.autoqDelegatedHandled = true;
@@ -26302,6 +29500,9 @@ const AutoQueueModule = (() => {
         return;
       }
 
+      autoQueueDelegatedActionsBound = false;
+      autoQueueDirectActionButtonsBound = false;
+
       const existed = targetHost.querySelector('#cgpt-autoq-module');
       if (existed) {
         root = existed;
@@ -26327,6 +29528,7 @@ const AutoQueueModule = (() => {
         renderTaskEditor();
         renderTaskProfileDefaults();
         ensureMainLiteStructure();
+        syncAdvancedDebugToggleButton();
         updateStatus();
         logAutoQueueActionButtonDomState('mount-existed');
         return;
@@ -26383,6 +29585,14 @@ const AutoQueueModule = (() => {
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start">${getAutoQueueStartIdleText()}</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">${getAutoQueueSendOnceIdleText()}</button>
             <button type="button" class="cgpt-btn" id="cgpt-autoq-copy-log" data-action="copy-log" title="复制小张工具箱内存日志，便于排查上传、发送、等待回复等问题">复制日志</button>
+            <button
+              type="button"
+              class="cgpt-btn xz-autoq-advanced-debug-toggle-btn"
+              id="xz-autoq-advanced-debug-toggle-btn"
+              data-action="advanced-debug"
+              data-button-role="advanced-debug"
+              title="展开批量任务高级状态：按钮检测、输入框状态、上传状态、终止符识别、二次验证状态、定时器状态"
+            >高级调试</button>
           </div>
         </div>
 
@@ -26455,6 +29665,7 @@ const AutoQueueModule = (() => {
       bindEvents();
       bindTaskPanelEvents();
       ensureMainLiteStructure();
+      syncAdvancedDebugToggleButton();
       updateStatus();
       logAutoQueueActionButtonDomState('mount-new');
     }

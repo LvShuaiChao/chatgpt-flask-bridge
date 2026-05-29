@@ -164,6 +164,10 @@
       moduleInitState: 'initializing',
       moduleInitError: '',
       moduleRenderFailed: false,
+      uploadCriticalMode: false,
+      uploadCriticalReason: '',
+      uploadCriticalAt: 0,
+      uploadListExpandedAll: false,
     };
     let duplicateWatcherTimer = 0;
 
@@ -190,6 +194,11 @@
     const uploadTimers = createTimerRegistry('UPLOAD');
     let quickPromptRenderSignature = '';
     let persistQueueThrottleTimer = 0;
+    let uploadPersistLightTimer = 0;
+    let uploadGroupCountLightTimer = 0;
+    let lastUploadListRenderExecutedAt = 0;
+    const UPLOAD_LIST_RENDER_LIMIT = 50;
+    const UPLOAD_LIST_RENDER_MIN_INTERVAL_MS = 800;
     let persistQueuePendingStage = '';
     let persistQueueAllowEmptyReason = '';
     let uploadSendShortcutBound = false;
@@ -206,7 +215,10 @@
     let lastHealStaleDelegateAutoqAt = 0;
     const WAIT_REAL_SEND_BUTTON_POLL_MS = 400;
     const WAIT_REAL_SEND_BUTTON_LOG_INTERVAL_MS = 2000;
+    const WAITING_REPLY_STABLE_MS = 3000;
+    const WAITING_REPLY_STABLE_MIN_COUNT = 2;
     let waitingReplyIdleStreak = 0;
+    let waitingReplyTextStableSnapshot = null;
     let uploadShortcutDebugLastAt = 0;
     // deprecated: only used for compatibility, do not use as render source
     let copyLastMessageTaskRunning = false;
@@ -4966,6 +4978,9 @@
     }
 
     function diagnoseUploadListRender(el, html, reason = '') {
+      if (!isUploadDebugEnabled()) {
+        return;
+      }
       const listNode = el || listEl || (rootElRef ? qs(UploadSelectors.list, rootElRef) : null);
       const content = typeof html === 'string'
         ? html
@@ -6389,15 +6404,58 @@
       }
     }
 
+    function markUploadItemNeedsRebind(item, reason = '', source = '') {
+      if (!item || typeof item !== 'object') {
+        return;
+      }
+
+      const reasonText = String(reason || 'file-handle-unavailable').trim() || 'file-handle-unavailable';
+
+      item.state = UploadState.MISSING_FILE;
+      item.attachState = UploadState.MISSING_FILE;
+      item.status = 'needs_rebind';
+      item.registryStatus = 'needs_rebind';
+      item.restoreState = UploadRestoreState.NEEDS_REBIND;
+      item.sourceKind = 'missing-file';
+      item.readMode = '';
+      item.localReadable = false;
+      item.localBound = false;
+      item.reusableForCadence = false;
+      item.uploadName = '';
+      item.message = `文件源已失效，请重新选择：${reasonText}`;
+      item.updatedAt = Date.now();
+
+      item.file = null;
+      item.sourceFile = null;
+      item.originalFile = null;
+      item.blob = null;
+      item.sourceBlob = null;
+      item.fileHandle = null;
+      item.handle = null;
+      item.localHandle = null;
+
+      syncUploadItemSchemaInPlace(item);
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_REBIND][MARK] source=${source || '-'} name=${item.name || item.filename || '-'} reason=${reasonText}`,
+      );
+    }
+
     async function ensureReusableFileForUploadItem(item, source = '') {
       if (!item) {
         return false;
       }
 
       if (item.restoreState === UploadRestoreState.NEEDS_REBIND) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=needs-rebind`,
+        );
         return false;
       }
       if (item.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=permission-required`,
+        );
         return false;
       }
 
@@ -6445,6 +6503,12 @@
           ToolboxShell.appendLog(
             `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=getFile-error error=${errText}`,
           );
+
+          markUploadItemNeedsRebind(item, errText, source || 'ensureReusableFileForUploadItem');
+
+          scheduleRenderUpload(`file-handle-reload-failed:${source || '-'}`);
+          persistQueueThrottled(`file-handle-reload-failed:${source || '-'}`);
+
           return false;
         }
       }
@@ -6452,6 +6516,11 @@
       ToolboxShell.appendLog(
         `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=no-readable-source`,
       );
+      markUploadItemNeedsRebind(item, 'no-readable-source', source || 'ensureReusableFileForUploadItem');
+
+      scheduleRenderUpload(`no-readable-source:${source || '-'}`);
+      persistQueueThrottled(`no-readable-source:${source || '-'}`);
+
       return false;
     }
 
@@ -6589,6 +6658,27 @@
       const missingSourceItems = scopedItems.filter(
         (item) => item && !isFinalItem(item) && !hasAttemptableUploadSource(item),
       );
+      const needsRebindItems = scopedItems.filter((item) => {
+        if (!item) {
+          return false;
+        }
+        const normalizedStatus = String(item.status || '').trim().toLowerCase();
+        return (
+          item.restoreState === UploadRestoreState.NEEDS_REBIND
+          || item.registryStatus === 'needs_rebind'
+          || normalizedStatus === 'needs_rebind'
+        );
+      });
+      const missingFileItems = scopedItems.filter((item) => {
+        if (!item) {
+          return false;
+        }
+        return (
+          item.restoreState === UploadRestoreState.MISSING
+          || item.state === UploadState.MISSING_FILE
+          || item.sourceKind === 'missing-file'
+        );
+      });
       const uploadedItems = scopedItems.filter((item) => item && isQueueItemAlreadyUploaded(item));
       const attachedItems = scopedItems.filter((item) => item && isLegacyUploadItemAttached(item));
       const firstBlocked = blockedItems[0] || null;
@@ -6602,12 +6692,14 @@
         uploadedCount: uploadedItems.length,
         attachedCount: attachedItems.length,
         missingSourceCount: missingSourceItems.length,
+        needsRebindCount: needsRebindItems.length,
+        missingCount: missingFileItems.length,
         blockedCount: blockedItems.length,
         firstBlockedReason: firstBlockedReason || '',
       };
       const presenceSummary = summarizeUploadAttachmentPresenceForScope(scopeGroupId);
       ToolboxShell.appendLog(
-        `[UPLOAD_START][NO_PENDING_DIAG] activeGroupId=${summary.activeGroupId || '-'} totalItems=${summary.totalItems} pendingCount=${summary.pendingCount} uploadedCount=${summary.uploadedCount} attachedCount=${summary.attachedCount} missingSourceCount=${summary.missingSourceCount} blockedCount=${summary.blockedCount} firstBlockedReason=${summary.firstBlockedReason || '-'} localBound=${presenceSummary.localBound} composerAttached=${presenceSummary.composerAttached} conversationSent=${presenceSummary.conversationSent}`,
+        `[UPLOAD_START][NO_PENDING_DIAG] activeGroupId=${summary.activeGroupId || '-'} totalItems=${summary.totalItems} pendingCount=${summary.pendingCount} uploadedCount=${summary.uploadedCount} attachedCount=${summary.attachedCount} missingSourceCount=${summary.missingSourceCount} needsRebindCount=${summary.needsRebindCount} missingCount=${summary.missingCount} blockedCount=${summary.blockedCount} firstBlockedReason=${summary.firstBlockedReason || '-'} localBound=${presenceSummary.localBound} composerAttached=${presenceSummary.composerAttached} conversationSent=${presenceSummary.conversationSent}`,
       );
       return summary;
     }
@@ -6714,6 +6806,16 @@
           shouldOpenPicker: false,
         };
       }
+      if (summary.totalItems > 0 && summary.pendingCount === 0 && summary.needsRebindCount > 0) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_START][NO_PENDING_REASON] reason=needs-rebind totalItems=${summary.totalItems} needsRebind=${summary.needsRebindCount} missing=${summary.missingCount || 0}`,
+        );
+        return {
+          reason: 'needs-rebind',
+          message: '上传队列中有文件记录，但真实文件源已失效，请点击「重新绑定」或删除后重新拖入文件。',
+          shouldOpenPicker: false,
+        };
+      }
       if (summary.missingSourceCount > 0) {
         return {
           reason: 'missing-source',
@@ -6753,6 +6855,16 @@
 
     function hasAttemptableUploadSource(q) {
       if (!q || isUploadSourceCacheForbidden(q)) {
+        return false;
+      }
+
+      if (
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.restoreState === UploadRestoreState.MISSING
+        || q.state === UploadState.MISSING_FILE
+        || q.registryStatus === 'needs_rebind'
+        || String(q.status || '').trim().toLowerCase() === 'needs_rebind'
+      ) {
         return false;
       }
 
@@ -7222,7 +7334,49 @@
     }
 
     function isUploadDebugEnabled() {
+      if (state.uploadDebugEnabled) {
+        return true;
+      }
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getState === 'function'
+      ) {
+        const autoState = AutoQueueModule.getState() || {};
+        if (autoState.advancedDebugVisible) {
+          return true;
+        }
+      }
       return isUploadListDebugEnabled();
+    }
+
+    function isPersistUploadBlobEnabled() {
+      return APP.persistUploadBlobEnabled === true && Number(APP.uploadBlobMaxBytes) > 0;
+    }
+
+    function logSlowOperation(name, startedAt, extra = '') {
+      const cost = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now() - startedAt
+        : Date.now() - startedAt;
+      const thresholdMs = isUploadDebugEnabled() ? 50 : 200;
+      if (cost < thresholdMs) {
+        return;
+      }
+      const line = `[PERF][SLOW] name=${name} cost=${cost.toFixed(1)}ms ${extra || ''}`.trim();
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      } else {
+        console.warn(line);
+      }
+    }
+
+    function isPageScrollingNow() {
+      return !!(
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.isUserScrollingNow === 'function'
+        && ToolboxShell.isUserScrollingNow()
+      );
     }
 
     function isFlaskLocalDirectSource(q) {
@@ -7241,11 +7395,16 @@
         return '';
       }
 
+      if (
+        q.restoreState === UploadRestoreState.NEEDS_REBIND
+        || q.registryStatus === 'needs_rebind'
+        || String(q.status || '').trim().toLowerCase() === 'needs_rebind'
+      ) {
+        return '文件源已失效，需重新选择';
+      }
+
       if (q.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
         return '需要重新授权';
-      }
-      if (q.restoreState === UploadRestoreState.NEEDS_REBIND) {
-        return '需要重新选择';
       }
       if (q.restoreState === UploadRestoreState.MISSING) {
         return '文件不存在';
@@ -7405,6 +7564,34 @@
 
     function getUploadInlineStatusText(q) {
       const normalizedStatus = String(q && q.status ? q.status : '').trim().toLowerCase();
+
+      if (
+        q
+        && (
+          q.restoreState === UploadRestoreState.NEEDS_REBIND
+          || q.registryStatus === 'needs_rebind'
+          || normalizedStatus === 'needs_rebind'
+        )
+      ) {
+        return '本地不可读 · 需要重新选择';
+      }
+
+      if (q && q.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
+        return '本地不可读 · 需要重新授权';
+      }
+
+      if (
+        q
+        && (
+          q.restoreState === UploadRestoreState.MISSING
+          || q.state === UploadState.MISSING_FILE
+          || q.sourceKind === 'missing-file'
+          || q.sourceKind === 'missing-local'
+        )
+      ) {
+        return '本地不可读 · 文件源失效';
+      }
+
       const localReadable = !isUploadItemLocallyUnreadable(q);
       const localText = localReadable ? '本地可读' : '本地不可读';
 
@@ -7737,6 +7924,9 @@
     }
 
     function hasPersistableUploadBlob(item) {
+      if (!isPersistUploadBlobEnabled()) {
+        return false;
+      }
       const blob = resolveUploadBlobCandidate(item);
       if (!blob) {
         return false;
@@ -7780,7 +7970,8 @@
       const blobCandidate = resolveUploadBlobCandidate(mergedItem);
       const size = getUploadItemSizeBytes(mergedItem) || (blobCandidate ? Number(blobCandidate.size) || 0 : 0);
       const canSaveBlob = !!(
-        blobCandidate
+        isPersistUploadBlobEnabled()
+        && blobCandidate
         && size > 0
         && size <= APP.uploadBlobMaxBytes
       );
@@ -8312,6 +8503,9 @@
     }
 
     async function persistQueue(stage = '', options = {}) {
+      const persistStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       const groupIdSnapshot = String(state.activeGroupId || '').trim();
       if (!groupIdSnapshot) {
         console.warn('[ChatGPT toolbox] persistQueue: activeGroupId 为空');
@@ -8462,6 +8656,11 @@
           `[PERF][persistQueue] cost=${costMs}ms mode=${persistMode} itemCount=${queueSnapshot.length} stage=${stageText}`,
           costMs,
           100,
+        );
+        logSlowOperation(
+          'persistQueue',
+          persistStartedAt,
+          `mode=${persistMode} itemCount=${queueSnapshot.length} stage=${stageText}`,
         );
       }
     }
@@ -8809,12 +9008,7 @@
         return;
       }
 
-      const critical = (
-        typeof UploadCriticalRuntime !== 'undefined'
-        && UploadCriticalRuntime
-        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
-        && UploadCriticalRuntime.isUploadCriticalMode()
-      );
+      const critical = isUploadCriticalNow();
       const effectiveDelayMs = critical
         ? Math.max(Number(delayMs) || 0, 3000)
         : delayMs;
@@ -8826,6 +9020,34 @@
 
         persistQueueInBackground(stageText);
       }, effectiveDelayMs);
+    }
+
+    function schedulePersistQueueLight(reason, delayMs = 1500) {
+      window.clearTimeout(uploadPersistLightTimer);
+      uploadPersistLightTimer = window.setTimeout(() => {
+        uploadPersistLightTimer = 0;
+        persistQueue(reason || 'light-persist').catch((err) => {
+          const message = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] schedulePersistQueueLight failed', err);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[UPLOAD_PERF][PERSIST_ERROR] reason=${reason || '-'} error=${message}`);
+          }
+        });
+      }, Math.max(300, Number(delayMs) || 1500));
+    }
+
+    function scheduleRefreshUploadGroupCountsLight(reason, delayMs = 2000) {
+      window.clearTimeout(uploadGroupCountLightTimer);
+      uploadGroupCountLightTimer = window.setTimeout(() => {
+        uploadGroupCountLightTimer = 0;
+        refreshUploadGroupCounts().catch((err) => {
+          const message = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] scheduleRefreshUploadGroupCountsLight failed', err);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[UPLOAD_PERF][COUNT_ERROR] reason=${reason || '-'} error=${message}`);
+          }
+        });
+      }, Math.max(500, Number(delayMs) || 2000));
     }
 
     function stripTrailingCountFromGroupName(name) {
@@ -8881,6 +9103,9 @@
     }
 
     async function refreshUploadGroupCounts() {
+      const refreshStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       const counts = new Map();
 
       state.groups.forEach((group) => {
@@ -8927,6 +9152,7 @@
             }
           }
         }
+        logSlowOperation('refreshUploadGroupCounts', refreshStartedAt, `groups=${state.groups.length}`);
         return true;
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
@@ -11471,7 +11697,10 @@
       };
     }
 
-    function renderToolboxPageStatusRow() {
+    let lastToolboxTopStatusSignature = '';
+    let lastToolboxTopStatusHeavyAt = 0;
+
+    function renderToolboxPageStatusRow(options = {}) {
       let pageStatusRowEl = document.getElementById('cgpt-toolbox-page-status-row');
 
       if (!pageStatusRowEl) {
@@ -11587,6 +11816,44 @@
       const uploadQuotaTitle = `本地上传统计（非官方额度）：已用：${uploadQuota.used}/${uploadQuota.maxFiles}；剩余：${uploadQuotaRemaining}；窗口：${uploadWindowMinutes} 分钟；下一条释放：${uploadNextReleaseTitle}；状态：${uploadStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
       const messageQuotaTitle = `本地消息统计（非官方额度）：已用：${messageQuota.used}/${messageQuota.maxMessages}；剩余：${messageQuotaRemaining}；窗口：${messageWindowMinutes} 分钟；下一条释放：${messageNextReleaseTitle}；状态：${messageStatusLabel}。该额度是工具箱本地滑动窗口统计，不代表 ChatGPT 官方真实额度。`;
 
+      const signature = [
+        pageIdText,
+        roundText,
+        uploadQuotaText,
+        messageQuotaText,
+        uploadBadgeStateClass,
+        messageBadgeStateClass,
+      ].join('|');
+
+      if (signature === lastToolboxTopStatusSignature) {
+        updateChatInputStateBadge();
+        return;
+      }
+      lastToolboxTopStatusSignature = signature;
+
+      const pageIdBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-page-id-badge');
+      const turnBadge = pageStatusRowEl.querySelector('.cgpt-toolbox-turn-count-badge');
+      const quotaBadges = pageStatusRowEl.querySelectorAll(
+        '.cgpt-toolbox-top-status-badge:not(#cgpt-page-input-state):not(.cgpt-toolbox-page-id-badge):not(.cgpt-toolbox-turn-count-badge)',
+      );
+
+      if (pageIdBadge && turnBadge && quotaBadges.length >= 2) {
+        pageIdBadge.textContent = pageIdText;
+        pageIdBadge.title = pageIdText;
+        turnBadge.textContent = roundText;
+        turnBadge.title = `${roundText}（当前对话已完成轮数）`;
+        const uploadBadgeEl = quotaBadges[0];
+        const messageBadgeEl = quotaBadges[1];
+        uploadBadgeEl.className = `cgpt-toolbox-top-status-badge ${uploadBadgeStateClass}`.trim();
+        uploadBadgeEl.textContent = uploadQuotaText;
+        uploadBadgeEl.title = uploadQuotaTitle;
+        messageBadgeEl.className = `cgpt-toolbox-top-status-badge ${messageBadgeStateClass}`.trim();
+        messageBadgeEl.textContent = messageQuotaText;
+        messageBadgeEl.title = messageQuotaTitle;
+        updateChatInputStateBadge();
+        return;
+      }
+
       pageStatusRowEl.innerHTML = `
         <span id="cgpt-page-input-state" class="cgpt-status-pill cgpt-toolbox-top-status-badge cgpt-state-unknown">未知</span>
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-page-id-badge" title="${escapeHtml(pageIdText)}">${escapeHtml(pageIdText)}</span>
@@ -11599,8 +11866,16 @@
 
     function renderToolboxTopStatus(options = {}) {
       const heavy = options && options.heavy === true;
-      renderToolboxPageStatusRow();
+      const force = options && options.force === true;
+      const now = Date.now();
+      if (heavy && !force && now - lastToolboxTopStatusHeavyAt < 3000) {
+        renderToolboxPageStatusRow({ heavy: false });
+        updateChatInputStateBadge();
+        return;
+      }
+      renderToolboxPageStatusRow({ heavy });
       if (heavy) {
+        lastToolboxTopStatusHeavyAt = now;
         renderProjectCategoryChips();
       }
       updateChatInputStateBadge();
@@ -15023,7 +15298,14 @@
 
     async function sendContinueMessageOnly(source = 'button', options = {}) {
       const sourceText = String(source || '');
-      const isLoopMode = sourceText.startsWith('loop-');
+      const isLoopMode = (
+        sourceText.startsWith('loop-')
+        || sourceText.includes('continue')
+        || sourceText.includes('closed-loop')
+        || sourceText.includes('autoq-task')
+        || sourceText.includes('upload-verify-loop')
+        || sourceText.includes('copy-hotkey')
+      );
       const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
 
       if (shouldStop()) {
@@ -15113,7 +15395,15 @@
         return result;
       }
 
-      if (isLoopMode && isAssistantBusyReason(reason)) {
+      if (
+        isLoopMode
+        && (
+          isAssistantBusyReason(reason)
+          || reason === 'waiting_real_send_button'
+          || reason === 'send_not_confirmed_composer_still_has_payload'
+          || String(reason || '').startsWith('send_not_confirmed:')
+        )
+      ) {
         const composerText = (
           typeof ComposerApi !== 'undefined'
           && ComposerApi
@@ -15218,6 +15508,33 @@
         };
       }
 
+      const capBeforeContinueSend = typeof getUploadPageCapabilityLight === 'function'
+        ? getUploadPageCapabilityLight()
+        : null;
+
+      const composerTextBeforeContinue = (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getComposerText === 'function'
+      )
+        ? String(ComposerApi.getComposerText() || '')
+        : '';
+
+      const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_CONTINUE][BEFORE_SEND_DIAG] source=${sourceText || '-'} `
+        + `continueChars=${text.length} `
+        + `composerChars=${composerTextBeforeContinue.length} `
+        + `hidden=${document.hidden ? 1 : 0} `
+        + `hasFocus=${document.hasFocus && document.hasFocus() ? 1 : 0} `
+        + `activeTag=${activeEl && activeEl.tagName ? activeEl.tagName : '-'} `
+        + `activeId=${activeEl && activeEl.id ? activeEl.id : '-'} `
+        + `sendable=${capBeforeContinueSend && capBeforeContinueSend.sendable ? 1 : 0} `
+        + `inputable=${capBeforeContinueSend && capBeforeContinueSend.inputable ? 1 : 0} `
+        + `responseState=${capBeforeContinueSend && capBeforeContinueSend.response_state ? capBeforeContinueSend.response_state : '-'}`,
+      );
+
       ToolboxShell.appendLog(
         `[UPLOAD_CONTINUE][SEND_VIA_SEND_BUTTON_CORE] source=${sourceText} chars=${text.length}`,
       );
@@ -15240,14 +15557,48 @@
 
         if (!result || !result.ok) {
           const reason = result && result.reason ? result.reason : 'send-message-button-core-failed';
-          setStatus(`发送继续失败：${reason}`, 'warn');
-          console.warn('[UPLOAD_CONTINUE][SEND_FAILED]', {
+
+          setStatus(`发送继续失败，准备尝试直写输入框兜底：${reason}`, 'warn');
+
+          console.warn('[UPLOAD_CONTINUE][SEND_FAILED_BEFORE_FALLBACK]', {
             source: sourceText,
             reason,
             result,
           });
-          safeAppendLog(`[UPLOAD_CONTINUE][send-failed] reason=${reason}`);
-          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED] source=${sourceText} reason=${reason}`);
+
+          safeAppendLog(`[UPLOAD_CONTINUE][send-failed-before-fallback] reason=${reason}`);
+          safeAppendLog(`[UPLOAD_CONTINUE][SEND_FAILED_BEFORE_FALLBACK] source=${sourceText} reason=${reason}`);
+
+          if (typeof sendTextToChatGPTComposerDirectly === 'function') {
+            const fallbackResult = await sendTextToChatGPTComposerDirectly(text, {
+              source: `${sourceText || 'copy-continue'}:direct-fallback`,
+            });
+
+            safeAppendLog(
+              `[UPLOAD_CONTINUE][DIRECT_FALLBACK_RESULT] source=${sourceText || '-'} `
+              + `ok=${fallbackResult && fallbackResult.ok ? 1 : 0} `
+              + `reason=${fallbackResult && fallbackResult.reason ? fallbackResult.reason : '-'}`,
+            );
+
+            console.warn('[UPLOAD_CONTINUE][DIRECT_FALLBACK_RESULT]', {
+              source: sourceText,
+              reason,
+              fallbackResult,
+            });
+
+            if (fallbackResult && fallbackResult.ok) {
+              setStatus('已通过直写输入框兜底发送继续指令', 'success');
+
+              return {
+                ok: true,
+                reason: `direct-fallback-after:${reason}`,
+                fallback: true,
+              };
+            }
+          }
+
+          setStatus(`发送继续失败：${reason}`, 'warn');
+
           return {
             ok: false,
             reason,
@@ -17561,11 +17912,28 @@
             assistantMessageKey,
           };
         }
+        const continueFailReason = detail || 'unknown';
+
         ToolboxShell.appendLog(
-          `[COPY_HOTKEY_CONTINUE][failed] reason=continue-send-failed detail=${detail || '-'}`,
+          `[COPY_HOTKEY_CONTINUE][failed] reason=continue-send-failed `
+          + `detail=${continueFailReason} `
+          + `source=${sourceText || '-'} `
+          + `copied=${copiedText ? 1 : 0} `
+          + `hotkeySent=${hotkeySent ? 1 : 0} `
+          + `assistantMessageKey=${assistantMessageKey || '-'}`,
         );
+
+        console.warn('[COPY_HOTKEY_CONTINUE][continue-send-failed]', {
+          source: sourceText || '-',
+          detail: continueFailReason,
+          copied: !!copiedText,
+          hotkeySent,
+          assistantMessageKey,
+          continueResult,
+        });
+
         if (!isLoopMode) {
-          setStatus('复制和快捷键已完成，但发送继续指令失败', 'error');
+          setStatus(`复制和快捷键已完成，但发送继续指令失败：${continueFailReason}`, 'error');
         }
         return {
           ok: false,
@@ -18893,7 +19261,7 @@
     const UPLOAD_DRAG_DEPTH_PROP = '__cgptUploadDragDepthV1';
     const UPLOAD_DRAG_BIND_CLEANUP_PROP = '__cgptUploadDragBindCleanupV1';
     const MULTI_UPLOAD_DRAG_OVER_LOG_INTERVAL_MS = 800;
-    const MULTI_UPLOAD_DRAG_OVER_THROTTLE_MS = 120;
+    const MULTI_UPLOAD_DRAG_OVER_THROTTLE_MS = 250;
     let lastMultiUploadDragOverLogAt = 0;
     let lastMultiUploadDragProcessAt = 0;
     let lastMultiUploadDragVisualOn = false;
@@ -18996,22 +19364,24 @@
       }
 
       if (shouldLetNativeChatGptHandleUploadDrop(e)) {
-        ToolboxShell.appendLog(`[UPLOAD_DND][NATIVE_PASS] source=${String(options.source || '-')} reason=native-area`);
+        if (isUploadDebugEnabled()) {
+          ToolboxShell.appendLog(`[UPLOAD_DND][NATIVE_PASS] source=${String(options.source || '-')} reason=native-area`);
+        }
         return false;
       }
 
       e.preventDefault();
       e.stopPropagation();
 
-      if (typeof e.stopImmediatePropagation === 'function') {
+      const sourceText = String(options.source || '-');
+      const inToolbox = sourceText !== 'global-drop' && isEventInToolbox(e);
+      if (inToolbox && typeof e.stopImmediatePropagation === 'function') {
         e.stopImmediatePropagation();
       }
 
       if (e.dataTransfer) {
         e.dataTransfer.dropEffect = options.dropEffect || 'copy';
       }
-
-      ToolboxShell.appendLog(`[UPLOAD_DND][TOOLBOX_HANDLE] source=${String(options.source || '-')}`);
 
       return true;
     }
@@ -19215,6 +19585,10 @@
 
         const afterCount = getActiveGroupFiles().length;
         const addedCount = Math.max(0, afterCount - beforeCount);
+        const afterNames = getActiveGroupFiles().map((item) => item.name || 'unknown').join('|');
+        ToolboxShell.appendLog(
+          `[MULTI_UPLOAD][DROP_ADD_DONE] beforeQueue=${beforeCount} afterQueue=${afterCount} added=${addedCount} names=${afterNames || '-'}`,
+        );
 
         setStatus(`已拖入：${validEntries.length} 个文件，新增：${addedCount} 个`);
 
@@ -19261,6 +19635,11 @@
       }
 
       const rawFiles = Array.from(transfer.files || []).filter(Boolean);
+      const transferItems = Array.from(transfer.items || []);
+      const rawNames = rawFiles.map((file) => file.name || 'unknown').join('|');
+      ToolboxShell.appendLog(
+        `[MULTI_UPLOAD][DROP_RAW] source=${sourceText} transferFiles=${rawFiles.length} transferItems=${transferItems.length} names=${rawNames || '-'}`,
+      );
       console.info('[MULTI_UPLOAD][DROP]', {
         files_len: rawFiles.length,
         names: rawFiles.map((file) => file.name || 'unknown'),
@@ -19273,6 +19652,13 @@
       }
 
       const dropped = await collectDroppedFilesWithHandles(transfer);
+      const collectedNames = dropped.map((entry) => (
+        entry && entry.file && entry.file.name ? entry.file.name : 'unknown'
+      )).join('|');
+      const handleCount = dropped.filter((entry) => entry && entry.handle).length;
+      ToolboxShell.appendLog(
+        `[MULTI_UPLOAD][DROP_COLLECTED] source=${sourceText} collected=${dropped.length} handleCount=${handleCount} names=${collectedNames || '-'}`,
+      );
 
       if (!dropped.length) {
         console.info('[MULTI_UPLOAD][DROP_EMPTY]');
@@ -19284,8 +19670,10 @@
       dropped.forEach((entry) => {
         const name = entry && entry.file && entry.file.name ? entry.file.name : 'unknown';
         if (entry && entry.handle) {
-          ToolboxShell.appendLog(`[MULTI_UPLOAD][DROP_HANDLE] name=${name} handle=1`);
-        } else {
+          if (isUploadDebugEnabled()) {
+            ToolboxShell.appendLog(`[MULTI_UPLOAD][DROP_HANDLE] name=${name} handle=1`);
+          }
+        } else if (isUploadDebugEnabled()) {
           ToolboxShell.appendLog(`[MULTI_UPLOAD][DROP_HANDLE_MISSING] name=${name} fallback=session-file`);
         }
       });
@@ -19351,12 +19739,14 @@
           setMultiUploadDragOverVisual(true);
         }
 
-        const meta = getDragTransferMeta(e);
-        console.info('[MULTI_UPLOAD][DRAG_ENTER]', {
-          target: getDragEventTargetTag(e),
-          has_files: meta.has_files,
-          items_len: meta.items_len,
-        });
+        if (isUploadDebugEnabled()) {
+          const meta = getDragTransferMeta(e);
+          console.info('[MULTI_UPLOAD][DRAG_ENTER]', {
+            target: getDragEventTargetTag(e),
+            has_files: meta.has_files,
+            items_len: meta.items_len,
+          });
+        }
       }
 
       function onDragOver(e) {
@@ -19379,12 +19769,14 @@
 
         if (now - lastMultiUploadDragOverLogAt >= MULTI_UPLOAD_DRAG_OVER_LOG_INTERVAL_MS) {
           lastMultiUploadDragOverLogAt = now;
-          const meta = getDragTransferMeta(e);
-          console.info('[MULTI_UPLOAD][DRAG_OVER]', {
-            target: getDragEventTargetTag(e),
-            has_files: meta.has_files,
-            items_len: meta.items_len,
-          });
+          if (isUploadDebugEnabled()) {
+            const meta = getDragTransferMeta(e);
+            console.info('[MULTI_UPLOAD][DRAG_OVER]', {
+              target: getDragEventTargetTag(e),
+              has_files: meta.has_files,
+              items_len: meta.items_len,
+            });
+          }
         }
       }
 
@@ -19695,9 +20087,26 @@
       };
     }
 
-    function dedupeActiveGroupQueue(reason) {
+    function resolveQueueDedupeKey(item, options = {}) {
+      const strongOnly = options.strongOnly === true;
+      const strongKey = buildQueueFileKey(item);
+      if (strongKey) {
+        return { key: strongKey, keyKind: 'strong' };
+      }
+      if (strongOnly) {
+        return { key: '', keyKind: '' };
+      }
+      const looseKey = buildQueueLooseFileKey(item);
+      if (looseKey) {
+        return { key: looseKey, keyKind: 'loose' };
+      }
+      return { key: '', keyKind: '' };
+    }
+
+    function dedupeActiveGroupQueue(reason, options = {}) {
       const groupId = state.activeGroupId;
       if (!groupId || !Array.isArray(state.queue)) return;
+      const strongOnly = options.strongOnly === true;
       const seen = new Map();
       const keep = [];
       for (const item of state.queue) {
@@ -19705,28 +20114,34 @@
           keep.push(item);
           continue;
         }
-        let key = buildQueueLooseFileKey(item);
-        if (!key) {
-          key = buildQueueFileKey(item);
-        }
+        const { key, keyKind } = resolveQueueDedupeKey(item, { strongOnly });
         if (!key) {
           keep.push(item);
           continue;
         }
         if (seen.has(key)) {
           const id = item.id || item._uploadId || '?';
+          const removedId = id;
+          const oldId = seen.get(key) || '-';
+          const strongKey = buildQueueFileKey(item);
+          const looseKey = buildQueueLooseFileKey(item);
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][dedupe-active-group:remove] reason=${reason} name=${item.name || '-'} size=${item.size || 0} id=${id}`
+            `[UPLOAD_DIAG][dedupe-active-group:remove] reason=${reason} keyKind=${keyKind} name=${item.name || '-'} size=${item.size || 0} lastModified=${item.lastModified || 0} type=${item.type || item.mimeType || '-'} strongKey=${strongKey || '-'} looseKey=${looseKey || '-'} oldId=${oldId} removedId=${removedId}`,
           );
           continue;
         }
-        seen.set(key, true);
+        seen.set(key, item.id || item._uploadId || '?');
         keep.push(item);
       }
       state.queue = keep;
     }
 
     async function addFiles(files, options = {}) {
+      const addFilesStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      enterUploadCriticalMode('addFiles');
+
       const cleanFiles = Array.from(files || []).filter(Boolean);
       const handles = Array.isArray(options.handles) ? options.handles : [];
       const noHandleReadMode = options.noHandleReadMode
@@ -19765,14 +20180,10 @@
       cleanFiles.forEach((file, index) => {
         const fileKey = buildQueueFileKey(file);
         const fileLooseKey = buildQueueLooseFileKey(file);
-        const useLooseDedupe = options.sourceKind === 'drop';
 
-        if (
-          (fileKey && existingKeys.has(fileKey))
-          || (useLooseDedupe && fileLooseKey && existingLooseKeys.has(fileLooseKey))
-        ) {
+        if (fileKey && existingKeys.has(fileKey)) {
           ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][add-file-skip-duplicate] index=${index} name=${file.name || '-'} size=${file.size || 0} fileKey=${fileKey || '-'} looseKey=${fileLooseKey || '-'}`
+            `[UPLOAD_DIAG][add-file-skip-duplicate] index=${index} reason=strong-key name=${file.name || '-'} size=${file.size || 0} lastModified=${file.lastModified || 0} type=${file.type || '-'} fileKey=${fileKey}`,
           );
           return;
         }
@@ -19780,7 +20191,9 @@
         const handle = handles[index] || null;
         const hasHandle = isFileHandleLike(handle);
         const fileSize = Number(file.size) || 0;
-        const canPersistBlob = fileSize > 0 && fileSize <= APP.uploadBlobMaxBytes;
+        const canPersistBlob = isPersistUploadBlobEnabled()
+          && fileSize > 0
+          && fileSize <= APP.uploadBlobMaxBytes;
 
         const item = normalizeUploadItem({
           id: newId(),
@@ -19829,14 +20242,18 @@
 
         addedCount += 1;
 
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][add-file] index=${index} name=${item.name || '-'} size=${item.size || 0} handle=${hasHandle ? 1 : 0} sourceKind=${item.sourceKind} readMode=${item.readMode}`,
-        );
+        if (isUploadDebugEnabled()) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][add-file] index=${index} name=${item.name || '-'} size=${item.size || 0} handle=${hasHandle ? 1 : 0} sourceKind=${item.sourceKind} readMode=${item.readMode}`,
+          );
+        }
       });
 
       dedupeActiveGroupQueue('add-files');
-      await awaitPersistQueueBriefly('addFiles', 300);
-      await refreshUploadGroupCounts();
+      syncActiveGroupCountInCache();
+
+      schedulePersistQueueLight('addFiles', 1500);
+      scheduleRefreshUploadGroupCountsLight('addFiles', 2000);
 
       if (addedCount > 0) {
         const lastAdded = getActiveGroupFiles()[getActiveGroupFiles().length - 1];
@@ -19845,11 +20262,25 @@
         }
       }
 
-      render();
+      renderUploadButtonsOnly({
+        heavy: false,
+        skipCapabilityScan: true,
+        scope: 'upload-only',
+        buttonTasksReason: 'addFiles-fast',
+      });
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][addFiles:done] count=${addedCount} queue=${getActiveGroupFiles().length} group=${state.activeGroupId || '-'}`,
-      );
+      renderToolboxTopStatus({
+        heavy: false,
+        reason: 'addFiles-fast',
+      });
+
+      scheduleRenderUploadListOnly('addFiles-fast', 800);
+
+      if (isUploadDebugEnabled()) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DIAG][addFiles:done] count=${addedCount} queue=${getActiveGroupFiles().length} group=${state.activeGroupId || '-'}`,
+        );
+      }
       if (addedCount > 0) {
         broadcastUploadGlobalStateChanged('add-files', {
           groupId: state.activeGroupId || '',
@@ -19861,6 +20292,7 @@
         addedCount,
         groupId: state.activeGroupId || '-',
       });
+      logSlowOperation('addFiles', addFilesStartedAt, `count=${addedCount}`);
     }
 
     function pickOneLocalFileByInput() {
@@ -20886,6 +21318,16 @@
       const runId = options.runId;
       const signal = options.signal;
       let errText = '';
+      const batchSource = String(
+        options.batchSource || options.parentSource || options.source || '',
+      ).trim();
+
+      if (total > 1 && /autoq|batch|cadence|closed-loop|copy-loop|legacy-startUpload/i.test(batchSource)) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_PATH][SINGLE_UPLOAD_FORBIDDEN_IN_BATCH] source=${batchSource} taskId=${options.taskId || '-'} reason=uploadOne-seq-${seq}-of-${total}`,
+        );
+        throw new Error('uploadOne-forbidden-in-batch');
+      }
 
       ToolboxShell.appendLog(`[UPLOAD_DIAG][uploadOne:start] seq=${seq}/${total} name=${q.name} state=${q.state}`);
 
@@ -22406,6 +22848,8 @@
         || sourceText.includes('cadence-upload')
         || sourceText.includes('auto-upload-cadence')
         || sourceText.includes('autoq-rebuilt-after-initial-payload-consumed')
+        || sourceText.includes('autoq-next-task')
+        || sourceText.includes('next-task')
         || isVerifyUploadSource;
       if (isVerifyUploadSource) {
         ToolboxShell.appendLog(
@@ -22966,9 +23410,7 @@
         `;
       }
 
-      const queueHtml = files
-        .map((q) => buildUploadQueueItemHtml(q, activeGroupId, selectedFileId))
-        .join('');
+      const queueHtml = buildLimitedUploadQueueListHtml(files, activeGroupId, selectedFileId);
 
       const queueHintHtml = `
         <div class="cgpt-upload-item empty toolbox-upload-queue-hint" data-no-row-upload="1">
@@ -22980,7 +23422,73 @@
       return `${queueHintHtml}${flaskHtml}${queueHtml}`;
     }
 
+    function getUploadListItemsToRender(files) {
+      const allFiles = Array.isArray(files) ? files : [];
+      if (state.uploadListExpandedAll || allFiles.length <= UPLOAD_LIST_RENDER_LIMIT) {
+        return { items: allFiles, hiddenCount: 0 };
+      }
+
+      const activeUploadId = String(state.activeId || state.uploadTask?.activeId || '').trim();
+      const runningStates = new Set([
+        UploadState.READING,
+        UploadState.ATTACHING,
+      ]);
+      const rendered = [];
+      const renderedIds = new Set();
+
+      allFiles.slice(0, UPLOAD_LIST_RENDER_LIMIT).forEach((item) => {
+        if (!item || !item.id || renderedIds.has(item.id)) {
+          return;
+        }
+        rendered.push(item);
+        renderedIds.add(item.id);
+      });
+
+      allFiles.forEach((item) => {
+        if (!item || !item.id || renderedIds.has(item.id)) {
+          return;
+        }
+        const isActive = item.id === activeUploadId;
+        const isRunning = runningStates.has(normalizeUploadStateValue(item.state, ''));
+        if (isActive || isRunning) {
+          rendered.push(item);
+          renderedIds.add(item.id);
+        }
+      });
+
+      return {
+        items: rendered,
+        hiddenCount: Math.max(0, allFiles.length - rendered.length),
+      };
+    }
+
+    function buildLimitedUploadQueueListHtml(files, activeGroupId, selectedFileId) {
+      const { items, hiddenCount } = getUploadListItemsToRender(files);
+      const listHtml = items
+        .map((q) => buildUploadQueueItemHtml(q, activeGroupId, selectedFileId))
+        .join('');
+
+      if (hiddenCount <= 0) {
+        return listHtml;
+      }
+
+      const summaryHtml = `
+        <div class="cgpt-upload-item empty toolbox-upload-list-summary" data-no-row-upload="1">
+          <div>
+            <div class="cgpt-upload-meta toolbox-upload-drop-hint">
+              还有 ${hiddenCount} 个文件未展开显示，上传任务仍会继续执行。
+            </div>
+            <button type="button" class="cgpt-btn cgpt-btn-ghost cgpt-upload-expand-all-btn" data-upload-expand-all="1">
+              展开全部
+            </button>
+          </div>
+        </div>
+      `;
+      return `${listHtml}${summaryHtml}`;
+    }
+
     function clearUploadCriticalMode(reason = '') {
+      clearUploadCriticalModeState(reason);
       if (
         typeof ComposerApi !== 'undefined'
         && typeof ComposerApi.clearUploadCriticalMode === 'function'
@@ -23018,6 +23526,20 @@
       ) {
         UploadCriticalRuntime.setUploadCriticalModeOn(reason);
       }
+    }
+
+    function enterUploadCriticalMode(reason) {
+      const text = String(reason || 'upload-critical');
+      setUploadCriticalModeOn(text);
+      state.uploadCriticalMode = true;
+      state.uploadCriticalReason = text;
+      state.uploadCriticalAt = Date.now();
+    }
+
+    function clearUploadCriticalModeState(reason = '') {
+      state.uploadCriticalMode = false;
+      state.uploadCriticalReason = String(reason || '');
+      state.uploadCriticalAt = 0;
     }
 
     function isSendRelatedUploadRenderReason(reason = '') {
@@ -23101,12 +23623,15 @@
     }
 
     function isUploadCriticalNow() {
-      return (
+      if (
         typeof UploadCriticalRuntime !== 'undefined'
         && UploadCriticalRuntime
         && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
         && UploadCriticalRuntime.isUploadCriticalMode()
-      );
+      ) {
+        return true;
+      }
+      return !!state.uploadCriticalMode;
     }
 
     function isUploadListRenderReason(reason = '') {
@@ -23137,10 +23662,10 @@
       const critical = isUploadCriticalNow();
       const waitMs = Number.isFinite(Number(delayMs))
         ? Math.max(0, Number(delayMs))
-        : (critical ? 1000 : 200);
+        : (critical ? 1000 : UPLOAD_LIST_RENDER_MIN_INTERVAL_MS);
       const boundedWaitMs = critical
-        ? Math.min(1500, Math.max(800, waitMs))
-        : Math.min(200, Math.max(0, waitMs));
+        ? Math.min(1500, Math.max(UPLOAD_LIST_RENDER_MIN_INTERVAL_MS, waitMs))
+        : Math.min(1500, Math.max(UPLOAD_LIST_RENDER_MIN_INTERVAL_MS, waitMs));
 
       if (uploadListRenderTimer) {
         return;
@@ -23414,7 +23939,18 @@
       }
     }
 
-    function renderUploadListOnly(reason = '') {
+    function renderUploadListOnly(reason = '', options = {}) {
+      const force = !!(options && options.force);
+      const now = Date.now();
+      if (
+        !force
+        && lastUploadListRenderExecutedAt > 0
+        && now - lastUploadListRenderExecutedAt < UPLOAD_LIST_RENDER_MIN_INTERVAL_MS
+      ) {
+        scheduleRenderUploadListOnly(reason || 'throttled-retry', UPLOAD_LIST_RENDER_MIN_INTERVAL_MS);
+        return;
+      }
+
       const el = listEl || (rootElRef ? qs(UploadSelectors.list, rootElRef) : null);
       if (!el) return;
 
@@ -23426,20 +23962,15 @@
       refreshQueueReadableState();
       const html = buildUploadListHtml();
       el.innerHTML = html;
-      diagnoseUploadListRender(el, html, reason || 'renderUploadListOnly');
-      const costMs = Math.round(
-        ((typeof performance !== 'undefined' && performance.now)
-          ? performance.now()
-          : Date.now()) - startedAt,
-      );
-      if (costMs > 80) {
-        const line = `[PERF][renderUploadListOnly] cost=${costMs}ms itemCount=${getActiveGroupFiles().length} reason=${String(reason || '-').trim() || '-'}`;
-        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(line);
-        } else {
-          console.warn(line);
-        }
+      if (isUploadDebugEnabled()) {
+        diagnoseUploadListRender(el, html, reason || 'renderUploadListOnly');
       }
+      lastUploadListRenderExecutedAt = Date.now();
+      logSlowOperation(
+        'renderUploadListOnly',
+        startedAt,
+        `itemCount=${getActiveGroupFiles().length} reason=${String(reason || '-').trim() || '-'}`,
+      );
     }
 
     let composerCapabilityLocalFallbackWarnedOnce = false;
@@ -24508,6 +25039,29 @@
     let uploadButtonsRendering = false;
     let uploadButtonsRenderPending = false;
     let uploadButtonsRenderPendingAt = 0;
+    let lastUploadButtonRenderSignature = '';
+    let lastUploadButtonRenderAt = 0;
+
+    function buildUploadButtonRenderSignature(snapshot, capability, renderScope) {
+      const uploadTask = snapshot && snapshot.uploadTask ? snapshot.uploadTask : {};
+      const sendTask = snapshot && snapshot.sendTask ? snapshot.sendTask : {};
+      const uploadQueue = snapshot && snapshot.uploadQueue ? snapshot.uploadQueue : {};
+      return [
+        String(renderScope || 'all'),
+        String(uploadTask.phase || ''),
+        String(uploadTask.cancelRequested ? 1 : 0),
+        String(sendTask.phase || ''),
+        String(snapshot && snapshot.uploadRunning ? 1 : 0),
+        String(snapshot && snapshot.autoContinueRunning ? 1 : 0),
+        String(snapshot && snapshot.activeFilesCount || 0),
+        String(uploadQueue.totalUploadItems || uploadQueue.total || 0),
+        String(uploadQueue.attached || 0),
+        String(uploadQueue.failed || 0),
+        capability && capability.canSendNow ? 1 : 0,
+        capability && capability.isResponding ? 1 : 0,
+        capability && capability.attachmentCount ? capability.attachmentCount : 0,
+      ].join('|');
+    }
 
     function renderUploadButtonsOnly(options = {}) {
       const renderScope = resolveUploadButtonRenderScope(options);
@@ -24546,6 +25100,7 @@
         && UploadCriticalRuntime.isUploadCriticalMode()
       );
       const debugEnabled = isUploadDebugEnabled();
+      let skipDomRender = false;
 
       try {
         if (
@@ -24641,6 +25196,25 @@
           ? fallbackCapability
           : (getUploadPageCapability({ heavy: useHeavy && !skipCapabilityScan }) || fallbackCapability);
         const renderSnapshot = buildUploadButtonRenderSnapshot();
+
+        const renderSignature = buildUploadButtonRenderSignature(renderSnapshot, capability, renderScope);
+        const signatureNow = Date.now();
+        const forceRender = options && options.force === true;
+        const allowSkip = !forceRender && !useHeavy && !debugEnabled;
+        if (
+          allowSkip
+          && renderSignature === lastUploadButtonRenderSignature
+          && signatureNow - lastUploadButtonRenderAt < 1000
+        ) {
+          skipDomRender = true;
+        } else {
+          lastUploadButtonRenderSignature = renderSignature;
+          lastUploadButtonRenderAt = signatureNow;
+        }
+
+        if (skipDomRender) {
+          return;
+        }
 
         const currentStartBtn = rootElRef
           ? qs(UploadSelectors.startBtn, rootElRef)
@@ -25328,11 +25902,42 @@
     function render() {
       if (!listEl) return;
 
+      const renderStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+
+      if (isUploadCriticalNow()) {
+        renderToolboxTopStatus({
+          heavy: false,
+          reason: 'render-critical-skip-full',
+        });
+        renderUploadButtonsOnly({
+          heavy: false,
+          skipCapabilityScan: true,
+          scope: 'upload-only',
+          buttonTasksReason: 'render-critical-skip-full',
+        });
+        scheduleRenderUploadListOnly('render-critical-deferred', 1200);
+        logSlowOperation('render', renderStartedAt, 'mode=critical-skip');
+        return;
+      }
+
+      if (isPageScrollingNow()) {
+        renderToolboxTopStatus({
+          heavy: false,
+          reason: 'render-scroll-skip-full',
+        });
+        scheduleRenderUploadListOnly('render-scroll-deferred', 1200);
+        return;
+      }
+
       try {
         if (rootElRef) {
           ensureUploadActionToolbar(rootElRef);
           ensureUploadGroupSection(rootElRef);
-          logUploadActionRowLayout(rootElRef, 'render');
+          if (isUploadDebugEnabled()) {
+            logUploadActionRowLayout(rootElRef, 'render');
+          }
           groupListEl = qs('#cgpt-upload-group-list', rootElRef);
         }
 
@@ -25342,7 +25947,9 @@
 
         const uploadListHtml = buildUploadListHtml();
         listEl.innerHTML = uploadListHtml;
-        diagnoseUploadListRender(listEl, uploadListHtml, 'render');
+        if (isUploadDebugEnabled()) {
+          diagnoseUploadListRender(listEl, uploadListHtml, 'render');
+        }
 
         renderUploadButtonsOnly();
 
@@ -25363,6 +25970,7 @@
             ToolboxShell.clearStatus('module-health');
           }
         }
+        logSlowOperation('render', renderStartedAt, `itemCount=${getActiveGroupFiles().length}`);
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
         state.moduleRenderFailed = true;
@@ -30247,6 +30855,14 @@
         );
       }
 
+      ToolboxShell.appendLog(
+        `[UPLOAD_PATH][START_UPLOAD_REDIRECT] reason=deprecated-sequential-uploadOne targets=${uploadableTargets.length}`,
+      );
+      return startUploadFromCurrentQueue({
+        source: `legacy-startUpload:${uploadReason}`,
+        forceReupload: opts.forceReupload === true,
+      });
+
       startDuplicateWatcher();
 
       state.cancelled = false;
@@ -30816,11 +31432,35 @@
       throw new Error(`无法创建内存上传文件：${item.name || item.filename || 'upload.bin'}`);
     }
 
+    function buildUploadFilesToChatGPTResult(partial = {}) {
+      const requestedCount = Math.max(0, Number(partial.requestedCount) || 0);
+      const attachedCount = Math.max(0, Number(partial.attachedCount) || 0);
+      const uploadedNames = Array.isArray(partial.uploadedNames) ? partial.uploadedNames : [];
+      const failedNames = Array.isArray(partial.failedNames) ? partial.failedNames : [];
+      const isPartial = partial.partial === true
+        || (requestedCount > 0 && attachedCount > 0 && attachedCount < requestedCount);
+      return {
+        ok: partial.ok === true && !isPartial,
+        requestedCount,
+        attachedCount,
+        uploadedNames,
+        failedNames,
+        partial: isPartial,
+        reason: String(partial.reason || '').trim(),
+        detail: String(partial.detail || '').trim(),
+      };
+    }
+
     async function uploadFilesToChatGPT(files, options = {}) {
       const cleanFiles = (files || []).filter(Boolean);
       if (!cleanFiles.length) {
         ToolboxShell.showToast('没有待上传文件', 'warn', 1800);
-        return false;
+        return buildUploadFilesToChatGPTResult({
+          ok: false,
+          requestedCount: 0,
+          attachedCount: 0,
+          reason: 'no-files',
+        });
       }
 
       const opts = options && typeof options === 'object' ? options : {};
@@ -30831,15 +31471,30 @@
       const allowDuplicateComposerAttachments = opts.allowDuplicateComposerAttachments === true;
       const stopFinalUploadBlock = blockStopFinalUploadBySource(attachSource);
       if (stopFinalUploadBlock) {
-        return false;
+        return buildUploadFilesToChatGPTResult({
+          ok: false,
+          requestedCount: cleanFiles.length,
+          attachedCount: 0,
+          reason: stopFinalUploadBlock.reason || 'upload-blocked',
+        });
       }
       const afterInitialUploadBlock = blockUploadAfterInitialIfNeeded(attachSource);
       if (afterInitialUploadBlock.blocked) {
-        return false;
+        return buildUploadFilesToChatGPTResult({
+          ok: false,
+          requestedCount: cleanFiles.length,
+          attachedCount: 0,
+          reason: afterInitialUploadBlock.reason || 'upload-blocked-after-initial',
+        });
       }
       const batchUploadBlock = blockUploadIfBatchForbidden(attachSource);
       if (batchUploadBlock) {
-        return false;
+        return buildUploadFilesToChatGPTResult({
+          ok: false,
+          requestedCount: cleanFiles.length,
+          attachedCount: 0,
+          reason: batchUploadBlock.reason || 'batch-upload-forbidden',
+        });
       }
       const signal = opts.signal || null;
       const isCancelled = typeof opts.isCancelled === 'function'
@@ -30882,7 +31537,13 @@
           ToolboxShell.appendLog(
             `[UPLOAD][SKIP_ALL_ALREADY_ATTACHED] source=${attachSource || '-'} incoming=${cleanFiles.length} action=skip-attach`,
           );
-          return true;
+          return buildUploadFilesToChatGPTResult({
+            ok: true,
+            requestedCount: cleanFiles.length,
+            attachedCount: cleanFiles.length,
+            uploadedNames: cleanFiles.map((file) => file.name).filter(Boolean),
+            reason: 'already-attached',
+          });
         }
 
         filesToAttach = filtered.toAttach;
@@ -30926,14 +31587,83 @@
         );
 
         const preparedFiles = await prepareFilesForAttach(filesToAttach, attachSource);
+        const beforeAttachSnapshot = (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+        )
+          ? ComposerApi.getComposerAttachmentSnapshot(`uploadFilesToChatGPT:before:${attachSource}`)
+          : null;
+        const beforeReady = Number(
+          beforeAttachSnapshot && beforeAttachSnapshot.readyCount != null
+            ? beforeAttachSnapshot.readyCount
+            : (beforeAttachSnapshot && beforeAttachSnapshot.fileCount != null
+              ? (beforeAttachSnapshot.fileCount - (beforeAttachSnapshot.uploadingCount || 0))
+              : 0),
+        ) || 0;
+
+        ToolboxShell.appendLog(
+          `[UPLOAD][BEFORE_ATTACH] source=${attachSource} files=${preparedFiles.length} names=${preparedFiles.map((f) => (f && f.name ? f.name : '-')).join('|')}`,
+        );
+
         const uploadResult = await ComposerApi.attachFilesByFileInput(
           preparedFiles,
           attachTimeoutMs,
           attachOptions,
         );
-        if (uploadResult && uploadResult.ok) {
-          return true;
+
+        const afterAttachSnapshot = (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerAttachmentSnapshot === 'function'
+        )
+          ? ComposerApi.getComposerAttachmentSnapshot(`uploadFilesToChatGPT:after:${attachSource}`)
+          : null;
+        const afterReady = Number(
+          afterAttachSnapshot && afterAttachSnapshot.readyCount != null
+            ? afterAttachSnapshot.readyCount
+            : (afterAttachSnapshot && afterAttachSnapshot.fileCount != null
+              ? (afterAttachSnapshot.fileCount - (afterAttachSnapshot.uploadingCount || 0))
+              : 0),
+        ) || 0;
+        const readyIncrease = Math.max(0, afterReady - beforeReady);
+        const requestedCount = preparedFiles.length;
+        const attachedCountFromResult = Number(uploadResult && uploadResult.attachedCount);
+        const attachedCount = Number.isFinite(attachedCountFromResult) && attachedCountFromResult > 0
+          ? attachedCountFromResult
+          : (uploadResult && uploadResult.ok ? Math.max(readyIncrease, requestedCount) : readyIncrease);
+        const uploadedNames = Array.isArray(uploadResult && uploadResult.uploadedNames)
+          ? uploadResult.uploadedNames
+          : (uploadResult && uploadResult.ok ? preparedFiles.map((file) => file.name).filter(Boolean) : []);
+        const failedNames = Array.isArray(uploadResult && uploadResult.failedNames)
+          ? uploadResult.failedNames
+          : [];
+        const partial = !!(
+          uploadResult
+          && (
+            uploadResult.partial === true
+            || (requestedCount > 1 && attachedCount > 0 && attachedCount < requestedCount)
+            || (requestedCount > 1 && readyIncrease > 0 && readyIncrease < requestedCount)
+          )
+        );
+
+        if (partial) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_MULTI][PARTIAL_ATTACH] expected=${requestedCount} actualIncrease=${readyIncrease} attachedCount=${attachedCount} names=${preparedFiles.map((f) => f.name).join('|')}`,
+          );
         }
+
+        if (uploadResult && uploadResult.ok && !partial) {
+          return buildUploadFilesToChatGPTResult({
+            ok: true,
+            requestedCount,
+            attachedCount: Math.max(attachedCount, requestedCount),
+            uploadedNames,
+            failedNames,
+            reason: uploadResult.reason || 'attach-ok',
+          });
+        }
+
         const reasonParts = [];
         if (uploadResult && uploadResult.reason) {
           reasonParts.push(uploadResult.reason);
@@ -30943,7 +31673,21 @@
         }
         const reason = reasonParts.length
           ? reasonParts.join('：')
-          : 'attachFilesByFileInput 未成功';
+          : (partial ? 'partial-attach' : 'attachFilesByFileInput 未成功');
+
+        if (partial) {
+          return buildUploadFilesToChatGPTResult({
+            ok: false,
+            requestedCount,
+            attachedCount,
+            uploadedNames,
+            failedNames,
+            partial: true,
+            reason,
+            detail: uploadResult && uploadResult.detail ? uploadResult.detail : '',
+          });
+        }
+
         throw new Error(reason);
       }
 
@@ -31045,13 +31789,43 @@
       logUploadSourceCheck(queueItem, reason || 'native-upload-settled');
     }
 
-    function markPendingItemsUploaded(pendingItems, reason = 'native-upload-settled') {
+    function normalizeUploadItemNameKey(name) {
+      return String(name || '').trim().toLowerCase();
+    }
+
+    function shouldMarkPendingItemUploaded(item, attachResult) {
+      if (!item) return false;
+      if (!attachResult || typeof attachResult !== 'object') {
+        return true;
+      }
+      const uploadedNames = Array.isArray(attachResult.uploadedNames)
+        ? attachResult.uploadedNames
+        : [];
+      if (!uploadedNames.length) {
+        return attachResult.partial !== true;
+      }
+      const itemName = normalizeUploadItemNameKey(item.name || item.filename || '');
+      if (!itemName) {
+        return false;
+      }
+      return uploadedNames.some((name) => normalizeUploadItemNameKey(name) === itemName);
+    }
+
+    function markPendingItemsUploaded(pendingItems, reason = 'native-upload-settled', attachResult = null) {
       const flaskIds = [];
+      let markedCount = 0;
 
       for (const item of pendingItems || []) {
         if (!item) continue;
+        if (!shouldMarkPendingItemUploaded(item, attachResult)) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][MARK_PENDING_SKIP] reason=${reason} name=${item.name || item.filename || '-'} partial=${attachResult && attachResult.partial ? 1 : 0}`,
+          );
+          continue;
+        }
 
         markUploadItemAttachedAfterNativeSuccess(item, reason, item.uploadFile || null);
+        markedCount += 1;
 
         if (item.file_id) {
           flaskIds.push(item.file_id);
@@ -31091,6 +31865,12 @@
             updatedAt: uploadedAt,
           };
         });
+      }
+
+      if (attachResult && attachResult.partial === true) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][MARK_PENDING_PARTIAL] reason=${reason} marked=${markedCount} total=${(pendingItems || []).length} attachedCount=${Number(attachResult.attachedCount) || 0}`,
+        );
       }
 
       // 上传记录已标记为 ATTACHED 时，如果这是一次主上传流程且所有待上传项都已成功，
@@ -32063,7 +32843,12 @@
         : cadenceReusedFiles;
 
       const skippedByMaxFiles = Math.max(0, allPendingItems.length - pendingItems.length);
+      const namesAll = allPendingItems.map((item) => item && (item.name || item.filename) ? (item.name || item.filename) : '-').join('|');
+      const namesPending = pendingItems.map((item) => item && (item.name || item.filename) ? (item.name || item.filename) : '-').join('|');
 
+      ToolboxShell.appendLog(
+        `[UPLOAD][PENDING_SLICE] source=${uploadSource} allPending=${allPendingItems.length} maxFiles=${maxFiles || '-'} pending=${pendingItems.length} skippedByMaxFiles=${skippedByMaxFiles} namesAll=${namesAll || '-'} namesPending=${namesPending || '-'}`,
+      );
       ToolboxShell.appendLog(
         `[UPLOAD][PENDING_DEBUG] source=${uploadSource} groupId=${scopeGroupId || '-'} allPending=${allPendingItems.length} pending=${pendingItems.length} queue=${(state.queue || []).length} flask=${(state.flaskFiles || []).length} manualImmediate=${state.manualUploadImmediateBusy ? 1 : 0} running=${state.running ? 1 : 0}`,
       );
@@ -32360,12 +33145,19 @@
             setUploadCriticalModeOn('open-loop-dispatch-start');
             didSetUploadCriticalFlag = true;
           }
-          await uploadFilesToChatGPT(files, {
+          const openLoopUploadResult = await uploadFilesToChatGPT(files, {
             signal: uploadSignal,
             isCancelled: () => checkShouldStop(),
             mode,
             openLoop: openLoopForManualUploadOnly,
+            source: uploadSource,
           });
+          if (!openLoopUploadResult || openLoopUploadResult.ok !== true) {
+            const openLoopReason = openLoopUploadResult && openLoopUploadResult.reason
+              ? openLoopUploadResult.reason
+              : 'open-loop-upload-failed';
+            throw new Error(openLoopReason);
+          }
           ToolboxShell.appendLog(`[UPLOAD][OPEN_LOOP][TRIGGERED] source=${uploadSource} files=${files.length}`);
           for (const item of pendingItems || []) {
             if (!item) continue;
@@ -32457,7 +33249,7 @@
         }
         didSetUploadCriticalFlag = true;
 
-        await uploadFilesToChatGPT(files, {
+        const batchUploadResult = await uploadFilesToChatGPT(files, {
           signal: uploadSignal,
           isCancelled: () => checkShouldStop(),
           mode,
@@ -32468,6 +33260,21 @@
           continueWithUpload: cadenceUploadMode,
           uploadOnly: uploadOnlyMode,
         });
+
+        if (!batchUploadResult || batchUploadResult.ok !== true) {
+          const batchFailReason = batchUploadResult && batchUploadResult.reason
+            ? batchUploadResult.reason
+            : 'batch-upload-failed';
+          if (batchUploadResult && batchUploadResult.partial === true) {
+            markPendingItemsUploaded(pendingItems, 'partial-attach', batchUploadResult);
+            ToolboxShell.showToast(
+              `部分上传成功：${batchUploadResult.attachedCount}/${batchUploadResult.requestedCount}`,
+              'warn',
+              3200,
+            );
+          }
+          throw new Error(batchFailReason);
+        }
 
         if (false) {
           ToolboxShell.appendLog(`[UPLOAD][OPEN_LOOP][INJECT] source=${uploadSource} files=${files.length}`);
@@ -32604,7 +33411,19 @@
 
             if (attachedToComposer) {
               // 允许进入“待确认”而不是直接失败：附件卡片/数量已出现，但 readyDiff 没出来
-              markPendingItemsUploaded(pendingItems, 'attached-to-composer-without-send-ready');
+              const partialAttachResult = readyDiff > 0 && readyDiff < files.length
+                ? {
+                  partial: true,
+                  attachedCount: readyDiff,
+                  requestedCount: files.length,
+                  uploadedNames: files.slice(0, readyDiff).map((file) => file && file.name).filter(Boolean),
+                }
+                : null;
+              markPendingItemsUploaded(
+                pendingItems,
+                'attached-to-composer-without-send-ready',
+                partialAttachResult,
+              );
               for (const item of pendingItems || []) {
                 if (!item) continue;
                 if (item.id) {
@@ -32682,13 +33501,26 @@
             });
           }
 
+          if (readyDiff > 0 && readyDiff < files.length) {
+            ToolboxShell.appendLog(
+              `[UPLOAD_MULTI][PARTIAL_ATTACH] expected=${files.length} actualIncrease=${readyDiff} names=${files.map((f) => f && f.name).join('|')}`,
+            );
+            markPendingItemsUploaded(pendingItems, 'partial-attach-by-ready-diff', {
+              partial: true,
+              attachedCount: readyDiff,
+              requestedCount: files.length,
+              uploadedNames: files.slice(0, readyDiff).map((file) => file && file.name).filter(Boolean),
+            });
+            throw new Error('partial-attach');
+          }
+
           ToolboxShell.appendLog(
             `[UPLOAD_NATIVE][SUCCESS_BY_READY_DIFF] runId=${currentRunId || '-'} beforeReady=${beforeReady} afterReady=${afterReady} readyDiff=${readyDiff} rawCount=${Number(composerAfterSnapshot && composerAfterSnapshot.rawCount || 0)} uniqueCount=${Number(composerAfterSnapshot && (composerAfterSnapshot.uniqueCount != null ? composerAfterSnapshot.uniqueCount : composerAfterSnapshot.count) || 0)}`,
           );
         }
 
         // 未能比较 ready diff 时，保留旧逻辑：以 attachFilesByFileInput 的结果作为成功依据
-        markPendingItemsUploaded(pendingItems, 'native-upload-settled');
+        markPendingItemsUploaded(pendingItems, 'native-upload-settled', batchUploadResult);
         pendingItems.forEach((item) => {
           logUploadSourceCheck(item, `after-upload:${uploadSource}`);
         });
@@ -34707,6 +35539,15 @@
         const target = e.target instanceof HTMLElement ? e.target : null;
         if (!target) return;
 
+        const expandAllBtn = target.closest('[data-upload-expand-all="1"]');
+        if (expandAllBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          state.uploadListExpandedAll = true;
+          renderUploadListOnly('expand-all', { force: true });
+          return;
+        }
+
         const removeBtn = target.closest('[data-upload-remove-id]');
 
         if (removeBtn) {
@@ -34806,6 +35647,10 @@
     }
 
     function logUploadActionRowLayout(rootEl, reason = '') {
+      if (!isUploadDebugEnabled()) {
+        return;
+      }
+
       const row = rootEl && rootEl.querySelector
         ? rootEl.querySelector('.cgpt-upload-main-action-row')
         : null;
@@ -35835,10 +36680,59 @@
       return true;
     }
 
+    function updateWaitingReplyTextStableSnapshot() {
+      const now = Date.now();
+      const text = getLatestAssistantTextForCopyCheck();
+      if (!waitingReplyTextStableSnapshot) {
+        waitingReplyTextStableSnapshot = {
+          text: '',
+          firstSeenAt: 0,
+          lastSeenAt: 0,
+          count: 0,
+        };
+      }
+      const snap = waitingReplyTextStableSnapshot;
+      if (text && text === snap.text) {
+        snap.lastSeenAt = now;
+        snap.count += 1;
+      } else {
+        snap.text = text;
+        snap.firstSeenAt = text ? now : 0;
+        snap.lastSeenAt = text ? now : 0;
+        snap.count = text ? 1 : 0;
+      }
+      waitingReplyTextStableSnapshot = snap;
+      return {
+        text,
+        stableMs: text ? now - Number(snap.firstSeenAt || now) : 0,
+        count: snap.count,
+      };
+    }
+
+    function canFinishWaitingReplyByStableAssistantText() {
+      const assistantBusy = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+        && ComposerApi.isAssistantLikelyBusy();
+      const stopVisible = hasRealStopButtonForCopy();
+      if (assistantBusy || stopVisible) {
+        return null;
+      }
+      const stable = updateWaitingReplyTextStableSnapshot();
+      if (
+        !stable.text
+        || stable.stableMs < WAITING_REPLY_STABLE_MS
+        || stable.count < WAITING_REPLY_STABLE_MIN_COUNT
+      ) {
+        return null;
+      }
+      return stable;
+    }
+
     function startWaitingReplyCheck(runId, sendStartedAt) {
       stopWaitingReplyCheck();
       invalidateReplyWaitAssistantCountCache();
       waitingReplyIdleStreak = 0;
+      waitingReplyTextStableSnapshot = null;
       state.replyWaitSawBusy = false;
       state.replyWaitAssistantCountBefore = countVisibleAssistantMessagesForReplyWait(true);
       state.waitingReplyRunId = runId;
@@ -35935,6 +36829,17 @@
             if (!capability.is_responding && !generatingState) {
               waitingReplyIdleStreak += 1;
 
+              const stableReply = canFinishWaitingReplyByStableAssistantText();
+              if (stableReply) {
+                ToolboxShell.appendLog(
+                  `[SEND_UI][REPLY_COMPLETE_FALLBACK] runId=${runId} stableMs=${stableReply.stableMs} `
+                  + `count=${stableReply.count} textLen=${stableReply.text.length}`,
+                );
+                logUploadSendUiState('reply_done', `stableFallback=${stableReply.stableMs}`, runId);
+                finishWaitingReply('reply_done');
+                return;
+              }
+
               if (waitingReplyIdleStreak >= 2) {
                 var latestAssistantTextLen = getLatestAssistantTextForCopyCheck().length;
                 var hasReplyEvidence = state.replyWaitSawBusy || assistantCountIncreased;
@@ -35965,6 +36870,7 @@
               }
             } else {
               waitingReplyIdleStreak = 0;
+              waitingReplyTextStableSnapshot = null;
             }
           } catch (err) {
             const errText = err && err.message ? err.message : String(err);
@@ -36423,6 +37329,8 @@
       canStartNextTaskByQuota,
       renderToolboxTopStatus,
       scheduleRenderUpload,
+      isUploadCriticalNow,
+      enterUploadCriticalMode,
     };
   })();
 

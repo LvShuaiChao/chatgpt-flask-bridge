@@ -5961,7 +5961,8 @@
       };
     }
 
-    function scoreFileInputCandidate(input, source) {
+    function scoreFileInputCandidate(input, source, options = {}) {
+      const requireMultiple = options.requireMultiple === true;
       const composerRoot = getComposerRoot();
       const inComposer = composerRoot instanceof HTMLElement && composerRoot.contains(input);
       const visible = isElementVisible(input);
@@ -5991,10 +5992,21 @@
         score += 30;
       }
 
+      if (requireMultiple) {
+        if (input.multiple === true) {
+          score += 250;
+        } else {
+          score -= 1000;
+        }
+      } else if (input.multiple === true) {
+        score += 15;
+      }
+
       return score;
     }
 
-    function findFileInputsLegacy() {
+    function findFileInputsLegacy(options = {}) {
+      const requireMultiple = options.requireMultiple === true;
       const composerRoot = getComposerRoot();
       const ranked = [];
 
@@ -6030,7 +6042,7 @@
         }
 
         const desc = describeFileInputCandidate(input);
-        const score = scoreFileInputCandidate(input, source);
+        const score = scoreFileInputCandidate(input, source, { requireMultiple });
 
         ToolboxShell.appendLog(
           `[UPLOAD_INPUT][CANDIDATE] source=${source} score=${score} accept=${desc.accept} multiple=${desc.multiple ? 1 : 0} inComposer=${desc.inComposer ? 1 : 0} visible=${desc.visible ? 1 : 0} display=${desc.display} html=${desc.outerHtml}`,
@@ -6063,17 +6075,36 @@
 
       ranked.sort((a, b) => b.score - a.score);
 
-      if (ranked[0]) {
-        const selected = ranked[0];
+      let selectedRanked = ranked;
+      if (requireMultiple) {
+        const multipleOnly = ranked.filter((row) => row.desc && row.desc.multiple);
+        if (multipleOnly.length) {
+          selectedRanked = multipleOnly;
+        }
+      }
+
+      if (selectedRanked[0]) {
+        const selected = selectedRanked[0];
         ToolboxShell.appendLog(
           `[UPLOAD_INPUT][SELECTED] source=${selected.source} score=${selected.score} accept=${selected.desc.accept} multiple=${selected.desc.multiple ? 1 : 0} inComposer=${selected.desc.inComposer ? 1 : 0} visible=${selected.desc.visible ? 1 : 0} display=${selected.desc.display} html=${selected.desc.outerHtml}`,
         );
       }
 
-      return ranked.map((row) => row.input);
+      return selectedRanked.map((row) => row.input);
     }
 
-    function dispatchFilesToInputLegacy(input, files) {
+    function dispatchFilesToInputLegacy(input, files, options = {}) {
+      const allowMultiOnSingle = options.allowMultiOnSingle === true;
+      const cleanBatch = (files || []).filter(Boolean);
+      if (cleanBatch.length > 1 && input.multiple !== true && !allowMultiOnSingle) {
+        const err = new Error('input-not-multiple-for-multi-files');
+        err.code = 'input-not-multiple-for-multi-files';
+        ToolboxShell.appendLog(
+          `[UPLOAD_INPUT][DISPATCH_BLOCKED] reason=input-not-multiple-for-multi-files files=${cleanBatch.length} multiple=${input.multiple ? 1 : 0}`,
+        );
+        throw err;
+      }
+
       const dt = new DataTransfer();
 
       files.forEach((file, index) => {
@@ -6119,6 +6150,130 @@
       window.setTimeout(() => {
         input.value = '';
       }, 0);
+    }
+
+    async function attachFilesSequentiallyToInput(input, files, timeoutMs, options = {}) {
+      const signal = options.signal;
+      const isCancelled = typeof options.isCancelled === 'function'
+        ? options.isCancelled
+        : () => !!(signal && signal.aborted);
+      const cleanFiles = (files || []).filter(Boolean);
+      const uploadedNames = [];
+      const failedNames = [];
+      let success = 0;
+      let failed = 0;
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_MULTI][SEQUENTIAL_FALLBACK_START] fileCount=${cleanFiles.length} reason=input-multiple-false`,
+      );
+
+      for (let index = 0; index < cleanFiles.length; index += 1) {
+        if (isCancelled()) {
+          return {
+            ok: false,
+            cancelled: true,
+            reason: '用户已停止上传',
+            attachedCount: success,
+            uploadedNames,
+            failedNames,
+          };
+        }
+
+        const file = cleanFiles[index];
+        const chipCountBefore = typeof countAttachmentChipsFast === 'function'
+          ? countAttachmentChipsFast()
+          : countAttachmentChips();
+        const fileName = file && file.name ? file.name : `file_${index + 1}`;
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_MULTI][SEQUENTIAL_ATTACH_ONE] index=${index} total=${cleanFiles.length} name=${fileName} beforeCount=${chipCountBefore}`,
+        );
+
+        try {
+          dispatchFilesToInputLegacy(input, [file], { allowMultiOnSingle: true });
+        } catch (dispatchErr) {
+          const errText = dispatchErr && dispatchErr.message ? dispatchErr.message : String(dispatchErr);
+          console.error('[ChatGPT toolbox] sequential attach dispatch failed', dispatchErr);
+          ToolboxShell.appendLog(
+            `[UPLOAD_MULTI][SEQUENTIAL_ATTACH_ONE_DONE] index=${index} name=${fileName} afterCount=${chipCountBefore} ok=0 error=${errText}`,
+          );
+          failed += 1;
+          failedNames.push(fileName);
+          continue;
+        }
+
+        const perFileTimeout = Math.max(
+          8000,
+          Math.floor(Number(timeoutMs) / Math.max(1, cleanFiles.length)),
+        );
+        const evidence = await waitForAttachmentEvidence([file], chipCountBefore, perFileTimeout, {
+          signal,
+          isCancelled,
+        });
+        const chipCountAfter = typeof countAttachmentChipsFast === 'function'
+          ? countAttachmentChipsFast()
+          : countAttachmentChips();
+        const ok = !!(evidence && evidence.ok);
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_MULTI][SEQUENTIAL_ATTACH_ONE_DONE] index=${index} name=${fileName} afterCount=${chipCountAfter} ok=${ok ? 1 : 0}`,
+        );
+
+        if (ok) {
+          success += 1;
+          uploadedNames.push(fileName);
+        } else {
+          failed += 1;
+          failedNames.push(fileName);
+        }
+      }
+
+      const finalComposerCount = typeof countAttachmentChipsFast === 'function'
+        ? countAttachmentChipsFast()
+        : countAttachmentChips();
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_MULTI][SEQUENTIAL_FALLBACK_DONE] success=${success} failed=${failed} finalComposerCount=${finalComposerCount}`,
+      );
+
+      if (success <= 0) {
+        return {
+          ok: false,
+          method: 'file-input-sequential',
+          reason: 'sequential-fallback-failed',
+          detail: failedNames.join('|') || 'all-files-failed',
+          attachedCount: 0,
+          requestedCount: cleanFiles.length,
+          uploadedNames,
+          failedNames,
+          partial: false,
+        };
+      }
+
+      if (failed > 0) {
+        return {
+          ok: false,
+          method: 'file-input-sequential',
+          reason: 'sequential-fallback-partial',
+          detail: `failed=${failedNames.join('|')}`,
+          attachedCount: success,
+          requestedCount: cleanFiles.length,
+          uploadedNames,
+          failedNames,
+          partial: true,
+        };
+      }
+
+      return {
+        ok: true,
+        method: 'file-input-sequential',
+        reason: 'sequential-fallback-ok',
+        attachedCount: success,
+        requestedCount: cleanFiles.length,
+        uploadedNames,
+        failedNames,
+        partial: false,
+      };
     }
 
     async function attachFilesByFileInput(files, timeoutMs = 120000, options = {}) {
@@ -6183,8 +6338,9 @@
       const cleanFiles = files
         .map((f, index) => normalizeToNativeFile(f, f && f.name ? f.name : `upload_${index + 1}.bin`))
         .filter(Boolean);
+      const requireMultipleInput = cleanFiles.length > 1;
 
-      ToolboxShell.appendLog(`[UPLOAD_DIAG][file-input:start] inputFiles=${files.length} cleanFiles=${cleanFiles.length} names=${cleanFiles.map((f) => f.name).join('|')}`);
+      ToolboxShell.appendLog(`[UPLOAD_DIAG][file-input:start] inputFiles=${files.length} cleanFiles=${cleanFiles.length} requireMultiple=${requireMultipleInput ? 1 : 0} names=${cleanFiles.map((f) => f.name).join('|')}`);
 
       if (!cleanFiles.length) {
         ToolboxShell.appendLog(`[UPLOAD_DIAG][file-input:no-clean-file] raw=${files.map((f, i) => `${i}:${f && f.name || '-'} tag=${f ? Object.prototype.toString.call(f) : '-'} size=${f && f.size}`).join('|')}`);
@@ -6246,7 +6402,9 @@
             ToolboxShell.appendLog(
               `[UPLOAD_OFFICIAL_UI][EXISTING_INPUT_FAST_PATH] usable=1 hidden=${hiddenInput ? 1 : 0}`,
             );
-            inputs = [existingComposerInput].concat(findFileInputsLegacy().filter((x) => x !== existingComposerInput));
+            inputs = [existingComposerInput].concat(
+              findFileInputsLegacy({ requireMultiple: requireMultipleInput }).filter((x) => x !== existingComposerInput),
+            );
           }
 
           let candidates = inputs.length
@@ -6346,7 +6504,9 @@
 
           if (picked) {
             ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][INPUT_FOUND]');
-            inputs = [picked].concat(findFileInputsLegacy().filter((x) => x !== picked));
+            inputs = [picked].concat(
+              findFileInputsLegacy({ requireMultiple: requireMultipleInput }).filter((x) => x !== picked),
+            );
           } else {
             ToolboxShell.appendLog('[UPLOAD_OFFICIAL_UI][INPUT_NOT_FOUND_FALLBACK_LEGACY]');
           }
@@ -6358,10 +6518,17 @@
       }
 
       if (!inputs.length) {
-        inputs = findFileInputsLegacy();
+        inputs = findFileInputsLegacy({ requireMultiple: requireMultipleInput });
       }
 
-      ToolboxShell.appendLog(`旧版 input 上传：发现 ${inputs.length} 个文input`);
+      if (requireMultipleInput) {
+        const multipleInputs = inputs.filter((input) => input instanceof HTMLInputElement && input.multiple === true);
+        if (multipleInputs.length) {
+          inputs = multipleInputs.concat(inputs.filter((input) => !multipleInputs.includes(input)));
+        }
+      }
+
+      ToolboxShell.appendLog(`旧版 input 上传：发现 ${inputs.length} 个文input requireMultiple=${requireMultipleInput ? 1 : 0}`);
 
       if (!inputs.length) {
         console.warn('[ChatGPT toolbox] legacy input upload failed: no file inputs');
@@ -6382,6 +6549,7 @@
         }
 
         try {
+          const inputDesc = describeFileInputCandidate(input);
           console.debug('[ChatGPT toolbox] legacy input upload try', {
             input,
             accept: input.getAttribute('accept'),
@@ -6394,12 +6562,97 @@
               type: f.type,
             })),
           });
+          ToolboxShell.appendLog(
+            `[UPLOAD_INPUT][TRY] multiple=${inputDesc.multiple ? 1 : 0} files=${cleanFiles.length} names=${cleanFiles.map((f) => f.name).join('|')}`,
+          );
 
           const chipCountBefore = typeof countAttachmentChipsFast === 'function'
             ? countAttachmentChipsFast()
             : countAttachmentChips();
 
-          dispatchFilesToInputLegacy(input, cleanFiles);
+          if (requireMultipleInput && input.multiple !== true) {
+            const sequentialResult = await attachFilesSequentiallyToInput(
+              input,
+              cleanFiles,
+              timeoutMs,
+              {
+                signal,
+                isCancelled,
+              },
+            );
+            if (sequentialResult && sequentialResult.ok) {
+              const nativeResult = await finalizeAttachAfterComposerEvidence(cleanFiles, {
+                timeoutMs: Math.max(timeoutMs, 60000),
+                nativeSettleTimeoutMs: Math.max(timeoutMs, 60000),
+                signal,
+                isCancelled,
+                uploadOnly,
+                requireSendReady,
+                runId: options.runId,
+                evidenceReason: 'sequential-fallback-ok',
+              });
+              if (nativeResult.cancelled) {
+                return {
+                  ok: false,
+                  cancelled: true,
+                  reason: nativeResult.reason || '用户已停止上传',
+                };
+              }
+              if (nativeResult.ok) {
+                return {
+                  ...nativeResult,
+                  attachedCount: sequentialResult.attachedCount,
+                  requestedCount: sequentialResult.requestedCount,
+                  uploadedNames: sequentialResult.uploadedNames,
+                  failedNames: sequentialResult.failedNames,
+                  partial: false,
+                  reason: nativeResult.reason || sequentialResult.reason || 'sequential-fallback-ok',
+                };
+              }
+              return {
+                ok: false,
+                method: 'file-input-sequential',
+                reason: nativeResult.reason || 'native-upload-failed',
+                detail: nativeResult.detail || '',
+                attachedCount: sequentialResult.attachedCount,
+                requestedCount: sequentialResult.requestedCount,
+                uploadedNames: sequentialResult.uploadedNames,
+                failedNames: sequentialResult.failedNames,
+                partial: sequentialResult.partial === true,
+              };
+            }
+            if (sequentialResult && sequentialResult.partial) {
+              return sequentialResult;
+            }
+            continue;
+          }
+
+          try {
+            dispatchFilesToInputLegacy(input, cleanFiles);
+          } catch (dispatchErr) {
+            if (
+              dispatchErr
+              && (
+                dispatchErr.code === 'input-not-multiple-for-multi-files'
+                || String(dispatchErr.message || '').includes('input-not-multiple-for-multi-files')
+              )
+              && requireMultipleInput
+            ) {
+              const sequentialResult = await attachFilesSequentiallyToInput(
+                input,
+                cleanFiles,
+                timeoutMs,
+                {
+                  signal,
+                  isCancelled,
+                },
+              );
+              if (sequentialResult && (sequentialResult.ok || sequentialResult.partial)) {
+                return sequentialResult;
+              }
+            }
+            throw dispatchErr;
+          }
 
           ToolboxShell.appendLog(`已触发旧版 input change：${cleanFiles.map((f) => f.name).join(', ')} chipBefore=${chipCountBefore}`);
 
@@ -6414,6 +6667,26 @@
           );
 
           if (evidence && evidence.ok) {
+            const chipCountAfter = typeof countAttachmentChipsFast === 'function'
+              ? countAttachmentChipsFast()
+              : countAttachmentChips();
+            const chipIncrease = Math.max(0, chipCountAfter - chipCountBefore);
+            if (requireMultipleInput && chipIncrease > 0 && chipIncrease < cleanFiles.length) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_MULTI][PARTIAL_ATTACH] expected=${cleanFiles.length} actualIncrease=${chipIncrease} names=${cleanFiles.map((f) => f.name).join('|')}`,
+              );
+              return {
+                ok: false,
+                method: 'file-input',
+                reason: 'partial-attach',
+                detail: `chip increase ${chipCountBefore}->${chipCountAfter}`,
+                attachedCount: chipIncrease,
+                requestedCount: cleanFiles.length,
+                uploadedNames: cleanFiles.slice(0, chipIncrease).map((file) => file.name),
+                failedNames: cleanFiles.slice(chipIncrease).map((file) => file.name),
+                partial: true,
+              };
+            }
             ToolboxShell.appendLog(
               `[UPLOAD_DIAG][file-input:batch-evidence-ok] reason=${evidence.reason || '-'} level=${evidence.level || '-'} phase=attached_to_composer`
             );
@@ -6438,7 +6711,14 @@
             }
 
             if (nativeResult.ok) {
-              return nativeResult;
+              return {
+                ...nativeResult,
+                attachedCount: cleanFiles.length,
+                requestedCount: cleanFiles.length,
+                uploadedNames: cleanFiles.map((file) => file.name).filter(Boolean),
+                failedNames: [],
+                partial: false,
+              };
             }
 
             return {
@@ -6448,6 +6728,9 @@
               detail: nativeResult.detail || '',
               attachedToComposer: true,
               composerEvidence: evidence.reason || '',
+              attachedCount: 0,
+              requestedCount: cleanFiles.length,
+              partial: false,
             };
           }
 
@@ -7277,7 +7560,7 @@
   function buildDetectReenterSkipState(reasonText) {
     return {
       is_responding: false,
-      response_state: 'unknown',
+      response_state: 'detecting',
       response_state_reason: 'detect-reenter-skip',
       reason: 'detect-reenter-skip',
       can_accept_input: false,
@@ -7315,7 +7598,7 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(`[COMPOSER][DETECT_REENTER_SKIP] reason=${reasonText}`);
       }
-      return buildDetectReenterSkipState(reasonText);
+      return getCachedResponseStateForReenter(reasonText);
     }
     if (detectComposerResponseStateDepth >= MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH) {
       const line = `[COMPOSER][RECURSION_GUARD] scope=detectComposerResponseState depth=${detectComposerResponseStateDepth} max=${MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH}`;
@@ -7327,14 +7610,15 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(line);
       }
-      return detectComposerResponseStateLight();
+      return rememberResponseState(responseCacheKey, detectComposerResponseStateLight());
     }
 
     detectComposerResponseStateDepth += 1;
     composerDetecting = true;
     try {
     if (options && options.light === true) {
-      return detectComposerResponseStateLight();
+      const lightResult = detectComposerResponseStateLight();
+      return rememberResponseState(responseCacheKey, lightResult);
     }
 
     if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
@@ -7559,8 +7843,9 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(`[COMPOSER][DETECT_ERROR] scope=detectComposerResponseState error=${errText}`);
       }
-      return detectComposerResponseStateLight();
+      return rememberResponseState(responseCacheKey, detectComposerResponseStateLight());
     } finally {
+      composerDetecting = false;
       detectComposerResponseStateDepth = Math.max(0, detectComposerResponseStateDepth - 1);
       const costMs = Math.round(
         ((typeof performance !== 'undefined' && performance.now)
@@ -9018,6 +9303,64 @@
     value: null,
   };
 
+  const RESPONSE_STATE_REENTER_CACHE_MAX_AGE_MS = 3000;
+
+  function isDetectReenterResponseState(value) {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+
+    return value._detect_reenter_skip === true
+      || String(value.response_state_reason || '') === 'detect-reenter-skip'
+      || String(value.reason || '') === 'detect-reenter-skip';
+  }
+
+  function isUsableCachedResponseState(value) {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+
+    if (isDetectReenterResponseState(value)) {
+      return false;
+    }
+
+    const stateText = String(value.response_state || '').trim();
+    if (!stateText || stateText === 'unknown' || stateText === 'detecting') {
+      return false;
+    }
+
+    return true;
+  }
+
+  function rememberResponseState(cacheKey, result) {
+    if (isUsableCachedResponseState(result)) {
+      responseStateCache.at = Date.now();
+      responseStateCache.key = cacheKey;
+      responseStateCache.value = result;
+    }
+
+    return result;
+  }
+
+  function getCachedResponseStateForReenter(reasonText) {
+    const now = Date.now();
+    const cached = responseStateCache.value;
+
+    if (
+      isUsableCachedResponseState(cached)
+      && now - Number(responseStateCache.at || 0) <= RESPONSE_STATE_REENTER_CACHE_MAX_AGE_MS
+    ) {
+      return {
+        ...cached,
+        response_state_at: now,
+        _detect_reenter_cached: true,
+        _detect_reason: reasonText,
+      };
+    }
+
+    return buildDetectReenterSkipState(reasonText);
+  }
+
   function buildPageCapabilityCacheKey(reason = '') {
     return [
       location.href || '',
@@ -9319,6 +9662,28 @@
         type: 'offline',
         title: 'Bridge / 油猴页面不可用或未连接',
         reason: !bridgeOnline ? 'bridge_offline' : 'page_offline',
+        ...internal,
+      };
+    }
+
+    const capabilityStateText = String(capability && capability.response_state ? capability.response_state : '').trim();
+    const capabilityReasonText = String(capability && capability.response_state_reason ? capability.response_state_reason : '').trim();
+
+    if (
+      capability
+      && (
+        capability._detect_reenter_skip === true
+        || capabilityStateText === 'detecting'
+        || capabilityReasonText === 'detect-reenter-skip'
+        || capabilityReasonText === 'detect_in_progress'
+      )
+    ) {
+      return {
+        text: '检测中',
+        cls: 'cgpt-state-waiting',
+        type: 'running',
+        title: '页面状态检测正在进行，稍后自动刷新',
+        reason: 'detect_in_progress',
         ...internal,
       };
     }
