@@ -505,6 +505,24 @@
     };
   }
 
+  function formatUploadFailureUserMessage(reason, fallbackMessage = '') {
+    const normalized = String(reason || '').trim();
+    if (normalized === 'timeout-wait-ready') {
+      return '页面上传入口未就绪，已清理上传状态，请重试';
+    }
+    if (normalized === 'upload_input_not_ready') {
+      return '未找到当前输入框的文件上传入口，请刷新页面或重新打开会话';
+    }
+    if (normalized === 'composer_not_ready' || normalized === 'final-upload-blocked-composer-not-ready') {
+      return '页面上传入口未就绪，已清理上传状态，请重试';
+    }
+    if (normalized === 'no-files') {
+      return '本地队列没有可上传文件';
+    }
+    const fallback = String(fallbackMessage || '').trim();
+    return fallback;
+  }
+
   function getUploadButtonViewState(snapshot = {}) {
     // 仅依据 uploadTask / uploadRunning / activeFilesCount，禁止读取 waitingSend / waitingReply / messageSending。
     const batchUploadForbiddenReason = String(snapshot.batchUploadForbiddenReason || '').trim();
@@ -631,10 +649,12 @@
     }
 
     if (phase === TaskPhase.FAILED) {
+      const lastError = String(snapshot.lastRealUploadError || '').trim();
+      const failTitle = lastError || '上传失败，点击重新上传';
       return {
         phase: TaskPhase.FAILED,
         text: '上传失败，点击重试',
-        title: '上传失败，点击重新上传',
+        title: failTitle,
         disabled: false,
         allowCancel: false,
         action: 'start',
