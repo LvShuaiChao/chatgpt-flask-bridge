@@ -20,7 +20,12 @@
     'send-button-disabled': '发送按钮不可点击',
     'assistant-busy': 'ChatGPT 正在回复',
     'page-throttled': '页面后台限速中',
-    'click-failed': '点击发送按钮失败',
+    'click-failed': '发送按钮点击失败，请检查页面是否被遮挡或按钮是否可点击',
+    'native-send-button-not-ready': '发送按钮尚未就绪，可能附件仍在处理，请等待后重试',
+    'native-send-button-timeout': '发送按钮尚未就绪，等待超时，请稍后再试',
+    'attachment-state-inconsistent': '附件状态正在同步，请等待文件卡片稳定后重试',
+    'waiting_attachment_upload_done': '发送按钮尚未就绪，可能附件仍在处理，请等待后重试',
+    'send-button-disabled': '发送按钮尚未就绪，可能附件仍在处理，请等待后重试',
     sent: '已发送',
     cancelled: '已取消',
     'composer-not-ready': '输入框未就绪',
@@ -219,11 +224,17 @@
       }
 
       if (detected.reason === 'send-button-disabled') {
-        return {
-          ok: false,
-          reason: 'send-button-disabled',
-          candidates: detected.candidates || [],
-        };
+        const waitElapsed = Date.now() - startedAt;
+        if (waitElapsed % 600 < COMPOSER_SEND_BUTTON_POLL_MS) {
+          composerSendLog('[COMPOSER_SEND][WAIT_NATIVE_BUTTON_READY]', Object.assign({}, ctx, {
+            elapsedMs: waitElapsed,
+            sendButtonFound: 1,
+            realSendButtonEnabled: 0,
+            reason: 'send-button-disabled',
+          }));
+        }
+        await composerSendSleep(COMPOSER_SEND_BUTTON_POLL_MS);
+        continue;
       }
 
       const now = Date.now();
@@ -260,10 +271,41 @@
     return {
       ok: false,
       reason: finalDetected.reason === 'send-button-disabled'
-        ? 'send-button-disabled'
+        ? 'native-send-button-timeout'
         : 'send-button-not-found',
       candidates,
     };
+  }
+
+  function mapStableSendFailureToComposerReason(stableReason) {
+    const raw = String(stableReason || '').trim();
+    if (!raw) {
+      return 'click-failed';
+    }
+    const waitReasons = new Set([
+      'waiting_attachment_upload_done',
+      'native-send-button-not-ready',
+      'native-send-button-timeout',
+      'send_button_disabled',
+      'send-button-disabled',
+      'enter_fallback_blocked_with_attachment',
+      'home_new_chat_payload_but_send_button_missing',
+      'payload_ready_but_send_button_missing',
+      'attachment_ready_but_send_button_missing',
+    ]);
+    if (waitReasons.has(raw)) {
+      return 'native-send-button-not-ready';
+    }
+    if (raw === 'assistant_busy') {
+      return 'assistant-busy';
+    }
+    if (raw === 'attachment-state-inconsistent') {
+      return 'attachment-state-inconsistent';
+    }
+    if (raw === 'click-failed' || raw === 'click_send_failed') {
+      return 'click-failed';
+    }
+    return raw;
   }
 
   async function sendTextThroughComposer(options) {
@@ -515,10 +557,11 @@
       }
 
       const stableReason = String((stableResult && stableResult.reason) || 'click-failed');
+      const mappedReason = mapStableSendFailureToComposerReason(stableReason);
       const fail = buildComposerSendResult(ctx, {
         ok: false,
-        reason: stableReason === 'assistant_busy' ? 'assistant-busy' : 'click-failed',
-        detail: mapComposerSendReasonToChinese(stableReason === 'assistant_busy' ? 'assistant-busy' : 'click-failed'),
+        reason: mappedReason,
+        detail: mapComposerSendReasonToChinese(mappedReason),
         composerFound: true,
         composerRootFound: composerRoot instanceof HTMLElement,
         composerTextLen,

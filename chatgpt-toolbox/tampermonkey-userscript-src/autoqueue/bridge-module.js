@@ -3174,6 +3174,23 @@
             });
             renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
             updateChatInputStateBadge();
+            if (
+              typeof UploadModule !== 'undefined'
+              && UploadModule
+              && typeof UploadModule.renderUploadButtonsOnly === 'function'
+            ) {
+              try {
+                UploadModule.renderUploadButtonsOnly({
+                  immediate: true,
+                  force: true,
+                  heavy: false,
+                  scope: 'all',
+                  buttonTasksReason: 'bridge-poll-capability-change',
+                });
+              } catch (err) {
+                console.warn('[BRIDGE][UPLOAD_BUTTON_REFRESH_FAILED]', err);
+              }
+            }
           } else {
             const failReason = handled.reason || '-';
             updateStatus(`消息处理失败：${failReason}`);

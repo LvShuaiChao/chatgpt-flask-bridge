@@ -177,6 +177,7 @@
         'button_disabled',
         'payload_ready_but_send_button_missing',
         'attachment_ready_but_send_button_missing',
+        'home_new_chat_payload_but_send_button_missing',
         'send_button_not_ready_after_text',
         'waiting_real_send_button',
         'composer_empty_wait_payload',
@@ -184,6 +185,9 @@
         'attachment_uploading',
         'waiting_attachment_upload',
         'waiting_attachment_upload_done',
+        'native-send-button-not-ready',
+        'native-send-button-timeout',
+        'attachment-state-inconsistent',
         'enter_fallback_blocked_with_attachment',
       ]);
       const stableReason = String(stableResult.reason || '');
@@ -239,6 +243,9 @@
       'send_button_not_ready_after_text',
       'send_button_not_ready_with_attachment',
       'waiting_attachment_upload_done',
+      'native-send-button-not-ready',
+      'native-send-button-timeout',
+      'attachment-state-inconsistent',
       'enter_fallback_blocked_with_attachment',
       'send_button_disabled',
       'button_disabled',
@@ -676,6 +683,27 @@
         continue;
       }
 
+      if (hasAttachment && !hasUploadingAttachment && !nativeButtonReady) {
+        const waitElapsed = Date.now() - startedAt;
+        if (waitElapsed % 600 < intervalMs) {
+          const responseState = typeof detectComposerResponseState === 'function'
+            ? detectComposerResponseState({ reason: 'send-wait-button' })
+            : {};
+          sendPipelineLog('[SEND][WAIT_NATIVE_BUTTON_READY]', {
+            source: ctx.source,
+            mode: ctx.mode,
+            elapsedMs: waitElapsed,
+            has_attachment: hasAttachment ? 1 : 0,
+            attachment_uploading: hasUploadingAttachment ? 1 : 0,
+            send_button_ready: sendSnap.ready ? 1 : 0,
+            response_state: String(responseState.response_state || '-'),
+            response_reason: String(responseState.response_state_reason || '-'),
+          });
+        }
+        await sendPipelineSleep(intervalMs);
+        continue;
+      }
+
       // 以 ChatGPT 原生发送按钮为准：存在、可见、未 disabled，且页面未在回答中
       if ((hasPayload || nativeReadyWithoutText) && nativeButtonReady) {
         if (hasAttachment && !hasUploadingAttachment) {
@@ -782,12 +810,18 @@
     }
 
     if (finalHasAttachment && (finalAttachmentUploading || !finalNativeReady)) {
-      sendPipelineLogAttachmentWait('[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]', {
-        reason: 'waiting_attachment_upload_done',
+      const waitTag = finalAttachmentUploading
+        ? '[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]'
+        : '[SEND][WAIT_NATIVE_BUTTON_READY]';
+      const waitReason = finalAttachmentUploading
+        ? 'waiting_attachment_upload_done'
+        : 'native-send-button-timeout';
+      sendPipelineLogAttachmentWait(waitTag, {
+        reason: waitReason,
       });
       return {
         ok: false,
-        reason: 'waiting_attachment_upload_done',
+        reason: waitReason,
         retryable: true,
         wait_send: true,
         wait_reply: false,

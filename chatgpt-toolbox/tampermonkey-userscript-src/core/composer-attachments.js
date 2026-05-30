@@ -19,12 +19,15 @@ const ComposerAttachments = (() => {
   const ATTACHMENT_EVIDENCE_BACKGROUND_CACHE_MS = 2500;
 
   function shouldUseCachedAttachmentEvidence(reason, options = {}) {
-    if (options && options.forceRefresh === true) {
+    if (options && (options.forceRefresh === true || options.forceFresh === true)) {
       return false;
     }
     const reasonText = String(reason || '');
     if (
-      reasonText.includes('after-send')
+      reasonText.includes('before-send')
+      || reasonText.includes('send-before')
+      || reasonText.includes('canonical-upload-snapshot:send-before')
+      || reasonText.includes('after-send')
       || reasonText.includes('confirm-send')
       || reasonText.includes('upload-start')
       || reasonText.includes('upload-finish')
@@ -696,30 +699,22 @@ const ComposerAttachments = (() => {
         console.error('[ChatGPT toolbox] attachment cache stale DOM recount failed', domCountErr);
       }
 
-      if (
-        domAttachCount >= 0
-        && Number(cached.count || 0) > 0
-        && domAttachCount === 0
-      ) {
+      const cachedBusinessCount = Number(cached.normalizedCount != null ? cached.normalizedCount : cached.count) || 0;
+      const cacheDomMismatch = domAttachCount >= 0 && cachedBusinessCount !== domAttachCount;
+      if (cacheDomMismatch) {
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
             `[COMPOSER][ATTACHMENT_CACHE_STALE_IGNORED] reason=${reasonText} `
-            + `cachedCount=${cached.count} domCount=${domAttachCount} action=clear-cache-before-send`,
+            + `cachedCount=${cachedBusinessCount} domCount=${domAttachCount} action=clear-cache-before-send`,
           );
         }
         attachmentEvidenceCache.ts = 0;
         attachmentEvidenceCache.result = null;
         attachmentEvidenceCache.reason = '';
-        cached.count = 0;
-        cached.rawCount = 0;
-        cached.normalizedCount = 0;
-        cached.readyCount = 0;
-        cached.uploadingCount = 0;
-        cached.hasAttachment = false;
-        cached.filenames = [];
-        cached.source = `${cached.source || 'cache'}-stale-dom-cleared`;
-        attachmentEvidenceCache.result = Object.assign({}, cached);
-        attachmentEvidenceCache.ts = now;
+        return getSharedComposerAttachmentEvidence(reasonText, Object.assign({}, options, {
+          forceFresh: true,
+          forceRefresh: true,
+        }));
       }
 
       if (

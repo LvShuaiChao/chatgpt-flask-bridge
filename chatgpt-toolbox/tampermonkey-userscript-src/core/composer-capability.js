@@ -46,10 +46,12 @@ const ComposerCapability = (() => {
       return cache.heavy;
     }
 
-    const cap = readMainCapability(reason, { mode });
+    let cap = readMainCapability(reason, { mode });
     if (!cap) {
       return null;
     }
+
+    cap = enrichCapabilityWithSendButton(cap);
 
     if (mode === 'light') {
       cache.light = cap;
@@ -79,6 +81,62 @@ const ComposerCapability = (() => {
     } else {
       console.log(line);
     }
+  }
+
+  function probeDomSendButtonPresent() {
+    const selectors = [
+      'button#composer-submit-button',
+      'button[data-testid="composer-submit-button"]',
+      'button[data-testid="send-button"]',
+      'button[aria-label="发送"]',
+      'button[aria-label="发送消息"]',
+      'button[aria-label="发送提示"]',
+      'button[aria-label="Send"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="Send prompt"]',
+    ];
+    for (const selector of selectors) {
+      const btn = document.querySelector(selector);
+      if (btn instanceof HTMLButtonElement) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function enrichCapabilityWithSendButton(cap) {
+    if (!cap || typeof cap !== 'object') {
+      return cap;
+    }
+
+    const domHasSendButton = probeDomSendButtonPresent();
+    const hasSendButton = cap.hasSendButton === true
+      || cap.has_send_button === true
+      || domHasSendButton;
+
+    let responseStateReason = String(cap.response_state_reason || '').trim();
+    if (
+      hasSendButton
+      && (
+        responseStateReason === 'send_button_missing'
+        || responseStateReason === 'payload_ready_but_send_button_missing'
+      )
+    ) {
+      responseStateReason = cap.can_send_now || cap.canSendNow ? 'ready' : 'composer_present';
+    }
+
+    const sendable = cap.sendable === true
+      || (cap.can_send_now === true && hasSendButton && !cap.is_responding);
+
+    return {
+      ...cap,
+      hasSendButton,
+      has_send_button: hasSendButton,
+      sendable,
+      inputable: cap.inputable !== false && cap.can_accept_input !== false,
+      reason: String(cap.reason || responseStateReason || '').trim() || responseStateReason,
+      response_state_reason: responseStateReason || cap.response_state_reason,
+    };
   }
 
   function callComposerOrLocal(name, args = []) {

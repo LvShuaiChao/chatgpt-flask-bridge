@@ -466,6 +466,15 @@ function detectRealSendButton(composerRoot) {
   }
 
   if (best && best.button instanceof HTMLButtonElement) {
+    const btnReady = !best.disabled && best.button.getAttribute('aria-disabled') !== 'true';
+    if (!btnReady) {
+      return {
+        found: false,
+        button: null,
+        reason: 'send-button-disabled',
+        candidates,
+      };
+    }
     return {
       found: true,
       button: best.button,

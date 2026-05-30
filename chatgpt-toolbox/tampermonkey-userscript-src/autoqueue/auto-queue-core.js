@@ -34622,7 +34622,11 @@ const AutoQueueModule = (() => {
         || sourceText.includes('continue-with-upload')
         || sourceText.includes('auto-upload-every-n')
         || sourceText.includes('closed-loop-every5-upload')
-        || sourceText.includes('closed-loop-hotkey-every5-upload');
+        || sourceText.includes('closed-loop-hotkey-every5-upload')
+        || sourceText.includes('closed-loop-every-n-upload')
+        || sourceText.includes('closed-loop-hotkey-every-n-upload')
+        || sourceText.includes('closed-loop-every-round-upload')
+        || sourceText.includes('closed-loop-hotkey-every-round-upload');
     }
 
     function decideNextBatchAction(batchStateOverride) {

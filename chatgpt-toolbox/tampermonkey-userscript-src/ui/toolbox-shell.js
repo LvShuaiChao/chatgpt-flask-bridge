@@ -791,11 +791,15 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row {
-          justify-content: flex-start;
+          justify-content: flex-start !important;
+          align-self: stretch;
+          width: 100%;
           flex-wrap: wrap;
           row-gap: 3px;
           max-height: 42px;
           overflow: hidden;
+          padding-left: 0;
+          padding-right: 0;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
@@ -1119,13 +1123,15 @@
           display: flex;
           flex-wrap: wrap;
           align-items: center;
-          justify-content: flex-end;
-          gap: 4px;
+          justify-content: flex-start !important;
+          align-self: stretch;
+          width: 100%;
           max-width: 100%;
           min-width: 0;
           overflow: hidden;
           box-sizing: border-box;
-          padding: 0 2px;
+          padding: 0;
+          gap: 4px;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge,
@@ -1897,7 +1903,7 @@
         }
 
         .cgpt-settings-subtab {
-          flex: 1 1 120px;
+          flex: 1 1 96px;
           min-width: 0;
           max-width: 100%;
           height: 30px;
@@ -2073,6 +2079,11 @@
           color: #ffffff !important;
         }
 
+        .cgpt-btn-attention {
+          outline: 2px solid #facc15 !important;
+          box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.25) !important;
+        }
+
         .cgpt-btn.cgpt-btn-danger:not(.cgpt-btn-busy) {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
@@ -2140,6 +2151,24 @@
 
         .cgpt-btn.warning:hover {
           background: #d97706;
+        }
+
+        #cgpt-open-chatgpt-home.cgpt-btn-home:not(.cgpt-btn-busy):not(.cgpt-btn-failed):not(.cgpt-btn-disabled):not(:disabled) {
+          background: #ea580c !important;
+          border-color: #f97316 !important;
+          color: #ffffff !important;
+        }
+
+        #cgpt-open-chatgpt-home.cgpt-btn-home:not(.cgpt-btn-busy):not(.cgpt-btn-failed):not(.cgpt-btn-disabled):not(:disabled):hover {
+          background: #f97316 !important;
+          border-color: #fb923c !important;
+          color: #ffffff !important;
+        }
+
+        #cgpt-open-chatgpt-home.cgpt-btn-home:not(.cgpt-btn-busy):not(.cgpt-btn-failed):not(.cgpt-btn-disabled):not(:disabled):active {
+          background: #c2410c !important;
+          border-color: #ea580c !important;
+          color: #ffffff !important;
         }
 
         .cgpt-btn.waiting {
@@ -2610,26 +2639,29 @@
           min-width: 0;
           height: 28px;
           padding: 0 10px;
-          border: 1px solid #475569;
-          background: #171b22;
-          color: #d1d5db;
+          border: 1px solid #2563eb;
+          background: #0f172a;
+          color: #bfdbfe;
           border-radius: 999px;
           cursor: pointer;
           white-space: nowrap;
           max-width: 140px;
           overflow: hidden;
+          opacity: 1;
         }
 
         .cgpt-upload-group-chip:hover {
-          background: #202633;
+          background: #1d4ed8;
+          border-color: #60a5fa;
+          color: #ffffff;
         }
 
         .cgpt-upload-group-chip.active {
-          background: #22324a;
-          border-color: #4b6b95;
-          color: #dbeafe;
-          font-weight: 650;
-          box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.10);
+          background: #1d4ed8;
+          border-color: #93c5fd;
+          color: #ffffff;
+          font-weight: 700;
+          box-shadow: inset 0 0 0 1px rgba(191, 219, 254, 0.18);
         }
 
         .toolbox-upload-drop-zone.is-drag-over,
@@ -6662,7 +6694,8 @@
           </div>
 
           <div class="cgpt-toolbox-tabs cgpt-top-tabs">
-            <button type="button" class="cgpt-toolbox-tab active" data-tab="upload" data-full-label="多文件上传" data-short-label="上传">多文件上传</button>
+            <!-- upload tab：只改顶部标签显示名，内部仍然是 upload 模块 -->
+            <button type="button" class="cgpt-toolbox-tab active" data-tab="upload" data-full-label="首页" data-short-label="上传">首页</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="autoq" data-full-label="自动指令" data-short-label="指令">自动指令</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="prompt" data-full-label="Prompt 管理" data-short-label="Prompt">Prompt 管理</button>
             <button type="button" class="cgpt-toolbox-tab" data-tab="bridge" data-full-label="浏览器桥接" data-short-label="桥接">浏览器桥接</button>

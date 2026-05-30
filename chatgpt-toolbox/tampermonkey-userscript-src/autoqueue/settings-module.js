@@ -5,7 +5,7 @@
   const SettingsModule = (() => {
     let host = null;
     let root = null;
-    let activeSettingsSubtab = 'basic';
+    let activeSettingsSubtab = 'toolbox';
     let continuePromptMigrationChecked = false;
 
     function setSettingsStatus(text, type, options = {}) {
@@ -292,6 +292,13 @@
             || current.continueAutomation?.autoUploadInterval
             || 5,
           ),
+          closedLoopNextDelayMs: Math.round(
+            Number(
+              qs('#cgpt-setting-closed-loop-next-delay-sec', root)?.value
+              || ((Number(current.continueAutomation?.closedLoopNextDelayMs || 1200)) / 1000)
+              || 1.2,
+            ) * 1000,
+          ),
           homeNavEnabled: !!(
             qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
             || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
@@ -324,19 +331,38 @@
       };
     }
 
+    function normalizeSettingsSubtabName(name) {
+      const raw = String(name || '').trim();
+      const alias = {
+        basic: 'toolbox',
+        ui: 'continue-task',
+        'batch-timing': 'stats-debug',
+      };
+      const normalized = alias[raw] || raw;
+      const allowed = new Set([
+        'toolbox',
+        'shortcut',
+        'continue-task',
+        'quota-notify',
+        'stats-debug',
+      ]);
+      return allowed.has(normalized) ? normalized : 'toolbox';
+    }
+
     function renderSettingsSubtabs() {
       if (!root) return;
+      activeSettingsSubtab = normalizeSettingsSubtabName(activeSettingsSubtab);
 
       const tabs = qsa('[data-settings-subtab]', root);
       const panels = qsa('[data-settings-panel]', root);
 
       tabs.forEach((btn) => {
-        const name = btn.getAttribute('data-settings-subtab') || 'basic';
+        const name = btn.getAttribute('data-settings-subtab') || 'toolbox';
         btn.classList.toggle('active', name === activeSettingsSubtab);
       });
 
       panels.forEach((panelEl) => {
-        const name = panelEl.getAttribute('data-settings-panel') || 'basic';
+        const name = panelEl.getAttribute('data-settings-panel') || 'toolbox';
         panelEl.style.display = name === activeSettingsSubtab ? '' : 'none';
       });
     }
@@ -382,6 +408,12 @@
       const loopAutoUploadIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root);
       if (loopAutoUploadIntervalEl) {
         loopAutoUploadIntervalEl.value = String(cfg.continueAutomation?.autoUploadInterval || 5);
+      }
+
+      const closedLoopNextDelayEl = qs('#cgpt-setting-closed-loop-next-delay-sec', root);
+      if (closedLoopNextDelayEl) {
+        const delayMs = Number(cfg.continueAutomation?.closedLoopNextDelayMs || 1200);
+        closedLoopNextDelayEl.value = String(Math.max(0, delayMs / 1000));
       }
 
       const unifiedHomeNavEnabled = cfg.continueAutomation?.homeNavEnabled !== false;
@@ -486,6 +518,11 @@
           action: 'sendMessage',
           enabledId: 'cgpt-shortcut-send-enabled',
           labelId: 'cgpt-shortcut-send-label',
+        },
+        {
+          action: 'sendCopyAndHotkeyOnce',
+          enabledId: 'cgpt-shortcut-send-copy-hotkey-enabled',
+          labelId: 'cgpt-shortcut-send-copy-hotkey-label',
         },
         {
           action: 'copyAndHotkeyOnce',
@@ -676,14 +713,17 @@
       }
 
       bindShortcutEnabled('cgpt-shortcut-send-enabled', 'sendMessage');
+      bindShortcutEnabled('cgpt-shortcut-send-copy-hotkey-enabled', 'sendCopyAndHotkeyOnce');
       bindShortcutEnabled('cgpt-shortcut-copy-hotkey-enabled', 'copyAndHotkeyOnce');
       bindShortcutEnabled('cgpt-shortcut-upload-enabled', 'startUpload');
 
       bindShortcutRecord('cgpt-shortcut-send-record', 'sendMessage');
+      bindShortcutRecord('cgpt-shortcut-send-copy-hotkey-record', 'sendCopyAndHotkeyOnce');
       bindShortcutRecord('cgpt-shortcut-copy-hotkey-record', 'copyAndHotkeyOnce');
       bindShortcutRecord('cgpt-shortcut-upload-record', 'startUpload');
 
       bindShortcutClear('cgpt-shortcut-send-clear', 'sendMessage');
+      bindShortcutClear('cgpt-shortcut-send-copy-hotkey-clear', 'sendCopyAndHotkeyOnce');
       bindShortcutClear('cgpt-shortcut-copy-hotkey-clear', 'copyAndHotkeyOnce');
       bindShortcutClear('cgpt-shortcut-upload-clear', 'startUpload');
 
@@ -781,6 +821,7 @@
         '#cgpt-setting-restore-scroll-after-copy',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-interval',
+        '#cgpt-setting-closed-loop-next-delay-sec',
         '#cgpt-setting-unified-continue-home-nav-enabled',
         '#cgpt-setting-unified-continue-home-nav-interval',
         '#cgpt-setting-unified-continue-home-nav-url',
@@ -1017,7 +1058,9 @@
           e.preventDefault();
           e.stopPropagation();
 
-          activeSettingsSubtab = btn.getAttribute('data-settings-subtab') || 'basic';
+          activeSettingsSubtab = normalizeSettingsSubtabName(
+            btn.getAttribute('data-settings-subtab') || 'toolbox',
+          );
           MemoryManager.set('settingsActiveSubtab', activeSettingsSubtab);
           renderSettingsSubtabs();
 
@@ -1032,13 +1075,16 @@
       host.innerHTML = `
         <div class="cgpt-section cgpt-settings-module" id="cgpt-settings-module">
           <div class="cgpt-settings-subtabs" id="cgpt-settings-subtabs">
-            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="basic">基础</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="toolbox">工具箱</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="shortcut">快捷键</button>
-            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="ui">界面</button>
-            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="batch-timing">批量计时</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="continue-task">自动续写</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="quota-notify">额度提醒</button>
+            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="stats-debug">统计调试</button>
           </div>
 
-          <div class="cgpt-settings-panel" data-settings-panel="basic">
+          <div class="cgpt-settings-panel" data-settings-panel="toolbox">
+            <div class="cgpt-section-title" style="margin-top: 4px;">工具箱显示与位置</div>
+
             <label class="cgpt-checkbox-line" title="开启后，拖动工具箱贴住浏览器右边缘后自动收起，只保留边缘把手；只是靠近边缘不会隐藏。关闭后只保留普通拖拽，不自动隐藏。">
               <input type="checkbox" id="cgpt-setting-edge-auto-hide">
               工具箱贴边自动隐藏
@@ -1049,72 +1095,34 @@
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-force-show-toolbox" title="当工具箱跑出屏幕、贴边状态异常或隐藏后找不到入口时，可先强制显示，再按需重置位置。">强制显示工具箱</button>
             </div>
 
-            <div class="cgpt-row" style="margin-top: 10px;">
-              <button
-                type="button"
-                class="cgpt-btn"
-                id="cgpt-setting-clear-autoqueue-mojibake-cache"
-                title="仅清除自动指令相关缓存（autoQueueConfig、autoqueueActiveSubtab），不会删除 Prompt 管理器数据。清理后请刷新页面。"
-              >清理自动指令乱码缓存</button>
-            </div>
+            <div class="cgpt-section-title" style="margin-top: 12px;">精简模式显示内容</div>
 
-            <div class="cgpt-section-title" style="margin-top: 12px;">额度设置</div>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-upload-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">上传额度上限</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-upload-quota-limit"
-                data-no-wheel-number="1"
-                min="1"
-                max="10000"
-                step="1"
-                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
-              >
-            </div>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-message-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">消息额度上限</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-message-quota-limit"
-                data-no-wheel-number="1"
-                min="1"
-                max="10000"
-                step="1"
-                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
-              >
-            </div>
-
-            <div class="cgpt-row" style="margin-top: 8px;">
-              <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save" title="修改上限后顶部「上传额度 / 消息额度」的分母会立即更新。">保存额度设置</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置今日统计</button>
-            </div>
-
-            <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器</div>
             <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-beep-copy-success-enabled">
-              复制成功后播放蜂鸣器
+              <input type="checkbox" id="cgpt-setting-compact-show-upload-groups">
+              显示项目分组栏
             </label>
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-volume">音量</label>
-              <input type="range" class="cgpt-input" id="cgpt-setting-beep-volume" min="0.05" max="1" step="0.05">
-            </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-duration">时长 (毫秒)</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="30" max="10000" step="10">
-            </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-beep-frequency" data-no-wheel-number="1" min="80" max="6000" step="10">
-            </div>
-            <div class="cgpt-row" style="margin-top: 8px;">
-              <button type="button" class="cgpt-btn primary" id="cgpt-setting-test-beep" title="蜂鸣器用于复制成功提醒；浏览器可能要求先点击页面或工具箱一次后才允许播放声音。">测试蜂鸣器</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-test-title-flash">测试标题闪烁</button>
-              <span id="cgpt-setting-beep-status">未测试</span>
-            </div>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-upload-start">
+              显示上传按钮
+            </label>
+
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-compact-show-file-list">
+              显示上传文件列表
+            </label>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">拖拽上传</div>
+            <label class="cgpt-checkbox-line" title="拖到 ChatGPT 输入框仍由 ChatGPT 原生处理；拖到工具箱面板内始终加入队列。">
+              <input type="checkbox" id="cgpt-setting-global-drop-capture">
+              页面空白处拖入文件时加入工具箱队列
+            </label>
+
+            <div class="cgpt-section-title" style="margin-top: 10px;">复制回复</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-restore-scroll-after-copy">
+              复制最后消息后恢复原滚动位置
+            </label>
           </div>
 
           <div class="cgpt-settings-panel" data-settings-panel="shortcut">
@@ -1127,6 +1135,16 @@
                 <input id="cgpt-shortcut-send-label" class="cgpt-hotkey-setting-input" readonly>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-record" title="默认 Ctrl+Alt+S。录制时请按完整组合键；仅按 Ctrl/Alt/Shift 不会保存，需再按主键。按 Esc 取消。">录制</button>
                 <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-clear">清空</button>
+              </div>
+
+              <div class="cgpt-hotkey-setting-row" data-shortcut-action="sendCopyAndHotkeyOnce">
+                <label class="cgpt-hotkey-setting-label" title="按下该快捷键后执行：发送消息 -> 等待回复完成 -> 复制最后回复 -> 触发目标快捷键。这里设置的是触发按钮本身的快捷键，不是复制后发送给 GUI 的目标快捷键。">
+                  <input type="checkbox" class="cgpt-hotkey-setting-checkbox" id="cgpt-shortcut-send-copy-hotkey-enabled">
+                  <span class="cgpt-hotkey-setting-label-text">发送+复制+快捷键</span>
+                </label>
+                <input id="cgpt-shortcut-send-copy-hotkey-label" class="cgpt-hotkey-setting-input" readonly>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-copy-hotkey-record" title="默认 Ctrl+Alt+J。录制的是触发「发送+复制+快捷键」按钮本身的快捷键；不是复制后发送给 GUI 的目标快捷键。按 Esc 可取消。">录制</button>
+                <button type="button" class="cgpt-hotkey-setting-btn" id="cgpt-shortcut-send-copy-hotkey-clear">清空</button>
               </div>
 
               <div class="cgpt-hotkey-setting-row" data-shortcut-action="copyAndHotkeyOnce">
@@ -1157,37 +1175,8 @@
             </div>
           </div>
 
-          <div class="cgpt-settings-panel" data-settings-panel="ui">
-            <div class="cgpt-section-title" style="margin-top: 4px;">精简模式显示内容</div>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-compact-show-upload-groups">
-              显示项目分组栏
-            </label>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-compact-show-upload-start">
-              显示上传按钮
-            </label>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-compact-show-file-list">
-              显示上传文件列表
-            </label>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">拖拽上传</div>
-            <label class="cgpt-checkbox-line" title="拖到 ChatGPT 输入框仍由 ChatGPT 原生处理；拖到工具箱面板内始终加入队列。">
-              <input type="checkbox" id="cgpt-setting-global-drop-capture">
-              页面空白处拖入文件时加入工具箱队列
-            </label>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">复制回复</div>
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-restore-scroll-after-copy">
-              复制最后消息后恢复原滚动位置
-            </label>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">连续复制+快捷键+继续（循环附加）</div>
+          <div class="cgpt-settings-panel" data-settings-panel="continue-task">
+            <div class="cgpt-section-title" style="margin-top: 4px;">连续复制+快捷键+继续（循环附加）</div>
 
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-setting-copy-hotkey-loop-auto-upload-enabled">
@@ -1197,6 +1186,20 @@
             <div class="cgpt-kv">
               <label for="cgpt-setting-copy-hotkey-loop-auto-upload-interval">上传间隔轮数</label>
               <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-auto-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+            </div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-closed-loop-next-delay-sec" title="闭环每轮回答完成后，等待多少秒再进入下一轮。默认 1.2 秒。">闭环每轮完成后停顿时间（秒）</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-closed-loop-next-delay-sec"
+                data-no-wheel-number="1"
+                min="0"
+                max="600"
+                step="0.1"
+                title="闭环每轮回答完成后，等待多少秒再进入下一轮。默认 1.2 秒。"
+              >
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 10px;">无限继续统一回首页</div>
@@ -1247,7 +1250,67 @@
             </div>
           </div>
 
-          <div class="cgpt-settings-panel" data-settings-panel="batch-timing">
+          <div class="cgpt-settings-panel" data-settings-panel="quota-notify">
+            <div class="cgpt-section-title" style="margin-top: 4px;">额度设置</div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-upload-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">上传额度上限</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-upload-quota-limit"
+                data-no-wheel-number="1"
+                min="1"
+                max="10000"
+                step="1"
+                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
+              >
+            </div>
+
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-message-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">消息额度上限</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-message-quota-limit"
+                data-no-wheel-number="1"
+                min="1"
+                max="10000"
+                step="1"
+                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
+              >
+            </div>
+
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save" title="修改上限后顶部「上传额度 / 消息额度」的分母会立即更新。">保存额度设置</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置今日统计</button>
+            </div>
+
+            <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器 / 标题提醒</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-setting-beep-copy-success-enabled">
+              复制成功后播放蜂鸣器
+            </label>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-volume">音量</label>
+              <input type="range" class="cgpt-input" id="cgpt-setting-beep-volume" min="0.05" max="1" step="0.05">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-duration">时长 (毫秒)</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="30" max="10000" step="10">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-beep-frequency" data-no-wheel-number="1" min="80" max="6000" step="10">
+            </div>
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn primary" id="cgpt-setting-test-beep" title="蜂鸣器用于复制成功提醒；浏览器可能要求先点击页面或工具箱一次后才允许播放声音。">测试蜂鸣器</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-test-title-flash">测试标题闪烁</button>
+              <span id="cgpt-setting-beep-status">未测试</span>
+            </div>
+          </div>
+
+          <div class="cgpt-settings-panel" data-settings-panel="stats-debug">
             <div class="cgpt-section-title" style="margin-top: 4px;">批量任务计时统计</div>
 
             <label class="cgpt-checkbox-line" title="在「自动指令 → 批量任务组模式」状态区显示运行/批量/当前任务耗时、平均耗时与预计剩余时间。当前任务耗时仅在消息真正发送成功后开始计时。">
@@ -1269,13 +1332,24 @@
               </select>
             </div>
 
+            <div class="cgpt-row" style="margin-top: 8px;">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-runtime-stats-reset" title="重置会清空批量/任务计时与平均耗时，但不会重置「程序运行时长」。">重置计时统计</button>
+            </div>
+
+            <div class="cgpt-section-title" style="margin-top: 12px;">调试日志</div>
             <label class="cgpt-checkbox-line" title="开启后输出 AUTOQ_TRACE 多步骤闭环状态机日志，便于排查为什么没有继续、没有验收或为什么提前停止。">
               <input type="checkbox" id="cgpt-setting-autoq-trace-debug">
               开启 AUTOQ_TRACE 调试日志
             </label>
 
+            <div class="cgpt-section-title" style="margin-top: 12px;">维护清理</div>
             <div class="cgpt-row" style="margin-top: 8px;">
-              <button type="button" class="cgpt-btn" id="cgpt-setting-runtime-stats-reset" title="重置会清空批量/任务计时与平均耗时，但不会重置「程序运行时长」。">重置计时统计</button>
+              <button
+                type="button"
+                class="cgpt-btn"
+                id="cgpt-setting-clear-autoqueue-mojibake-cache"
+                title="仅清除自动指令相关缓存（autoQueueConfig、autoqueueActiveSubtab），不会删除 Prompt 管理器数据。清理后请刷新页面。"
+              >清理自动指令乱码缓存</button>
             </div>
           </div>
         </div>
@@ -1297,7 +1371,9 @@
         moduleName: 'SETTINGS',
       });
 
-      activeSettingsSubtab = MemoryManager.get('settingsActiveSubtab', 'basic');
+      activeSettingsSubtab = normalizeSettingsSubtabName(
+        MemoryManager.get('settingsActiveSubtab', 'toolbox'),
+      );
       bindEvents();
       render();
       renderShortcutSettings();

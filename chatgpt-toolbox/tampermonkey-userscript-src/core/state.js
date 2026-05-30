@@ -235,6 +235,7 @@
 
     // 发送按钮：只负责发送。新 ID 不再带 upload-start，避免语义和状态污染。
     sendMessageBtn: '#cgpt-send-message-once',
+    sendCopyHotkeyBtn: '#cgpt-send-copy-hotkey-once',
 
     copyContinueBtn: '#cgpt-upload-continue-once',
     autoContinueBtn: '#cgpt-auto-continue-once',
@@ -245,6 +246,7 @@
     copyHotkeyContinueOnceBtn: '#cgpt-copy-hotkey-continue-once',
     copyHotkeyContinueLoopBtn: '#cgpt-copy-hotkey-continue-loop',
     closedLoopUploadEvery5HotkeyBtn: '#cgpt-closed-loop-upload-every5-hotkey-btn',
+    closedLoopUploadEveryRoundHotkeyBtn: '#cgpt-closed-loop-upload-every-round-hotkey-btn',
     closedLoopUploadEvery5Btn: '#cgpt-closed-loop-upload-every5-btn',
     /** @deprecated 旧 ID，迁移后指向 closedLoopUploadEvery5HotkeyBtn */
     copyHotkeyContinueLoopUploadVerifyBtn: '#cgpt-closed-loop-upload-every5-hotkey-btn',
@@ -363,13 +365,19 @@
 
   const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成当前任务。
 
-如果还有未输出完的内容，请继续输出剩余内容。
+你必须先判断“最开始那个 Prompt 的任务目标”是否已经完整完成，而不是机械地继续，也不是机械地停止。
 
-如果当前任务已经不需要继续输出，或者你无法继续推进当前任务，请只输出：
+只允许两种结果：
+
+1. 如果你非常确定最开始那个 Prompt 的任务目标已经完整完成，并且没有任何剩余内容、遗漏内容、未输出完的代码、未覆盖的文件、未完成的检查项或未完成的修改指令，只能回复下面这一行，不能有任何其他文字：
 {{STOP_SIGNAL}}
 
+2. 如果最开始那个 Prompt 的任务目标还没有完成，或者你无法确认它已经完整完成，不要输出任何终止符号，直接继续补充尚未完成、尚未输出、尚未覆盖的内容。
+
+如果还缺少源码、日志、构建结果、测试结果、用户确认等外部材料，说明任务尚未进入可停止状态。此时不要输出终止符号，应继续说明缺少什么材料，或者继续补充当前能够完成的部分。
+
 继续输出时必须遵守：
-1. 不要重复已经输出过的内容。
+1. 不要重复之前已经输出过的内容。
 2. 不要重新开始整个任务。
 3. 不要扩展到新任务。
 4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。

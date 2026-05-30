@@ -7112,6 +7112,7 @@
     'attachment_processing',
     'payload_ready_but_send_button_missing',
     'attachment_ready_but_send_button_missing',
+    'home_new_chat_payload_but_send_button_missing',
     'send_button_disabled_with_payload',
     'send_button_not_ready_after_text',
     'send_button_not_ready_with_attachment',
@@ -7345,12 +7346,128 @@
     appendSendLogFields('[SEND][PRE_SEND_GATE]', fields);
   }
 
+  function canReallyClickNativeSend(extra = {}) {
+    const payload = extra.payload && typeof extra.payload === 'object'
+      ? extra.payload
+      : composerHasPayloadInInput();
+    const responseState = extra.responseState && typeof extra.responseState === 'object'
+      ? extra.responseState
+      : (typeof detectComposerResponseState === 'function'
+        ? detectComposerResponseState({ reason: 'can-really-click-send' })
+        : {});
+    const sendSnap = extra.sendSnap && typeof extra.sendSnap === 'object'
+      ? extra.sendSnap
+      : (typeof getComposerSendButtonSnapshot === 'function'
+        ? getComposerSendButtonSnapshot({ silent: true })
+        : { found: false, ready: false });
+    const sendability = extra.sendability && typeof extra.sendability === 'object'
+      ? extra.sendability
+      : (typeof evaluateComposerSendability === 'function'
+        ? evaluateComposerSendability()
+        : { realSendButtonEnabled: false });
+    const sendButtonDisabled = !!(
+      sendSnap.button instanceof HTMLButtonElement
+      && isSendButtonDisabled(sendSnap.button)
+    );
+    const responseReason = String(responseState.response_state_reason || '').trim();
+    const blockedReasons = new Set([
+      'home_new_chat_payload_but_send_button_missing',
+      'payload_ready_but_send_button_missing',
+      'attachment_ready_but_send_button_missing',
+      'send_button_disabled_with_payload',
+    ]);
+
+    if (responseState.response_state === 'not_ready' && blockedReasons.has(responseReason)) {
+      return false;
+    }
+
+    return !!(
+      sendSnap.found === true
+      && sendability.realSendButtonEnabled
+      && !sendButtonDisabled
+      && !payload.attachmentUploading
+      && responseState.response_state === 'ready'
+    );
+  }
+
+  async function waitForNativeSendButtonReady(options = {}) {
+    const waitMs = Math.max(1000, Number(options.waitMs || SEND_TEXT_BUTTON_WAIT_MS));
+    const pollMs = Math.max(50, Number(options.pollMs || 300));
+    const source = String(options.source || '-');
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const startAt = Date.now();
+
+    if (typeof invalidateComposerResponseStateCache === 'function') {
+      invalidateComposerResponseStateCache();
+    }
+    if (
+      typeof ComposerAttachments !== 'undefined'
+      && ComposerAttachments
+      && typeof ComposerAttachments.markAttachmentDirty === 'function'
+    ) {
+      ComposerAttachments.markAttachmentDirty(`before-send:${source}`);
+    }
+
+    while (Date.now() - startAt < waitMs) {
+      if (shouldStop()) {
+        return { ok: false, reason: 'cancelled', retryable: false };
+      }
+
+      if (typeof invalidateComposerResponseStateCache === 'function') {
+        invalidateComposerResponseStateCache();
+      }
+
+      const payload = composerHasPayloadInInput();
+      const responseState = typeof detectComposerResponseState === 'function'
+        ? detectComposerResponseState({ reason: 'send-wait-button' })
+        : {};
+      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+        ? getComposerSendButtonSnapshot({ silent: true })
+        : { found: false, ready: false };
+      const sendability = typeof evaluateComposerSendability === 'function'
+        ? evaluateComposerSendability()
+        : { realSendButtonEnabled: false };
+      const sendButtonDisabled = !!(
+        sendSnap.button instanceof HTMLButtonElement
+        && isSendButtonDisabled(sendSnap.button)
+      );
+
+      if (canReallyClickNativeSend({ payload, responseState, sendSnap, sendability })) {
+        return { ok: true, reason: 'native-send-button-ready', retryable: false };
+      }
+
+      appendSendLogFields('[SEND][WAIT_NATIVE_BUTTON_READY]', {
+        elapsedMs: Date.now() - startAt,
+        source,
+        hasAttachment: payload.hasAttachment ? 1 : 0,
+        attachmentUploading: payload.attachmentUploading ? 1 : 0,
+        sendButtonFound: sendSnap.found ? 1 : 0,
+        realSendButtonEnabled: sendability.realSendButtonEnabled ? 1 : 0,
+        sendButtonDisabled: sendButtonDisabled ? 1 : 0,
+        responseState: String(responseState.response_state || '-'),
+        responseReason: String(responseState.response_state_reason || '-'),
+      });
+
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      reason: 'native-send-button-timeout',
+      retryable: true,
+      wait_send: true,
+      wait_reply: false,
+    };
+  }
+
   function buildSendButtonWaitBlockedResult(source) {
     const payload = composerHasPayloadInInput();
     const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
       ? getComposerSendButtonSnapshot({ silent: true })
       : { ready: false };
-    const reason = 'waiting_attachment_upload_done';
+    const reason = sendSnap.ready && !payload.attachmentUploading
+      ? 'native-send-button-not-ready'
+      : 'waiting_attachment_upload_done';
     const logTag = '[SEND][WAIT_ATTACHMENT_UPLOAD_DONE]';
     appendSendLogFields(logTag, {
       hasAttachment: payload.hasAttachment ? 1 : 0,
@@ -8018,7 +8135,8 @@
       ? sendButtonInput
       : findChatGPTSendButton());
     const realSendButtonEnabled = isRealSendButtonEnabled(sendButton);
-    const sendable = textLen > 0 || hasAttachment || realSendButtonEnabled;
+    const hasContent = textLen > 0 || hasAttachment;
+    const sendable = hasContent && realSendButtonEnabled;
     const responseState = opts.responseState && typeof opts.responseState === 'object'
       ? opts.responseState
       : detectComposerResponseState({ reason: 'evaluateComposerSendability' });
@@ -8035,8 +8153,10 @@
     return {
       textLen,
       hasAttachment,
+      hasContent,
       realSendButtonEnabled,
       sendable,
+      canSendNow: sendable,
       sendModeReason,
       response_state: String(responseState.response_state || 'unknown'),
       response_state_reason: String(responseState.response_state_reason || '-'),
@@ -9732,6 +9852,22 @@
 
   function getTopMainStatus() {
     if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
+      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
+        ? getComposerSendButtonSnapshot({ silent: true })
+        : { ready: false };
+      if (!sendSnap.ready) {
+        return {
+          text: '附件处理中',
+          cls: 'cgpt-state-waiting',
+          type: 'online',
+          title: '输入框有内容，等待 ChatGPT 发送按钮可用',
+          reason: 'home_new_chat_payload_but_send_button_missing',
+          isGenerating: false,
+          isResponding: false,
+          isAnswering: false,
+          responseInProgress: false,
+        };
+      }
       appendTopMainStatusOverrideLogThrottled(
         'home_new_chat_ready_to_send',
         '[TOOLBOX_TOP_STATUS][STATE_OVERRIDE] reason=home_new_chat_ready_to_send',
@@ -9884,7 +10020,9 @@
       return;
     }
 
+    const prevText = String(ChatInputStateRuntime.lastTopStatusText || '').trim();
     const info = getTopMainStatus();
+    const nextText = String(info.text || '').trim();
     logTopMainStatusChange(info);
 
     badge.textContent = info.text;
@@ -9903,6 +10041,26 @@
     );
 
     badge.classList.add(info.cls || 'cgpt-state-unknown');
+
+    if (nextText !== prevText) {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.renderUploadButtonsOnly === 'function'
+      ) {
+        try {
+          UploadModule.renderUploadButtonsOnly({
+            immediate: true,
+            force: true,
+            heavy: false,
+            scope: 'all',
+            buttonTasksReason: `top-main-status-change:${nextText || '-'}`,
+          });
+        } catch (err) {
+          console.warn('[TOP_STATUS][UPLOAD_BUTTON_REFRESH_FAILED]', err);
+        }
+      }
+    }
   }
 
   function logPageCapability(capability, tag = '[CAPABILITY]') {
@@ -10956,39 +11114,32 @@
 
     if (
       (precheckSendability.hasAttachment || precheckSendability.textLen > 0)
-      && !precheckSendability.realSendButtonEnabled
+      && !canReallyClickNativeSend({
+        payload: composerHasPayloadInInput(),
+        responseState,
+        sendability: precheckSendability,
+      })
     ) {
-      const payload = composerHasPayloadInInput();
-      const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
-        ? getComposerSendButtonSnapshot({ silent: true })
-        : { ready: false };
-      const nativeReadyNow = sendSnap.ready === true && !payload.attachmentUploading;
+      const waitResult = await waitForNativeSendButtonReady({
+        source,
+        shouldStop,
+        waitMs: Number(options.nativeButtonWaitMs || SEND_TEXT_BUTTON_WAIT_MS),
+      });
 
-      if (nativeReadyNow) {
-        appendSendLogFields('[SEND][NATIVE_READY_OVERRIDE]', {
-          source,
-          reason: 'precheck_skip_wait_blocked',
-          hasAttachment: payload.hasAttachment ? 1 : 0,
-          attachmentUploading: payload.attachmentUploading ? 1 : 0,
-          sendButtonReady: sendSnap.ready ? 1 : 0,
-          nativeDisabled: sendSnap.ready ? 0 : 1,
-        });
-      } else {
-        const blocked = buildSendButtonWaitBlockedResult(source);
-        result.reason = blocked.reason;
-        result.retryable = blocked.retryable;
-        result.wait_send = blocked.wait_send === true;
-        result.wait_reply = blocked.wait_reply === true;
+      if (!waitResult.ok) {
+        result.reason = waitResult.reason || 'native-send-button-timeout';
+        result.retryable = waitResult.retryable !== false;
+        result.wait_send = waitResult.wait_send === true;
+        result.wait_reply = waitResult.wait_reply === true;
         appendSendLogFields('[SEND][BLOCKED_WAIT_BUTTON]', {
-          reason: blocked.reason,
+          reason: result.reason,
           source,
-          attachmentUploading: payload.attachmentUploading ? 1 : 0,
           ...getComposerSendDiagnostics(),
         });
         appendSendLogFields('[SEND][FAILED]', {
           reason: result.reason,
           attempts: 0,
-          last_error: responseState.response_state_reason || blocked.reason,
+          last_error: responseState.response_state_reason || result.reason,
         });
         return applyStableSendRetryableFlags(result);
       }

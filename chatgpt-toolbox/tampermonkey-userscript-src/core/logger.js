@@ -2643,6 +2643,7 @@
     continueAutomation: Object.freeze({
       autoUploadEnabled: true,
       autoUploadInterval: 5,
+      closedLoopNextDelayMs: 1200,
       homeNavEnabled: true,
       homeNavInterval: 20,
       homeNavUrl: 'https://chatgpt.com/',
@@ -2723,6 +2724,7 @@
     cfg.continueAutomation = {
       autoUploadEnabled: continueAutomationRaw.autoUploadEnabled !== false,
       autoUploadInterval: normalizePositiveInt(continueAutomationRaw.autoUploadInterval, 5, 1, 999),
+      closedLoopNextDelayMs: normalizePositiveInt(continueAutomationRaw.closedLoopNextDelayMs, 1200, 0, 600000),
       homeNavEnabled: continueAutomationRaw.homeNavEnabled !== false,
       homeNavInterval: normalizePositiveInt(continueAutomationRaw.homeNavInterval, 20, 1, 999),
       homeNavUrl: (
@@ -2918,6 +2920,16 @@
       shift: false,
       meta: false,
     },
+    sendCopyAndHotkeyOnce: {
+      enabled: true,
+      label: 'Ctrl+Alt+J',
+      key: 'j',
+      code: 'KeyJ',
+      ctrl: true,
+      alt: true,
+      shift: false,
+      meta: false,
+    },
     copyAndHotkeyOnce: {
       enabled: true,
       label: 'Ctrl+Alt+K',
@@ -3038,11 +3050,13 @@
     }
 
     const rawCopyLast = rawConfig.copyLastMessage;
+    const rawSendCopyOnce = rawConfig.sendCopyAndHotkeyOnce;
     const rawCopyOnce = rawConfig.copyAndHotkeyOnce;
     const rawCopyThen = rawConfig.copyThenShortcutTargetHotkey;
     const rawStartUpload = rawConfig.startUpload;
 
     const otherLooksDefault = (!rawCopyLast || isShortcutItemSame(rawCopyLast, DEFAULT_SHORTCUT_CONFIG.copyLastMessage))
+      && (!rawSendCopyOnce || isShortcutItemSame(rawSendCopyOnce, DEFAULT_SHORTCUT_CONFIG.sendCopyAndHotkeyOnce))
       && (!rawCopyOnce || isShortcutItemSame(rawCopyOnce, DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce))
       && (!rawCopyThen || isShortcutItemSame(rawCopyThen, DEFAULT_SHORTCUT_CONFIG.copyThenShortcutTargetHotkey))
       && (!rawStartUpload || isShortcutItemSame(rawStartUpload, DEFAULT_SHORTCUT_CONFIG.startUpload));
@@ -3076,6 +3090,10 @@
       raw && raw.copyLastMessage,
       DEFAULT_SHORTCUT_CONFIG.copyLastMessage,
     );
+    const sendCopyAndHotkeyOnce = cloneShortcutItem(
+      raw && raw.sendCopyAndHotkeyOnce,
+      DEFAULT_SHORTCUT_CONFIG.sendCopyAndHotkeyOnce,
+    );
     const copyAndHotkeyOnce = cloneShortcutItem(
       raw && raw.copyAndHotkeyOnce,
       DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
@@ -3095,6 +3113,7 @@
       saveShortcutConfig({
         sendMessage,
         copyLastMessage,
+        sendCopyAndHotkeyOnce,
         copyAndHotkeyOnce,
         copyThenShortcutTargetHotkey,
         startUpload,
@@ -3104,6 +3123,7 @@
     return {
       sendMessage,
       copyLastMessage,
+      sendCopyAndHotkeyOnce,
       copyAndHotkeyOnce,
       copyThenShortcutTargetHotkey,
       startUpload,
@@ -3116,6 +3136,10 @@
       {
         sendMessage: cloneShortcutItem(config && config.sendMessage, DEFAULT_SHORTCUT_CONFIG.sendMessage),
         copyLastMessage: cloneShortcutItem(config && config.copyLastMessage, DEFAULT_SHORTCUT_CONFIG.copyLastMessage),
+        sendCopyAndHotkeyOnce: cloneShortcutItem(
+          config && config.sendCopyAndHotkeyOnce,
+          DEFAULT_SHORTCUT_CONFIG.sendCopyAndHotkeyOnce,
+        ),
         copyAndHotkeyOnce: cloneShortcutItem(
           config && config.copyAndHotkeyOnce,
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
@@ -3138,6 +3162,10 @@
       {
         sendMessage: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.sendMessage, DEFAULT_SHORTCUT_CONFIG.sendMessage),
         copyLastMessage: cloneShortcutItem(DEFAULT_SHORTCUT_CONFIG.copyLastMessage, DEFAULT_SHORTCUT_CONFIG.copyLastMessage),
+        sendCopyAndHotkeyOnce: cloneShortcutItem(
+          DEFAULT_SHORTCUT_CONFIG.sendCopyAndHotkeyOnce,
+          DEFAULT_SHORTCUT_CONFIG.sendCopyAndHotkeyOnce,
+        ),
         copyAndHotkeyOnce: cloneShortcutItem(
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
           DEFAULT_SHORTCUT_CONFIG.copyAndHotkeyOnce,
@@ -3508,6 +3536,17 @@
         : `发送信息快捷键：${shortcutCfg.sendMessage.label || '未设置'}`;
     }
 
+    const sendCopyHotkeyBtn = qs(UploadSelectors.sendCopyHotkeyBtn, scope);
+    if (sendCopyHotkeyBtn) {
+      const triggerLabel = shortcutCfg.sendCopyAndHotkeyOnce && shortcutCfg.sendCopyAndHotkeyOnce.label
+        ? shortcutCfg.sendCopyAndHotkeyOnce.label
+        : '未设置';
+      const targetLabel = typeof getCopyThenShortcutTargetLabel === 'function'
+        ? getCopyThenShortcutTargetLabel()
+        : '';
+      sendCopyHotkeyBtn.title = `触发快捷键：${triggerLabel}；流程：发送消息 -> 等待回复完成 -> 复制最后回复 -> ${targetLabel || '目标快捷键'}`;
+    }
+
     const copyContinueBtn = qs(UploadSelectors.copyContinueBtn, scope);
     if (copyContinueBtn) {
       let copyTitle = '先复制最后回复，再发送“继续”';
@@ -3597,12 +3636,18 @@
     const copyHotkeyUploadVerifyLoopHotkeyBtn = qs(UploadSelectors.closedLoopUploadEvery5HotkeyBtn, scope);
     if (copyHotkeyUploadVerifyLoopHotkeyBtn) {
       const targetLabel = getCopyThenShortcutTargetLabel() || '目标快捷键';
-      copyHotkeyUploadVerifyLoopHotkeyBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每 5 轮自动上传一次代码`;
+      copyHotkeyUploadVerifyLoopHotkeyBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；按配置间隔自动上传代码`;
+    }
+
+    const copyHotkeyUploadVerifyLoopEveryRoundBtn = qs(UploadSelectors.closedLoopUploadEveryRoundHotkeyBtn, scope);
+    if (copyHotkeyUploadVerifyLoopEveryRoundBtn) {
+      const targetLabel = getCopyThenShortcutTargetLabel() || '目标快捷键';
+      copyHotkeyUploadVerifyLoopEveryRoundBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每一轮都自动重新上传代码`;
     }
 
     const copyHotkeyUploadVerifyLoopPlainBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, scope);
     if (copyHotkeyUploadVerifyLoopPlainBtn) {
-      copyHotkeyUploadVerifyLoopPlainBtn.title = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；每 5 轮自动上传一次代码';
+      copyHotkeyUploadVerifyLoopPlainBtn.title = '等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 发送继续指令；按配置间隔自动上传代码';
     }
   }
 
