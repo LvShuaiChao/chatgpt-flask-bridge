@@ -154,72 +154,31 @@
   }
 
   function getClosedLoopOwnerFromSnapshot(snapshot = {}) {
-    const direct = String(
-      snapshot.closedLoopOwner
-      || snapshot.closedLoopContinueOwner
-      || snapshot.owner
-      || snapshot.taskOwner
-      || '',
-    ).trim();
-    if (direct) {
-      return direct;
-    }
-    const runningOwner = getToolboxRunningOwnerFromRuntime(snapshot);
-    if (runningOwner && runningOwner.action) {
-      return String(runningOwner.action).trim();
-    }
-    if (!snapshot.closedLoopContinueRunning) {
-      return '';
-    }
-    const mode = String(snapshot.closedLoopContinueMode || snapshot.closedLoopMode || '').trim();
-    if (mode === 'without_hotkey') {
-      return 'closed-loop-without-hotkey';
-    }
-    if (mode === 'with_hotkey_every_round') {
-      return 'closed-loop-with-hotkey-upload-every-round';
-    }
-    if (mode === 'with_hotkey') {
-      return 'closed-loop-with-hotkey';
-    }
-    return '';
+    return ClosedLoopButtonVm.getClosedLoopOwnerFromSnapshot(snapshot);
   }
 
   function getClosedLoopOwnerActionFromSnapshot(snapshot = {}) {
-    return getClosedLoopOwnerFromSnapshot(snapshot);
+    return ClosedLoopButtonVm.getClosedLoopOwnerActionFromSnapshot(snapshot);
   }
 
   function resolveClosedLoopOwnerAction(snapshot = {}) {
-    return getClosedLoopOwnerActionFromSnapshot(snapshot);
+    return ClosedLoopButtonVm.resolveClosedLoopOwnerAction(snapshot);
   }
 
   function isClosedLoopOwnerAction(action, snapshot = {}) {
-    return isCurrentClosedLoopOwnerButton(action, null, snapshot);
+    return ClosedLoopButtonVm.isClosedLoopOwnerAction(action, snapshot);
   }
 
   function resolveActionForClosedLoopMode(mode) {
-    const modeText = String(mode || 'with_hotkey').trim();
-    if (modeText === 'without_hotkey') {
-      return 'closed-loop-without-hotkey';
-    }
-    if (modeText === 'with_hotkey_every_round') {
-      return 'closed-loop-with-hotkey-upload-every-round';
-    }
-    return 'closed-loop-with-hotkey';
+    return ClosedLoopButtonVm.resolveActionForClosedLoopMode(mode);
   }
 
   function isClosedLoopStopLikeText(text) {
-    const normalized = String(text || '').trim();
-    return normalized.includes('停止闭环继续') || normalized.includes('正在停止闭环');
+    return ClosedLoopButtonVm.isClosedLoopStopLikeText(text);
   }
 
   function isClosedLoopLikeText(text) {
-    const t = String(text || '').trim();
-    return t.includes('闭环')
-      || t.includes('停止闭环继续')
-      || t.includes('停止环继续')
-      || t.startsWith('环-')
-      || t.includes('快捷键模式+每')
-      || t.includes('仅对话+每');
+    return ClosedLoopButtonVm.isClosedLoopLikeText(text);
   }
 
   function isKnownPollutedButtonText(text) {
@@ -231,17 +190,102 @@
       || t === '环-仅对话+每5轮上传';
   }
 
-  const CLOSED_LOOP_BUTTON_ACTIONS = new Set([
-    'closed-loop-with-hotkey',
-    'closed-loop-with-hotkey-upload-every-round',
-    'closed-loop-without-hotkey',
-  ]);
+  const CLOSED_LOOP_BUTTON_ACTIONS = ClosedLoopButtonVm.CLOSED_LOOP_BUTTON_ACTIONS;
+  const CLOSED_LOOP_BUTTON_IDS = ClosedLoopButtonVm.CLOSED_LOOP_BUTTON_IDS;
+  const CLOSED_LOOP_BUTTON_GROUP = ClosedLoopButtonVm.CLOSED_LOOP_BUTTON_GROUP || 'closed-loop';
 
-  const CLOSED_LOOP_BUTTON_IDS = new Set([
-    'cgpt-closed-loop-upload-every5-hotkey-btn',
-    'cgpt-closed-loop-upload-every-round-hotkey-btn',
-    'cgpt-closed-loop-upload-every5-btn',
-  ]);
+  const CLOSED_LOOP_LEGACY_INHERITED_COLOR_CLASSES = [
+    'purple',
+    'cyan',
+    'teal',
+    'green',
+    'primary',
+    'warning',
+    'orange',
+    'cgpt-btn-copy-hotkey',
+    'cgpt-btn-upload',
+    'cgpt-auto-continue',
+  ];
+
+  const CLOSED_LOOP_TOGGLE_STATE_CLASSES = [
+    'cgpt-btn-closed-loop',
+    'cgpt-btn-closed-loop-idle',
+    'cgpt-btn-danger',
+    'cgpt-btn-stop',
+    'cgpt-action-running',
+  ];
+
+  const CLOSED_LOOP_IDLE_CLASS_NAME = 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle';
+  const CLOSED_LOOP_RUNNING_CLASS_NAME = 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-danger cgpt-btn-stop cgpt-action-running';
+
+  function stripClosedLoopLegacyColorClasses(button) {
+    if (!button) {
+      return;
+    }
+    CLOSED_LOOP_LEGACY_INHERITED_COLOR_CLASSES.forEach((cls) => {
+      button.classList.remove(cls);
+    });
+  }
+
+  function applyClosedLoopButtonClassName(button, className) {
+    if (!button) {
+      return;
+    }
+    stripClosedLoopLegacyColorClasses(button);
+    CLOSED_LOOP_TOGGLE_STATE_CLASSES.forEach((cls) => {
+      button.classList.remove(cls);
+    });
+    String(className || '')
+      .split(/\s+/)
+      .map((cls) => cls.trim())
+      .filter(Boolean)
+      .forEach((cls) => button.classList.add(cls));
+    if (!button.classList.contains('cgpt-btn')) {
+      button.classList.add('cgpt-btn');
+    }
+    if (!button.classList.contains('cgpt-btn-closed-loop')) {
+      button.classList.add('cgpt-btn-closed-loop');
+    }
+    button.dataset.cgptButtonGroup = CLOSED_LOOP_BUTTON_GROUP;
+  }
+
+  function resolveClosedLoopStyleColorLabel(options = {}, view = {}) {
+    if (
+      options.phase === ButtonState.Phase.DANGER
+      || view.forceDanger === true
+      || view.buttonPhase === 'danger'
+      || (view.allowCancel === true && view.buttonPhase !== 'closed-loop-idle')
+    ) {
+      return 'red';
+    }
+    if (view.disabled === true || options.disabled === true) {
+      return 'gray';
+    }
+    return 'orange';
+  }
+
+  function logClosedLoopButtonStyleDecide(button, view = {}, options = {}, extra = {}) {
+    if (!button) {
+      return;
+    }
+    const id = String(button.id || '-').trim() || '-';
+    const action = String(
+      button.dataset.action
+      || button.dataset.cgptBaseAction
+      || view.action
+      || '-',
+    ).trim() || '-';
+    const running = extra.running === true ? 1 : 0;
+    const isOwner = extra.isOwner === true ? 1 : 0;
+    const classText = String(button.className || '').trim() || '-';
+    const color = resolveClosedLoopStyleColorLabel(options, view);
+    const line = `[CLOSED_LOOP_BUTTON][STYLE_DECIDE] id=${id} action=${action} group=closed-loop running=${running} isOwner=${isOwner} class=${classText} color=${color}`;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+  }
 
   const NORMAL_BUTTON_IDLE_LABELS = Object.freeze({
     'start-upload': '开始上传',
@@ -263,46 +307,19 @@
   });
 
   function isClosedLoopButtonAction(action) {
-    return CLOSED_LOOP_BUTTON_ACTIONS.has(String(action || '').trim());
+    return ClosedLoopButtonVm.isClosedLoopButtonAction(action);
   }
 
   function isClosedLoopButtonElement(button) {
-    if (!button) {
-      return false;
-    }
-    const id = String(button.id || '').trim();
-    const action = String(
-      button.dataset?.action
-      || button.dataset?.cgptButtonAction
-      || button.dataset?.cgptRuntimeAction
-      || '',
-    ).trim();
-    return CLOSED_LOOP_BUTTON_IDS.has(id) || CLOSED_LOOP_BUTTON_ACTIONS.has(action);
+    return ClosedLoopButtonVm.isClosedLoopButtonElement(button);
   }
 
   function isClosedLoopModeButton(buttonOrAction) {
-    if (!buttonOrAction) {
-      return false;
-    }
-    if (typeof buttonOrAction === 'string') {
-      return isClosedLoopButtonAction(buttonOrAction);
-    }
-    return isClosedLoopButtonElement(buttonOrAction);
+    return ClosedLoopButtonVm.isClosedLoopModeButton(buttonOrAction);
   }
 
   function getClosedLoopIdleTextByAction(action, snapshot = {}) {
-    void snapshot;
-    const normalized = String(action || '').trim();
-    if (normalized === 'closed-loop-with-hotkey-upload-every-round') {
-      return '闭环-快捷键模式+每一轮上传';
-    }
-    if (normalized === 'closed-loop-with-hotkey') {
-      return '闭环-快捷键模式+每5轮上传';
-    }
-    if (normalized === 'closed-loop-without-hotkey') {
-      return '闭环-仅对话+每5轮上传';
-    }
-    return '闭环';
+    return ClosedLoopButtonVm.getClosedLoopIdleTextByAction(action, snapshot);
   }
 
   function getNormalButtonIdleLabel(action, fallback = '') {
@@ -311,30 +328,7 @@
   }
 
   function isCurrentClosedLoopOwnerButton(action, button, snapshot = {}) {
-    const normalizedAction = String(action || '').trim();
-    const owner = getClosedLoopOwnerFromSnapshot(snapshot);
-    if (!owner) {
-      return false;
-    }
-    if (!isClosedLoopButtonAction(normalizedAction) && !isClosedLoopButtonElement(button)) {
-      return false;
-    }
-    if (normalizedAction) {
-      return normalizedAction === owner;
-    }
-    if (button && button.id) {
-      const id = String(button.id || '').trim();
-      if (owner === 'closed-loop-with-hotkey-upload-every-round') {
-        return id === 'cgpt-closed-loop-upload-every-round-hotkey-btn';
-      }
-      if (owner === 'closed-loop-without-hotkey') {
-        return id === 'cgpt-closed-loop-upload-every5-btn';
-      }
-      if (owner === 'closed-loop-with-hotkey') {
-        return id === 'cgpt-closed-loop-upload-every5-hotkey-btn';
-      }
-    }
-    return false;
+    return ClosedLoopButtonVm.isCurrentClosedLoopOwnerButton(action, button, snapshot);
   }
 
   function resolveClosedLoopIdleBusinessText(action, snapshot = {}) {
@@ -1365,6 +1359,31 @@
         : withKey;
     };
 
+    const sendMessageTask = snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
+      ? snapshot.sendMessageTask
+      : null;
+    if (sendMessageTask && sendMessageTask.running) {
+      const taskText = String(sendMessageTask.buttonText || '取消发送').trim() || '取消发送';
+      const taskPhase = String(sendMessageTask.phase || '').trim().toLowerCase();
+      const isStopView = taskPhase === 'sent_waiting_response'
+        || taskPhase === 'stopping_response'
+        || (
+          !!sendMessageTask.hasClickedNativeSend
+          && (phase === TaskPhase.WAITING_REPLY || capability.isResponding)
+        );
+      return finish({
+        phase: isStopView ? TaskPhase.WAITING_REPLY : TaskPhase.WAITING_SEND,
+        text: taskText,
+        title: isStopView
+          ? '消息已发出；再次点击将尝试停止 ChatGPT 当前回答'
+          : '发送准备中；再次点击可取消本次发送',
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel-send',
+        buttonPhase: isStopView ? 'waiting_reply' : 'waiting',
+      });
+    }
+
     if (uploadTaskActive && phase === TaskPhase.IDLE && !pendingSendAfterReply) {
       return finish({
         phase: TaskPhase.IDLE,
@@ -1411,16 +1430,16 @@
       let waitTitle = '正在等待 ChatGPT 发送按钮可用';
 
       if (!textLen && !hasAttachment) {
-        waitText = '等待输入框';
-        waitTitle = '输入框尚未就绪';
+        waitText = '取消发送（等待输入框）';
+        waitTitle = '输入框尚未就绪；再次点击可取消发送';
       } else if (hasAttachment && nativeReady) {
-        waitText = capability.isResponding ? '发送中' : '等待点击发送';
+        waitText = capability.isResponding ? '取消发送（点击中）' : '取消发送（准备发送）';
         waitTitle = capability.isResponding
-          ? '原生发送按钮已就绪，正在进入发送流程'
-          : '原生发送按钮已可点击，正在准备触发发送';
+          ? '正在进入发送流程；再次点击可取消或停止'
+          : '原生发送按钮已可点击；再次点击可取消发送';
       } else if (hasAttachment && (!nativeReady || capability.isResponding)) {
-        waitText = '等待附件';
-        waitTitle = '附件仍在上传或处理中';
+        waitText = '取消发送（等待附件）';
+        waitTitle = '附件仍在上传或处理中；再次点击可取消发送';
       } else if (capability.isResponding) {
         waitText = '等待回复';
         waitTitle = '助手正在回复';
@@ -1440,8 +1459,8 @@
     if (phase === TaskPhase.SENDING) {
       return finish({
         phase: TaskPhase.SENDING,
-        text: '发送中',
-        title: '正在发送',
+        text: '取消发送（点击中）',
+        title: '正在发送；再次点击可取消或停止',
         disabled: false,
         allowCancel: true,
         action: 'cancel-send',
@@ -1462,13 +1481,17 @@
     }
 
     if (phase === TaskPhase.WAITING_REPLY) {
+      const stopVisible = typeof document !== 'undefined'
+        && !!document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
       return finish({
         phase: TaskPhase.WAITING_REPLY,
-        text: '等待回复',
-        title: '正在等待 ChatGPT 回复完成',
+        text: stopVisible ? '停止回答' : '等待回复',
+        title: stopVisible
+          ? 'ChatGPT 正在回答；再次点击尝试停止生成'
+          : '正在等待 ChatGPT 回复完成',
         disabled: false,
         allowCancel: true,
-        action: 'cancel-wait-reply',
+        action: 'cancel-send',
         buttonPhase: 'waiting_reply',
       });
     }
@@ -1696,17 +1719,23 @@
           disabled: false,
           allowCancel: true,
           action: 'cancel',
-          buttonPhase: 'waiting',
+          runtimeAction: 'cancel',
+          buttonPhase: 'danger',
+          forceDanger: true,
+          taskKey: 'copyHotkeyOnce',
         };
       }
       return {
         phase: rawPhase || phase || TaskPhase.RUNNING,
-        text: '处理中...',
+        text: '取消执行',
         title: '复制+快捷键流程进行中；再次点击将请求取消',
         disabled: false,
         allowCancel: true,
         action: 'cancel',
-        buttonPhase: 'running',
+        runtimeAction: 'cancel',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        taskKey: 'copyHotkeyOnce',
       };
     }
 
@@ -2823,142 +2852,15 @@
   }
 
   function formatClosedLoopRunningButtonWaitSuffix(snapshot = {}) {
-    const waitVisual = snapshot.closedLoopWaitVisual || {};
-    const closedLoopRunning = snapshot.closedLoopContinueRunning === true || waitVisual.running === true;
-    if (!closedLoopRunning) {
-      return '';
-    }
-
-    const waitKind = String(waitVisual.waitKind || 'idle');
-
-    if (waitKind === 'next-step') {
-      const ms = Math.max(0, Number(waitVisual.nextStepRemainingMs || 0));
-      const sec = ms / 1000;
-      return `（等待下一轮 ${sec.toFixed(1)}s）`;
-    }
-
-    if (waitKind === 'reply') {
-      const ms = Math.max(0, Number(waitVisual.replyWaitElapsedMs || 0));
-      const sec = Math.floor(ms / 1000);
-      return `（回复中 ${sec}s）`;
-    }
-
-    return '';
+    return ClosedLoopButtonVm.formatClosedLoopRunningButtonWaitSuffix(snapshot);
   }
 
   function resolveClosedLoopStopButtonText(snapshot = {}, stopping = false) {
-    if (stopping) {
-      return '正在停止闭环继续';
-    }
-    return `停止闭环继续${formatClosedLoopRunningButtonWaitSuffix(snapshot)}`;
+    return ClosedLoopButtonVm.resolveClosedLoopStopButtonText(snapshot, stopping);
   }
 
   function getClosedLoopContinueButtonViewState(snapshot = {}, mode = 'with_hotkey') {
-    const running = snapshot.closedLoopContinueRunning === true;
-    const stopping = snapshot.closedLoopContinueStopping === true;
-    const modeText = String(mode || 'with_hotkey').trim();
-    const actionByMode = {
-      with_hotkey: 'closed-loop-with-hotkey',
-      with_hotkey_every_round: 'closed-loop-with-hotkey-upload-every-round',
-      without_hotkey: 'closed-loop-without-hotkey',
-    };
-    const currentAction = actionByMode[modeText] || 'closed-loop-with-hotkey';
-    const owner = getClosedLoopOwnerFromSnapshot(snapshot);
-    const isOwner = running && owner === currentAction;
-    const idleText = getClosedLoopIdleTextByAction(currentAction, snapshot);
-    const buttonName = currentAction;
-
-    if (running && isOwner) {
-      const loopTask = snapshot.copyHotkeyUploadVerifyLoopTask && typeof snapshot.copyHotkeyUploadVerifyLoopTask === 'object'
-        ? snapshot.copyHotkeyUploadVerifyLoopTask
-        : {};
-      const loopPhase = String(loopTask.phase || '').trim().toLowerCase();
-      const loopRound = Math.max(
-        0,
-        Number(loopTask.cycleIndex != null ? loopTask.cycleIndex : 0)
-          || Number(snapshot.closedLoopContinueRound || 0)
-          || 0,
-      );
-      const retryingCurrentRound = snapshot.closedLoopRetryingCurrentRound === true;
-      if (!stopping && loopPhase === 'paused') {
-        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(
-            `[BUTTON_STATE][PAUSED] button=${buttonName} mode=${modeText} round=${loopTask.round != null ? loopTask.round : '-'}`,
-          );
-        }
-        return {
-          phase: 'paused',
-          text: '已暂停',
-          title: loopTask.lastError
-            ? `闭环已暂停：${String(loopTask.lastError)}。点击停止当前闭环任务`
-            : '闭环已暂停，点击停止当前闭环任务',
-          disabled: false,
-          allowCancel: true,
-          action: currentAction,
-          runtimeAction: 'stop-closed-loop',
-          buttonPhase: 'paused',
-        };
-      }
-      const stopButtonText = resolveClosedLoopStopButtonText(snapshot, stopping);
-      if (!stopping && loopPhase === 'waiting_next_reply') {
-        return {
-          phase: TaskPhase.RUNNING,
-          text: stopButtonText,
-          title: '点击停止当前闭环任务',
-          disabled: false,
-          allowCancel: true,
-          action: currentAction,
-          runtimeAction: 'stop-closed-loop',
-          buttonPhase: 'running',
-        };
-      }
-      if (!stopping && retryingCurrentRound) {
-        return {
-          phase: TaskPhase.RUNNING,
-          text: stopButtonText,
-          title: '点击停止当前闭环任务',
-          disabled: false,
-          allowCancel: true,
-          action: currentAction,
-          runtimeAction: 'stop-closed-loop',
-          buttonPhase: 'running',
-        };
-      }
-      return {
-        phase: stopping ? 'stopping' : TaskPhase.RUNNING,
-        text: stopButtonText,
-        title: stopping ? '正在停止闭环继续任务' : '点击停止当前闭环任务',
-        disabled: false,
-        allowCancel: true,
-        action: currentAction,
-        runtimeAction: 'stop-closed-loop',
-        buttonPhase: 'running',
-      };
-    }
-
-    if (running && !isOwner) {
-      return {
-        phase: TaskPhase.IDLE,
-        text: idleText,
-        title: '当前已有闭环任务运行中，请先停止当前闭环任务',
-        disabled: true,
-        allowCancel: false,
-        action: currentAction,
-        buttonPhase: 'locked',
-        preserveBaseColorWhenDisabled: true,
-        lockedByClosedLoop: true,
-      };
-    }
-
-    return {
-      phase: TaskPhase.IDLE,
-      text: idleText,
-      title: snapshot.closedLoopTitle || '点击启动该闭环模式',
-      disabled: false,
-      allowCancel: false,
-      action: currentAction,
-      buttonPhase: 'idle',
-    };
+    return ClosedLoopButtonVm.getClosedLoopContinueButtonViewState(snapshot, mode);
   }
 
   function getCopyHotkeyLoopButtonViewState(snapshot = {}) {
@@ -3083,10 +2985,10 @@
       return { ...base, phase: ButtonState.Phase.WAITING_ATTACHMENT };
     }
     if (taskPhase === TaskPhase.WAITING_SEND) {
-      if (base.text === '等待输入框') {
+      if (base.text === '等待输入框' || base.text === '取消发送（等待输入框）') {
         return { ...base, phase: ButtonState.Phase.WAITING_INPUT };
       }
-      if (base.text === '等待附件') {
+      if (base.text === '等待附件' || base.text === '取消发送（等待附件）') {
         return { ...base, phase: ButtonState.Phase.WAITING_ATTACHMENT };
       }
       return { ...base, phase: ButtonState.Phase.WAITING_SEND };
@@ -3129,6 +3031,30 @@
       ariaBusy: CANCELLABLE_TASK_PHASES.has(view.phase) || view.allowCancel === true,
     };
 
+    if (view.buttonGroup === CLOSED_LOOP_BUTTON_GROUP || view.forceClosedLoopStyle === true) {
+      if (
+        view.forceDanger === true
+        || view.allowCancel === true
+        || buttonPhase === 'danger'
+      ) {
+        return {
+          ...base,
+          phase: ButtonState.Phase.DANGER,
+          disabled: !!view.disabled,
+          allowCancel: !!view.allowCancel,
+          className: CLOSED_LOOP_RUNNING_CLASS_NAME,
+        };
+      }
+      return {
+        ...base,
+        phase: ButtonState.Phase.IDLE,
+        disabled: !!view.disabled,
+        allowCancel: false,
+        preserveBaseColorWhenDisabled: view.preserveBaseColorWhenDisabled === true,
+        className: CLOSED_LOOP_IDLE_CLASS_NAME,
+      };
+    }
+
     if (buttonPhase === 'success' || taskPhase === TaskPhase.SUCCESS) {
       return { ...base, phase: ButtonState.Phase.IDLE };
     }
@@ -3144,8 +3070,14 @@
     if (buttonPhase === 'disabled') {
       return { ...base, phase: ButtonState.Phase.DISABLED };
     }
-    if (buttonPhase === 'danger' && view.allowCancel !== true) {
-      return { ...base, phase: ButtonState.Phase.DANGER, permanentDanger: true };
+    if (view.forceDanger === true || buttonPhase === 'danger') {
+      return {
+        ...base,
+        phase: ButtonState.Phase.DANGER,
+        disabled: !!view.disabled,
+        allowCancel: !!view.allowCancel,
+        permanentDanger: view.allowCancel !== true,
+      };
     }
     if (buttonPhase === 'warning') {
       return { ...base, phase: ButtonState.Phase.IDLE };
@@ -3519,6 +3451,13 @@
     syncUploadButtonIndicatorClasses(button, resolvedView);
 
     const changed = ButtonState.setToolboxButtonState(button, options);
+    if (isClosedLoopActionName(canonicalAction) && options.className) {
+      applyClosedLoopButtonClassName(button, options.className);
+      logClosedLoopButtonStyleDecide(button, resolvedView, options, {
+        running: snapshot.closedLoopContinueRunning === true,
+        isOwner: isClosedLoopOwnerAction(canonicalAction, snapshot),
+      });
+    }
     button.title = String(
       resolvedView.title || resolvedView.text || button.title || '',
     ).trim();
@@ -3537,9 +3476,12 @@
     );
     logButtonActionState(button, resolvedView, reason);
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      const applyPhaseLabel = options.phase === ButtonState.Phase.DANGER
+        ? 'danger'
+        : (resolvedView.buttonPhase || resolvedView.phase || '-');
       ToolboxShell.appendLog(
         `[BUTTON_VIEW][APPLY] id=${button.id || '-'} action=${button.dataset.action || '-'} `
-        + `taskKey=${resolvedView.taskKey || '-'} phase=${resolvedView.buttonPhase || resolvedView.phase || '-'} `
+        + `taskKey=${resolvedView.taskKey || '-'} phase=${applyPhaseLabel} `
         + `text=${resolvedView.text || String(button.textContent || '').trim() || '-'}`,
       );
     }
@@ -3599,6 +3541,9 @@
     isCurrentClosedLoopOwnerButton,
     CLOSED_LOOP_BUTTON_ACTIONS,
     CLOSED_LOOP_BUTTON_IDS,
+    CLOSED_LOOP_IDLE_CLASS_NAME,
+    CLOSED_LOOP_RUNNING_CLASS_NAME,
+    applyClosedLoopButtonClassName,
     clearClosedLoopStopVisualClasses,
     mapViewStateToToolboxOptions,
     mapSendMessageViewStateToToolboxOptions,

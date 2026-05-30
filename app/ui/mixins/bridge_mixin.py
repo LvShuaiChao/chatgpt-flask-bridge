@@ -39,6 +39,7 @@ from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
 from app.utils.page_status import page_url_from
 from app.utils.trace_log import kv_line, make_send_trace_id
+from app.ui.bridge.message_router import resolve_inbound_route
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
@@ -1959,23 +1960,24 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
     def _handle_inbound_event(self, item):
         kind = item.get("kind", "?")
         payload = item.get("payload") or {}
-        if kind == "report_unknown":
+        route = resolve_inbound_route(kind)
+        if route == "report_unknown":
             self._handle_report_unknown_event(item, payload)
             return
-        if kind == "report_mismatch":
+        if route == "report_mismatch":
             self._handle_report_mismatch_event(item, payload)
             return
-        if kind in ("ack_mismatch", "report_ignored"):
+        if route in ("ack_mismatch", "report_ignored"):
             self._handle_ack_mismatch_or_ignored_event(item, payload, kind)
             return
-        if kind in ("open_url_success", "open_url_failed"):
+        if route in ("open_url_success", "open_url_failed"):
             self._handle_open_url_result_event(item, payload, kind)
             return
-        if kind == "close_page_requested":
+        if route == "close_page_requested":
             client_id = item.get("client_id") or "-"
             self._append_log(f"[关闭页面] 已向页面发送关闭请求 client_id={client_id}")
             return
-        if kind == "close_page_still_open":
+        if route == "close_page_still_open":
             page_url = (payload.get("url") or "")
             detail = payload.get("detail") or ""
             client_id = item.get("client_id") or "-"
@@ -1986,16 +1988,16 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
                 "页面仍在运行，浏览器可能拦截了 window.close()"
             )
             return
-        if kind == "control_done":
+        if route == "control_done":
             self._handle_control_done_event(item, payload)
             return
-        if kind in ("close_page_success", "close_page_failed", "command_failed"):
+        if route == "command_result":
             self._handle_command_result_event(item, payload, kind)
             return
-        if kind == "conversation_snapshot":
+        if route == "conversation_snapshot":
             self._handle_conversation_snapshot_inbound(item)
             return
-        if kind == "conversation_created":
+        if route == "conversation_created":
             self._handle_conversation_created_event(item, payload)
             return
         self._handle_bound_message_event(item, payload, kind)

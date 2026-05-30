@@ -110,7 +110,17 @@ const AutoQueueModule = (() => {
       if (typeof getDefaultTaskContinuePromptText === 'function') {
         return getDefaultTaskContinuePromptText();
       }
-      return '请继续完成上一个任务。';
+      if (typeof getDefaultBatchContinuePromptText === 'function') {
+        return getDefaultBatchContinuePromptText();
+      }
+      if (typeof appendDetailedCursorInstructionBlock === 'function') {
+        return appendDetailedCursorInstructionBlock('请继续完成当前任务。');
+      }
+      return [
+        '请继续完成当前任务。',
+        '',
+        '如果任务涉及代码修改、修复、重构、Bug 定位、UI 行为、状态同步、上传逻辑、闭环控制或日志排查，必须输出详细 Cursor / Claude Code 修改指令，列出文件路径、函数名、关键代码、日志要求和验证步骤。',
+      ].join('\n');
     }
 
     function normalizeListProfiles() {
@@ -3367,9 +3377,18 @@ const AutoQueueModule = (() => {
         typeof DEFAULT_SINGLE_QUESTION_STEP_TASK_PROMPT !== 'undefined' ? DEFAULT_SINGLE_QUESTION_STEP_TASK_PROMPT : '',
         'DEFAULT_SINGLE_QUESTION_STEP_PROMPT',
       );
+      const continuePromptFallback = typeof getDefaultBatchContinuePromptText === 'function'
+        ? getDefaultBatchContinuePromptText()
+        : (typeof appendDetailedCursorInstructionBlock === 'function'
+          ? appendDetailedCursorInstructionBlock('请继续完成当前任务。')
+          : [
+            '请继续完成当前任务。',
+            '',
+            '如果任务涉及代码修改、修复、重构、Bug 定位、UI 行为、状态同步、上传逻辑、闭环控制或日志排查，必须输出详细 Cursor / Claude Code 修改指令，列出文件路径、函数名、关键代码、日志要求和验证步骤。',
+          ].join('\n'));
       const continuePrompt = getSafeDefaultPrompt(
         typeof DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT !== 'undefined' ? DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT : '',
-        '请继续完成上一个任务，不要重复已经输出过的内容。',
+        continuePromptFallback,
         'DEFAULT_SINGLE_QUESTION_STEP_CONTINUE_PROMPT',
       );
 
@@ -4317,9 +4336,9 @@ const AutoQueueModule = (() => {
             闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
           </div>
           <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey">闭环-快捷键模式+每5轮上传</button>
-            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-closed-loop-mode="with_hotkey_every_round">闭环-快捷键模式+每一轮上传</button>
-            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-closed-loop-mode="without_hotkey">闭环-仅对话+每5轮上传</button>
+            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
+            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
           </div>
           <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
           <label class="cgpt-checkbox-line">
@@ -27943,7 +27962,7 @@ const AutoQueueModule = (() => {
         : templateText;
 
       taskProfileDefaultsEl.innerHTML = `
-        <div class="cgpt-hint cgpt-autoq-task-batch-hint">统一继续指令与默认终止信号将应用于本任务组内所有任务（除非任务单独覆盖）。</div>
+        <div class="cgpt-hint cgpt-autoq-task-batch-hint">统一继续指令与默认终止信号将应用于本任务组内所有任务（除非任务单独覆盖）。默认继续指令已包含详细 Cursor / Claude Code 修改要求。</div>
         <div class="cgpt-autoq-task-profile-defaults-grid">
           <div class="cgpt-kv cgpt-autoq-task-editor-full">
             <label for="cgpt-autoq-profile-default-continue">统一继续指令（模板，使用 {{DONE_SIGNAL}} 占位符）</label>
@@ -38093,13 +38112,13 @@ const AutoQueueModule = (() => {
     }
 
     function getContinueUntilDonePromptText() {
-      return [
+      const prompt = [
         '请继续完成上一个任务。',
         '',
         '你现在必须和“最开始的任务要求”进行对照判断。',
         '',
         '停止规则：',
-        '1. 只有当你能明确确认最开始的任务目标已经完整完成，所有要求都已经覆盖，没有剩余内容、遗漏检查项、遗漏代码、遗漏结论、遗漏 Cursor 指令时，才允许停止。',
+        '1. 只有当你能明确确认最开始的任务目标已经完整完成，所有要求都已经覆盖，没有剩余内容、遗漏检查项、遗漏代码、遗漏结论、遗漏 Cursor / Claude Code 指令时，才允许停止。',
         '2. 如果已经完整完成，只能回复下面这一行，不能有任何其他文字：',
         '{{DONE_SIGNAL}}',
         '',
@@ -38111,8 +38130,17 @@ const AutoQueueModule = (() => {
         '5. 不要扩展到新任务。',
         '6. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。',
         '',
+        '如果任务涉及代码修改、修复、重构、Bug 定位、UI 行为、状态同步、上传逻辑、闭环控制、Prompt 修改或日志排查，必须继续输出详细 Cursor / Claude Code 修改指令。',
+        '',
         '请直接继续输出剩余内容。',
       ].join('\n');
+      const rendered = typeof appendDetailedCursorInstructionBlock === 'function'
+        ? appendDetailedCursorInstructionBlock(prompt)
+        : prompt;
+      if (typeof logPromptDetailCursorBlock === 'function') {
+        logPromptDetailCursorBlock('getContinueUntilDonePromptText', rendered);
+      }
+      return rendered;
     }
 
     function toggleContinueLoopFromUpload(source = 'upload-button') {
@@ -38186,9 +38214,15 @@ const AutoQueueModule = (() => {
         readPanelConfig();
       }
 
-      const promptText = typeof renderContinuePromptTemplate === 'function'
+      let promptText = typeof renderContinuePromptTemplate === 'function'
         ? renderContinuePromptTemplate(getContinueUntilDonePromptText(), TASK_DONE_SIGNAL)
         : getContinueUntilDonePromptText().replaceAll('{{DONE_SIGNAL}}', TASK_DONE_SIGNAL);
+      if (typeof appendDetailedCursorInstructionBlock === 'function') {
+        promptText = appendDetailedCursorInstructionBlock(promptText);
+      }
+      if (typeof logPromptDetailCursorBlock === 'function') {
+        logPromptDetailCursorBlock('startContinueUntilDoneFromUpload', promptText);
+      }
 
       config.promptMode = 'continue';
       config.continuePromptsText = promptText;
@@ -39095,6 +39129,19 @@ const AutoQueueModule = (() => {
           refreshPromptTextareaForMode('continue');
           log('已恢复默认继续指令');
           ToolboxShell.appendLog('[AUTOQ][continue-prompt-reset-defaults]');
+          const resetPreview = typeof getDefaultContinuePromptTextForUi === 'function'
+            ? getDefaultContinuePromptTextForUi()
+            : '';
+          if (typeof logPromptDetailCursorBlock === 'function') {
+            logPromptDetailCursorBlock('autoq-continue-prompt-reset', resetPreview);
+          } else if (resetPreview) {
+            const hasDetailed = typeof hasDetailedCursorInstructionBlock === 'function'
+              ? hasDetailedCursorInstructionBlock(resetPreview)
+              : resetPreview.includes('Cursor / Claude Code 修改指令');
+            ToolboxShell.appendLog(
+              `[PROMPT][DETAIL_CURSOR_BLOCK] source=autoq-continue-prompt-reset hasDetailed=${hasDetailed ? 1 : 0} len=${resetPreview.length}`,
+            );
+          }
         });
       }
 
@@ -39309,9 +39356,9 @@ const AutoQueueModule = (() => {
               闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
             </div>
             <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey">闭环-快捷键模式+每5轮上传</button>
-              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-closed-loop-mode="with_hotkey_every_round">闭环-快捷键模式+每一轮上传</button>
-              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-closed-loop-mode="without_hotkey">闭环-仅对话+每5轮上传</button>
+              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
+              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
             </div>
             <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
             <label class="cgpt-checkbox-line">

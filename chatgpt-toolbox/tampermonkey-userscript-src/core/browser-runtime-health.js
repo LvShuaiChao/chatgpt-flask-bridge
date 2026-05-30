@@ -105,9 +105,76 @@ const BrowserRuntimeHealth = (() => {
     }
   }
 
+  function hasActiveUploadSendOrAutoQueueTask() {
+    try {
+      if (typeof UploadModule !== 'undefined') {
+        if (typeof UploadModule.isSendMessageTaskRunning === 'function' && UploadModule.isSendMessageTaskRunning()) {
+          return true;
+        }
+        if (typeof UploadModule.isSendPipelineBusy === 'function' && UploadModule.isSendPipelineBusy()) {
+          return true;
+        }
+        const uploadState = typeof UploadModule.getUploadTaskState === 'function'
+          ? UploadModule.getUploadTaskState()
+          : null;
+        const uploadPhase = String(uploadState && uploadState.phase ? uploadState.phase : '').trim();
+        if (uploadPhase === 'uploading' || uploadPhase === 'cancelling') {
+          return true;
+        }
+      }
+      if (typeof AutoQueueModule !== 'undefined' && typeof AutoQueueModule.getState === 'function') {
+        const autoState = AutoQueueModule.getState() || {};
+        const autoPhase = String(autoState.phase || '').trim();
+        if (autoPhase && autoPhase !== 'idle' && autoPhase !== 'stopped') {
+          return true;
+        }
+      }
+    } catch (error) {
+      console.error('[BROWSER_RUNTIME][ACTIVE_TASK_CHECK_FAILED]', error);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BROWSER_RUNTIME][ACTIVE_TASK_CHECK_FAILED] type=${error && error.name ? error.name : 'Error'} error=${error && error.message ? error.message : String(error)}`,
+        );
+      }
+    }
+    return false;
+  }
+
+  function handleThrottleRecovered(reason = '-') {
+    const safeReason = String(reason || '-').trim() || '-';
+    const rt = getRuntimeState(safeReason);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+      ToolboxShell.appendLog(
+        `[BROWSER_RUNTIME][THROTTLE_RECOVERED] reason=${safeReason} hidden=${rt.hidden ? 1 : 0} visibility=${rt.visibilityState} focus=${rt.hasFocus ? 1 : 0}`,
+      );
+    }
+    if (hasActiveUploadSendOrAutoQueueTask()) {
+      return;
+    }
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
+      ToolboxShell.setStatus('页面已恢复，可继续发送', 'ready', {
+        owner: 'system',
+      });
+      window.setTimeout(() => {
+        if (hasActiveUploadSendOrAutoQueueTask()) {
+          return;
+        }
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
+          ToolboxShell.setStatus('', 'idle', {
+            owner: 'system',
+          });
+        }
+      }, 1500);
+    }
+  }
+
   function onVisibilityChange() {
     appendRuntimeLog('visibilitychange');
     if (document.visibilityState === 'visible') {
+      if (state.throttled) {
+        state.throttled = false;
+        handleThrottleRecovered('visibility-visible');
+      }
       void forceForegroundCatchUp('visibility-visible');
     } else if (state.throttled || document.hidden) {
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.setStatus) {
@@ -120,11 +187,19 @@ const BrowserRuntimeHealth = (() => {
 
   function onWindowFocus() {
     appendRuntimeLog('window-focus');
+    if (!document.hidden && state.throttled) {
+      state.throttled = false;
+      handleThrottleRecovered('window-focus');
+    }
     void forceForegroundCatchUp('window-focus');
   }
 
   function onPageShow() {
     appendRuntimeLog('pageshow');
+    if (!document.hidden && state.throttled) {
+      state.throttled = false;
+      handleThrottleRecovered('pageshow');
+    }
     void forceForegroundCatchUp('pageshow');
   }
 
@@ -146,6 +221,7 @@ const BrowserRuntimeHealth = (() => {
       const nextThrottled = document.hidden || drift > 3000;
 
       if (nextThrottled !== state.throttled) {
+        const wasThrottled = state.throttled;
         state.throttled = nextThrottled;
         appendRuntimeLog(nextThrottled ? 'throttled-on' : 'throttled-off');
 
@@ -155,7 +231,12 @@ const BrowserRuntimeHealth = (() => {
               owner: 'system',
             });
           }
+        } else if (wasThrottled) {
+          handleThrottleRecovered('throttled-off');
         }
+      } else if (!nextThrottled && !document.hidden && state.throttled) {
+        state.throttled = false;
+        handleThrottleRecovered('interval-visible-recover');
       }
     }, 1000);
 
@@ -273,7 +354,12 @@ async function executeForegroundResume(reason = '-') {
         UploadModule.refresh();
       }
       if (typeof UploadModule.resumeAfterForeground === 'function') {
-        await UploadModule.resumeAfterForeground(`foreground-catch-up:${catchReason}`);
+        const preserveActiveSend = typeof UploadModule.shouldPreserveActiveSendTaskOnForeground === 'function'
+          && UploadModule.shouldPreserveActiveSendTaskOnForeground(`foreground-catch-up:${catchReason}`);
+        await UploadModule.resumeAfterForeground(
+          `foreground-catch-up:${catchReason}`,
+          { preserveActiveSend: !!preserveActiveSend },
+        );
       }
     }
 

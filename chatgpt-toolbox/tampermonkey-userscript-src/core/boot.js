@@ -463,6 +463,13 @@ async function initToolbox() {
     TitlePrefixModule.start();
   });
 
+  await safeInitStep('ResponseDoneNotifyModule.init', () => {
+    if (typeof ResponseDoneNotifyModule !== 'undefined'
+      && typeof ResponseDoneNotifyModule.init === 'function') {
+      ResponseDoneNotifyModule.init();
+    }
+  });
+
   await safeInitStep('ReplyDoneTitleFlashWatcher.start', () => {
     ReplyDoneTitleFlashWatcher.start();
   });

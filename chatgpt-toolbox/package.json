@@ -3,13 +3,20 @@
   "private": true,
   "description": "Tampermonkey userscript build for ChatGPT toolbox",
   "scripts": {
-    "build": "node scripts/check-encoding.mjs && node build.userjs.mjs && node --check dist/client.user.js",
+    "build": "node scripts/check-encoding.mjs && node scripts/check-toolbox-header-status-no-free-vars.mjs && node build.userjs.mjs && node --check dist/client.user.js && node scripts/check-dist-no-header-free-state.mjs",
     "watch": "node scripts/check-encoding.mjs && node build.userjs.mjs --watch",
     "check:encoding": "node scripts/check-encoding.mjs",
     "check:dist": "node --check dist/client.user.js",
+    "check:upload-persist-db": "node scripts/check-upload-persist-db-no-free-vars.mjs",
+    "check:upload-file-source": "node scripts/check-upload-file-source-no-free-vars.mjs",
+    "check:upload-queue-store": "node scripts/check-upload-queue-store-no-free-vars.mjs",
+    "check:toolbox-header-status": "node scripts/check-toolbox-header-status-no-free-vars.mjs",
+    "check:dist-header-state": "node scripts/check-dist-no-header-free-state.mjs",
+    "check:toolbox-shell-state": "node scripts/check-toolbox-shell-no-free-state.mjs",
     "rebuild": "npm run build"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.3"
   }
 }

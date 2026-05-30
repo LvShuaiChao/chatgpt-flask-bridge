@@ -50,6 +50,14 @@ from app.server.external_api import (
 from app.server.state import POLL_SUMMARY_INTERVAL_SEC
 
 from app.server.control_commands import STRICT_TARGET_CONTROL_COMMANDS
+from app.server.message_queue_core.models import (
+    set_message_status as _core_set_message_status,
+    sync_message_status_fields as _core_sync_message_status_fields,
+)
+from app.server.message_queue_core.status import (
+    build_bridge_status_summary as _core_build_bridge_status_summary,
+    outbound_queue_stats as _core_outbound_queue_stats,
+)
 
 
 def _is_invalid_assistant_reply_text(text):
@@ -64,57 +72,22 @@ def _bridge_message_id_matches(msg, message_id):
 
 
 def _sync_message_status_fields(msg, status):
-    if not isinstance(msg, dict):
-        return
-    msg["message_status"] = status
+    _core_sync_message_status_fields(msg, status)
 
 
 def _set_message_status(msg, status, *, error_detail=None):
-    if not isinstance(msg, dict):
-        return
-    _sync_message_status_fields(msg, status)
-    msg["finalized_at"] = _now()
-    if error_detail is not None:
-        msg["error_detail"] = error_detail
+    _core_set_message_status(msg, status, error_detail=error_detail, now_fn=_now)
 
 
 def _build_bridge_status_summary(pages):
     """从 pages 快照推导在线统计与焦点页（无单客户端全局字段）。"""
-    online_pages = [p for p in (pages or []) if isinstance(p, dict) and p.get("online")]
-    focused = None
     with st._state_lock:
         last_focused = (
             dict(st._last_focused_tm_page)
             if isinstance(st._last_focused_tm_page, dict)
             else None
         )
-    if last_focused:
-        focused = last_focused
-    else:
-        focus_candidates = [
-            p for p in online_pages if p.get("has_focus")
-        ]
-        if focus_candidates:
-            focus_candidates.sort(
-                key=lambda p: float(p.get("last_focus_at") or p.get("last_seen") or 0),
-                reverse=True,
-            )
-            focused = {
-                k: focus_candidates[0].get(k)
-                for k in (
-                    "client_id",
-                    "page_instance_id",
-                    "url",
-                    "conversation_id",
-                    "page_type",
-                    "page_no",
-                )
-            }
-    return {
-        "online_count": len(online_pages),
-        "focused_page": focused,
-        "bound_page": None,
-    }
+    return _core_build_bridge_status_summary(pages, last_focused_tm_page=last_focused)
 
 
 def get_bridge_status():
@@ -1236,22 +1209,14 @@ def _poll_response(msg, retry):
 
 
 def _outbound_queue_stats(client_id="", conversation_id=""):
-    client_id = (client_id or "").strip()
-    conversation_id = (conversation_id or "").strip()
-    pending_total = 0
-    pending_for_page = 0
-    pending_for_conversation = 0
     with st._state_lock:
-        for msg in st._outbound_queue:
-            if msg.get("type") == "command":
-                continue
-            pending_total += 1
-            if client_id and _message_matches_client(msg, client_id):
-                pending_for_page += 1
-            msg_conv = (msg.get("conversation_id") or "").strip()
-            if conversation_id and msg_conv == conversation_id:
-                pending_for_conversation += 1
-    return pending_total, pending_for_page, pending_for_conversation
+        queue_snapshot = list(st._outbound_queue)
+    return _core_outbound_queue_stats(
+        queue_snapshot,
+        client_id=client_id,
+        conversation_id=conversation_id,
+        message_matches_client=_message_matches_client,
+    )
 
 
 def _poll_minimal_idle_response(body=None):

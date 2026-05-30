@@ -180,6 +180,14 @@
     '等待回复',
     '取消中',
     '发送失败',
+    '取消发送',
+    '取消发送（等待输入框）',
+    '取消发送（写入中）',
+    '取消发送（等待附件）',
+    '取消发送（准备发送）',
+    '取消发送（点击中）',
+    '停止回答',
+    '停止中',
   ]);
 
   const TASK_PHASE_TO_BUTTON_PHASE = Object.freeze({
@@ -743,9 +751,16 @@
     } else {
       clearButtonStateColorClasses(button);
       if (!isSendBtn) {
-        button.classList.toggle('cgpt-btn-busy', allowBusyClass && !usePermanentDanger);
-        if (usePermanentDanger) {
+        const useCancellableDanger = phase === ButtonPhase.DANGER && allowCancel === true;
+        button.classList.toggle(
+          'cgpt-btn-busy',
+          allowBusyClass && !usePermanentDanger && !useCancellableDanger,
+        );
+        if (usePermanentDanger || useCancellableDanger) {
           button.classList.add('cgpt-btn-danger');
+        }
+        if (useCancellableDanger) {
+          button.classList.add('cgpt-btn-stop', 'cgpt-btn-waiting-danger', 'cgpt-action-running');
         }
       }
     }

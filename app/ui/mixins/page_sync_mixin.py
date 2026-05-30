@@ -7,8 +7,11 @@ import re
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple
+
+from app.ui.page_sync.render import format_sync_target_status_text
+from app.ui.page_sync.page_snapshot import normalize_conversation_snapshot_payload
+from app.ui.page_sync.state import SyncPlan
 
 from app.constants import USER_SEND_PENDING_STATUSES
 from app.utils.page_command import evaluate_sync_poll_freshness, is_page_polling_active, resolve_page_command_target
@@ -29,49 +32,8 @@ from app.utils.page_status import (
     page_url_from,
     read_snapshot_identity,
 )
-from app.utils.page_identity import PageIdentity
 from app.utils.trace_log import kv_line, make_sync_trace_id
 from PyQt5.QtCore import QTimer
-
-
-@dataclass
-class SyncPlan:
-    """一次 sync_conversation 的决策与入队上下文。"""
-
-    session: Any
-    session_id: str
-    request_reason: str = "manual_button"
-    delay_ms: int = 0
-    allow_open_url: bool = False
-    strict_bound_identity: bool = True
-    trace_id: str = ""
-    request_id: str = ""
-    allowed: bool = False
-    target: Dict[str, Any] = field(default_factory=dict)
-    target_source: str = ""
-    block_reason: str = ""
-    mode: str = "merge"
-    max_messages: int = 10
-
-    @property
-    def identity(self) -> PageIdentity:
-        return PageIdentity.from_mapping(self.target)
-
-    @property
-    def client_id(self) -> str:
-        return self.identity.client_id
-
-    @property
-    def page_instance_id(self) -> str:
-        return self.identity.page_instance_id
-
-    @property
-    def conversation_id(self) -> str:
-        return self.identity.conversation_id
-
-    @property
-    def url(self) -> str:
-        return self.identity.url
 
 
 class PageSyncMixin:
@@ -126,72 +88,22 @@ class PageSyncMixin:
         }
 
     def _format_sync_target_status_text(self, target, profile=None):
-        if hasattr(self, "_is_ui_verbose_status_enabled") and not self._is_ui_verbose_status_enabled():
-            sync_text, _chip = self._format_compact_sync_chip(target, profile)
-            send_text, _send_chip = self._format_compact_send_chip(target, profile)
-            return f"{sync_text}｜{send_text}"
-
-        online = bool(
-            target.get("online")
-            if target.get("online") is not None
-            else (profile or {}).get("online")
-        )
-        prebound_home = bool(
-            target.get("prebound_home")
-            if target.get("prebound_home") is not None
-            else (profile or {}).get("prebound_home")
-        )
-        conversation_syncable = bool(
-            target.get("conversation_syncable")
-            if target.get("conversation_syncable") is not None
-            else (profile or {}).get("conversation_syncable")
-        )
-        if prebound_home and online:
-            return "已绑定首页｜等待进入对话｜不可同步对话"
-        if not online:
-            reason = (
-                target.get("reason_code")
-                or target.get("reason")
-                or (profile or {}).get("reason_code")
-                or (profile or {}).get("reason")
-                or ""
-            ).strip()
-            if reason in ("bound_page_offline", "offline", "no_online_page"):
-                return "同步：不可同步（离线）"
-            return "同步：不可同步"
-        if online and not conversation_syncable:
-            return "已绑定在线｜等待进入对话页｜不可同步对话"
+        verbose = True
+        if hasattr(self, "_is_ui_verbose_status_enabled"):
+            verbose = self._is_ui_verbose_status_enabled()
         queue_size = 0
         if hasattr(self, "_current_session_queue_size"):
             queue_size = int(self._current_session_queue_size() or 0)
-        prof = profile or {}
-
-        def _field(key, default=None):
-            if target.get(key) is not None:
-                return target.get(key)
-            if prof.get(key) is not None:
-                return prof.get(key)
-            return default
-
-        send_now = bool(_field("send_now_available", False))
-        send_queueable = bool(_field("send_queueable", False))
-        send_decision = (_field("send_decision") or "").strip()
-        send_requestable = (_field("send_decision", "blocked") in ("allowed", "queued"))
-        is_responding = bool(_field("is_responding", False))
-        sync_line = "同步：可同步"
-        if send_now:
-            return f"{sync_line}｜发送：可发送"
-        if send_queueable or send_decision == "queued":
-            return f"{sync_line}｜发送：可排队"
-        if is_responding:
-            return f"{sync_line}｜发送：等待回复"
-        if queue_size > 0:
-            return f"{sync_line}｜发送：等待队列"
-        if not send_requestable and not send_now and not send_queueable:
-            return f"{sync_line}｜发送：不可发送"
-        if send_requestable:
-            return f"{sync_line}｜发送：等待注入后发送"
-        return f"{sync_line}｜发送：不可发送"
+        compact_sync = getattr(self, "_format_compact_sync_chip", None)
+        compact_send = getattr(self, "_format_compact_send_chip", None)
+        return format_sync_target_status_text(
+            target,
+            profile,
+            verbose=verbose,
+            compact_sync_chip=compact_sync if callable(compact_sync) else None,
+            compact_send_chip=compact_send if callable(compact_send) else None,
+            queue_size=queue_size,
+        )
 
     def _update_sync_target_display(self, snapshot=None):
         """轻量展示：绑定页快照，不调用 resolve_sync_decision / resolve_page_action。"""
@@ -572,93 +484,9 @@ class PageSyncMixin:
         return True, ""
 
     def _normalize_conversation_snapshot_payload(self, payload, item=None, pending_sync=None):
-        payload = dict(payload or {})
-        item = item or {}
-        pending_sync = pending_sync or {}
-        page_meta = payload.get("page") if isinstance(payload.get("page"), dict) else {}
-        for key in (
-            "session_id",
-            "conversation_id",
-            "request_id",
-            "client_id",
-            "page_instance_id",
-            "url",
-            "page_no",
-            "page_display_id",
-        ):
-            if not str(payload.get(key) or "").strip():
-                alt = (
-                    item.get(key)
-                    or pending_sync.get(key)
-                    or page_meta.get(key)
-                    or ""
-                )
-                if alt:
-                    payload[key] = alt
-        if not (payload.get("client_id") or "").strip():
-            payload["client_id"] = (item.get("client_id") or "").strip()
-        if not (payload.get("conversation_id") or "").strip():
-            conv = parse_conversation_id(
-                page_url_from(payload) or (payload.get("url") or "")
-            )
-            if conv:
-                payload["conversation_id"] = conv
-        snapshot_url = (payload.get("url") or "").strip()
-        if snapshot_url:
-            payload["url"] = snapshot_url
-
-        stats = payload.get("stats")
-        if not isinstance(stats, dict):
-            stats = {}
-
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            messages = []
-
-        if not stats:
-            user_count = 0
-            assistant_count = 0
-            total_chars = 0
-
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                role = str(msg.get("role") or "").strip().lower()
-                text = str(msg.get("text") or msg.get("content") or "").strip()
-                char_count = len("".join(text.split()))
-                total_chars += char_count
-
-                if role == "user":
-                    user_count += 1
-                elif role == "assistant":
-                    assistant_count += 1
-
-            stats = {
-                "total_count": len(messages),
-                "user_count": user_count,
-                "assistant_count": assistant_count,
-                "round_count": (
-                    min(user_count, assistant_count)
-                    if user_count and assistant_count
-                    else (len(messages) + 1) // 2
-                ),
-                "total_chars": total_chars,
-                "dom_estimated_round_count": int(
-                    payload.get("dom_estimated_round_count") or 0
-                ),
-            }
-
-        payload["stats"] = stats
-        payload["message_count"] = int(stats.get("total_count") or len(messages))
-        payload["user_count"] = int(stats.get("user_count") or 0)
-        payload["assistant_count"] = int(stats.get("assistant_count") or 0)
-        payload["round_count"] = int(stats.get("round_count") or 0)
-        payload["dom_estimated_round_count"] = int(
-            stats.get("dom_estimated_round_count")
-            or payload.get("dom_estimated_round_count")
-            or 0
+        return normalize_conversation_snapshot_payload(
+            payload, item=item, pending_sync=pending_sync
         )
-        return payload
 
     def _handle_conversation_snapshot_inbound(self, item):
         """兼容入口：bridge 入站仍调用此名。"""

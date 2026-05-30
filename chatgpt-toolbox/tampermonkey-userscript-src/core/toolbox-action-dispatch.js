@@ -100,7 +100,35 @@ const ToolboxActionDispatch = (() => {
     const source = String(ctx.source || 'unknown').trim() || 'unknown';
     const button = ctx.button || null;
     const event = ctx.event || null;
-    const resolved = resolveCanonicalAction(action, ctx);
+    let dispatchAction = action;
+
+    if (button instanceof HTMLElement) {
+      const runtimeAction = String(button.dataset.cgptRuntimeAction || '').trim();
+      const baseAction = String(
+        button.dataset.cgptBaseAction || button.dataset.action || '',
+      ).trim();
+      if (runtimeAction || baseAction) {
+        appendDispatchLog(
+          `[TOOLBOX_ACTION][RUNTIME_ACTION] base=${baseAction || '-'} runtime=${runtimeAction || '-'} id=${button.id || '-'}`,
+        );
+      }
+      if (runtimeAction) {
+        dispatchAction = runtimeAction;
+        if (
+          runtimeAction === 'cancel'
+          && (
+            baseAction === 'copy-hotkey-once'
+            || baseAction === 'copy-and-hotkey'
+          )
+        ) {
+          dispatchAction = 'copy-and-hotkey';
+        }
+      } else if (baseAction) {
+        dispatchAction = baseAction;
+      }
+    }
+
+    const resolved = resolveCanonicalAction(dispatchAction, ctx);
 
     appendDispatchLog(
       `[ACTION_DISPATCH][HIT] action=${resolved.canonical || '-'} handler=${resolved.handlerAction || '-'} raw=${resolved.raw || '-'} source=${source} id=${button && button.id ? button.id : '-'}`,

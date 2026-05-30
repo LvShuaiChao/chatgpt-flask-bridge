@@ -16,6 +16,226 @@
     const UPLOAD_DB_EMPTY_GROUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     const UPLOAD_DB_FAILED_ROW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+    function formatUploadErrorStack(error) {
+      if (!error || !error.stack) {
+        return '-';
+      }
+      return String(error.stack).split('\n').slice(0, 3).join(' | ');
+    }
+
+    function safeFormatFileSize(size, source = '') {
+      const formatter = (
+        (typeof globalThis !== 'undefined' && typeof globalThis.formatFileSize === 'function' && globalThis.formatFileSize)
+        || (
+          typeof globalThis !== 'undefined'
+          && globalThis.ToolboxUtils
+          && typeof globalThis.ToolboxUtils.formatFileSize === 'function'
+            ? globalThis.ToolboxUtils.formatFileSize
+            : null
+        )
+        || (typeof formatBytes === 'function' ? formatBytes : null)
+      );
+      if (formatter) {
+        return formatter(size);
+      }
+
+      const bytes = Number(size);
+      if (!Number.isFinite(bytes) || bytes < 0) {
+        return '0 B';
+      }
+      if (bytes < 1024) {
+        return `${Math.round(bytes)} B`;
+      }
+      const kb = bytes / 1024;
+      if (kb < 1024) {
+        return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
+      }
+      const mb = kb / 1024;
+      const text = `${mb.toFixed(1)} MB`;
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][FORMAT_FILE_SIZE_FALLBACK] source=${source || '-'} size=${size} text=${text}`,
+        );
+      }
+      return text;
+    }
+
+    function safeDownloadJson(filename, data, source = '') {
+      const downloader = (
+        (typeof globalThis !== 'undefined' && typeof globalThis.downloadJson === 'function' && globalThis.downloadJson)
+        || (
+          typeof globalThis !== 'undefined'
+          && globalThis.ToolboxUtils
+          && typeof globalThis.ToolboxUtils.downloadJson === 'function'
+            ? globalThis.ToolboxUtils.downloadJson
+            : null
+        )
+        || (typeof downloadJsonFile === 'function' ? downloadJsonFile : null)
+      );
+      if (downloader) {
+        return downloader(filename, data);
+      }
+
+      const safeFilename = String(filename || 'download.json').trim() || 'download.json';
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][DOWNLOAD_JSON_FALLBACK] source=${source || '-'} filename=${safeFilename}`,
+        );
+      }
+      const jsonText = JSON.stringify(data == null ? {} : data, null, 2);
+      const blob = new Blob([jsonText], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = safeFilename.endsWith('.json') ? safeFilename : `${safeFilename}.json`;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (error) {
+        console.error('[UPLOAD][DOWNLOAD_JSON_FALLBACK_FAILED]', error);
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLog === 'function'
+        ) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][DOWNLOAD_JSON_FALLBACK_FAILED] source=${source || '-'} filename=${safeFilename} error=${error && error.message ? error.message : String(error)} stack=${formatUploadErrorStack(error)}`,
+          );
+        }
+        throw error;
+      } finally {
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+        }, 1000);
+      }
+    }
+
+    function safeReadJsonFile(event, options = {}, source = '') {
+      const reader = (
+        (typeof globalThis !== 'undefined' && typeof globalThis.readJsonFile === 'function' && globalThis.readJsonFile)
+        || (
+          typeof globalThis !== 'undefined'
+          && globalThis.ToolboxUtils
+          && typeof globalThis.ToolboxUtils.readJsonFile === 'function'
+            ? globalThis.ToolboxUtils.readJsonFile
+            : null
+        )
+        || (typeof readJsonFileFromInput === 'function' ? readJsonFileFromInput : null)
+      );
+      if (reader) {
+        return reader(event, options);
+      }
+
+      const tag = options.tag || `[UPLOAD][READ_JSON_FALLBACK] source=${source || '-'}`;
+      const file = event && event.target && event.target.files
+        ? event.target.files[0]
+        : null;
+
+      if (!file) {
+        return Promise.resolve(null);
+      }
+
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
+        ToolboxShell.appendLog(tag);
+      }
+
+      return new Promise((resolve, reject) => {
+        const fileReader = new FileReader();
+
+        fileReader.onload = () => {
+          try {
+            const raw = String(fileReader.result || '');
+            resolve(JSON.parse(raw));
+          } catch (error) {
+            reject(error);
+          } finally {
+            if (event.target) {
+              event.target.value = '';
+            }
+          }
+        };
+
+        fileReader.onerror = () => {
+          const error = fileReader.error || new Error('FileReader read failed');
+          if (event.target) {
+            event.target.value = '';
+          }
+          reject(error);
+        };
+
+        fileReader.readAsText(file, options.encoding || 'utf-8');
+      }).catch((error) => {
+        console.error('[UPLOAD][READ_JSON_FALLBACK_FAILED]', error);
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLog === 'function'
+        ) {
+          ToolboxShell.appendLog(
+            `[UPLOAD][READ_JSON_FALLBACK_FAILED] source=${source || '-'} file=${file.name || '-'} error=${error && error.message ? error.message : String(error)} stack=${formatUploadErrorStack(error)}`,
+          );
+        }
+        throw error;
+      });
+    }
+
+    function auditUploadModuleDependencies(source = '') {
+      const missing = [];
+      const hasFormatFileSize = (
+        (typeof globalThis !== 'undefined' && typeof globalThis.formatFileSize === 'function')
+        || (
+          typeof globalThis !== 'undefined'
+          && globalThis.ToolboxUtils
+          && typeof globalThis.ToolboxUtils.formatFileSize === 'function'
+        )
+        || typeof safeFormatFileSize === 'function'
+      );
+      const hasDownloadJson = (
+        (typeof globalThis !== 'undefined' && typeof globalThis.downloadJson === 'function')
+        || (
+          typeof globalThis !== 'undefined'
+          && globalThis.ToolboxUtils
+          && typeof globalThis.ToolboxUtils.downloadJson === 'function'
+        )
+        || typeof safeDownloadJson === 'function'
+      );
+      if (!hasFormatFileSize) {
+        missing.push('formatFileSize');
+      }
+      if (!hasDownloadJson) {
+        missing.push('downloadJson');
+      }
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_MODULE][DEPENDENCY_AUDIT] source=${source || '-'} missing=${missing.join('|') || '-'} hasSafeFormat=${typeof safeFormatFileSize === 'function' ? 1 : 0} hasSafeDownload=${typeof safeDownloadJson === 'function' ? 1 : 0}`,
+        );
+      }
+      return {
+        ok: missing.length === 0 || (typeof safeFormatFileSize === 'function' && typeof safeDownloadJson === 'function'),
+        missing,
+      };
+    }
+
     const SEND_STABLE_RETRY_LIMIT = 30;
     const SEND_STABLE_RETRY_INTERVAL_MS = 300;
     const SEND_WAIT_TIMEOUT_MS = 60 * 1000;
@@ -81,6 +301,8 @@
       uploadSendFailureHintAt: 0,
       uploadSendSuccessHint: '',
       uploadSendSuccessHintAt: 0,
+      lastSendTriggerAt: 0,
+      lastSendTriggerSource: '',
       messageSending: false,
       messageSendCancelRequested: false,
       uploadTask: {
@@ -205,7 +427,6 @@
     let persistQueueThrottleTimer = 0;
     let uploadPersistLightTimer = 0;
     let uploadGroupCountLightTimer = 0;
-    let lastUploadListRenderExecutedAt = 0;
     const UPLOAD_LIST_RENDER_LIMIT = 50;
     const UPLOAD_LIST_RENDER_MIN_INTERVAL_MS = 800;
     let persistQueuePendingStage = '';
@@ -221,6 +442,466 @@
     let lastUploadSendPanelFailReason = '';
     let lastSharedSendOutcome = null;
     let uploadSendTaskStartedAt = 0;
+
+    const SEND_MESSAGE_PHASES = Object.freeze({
+      IDLE: 'idle',
+      WAITING_COMPOSER: 'waiting_composer',
+      WRITING_TEXT: 'writing_text',
+      WAITING_ATTACHMENT: 'waiting_attachment',
+      READY_TO_CLICK: 'ready_to_click',
+      CLICKING_SEND: 'clicking_send',
+      SENT_WAITING_RESPONSE: 'sent_waiting_response',
+      STOPPING_RESPONSE: 'stopping_response',
+      CANCELLED: 'cancelled',
+      FAILED: 'failed',
+    });
+
+    const UploadPersistedKind = Object.freeze({
+      METADATA_ONLY: 'metadata_only',
+      FILE_SYSTEM_HANDLE: 'file_system_handle',
+      FLASK_REF: 'flask_ref',
+    });
+
+    const UploadRestoreState = Object.freeze({
+      READY: 'ready',
+      NEEDS_REBIND: 'needs_rebind',
+      PERMISSION_REQUIRED: 'permission_required',
+      MISSING: 'missing',
+      ERROR: 'error',
+    });
+
+    const sendMessageTaskState = {
+      running: false,
+      phase: SEND_MESSAGE_PHASES.IDLE,
+      runId: '',
+      abortController: null,
+      startedAtMs: 0,
+      lastReason: '',
+      hasClickedNativeSend: false,
+    };
+
+    function shouldUseSendMessageTaskState(source = '') {
+      return isManualSendMessageSource(source);
+    }
+
+    function setSendMessageTaskPhase(phase, reason = '') {
+      if (!sendMessageTaskState.running) {
+        return;
+      }
+      const nextPhase = String(phase || SEND_MESSAGE_PHASES.IDLE).trim() || SEND_MESSAGE_PHASES.IDLE;
+      sendMessageTaskState.phase = nextPhase;
+      if (reason) {
+        sendMessageTaskState.lastReason = String(reason).trim();
+      }
+      ToolboxShell.appendLog(
+        `[SEND_TASK][PHASE] runId=${sendMessageTaskState.runId || '-'} phase=${nextPhase} reason=${reason || '-'}`,
+      );
+      scheduleRenderUpload(`send-task-phase:${nextPhase}`);
+    }
+
+    function getSendMessageButtonText() {
+      if (!sendMessageTaskState.running) {
+        return '发送消息';
+      }
+      switch (sendMessageTaskState.phase) {
+        case SEND_MESSAGE_PHASES.WAITING_COMPOSER:
+          return '取消发送（等待输入框）';
+        case SEND_MESSAGE_PHASES.WRITING_TEXT:
+          return '取消发送（写入中）';
+        case SEND_MESSAGE_PHASES.WAITING_ATTACHMENT:
+          return '取消发送（等待附件）';
+        case SEND_MESSAGE_PHASES.READY_TO_CLICK:
+          return '取消发送（准备发送）';
+        case SEND_MESSAGE_PHASES.CLICKING_SEND:
+          return '取消发送（点击中）';
+        case SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE:
+          return '停止回答';
+        case SEND_MESSAGE_PHASES.STOPPING_RESPONSE:
+          return '停止中';
+        case SEND_MESSAGE_PHASES.CANCELLING:
+          return '取消中';
+        default:
+          return '取消发送';
+      }
+    }
+
+    function startSendMessageTask(source = '') {
+      const runId = `send-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      if (sendMessageTaskState.running) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][START_BLOCKED_ALREADY_RUNNING] currentRunId=${sendMessageTaskState.runId || '-'} phase=${sendMessageTaskState.phase || '-'} source=${source || '-'}`,
+        );
+        return null;
+      }
+      const abortController = new AbortController();
+      sendMessageTaskState.running = true;
+      sendMessageTaskState.phase = SEND_MESSAGE_PHASES.WAITING_COMPOSER;
+      sendMessageTaskState.runId = runId;
+      sendMessageTaskState.abortController = abortController;
+      sendMessageTaskState.startedAtMs = Date.now();
+      sendMessageTaskState.lastReason = source || '';
+      sendMessageTaskState.hasClickedNativeSend = false;
+      state.waitingSendAbortController = abortController;
+      let startTextLen = -1;
+      let startAttachmentCount = -1;
+      let startNativeReady = -1;
+      try {
+        startTextLen = typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '').trim().length
+          : -1;
+        startAttachmentCount = typeof ComposerApi !== 'undefined' && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          ? (ComposerApi.hasComposerAttachmentUnified() ? 1 : 0)
+          : -1;
+        if (typeof getComposerSendButtonSnapshot === 'function') {
+          const snap = getComposerSendButtonSnapshot({ silent: true });
+          startNativeReady = snap && snap.ready ? 1 : 0;
+        }
+      } catch (startLogErr) {
+        console.error('[ChatGPT toolbox] startSendMessageTask composer snapshot failed', startLogErr);
+      }
+      ToolboxShell.appendLog(
+        `[SEND_TASK][START] runId=${runId} source=${source || '-'} phase=${sendMessageTaskState.phase} `
+        + `textLen=${startTextLen} attachmentCount=${startAttachmentCount} nativeReady=${startNativeReady}`,
+      );
+      scheduleRenderUpload('send-task-start');
+      return {
+        runId,
+        signal: abortController.signal,
+      };
+    }
+
+    function clickChatGptStopButtonForSendTask(source = '') {
+      if (typeof document === 'undefined') {
+        return {
+          ok: false,
+          reason: 'document-unavailable',
+        };
+      }
+      const candidates = Array.from(document.querySelectorAll([
+        '[data-testid="stop-button"]',
+        'button[aria-label*="停止回答"]',
+        'button[aria-label*="停止"]',
+        'button[aria-label*="Stop"]',
+        'button[aria-label*="stop"]',
+      ].join(',')));
+      const btn = candidates.find((item) => {
+        if (!(item instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = item.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      if (!btn) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][STOP_BUTTON_NOT_FOUND] source=${source || '-'}`,
+        );
+        return {
+          ok: false,
+          reason: 'stop-button-not-found',
+        };
+      }
+      try {
+        btn.click();
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[ChatGPT toolbox] clickChatGptStopButtonForSendTask failed', err);
+        ToolboxShell.appendLog(
+          `[SEND_TASK][STOP_BUTTON_CLICK_FAILED] source=${source || '-'} error=${errText}`,
+        );
+        return {
+          ok: false,
+          reason: 'stop-button-click-failed',
+        };
+      }
+      ToolboxShell.appendLog(
+        `[SEND_TASK][STOP_BUTTON_CLICKED] source=${source || '-'}`,
+      );
+      return {
+        ok: true,
+        reason: 'clicked',
+      };
+    }
+
+    function finishSendMessageTask(result = {}) {
+      if (!sendMessageTaskState.running && sendMessageTaskState.phase === SEND_MESSAGE_PHASES.IDLE) {
+        return;
+      }
+      const oldRunId = sendMessageTaskState.runId;
+      const oldPhase = sendMessageTaskState.phase;
+      sendMessageTaskState.running = false;
+      sendMessageTaskState.phase = result.ok
+        ? SEND_MESSAGE_PHASES.IDLE
+        : (sendMessageTaskState.phase === SEND_MESSAGE_PHASES.CANCELLED
+          ? SEND_MESSAGE_PHASES.CANCELLED
+          : SEND_MESSAGE_PHASES.FAILED);
+      sendMessageTaskState.runId = '';
+      sendMessageTaskState.abortController = null;
+      sendMessageTaskState.startedAtMs = 0;
+      sendMessageTaskState.lastReason = result.reason || '';
+      sendMessageTaskState.hasClickedNativeSend = false;
+      if (state.waitingSendAbortController) {
+        state.waitingSendAbortController = null;
+      }
+      ToolboxShell.appendLog(
+        `[SEND_TASK][FINISH] oldRunId=${oldRunId || '-'} oldPhase=${oldPhase || '-'} ok=${result.ok ? 1 : 0} reason=${result.reason || '-'}`,
+      );
+      scheduleRenderUpload('send-task-finish');
+    }
+
+    function cancelSendMessageTask(reason = '') {
+      if (!sendMessageTaskState.running) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][CANCEL_SKIP_NOT_RUNNING] reason=${reason || '-'}`,
+        );
+        return {
+          ok: false,
+          reason: 'not-running',
+        };
+      }
+
+      const runId = sendMessageTaskState.runId;
+      const phase = sendMessageTaskState.phase;
+      const hasClickedNativeSend = !!sendMessageTaskState.hasClickedNativeSend;
+      ToolboxShell.appendLog(
+        `[SEND_TASK][CANCEL_REQUEST] runId=${runId || '-'} phase=${phase || '-'} hasClickedNativeSend=${hasClickedNativeSend ? 1 : 0} reason=${reason || '-'}`,
+      );
+
+      if (!hasClickedNativeSend) {
+        if (sendMessageTaskState.abortController) {
+          try {
+            sendMessageTaskState.abortController.abort();
+          } catch (err) {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] cancelSendMessageTask abort failed', err);
+            ToolboxShell.appendLog(
+              `[SEND_TASK][ABORT_ERROR] runId=${runId || '-'} error=${errText}`,
+            );
+          }
+        }
+        state.cancelWaitingSend = true;
+        state.messageSendCancelRequested = true;
+        state.autoSendRunId += 1;
+        if (currentUploadSendFlowRun && !currentUploadSendFlowRun.cancelled) {
+          cancelCurrentUploadSend(`send-task-cancel:${reason || '-'}`);
+        }
+        sendMessageTaskState.running = false;
+        sendMessageTaskState.phase = SEND_MESSAGE_PHASES.CANCELLED;
+        sendMessageTaskState.runId = '';
+        sendMessageTaskState.abortController = null;
+        sendMessageTaskState.hasClickedNativeSend = false;
+        state.waitingSendAbortController = null;
+        const cancelReasonText = String(reason || '').trim();
+        const isExplicitCancel = cancelReasonText === 'explicit-cancel'
+          || cancelReasonText.startsWith('cancel-send:')
+          || cancelReasonText.startsWith('cancel-wait-reply:')
+          || cancelReasonText === 'second-click-send-message-button';
+        if (isExplicitCancel) {
+          setStatus('用户取消发送', 'warn', {
+            owner: 'send',
+            shortText: '用户取消发送',
+          });
+          ToolboxShell.appendLog(
+            `[SEND_TASK][EXPLICIT_CANCEL] runId=${runId || '-'} oldPhase=${phase || '-'} reason=${cancelReasonText || '-'}`,
+          );
+        } else {
+          setStatus('已取消发送', 'warn', {
+            owner: 'send',
+            shortText: '已取消发送',
+          });
+          ToolboxShell.appendLog(
+            `[SEND_TASK][CANCELLED_BEFORE_NATIVE_SEND] runId=${runId || '-'} oldPhase=${phase || '-'} reason=${cancelReasonText || '-'}`,
+          );
+        }
+        resetUploadSendUiState(`send-task-cancel:${reason || '-'}`, state.autoSendRunId);
+        scheduleRenderUpload('send-task-cancelled');
+        return {
+          ok: true,
+          reason: 'cancelled-before-native-send',
+        };
+      }
+
+      const stopResult = clickChatGptStopButtonForSendTask('send-task-cancel-after-native-send');
+      sendMessageTaskState.phase = SEND_MESSAGE_PHASES.STOPPING_RESPONSE;
+      ToolboxShell.appendLog(
+        `[SEND_TASK][CANCEL_AFTER_NATIVE_SEND] runId=${runId || '-'} stopClicked=${stopResult.ok ? 1 : 0} reason=${stopResult.reason || '-'}`,
+      );
+      if (stopResult.ok) {
+        setStatus('已请求停止回答', 'warn', {
+          owner: 'send',
+          shortText: '已请求停止回答',
+        });
+        setSendMessageTaskPhase(SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE, 'stop-response-clicked');
+      } else {
+        setStatus('未找到停止回答按钮', 'warn', {
+          owner: 'send',
+          shortText: '未找到停止按钮',
+        });
+        setSendMessageTaskPhase(SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE, stopResult.reason || 'stop-not-found');
+      }
+      scheduleRenderUpload('send-task-stopping-response');
+      return {
+        ok: stopResult.ok,
+        reason: stopResult.ok ? 'stop-response-clicked' : stopResult.reason,
+      };
+    }
+
+    function isSendMessageTaskAborted() {
+      return !!(
+        sendMessageTaskState.running
+        && sendMessageTaskState.abortController
+        && sendMessageTaskState.abortController.signal.aborted
+      );
+    }
+
+    function assertSendTaskNotAborted(signal, runId, phase) {
+      const aborted = (signal && signal.aborted) || isSendMessageTaskAborted();
+      if (aborted) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][ABORTED] runId=${runId || sendMessageTaskState.runId || '-'} phase=${phase || sendMessageTaskState.phase || '-'}`,
+        );
+        return false;
+      }
+      return true;
+    }
+
+    function markSendMessageNativeSendClicked(source = '') {
+      if (!sendMessageTaskState.running) {
+        return;
+      }
+      sendMessageTaskState.hasClickedNativeSend = true;
+      setSendMessageTaskPhase(SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE, source || 'native-send-clicked');
+      ToolboxShell.appendLog(
+        `[SEND_TASK][NATIVE_SEND_CLICKED] runId=${sendMessageTaskState.runId || '-'} source=${source || '-'}`,
+      );
+      ToolboxShell.appendLog(
+        `[SEND_TASK][WAITING_REPLY] reason=native-clicked runId=${sendMessageTaskState.runId || '-'} source=${source || '-'}`,
+      );
+    }
+
+    function isExplicitSendCancelIntent(detail = {}) {
+      const action = String(detail.action || '').trim();
+      const runtimeAction = String(detail.runtimeAction || '').trim();
+      const source = String(detail.source || '').trim();
+      const buttonText = String(detail.buttonText || detail.text || '').trim();
+      if (
+        isShortcutSendTriggerSource(source)
+        && sendMessageTaskState.running
+        && isSendTaskWaitingComposerPhase()
+      ) {
+        return false;
+      }
+      if (action === 'cancel-send' || runtimeAction === 'cancel-send') {
+        return true;
+      }
+      if (buttonText.includes('取消发送')) {
+        return true;
+      }
+      if (source.includes('cancel-send')) {
+        return true;
+      }
+      return false;
+    }
+
+    function isSendTaskWaitingComposerPhase(phase = '') {
+      const normalized = String(phase || sendMessageTaskState.phase || '').trim();
+      return normalized === SEND_MESSAGE_PHASES.WAITING_COMPOSER
+        || normalized === 'waiting'
+        || normalized === 'checking_composer';
+    }
+
+    function isShortcutSendTriggerSource(source = '') {
+      const src = String(source || '').trim();
+      return src.includes('shortcut:registry')
+        || src.includes('unified-document')
+        || src.includes('hotkey')
+        || /^shortcut:/i.test(src)
+        || src === 'enter-hotkey';
+    }
+
+    function shouldIgnoreDuplicateSendTrigger(detail = {}) {
+      if (!sendMessageTaskState.running) {
+        return false;
+      }
+      if (!isSendTaskWaitingComposerPhase()) {
+        return false;
+      }
+      if (isExplicitSendCancelIntent(detail)) {
+        return false;
+      }
+      const source = String(detail.source || '').trim();
+      const isShortcutSend = isShortcutSendTriggerSource(source);
+      const now = Date.now();
+      const lastAt = Number(state.lastSendTriggerAt || 0);
+      const lastSource = String(state.lastSendTriggerSource || '');
+      state.lastSendTriggerAt = now;
+      state.lastSendTriggerSource = source;
+      if (isShortcutSend) {
+        if (lastSource === source && now - lastAt < 2000) {
+          return true;
+        }
+        return true;
+      }
+      if (lastSource === source && now - lastAt < 400) {
+        return true;
+      }
+      return false;
+    }
+
+    function buildSendTaskTriggerDetail(options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const button = opts.button instanceof HTMLElement ? opts.button : null;
+      return {
+        action: String(opts.action || 'send-message').trim(),
+        runtimeAction: String(opts.runtimeAction || '').trim(),
+        source: String(opts.source || '').trim(),
+        buttonText: button
+          ? String(button.textContent || '').trim()
+          : String(opts.buttonText || opts.text || '').trim(),
+      };
+    }
+
+    function handleRunningSendTaskTrigger(detail = {}) {
+      if (!sendMessageTaskState.running) {
+        return { handled: false };
+      }
+      if (isExplicitSendCancelIntent(detail)) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][EXPLICIT_CANCEL] source=${detail.source || '-'} phase=${sendMessageTaskState.phase || '-'} reason=explicit-cancel`,
+        );
+        cancelSendMessageTask('explicit-cancel');
+        return { handled: true, result: 'cancelled' };
+      }
+      if (
+        isSendTaskWaitingComposerPhase()
+        && canRecoverSendFromWaitingComposer()
+        && shouldIgnoreDuplicateSendTrigger(detail)
+      ) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][DUPLICATE_TRIGGER_RECOVER_SEND] phase=${sendMessageTaskState.phase || '-'} action=retry-click source=${detail.source || '-'}`,
+        );
+        void sendExistingComposerBySendMessageButtonCore({
+          source: String(detail.source || 'duplicate-trigger-recover').trim() || 'duplicate-trigger-recover',
+          logSource: `duplicate-trigger-recover:${detail.source || '-'}`,
+          manualSend: true,
+        }).catch((err) => {
+          console.error('[SEND_TASK][DUPLICATE_TRIGGER_RECOVER_SEND_FAILED]', err);
+          ToolboxShell.appendLog(
+            `[SEND_TASK][DUPLICATE_TRIGGER_RECOVER_SEND_FAILED] source=${detail.source || '-'} error=${err && err.message ? err.message : String(err)}`,
+          );
+        });
+        return { handled: true, result: 'recover-send' };
+      }
+      if (shouldIgnoreDuplicateSendTrigger(detail)) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][DUPLICATE_TRIGGER_IGNORED] source=${detail.source || '-'} phase=${sendMessageTaskState.phase || '-'} reason=waiting-composer-repeat message=已有发送任务正在等待输入框，忽略重复触发`,
+        );
+        return { handled: true, result: 'ignored-duplicate' };
+      }
+      ToolboxShell.appendLog(
+        `[SEND_TASK][BUSY_TRIGGER_IGNORED] source=${detail.source || '-'} phase=${sendMessageTaskState.phase || '-'} reason=not-explicit-cancel`,
+      );
+      return { handled: true, result: 'ignored-busy' };
+    }
 
     function noteSharedSendOutcome(patch = {}) {
       const base = lastSharedSendOutcome && typeof lastSharedSendOutcome === 'object'
@@ -336,8 +1017,6 @@
     let copyHotkeyUploadVerifyLoopCount = 0;
     let copyHotkeyContinueLoopRunGeneration = 0;
     let copyHotkeyUploadVerifyLoopRunGeneration = 0;
-    let uploadListRenderTimer = 0;
-    let uploadListRenderPendingReason = '';
     let uploadListRenderPendingItemId = '';
     let uploadListRenderSignature = '';
     let uploadListCachedDropTargets = [];
@@ -470,41 +1149,9 @@
       }
     }
 
-    function sanitizePersistedUploadRows(rows, activeGroupId) {
-      const safeRows = normalizeRestoreArray(rows, 'loadQueueForActiveGroup.rows');
-      const scopedRows = [];
-      let skippedNonObjectCount = 0;
 
-      safeRows.forEach((row, index) => {
-        if (!isPlainObject(row)) {
-          skippedNonObjectCount += 1;
-          logDirtyRestoreEntry('SKIP_INVALID_ROW', {
-            index,
-            actualType: row === null ? 'null' : typeof row,
-            value: getRestoreDirtyValueText(row),
-          });
-          return;
-        }
-
-        const groupId = String(row.groupId || '').trim();
-        if (groupId !== activeGroupId) {
-          return;
-        }
-
-        scopedRows.push(row);
-      });
-
-      if (skippedNonObjectCount > 0) {
-        setLastRestoreWarning(`上传队列中跳过了 ${skippedNonObjectCount} 条损坏记录`, {
-          reason: 'load-queue-skip-invalid-rows',
-          clearFailedStatus: true,
-        });
-      }
-
-      return {
-        scopedRows,
-        skippedNonObjectCount,
-      };
+    function sanitizePersistedUploadRows(...args) {
+      return ensureUploadQueueStore().sanitizePersistedUploadRows(...args);
     }
 
     const CLOSED_LOOP_CONTINUE_MODES = {
@@ -520,6 +1167,7 @@
         buttonId: 'cgpt-closed-loop-upload-every5-hotkey-btn',
         selector: '#cgpt-closed-loop-upload-every5-hotkey-btn',
         toolbarKey: 'closed-loop-with-hotkey',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5',
         label: '',
         title: '快捷键模式：等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 触发配置快捷键 -> 使用稳定直接发送链路发送继续指令；按配置间隔自动上传代码',
       }),
@@ -529,6 +1177,7 @@
         buttonId: 'cgpt-closed-loop-upload-every-round-hotkey-btn',
         selector: '#cgpt-closed-loop-upload-every-round-hotkey-btn',
         toolbarKey: 'closed-loop-with-hotkey-upload-every-round',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round',
         label: '',
         title: '快捷键模式：等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 触发配置快捷键 -> 使用稳定直接发送链路发送继续指令；每一轮都自动重新上传代码',
         datasetClosedLoopMode: 'with_hotkey_every_round',
@@ -539,6 +1188,7 @@
         buttonId: 'cgpt-closed-loop-upload-every5-btn',
         selector: '#cgpt-closed-loop-upload-every5-btn',
         toolbarKey: 'closed-loop-without-hotkey',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5',
         label: '',
         title: '直接发送模式：等待回复完成 -> 判断终止信号 -> 直接发送继续指令；按配置间隔自动上传代码，不触发快捷键',
         datasetClosedLoopMode: 'without_hotkey',
@@ -691,9 +1341,469 @@
         ? minMs
         : Math.floor(minMs + Math.random() * (maxMs - minMs + 1));
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][NEXT_DELAY_RANDOM] runId=${meta.runId || '-'} round=${meta.round || '-'} minMs=${minMs} maxMs=${maxMs} selectedMs=${selectedMs} minSec=${Math.round(minMs / 1000)} maxSec=${Math.round(maxMs / 1000)} selectedSec=${Math.round(selectedMs / 1000)}`,
+        `[CLOSED_LOOP][NEXT_DELAY_RANDOM] runId=${meta.runId || '-'} round=${meta.round || '-'} reason=${meta.reason || '-'} minMs=${minMs} maxMs=${maxMs} selectedMs=${selectedMs} minSec=${Math.round(minMs / 1000)} maxSec=${Math.round(maxMs / 1000)} selectedSec=${Math.round(selectedMs / 1000)}`,
       );
       return selectedMs;
+    }
+
+    function getClosedLoopComposerRuntimeState(reason = '') {
+      let responseState = '';
+      let responseReason = '';
+      let inputable = false;
+      let sendable = false;
+      let latestTurnId = '';
+      let bridgeState = null;
+      if (
+        typeof BridgeRuntime !== 'undefined'
+        && BridgeRuntime
+        && typeof BridgeRuntime.getLastPollState === 'function'
+      ) {
+        bridgeState = BridgeRuntime.getLastPollState();
+      }
+      if (
+        (!bridgeState || typeof bridgeState !== 'object')
+        && typeof ChatGptBridge !== 'undefined'
+        && ChatGptBridge
+        && typeof ChatGptBridge.getLastState === 'function'
+      ) {
+        bridgeState = ChatGptBridge.getLastState();
+      }
+      if (bridgeState && typeof bridgeState === 'object') {
+        responseState = String(
+          bridgeState.response_state
+          || bridgeState.responseState
+          || '',
+        ).trim();
+        responseReason = String(
+          bridgeState.response_state_reason
+          || bridgeState.responseStateReason
+          || '',
+        ).trim();
+        inputable = !!(bridgeState.inputable || bridgeState.canInput);
+        sendable = !!(bridgeState.sendable || bridgeState.canSend);
+        latestTurnId = String(
+          bridgeState.latestTurnId
+          || bridgeState.latest_turn_id
+          || bridgeState.turnId
+          || '',
+        ).trim();
+      }
+      const stateLower = responseState.toLowerCase();
+      const reasonLower = responseReason.toLowerCase();
+      let busy = (
+        stateLower === 'generating'
+        || stateLower === 'streaming'
+        || stateLower === 'responding'
+        || stateLower === 'busy'
+        || reasonLower.includes('assistant_busy')
+        || reasonLower.includes('generating')
+        || reasonLower.includes('streaming')
+      );
+      let hasStopButton = false;
+      if (typeof document !== 'undefined') {
+        const stopButtonCandidates = Array.from(document.querySelectorAll([
+          '[data-testid="stop-button"]',
+          'button[aria-label*="停止回答"]',
+          'button[aria-label*="Stop"]',
+          'button[aria-label*="stop"]',
+        ].join(',')));
+        hasStopButton = stopButtonCandidates.some((btn) => {
+          if (!(btn instanceof HTMLElement)) {
+            return false;
+          }
+          const rect = btn.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+      }
+      if (hasStopButton) {
+        busy = true;
+      }
+      const result = {
+        busy,
+        responseState,
+        responseReason,
+        inputable,
+        sendable,
+        latestTurnId,
+        hasStopButton,
+        reason,
+      };
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][RUNTIME_STATE]',
+          `reason=${reason || '-'}`,
+          `busy=${busy ? 1 : 0}`,
+          `responseState=${responseState || '-'}`,
+          `responseReason=${responseReason || '-'}`,
+          `inputable=${inputable ? 1 : 0}`,
+          `sendable=${sendable ? 1 : 0}`,
+          `stopButton=${hasStopButton ? 1 : 0}`,
+          `turnId=${latestTurnId || '-'}`,
+        ].join(' '),
+      );
+      return result;
+    }
+
+    function getClosedLoopComposerTextState(reason = '') {
+      let text = '';
+      if (
+        typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.getText === 'function'
+      ) {
+        text = String(ComposerApi.getText() || '');
+      } else if (typeof getComposerText === 'function') {
+        text = String(getComposerText() || '');
+      } else if (typeof readComposerTextFallback === 'function') {
+        text = String(readComposerTextFallback() || '');
+      }
+      const trimmed = text.trim();
+      let hasUploadPayload = false;
+      if (typeof detectComposerHasUploadPayload === 'function') {
+        hasUploadPayload = !!detectComposerHasUploadPayload();
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][COMPOSER_STATE]',
+          `reason=${reason || '-'}`,
+          `textLen=${trimmed.length}`,
+          `hasUploadPayload=${hasUploadPayload ? 1 : 0}`,
+        ].join(' '),
+      );
+      return {
+        text,
+        trimmed,
+        textLen: trimmed.length,
+        hasUploadPayload,
+        empty: trimmed.length === 0 && !hasUploadPayload,
+      };
+    }
+
+    function normalizeClosedLoopContinuePromptText(value, reason = '') {
+      const text = String(value || '').trim();
+      if (text) {
+        return text;
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][PROMPT_FALLBACK_TO_DEFAULT] reason=${reason || '-'} fallback=${CLOSED_LOOP_DEFAULT_CONTINUE_TEXT}`,
+      );
+      return CLOSED_LOOP_DEFAULT_CONTINUE_TEXT;
+    }
+
+    async function waitClosedLoopReplyDoneStable(runId, round, options = {}) {
+      const requiredStableCount = Math.max(
+        1,
+        Number(options.requiredStableCount || closedLoopContinueState.replyDoneRequiredStableCount || 3),
+      );
+      const pollMs = Math.max(500, Number(options.pollMs || 1500));
+      const timeoutMs = Math.max(30000, Number(options.timeoutMs || 30 * 60 * 1000));
+      const startMs = Date.now();
+      let stableCount = 0;
+      let lastBusyState = null;
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
+        reason: 'wait-reply-stable-start',
+      });
+      closedLoopContinueState.waitingReplySinceMs = startMs;
+      closedLoopContinueState.replyDoneStableCount = 0;
+      beginClosedLoopReplyWait(`wait-reply-stable-round-${round}`);
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][WAIT_REPLY_STABLE_START]',
+          `runId=${runId}`,
+          `round=${round}`,
+          `requiredStableCount=${requiredStableCount}`,
+          `pollMs=${pollMs}`,
+          `timeoutMs=${timeoutMs}`,
+        ].join(' '),
+      );
+      while (closedLoopContinueState.running && closedLoopContinueState.runId === runId) {
+        const elapsedMs = Date.now() - startMs;
+        if (elapsedMs > timeoutMs) {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][WAIT_REPLY_STABLE_TIMEOUT]',
+              `runId=${runId}`,
+              `round=${round}`,
+              `elapsedMs=${elapsedMs}`,
+              `stableCount=${stableCount}`,
+            ].join(' '),
+          );
+          return {
+            ok: false,
+            reason: 'timeout',
+            stableCount,
+            elapsedMs,
+          };
+        }
+        const runtime = getClosedLoopComposerRuntimeState(`wait-reply-stable:${round}`);
+        const composer = getClosedLoopComposerTextState(`wait-reply-stable:${round}`);
+        if (runtime.busy) {
+          stableCount = 0;
+          closedLoopContinueState.replyDoneStableCount = 0;
+          lastBusyState = runtime;
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][WAIT_REPLY_BUSY]',
+              `runId=${runId}`,
+              `round=${round}`,
+              `elapsedMs=${elapsedMs}`,
+              'stableCount=0',
+              `responseState=${runtime.responseState || '-'}`,
+              `responseReason=${runtime.responseReason || '-'}`,
+              `stopButton=${runtime.hasStopButton ? 1 : 0}`,
+            ].join(' '),
+          );
+          await sleep(pollMs);
+          continue;
+        }
+        if (!composer.empty) {
+          stableCount = 0;
+          closedLoopContinueState.replyDoneStableCount = 0;
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][WAIT_REPLY_COMPOSER_NOT_EMPTY]',
+              `runId=${runId}`,
+              `round=${round}`,
+              `elapsedMs=${elapsedMs}`,
+              `textLen=${composer.textLen}`,
+              `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
+              'action=reset-stable-count',
+            ].join(' '),
+          );
+          await sleep(pollMs);
+          continue;
+        }
+        stableCount += 1;
+        closedLoopContinueState.replyDoneStableCount = stableCount;
+        closedLoopContinueState.lastReplyDoneCheckMs = Date.now();
+        if (runtime.latestTurnId) {
+          closedLoopContinueState.lastObservedTurnId = runtime.latestTurnId;
+        }
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][WAIT_REPLY_STABLE_TICK]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `stableCount=${stableCount}/${requiredStableCount}`,
+            `elapsedMs=${elapsedMs}`,
+            `responseState=${runtime.responseState || '-'}`,
+            `inputable=${runtime.inputable ? 1 : 0}`,
+            `sendable=${runtime.sendable ? 1 : 0}`,
+            `turnId=${runtime.latestTurnId || '-'}`,
+          ].join(' '),
+        );
+        if (stableCount >= requiredStableCount) {
+          setClosedLoopPhase(CLOSED_LOOP_PHASES.REPLY_DONE_STABLE, {
+            reason: 'stable-count-reached',
+          });
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][WAIT_REPLY_STABLE_DONE]',
+              `runId=${runId}`,
+              `round=${round}`,
+              `stableCount=${stableCount}`,
+              `elapsedMs=${Date.now() - startMs}`,
+            ].join(' '),
+          );
+          return {
+            ok: true,
+            reason: 'stable-done',
+            stableCount,
+            elapsedMs: Date.now() - startMs,
+            lastBusyState,
+          };
+        }
+        await sleep(pollMs);
+      }
+      return {
+        ok: false,
+        reason: 'stopped-or-runid-changed',
+        stableCount,
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    async function waitClosedLoopPostReplyDelay(runId, round, delayMs) {
+      const safeDelayMs = Math.max(0, Math.min(600000, Math.round(Number(delayMs) || 0)));
+      const startMs = Date.now();
+      const untilMs = startMs + safeDelayMs;
+      closedLoopContinueState.postReplyDelayRunning = true;
+      closedLoopContinueState.postReplyDelayStartedAtMs = startMs;
+      closedLoopContinueState.postReplyDelayUntilMs = untilMs;
+      closedLoopContinueState.postReplyDelayMs = safeDelayMs;
+      closedLoopContinueState.nextStepCountdownEndAt = untilMs;
+      closedLoopContinueState.nextStepDelayMs = safeDelayMs;
+      closedLoopContinueState.waitKind = 'next-step';
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.POST_REPLY_DELAY, {
+        reason: 'post-reply-delay-start',
+      });
+      startClosedLoopButtonCountdownTick(`post-reply-delay-round-${round}`);
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][POST_REPLY_DELAY_START]',
+          `runId=${runId}`,
+          `round=${round}`,
+          `delayMs=${safeDelayMs}`,
+          `delaySec=${Math.round(safeDelayMs / 1000)}`,
+          `untilMs=${untilMs}`,
+        ].join(' '),
+      );
+      while (closedLoopContinueState.running && closedLoopContinueState.runId === runId) {
+        const now = Date.now();
+        const remainingMs = Math.max(0, untilMs - now);
+        if (remainingMs <= 0) {
+          break;
+        }
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][POST_REPLY_DELAY_TICK]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `remainingMs=${remainingMs}`,
+            `remainingSec=${Math.ceil(remainingMs / 1000)}`,
+          ].join(' '),
+        );
+        if (typeof renderClosedLoopContinueButtons === 'function') {
+          renderClosedLoopContinueButtons();
+        }
+        if (typeof scheduleUploadRender === 'function') {
+          scheduleUploadRender('closed-loop-post-delay-tick');
+        }
+        await sleep(Math.min(1000, remainingMs));
+      }
+      endClosedLoopNextStepWait('post-reply-delay-done');
+      closedLoopContinueState.postReplyDelayRunning = false;
+      closedLoopContinueState.postReplyDelayUntilMs = 0;
+      closedLoopContinueState.postReplyDelayMs = 0;
+      if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][POST_REPLY_DELAY_ABORTED]',
+            `runId=${runId}`,
+            `round=${round}`,
+            'reason=stopped-or-runid-changed',
+          ].join(' '),
+        );
+        return {
+          ok: false,
+          reason: 'stopped-or-runid-changed',
+        };
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][POST_REPLY_DELAY_DONE]',
+          `runId=${runId}`,
+          `round=${round}`,
+          `elapsedMs=${Date.now() - startMs}`,
+        ].join(' '),
+      );
+      return {
+        ok: true,
+        reason: 'delay-done',
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    function checkClosedLoopReadyForNextSend(runId, round, reason = '') {
+      const runtime = getClosedLoopComposerRuntimeState(`final-check:${reason || '-'}:${round}`);
+      const composer = getClosedLoopComposerTextState(`final-check:${reason || '-'}:${round}`);
+      if (runtime.busy) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][POST_DELAY_FINAL_CHECK_BUSY]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `responseState=${runtime.responseState || '-'}`,
+            `responseReason=${runtime.responseReason || '-'}`,
+            `stopButton=${runtime.hasStopButton ? 1 : 0}`,
+            'action=back-to-wait-reply',
+          ].join(' '),
+        );
+        return {
+          ok: false,
+          reason: 'busy',
+          runtime,
+          composer,
+        };
+      }
+      if (!composer.empty) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][POST_DELAY_FINAL_CHECK_COMPOSER_NOT_EMPTY]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `textLen=${composer.textLen}`,
+            `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
+            'action=block-next-send',
+          ].join(' '),
+        );
+        return {
+          ok: false,
+          reason: 'composer-not-empty',
+          runtime,
+          composer,
+        };
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][POST_DELAY_FINAL_CHECK_OK]',
+          `runId=${runId}`,
+          `round=${round}`,
+          `responseState=${runtime.responseState || '-'}`,
+          `inputable=${runtime.inputable ? 1 : 0}`,
+          `sendable=${runtime.sendable ? 1 : 0}`,
+        ].join(' '),
+      );
+      return {
+        ok: true,
+        reason: 'ready',
+        runtime,
+        composer,
+      };
+    }
+
+    function clearClosedLoopTimersAndLocks(reason = '') {
+      if (closedLoopContinueState.nextStepTimer) {
+        clearTimeout(closedLoopContinueState.nextStepTimer);
+        closedLoopContinueState.nextStepTimer = null;
+      }
+      if (closedLoopContinueState.timerId) {
+        clearTimeout(closedLoopContinueState.timerId);
+        closedLoopContinueState.timerId = null;
+      }
+      closedLoopContinueState.currentStepRunning = false;
+      closedLoopContinueState.currentStepToken = '';
+      closedLoopContinueState.postReplyDelayRunning = false;
+      closedLoopContinueState.postReplyDelayStartedAtMs = 0;
+      closedLoopContinueState.postReplyDelayUntilMs = 0;
+      closedLoopContinueState.postReplyDelayMs = 0;
+      closedLoopContinueState.replyDoneStableCount = 0;
+      closedLoopContinueState.waitingReplySinceMs = 0;
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][CLEAR_TIMERS_AND_LOCKS] runId=${closedLoopContinueState.runId || '-'} reason=${reason || '-'}`,
+      );
+    }
+
+    function guardClosedLoopBeforeSend(runId, round, sourceTag = '') {
+      const beforeSendRuntime = getClosedLoopComposerRuntimeState(`before-send:${round}:${sourceTag}`);
+      if (beforeSendRuntime.busy) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][SEND_BLOCKED_BUSY]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `source=${sourceTag || '-'}`,
+            `responseState=${beforeSendRuntime.responseState || '-'}`,
+            `responseReason=${beforeSendRuntime.responseReason || '-'}`,
+            `stopButton=${beforeSendRuntime.hasStopButton ? 1 : 0}`,
+          ].join(' '),
+        );
+        recoverClosedLoopContinue(runId, 'busy-before-send', {
+          delayMs: 5000,
+        });
+        return false;
+      }
+      return true;
     }
 
     function isClosedLoopEveryRoundUploadMode(mode) {
@@ -772,6 +1882,7 @@
     function syncClosedLoopRound(round, reason = '') {
       const value = Math.max(0, Number(round) || 0);
       closedLoopContinueState.round = value;
+      closedLoopContinueState.currentRound = value;
       const task = ensureCopyHotkeyUploadVerifyLoopTask();
       task.cycleIndex = value;
       copyHotkeyUploadVerifyLoopCount = value;
@@ -796,9 +1907,9 @@
         ? ` data-closed-loop-mode="${plainDef.datasetClosedLoopMode}"`
         : '';
       return `
-            <button type="button" class="cgpt-btn cyan" id="${hotkeyDef.id}" data-action="${hotkeyDef.action}" title="${hotkeyDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)}</button>
-            <button type="button" class="cgpt-btn cyan" id="${everyRoundDef.id}" data-action="${everyRoundDef.action}"${everyRoundModeAttr} title="${everyRoundDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND)}</button>
-            <button type="button" class="cgpt-btn cyan" id="${plainDef.id}" data-action="${plainDef.action}"${plainModeAttr} title="${plainDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)}</button>`;
+            <button type="button" class="${hotkeyDef.className}" id="${hotkeyDef.id}" data-action="${hotkeyDef.action}" title="${hotkeyDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)}</button>
+            <button type="button" class="${everyRoundDef.className}" id="${everyRoundDef.id}" data-action="${everyRoundDef.action}"${everyRoundModeAttr} title="${everyRoundDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND)}</button>
+            <button type="button" class="${plainDef.className}" id="${plainDef.id}" data-action="${plainDef.action}"${plainModeAttr} title="${plainDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)}</button>`;
     }
 
     function applyClosedLoopContinueButtonDef(btn, actionDef) {
@@ -813,6 +1924,29 @@
       if (actionDef.datasetClosedLoopMode) {
         btn.dataset.closedLoopMode = actionDef.datasetClosedLoopMode;
       }
+      const CLOSED_LOOP_STRIP_CLASSES = [
+        'cyan',
+        'purple',
+        'teal',
+        'green',
+        'primary',
+        'warning',
+        'orange',
+        'cgpt-btn-copy-hotkey',
+        'cgpt-btn-upload',
+        'cgpt-auto-continue',
+        'cgpt-btn-danger',
+        'cgpt-btn-stop',
+        'cgpt-action-running',
+        'cgpt-btn-closed-loop-idle',
+      ];
+      CLOSED_LOOP_STRIP_CLASSES.forEach((cls) => btn.classList.remove(cls));
+      btn.dataset.cgptButtonGroup = 'closed-loop';
+      String(actionDef.className || 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle')
+        .split(/\s+/)
+        .map((cls) => cls.trim())
+        .filter(Boolean)
+        .forEach((cls) => btn.classList.add(cls));
     }
 
     function isClosedLoopUserCancelledReason(reason) {
@@ -829,18 +1963,33 @@
       );
     }
 
+    const CLOSED_LOOP_PHASES = Object.freeze({
+      IDLE: 'idle',
+      SENDING: 'sending',
+      WAITING_REPLY: 'waiting_reply',
+      REPLY_DONE_STABLE: 'reply_done_stable',
+      POST_REPLY_DELAY: 'post_reply_delay',
+      READY_NEXT_ROUND: 'ready_next_round',
+      STOPPING: 'stopping',
+    });
+
+    const CLOSED_LOOP_DEFAULT_CONTINUE_TEXT = '继续';
+
     const closedLoopContinueState = {
       running: false,
       stopping: false,
       cancelRequested: false,
       cancelReason: '',
-      phase: 'idle',
+      phase: CLOSED_LOOP_PHASES.IDLE,
       runId: 0,
       timerId: null,
-      nextStepTimer: 0,
+      nextStepTimer: null,
       retryTimerId: null,
       retryAttempts: 0,
       round: 0,
+      currentRound: 0,
+      currentStepRunning: false,
+      currentStepToken: '',
       lastReason: '',
       mode: CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY,
       doneVerificationRunning: false,
@@ -854,6 +2003,20 @@
       retryingCurrentRound: false,
       lastProcessedReplyKey: '',
       lastProcessedRound: 0,
+      waitingReplySinceMs: 0,
+      replyDoneStableCount: 0,
+      replyDoneRequiredStableCount: 3,
+      lastReplyDoneCheckMs: 0,
+      lastObservedTurnId: '',
+      lastSentTurnId: '',
+      lastSentAtMs: 0,
+      lastSendRound: 0,
+      postReplyDelayRunning: false,
+      postReplyDelayStartedAtMs: 0,
+      postReplyDelayUntilMs: 0,
+      postReplyDelayMs: 0,
+      lastScheduleReason: '',
+      lastScheduleAtMs: 0,
       waitKind: 'idle',
       waitStartedAt: 0,
       nextStepDelayMs: 0,
@@ -861,6 +2024,53 @@
       countdownTickTimer: 0,
       lastReplyWaitLogSec: -1,
     };
+
+    function setClosedLoopPhase(phase, meta = {}) {
+      const prev = closedLoopContinueState.phase || CLOSED_LOOP_PHASES.IDLE;
+      closedLoopContinueState.phase = phase;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][PHASE]',
+          `prev=${prev}`,
+          `next=${phase}`,
+          `runId=${closedLoopContinueState.runId || '-'}`,
+          `round=${Number(closedLoopContinueState.currentRound || closedLoopContinueState.round || 0)}`,
+          `reason=${meta.reason || '-'}`,
+        ].join(' '),
+      );
+    }
+
+    function getClosedLoopRunningButtonText(baseStopText = '停止闭环继续') {
+      const now = Date.now();
+      const phase = closedLoopContinueState.phase;
+      if (
+        phase === CLOSED_LOOP_PHASES.POST_REPLY_DELAY
+        && closedLoopContinueState.postReplyDelayUntilMs > now
+      ) {
+        const remainSec = Math.max(
+          0,
+          Math.ceil((closedLoopContinueState.postReplyDelayUntilMs - now) / 1000),
+        );
+        return `${baseStopText}（等待 ${remainSec}s）`;
+      }
+      if (
+        phase === CLOSED_LOOP_PHASES.WAITING_REPLY
+        && closedLoopContinueState.waitingReplySinceMs > 0
+      ) {
+        const elapsedSec = Math.max(
+          0,
+          Math.floor((now - closedLoopContinueState.waitingReplySinceMs) / 1000),
+        );
+        return `${baseStopText}（回复中 ${elapsedSec}s）`;
+      }
+      if (phase === CLOSED_LOOP_PHASES.REPLY_DONE_STABLE) {
+        return `${baseStopText}（确认完成）`;
+      }
+      if (phase === CLOSED_LOOP_PHASES.SENDING) {
+        return `${baseStopText}（发送中）`;
+      }
+      return baseStopText;
+    }
 
     function normalizeClosedLoopActionName(action) {
       return String(action || '').trim();
@@ -955,26 +2165,50 @@
 
     function getClosedLoopWaitVisualSnapshot() {
       const running = closedLoopContinueState.running === true;
-      const waitKind = closedLoopContinueState.waitKind || 'idle';
+      const phase = closedLoopContinueState.phase || CLOSED_LOOP_PHASES.IDLE;
+      let waitKind = closedLoopContinueState.waitKind || 'idle';
       const now = Date.now();
 
       let replyWaitElapsedMs = 0;
       let nextStepRemainingMs = 0;
+      let postReplyDelayRemainingMs = 0;
 
-      if (running && waitKind === 'reply' && closedLoopContinueState.waitStartedAt > 0) {
+      if (
+        running
+        && phase === CLOSED_LOOP_PHASES.WAITING_REPLY
+        && closedLoopContinueState.waitingReplySinceMs > 0
+      ) {
+        waitKind = 'reply';
+        replyWaitElapsedMs = Math.max(0, now - closedLoopContinueState.waitingReplySinceMs);
+      } else if (running && waitKind === 'reply' && closedLoopContinueState.waitStartedAt > 0) {
         replyWaitElapsedMs = Math.max(0, now - closedLoopContinueState.waitStartedAt);
       }
 
-      if (running && waitKind === 'next-step' && closedLoopContinueState.nextStepCountdownEndAt > 0) {
+      if (
+        running
+        && phase === CLOSED_LOOP_PHASES.POST_REPLY_DELAY
+        && closedLoopContinueState.postReplyDelayUntilMs > now
+      ) {
+        waitKind = 'next-step';
+        postReplyDelayRemainingMs = Math.max(
+          0,
+          closedLoopContinueState.postReplyDelayUntilMs - now,
+        );
+        nextStepRemainingMs = postReplyDelayRemainingMs;
+      } else if (running && waitKind === 'next-step' && closedLoopContinueState.nextStepCountdownEndAt > 0) {
         nextStepRemainingMs = Math.max(0, closedLoopContinueState.nextStepCountdownEndAt - now);
+        postReplyDelayRemainingMs = nextStepRemainingMs;
       }
 
       return {
         running,
         waitKind,
+        phase,
         replyWaitElapsedMs,
         nextStepDelayMs: Math.max(0, Number(closedLoopContinueState.nextStepDelayMs || 0)),
         nextStepRemainingMs,
+        postReplyDelayRemainingMs,
+        runningButtonText: running ? getClosedLoopRunningButtonText() : '',
       };
     }
 
@@ -2356,23 +3590,10 @@
           `[CLOSED_LOOP][RETRY_FIRE] runId=${runId} attempts=${closedLoopContinueState.retryAttempts} reason=${reasonText}`,
         );
 
-        void runClosedLoopContinueStep(runId, {
+        scheduleClosedLoopContinueNextStep(runId, 0, `retry-fire:${reasonText}`, {
           retryCurrentRound: options.retryCurrentRound === true,
           skipHomeNavigation: options.skipHomeNavigation === true,
           retryReason: reasonText,
-        }).catch((error) => {
-          const errText = formatToolboxError(error);
-          console.error('[CLOSED_LOOP][RETRY_STEP_FAILED]', error);
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][RETRY_STEP_FAILED] runId=${runId} error=${errText}`,
-          );
-          scheduleClosedLoopRetry(runId, `retry-step-failed:${errText}`, {
-            delayMs: 5000,
-            maxAttempts,
-            retryCurrentRound: true,
-            skipHomeNavigation: true,
-            forceRetry: true,
-          });
         });
       }, delayMs);
 
@@ -2380,76 +3601,67 @@
     }
 
     function clearClosedLoopStepTimer(reason = 'unknown') {
-      if (closedLoopContinueState.timerId) {
-        clearTimeout(closedLoopContinueState.timerId);
-        closedLoopContinueState.timerId = null;
-        ToolboxShell.appendLog(`[CLOSED_LOOP][TIMER_ABORT] reason=${reason || '-'}`);
-      }
-      if (closedLoopContinueState.nextStepTimer) {
-        clearTimeout(closedLoopContinueState.nextStepTimer);
-        closedLoopContinueState.nextStepTimer = 0;
-      }
+      clearClosedLoopTimersAndLocks(reason || 'clear-step-timer');
+      ToolboxShell.appendLog(`[CLOSED_LOOP][TIMER_ABORT] reason=${reason || '-'}`);
     }
 
-    function scheduleClosedLoopContinueNextStep(runId, delayMs, reason, options = {}) {
+    function scheduleClosedLoopContinueNextStep(runId, delayMs, reason = '', options = {}) {
       const scheduleReason = String(reason || 'unknown').trim() || 'unknown';
-      const safeDelayMs = Math.max(0, Number(delayMs || 0));
-      const retryCurrentRound = options && options.retryCurrentRound === true;
-      const scheduledAt = Date.now();
-      const fireAt = scheduledAt + safeDelayMs;
-
-      clearClosedLoopStepTimer(`reschedule:${scheduleReason}`);
-
-      if (!isClosedLoopRunActive(runId)) {
+      if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][TIMER_ABORT] reason=inactive-before-schedule runId=${runId} scheduleReason=${scheduleReason}`,
+          [
+            '[CLOSED_LOOP][SCHEDULE_SKIP_RUNID_MISMATCH]',
+            `runId=${runId || '-'}`,
+            `currentRunId=${closedLoopContinueState.runId || '-'}`,
+            `running=${closedLoopContinueState.running ? 1 : 0}`,
+            `reason=${scheduleReason}`,
+          ].join(' '),
         );
         return false;
       }
-
-      ToolboxShell.appendLog(
-        `[CLOSED_LOOP][SCHEDULE_NEXT] runId=${runId} delayMs=${safeDelayMs} scheduledAt=${scheduledAt} fireAt=${fireAt} reason=${scheduleReason} retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
-      );
-
-      beginClosedLoopNextStepWait(safeDelayMs, scheduleReason);
-
-      const nextStepTimerId = window.setTimeout(() => {
-        const actualWaitMs = Date.now() - scheduledAt;
+      if (closedLoopContinueState.nextStepTimer) {
+        clearTimeout(closedLoopContinueState.nextStepTimer);
+        closedLoopContinueState.nextStepTimer = null;
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][SCHEDULE_CLEAR_OLD_TIMER] runId=${runId} reason=${scheduleReason}`,
+        );
+      }
+      if (closedLoopContinueState.timerId) {
+        clearTimeout(closedLoopContinueState.timerId);
         closedLoopContinueState.timerId = null;
-        closedLoopContinueState.nextStepTimer = 0;
-
-        if (shouldStopClosedLoopRun(runId)) {
+      }
+      const safeDelayMs = Math.max(0, Math.min(600000, Math.round(Number(delayMs) || 0)));
+      closedLoopContinueState.lastScheduleReason = scheduleReason;
+      closedLoopContinueState.lastScheduleAtMs = Date.now();
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][SCHEDULE_NEXT_STEP]',
+          `runId=${runId}`,
+          `delayMs=${safeDelayMs}`,
+          `delaySec=${Math.round(safeDelayMs / 1000)}`,
+          `reason=${scheduleReason}`,
+        ].join(' '),
+      );
+      const retryCurrentRound = options && options.retryCurrentRound === true;
+      closedLoopContinueState.nextStepTimer = setTimeout(() => {
+        closedLoopContinueState.nextStepTimer = null;
+        closedLoopContinueState.timerId = null;
+        if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][NEXT_STEP_CANCELLED] runId=${runId} reason=stopped-during-post-reply-delay scheduleReason=${scheduleReason} actualWaitMs=${actualWaitMs}`,
+            [
+              '[CLOSED_LOOP][SCHEDULED_STEP_SKIP_STOPPED]',
+              `runId=${runId}`,
+              `currentRunId=${closedLoopContinueState.runId || '-'}`,
+              `reason=${scheduleReason}`,
+            ].join(' '),
           );
           return;
         }
-
-        if (!isClosedLoopRunActive(runId)) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][TIMER_ABORT] reason=inactive runId=${runId} scheduleReason=${scheduleReason} actualWaitMs=${actualWaitMs}`,
-          );
-          return;
-        }
-
-        endClosedLoopNextStepWait(`timer-fire:${scheduleReason}`);
-
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][POST_REPLY_DELAY_DONE] runId=${runId} expectedDelayMs=${safeDelayMs} actualWaitMs=${actualWaitMs} reason=${scheduleReason} action=start-next-round retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
-        );
-        if (safeDelayMs > 0 && actualWaitMs + 50 < safeDelayMs) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][POST_REPLY_DELAY_TOO_SHORT] runId=${runId} expectedDelayMs=${safeDelayMs} actualWaitMs=${actualWaitMs} reason=${scheduleReason}`,
-          );
-        }
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][TIMER_FIRE] runId=${runId} scheduleReason=${scheduleReason} retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
-        );
-
         void runClosedLoopContinueStep(runId, {
+          source: `scheduled:${scheduleReason}`,
           retryCurrentRound,
           skipHomeNavigation: options.skipHomeNavigation === true,
-          retryReason: scheduleReason,
+          retryReason: options.retryReason || scheduleReason,
         }).catch((error) => {
           const errText = formatToolboxError(error);
           console.error('[CLOSED_LOOP][STEP_FAILED]', error);
@@ -2465,9 +3677,7 @@
           });
         });
       }, safeDelayMs);
-      closedLoopContinueState.timerId = nextStepTimerId;
-      closedLoopContinueState.nextStepTimer = nextStepTimerId;
-
+      closedLoopContinueState.timerId = closedLoopContinueState.nextStepTimer;
       return true;
     }
 
@@ -2543,10 +3753,31 @@
 
     function getClosedLoopContinueButtonElement(mode) {
       const actionDef = getClosedLoopContinueActionDef(mode);
-      const primaryId = actionDef.id;
       const selector = actionDef.selector;
-      return document.getElementById(primaryId)
-        || (rootElRef ? qs(selector, rootElRef) : null);
+      const candidates = [];
+
+      if (rootElRef) {
+        const scoped = qs(selector, rootElRef);
+        if (scoped) {
+          candidates.push(scoped);
+        }
+      }
+
+      document.querySelectorAll(selector).forEach((btn) => {
+        if (!candidates.includes(btn)) {
+          candidates.push(btn);
+        }
+      });
+
+      const visible = candidates.find((btn) => {
+        if (!(btn instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = btn.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+
+      return visible || candidates[0] || null;
     }
 
     function forceResetClosedLoopStopButtonsWhenNotRunning(reason = 'unknown') {
@@ -2936,12 +4167,14 @@
       closedLoopContinueState.cancelReason = src;
       closedLoopContinueState.runId = oldRunId + 1;
       closedLoopContinueState.mode = '';
-      closedLoopContinueState.phase = 'idle';
       closedLoopContinueState.retryingCurrentRound = false;
       closedLoopContinueState.doneVerificationRunning = false;
       closedLoopContinueState.homeNavigationRunning = false;
 
-      clearClosedLoopStepTimer(`stop:${src}`);
+      clearClosedLoopTimersAndLocks(`stop:${src}`);
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.IDLE, {
+        reason: `stop:${src}`,
+      });
       clearClosedLoopRetryTimer(`stop:${src}`);
       clearClosedLoopButtonWaitState(`stop:${src}`);
 
@@ -3515,6 +4748,36 @@
         };
       }
 
+      const composerAttachmentCountForPrepare = Math.max(
+        0,
+        Number(duplicateSnapshotBeforeSend.normalizedCount || 0),
+      );
+      try {
+        await prepareBeforeManualSend({
+          isManualSend,
+          attachmentCount: composerAttachmentCountForPrepare,
+          source: logSource,
+        });
+      } catch (prepareErr) {
+        const prepareErrStack = prepareErr && prepareErr.stack
+          ? prepareErr.stack
+          : (prepareErr && prepareErr.message ? prepareErr.message : String(prepareErr));
+        console.error('[ChatGPT toolbox] prepareBeforeManualSend failed', prepareErr);
+        ToolboxShell.appendLog(
+          `[SEND_PREPARE][FAILED] source=${logSource} error=${prepareErrStack}`,
+        );
+        if (isManualSend && composerAttachmentCountForPrepare === 0) {
+          ToolboxShell.appendLog(
+            `[SEND_PREPARE][PLAIN_TEXT_CONTINUE] source=${logSource} reason=queue-restore-failed-but-plain-text`,
+          );
+        } else {
+          return {
+            ok: false,
+            reason: 'send-prepare-failed',
+          };
+        }
+      }
+
       const sendLockOwnerCtx = resolveSendLockOwnerContext(source);
       const sendLockClaimOptions = {
         timeoutMs,
@@ -3612,6 +4875,34 @@
           ok: false,
           reason: 'upload-send-flow-locked',
         };
+      }
+
+      const useSendMessageTask = shouldUseSendMessageTaskState(source);
+      let sendMessageTaskCtx = null;
+      if (useSendMessageTask) {
+        if (sendMessageTaskState.running && sendMessageTaskState.runId) {
+          sendMessageTaskCtx = {
+            runId: sendMessageTaskState.runId,
+            signal: sendMessageTaskState.abortController
+              ? sendMessageTaskState.abortController.signal
+              : null,
+          };
+          ToolboxShell.appendLog(
+            `[SEND_TASK][REUSE_RUNNING] runId=${sendMessageTaskCtx.runId} source=${logSource}`,
+          );
+        } else {
+          sendMessageTaskCtx = startSendMessageTask(logSource);
+          if (!sendMessageTaskCtx) {
+            releaseUploadActionLock('send-message');
+            finishUploadSendRun(flowRun, `shared-send-message-blocked-already-running:${source}`);
+            return {
+              ok: false,
+              reason: 'send-task-already-running',
+              wait: true,
+              retryable: false,
+            };
+          }
+        }
       }
 
       const runId = claimWaitingSendRun(
@@ -3799,6 +5090,28 @@
           reason: errText,
         };
       } finally {
+        if (
+          useSendMessageTask
+          && sendMessageTaskCtx
+          && sendMessageTaskState.runId === sendMessageTaskCtx.runId
+        ) {
+          const keepForStopButton = sendMessageTaskState.hasClickedNativeSend
+            && (
+              state.waitingReply
+              || getSendTaskPhase() === 'waiting_reply'
+              || sendMessageTaskState.phase === SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE
+              || sendMessageTaskState.phase === SEND_MESSAGE_PHASES.STOPPING_RESPONSE
+            );
+          if (!keepForStopButton && sendMessageTaskState.phase !== SEND_MESSAGE_PHASES.CANCELLED) {
+            const doneOk = !!(sharedSendOutcome && (sharedSendOutcome.ok || sharedSendOutcome.sent));
+            finishSendMessageTask({
+              ok: doneOk,
+              reason: sharedSendOutcome && sharedSendOutcome.reason
+                ? String(sharedSendOutcome.reason)
+                : 'done',
+            });
+          }
+        }
         finishUploadSendRun(flowRun, `shared-send-message-finally:${source}`);
         releaseUploadActionLock('send-message');
         scheduleRenderUpload(`shared-send-message-finally:${source}`);
@@ -4873,23 +6186,51 @@
         );
         return;
       }
-
-      if (
-        closedLoopContinueState.waitKind === 'next-step'
-        && (closedLoopContinueState.timerId || closedLoopContinueState.nextStepTimer)
-      ) {
+      if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_SKIP] runId=${runId} reason=post-reply-delay-timer-active waitKind=next-step`,
+          [
+            '[CLOSED_LOOP][STEP_SKIP_RUNID_MISMATCH]',
+            `runId=${runId || '-'}`,
+            `currentRunId=${closedLoopContinueState.runId || '-'}`,
+            `running=${closedLoopContinueState.running ? 1 : 0}`,
+            `source=${options.source || '-'}`,
+          ].join(' '),
         );
         return;
       }
+      if (closedLoopContinueState.currentStepRunning) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][STEP_REENTRY_BLOCKED]',
+            `runId=${runId}`,
+            `phase=${closedLoopContinueState.phase || '-'}`,
+            `token=${closedLoopContinueState.currentStepToken || '-'}`,
+            `source=${options.source || '-'}`,
+          ].join(' '),
+        );
+        return;
+      }
+      const stepToken = `${runId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      closedLoopContinueState.currentStepRunning = true;
+      closedLoopContinueState.currentStepToken = stepToken;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][STEP_ENTER]',
+          `runId=${runId}`,
+          `token=${stepToken}`,
+          `phase=${closedLoopContinueState.phase || '-'}`,
+          `source=${options.source || '-'}`,
+        ].join(' '),
+      );
+
       if (closedLoopContinueState.waitKind === 'reply') {
         endClosedLoopReplyWait('step-active');
-      } else {
+      } else if (closedLoopContinueState.waitKind !== 'next-step') {
         clearClosedLoopButtonWaitState('step-active');
       }
       renderClosedLoopContinueButtons();
 
+      try {
       const retryCurrentRound = options && options.retryCurrentRound === true;
       closedLoopContinueState.retryingCurrentRound = retryCurrentRound;
       let round = 0;
@@ -4904,8 +6245,14 @@
         closedLoopContinueState.retryAttempts = 0;
       }
       syncClosedLoopRound(round, retryCurrentRound ? 'retry-current-round' : 'step-advance');
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.SENDING, {
+        reason: `round-${round}-send-start`,
+      });
 
       ToolboxShell.appendLog(`[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][cycle-start] round=${round}`);
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][ROUND_SEND_START] runId=${runId} round=${round} source=${options.source || '-'}`,
+      );
       ToolboxShell.appendLog(`[CLOSED_LOOP][STEP_START] runId=${runId} round=${round}`);
 
       const closedLoopCfg = getClosedLoopAutomationConfig();
@@ -5091,6 +6438,10 @@
       };
 
       let result = null;
+
+      if (!guardClosedLoopBeforeSend(runId, round, stepSourceTag)) {
+        return;
+      }
 
       if (round === 1) {
         result = await runUploadVerifyLoopInitialSend({
@@ -5523,28 +6874,29 @@
       closedLoopContinueState.retryingCurrentRound = false;
       closedLoopContinueState.hotkeyContinueSendFailCount = 0;
       closedLoopContinueState.sendFailedStreak = 0;
+      closedLoopContinueState.lastSentAtMs = Date.now();
+      closedLoopContinueState.lastSendRound = round;
 
       setCopyHotkeyUploadVerifyLoopPhase('waiting_next_reply', `round-${round}-wait`, {
         cycleIndex: round,
         currentSubtask: 'wait-next-reply',
       });
-      beginClosedLoopReplyWait(`round-${round}-wait`);
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
+        reason: `round-${round}-sent`,
+      });
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][ROUND_SENT_WAIT_REPLY] runId=${runId} round=${round}`,
+      );
       setStatus(`第 ${round} 轮已发送，正在等待回复完成`, 'running', {
         persist: true,
         shortText: '等回复',
       });
 
-      const waitPreviousKey = isInitialSendRound
-        ? previousKeyBeforeStep
-        : (result.assistantMessageKey || previousKeyBeforeStep || '');
-
-      const waited = await waitAssistantCycleAfterContinue(
-        isInitialSendRound
-          ? `upload-verify-loop-initial-${round}`
-          : stepSourceTag,
-        waitPreviousKey,
-        { shouldStop },
-      );
+      const stableResult = await waitClosedLoopReplyDoneStable(runId, round, {
+        requiredStableCount: closedLoopContinueState.replyDoneRequiredStableCount || 3,
+        pollMs: 1500,
+        timeoutMs: 30 * 60 * 1000,
+      });
 
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(
@@ -5553,21 +6905,18 @@
         return;
       }
 
-      if (!waited) {
+      if (!stableResult.ok) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_PAUSED] reason=wait-next-reply-failed runId=${runId} round=${round}`,
+          `[CLOSED_LOOP][ROUND_WAIT_REPLY_NOT_OK] runId=${runId} round=${round} reason=${stableResult.reason} stableCount=${stableResult.stableCount || 0}`,
         );
-        const recoverReason = 'wait-next-reply-failed';
-        setStatus(`闭环第 ${round} 轮等待下一条回复失败，准备恢复`, 'warn');
-        recoverClosedLoopContinue(runId, recoverReason, {
-          delayMs: 5000,
-        });
+        if (closedLoopContinueState.running && closedLoopContinueState.runId === runId) {
+          recoverClosedLoopContinue(runId, `wait-reply-${stableResult.reason}`, {
+            delayMs: 5000,
+          });
+        }
         return;
       }
 
-      ToolboxShell.appendLog(
-        `[CLOSED_LOOP][REPLY_DONE] runId=${runId} round=${round} action=prepare-next-delay`,
-      );
       endClosedLoopReplyWait(`round-${round}-reply-done`);
 
       const stopSignalResult = detectCopyHotkeyLoopStopSignal(round);
@@ -5629,17 +6978,85 @@
       const delayMs = getClosedLoopNextStepDelayMs({
         runId,
         round,
-        reason: 'reply-done-before-next-round',
+        reason: 'reply-stable-before-next-round',
+      });
+      const delayResult = await waitClosedLoopPostReplyDelay(runId, round, delayMs);
+      if (!delayResult.ok) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][ROUND_POST_DELAY_NOT_OK] runId=${runId} round=${round} reason=${delayResult.reason}`,
+        );
+        return;
+      }
+
+      const finalCheck = checkClosedLoopReadyForNextSend(
+        runId,
+        round,
+        'post-reply-delay-done',
+      );
+      if (!finalCheck.ok) {
+        if (finalCheck.reason === 'busy') {
+          setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
+            reason: 'final-check-busy',
+          });
+          beginClosedLoopReplyWait('final-check-busy');
+          recoverClosedLoopContinue(runId, 'busy-after-post-delay', {
+            delayMs: 5000,
+          });
+        } else {
+          recoverClosedLoopContinue(runId, `final-check-${finalCheck.reason}`, {
+            delayMs: 5000,
+          });
+        }
+        return;
+      }
+
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.READY_NEXT_ROUND, {
+        reason: `round-${round}-ready-next`,
       });
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][POST_REPLY_DELAY_START] runId=${runId} round=${round} delayMs=${delayMs} delaySec=${Math.round(delayMs / 1000)} reason=reply-done-before-next-round`,
+        `[CLOSED_LOOP][REPLY_DONE] runId=${runId} round=${round} action=schedule-next-round`,
       );
       scheduleClosedLoopContinueNextStep(
         runId,
-        delayMs,
-        `round-${round}-post-reply-delay`,
+        0,
+        `round-${round}-reply-stable-delay-done`,
       );
-      return;
+      } catch (error) {
+        console.error('[CLOSED_LOOP][STEP_ERROR]', error);
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][STEP_ERROR]',
+            `runId=${runId}`,
+            `message=${error && error.message ? error.message : String(error)}`,
+            `stack=${error && error.stack ? String(error.stack).split('\n').slice(0, 3).join(' | ') : '-'}`,
+          ].join(' '),
+        );
+        recoverClosedLoopContinue(runId, 'step-error', {
+          delayMs: 5000,
+        });
+      } finally {
+        if (closedLoopContinueState.currentStepToken === stepToken) {
+          closedLoopContinueState.currentStepRunning = false;
+          closedLoopContinueState.currentStepToken = '';
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][STEP_EXIT]',
+              `runId=${runId}`,
+              `token=${stepToken}`,
+              `phase=${closedLoopContinueState.phase || '-'}`,
+            ].join(' '),
+          );
+        } else {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][STEP_EXIT_SKIP_TOKEN_CHANGED]',
+              `runId=${runId}`,
+              `token=${stepToken}`,
+              `currentToken=${closedLoopContinueState.currentStepToken || '-'}`,
+            ].join(' '),
+          );
+        }
+      }
     }
 
     function migrateLegacyClosedLoopHotkeyButton(scope) {
@@ -5662,16 +7079,47 @@
       ToolboxShell.appendLog('[CLOSED_LOOP][MIGRATE] legacy closed-loop button id -> hotkey btn');
     }
 
+    function isClosedLoopButtonsHiddenByExtraNarrowLayout() {
+      const panel = document.getElementById(typeof APP !== 'undefined' && APP && APP.panelId ? APP.panelId : 'cgpt-toolbox-panel');
+      if (!(panel instanceof HTMLElement)) {
+        return false;
+      }
+      if (!panel.classList.contains('cgpt-toolbox-extra-narrow')) {
+        return false;
+      }
+      const row = rootElRef
+        ? rootElRef.querySelector('.cgpt-upload-closed-loop-action-row')
+        : document.querySelector('#cgpt-upload-module .cgpt-upload-closed-loop-action-row');
+      if (!row) {
+        return false;
+      }
+      const style = window.getComputedStyle(row);
+      return style.display === 'none' || style.visibility === 'hidden';
+    }
+
     function logClosedLoopButtonHitTest(reason = '') {
       const ids = [
         CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id,
         CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id,
         CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id,
       ];
+      const hiddenByExtraNarrow = isClosedLoopButtonsHiddenByExtraNarrowLayout();
       ids.forEach((id) => {
         const btn = document.getElementById(id);
         if (!btn) {
-          ToolboxShell.appendLog(`[CLOSED_LOOP][HIT_TEST] id=${id} found=0 reason=${reason || '-'}`);
+          if (hiddenByExtraNarrow) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][HIT_TEST_SKIP] id=${id} reason=hidden-by-extra-narrow source=${reason || '-'}`,
+            );
+          } else {
+            ToolboxShell.appendLog(`[CLOSED_LOOP][HIT_TEST] id=${id} found=0 reason=${reason || '-'}`);
+          }
+          return;
+        }
+        if (hiddenByExtraNarrow) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][HIT_TEST_SKIP] id=${id} reason=hidden-by-extra-narrow source=${reason || '-'}`,
+          );
           return;
         }
         const rect = btn.getBoundingClientRect();
@@ -6292,16 +7740,27 @@
     }
 
     function getDefaultCopyHotkeyContinuePromptText() {
+      let text = '';
       if (typeof getDefaultBatchContinuePromptText === 'function') {
-        return getDefaultBatchContinuePromptText();
+        text = getDefaultBatchContinuePromptText();
+      } else if (typeof getDefaultTaskContinuePromptText === 'function') {
+        text = getDefaultTaskContinuePromptText();
+      } else if (typeof getDefaultContinuePromptText === 'function') {
+        text = getDefaultContinuePromptText();
+      } else {
+        text = '请继续完成当前任务。';
       }
-      if (typeof getDefaultTaskContinuePromptText === 'function') {
-        return getDefaultTaskContinuePromptText();
+      if (typeof appendDetailedCursorInstructionBlock === 'function') {
+        return appendDetailedCursorInstructionBlock(text);
       }
-      if (typeof getDefaultContinuePromptText === 'function') {
-        return getDefaultContinuePromptText();
+      if (!String(text || '').includes('Cursor / Claude Code 修改指令')) {
+        return [
+          String(text || '').trim(),
+          '',
+          '如果当前任务涉及代码修改、修复、重构、Bug 定位、UI 行为、状态同步、上传逻辑、闭环控制或日志排查，必须输出详细的 Cursor / Claude Code 修改指令。必须列出涉及文件、函数名、修改前问题、修改后目标行为、关键代码片段、日志要求、验证步骤和边界条件。不要只给笼统建议。',
+        ].join('\n');
       }
-      return '请继续完成当前任务。';
+      return text;
     }
 
     function readUserConfiguredContinuePromptText() {
@@ -6316,10 +7775,19 @@
     function logContinuePromptBuild(promptText, options = {}) {
       const source = String(options.source || options.logSource || '-').trim() || '-';
       const text = String(promptText || '');
+      const hasDetailedCursor = typeof hasDetailedCursorInstructionBlock === 'function'
+        ? hasDetailedCursorInstructionBlock(text)
+        : (
+          text.includes('Cursor / Claude Code 修改指令')
+          || text.includes('函数名')
+          || text.includes('验证步骤')
+        );
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][CONTINUE_PROMPT_BUILD] source=${source} len=${text.length} `
         + `hasStopToken=${text.includes(CANONICAL_CONTINUE_STOP_TOKEN) ? 1 : 0} `
-        + `requireCursor=${text.includes('Cursor 修改指令') ? 1 : 0}`,
+        + `hasDetailedCursor=${hasDetailedCursor ? 1 : 0} `
+        + `hasFunctionRequirement=${text.includes('函数名') ? 1 : 0} `
+        + `hasVerifyRequirement=${text.includes('验证步骤') ? 1 : 0}`,
       );
     }
 
@@ -6329,14 +7797,18 @@
       const defaultMarkers = [
         '请继续完成当前任务',
         '最开始那个 Prompt',
-        'Cursor 修改指令',
+        'Cursor',
+        'Claude Code',
+        '函数名',
+        '验证步骤',
+        '日志要求',
         signal,
       ].filter((item) => item && text.includes(item));
-      if (defaultMarkers.length >= 3) {
+      if (defaultMarkers.length >= 4) {
         return {
-          allowLenDelta: 80,
+          allowLenDelta: 120,
           allowCoreContains: true,
-          requiredIncludes: defaultMarkers,
+          requiredIncludes: defaultMarkers.slice(0, 6),
         };
       }
       const userCore = text.slice(0, Math.min(48, text.length)).trim();
@@ -6558,8 +8030,9 @@
       return matched;
     }
 
-    function getActiveGroupId() {
-      return String(state.activeGroupId || '').trim();
+
+    function getActiveGroupId(...args) {
+      return ensureUploadQueueStore().getActiveGroupId(...args);
     }
 
     function formatUploadGroupDiagFields(extra = {}) {
@@ -6601,12 +8074,431 @@
       }
       console.log(line);
     }
+    const uploadModuleRefs = {
+      get dbPromise() { return dbPromise; },
+      set dbPromise(v) { dbPromise = v; },
+      get persistQueuePromise() { return persistQueuePromise; },
+      set persistQueuePromise(v) { persistQueuePromise = v; },
+      get persistQueueAllowEmptyReason() { return persistQueueAllowEmptyReason; },
+      set persistQueueAllowEmptyReason(v) { persistQueueAllowEmptyReason = v; },
+      get uploadBroadcastChannel() { return uploadBroadcastChannel; },
+      set uploadBroadcastChannel(v) { uploadBroadcastChannel = v; },
+      get uploadGlobalSyncInitialized() { return uploadGlobalSyncInitialized; },
+      set uploadGlobalSyncInitialized(v) { uploadGlobalSyncInitialized = v; },
+      get pendingUploadGlobalSyncMessage() { return pendingUploadGlobalSyncMessage; },
+      set pendingUploadGlobalSyncMessage(v) { pendingUploadGlobalSyncMessage = v; },
+      get lastManualUploadGroupAt() { return lastManualUploadGroupAt; },
+      set lastManualUploadGroupAt(v) { lastManualUploadGroupAt = v; },
+      get listEl() { return listEl; },
+      set listEl(v) { listEl = v; },
+      get groupListEl() { return groupListEl; },
+      set groupListEl(v) { groupListEl = v; },
+      get managePanelEl() { return managePanelEl; },
+      set managePanelEl(v) { managePanelEl = v; },
+      get manageGroupListEl() { return manageGroupListEl; },
+      set manageGroupListEl(v) { manageGroupListEl = v; },
+      get rootElRef() { return rootElRef; },
+      set rootElRef(v) { rootElRef = v; },
+      get uploadFileHandleDbPromise() { return uploadFileHandleDbPromise; },
+      set uploadFileHandleDbPromise(v) { uploadFileHandleDbPromise = v; },
+      get uploadGroupCountsRefreshTimer() { return uploadGroupCountsRefreshTimer; },
+      set uploadGroupCountsRefreshTimer(v) { uploadGroupCountsRefreshTimer = v; },
+      get uploadDbCleanupTimer() { return uploadDbCleanupTimer; },
+      set uploadDbCleanupTimer(v) { uploadDbCleanupTimer = v; },
+      get persistQueueItemDirtyIds() { return persistQueueItemDirtyIds; },
+      set persistQueueItemDirtyIds(v) { persistQueueItemDirtyIds = v; },
+      get persistQueueItemPendingStage() { return persistQueueItemPendingStage; },
+      set persistQueueItemPendingStage(v) { persistQueueItemPendingStage = v; },
+      get persistQueueItemTimer() { return persistQueueItemTimer; },
+      set persistQueueItemTimer(v) { persistQueueItemTimer = v; },
+      get persistQueuePendingStage() { return persistQueuePendingStage; },
+      set persistQueuePendingStage(v) { persistQueuePendingStage = v; },
+      get persistQueueThrottleTimer() { return persistQueueThrottleTimer; },
+      set persistQueueThrottleTimer(v) { persistQueueThrottleTimer = v; },
+      get uploadPersistLightTimer() { return uploadPersistLightTimer; },
+      set uploadPersistLightTimer(v) { uploadPersistLightTimer = v; },
+      get uploadGroupCountLightTimer() { return uploadGroupCountLightTimer; },
+      set uploadGroupCountLightTimer(v) { uploadGroupCountLightTimer = v; },
+      get lastPersistUserNotifyAt() { return lastPersistUserNotifyAt; },
+      set lastPersistUserNotifyAt(v) { lastPersistUserNotifyAt = v; },
+    };
 
-    function getLocalUploadFileCount() {
-      const activeFiles = getActiveGroupFiles().length;
-      const uploadItems = Array.isArray(state.queue) ? state.queue.length : 0;
-      const groupFiles = getActiveGroupFiles().length;
-      return Math.max(activeFiles, uploadItems, groupFiles);
+    let uploadQueueStoreInstance = null;
+    let uploadGroupStoreInstance = null;
+    let uploadPersistDbInstance = null;
+    let uploadFileSourceInstance = null;
+    let uploadRenderListInstance = null;
+
+    function ensureUploadQueueStore() {
+      if (uploadQueueStoreInstance) return uploadQueueStoreInstance;
+      uploadQueueStoreInstance = UploadQueueStore.create({
+        state,
+        appendUploadLog,
+        UploadState,
+        UploadRestoreState,
+        UploadPersistedKind,
+        isUploadDebugEnabled,
+        normalizeUploadCompareName,
+        resolveUploadAttachmentPresenceLevel,
+        findUploadGroupById,
+        getActiveGroup: () => ensureUploadGroupStore().getActiveGroup(),
+        getUploadGroupStableKey: (...a) => ensureUploadGroupStore().getUploadGroupStableKey(...a),
+        getUploadFileFolderKey: (...a) => ensureUploadGroupStore().getUploadFileFolderKey(...a),
+        saveMultiUploadLastSelection,
+        getMultiUploadLastSelection,
+        logMultiUploadLastSelectionEvent,
+        isFlaskLocalDirectItem,
+        hasReusableUploadSourceForReset: (...a) => ensureUploadFileSource().hasReusableUploadSourceForReset(...a),
+        hasAttemptableUploadSource: (...a) => ensureUploadFileSource().hasAttemptableUploadSource(...a),
+        newId,
+        logDirtyRestoreEntry,
+        getRestoreDirtyValueText,
+        setLastRestoreWarning,
+        isPlainObject,
+        normalizeRestoreArray,
+      });
+      return uploadQueueStoreInstance;
+    }
+
+    function ensureUploadGroupStore() {
+      if (uploadGroupStoreInstance) return uploadGroupStoreInstance;
+      uploadGroupStoreInstance = UploadGroupStore.create({
+        state,
+        appendUploadLog,
+        appendUploadGroupLog,
+        DEFAULT_UPLOAD_GROUP_NAME,
+        UPLOAD_GLOBAL_SYNC_KEY,
+        UPLOAD_PROJECT_NAME_KEY_MAP,
+        refs: uploadModuleRefs,
+        getMultiUploadLastSelection,
+        getActiveGroupId: () => ensureUploadQueueStore().getActiveGroupId(),
+        getActiveGroupFiles: () => ensureUploadQueueStore().getActiveGroupFiles(),
+        getSelectedFileIdForActiveGroup: () => ensureUploadQueueStore().getSelectedFileIdForActiveGroup(),
+        getLocalUploadFileCount: (...a) => ensureUploadQueueStore().getLocalUploadFileCount(...a),
+        normalizeUploadItem: (...a) => ensureUploadQueueStore().normalizeUploadItem(...a),
+        syncUploadGroupAppState,
+        scheduleRenderUpload,
+        scheduleRenderUploadListOnly: (...a) => ensureUploadRenderList().scheduleRenderUploadListOnly(...a),
+        persistGroups: (...a) => ensureUploadPersistDb().persistGroups(...a),
+        persistQueue: (...a) => ensureUploadPersistDb().persistQueue(...a),
+        loadGroups: (...a) => ensureUploadPersistDb().loadGroups(...a),
+        loadQueueForActiveGroup: (...a) => ensureUploadPersistDb().loadQueueForActiveGroup(...a),
+        renderUploadListOnly: (...a) => ensureUploadRenderList().renderUploadListOnly(...a),
+        refreshUploadGroupDomRefs: (...a) => ensureUploadRenderList().refreshUploadGroupDomRefs(...a),
+        syncGroupManagePanel: (...a) => ensureUploadRenderList().syncGroupManagePanel(...a),
+        renderProjectCategoryChips: (...a) => ensureUploadRenderList().renderProjectCategoryChips(...a),
+        renderUploadButtonsOnly,
+        render,
+        setStatus,
+        awaitPersistQueueBriefly: (...a) => ensureUploadPersistDb().awaitPersistQueueBriefly(...a),
+        saveMultiUploadSelectionForActiveGroup: (...a) => ensureUploadQueueStore().saveMultiUploadSelectionForActiveGroup(...a),
+        refreshUploadGroupCounts,
+        healStaleUploadRunningLockIfNeeded,
+        isUploadRunActuallyActive,
+        hasActiveUploadInProgressOnQueue,
+        createId,
+        withAllowedEmptyQueuePersist,
+        clearActiveGroupQueueInline: (...a) => ensureUploadGroupStore().clearActiveGroupQueueInline(...a),
+        deleteGroupQueue: (...a) => ensureUploadGroupStore().deleteGroupQueue(...a),
+        downloadJson: safeDownloadJson,
+        readJsonFile: safeReadJsonFile,
+        groupNameInputElRef: () => groupNameInputEl,
+        lastGroupNameInputValueRef: () => lastGroupNameInputValue,
+        clearConfirmUntilRef: () => clearConfirmUntil,
+        deleteConfirmUntilRef: () => deleteConfirmUntil,
+      });
+      return uploadGroupStoreInstance;
+    }
+
+    function ensureUploadPersistDb() {
+      if (uploadPersistDbInstance) return uploadPersistDbInstance;
+      uploadPersistDbInstance = UploadPersistDb.create({
+        state,
+        appendUploadLog,
+        refs: uploadModuleRefs,
+        UPLOAD_DB_MAX_GROUPS,
+        UPLOAD_DB_MAX_QUEUE_ROWS,
+        UPLOAD_DB_EMPTY_GROUP_TTL_MS,
+        UPLOAD_DB_FAILED_ROW_TTL_MS,
+        getActiveGroupId: () => ensureUploadQueueStore().getActiveGroupId(),
+        getActiveGroupFiles: () => ensureUploadQueueStore().getActiveGroupFiles(),
+        getUploadItemGroupId: (...a) => ensureUploadQueueStore().getUploadItemGroupId(...a),
+        normalizeUploadItem: (...a) => ensureUploadQueueStore().normalizeUploadItem(...a),
+        sanitizePersistedUploadRows: (...a) => ensureUploadQueueStore().sanitizePersistedUploadRows(...a),
+        syncUploadItemSchemaInPlace: (...a) => ensureUploadQueueStore().syncUploadItemSchemaInPlace(...a),
+        restoreUploadItemFromPersistRow: (...a) => ensureUploadFileSource().restoreUploadItemFromPersistRow(...a),
+        buildUploadHandleKey: (...a) => ensureUploadFileSource().buildUploadHandleKey(...a),
+        isFileHandleLike: (...a) => ensureUploadFileSource().isFileHandleLike(...a),
+        saveUploadFileHandle: (...a) => ensureUploadPersistDb().saveUploadFileHandle(...a),
+        getQueueRestorePhase,
+        shouldAllowEmptyQueuePersist,
+        mergeActiveGroupQueueFromMemory,
+        setQueueRestorePhase,
+        syncActiveGroupSelectionAfterQueueLoad: (...a) => ensureUploadQueueStore().syncActiveGroupSelectionAfterQueueLoad(...a),
+        isPlainObject,
+        normalizeRestoreArray,
+        normalizeRestoreObject,
+        logDirtyRestoreEntry,
+        getRestoreDirtyValueText,
+        setLastRestoreWarning,
+        resetDirtyUploadRestoreState,
+        isInvalidRestoreStateError,
+        safeAssignRestoreState,
+        uploadTimers,
+        scheduleRefreshUploadGroupCountsLight: (...a) => ensureUploadPersistDb().scheduleRefreshUploadGroupCountsLight(...a),
+        renderUploadListOnly: (...a) => ensureUploadRenderList().renderUploadListOnly(...a),
+        refreshUploadGroupCounts,
+        isUploadListDebugEnabled,
+        isBlobLike,
+        getObjectTag,
+        isUploadDebugEnabled,
+        ensureUploadGroupStableKeys: (...a) => ensureUploadGroupStore().ensureUploadGroupStableKeys(...a),
+        createDefaultGroup: (...a) => ensureUploadGroupStore().createDefaultGroup(...a),
+        resolveUploadGroupSelection: (...a) => ensureUploadGroupStore().resolveUploadGroupSelection(...a),
+        ensureActiveUploadGroupIdValid,
+        syncUploadGroupAppState,
+        appendUploadGroupLog,
+        scheduleRenderUpload,
+        setStatus,
+        migrateLegacyUploadSelectionIfNeeded,
+        getToolboxPageState: () => {
+          if (typeof getToolboxPageState === 'function') {
+            return getToolboxPageState();
+          }
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog('[UPLOAD_GROUP][WARN] getToolboxPageState missing, fallback empty page state');
+          }
+          return {};
+        },
+        saveGlobalUploadActiveGroupId,
+        saveUploadLastActiveGroupId,
+        dedupeActiveGroupQueue,
+        migrateMissingGroupIdRows,
+        isStaleFailedUploadRow,
+        UploadPersistedKind,
+        UploadRestoreState,
+        UPLOAD_HANDLE_DB_NAME,
+        UPLOAD_HANDLE_STORE,
+        UPLOAD_HANDLE_DB_VERSION,
+        UPLOAD_PERSIST_TIMEOUT_MS,
+        hasAttemptableUploadSource: (...a) => ensureUploadFileSource().hasAttemptableUploadSource(...a),
+        hasAttachmentEvidenceForItem,
+        shouldPreserveMissingOrFailedState,
+        isUploadUnfinishedState,
+        normalizeUploadState,
+        isFlaskLocalDirectSource,
+        isFlaskLocalDirectItem,
+        isFileLike,
+        isPersistUploadBlobEnabled,
+        getUploadItemSizeBytes,
+        normalizeUploadRegistryStatus: (...a) => ensureUploadQueueStore().normalizeUploadRegistryStatus(...a),
+        appendUploadSchemaAuditLog,
+        broadcastUploadGlobalStateChanged: (...a) => ensureUploadGroupStore().broadcastUploadGlobalStateChanged(...a),
+        isProtectedUploadGroup,
+        syncActiveGroupCountInCache,
+        logSlowOperation,
+        withTimeout,
+        sleep,
+        renderProjectCategoryChips,
+        renderManageGroupList,
+        isComposerAttachmentReadyForUserVisibleUpload,
+        clearUploadFailureStatusIndicators,
+        reconcileIdleUploadFailureState,
+        refreshUploadFailurePresentation,
+        refreshQueueReadableState,
+        isUploadCriticalNow,
+        isUploadItemMissingSource,
+        restoreMissingUploadItem: (...a) => ensureUploadFileSource().restoreMissingUploadItem(...a),
+        logUploadQueueSnapshot,
+        countRenderedUploadListItems,
+        normalizePersistedKind,
+        render,
+        newId,
+      });
+      return uploadPersistDbInstance;
+    }
+
+    function ensureUploadFileSource() {
+      if (uploadFileSourceInstance) return uploadFileSourceInstance;
+      uploadFileSourceInstance = UploadFileSource.create({
+        state,
+        appendUploadLog,
+
+        UploadState,
+        UploadRestoreState,
+        UploadPersistedKind,
+
+        getActiveGroupId: () => ensureUploadQueueStore().getActiveGroupId(),
+        getScopedQueueItemsForUpload: (...a) => ensureUploadQueueStore().getScopedQueueItemsForUpload(...a),
+        normalizeUploadItem: (...a) => ensureUploadQueueStore().normalizeUploadItem(...a),
+        syncUploadItemSchemaInPlace: (...a) => ensureUploadQueueStore().syncUploadItemSchemaInPlace(...a),
+
+        loadUploadFileHandle: (...a) => ensureUploadPersistDb().loadUploadFileHandle(...a),
+        saveUploadFileHandle: (...a) => ensureUploadPersistDb().saveUploadFileHandle(...a),
+        deleteUploadFileHandle: (...a) => ensureUploadPersistDb().deleteUploadFileHandle(...a),
+        getPersistedKindForItem: (...a) => ensureUploadPersistDb().getPersistedKindForItem(...a),
+        getRestoreStateForItem: (...a) => ensureUploadPersistDb().getRestoreStateForItem(...a),
+        resolveUploadBlobCandidate: (...a) => ensureUploadPersistDb().resolveUploadBlobCandidate(...a),
+        schedulePersistQueueItem: (...a) => ensureUploadPersistDb().schedulePersistQueueItem(...a),
+
+        scheduleRenderUploadListOnly: (...a) => ensureUploadRenderList().scheduleRenderUploadListOnly(...a),
+        renderUploadListOnly: (...a) => ensureUploadRenderList().renderUploadListOnly(...a),
+
+        isFlaskLocalDirectSource,
+        isFlaskLocalDirectItem,
+        isFileLike,
+        isBlobLike,
+        isUploadUnfinishedState,
+        normalizeUploadState,
+        safeAssignRestoreState,
+        isUploadDebugEnabled,
+        resetDirtyUploadRestoreState,
+        normalizeRestoreObject,
+        isPlainObject,
+        hasAttachmentEvidenceForItem,
+        awaitPersistQueueBriefly: (...a) => ensureUploadPersistDb().awaitPersistQueueBriefly(...a),
+        persistQueueThrottled,
+        getActiveUploadScopeGroupId: (...a) => ensureUploadQueueStore().getActiveUploadScopeGroupId(...a),
+        isUploadItemInActiveScope: (...a) => ensureUploadQueueStore().isUploadItemInActiveScope(...a),
+        buildVirtualFilePrepareSource,
+        isCadenceUploadSource,
+        prepareVirtualUploadFileForItem,
+        isQueueItemAlreadyUploaded,
+        isLegacyUploadItemAttached,
+        summarizeUploadAttachmentPresenceForScope,
+        STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE,
+        describeUploadSource,
+        logUploadItemSource,
+        getActiveGroupFiles: () => ensureUploadQueueStore().getActiveGroupFiles(),
+        refreshUploadGroupCounts,
+        broadcastUploadGlobalStateChanged: (...a) => ensureUploadGroupStore().broadcastUploadGlobalStateChanged(...a),
+        render,
+
+        newId,
+        createId,
+        setStatus,
+        scheduleRenderUpload,
+        persistQueue: (...a) => ensureUploadPersistDb().persistQueue(...a),
+        openUploadFileHandleDb: (...a) => ensureUploadPersistDb().openUploadFileHandleDb(...a),
+        buildUploadHandleKey: (...a) => ensureUploadFileSource().buildUploadHandleKey(...a),
+        getUploadItemGroupId: (...a) => ensureUploadQueueStore().getUploadItemGroupId(...a),
+        markUploadItemNeedsRebind: (...a) => ensureUploadFileSource().markUploadItemNeedsRebind(...a),
+        hasActuallyReusableUploadSource: (...a) => ensureUploadFileSource().hasActuallyReusableUploadSource(...a),
+        canReadFromLocal: (...a) => ensureUploadFileSource().canReadFromLocal(...a),
+        isUploadSourceCacheForbidden: (...a) => ensureUploadFileSource().isUploadSourceCacheForbidden(...a),
+        isCachedUploadSnapshot: (...a) => ensureUploadFileSource().isCachedUploadSnapshot(...a),
+        hasLocalReadableHandle: (...a) => ensureUploadFileSource().hasLocalReadableHandle(...a),
+        hasReadableFreshLocalSource: (...a) => ensureUploadFileSource().hasReadableFreshLocalSource(...a),
+        isUploadItemLocallyUnreadable: (...a) => ensureUploadFileSource().isUploadItemLocallyUnreadable(...a),
+        throwStrictCacheForbidden: (...a) => ensureUploadFileSource().throwStrictCacheForbidden(...a),
+        resolveFlaskLocalDirectDownloadUrl: (...a) => ensureUploadFileSource().resolveFlaskLocalDirectDownloadUrl(...a),
+        hasStrictLocalCachePayload: (...a) => ensureUploadFileSource().hasStrictLocalCachePayload(...a),
+        validateRebindFile: (...a) => ensureUploadFileSource().validateRebindFile(...a),
+        applyReboundFile: (...a) => ensureUploadFileSource().applyReboundFile(...a),
+        restoreHandleBackedUploadItem: (...a) => ensureUploadFileSource().restoreHandleBackedUploadItem(...a),
+        restoreMissingUploadItem: (...a) => ensureUploadFileSource().restoreMissingUploadItem(...a),
+        clearStaleUnreadableFlagsForReadableItem: (...a) => ensureUploadFileSource().clearStaleUnreadableFlagsForReadableItem(...a),
+        ensureReusableFileForUploadItem: (...a) => ensureUploadFileSource().ensureReusableFileForUploadItem(...a),
+        getPendingUploadItemsForStart: (...a) => ensureUploadFileSource().getPendingUploadItemsForStart(...a),
+        UploadSelectors,
+        qs,
+      });
+      return uploadFileSourceInstance;
+    }
+
+    function ensureUploadRenderList() {
+      if (uploadRenderListInstance) return uploadRenderListInstance;
+      uploadRenderListInstance = UploadRenderList.create({
+        state,
+        appendUploadLog,
+        refs: uploadModuleRefs,
+        getActiveGroupId: () => ensureUploadQueueStore().getActiveGroupId(),
+        getActiveGroupFiles: () => ensureUploadQueueStore().getActiveGroupFiles(),
+        getSelectedFileIdForActiveGroup: () => ensureUploadQueueStore().getSelectedFileIdForActiveGroup(),
+        getActiveGroup: () => ensureUploadGroupStore().getActiveGroup(),
+        getUploadGroupStableKey: (...a) => ensureUploadGroupStore().getUploadGroupStableKey(...a),
+        hasAttemptableUploadSource: (...a) => ensureUploadFileSource().hasAttemptableUploadSource(...a),
+        isUploadItemLocallyUnreadable: (...a) => ensureUploadFileSource().isUploadItemLocallyUnreadable(...a),
+        getActiveGroupDbCount,
+        getQueueRestorePhase,
+        diagnoseUploadListRender,
+        uploadTimers,
+        UploadSelectors,
+        qs,
+        escapeHtml,
+        formatFileSize: safeFormatFileSize,
+        isUploadDebugEnabled,
+        renderUploadButtonsOnly,
+        scheduleRenderUpload,
+        setSelectedFileIdForActiveGroup: (...a) => ensureUploadQueueStore().setSelectedFileIdForActiveGroup(...a),
+        rebindUploadFile: (...a) => ensureUploadFileSource().rebindUploadFile(...a),
+        requestUploadFilePermission: (...a) => ensureUploadFileSource().requestUploadFilePermission(...a),
+        removeFileFromCurrentGroup: (...a) => ensureUploadGroupStore().removeFileFromCurrentGroup(...a),
+        switchGroup: (...a) => ensureUploadGroupStore().switchGroup(...a),
+        renameActiveGroupInline: (...a) => ensureUploadGroupStore().renameActiveGroupInline(...a),
+        deleteActiveGroupInline: (...a) => ensureUploadGroupStore().deleteActiveGroupInline(...a),
+        clearActiveGroupQueueInline: (...a) => ensureUploadGroupStore().clearActiveGroupQueueInline(...a),
+        createGroupInline: (...a) => ensureUploadGroupStore().createGroupInline(...a),
+        ensureQueueReadyForVisibleUploadList,
+        scheduleQueueRestoreForVisibleMismatch,
+        countRenderedUploadListItems,
+        buildUploadQueueItemHtml: (...a) => ensureUploadRenderList().buildUploadQueueItemHtml(...a),
+        getUploadListItemsToRender: (...a) => ensureUploadRenderList().getUploadListItemsToRender(...a),
+        buildLimitedUploadQueueListHtml: (...a) => ensureUploadRenderList().buildLimitedUploadQueueListHtml(...a),
+        renderProjectCategoryChips: (...a) => ensureUploadRenderList().renderProjectCategoryChips(...a),
+        toggleGroupManagePanel: (...a) => ensureUploadRenderList().toggleGroupManagePanel(...a),
+        renderManageGroupList: (...a) => ensureUploadRenderList().renderManageGroupList(...a),
+        syncGroupManagePanel: (...a) => ensureUploadRenderList().syncGroupManagePanel(...a),
+        UPLOAD_PROJECT_NAME_KEY_MAP,
+
+        getActiveUploadScopeGroupId,
+        isUploadItemInActiveScope,
+        getFlaskUploadFileId,
+        findQueueItemByFlaskFileId,
+        getUploadItemGroupId,
+
+        clearStaleUnreadableFlagsForReadableItem,
+        getUploadItemVisualClass,
+        isUploadSourceCacheForbidden,
+        getUploadInlineStatusText,
+        hasLocalReadableHandle,
+        buildUploadItemTitle,
+        shouldShowRebindButton,
+        shouldShowGrantPermissionButton,
+        isUploadListDebugEnabled,
+
+        refreshQueueReadableState,
+        logSlowOperation,
+        isUploadCriticalNow,
+
+        appendUploadGroupLog,
+        ensureActiveUploadGroupIdValid,
+        ensureDefaultGroupReady,
+        ensureUploadGroupSection,
+        getUploadGroupFileCount,
+        stripTrailingCountFromGroupName,
+        syncUploadGroupAppState,
+        shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply,
+
+        formatBytes: safeFormatFileSize,
+        UploadState,
+        normalizeUploadStateValue,
+
+        UPLOAD_LIST_RENDER_LIMIT,
+        UPLOAD_LIST_RENDER_MIN_INTERVAL_MS,
+
+        getHost: () => host,
+        getUploadGroupsInitResolved: () => uploadGroupsInitResolved,
+        getUploadModuleInitPromise: () => uploadModuleInitPromise,
+      });
+      return uploadRenderListInstance;
+    }
+
+
+
+
+    function getLocalUploadFileCount(...args) {
+      return ensureUploadQueueStore().getLocalUploadFileCount(...args);
     }
 
     function isManualStartUploadSource(source) {
@@ -6954,6 +8846,38 @@
       }
     }
 
+    async function prepareBeforeManualSend(ctx = {}) {
+      const attachmentCount = Math.max(0, Number(ctx.attachmentCount || 0));
+      const isManualSend = !!ctx.isManualSend;
+      const source = String(ctx.source || 'send-prepare').trim() || 'send-prepare';
+
+      if (isManualSend && attachmentCount === 0) {
+        ToolboxShell.appendLog(
+          `[SEND_PREPARE][SKIP_UPLOAD_QUEUE_RESTORE] reason=plain-text-send attachmentCount=0 source=${source}`,
+        );
+        Promise.resolve()
+          .then(() => ensureQueueReadyForVisibleUploadList(`background-after-plain-text-send:${source}`))
+          .catch((error) => {
+            const errStack = error && error.stack ? error.stack : (error && error.message ? error.message : String(error));
+            console.error('[ChatGPT toolbox] background upload queue restore after plain-text send failed', error);
+            ToolboxShell.appendLog(
+              `[SEND_PREPARE][BACKGROUND_UPLOAD_RESTORE_FAILED] source=${source} error=${errStack}`,
+            );
+          });
+        return {
+          ok: true,
+          skippedUploadQueueRestore: true,
+        };
+      }
+
+      const restored = await ensureQueueReadyForVisibleUploadList(`send-prepare:${source}`);
+      return {
+        ok: true,
+        skippedUploadQueueRestore: false,
+        restored,
+      };
+    }
+
     function scheduleQueueRestoreForVisibleMismatch(reason = '') {
       const reasonText = String(reason || 'visible-list-count-mismatch').trim() || 'visible-list-count-mismatch';
       if (getQueueRestorePhase() === 'loading') {
@@ -7191,14 +9115,9 @@
       return true;
     }
 
-    function getActiveGroupFiles() {
-      const groupId = getActiveGroupId();
-      if (!groupId) {
-        return [];
-      }
-      return (state.queue || []).filter(
-        (file) => file && String(file.groupId || '').trim() === groupId,
-      );
+
+    function getActiveGroupFiles(...args) {
+      return ensureUploadQueueStore().getActiveGroupFiles(...args);
     }
 
     function getUploadStateSnapshot() {
@@ -7388,71 +9307,29 @@
       return result;
     }
 
-    function getUploadItemGroupId(item) {
-      if (!item) return '';
-      return String(
-        item.groupId
-        || item.uploadActiveGroupId
-        || item.upload_active_group_id
-        || item.projectGroupId
-        || ''
-      ).trim();
+
+    function getUploadItemGroupId(...args) {
+      return ensureUploadQueueStore().getUploadItemGroupId(...args);
     }
 
-    function normalizeUploadRegistryStatus(value, item = null) {
-      const text = String(value || '').trim().toLowerCase();
-      if (!text) {
-        if (item && isFlaskLocalDirectItem(item)) {
-          return 'registered';
-        }
-        return 'pending';
-      }
-      if (['registered', 'pending', 'missing', 'failed', 'permission_required', 'needs_rebind'].includes(text)) {
-        return text;
-      }
-      if (text === 'uploaded' || text === 'attached' || text === 'done') {
-        return 'registered';
-      }
-      if (text === 'pending_confirm') {
-        return 'registered';
-      }
-      return text;
+
+    function normalizeUploadRegistryStatus(...args) {
+      return ensureUploadQueueStore().normalizeUploadRegistryStatus(...args);
     }
 
-    function normalizeUploadAttachState(rawState, item = null) {
-      const normalized = typeof UploadStateUtils !== 'undefined' && UploadStateUtils
-        && typeof UploadStateUtils.normalize === 'function'
-        ? UploadStateUtils.normalize(rawState, UploadState.IDLE)
-        : String(rawState || '').trim() || UploadState.IDLE;
-      if (normalized === UploadState.IDLE && item && String(item.status || '').trim().toLowerCase() === 'pending_confirm') {
-        return UploadState.ATTACHING;
-      }
-      return normalized;
+
+    function normalizeUploadAttachState(...args) {
+      return ensureUploadQueueStore().normalizeUploadAttachState(...args);
     }
 
-    function normalizeUploadComposerPresence(value, item = null) {
-      const text = String(value || '').trim().toLowerCase();
-      if (['composer-attached', 'conversation-sent', 'local-bound', 'unbound'].includes(text)) {
-        return text;
-      }
-      if (item && typeof resolveUploadAttachmentPresenceLevel === 'function') {
-        return resolveUploadAttachmentPresenceLevel(item);
-      }
-      return 'unbound';
+
+    function normalizeUploadComposerPresence(...args) {
+      return ensureUploadQueueStore().normalizeUploadComposerPresence(...args);
     }
 
-    function normalizeUploadSendState(value, item = null) {
-      const text = String(value || '').trim().toLowerCase();
-      if (['idle', 'sent', 'pending', 'failed', 'cancelled'].includes(text)) {
-        return text;
-      }
-      const presence = item && typeof resolveUploadAttachmentPresenceLevel === 'function'
-        ? resolveUploadAttachmentPresenceLevel(item)
-        : 'unbound';
-      if (presence === 'conversation-sent') {
-        return 'sent';
-      }
-      return 'idle';
+
+    function normalizeUploadSendState(...args) {
+      return ensureUploadQueueStore().normalizeUploadSendState(...args);
     }
 
     function getUploadItemSchemaAuditData(item) {
@@ -7507,40 +9384,14 @@
       }
     }
 
-    function applyUnifiedUploadAliases(target) {
-      if (!target || typeof target !== 'object') {
-        return target;
-      }
-      target.type = target.mimeType || target.type || 'application/octet-stream';
-      target.mime_type = target.mimeType || target.mime_type || target.type || 'application/octet-stream';
-      target.state = target.attachState || target.state || UploadState.IDLE;
-      target.status = target.registryStatus || target.status || 'pending';
-      target.download_url = target.downloadUrl || target.download_url || '';
-      const restoreStateText = String(target.restoreState || '').trim().toLowerCase();
-      const registryStatusText = String(target.registryStatus || target.status || '').trim().toLowerCase();
-      const attachStateText = String(target.attachState || target.state || '').trim();
-      target.needsRebind = !!(
-        target.needsRebind === true
-        || restoreStateText === UploadRestoreState.NEEDS_REBIND
-        || registryStatusText === 'needs_rebind'
-        || attachStateText === UploadState.NEEDS_REBIND
-        || attachStateText === UploadState.MISSING_FILE
-      );
-      if (!String(target.missingReason || '').trim() && target.needsRebind) {
-        target.missingReason = String(target.message || '').trim() || 'page-reloaded-file-object-lost';
-      }
-      return target;
+
+    function applyUnifiedUploadAliases(...args) {
+      return ensureUploadQueueStore().applyUnifiedUploadAliases(...args);
     }
 
-    function syncUploadItemSchemaInPlace(target) {
-      if (!target || typeof target !== 'object') {
-        return target;
-      }
-      const normalized = normalizeUploadItem(target, {
-        groupId: getUploadItemGroupId(target) || state.activeGroupId,
-      });
-      Object.assign(target, normalized);
-      return target;
+
+    function syncUploadItemSchemaInPlace(...args) {
+      return ensureUploadQueueStore().syncUploadItemSchemaInPlace(...args);
     }
 
     function logNormalizedUploadItem(item) {
@@ -7550,88 +9401,19 @@
       appendUploadSchemaAuditLog('UPLOAD_ITEM_NORMALIZED', item);
     }
 
-    function normalizeUploadItem(rawItem, options = {}) {
-      const item = rawItem && typeof rawItem === 'object' ? rawItem : {};
-      const fallbackGroupId = String(options.groupId || options.fallbackGroupId || getActiveGroupId() || '').trim();
-      const normalizedName = String(item.name || item.filename || item.fileName || '').trim();
-      const normalizedMimeType = String(item.mimeType || item.mime_type || item.type || '').trim();
-      const normalizedDownloadUrl = String(item.downloadUrl || item.download_url || '').trim();
-      const normalizedFlaskPath = String(item.flaskPath || '').trim();
-      const normalizedGroupId = getUploadItemGroupId(item) || fallbackGroupId;
-      const normalizedSourceKind = String(
-        item.sourceKind
-        || item.source
-        || item.origin
-        || item.kind
-        || (item.file_id || normalizedDownloadUrl || normalizedFlaskPath ? 'flask_local_direct' : '')
-        || 'browser_file',
-      ).trim();
-      const normalizedReadMode = String(item.readMode || '').trim();
-      const normalizedHandleKey = String(item.handleKey || '').trim();
-      const normalizedUploadName = String(item.uploadName || '').trim();
-      const normalizedManualPathNote = String(item.manualPathNote || '').trim();
-      const normalizedRestoreState = item.restoreState || '';
-      const normalizedPersistedKind = String(item.persistedKind || '').trim();
-      const attachState = normalizeUploadAttachState(item.attachState != null ? item.attachState : item.state, item);
-      const composerPresence = normalizeUploadComposerPresence(item.composerPresence, item);
-      const sendState = normalizeUploadSendState(item.sendState, item);
-      const registryStatus = normalizeUploadRegistryStatus(
-        item.registryStatus != null ? item.registryStatus : item.status,
-        item,
-      );
 
-      const normalized = {
-        ...item,
-        id: item.id || item.file_id || newId(),
-        name: normalizedName || 'unknown',
-        mimeType: normalizedMimeType || 'application/octet-stream',
-        downloadUrl: normalizedDownloadUrl,
-        displayPath: String(item.displayPath || item.name || item.filename || item.fileName || '').trim(),
-        size: Number(item.size) || 0,
-        lastModified: Number(item.lastModified) || 0,
-        groupId: normalizedGroupId,
-        sourceKind: normalizedSourceKind,
-        readMode: normalizedReadMode,
-        registryStatus,
-        attachState,
-        composerPresence,
-        sendState,
-        restoreState: normalizedRestoreState,
-        persistedKind: normalizedPersistedKind,
-        handleKey: normalizedHandleKey,
-        flaskPath: normalizedFlaskPath,
-        uploadName: normalizedUploadName,
-        manualPathNote: normalizedManualPathNote,
-        message: String(item.message || '').trim(),
-        file: item.file || null,
-        blob: item.blob || null,
-        fileHandle: item.fileHandle || null,
-        persistedAttached: !!item.persistedAttached,
-        attachedInSession: !!item.attachedInSession,
-      };
-
-      if (!normalized.uploadActiveGroupId) {
-        normalized.uploadActiveGroupId = normalized.groupId;
-      }
-
-      applyUnifiedUploadAliases(normalized);
-      logNormalizedUploadItem(normalized);
-      return normalized;
+    function normalizeUploadItem(...args) {
+      return ensureUploadQueueStore().normalizeUploadItem(...args);
     }
 
-    function getUploadGroupById(groupId) {
-      if (typeof findUploadGroupById === 'function') {
-        return findUploadGroupById(groupId);
-      }
-      const gid = String(groupId || '').trim();
-      if (!gid) return null;
-      return (state.groups || []).find((group) => group && group.id === gid) || null;
+
+    function getUploadGroupById(...args) {
+      return ensureUploadQueueStore().getUploadGroupById(...args);
     }
 
-    function getActiveUploadScopeGroupId(options = {}) {
-      const opts = options && typeof options === 'object' ? options : {};
-      const groupId = String(opts.groupId || opts.scopeGroupId || getActiveGroupId() || '').trim();
-      return groupId;
+
+    function getActiveUploadScopeGroupId(...args) {
+      return ensureUploadQueueStore().getActiveUploadScopeGroupId(...args);
     }
 
     function isFlaskUploadGroupId(groupId) {
@@ -7650,161 +9432,49 @@
       );
     }
 
-    function isUploadItemInActiveScope(item, groupId) {
-      if (!item) return false;
-      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
-      if (!scopeGroupId) return true;
-      const itemGroupId = getUploadItemGroupId(item);
-      if (itemGroupId) {
-        return itemGroupId === scopeGroupId;
-      }
-      if (typeof isFlaskLocalDirectItem === 'function' && isFlaskLocalDirectItem(item)) {
-        return isFlaskUploadGroupId(scopeGroupId);
-      }
-      return false;
+
+    function isUploadItemInActiveScope(...args) {
+      return ensureUploadQueueStore().isUploadItemInActiveScope(...args);
     }
 
-    function getScopedQueueItemsForUpload(groupId) {
-      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
-      return (state.queue || []).filter((item) => isUploadItemInActiveScope(item, scopeGroupId));
+
+    function getScopedQueueItemsForUpload(...args) {
+      return ensureUploadQueueStore().getScopedQueueItemsForUpload(...args);
     }
 
-    function getScopedFlaskFilesForUpload(groupId) {
-      const scopeGroupId = String(groupId || getActiveGroupId() || '').trim();
-      return (state.flaskFiles || []).filter((item) => isUploadItemInActiveScope(item, scopeGroupId));
+
+    function getScopedFlaskFilesForUpload(...args) {
+      return ensureUploadQueueStore().getScopedFlaskFilesForUpload(...args);
     }
 
-    function hasActiveScopeUploadableFiles(options = {}) {
-      const groupId = getActiveUploadScopeGroupId(options);
-      const queueFiles = getScopedQueueItemsForUpload(groupId).filter((item) => {
-        if (!item) return false;
-        if (typeof hasReusableUploadSourceForReset === 'function' && hasReusableUploadSourceForReset(item)) {
-          return true;
-        }
-        if (typeof hasAttemptableUploadSource === 'function' && hasAttemptableUploadSource(item)) {
-          return true;
-        }
-        return false;
-      });
-      const flaskFiles = getScopedFlaskFilesForUpload(groupId).filter((item) => {
-        if (!item) return false;
-        return typeof isFlaskLocalDirectItem === 'function' && isFlaskLocalDirectItem(item);
-      });
-      return queueFiles.length + flaskFiles.length > 0;
+
+    function hasActiveScopeUploadableFiles(...args) {
+      return ensureUploadQueueStore().hasActiveScopeUploadableFiles(...args);
     }
 
-    function getSelectedFileIdForActiveGroup() {
-      const groupId = getActiveGroupId();
-      if (!groupId) {
-        return '';
-      }
-      return String(
-        state.selectedFileIdByGroup[groupId] || state.activeId || '',
-      ).trim();
+
+    function getSelectedFileIdForActiveGroup(...args) {
+      return ensureUploadQueueStore().getSelectedFileIdForActiveGroup(...args);
     }
 
-    function setSelectedFileIdForActiveGroup(fileId, meta = {}) {
-      const groupId = getActiveGroupId();
-      const id = String(fileId || '').trim();
-      if (!groupId) {
-        return;
-      }
-      state.selectedFileIdByGroup[groupId] = id;
-      state.activeId = id;
-      const file = getActiveGroupFiles().find((item) => item.id === id) || null;
-      console.log('[UPLOAD][FILE_SELECT]', {
-        projectKey: groupId,
-        fileId: id,
-        fileName: file && file.name ? file.name : '',
-        reason: meta.reason || '',
-      });
 
-      if (meta.skipLastSelectionSave) {
-        return;
-      }
-
-      const activeGroup = getActiveGroup();
-      const projectKey = getUploadGroupStableKey(activeGroup);
-      if (!projectKey) {
-        return;
-      }
-
-      const folderKey = file ? getUploadFileFolderKey(file) : '';
-      saveMultiUploadLastSelection({
-        projectKey,
-        folderKey,
-      });
+    function setSelectedFileIdForActiveGroup(...args) {
+      return ensureUploadQueueStore().setSelectedFileIdForActiveGroup(...args);
     }
 
-    function resolveSelectedFileIdForGroup(groupId, files) {
-      const gid = String(groupId || '').trim();
-      const group = state.groups.find((item) => item && item.id === gid) || null;
-      const oldSelectedId = String(state.selectedFileIdByGroup[gid] || '').trim();
-      if (oldSelectedId && files.some((file) => file && file.id === oldSelectedId)) {
-        return oldSelectedId;
-      }
 
-      const saved = getMultiUploadLastSelection();
-      const groupKey = getUploadGroupStableKey(group);
-      if (saved.projectKey && groupKey && saved.projectKey === groupKey && saved.folderKey) {
-        const savedFile = files.find(
-          (file) => file && getUploadFileFolderKey(file) === saved.folderKey,
-        );
-        if (savedFile) {
-          return savedFile.id;
-        }
-
-        logMultiUploadLastSelectionEvent('FOLDER_MISSING', {
-          projectKey: groupKey,
-          savedFolder: saved.folderKey,
-          fallback: files.length ? getUploadFileFolderKey(files[0]) : '',
-        });
-
-        if (files.length > 0) {
-          const fallbackFolderKey = getUploadFileFolderKey(files[0]);
-          saveMultiUploadLastSelection({
-            projectKey: groupKey,
-            folderKey: fallbackFolderKey,
-          });
-          return files[0].id;
-        }
-      }
-
-      if (files.length > 0) {
-        return files[0].id;
-      }
-      return '';
+    function resolveSelectedFileIdForGroup(...args) {
+      return ensureUploadQueueStore().resolveSelectedFileIdForGroup(...args);
     }
 
-    function syncActiveGroupSelectionAfterQueueLoad(groupId) {
-      const gid = String(groupId || getActiveGroupId() || '').trim();
-      const files = getActiveGroupFiles();
-      const selectedId = resolveSelectedFileIdForGroup(gid, files);
-      state.selectedFileIdByGroup[gid] = selectedId;
-      state.activeId = selectedId;
-      console.log('[UPLOAD][PROJECT_SWITCH]', {
-        activeProjectKey: gid,
-        fileCount: files.length,
-        selectedFileId: selectedId,
-      });
+
+    function syncActiveGroupSelectionAfterQueueLoad(...args) {
+      return ensureUploadQueueStore().syncActiveGroupSelectionAfterQueueLoad(...args);
     }
 
-    function saveMultiUploadSelectionForActiveGroup(options = {}) {
-      const activeGroup = getActiveGroup();
-      const projectKey = getUploadGroupStableKey(activeGroup);
-      if (!projectKey) {
-        return;
-      }
 
-      const selectedFile = getActiveGroupFiles().find(
-        (item) => item && item.id === getSelectedFileIdForActiveGroup(),
-      ) || null;
-      const folderKey = selectedFile ? getUploadFileFolderKey(selectedFile) : '';
-
-      saveMultiUploadLastSelection({
-        projectKey,
-        folderKey: options.folderKey != null ? options.folderKey : folderKey,
-      });
+    function saveMultiUploadSelectionForActiveGroup(...args) {
+      return ensureUploadQueueStore().saveMultiUploadSelectionForActiveGroup(...args);
     }
 
     function shouldSkipUploadUiAction(actionKey, source, intervalMs) {
@@ -7932,15 +9602,9 @@
       });
     }
 
-    function createDefaultGroup() {
-      const group = {
-        id: createId('upload_group'),
-        name: DEFAULT_UPLOAD_GROUP_NAME,
-        key: 'default',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      return group;
+
+    function createDefaultGroup(...args) {
+      return ensureUploadGroupStore().createDefaultGroup(...args);
     }
 
     function newId() {
@@ -8121,164 +9785,71 @@
       }
     }
 
-    function isFileHandleLike(value) {
-      return !!(
-        value &&
-        typeof value.getFile === 'function'
-      );
+
+    function isFileHandleLike(...args) {
+      return ensureUploadFileSource().isFileHandleLike(...args);
     }
 
-    function getPageWindowForFilePicker() {
-      try {
-        if (typeof unsafeWindow !== 'undefined' && unsafeWindow) {
-          return unsafeWindow;
-        }
-      } catch (e) {
-        console.warn('[ChatGPT toolbox] unsafeWindow unavailable for file picker', e);
-      }
 
-      return window;
+    function getPageWindowForFilePicker(...args) {
+      return ensureUploadFileSource().getPageWindowForFilePicker(...args);
     }
 
-    function getShowOpenFilePickerFn() {
-      const pageWin = getPageWindowForFilePicker();
 
-      if (pageWin && typeof pageWin.showOpenFilePicker === 'function') {
-        return pageWin.showOpenFilePicker.bind(pageWin);
-      }
-
-      if (typeof window.showOpenFilePicker === 'function') {
-        return window.showOpenFilePicker.bind(window);
-      }
-
-      return null;
+    function getShowOpenFilePickerFn(...args) {
+      return ensureUploadFileSource().getShowOpenFilePickerFn(...args);
     }
 
-    const UploadPersistedKind = Object.freeze({
-      METADATA_ONLY: 'metadata_only',
-      FILE_SYSTEM_HANDLE: 'file_system_handle',
-      FLASK_REF: 'flask_ref',
-    });
-
-    const UploadRestoreState = Object.freeze({
-      READY: 'ready',
-      NEEDS_REBIND: 'needs_rebind',
-      PERMISSION_REQUIRED: 'permission_required',
-      MISSING: 'missing',
-      ERROR: 'error',
-    });
+    function normalizePersistedKind(kind) {
+      const v = String(kind || '').trim();
+      if (
+        v === UploadPersistedKind.METADATA_ONLY
+        || v === UploadPersistedKind.FILE_SYSTEM_HANDLE
+        || v === UploadPersistedKind.FLASK_REF
+      ) {
+        return v;
+      }
+      return UploadPersistedKind.METADATA_ONLY;
+    }
 
     const UPLOAD_HANDLE_DB_NAME = 'cgpt_toolbox_upload_files';
     const UPLOAD_HANDLE_STORE = 'fileHandles';
     const UPLOAD_HANDLE_DB_VERSION = 1;
     let uploadFileHandleDbPromise = null;
 
-    function buildUploadHandleKey(item) {
-      if (!item) return '';
-      const id = String(item.id || '').trim();
-      const groupId = String(item.groupId || state.activeGroupId || '').trim();
-      if (!id) return '';
-      return `upload:${groupId || '-'}:${id}`;
+
+    function buildUploadHandleKey(...args) {
+      return ensureUploadFileSource().buildUploadHandleKey(...args);
     }
 
-    function openUploadFileHandleDb() {
-      if (uploadFileHandleDbPromise) return uploadFileHandleDbPromise;
 
-      uploadFileHandleDbPromise = new Promise((resolve, reject) => {
-        if (!window.indexedDB) {
-          reject(new Error('当前浏览器不支持 IndexedDB'));
-          return;
-        }
-        const req = indexedDB.open(UPLOAD_HANDLE_DB_NAME, UPLOAD_HANDLE_DB_VERSION);
-        req.onupgradeneeded = () => {
-          const db = req.result;
-          if (!db.objectStoreNames.contains(UPLOAD_HANDLE_STORE)) {
-            db.createObjectStore(UPLOAD_HANDLE_STORE, { keyPath: 'handleKey' });
-          }
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => {
-          const err = req.error || new Error('openUploadFileHandleDb failed');
-          console.error('[ChatGPT toolbox] openUploadFileHandleDb failed', err);
-          ToolboxShell.appendLog(`[UPLOAD_HANDLE_DB][OPEN_FAILED] error=${err.message || String(err)}`);
-          uploadFileHandleDbPromise = null;
-          reject(err);
-        };
-      }).catch((err) => {
-        uploadFileHandleDbPromise = null;
-        throw err;
-      });
-
-      return uploadFileHandleDbPromise;
+    function openUploadFileHandleDb(...args) {
+      return ensureUploadPersistDb().openUploadFileHandleDb(...args);
     }
 
-    async function saveUploadFileHandle(handleKey, handle) {
-      if (!handleKey || !isFileHandleLike(handle)) return false;
-      try {
-        const db = await openUploadFileHandleDb();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(UPLOAD_HANDLE_STORE, 'readwrite');
-          const store = tx.objectStore(UPLOAD_HANDLE_STORE);
-          store.put({
-            handleKey,
-            handle,
-            updatedAt: Date.now(),
-          });
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('saveUploadFileHandle tx failed'));
-          tx.onabort = () => reject(tx.error || new Error('saveUploadFileHandle tx aborted'));
-        });
-        return true;
-      } catch (err) {
-        console.error('[ChatGPT toolbox] saveUploadFileHandle failed', err);
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE_DB][SAVE_FAILED] key=${handleKey} error=${err && err.message ? err.message : String(err)}`);
-        return false;
-      }
+
+    async function saveUploadFileHandle(...args) {
+      return ensureUploadPersistDb().saveUploadFileHandle(...args);
     }
 
-    async function loadUploadFileHandle(handleKey) {
-      if (!handleKey) return null;
-      try {
-        const db = await openUploadFileHandleDb();
-        return await new Promise((resolve, reject) => {
-          const tx = db.transaction(UPLOAD_HANDLE_STORE, 'readonly');
-          const store = tx.objectStore(UPLOAD_HANDLE_STORE);
-          const req = store.get(handleKey);
-          req.onsuccess = () => resolve(req.result && req.result.handle ? req.result.handle : null);
-          req.onerror = () => reject(req.error || new Error('loadUploadFileHandle get failed'));
-        });
-      } catch (err) {
-        console.error('[ChatGPT toolbox] loadUploadFileHandle failed', err);
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE_DB][LOAD_FAILED] key=${handleKey} error=${err && err.message ? err.message : String(err)}`);
-        return null;
-      }
+
+    async function loadUploadFileHandle(...args) {
+      return ensureUploadPersistDb().loadUploadFileHandle(...args);
     }
 
-    async function deleteUploadFileHandle(handleKey) {
-      if (!handleKey) return false;
-      try {
-        const db = await openUploadFileHandleDb();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(UPLOAD_HANDLE_STORE, 'readwrite');
-          tx.objectStore(UPLOAD_HANDLE_STORE).delete(handleKey);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('deleteUploadFileHandle tx failed'));
-          tx.onabort = () => reject(tx.error || new Error('deleteUploadFileHandle tx aborted'));
-        });
-        return true;
-      } catch (err) {
-        console.error('[ChatGPT toolbox] deleteUploadFileHandle failed', err);
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE_DB][DELETE_FAILED] key=${handleKey} error=${err && err.message ? err.message : String(err)}`);
-        return false;
-      }
+
+    async function deleteUploadFileHandle(...args) {
+      return ensureUploadPersistDb().deleteUploadFileHandle(...args);
     }
 
-    function hasActuallyReusableUploadSource(q) {
-      return hasAttemptableUploadSource(q);
+
+    function hasActuallyReusableUploadSource(...args) {
+      return ensureUploadFileSource().hasActuallyReusableUploadSource(...args);
     }
 
-    function hasReusableUploadSourceForReset(q) {
-      return hasAttemptableUploadSource(q);
+
+    function hasReusableUploadSourceForReset(...args) {
+      return ensureUploadFileSource().hasReusableUploadSourceForReset(...args);
     }
 
     function isUploadRunning() {
@@ -8314,307 +9885,24 @@
       }
     }
 
-    function markUploadItemNeedsRebind(item, reason = '', source = '') {
-      if (!item || typeof item !== 'object') {
-        return;
-      }
 
-      const reasonText = String(reason || 'file-handle-unavailable').trim() || 'file-handle-unavailable';
-
-      item.state = UploadState.NEEDS_REBIND;
-      item.attachState = UploadState.NEEDS_REBIND;
-      item.status = 'needs_rebind';
-      item.registryStatus = 'needs_rebind';
-      item.restoreState = UploadRestoreState.NEEDS_REBIND;
-      item.needsRebind = true;
-      item.missingReason = reasonText;
-      item.sourceKind = 'missing-file';
-      item.readMode = '';
-      item.localReadable = false;
-      item.localBound = false;
-      item.reusableForCadence = false;
-      item.uploadName = '';
-      item.message = `文件源已失效，请重新选择：${reasonText}`;
-      item.updatedAt = Date.now();
-
-      item.file = null;
-      item.sourceFile = null;
-      item.originalFile = null;
-      item.blob = null;
-      item.sourceBlob = null;
-      item.fileHandle = null;
-      item.handle = null;
-      item.localHandle = null;
-
-      syncUploadItemSchemaInPlace(item);
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_REBIND][MARK] source=${source || '-'} name=${item.name || item.filename || '-'} reason=${reasonText}`,
-      );
+    function markUploadItemNeedsRebind(...args) {
+      return ensureUploadFileSource().markUploadItemNeedsRebind(...args);
     }
 
-    async function ensureReusableFileForUploadItem(item, source = '') {
-      if (!item) {
-        return false;
-      }
 
-      if (item.restoreState === UploadRestoreState.NEEDS_REBIND) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=needs-rebind`,
-        );
-        return false;
-      }
-      if (item.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
-        ToolboxShell.appendLog(
-          `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=permission-required`,
-        );
-        return false;
-      }
-
-      if (isUploadSourceCacheForbidden(item) && !hasLocalReadableHandle(item) && !isFlaskLocalDirectSource(item)) {
-        markCacheForbiddenUploadItems([item], source || 'ensureReusableFileForUploadItem');
-        return false;
-      }
-
-      if (isFlaskLocalDirectSource(item) || isFlaskLocalDirectItem(item)) {
-        const hasFlaskEndpoint = !!(
-          String(typeof item.download_url === 'string' ? item.download_url : '').trim()
-          || String(item.file_id || '').trim()
-        );
-        if (hasFlaskEndpoint) {
-          return true;
-        }
-      }
-
-      if (
-        isFileLike(item.file)
-        || isFileLike(item.sourceFile)
-        || isFileLike(item.originalFile)
-      ) {
-        return true;
-      }
-
-      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
-        try {
-          const file = await item.fileHandle.getFile();
-          if (isFileLike(file)) {
-            item.file = file;
-            item.sourceFile = file;
-            item.originalFile = file;
-            item.name = item.name || file.name;
-            item.size = item.size || file.size;
-            item.type = item.type || file.type;
-            ToolboxShell.appendLog(
-              `[UPLOAD][FILE_HANDLE_RELOAD_OK] source=${source || '-'} name=${file.name || '-'} size=${file.size || 0}`,
-            );
-            return true;
-          }
-        } catch (e) {
-          console.error('[ChatGPT toolbox] ensureReusableFileForUploadItem: fileHandle.getFile failed', e);
-          const errText = e && e.message ? e.message : String(e);
-          ToolboxShell.appendLog(
-            `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=getFile-error error=${errText}`,
-          );
-
-          markUploadItemNeedsRebind(item, errText, source || 'ensureReusableFileForUploadItem');
-
-          scheduleRenderUpload(`file-handle-reload-failed:${source || '-'}`);
-          persistQueueThrottled(`file-handle-reload-failed:${source || '-'}`);
-
-          return false;
-        }
-      }
-
-      ToolboxShell.appendLog(
-        `[UPLOAD][FILE_HANDLE_RELOAD_FAILED] source=${source || '-'} name=${item.name || item.filename || '-'} reason=no-readable-source`,
-      );
-      markUploadItemNeedsRebind(item, 'no-readable-source', source || 'ensureReusableFileForUploadItem');
-
-      scheduleRenderUpload(`no-readable-source:${source || '-'}`);
-      persistQueueThrottled(`no-readable-source:${source || '-'}`);
-
-      return false;
+    async function ensureReusableFileForUploadItem(...args) {
+      return ensureUploadFileSource().ensureReusableFileForUploadItem(...args);
     }
 
-    async function getPendingUploadItemsForStart(source = '', options = {}) {
-      const scopeGroupId = getActiveUploadScopeGroupId(options);
-      const items = [];
-      const seen = new Set();
-      const forceReupload = options && typeof options === 'object' && options.forceReupload === true;
 
-      const pushItem = (item, itemSource) => {
-        if (!item) return;
-        if (!isUploadItemInActiveScope(item, scopeGroupId)) return;
-        const key = [
-          itemSource,
-          item.id || item.file_id || '',
-          item.name || item.filename || '',
-          typeof item.download_url === 'string' ? item.download_url : '',
-        ].join('|');
-        if (seen.has(key)) return;
-        seen.add(key);
-        items.push({
-          ...item,
-          groupId: getUploadItemGroupId(item) || scopeGroupId,
-          source: itemSource || item.source || 'browser_file',
-        });
-      };
-
-      for (const item of state.queue || []) {
-        if (!item) continue;
-        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
-
-        if (item.restoreState === UploadRestoreState.NEEDS_REBIND || item.needsRebind === true) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][NEEDS_REBIND] id=${item.id || '-'} name=${item.name || item.filename || '-'} `
-            + `reason=${String(item.missingReason || 'page-reloaded-file-object-lost').trim()}`,
-          );
-          continue;
-        }
-        if (item.restoreState === UploadRestoreState.PERMISSION_REQUIRED) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][PERMISSION_REQUIRED] id=${item.id || '-'} name=${item.name || item.filename || '-'}`
-          );
-          continue;
-        }
-
-        const reusable = await ensureReusableFileForUploadItem(item, source);
-        if (!reusable) {
-          ToolboxShell.appendLog(
-            `[UPLOAD][PENDING_SKIP] source=${source || '-'} groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} reason=no-reusable-source state=${item.state || '-'} status=${item.status || '-'}`,
-          );
-          continue;
-        }
-
-        const virtualPrepareSource = buildVirtualFilePrepareSource(source, options);
-        const virtualPrepareOpts = {
-          ...options,
-          source,
-          parentSource: source,
-          cadenceUpload: isCadenceUploadSource(source) || options.cadenceUpload === true,
-          continueWithUpload: isCadenceUploadSource(source) || options.continueWithUpload === true,
-        };
-        try {
-          await prepareVirtualUploadFileForItem(item, virtualPrepareSource, virtualPrepareOpts);
-        } catch (virtualErr) {
-          const virtualErrText = virtualErr && virtualErr.message ? virtualErr.message : String(virtualErr);
-          ToolboxShell.appendLog(
-            `[UPLOAD][PENDING_SKIP] source=${source || '-'} groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} reason=virtual-file-failed detail=${virtualErrText}`,
-          );
-          continue;
-        }
-
-        if (!forceReupload && isQueueItemAlreadyUploaded(item)) {
-          ToolboxShell.appendLog(
-            `[UPLOAD][SKIP_ALREADY_UPLOADED] original=${item.originalUploadName || item.name || item.filename || '-'} virtual=${item.virtualUploadName || '-'} timestamp=${item.virtualUploadTimestamp || '-'} fingerprint=${item.uploadedFingerprint || '-'} attachedVirtual=${item.attachedVirtualUploadName || '-'} source=${source || '-'}`,
-          );
-          continue;
-        }
-
-        pushItem(item, item.source || 'browser_file');
-      }
-
-      for (const item of state.flaskFiles || []) {
-        if (!item) continue;
-        if (!isUploadItemInActiveScope(item, scopeGroupId)) continue;
-        if (!isFlaskLocalDirectItem(item)) continue;
-
-        const flaskVirtualPrepareSource = buildVirtualFilePrepareSource(source, options);
-        const flaskVirtualPrepareOpts = {
-          ...options,
-          source,
-          parentSource: source,
-          cadenceUpload: isCadenceUploadSource(source) || options.cadenceUpload === true,
-          continueWithUpload: isCadenceUploadSource(source) || options.continueWithUpload === true,
-        };
-        try {
-          await prepareVirtualUploadFileForItem(item, flaskVirtualPrepareSource, flaskVirtualPrepareOpts);
-        } catch (virtualErr) {
-          ToolboxShell.appendLog(
-            `[UPLOAD][PENDING_SKIP] source=${source || '-'} groupId=${scopeGroupId || '-'} name=${item.name || item.filename || '-'} reason=virtual-file-failed`,
-          );
-          continue;
-        }
-
-        if (!forceReupload && isQueueItemAlreadyUploaded(item)) {
-          ToolboxShell.appendLog(
-            `[UPLOAD][SKIP_ALREADY_UPLOADED] original=${item.originalUploadName || item.name || item.filename || '-'} virtual=${item.virtualUploadName || '-'} timestamp=${item.virtualUploadTimestamp || '-'} fingerprint=${item.uploadedFingerprint || '-'} attachedVirtual=${item.attachedVirtualUploadName || '-'} source=${source || '-'}`,
-          );
-          continue;
-        }
-
-        pushItem(item, 'flask_local_direct');
-      }
-
-      ToolboxShell.appendLog(
-        `[UPLOAD][PENDING_FOR_START] source=${source || '-'} groupId=${scopeGroupId || '-'} count=${items.length}`,
-      );
-      return items;
+    async function getPendingUploadItemsForStart(...args) {
+      return ensureUploadFileSource().getPendingUploadItemsForStart(...args);
     }
 
-    function diagnoseNoPendingUploadItems(scopeGroupId = '', pendingItems = []) {
-      const inScope = (item) => item && isUploadItemInActiveScope(item, scopeGroupId);
-      const scopedQueue = (state.queue || []).filter(inScope);
-      const scopedFlask = (state.flaskFiles || []).filter(inScope);
-      const scopedItems = scopedQueue.concat(scopedFlask);
-      const isFinalItem = (item) => {
-        if (!item) {
-          return false;
-        }
-        const normalizedItem = normalizeUploadItem(item, {
-          groupId: scopeGroupId || getUploadItemGroupId(item) || state.activeGroupId,
-        });
-        return normalizedItem.attachState === UploadState.ATTACHED
-          || normalizedItem.sendState === 'sent';
-      };
-      const blockedItems = scopedItems.filter((item) => item && isUploadSourceCacheForbidden(item));
-      const missingSourceItems = scopedItems.filter(
-        (item) => item && !isFinalItem(item) && !hasAttemptableUploadSource(item),
-      );
-      const needsRebindItems = scopedItems.filter((item) => {
-        if (!item) {
-          return false;
-        }
-        const normalizedStatus = String(item.status || '').trim().toLowerCase();
-        return (
-          item.restoreState === UploadRestoreState.NEEDS_REBIND
-          || item.registryStatus === 'needs_rebind'
-          || normalizedStatus === 'needs_rebind'
-        );
-      });
-      const missingFileItems = scopedItems.filter((item) => {
-        if (!item) {
-          return false;
-        }
-        return (
-          item.restoreState === UploadRestoreState.MISSING
-          || item.state === UploadState.MISSING_FILE
-          || item.sourceKind === 'missing-file'
-        );
-      });
-      const uploadedItems = scopedItems.filter((item) => item && isQueueItemAlreadyUploaded(item));
-      const attachedItems = scopedItems.filter((item) => item && isLegacyUploadItemAttached(item));
-      const firstBlocked = blockedItems[0] || null;
-      const firstBlockedReason = firstBlocked
-        ? String(firstBlocked.cacheSourceBlockedReason || firstBlocked.message || firstBlocked.status || '').trim()
-        : '';
-      const summary = {
-        activeGroupId: scopeGroupId || state.activeGroupId || '',
-        totalItems: scopedItems.length,
-        pendingCount: Array.isArray(pendingItems) ? pendingItems.length : 0,
-        uploadedCount: uploadedItems.length,
-        attachedCount: attachedItems.length,
-        missingSourceCount: missingSourceItems.length,
-        needsRebindCount: needsRebindItems.length,
-        missingCount: missingFileItems.length,
-        blockedCount: blockedItems.length,
-        firstBlockedReason: firstBlockedReason || '',
-      };
-      const presenceSummary = summarizeUploadAttachmentPresenceForScope(scopeGroupId);
-      ToolboxShell.appendLog(
-        `[UPLOAD_START][NO_PENDING_DIAG] activeGroupId=${summary.activeGroupId || '-'} totalItems=${summary.totalItems} pendingCount=${summary.pendingCount} uploadedCount=${summary.uploadedCount} attachedCount=${summary.attachedCount} missingSourceCount=${summary.missingSourceCount} needsRebindCount=${summary.needsRebindCount} missingCount=${summary.missingCount} blockedCount=${summary.blockedCount} firstBlockedReason=${summary.firstBlockedReason || '-'} localBound=${presenceSummary.localBound} composerAttached=${presenceSummary.composerAttached} conversationSent=${presenceSummary.conversationSent}`,
-      );
-      return summary;
+
+    function diagnoseNoPendingUploadItems(...args) {
+      return ensureUploadFileSource().diagnoseNoPendingUploadItems(...args);
     }
 
     function diagnoseUploadEntryPoints(source = 'manual') {
@@ -8704,51 +9992,9 @@
       }
     }
 
-    function resolveNoPendingUploadResult(summary = {}) {
-      if (!summary.totalItems) {
-        return {
-          reason: 'no-files',
-          message: '当前项目没有文件，请先选择或拖入文件',
-          shouldOpenPicker: true,
-        };
-      }
-      if (summary.blockedCount > 0) {
-        return {
-          reason: 'blocked',
-          message: `存在被拦截文件：${summary.firstBlockedReason || '状态受限'}`,
-          shouldOpenPicker: false,
-        };
-      }
-      if (summary.totalItems > 0 && summary.pendingCount === 0 && summary.needsRebindCount > 0) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_START][NO_PENDING_REASON] reason=missing-local-file-needs-rebind totalItems=${summary.totalItems} needsRebind=${summary.needsRebindCount} missing=${summary.missingCount || 0}`,
-        );
-        return {
-          reason: 'missing-local-file-needs-rebind',
-          message: '刷新页面或换电脑后，浏览器不会保留本地文件读取权限。请点击「重新绑定」重新选择同名文件。',
-          shouldOpenPicker: false,
-        };
-      }
-      if (summary.missingSourceCount > 0) {
-        return {
-          reason: 'missing-local-file-needs-rebind',
-          message: '当前组文件源已失效。刷新/换电脑后需重新绑定，请点击「重新绑定」或重新拖入文件。',
-          shouldOpenPicker: false,
-        };
-      }
-      if (summary.uploadedCount + summary.attachedCount >= summary.totalItems) {
-        return {
-          reason: 'already-uploaded',
-          message: '当前组文件已上传，无需重复上传',
-          shouldOpenPicker: false,
-          skipSuccess: true,
-        };
-      }
-      return {
-        reason: 'no-files',
-        message: '没有待上传文件',
-        shouldOpenPicker: false,
-      };
+
+    function resolveNoPendingUploadResult(...args) {
+      return ensureUploadFileSource().resolveNoPendingUploadResult(...args);
     }
 
     function logUploadSourceCheck(item, stage = '') {
@@ -8758,156 +10004,34 @@
       );
     }
 
-    function canReadFromLocal(q) {
-      return !!(
-        q &&
-        q.sourceKind === 'local-handle' &&
-        hasLocalReadableHandle(q)
-      );
+
+    function canReadFromLocal(...args) {
+      return ensureUploadFileSource().canReadFromLocal(...args);
     }
 
-    function isUploadItemAttemptable(item) {
-      if (!item || isUploadSourceCacheForbidden(item)) {
-        return false;
-      }
 
-      if (
-        item.needsRebind === true
-        || item.restoreState === UploadRestoreState.NEEDS_REBIND
-        || item.restoreState === UploadRestoreState.MISSING
-        || item.state === UploadState.MISSING_FILE
-        || item.state === UploadState.NEEDS_REBIND
-        || item.attachState === UploadState.MISSING_FILE
-        || item.attachState === UploadState.NEEDS_REBIND
-        || item.registryStatus === 'needs_rebind'
-        || String(item.status || '').trim().toLowerCase() === 'needs_rebind'
-      ) {
-        return false;
-      }
-
-      if (isFileLike(item.file) || isFileLike(item.sourceFile) || isFileLike(item.originalFile)) {
-        return true;
-      }
-
-      if (isBlobLike(item.blob) || isBlobLike(item.sourceBlob)) {
-        return true;
-      }
-
-      if (hasLocalReadableHandle(item)) {
-        return true;
-      }
-
-      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
-        return true;
-      }
-
-      if (isFlaskLocalDirectSource(item)) {
-        return !!(
-          String(typeof item.download_url === 'string' ? item.download_url : '').trim()
-          || String(item.file_id || '').trim()
-        );
-      }
-
-      return false;
+    function isUploadItemAttemptable(...args) {
+      return ensureUploadFileSource().isUploadItemAttemptable(...args);
     }
 
-    function hasAttemptableUploadSource(q) {
-      return isUploadItemAttemptable(q);
+
+    function hasAttemptableUploadSource(...args) {
+      return ensureUploadFileSource().hasAttemptableUploadSource(...args);
     }
 
-    function getUploadLocalFileDiagnostics(scopeGroupId = '', pendingItems = []) {
-      return diagnoseNoPendingUploadItems(scopeGroupId, pendingItems);
+
+    function getUploadLocalFileDiagnostics(...args) {
+      return ensureUploadFileSource().getUploadLocalFileDiagnostics(...args);
     }
 
-    function hasReadableFreshLocalSource(q) {
-      if (!q) {
-        return false;
-      }
-      if (hasLocalReadableHandle(q)) {
-        return true;
-      }
-      if (isFlaskLocalDirectSource(q) && hasAttemptableUploadSource(q)) {
-        return true;
-      }
-      return false;
+
+    function hasReadableFreshLocalSource(...args) {
+      return ensureUploadFileSource().hasReadableFreshLocalSource(...args);
     }
 
-    function clearStaleUnreadableFlagsForReadableItem(q, reason = '') {
-      if (!q || !hasReadableFreshLocalSource(q)) {
-        return false;
-      }
-      let changed = false;
-      const oldRestoreState = q.restoreState;
-      const oldRegistryStatus = q.registryStatus;
-      const oldStatus = q.status;
-      const oldSourceKind = q.sourceKind;
-      const oldState = q.state;
-      const oldMessage = q.message;
 
-      if (
-        q.restoreState === UploadRestoreState.NEEDS_REBIND
-        || q.restoreState === UploadRestoreState.MISSING
-        || q.restoreState === UploadRestoreState.PERMISSION_REQUIRED
-      ) {
-        q.restoreState = UploadRestoreState.READY;
-        changed = true;
-      }
-      if (String(q.registryStatus || '').trim().toLowerCase() === 'needs_rebind') {
-        q.registryStatus = 'ready';
-        changed = true;
-      }
-      if (String(q.status || '').trim().toLowerCase() === 'needs_rebind') {
-        q.status = 'ready';
-        changed = true;
-      }
-      if (
-        q.sourceKind === 'missing-file'
-        || q.sourceKind === 'missing-local'
-        || q.sourceKind === 'cached-snapshot'
-        || q.sourceKind === 'cached-only'
-        || q.sourceKind === 'indexeddb-blob'
-        || q.sourceKind === 'session-file'
-        || q.sourceKind === 'session-blob'
-      ) {
-        q.sourceKind = hasLocalReadableHandle(q) ? 'local-handle' : q.sourceKind;
-        changed = true;
-      }
-      if (q.state === UploadState.MISSING_FILE) {
-        q.state = UploadState.IDLE;
-        changed = true;
-      }
-      if (
-        String(q.message || '').includes('重新绑定')
-        || String(q.message || '').includes('重新选择')
-        || String(q.message || '').includes('文件源已失效')
-        || String(q.message || '').includes('本地不可读')
-        || String(q.message || '').includes('缺少文件')
-        || String(q.message || '').includes('缓存快照')
-      ) {
-        q.message = '';
-        changed = true;
-      }
-      if (String(q.error || '').trim()) {
-        q.error = '';
-        changed = true;
-      }
-      if (String(q.lastError || '').trim()) {
-        q.lastError = '';
-        changed = true;
-      }
-      if (changed) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_UI][READABLE_STATE_FIX] reason=${reason || '-'} `
-          + `name=${q.name || '-'} `
-          + `restoreState=${oldRestoreState || '-'}=>${q.restoreState || '-'} `
-          + `registryStatus=${oldRegistryStatus || '-'}=>${q.registryStatus || '-'} `
-          + `status=${oldStatus || '-'}=>${q.status || '-'} `
-          + `sourceKind=${oldSourceKind || '-'}=>${q.sourceKind || '-'} `
-          + `state=${oldState || '-'}=>${q.state || '-'} `
-          + `message=${oldMessage ? 1 : 0}=>${q.message ? 1 : 0}`,
-        );
-      }
-      return changed;
+    function clearStaleUnreadableFlagsForReadableItem(...args) {
+      return ensureUploadFileSource().clearStaleUnreadableFlagsForReadableItem(...args);
     }
 
     function getUploadItemVisualState(q) {
@@ -9340,86 +10464,31 @@
     // 浏览器通常不会暴露真实绝对路径
     // 是否能重新读取本地文件，只看 fileHandle 是否存在且可 getFile
 
-    function hasLocalReadableHandle(q) {
-      return !!(
-        q &&
-        q.fileHandle &&
-        typeof q.fileHandle.getFile === 'function'
-      );
+
+    function hasLocalReadableHandle(...args) {
+      return ensureUploadFileSource().hasLocalReadableHandle(...args);
     }
 
-    function isUploadSourceCacheForbidden(q) {
-      if (!q) {
-        return false;
-      }
-      if (hasLocalReadableHandle(q) || isFlaskLocalDirectSource(q)) {
-        return false;
-      }
-      const kind = String(q.sourceKind || '').trim();
-      const readMode = String(q.readMode || '').trim();
-      if (
-        kind === 'cached-snapshot'
-        || kind === 'cached-only'
-        || kind === 'indexeddb-blob'
-        || kind === 'session-file'
-        || kind === 'session-blob'
-        || readMode === 'indexeddb-blob'
-        || readMode === 'snapshot'
-        || readMode === 'session'
-      ) {
-        return true;
-      }
-      return !!(
-        isFileLike(q.file)
-        || isFileLike(q.sourceFile)
-        || isFileLike(q.originalFile)
-        || isBlobLike(q.blob)
-        || isBlobLike(q.sourceBlob)
-      );
+
+    function isUploadSourceCacheForbidden(...args) {
+      return ensureUploadFileSource().isUploadSourceCacheForbidden(...args);
     }
 
-    function isCachedUploadSnapshot(q) {
-      return isUploadSourceCacheForbidden(q);
+
+    function isCachedUploadSnapshot(...args) {
+      return ensureUploadFileSource().isCachedUploadSnapshot(...args);
     }
 
     const STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE = '禁止使用缓存上传，请重新绑定真实本地文件';
 
-    function markCacheForbiddenUploadItems(items, stage = '') {
-      let count = 0;
-      const stageText = String(stage || '-').trim() || '-';
-      const forbiddenMessage = STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE;
 
-      (items || []).forEach((q) => {
-        if (!q || !isUploadSourceCacheForbidden(q)) {
-          return;
-        }
-
-        q.state = UploadState.MISSING_FILE;
-        q.sourceKind = q.sourceKind || 'cached-snapshot';
-        q.readMode = q.readMode || '';
-        q.message = forbiddenMessage;
-        q.updatedAt = Date.now();
-        count += 1;
-
-        ToolboxShell.appendLog(
-          `[UPLOAD][BLOCK_CACHE_SOURCE] stage=${stageText} name=${q.name || '-'} sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'}`,
-        );
-      });
-
-      return count;
+    function markCacheForbiddenUploadItems(...args) {
+      return ensureUploadFileSource().markCacheForbiddenUploadItems(...args);
     }
 
-    function blockUploadIfCacheSourcesPresent(files, stage = '') {
-      const blockedItems = (files || []).filter(isUploadSourceCacheForbidden);
-      if (!blockedItems.length) {
-        return false;
-      }
 
-      markCacheForbiddenUploadItems(blockedItems, stage);
-      setStatus('上传失败：当前文件是缓存快照，必须重新绑定真实本地文件后才能上传。', 'error');
-      scheduleRenderUpload(`block-cache-source:${stage || 'upload'}`);
-      persistQueueThrottled(`block-cache-source:${stage || 'upload'}`);
-      return true;
+    function blockUploadIfCacheSourcesPresent(...args) {
+      return ensureUploadFileSource().blockUploadIfCacheSourcesPresent(...args);
     }
 
     function isUploadListDebugEnabled() {
@@ -9520,32 +10589,9 @@
       return '';
     }
 
-    function isUploadItemLocallyUnreadable(q) {
-      if (!q) {
-        return true;
-      }
 
-      if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
-        return false;
-      }
-
-      if (isUploadSourceCacheForbidden(q)) {
-        return true;
-      }
-
-      if (
-        q.state === UploadState.MISSING_FILE
-        || q.sourceKind === 'missing-file'
-        || q.sourceKind === 'missing-local'
-      ) {
-        return true;
-      }
-
-      if (hasAttemptableUploadSource(q)) {
-        return false;
-      }
-
-      return true;
+    function isUploadItemLocallyUnreadable(...args) {
+      return ensureUploadFileSource().isUploadItemLocallyUnreadable(...args);
     }
 
     function isUploadItemSentWithMessage(q) {
@@ -9952,63 +10998,19 @@
         : UploadState.IDLE;
     }
 
-    function getPersistedUploadState(q) {
-      if (!q) return UploadState.IDLE;
 
-      if (q.sourceKind === 'cached-only' || q.sourceKind === 'missing-local') {
-        return UploadState.MISSING_FILE;
-      }
-
-      if (!hasAttemptableUploadSource(q)) {
-        return UploadState.MISSING_FILE;
-      }
-
-      if (shouldPreserveMissingOrFailedState(q)) {
-        return UploadState.MISSING_FILE;
-      }
-
-      if (q.state === UploadState.ATTACHED) {
-        if (hasAttachmentEvidenceForItem(q)) {
-          return UploadState.ATTACHED;
-        }
-        return UploadState.IDLE;
-      }
-
-      if (
-        isUploadUnfinishedState(q.state) ||
-        q.state === UploadState.CANCELLED
-      ) {
-        return UploadState.IDLE;
-      }
-
-      if (q.state === UploadState.FAILED) {
-        return UploadState.IDLE;
-      }
-
-      return normalizeUploadState(q.state || UploadState.IDLE, true);
+    function getPersistedUploadState(...args) {
+      return ensureUploadPersistDb().getPersistedUploadState(...args);
     }
 
-    function getPersistedKindForItem(q) {
-      if (!q) return UploadPersistedKind.METADATA_ONLY;
-      if (isFlaskLocalDirectSource(q) || isFlaskLocalDirectItem(q)) {
-        return UploadPersistedKind.FLASK_REF;
-      }
-      if (isFileHandleLike(q.fileHandle)) {
-        return UploadPersistedKind.FILE_SYSTEM_HANDLE;
-      }
-      return UploadPersistedKind.METADATA_ONLY;
+
+    function getPersistedKindForItem(...args) {
+      return ensureUploadPersistDb().getPersistedKindForItem(...args);
     }
 
-    function getRestoreStateForItem(q) {
-      if (!q) return UploadRestoreState.ERROR;
-      if (q.restoreState) return q.restoreState;
-      if (isFlaskLocalDirectSource(q) || isFlaskLocalDirectItem(q)) {
-        return hasAttemptableUploadSource(q) ? UploadRestoreState.READY : UploadRestoreState.MISSING;
-      }
-      if (isFileHandleLike(q.fileHandle)) {
-        return UploadRestoreState.READY;
-      }
-      return UploadRestoreState.NEEDS_REBIND;
+
+    function getRestoreStateForItem(...args) {
+      return ensureUploadPersistDb().getRestoreStateForItem(...args);
     }
 
     function getUploadItemSizeBytes(item) {
@@ -10027,243 +11029,29 @@
       return 0;
     }
 
-    function resolveUploadBlobCandidate(item) {
-      if (!item) return null;
 
-      if (isBlobLike(item.blob)) {
-        return item.blob;
-      }
-
-      if (isBlobLike(item.sourceBlob)) {
-        return item.sourceBlob;
-      }
-
-      if (isFileLike(item.file)) {
-        return item.file;
-      }
-
-      if (isFileLike(item.sourceFile)) {
-        return item.sourceFile;
-      }
-
-      if (isFileLike(item.originalFile)) {
-        return item.originalFile;
-      }
-
-      return null;
+    function resolveUploadBlobCandidate(...args) {
+      return ensureUploadPersistDb().resolveUploadBlobCandidate(...args);
     }
 
-    function hasPersistableUploadBlob(item) {
-      if (!isPersistUploadBlobEnabled()) {
-        return false;
-      }
-      const blob = resolveUploadBlobCandidate(item);
-      if (!blob) {
-        return false;
-      }
 
-      const size = getUploadItemSizeBytes(item) || Number(blob.size) || 0;
-      return size > 0 && size <= APP.uploadBlobMaxBytes;
+    function hasPersistableUploadBlob(...args) {
+      return ensureUploadPersistDb().hasPersistableUploadBlob(...args);
     }
 
-    function mergeQueueItemWithPersistedBlob(item, existingRow) {
-      if (!item || !existingRow || hasAttemptableUploadSource(item)) {
-        return item;
-      }
 
-      const size = getUploadItemSizeBytes(item) || Number(existingRow.size) || 0;
-      const cacheKind = item.sourceKind || existingRow.sourceKind || 'cached-snapshot';
-      const cacheReadMode = item.readMode || existingRow.readMode || 'indexeddb-blob';
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][persist-row:merge-cache-metadata-only] name=${item.name || '-'} size=${size} sourceKind=${cacheKind}`,
-      );
-
-      return {
-        ...item,
-        sourceKind: cacheKind,
-        readMode: cacheReadMode,
-        size: item.size || existingRow.size || size,
-        attachState: UploadState.MISSING_FILE,
-        message: item.message || '禁止使用缓存快照上传，请重新绑定真实本地文件',
-      };
+    function mergeQueueItemWithPersistedBlob(...args) {
+      return ensureUploadPersistDb().mergeQueueItemWithPersistedBlob(...args);
     }
 
-    function buildPersistRow(q, existingRow = null) {
-      const mergedItem = normalizeUploadItem(
-        mergeQueueItemWithPersistedBlob(q, existingRow) || q,
-        {
-          groupId: getUploadItemGroupId(q) || state.activeGroupId,
-        },
-      );
-      const hasHandle = isFileHandleLike(mergedItem.fileHandle);
-      const blobCandidate = resolveUploadBlobCandidate(mergedItem);
-      const size = getUploadItemSizeBytes(mergedItem) || (blobCandidate ? Number(blobCandidate.size) || 0 : 0);
-      const canSaveBlob = !!(
-        isPersistUploadBlobEnabled()
-        && blobCandidate
-        && size > 0
-        && size <= APP.uploadBlobMaxBytes
-      );
-      const mimeType = mergedItem.mimeType || mergedItem.type || 'application/octet-stream';
-      const downloadUrl = String(mergedItem.downloadUrl || mergedItem.download_url || '').trim();
-      const flaskPath = String(mergedItem.flaskPath || '').trim();
-      const attachState = getPersistedUploadState(mergedItem);
-      const registryStatus = normalizeUploadRegistryStatus(
-        mergedItem.registryStatus || mergedItem.status || 'pending',
-        mergedItem,
-      );
 
-      const row = {
-        id: mergedItem.id,
-        groupId: mergedItem.groupId || state.activeGroupId,
-        name: mergedItem.name,
-        displayPath: mergedItem.displayPath || mergedItem.name || '',
-        size: mergedItem.size,
-        lastModified: mergedItem.lastModified,
-        mimeType,
-        downloadUrl,
-        sourceKind: mergedItem.sourceKind || '',
-        readMode: mergedItem.readMode || '',
-        registryStatus,
-        attachState,
-        composerPresence: mergedItem.composerPresence || '',
-        sendState: mergedItem.sendState || '',
-        message: mergedItem.message,
-        handle: hasHandle ? mergedItem.fileHandle : null,
-        persistedKind: getPersistedKindForItem(mergedItem),
-        restoreState: getRestoreStateForItem(mergedItem),
-        handleKey: String(mergedItem.handleKey || buildUploadHandleKey(mergedItem) || ''),
-        flaskPath,
-        uploadName: mergedItem.uploadName || '',
-        manualPathNote: String(mergedItem.manualPathNote || '').trim(),
-        blob: null,
-        blobSaved: false,
-        blobSavedAt: 0,
-        debugSavedFrom: '',
-      };
-      row.type = row.mimeType;
-      row.mime_type = row.mimeType;
-      row.state = row.attachState;
-      row.status = row.registryStatus;
-      row.download_url = row.downloadUrl;
-
-      if (canSaveBlob) {
-        row.blob = blobCandidate;
-        row.blobSaved = true;
-        row.blobSavedAt = Date.now();
-        row.debugSavedFrom = String(mergedItem.sourceKind || mergedItem.readMode || 'unknown');
-
-        // 无 handle 的场景（input/拖拽未拿到句柄）才把 sourceKind 标记为缓存快照；
-        // 跨窗口恢复后 UI 显示「缓存快照，需重新绑定」，禁止用缓存上传。
-        if (!hasHandle) {
-          row.sourceKind = 'cached-snapshot';
-          row.readMode = 'indexeddb-blob';
-        }
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persist-row:blob-saved] name=${mergedItem.name || '-'} size=${size} sourceKind=${mergedItem.sourceKind || '-'} readMode=${mergedItem.readMode || '-'}`
-        );
-      } else if (blobCandidate && size > APP.uploadBlobMaxBytes) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persist-row:blob-skip-large] name=${mergedItem.name || '-'} size=${size} limit=${APP.uploadBlobMaxBytes}`
-        );
-      } else {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persist-row:no-readable-source] name=${mergedItem.name || '-'} handle=${hasHandle ? 1 : 0} blob=${blobCandidate ? 1 : 0}`
-        );
-      }
-
-      appendUploadSchemaAuditLog('UPLOAD_PERSIST_ROW', row);
-      return row;
+    function buildPersistRow(...args) {
+      return ensureUploadPersistDb().buildPersistRow(...args);
     }
 
-    async function clearPersistedUploadBlobs(reason) {
-      if (!APP || !APP.uploadStore) {
-        console.warn('[ChatGPT toolbox] clearPersistedUploadBlobs: APP.uploadStore not available');
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][clear-persisted-blob:skip] reason=${reason || '-'} error=uploadStore-not-available`,
-        );
-        return;
-      }
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][clear-persisted-blob:start] reason=${reason || '-'}`,
-      );
-
-      let changed = 0;
-
-      try {
-        const db = await openDb();
-
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadStore);
-          const req = store.getAll();
-
-          req.onerror = () => {
-            reject(req.error || new Error('IndexedDB uploadStore getAll failed'));
-          };
-
-          req.onsuccess = () => {
-            const rows = Array.isArray(req.result) ? req.result : [];
-
-            rows.forEach((record) => {
-              if (!record) {
-                return;
-              }
-              const normalizedRecord = normalizeUploadItem(record, {
-                groupId: getUploadItemGroupId(record) || state.activeGroupId,
-              });
-
-              const hasBlob = record.blob !== null && record.blob !== undefined;
-
-              if (hasBlob || record.blobSaved || record.blobSavedAt || record.debugSavedFrom) {
-                ToolboxShell.appendLog(
-                  `[UPLOAD_DIAG][clear-persisted-blob:item] name=${normalizedRecord.name || '-'} id=${normalizedRecord.id || '-'} oldBlob=${hasBlob ? 1 : 0}`,
-                );
-
-                const row = buildPersistRow({
-                  ...normalizedRecord,
-                  blob: null,
-                }, record);
-                row.handle = record.handle || row.handle || null;
-                row.blob = null;
-                row.blobSaved = false;
-                row.blobSavedAt = 0;
-                row.debugSavedFrom = '';
-
-                store.put(row);
-                changed += 1;
-              }
-            });
-          };
-
-          tx.oncomplete = () => {
-            resolve();
-          };
-
-          tx.onerror = () => {
-            reject(tx.error || new Error('IndexedDB clearPersistedUploadBlobs transaction failed'));
-          };
-
-          tx.onabort = () => {
-            reject(tx.error || new Error('IndexedDB clearPersistedUploadBlobs transaction aborted'));
-          };
-        });
-      } catch (e) {
-        console.error('[ChatGPT toolbox] clearPersistedUploadBlobs failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][clear-persisted-blob:error] reason=${reason || '-'} error=${e && e.message ? e.message : String(e)}`,
-        );
-      }
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][clear-persisted-blob:done] changed=${changed}`,
-      );
-      if (changed > 0) {
-        broadcastUploadGlobalStateChanged('clear-persisted-blob', { changed });
-      }
+    async function clearPersistedUploadBlobs(...args) {
+      return ensureUploadPersistDb().clearPersistedUploadBlobs(...args);
     }
 
     function isProtectedUploadGroup(group, activeGroupId) {
@@ -10290,685 +11078,49 @@
       return updatedAt > 0 && now - updatedAt > UPLOAD_DB_FAILED_ROW_TTL_MS;
     }
 
-    async function cleanupUploadDbGarbage(reason) {
-      const now = Date.now();
 
-      try {
-        const db = await openDb();
-
-        const { groups, rows } = await new Promise((resolve, reject) => {
-          const tx = db.transaction([APP.uploadGroupStore, APP.uploadStore], 'readonly');
-          const groupStore = tx.objectStore(APP.uploadGroupStore);
-          const queueStore = tx.objectStore(APP.uploadStore);
-
-          const groupReq = groupStore.getAll();
-          const queueReq = queueStore.getAll();
-
-          let groupsResult = [];
-          let rowsResult = [];
-
-          groupReq.onerror = () => {
-            reject(groupReq.error || new Error('getAll groups failed'));
-          };
-
-          queueReq.onerror = () => {
-            reject(queueReq.error || new Error('getAll queue failed'));
-          };
-
-          groupReq.onsuccess = () => {
-            groupsResult = Array.isArray(groupReq.result) ? groupReq.result : [];
-          };
-
-          queueReq.onsuccess = () => {
-            rowsResult = Array.isArray(queueReq.result) ? queueReq.result : [];
-          };
-
-          tx.oncomplete = () => {
-            resolve({ groups: groupsResult, rows: rowsResult });
-          };
-
-          tx.onerror = () => {
-            reject(tx.error || new Error('cleanupUploadDbGarbage read transaction failed'));
-          };
-
-          tx.onabort = () => {
-            reject(tx.error || new Error('cleanupUploadDbGarbage read transaction aborted'));
-          };
-        });
-
-        const activeGroupId = String(state.activeGroupId || '');
-        const groupIds = new Set(
-          groups.map((group) => String(group.id || '')).filter(Boolean),
-        );
-
-        const rowCountByGroup = new Map();
-        rows.forEach((row) => {
-          const groupId = String(row.groupId || '');
-          rowCountByGroup.set(groupId, (rowCountByGroup.get(groupId) || 0) + 1);
-        });
-
-        const queueIdsToDelete = new Set();
-        rows.forEach((row) => {
-          const groupId = String(row.groupId || '');
-          if (!groupId || !groupIds.has(groupId)) {
-            queueIdsToDelete.add(row.id);
-          }
-        });
-
-        rows.forEach((row) => {
-          if (queueIdsToDelete.has(row.id)) {
-            return;
-          }
-          if (isStaleFailedUploadRow(row, now)) {
-            queueIdsToDelete.add(row.id);
-          }
-        });
-
-        let survivingRowCount = rows.length - queueIdsToDelete.size;
-        if (survivingRowCount > UPLOAD_DB_MAX_QUEUE_ROWS) {
-          const overflowCandidates = rows
-            .filter((row) => !queueIdsToDelete.has(row.id))
-            .filter((row) => {
-              const groupId = String(row.groupId || '');
-              if (!groupId || !groupIds.has(groupId)) {
-                return true;
-              }
-              return isStaleFailedUploadRow(row, now);
-            })
-            .sort(
-              (a, b) => Number(a.updatedAt || a.createdAt || 0)
-                - Number(b.updatedAt || b.createdAt || 0),
-            );
-
-          for (const row of overflowCandidates) {
-            if (survivingRowCount <= UPLOAD_DB_MAX_QUEUE_ROWS) {
-              break;
-            }
-            if (!queueIdsToDelete.has(row.id)) {
-              queueIdsToDelete.add(row.id);
-              survivingRowCount -= 1;
-            }
-          }
-        }
-
-        const groupsToDelete = new Set();
-        const removableByTtl = groups
-          .filter((group) => {
-            const groupId = String(group.id || '');
-            if (isProtectedUploadGroup(group, activeGroupId)) {
-              return false;
-            }
-            const count = rowCountByGroup.get(groupId) || 0;
-            if (count > 0) {
-              return false;
-            }
-            const updatedAt = Number(group.updatedAt || group.createdAt || 0);
-            return updatedAt > 0 && now - updatedAt > UPLOAD_DB_EMPTY_GROUP_TTL_MS;
-          })
-          .sort(
-            (a, b) => Number(a.updatedAt || a.createdAt || 0)
-              - Number(b.updatedAt || b.createdAt || 0),
-          );
-
-        removableByTtl.forEach((group) => {
-          groupsToDelete.add(group.id);
-        });
-
-        let projectedGroupCount = groups.length - groupsToDelete.size;
-        if (projectedGroupCount > UPLOAD_DB_MAX_GROUPS) {
-          const moreEmptyGroups = groups
-            .filter((group) => {
-              const groupId = String(group.id || '');
-              if (groupsToDelete.has(groupId) || isProtectedUploadGroup(group, activeGroupId)) {
-                return false;
-              }
-              return (rowCountByGroup.get(groupId) || 0) === 0;
-            })
-            .sort(
-              (a, b) => Number(a.updatedAt || a.createdAt || 0)
-                - Number(b.updatedAt || b.createdAt || 0),
-            );
-
-          for (const group of moreEmptyGroups) {
-            if (projectedGroupCount <= UPLOAD_DB_MAX_GROUPS) {
-              break;
-            }
-            groupsToDelete.add(group.id);
-            projectedGroupCount -= 1;
-          }
-        }
-
-        if (!queueIdsToDelete.size && !groupsToDelete.size) {
-          return;
-        }
-
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction([APP.uploadGroupStore, APP.uploadStore], 'readwrite');
-          const groupStore = tx.objectStore(APP.uploadGroupStore);
-          const queueStore = tx.objectStore(APP.uploadStore);
-
-          rows.forEach((row) => {
-            if (!queueIdsToDelete.has(row.id)) {
-              return;
-            }
-            const groupId = String(row.groupId || '');
-            queueStore.delete(row.id);
-            const isOrphan = !groupId || !groupIds.has(groupId);
-            ToolboxShell.appendLog(
-              `[UPLOAD_DB_CLEANUP][${isOrphan ? 'queue_orphan_deleted' : 'queue_row_deleted'}] reason=${reason || '-'} id=${row.id || '-'} groupId=${groupId || '-'} state=${row.state || '-'}`,
-            );
-          });
-
-          groups.forEach((group) => {
-            if (!groupsToDelete.has(group.id)) {
-              return;
-            }
-            groupStore.delete(group.id);
-            ToolboxShell.appendLog(
-              `[UPLOAD_DB_CLEANUP][empty_group_deleted] reason=${reason || '-'} groupId=${group.id || '-'} name=${group.name || '-'}`,
-            );
-          });
-
-          tx.oncomplete = () => {
-            resolve();
-          };
-
-          tx.onerror = () => {
-            reject(tx.error || new Error('cleanupUploadDbGarbage delete transaction failed'));
-          };
-
-          tx.onabort = () => {
-            reject(tx.error || new Error('cleanupUploadDbGarbage delete transaction aborted'));
-          };
-        });
-      } catch (error) {
-        console.error('[ChatGPT toolbox] cleanupUploadDbGarbage failed', error);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DB_CLEANUP][error] reason=${reason || '-'} error=${error && error.message ? error.message : String(error)}`,
-        );
-      }
+    async function cleanupUploadDbGarbage(...args) {
+      return ensureUploadPersistDb().cleanupUploadDbGarbage(...args);
     }
 
-    function openDb() {
-      if (dbPromise) return dbPromise;
 
-      dbPromise = new Promise((resolve, reject) => {
-        if (!window.indexedDB) {
-          reject(new Error('当前浏览器不支持 IndexedDB'));
-          return;
-        }
-
-        const req = indexedDB.open(APP.uploadDbName, APP.uploadDbVersion);
-
-        req.onupgradeneeded = () => {
-          const db = req.result;
-
-          if (!db.objectStoreNames.contains(APP.uploadStore)) {
-            const queueStore = db.createObjectStore(APP.uploadStore, {
-              keyPath: 'id',
-            });
-            queueStore.createIndex('groupId', 'groupId', { unique: false });
-          } else {
-            const tx = req.transaction;
-            const queueStore = tx.objectStore(APP.uploadStore);
-            if (!queueStore.indexNames.contains('groupId')) {
-              queueStore.createIndex('groupId', 'groupId', { unique: false });
-            }
-          }
-
-          if (!db.objectStoreNames.contains(APP.uploadGroupStore)) {
-            db.createObjectStore(APP.uploadGroupStore, {
-              keyPath: 'id',
-            });
-          }
-        };
-
-        req.onsuccess = () => {
-          const db = req.result;
-
-          db.onversionchange = () => {
-            db.close();
-            dbPromise = null;
-            ToolboxShell.appendLog('[UPLOAD_DB][versionchange] db closed');
-          };
-
-          db.onclose = () => {
-            dbPromise = null;
-            ToolboxShell.appendLog('[UPLOAD_DB][closed] IndexedDB connection closed');
-          };
-
-          db.onerror = (event) => {
-            console.error('[ChatGPT toolbox] IndexedDB connection error', event);
-            ToolboxShell.appendLog('[UPLOAD_DB][connection-error] IndexedDB connection error');
-          };
-
-          resolve(db);
-        };
-
-        req.onerror = () => {
-          const err = req.error || new Error('IndexedDB open failed');
-          dbPromise = null;
-
-          console.error('[ChatGPT toolbox] IndexedDB open failed', err);
-
-          if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_DB][open:failed] error=${err && err.message ? err.message : String(err)}`,
-            );
-          }
-
-          reject(err);
-        };
-
-        req.onblocked = () => {
-          const err = new Error('IndexedDB open blocked by another tab or old connection');
-          dbPromise = null;
-
-          console.warn('[ChatGPT toolbox] IndexedDB open blocked');
-
-          if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-            ToolboxShell.appendLog('[UPLOAD_DB][open:blocked] IndexedDB 被其他页面或旧连接阻塞');
-          }
-
-          reject(err);
-        };
-      }).catch((err) => {
-        dbPromise = null;
-        throw err;
-      });
-
-      return dbPromise;
+    function openDb(...args) {
+      return ensureUploadPersistDb().openDb(...args);
     }
 
-    async function debugReadBackPersistedQueue(stage) {
-      if (!isUploadListDebugEnabled()) {
-        return;
-      }
-      try {
-        const db = await openDb();
 
-        const rows = await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readonly');
-          const store = tx.objectStore(APP.uploadStore);
-          const req = store.getAll();
-
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error || new Error('IndexedDB debug getAll failed'));
-        });
-
-        const currentRows = rows.filter((r) => r.groupId === state.activeGroupId);
-
-        const summary = currentRows.map((r) => {
-          const normalized = normalizeUploadItem(r, {
-            groupId: getUploadItemGroupId(r) || state.activeGroupId,
-          });
-          return {
-            id: normalized.id,
-            name: normalized.name,
-            state: normalized.attachState,
-            registryStatus: normalized.registryStatus,
-            mimeType: normalized.mimeType,
-            blobSaved: !!r.blobSaved,
-            hasBlob: isBlobLike(r.blob),
-            blobTag: r.blob ? getObjectTag(r.blob) : '',
-            blobSize: r.blob && typeof r.blob.size === 'number' ? r.blob.size : null,
-            hasHandle: !!r.handle,
-            handleName: r.handle && r.handle.name ? r.handle.name : '',
-            debugSavedFrom: r.debugSavedFrom || '',
-            message: normalized.message || '',
-          };
-        });
-
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB回读 ${summary.length} 条：${summary.map((x) => `${x.name}:blob=${x.hasBlob ? 1 : 0},handle=${x.hasHandle ? 1 : 0},state=${x.state}`).join('|')}`);
-
-        console.debug('[ChatGPT toolbox] persisted queue readback', {
-          stage,
-          activeGroupId: state.activeGroupId,
-          summary,
-        });
-      } catch (e) {
-        console.error('[ChatGPT toolbox] debugReadBackPersistedQueue failed', stage, e);
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][${stage}] IndexedDB回读失败${e && e.message ? e.message : String(e)}`);
-      }
+    async function debugReadBackPersistedQueue(...args) {
+      return ensureUploadPersistDb().debugReadBackPersistedQueue(...args);
     }
 
-    async function persistQueue(stage = '', options = {}) {
-      const persistStartedAt = (typeof performance !== 'undefined' && performance.now)
-        ? performance.now()
-        : Date.now();
-      const groupIdSnapshot = String(state.activeGroupId || '').trim();
-      if (!groupIdSnapshot) {
-        console.warn('[ChatGPT toolbox] persistQueue: activeGroupId 为空');
-        return;
-      }
 
-      const queueSnapshot = getActiveGroupFiles().map((item) => ({
-        ...item,
-        groupId: groupIdSnapshot,
-      }));
-      const stageText = String(stage || '').trim() || '-';
-      const restorePhase = getQueueRestorePhase();
-      const allowEmpty = shouldAllowEmptyQueuePersist(stageText);
-      const persistMode = options && options.mode ? String(options.mode) : 'full';
-      const perfStartedAt = Date.now();
-
-      if (!queueSnapshot.length) {
-        if (restorePhase !== 'ready') {
-          const skipLine = `[UPLOAD_PERSIST][SKIP_EMPTY_BEFORE_RESTORE] activeGroupId=${groupIdSnapshot || '-'} queueRestorePhase=${restorePhase} queueLoadedOnce=${state.queueLoadedOnce ? 1 : 0} stage=${stageText}`;
-          console.warn(skipLine);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(skipLine);
-          }
-          return;
-        }
-
-        if (!allowEmpty.allow) {
-          const skipLine = `[UPLOAD_PERSIST][SKIP_EMPTY_NO_EXPLICIT_ALLOW] activeGroupId=${groupIdSnapshot || '-'} queueRestorePhase=${restorePhase} queueLoadedOnce=${state.queueLoadedOnce ? 1 : 0} stage=${stageText}`;
-          console.warn(skipLine);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(skipLine);
-          }
-          return;
-        }
-      }
-
-      try {
-        for (const item of queueSnapshot) {
-          if (!item) continue;
-          item.handleKey = String(item.handleKey || buildUploadHandleKey(item) || '');
-          if (isFileHandleLike(item.fileHandle) && item.handleKey) {
-            const saved = await saveUploadFileHandle(item.handleKey, item.fileHandle);
-            if (!saved) {
-              ToolboxShell.appendLog(
-                `[UPLOAD_HANDLE_DB][SAVE_SKIP] id=${item.id || '-'} name=${item.name || '-'} key=${item.handleKey || '-'}`
-              );
-            }
-          }
-        }
-
-        const db = await openDb();
-
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadStore);
-          const req = store.getAll();
-
-          req.onerror = () => reject(req.error || new Error('IndexedDB queue getAll before persist failed'));
-
-          req.onsuccess = () => {
-            const rows = req.result || [];
-            const existingRowsById = new Map();
-
-            rows.forEach((r) => {
-              if (!r || !r.id) {
-                return;
-              }
-
-              const gid = String(r.groupId || '').trim() || groupIdSnapshot;
-              if (gid === groupIdSnapshot) {
-                existingRowsById.set(r.id, r);
-              }
-            });
-
-            if (queueSnapshot.length > 0 || allowEmpty.allow) {
-              rows.forEach((r) => {
-                const gid = String(r.groupId || '').trim() || groupIdSnapshot;
-                if (gid === groupIdSnapshot) {
-                  store.delete(r.id);
-                }
-              });
-            } else {
-              const skipDeleteLine = `[UPLOAD_PERSIST][SKIP_DELETE_EMPTY] activeGroupId=${groupIdSnapshot || '-'} queueRestorePhase=${restorePhase} queueLoadedOnce=${state.queueLoadedOnce ? 1 : 0} stage=${stageText}`;
-              console.warn(skipDeleteLine);
-              if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-                ToolboxShell.appendLog(skipDeleteLine);
-              }
-            }
-
-            queueSnapshot.forEach((q) => {
-              const row = buildPersistRow({
-                ...q,
-                groupId: groupIdSnapshot,
-              }, existingRowsById.get(q.id));
-
-              const putReq = store.put(row);
-
-              putReq.onerror = (ev) => {
-                if (!row.handle) {
-                  return;
-                }
-
-                const err = putReq.error || new Error('IndexedDB put with handle failed');
-
-                console.error('[ChatGPT toolbox] persist row with handle failed, retry without handle', err);
-                ToolboxShell.appendLog(
-                  `[UPLOAD_DIAG][persist:handle-failed] name=${row.name || '-'} error=${err && err.message ? err.message : String(err)}`,
-                );
-
-                if (typeof ev.preventDefault === 'function') {
-                  ev.preventDefault();
-                }
-
-                if (typeof ev.stopPropagation === 'function') {
-                  ev.stopPropagation();
-                }
-
-                store.put({
-                  ...row,
-                  handle: null,
-                });
-              };
-            });
-          };
-
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('IndexedDB queue persist transaction failed'));
-        });
-
-        if (isUploadListDebugEnabled()) {
-          await debugReadBackPersistedQueue(`persistQueue:${stageText}:after-write`);
-        }
-        scheduleRefreshUploadGroupCounts(`persistQueue:${stageText}`, 1200);
-        scheduleCleanupUploadDbGarbage(`persistQueue:${stageText}`, 6000);
-      } catch (e) {
-        const errText = e && e.stack ? e.stack : (e && e.message ? e.message : String(e));
-        console.error('[ChatGPT toolbox] persist upload queue failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][persistQueue:failed] groupId=${groupIdSnapshot} queueLen=${queueSnapshot.length} stage=${stageText} error=${errText}`,
-        );
-        if (!isUploadListDebugEnabled()) {
-          void debugReadBackPersistedQueue(`persistQueue:${stageText}:failed`);
-        }
-        throw e;
-      } finally {
-        const costMs = Date.now() - perfStartedAt;
-        logPersistPerfIfSlow(
-          `[PERF][persistQueue] cost=${costMs}ms mode=${persistMode} itemCount=${queueSnapshot.length} stage=${stageText}`,
-          costMs,
-          100,
-        );
-        logSlowOperation(
-          'persistQueue',
-          persistStartedAt,
-          `mode=${persistMode} itemCount=${queueSnapshot.length} stage=${stageText}`,
-        );
-      }
+    async function persistQueue(...args) {
+      return ensureUploadPersistDb().persistQueue(...args);
     }
 
-    async function persistQueueItem(item, stage = '') {
-      const normalizedItem = item && typeof item === 'object'
-        ? normalizeUploadItem(item, {
-          groupId: getUploadItemGroupId(item) || state.activeGroupId,
-        })
-        : null;
-      const itemId = normalizedItem && normalizedItem.id ? String(normalizedItem.id) : '';
-      const groupIdSnapshot = normalizedItem && normalizedItem.groupId
-        ? String(normalizedItem.groupId || '').trim()
-        : String(state.activeGroupId || '').trim();
 
-      if (!normalizedItem || !itemId || !groupIdSnapshot) {
-        return;
-      }
-
-      const perfStartedAt = Date.now();
-      const stageText = String(stage || '').trim() || '-';
-
-      try {
-        normalizedItem.handleKey = String(normalizedItem.handleKey || buildUploadHandleKey(normalizedItem) || '');
-        if (isFileHandleLike(normalizedItem.fileHandle) && normalizedItem.handleKey) {
-          const saved = await saveUploadFileHandle(normalizedItem.handleKey, normalizedItem.fileHandle);
-          if (!saved) {
-            ToolboxShell.appendLog(
-              `[UPLOAD_HANDLE_DB][SAVE_SKIP] id=${normalizedItem.id || '-'} name=${normalizedItem.name || '-'} key=${normalizedItem.handleKey || '-'}`,
-            );
-          }
-        }
-
-        const db = await openDb();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadStore);
-          const getReq = store.get(itemId);
-
-          getReq.onerror = () => reject(getReq.error || new Error('IndexedDB queue get before item persist failed'));
-          getReq.onsuccess = () => {
-            const existingRow = getReq.result && typeof getReq.result === 'object'
-              ? getReq.result
-              : null;
-            const row = buildPersistRow({
-              ...normalizedItem,
-              groupId: groupIdSnapshot,
-            }, existingRow);
-            const putReq = store.put(row);
-
-            putReq.onerror = (event) => {
-              if (!row.handle) {
-                return;
-              }
-              const err = putReq.error || new Error('IndexedDB put item with handle failed');
-              console.error('[ChatGPT toolbox] persistQueueItem put with handle failed, retry without handle', err);
-              ToolboxShell.appendLog(
-                `[UPLOAD_DIAG][persist:item-handle-failed] id=${row.id || '-'} name=${row.name || '-'} error=${err && err.message ? err.message : String(err)}`,
-              );
-              if (typeof event.preventDefault === 'function') {
-                event.preventDefault();
-              }
-              if (typeof event.stopPropagation === 'function') {
-                event.stopPropagation();
-              }
-              store.put({
-                ...row,
-                handle: null,
-              });
-            };
-          };
-
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('IndexedDB queue item persist transaction failed'));
-          tx.onabort = () => reject(tx.error || new Error('IndexedDB queue item persist transaction aborted'));
-        });
-      } catch (error) {
-        console.error('[ChatGPT toolbox] persistQueueItem failed', error);
-        if (!isUploadListDebugEnabled()) {
-          void debugReadBackPersistedQueue(`persistQueueItem:${stageText}:failed`);
-        }
-        throw error;
-      } finally {
-        const costMs = Date.now() - perfStartedAt;
-        logPersistPerfIfSlow(
-          `[PERF][persistQueueItem] cost=${costMs}ms itemId=${itemId} stage=${stageText}`,
-          costMs,
-          100,
-        );
-      }
+    async function persistQueueItem(...args) {
+      return ensureUploadPersistDb().persistQueueItem(...args);
     }
 
-    function logPersistPerfIfSlow(line, costMs, thresholdMs = 100) {
-      if (costMs <= thresholdMs) {
-        return;
-      }
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(line);
-      } else {
-        console.warn(line);
-      }
+
+    function logPersistPerfIfSlow(...args) {
+      return ensureUploadPersistDb().logPersistPerfIfSlow(...args);
     }
 
-    function scheduleRefreshUploadGroupCounts(reason = '', delayMs = 1200) {
-      const waitMs = Math.max(200, Number(delayMs) || 0);
-      if (uploadGroupCountsRefreshTimer) {
-        return;
-      }
-      uploadGroupCountsRefreshTimer = window.setTimeout(() => {
-        uploadGroupCountsRefreshTimer = 0;
-        void refreshUploadGroupCounts().catch((error) => {
-          console.error('[ChatGPT toolbox] scheduleRefreshUploadGroupCounts failed', error);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            const errText = error && error.message ? error.message : String(error);
-            ToolboxShell.appendLog(
-              `[UPLOAD_GROUP][refresh-counts:scheduled-failed] reason=${String(reason || '-')} error=${errText}`,
-            );
-          }
-        });
-      }, waitMs);
+
+    function scheduleRefreshUploadGroupCounts(...args) {
+      return ensureUploadPersistDb().scheduleRefreshUploadGroupCounts(...args);
     }
 
-    function scheduleCleanupUploadDbGarbage(reason = '', delayMs = 5000) {
-      const waitMs = Math.max(800, Number(delayMs) || 0);
-      if (uploadDbCleanupTimer) {
-        return;
-      }
-      uploadDbCleanupTimer = window.setTimeout(() => {
-        uploadDbCleanupTimer = 0;
-        void cleanupUploadDbGarbage(reason || 'scheduled-cleanup');
-      }, waitMs);
+
+    function scheduleCleanupUploadDbGarbage(...args) {
+      return ensureUploadPersistDb().scheduleCleanupUploadDbGarbage(...args);
     }
 
-    function schedulePersistQueueItem(item, stage = '', delayMs = 500) {
-      const itemId = item && item.id ? String(item.id) : '';
-      if (!itemId) {
-        return;
-      }
-      persistQueueItemDirtyIds.add(itemId);
-      persistQueueItemPendingStage = String(stage || persistQueueItemPendingStage || 'item-update');
 
-      if (persistQueueItemTimer) {
-        return;
-      }
-
-      const critical = (
-        typeof UploadCriticalRuntime !== 'undefined'
-        && UploadCriticalRuntime
-        && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
-        && UploadCriticalRuntime.isUploadCriticalMode()
-      );
-      const waitMs = critical
-        ? Math.max(Number(delayMs) || 0, 1200)
-        : Math.max(Number(delayMs) || 0, 200);
-
-      persistQueueItemTimer = window.setTimeout(() => {
-        const ids = Array.from(persistQueueItemDirtyIds);
-        const stageText = persistQueueItemPendingStage || 'item-update';
-        persistQueueItemDirtyIds.clear();
-        persistQueueItemPendingStage = '';
-        persistQueueItemTimer = 0;
-
-        ids.forEach((dirtyId) => {
-          const dirtyItem = state.queue.find((x) => x && x.id === dirtyId);
-          if (!dirtyItem) {
-            return;
-          }
-          void persistQueueItem(dirtyItem, stageText).catch((error) => {
-            const errText = error && error.message ? error.message : String(error);
-            console.error('[ChatGPT toolbox] scheduled persistQueueItem failed', error);
-            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-              ToolboxShell.appendLog(
-                `[UPLOAD_PERSIST][ITEM_FAILED] id=${dirtyId || '-'} stage=${stageText} error=${errText}`,
-              );
-            }
-          });
-        });
-      }, waitMs);
+    function schedulePersistQueueItem(...args) {
+      return ensureUploadPersistDb().schedulePersistQueueItem(...args);
     }
 
     const UPLOAD_PERSIST_TIMEOUT_MS = 8000;
@@ -10992,192 +11144,34 @@
 
     let lastPersistUserNotifyAt = 0;
 
-    function schedulePersistQueue(stage = '') {
-      const stageText = String(stage || '').trim() || '-';
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
-        ToolboxShell.appendLogIfChanged(
-          'UPLOAD_PERSIST:SCHEDULE',
-          stageText,
-          `[UPLOAD_PERSIST][SCHEDULE] stage=${stageText}`,
-          2000,
-        );
-      } else if (isUploadDebugEnabled()) {
-        ToolboxShell.appendLog(`[UPLOAD_PERSIST][SCHEDULE] stage=${stageText}`);
-      }
-      persistQueuePromise = persistQueuePromise
-        .catch((e) => {
-          const errText = e && e.message ? e.message : String(e);
-          console.warn('[ChatGPT toolbox] previous persistQueue failed before next run', e);
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][persistQueue:previous-failed] error=${errText}`
-          );
-        })
-        .then(async () => {
-          const startedAt = Date.now();
 
-          const timeoutTimer = window.setTimeout(() => {
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][persistQueue:slow] running>${UPLOAD_PERSIST_TIMEOUT_MS}ms`
-            );
-          }, UPLOAD_PERSIST_TIMEOUT_MS);
-
-          try {
-            await withTimeout(
-              persistQueue(stageText),
-              UPLOAD_PERSIST_TIMEOUT_MS,
-              'persistQueue',
-            );
-          } finally {
-            window.clearTimeout(timeoutTimer);
-            ToolboxShell.appendLog(
-              `[UPLOAD_DIAG][persistQueue:done] cost=${Date.now() - startedAt}ms`
-            );
-          }
-        })
-        .then(() => {
-          renderProjectCategoryChips();
-          renderManageGroupList();
-        })
-        .catch((e) => {
-          const errName = e && e.name ? e.name : 'Error';
-          const errText = e && e.message ? e.message : String(e);
-
-          console.warn('[ChatGPT toolbox] schedulePersistQueue failed or timeout', e);
-
-          let composerAttachmentReady = false;
-          try {
-            composerAttachmentReady = isComposerAttachmentReadyForUserVisibleUpload();
-          } catch (readyCheckErr) {
-            console.error('[ChatGPT toolbox] persist timeout composer attachment ready check failed', readyCheckErr);
-            ToolboxShell.appendLog(
-              `[UPLOAD_PERSIST][READY_CHECK_FAILED] error=${readyCheckErr && readyCheckErr.message ? readyCheckErr.message : String(readyCheckErr)}`,
-            );
-          }
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] type=${errName} timeoutMs=${UPLOAD_PERSIST_TIMEOUT_MS} composerAttachmentReady=${composerAttachmentReady ? 1 : 0} note=timeout-does-not-cancel-indexeddb-write error=${errText}`,
-          );
-
-          // 持久化慢/超时不应阻塞上传主流程；附件已在输入框时只记日志，不弹 warn。
-          if (!composerAttachmentReady) {
-            const now = Date.now();
-            if (!lastPersistUserNotifyAt || now - lastPersistUserNotifyAt >= 10000) {
-              lastPersistUserNotifyAt = now;
-              if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.showToast === 'function') {
-                ToolboxShell.showToast(
-                  '本地队列保存较慢；附件已在输入框，不影响发送',
-                  'info',
-                  2600,
-                );
-              }
-            }
-          } else {
-            ToolboxShell.appendLog(
-              `[UPLOAD_PERSIST][TOAST_SUPPRESSED] reason=composer-attachment-ready error=${errText}`,
-            );
-          }
-
-          // 永不向外抛出：避免 await schedulePersistQueue 导致 UI/流程卡死。
-          return null;
-        });
-
-      return persistQueuePromise;
+    function schedulePersistQueue(...args) {
+      return ensureUploadPersistDb().schedulePersistQueue(...args);
     }
 
-    async function awaitPersistQueueBriefly(stage, maxWaitMs = 300) {
-      const waitMs = Math.max(0, Number(maxWaitMs) || 0);
-      try {
-        if (waitMs <= 0) {
-          void schedulePersistQueue(stage);
-          return { ok: true, waitedMs: 0, timedOut: false };
-        }
 
-        const startedAt = Date.now();
-        const result = await Promise.race([
-          schedulePersistQueue(stage).then(() => ({ timedOut: false })),
-          sleep(waitMs).then(() => ({ timedOut: true })),
-        ]);
-
-        if (result && result.timedOut) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] stage=${String(stage || '-')} briefWaitMs=${waitMs}`,
-          );
-        } else {
-          ToolboxShell.appendLog(
-            `[UPLOAD_PERSIST][BACKGROUND_DONE] stage=${String(stage || '-')} cost=${Date.now() - startedAt}ms`,
-          );
-        }
-
-        return { ok: true, waitedMs: Date.now() - startedAt, timedOut: !!(result && result.timedOut) };
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] awaitPersistQueueBriefly failed', err);
-        ToolboxShell.appendLog(
-          `[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] stage=${String(stage || '-')} error=${errText}`,
-        );
-        return { ok: false, error: errText };
-      }
+    async function awaitPersistQueueBriefly(...args) {
+      return ensureUploadPersistDb().awaitPersistQueueBriefly(...args);
     }
 
-    function persistQueueInBackground(stage) {
-      void schedulePersistQueue(stage)
-        .then(() => {
-          ToolboxShell.appendLog(`[UPLOAD_PERSIST][BACKGROUND_DONE] stage=${String(stage || '-')} via=fire_and_forget`);
-        })
-        .catch((err) => {
-          const errText = err && err.message ? err.message : String(err);
-          console.warn('[ChatGPT toolbox] background persist failed', stage, err);
-          ToolboxShell.appendLog(`[UPLOAD_PERSIST][BACKGROUND_TIMEOUT] stage=${String(stage || '-')} error=${errText}`);
-        });
+
+    function persistQueueInBackground(...args) {
+      return ensureUploadPersistDb().persistQueueInBackground(...args);
     }
 
-    function persistQueueThrottled(stage, delayMs = 600) {
-      persistQueuePendingStage = stage || persistQueuePendingStage || '-';
 
-      if (persistQueueThrottleTimer) {
-        return;
-      }
-
-      const critical = isUploadCriticalNow();
-      const effectiveDelayMs = critical
-        ? Math.max(Number(delayMs) || 0, 3000)
-        : delayMs;
-
-      persistQueueThrottleTimer = window.setTimeout(() => {
-        const stageText = persistQueuePendingStage;
-        persistQueuePendingStage = '';
-        persistQueueThrottleTimer = 0;
-
-        persistQueueInBackground(stageText);
-      }, effectiveDelayMs);
+    function persistQueueThrottled(...args) {
+      return ensureUploadPersistDb().persistQueueThrottled(...args);
     }
 
-    function schedulePersistQueueLight(reason, delayMs = 1500) {
-      window.clearTimeout(uploadPersistLightTimer);
-      uploadPersistLightTimer = window.setTimeout(() => {
-        uploadPersistLightTimer = 0;
-        persistQueue(reason || 'light-persist').catch((err) => {
-          const message = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] schedulePersistQueueLight failed', err);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(`[UPLOAD_PERF][PERSIST_ERROR] reason=${reason || '-'} error=${message}`);
-          }
-        });
-      }, Math.max(300, Number(delayMs) || 1500));
+
+    function schedulePersistQueueLight(...args) {
+      return ensureUploadPersistDb().schedulePersistQueueLight(...args);
     }
 
-    function scheduleRefreshUploadGroupCountsLight(reason, delayMs = 2000) {
-      window.clearTimeout(uploadGroupCountLightTimer);
-      uploadGroupCountLightTimer = window.setTimeout(() => {
-        uploadGroupCountLightTimer = 0;
-        refreshUploadGroupCounts().catch((err) => {
-          const message = err && err.message ? err.message : String(err);
-          console.error('[ChatGPT toolbox] scheduleRefreshUploadGroupCountsLight failed', err);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(`[UPLOAD_PERF][COUNT_ERROR] reason=${reason || '-'} error=${message}`);
-          }
-        });
-      }, Math.max(500, Number(delayMs) || 2000));
+
+    function scheduleRefreshUploadGroupCountsLight(...args) {
+      return ensureUploadPersistDb().scheduleRefreshUploadGroupCountsLight(...args);
     }
 
     function stripTrailingCountFromGroupName(name) {
@@ -11297,137 +11291,19 @@
       }
     }
 
-    function renderUploadGroupChipHtml(group, activeGroupId) {
-      const active = group.id === activeGroupId ? ' active' : '';
-      const count = getUploadGroupFileCount(group.id);
-      const cleanName = stripTrailingCountFromGroupName(group.name);
-      const title = `${cleanName}：${count} 个文件`;
 
-      return `
-          <button type="button"
-            class="cgpt-chip-btn cgpt-upload-group-chip${active}"
-            data-group-id="${escapeHtml(group.id)}"
-            title="${escapeHtml(title)}">
-            <span class="cgpt-chip-name">${escapeHtml(cleanName)}</span>
-            <span class="cgpt-chip-count">${count}</span>
-          </button>
-        `;
+    function renderUploadGroupChipHtml(...args) {
+      return ensureUploadRenderList().renderUploadGroupChipHtml(...args);
     }
 
-    async function persistGroups() {
-      try {
-        const db = await openDb();
 
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadGroupStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadGroupStore);
-
-          const clearReq = store.clear();
-
-          clearReq.onerror = () => reject(clearReq.error || new Error('IndexedDB groups clear failed'));
-          clearReq.onsuccess = () => {
-            state.groups.forEach((g) => {
-              const putReq = store.put(g);
-
-              putReq.onerror = () => {
-                reject(putReq.error || new Error(`IndexedDB groups put failed: ${g && g.id ? g.id : '-'}`));
-              };
-            });
-          };
-
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('IndexedDB groups transaction failed'));
-          tx.onabort = () => reject(tx.error || new Error('IndexedDB groups transaction aborted'));
-        });
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-        console.error('[ChatGPT toolbox] persist upload groups failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][persist-failed] groups=${state.groups.length} activeGroupId=${state.activeGroupId || '-'} type=${errName} error=${errText}`,
-        );
-        setStatus(`上传分组保存失败：${errText}`, 'error');
-        throw e;
-      }
+    async function persistGroups(...args) {
+      return ensureUploadPersistDb().persistGroups(...args);
     }
 
-    async function loadGroups() {
-      try {
-        const db = await openDb();
 
-        const rows = await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadGroupStore, 'readonly');
-          const store = tx.objectStore(APP.uploadGroupStore);
-          const req = store.getAll();
-
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error || new Error('IndexedDB groups getAll failed'));
-        });
-
-        state.groups = rows;
-
-        if (!state.groups.length) {
-          const defaultGroup = createDefaultGroup();
-          state.groups = [defaultGroup];
-          state.activeGroupId = defaultGroup.id;
-          ToolboxShell.appendLog(
-            `[UPLOAD_GROUP][CREATE_DEFAULT_GROUP] store=${APP.uploadGroupStore} activeGroupId=${state.activeGroupId || '-'}`,
-          );
-          await persistGroups();
-          saveGlobalUploadActiveGroupId(state.activeGroupId, 'upload-default-group-created');
-          saveUploadLastActiveGroupId(state.activeGroupId, 'upload-default-group-created');
-          ensureActiveUploadGroupIdValid('load-groups-default-created');
-          syncUploadGroupAppState();
-          appendUploadGroupLog('INIT', { stage: 'loadGroups:created-default' });
-          void cleanupUploadDbGarbage('load-groups');
-          return;
-        }
-
-        await ensureUploadGroupStableKeys();
-        migrateLegacyUploadSelectionIfNeeded();
-
-        const pageState = getToolboxPageState();
-        const resolved = resolveUploadGroupSelection({
-          pageState,
-          reason: 'load-groups',
-        });
-        state.activeGroupId = resolved.resolvedGroupId || '';
-        if (state.activeGroupId) {
-          saveGlobalUploadActiveGroupId(state.activeGroupId, 'load-groups');
-          saveUploadLastActiveGroupId(state.activeGroupId, 'load-groups');
-        }
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][active-resolve] pageGroup=${resolved.pageGroupId || '-'} globalGroup=${resolved.globalUploadActiveGroupId || resolved.uploadLastActiveGroupId || '-'} active=${state.activeGroupId || '-'} source=${resolved.reason || '-'}`,
-        );
-
-        ensureActiveUploadGroupIdValid('load-groups');
-        syncUploadGroupAppState();
-        appendUploadGroupLog('INIT', { stage: 'loadGroups:ok' });
-        void cleanupUploadDbGarbage('load-groups');
-      } catch (e) {
-        const errStack = e && e.stack ? e.stack : String(e);
-        const errName = e && e.name ? e.name : 'Error';
-        console.error('[ChatGPT toolbox] load upload groups failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][load-failed] store=${APP.uploadGroupStore} type=${errName} error=${errStack}`,
-        );
-        setStatus(
-          '读取文件组失败，当前为临时默认分组，请勿立即导入/删除分组；请刷新或检查 IndexedDB',
-          'error',
-        );
-
-        if (!state.groups.length) {
-          const tempGroup = createDefaultGroup();
-          tempGroup.__temporary = true;
-          state.groups = [tempGroup];
-          state.activeGroupId = tempGroup.id;
-        }
-
-        ensureActiveUploadGroupIdValid('load-groups-failed');
-        syncUploadGroupAppState();
-        appendUploadGroupLog('INIT', { stage: 'loadGroups:failed-temp' });
-      }
+    async function loadGroups(...args) {
+      return ensureUploadPersistDb().loadGroups(...args);
     }
 
     function resolveLegacyMissingGroupTargetId() {
@@ -11505,396 +11381,24 @@
       }
     }
 
-    function restoreHandleBackedUploadItem(item, restoredState, hasBlob) {
-      item.sourceKind = 'local-handle';
-      item.readMode = 'handle';
-      item.state = UploadState.IDLE;
-      item.message = '';
 
-      if (restoredState === UploadState.ATTACHED) {
-        if (hasAttachmentEvidenceForItem(item)) {
-          item.state = UploadState.ATTACHED;
-          item.attachedInSession = true;
-          item.message = '';
-        } else {
-          item.persistedAttached = true;
-          item.state = UploadState.IDLE;
-          item.message = '全局文件已绑定，可在当前页上传';
-          item.uploadName = '';
-        }
-      } else {
-        item.state = normalizeUploadState(restoredState, true);
-      }
-
-      syncUploadItemSchemaInPlace(item);
-      return false;
+    function restoreHandleBackedUploadItem(...args) {
+      return ensureUploadFileSource().restoreHandleBackedUploadItem(...args);
     }
 
-    function restoreMissingUploadItem(item, restoredState) {
-      item.sourceKind = 'missing-file';
-      item.readMode = '';
-      item.state = UploadState.MISSING_FILE;
-      item.message = '缺少文件，请重新拖入';
-      item.uploadName = '';
 
-      if (restoredState === UploadState.ATTACHED) {
-        item.persistedAttached = true;
-      }
-
-      syncUploadItemSchemaInPlace(item);
-      return true;
+    function restoreMissingUploadItem(...args) {
+      return ensureUploadFileSource().restoreMissingUploadItem(...args);
     }
 
-    async function restoreUploadItemFromPersistRow(row, activeGroupId) {
-      const safeRow = normalizeRestoreObject(row, 'persist-row');
-      if (!isPlainObject(row)) {
-        resetDirtyUploadRestoreState('invalid-persist-row', row);
-        return null;
-      }
-      const restoredState = row.state || UploadState.IDLE;
-      const handleKey = String(safeRow.handleKey || '').trim();
-      let handle = safeRow.handle || null;
-      if (!isFileHandleLike(handle) && handleKey) {
-        handle = await loadUploadFileHandle(handleKey);
-      }
-      const persistedBlob = safeRow.blob || null;
-      const hasBlob = isBlobLike(persistedBlob);
-      const hasHandle = !!(handle && isFileHandleLike(handle));
-      const persistedKind = String(safeRow.persistedKind || '').trim() || (
-        hasHandle ? UploadPersistedKind.FILE_SYSTEM_HANDLE : UploadPersistedKind.METADATA_ONLY
-      );
 
-        const item = normalizeUploadItem({
-          id: safeRow.id || newId(),
-          groupId: safeRow.groupId || activeGroupId,
-          name: safeRow.name || 'unknown',
-          displayPath: safeRow.displayPath || safeRow.name || 'unknown',
-          size: Number(safeRow.size) || 0,
-          lastModified: Number(safeRow.lastModified) || 0,
-          mimeType: safeRow.mimeType || safeRow.mime_type || safeRow.type || 'application/octet-stream',
-          type: safeRow.type || safeRow.mime_type || 'application/octet-stream',
-          downloadUrl: safeRow.downloadUrl || safeRow.download_url || '',
-          file: null,
-          blob: null,
-          fileHandle: hasHandle ? handle : null,
-          attachState: safeRow.attachState || safeRow.state || UploadState.IDLE,
-          registryStatus: safeRow.registryStatus || safeRow.status || 'pending',
-          composerPresence: safeRow.composerPresence || 'unbound',
-          sendState: safeRow.sendState || 'idle',
-          message: '',
-          uploadName: safeRow.uploadName || '',
-          manualPathNote: String(safeRow.manualPathNote || '').trim(),
-          persistedAttached: false,
-        attachedInSession: false,
-        sourceKind: safeRow.sourceKind || '',
-        readMode: safeRow.readMode || '',
-        persistedKind,
-        restoreState: UploadRestoreState.ERROR,
-        handleKey,
-        flaskPath: String(safeRow.flaskPath || ''),
-      }, {
-        groupId: activeGroupId,
-      });
-
-      let needsReDrag = false;
-
-      if (persistedKind === UploadPersistedKind.FILE_SYSTEM_HANDLE && item.fileHandle) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][restore-row:handle] name=${item.name || '-'} handle=1`
-        );
-        try {
-          const permission = typeof item.fileHandle.queryPermission === 'function'
-            ? await item.fileHandle.queryPermission({ mode: 'read' })
-            : 'granted';
-          if (permission === 'granted') {
-            const file = await item.fileHandle.getFile();
-            if (isFileLike(file)) {
-              item.file = file;
-              item.sourceFile = file;
-              item.originalFile = file;
-              safeAssignRestoreState(item, UploadRestoreState.READY, 'restore-item:file-handle-ready');
-              needsReDrag = restoreHandleBackedUploadItem(item, restoredState, hasBlob);
-            } else {
-              safeAssignRestoreState(item, UploadRestoreState.ERROR, 'restore-item:file-handle-error');
-              needsReDrag = restoreMissingUploadItem(item, restoredState);
-            }
-          } else {
-            safeAssignRestoreState(item, UploadRestoreState.PERMISSION_REQUIRED, 'restore-item:permission-required');
-            item.state = UploadState.MISSING_FILE;
-            item.message = '需要重新授权';
-            needsReDrag = true;
-          }
-        } catch (e) {
-          console.error('[ChatGPT toolbox] restore file handle item failed', e);
-          safeAssignRestoreState(item, UploadRestoreState.ERROR, 'restore-item:handle-catch-error');
-          item.state = UploadState.MISSING_FILE;
-          item.message = `句柄恢复失败：${e && e.message ? e.message : String(e)}`;
-          needsReDrag = true;
-        }
-      } else if (persistedKind === UploadPersistedKind.FLASK_REF) {
-        safeAssignRestoreState(
-          item,
-          hasAttemptableUploadSource(item) ? UploadRestoreState.READY : UploadRestoreState.MISSING,
-          'restore-item:flask-ref',
-        );
-        item.sourceKind = 'flask_local_direct';
-        item.readMode = item.readMode || 'flask-local-direct';
-        item.state = item.restoreState === UploadRestoreState.READY ? UploadState.IDLE : UploadState.MISSING_FILE;
-        item.message = item.restoreState === UploadRestoreState.READY ? '' : '文件不存在';
-      } else if (hasBlob) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][restore-row:blob-cache-forbidden] name=${item.name || '-'} blob=1 size=${item.size || 0}`,
-        );
-
-        item.sourceKind = safeRow.sourceKind || 'cached-snapshot';
-        item.readMode = safeRow.readMode || 'indexeddb-blob';
-        item.state = UploadState.MISSING_FILE;
-        item.message = '需要重新选择';
-        safeAssignRestoreState(item, UploadRestoreState.NEEDS_REBIND, 'restore-item:blob-needs-rebind');
-        item.uploadName = '';
-        item.persistedAttached = false;
-        item.attachedInSession = false;
-        needsReDrag = true;
-      } else {
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][restore-row:missing] name=${item.name || '-'} reason=no-handle-no-blob`
-        );
-        needsReDrag = restoreMissingUploadItem(item, restoredState);
-        safeAssignRestoreState(item, UploadRestoreState.NEEDS_REBIND, 'restore-item:missing-needs-rebind');
-      }
-
-      if (!item.restoreState) {
-        safeAssignRestoreState(
-          item,
-          needsReDrag ? UploadRestoreState.NEEDS_REBIND : UploadRestoreState.READY,
-          'restore-item:final-default',
-        );
-      }
-      syncUploadItemSchemaInPlace(item);
-
-      console.debug('[ChatGPT toolbox] loadQueue row restore', {
-        row: {
-          id: safeRow.id,
-          name: safeRow.name,
-          state: safeRow.state,
-          hasHandle: hasHandle ? 1 : 0,
-          hasBlob: hasBlob ? 1 : 0,
-        },
-        item: describeUploadSource(item),
-        needsReDrag,
-      });
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][restore-row] name=${item.name || '-'} blob=${hasBlob ? 1 : 0} handle=${item.fileHandle ? 1 : 0} sourceKind=${item.sourceKind || '-'} readMode=${item.readMode || '-'}`,
-      );
-
-      logUploadItemSource('loadQueue:item-restored', item, {
-        reason: needsReDrag ? 'missing-readable-source' : 'restored-readable-source',
-      });
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_RESTORE][ITEM] id=${item.id || '-'} name=${item.name || '-'} kind=${item.persistedKind || '-'} restoreState=${item.restoreState || '-'}`
-      );
-      return item;
+    async function restoreUploadItemFromPersistRow(...args) {
+      return ensureUploadFileSource().restoreUploadItemFromPersistRow(...args);
     }
 
-    async function loadQueueForActiveGroup() {
-      if (!state.activeGroupId) {
-        console.warn('[ChatGPT toolbox] loadQueueForActiveGroup: activeGroupId 为空');
-        setQueueRestorePhase('idle', {
-          groupId: '',
-          loadedOnce: false,
-          reason: 'load-queue-no-active-group',
-        });
-        state.queue = [];
-        setLastRestoreWarning('', { reason: 'load-queue-no-active-group' });
-        clearUploadFailureStatusIndicators('load-queue-no-active-group');
-        render();
-        return;
-      }
 
-      try {
-        setQueueRestorePhase('loading', {
-          groupId: state.activeGroupId,
-          loadedOnce: false,
-          reason: 'load-queue-start',
-        });
-        ToolboxShell.appendLog(`[UPLOAD_RESTORE][START] activeGroupId=${state.activeGroupId || '-'}`);
-        const db = await openDb();
-
-        const migrated = await migrateMissingGroupIdRows();
-
-        if (migrated === false) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_GROUP][load-queue:migrate-skipped] groupId=${state.activeGroupId || '-'} note=legacy-rows-without-groupId-may-be-invisible`,
-          );
-        }
-
-        const rows = await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readonly');
-          const store = tx.objectStore(APP.uploadStore);
-
-          if (store.indexNames.contains('groupId')) {
-            const index = store.index('groupId');
-            const req = index.getAll(state.activeGroupId);
-
-            req.onsuccess = () => resolve(req.result || []);
-            req.onerror = () => reject(req.error || new Error('IndexedDB queue group index getAll failed'));
-            return;
-          }
-
-          const req = store.getAll();
-
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error || new Error('IndexedDB queue getAll failed'));
-        });
-
-        ToolboxShell.appendLog(`[UPLOAD_RESTORE][META_COUNT] count=${rows.length}`);
-        ToolboxShell.appendLog(`[UPLOAD_RESTORE][GROUP_COUNT] count=${state.groups.length}`);
-        const { scopedRows, skippedNonObjectCount } = sanitizePersistedUploadRows(rows, state.activeGroupId);
-        if (skippedNonObjectCount > 0) {
-          ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][SKIP_INVALID_ROWS] count=${skippedNonObjectCount} activeGroupId=${state.activeGroupId || '-'}`
-          );
-        }
-        const restoredItems = await Promise.all(
-          scopedRows.map(async (r) => {
-            try {
-              return await restoreUploadItemFromPersistRow(r, state.activeGroupId);
-            } catch (rowErr) {
-              const fallback = normalizeUploadItem({
-                id: r.id || newId(),
-                groupId: state.activeGroupId,
-                name: r.name || 'unknown',
-                size: Number(r.size || 0),
-                mimeType: r.mimeType || r.mime_type || r.type || 'application/octet-stream',
-                downloadUrl: r.downloadUrl || r.download_url || '',
-                lastModified: Number(r.lastModified || Date.now()),
-                sourceKind: r.sourceKind || 'unknown',
-                readMode: r.readMode || 'none',
-                uploadName: '',
-                persistedAttached: false,
-                attachState: UploadState.MISSING_FILE,
-                registryStatus: r.registryStatus || r.status || 'pending',
-                message: '',
-                restoreState: UploadRestoreState.ERROR,
-              }, {
-                groupId: state.activeGroupId,
-              });
-              restoreMissingUploadItem(fallback, UploadState.MISSING_FILE);
-              safeAssignRestoreState(fallback, UploadRestoreState.ERROR, 'restore-fallback:item');
-              fallback.state = UploadState.MISSING_FILE;
-              fallback.message = `恢复失败：${rowErr && rowErr.message ? rowErr.message : String(rowErr)}`;
-              fallback.persistedKind = normalizePersistedKind(r.persistedKind);
-              syncUploadItemSchemaInPlace(fallback);
-              ToolboxShell.appendLog(
-                `[UPLOAD_RESTORE][ITEM] id=${fallback.id || '-'} name=${fallback.name || '-'} kind=${fallback.persistedKind || '-'} restoreState=${fallback.restoreState || '-'}`
-              );
-              return fallback;
-            }
-          })
-        );
-        const restoredBase = normalizeRestoreArray(restoredItems, 'loadQueueForActiveGroup.restoredItems').filter(Boolean);
-        state.queue = mergeActiveGroupQueueFromMemory(restoredBase, 'loadQueueForActiveGroup');
-        const invalidRestoredItems = state.queue.filter((item) => !isPlainObject(item));
-        if (invalidRestoredItems.length > 0) {
-          invalidRestoredItems.forEach((item, index) => {
-            logDirtyRestoreEntry('SKIP_INVALID_RESTORED_ITEM', {
-              index,
-              actualType: item === null ? 'null' : typeof item,
-              value: getRestoreDirtyValueText(item),
-            });
-          });
-          state.queue = state.queue.filter((item) => isPlainObject(item));
-          setLastRestoreWarning(`上传队列中跳过了 ${invalidRestoredItems.length} 条异常恢复结果`, {
-            reason: 'load-queue-skip-invalid-restored-items',
-            clearFailedStatus: true,
-          });
-        } else if (skippedNonObjectCount <= 0) {
-          setLastRestoreWarning('', { reason: 'load-queue-success' });
-        }
-        clearUploadFailureStatusIndicators('load-queue-success');
-        const restoreStat = {
-          restored: state.queue.length,
-          ready: state.queue.filter((x) => x.restoreState === UploadRestoreState.READY).length,
-          needsRebind: state.queue.filter((x) => x.restoreState === UploadRestoreState.NEEDS_REBIND).length,
-          permissionRequired: state.queue.filter((x) => x.restoreState === UploadRestoreState.PERMISSION_REQUIRED).length,
-          missing: state.queue.filter((x) => x.restoreState === UploadRestoreState.MISSING).length,
-        };
-        const readableCount = state.queue.filter((x) => !isUploadItemMissingSource(x)).length;
-        const handleCount = state.queue.filter((x) => x && x.fileHandle).length;
-        const blobCount = state.queue.filter((x) => x && x.blob).length;
-        ToolboxShell.appendLog(
-          `[UPLOAD_RESTORE][DONE] restored=${restoreStat.restored} ready=${restoreStat.ready} needsRebind=${restoreStat.needsRebind} permissionRequired=${restoreStat.permissionRequired} missing=${restoreStat.missing}`
-        );
-        ToolboxShell.appendLog(
-          `[UPLOAD_INIT][QUEUE_RESTORED] activeGroupId=${state.activeGroupId || '-'} restoredCount=${restoreStat.restored} readableCount=${readableCount} handleCount=${handleCount} blobCount=${blobCount} missingSourceCount=${restoreStat.missing}`,
-        );
-
-        setQueueRestorePhase('ready', {
-          groupId: state.activeGroupId,
-          loadedOnce: true,
-          reason: 'load-queue-success',
-        });
-        refreshQueueReadableState();
-        syncActiveGroupSelectionAfterQueueLoad(state.activeGroupId);
-        await refreshUploadGroupCounts();
-        dedupeActiveGroupQueue('load-queue');
-        renderProjectCategoryChips();
-        renderUploadListOnly('loadQueueForActiveGroup:success');
-        render();
-        const visibleListItems = countRenderedUploadListItems(listEl);
-        ToolboxShell.appendLog(
-          `[UPLOAD_RESTORE][DONE_RENDER_SYNC] activeGroupId=${state.activeGroupId || '-'} restored=${restoreStat.restored} visibleListItems=${visibleListItems}`,
-        );
-        reconcileIdleUploadFailureState('load-queue-success');
-        logUploadQueueSnapshot('loadQueue:after-load');
-      } catch (e) {
-        if (isInvalidRestoreStateError(e)) {
-          setQueueRestorePhase('failed', {
-            groupId: state.activeGroupId,
-            loadedOnce: false,
-            reason: 'load-queue-invalid-restore-state',
-          });
-          resetDirtyUploadRestoreState('invalid-restore-state', true);
-          dedupeActiveGroupQueue('load-queue-invalid-restore-state');
-          syncActiveGroupCountInCache();
-          render();
-          reconcileIdleUploadFailureState('load-queue-invalid-restore-state');
-          setStatus('上传队列恢复状态无效，已重置', 'warn', {
-            owner: 'upload',
-            shortText: '提醒',
-            persist: false,
-          });
-          return;
-        }
-
-        setQueueRestorePhase('failed', {
-          groupId: state.activeGroupId,
-          loadedOnce: false,
-          reason: 'load-queue-catch',
-        });
-        console.error('[ChatGPT toolbox] load upload queue for group failed', e);
-        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][FAILED] activeGroupId=${state.activeGroupId || '-'} error=${e && e.stack ? e.stack : (e && e.message ? e.message : String(e))}`,
-          );
-        }
-        dedupeActiveGroupQueue('load-queue');
-        syncActiveGroupCountInCache();
-        render();
-        reconcileIdleUploadFailureState('load-queue-catch');
-        setLastRestoreWarning(`上传队列恢复状态无效，已重置：${e && e.message ? e.message : String(e)}`, {
-          reason: 'load-queue-catch',
-          clearFailedStatus: true,
-        });
-        setStatus('上传队列恢复状态无效，已重置', 'warn', {
-          owner: 'upload',
-          shortText: '提醒',
-          persist: false,
-        });
-        refreshUploadFailurePresentation('load-queue-catch');
-      }
+    async function loadQueueForActiveGroup(...args) {
+      return ensureUploadPersistDb().loadQueueForActiveGroup(...args);
     }
 
     function isHardFileReadFailure(reason) {
@@ -12146,70 +11650,34 @@
       }
     }
 
-    function getActiveGroup() {
-      return state.groups.find((g) => g.id === state.activeGroupId) || null;
+
+    function getActiveGroup(...args) {
+      return ensureUploadGroupStore().getActiveGroup(...args);
     }
 
-    function getActiveGroupName() {
-      const g = getActiveGroup();
-      return g ? g.name : '未命名组';
+
+    function getActiveGroupName(...args) {
+      return ensureUploadGroupStore().getActiveGroupName(...args);
     }
 
-    function normalizeUploadFolderPath(value) {
-      return String(value || '')
-        .replace(/\\/g, '/')
-        .replace(/\/+/g, '/')
-        .replace(/^\/+|\/+$/g, '')
-        .trim()
-        .toLowerCase();
+
+    function normalizeUploadFolderPath(...args) {
+      return ensureUploadGroupStore().normalizeUploadFolderPath(...args);
     }
 
-    function deriveUploadGroupStableKey(group) {
-      if (!group || typeof group !== 'object') {
-        return '';
-      }
 
-      const existingKey = String(group.key || '').trim();
-      if (existingKey) {
-        return existingKey;
-      }
-
-      const cleanName = stripTrailingCountFromGroupName(group.name || '');
-      if (UPLOAD_PROJECT_NAME_KEY_MAP[cleanName]) {
-        return UPLOAD_PROJECT_NAME_KEY_MAP[cleanName];
-      }
-
-      const slug = cleanName
-        .toLowerCase()
-        .replace(/[^\w\u4e00-\u9fff-]+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-
-      if (slug) {
-        return slug;
-      }
-
-      return String(group.id || '').trim();
+    function deriveUploadGroupStableKey(...args) {
+      return ensureUploadGroupStore().deriveUploadGroupStableKey(...args);
     }
 
-    function getUploadGroupStableKey(group) {
-      return deriveUploadGroupStableKey(group);
+
+    function getUploadGroupStableKey(...args) {
+      return ensureUploadGroupStore().getUploadGroupStableKey(...args);
     }
 
-    function getUploadFileFolderKey(file) {
-      if (!file || typeof file !== 'object') {
-        return '';
-      }
 
-      const fileId = String(file.id || '').trim();
-      if (fileId) {
-        return fileId;
-      }
-
-      const normalizedPath = normalizeUploadFolderPath(
-        file.displayPath || file.webkitRelativePath || file.manualPathNote || file.name || '',
-      );
-      return normalizedPath;
+    function getUploadFileFolderKey(...args) {
+      return ensureUploadGroupStore().getUploadFileFolderKey(...args);
     }
 
     function persistCompactUiConfigPatch(patch) {
@@ -12285,25 +11753,9 @@
       }
     }
 
-    async function ensureUploadGroupStableKeys() {
-      let changed = false;
 
-      state.groups.forEach((group) => {
-        if (!group) {
-          return;
-        }
-
-        const nextKey = deriveUploadGroupStableKey(group);
-        if (group.key !== nextKey) {
-          group.key = nextKey;
-          group.updatedAt = Date.now();
-          changed = true;
-        }
-      });
-
-      if (changed) {
-        await persistGroups();
-      }
+    async function ensureUploadGroupStableKeys(...args) {
+      return ensureUploadGroupStore().ensureUploadGroupStableKeys(...args);
     }
 
     function migrateLegacyUploadSelectionIfNeeded() {
@@ -12330,1321 +11782,156 @@
       });
     }
 
-    function isValidUploadGroupId(groupId) {
-      const id = String(groupId || '').trim();
-      return Boolean(id && state.groups.some((g) => g.id === id));
-    }
 
-    function resolveUploadGroupSelection(options = {}) {
-      const pageState = options.pageState && typeof options.pageState === 'object'
-        ? options.pageState
-        : getToolboxPageState();
-      const groups = Array.isArray(options.groups) ? options.groups : state.groups;
-      const excludeGroupId = String(options.excludeGroupId || '').trim();
-
-      const savedSelection = getMultiUploadLastSelection();
-      const savedProjectKey = String(savedSelection.projectKey || '').trim();
-      const savedFolderKey = String(savedSelection.folderKey || '').trim();
-
-      const pageGroupId = String(readToolboxStateField(pageState, 'uploadActiveGroupId', '')).trim();
-      const lastManualGroupId = getLastManualUploadGroupId();
-      const globalUploadActiveGroupId = getGlobalUploadActiveGroupId();
-      const uploadLastActiveGroupId = getUploadLastActiveGroupId();
-      const stateActiveGroupId = String(state.activeGroupId || '').trim();
-      const firstGroupId = groups[0] && groups[0].id
-        ? String(groups[0].id).trim()
-        : '';
-
-      function isValidInGroups(id) {
-        const trimmed = String(id || '').trim();
-        return Boolean(trimmed && groups.some((g) => g && g.id === trimmed));
-      }
-
-      function findGroupIdForKey(projectKey) {
-        const key = String(projectKey || '').trim();
-        if (!key) return '';
-        const found = groups.find((g) => g && getUploadGroupStableKey(g) === key);
-        return (found && found.id) || '';
-      }
-
-      let resolvedGroupId = '';
-      let reason = 'none';
-
-      if (savedProjectKey) {
-        const groupIdFromSaved = findGroupIdForKey(savedProjectKey);
-        if (isValidInGroups(groupIdFromSaved) && groupIdFromSaved !== excludeGroupId) {
-          resolvedGroupId = groupIdFromSaved;
-          reason = 'multi-upload-last-selection';
-        } else {
-          if (groupIdFromSaved && groupIdFromSaved === excludeGroupId) {
-            logMultiUploadLastSelectionEvent('EXCLUDE_DELETED_GROUP', {
-              saved: savedProjectKey,
-              excludedGroupId: excludeGroupId,
-            });
-            if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-              ToolboxShell.appendLog('[MULTI_UPLOAD][SELECTION][EXCLUDE_DELETED_GROUP]');
-            }
-          } else {
-            logMultiUploadLastSelectionEvent('PROJECT_MISSING', {
-              saved: savedProjectKey,
-            });
-          }
-        }
-      }
-
-      if (!resolvedGroupId) {
-        const fallthroughCandidates = [
-          { id: globalUploadActiveGroupId, reason: 'global-upload-active' },
-          { id: uploadLastActiveGroupId, reason: 'upload-last-active' },
-          { id: lastManualGroupId, reason: 'last-manual' },
-          { id: stateActiveGroupId, reason: 'state-active' },
-          { id: pageGroupId, reason: 'page-state-legacy' },
-          { id: firstGroupId, reason: 'first-group' },
-        ];
-
-        for (const candidate of fallthroughCandidates) {
-          if (isValidInGroups(candidate.id) && candidate.id !== excludeGroupId) {
-            resolvedGroupId = candidate.id;
-            reason = candidate.reason;
-            break;
-          }
-        }
-      }
-
-      let resolvedFolderKey = '';
-      if (resolvedGroupId && savedFolderKey && reason === 'multi-upload-last-selection') {
-        const group = groups.find((item) => item && item.id === resolvedGroupId) || null;
-        const groupKey = getUploadGroupStableKey(group);
-        if (groupKey === savedProjectKey) {
-          const files = (state.queue || []).filter(
-            (file) => file && String(file.groupId || '').trim() === resolvedGroupId,
-          );
-          const savedFile = files.find(
-            (file) => file && getUploadFileFolderKey(file) === savedFolderKey,
-          );
-          if (savedFile) {
-            resolvedFolderKey = savedFolderKey;
-          } else if (files.length > 0) {
-            resolvedFolderKey = getUploadFileFolderKey(files[0]) || '';
-            logMultiUploadLastSelectionEvent('FOLDER_MISSING', {
-              projectKey: groupKey,
-              savedFolder: savedFolderKey,
-              fallback: resolvedFolderKey,
-            });
-          }
-        }
-      }
-
-      const result = {
-        reason,
-        savedProjectKey,
-        pageGroupId,
-        globalUploadActiveGroupId,
-        lastManualGroupId,
-        uploadLastActiveGroupId,
-        stateActiveGroupId,
-        resolvedGroupId,
-        resolvedFolderKey,
-        groupId: resolvedGroupId,
-        source: reason,
-      };
-
-      console.info('[MULTI_UPLOAD][SELECTION][RESOLVE]', result);
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[MULTI_UPLOAD][SELECTION][RESOLVE] reason=${reason} savedProjectKey=${savedProjectKey || '-'} `
-          + `pageGroupId=${pageGroupId || '-'} globalUploadActiveGroupId=${globalUploadActiveGroupId || '-'} `
-          + `lastManualGroupId=${lastManualGroupId || '-'} `
-          + `uploadLastActiveGroupId=${uploadLastActiveGroupId || '-'} stateActiveGroupId=${stateActiveGroupId || '-'} `
-          + `resolvedGroupId=${resolvedGroupId || '-'} resolvedFolderKey=${resolvedFolderKey || '-'}`,
-        );
-      }
-
-      return result;
-    }
-
-    function getLastManualUploadGroupId() {
-      const id = String(
-        MemoryManager.get(MemoryManager.KEYS.lastManualUploadGroupId, '') || '',
-      ).trim();
-
-      if (!id) {
-        return '';
-      }
-
-      return state.groups.some((g) => g.id === id) ? id : '';
-    }
-
-    function saveLastManualUploadGroupId(groupId, reason = '') {
-      const id = String(groupId || '').trim();
-
-      if (!id) {
-        return;
-      }
-
-      if (!state.groups.some((g) => g.id === id)) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_PAGE_STATE][save-last-manual-skip] reason=${reason || '-'} groupId=${id} exists=0`,
-        );
-        return;
-      }
-
-      MemoryManager.set(MemoryManager.KEYS.lastManualUploadGroupId, id);
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_PAGE_STATE][save-last-manual] reason=${reason || '-'} groupId=${id}`,
-      );
-    }
-
-    function saveUploadLastActiveGroupId(groupId, reason = '') {
-      const id = String(groupId || '').trim();
-      if (!id) {
-        return;
-      }
-      if (!state.groups.some((g) => g.id === id)) {
-        return;
-      }
-      MemoryManager.set(MemoryManager.KEYS.uploadLastActiveGroupId, id);
-      ToolboxShell.appendLog(
-        `[UPLOAD_PAGE_STATE][save-global-active] reason=${reason || '-'} groupId=${id}`,
-      );
-    }
-
-    function saveGlobalUploadActiveGroupId(groupId, reason = '') {
-      const id = String(groupId || '').trim();
-      if (!id) {
-        return;
-      }
-      if (!state.groups.some((g) => g.id === id)) {
-        return;
-      }
-      MemoryManager.set(MemoryManager.KEYS.globalUploadActiveGroupId, id);
-      ToolboxShell.appendLog(
-        `[UPLOAD_PAGE_STATE][save-global-upload-active] reason=${reason || '-'} groupId=${id}`,
-      );
-    }
-
-    function getGlobalUploadActiveGroupId() {
-      const globalId = String(
-        MemoryManager.get(MemoryManager.KEYS.globalUploadActiveGroupId, '') || '',
-      ).trim();
-      if (state.groups.some((g) => g.id === globalId)) {
-        return globalId;
-      }
-      return getUploadLastActiveGroupId();
-    }
-
-    function getUploadLastActiveGroupId() {
-      const id = String(MemoryManager.get(MemoryManager.KEYS.uploadLastActiveGroupId, '') || '').trim();
-      return state.groups.some((g) => g.id === id) ? id : '';
-    }
-
-    function broadcastUploadGlobalStateChanged(reason, payload = {}) {
-      const message = {
-        type: 'upload-global-state-changed',
-        reason: String(reason || '').trim() || 'unknown',
-        activeGroupId: String(state.activeGroupId || '').trim(),
-        updatedAt: Date.now(),
-        payload: payload && typeof payload === 'object' ? payload : {},
-      };
-      ToolboxShell.appendLog(
-        `[UPLOAD_GLOBAL_SYNC][broadcast] reason=${message.reason} activeGroupId=${message.activeGroupId || '-'} running=${state.running ? 1 : 0}`,
-      );
-      try {
-        localStorage.setItem(UPLOAD_GLOBAL_SYNC_KEY, JSON.stringify(message));
-      } catch (error) {
-        console.error('[ChatGPT toolbox] upload global sync localStorage write failed', error);
-      }
-      if (uploadBroadcastChannel) {
-        try {
-          uploadBroadcastChannel.postMessage(message);
-        } catch (error) {
-          console.error('[ChatGPT toolbox] upload global sync postMessage failed', error);
-        }
-      }
-    }
-
-    async function applyUploadGlobalSyncMessage(message, source) {
-      const incomingGroupId = String(message && message.activeGroupId || '').trim();
-      if (incomingGroupId && incomingGroupId !== state.activeGroupId && !state.groups.some((g) => g.id === incomingGroupId)) {
-        await loadGroups();
-      }
-      if (incomingGroupId && incomingGroupId !== state.activeGroupId) {
-        state.activeGroupId = incomingGroupId;
-        saveGlobalUploadActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
-        saveUploadLastActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
-      }
-      await loadGroups();
-      await loadQueueForActiveGroup();
-      await refreshUploadGroupCounts();
-      render();
-      ToolboxShell.appendLog(
-        `[UPLOAD_GLOBAL_SYNC][applied] source=${source || '-'} activeGroupId=${state.activeGroupId || '-'} queue=${getActiveGroupFiles().length}`,
-      );
-    }
-
-    async function handleUploadGlobalSyncMessage(message, source) {
-      if (!message || message.type !== 'upload-global-state-changed') {
-        return;
-      }
-      const incomingGroupId = String(message.activeGroupId || '').trim();
-      ToolboxShell.appendLog(
-        `[UPLOAD_GLOBAL_SYNC][receive] source=${source || '-'} reason=${message.reason || '-'} activeGroupId=${incomingGroupId || '-'} running=${state.running ? 1 : 0}`,
-      );
-      if (state.running) {
-        pendingUploadGlobalSyncMessage = message;
-        ToolboxShell.appendLog(
-          `[UPLOAD_GLOBAL_SYNC][skip-running] source=${source || '-'} reason=${message.reason || '-'} activeGroupId=${incomingGroupId || '-'}`
-        );
-        return;
-      }
-      await applyUploadGlobalSyncMessage(message, source);
-    }
-
-    function flushPendingUploadGlobalSync(reason = '') {
-      if (!pendingUploadGlobalSyncMessage || state.running) {
-        return;
-      }
-      const message = pendingUploadGlobalSyncMessage;
-      pendingUploadGlobalSyncMessage = null;
-      void handleUploadGlobalSyncMessage(message, `pending:${reason || 'unknown'}`).catch((error) => {
-        console.error('[ChatGPT toolbox] flushPendingUploadGlobalSync failed', error);
-      });
-    }
-
-    function initUploadGlobalSync() {
-      if (uploadGlobalSyncInitialized) {
-        return;
-      }
-      uploadGlobalSyncInitialized = true;
-      if ('BroadcastChannel' in window) {
-        uploadBroadcastChannel = new BroadcastChannel(UPLOAD_GLOBAL_SYNC_KEY);
-        uploadBroadcastChannel.onmessage = (event) => {
-          void handleUploadGlobalSyncMessage(event.data, 'broadcast-channel');
-        };
-      }
-      window.addEventListener('storage', (event) => {
-        if (!event || event.key !== UPLOAD_GLOBAL_SYNC_KEY || !event.newValue) {
-          return;
-        }
-        let data = null;
-        try {
-          data = JSON.parse(event.newValue || 'null');
-        } catch (error) {
-          console.error('[ChatGPT toolbox] parse upload global sync storage event failed', error);
-          ToolboxShell.appendLog(
-            `[UPLOAD_GLOBAL_SYNC][parse-failed] error=${error && error.message ? error.message : String(error)}`
-          );
-          return;
-        }
-        void handleUploadGlobalSyncMessage(data, 'storage');
-      });
-    }
-
-    async function switchGroup(groupId, options = {}) {
-      if (!groupId) return;
-
-      appendUploadGroupLog('SWITCH', {
-        targetGroupId: groupId,
-        fromGroupId: getActiveGroupId() || '-',
-        reason: options.reason || '-',
-      });
-
-      healStaleUploadRunningLockIfNeeded('switchGroup');
-
-      const uploadActuallyRunning = !!(
-        (typeof isUploadRunActuallyActive === 'function' && isUploadRunActuallyActive())
-        || (typeof hasActiveUploadInProgressOnQueue === 'function' && hasActiveUploadInProgressOnQueue())
-        || state.uploadAbortController
-      );
-      if (uploadActuallyRunning) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][SWITCH_BLOCKED_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} stateRunning=${state.running ? 1 : 0} abort=${state.uploadAbortController ? 1 : 0}`,
-        );
-        setStatus('附件正在上传中，暂时不能切换分组', 'warn');
-        return;
-      }
-      if (state.running) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][SWITCH_HEAL_STALE_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} reason=state-running-without-real-upload`,
-        );
-        state.running = false;
-        state.cancelled = false;
-        state.activeId = '';
-        state.uploadAbortController = null;
-      }
-
-      const exists = state.groups.some((g) => g.id === groupId);
-      if (!exists) {
-        console.warn('[ChatGPT toolbox] switchGroup: 分组不存在', groupId);
-        ToolboxShell.appendLog(`[UPLOAD_GROUP][switch:missing] groupId=${groupId || '-'}`);
-        setStatus('切换失败：分组不存在', 'error');
-        return;
-      }
-
-      const prevActiveGroupId = state.activeGroupId;
-      const prevActiveId = state.activeId;
-      const prevQueue = state.queue.slice();
-
-      try {
-        await awaitPersistQueueBriefly('switchGroup:before', 300);
-
-        state.activeGroupId = groupId;
-        saveGlobalUploadActiveGroupId(groupId, options.reason || 'switch-group');
-        saveUploadLastActiveGroupId(groupId, options.reason || 'switch-group');
-
-        if (options.saveLastManual !== false) {
-          saveLastManualUploadGroupId(groupId, options.reason || 'switch-group');
-          lastManualUploadGroupAt = Date.now();
-        }
-
-        await persistGroups();
-        await loadQueueForActiveGroup();
-        saveMultiUploadSelectionForActiveGroup();
-
-        renderProjectCategoryChips();
-        renderUploadListOnly('switch-group', { force: true });
-        renderUploadButtonsOnly({
-          immediate: true,
-          force: true,
-          buttonTasksReason: 'switch-group',
-        });
-        setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
-        render();
-
-        syncUploadGroupAppState();
-        appendUploadGroupLog('SWITCH', {
-          phase: 'ok',
-          fromGroupId: prevActiveGroupId || '-',
-          targetGroupId: groupId || '-',
-        });
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][switch:ok] from=${prevActiveGroupId || '-'} to=${groupId || '-'} count=${getActiveGroupFiles().length} selected=${getSelectedFileIdForActiveGroup() || '-'}`,
-        );
-        broadcastUploadGlobalStateChanged('switch-group', {
-          sourceReason: options.reason || 'switch-group',
-        });
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.activeGroupId = prevActiveGroupId;
-        state.activeId = prevActiveId;
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        console.error('[ChatGPT toolbox] switchGroup failed', e);
-
-        setStatus(`切换分组失败，已恢复原分组：${errText}`, 'error');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][switch:failed-rollback] from=${prevActiveGroupId || '-'} to=${groupId || '-'} type=${errName} error=${errText}`,
-        );
-
-        throw e;
-      }
-    }
-
-    function buildRandomGroupName() {
-      const tag = buildUploadTimestamp().slice(0, 20);
-      const baseName = `项目_${tag}`;
-
-      const existingNames = new Set(
-        state.groups.map((g) => String(g.name || '').trim())
-      );
-
-      return buildUniqueName(baseName, existingNames);
-    }
-
-    function buildNextGroupName() {
-      return buildRandomGroupName();
-    }
-
-    async function createGroupInline() {
-      healStaleUploadRunningLockIfNeeded('createGroupInline');
-
-      if (state.running) {
-        setStatus('正在上传中，不能新建分组');
-        return;
-      }
-
-      const prevGroups = state.groups.slice();
-      const prevActiveGroupId = state.activeGroupId;
-      const prevActiveId = state.activeId;
-      const prevQueue = state.queue.slice();
-
-      try {
-        await awaitPersistQueueBriefly('createGroupInline:before', 300);
-
-        const groupName = buildNextGroupName();
-
-        const group = {
-          id: createId('upload_group'),
-          name: groupName,
-          key: '',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        group.key = deriveUploadGroupStableKey(group);
-
-        state.groups.push(group);
-        state.activeGroupId = group.id;
-        state.activeId = '';
-        state.selectedFileIdByGroup[group.id] = '';
-        state.queue = [];
-
-        await persistGroups();
-        await awaitPersistQueueBriefly('createGroupInline:after-persist-groups', 300);
-
-        saveLastManualUploadGroupId(group.id, 'create-group-inline');
-        saveUploadLastActiveGroupId(group.id, 'create-group-inline');
-        saveGlobalUploadActiveGroupId(group.id, 'create-group-inline');
-
-        if (managePanelEl && managePanelEl.classList.contains('cgpt-toolbox-hidden')) {
-          managePanelEl.classList.remove('cgpt-toolbox-hidden');
-        }
-
-        render();
-
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        if (groupNameInputEl) {
-          groupNameInputEl.focus();
-          groupNameInputEl.select();
-        }
-
-        setStatus(`已新建分组：${group.name}`, 'success');
-        ToolboxShell.appendLog(`[UPLOAD_GROUP][create-inline:ok] groupId=${group.id} name=${group.name}`);
-        broadcastUploadGlobalStateChanged('create-group', { groupId: group.id });
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.groups = prevGroups;
-        state.activeGroupId = prevActiveGroupId;
-        state.activeId = prevActiveId;
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        console.error('[ChatGPT toolbox] createGroupInline failed', e);
-
-        setStatus(`新建分组失败，已恢复原状态：${errText}`, 'error');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][create-inline:failed-rollback] type=${errName} error=${errText}`,
-        );
-
-        throw e;
-      }
+    function isValidUploadGroupId(...args) {
+      return ensureUploadGroupStore().isValidUploadGroupId(...args);
     }
 
 
-    function refreshUploadGroupDomRefs(rootEl) {
-      const root = rootEl || rootElRef || host || document;
-
-      groupListEl = qs('#cgpt-upload-group-list', root);
-      managePanelEl = qs('#cgpt-upload-manage-panel', root);
-      manageGroupListEl = qs('#cgpt-upload-manage-group-list', root);
-      groupNameInputEl = qs('#cgpt-upload-group-name-input', root);
-
-      return root;
+    function resolveUploadGroupSelection(...args) {
+      return ensureUploadGroupStore().resolveUploadGroupSelection(...args);
     }
 
-    function toggleGroupManagePanel(source = 'unknown') {
-      const root = rootElRef || host || document;
 
-      if (rootElRef) {
-        ensureUploadGroupSection(rootElRef);
-      }
-
-      refreshUploadGroupDomRefs(root);
-
-      if (!managePanelEl) {
-        const errText = 'missing #cgpt-upload-manage-panel';
-        console.error('[ChatGPT toolbox] toggleGroupManagePanel failed:', errText);
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][MANAGE_TOGGLE_FAILED] source=${String(source || '-')} reason=${errText}`,
-        );
-        return false;
-      }
-
-      const wasHidden = managePanelEl.classList.contains('cgpt-toolbox-hidden');
-      managePanelEl.classList.toggle('cgpt-toolbox-hidden', !wasHidden);
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_GROUP_MANAGE][TOGGLE] visible=${wasHidden ? 'true' : 'false'}`,
-      );
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_GROUP][MANAGE_TOGGLE] source=${String(source || '-')} visible=${wasHidden ? '1' : '0'}`,
-      );
-
-      if (wasHidden) {
-        syncGroupManagePanel({ force: true });
-      }
-
-      return true;
+    function getLastManualUploadGroupId(...args) {
+      return ensureUploadGroupStore().getLastManualUploadGroupId(...args);
     }
 
-    function renderManageGroupList() {
-      if (!manageGroupListEl) return;
 
-      if (!state.groups.length) {
-        manageGroupListEl.innerHTML = renderEmptyState(
-          '暂无分组',
-          'cgpt-upload-manage-empty cgpt-empty-state',
-        );
-        return;
-      }
-
-      manageGroupListEl.innerHTML = state.groups.map((g) => {
-        const active = g.id === state.activeGroupId ? ' active' : '';
-        const count = getUploadGroupFileCount(g.id);
-        const cleanName = stripTrailingCountFromGroupName(g.name);
-
-        return `
-          <button type="button"
-            class="cgpt-upload-manage-group-item${active}"
-            data-group-id="${escapeHtml(g.id)}"
-            title="${escapeHtml(`${cleanName} · ${count} 个文件`)}">
-            <span class="cgpt-upload-manage-group-name">${escapeHtml(cleanName)}</span>
-            <span class="cgpt-upload-manage-group-count">${count} 个</span>
-          </button>
-        `;
-      }).join('');
+    function saveLastManualUploadGroupId(...args) {
+      return ensureUploadGroupStore().saveLastManualUploadGroupId(...args);
     }
 
-    function syncGroupManagePanel(options = {}) {
-      const group = getActiveGroup();
 
-      renderManageGroupList();
-
-      const force = options.force === true;
-      const inputFocused = document.activeElement === groupNameInputEl;
-
-      if (groupNameInputEl && (force || !inputFocused)) {
-        const nextName = group ? group.name : '';
-        groupNameInputEl.value = nextName;
-        lastGroupNameInputValue = nextName;
-      }
-
-      // Blob persistence disabled - sync removed
-
-      const clearBtn = qs('#cgpt-upload-group-clear-inline', host || document);
-      if (clearBtn) {
-        clearBtn.textContent = '清空当前组';
-      }
-
-      const deleteBtn = qs('#cgpt-upload-group-delete-inline', host || document);
-      if (deleteBtn) {
-        deleteBtn.textContent = '删除当前组';
-      }
-
-      clearConfirmUntil = 0;
-      deleteConfirmUntil = 0;
+    function saveUploadLastActiveGroupId(...args) {
+      return ensureUploadGroupStore().saveUploadLastActiveGroupId(...args);
     }
 
-    async function renameActiveGroupInline() {
-      const group = getActiveGroup();
 
-      if (!group) {
-        setStatus('缺少文件，请重新拖入');
-        return false;
-      }
-
-      const text = String(groupNameInputEl ? groupNameInputEl.value : '').trim();
-
-      if (!text) {
-        setStatus('请输入分组名称');
-        console.warn('[ChatGPT toolbox] renameActiveGroupInline: 分组名称为空');
-        return false;
-      }
-
-      if (text === group.name) {
-        setStatus(`分组名称未变化：${group.name}`);
-        return true;
-      }
-
-      if (state.groups.some((g) => g.id !== group.id && g.name === text)) {
-        setStatus('分组名称已存在');
-        return false;
-      }
-
-      const prevName = group.name;
-      const prevUpdatedAt = group.updatedAt;
-      const nextName = normalizeEntityName(text);
-
-      try {
-        group.name = nextName;
-        group.updatedAt = Date.now();
-
-        await persistGroups();
-
-        lastGroupNameInputValue = group.name;
-
-        renderProjectCategoryChips();
-        renderManageGroupList();
-        render();
-        syncGroupManagePanel();
-
-        setStatus(`已保存分组名称：${group.name}`, 'success');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][rename-inline:ok] groupId=${group.id || '-'} oldName=${prevName || '-'} newName=${group.name || '-'}`,
-        );
-        broadcastUploadGlobalStateChanged('rename-group', { groupId: group.id });
-
-        return true;
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        group.name = prevName;
-        group.updatedAt = prevUpdatedAt;
-
-        if (groupNameInputEl) {
-          groupNameInputEl.value = prevName;
-        }
-
-        renderProjectCategoryChips();
-        renderManageGroupList();
-        render();
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        console.error('[ChatGPT toolbox] renameActiveGroupInline failed', e);
-
-        setStatus(`保存分组名称失败，已恢复原名称：${errText}`, 'error');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][rename-inline:failed-rollback] groupId=${group.id || '-'} oldName=${prevName || '-'} nextName=${nextName || '-'} type=${errName} error=${errText}`,
-        );
-
-        throw e;
-      }
+    function saveGlobalUploadActiveGroupId(...args) {
+      return ensureUploadGroupStore().saveGlobalUploadActiveGroupId(...args);
     }
 
-    async function deleteGroupQueue(groupId) {
-      const targetGroupId = String(groupId || '').trim();
 
-      if (!targetGroupId) {
-        const msg = 'deleteGroupQueue skipped: empty groupId';
-        console.warn(`[ChatGPT toolbox] ${msg}`);
-        ToolboxShell.appendLog('[UPLOAD_GROUP][delete-queue:skip] groupId为空');
-        return;
-      }
-
-      try {
-        const db = await openDb();
-
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadStore);
-          const req = store.getAll();
-
-          req.onerror = () => {
-            reject(req.error || new Error('IndexedDB getAll failed before delete group queue'));
-          };
-
-          req.onsuccess = () => {
-            const rows = req.result || [];
-            let deleted = 0;
-
-            rows.forEach((row) => {
-              const rowGroupId = String(row && row.groupId || '').trim();
-
-              if (rowGroupId === targetGroupId) {
-                store.delete(row.id);
-                deleted += 1;
-              }
-            });
-
-            ToolboxShell.appendLog(
-              `[UPLOAD_GROUP][delete-queue] groupId=${targetGroupId} deleted=${deleted}`,
-            );
-          };
-
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => {
-            reject(tx.error || new Error('IndexedDB delete group queue transaction failed'));
-          };
-          tx.onabort = () => {
-            reject(tx.error || new Error('IndexedDB delete group queue transaction aborted'));
-          };
-        });
-
-        await refreshUploadGroupCounts();
-      } catch (e) {
-        console.error('[ChatGPT toolbox] deleteGroupQueue failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][delete-queue:error] groupId=${targetGroupId} error=${e && e.message ? e.message : String(e)}`,
-        );
-        throw e;
-      }
+    function getGlobalUploadActiveGroupId(...args) {
+      return ensureUploadGroupStore().getGlobalUploadActiveGroupId(...args);
     }
 
-    async function clearActiveGroupQueueInline(button) {
-      const group = getActiveGroup();
 
-      if (!group) {
-        setStatus('当前没有可清空的分组');
-        return;
-      }
-
-      const now = Date.now();
-
-      if (now > clearConfirmUntil) {
-        clearConfirmUntil = now + 3000;
-
-        if (button) {
-          button.textContent = '再次点击清空';
-        }
-
-        setStatus('再次点击确认清空当前组文件');
-        return;
-      }
-
-      clearConfirmUntil = 0;
-
-      if (!clearUploadFilesByUserAction('clear-active-group-inline')) {
-        return;
-      }
-
-      const prevQueue = state.queue.slice();
-      const groupId = String(group.id || '').trim();
-
-      const removedItems = prevQueue.filter((item) => {
-        return item && String(item.groupId || '').trim() === groupId;
-      });
-
-      try {
-        state.queue = prevQueue.filter((item) => {
-          return !item || String(item.groupId || '').trim() !== groupId;
-        });
-
-        await withAllowedEmptyQueuePersist('clear-active-group-inline', () => (
-          awaitPersistQueueBriefly('clearActiveGroupQueueInline', 300)
-        ));
-
-        for (const item of removedItems) {
-          if (!item) {
-            continue;
-          }
-
-          const handleKey = String(item.handleKey || buildUploadHandleKey(item) || '').trim();
-
-          if (handleKey) {
-            await deleteUploadFileHandle(handleKey);
-          }
-        }
-
-        await refreshUploadGroupCounts();
-
-        render();
-        syncGroupManagePanel();
-
-        if (typeof cleanupChatMessageCaches === 'function') {
-          cleanupChatMessageCaches('upload-group-cleared');
-        }
-
-        setStatus(`已清空分组：${group.name}`, 'success');
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][clear-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'} removed=${removedItems.length}`,
-        );
-        broadcastUploadGlobalStateChanged('clear-group', {
-          groupId: group.id,
-          removed: removedItems.length,
-        });
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel();
-
-        console.error('[ChatGPT toolbox] clearActiveGroupQueueInline failed', e);
-
-        setStatus(`清空分组失败，已恢复原队列：${errText}`, 'error');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][clear-inline:failed-rollback] groupId=${group.id || '-'} name=${group.name || '-'} type=${errName} error=${errText}`,
-        );
-
-        throw e;
-      }
+    function getUploadLastActiveGroupId(...args) {
+      return ensureUploadGroupStore().getUploadLastActiveGroupId(...args);
     }
 
-    async function deleteActiveGroupInline(button) {
-      const group = getActiveGroup();
 
-      if (!group) {
-        setStatus('当前没有可删除的分组');
-        return;
-      }
-
-      if (state.groups.length <= 1) {
-        setStatus('至少保留一个分组');
-        return;
-      }
-
-      const now = Date.now();
-
-      if (now > deleteConfirmUntil) {
-        deleteConfirmUntil = now + 3000;
-
-        if (button) {
-          button.textContent = '再次点击清空';
-        }
-
-        setStatus('再次点击确认删除当前组');
-        return;
-      }
-
-      deleteConfirmUntil = 0;
-
-      const prevGroups = state.groups.slice();
-      const prevActiveGroupId = state.activeGroupId;
-      const prevActiveId = state.activeId;
-      const prevQueue = state.queue.slice();
-      const nextGroups = state.groups.filter((g) => g.id !== group.id);
-      const preferred = resolveUploadGroupSelection({
-        reason: 'delete-group-inline',
-        groups: nextGroups,
-        excludeGroupId: group.id,
-      });
-      const resolvedCandidate = preferred.resolvedGroupId || '';
-      const nextActiveGroupId = resolvedCandidate || (nextGroups[0] && nextGroups[0].id) || '';
-
-      if (!nextActiveGroupId) {
-        setStatus('删除失败：没有可切换的目标分组', 'error');
-        return;
-      }
-
-      try {
-        await awaitPersistQueueBriefly('deleteActiveGroupInline:before', 300);
-
-        state.groups = nextGroups;
-        state.activeGroupId = nextActiveGroupId;
-        state.activeId = '';
-        state.queue = [];
-
-        await persistGroups();
-        await loadQueueForActiveGroup();
-
-        try {
-          await deleteGroupQueue(group.id);
-        } catch (cleanupErr) {
-          const cleanupText = cleanupErr && cleanupErr.message ? cleanupErr.message : String(cleanupErr);
-
-          console.error('[ChatGPT toolbox] deleteActiveGroupInline cleanup queue failed', cleanupErr);
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_GROUP][delete-inline:queue-cleanup-failed] groupId=${group.id || '-'} name=${group.name || '-'} error=${cleanupText}`,
-          );
-
-          setStatus(`分组已删除，但旧队列清理失败：${cleanupText}`, 'error');
-        }
-
-        await refreshUploadGroupCounts();
-
-        render();
-
-        const nextActiveGroup = state.groups.find((g) => g.id === state.activeGroupId) || null;
-        if (nextActiveGroup) {
-          saveMultiUploadLastSelection({
-            projectKey: getUploadGroupStableKey(nextActiveGroup),
-            folderKey: '',
-          });
-        }
-        saveLastManualUploadGroupId(state.activeGroupId, 'delete-group-inline');
-        saveUploadLastActiveGroupId(state.activeGroupId, 'delete-group-inline');
-        saveGlobalUploadActiveGroupId(state.activeGroupId, 'delete-group-inline');
-
-        if (!state.groups.some((g) => g.id === state.activeGroupId)) {
-          console.warn('[UPLOAD_GROUP][delete-inline:active-invalid-fallback]', {
-            activeGroupId: state.activeGroupId,
-            nextGroupIds: nextGroups.map((g) => g.id),
-          });
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog('[UPLOAD_GROUP][delete-inline:active-invalid-fallback]');
-          }
-          state.activeGroupId = nextGroups[0].id;
-        }
-
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        setStatus(`已删除分组：${group.name}`, 'success');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][delete-inline:ok] groupId=${group.id || '-'} name=${group.name || '-'}`,
-        );
-        broadcastUploadGlobalStateChanged('delete-group', {
-          groupId: group.id,
-          nextActiveGroupId: state.activeGroupId || '',
-        });
-        void cleanupUploadDbGarbage('delete-active-group');
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.groups = prevGroups;
-        state.activeGroupId = prevActiveGroupId;
-        state.activeId = prevActiveId;
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        console.error('[ChatGPT toolbox] deleteActiveGroupInline failed', e);
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][delete-inline:failed-rollback] groupId=${group.id || '-'} name=${group.name || '-'} type=${errName} error=${errText}`,
-        );
-
-        setStatus(`删除分组失败，已恢复原状态：${errText}`, 'error');
-
-        throw e;
-      }
+    function broadcastUploadGlobalStateChanged(...args) {
+      return ensureUploadGroupStore().broadcastUploadGlobalStateChanged(...args);
     }
 
-    async function removeFileFromCurrentGroup(id) {
-      const fileId = String(id || '').trim();
 
-      if (!fileId) {
-        setStatus('删除失败：文件 ID 为空', 'error');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][remove-file:skip] reason=empty-id');
-        return false;
-      }
-
-      healStaleUploadRunningLockIfNeeded('remove-file-before-check');
-
-      const uploadActuallyActive = state.running || isUploadRunActuallyActive();
-
-      if (uploadActuallyActive) {
-        setStatus('正在上传中，不能删除文件', 'warn');
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:skip] reason=upload-running id=${fileId} running=${state.running ? 1 : 0}`,
-        );
-        return false;
-      }
-
-      const q = getActiveGroupFiles().find((item) => item && item.id === fileId);
-
-      if (!q) {
-        setStatus('未找到要删除的文件', 'warn');
-        console.warn('[ChatGPT toolbox] removeFileFromCurrentGroup: 文件不存在', fileId);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:missing] id=${fileId} activeGroupId=${getActiveGroupId() || '-'}`,
-        );
-        return false;
-      }
-
-      if (!clearUploadFilesByUserAction('remove-file-from-current-group')) {
-        return false;
-      }
-
-      const prevQueue = state.queue.slice();
-      const activeGroupId = getActiveGroupId();
-
-      try {
-        state.queue = state.queue.filter((item) => item && item.id !== fileId);
-        syncActiveGroupSelectionAfterQueueLoad(activeGroupId);
-
-        render();
-        syncGroupManagePanel({ force: true });
-
-        setStatus(`已从界面移除：${q.name}，正在保存队列…`, 'success');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:ui-removed] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'}`,
-        );
-
-        await withAllowedEmptyQueuePersist('remove-file-from-current-group', () => (
-          awaitPersistQueueBriefly('removeFileFromCurrentGroup', 300)
-        ));
-
-        render();
-        syncGroupManagePanel({ force: true });
-
-        setStatus(`已从工具箱移除：${q.name}`, 'success');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:ok] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'}`,
-        );
-        broadcastUploadGlobalStateChanged('remove-file', {
-          groupId: activeGroupId || '',
-          fileId,
-        });
-
-        return true;
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel({ force: true });
-
-        console.error('[ChatGPT toolbox] removeFileFromCurrentGroup failed', e);
-
-        setStatus(`移除文件失败，已恢复原队列：${errText}`, 'error');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:failed-rollback] id=${fileId} name=${q.name || '-'} type=${errName} error=${errText}`,
-        );
-
-        throw e;
-      }
+    async function applyUploadGlobalSyncMessage(...args) {
+      return ensureUploadGroupStore().applyUploadGlobalSyncMessage(...args);
     }
 
-    async function exportGroupsAndQueueMeta() {
-      try {
-        const db = await openDb();
 
-        const groups = await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadGroupStore, 'readonly');
-          const store = tx.objectStore(APP.uploadGroupStore);
-          const req = store.getAll();
-
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error || new Error('IndexedDB groups export getAll failed'));
-        });
-
-        const rows = await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readonly');
-          const store = tx.objectStore(APP.uploadStore);
-          const req = store.getAll();
-
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error || new Error('IndexedDB queue export getAll failed'));
-        });
-
-        const queue = (rows || []).map((r) => {
-          const normalized = normalizeUploadItem(r, {
-            groupId: getUploadItemGroupId(r) || state.activeGroupId,
-          });
-          return {
-            id: normalized.id,
-            groupId: normalized.groupId,
-            name: normalized.name,
-            displayPath: normalized.displayPath || normalized.name || '',
-            size: normalized.size,
-            lastModified: normalized.lastModified,
-            mimeType: normalized.mimeType,
-            downloadUrl: normalized.downloadUrl || '',
-            sourceKind: normalized.sourceKind || '',
-            readMode: normalized.readMode || '',
-            registryStatus: normalized.registryStatus || 'pending',
-            attachState: normalized.attachState || UploadState.IDLE,
-            composerPresence: normalized.composerPresence || 'unbound',
-            sendState: normalized.sendState || 'idle',
-            restoreState: normalized.restoreState || '',
-            persistedKind: normalized.persistedKind || '',
-            flaskPath: normalized.flaskPath || '',
-            uploadName: normalized.uploadName || '',
-            manualPathNote: String(normalized.manualPathNote || '').trim(),
-            message: normalized.message || '',
-            blobSaved: !!r.blobSaved,
-            blobSavedAt: Number(r.blobSavedAt) || 0,
-          };
-        });
-
-        return {
-          activeGroupId: state.activeGroupId,
-          groups,
-          queue,
-        };
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-        console.error('[ChatGPT toolbox] exportGroupsAndQueueMeta failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][export-meta:failed] activeGroupId=${state.activeGroupId || '-'} type=${errName} error=${errText}`,
-        );
-        throw new Error(`上传分组与队列导出失败：${errText}`);
-      }
+    async function handleUploadGlobalSyncMessage(...args) {
+      return ensureUploadGroupStore().handleUploadGlobalSyncMessage(...args);
     }
 
-    async function importGroupsAndQueueMeta(payload) {
-      if (!payload || typeof payload !== 'object') {
-        console.warn('[ChatGPT toolbox] importGroupsAndQueueMeta: invalid payload', payload);
-        return;
-      }
 
-      const prevGroups = state.groups.slice();
-      const prevActiveGroupId = state.activeGroupId;
-      const prevActiveId = state.activeId;
-      const prevQueue = state.queue.slice();
-
-      const incomingGroups = Array.isArray(payload.groups) ? payload.groups : [];
-      const incomingQueue = Array.isArray(payload.queue) ? payload.queue : [];
-
-      let nextGroups = [];
-      let nextActiveGroupId = '';
-
-      if (!incomingGroups.length) {
-        const defaultGroup = createDefaultGroup();
-        nextGroups = [defaultGroup];
-        nextActiveGroupId = defaultGroup.id;
-      } else {
-        nextGroups = incomingGroups.map((g) => {
-          const group = {
-            id: String(g.id || createId('upload_group')),
-            name: String(g.name || DEFAULT_UPLOAD_GROUP_NAME).slice(0, 24),
-            key: String(g.key || '').trim(),
-            createdAt: Number(g.createdAt) || Date.now(),
-            updatedAt: Number(g.updatedAt) || Date.now(),
-          };
-
-          if (!group.key) {
-            group.key = deriveUploadGroupStableKey(group);
-          }
-
-          return group;
-        });
-
-        const wantedId = String(payload.activeGroupId || '');
-        const exists = nextGroups.some((g) => g.id === wantedId);
-        nextActiveGroupId = exists ? wantedId : nextGroups[0].id;
-      }
-
-      const validGroupIds = new Set(nextGroups.map((g) => String(g.id || '').trim()).filter(Boolean));
-
-      try {
-        state.groups = nextGroups;
-        state.activeGroupId = nextActiveGroupId;
-        state.activeId = '';
-
-        await persistGroups();
-
-        const db = await openDb();
-
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(APP.uploadStore, 'readwrite');
-          const store = tx.objectStore(APP.uploadStore);
-          const clearReq = store.clear();
-
-          clearReq.onerror = () => reject(clearReq.error || new Error('IndexedDB queue clear on import failed'));
-
-          clearReq.onsuccess = () => {
-            incomingQueue.forEach((r) => {
-              if (!r || !r.id) return;
-
-              const rawGroupId = String(r.groupId || '').trim();
-              const groupId = validGroupIds.has(rawGroupId)
-                ? rawGroupId
-                : state.activeGroupId;
-
-              if (rawGroupId && rawGroupId !== groupId) {
-                ToolboxShell.appendLog(
-                  `[UPLOAD][IMPORT][QUEUE_GROUP_FALLBACK] old=${rawGroupId} fallback=${groupId}`,
-                );
-              }
-
-              const normalized = normalizeUploadItem(r, { groupId });
-              const row = buildPersistRow({
-                ...normalized,
-                groupId,
-                blob: r.blob instanceof Blob ? r.blob : normalized.blob,
-                handle: null,
-                fileHandle: null,
-              });
-              row.handle = null;
-              row.blob = r.blob instanceof Blob ? r.blob : row.blob;
-              row.blobSaved = !!(r.blob instanceof Blob) || !!r.blobSaved || !!row.blobSaved;
-              row.blobSavedAt = Number(r.blobSavedAt) || row.blobSavedAt || 0;
-              appendUploadSchemaAuditLog('UPLOAD_IMPORT_ROW_NORMALIZED', row);
-
-              const putReq = store.put(row);
-
-              putReq.onerror = () => {
-                console.error('[ChatGPT toolbox] import queue row put failed', {
-                  id: row.id,
-                  name: row.name,
-                  error: putReq.error,
-                });
-              };
-            });
-          };
-
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error || new Error('IndexedDB queue import transaction failed'));
-          tx.onabort = () => reject(tx.error || new Error('IndexedDB queue import transaction aborted'));
-        });
-
-        state.queue = [];
-
-        await loadQueueForActiveGroup();
-        await refreshUploadGroupCounts();
-        saveGlobalUploadActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
-        saveUploadLastActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][import:ok] groups=${state.groups.length} queue=${incomingQueue.length} activeGroupId=${state.activeGroupId || '-'}`,
-        );
-        broadcastUploadGlobalStateChanged('import-groups', {
-          groups: state.groups.length,
-          queue: incomingQueue.length,
-        });
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
-        state.groups = prevGroups;
-        state.activeGroupId = prevActiveGroupId;
-        state.activeId = prevActiveId;
-        state.queue = prevQueue;
-
-        render();
-        syncGroupManagePanel({
-          force: true,
-        });
-
-        console.error('[ChatGPT toolbox] importGroupsAndQueueMeta failed', e);
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][import:failed-rollback] type=${errName} error=${errText}`,
-        );
-
-        setStatus(`导入上传分组失败，已恢复原状态：${errText}`, 'error');
-
-        throw e;
-      }
+    function flushPendingUploadGlobalSync(...args) {
+      return ensureUploadGroupStore().flushPendingUploadGlobalSync(...args);
     }
 
-    function renderProjectCategoryChipHtml(group, activeGroupId) {
-      return renderUploadGroupChipHtml(group, activeGroupId);
+
+    function initUploadGlobalSync(...args) {
+      return ensureUploadGroupStore().initUploadGlobalSync(...args);
+    }
+
+
+    async function switchGroup(...args) {
+      return ensureUploadGroupStore().switchGroup(...args);
+    }
+
+
+    function buildRandomGroupName(...args) {
+      return ensureUploadGroupStore().buildRandomGroupName(...args);
+    }
+
+
+    function buildNextGroupName(...args) {
+      return ensureUploadGroupStore().buildNextGroupName(...args);
+    }
+
+
+    async function createGroupInline(...args) {
+      return ensureUploadGroupStore().createGroupInline(...args);
+    }
+
+
+
+    function refreshUploadGroupDomRefs(...args) {
+      return ensureUploadRenderList().refreshUploadGroupDomRefs(...args);
+    }
+
+
+    function toggleGroupManagePanel(...args) {
+      return ensureUploadRenderList().toggleGroupManagePanel(...args);
+    }
+
+
+    function renderManageGroupList(...args) {
+      return ensureUploadRenderList().renderManageGroupList(...args);
+    }
+
+
+    function syncGroupManagePanel(...args) {
+      return ensureUploadRenderList().syncGroupManagePanel(...args);
+    }
+
+
+    async function renameActiveGroupInline(...args) {
+      return ensureUploadGroupStore().renameActiveGroupInline(...args);
+    }
+
+
+    async function deleteGroupQueue(...args) {
+      return ensureUploadGroupStore().deleteGroupQueue(...args);
+    }
+
+
+    async function clearActiveGroupQueueInline(...args) {
+      return ensureUploadGroupStore().clearActiveGroupQueueInline(...args);
+    }
+
+
+    async function deleteActiveGroupInline(...args) {
+      return ensureUploadGroupStore().deleteActiveGroupInline(...args);
+    }
+
+
+    async function removeFileFromCurrentGroup(...args) {
+      return ensureUploadGroupStore().removeFileFromCurrentGroup(...args);
+    }
+
+
+    async function exportGroupsAndQueueMeta(...args) {
+      return ensureUploadGroupStore().exportGroupsAndQueueMeta(...args);
+    }
+
+
+    async function importGroupsAndQueueMeta(...args) {
+      return ensureUploadGroupStore().importGroupsAndQueueMeta(...args);
+    }
+
+
+    function renderProjectCategoryChipHtml(...args) {
+      return ensureUploadRenderList().renderProjectCategoryChipHtml(...args);
     }
 
     /** 项目分类统计（上传分组 chip），与页面连接状态无关。*/
-    function renderUploadGroupFallbackChipHtml() {
-      return `
-          <button type="button"
-            class="cgpt-chip-btn cgpt-upload-group-chip active"
-            data-group-id=""
-            title="默认：0 个文件">
-            <span class="cgpt-chip-name">默认</span>
-            <span class="cgpt-chip-count">0</span>
-          </button>
-        `;
+
+    function renderUploadGroupFallbackChipHtml(...args) {
+      return ensureUploadRenderList().renderUploadGroupFallbackChipHtml(...args);
     }
 
     function shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply(reason = '-') {
@@ -13677,64 +11964,9 @@
       }
     }
 
-    function renderProjectCategoryChips() {
-      if (shouldSkipHeavyUploadRenderDuringAutoQueueWaitingReply('render-chips')) {
-        appendUploadGroupLog('RENDER_SKIP', { phase: 'waiting-reply' });
-        return;
-      }
-      if (!groupListEl) {
-        ToolboxShell.appendLog('[UPLOAD_GROUP_UI][render-skip] reason=groupListEl-missing');
-        return;
-      }
 
-      ensureActiveUploadGroupIdValid('render-chips');
-
-      if (!state.groups.length) {
-        if (!uploadGroupsInitResolved) {
-          groupListEl.innerHTML = `
-            <button type="button"
-              class="cgpt-chip-btn cgpt-upload-group-chip active"
-              data-group-id=""
-              disabled
-              title="正在加载上传分组">
-              <span class="cgpt-chip-name">加载中</span>
-              <span class="cgpt-chip-count">…</span>
-            </button>
-          `;
-          appendUploadGroupLog('RENDER', { phase: 'waiting-init' });
-          Promise.resolve(uploadModuleInitPromise)
-            .then(() => {
-              ensureActiveUploadGroupIdValid('render-chips-after-init');
-              renderProjectCategoryChips();
-            })
-            .catch((err) => {
-              console.error('[ChatGPT toolbox] renderProjectCategoryChips after init failed', err);
-              renderProjectCategoryChips();
-            });
-          return;
-        }
-
-        appendUploadGroupLog('RENDER', { phase: 'empty-recovering' });
-        groupListEl.innerHTML = renderUploadGroupFallbackChipHtml();
-        ensureDefaultGroupReady()
-          .then(() => {
-            appendUploadGroupLog('RENDER', { phase: 'after-ensure-default' });
-            renderProjectCategoryChips();
-          })
-          .catch((err) => {
-            console.error('[ChatGPT toolbox] ensureDefaultGroupReady failed during render', err);
-            groupListEl.innerHTML = renderUploadGroupFallbackChipHtml();
-            appendUploadGroupLog('RENDER', { phase: 'fallback-after-error' });
-          });
-        return;
-      }
-
-      groupListEl.innerHTML = state.groups
-        .map((group) => renderProjectCategoryChipHtml(group, state.activeGroupId))
-        .join('');
-
-      syncUploadGroupAppState();
-      appendUploadGroupLog('RENDER', { phase: 'ok' });
+    function renderProjectCategoryChips(...args) {
+      return ensureUploadRenderList().renderProjectCategoryChips(...args);
     }
 
     function getCurrentConversationSnapshotStatsForHeader() {
@@ -14076,6 +12308,9 @@
 
       if (signature === lastToolboxTopStatusSignature) {
         updateChatInputStateBadge();
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          renderToolboxHeaderStatus('renderToolboxPageStatusRow-skip');
+        }
         syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-skip');
         return;
       }
@@ -14119,6 +12354,9 @@
         messageBadgeEl.textContent = messageQuotaText;
         messageBadgeEl.title = messageQuotaTitle;
         updateChatInputStateBadge();
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          renderToolboxHeaderStatus('renderToolboxPageStatusRow-patch');
+        }
         syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-patch');
         return;
       }
@@ -14136,6 +12374,9 @@
         <span class="cgpt-toolbox-top-status-badge cgpt-toolbox-message-quota-badge cgpt-toolbox-low-priority-badge cgpt-top-stat-secondary cgpt-local-message-badge ${messageBadgeStateClass}" title="${escapeHtml(messageQuotaTitle)}">${escapeHtml(messageQuotaText)}</span>
       `;
       updateChatInputStateBadge();
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus('renderToolboxPageStatusRow-full');
+      }
       syncToolboxHeaderLayoutFromUpload('renderToolboxPageStatusRow-full');
     }
 
@@ -14162,6 +12403,9 @@
         renderProjectCategoryChips();
       }
       updateChatInputStateBadge();
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus(`renderToolboxTopStatus:${reason || '-'}`);
+      }
       syncToolboxHeaderLayoutFromUpload(`renderToolboxTopStatus:${reason}`);
     }
 
@@ -14426,6 +12670,9 @@
           return { ok: false, reason: 'cancelled' };
         }
         if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+          return { ok: false, reason: 'cancelled' };
+        }
+        if (isSendMessageTaskAborted()) {
           return { ok: false, reason: 'cancelled' };
         }
 
@@ -18409,6 +16656,11 @@
         return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
       }
 
+      if (isSendMessageTaskAborted()) {
+        ToolboxShell.appendLog(`[${logPrefix}][SEND_FLOW][CANCELLED] source=${sourceText} reason=send-message-task-aborted`);
+        return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+      }
+
       if (typeof document !== 'undefined') {
         const hasFocus = !document.hasFocus || document.hasFocus();
         const hidden = !!document.hidden;
@@ -18424,10 +16676,14 @@
         }
       }
 
+      if (isSendMessageTaskAborted()) {
+        return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
+      }
+
       emitPhase('focus-composer', { source: sourceText });
       await focusComposerForClosedLoop(sourceText);
 
-      if (shouldStop()) {
+      if (shouldStop() || isSendMessageTaskAborted()) {
         return { ok: false, reason: 'cancelled', detail: '', sent: false, attachmentReady: false, textLen: 0, source: sourceText };
       }
 
@@ -18851,7 +17107,10 @@
       const sourceText = String(context.source || 'closed-loop-continue').trim() || 'closed-loop-continue';
       const shouldStop = typeof context.shouldStop === 'function' ? context.shouldStop : () => false;
       const doneSignal = getCopyHotkeyContinueStopSignal(context);
-      const prompt = String(promptText || '');
+      const prompt = normalizeClosedLoopContinuePromptText(
+        promptText,
+        `sendClosedLoopContinuePrompt:${sourceText}`,
+      );
 
       logContinuePromptBuild(prompt, { source: sourceText, logSource: sourceText });
 
@@ -19880,6 +18139,45 @@
       );
     }
 
+    function paintCopyHotkeyOnceButtonRunningNow(btn, reason = '-') {
+      if (!(btn instanceof HTMLButtonElement)) {
+        return false;
+      }
+      const title = '正在等待回复完成；再次点击将取消本次复制+快捷键任务';
+      btn.dataset.busy = '1';
+      btn.dataset.cgptTaskPhase = 'waiting_reply';
+      btn.dataset.cgptButtonPhase = 'waiting_reply';
+      btn.dataset.cgptRuntimeAction = 'cancel';
+      btn.dataset.cgptButtonAction = 'cancel';
+      btn.dataset.cgptCopyHotkeyImmediatePaint = '1';
+      btn.disabled = false;
+      btn.textContent = '取消等待';
+      btn.title = title;
+      btn.setAttribute('aria-busy', 'true');
+      btn.classList.remove(
+        'cgpt-upload-idle',
+        'cgpt-btn-idle',
+        'cgpt-btn-disabled',
+        'cgpt-btn-failed',
+        'cgpt-upload-failed',
+        'cgpt-upload-success',
+      );
+      btn.classList.add(
+        'danger',
+        'cgpt-btn-danger',
+        'cgpt-btn-stop',
+        'cgpt-btn-busy',
+        'cgpt-btn-waiting-danger',
+        'cgpt-action-running',
+      );
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][IMMEDIATE_BUTTON_RUNNING] id=${btn.id || '-'} reason=${reason || '-'} text=${String(btn.textContent || '').trim()}`,
+        );
+      }
+      return true;
+    }
+
     async function runCopyAndHotkeyAction(source = 'button', options = {}) {
       const sourceText = String(source || '');
       ToolboxShell.appendLog(`[COPY_HOTKEY_ONCE][start] source=${sourceText || '-'}`);
@@ -19942,17 +18240,17 @@
         };
       }
 
+      setCopyHotkeyOncePhase('waiting_reply', sourceText || 'start');
+      if (btn) {
+        paintCopyHotkeyOnceButtonRunningNow(btn, sourceText || 'start');
+      }
+      setStatus('正在等待回答完成，然后复制并发送快捷键', 'running');
+
       if (btn && typeof startButtonLongWaitDangerTimer === 'function') {
         startButtonLongWaitDangerTimer(btn, 'long_wait_reply_or_hotkey', BUTTON_LONG_WAIT_DANGER_MS);
       }
 
       try {
-        if (btn) {
-          btn.dataset.busy = '1';
-        }
-        setCopyHotkeyOncePhase('waiting_reply', sourceText || 'start');
-        setStatus('正在等待回答完成，然后复制并发送快捷键', 'running');
-
         const waitCopyResult = await waitAndCopyLatestAssistant({
           source,
           reason: `copy-and-hotkey:${sourceText || '-'}`,
@@ -20096,7 +18394,10 @@
         }
 
         if (btn) {
+          delete btn.dataset.cgptCopyHotkeyImmediatePaint;
+          delete btn.dataset.cgptButtonAction;
           btn.dataset.busy = '0';
+          btn.removeAttribute('aria-busy');
         }
 
         renderUploadButtonsOnly();
@@ -21851,49 +20152,9 @@
       return true;
     }
 
-    function buildFlaskUploadListHtml() {
-      const activeGroupId = getActiveUploadScopeGroupId();
-      const flaskRows = (state.flaskFiles || []).filter(
-        (row) => row
-          && row.status !== 'uploaded'
-          && isUploadItemInActiveScope(row, activeGroupId),
-      );
 
-      return flaskRows.map((row) => {
-        const fileId = getFlaskUploadFileId(row);
-        const queueItem = findQueueItemByFlaskFileId(fileId, activeGroupId);
-        const uploadItemId = String(
-          (queueItem && queueItem.id) || row.id || fileId || '',
-        ).trim();
-        const groupId = getUploadItemGroupId(queueItem || row) || activeGroupId;
-        const flaskStatusText = '本地直读 · 未上传';
-        const itemTitle = escapeHtml([
-          `文件名：${row.name || '-'}`,
-          `大小：${formatBytes(row.size)}`,
-          '状态：未上传',
-          '读取方式：本地直读',
-          row.download_url ? `下载：${row.download_url}` : '',
-        ].filter(Boolean).join('\n'));
-
-        return `
-            <div class="cgpt-upload-item flask-local-direct"
-              data-id="${escapeHtml(uploadItemId)}"
-              data-upload-file-row="1"
-              data-upload-item-id="${escapeHtml(uploadItemId)}"
-              data-group-id="${escapeHtml(groupId)}"
-              data-flask-file-id="${escapeHtml(fileId)}"
-              title="${itemTitle}">
-              <div class="cgpt-upload-file-main">
-                <div class="cgpt-upload-name">${escapeHtml(row.name || 'unknown')}</div>
-                <div class="cgpt-upload-meta">
-                  ${escapeHtml(formatBytes(row.size))}
-                  <span class="cgpt-upload-dot">·</span>
-                  <span class="cgpt-upload-source-label">${escapeHtml(flaskStatusText)}</span>
-                </div>
-              </div>
-            </div>
-          `;
-      }).join('');
+    function buildFlaskUploadListHtml(...args) {
+      return ensureUploadRenderList().buildFlaskUploadListHtml(...args);
     }
 
     function buildDropSignature(dataTransfer) {
@@ -22972,851 +21233,80 @@
       logSlowOperation('addFiles', addFilesStartedAt, `count=${addedCount}`);
     }
 
-    function pickOneLocalFileByInput() {
-      return new Promise((resolve, reject) => {
-        const input = document.createElement('input');
-        let finished = false;
-        let focusCancelTimer = 0;
 
-        function cleanup() {
-          window.removeEventListener('focus', onWindowFocus, true);
-
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-            focusCancelTimer = 0;
-          }
-
-          if (input && input.parentNode) {
-            input.parentNode.removeChild(input);
-          }
-        }
-
-        function finishOk(file) {
-          if (finished) return;
-          finished = true;
-          cleanup();
-
-          resolve({
-            file,
-            handle: null,
-            source: 'input-file',
-          });
-        }
-
-        function finishFailed(err) {
-          if (finished) return;
-          finished = true;
-          cleanup();
-          reject(err);
-        }
-
-        function readSelectedFile() {
-          const file = input.files && input.files[0] ? input.files[0] : null;
-
-          if (!file) {
-            finishFailed(new Error('用户取消选择文件'));
-            return;
-          }
-
-          finishOk(file);
-        }
-
-        function onWindowFocus() {
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-          }
-
-          focusCancelTimer = window.setTimeout(() => {
-            focusCancelTimer = 0;
-
-            if (finished) return;
-
-            const file = input.files && input.files[0] ? input.files[0] : null;
-
-            if (file) {
-              finishOk(file);
-              return;
-            }
-
-            finishFailed(new Error('用户取消选择文件'));
-          }, 1200);
-        }
-
-        input.type = 'file';
-        input.style.position = 'fixed';
-        input.style.left = '-9999px';
-        input.style.top = '-9999px';
-        input.style.width = '1px';
-        input.style.height = '1px';
-        input.style.opacity = '0';
-        input.style.pointerEvents = 'none';
-        input.style.zIndex = '-1';
-
-        input.addEventListener('change', () => {
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-            focusCancelTimer = 0;
-          }
-
-          readSelectedFile();
-        }, {
-          once: true,
-        });
-
-        input.addEventListener('cancel', () => {
-          finishFailed(new Error('用户取消选择文件'));
-        }, {
-          once: true,
-        });
-
-        document.body.appendChild(input);
-
-        window.setTimeout(() => {
-          window.addEventListener('focus', onWindowFocus, true);
-        }, 0);
-
-        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][picker:before-open] mode=input-file multiple=0');
-
-        input.click();
-      });
+    function pickOneLocalFileByInput(...args) {
+      return ensureUploadFileSource().pickOneLocalFileByInput(...args);
     }
 
-    function pickLocalFilesByInputMultiple() {
-      return new Promise((resolve, reject) => {
-        const input = document.createElement('input');
-        let finished = false;
-        let focusCancelTimer = 0;
 
-        function cleanup() {
-          window.removeEventListener('focus', onWindowFocus, true);
-
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-            focusCancelTimer = 0;
-          }
-
-          if (input && input.parentNode) {
-            input.parentNode.removeChild(input);
-          }
-        }
-
-        function finishOk(files) {
-          if (finished) return;
-          finished = true;
-          cleanup();
-
-          const clean = Array.from(files || []).filter(Boolean);
-          resolve(clean.map((file) => ({
-            file,
-            handle: null,
-            source: 'input-file',
-          })));
-        }
-
-        function finishFailed(err) {
-          if (finished) return;
-          finished = true;
-          cleanup();
-          reject(err);
-        }
-
-        function readSelectedFiles() {
-          const files = input.files ? Array.from(input.files).filter(Boolean) : [];
-          if (!files.length) {
-            finishFailed(new Error('用户取消选择文件'));
-            return;
-          }
-          finishOk(files);
-        }
-
-        function onWindowFocus() {
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-          }
-
-          focusCancelTimer = window.setTimeout(() => {
-            focusCancelTimer = 0;
-
-            if (finished) return;
-
-            const files = input.files ? Array.from(input.files).filter(Boolean) : [];
-            if (files.length) {
-              finishOk(files);
-              return;
-            }
-
-            finishFailed(new Error('用户取消选择文件'));
-          }, 1200);
-        }
-
-        input.type = 'file';
-        input.multiple = true;
-        input.style.position = 'fixed';
-        input.style.left = '-9999px';
-        input.style.top = '-9999px';
-        input.style.width = '1px';
-        input.style.height = '1px';
-        input.style.opacity = '0';
-        input.style.pointerEvents = 'none';
-        input.style.zIndex = '-1';
-
-        input.addEventListener('change', () => {
-          if (focusCancelTimer) {
-            window.clearTimeout(focusCancelTimer);
-            focusCancelTimer = 0;
-          }
-
-          readSelectedFiles();
-        }, {
-          once: true,
-        });
-
-        input.addEventListener('cancel', () => {
-          finishFailed(new Error('用户取消选择文件'));
-        }, {
-          once: true,
-        });
-
-        document.body.appendChild(input);
-
-        window.setTimeout(() => {
-          window.addEventListener('focus', onWindowFocus, true);
-        }, 0);
-
-        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1 multiple=1');
-        input.click();
-      });
+    function pickLocalFilesByInputMultiple(...args) {
+      return ensureUploadFileSource().pickLocalFilesByInputMultiple(...args);
     }
 
-    async function pickLocalFilesWithHandlesForAdd() {
-      const showOpenFilePicker = getShowOpenFilePickerFn();
 
-      if (!showOpenFilePicker) {
-        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1 supported=0 multiple=1');
-        return pickLocalFilesByInputMultiple();
-      }
-
-      ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=file-system-access supported=1 multiple=1');
-
-      let handles;
-      try {
-        handles = await showOpenFilePicker({
-          multiple: true,
-        });
-      } catch (e) {
-        if (e && (e.name === 'AbortError' || e.code === 20)) {
-          throw new Error('用户取消选择文件');
-        }
-
-        console.error('[ChatGPT toolbox] showOpenFilePicker failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][picker:file-system-access-failed] error=${e && e.message ? e.message : String(e)}`,
-        );
-        throw e;
-      }
-
-      const entries = [];
-      const list = Array.isArray(handles) ? handles : [];
-      for (const handle of list) {
-        if (!handle || typeof handle.getFile !== 'function') {
-          continue;
-        }
-
-        const file = await handle.getFile();
-        if (!file) {
-          continue;
-        }
-
-        entries.push({
-          file,
-          handle,
-          source: 'file-system-access',
-        });
-      }
-
-      if (!entries.length) {
-        throw new Error('未选择到有效文件');
-      }
-
-      return entries;
+    async function pickLocalFilesWithHandlesForAdd(...args) {
+      return ensureUploadFileSource().pickLocalFilesWithHandlesForAdd(...args);
     }
 
-    async function pickOneLocalFileWithHandle() {
-      const showOpenFilePicker = getShowOpenFilePickerFn();
 
-      if (!showOpenFilePicker) {
-        ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=input-file fallback=1 supported=0');
-        return pickOneLocalFileByInput();
-      }
-
-      ToolboxShell.appendLog('[UPLOAD_DIAG][picker] mode=file-system-access supported=1');
-      ToolboxShell.appendLog('[UPLOAD_DIAG][picker:before-open] mode=file-system-access multiple=0');
-
-      let handles;
-
-      try {
-        handles = await showOpenFilePicker({
-          multiple: false,
-        });
-      } catch (e) {
-        if (e && (e.name === 'AbortError' || e.code === 20)) {
-          throw new Error('用户取消选择文件');
-        }
-
-        console.error('[ChatGPT toolbox] showOpenFilePicker failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][picker:file-system-access-failed] error=${e && e.message ? e.message : String(e)}`,
-        );
-        throw e;
-      }
-
-      const handle = handles && handles[0] ? handles[0] : null;
-
-      if (!handle || typeof handle.getFile !== 'function') {
-        const err = new Error('未获取到有效文件句柄');
-        console.error('[ChatGPT toolbox] pickOneLocalFileWithHandle: invalid handle', handle);
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][picker:invalid-handle] error=${err.message}`);
-        throw err;
-      }
-
-      let file;
-
-      try {
-        file = await handle.getFile();
-      } catch (e) {
-        console.error('[ChatGPT toolbox] pickOneLocalFileWithHandle: handle.getFile failed', e);
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][picker:getFile-failed] error=${e && e.message ? e.message : String(e)}`,
-        );
-        throw e;
-      }
-
-      if (!file) {
-        const err = new Error('文件句柄读取文件失败');
-        console.error('[ChatGPT toolbox] pickOneLocalFileWithHandle: empty file', handle);
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][picker:empty-file] error=${err.message}`);
-        throw err;
-      }
-
-      return {
-        file,
-        handle,
-        source: 'file-system-access',
-      };
+    async function pickOneLocalFileWithHandle(...args) {
+      return ensureUploadFileSource().pickOneLocalFileWithHandle(...args);
     }
 
-    async function pickOneLocalFileForRebind() {
-      return pickOneLocalFileWithHandle();
+
+    async function pickOneLocalFileForRebind(...args) {
+      return ensureUploadFileSource().pickOneLocalFileForRebind(...args);
     }
 
-    function validateRebindFile(oldItem, newFile) {
-      if (!(newFile instanceof File) && !isFileLike(newFile)) {
-        return {
-          ok: false,
-          reason: 'not-file',
-        };
-      }
-      const expectedName = String(oldItem && (oldItem.name || oldItem.filename) || '').trim();
-      const actualName = String(newFile.name || '').trim();
-      if (expectedName && actualName && expectedName !== actualName) {
-        return {
-          ok: false,
-          reason: 'filename-mismatch',
-          detail: `expected=${expectedName} actual=${actualName}`,
-        };
-      }
-      const expectedSize = Number(oldItem && oldItem.size) || 0;
-      const actualSize = Number(newFile.size) || 0;
-      if (expectedSize > 0 && actualSize > 0 && expectedSize !== actualSize) {
-        return {
-          ok: false,
-          reason: 'filesize-mismatch',
-          detail: `expected=${expectedSize} actual=${actualSize}`,
-        };
-      }
-      return {
-        ok: true,
-        reason: 'ok',
-      };
+
+    function validateRebindFile(...args) {
+      return ensureUploadFileSource().validateRebindFile(...args);
     }
 
-    function applyReboundFile(item, file, handle) {
-      if (!item || !isFileLike(file)) {
-        return false;
-      }
-      const hasHandle = isFileHandleLike(handle);
-      item.file = file;
-      item.sourceFile = file;
-      item.originalFile = file;
-      item.blob = file;
-      item.sourceBlob = file;
-      item.name = file.name || item.name || 'unknown';
-      item.size = file.size || 0;
-      item.type = file.type || item.type || 'application/octet-stream';
-      item.lastModified = file.lastModified || Date.now();
-      item.state = UploadState.IDLE;
-      item.attachState = UploadState.IDLE;
-      item.status = 'ready';
-      item.registryStatus = 'ready';
-      item.needsRebind = false;
-      item.missingReason = '';
-      item.message = '';
-      item.error = '';
-      item.lastError = '';
-      if (hasHandle) {
-        item.fileHandle = handle;
-        item.sourceKind = 'local-handle';
-        item.readMode = 'handle';
-        item.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
-        item.handleKey = buildUploadHandleKey(item);
-      } else {
-        item.fileHandle = null;
-        item.sourceKind = 'browser_file';
-        item.readMode = 'file';
-        item.persistedKind = UploadPersistedKind.METADATA_ONLY;
-        item.handleKey = '';
-      }
-      safeAssignRestoreState(item, UploadRestoreState.READY, 'rebind:applyReboundFile');
-      item.uploadName = '';
-      item.persistedAttached = false;
-      item.attachedInSession = false;
-      clearStaleUnreadableFlagsForReadableItem(item, 'applyReboundFile');
-      syncUploadItemSchemaInPlace(item);
-      ToolboxShell.appendLog(
-        `[UPLOAD_REBIND][OK] id=${item.id || '-'} name=${item.name || '-'} size=${item.size || 0}`,
-      );
-      return true;
+
+    function applyReboundFile(...args) {
+      return ensureUploadFileSource().applyReboundFile(...args);
     }
 
-    async function rebindUploadFile(id) {
-      ToolboxShell.appendLog(`[UPLOAD_REBIND][START] id=${id || '-'}`);
 
-      if (!id) {
-        setStatus('重新绑定失败：缺少文件 ID');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][rebind-file:skip] reason=empty-id');
-        return;
-      }
-
-      const q = getActiveGroupFiles().find((item) => item && item.id === id);
-
-      if (!q) {
-        setStatus('重新绑定失败：未找到队列文件');
-        ToolboxShell.appendLog(`[UPLOAD_DIAG][rebind-file:missing] id=${id || '-'}`);
-        return;
-      }
-
-      try {
-        const picked = await pickOneLocalFileForRebind();
-        const file = picked.file;
-        const handle = picked.handle;
-
-        if (!file) {
-          throw new Error('重新绑定文件为空');
-        }
-
-        const validation = validateRebindFile(q, file);
-        if (!validation.ok) {
-          if (validation.reason === 'filename-mismatch') {
-            const oldName = q.name || '';
-            const ok = window.confirm(
-              `重新选择的文件名和原记录不同。\n\n原文件：${oldName}\n新文件：${file.name}\n\n是否继续绑定？`,
-            );
-            if (!ok) {
-              ToolboxShell.appendLog(
-                `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
-              );
-              setStatus('已取消重新绑定');
-              return;
-            }
-          } else {
-            ToolboxShell.appendLog(
-              `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
-            );
-            setStatus(`重新绑定失败：${validation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
-            return;
-          }
-        }
-
-        const hasHandle = isFileHandleLike(handle);
-
-        if (!hasHandle) {
-          q.fileHandle = null;
-          q.file = null;
-          q.sourceFile = null;
-          q.originalFile = null;
-          q.blob = null;
-          q.sourceBlob = null;
-          q.state = UploadState.MISSING_FILE;
-          q.sourceKind = 'missing-file';
-          q.readMode = '';
-          q.message = '需要重新选择';
-          q.persistedKind = UploadPersistedKind.METADATA_ONLY;
-          safeAssignRestoreState(q, UploadRestoreState.NEEDS_REBIND, 'rebind:file-needs-rebind');
-          q.handleKey = '';
-          q.uploadName = '';
-          q.persistedAttached = false;
-
-          await awaitPersistQueueBriefly('rebindUploadFile:no-handle', 300);
-          await refreshUploadGroupCounts();
-          render();
-          broadcastUploadGlobalStateChanged('rebind-file', {
-            id,
-            groupId: state.activeGroupId || '',
-            success: false,
-          });
-
-          setStatus('重新绑定失败：未获得本地文件句柄，无法保证从磁盘读取');
-          ToolboxShell.appendLog(`[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=no-handle`);
-          return;
-        }
-
-        q.fileHandle = handle;
-
-        let freshFile = null;
-        try {
-          freshFile = await handle.getFile();
-        } catch (readErr) {
-          const errText = readErr && readErr.message ? readErr.message : String(readErr);
-          const errStack = readErr && readErr.stack ? readErr.stack : '';
-          console.error('[UPLOAD_REBIND][ERROR]', readErr);
-          ToolboxShell.appendLog(
-            `[UPLOAD_REBIND][ERROR] id=${id || '-'} error=${errText} stack=${String(errStack).slice(0, 1200)}`,
-          );
-          markUploadItemNeedsRebind(q, errText, 'rebind:read-after-bind-failed');
-          q.message = `重新绑定后读取失败：${errText}`;
-          await awaitPersistQueueBriefly('rebindUploadFile:read-after-bind-failed', 300);
-          await refreshUploadGroupCounts();
-          render();
-          setStatus(`重新绑定后读取失败：${errText}`);
-          return;
-        }
-        if (!freshFile || Number(freshFile.size || 0) <= 0) {
-          markUploadItemNeedsRebind(q, 'empty-after-bind', 'rebind:empty-after-bind');
-          q.message = '重新绑定后文件为空或不可读';
-          await awaitPersistQueueBriefly('rebindUploadFile:empty-after-bind', 300);
-          await refreshUploadGroupCounts();
-          render();
-          setStatus('重新绑定失败：文件为空或不可读');
-          ToolboxShell.appendLog(`[UPLOAD_REBIND][EMPTY_AFTER_BIND] id=${id || '-'} name=${q.name || '-'}`);
-          return;
-        }
-
-        const reboundValidation = validateRebindFile(q, freshFile);
-        if (!reboundValidation.ok && reboundValidation.reason !== 'filename-mismatch') {
-          ToolboxShell.appendLog(
-            `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${reboundValidation.reason} detail=${reboundValidation.detail || '-'}`,
-          );
-          setStatus(`重新绑定失败：${reboundValidation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
-          return;
-        }
-
-        applyReboundFile(q, freshFile, handle);
-        ToolboxShell.appendLog(
-          `[UPLOAD_REBIND][STATE_READY] id=${id || '-'} name=${q.name || '-'} `
-          + `sourceKind=${q.sourceKind || '-'} readMode=${q.readMode || '-'} `
-          + `state=${q.state || '-'} status=${q.status || '-'} `
-          + `restoreState=${q.restoreState || '-'} handle=${hasLocalReadableHandle(q) ? 1 : 0}`,
-        );
-
-        await awaitPersistQueueBriefly('rebindUploadFile:ok', 300);
-        await refreshUploadGroupCounts();
-
-        render();
-        broadcastUploadGlobalStateChanged('rebind-file', {
-          id,
-          groupId: state.activeGroupId || '',
-          success: true,
-        });
-
-        setStatus(`已重新绑定文件：${q.name}`);
-        ToolboxShell.appendLog(`[UPLOAD_REBIND][MATCH_OK] id=${id || '-'} name=${q.name || '-'} size=${q.size || 0}`);
-        ToolboxShell.appendLog(`[UPLOAD_REBIND][DONE] id=${id || '-'} source=${picked.source || '-'} handle=${hasHandle ? 1 : 0}`);
-      } catch (err) {
-        const errText = err && err.message ? err.message : String(err);
-
-        if (errText.includes('用户取消选择文件') || errText.includes('未选择文件')) {
-          console.warn('[ChatGPT toolbox] rebind upload file cancelled', err);
-          setStatus('已取消重新绑定');
-          ToolboxShell.appendLog(`[UPLOAD_DIAG][rebind-file:cancelled] id=${id || '-'} error=${errText}`);
-          return;
-        }
-
-        console.warn('[ChatGPT toolbox] rebind upload file failed', err);
-        console.error('[ChatGPT toolbox] rebind upload file failed', err);
-        setStatus(`重新绑定失败：${errText}`);
-        ToolboxShell.appendLog(`[UPLOAD_REBIND][FAILED] id=${id || '-'} error=${errText}`);
-      }
+    async function rebindUploadFile(...args) {
+      return ensureUploadFileSource().rebindUploadFile(...args);
     }
 
-    async function requestUploadFilePermission(id) {
-      if (!id) return;
-      const q = getActiveGroupFiles().find((item) => item && item.id === id);
-      if (!q) return;
-      ToolboxShell.appendLog(`[UPLOAD_HANDLE][REQUEST_PERMISSION] id=${id || '-'} name=${q.name || '-'}`);
-      try {
-        const handle = q.fileHandle || await loadUploadFileHandle(String(q.handleKey || ''));
-        if (!isFileHandleLike(handle)) {
-          safeAssignRestoreState(q, UploadRestoreState.MISSING, 'rebind:file-missing');
-          q.state = UploadState.MISSING_FILE;
-          q.message = '文件句柄不存在';
-          await awaitPersistQueueBriefly('requestUploadFilePermission:missing-handle', 300);
-          render();
-          ToolboxShell.appendLog(`[UPLOAD_HANDLE][GET_FILE_FAILED] id=${id || '-'} reason=missing-handle`);
-          return;
-        }
-        q.fileHandle = handle;
-        const permission = typeof handle.requestPermission === 'function'
-          ? await handle.requestPermission({ mode: 'read' })
-          : 'granted';
-        if (permission !== 'granted') {
-          safeAssignRestoreState(q, UploadRestoreState.PERMISSION_REQUIRED, 'rebind:file-permission-required');
-          q.state = UploadState.MISSING_FILE;
-          q.message = '需要重新授权';
-          await awaitPersistQueueBriefly('requestUploadFilePermission:permission-denied', 300);
-          render();
-          ToolboxShell.appendLog(`[UPLOAD_HANDLE][PERMISSION_DENIED] id=${id || '-'} name=${q.name || '-'}`);
-          return;
-        }
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE][PERMISSION_GRANTED] id=${id || '-'} name=${q.name || '-'}`);
-        const file = await handle.getFile();
-        if (!isFileLike(file)) {
-          throw new Error('getFile 返回空文件');
-        }
-        q.file = file;
-        q.sourceFile = file;
-        q.originalFile = file;
-        q.blob = file;
-        q.sourceBlob = file;
-        safeAssignRestoreState(q, UploadRestoreState.READY, 'rebind:file-ready-final');
-        q.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
-        q.state = UploadState.IDLE;
-        q.message = '';
-        await awaitPersistQueueBriefly('requestUploadFilePermission:ok', 300);
-        render();
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE][GET_FILE_OK] id=${id || '-'} name=${q.name || '-'} size=${q.size || 0}`);
-      } catch (err) {
-        console.error('[ChatGPT toolbox] requestUploadFilePermission failed', err);
-        safeAssignRestoreState(q, UploadRestoreState.ERROR, 'rebind:file-error');
-        q.state = UploadState.MISSING_FILE;
-        q.message = `授权读取失败：${err && err.message ? err.message : String(err)}`;
-        await awaitPersistQueueBriefly('requestUploadFilePermission:failed', 300);
-        render();
-        ToolboxShell.appendLog(`[UPLOAD_HANDLE][GET_FILE_FAILED] id=${id || '-'} error=${err && err.message ? err.message : String(err)}`);
-      }
+
+    async function requestUploadFilePermission(...args) {
+      return ensureUploadFileSource().requestUploadFilePermission(...args);
     }
 
-    function throwStrictCacheForbidden(item, callerSource = '') {
-      markCacheForbiddenUploadItems([item], callerSource || 'strict-local-file');
-      const err = new Error(STRICT_UPLOAD_CACHE_FORBIDDEN_MESSAGE);
-      console.error('[ChatGPT toolbox] resolveStrictLocalUploadFile: cache forbidden', {
-        name: err.name,
-        message: err.message,
-        stack: err.stack,
-        callerSource,
-        itemName: item && (item.name || item.filename) ? (item.name || item.filename) : '-',
-      });
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][readFreshFile:cache-forbidden] stage=${callerSource || '-'} name=${item && (item.name || item.filename) ? (item.name || item.filename) : '-'} sourceKind=${item && item.sourceKind ? item.sourceKind : '-'} readMode=${item && item.readMode ? item.readMode : '-'}`,
-      );
-      throw err;
+
+    function throwStrictCacheForbidden(...args) {
+      return ensureUploadFileSource().throwStrictCacheForbidden(...args);
     }
 
-    function resolveFlaskLocalDirectDownloadUrl(q) {
-      const direct = String(
-        typeof q.download_url === 'string' ? q.download_url : '',
-      ).trim();
-      if (direct) {
-        return direct;
-      }
 
-      const fileId = String(q.file_id || '').trim();
-      if (!fileId) {
-        return '';
-      }
-
-      let base = 'http://127.0.0.1:5000';
-      if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
-        const stored = String(MemoryManager.get('bridgeBaseUrl', base) || '').trim();
-        if (stored) {
-          base = stored;
-        }
-      }
-
-      return `${base.replace(/\/$/, '')}/api/upload_files/${encodeURIComponent(fileId)}/content`;
+    function resolveFlaskLocalDirectDownloadUrl(...args) {
+      return ensureUploadFileSource().resolveFlaskLocalDirectDownloadUrl(...args);
     }
 
-    function hasStrictLocalCachePayload(item) {
-      if (!item) {
-        return false;
-      }
 
-      return !!(
-        isFileLike(item.file)
-        || isFileLike(item.sourceFile)
-        || isFileLike(item.originalFile)
-        || isBlobLike(item.blob)
-        || isBlobLike(item.sourceBlob)
-      );
+    function hasStrictLocalCachePayload(...args) {
+      return ensureUploadFileSource().hasStrictLocalCachePayload(...args);
     }
 
     // 所有上传路径的唯一底层读取入口：仅 local-handle 或 flask_local_direct
-    async function resolveStrictLocalUploadFile(item, options = {}) {
-      const callerSource = String(options.source || 'resolveStrictLocalUploadFile').trim()
-        || 'resolveStrictLocalUploadFile';
-      const itemName = item && (item.name || item.filename)
-        ? (item.name || item.filename)
-        : '-';
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_STRICT_SOURCE][ENTER] source=${callerSource} name=${itemName}`,
-      );
-
-      if (!item) {
-        throw new Error(`${callerSource}: empty queue item`);
-      }
-
-      if (item.fileHandle && typeof item.fileHandle.getFile === 'function') {
-        try {
-          const fresh = await item.fileHandle.getFile();
-
-          if (fresh && fresh.size >= 0) {
-            item.file = fresh;
-            item.blob = fresh;
-            item.name = fresh.name || item.name;
-            item.size = fresh.size;
-            item.type = fresh.type || item.type || 'application/octet-stream';
-            item.lastModified = fresh.lastModified || item.lastModified;
-            item.sourceKind = 'local-handle';
-            item.readMode = 'handle';
-            item.message = '';
-
-            ToolboxShell.appendLog(
-              `[UPLOAD_FILE][USE_FILE_HANDLE] name=${item.name || '-'} size=${item.size || 0}`,
-            );
-
-            return fresh;
-          }
-        } catch (e) {
-          const errName = e && e.name ? e.name : 'Error';
-          const errText = e && e.message ? e.message : String(e);
-          const errStack = e && e.stack ? e.stack : '-';
-
-          console.error('[ChatGPT toolbox] resolveStrictLocalUploadFile: fileHandle.getFile failed', e);
-
-          item.message = '文件句柄读取失败，无法从磁盘读取最新文件';
-          item.state = UploadState.MISSING_FILE;
-          item.sourceKind = 'missing-file';
-          item.readMode = '';
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_DIAG][strict-local-file:handle-failed] source=${callerSource} name=${itemName} error.name=${errName} error.message=${errText} stack=${errStack}`,
-          );
-
-          throw new Error('文件句柄读取失败，无法保证从磁盘读取最新文件 ' + itemName);
-        }
-
-        item.state = UploadState.MISSING_FILE;
-        item.sourceKind = 'missing-file';
-        item.readMode = '';
-        item.message = '文件句柄读取返回空文件';
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][strict-local-file:handle-invalid] source=${callerSource} name=${itemName}`,
-        );
-
-        throw new Error('文件句柄读取返回空文件，无法保证从磁盘读取最新文件 ' + itemName);
-      }
-
-      const isFlaskDirect = isFlaskLocalDirectSource(item) || isFlaskLocalDirectItem(item);
-      if (isFlaskDirect) {
-        const fileName = item.name || item.filename || 'upload.bin';
-        const localDirectUrl = resolveFlaskLocalDirectDownloadUrl(item);
-
-        if (!localDirectUrl) {
-          throw new Error(`文件缺少 download_url/file_id，无法从 Flask 本地直读：${fileName}`);
-        }
-
-        item.source = item.source || 'flask_local_direct';
-        item.sourceKind = 'flask_local_direct';
-        item.readMode = item.readMode || 'flask-local-direct';
-
-        const response = await fetch(localDirectUrl, {
-          method: 'GET',
-          credentials: 'include',
-          cache: 'no-store',
-        });
-
-        if (!response.ok) {
-          throw new Error(
-            `Flask 本地直读失败：${response.status} ${response.statusText} ${fileName}`,
-          );
-        }
-
-        const blob = await response.blob();
-        if (!blob || Number(blob.size) <= 0) {
-          throw new Error(`Flask 本地直读返回空文件：${fileName}`);
-        }
-
-        const freshFile = new File(
-          [blob],
-          fileName,
-          {
-            type: item.mime_type || item.type || blob.type || 'application/octet-stream',
-            lastModified: item.lastModified || Date.now(),
-          },
-        );
-
-        item.file = freshFile;
-        item.blob = freshFile;
-        item.size = freshFile.size;
-        item.type = freshFile.type || item.type || 'application/octet-stream';
-        item.message = '';
-
-        ToolboxShell.appendLog(
-          `[UPLOAD_FILE][USE_FLASK_LOCAL_DIRECT] name=${fileName} size=${freshFile.size || 0} file_id=${item.file_id || '-'} url=${localDirectUrl}`,
-        );
-
-        return freshFile;
-      }
-
-      if (isUploadSourceCacheForbidden(item) || hasStrictLocalCachePayload(item)) {
-        throwStrictCacheForbidden(item, callerSource);
-      }
-
-      item.state = UploadState.MISSING_FILE;
-      item.sourceKind = 'missing-file';
-      item.readMode = '';
-      item.message = '缺少文件句柄，无法从磁盘读取最新文件';
-
-      ToolboxShell.appendLog(
-        `[UPLOAD_FILE][NEED_REBIND] name=${itemName}`,
-      );
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][strict-local-file:missing-handle] source=${callerSource} name=${itemName}`,
-      );
-
-      throw new Error('缺少文件句柄，无法从磁盘读取最新文件，缺少可读取的文件对象 ' + itemName);
+    async function resolveStrictLocalUploadFile(...args) {
+      return ensureUploadFileSource().resolveStrictLocalUploadFile(...args);
     }
 
-    async function readFreshFile(q) {
-      if (!q) {
-        throw new Error('readFreshFile: empty queue item');
-      }
 
-      return resolveStrictLocalUploadFile(q, { source: 'readFreshFile' });
+    async function readFreshFile(...args) {
+      return ensureUploadFileSource().readFreshFile(...args);
     }
 
-    async function prepareFilesForAttach(files, source = '') {
-      const list = Array.isArray(files) ? files.filter(Boolean) : [];
-      const tag = String(source || '').trim() || 'unknown';
 
-      // Fixed behavior: upload file name is already prepared by `createTimestampedUploadFile()` (virtualUploadName).
-      ToolboxShell.appendLog(
-        `[UPLOAD_FILE_NAME][PREPARE] source=${tag} count=${list.length}`,
-      );
-
-      return list;
+    async function prepareFilesForAttach(...args) {
+      return ensureUploadFileSource().prepareFilesForAttach(...args);
     }
 
     function dismissDuplicateDialogs() {
@@ -25051,6 +22541,31 @@
           + `autoSendWaiting=${state.autoSendWaiting ? 1 : 0} `
           + `waitingRealSendButton=${state.waitingRealSendButton ? 1 : 0} reason=${reason}`,
         );
+
+        if (typeof TitlePrefixModule !== 'undefined'
+          && typeof TitlePrefixModule.syncToolboxTabTitleFromSendPhase === 'function') {
+          TitlePrefixModule.syncToolboxTabTitleFromSendPhase(
+            phase,
+            `send-task:${reason || '-'}`,
+          );
+        }
+
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          let headerReason = `send-task:${phase}:${reason || '-'}`;
+          if (phase === 'waiting_reply') {
+            headerReason = 'send-task-waiting-reply';
+          } else if (
+            phase === 'waiting_send'
+            || phase === 'waiting_page_reply_to_send'
+            || phase === 'waiting_composer'
+            || phase === 'waiting_ready'
+          ) {
+            headerReason = 'send-task-waiting-composer';
+          } else if (phase === 'idle') {
+            headerReason = state.cancelled ? 'send-task-cancelled' : 'send-task-finished';
+          }
+          renderToolboxHeaderStatus(headerReason);
+        }
       }
     }
 
@@ -25824,6 +23339,13 @@
         moduleInitError: String(state.moduleInitError || ''),
         ...getAutoQueueBatchRunSnapshotForUploadButtons(),
         sendTask: runtime.sendTask,
+        sendMessageTask: {
+          running: sendMessageTaskState.running,
+          phase: sendMessageTaskState.phase,
+          runId: sendMessageTaskState.runId,
+          hasClickedNativeSend: sendMessageTaskState.hasClickedNativeSend,
+          buttonText: getSendMessageButtonText(),
+        },
         copyTask: runtime.copyTask,
         uploadRunning: isUploadRunActuallyActive(),
         activeFilesCount: getActiveGroupFiles().length,
@@ -26138,264 +23660,24 @@
       return true;
     }
 
-    function buildUploadQueueItemHtml(q, activeGroupId, selectedFileId) {
-      if (!q || !q.id) {
-        return '';
-      }
-      clearStaleUnreadableFlagsForReadableItem(q, 'buildUploadQueueItemHtml');
-      const activeClass = selectedFileId === q.id ? 'active' : '';
-      const visualClass = getUploadItemVisualClass(q);
-      const cachedClass = isUploadSourceCacheForbidden(q) ? 'cached-snapshot' : '';
-      const sourceText = getUploadInlineStatusText(q);
-      if (isUploadDebugEnabled()) {
-        ToolboxShell.appendLog(
-          `[UPLOAD_UI][ITEM_STATE] name=${q.name || '-'} `
-          + `text=${sourceText || '-'} `
-          + `visual=${visualClass || '-'} `
-          + `state=${q.state || '-'} `
-          + `status=${q.status || '-'} `
-          + `registryStatus=${q.registryStatus || '-'} `
-          + `restoreState=${q.restoreState || '-'} `
-          + `sourceKind=${q.sourceKind || '-'} `
-          + `readMode=${q.readMode || '-'} `
-          + `handle=${hasLocalReadableHandle(q) ? 1 : 0} `
-          + `attemptable=${hasAttemptableUploadSource(q) ? 1 : 0} `
-          + `cacheForbidden=${isUploadSourceCacheForbidden(q) ? 1 : 0}`,
-        );
-      }
-      const itemTitle = escapeHtml(buildUploadItemTitle(q));
-      const normalizedState = String(q.state || '').trim().toLowerCase();
-      const removeDisabled = normalizedState === 'uploading' || normalizedState === 'cancelling';
-      const errorText = String(q.error || q.lastError || '').trim();
-      const errorHtml = errorText
-        ? `<div class="cgpt-upload-meta cgpt-upload-error" data-upload-item-error>${escapeHtml(errorText)}</div>`
-        : '';
 
-      const rebindButtonHtml = shouldShowRebindButton(q)
-        ? `
-            <button type="button"
-              class="cgpt-upload-file-rebind"
-              data-no-row-upload="1"
-              data-action="rebind-upload-file"
-              data-cgpt-base-action="rebind-upload-file"
-              data-upload-rebind-id="${escapeHtml(q.id)}"
-              title="重新选择本地文件">
-              重新绑定
-            </button>
-          `
-        : '';
-      const grantPermissionButtonHtml = shouldShowGrantPermissionButton(q)
-        ? `
-            <button type="button"
-              class="cgpt-upload-file-rebind"
-              data-no-row-upload="1"
-              data-action="grant-upload-file-permission"
-              data-cgpt-base-action="grant-upload-file-permission"
-              data-upload-grant-id="${escapeHtml(q.id)}"
-              title="请求读取权限">
-              授权读取
-            </button>
-          `
-        : '';
-      const virtualUploadNameHtml = isUploadListDebugEnabled() && q.virtualUploadName
-        ? `
-                <div class="cgpt-upload-meta">实际上传名：${escapeHtml(q.virtualUploadName)}</div>
-              `
-        : '';
-
-      return `
-            <div class="cgpt-upload-item ${activeClass} ${visualClass} ${cachedClass}"
-              data-id="${q.id}"
-              data-group-id="${escapeHtml(activeGroupId)}"
-              data-file-id="${escapeHtml(q.id)}"
-              data-upload-file-row="1"
-              data-upload-item-id="${escapeHtml(q.id)}"
-              title="${itemTitle}">
-              <div class="cgpt-upload-file-main">
-                <div class="cgpt-upload-name">${escapeHtml(q.name || 'unknown')}</div>
-                ${virtualUploadNameHtml}
-                <div class="cgpt-upload-meta">
-                  ${escapeHtml(formatBytes(q.size))}
-                  <span class="cgpt-upload-dot">·</span>
-                  <span class="cgpt-upload-source-label ${visualClass ? `status-${visualClass}` : ''} ${isUploadSourceCacheForbidden(q) ? 'cached-source' : ''}">
-                    ${escapeHtml(sourceText)}
-                  </span>
-                  ${rebindButtonHtml}
-                  ${grantPermissionButtonHtml}
-                </div>
-                ${errorHtml}
-              </div>
-              <div class="cgpt-upload-actions-cell">
-                <button type="button"
-                  class="cgpt-upload-file-remove"
-                  data-no-row-upload="1"
-                  data-upload-remove-id="${escapeHtml(q.id)}"
-                  title="移除"
-                  ${removeDisabled ? 'disabled' : ''}>
-                  ×
-                </button>
-              </div>
-            </div>
-          `;
+    function buildUploadQueueItemHtml(...args) {
+      return ensureUploadRenderList().buildUploadQueueItemHtml(...args);
     }
 
-    function buildUploadListHtml() {
-      const files = getActiveGroupFiles();
-      const selectedFileId = getSelectedFileIdForActiveGroup();
-      const activeGroupId = getActiveGroupId();
-      const flaskHtml = buildFlaskUploadListHtml();
-      const restorePhase = getQueueRestorePhase();
-      const activeGroupDbCount = getActiveGroupDbCount();
 
-      if (!files.length && !flaskHtml) {
-        if (state.moduleRenderFailed) {
-          return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">队列已恢复，但界面渲染失败，请查看日志</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">${escapeHtml(state.moduleInitError || 'render-failed')}</div>
-            </div>
-          </div>
-        `;
-        }
-        if (restorePhase === 'loading' || restorePhase === 'idle') {
-          return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">正在恢复上次文件列表…</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">请稍候，上传队列正在从本地缓存恢复</div>
-            </div>
-          </div>
-        `;
-        }
-        if (restorePhase === 'failed') {
-          return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">上传队列恢复失败，请查看日志</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">${escapeHtml(state.lastRestoreWarning || state.moduleInitError || 'restore-failed')}</div>
-            </div>
-          </div>
-        `;
-        }
-        if (activeGroupDbCount > 0) {
-          const mismatchLine = `[UPLOAD_GROUP][COUNT_MISMATCH] dbCount=${activeGroupDbCount} memoryCount=${files.length} activeGroupId=${activeGroupId || '-'}`;
-          console.warn(mismatchLine);
-          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-            ToolboxShell.appendLog(mismatchLine);
-          }
-          scheduleQueueRestoreForVisibleMismatch('buildUploadListHtml:db-count-memory-empty');
-          return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">正在恢复上次文件列表…</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">本地缓存显示当前项目有 ${activeGroupDbCount} 个文件，正在同步界面</div>
-            </div>
-          </div>
-        `;
-        }
-        appendUploadGroupLog('EMPTY_REASON', {
-          activeGroupId: activeGroupId || '-',
-          metaCount: state.queue.length,
-          queue: files.length,
-          restored: state.queue.filter((x) => x && x.restoreState).length,
-          reason: restorePhase === 'ready' ? 'active-group-no-items' : `active-group-no-items-phase-${restorePhase}`,
-        });
-        if (restorePhase !== 'ready') {
-          return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">正在恢复上次文件列表…</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">queueRestorePhase=${escapeHtml(restorePhase)}</div>
-            </div>
-          </div>
-        `;
-        }
-        return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
-            <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">当前全局项目没有文件</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">松开鼠标，添加到当前项目</div>
-            </div>
-          </div>
-        `;
-      }
-
-      const queueHtml = buildLimitedUploadQueueListHtml(files, activeGroupId, selectedFileId);
-
-      const queueHintHtml = `
-        <div class="cgpt-upload-item empty toolbox-upload-queue-hint" data-no-row-upload="1">
-          <div class="cgpt-upload-meta">
-            本地队列 · 点击文件行上传当前文件 · 点击「开始上传」批量上传当前分组
-          </div>
-        </div>
-      `;
-      return `${queueHintHtml}${flaskHtml}${queueHtml}`;
+    function buildUploadListHtml(...args) {
+      return ensureUploadRenderList().buildUploadListHtml(...args);
     }
 
-    function getUploadListItemsToRender(files) {
-      const allFiles = Array.isArray(files) ? files : [];
-      if (state.uploadListExpandedAll || allFiles.length <= UPLOAD_LIST_RENDER_LIMIT) {
-        return { items: allFiles, hiddenCount: 0 };
-      }
 
-      const activeUploadId = String(state.activeId || state.uploadTask?.activeId || '').trim();
-      const runningStates = new Set([
-        UploadState.READING,
-        UploadState.ATTACHING,
-      ]);
-      const rendered = [];
-      const renderedIds = new Set();
-
-      allFiles.slice(0, UPLOAD_LIST_RENDER_LIMIT).forEach((item) => {
-        if (!item || !item.id || renderedIds.has(item.id)) {
-          return;
-        }
-        rendered.push(item);
-        renderedIds.add(item.id);
-      });
-
-      allFiles.forEach((item) => {
-        if (!item || !item.id || renderedIds.has(item.id)) {
-          return;
-        }
-        const isActive = item.id === activeUploadId;
-        const isRunning = runningStates.has(normalizeUploadStateValue(item.state, ''));
-        if (isActive || isRunning) {
-          rendered.push(item);
-          renderedIds.add(item.id);
-        }
-      });
-
-      return {
-        items: rendered,
-        hiddenCount: Math.max(0, allFiles.length - rendered.length),
-      };
+    function getUploadListItemsToRender(...args) {
+      return ensureUploadRenderList().getUploadListItemsToRender(...args);
     }
 
-    function buildLimitedUploadQueueListHtml(files, activeGroupId, selectedFileId) {
-      const { items, hiddenCount } = getUploadListItemsToRender(files);
-      const listHtml = items
-        .map((q) => buildUploadQueueItemHtml(q, activeGroupId, selectedFileId))
-        .join('');
 
-      if (hiddenCount <= 0) {
-        return listHtml;
-      }
-
-      const summaryHtml = `
-        <div class="cgpt-upload-item empty toolbox-upload-list-summary" data-no-row-upload="1">
-          <div>
-            <div class="cgpt-upload-meta toolbox-upload-drop-hint">
-              还有 ${hiddenCount} 个文件未展开显示，上传任务仍会继续执行。
-            </div>
-            <button type="button" class="cgpt-btn cgpt-btn-ghost cgpt-upload-expand-all-btn" data-upload-expand-all="1">
-              展开全部
-            </button>
-          </div>
-        </div>
-      `;
-      return `${listHtml}${summaryHtml}`;
+    function buildLimitedUploadQueueListHtml(...args) {
+      return ensureUploadRenderList().buildLimitedUploadQueueListHtml(...args);
     }
 
     function clearUploadCriticalMode(reason = '') {
@@ -26567,119 +23849,14 @@
       );
     }
 
-    function scheduleRenderUploadListOnly(reason = '', delayMs) {
-      const reasonText = String(reason || '').trim() || '-';
-      uploadListRenderPendingReason = reasonText;
-      const critical = isUploadCriticalNow();
-      const waitMs = Number.isFinite(Number(delayMs))
-        ? Math.max(0, Number(delayMs))
-        : (critical ? 1000 : UPLOAD_LIST_RENDER_MIN_INTERVAL_MS);
-      const boundedWaitMs = critical
-        ? Math.min(1500, Math.max(UPLOAD_LIST_RENDER_MIN_INTERVAL_MS, waitMs))
-        : Math.min(1500, Math.max(UPLOAD_LIST_RENDER_MIN_INTERVAL_MS, waitMs));
 
-      if (uploadListRenderTimer) {
-        return;
-      }
-
-      uploadListRenderTimer = window.setTimeout(() => {
-        const pendingReason = uploadListRenderPendingReason || reasonText;
-        uploadListRenderTimer = 0;
-        uploadListRenderPendingReason = '';
-        renderUploadListOnly(pendingReason);
-      }, boundedWaitMs);
+    function scheduleRenderUploadListOnly(...args) {
+      return ensureUploadRenderList().scheduleRenderUploadListOnly(...args);
     }
 
-    function updateUploadListItemDom(itemId, reason = '') {
-      const idText = String(itemId || '').trim();
-      if (!idText) {
-        return false;
-      }
 
-      const reasonText = String(reason || '').trim() || 'update-item';
-      const el = listEl || (rootElRef ? qs(UploadSelectors.list, rootElRef) : null);
-      if (!el) {
-        return false;
-      }
-
-      const escapedId = escapeHtml(idText);
-      const currentItemEl = el.querySelector(
-        `.cgpt-upload-item[data-id="${escapedId}"], .cgpt-upload-item[data-file-id="${escapedId}"]`,
-      );
-      if (!(currentItemEl instanceof HTMLElement)) {
-        return false;
-      }
-
-      const activeGroupId = getActiveGroupId();
-      const selectedFileId = getSelectedFileIdForActiveGroup();
-      const queueItem = getActiveGroupFiles().find((q) => String(q && q.id || '') === idText);
-
-      if (!queueItem) {
-        currentItemEl.remove();
-        return true;
-      }
-
-      const nextItemHtml = buildUploadQueueItemHtml(queueItem, activeGroupId, selectedFileId).trim();
-      if (!nextItemHtml) {
-        return false;
-      }
-      const tpl = document.createElement('template');
-      tpl.innerHTML = nextItemHtml;
-      const nextItemEl = tpl.content.firstElementChild;
-      if (!(nextItemEl instanceof HTMLElement)) {
-        return false;
-      }
-      currentItemEl.setAttribute('data-id', String(queueItem.id || ''));
-      currentItemEl.setAttribute('data-file-id', String(queueItem.id || ''));
-      currentItemEl.setAttribute('data-group-id', String(activeGroupId || ''));
-      currentItemEl.className = nextItemEl.className;
-      currentItemEl.title = nextItemEl.title;
-
-      const currentNameEl = currentItemEl.querySelector('.cgpt-upload-name');
-      const nextNameEl = nextItemEl.querySelector('.cgpt-upload-name');
-      if (currentNameEl && nextNameEl) {
-        currentNameEl.textContent = nextNameEl.textContent;
-      }
-
-      const currentMetaEl = currentItemEl.querySelector('.cgpt-upload-meta');
-      const nextMetaEl = nextItemEl.querySelector('.cgpt-upload-meta');
-      if (currentMetaEl && nextMetaEl) {
-        currentMetaEl.innerHTML = nextMetaEl.innerHTML;
-      }
-
-      const currentErrorEl = currentItemEl.querySelector('[data-upload-item-error]');
-      const nextErrorEl = nextItemEl.querySelector('[data-upload-item-error]');
-      if (nextErrorEl) {
-        if (currentErrorEl) {
-          currentErrorEl.replaceWith(nextErrorEl.cloneNode(true));
-        } else {
-          const currentMainEl = currentItemEl.querySelector('.cgpt-upload-file-main');
-          if (currentMainEl) {
-            currentMainEl.appendChild(nextErrorEl.cloneNode(true));
-          }
-        }
-      } else if (currentErrorEl) {
-        currentErrorEl.remove();
-      }
-
-      const currentActionsCell = currentItemEl.querySelector('.cgpt-upload-actions-cell');
-      const nextActionsCell = nextItemEl.querySelector('.cgpt-upload-actions-cell');
-      if (currentActionsCell && nextActionsCell) {
-        currentActionsCell.innerHTML = nextActionsCell.innerHTML;
-      }
-
-      if (
-        typeof ToolboxShell !== 'undefined'
-        && typeof ToolboxShell.appendLogIfChanged === 'function'
-      ) {
-        ToolboxShell.appendLogIfChanged(
-          'UPLOAD_LIST:item_update',
-          `${idText}|${reasonText}`,
-          `[UPLOAD_LIST][item-update] id=${idText} reason=${reasonText}`,
-          1500,
-        );
-      }
-      return true;
+    function updateUploadListItemDom(...args) {
+      return ensureUploadRenderList().updateUploadListItemDom(...args);
     }
 
     function scheduleRenderUpload(reason = '') {
@@ -26902,38 +24079,9 @@
       }
     }
 
-    function renderUploadListOnly(reason = '', options = {}) {
-      const force = !!(options && options.force);
-      const now = Date.now();
-      if (
-        !force
-        && lastUploadListRenderExecutedAt > 0
-        && now - lastUploadListRenderExecutedAt < UPLOAD_LIST_RENDER_MIN_INTERVAL_MS
-      ) {
-        scheduleRenderUploadListOnly(reason || 'throttled-retry', UPLOAD_LIST_RENDER_MIN_INTERVAL_MS);
-        return;
-      }
 
-      const el = listEl || (rootElRef ? qs(UploadSelectors.list, rootElRef) : null);
-      if (!el) return;
-
-      listEl = el;
-      const startedAt = (typeof performance !== 'undefined' && performance.now)
-        ? performance.now()
-        : Date.now();
-      el.classList.add('toolbox-upload-file-list');
-      refreshQueueReadableState();
-      const html = buildUploadListHtml();
-      el.innerHTML = html;
-      if (isUploadDebugEnabled()) {
-        diagnoseUploadListRender(el, html, reason || 'renderUploadListOnly');
-      }
-      lastUploadListRenderExecutedAt = Date.now();
-      logSlowOperation(
-        'renderUploadListOnly',
-        startedAt,
-        `itemCount=${getActiveGroupFiles().length} reason=${String(reason || '-').trim() || '-'}`,
-      );
+    function renderUploadListOnly(...args) {
+      return ensureUploadRenderList().renderUploadListOnly(...args);
     }
 
     let composerCapabilityLocalFallbackWarnedOnce = false;
@@ -27797,8 +24945,9 @@
 
       setSendMessageButtonVisualState(sendBtn, true);
 
-      setButtonWaiting(sendBtn, '等待发送', {
-        title: '已接收发送请求，正在等待附件上传完成或发送按钮可用；再次点击可取消',
+      const immediateBusyText = getSendMessageButtonText();
+      setButtonWaiting(sendBtn, immediateBusyText, {
+        title: '再次点击可取消发送；若已发出消息则尝试停止回答',
         allowCancel: true,
         reason: reason || 'send-message:immediate-busy',
       });
@@ -27899,6 +25048,33 @@
       const reason = String(options.reason || 'render');
 
       logSendButtonStateSource(sendPhase, reason);
+
+      if (sendMessageTaskState.running) {
+        const taskText = getSendMessageButtonText();
+        const isStopView = sendMessageTaskState.phase === SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE
+          || sendMessageTaskState.phase === SEND_MESSAGE_PHASES.STOPPING_RESPONSE
+          || !!sendMessageTaskState.hasClickedNativeSend;
+        button.dataset.action = 'send-message';
+        if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
+          ButtonState.setButtonRuntimeAction(button, 'cancel-send');
+        } else {
+          button.dataset.cgptRuntimeAction = 'cancel-send';
+        }
+        setSendMessageButtonVisualState(button, true, sendMessageTaskState.phase);
+        button.classList.toggle('cgpt-btn-danger', true);
+        const activeTaskResult = setToolboxButtonState(button, {
+          phase: isStopView ? ButtonPhase.WAITING_REPLY : ButtonPhase.WAITING_SEND,
+          text: taskText,
+          title: isStopView
+            ? '消息已发出；再次点击将尝试停止 ChatGPT 当前回答'
+            : '发送准备中；再次点击可取消本次发送',
+          disabled: false,
+          allowCancel: true,
+          reason,
+        });
+        finalizeSendButtonStateFromTask(reason);
+        return activeTaskResult;
+      }
 
       function resolveAutoQueueOwnerForSendMessageSuppression() {
         if (
@@ -28168,6 +25344,9 @@
         String(uploadTask.phase || ''),
         String(uploadTask.cancelRequested ? 1 : 0),
         String(sendTask.phase || ''),
+        String(snapshot && snapshot.sendMessageTask && snapshot.sendMessageTask.running ? 1 : 0),
+        String(snapshot && snapshot.sendMessageTask && snapshot.sendMessageTask.phase ? snapshot.sendMessageTask.phase : ''),
+        String(snapshot && snapshot.sendMessageTask && snapshot.sendMessageTask.hasClickedNativeSend ? 1 : 0),
         String(snapshot && snapshot.uploadRunning ? 1 : 0),
         String(snapshot && snapshot.autoContinueRunning ? 1 : 0),
         String(snapshot && snapshot.activeFilesCount || 0),
@@ -28779,10 +25958,13 @@
         if (shouldRunClosedLoopDiagnostics('after-render-upload-buttons')) {
           rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
         }
+        auditToolboxActionGridLayout(renderReason);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[UPLOAD_RENDER][FAILED]', err);
-        ToolboxShell.appendLog(`[UPLOAD_RENDER][FAILED] error=${errText}`);
+        ToolboxShell.appendLog(
+          `[UPLOAD_RENDER][FAILED] error=${errText} stack=${formatUploadErrorStack(err)}`,
+        );
       } finally {
         const renderCostMs = (
           (typeof performance !== 'undefined' && performance.now)
@@ -29228,7 +26410,9 @@
         state.moduleInitState = 'failed';
         state.moduleInitError = `上传界面渲染失败：${errText}`;
         console.error('[ChatGPT toolbox] upload render failed', error);
-        ToolboxShell.appendLog(`[UPLOAD_RENDER][FAILED] error=${errText}`);
+        ToolboxShell.appendLog(
+          `[UPLOAD_RENDER][FAILED] error=${errText} stack=${formatUploadErrorStack(error)}`,
+        );
         if (typeof globalThis !== 'undefined' && globalThis.ToolboxModuleHealth && typeof globalThis.ToolboxModuleHealth.report === 'function') {
           globalThis.ToolboxModuleHealth.report('UploadModule', {
             ok: false,
@@ -29863,6 +27047,13 @@
         reason || 'reset-upload-send-ui',
       );
 
+      if (sendMessageTaskState.running) {
+        finishSendMessageTask({
+          ok: false,
+          reason: String(reason || 'reset-upload-send-ui'),
+        });
+      }
+
       if (preserveCancelRequested) {
         if (closedLoopFinishCleanup) {
           ToolboxShell.appendLog(
@@ -30275,6 +27466,9 @@
     }
 
     function isWaitSendCancelled(runId) {
+      if (sendMessageTaskState.running && sendMessageTaskState.abortController && sendMessageTaskState.abortController.signal.aborted) {
+        return true;
+      }
       if (state.cancelWaitingSend || state.messageSendCancelRequested) {
         return true;
       }
@@ -30450,6 +27644,9 @@
       if (!reasonText.includes('foreground-resume')) {
         return false;
       }
+      if (shouldPreserveActiveSendTaskOnForeground(reason)) {
+        return true;
+      }
       const uploadPhase = getUploadTaskState().phase;
       const sendPhase = getSendTaskPhase();
       return uploadPhase === 'uploading'
@@ -30461,6 +27658,61 @@
           'waiting_reply',
           'cancelling',
         ].includes(sendPhase);
+    }
+
+    function shouldPreserveActiveSendTaskOnForeground(reason = '-') {
+      const phase = String(sendMessageTaskState && sendMessageTaskState.phase ? sendMessageTaskState.phase : '').trim();
+      const running = !!(sendMessageTaskState && sendMessageTaskState.running);
+      const protectedPhases = new Set([
+        SEND_MESSAGE_PHASES.WAITING_COMPOSER,
+        SEND_MESSAGE_PHASES.WRITING_TEXT,
+        SEND_MESSAGE_PHASES.WAITING_ATTACHMENT,
+        SEND_MESSAGE_PHASES.READY_TO_CLICK,
+        SEND_MESSAGE_PHASES.CLICKING_SEND,
+        'waiting_send',
+        'sending',
+      ]);
+      if (!running || !protectedPhases.has(phase)) {
+        return false;
+      }
+      const text = typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : '';
+      const hasAttachment = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        && ComposerApi.hasComposerAttachmentUnified();
+      const btn = typeof ComposerApi !== 'undefined' && typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
+      const nativeReady = btn instanceof HTMLButtonElement
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(btn);
+      if (text.length > 0 || hasAttachment || nativeReady) {
+        ToolboxShell.appendLog(
+          `[SEND][PRESERVE_ACTIVE_SEND_ON_FOREGROUND] reason=${reason || '-'} phase=${phase} textLen=${text.length} hasAttachment=${hasAttachment ? 1 : 0} nativeReady=${nativeReady ? 1 : 0}`,
+        );
+        return true;
+      }
+      return false;
+    }
+
+    function canRecoverSendFromWaitingComposer() {
+      if (!sendMessageTaskState.running || !isSendTaskWaitingComposerPhase()) {
+        return false;
+      }
+      const text = typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerText === 'function'
+        ? String(ComposerApi.getComposerText() || '').trim()
+        : '';
+      const hasAttachment = typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        && ComposerApi.hasComposerAttachmentUnified();
+      const btn = typeof ComposerApi !== 'undefined' && typeof ComposerApi.findSendButton === 'function'
+        ? ComposerApi.findSendButton({ silent: true })
+        : null;
+      const nativeReady = btn instanceof HTMLButtonElement
+        && typeof ComposerApi.isSendButtonReady === 'function'
+        && ComposerApi.isSendButtonReady(btn);
+      return (text.length > 0 || hasAttachment) && nativeReady;
     }
 
     function shouldSkipResetRuntimeDuringUpload(reason = '') {
@@ -30583,6 +27835,9 @@
     }
 
     function resetRuntimeStateOnBoot(reason) {
+      if (shouldPreserveActiveSendTaskOnForeground(reason)) {
+        return;
+      }
       if (isAutoQueueActiveSendProtected(reason)) {
         scheduleRenderUpload(`reset-runtime-skip:${reason || 'boot'}`);
         return;
@@ -30611,6 +27866,9 @@
     }
 
     function clearStaleBusySendStateOnHomeReady(reason) {
+      if (shouldPreserveActiveSendTaskOnForeground(reason)) {
+        return false;
+      }
       if (isAutoQueueActiveSendProtected(reason)) {
         return false;
       }
@@ -31499,6 +28757,25 @@
       ToolboxShell.appendLog(`[SEND_MESSAGE][CLICK] source=${logSource} rawSource=${rawSource}`);
       ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${logSource}`);
 
+      if (
+        isManualSendMessageSource(src)
+        && !options.parentAction
+        && !options.compositeAction
+        && sendMessageTaskState.running
+      ) {
+        const runningTriggerDetail = buildSendTaskTriggerDetail({
+          action: 'send-message',
+          runtimeAction: String(options.runtimeAction || '').trim(),
+          source: logSource,
+          button: options.button,
+          buttonText: options.buttonText,
+        });
+        const runningTriggerResult = handleRunningSendTaskTrigger(runningTriggerDetail);
+        if (runningTriggerResult.handled) {
+          return runningTriggerResult.result === 'cancelled';
+        }
+      }
+
       clearStaleBusySendStateOnHomeReady('trigger-send');
 
       syncSendTaskPhase();
@@ -31615,6 +28892,16 @@
             state.uploadSendFailureHintAt = Date.now();
             scheduleRenderUpload('send-message:trigger-blocked');
           }
+          if (
+            isManualSendMessageSource(src)
+            && !options.parentAction
+            && !options.compositeAction
+            && sendMessageTaskState.running
+            && !sendMessageTaskState.hasClickedNativeSend
+            && sendMessageTaskState.phase !== SEND_MESSAGE_PHASES.CANCELLED
+          ) {
+            finishSendMessageTask({ ok: false, reason: blockedReason || doneReason });
+          }
         }
 
         return doneOk;
@@ -31626,6 +28913,15 @@
           `[UPLOAD][TRIGGER_SEND][FAILED] source=${logSource} error=${errText}`,
         );
         setStatus(`发送消息失败：${errText}`, 'error');
+        if (
+          isManualSendMessageSource(src)
+          && !options.parentAction
+          && !options.compositeAction
+          && sendMessageTaskState.running
+          && sendMessageTaskState.phase !== SEND_MESSAGE_PHASES.CANCELLED
+        ) {
+          finishSendMessageTask({ ok: false, reason: errText });
+        }
 
         return false;
       }
@@ -31667,6 +28963,11 @@
     }
 
     function cancelWaitingSend(reason = 'user-click', options = {}) {
+      if (sendMessageTaskState.running) {
+        const cancelResult = cancelSendMessageTask(reason);
+        return !!(cancelResult && cancelResult.ok);
+      }
+
       if (!isSendTaskBusy() && !isWaitingSendButton() && !state.waitingReply && !state.pendingSendAfterReply) {
         return false;
       }
@@ -31904,6 +29205,9 @@
 
     function shouldStopForeverSend(runId) {
       if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        return true;
+      }
+      if (sendMessageTaskState.running && sendMessageTaskState.abortController && sendMessageTaskState.abortController.signal.aborted) {
         return true;
       }
       if (state.cancelWaitingSend) {
@@ -32983,10 +30287,28 @@
       logUploadSendUiState('click', 'send-message-start', runId);
       clearStaleBusySendStateOnHomeReady('send-panel-click');
 
+      const usePanelSendTask = shouldUseSendMessageTaskState(source);
+      if (usePanelSendTask) {
+        if (!sendMessageTaskState.running) {
+          const startedTask = startSendMessageTask(source);
+          if (!startedTask) {
+            ToolboxShell.appendLog(
+              `[SEND_TASK][FAILED] stage=before-send-panel reason=send-task-already-running source=${source}`,
+            );
+            return false;
+          }
+        } else {
+          setSendMessageTaskPhase(SEND_MESSAGE_PHASES.WAITING_COMPOSER, 'send-panel-enter');
+        }
+      }
+
       let sendFailureHandled = false;
       let textAlreadyInjected = false;
 
       if (shouldInjectText) {
+        if (usePanelSendTask) {
+          setSendMessageTaskPhase(SEND_MESSAGE_PHASES.WRITING_TEXT, 'payload-inject');
+        }
         const promptState = inspectSharedComposerPromptState(unifiedText);
         if (promptState.exactMatch) {
           ToolboxShell.appendLog(
@@ -33034,6 +30356,19 @@
 
       function uploadSendFlowCancelCheck(stage) {
         const stageText = String(stage || '-');
+
+        if (
+          sendMessageTaskState.running
+          && sendMessageTaskState.abortController
+          && sendMessageTaskState.abortController.signal.aborted
+        ) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_DIAG][send-message-button:cancel-check] stage=${stageText} reason=send_task_aborted runId=${runId}`,
+          );
+          logUploadSendUiState('send-aborted', `send-task-aborted:${stageText}`, runId);
+          finishUploadSendFlow('cancelled', { preserveCancelRequested: false });
+          return true;
+        }
 
         if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
           ToolboxShell.appendLog(
@@ -33339,6 +30674,9 @@
           capability,
         );
         if (requireUploadDone && hasAttachmentBeforeSend) {
+          if (usePanelSendTask) {
+            setSendMessageTaskPhase(SEND_MESSAGE_PHASES.WAITING_ATTACHMENT, 'wait-attachment-before-send');
+          }
           ToolboxShell.appendLog('[SEND][ATTACHMENT_WAIT_REQUIRED] reason=real-attachment-detected');
           const attachmentWaitMs = isManualSend
             ? resolveManualSendAttachmentWaitMs()
@@ -33346,9 +30684,17 @@
           const attachmentReady = await waitComposerAttachmentReady({
             timeoutMs: attachmentWaitMs,
             source,
+            signal: usePanelSendTask && sendMessageTaskState.abortController
+              ? sendMessageTaskState.abortController.signal
+              : null,
+            isCancelled: () => isWaitSendCancelled(runId) || isSendMessageTaskAborted(),
           });
 
           if (!attachmentReady.ok) {
+            if (attachmentReady.reason === 'cancelled' || isSendMessageTaskAborted()) {
+              sendFailureHandled = true;
+              return false;
+            }
             ToolboxShell.appendLog(
               `[SEND][WAIT_ATTACHMENT_UPLOAD] reason=${attachmentReady.reason || 'attachment-not-ready'} source=${source} sendReady=${isUploadNativeSendReadyForSendNow() ? 1 : 0}`,
             );
@@ -33441,6 +30787,9 @@
           }
 
           if (capabilityNow.canSendNow || isUploadNativeSendReadyForSendNow()) {
+            if (usePanelSendTask) {
+              setSendMessageTaskPhase(SEND_MESSAGE_PHASES.READY_TO_CLICK, 'native-send-ready-loop');
+            }
             setAuthoritativeSendTaskState(
               {
                 phase: 'sending',
@@ -33450,6 +30799,10 @@
               },
               'send-message:click-native-send-button',
             );
+          }
+
+          if (usePanelSendTask) {
+            setSendMessageTaskPhase(SEND_MESSAGE_PHASES.CLICKING_SEND, 'send-unified-attempt');
           }
 
           if (!assertUploadSendFlowAlive(activeFlowRun, 'before-stable-send')) {
@@ -33731,6 +31084,9 @@
           ToolboxShell.appendLog(
             `[SEND_MESSAGE][DONE] ok=1 source=${source} reason=${sendResult.reason || '-'}`,
           );
+          if (usePanelSendTask) {
+            markSendMessageNativeSendClicked(source);
+          }
           // 不再在顶部按钮上延时显示“已发送”；成功语义交给日志/批量统计
           state.uploadSendSuccessHint = '';
           state.uploadSendSuccessHintAt = 0;
@@ -34222,10 +31578,32 @@
       ToolboxShell.appendLog(`[SEND_HOTKEY][TRIGGER_SEND] source=${src}`);
       scheduleRenderUpload(`send-shortcut:checking:${src}`);
 
+      if (sendMessageTaskState.running && isSendTaskWaitingComposerPhase()) {
+        const shortcutTriggerDetail = buildSendTaskTriggerDetail({
+          action: 'send-message',
+          runtimeAction: 'send-message',
+          source: src,
+        });
+        const shortcutRunningResult = handleRunningSendTaskTrigger(shortcutTriggerDetail);
+        if (shortcutRunningResult.handled) {
+          return true;
+        }
+      }
+
       const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
 
       if (sendBtn) {
-        const runtimeAction = resolveUploadButtonRuntimeAction(sendBtn, 'send-message');
+        let runtimeAction = resolveUploadButtonRuntimeAction(sendBtn, 'send-message');
+        if (
+          sendMessageTaskState.running
+          && isSendTaskWaitingComposerPhase()
+          && (runtimeAction === 'cancel-send' || runtimeAction === 'cancel')
+        ) {
+          ToolboxShell.appendLog(
+            `[SEND_HOTKEY][FORCE_SEND_MESSAGE] source=${src} phase=${sendMessageTaskState.phase || '-'} runtimeAction=${runtimeAction}`,
+          );
+          runtimeAction = 'send-message';
+        }
         dispatchToolboxActionSafe(runtimeAction, {
           button: sendBtn,
           source: src,
@@ -38434,6 +35812,17 @@
 
       if (runtimeAction === 'cancel' || runtimeAction === 'stop') {
         if (
+          baseAction === 'copy-hotkey-once'
+          || baseAction === 'copy-and-hotkey'
+          || domAction === 'copy-and-hotkey'
+          || domAction === 'copy-hotkey-once'
+        ) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_ACTION][RUNTIME_ACTION] base=${baseAction || domAction || '-'} runtime=${runtimeAction} id=${button.id || '-'}`,
+          );
+          return 'copy-and-hotkey';
+        }
+        if (
           closedLoopContinueState.running === true
           && isClosedLoopStartAction(baseAction || domAction)
         ) {
@@ -38696,14 +36085,36 @@
       },
       'cancel-send': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
+        const cancelBtn = ctx && ctx.button instanceof HTMLElement ? ctx.button : null;
         ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][cancel-send] source=${src}`);
-        cancelWaitingSend(src);
+        if (sendMessageTaskState.running) {
+          if (isShortcutSendTriggerSource(src) && isSendTaskWaitingComposerPhase()) {
+            const shortcutIgnoreDetail = buildSendTaskTriggerDetail({
+              action: 'send-message',
+              runtimeAction: 'send-message',
+              source: src,
+              button: cancelBtn,
+            });
+            handleRunningSendTaskTrigger(shortcutIgnoreDetail);
+            return true;
+          }
+          ToolboxShell.appendLog(
+            `[SEND_TASK][EXPLICIT_CANCEL] source=${src} phase=${sendMessageTaskState.phase || '-'} reason=cancel-send-action`,
+          );
+          cancelSendMessageTask('explicit-cancel');
+        } else {
+          cancelWaitingSend(src);
+        }
         return true;
       },
       'cancel-wait-reply': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
         ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][cancel-wait-reply] source=${src}`);
-        cancelWaitingSend(src);
+        if (sendMessageTaskState.running) {
+          cancelSendMessageTask(`cancel-wait-reply:${src}`);
+        } else {
+          cancelWaitingSend(src);
+        }
         return true;
       },
       'cancel-send-copy-hotkey': (ctx) => {
@@ -38715,6 +36126,18 @@
       'send-message': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
         const rawSource = ctx && ctx.rawSource ? ctx.rawSource : src;
+        const sendBtnForCtx = ctx && ctx.button instanceof HTMLElement ? ctx.button : null;
+        if (sendMessageTaskState.running) {
+          const runningDetail = buildSendTaskTriggerDetail({
+            action: 'send-message',
+            source: src,
+            button: sendBtnForCtx,
+          });
+          const runningResult = handleRunningSendTaskTrigger(runningDetail);
+          if (runningResult.handled) {
+            return true;
+          }
+        }
         const triggerPhase = getSendTaskPhase();
         let responseState = {};
         try {
@@ -38750,6 +36173,10 @@
         );
 
         if (canPaintImmediately) {
+          const normalizedSrc = normalizeSendMessageSource(src, 'send-message');
+          if (isManualSendMessageSource(normalizedSrc) && !sendMessageTaskState.running) {
+            startSendMessageTask(`send-message:manual-click-immediate:${normalizedSrc}`);
+          }
           paintSendMessageButtonWaitingImmediately(`send-message:manual-click-immediate:${src}`);
         }
 
@@ -39251,6 +36678,21 @@
       }
 
       if (normalizedAction === 'send-message') {
+        if (sendMessageTaskState.running) {
+          const btnRawActionEarly = button instanceof HTMLElement
+            ? String(button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || button.dataset.action || '').trim()
+            : '';
+          const runningDetail = buildSendTaskTriggerDetail({
+            action: 'send-message',
+            runtimeAction: btnRawActionEarly,
+            source: src,
+            button,
+          });
+          const runningResult = handleRunningSendTaskTrigger(runningDetail);
+          if (runningResult.handled) {
+            return true;
+          }
+        }
         syncSendTaskPhase();
         const activeSendPhase = getSendTaskPhase();
         const shouldLetTriggerHandleReplyQueue = (
@@ -39684,18 +37126,22 @@
         && ToolboxActionRegistry
         && typeof ToolboxActionRegistry.getUploadUiActionDefs === 'function'
       )
-        ? ToolboxActionRegistry.getUploadUiActionDefs().map((def) => ({
-          selector: def.selector,
-          action: def.action,
-          handlerAction: def.handlerAction || def.action,
-          label: def.label,
-        }))
-        : [
-          ...UPLOAD_ACTION_BUTTON_DEFS.map((def) => ({
-            selector: def.selector,
+        ? ToolboxActionRegistry.getUploadUiActionDefs()
+          .map((def) => ({
+            selector: String(def.selector || '').trim(),
             action: def.action,
+            handlerAction: def.handlerAction || def.action,
             label: def.label,
-          })),
+          }))
+          .filter((def) => def.selector)
+        : [
+          ...UPLOAD_ACTION_BUTTON_DEFS
+            .map((def) => ({
+              selector: String(def.selector || '').trim(),
+              action: def.action,
+              label: def.label,
+            }))
+            .filter((def) => def.selector),
           {
             selector: '#cgpt-upload-group-manage',
             action: 'toggle-upload-group-manage',
@@ -39886,7 +37332,14 @@
       }
 
       for (const def of UPLOAD_UI_ACTIONS) {
-        const button = target.closest(def.selector);
+        const selector = String(def && def.selector ? def.selector : '').trim();
+        if (!selector) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_UI_ACTION][skip-empty-selector] action=${def && def.action ? def.action : '-'}`,
+          );
+          continue;
+        }
+        const button = target.closest(selector);
         if (!button) {
           continue;
         }
@@ -40442,13 +37895,145 @@
       bindUploadGroupChipClickFallback(rootEl, 'bind-events');
     }
 
+    function buildUploadClosedLoopActionRowHtml() {
+      return `
+          <div class="cgpt-row cgpt-upload-action-row cgpt-upload-closed-loop-action-row cgpt-action-group" data-action-row="closed-loop">
+            ${buildClosedLoopContinueButtonsHtml()}
+          </div>
+      `;
+    }
+
+    function getToolboxRootElementForLayoutAudit() {
+      if (rootElRef instanceof HTMLElement) {
+        return rootElRef;
+      }
+      const uploadModule = document.querySelector('#cgpt-upload-module');
+      if (uploadModule instanceof HTMLElement) {
+        return uploadModule;
+      }
+      if (
+        typeof ToolboxHeaderStatus !== 'undefined'
+        && ToolboxHeaderStatus
+        && typeof ToolboxHeaderStatus.getToolboxRootElement === 'function'
+      ) {
+        const headerRoot = ToolboxHeaderStatus.getToolboxRootElement();
+        if (headerRoot instanceof HTMLElement) {
+          return headerRoot;
+        }
+      }
+      const panelId = typeof APP !== 'undefined' && APP && APP.panelId ? APP.panelId : 'cgpt-toolbox-panel';
+      return document.getElementById(panelId);
+    }
+
+    function auditToolboxActionGridLayout(reason) {
+      const root = getToolboxRootElementForLayoutAudit();
+      const appendLogLine = (line) => {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+          return;
+        }
+        console.log(line);
+      };
+      if (!(root instanceof HTMLElement)) {
+        appendLogLine(`[BUTTON_LAYOUT][AUDIT_SKIP] reason=${reason || '-'} cause=no-root`);
+        return;
+      }
+      const grid = root.querySelector('.cgpt-toolbox-action-grid');
+      if (!grid) {
+        appendLogLine(`[BUTTON_LAYOUT][AUDIT_SKIP] reason=${reason || '-'} cause=no-grid`);
+        return;
+      }
+      const buttons = Array.from(grid.querySelectorAll('.cgpt-btn'));
+      const rows = new Map();
+      buttons.forEach((btn) => {
+        const rect = btn.getBoundingClientRect();
+        const top = Math.round(rect.top);
+        if (!rows.has(top)) {
+          rows.set(top, []);
+        }
+        rows.get(top).push({
+          text: String(btn.textContent || '').trim(),
+          height: Math.round(rect.height),
+          top,
+        });
+      });
+      const rowTops = Array.from(rows.keys()).sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < rowTops.length; i += 1) {
+        const prevTop = rowTops[i - 1];
+        const currTop = rowTops[i];
+        const prevItems = rows.get(prevTop) || [];
+        const prevHeight = Math.max(...prevItems.map((x) => x.height), 0);
+        gaps.push(currTop - prevTop - prevHeight);
+      }
+      appendLogLine(
+        `[BUTTON_LAYOUT][AUDIT] reason=${reason || '-'} rows=${rowTops.length} gaps=${gaps.join(',') || '-'} width=${Math.round(grid.getBoundingClientRect().width)}`,
+      );
+    }
+
+    function ensureUploadClosedLoopActionRow(rootEl) {
+      if (!(rootEl instanceof HTMLElement)) {
+        return;
+      }
+      const toolbar = rootEl.querySelector('.cgpt-upload-action-toolbar');
+      if (!toolbar) {
+        return;
+      }
+      const actionGrid = toolbar.querySelector('.cgpt-toolbox-action-grid') || toolbar;
+      let closedLoopRow = toolbar.querySelector('.cgpt-upload-closed-loop-action-row');
+      if (!closedLoopRow) {
+        closedLoopRow = document.createElement('div');
+        closedLoopRow.className = 'cgpt-row cgpt-upload-action-row cgpt-upload-closed-loop-action-row cgpt-action-group';
+        closedLoopRow.dataset.actionRow = 'closed-loop';
+        closedLoopRow.innerHTML = buildClosedLoopContinueButtonsHtml();
+        const mainRow = toolbar.querySelector('.cgpt-upload-main-action-row');
+        if (mainRow && mainRow.nextSibling) {
+          actionGrid.insertBefore(closedLoopRow, mainRow.nextSibling);
+        } else if (mainRow) {
+          actionGrid.appendChild(closedLoopRow);
+        } else {
+          actionGrid.appendChild(closedLoopRow);
+        }
+        ToolboxShell.appendLog('[UPLOAD_UI][CLOSED_LOOP_ROW_INSERTED]');
+      } else {
+        if (!closedLoopRow.classList.contains('cgpt-action-group')) {
+          closedLoopRow.classList.add('cgpt-action-group');
+        }
+        const requiredIds = [
+          CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id,
+          CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id,
+          CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id,
+        ];
+        const missing = requiredIds.filter((id) => !closedLoopRow.querySelector(`#${id}`));
+        if (missing.length > 0) {
+          closedLoopRow.innerHTML = buildClosedLoopContinueButtonsHtml();
+          ToolboxShell.appendLog(
+            `[UPLOAD_UI][CLOSED_LOOP_ROW_HEAL] missing=${missing.join(',')}`,
+          );
+        }
+      }
+      [
+        CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY,
+        CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND,
+        CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY,
+      ].forEach((mode) => {
+        const btn = closedLoopRow.querySelector(`#${getClosedLoopContinueActionDef(mode).id}`);
+        if (btn) {
+          applyClosedLoopContinueButtonDef(btn, getClosedLoopContinueActionDef(mode));
+        }
+      });
+    }
+
     function buildUploadActionToolbarInnerHtml() {
       const buttonsHtml = UPLOAD_ACTION_BUTTON_DEFS
         .map((def) => renderUploadActionButtonHtml(def))
         .join('');
       return `
-          <div class="cgpt-row cgpt-upload-action-row cgpt-upload-main-action-row" data-action-row="main">
-            ${buttonsHtml}
+          <div class="cgpt-toolbox-action-grid">
+            <div class="cgpt-row cgpt-upload-action-row cgpt-upload-main-action-row cgpt-action-group" data-action-row="main">
+              ${buttonsHtml}
+            </div>
+            ${buildUploadClosedLoopActionRowHtml()}
           </div>
       `;
     }
@@ -40483,6 +38068,10 @@
         return false;
       }
 
+      if (!toolbar.querySelector('.cgpt-toolbox-action-grid')) {
+        return true;
+      }
+
       if (toolbar.querySelector('.cgpt-upload-extra-action-row')) {
         return true;
       }
@@ -40504,7 +38093,21 @@
         .filter((def) => def.required)
         .map((def) => def.selector);
 
-      return requiredButtons.some((selector) => !mainRow.querySelector(selector));
+      if (requiredButtons.some((selector) => !mainRow.querySelector(selector))) {
+        return true;
+      }
+
+      const closedLoopRow = toolbar.querySelector('.cgpt-upload-closed-loop-action-row');
+      if (!closedLoopRow) {
+        return true;
+      }
+
+      const closedLoopIds = [
+        CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id,
+        CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id,
+        CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id,
+      ];
+      return closedLoopIds.some((id) => !closedLoopRow.querySelector(`#${id}`));
     }
 
     function migrateUploadActionToolbarLayout(rootEl) {
@@ -40524,7 +38127,7 @@
       }
 
       toolbar.innerHTML = buildUploadActionToolbarInnerHtml();
-      ToolboxShell.appendLog('[UPLOAD_UI][ACTION_TOOLBAR_MIGRATED] all-actions-wrap-row');
+      ToolboxShell.appendLog('[UPLOAD_UI][ACTION_TOOLBAR_MIGRATED] unified-action-grid');
       logUploadActionRowLayout(rootEl, 'migrate-upload-action-toolbar');
       rebindClosedLoopContinueUi(rootEl, 'after-migrate-toolbar');
     }
@@ -40567,6 +38170,8 @@
         migrateUploadActionToolbarLayout(rootEl);
         logUploadActionRowLayout(rootEl, 'ensure-upload-action-toolbar-migrated');
       }
+
+      ensureUploadClosedLoopActionRow(rootEl);
 
       if (uploadSection && toolbar.nextElementSibling !== uploadSection) {
         rootEl.insertBefore(toolbar, uploadSection);
@@ -40792,6 +38397,7 @@
         actionRow.appendChild(btn);
       });
 
+      ensureUploadClosedLoopActionRow(rootEl);
       logUploadActionRowLayout(rootEl, 'ensure-upload-action-buttons');
       rebindClosedLoopContinueUi(rootEl, 'after-ensure-upload-action-buttons');
     }
@@ -41295,6 +38901,8 @@
     }
 
     function mount(targetHost) {
+      auditUploadModuleDependencies('mount:init');
+
       if (!targetHost) {
         console.error('[ChatGPT toolbox] UploadModule.mount: targetHost 为空');
         ToolboxShell.appendLog('[UPLOAD][mount-failed] targetHost empty');
@@ -41745,17 +39353,20 @@
       if (reason === 'reply_done') {
         setStatus('回复完成');
 
-        if (
-          typeof TitlePrefixModule !== 'undefined'
-          && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
-        ) {
-          const titleFlashReason = 'upload-waiting-reply-done';
-          const titleFlashOptions = { intervalMs: 600, autoStopMs: 0 };
-          TitlePrefixModule.startReplyDoneFlash(titleFlashReason, titleFlashOptions);
+        const titleFlashReason = 'upload-waiting-reply-done';
+        if (typeof ResponseDoneNotifyModule !== 'undefined'
+          && typeof ResponseDoneNotifyModule.startResponseDoneNotify === 'function') {
+          ResponseDoneNotifyModule.startResponseDoneNotify(titleFlashReason);
+        } else if (typeof TitlePrefixModule !== 'undefined') {
+          if (typeof TitlePrefixModule.setToolboxTabTitleState === 'function') {
+            TitlePrefixModule.setToolboxTabTitleState('reply_done', titleFlashReason);
+          } else if (typeof TitlePrefixModule.startReplyDoneFlash === 'function') {
+            TitlePrefixModule.startReplyDoneFlash(titleFlashReason);
+          }
 
           if (typeof ToolboxShell !== 'undefined'
             && typeof ToolboxShell.flashHeaderTitleOnce === 'function') {
-            ToolboxShell.flashHeaderTitleOnce('回复完成', titleFlashOptions);
+            ToolboxShell.flashHeaderTitleOnce('回复完成', {});
           }
         }
       } else if (reason === 'timeout') {
@@ -41943,7 +39554,7 @@
             console.error('[ChatGPT toolbox] upload refresh queue restore failed', err);
             if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
               ToolboxShell.appendLog(
-                `[UPLOAD_RESTORE][REFRESH_FAILED] reason=${refreshReason} activeGroupId=${state.activeGroupId || '-'} error=${errText}`,
+                `[UPLOAD_RESTORE][REFRESH_FAILED] reason=${refreshReason} activeGroupId=${state.activeGroupId || '-'} error=${errText} stack=${formatUploadErrorStack(err)}`,
               );
             }
           });
@@ -42057,9 +39668,13 @@
       syncCopyTaskPhase,
       exportGroupsAndQueueMeta,
       importGroupsAndQueueMeta,
-      resumeAfterForeground: async (reason = '-') => {
+      resumeAfterForeground: async (reason = '-', options = {}) => {
         const tag = String(reason || '-').trim() || '-';
-        clearStaleBusySendStateOnHomeReady(`foreground-resume:${tag}`);
+        const preserveActiveSend = options.preserveActiveSend === true
+          || shouldPreserveActiveSendTaskOnForeground(`foreground-resume:${tag}`);
+        if (!preserveActiveSend) {
+          clearStaleBusySendStateOnHomeReady(`foreground-resume:${tag}`);
+        }
         healStaleSendUiStateIfNeeded('foreground-resume');
         healStaleWaitingReplyStateIfNeeded('foreground-resume');
         healStaleUploadRunningLockIfNeeded('foreground-resume');
@@ -42118,7 +39733,7 @@
           const restoreErrText = restoreErr && restoreErr.message ? restoreErr.message : String(restoreErr);
           console.error('[ChatGPT toolbox] foreground upload queue restore failed', restoreErr);
           ToolboxShell.appendLog(
-            `[UPLOAD_RESTORE][FOREGROUND_FAILED] reason=${tag} activeGroupId=${state.activeGroupId || '-'} error=${restoreErrText}`,
+            `[UPLOAD_RESTORE][FOREGROUND_FAILED] reason=${tag} activeGroupId=${state.activeGroupId || '-'} error=${restoreErrText} stack=${formatUploadErrorStack(restoreErr)}`,
           );
         }
         renderToolboxTopStatus();
@@ -42156,6 +39771,8 @@
       startSendMessageFlow,
       triggerSendFromToolbox,
       clearStaleBusySendStateOnHomeReady,
+      shouldPreserveActiveSendTaskOnForeground,
+      isSendMessageTaskRunning: () => !!sendMessageTaskState.running,
       cancelCurrentUploadSend,
       cancelUploadFlow,
       applyBridgeUploadFiles,

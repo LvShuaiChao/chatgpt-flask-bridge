@@ -541,7 +541,7 @@
         const stopSignalForDisplay = cfg.copyHotkeyContinueStopSignal
           || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
         promptTextEl.value = getContinuePromptTextForSettingsDisplay(cfg);
-        promptTextEl.placeholder = `内置默认继续指令（完成时仅回复 ${stopSignalForDisplay}；未完成须继续补充并给出详细 Cursor 修改指令）`;
+        promptTextEl.placeholder = `留空则使用内置默认继续指令。默认继续指令会要求：若任务涉及代码修改/修复/重构/Bug 定位/UI 状态/闭环控制/上传逻辑/日志排查，必须输出详细 Cursor / Claude Code 修改指令，并列出文件路径、函数名、关键代码、日志和验证步骤。完成时仅回复 ${stopSignalForDisplay}。默认继续指令已包含详细 Cursor / Claude Code 修改要求。`;
       }
 
       const runtimeStatsCfg = getAutoQueueTaskQueueSettings();
@@ -854,6 +854,17 @@
           saveConfig(cfg);
           render();
           ToolboxShell.appendLog('[SETTINGS][continue-prompt-reset-defaults]');
+          const resetPreview = renderDefaultContinuePromptForSettings(defaultStop);
+          if (typeof logPromptDetailCursorBlock === 'function') {
+            logPromptDetailCursorBlock('settings-continue-prompt-reset', resetPreview);
+          } else {
+            const hasDetailed = typeof hasDetailedCursorInstructionBlock === 'function'
+              ? hasDetailedCursorInstructionBlock(resetPreview)
+              : resetPreview.includes('Cursor / Claude Code 修改指令');
+            ToolboxShell.appendLog(
+              `[PROMPT][DETAIL_CURSOR_BLOCK] source=settings-continue-prompt-reset hasDetailed=${hasDetailed ? 1 : 0} len=${resetPreview.length}`,
+            );
+          }
         });
       }
 
@@ -1135,26 +1146,44 @@
         const statusEl = settingsBeepRefs.beepStatus;
 
         if (
-          typeof TitlePrefixModule !== 'undefined'
-          && typeof TitlePrefixModule.startReplyDoneFlash === 'function'
+          typeof ResponseDoneNotifyModule !== 'undefined'
+          && typeof ResponseDoneNotifyModule.startResponseDoneNotify === 'function'
         ) {
-          TitlePrefixModule.startReplyDoneFlash('settings-test', {
-            intervalMs: 600,
-            autoStopMs: 0,
-          });
+          ResponseDoneNotifyModule.startResponseDoneNotify('settings-test');
 
-          if (
-            typeof ToolboxShell !== 'undefined'
-            && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
-          ) {
-            ToolboxShell.flashHeaderTitleOnce('回复完成', {
+          if (statusEl) {
+            statusEl.textContent = '已开始测试标签页标题与 favicon 提示（🔴 [回复完成]）；点击页面或切回标签可清除';
+          }
+
+          ToolboxShell.appendLog('[SETTINGS][title-flash-test] start');
+          return;
+        }
+
+        if (
+          typeof TitlePrefixModule !== 'undefined'
+          && (
+            typeof TitlePrefixModule.setToolboxTabTitleState === 'function'
+            || typeof TitlePrefixModule.startReplyDoneFlash === 'function'
+          )
+        ) {
+          if (typeof TitlePrefixModule.setToolboxTabTitleState === 'function') {
+            TitlePrefixModule.setToolboxTabTitleState('reply_done', 'settings-test');
+          } else {
+            TitlePrefixModule.startReplyDoneFlash('settings-test', {
               intervalMs: 600,
               autoStopMs: 0,
             });
           }
 
+          if (
+            typeof ToolboxShell !== 'undefined'
+            && typeof ToolboxShell.flashHeaderTitleOnce === 'function'
+          ) {
+            ToolboxShell.flashHeaderTitleOnce('回复完成', {});
+          }
+
           if (statusEl) {
-            statusEl.textContent = '已开始测试浏览器标题闪烁；工具箱标题闪烁已禁用';
+            statusEl.textContent = '已开始测试标签页标题与 favicon 提示（🔴 [回复完成]）';
           }
 
           ToolboxShell.appendLog('[SETTINGS][title-flash-test] start');
@@ -1382,12 +1411,12 @@
                 id="cgpt-setting-copy-hotkey-continue-prompt-text"
                 rows="12"
                 style="width: 100%; resize: vertical;"
-                placeholder="留空则使用内置默认继续指令（不需继续时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>）。"
+                placeholder="留空则使用内置默认继续指令。默认继续指令会要求：若任务涉及代码修改/修复/重构/Bug 定位/UI 状态/闭环控制/上传逻辑/日志排查，必须输出详细 Cursor / Claude Code 修改指令，并列出文件路径、函数名、关键代码、日志和验证步骤。"
               ></textarea>
             </div>
 
             <div class="cgpt-row">
-              <button type="button" class="cgpt-btn" id="cgpt-setting-copy-hotkey-continue-prompt-reset" title="单次或连续「复制+快捷键+继续」会发送上面的继续指令。若 ChatGPT 仅回复终止信号（整段回复只有这一行），将停止复制、快捷键与继续发送。">
+              <button type="button" class="cgpt-btn" id="cgpt-setting-copy-hotkey-continue-prompt-reset" title="恢复内置默认继续指令。默认模板会强制要求涉及代码修改时输出详细 Cursor / Claude Code 修改指令。">
                 恢复默认继续指令
               </button>
             </div>

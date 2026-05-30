@@ -25,6 +25,9 @@ from urllib.parse import urljoin
 
 import requests
 
+from app.client.bridge_client_core.http_client import BridgeHttpClient
+from app.client.bridge_client_core.reconnect import ReconnectPolicy
+
 DEFAULT_CLIENT_NAME = "bridge_client"
 DEFAULT_BASE_URL = "http://127.0.0.1:5000"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -136,6 +139,14 @@ class BridgeClient:
         self.http_timeout = float(http_timeout)
         self.poll_interval = float(poll_interval)
         self._session = requests.Session()
+        self._http = BridgeHttpClient(
+            self.base_url,
+            self.token,
+            session=self._session,
+            default_http_timeout=self.http_timeout,
+            api_error_cls=BridgeApiError,
+        )
+        self._reconnect = ReconnectPolicy()
 
     def _headers(self, *, include_json: bool = False) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -401,9 +412,7 @@ class BridgeClient:
         return diag
 
     def _url(self, path: str) -> str:
-        if not path.startswith("/"):
-            path = "/" + path
-        return urljoin(self.base_url + "/", path.lstrip("/"))
+        return self._http.url(path)
 
     def _decode_json_response(
         self,
@@ -412,39 +421,9 @@ class BridgeClient:
         path: str = "",
         allow_not_ok: bool = False,
     ) -> dict[str, Any]:
-        try:
-            data = response.json()
-        except ValueError as error:
-            text = (response.text or "")[:500]
-            raise BridgeApiError(
-                f"响应不是 JSON（HTTP {response.status_code}）：{text}",
-                status_code=response.status_code,
-            ) from error
-
-        if not isinstance(data, dict):
-            raise BridgeApiError(
-                f"响应格式异常（HTTP {response.status_code}）",
-                status_code=response.status_code,
-            )
-
-        if response.status_code == 404 and path.startswith("/api/v1"):
-            raise BridgeApiError(
-                "外部 API /api/v1 不存在。请完全退出 GUI 后重新启动，以加载最新 server.py。",
-                code="API_V1_NOT_FOUND",
-                status_code=404,
-                payload=data,
-            )
-
-        if response.status_code >= 400 or (
-            not allow_not_ok and not data.get("ok")
-        ):
-            raise BridgeApiError(
-                data.get("error") or f"HTTP {response.status_code}",
-                code=str(data.get("code") or ""),
-                status_code=response.status_code,
-                payload=data,
-            )
-        return data
+        return self._http.decode_json_response(
+            response, path=path, allow_not_ok=allow_not_ok
+        )
 
     def _request(
         self,
@@ -454,31 +433,7 @@ class BridgeClient:
         json_body: Optional[dict] = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
-        timeout = self.http_timeout if timeout is None else timeout
-        method_upper = method.upper()
-        url = self._url(path)
-        try:
-            response = self._session.request(
-                method_upper,
-                url,
-                json=json_body,
-                headers=self._headers(),
-                timeout=timeout,
-            )
-        except requests.RequestException as error:
-            payload_keys = sorted((json_body or {}).keys()) if isinstance(json_body, dict) else []
-            raise BridgeApiError(
-                "[CLIENT][REQUEST_FAILED] "
-                f"method={method_upper} "
-                f"url={url} "
-                f"path={path} "
-                f"timeout={timeout} "
-                f"payload_keys={payload_keys} "
-                f"error_type={type(error).__name__} "
-                f"error={error}"
-            ) from error
-
-        return self._decode_json_response(response, path=path)
+        return self._http.request(method, path, json_body=json_body, timeout=timeout)
 
     def check_connection(self) -> tuple[bool, str]:
         """

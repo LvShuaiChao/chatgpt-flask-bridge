@@ -7551,6 +7551,42 @@
 
         hasComposer = !!(composer || composerRoot || composerText);
 
+        if (!(sendButton instanceof HTMLButtonElement)) {
+          if (typeof ComposerApi.findSendButton === 'function') {
+            const candidate = ComposerApi.findSendButton({ silent: true });
+            if (candidate instanceof HTMLButtonElement && !isInsideToolbox(candidate)) {
+              sendButton = candidate;
+            }
+          }
+        }
+        if (!(sendButton instanceof HTMLButtonElement)) {
+          const fallbackSelectors = [
+            '#composer-submit-button',
+            'button[data-testid="send-button"]',
+            'button[aria-label*="发送"]',
+            'button[aria-label*="Send"]',
+          ];
+          for (const selector of fallbackSelectors) {
+            const candidate = document.querySelector(selector);
+            if (!(candidate instanceof HTMLButtonElement)) {
+              continue;
+            }
+            if (isInsideToolbox(candidate)) {
+              continue;
+            }
+            const labelText = String(
+              candidate.getAttribute('aria-label')
+              || candidate.getAttribute('data-testid')
+              || candidate.textContent
+              || '',
+            ).trim();
+            if (/添加文件|上传|附件|移除文件|开始听写|语音|Attach|attachment|remove|dictation/i.test(labelText)) {
+              continue;
+            }
+            sendButton = candidate;
+            break;
+          }
+        }
         if (sendButton instanceof HTMLButtonElement) {
           sendButtonReady = typeof ComposerApi.isSendButtonReady === 'function'
             ? !!ComposerApi.isSendButtonReady(sendButton)
@@ -8188,8 +8224,14 @@
       }
 
       if (busy) {
-        if (!wasBusy && typeof TitlePrefixModule.stopReplyDoneFlash === 'function') {
-          TitlePrefixModule.stopReplyDoneFlash('assistant-started');
+        if (!wasBusy
+          && typeof ResponseDoneNotifyModule !== 'undefined'
+          && typeof ResponseDoneNotifyModule.acknowledgeResponseDoneNotification === 'function') {
+          ResponseDoneNotifyModule.acknowledgeResponseDoneNotification('assistant-started');
+        }
+        if (!wasBusy
+          && typeof TitlePrefixModule.setToolboxTabTitleState === 'function') {
+          TitlePrefixModule.setToolboxTabTitleState('responding', 'response-started');
         }
         if (!wasBusy
           && typeof ToolboxShell !== 'undefined'
@@ -8215,16 +8257,21 @@
         }
 
         lastFlashAt = now;
-        const titleFlashReason = `assistant-finished:${reason || '-'}`;
-        const titleFlashOptions = { intervalMs: 600, autoStopMs: 0 };
-        TitlePrefixModule.startReplyDoneFlash(titleFlashReason, titleFlashOptions);
-
-        if (typeof ToolboxShell !== 'undefined'
-          && typeof ToolboxShell.flashHeaderTitleOnce === 'function') {
-          ToolboxShell.flashHeaderTitleOnce('回复完成', titleFlashOptions);
+        const titleFlashReason = `response-finished:${reason || '-'}`;
+        if (typeof ResponseDoneNotifyModule !== 'undefined'
+          && typeof ResponseDoneNotifyModule.startResponseDoneNotify === 'function') {
+          ResponseDoneNotifyModule.startResponseDoneNotify(titleFlashReason);
+        } else if (typeof TitlePrefixModule.setToolboxTabTitleState === 'function') {
+          TitlePrefixModule.setToolboxTabTitleState('reply_done', titleFlashReason);
+        } else if (typeof TitlePrefixModule.startReplyDoneFlash === 'function') {
+          TitlePrefixModule.startReplyDoneFlash(titleFlashReason);
         }
 
         refreshToolboxPageStatusDisplay(`assistant-finished:${reason || '-'}`);
+
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          renderToolboxHeaderStatus(`assistant-finished:${reason || '-'}`);
+        }
       }
 
       updateChatInputStateBadge();
@@ -8261,7 +8308,14 @@
 
       started = false;
       wasBusy = false;
-      TitlePrefixModule.stopReplyDoneFlash('watcher-stop');
+      if (typeof ResponseDoneNotifyModule !== 'undefined'
+        && typeof ResponseDoneNotifyModule.acknowledgeResponseDoneNotification === 'function') {
+        ResponseDoneNotifyModule.acknowledgeResponseDoneNotification('watcher-stop');
+      } else if (typeof TitlePrefixModule.setToolboxTabTitleState === 'function') {
+        TitlePrefixModule.setToolboxTabTitleState('idle', 'watcher-stop');
+      } else if (typeof TitlePrefixModule.stopReplyDoneFlash === 'function') {
+        TitlePrefixModule.stopReplyDoneFlash('watcher-stop');
+      }
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
         ToolboxShell.stopHeaderTitleFlash('watcher-stop');
       }
@@ -9938,6 +9992,17 @@
       };
     }
 
+    if (resolveWaitingForReply()) {
+      return {
+        text: '等回复',
+        cls: 'cgpt-state-waiting',
+        type: 'waiting',
+        title: '已发送，等待 ChatGPT 回复',
+        reason: 'waiting_reply',
+        ...internal,
+      };
+    }
+
     if (resolveIsSending()) {
       return {
         text: '发送中',
@@ -10017,6 +10082,9 @@
   function updateChatInputStateBadge() {
     const badge = document.querySelector('#cgpt-page-input-state');
     if (!badge) {
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus('updateChatInputStateBadge:no-page-badge');
+      }
       return;
     }
 
@@ -10028,6 +10096,7 @@
     badge.textContent = info.text;
     badge.title = info.title || info.text;
     badge.classList.add('cgpt-toolbox-status-primary-badge');
+    badge.style.display = '';
 
     badge.classList.remove(
       'cgpt-state-ready',
@@ -10060,6 +10129,10 @@
           console.warn('[TOP_STATUS][UPLOAD_BUTTON_REFRESH_FAILED]', err);
         }
       }
+    }
+
+    if (typeof renderToolboxHeaderStatus === 'function') {
+      renderToolboxHeaderStatus(`updateChatInputStateBadge:${nextText || '-'}`);
     }
   }
 
@@ -10811,30 +10884,61 @@
     }
   }
 
+  function appendSendTaskStageLog(line) {
+    const text = String(line || '').trim();
+    if (!text) {
+      return;
+    }
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(text);
+      return;
+    }
+    console.log(text);
+  }
+
   function clickSendButton(button, source = 'stable-send') {
     const sendButton = resolveComposerButtonElement(button);
 
     if (!(sendButton instanceof HTMLButtonElement)) {
+      appendSendTaskStageLog(
+        `[SEND_TASK][FAILED] stage=before-native-click error=invalid_send_button source=${String(source || '-')}`,
+      );
       return { ok: false, reason: 'invalid_send_button' };
     }
+
+    const sendBtnInfo = describeComposerSendButtonForLog(sendButton);
+    const sendBtnDisabled = isSendButtonDisabled(sendButton);
 
     if (isVoiceComposerButton(sendButton)) {
       appendSendLogFields('[SEND][CLICK_REJECT]', {
         reason: 'voice_button',
         source,
-        selector: describeComposerSendButtonForLog(sendButton).selector || '-',
+        selector: sendBtnInfo.selector || '-',
       });
+      appendSendTaskStageLog(
+        `[SEND_TASK][FAILED] stage=before-native-click error=voice_button_only source=${String(source || '-')}`,
+      );
       return { ok: false, reason: 'voice_button_only', retryable: true };
     }
 
-    if (isSendButtonDisabled(sendButton)) {
+    if (sendBtnDisabled) {
+      appendSendTaskStageLog(
+        `[SEND_TASK][FAILED] stage=before-native-click error=send_button_disabled source=${String(source || '-')} `
+        + `buttonFound=1 disabled=1 aria=${sendBtnInfo.aria || '-'} testid=${sendButton.getAttribute('data-testid') || '-'}`,
+      );
       return { ok: false, reason: 'send_button_disabled' };
     }
 
     try {
       const diag = getComposerSendDiagnostics();
+      appendSendTaskStageLog(
+        `[SEND_TASK][BEFORE_NATIVE_CLICK] buttonFound=1 disabled=0 aria=${sendBtnInfo.aria || '-'} `
+        + `testid=${sendButton.getAttribute('data-testid') || '-'} source=${String(source || '-')} `
+        + `textLen=${diag.composer_text_len != null ? diag.composer_text_len : (diag.textLen != null ? diag.textLen : 0)} `
+        + `attachmentCount=${diag.has_attachment != null ? (diag.has_attachment ? 1 : 0) : (diag.hasAttachment ? 1 : 0)}`,
+      );
       appendSendLogFields('[SEND][CLICK_SUBMIT_BUTTON]', {
-        selector: sendButton.id === 'composer-submit-button' ? '#composer-submit-button' : describeComposerSendButtonForLog(sendButton).selector,
+        selector: sendButton.id === 'composer-submit-button' ? '#composer-submit-button' : sendBtnInfo.selector,
         ...diag,
         source,
       });
@@ -10845,13 +10949,17 @@
       });
       sendButton.focus();
       sendButton.click();
+      appendSendTaskStageLog(
+        `[SEND_TASK][NATIVE_SEND_CLICKED] method=click source=${String(source || '-')}`,
+      );
       return { ok: true, reason: 'clicked' };
     } catch (err) {
       const errText = err && err.message ? err.message : String(err);
+      const errStack = err && err.stack ? err.stack : errText;
       console.error('[ChatGPT toolbox] clickSendButton failed', {
         error_type: err && err.name ? err.name : 'Error',
         error: errText,
-        stack: err && err.stack ? err.stack : '',
+        stack: errStack,
       });
       appendSendLogFields('[SEND][ERROR]', {
         tag: 'clickSendButton',
@@ -10859,6 +10967,9 @@
         error: errText,
         stack: err && err.stack ? String(err.stack).slice(0, 200) : '-',
       });
+      appendSendTaskStageLog(
+        `[SEND_TASK][FAILED] stage=native-click error=${errStack} source=${String(source || '-')}`,
+      );
       return { ok: false, reason: 'send_click_exception', error: errText };
     }
   }
@@ -11649,6 +11760,9 @@
           if (result.reason === 'voice_button_only') {
             result.retryable = true;
           }
+          appendSendTaskStageLog(
+            `[SEND_TASK][FAILED] stage=native-click error=${result.reason} source=${String(source || '-')} attempt=${attempt}`,
+          );
           await sleep(intervalMs);
           continue;
         }
@@ -11664,6 +11778,9 @@
           timeoutMs: SEND_STABLE_VERIFY_TIMEOUT_MS,
         });
         if (verifiedClick.ok) {
+          appendSendTaskStageLog(
+            `[SEND_TASK][WAITING_REPLY] reason=native-clicked source=${String(source || '-')} attempt=${attempt}`,
+          );
           result.ok = true;
           result.reason = result.sendModeReason === 'attachment_only_send'
             ? 'attachment_only_send'

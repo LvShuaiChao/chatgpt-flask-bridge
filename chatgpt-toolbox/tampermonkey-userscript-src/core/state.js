@@ -19,8 +19,8 @@
    * TitlePrefixModule
    * - 只负责浏览器标签页标题的 ChatGPT 前缀与规范化。?
    *
-   * TitleBlinkNotifyModule
-   * - 回答完成后在页面失焦时闪烁标签标题提醒。?
+   * ResponseDoneNotifyModule
+   * - 回答完成后的「回复完成」未读提醒；用户回到页面并交互后自动确认清除。?
    *
    * ExportModule
    * - 只负责对话导出、配置导出、设置备份。?
@@ -336,6 +336,101 @@
   const DEFAULT_BATCH_NO_MORE_CONTENT_SIGNAL = LEGACY_BATCH_NO_MORE_CONTENT_SIGNAL;
   const DEFAULT_TASK_DONE_SIGNAL = DEFAULT_BATCH_STOP_SIGNAL;
 
+  const DETAILED_CURSOR_MODIFICATION_INSTRUCTION_BLOCK = `
+如果当前任务涉及代码修改、修复方案、重构建议、Bug 定位、UI 行为修复、状态同步、闭环控制、上传逻辑、按钮状态、Prompt 修改、日志排查、构建问题、测试问题、Cursor 修改建议或 Claude Code 修改建议，必须给出详细的 Cursor / Claude Code 修改指令。
+Cursor / Claude Code 修改指令必须尽可能可直接粘贴执行，不能只写概要。至少需要包含：
+1. 修改目标：
+   - 明确这次要解决什么问题。
+   - 明确用户看到的错误现象是什么。
+   - 明确修改后的目标行为是什么。
+2. 涉及文件：
+   - 写出完整或相对文件路径。
+   - 如果不确定路径，必须给出搜索关键词和可能所在模块。
+   - 不要只写“相关文件”。
+3. 具体定位：
+   - 写出函数名、类名、变量名、常量名、DOM id、按钮 id、配置字段、状态字段或日志标签。
+   - 如果涉及前端按钮或状态机，必须写出 action、data-action、button id、phase/state 字段。
+   - 如果涉及后端或 Python，必须写出模块名、函数名、类名。
+4. 修改前问题：
+   - 说明当前逻辑为什么会出错。
+   - 如果是状态不同步，要说明是哪几个状态源不一致。
+   - 如果是异步/闭环/上传问题，要说明哪个阶段可能提前执行或重复执行。
+5. 修改后逻辑：
+   - 说明应该新增、替换或删除哪些逻辑。
+   - 如果涉及状态机，必须写出状态流转顺序。
+   - 如果涉及等待、轮询、上传、发送，必须写出前置条件和后置条件。
+6. 代码要求：
+   - 代码量不大时，直接给出完整修改后的函数或关键代码片段。
+   - 代码量较大时，给出可直接粘贴给 Cursor 执行的分步修改指令。
+   - 不要只说“增加判断”“优化逻辑”“完善日志”，必须写出判断条件、字段名、函数名和日志名。
+7. 日志要求：
+   - 如果涉及运行时行为，必须给出需要新增或修改的日志标签。
+   - 日志应包含关键字段，例如 runId、round、phase、action、source、reason、count、groupId、delayMs、delaySec、error message。
+   - 如果是异常，必须输出具体 error.message 或 stack 摘要。
+8. 验证步骤：
+   - 给出明确的手动验证步骤。
+   - 给出预期日志。
+   - 给出异常场景验证。
+   - 如果需要构建，写出构建命令。
+   - 如果需要测试，写出测试命令或最小复现步骤。
+9. 边界条件：
+   - 说明空输入、重复点击、页面刷新、后台恢复、网络延迟、上传失败、状态失效、旧配置迁移等边界情况。
+   - 如果缺少源码、日志、构建结果、测试结果或用户确认，必须说明缺少什么，不能假装已经验证完成。
+10. 输出格式：
+   - 如果任务还没有完成，继续输出尚未完成的分析、代码或 Cursor 修改指令。
+   - 不要重复之前已经输出过的内容。
+   - 不要重新开始整个任务。
+   - 不要扩展到无关任务。
+   - 不要输出笼统建议，要输出可执行修改指令。
+`;
+
+  function hasDetailedCursorInstructionBlock(text) {
+    const normalized = String(text || '');
+    return (
+      normalized.includes('Cursor / Claude Code 修改指令')
+      || normalized.includes('Cursor 修改指令必须尽可能可直接粘贴执行')
+      || normalized.includes('Claude Code 修改建议')
+      || (
+        normalized.includes('涉及文件')
+        && normalized.includes('函数名')
+        && normalized.includes('验证步骤')
+        && normalized.includes('日志要求')
+      )
+    );
+  }
+
+  function appendDetailedCursorInstructionBlock(text) {
+    const base = String(text || '').trim();
+    if (!base) {
+      return DETAILED_CURSOR_MODIFICATION_INSTRUCTION_BLOCK.trim();
+    }
+    if (hasDetailedCursorInstructionBlock(base)) {
+      return base;
+    }
+    return [
+      base,
+      '',
+      DETAILED_CURSOR_MODIFICATION_INSTRUCTION_BLOCK.trim(),
+    ].join('\n');
+  }
+
+  function logPromptDetailCursorBlock(source, promptText) {
+    if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.appendLog !== 'function') {
+      return;
+    }
+    const prompt = String(promptText || '');
+    const hasDetailed = hasDetailedCursorInstructionBlock(prompt);
+    ToolboxShell.appendLog(
+      `[PROMPT][DETAIL_CURSOR_BLOCK] source=${String(source || '-')} hasDetailed=${hasDetailed ? 1 : 0} len=${prompt.length}`,
+    );
+  }
+
+  if (typeof window !== 'undefined') {
+    window.DETAILED_CURSOR_MODIFICATION_INSTRUCTION_BLOCK = DETAILED_CURSOR_MODIFICATION_INSTRUCTION_BLOCK;
+    window.appendDetailedCursorInstructionBlock = appendDetailedCursorInstructionBlock;
+    window.hasDetailedCursorInstructionBlock = hasDetailedCursorInstructionBlock;
+  }
+
   const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V2 = `请继续完成上一个任务。
 
 默认行为：继续输出剩余内容。
@@ -363,7 +458,7 @@
 4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
 5. 如果上一轮回答像是被截断，请从中断位置继续。`;
 
-  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = `请继续完成当前任务。
+  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE_BASE = `请继续完成当前任务。
 
 你必须先判断“最开始那个 Prompt 的任务目标”是否已经完整完成，而不是机械地继续，也不是机械地停止。
 
@@ -383,23 +478,11 @@
 4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
 5. 如果上一轮回答像是被截断，请从中断位置继续。
 
-如果当前任务涉及代码修改、修复方案、重构建议、Bug 定位、UI 行为修复、状态同步、闭环控制、上传逻辑、按钮状态、日志排查或 Cursor 修改建议，必须给出详细的 Cursor 修改指令。
-
-Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
-1. 修改目标
-2. 涉及文件路径
-3. 函数名或定位关键词
-4. 修改前的问题
-5. 修改后的目标行为
-6. 需要新增/替换/删除的代码逻辑
-7. 关键代码片段
-8. 日志要求
-9. 验证步骤
-10. 边界条件
-
-不要只写“继续检查”“继续完善”“需要修复”等笼统描述。
-
 不要使用 try/pass。如果必须捕获异常，必须打印或记录具体错误。`;
+
+  const DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE = appendDetailedCursorInstructionBlock(
+    DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE_BASE,
+  );
 
   const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V1 = `请继续完成上一个任务。
 
@@ -791,7 +874,22 @@ Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
     if (
       normalized.includes('请继续完成当前任务')
       && normalized.includes('最开始那个 Prompt')
-      && !normalized.includes('Cursor 修改指令')
+      && !hasDetailedCursorInstructionBlock(normalized)
+    ) {
+      return true;
+    }
+
+    if (
+      normalized.includes('Cursor 修改指令')
+      && !normalized.includes('函数名')
+      && !normalized.includes('验证步骤')
+    ) {
+      return true;
+    }
+
+    if (
+      normalized.includes('涉及代码修改')
+      && !normalized.includes('Cursor / Claude Code 修改指令必须尽可能可直接粘贴执行')
     ) {
       return true;
     }
@@ -825,6 +923,19 @@ Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
       return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
     }
 
+    if (
+      text.includes('请继续完成当前任务')
+      && text.includes('最开始那个 Prompt')
+      && !hasDetailedCursorInstructionBlock(text)
+    ) {
+      if (typeof logFn === 'function') {
+        logFn(
+          `[AUTOQ][TASK_PROMPT][MIGRATE_TO_DETAILED_CURSOR_TEMPLATE] field=${field} oldLength=${text.length}`,
+        );
+      }
+      return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    }
+
     if (text.includes(DEFAULT_BATCH_DONE_SIGNAL)) {
       const repaired = text.replaceAll(DEFAULT_BATCH_DONE_SIGNAL, '{{DONE_SIGNAL}}');
       if (repaired !== text && typeof logFn === 'function') {
@@ -843,13 +954,27 @@ Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
   }
 
   function renderContinuePromptTemplate(template, doneSignal) {
-    const safeTemplate = String(template || DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
+    const rawTemplate = String(template || DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
+    let safeTemplate = rawTemplate;
+    if (!rawTemplate.trim()) {
+      safeTemplate = DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    } else if (isLegacyDefaultBatchContinuePromptTemplate(rawTemplate)) {
+      safeTemplate = DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    } else if (
+      rawTemplate.includes('请继续完成当前任务')
+      && rawTemplate.includes('最开始那个 Prompt')
+      && !hasDetailedCursorInstructionBlock(rawTemplate)
+    ) {
+      safeTemplate = DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    }
     const safeStopSignal = normalizeDoneSignal(doneSignal || DEFAULT_BATCH_STOP_SIGNAL);
-    return safeTemplate
+    const rendered = safeTemplate
       .replaceAll('{{STOP_SIGNAL}}', safeStopSignal)
       .replaceAll('{{DONE_SIGNAL}}', safeStopSignal)
       .replaceAll('{{BLOCKED_SIGNAL}}', safeStopSignal)
       .replaceAll('{{NO_MORE_CONTENT_SIGNAL}}', safeStopSignal);
+    logPromptDetailCursorBlock('renderContinuePromptTemplate', rendered);
+    return rendered;
   }
 
   function getContinuePromptTemplateForDisplay(value, logFn, fieldName) {
@@ -861,7 +986,7 @@ Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
   }
 
   function getDefaultBatchContinuePromptText() {
-    return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    return appendDetailedCursorInstructionBlock(DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE);
   }
 
   function getDefaultTaskContinuePromptText() {

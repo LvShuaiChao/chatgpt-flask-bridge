@@ -4434,17 +4434,37 @@
   const TitlePrefixModule = (() => {
     const PREFIX = 'ChatGPT - ';
 
+    const TOOLBOX_STATUS_PREFIX_RE = /^(?:🔴\s*)?(?:【|\[)(?:回复完成|回答中|等回复|发送中)(?:】|\])\s*/u;
+
     let started = false;
     let fixing = false;
     let titleObserver = null;
     let headObserver = null;
-    let replyDoneFlashTimer = 0;
-    let replyDoneFlashStopTimer = 0;
-    let replyDoneFlashBaseTitle = '';
-    let replyDoneFlashOn = false;
+    let originalDocumentTitle = '';
+    let originalFaviconHref = '';
+    let toolboxTitleState = '';
+
+    function stripToolboxStatusPrefixes(value) {
+      let text = String(value || '').trim();
+      let prev = '';
+      while (text !== prev) {
+        prev = text;
+        text = text
+          .replace(/^🔴\s*\[回复完成\]\s*/u, '')
+          .replace(/^\[回复完成\]\s*/u, '')
+          .replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '')
+          .replace(/^【回复完成】\s*/u, '')
+          .replace(/^\[回答中\]\s*/u, '')
+          .replace(/^\[等回复\]\s*/u, '')
+          .replace(/^\[发送中\]\s*/u, '')
+          .replace(TOOLBOX_STATUS_PREFIX_RE, '')
+          .trim();
+      }
+      return text;
+    }
 
     function stripKnownPrefixes(value) {
-      let text = String(value || '').trim();
+      let text = stripToolboxStatusPrefixes(value);
 
       text = text
         .replace(/^\(\d+\)\s+/, '')
@@ -4460,7 +4480,7 @@
       return text;
     }
 
-    function normalizeTitle(value) {
+    function buildNormalizedChatGptTitle(value) {
       const raw = String(value || '').trim();
 
       const issuePrefixMatch = raw.match(/^(\(\d+\)|\[\d+\])\s+/);
@@ -4477,6 +4497,180 @@
       }
 
       return `${issuePrefix}${PREFIX}${body}`.trim();
+    }
+
+    function normalizeTitle(value) {
+      const normalizedBase = buildNormalizedChatGptTitle(value);
+      if (!originalDocumentTitle) {
+        originalDocumentTitle = normalizedBase;
+      }
+      if (toolboxTitleState && toolboxTitleState !== 'idle') {
+        return buildTitleWithToolboxState(toolboxTitleState, normalizedBase);
+      }
+      return normalizedBase;
+    }
+
+    function getOriginalDocumentTitle() {
+      if (!originalDocumentTitle) {
+        originalDocumentTitle = buildNormalizedChatGptTitle(document.title || 'ChatGPT');
+      }
+      return originalDocumentTitle;
+    }
+
+    function getOriginalFaviconHref() {
+      if (originalFaviconHref) {
+        return originalFaviconHref;
+      }
+      const icon = document.querySelector('link[rel~="icon"]');
+      originalFaviconHref = icon ? String(icon.href || '') : '';
+      return originalFaviconHref;
+    }
+
+    function ensureFaviconLink() {
+      let icon = document.querySelector('link[rel~="icon"]');
+      if (!icon) {
+        icon = document.createElement('link');
+        icon.rel = 'icon';
+        document.head.appendChild(icon);
+      }
+      return icon;
+    }
+
+    function buildRedDoneFaviconDataUrl() {
+      const svg = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">',
+        '<circle cx="32" cy="32" r="30" fill="#dc2626"/>',
+        '<path d="M18 33.5L27 42L46 22" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>',
+        '</svg>',
+      ].join('');
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
+    function setToolboxFaviconState(state) {
+      const icon = ensureFaviconLink();
+      if (state === 'reply_done') {
+        icon.href = buildRedDoneFaviconDataUrl();
+        return;
+      }
+      const original = getOriginalFaviconHref();
+      if (original) {
+        icon.href = original;
+      }
+    }
+
+    function buildTitleWithToolboxState(state, baseTitle) {
+      const base = String(baseTitle || getOriginalDocumentTitle() || 'ChatGPT').trim() || 'ChatGPT';
+      if (state === 'reply_done') {
+        return `🔴 [回复完成] ${base}`;
+      }
+      if (state === 'responding') {
+        return `[回答中] ${base}`;
+      }
+      if (state === 'waiting_reply') {
+        return `[等回复] ${base}`;
+      }
+      if (state === 'sending') {
+        return `[发送中] ${base}`;
+      }
+      return base;
+    }
+
+    function setDocumentTitleRaw(value) {
+      const desc = getRawDocumentTitleDescriptor();
+      if (desc) {
+        fixing = true;
+        desc.set.call(document, value);
+        fixing = false;
+        return;
+      }
+      document.title = value;
+    }
+
+    function appendTitleStateLog(line) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+        return;
+      }
+      console.log(line);
+    }
+
+    function setToolboxTabTitleState(state, reason) {
+      const nextState = String(state || 'idle').trim().toLowerCase() || 'idle';
+      const baseTitle = buildNormalizedChatGptTitle(
+        stripToolboxStatusPrefixes(document.title || getOriginalDocumentTitle() || 'ChatGPT'),
+      );
+      if (!originalDocumentTitle) {
+        originalDocumentTitle = baseTitle;
+      }
+      toolboxTitleState = nextState === 'idle' ? '' : nextState;
+
+      if (nextState === 'idle') {
+        setDocumentTitleRaw(baseTitle);
+        setToolboxFaviconState('normal');
+      } else {
+        setDocumentTitleRaw(buildTitleWithToolboxState(nextState, baseTitle));
+        setToolboxFaviconState(nextState === 'reply_done' ? 'reply_done' : 'normal');
+      }
+
+      appendTitleStateLog(
+        `[TITLE_STATE][SET] state=${nextState || '-'} reason=${reason || '-'} title=${document.title}`,
+      );
+    }
+
+    function getToolboxTabTitleState() {
+      return toolboxTitleState || 'idle';
+    }
+
+    function syncToolboxTabTitleFromSendPhase(phase, reason) {
+      const normalized = String(phase || 'idle').trim().toLowerCase() || 'idle';
+      let assistantBusy = false;
+      try {
+        assistantBusy = typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          && ComposerApi.isAssistantLikelyBusy();
+      } catch (err) {
+        console.error('[ChatGPT toolbox] syncToolboxTabTitleFromSendPhase busy check failed', err);
+      }
+
+      if (
+        normalized === 'sending'
+        || normalized === 'waiting_send'
+        || normalized === 'waiting_ready'
+        || normalized === 'waiting_composer'
+        || normalized === 'waiting_page_reply_to_send'
+      ) {
+        setToolboxTabTitleState('sending', reason || `send-phase:${normalized}`);
+        return;
+      }
+
+      if (normalized === 'waiting_reply') {
+        setToolboxTabTitleState(
+          assistantBusy ? 'responding' : 'waiting_reply',
+          reason || `send-phase:${normalized}`,
+        );
+        return;
+      }
+
+      if (assistantBusy || normalized === 'generating' || normalized === 'responding') {
+        setToolboxTabTitleState('responding', reason || `send-phase:${normalized}`);
+        return;
+      }
+
+      if (toolboxTitleState === 'reply_done') {
+        return;
+      }
+
+      if (normalized === 'cancelled') {
+        setToolboxTabTitleState('idle', reason || `send-phase:${normalized}`);
+        return;
+      }
+
+      if (normalized === 'idle' || normalized === 'success' || normalized === 'failed') {
+        if (toolboxTitleState) {
+          return;
+        }
+        setToolboxTabTitleState('idle', reason || `send-phase:${normalized}`);
+      }
     }
 
     function getRawDocumentTitleDescriptor() {
@@ -4602,104 +4796,27 @@
         fixTitle();
       }, 1000);
 
-      function stopReplyDoneFlashWithHeader(reason = '') {
-        stopReplyDoneFlash(reason);
-        if (typeof ToolboxShell !== 'undefined'
-          && typeof ToolboxShell.stopHeaderTitleFlash === 'function') {
-          ToolboxShell.stopHeaderTitleFlash(reason);
-        }
-      }
-
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-          stopReplyDoneFlashWithHeader('visibility-visible');
-        }
-      }, true);
-
-      document.addEventListener('pointerdown', () => {
-        stopReplyDoneFlashWithHeader('pointerdown');
-      }, true);
-
-      document.addEventListener('keydown', () => {
-        stopReplyDoneFlashWithHeader('keydown');
-      }, true);
     }
-
 
     function stopReplyDoneFlash(reason = '') {
-      const wasActive = !!replyDoneFlashTimer || !!replyDoneFlashBaseTitle;
-
-      if (replyDoneFlashTimer) {
-        window.clearInterval(replyDoneFlashTimer);
-        replyDoneFlashTimer = 0;
+      if (toolboxTitleState === 'reply_done') {
+        setToolboxTabTitleState('idle', reason || 'stop-reply-done-flash');
       }
-
-      if (replyDoneFlashStopTimer) {
-        window.clearTimeout(replyDoneFlashStopTimer);
-        replyDoneFlashStopTimer = 0;
-      }
-
-      if (replyDoneFlashBaseTitle) {
-        document.title = normalizeTitle(replyDoneFlashBaseTitle || 'ChatGPT');
-      }
-
-      replyDoneFlashBaseTitle = '';
-      replyDoneFlashOn = false;
-
-      if (wasActive && typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[TITLE_FLASH][stop] reason=${reason || '-'}`);
-      }
+      appendTitleStateLog(`[TITLE_FLASH][stop] reason=${reason || '-'}`);
     }
 
-    function startReplyDoneFlash(reason = '', options = {}) {
-      const currentBase = stripKnownPrefixes(document.title) || 'ChatGPT';
-      const cleanBase = currentBase
-        .replace(/^🔔\s*回复完成\s*[-:：]\s*/u, '')
-        .replace(/^【回复完成】\s*/u, '')
-        .trim() || 'ChatGPT';
-
-      stopReplyDoneFlash(`restart:${reason || '-'}`);
-
-      replyDoneFlashBaseTitle = cleanBase;
-      replyDoneFlashOn = false;
-
-      const intervalMs = Number(options.intervalMs || 600);
-      const autoStopMs = Number(options.autoStopMs || 0);
-
-      const tick = () => {
-        replyDoneFlashOn = !replyDoneFlashOn;
-        document.title = replyDoneFlashOn
-          ? normalizeTitle(`【回复完成】 ${replyDoneFlashBaseTitle}`)
-          : normalizeTitle(replyDoneFlashBaseTitle);
-      };
-
-      tick();
-      replyDoneFlashTimer = window.setInterval(tick, intervalMs);
-
-      if (replyDoneFlashStopTimer) {
-        window.clearTimeout(replyDoneFlashStopTimer);
-        replyDoneFlashStopTimer = 0;
-      }
-
-      if (autoStopMs > 0) {
-        replyDoneFlashStopTimer = window.setTimeout(() => {
-          stopReplyDoneFlash(`auto-stop:${reason || 'reply-done'}`);
-        }, autoStopMs);
-      }
-
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        const flashMode = autoStopMs > 0 ? 'timed' : 'until-user-action';
-        ToolboxShell.appendLog(
-          `[TITLE_FLASH][start] reason=${reason || 'reply-done'} intervalMs=${intervalMs} `
-          + `autoStopMs=${autoStopMs} mode=${flashMode}`,
-        );
-      }
+    function startReplyDoneFlash(reason = '', _options = {}) {
+      setToolboxTabTitleState('reply_done', reason || 'reply-done');
+      appendTitleStateLog(`[TITLE_FLASH][start] reason=${reason || 'reply-done'} mode=stable`);
     }
 
     return {
       start,
       startReplyDoneFlash,
       stopReplyDoneFlash,
+      setToolboxTabTitleState,
+      syncToolboxTabTitleFromSendPhase,
+      getToolboxTabTitleState,
     };
   })();
 

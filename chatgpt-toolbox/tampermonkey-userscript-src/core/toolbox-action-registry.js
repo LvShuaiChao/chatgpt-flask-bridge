@@ -297,7 +297,7 @@ const ToolboxActionRegistry = (() => {
         action: ACTION.CLOSED_LOOP_HOTKEY_EVERY_N,
         handlerAction: ACTION.CLOSED_LOOP_HOTKEY_EVERY_N,
         label: '',
-        className: 'cgpt-btn cyan',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5',
         title: '快捷键模式闭环',
         required: true,
         visibleInUploadToolbar: false,
@@ -309,7 +309,7 @@ const ToolboxActionRegistry = (() => {
         action: ACTION.CLOSED_LOOP_HOTKEY_EVERY_ROUND,
         handlerAction: ACTION.CLOSED_LOOP_HOTKEY_EVERY_ROUND,
         label: '',
-        className: 'cgpt-btn cyan',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round',
         title: '快捷键模式闭环（每一轮上传）',
         required: true,
         visibleInUploadToolbar: false,
@@ -321,7 +321,7 @@ const ToolboxActionRegistry = (() => {
         action: ACTION.CLOSED_LOOP_DIRECT_EVERY_N,
         handlerAction: ACTION.CLOSED_LOOP_DIRECT_EVERY_N,
         label: '',
-        className: 'cgpt-btn cyan',
+        className: 'cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5',
         title: '直接发送模式闭环',
         required: true,
         visibleInUploadToolbar: false,
@@ -357,12 +357,14 @@ const ToolboxActionRegistry = (() => {
   function getUploadUiActionDefs() {
     const defs = getUploadToolbarButtonDefs();
     return [
-      ...defs.map((def) => ({
-        selector: def.selector,
-        action: def.action,
-        handlerAction: def.handlerAction || def.action,
-        label: def.label,
-      })),
+      ...defs
+        .map((def) => ({
+          selector: String(def.selector || '').trim(),
+          action: def.action,
+          handlerAction: def.handlerAction || def.action,
+          label: def.label,
+        }))
+        .filter((def) => def.selector),
       {
         selector: '#cgpt-upload-group-manage',
         action: ACTION.TOGGLE_UPLOAD_GROUP_MANAGE,

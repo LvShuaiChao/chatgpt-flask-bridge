@@ -11,12 +11,25 @@
     const TOOLBOX_MIN_WIDTH_FULL = 260;
     const TOOLBOX_MIN_WIDTH_COMPACT = 220;
 
+    const TOOLBOX_SIZE_LIMITS = Object.freeze({
+      DEFAULT_WIDTH: 474,
+      DEFAULT_HEIGHT: 620,
+      MIN_WIDTH: 360,
+      MIN_HEIGHT: 360,
+      MAX_WIDTH: 1120,
+      MAX_WIDTH_RATIO: 0.9,
+      MAX_HEIGHT_RATIO: 0.92,
+      VIEWPORT_MARGIN: 16,
+      NARROW_WIDTH: 620,
+      EXTRA_NARROW_WIDTH: 460,
+    });
+
     const PANEL_DEFAULT_SIZE = Object.freeze({
       width: 640,
       height: 500,
       minWidth: TOOLBOX_MIN_WIDTH_FULL,
       minHeight: 240,
-      maxWidth: 860,
+      maxWidth: TOOLBOX_SIZE_LIMITS.MAX_WIDTH,
       maxHeight: 760,
     });
 
@@ -601,8 +614,8 @@
           height: min(500px, calc(100vh - 32px));
           min-width: min(${TOOLBOX_MIN_WIDTH_FULL}px, calc(100vw - 24px));
           min-height: min(240px, calc(100vh - 32px));
-          max-width: min(860px, calc(100vw - 24px));
-          max-height: min(760px, calc(100vh - 32px));
+          max-width: min(${TOOLBOX_SIZE_LIMITS.MAX_WIDTH}px, calc(100vw * ${TOOLBOX_SIZE_LIMITS.MAX_WIDTH_RATIO}));
+          max-height: min(760px, calc(100vh * ${TOOLBOX_SIZE_LIMITS.MAX_HEIGHT_RATIO}));
           box-sizing: border-box;
           overflow: hidden;
           background: #0f1115;
@@ -647,6 +660,24 @@
           border-right: 2px solid rgba(148, 163, 184, 0.9);
           border-bottom: 2px solid rgba(148, 163, 184, 0.9);
           pointer-events: none;
+        }
+
+        .cgpt-toolbox-resize-left-handle {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 10px;
+          height: 100%;
+          cursor: ew-resize;
+          z-index: 2147483647;
+          user-select: none;
+          touch-action: none;
+          background: transparent;
+          pointer-events: auto;
+        }
+
+        .cgpt-toolbox-resize-left-handle:hover {
+          background: rgba(96, 165, 250, 0.12);
         }
 
         .cgpt-resize-n {
@@ -823,8 +854,12 @@
           max-width: 92px;
         }
 
-        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-status-primary-badge {
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-status-primary-badge,
+        #${APP.panelId} #cgpt-page-input-state.cgpt-toolbox-status-primary-badge {
           max-width: 88px;
+          display: inline-flex !important;
+          visibility: visible !important;
+          opacity: 1 !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-page-turn-badge,
@@ -1105,9 +1140,73 @@
           gap: 8px;
         }
 
-        .cgpt-toolbox-title {
+        .cgpt-header-status-chips {
           flex: 1 1 auto;
           min-width: 0;
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 4px;
+          overflow: hidden;
+        }
+
+        .cgpt-header-status-chip {
+          flex: 0 0 auto;
+          max-width: 80px;
+          padding: 2px 7px;
+          border-radius: 999px;
+          font-size: 12px;
+          line-height: 18px;
+          font-weight: 700;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .cgpt-header-status-chip-danger {
+          color: #ffffff;
+          background: #dc2626;
+        }
+
+        .cgpt-header-status-chip-reply-done,
+        .cgpt-header-status-chip-done {
+          color: #ffffff;
+          background: #dc2626;
+          border: 1px solid #ef4444;
+        }
+
+        .cgpt-header-status-chip-warn {
+          color: #ffffff;
+          background: #d97706;
+        }
+
+        .cgpt-header-status-chip-info {
+          color: #ffffff;
+          background: #2563eb;
+        }
+
+        .cgpt-header-status-chip-ok {
+          color: #ffffff;
+          background: #16a34a;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-header-status-chips,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-header-status-chips,
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-header-status-chips {
+          display: flex !important;
+          visibility: visible !important;
+          opacity: 1 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-header-status-chip {
+          max-width: 72px;
+          font-size: 11px;
+          padding: 2px 6px;
+        }
+
+        .cgpt-toolbox-title {
+          flex: 0 0 auto;
+          max-width: 42%;
           font-size: 13px;
           font-weight: 800;
           color: #f8fafc;
@@ -1242,6 +1341,7 @@
         }
 
         .cgpt-toolbox-header-actions {
+          flex: 0 0 auto;
           flex: 0 0 auto;
           display: flex;
           gap: 6px;
@@ -1947,6 +2047,14 @@
           overflow-x: hidden;
         }
 
+        .cgpt-upload-action-toolbar .cgpt-upload-action-row,
+        .cgpt-toolbox-action-grid .cgpt-upload-action-row {
+          margin-top: 0;
+          margin-bottom: 0;
+          padding-top: 0;
+          padding-bottom: 0;
+        }
+
         #cgpt-log-module .cgpt-log-actions {
           width: 100%;
         }
@@ -2253,6 +2361,35 @@
           cursor: not-allowed;
         }
 
+        .cgpt-btn.cgpt-btn-closed-loop,
+        .cgpt-btn.cgpt-btn-closed-loop-idle {
+          background: linear-gradient(135deg, #f97316, #ea580c) !important;
+          color: #ffffff !important;
+          border: 1px solid rgba(251, 146, 60, 0.55) !important;
+        }
+
+        .cgpt-btn.cgpt-btn-closed-loop:hover:not(:disabled),
+        .cgpt-btn.cgpt-btn-closed-loop-idle:hover:not(:disabled) {
+          background: linear-gradient(135deg, #fb923c, #f97316) !important;
+          color: #ffffff !important;
+        }
+
+        .cgpt-btn.cgpt-btn-closed-loop.cgpt-btn-danger,
+        .cgpt-btn.cgpt-btn-closed-loop.cgpt-btn-stop,
+        .cgpt-btn.cgpt-btn-closed-loop.cgpt-action-running {
+          background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+          color: #ffffff !important;
+          border: 1px solid rgba(248, 113, 113, 0.65) !important;
+        }
+
+        .cgpt-btn.cgpt-btn-closed-loop:disabled {
+          background: rgba(75, 85, 99, 0.75) !important;
+          color: rgba(255, 255, 255, 0.65) !important;
+          border-color: rgba(148, 163, 184, 0.35) !important;
+          opacity: 1 !important;
+          cursor: not-allowed;
+        }
+
         #cgpt-copy-hotkey-continue-loop.cgpt-btn-busy {
           background: #dc2626 !important;
           border-color: #ef4444 !important;
@@ -2319,8 +2456,48 @@
           overflow-y: visible !important;
         }
 
+        .cgpt-toolbox-action-grid {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          align-content: flex-start;
+          gap: 8px 8px;
+          width: 100%;
+          margin: 0;
+          padding: 0;
+          min-width: 0;
+          max-width: 100%;
+          overflow-x: hidden !important;
+          overflow-y: visible !important;
+        }
+
+        .cgpt-toolbox-action-grid > * {
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+
+        .cgpt-toolbox-action-grid .cgpt-action-group,
+        .cgpt-toolbox-action-grid .cgpt-upload-main-action-row,
+        .cgpt-toolbox-action-grid .cgpt-upload-closed-loop-action-row,
+        .cgpt-toolbox-action-grid .cgpt-upload-action-row {
+          display: contents;
+        }
+
+        .cgpt-toolbox-action-grid .cgpt-btn,
+        .cgpt-toolbox-action-grid button.cgpt-btn {
+          flex: 0 0 auto;
+          height: 32px;
+          min-height: 32px;
+          line-height: 18px;
+          padding: 6px 10px;
+          margin: 0 !important;
+          box-sizing: border-box;
+          white-space: nowrap;
+        }
+
         .cgpt-upload-action-toolbar .cgpt-upload-action-row {
           margin-top: 0;
+          margin-bottom: 0;
           justify-content: flex-start;
         }
 
@@ -2331,6 +2508,11 @@
           flex-wrap: wrap;
           min-width: 0;
           max-width: 100%;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-action-grid .cgpt-upload-closed-loop-action-row,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-upload-closed-loop-action-row {
+          display: none !important;
         }
 
         .cgpt-upload-main-action-row {
@@ -5066,6 +5248,30 @@
           max-width: 100% !important;
         }
 
+        .cgpt-toolbox-action-grid {
+          display: flex !important;
+          flex-wrap: wrap !important;
+          align-items: center !important;
+          align-content: flex-start !important;
+          gap: 8px 8px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+        }
+
+        .cgpt-toolbox-action-grid .cgpt-action-group,
+        .cgpt-toolbox-action-grid .cgpt-upload-main-action-row,
+        .cgpt-toolbox-action-grid .cgpt-upload-closed-loop-action-row,
+        .cgpt-toolbox-action-grid .cgpt-upload-action-row {
+          display: contents !important;
+        }
+
+        .cgpt-toolbox-action-grid .cgpt-btn,
+        .cgpt-toolbox-action-grid button.cgpt-btn {
+          margin: 0 !important;
+        }
+
         .cgpt-btn,
         .cgpt-toolbox-small-btn {
           max-width: 100% !important;
@@ -6436,6 +6642,10 @@
         }
       }
 
+      if (typeof ToolboxHeaderStatus !== 'undefined' && ToolboxHeaderStatus.ensureToolboxHeaderStatusChips) {
+        ToolboxHeaderStatus.ensureToolboxHeaderStatusChips(header);
+      }
+
       return titleRow;
     }
 
@@ -6696,6 +6906,7 @@
           <div class="cgpt-toolbox-header" id="cgpt-toolbox-drag-handle">
             <div class="cgpt-toolbox-title-row">
               <div class="cgpt-toolbox-title">小张工具箱</div>
+              <div class="cgpt-header-status-chips" aria-live="polite"></div>
               <div class="cgpt-toolbox-header-actions">
                 <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact">简洁</button>
               </div>
@@ -7135,21 +7346,189 @@
       };
     }
 
-    function getPanelMaxSize() {
-      const defaults = getCurrentPanelDefaultSize();
-      const viewport = getViewportMetrics();
-      const maxWidthCap = defaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860;
-      const maxHeightCap = defaults.maxHeight || PANEL_DEFAULT_SIZE.maxHeight || 760;
+    function getToolboxViewportWidth() {
+      return Math.max(
+        window.innerWidth || 0,
+        document.documentElement && document.documentElement.clientWidth
+          ? document.documentElement.clientWidth
+          : 0,
+      );
+    }
+
+    function getToolboxViewportHeight() {
+      return Math.max(
+        window.innerHeight || 0,
+        document.documentElement && document.documentElement.clientHeight
+          ? document.documentElement.clientHeight
+          : 0,
+      );
+    }
+
+    function getToolboxMaxWidth() {
+      const viewportWidth = getToolboxViewportWidth();
+      const margin = TOOLBOX_SIZE_LIMITS.VIEWPORT_MARGIN;
+      return Math.min(
+        TOOLBOX_SIZE_LIMITS.MAX_WIDTH,
+        Math.floor(viewportWidth * TOOLBOX_SIZE_LIMITS.MAX_WIDTH_RATIO),
+        viewportWidth - margin * 2,
+      );
+    }
+
+    function getToolboxMaxHeight() {
+      const viewportHeight = getToolboxViewportHeight();
+      return Math.max(
+        TOOLBOX_SIZE_LIMITS.MIN_HEIGHT,
+        Math.floor(viewportHeight * TOOLBOX_SIZE_LIMITS.MAX_HEIGHT_RATIO),
+      );
+    }
+
+    function getToolboxResizeMinWidth() {
+      const panelMins = getPanelMinSize();
+      return Math.max(TOOLBOX_SIZE_LIMITS.MIN_WIDTH, panelMins.minWidth || TOOLBOX_MIN_WIDTH_FULL);
+    }
+
+    function normalizeToolboxSavedSize(width, height, reason) {
+      const maxWidth = getToolboxMaxWidth();
+      const maxHeight = getToolboxMaxHeight();
+      const nextWidth = Math.round(
+        Math.max(
+          TOOLBOX_SIZE_LIMITS.MIN_WIDTH,
+          Math.min(
+            Number(width) || TOOLBOX_SIZE_LIMITS.DEFAULT_WIDTH,
+            maxWidth,
+          ),
+        ),
+      );
+      const nextHeight = Math.round(
+        Math.max(
+          TOOLBOX_SIZE_LIMITS.MIN_HEIGHT,
+          Math.min(
+            Number(height) || TOOLBOX_SIZE_LIMITS.DEFAULT_HEIGHT,
+            maxHeight,
+          ),
+        ),
+      );
+      appendLog(
+        `[TOOLBOX_SIZE][NORMALIZE] reason=${reason || '-'} width=${width}->${nextWidth} height=${height}->${nextHeight} maxWidth=${maxWidth}`,
+      );
+      return {
+        width: nextWidth,
+        height: nextHeight,
+      };
+    }
+
+    function fitPanelRectInViewport(rect, options = {}) {
+      const viewportWidth = getToolboxViewportWidth();
+      const viewportHeight = getToolboxViewportHeight();
+      const margin = TOOLBOX_SIZE_LIMITS.VIEWPORT_MARGIN;
+      const maxWidth = getToolboxMaxWidth();
+      const maxHeight = getToolboxMaxHeight();
+      const minWidth = options.minWidth != null ? options.minWidth : getToolboxResizeMinWidth();
+      const minHeight = options.minHeight != null ? options.minHeight : (getPanelMinSize().minHeight || TOOLBOX_SIZE_LIMITS.MIN_HEIGHT);
+
+      let left = Number(rect.left) || margin;
+      let top = Number(rect.top) || margin;
+      let width = Number(rect.width) || TOOLBOX_SIZE_LIMITS.DEFAULT_WIDTH;
+      let height = Number(rect.height) || TOOLBOX_SIZE_LIMITS.DEFAULT_HEIGHT;
+
+      width = Math.max(minWidth, Math.min(maxWidth, width));
+      height = Math.max(minHeight, Math.min(maxHeight, height));
+
+      if (left + width > viewportWidth - margin) {
+        left = viewportWidth - margin - width;
+      }
+      if (left < margin) {
+        left = margin;
+        width = Math.min(width, viewportWidth - margin * 2);
+      }
+      if (top + height > viewportHeight - margin) {
+        top = viewportHeight - margin - height;
+      }
+      if (top < margin) {
+        top = margin;
+      }
 
       return {
-        width: Math.max(
-          defaults.minWidth,
-          Math.min(maxWidthCap, viewport.width - 32),
-        ),
-        height: Math.max(
-          defaults.minHeight,
-          Math.min(maxHeightCap, viewport.height - 32),
-        ),
+        left: Math.round(left),
+        top: Math.round(top),
+        width: Math.round(width),
+        height: Math.round(height),
+      };
+    }
+
+    function calculateRightResizeRect(startRect, dx, dy) {
+      const viewportWidth = getToolboxViewportWidth();
+      const viewportHeight = getToolboxViewportHeight();
+      const margin = TOOLBOX_SIZE_LIMITS.VIEWPORT_MARGIN;
+      const maxWidth = getToolboxMaxWidth();
+      const maxHeight = getToolboxMaxHeight();
+      const minWidth = getToolboxResizeMinWidth();
+      const minHeight = getPanelMinSize().minHeight || TOOLBOX_SIZE_LIMITS.MIN_HEIGHT;
+
+      let nextLeft = startRect.left;
+      let nextTop = startRect.top;
+      let nextWidth = startRect.width + dx;
+      let nextHeight = startRect.height + dy;
+
+      nextWidth = Math.max(minWidth, Math.min(maxWidth, nextWidth));
+      nextHeight = Math.max(minHeight, Math.min(maxHeight, nextHeight));
+
+      const desiredRight = nextLeft + nextWidth;
+      const maxRight = viewportWidth - margin;
+      if (desiredRight > maxRight) {
+        nextLeft = maxRight - nextWidth;
+      }
+      if (nextLeft < margin) {
+        nextLeft = margin;
+        nextWidth = Math.min(nextWidth, viewportWidth - margin * 2);
+      }
+
+      const maxBottom = viewportHeight - margin;
+      if (nextTop + nextHeight > maxBottom) {
+        nextHeight = maxBottom - nextTop;
+      }
+      if (nextTop < margin) {
+        nextTop = margin;
+      }
+
+      return {
+        left: Math.round(nextLeft),
+        top: Math.round(nextTop),
+        width: Math.round(nextWidth),
+        height: Math.round(nextHeight),
+      };
+    }
+
+    function applyPanelResizeRect(rect, reason = '-') {
+      if (!panel || !rect) {
+        return;
+      }
+
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.width = `${rect.width}px`;
+      panel.style.height = `${rect.height}px`;
+      panel.style.setProperty('--cgpt-toolbox-width', `${rect.width}px`);
+      panel.style.setProperty('--cgpt-toolbox-height', `${rect.height}px`);
+
+      updateToolboxNarrowClass(reason);
+      syncToolboxHeaderLayout(reason);
+    }
+
+    function getPanelMaxSize() {
+      const defaults = getCurrentPanelDefaultSize();
+      const maxWidth = compactMode
+        ? Math.min(defaults.maxWidth || MAX_COMPACT_WIDTH, getToolboxMaxWidth())
+        : getToolboxMaxWidth();
+      const maxHeight = compactMode
+        ? (defaults.maxHeight || PANEL_COMPACT_DEFAULT_SIZE.maxHeight || 400)
+        : getToolboxMaxHeight();
+
+      return {
+        width: Math.max(defaults.minWidth, maxWidth),
+        height: Math.max(defaults.minHeight, maxHeight),
       };
     }
 
@@ -7304,29 +7683,35 @@
     }
 
     function clampToolboxWidth(width) {
-      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
       const defaults = getCurrentPanelDefaultSize();
-      const minWidth = defaults.minWidth || TOOLBOX_MIN_WIDTH_FULL;
-      const maxWidthCap = defaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860;
-      const maxWidth = Math.max(minWidth, Math.min(maxWidthCap, viewportWidth - 24));
+      const minWidth = Math.max(
+        defaults.minWidth || TOOLBOX_MIN_WIDTH_FULL,
+        compactMode ? TOOLBOX_MIN_WIDTH_COMPACT : TOOLBOX_SIZE_LIMITS.MIN_WIDTH,
+      );
+      const normalized = normalizeToolboxSavedSize(
+        width,
+        defaults.height || PANEL_DEFAULT_SIZE.height,
+        'clampToolboxWidth',
+      );
       const numericWidth = Number(width);
       if (!Number.isFinite(numericWidth)) {
         return defaults.width || 640;
       }
-      return Math.max(minWidth, Math.min(maxWidth, numericWidth));
+      return Math.max(minWidth, Math.min(normalized.width, getToolboxMaxWidth()));
     }
 
     function normalizePanelSize(size) {
       const defaults = getCurrentPanelDefaultSize();
+      const normalized = normalizeToolboxSavedSize(
+        size && size.width != null ? size.width : defaults.width,
+        size && size.height != null ? size.height : defaults.height,
+        'normalizePanelSize',
+      );
       const maxSize = getPanelMaxSize();
 
       return {
-        width: clampToolboxWidth(
-          size && size.width != null
-            ? size.width
-            : defaults.width,
-        ),
-        height: clampNumber(size && size.height, defaults.minHeight, maxSize.height),
+        width: clampToolboxWidth(normalized.width),
+        height: clampNumber(normalized.height, defaults.minHeight, maxSize.height),
       };
     }
 
@@ -7416,7 +7801,7 @@
         return false;
       }
 
-      if (target.closest('.cgpt-toolbox-resize-handle, .cgpt-resize-handle')) {
+      if (target.closest('.cgpt-toolbox-resize-handle, .cgpt-toolbox-resize-left-handle, .cgpt-resize-handle')) {
         return true;
       }
 
@@ -7457,6 +7842,154 @@
       return handle;
     }
 
+    function ensureToolboxLeftResizeHandle(panelEl) {
+      if (!panelEl) return null;
+
+      let handle = panelEl.querySelector('.cgpt-toolbox-resize-left-handle');
+      if (handle) return handle;
+
+      handle = document.createElement('div');
+      handle.className = 'cgpt-toolbox-resize-left-handle';
+      handle.title = '向左拖拽调整宽度';
+      panelEl.insertBefore(handle, panelEl.firstChild);
+      return handle;
+    }
+
+    function bindToolboxLeftResize(panelEl) {
+      if (!panelEl || panelEl.dataset.toolboxLeftResizeBound === '1') return;
+
+      const leftResizeHandle = ensureToolboxLeftResizeHandle(panelEl);
+      if (!leftResizeHandle) return;
+
+      panelEl.dataset.toolboxLeftResizeBound = '1';
+
+      leftResizeHandle.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (!panel || !root) {
+          return;
+        }
+
+        ensureRootPositionAnchored();
+
+        const rect = panel.getBoundingClientRect();
+        const resizeState = {
+          mode: 'left-width',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startLeft: rect.left,
+          startTop: rect.top,
+          startWidth: rect.width,
+          startHeight: rect.height,
+          startRight: rect.right,
+        };
+
+        panel.dataset.resizing = '1';
+        panel.classList.add('cgpt-resizing');
+        clearEdgeRevealTimer();
+        isResizingToolbox = true;
+
+        appendLog(
+          `[TOOLBOX_SIZE][LEFT_RESIZE_START] left=${Math.round(rect.left)} right=${Math.round(rect.right)} width=${Math.round(rect.width)}`,
+        );
+
+        try {
+          leftResizeHandle.setPointerCapture(event.pointerId);
+        } catch (error) {
+          console.error('[ChatGPT toolbox] setPointerCapture left-resize failed', {
+            message: error && error.message ? error.message : String(error),
+            stack: error && error.stack ? error.stack : '',
+          });
+        }
+
+        const onPointerMove = (moveEvent) => {
+          moveEvent.preventDefault();
+          moveEvent.stopPropagation();
+
+          const dx = moveEvent.clientX - resizeState.startX;
+          let nextLeft = resizeState.startLeft + dx;
+          let nextWidth = resizeState.startWidth - dx;
+          const maxWidth = getToolboxMaxWidth();
+          const minWidth = getToolboxResizeMinWidth();
+          const margin = TOOLBOX_SIZE_LIMITS.VIEWPORT_MARGIN;
+
+          if (nextWidth > maxWidth) {
+            nextWidth = maxWidth;
+            nextLeft = resizeState.startRight - nextWidth;
+          }
+          if (nextWidth < minWidth) {
+            nextWidth = minWidth;
+            nextLeft = resizeState.startRight - nextWidth;
+          }
+          if (nextLeft < margin) {
+            nextLeft = margin;
+            nextWidth = resizeState.startRight - nextLeft;
+          }
+
+          applyPanelResizeRect({
+            left: Math.round(nextLeft),
+            top: Math.round(resizeState.startTop),
+            width: Math.round(nextWidth),
+            height: Math.round(resizeState.startHeight),
+          }, `left-resize:${Math.round(nextWidth)}`);
+        };
+
+        const finishLeftResize = (upEvent, endReason) => {
+          upEvent.preventDefault();
+          upEvent.stopPropagation();
+
+          panel.dataset.resizing = '0';
+          panel.classList.remove('cgpt-resizing');
+          isResizingToolbox = false;
+
+          window.removeEventListener('pointermove', onPointerMove, true);
+          window.removeEventListener('pointerup', onPointerUp, true);
+          window.removeEventListener('pointercancel', onPointerCancel, true);
+
+          try {
+            leftResizeHandle.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            console.error('[ChatGPT toolbox] releasePointerCapture left-resize failed', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+
+          const finalRect = panel.getBoundingClientRect();
+          appendLog(
+            `[TOOLBOX_SIZE][LEFT_RESIZE_DONE] left=${Math.round(finalRect.left)} width=${Math.round(finalRect.width)} height=${Math.round(finalRect.height)}`,
+          );
+
+          schedulePostDragLayout(() => {
+            keepPanelInViewport({ save: false, reason: endReason });
+            clampRootToViewport('toolbox-left-resize-end', { save: false, allowEdgeHidden: false });
+            syncToolboxFloatingLayout('toolbox-left-resize-end');
+            syncToolboxHeaderLayout(endReason);
+            if (isPanelVisibleNow()) {
+              savePanelPositionFromDom('toolbox-left-resize-end');
+            }
+          });
+
+          savePanelSizeFromDom({ userAction: true, reason: endReason });
+          rememberLastPanelVisibleRect('toolbox-left-resize-end');
+          updateRestoreHotzone('toolbox-left-resize-end');
+        };
+
+        const onPointerUp = (upEvent) => {
+          finishLeftResize(upEvent, 'left-resize-pointerup');
+        };
+
+        const onPointerCancel = (upEvent) => {
+          finishLeftResize(upEvent, 'left-resize-pointercancel');
+        };
+
+        window.addEventListener('pointermove', onPointerMove, true);
+        window.addEventListener('pointerup', onPointerUp, true);
+        window.addEventListener('pointercancel', onPointerCancel, true);
+      }, true);
+    }
+
     function bindToolboxResize(panelEl) {
       if (!panelEl || panelEl.dataset.toolboxResizeBound === '1') return;
 
@@ -7478,59 +8011,44 @@
         const startX = event.clientX;
         const startY = event.clientY;
         const rect = panel.getBoundingClientRect();
-        const startWidth = rect.width;
-        const startHeight = rect.height;
-        const panelMins = getPanelMinSize();
-        const minWidth = panelMins.minWidth;
-        const minHeight = panelMins.minHeight;
-        const panelDefaults = getCurrentPanelDefaultSize();
-        const maxWidth = Math.max(
-          minWidth,
-          Math.min(panelDefaults.maxWidth || PANEL_DEFAULT_SIZE.maxWidth || 860, window.innerWidth - 24),
-        );
-        const maxHeight = Math.max(minHeight, window.innerHeight - 24);
+        const startRect = {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+        };
 
         panel.dataset.resizing = '1';
         panel.classList.add('cgpt-resizing');
         clearEdgeRevealTimer();
         isResizingToolbox = true;
 
+        appendLog(
+          `[TOOLBOX_SIZE][RESIZE_START] mode=right-bottom left=${Math.round(startRect.left)} width=${Math.round(startRect.width)} maxWidth=${getToolboxMaxWidth()} viewportWidth=${getToolboxViewportWidth()}`,
+        );
+
         try {
           handle.setPointerCapture(event.pointerId);
         } catch (error) {
-          console.warn('[ChatGPT toolbox] setPointerCapture resize failed', error);
+          console.error('[ChatGPT toolbox] setPointerCapture resize failed', {
+            message: error && error.message ? error.message : String(error),
+            stack: error && error.stack ? error.stack : '',
+          });
         }
 
         const onPointerMove = (moveEvent) => {
           moveEvent.preventDefault();
           moveEvent.stopPropagation();
 
-          const nextWidth = clampNumber(
-            startWidth + moveEvent.clientX - startX,
-            minWidth,
-            maxWidth,
-          );
-          const nextHeight = clampNumber(
-            startHeight + moveEvent.clientY - startY,
-            minHeight,
-            maxHeight,
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          const nextRect = calculateRightResizeRect(startRect, dx, dy);
+
+          appendLog(
+            `[TOOLBOX_SIZE][RESIZE_MOVE] mode=right-bottom dx=${Math.round(dx)} width=${nextRect.width} left=${nextRect.left} maxWidth=${getToolboxMaxWidth()} viewportWidth=${getToolboxViewportWidth()}`,
           );
 
-          console.log('[TOOLBOX_RESIZE][APPLY]', {
-            requestedWidth: Math.round(startWidth + moveEvent.clientX - startX),
-            appliedWidth: nextWidth,
-            minWidth,
-            mode: compactMode ? 'compact' : 'full',
-            reason: 'toolbox-resize-handle-move',
-          });
-
-          applyPanelSize({
-            width: nextWidth,
-            height: nextHeight,
-          }, {
-            reason: 'toolbox-resize-handle-move',
-            userAction: true,
-          });
+          applyPanelResizeRect(nextRect, 'toolbox-resize-handle-move');
         };
 
         const finishToolboxResize = (upEvent, endReason) => {
@@ -7548,12 +8066,16 @@
           try {
             handle.releasePointerCapture(event.pointerId);
           } catch (error) {
-            console.warn('[ChatGPT toolbox] releasePointerCapture resize failed', error);
+            console.error('[ChatGPT toolbox] releasePointerCapture resize failed', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
           }
 
           schedulePostDragLayout(() => {
             keepPanelInViewport({
               save: false,
+              reason: 'toolbox-resize-end',
             });
             clampRootToViewport('toolbox-resize-end', {
               save: false,
@@ -7908,6 +8430,13 @@
       if (!badge) {
         return false;
       }
+      if (
+        badge.id === 'cgpt-page-input-state'
+        || badge.classList.contains('cgpt-header-status-chip')
+        || badge.classList.contains('cgpt-toolbox-status-primary-badge')
+      ) {
+        return false;
+      }
       // 页ID、轮数必须显示。
       if (
         badge.classList.contains('cgpt-toolbox-must-show-badge')
@@ -7935,10 +8464,14 @@
       }
 
       const width = Math.round(panel.getBoundingClientRect().width || panel.offsetWidth || 0);
-      const narrow = width > 0 && width < 620;
-      const extraNarrow = width > 0 && width < 460;
+      const narrow = width > 0 && width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH;
+      const extraNarrow = width > 0 && width < TOOLBOX_SIZE_LIMITS.EXTRA_NARROW_WIDTH;
       panel.classList.toggle('cgpt-toolbox-narrow', narrow);
       panel.classList.toggle('cgpt-toolbox-extra-narrow', extraNarrow);
+
+      appendLog(
+        `[TOOLBOX_LAYOUT][MODE] width=${width} narrow=${narrow ? 1 : 0} extraNarrow=${extraNarrow ? 1 : 0} reason=${reason}`,
+      );
 
       const row = panel.querySelector('.cgpt-toolbox-header-status-row');
       if (row) {
@@ -7952,7 +8485,7 @@
           // 窄屏时仅缩短本地额度 badge 的展示文字，不隐藏。
           if (
             width > 0
-            && width < 620
+            && width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
             && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
           ) {
             const text = String(badge.textContent || '').trim();
@@ -7960,7 +8493,7 @@
               badge.textContent = text.replace(/^本地上传:/, '上传:');
             }
           } else if (
-            width >= 620
+            width >= TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
             && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
           ) {
             const text = String(badge.textContent || '').trim();
@@ -7970,7 +8503,7 @@
           }
           if (
             width > 0
-            && width < 620
+            && width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
             && badge.classList.contains('cgpt-toolbox-message-quota-badge')
           ) {
             const text = String(badge.textContent || '').trim();
@@ -7978,7 +8511,7 @@
               badge.textContent = text.replace(/^本地消息:/, '消息:');
             }
           } else if (
-            width >= 620
+            width >= TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
             && badge.classList.contains('cgpt-toolbox-message-quota-badge')
           ) {
             const text = String(badge.textContent || '').trim();
@@ -8040,6 +8573,25 @@
       updateToolboxResponsiveClass(panel, reason);
       updateToolboxStatusVisibilityClass(reason);
       detectTopStatusOverflow(reason);
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        try {
+          const runtimeState = typeof getToolboxRuntimeStateSafe === 'function'
+            ? getToolboxRuntimeStateSafe()
+            : {};
+          renderToolboxHeaderStatus(
+            `syncToolboxHeaderLayout:${reason || '-'}`,
+            runtimeState,
+          );
+        } catch (error) {
+          const message = error && error.message ? error.message : String(error);
+          const stack = error && error.stack ? error.stack : '';
+          console.warn('[TOOLBOX_HEADER][SYNC_FAILED]', message, stack);
+          appendLog(`[TOOLBOX_HEADER][SYNC_FAILED] reason=${reason || '-'} error=${message}`);
+          if (stack) {
+            appendLog(`[TOOLBOX_HEADER][SYNC_FAILED_STACK] ${stack}`);
+          }
+        }
+      }
     }
 
     function clampToolboxPanelToViewport(targetPanel, reason = '-') {
@@ -8049,31 +8601,27 @@
       }
 
       const rect = panelEl.getBoundingClientRect();
-      const margin = PANEL_VIEWPORT_MARGIN;
-      let left = rect.left;
-      let top = rect.top;
+      const fitted = fitPanelRectInViewport({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      });
 
-      if (top < margin) {
-        top = margin;
+      const sizeChanged = Math.abs(fitted.width - rect.width) > 0.5
+        || Math.abs(fitted.height - rect.height) > 0.5;
+      const posChanged = Math.abs(fitted.left - rect.left) > 0.5
+        || Math.abs(fitted.top - rect.top) > 0.5;
+
+      if (sizeChanged || posChanged) {
+        applyPanelResizeRect(fitted, reason);
+      } else {
+        panelEl.style.left = `${fitted.left}px`;
+        panelEl.style.top = `${fitted.top}px`;
       }
-
-      if (left < margin) {
-        left = margin;
-      }
-
-      if (left + rect.width > window.innerWidth - margin) {
-        left = Math.max(margin, window.innerWidth - rect.width - margin);
-      }
-
-      if (top + rect.height > window.innerHeight - margin) {
-        top = Math.max(margin, window.innerHeight - rect.height - margin);
-      }
-
-      panelEl.style.left = `${Math.round(left)}px`;
-      panelEl.style.top = `${Math.round(top)}px`;
 
       appendLog(
-        `[TOOLBOX_POSITION][CLAMP_VIEWPORT] reason=${reason} left=${Math.round(left)} top=${Math.round(top)} width=${Math.round(rect.width)} height=${Math.round(rect.height)}`,
+        `[TOOLBOX_POSITION][CLAMP_VIEWPORT] reason=${reason} left=${Math.round(rect.left)}->${fitted.left} top=${Math.round(rect.top)}->${fitted.top} width=${Math.round(rect.width)}->${fitted.width} height=${Math.round(rect.height)}->${fitted.height}`,
       );
     }
 
@@ -9414,25 +9962,10 @@
 
     function clampPanelRect(rect) {
       const mins = getPanelMinSize();
-
-      const width = Math.max(mins.minWidth, Math.min(rect.width, window.innerWidth - PANEL_VIEWPORT_MARGIN * 2));
-      const height = Math.max(mins.minHeight, Math.min(rect.height, window.innerHeight - PANEL_VIEWPORT_MARGIN * 2));
-
-      let left = rect.left;
-      let top = rect.top;
-
-      const maxLeft = window.innerWidth - width - PANEL_VIEWPORT_MARGIN;
-      const maxTop = window.innerHeight - height - PANEL_VIEWPORT_MARGIN;
-
-      left = Math.max(PANEL_VIEWPORT_MARGIN, Math.min(left, maxLeft));
-      top = Math.max(PANEL_VIEWPORT_MARGIN, Math.min(top, maxTop));
-
-      return {
-        left,
-        top,
-        width,
-        height,
-      };
+      return fitPanelRectInViewport(rect, {
+        minWidth: Math.max(mins.minWidth, TOOLBOX_SIZE_LIMITS.MIN_WIDTH),
+        minHeight: mins.minHeight,
+      });
     }
 
     function applyPanelRect(rect) {
@@ -9644,7 +10177,9 @@
       });
 
       ensureToolboxResizeHandle(panel);
+      ensureToolboxLeftResizeHandle(panel);
       bindToolboxResize(panel);
+      bindToolboxLeftResize(panel);
     }
 
     function readToolboxLayoutFlagsFromDom() {
@@ -9915,50 +10450,34 @@
       }
 
       const shouldSave = options.save === true;
+      const reason = options.reason || 'keepPanelInViewport';
       const rect = panel.getBoundingClientRect();
+      const fitted = fitPanelRectInViewport({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      });
 
-      let nextLeft = rect.left;
-      let nextTop = rect.top;
+      const changed = Math.abs(fitted.left - rect.left) > 0.5
+        || Math.abs(fitted.top - rect.top) > 0.5
+        || Math.abs(fitted.width - rect.width) > 0.5
+        || Math.abs(fitted.height - rect.height) > 0.5;
 
-      const viewport = getViewportMetrics();
-      const viewportWidth = viewport.width;
-      const viewportHeight = viewport.height;
-
-      if (rect.left < PANEL_VIEWPORT_MARGIN) {
-        nextLeft = PANEL_VIEWPORT_MARGIN;
-      }
-
-      if (rect.right > viewportWidth - PANEL_VIEWPORT_MARGIN) {
-        nextLeft = viewportWidth - rect.width - PANEL_VIEWPORT_MARGIN;
-      }
-
-      if (rect.top < PANEL_VIEWPORT_MARGIN) {
-        nextTop = PANEL_VIEWPORT_MARGIN;
-      }
-
-      if (rect.bottom > viewportHeight - PANEL_VIEWPORT_MARGIN) {
-        nextTop = viewportHeight - rect.height - PANEL_VIEWPORT_MARGIN;
-      }
-
-      nextLeft = Math.max(PANEL_VIEWPORT_MARGIN, nextLeft);
-      nextTop = Math.max(PANEL_VIEWPORT_MARGIN, nextTop);
-
-      if (
-        Math.abs(nextLeft - rect.left) > 0.5 ||
-        Math.abs(nextTop - rect.top) > 0.5
-      ) {
-        applyPanelPosition(nextLeft, nextTop, {
-          reason: options.reason || 'keepPanelInViewport',
-        });
+      if (changed) {
+        applyPanelResizeRect(fitted, reason);
+        appendLog(
+          `[TOOLBOX_POSITION][KEEP_IN_VIEWPORT] reason=${reason} left=${Math.round(rect.left)}->${fitted.left} width=${Math.round(rect.width)}->${fitted.width}`,
+        );
       } else {
-        updateToolboxNarrowClass(options.reason || 'keepPanelInViewport');
+        updateToolboxNarrowClass(reason);
       }
 
       if (shouldSave) {
         savePanelPositionFromDom('keepPanelInViewport');
       }
 
-      updateFloatingTitlePosition(options.reason || 'keep-panel');
+      updateFloatingTitlePosition(reason || 'keep-panel');
     }
 
     function getFloatingTitleEl() {
@@ -10529,11 +11048,16 @@
           width: saved.width,
           height: saved.height,
         });
+        const restoredSize = normalizeToolboxSavedSize(saved.width, saved.height, reasonText);
+        appendLog(
+          `[TOOLBOX_SIZE][RESTORE_SIZE] reason=${reasonText} key=${key} ` +
+          `width=${restoredSize.width} height=${restoredSize.height} compact=${compactMode ? 1 : 0}`,
+        );
         appendLog(
           `[TOOLBOX_SIZE][restore-saved] reason=${reasonText} key=${key} ` +
-          `width=${saved.width} height=${saved.height} compact=${compactMode ? 1 : 0}`,
+          `width=${restoredSize.width} height=${restoredSize.height} compact=${compactMode ? 1 : 0}`,
         );
-        applyPanelSize(saved, {
+        applyPanelSize(restoredSize, {
           reason: reasonText,
           force,
         });
@@ -11108,7 +11632,7 @@
         }
 
         const target = e && e.target instanceof Element ? e.target : null;
-        if (target && target.closest('.cgpt-resize-handle, .cgpt-toolbox-resize-handle')) {
+        if (target && target.closest('.cgpt-resize-handle, .cgpt-toolbox-resize-handle, .cgpt-toolbox-resize-left-handle')) {
           return;
         }
 
@@ -11818,6 +12342,11 @@
       '可输入',
       '发送中',
       '回答中',
+      '等回复',
+      '等回答',
+      '待发送',
+      '附件中',
+      '附件处理中',
       '不可发送',
       '不可发',
       '离线',
@@ -12076,6 +12605,10 @@
           logModuleRef.add(`[状态][${statusType}] ${latestStatusText}`);
         }
       }
+
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus(`setStatus:${opts.owner || 'ui'}`);
+      }
     }
 
     function setStatus(text, type, options) {
@@ -12127,6 +12660,9 @@
 
       const top = ToolboxStatusArbiter.getTop(now);
       applyTopStatusEntry(top);
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus(`setStatus-entry:${owner}`);
+      }
     }
 
     function clearStatus(owner) {
@@ -12137,11 +12673,17 @@
       ToolboxStatusArbiter.clear(ownerKey);
       const top = ToolboxStatusArbiter.getTop(Date.now());
       applyTopStatusEntry(top);
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus(`clearStatus:${ownerKey}`);
+      }
     }
 
     function refreshStatus(reason = '') {
       const top = ToolboxStatusArbiter.getTop(Date.now());
       applyTopStatusEntry(top);
+      if (typeof renderToolboxHeaderStatus === 'function') {
+        renderToolboxHeaderStatus(`refreshStatus:${reason || '-'}`);
+      }
       if (reason) {
         appendLog(`[STATUS_ARBITER][REFRESH] reason=${reason}`);
       }
