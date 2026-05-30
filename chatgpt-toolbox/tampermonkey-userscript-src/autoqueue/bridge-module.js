@@ -926,7 +926,7 @@
             reject(error);
           },
           ontimeout() {
-            const error = new Error(`请求超时 (${cfg.bridgeRequestTimeoutMs}ms): ${reqUrl}`);
+            const error = new Error(`请求超时 (${Math.round(Number(cfg.bridgeRequestTimeoutMs || 0) / 1000)} 秒): ${reqUrl}`);
             logBridgeError(error.message, error);
             reject(error);
           },
@@ -3187,6 +3187,12 @@
                   scope: 'all',
                   buttonTasksReason: 'bridge-poll-capability-change',
                 });
+                if (typeof UploadModule.reconcileManualComposerAttachmentClear === 'function') {
+                  UploadModule.reconcileManualComposerAttachmentClear('bridge-poll');
+                }
+                if (typeof UploadModule.healStaleUploadRunningLockIfNeeded === 'function') {
+                  UploadModule.healStaleUploadRunningLockIfNeeded('bridge-poll');
+                }
               } catch (err) {
                 console.warn('[BRIDGE][UPLOAD_BUTTON_REFRESH_FAILED]', err);
               }
@@ -3550,12 +3556,14 @@
         selector: '#cgpt-bridge-timeout',
         type: 'number',
         defaultValue: 30000,
+        uiUnitSec: true,
       },
       {
         key: 'bridgePollIntervalMs',
         selector: '#cgpt-bridge-interval',
         type: 'number',
         defaultValue: 3000,
+        uiUnitSec: true,
       },
     ]);
 
@@ -3866,7 +3874,10 @@
           return;
         }
 
-        DomUtil.setValue(state.root, field.selector, cfg[field.key], 'BRIDGE');
+        const displayValue = field.uiUnitSec
+          ? Math.round(Number(cfg[field.key] || field.defaultValue) / 1000)
+          : cfg[field.key];
+        DomUtil.setValue(state.root, field.selector, displayValue, 'BRIDGE');
       });
 
       DomUtil.setText(state.root, '#cgpt-bridge-url', getBridgeUrl(), 'BRIDGE');
@@ -3884,7 +3895,15 @@
         if (field.type === 'checked') {
           value = DomUtil.getChecked(state.root, field.selector, field.defaultValue, 'BRIDGE');
         } else if (field.type === 'number') {
-          value = Number(DomUtil.getValue(state.root, field.selector, field.defaultValue, 'BRIDGE')) || field.defaultValue;
+          const rawUi = Number(DomUtil.getValue(
+            state.root,
+            field.selector,
+            field.uiUnitSec ? field.defaultValue / 1000 : field.defaultValue,
+            'BRIDGE',
+          ));
+          value = field.uiUnitSec
+            ? Math.round((Number.isFinite(rawUi) ? rawUi : field.defaultValue / 1000) * 1000)
+            : (Number.isFinite(rawUi) ? rawUi : field.defaultValue);
         } else {
           value = DomUtil.getValue(state.root, field.selector, field.defaultValue, 'BRIDGE');
         }
@@ -3963,11 +3982,11 @@
             <label>接口路径</label>
             <input class="cgpt-input" id="cgpt-bridge-path" placeholder="/api/bridge">
 
-            <label>请求超时 ms</label>
-            <input class="cgpt-input" id="cgpt-bridge-timeout" type="number" data-no-wheel-number="1" min="1000">
+            <label title="单位：秒。内部仍按毫秒保存。">请求超时（秒）</label>
+            <input class="cgpt-input" id="cgpt-bridge-timeout" type="number" data-no-wheel-number="1" min="1" step="1" title="单位：秒。默认 30 秒。">
 
-            <label>轮询间隔 ms</label>
-            <input class="cgpt-input" id="cgpt-bridge-interval" type="number" data-no-wheel-number="1" min="500">
+            <label title="单位：秒。内部仍按毫秒保存。">轮询间隔（秒）</label>
+            <input class="cgpt-input" id="cgpt-bridge-interval" type="number" data-no-wheel-number="1" min="1" step="1" title="单位：秒。默认 3 秒。">
           </div>
 
           <label class="cgpt-checkbox-line" style="margin-top:8px;">

@@ -381,7 +381,25 @@
 2. 不要重新开始整个任务。
 3. 不要扩展到新任务。
 4. 只补充当前任务尚未完成、尚未输出、尚未覆盖的部分。
-5. 如果上一轮回答像是被截断，请从中断位置继续。`;
+5. 如果上一轮回答像是被截断，请从中断位置继续。
+
+如果当前任务涉及代码修改、修复方案、重构建议、Bug 定位、UI 行为修复、状态同步、闭环控制、上传逻辑、按钮状态、日志排查或 Cursor 修改建议，必须给出详细的 Cursor 修改指令。
+
+Cursor 修改指令必须尽可能可直接粘贴执行，至少包含：
+1. 修改目标
+2. 涉及文件路径
+3. 函数名或定位关键词
+4. 修改前的问题
+5. 修改后的目标行为
+6. 需要新增/替换/删除的代码逻辑
+7. 关键代码片段
+8. 日志要求
+9. 验证步骤
+10. 边界条件
+
+不要只写“继续检查”“继续完善”“需要修复”等笼统描述。
+
+不要使用 try/pass。如果必须捕获异常，必须打印或记录具体错误。`;
 
   const LEGACY_BATCH_CONTINUE_PROMPT_TEMPLATE_V1 = `请继续完成上一个任务。
 
@@ -770,6 +788,14 @@
       return true;
     }
 
+    if (
+      normalized.includes('请继续完成当前任务')
+      && normalized.includes('最开始那个 Prompt')
+      && !normalized.includes('Cursor 修改指令')
+    ) {
+      return true;
+    }
+
     return false;
   }
 
@@ -834,8 +860,12 @@
     return repairCorruptedContinuePromptTemplate(text, logFn, fieldName || 'continuePromptTemplate');
   }
 
-  function getDefaultTaskContinuePromptText() {
+  function getDefaultBatchContinuePromptText() {
     return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+  }
+
+  function getDefaultTaskContinuePromptText() {
+    return getDefaultBatchContinuePromptText();
   }
 
   function createDefaultTaskQueueSettings() {
@@ -994,7 +1024,7 @@
   }
 
   function getDefaultContinuePromptText() {
-    return DEFAULT_BATCH_CONTINUE_PROMPT_TEMPLATE;
+    return getDefaultBatchContinuePromptText();
   }
 
   function isLegacyContinuePromptText(text) {

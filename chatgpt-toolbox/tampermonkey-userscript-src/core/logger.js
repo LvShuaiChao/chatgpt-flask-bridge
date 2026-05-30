@@ -2643,7 +2643,11 @@
     continueAutomation: Object.freeze({
       autoUploadEnabled: true,
       autoUploadInterval: 5,
-      closedLoopNextDelayMs: 1200,
+      // 闭环每轮回复完成后，进入下一轮之前的随机等待区间（毫秒）。默认 40～60 秒。
+      closedLoopNextDelayMinMs: 40000,
+      closedLoopNextDelayMaxMs: 60000,
+      // 兼容旧配置字段。新逻辑不再主动使用该字段作为唯一等待时间。
+      closedLoopNextDelayMs: 0,
       homeNavEnabled: true,
       homeNavInterval: 20,
       homeNavUrl: 'https://chatgpt.com/',
@@ -2718,13 +2722,72 @@
       return intValue;
     }
 
+    function normalizeClosedLoopNextDelayMs(value, fallback, min, max) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return fallback;
+      const intValue = Math.round(n);
+      if (intValue < min) return fallback;
+      if (intValue > max) return max;
+      return intValue;
+    }
+
+    function normalizeClosedLoopDelayRangeMs(rawMin, rawMax, legacySingleMs, rawMinSec, rawMaxSec) {
+      let minMs = Number(rawMin);
+      let maxMs = Number(rawMax);
+      const legacyMs = Number(legacySingleMs);
+
+      if (!Number.isFinite(minMs) || minMs <= 0) {
+        const secMin = Number(rawMinSec);
+        if (Number.isFinite(secMin) && secMin > 0) {
+          minMs = Math.round(secMin * 1000);
+        } else if (Number.isFinite(legacyMs) && legacyMs >= 10000) {
+          minMs = legacyMs;
+        } else {
+          minMs = 40000;
+        }
+      }
+      if (!Number.isFinite(maxMs) || maxMs <= 0) {
+        const secMax = Number(rawMaxSec);
+        if (Number.isFinite(secMax) && secMax > 0) {
+          maxMs = Math.round(secMax * 1000);
+        } else if (Number.isFinite(legacyMs) && legacyMs >= 10000) {
+          maxMs = legacyMs;
+        } else {
+          maxMs = 60000;
+        }
+      }
+
+      minMs = Math.round(minMs);
+      maxMs = Math.round(maxMs);
+      minMs = Math.max(1000, Math.min(600000, minMs));
+      maxMs = Math.max(1000, Math.min(600000, maxMs));
+      if (minMs > maxMs) {
+        const tmp = minMs;
+        minMs = maxMs;
+        maxMs = tmp;
+      }
+      return {
+        minMs,
+        maxMs,
+      };
+    }
+
     const continueAutomationRaw = (
       raw.continueAutomation && typeof raw.continueAutomation === 'object'
     ) ? raw.continueAutomation : {};
+    const closedLoopDelayRange = normalizeClosedLoopDelayRangeMs(
+      continueAutomationRaw.closedLoopNextDelayMinMs,
+      continueAutomationRaw.closedLoopNextDelayMaxMs,
+      continueAutomationRaw.closedLoopNextDelayMs,
+      continueAutomationRaw.closedLoopNextDelayMinSec,
+      continueAutomationRaw.closedLoopNextDelayMaxSec,
+    );
     cfg.continueAutomation = {
       autoUploadEnabled: continueAutomationRaw.autoUploadEnabled !== false,
       autoUploadInterval: normalizePositiveInt(continueAutomationRaw.autoUploadInterval, 5, 1, 999),
-      closedLoopNextDelayMs: normalizePositiveInt(continueAutomationRaw.closedLoopNextDelayMs, 1200, 0, 600000),
+      closedLoopNextDelayMinMs: closedLoopDelayRange.minMs,
+      closedLoopNextDelayMaxMs: closedLoopDelayRange.maxMs,
+      closedLoopNextDelayMs: closedLoopDelayRange.minMs,
       homeNavEnabled: continueAutomationRaw.homeNavEnabled !== false,
       homeNavInterval: normalizePositiveInt(continueAutomationRaw.homeNavInterval, 20, 1, 999),
       homeNavUrl: (

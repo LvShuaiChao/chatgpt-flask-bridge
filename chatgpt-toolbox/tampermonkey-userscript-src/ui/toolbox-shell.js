@@ -796,8 +796,8 @@
           width: 100%;
           flex-wrap: wrap;
           row-gap: 3px;
-          max-height: 42px;
-          overflow: hidden;
+          max-height: none;
+          overflow: visible;
           padding-left: 0;
           padding-right: 0;
         }
@@ -808,14 +808,15 @@
           font-size: 11px;
           padding: 2px 6px;
           border-radius: 11px;
-          max-width: 120px;
+          max-width: none;
+          flex: 0 0 auto;
         }
 
         #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-upload-quota-badge,
         #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-message-quota-badge,
         #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-upload-quota-badge,
         #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-message-quota-badge {
-          display: none !important;
+          display: inline-flex !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-page-id-badge {
@@ -1088,7 +1089,7 @@
           flex-direction: column;
           align-items: stretch;
           gap: 4px;
-          overflow: hidden;
+          overflow: visible;
           background: #111827;
           border-bottom: 1px solid #2f3542;
           cursor: move;
@@ -1128,7 +1129,7 @@
           width: 100%;
           max-width: 100%;
           min-width: 0;
-          overflow: hidden;
+          overflow: visible;
           box-sizing: border-box;
           padding: 0;
           gap: 4px;
@@ -1972,6 +1973,7 @@
         }
 
         .cgpt-btn {
+          box-sizing: border-box;
           height: 32px;
           padding: 0 10px;
           border: 1px solid var(--cgpt-btn-border, #475569);
@@ -1979,7 +1981,14 @@
           color: var(--cgpt-btn-text, #f2f2f2);
           border-radius: 9px;
           cursor: pointer;
+          min-width: 0;
+          max-width: 100%;
           white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          direction: ltr;
+          text-align: center;
+          line-height: 1.25;
         }
 
         .cgpt-btn.compact {
@@ -4974,10 +4983,11 @@
         .cgpt-upload-main-action-row button {
           flex: 0 0 auto;
           min-height: 32px;
-          max-width: 180px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+          max-width: 100%;
+          white-space: normal;
+          overflow: visible;
+          text-overflow: clip;
+          line-height: 1.25;
         }
 
         /* 工具箱内部禁止横向滚动（完整模式 + 精简模式） */
@@ -7898,6 +7908,7 @@
       if (!badge) {
         return false;
       }
+      // 页ID、轮数必须显示。
       if (
         badge.classList.contains('cgpt-toolbox-must-show-badge')
         || badge.classList.contains('cgpt-toolbox-page-turn-badge')
@@ -7905,12 +7916,16 @@
       ) {
         return false;
       }
-      if (panelWidth < 620) {
-        return (
-          badge.classList.contains('cgpt-toolbox-upload-quota-badge')
-          || badge.classList.contains('cgpt-toolbox-message-quota-badge')
-        );
+      // 本地上传 / 本地消息不再因为 620px 阈值直接隐藏。
+      // 这两个状态是顶部额度判断的重要信息，应允许换行展示。
+      if (
+        badge.classList.contains('cgpt-toolbox-upload-quota-badge')
+        || badge.classList.contains('cgpt-toolbox-message-quota-badge')
+      ) {
+        return false;
       }
+      // 其他低优先级 badge 如后续需要隐藏，可在这里单独处理。
+      // 当前默认不隐藏，避免出现“明明有空间但状态消失”的问题。
       return false;
     }
 
@@ -7932,17 +7947,52 @@
             badge.style.display = 'none';
             return;
           }
+          // 只恢复由本函数写入的 display:none，不覆盖 CSS 正常布局。
+          badge.style.display = '';
+          // 窄屏时仅缩短本地额度 badge 的展示文字，不隐藏。
           if (
-            badge.classList.contains('cgpt-toolbox-upload-quota-badge')
-            || badge.classList.contains('cgpt-toolbox-message-quota-badge')
+            width > 0
+            && width < 620
+            && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
           ) {
-            badge.style.display = '';
+            const text = String(badge.textContent || '').trim();
+            if (text.startsWith('本地上传:')) {
+              badge.textContent = text.replace(/^本地上传:/, '上传:');
+            }
+          } else if (
+            width >= 620
+            && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
+          ) {
+            const text = String(badge.textContent || '').trim();
+            if (text.startsWith('上传:')) {
+              badge.textContent = text.replace(/^上传:/, '本地上传:');
+            }
+          }
+          if (
+            width > 0
+            && width < 620
+            && badge.classList.contains('cgpt-toolbox-message-quota-badge')
+          ) {
+            const text = String(badge.textContent || '').trim();
+            if (text.startsWith('本地消息:')) {
+              badge.textContent = text.replace(/^本地消息:/, '消息:');
+            }
+          } else if (
+            width >= 620
+            && badge.classList.contains('cgpt-toolbox-message-quota-badge')
+          ) {
+            const text = String(badge.textContent || '').trim();
+            if (text.startsWith('消息:')) {
+              badge.textContent = text.replace(/^消息:/, '本地消息:');
+            }
           }
         });
       }
 
+      const uploadBadgeVisible = !!row && !!row.querySelector('.cgpt-toolbox-upload-quota-badge:not([style*="display: none"])');
+      const messageBadgeVisible = !!row && !!row.querySelector('.cgpt-toolbox-message-quota-badge:not([style*="display: none"])');
       appendLog(
-        `[TOOLBOX_LAYOUT][STATUS_VISIBILITY] reason=${reason} width=${width} narrow=${narrow ? 1 : 0} extraNarrow=${extraNarrow ? 1 : 0}`,
+        `[TOOLBOX_LAYOUT][STATUS_VISIBILITY] reason=${reason} width=${width} narrow=${narrow ? 1 : 0} extraNarrow=${extraNarrow ? 1 : 0} uploadBadgeVisible=${uploadBadgeVisible ? 1 : 0} messageBadgeVisible=${messageBadgeVisible ? 1 : 0}`,
       );
     }
 
@@ -13300,13 +13350,24 @@
         )
       );
 
+      const closedLoopWaitPoll = (
+        (typeof window !== 'undefined' && window.__cgptClosedLoopWaitPollActive === true)
+        || meta.closedLoopWaitPoll === true
+      );
+      const pickSource = String(meta.pickSource || meta.source || '');
+      const isClosedLoopWaitPick = /wait-cycle|closed-loop-wait/i.test(pickSource);
+
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        const logTag = streaming
-          ? '[CHAT_PAGE][assistant-streaming-answer-picked]'
-          : '[CHAT_PAGE][assistant-final-answer-picked]';
-        ToolboxShell.appendLog(
-          `${logTag} source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
-        );
+        if (streaming && (closedLoopWaitPoll || isClosedLoopWaitPick)) {
+          // 闭环等待轮询期间不输出 streaming 重型 pick 日志。
+        } else {
+          const logTag = streaming
+            ? '[CHAT_PAGE][assistant-streaming-answer-picked]'
+            : '[CHAT_PAGE][assistant-final-answer-picked]';
+          ToolboxShell.appendLog(
+            `${logTag} source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
+          );
+        }
       }
 
       return {

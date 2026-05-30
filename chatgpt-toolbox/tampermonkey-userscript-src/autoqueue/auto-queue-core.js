@@ -1829,7 +1829,7 @@ const AutoQueueModule = (() => {
           { label: '是否命中停止符', value: terminal.terminalConfirmPassed ? '是' : '否' },
           { label: '二次验证状态', value: terminal.doneSignalVerificationRunning ? '进行中' : '未进行' },
           { label: '回复识别类型', value: reply.replyStateType || reply.classifyStatus },
-          { label: '当前回复耗时', value: timers.waitReplyElapsedMs ? `${timers.waitReplyElapsedMs}ms` : '-' },
+          { label: '当前回复耗时', value: timers.waitReplyElapsedMs ? `${Math.round(timers.waitReplyElapsedMs / 1000)} 秒` : '-' },
         ]),
         renderAutoQueueAdvancedDebugSection('任务状态', [
           { label: '当前任务名', value: autoQueue.currentTaskTitle },
@@ -1842,8 +1842,8 @@ const AutoQueueModule = (() => {
         renderAutoQueueAdvancedDebugSection('计时器状态', [
           { label: '主循环是否运行', value: autoQueue.isRunning ? '是' : '否' },
           { label: '最近 tick 时间', value: snapshot.time },
-          { label: '批量已运行', value: timers.batchElapsedMs ? `${timers.batchElapsedMs}ms` : '-' },
-          { label: '当前任务已运行', value: timers.currentTaskElapsedMs ? `${timers.currentTaskElapsedMs}ms` : '-' },
+          { label: '批量已运行', value: timers.batchElapsedMs ? `${Math.round(timers.batchElapsedMs / 1000)} 秒` : '-' },
+          { label: '当前任务已运行', value: timers.currentTaskElapsedMs ? `${Math.round(timers.currentTaskElapsedMs / 1000)} 秒` : '-' },
           { label: '是否疑似卡死', value: timers.waitReplyElapsedMs > 300000 ? '是' : '否' },
         ]),
         renderAutoQueueAdvancedDebugSection('按钮检测', [
@@ -3993,6 +3993,7 @@ const AutoQueueModule = (() => {
     function normalizeAutoMode(mode) {
       if (mode === 'list') return 'list';
       if (mode === 'task') return 'task';
+      if (mode === 'closed-loop') return 'closed-loop';
       return 'continue';
     }
 
@@ -4006,6 +4007,7 @@ const AutoQueueModule = (() => {
         continue: cloneModeSettingItem(Object.assign({}, base.continue, raw.continue || {})),
         list: cloneModeSettingItem(Object.assign({}, base.list, raw.list || {})),
         task: cloneModeSettingItem(Object.assign({}, base.task, raw.task || {})),
+        'closed-loop': cloneModeSettingItem(Object.assign({}, base.continue, raw['closed-loop'] || {})),
       };
     }
 
@@ -4163,6 +4165,240 @@ const AutoQueueModule = (() => {
       }
     }
 
+    function getClosedLoopCompactConfigForAutoq() {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getClosedLoopAutomationConfig === 'function'
+      ) {
+        return UploadModule.getClosedLoopAutomationConfig();
+      }
+      const cfg = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
+        ? CompactUiConfigStore.get()
+        : {};
+      return cfg && cfg.continueAutomation ? cfg.continueAutomation : {};
+    }
+
+    function saveAutoQueueClosedLoopSettingsFromUi() {
+      const panel = root ? qs('#cgpt-autoq-closed-loop-panel', root) : null;
+      if (!panel) return;
+      const enabledEl = qs('#cgpt-autoq-closed-loop-auto-upload-enabled', panel);
+      const intervalEl = qs('#cgpt-autoq-closed-loop-upload-interval', panel);
+      const minEl = qs('#cgpt-autoq-closed-loop-delay-min-sec', panel);
+      const maxEl = qs('#cgpt-autoq-closed-loop-delay-max-sec', panel);
+      const enabled = enabledEl ? !!enabledEl.checked : true;
+      let interval = Number(intervalEl ? intervalEl.value : 5);
+      if (!Number.isFinite(interval) || interval < 1) interval = 5;
+      interval = Math.max(1, Math.min(999, Math.floor(interval)));
+      let minSec = Number(minEl ? minEl.value : 40);
+      let maxSec = Number(maxEl ? maxEl.value : 60);
+      if (!Number.isFinite(minSec) || minSec <= 0) minSec = 40;
+      if (!Number.isFinite(maxSec) || maxSec <= 0) maxSec = 60;
+      minSec = Math.max(1, Math.min(600, Math.round(minSec)));
+      maxSec = Math.max(1, Math.min(600, Math.round(maxSec)));
+      if (minSec > maxSec) {
+        const tmp = minSec;
+        minSec = maxSec;
+        maxSec = tmp;
+      }
+      const current = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
+        ? CompactUiConfigStore.get()
+        : {};
+      const nextContinueAutomation = Object.assign({}, current.continueAutomation || {}, {
+        autoUploadEnabled: enabled,
+        autoUploadInterval: interval,
+        closedLoopNextDelayMinMs: minSec * 1000,
+        closedLoopNextDelayMaxMs: maxSec * 1000,
+        closedLoopNextDelayMs: minSec * 1000,
+      });
+      const nextConfig = Object.assign({}, current, {
+        continueAutomation: nextContinueAutomation,
+      });
+      if (typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.save) {
+        CompactUiConfigStore.save(nextConfig);
+      } else if (typeof MemoryManager !== 'undefined' && MemoryManager.KEYS) {
+        MemoryManager.set(MemoryManager.KEYS.compactUiConfig, nextConfig);
+      } else {
+        console.error('[AUTOQ][CLOSED_LOOP][SETTING_SAVE_FAILED] CompactUiConfigStore 和 MemoryManager 均不可用');
+        ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][SETTING_SAVE_FAILED] reason=no-store');
+        return;
+      }
+      ToolboxShell.appendLog(
+        `[AUTOQ][CLOSED_LOOP][SETTING_SAVE] enabled=${enabled ? 1 : 0} interval=${interval} minSec=${minSec} maxSec=${maxSec}`,
+      );
+      renderAutoQueueClosedLoopSettings();
+      refreshAutoQueueClosedLoopButtons('settings-save');
+    }
+
+    function renderAutoQueueClosedLoopSettings() {
+      if (!root) return;
+      const panel = qs('#cgpt-autoq-closed-loop-panel', root);
+      if (!panel) return;
+      const cfg = getClosedLoopCompactConfigForAutoq();
+      const enabledEl = qs('#cgpt-autoq-closed-loop-auto-upload-enabled', panel);
+      if (enabledEl) {
+        enabledEl.checked = cfg.autoUploadEnabled !== false;
+      }
+      const intervalEl = qs('#cgpt-autoq-closed-loop-upload-interval', panel);
+      if (intervalEl) {
+        intervalEl.value = String(Number(cfg.autoUploadInterval || 5));
+      }
+      const minEl = qs('#cgpt-autoq-closed-loop-delay-min-sec', panel);
+      if (minEl) {
+        minEl.value = String(Math.max(1, Math.round(Number(cfg.closedLoopNextDelayMinMs || 40000) / 1000)));
+      }
+      const maxEl = qs('#cgpt-autoq-closed-loop-delay-max-sec', panel);
+      if (maxEl) {
+        maxEl.value = String(Math.max(1, Math.round(Number(cfg.closedLoopNextDelayMaxMs || 60000) / 1000)));
+      }
+    }
+
+    function refreshAutoQueueClosedLoopButtons(reason = '') {
+      if (reason === 'upload-closed-loop-render') {
+        return;
+      }
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.renderClosedLoopContinueButtons === 'function'
+      ) {
+        UploadModule.renderClosedLoopContinueButtons();
+        ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][BUTTON_REFRESH] reason=${reason || '-'}`);
+      }
+    }
+
+    function renderClosedLoopPanelVisibility() {
+      if (!root) return;
+      closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
+      if (closedLoopPanelEl) {
+        closedLoopPanelEl.classList.toggle('cgpt-toolbox-hidden', config.promptMode !== 'closed-loop');
+      }
+      const editorBlock = qs('.cgpt-autoq-editor-block', root);
+      if (editorBlock) {
+        editorBlock.classList.toggle('cgpt-toolbox-hidden', config.promptMode === 'closed-loop');
+      }
+      const actionsEl = qs('.cgpt-autoq-actions', root);
+      if (actionsEl) {
+        actionsEl.classList.toggle('cgpt-toolbox-hidden', config.promptMode === 'closed-loop');
+      }
+      const settingsEl = qs('.cgpt-autoq-settings-section', root);
+      if (settingsEl) {
+        settingsEl.classList.toggle('cgpt-toolbox-hidden', config.promptMode === 'closed-loop');
+      }
+      renderAutoQueueClosedLoopSettings();
+      refreshAutoQueueClosedLoopButtons('visibility-render');
+    }
+
+    function ensureAutoQueueClosedLoopShell() {
+      if (!root) return;
+      const tabs = qs('.cgpt-autoq-mode-tabs', root);
+      if (tabs && !qs('[data-autoq-mode="closed-loop"]', tabs)) {
+        const tabBtn = document.createElement('button');
+        tabBtn.type = 'button';
+        tabBtn.className = 'cgpt-autoq-mode-tab';
+        tabBtn.dataset.autoqMode = 'closed-loop';
+        tabBtn.textContent = '闭环控制';
+        tabs.appendChild(tabBtn);
+        bindOnce(tabBtn, 'click', () => {
+          switchPromptMode('closed-loop');
+        }, 'autoq-mode-tab:closed-loop');
+      }
+      if (!qs('#cgpt-autoq-closed-loop-panel', root)) {
+        const taskPanel = qs('#cgpt-autoq-task-panel', root);
+        const editorBlock = qs('.cgpt-autoq-editor-block', root);
+        const anchor = taskPanel || editorBlock;
+        if (!anchor || !anchor.parentElement) return;
+        const panel = document.createElement('div');
+        panel.className = `cgpt-autoq-closed-loop-panel${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}`;
+        panel.id = 'cgpt-autoq-closed-loop-panel';
+        panel.innerHTML = `
+          <div class="cgpt-section-title" style="margin-top: 4px;">闭环控制模式</div>
+          <div class="cgpt-hint" style="margin-bottom: 8px;">
+            闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
+          </div>
+          <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
+            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey">闭环-快捷键模式+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-closed-loop-mode="with_hotkey_every_round">闭环-快捷键模式+每一轮上传</button>
+            <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-closed-loop-mode="without_hotkey">闭环-仅对话+每5轮上传</button>
+          </div>
+          <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
+          <label class="cgpt-checkbox-line">
+            <input type="checkbox" id="cgpt-autoq-closed-loop-auto-upload-enabled">
+            每隔指定轮数自动重新上传当前分组文件
+          </label>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-upload-interval">每 N 轮上传一次</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+          </div>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-delay-min-sec">每轮完成后最短等待秒数</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-min-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+          </div>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-delay-max-sec">每轮完成后最长等待秒数</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-max-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+          </div>
+          <div class="cgpt-hint">
+            默认随机等待 40～60 秒。每轮回复完成并确认没有终止信号后，会重新随机取一个等待时间，再进入下一轮。
+          </div>
+        `;
+        anchor.parentElement.insertBefore(panel, editorBlock || anchor.nextSibling);
+        ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][PANEL_HEAL] inserted closed-loop panel into existing autoq module');
+      }
+      closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
+      bindAutoQueueClosedLoopPanelEvents();
+    }
+
+    function bindAutoQueueClosedLoopPanelEvents() {
+      if (!root) return;
+      const panel = qs('#cgpt-autoq-closed-loop-panel', root);
+      if (!panel) return;
+      bindOnce(panel, 'click', (event) => {
+        const btn = event.target instanceof HTMLElement
+          ? event.target.closest('button[data-action]')
+          : null;
+        if (!btn) return;
+        const action = String(btn.dataset.action || '').trim();
+        if (!action) return;
+        if (
+          action !== 'closed-loop-with-hotkey'
+          && action !== 'closed-loop-with-hotkey-upload-every-round'
+          && action !== 'closed-loop-without-hotkey'
+        ) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (
+          typeof UploadModule === 'undefined'
+          || !UploadModule
+          || typeof UploadModule.dispatchClosedLoopAction !== 'function'
+        ) {
+          const msg = 'UploadModule.dispatchClosedLoopAction 不存在，无法启动闭环控制';
+          console.error('[AUTOQ][CLOSED_LOOP][DISPATCH_MISSING]', msg);
+          ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][DISPATCH_MISSING] action=${action}`);
+          return;
+        }
+        ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][CLICK] action=${action}`);
+        void UploadModule.dispatchClosedLoopAction(action, 'autoq-closed-loop-panel');
+      }, 'autoq-closed-loop-panel-click');
+      [
+        '#cgpt-autoq-closed-loop-auto-upload-enabled',
+        '#cgpt-autoq-closed-loop-upload-interval',
+        '#cgpt-autoq-closed-loop-delay-min-sec',
+        '#cgpt-autoq-closed-loop-delay-max-sec',
+      ].forEach((selector) => {
+        const el = qs(selector, panel);
+        if (!el) return;
+        bindOnce(el, 'change', () => {
+          saveAutoQueueClosedLoopSettingsFromUi();
+        }, `autoq-closed-loop-setting-change:${selector}`);
+        bindOnce(el, 'input', () => {
+          saveAutoQueueClosedLoopSettingsFromUi();
+        }, `autoq-closed-loop-setting-input:${selector}`);
+      });
+    }
+
     function switchPromptMode(nextMode) {
       const prevMode = normalizeAutoMode(config.promptMode);
       const normalizedNext = normalizeAutoMode(nextMode);
@@ -4172,6 +4408,7 @@ const AutoQueueModule = (() => {
         updateModeTabs();
         renderListPanelVisibility();
         renderTaskPanelVisibility();
+        renderClosedLoopPanelVisibility();
         renderListProfiles();
         renderTaskProfiles();
         renderTaskList();
@@ -4201,6 +4438,7 @@ const AutoQueueModule = (() => {
       updateModeTabs();
       renderListPanelVisibility();
       renderTaskPanelVisibility();
+      renderClosedLoopPanelVisibility();
       renderListProfiles();
       renderTaskProfiles();
       renderTaskList();
@@ -4223,6 +4461,8 @@ const AutoQueueModule = (() => {
         ToolboxShell.setStatus('已切换到列表模式');
       } else if (normalizedNext === 'task') {
         ToolboxShell.setStatus('已切换到批量任务');
+      } else if (normalizedNext === 'closed-loop') {
+        ToolboxShell.setStatus('已切换到闭环控制');
       } else {
         ToolboxShell.setStatus('已切换到继续模式');
       }
@@ -6233,6 +6473,7 @@ const AutoQueueModule = (() => {
     let listProfileNameEl = null;
     let listProfileDeleteConfirmUntil = 0;
     let taskPanelEl = null;
+    let closedLoopPanelEl = null;
     let taskProfilesEl = null;
     let taskProfileNameEl = null;
     let taskListEl = null;
@@ -7702,6 +7943,7 @@ const AutoQueueModule = (() => {
       updateModeTabs();
       renderListPanelVisibility();
       renderTaskPanelVisibility();
+      renderClosedLoopPanelVisibility();
       ensureListSelectUi();
       renderListProfiles();
       renderTaskProfiles();
@@ -7785,6 +8027,7 @@ const AutoQueueModule = (() => {
 
       if (m === 'list') return '列表模式';
       if (m === 'task') return '批量任务';
+      if (m === 'closed-loop') return '闭环控制';
       return '继续模式';
     }
 
@@ -38820,9 +39063,11 @@ const AutoQueueModule = (() => {
       qsa('.cgpt-autoq-mode-tab', root).forEach((btn) => {
         bindOnce(btn, 'click', () => {
           const mode = btn.getAttribute('data-autoq-mode');
-          switchPromptMode(mode === 'list' ? 'list' : (mode === 'task' ? 'task' : 'continue'));
+          switchPromptMode(normalizeAutoMode(mode));
         }, `autoq-mode-tab:${btn.getAttribute('data-autoq-mode') || 'unknown'}`);
       });
+
+      bindAutoQueueClosedLoopPanelEvents();
 
       qsa('input', root).forEach((el) => {
         bindOnce(el, 'change', () => {
@@ -38978,13 +39223,16 @@ const AutoQueueModule = (() => {
         listProfilesEl = qs('#cgpt-autoq-list-profile-chips', root);
         listProfileNameEl = qs('#cgpt-autoq-list-name', root);
         taskPanelEl = qs('#cgpt-autoq-task-panel', root);
+        closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
         mainLiteEl = qs('#cgpt-autoq-main-lite', root);
         startUploadBtn = ensureAutoQueueStartUploadButton();
         normalizeAutoConfig(config);
         resetRuntimeStateForFreshPage('mount-existed');
         clearStaleStopAdviceForIdleMode('mount-existed');
         restoreBatchModeActiveSubtabFromMemory();
+        ensureAutoQueueClosedLoopShell();
         renderTaskPanelVisibility();
+        renderClosedLoopPanelVisibility();
         syncBatchSubTabRefs();
         refreshBatchTaskPanelRefs();
         bindAutoQueueDelegatedActions('mount');
@@ -39022,6 +39270,7 @@ const AutoQueueModule = (() => {
             <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'continue' ? ' active' : ''}" data-autoq-mode="continue">继续模式</button>
             <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'list' ? ' active' : ''}" data-autoq-mode="list">列表模式</button>
             <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'task' ? ' active' : ''}" data-autoq-mode="task">批量任务</button>
+            <button type="button" class="cgpt-autoq-mode-tab${config.promptMode === 'closed-loop' ? ' active' : ''}" data-autoq-mode="closed-loop">闭环控制</button>
           </div>
 
           <div class="cgpt-autoq-main-lite" id="cgpt-autoq-main-lite"></div>
@@ -39052,6 +39301,38 @@ const AutoQueueModule = (() => {
               <button type="button" class="cgpt-autoq-batch-subtab" data-batch-subtab="settings" aria-selected="false">执行设置</button>
             </div>
             <div class="cgpt-autoq-batch-subtab-content" id="cgpt-autoq-batch-subtab-content"></div>
+          </div>
+
+          <div class="cgpt-autoq-closed-loop-panel${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-closed-loop-panel">
+            <div class="cgpt-section-title" style="margin-top: 4px;">闭环控制模式</div>
+            <div class="cgpt-hint" style="margin-bottom: 8px;">
+              闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
+            </div>
+            <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
+              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey">闭环-快捷键模式+每5轮上传</button>
+              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-closed-loop-mode="with_hotkey_every_round">闭环-快捷键模式+每一轮上传</button>
+              <button type="button" class="cgpt-btn cyan" id="cgpt-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-closed-loop-mode="without_hotkey">闭环-仅对话+每5轮上传</button>
+            </div>
+            <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
+            <label class="cgpt-checkbox-line">
+              <input type="checkbox" id="cgpt-autoq-closed-loop-auto-upload-enabled">
+              每隔指定轮数自动重新上传当前分组文件
+            </label>
+            <div class="cgpt-kv">
+              <label for="cgpt-autoq-closed-loop-upload-interval">每 N 轮上传一次</label>
+              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-autoq-closed-loop-delay-min-sec">每轮完成后最短等待秒数</label>
+              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-min-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+            </div>
+            <div class="cgpt-kv">
+              <label for="cgpt-autoq-closed-loop-delay-max-sec">每轮完成后最长等待秒数</label>
+              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-max-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+            </div>
+            <div class="cgpt-hint">
+              默认随机等待 40～60 秒。每轮回复完成并确认没有终止信号后，会重新随机取一个等待时间，再进入下一轮。
+            </div>
           </div>
 
           <div class="cgpt-autoq-editor-block">
@@ -39142,6 +39423,7 @@ const AutoQueueModule = (() => {
       listProfileSelectEl = qs('#cgpt-autoq-list-select', root);
       listProfileNameEl = qs('#cgpt-autoq-list-name', root);
       taskPanelEl = qs('#cgpt-autoq-task-panel', root);
+      closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
       mainLiteEl = qs('#cgpt-autoq-main-lite', root);
 
       repairAutoQueuePromptConfigIfNeeded();
@@ -39157,6 +39439,7 @@ const AutoQueueModule = (() => {
       updateModeTabs();
       renderListPanelVisibility();
       renderTaskPanelVisibility();
+      renderClosedLoopPanelVisibility();
       syncBatchSubTabRefs();
       refreshBatchTaskPanelRefs();
       renderListProfiles();
@@ -39446,6 +39729,19 @@ const AutoQueueModule = (() => {
       getCurrentTaskBadgeText,
       logCurrentTaskDisplayUpdate,
       refreshCurrentTaskDisplay,
+      refreshClosedLoopControlPanel: (reason = '') => {
+        renderAutoQueueClosedLoopSettings();
+        refreshAutoQueueClosedLoopButtons(reason || 'external-refresh');
+      },
+      openClosedLoopControlPanel: (reason = '') => {
+        config.promptMode = 'closed-loop';
+        saveConfig();
+        updateModeTabs();
+        renderListPanelVisibility();
+        renderTaskPanelVisibility();
+        renderClosedLoopPanelVisibility();
+        ToolboxShell.appendLog(`[AUTOQ][CLOSED_LOOP][OPEN_PANEL] reason=${reason || '-'}`);
+      },
     };
   })();
 

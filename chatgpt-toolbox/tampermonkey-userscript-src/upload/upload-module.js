@@ -624,14 +624,42 @@
       const homeNavInterval = Number(
         continueAutomation.homeNavInterval || 20,
       );
+      let minDelayMs = Number(continueAutomation.closedLoopNextDelayMinMs);
+      let maxDelayMs = Number(continueAutomation.closedLoopNextDelayMaxMs);
+      const legacyDelayMs = Number(continueAutomation.closedLoopNextDelayMs);
+      const legacyMinSec = Number(continueAutomation.closedLoopNextDelayMinSec);
+      const legacyMaxSec = Number(continueAutomation.closedLoopNextDelayMaxSec);
+      if (!Number.isFinite(minDelayMs) || minDelayMs <= 0) {
+        if (Number.isFinite(legacyMinSec) && legacyMinSec > 0) {
+          minDelayMs = Math.round(legacyMinSec * 1000);
+        } else if (Number.isFinite(legacyDelayMs) && legacyDelayMs >= 10000) {
+          minDelayMs = legacyDelayMs;
+        } else {
+          minDelayMs = 40000;
+        }
+      }
+      if (!Number.isFinite(maxDelayMs) || maxDelayMs <= 0) {
+        if (Number.isFinite(legacyMaxSec) && legacyMaxSec > 0) {
+          maxDelayMs = Math.round(legacyMaxSec * 1000);
+        } else if (Number.isFinite(legacyDelayMs) && legacyDelayMs >= 10000) {
+          maxDelayMs = legacyDelayMs;
+        } else {
+          maxDelayMs = 60000;
+        }
+      }
+      minDelayMs = Math.max(1000, Math.min(600000, Math.round(minDelayMs)));
+      maxDelayMs = Math.max(1000, Math.min(600000, Math.round(maxDelayMs)));
+      if (minDelayMs > maxDelayMs) {
+        const tmp = minDelayMs;
+        minDelayMs = maxDelayMs;
+        maxDelayMs = tmp;
+      }
       return {
         autoUploadEnabled: continueAutomation.autoUploadEnabled !== false,
         autoUploadInterval: Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 5,
-        closedLoopNextDelayMs: (() => {
-          const delayMs = Number(continueAutomation.closedLoopNextDelayMs || 1200);
-          if (!Number.isFinite(delayMs)) return 1200;
-          return Math.max(0, Math.min(600000, Math.floor(delayMs)));
-        })(),
+        closedLoopNextDelayMinMs: minDelayMs,
+        closedLoopNextDelayMaxMs: maxDelayMs,
+        closedLoopNextDelayMs: minDelayMs,
         homeNavEnabled: continueAutomation.homeNavEnabled !== false,
         homeNavInterval: Number.isFinite(homeNavInterval) && homeNavInterval > 0
           ? Math.floor(homeNavInterval)
@@ -642,13 +670,30 @@
       };
     }
 
-    function getClosedLoopNextStepDelayMs() {
+    function getClosedLoopNextStepDelayMs(meta = {}) {
       const cfg = getClosedLoopAutomationConfig();
-      const delayMs = Number(cfg.closedLoopNextDelayMs || 1200);
-      if (!Number.isFinite(delayMs)) {
-        return 1200;
+      let minMs = Number(cfg.closedLoopNextDelayMinMs);
+      let maxMs = Number(cfg.closedLoopNextDelayMaxMs);
+      if (!Number.isFinite(minMs) || minMs <= 0) {
+        minMs = 40000;
       }
-      return Math.max(0, Math.min(600000, Math.floor(delayMs)));
+      if (!Number.isFinite(maxMs) || maxMs <= 0) {
+        maxMs = 60000;
+      }
+      minMs = Math.max(1000, Math.min(600000, Math.round(minMs)));
+      maxMs = Math.max(1000, Math.min(600000, Math.round(maxMs)));
+      if (minMs > maxMs) {
+        const tmp = minMs;
+        minMs = maxMs;
+        maxMs = tmp;
+      }
+      const selectedMs = minMs === maxMs
+        ? minMs
+        : Math.floor(minMs + Math.random() * (maxMs - minMs + 1));
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][NEXT_DELAY_RANDOM] runId=${meta.runId || '-'} round=${meta.round || '-'} minMs=${minMs} maxMs=${maxMs} selectedMs=${selectedMs} minSec=${Math.round(minMs / 1000)} maxSec=${Math.round(maxMs / 1000)} selectedSec=${Math.round(selectedMs / 1000)}`,
+      );
+      return selectedMs;
     }
 
     function isClosedLoopEveryRoundUploadMode(mode) {
@@ -705,7 +750,7 @@
       const closedLoopCfg = getClosedLoopAutomationConfig();
       const intervalText = getClosedLoopUploadPolicyText(mode, closedLoopCfg);
       if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
-        return `闭环仅对话+${intervalText}`;
+        return `闭环-仅对话+${intervalText}`;
       }
       return `闭环-快捷键模式+${intervalText}`;
     }
@@ -732,6 +777,8 @@
       copyHotkeyUploadVerifyLoopCount = value;
       if (reason !== 'retry-current-round') {
         closedLoopContinueState.hotkeyContinueSendFailCount = 0;
+        closedLoopContinueState.lastProcessedReplyKey = '';
+        closedLoopContinueState.lastProcessedRound = 0;
       }
       if (reason) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][ROUND_SYNC] round=${value} reason=${reason}`);
@@ -785,8 +832,12 @@
     const closedLoopContinueState = {
       running: false,
       stopping: false,
+      cancelRequested: false,
+      cancelReason: '',
+      phase: 'idle',
       runId: 0,
       timerId: null,
+      nextStepTimer: 0,
       retryTimerId: null,
       retryAttempts: 0,
       round: 0,
@@ -801,7 +852,280 @@
       hotkeyContinueSendFailCount: 0,
       finishFinalStatus: '',
       retryingCurrentRound: false,
+      lastProcessedReplyKey: '',
+      lastProcessedRound: 0,
+      waitKind: 'idle',
+      waitStartedAt: 0,
+      nextStepDelayMs: 0,
+      nextStepCountdownEndAt: 0,
+      countdownTickTimer: 0,
+      lastReplyWaitLogSec: -1,
     };
+
+    function normalizeClosedLoopActionName(action) {
+      return String(action || '').trim();
+    }
+
+    function isClosedLoopStartAction(action) {
+      const name = normalizeClosedLoopActionName(action);
+      return name === 'closed-loop-with-hotkey'
+        || name === 'closed-loop-with-hotkey-upload-every-round'
+        || name === 'closed-loop-without-hotkey';
+    }
+
+    function getCurrentClosedLoopOwnerAction() {
+      const mode = String(closedLoopContinueState.mode || '').trim();
+      if (mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND) {
+        return 'closed-loop-with-hotkey-upload-every-round';
+      }
+      if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
+        return 'closed-loop-without-hotkey';
+      }
+      if (mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY) {
+        return 'closed-loop-with-hotkey';
+      }
+      return '';
+    }
+
+    function isCurrentClosedLoopStopClick(action, target = null) {
+      if (closedLoopContinueState.running !== true) {
+        return false;
+      }
+      const button = target instanceof HTMLElement ? target : null;
+      const resolvedAction = normalizeClosedLoopActionName(action);
+      const isClosedLoopBtn = (
+        typeof UploadButtonVm !== 'undefined'
+        && typeof UploadButtonVm.isClosedLoopModeButton === 'function'
+        && (
+          UploadButtonVm.isClosedLoopModeButton(button)
+          || UploadButtonVm.isClosedLoopModeButton(resolvedAction)
+        )
+      );
+      if (!isClosedLoopBtn) {
+        return false;
+      }
+      const id = button && button.id ? String(button.id) : '';
+      if (
+        closedLoopContinueState.mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND
+        && id === 'cgpt-closed-loop-upload-every-round-hotkey-btn'
+      ) {
+        return true;
+      }
+      if (
+        closedLoopContinueState.mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY
+        && id === 'cgpt-closed-loop-upload-every5-hotkey-btn'
+      ) {
+        return true;
+      }
+      if (
+        closedLoopContinueState.mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+        && id === 'cgpt-closed-loop-upload-every5-btn'
+      ) {
+        return true;
+      }
+      return false;
+    }
+
+    function shouldStopClosedLoopRun(runId) {
+      return closedLoopContinueState.running !== true
+        || closedLoopContinueState.cancelRequested === true
+        || Number(closedLoopContinueState.runId || 0) !== Number(runId || 0);
+    }
+
+    function tryInterceptClosedLoopStopClick(action, button, source, event) {
+      const resolvedAction = normalizeClosedLoopActionName(action);
+      if (!isCurrentClosedLoopStopClick(resolvedAction, button)) {
+        return false;
+      }
+      if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+      }
+      if (event && typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+      }
+      if (event && typeof event.stopImmediatePropagation === 'function') {
+        event.stopImmediatePropagation();
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STOP_BUTTON_CLICK] action=${resolvedAction || '-'} id=${button && button.id ? button.id : '-'} mode=${closedLoopContinueState.mode || '-'} source=${source || '-'}`,
+      );
+      stopClosedLoopContinue('button-click-stop');
+      return true;
+    }
+
+    function getClosedLoopWaitVisualSnapshot() {
+      const running = closedLoopContinueState.running === true;
+      const waitKind = closedLoopContinueState.waitKind || 'idle';
+      const now = Date.now();
+
+      let replyWaitElapsedMs = 0;
+      let nextStepRemainingMs = 0;
+
+      if (running && waitKind === 'reply' && closedLoopContinueState.waitStartedAt > 0) {
+        replyWaitElapsedMs = Math.max(0, now - closedLoopContinueState.waitStartedAt);
+      }
+
+      if (running && waitKind === 'next-step' && closedLoopContinueState.nextStepCountdownEndAt > 0) {
+        nextStepRemainingMs = Math.max(0, closedLoopContinueState.nextStepCountdownEndAt - now);
+      }
+
+      return {
+        running,
+        waitKind,
+        replyWaitElapsedMs,
+        nextStepDelayMs: Math.max(0, Number(closedLoopContinueState.nextStepDelayMs || 0)),
+        nextStepRemainingMs,
+      };
+    }
+
+    function clearClosedLoopButtonWaitState(reason = 'unknown') {
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      if (closedLoopContinueState.waitKind === 'next-step') {
+        endClosedLoopNextStepWait(`clear:${src}`);
+        return;
+      }
+      if (closedLoopContinueState.countdownTickTimer) {
+        clearInterval(closedLoopContinueState.countdownTickTimer);
+        closedLoopContinueState.countdownTickTimer = 0;
+      }
+      closedLoopContinueState.waitKind = 'idle';
+      closedLoopContinueState.waitStartedAt = 0;
+      closedLoopContinueState.nextStepDelayMs = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+      closedLoopContinueState.lastReplyWaitLogSec = -1;
+    }
+
+    function startClosedLoopButtonCountdownTick(reason = 'closed-loop-button-countdown') {
+      if (closedLoopContinueState.countdownTickTimer) {
+        clearInterval(closedLoopContinueState.countdownTickTimer);
+        closedLoopContinueState.countdownTickTimer = 0;
+      }
+
+      closedLoopContinueState.countdownTickTimer = setInterval(() => {
+        if (closedLoopContinueState.running !== true) {
+          clearInterval(closedLoopContinueState.countdownTickTimer);
+          closedLoopContinueState.countdownTickTimer = 0;
+          return;
+        }
+
+        if (
+          closedLoopContinueState.waitKind !== 'reply'
+          && closedLoopContinueState.waitKind !== 'next-step'
+        ) {
+          clearInterval(closedLoopContinueState.countdownTickTimer);
+          closedLoopContinueState.countdownTickTimer = 0;
+          return;
+        }
+
+        if (closedLoopContinueState.waitKind === 'next-step') {
+          const remainingMs = Math.max(
+            0,
+            Number(closedLoopContinueState.nextStepCountdownEndAt || 0) - Date.now(),
+          );
+          const secText = (remainingMs / 1000).toFixed(1);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_TICK] remainingMs=${remainingMs} runId=${closedLoopContinueState.runId || '-'} round=${closedLoopContinueState.round || 0}`,
+          );
+          ToolboxShell.appendLog(
+            `停止闭环继续（等待下一轮 ${secText}s）`,
+          );
+        } else if (closedLoopContinueState.waitKind === 'reply') {
+          const elapsedMs = Math.max(
+            0,
+            Date.now() - Number(closedLoopContinueState.waitStartedAt || 0),
+          );
+          const sec = Math.floor(elapsedMs / 1000);
+          if (sec !== closedLoopContinueState.lastReplyWaitLogSec) {
+            closedLoopContinueState.lastReplyWaitLogSec = sec;
+            ToolboxShell.appendLog(`停止闭环继续（回复中 ${sec}s）`);
+          }
+        }
+
+        if (typeof renderClosedLoopContinueButtons === 'function') {
+          renderClosedLoopContinueButtons();
+        }
+      }, 500);
+    }
+
+    function beginClosedLoopReplyWait(reason = 'unknown') {
+      if (closedLoopContinueState.running !== true) {
+        return;
+      }
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      closedLoopContinueState.waitKind = 'reply';
+      closedLoopContinueState.waitStartedAt = Date.now();
+      closedLoopContinueState.nextStepDelayMs = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][WAIT_VISUAL_REPLY_START] reason=${src} runId=${closedLoopContinueState.runId || '-'} round=${closedLoopContinueState.round || 0}`,
+      );
+      startClosedLoopButtonCountdownTick(`reply-${src}`);
+      renderClosedLoopContinueButtons();
+    }
+
+    function endClosedLoopReplyWait(reason = 'unknown') {
+      if (closedLoopContinueState.waitKind !== 'reply') {
+        return;
+      }
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      closedLoopContinueState.waitKind = 'idle';
+      closedLoopContinueState.waitStartedAt = 0;
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][REPLY_WAIT_END] reason=${src} runId=${closedLoopContinueState.runId || '-'} round=${closedLoopContinueState.round || 0}`,
+      );
+    }
+
+    function endClosedLoopNextStepWait(reason = 'unknown') {
+      if (closedLoopContinueState.waitKind !== 'next-step') {
+        return;
+      }
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      const runId = closedLoopContinueState.runId || '-';
+      const round = closedLoopContinueState.round || 0;
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_END] runId=${runId} round=${round} reason=${src}`,
+      );
+      if (closedLoopContinueState.countdownTickTimer) {
+        clearInterval(closedLoopContinueState.countdownTickTimer);
+        closedLoopContinueState.countdownTickTimer = 0;
+      }
+      closedLoopContinueState.waitKind = 'idle';
+      closedLoopContinueState.waitStartedAt = 0;
+      closedLoopContinueState.nextStepDelayMs = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+    }
+
+    function beginClosedLoopNextStepWait(delayMs, reason = 'unknown') {
+      if (closedLoopContinueState.running !== true) {
+        return;
+      }
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      const waitMs = Math.max(0, Number(delayMs || 0));
+      const runId = closedLoopContinueState.runId || '-';
+      const round = closedLoopContinueState.round || 0;
+      closedLoopContinueState.waitKind = 'next-step';
+      closedLoopContinueState.waitStartedAt = Date.now();
+      closedLoopContinueState.nextStepDelayMs = waitMs;
+      closedLoopContinueState.nextStepCountdownEndAt = Date.now() + waitMs;
+      setCopyHotkeyUploadVerifyLoopPhase('post_reply_delay', `next-step:${src}`, {
+        cycleIndex: round,
+        currentSubtask: 'post-reply-delay',
+      });
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_START] delayMs=${waitMs} runId=${runId} round=${round} reason=${src}`,
+      );
+      const initialSec = (waitMs / 1000).toFixed(1);
+      ToolboxShell.appendLog(`停止闭环继续（等待下一轮 ${initialSec}s）`);
+      startClosedLoopButtonCountdownTick(`next-step-${src}`);
+      renderClosedLoopContinueButtons();
+      if (typeof renderUploadButtonsOnly === 'function') {
+        renderUploadButtonsOnly({
+          immediate: true,
+          force: true,
+          buttonTasksReason: `post-reply-delay-start:${src}`,
+        });
+      }
+    }
 
     function syncToolboxRunningOwner(source = '') {
       const src = String(source || 'sync').trim() || 'sync';
@@ -1537,6 +1861,130 @@
       };
     }
 
+    function getSendCopyHotkeyPreflightState(source = 'send-copy-hotkey') {
+      const src = String(source || 'send-copy-hotkey');
+      let responseState = {};
+      try {
+        responseState = typeof detectComposerResponseState === 'function'
+          ? detectComposerResponseState()
+          : {};
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[SEND_COPY_HOTKEY][PREFLIGHT_RESPONSE_FAILED]', err);
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][PREFLIGHT_RESPONSE_FAILED] source=${src} error=${errText}`,
+        );
+        responseState = {};
+      }
+      let composerState = {};
+      try {
+        composerState = typeof getComposerAttachmentState === 'function'
+          ? getComposerAttachmentState(`send-copy-hotkey-preflight:${src}`)
+          : {};
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[SEND_COPY_HOTKEY][PREFLIGHT_COMPOSER_FAILED]', err);
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][PREFLIGHT_COMPOSER_FAILED] source=${src} error=${errText}`,
+        );
+        composerState = {};
+      }
+      const responseText = String(
+        responseState.response_state
+          || responseState.state
+          || '',
+      ).trim().toLowerCase();
+      const responseReason = String(
+        responseState.response_state_reason
+          || responseState.reason
+          || '',
+      ).trim().toLowerCase();
+      const sendable = responseState.sendable;
+      const inputable = responseState.inputable;
+      const assistantBusy = responseText === 'generating'
+        || responseReason === 'assistant_busy'
+        || responseState.is_responding === true
+        || responseState.responding === true
+        || responseState.busy === true;
+      const sendButtonNotFound = responseReason === 'send_button_not_found';
+      const composerCount = Number(
+        composerState.count
+          || composerState.fileCount
+          || composerState.ready
+          || 0,
+      ) || 0;
+      const composerUploading = !!(
+        Number(composerState.uploading || 0) > 0
+        || Number(composerState.nativeUploading || 0) > 0
+        || composerState.isUploading === true
+      );
+      const composerTextLen = Number(
+        responseState.textLength
+          || responseState.composerTextLen
+          || composerState.textLen
+          || 0,
+      ) || 0;
+      const localFileCount = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles().filter(Boolean).length
+        : 0;
+      const hasComposerPayload = composerCount > 0 || composerUploading || composerTextLen > 0;
+      ToolboxShell.appendLog(
+        `[SEND_COPY_HOTKEY][PREFLIGHT] source=${src} response_state=${responseText || '-'} response_reason=${responseReason || '-'} sendable=${sendable === false ? 0 : 1} inputable=${inputable === false ? 0 : 1} composerCount=${composerCount} composerUploading=${composerUploading ? 1 : 0} composerTextLen=${composerTextLen} localFileCount=${localFileCount} hasComposerPayload=${hasComposerPayload ? 1 : 0}`,
+      );
+      if (assistantBusy || inputable === false) {
+        return {
+          ok: false,
+          code: 'assistant-busy',
+          message: '当前 ChatGPT 正在回答，不能执行“发送+复制+快捷键”。请等待回复完成后再点击。',
+          responseState,
+          composerState,
+        };
+      }
+      if (sendButtonNotFound || sendable === false) {
+        if (!hasComposerPayload && localFileCount > 0) {
+          return {
+            ok: false,
+            code: 'need-upload-first',
+            message: '本地队列有文件，但输入框没有附件。请先点击“开始上传”，上传完成后再执行“发送+复制+快捷键”。',
+            responseState,
+            composerState,
+          };
+        }
+        return {
+          ok: false,
+          code: 'send-not-ready',
+          message: '当前输入框不可发送，请确认输入框里有文本或附件，并且 ChatGPT 没有在回答。',
+          responseState,
+          composerState,
+        };
+      }
+      if (!hasComposerPayload && localFileCount > 0) {
+        return {
+          ok: false,
+          code: 'need-upload-first',
+          message: '本地队列有文件，但输入框没有附件。请先点击“开始上传”，上传完成后再执行“发送+复制+快捷键”。',
+          responseState,
+          composerState,
+        };
+      }
+      if (!hasComposerPayload) {
+        return {
+          ok: false,
+          code: 'empty-composer',
+          message: '当前输入框没有可发送内容，请先输入文本或上传附件。',
+          responseState,
+          composerState,
+        };
+      }
+      return {
+        ok: true,
+        code: 'ok',
+        message: '',
+        responseState,
+        composerState,
+      };
+    }
+
     async function waitUntilComposerSendableForSendCopyHotkey(runId, source = 'send-copy-hotkey') {
       const startedAt = Date.now();
       const timeoutMs = 120000;
@@ -1618,11 +2066,11 @@
     }
 
     function isClosedLoopRunActive(runId) {
-      return (
-        closedLoopContinueState.running
-        && !closedLoopContinueState.stopping
-        && closedLoopContinueState.runId === runId
-      );
+      if (shouldStopClosedLoopRun(runId)) {
+        return false;
+      }
+      return closedLoopContinueState.running === true
+        && closedLoopContinueState.runId === runId;
     }
 
     function clearUploadPendingTimersOnBatchDoneSignal(source = 'batch-done-signal') {
@@ -1937,12 +2385,18 @@
         closedLoopContinueState.timerId = null;
         ToolboxShell.appendLog(`[CLOSED_LOOP][TIMER_ABORT] reason=${reason || '-'}`);
       }
+      if (closedLoopContinueState.nextStepTimer) {
+        clearTimeout(closedLoopContinueState.nextStepTimer);
+        closedLoopContinueState.nextStepTimer = 0;
+      }
     }
 
     function scheduleClosedLoopContinueNextStep(runId, delayMs, reason, options = {}) {
       const scheduleReason = String(reason || 'unknown').trim() || 'unknown';
-      const waitMs = Number(delayMs || 0);
+      const safeDelayMs = Math.max(0, Number(delayMs || 0));
       const retryCurrentRound = options && options.retryCurrentRound === true;
+      const scheduledAt = Date.now();
+      const fireAt = scheduledAt + safeDelayMs;
 
       clearClosedLoopStepTimer(`reschedule:${scheduleReason}`);
 
@@ -1954,19 +2408,40 @@
       }
 
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][SCHEDULE_NEXT] runId=${runId} delayMs=${waitMs} reason=${scheduleReason} retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
+        `[CLOSED_LOOP][SCHEDULE_NEXT] runId=${runId} delayMs=${safeDelayMs} scheduledAt=${scheduledAt} fireAt=${fireAt} reason=${scheduleReason} retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
       );
 
-      closedLoopContinueState.timerId = setTimeout(() => {
-        closedLoopContinueState.timerId = null;
+      beginClosedLoopNextStepWait(safeDelayMs, scheduleReason);
 
-        if (!isClosedLoopRunActive(runId)) {
+      const nextStepTimerId = window.setTimeout(() => {
+        const actualWaitMs = Date.now() - scheduledAt;
+        closedLoopContinueState.timerId = null;
+        closedLoopContinueState.nextStepTimer = 0;
+
+        if (shouldStopClosedLoopRun(runId)) {
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][TIMER_ABORT] reason=inactive runId=${runId} scheduleReason=${scheduleReason}`,
+            `[CLOSED_LOOP][NEXT_STEP_CANCELLED] runId=${runId} reason=stopped-during-post-reply-delay scheduleReason=${scheduleReason} actualWaitMs=${actualWaitMs}`,
           );
           return;
         }
 
+        if (!isClosedLoopRunActive(runId)) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][TIMER_ABORT] reason=inactive runId=${runId} scheduleReason=${scheduleReason} actualWaitMs=${actualWaitMs}`,
+          );
+          return;
+        }
+
+        endClosedLoopNextStepWait(`timer-fire:${scheduleReason}`);
+
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][POST_REPLY_DELAY_DONE] runId=${runId} expectedDelayMs=${safeDelayMs} actualWaitMs=${actualWaitMs} reason=${scheduleReason} action=start-next-round retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
+        );
+        if (safeDelayMs > 0 && actualWaitMs + 50 < safeDelayMs) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][POST_REPLY_DELAY_TOO_SHORT] runId=${runId} expectedDelayMs=${safeDelayMs} actualWaitMs=${actualWaitMs} reason=${scheduleReason}`,
+          );
+        }
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][TIMER_FIRE] runId=${runId} scheduleReason=${scheduleReason} retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
         );
@@ -1989,7 +2464,9 @@
             delayMs: 5000,
           });
         });
-      }, waitMs);
+      }, safeDelayMs);
+      closedLoopContinueState.timerId = nextStepTimerId;
+      closedLoopContinueState.nextStepTimer = nextStepTimerId;
 
       return true;
     }
@@ -2072,6 +2549,181 @@
         || (rootElRef ? qs(selector, rootElRef) : null);
     }
 
+    function forceResetClosedLoopStopButtonsWhenNotRunning(reason = 'unknown') {
+      const root = rootElRef || document;
+      if (!root) return;
+      const running = !!(
+        closedLoopContinueState
+        && closedLoopContinueState.running === true
+      );
+      if (running) return;
+      const closedLoopButtons = [
+        {
+          id: 'cgpt-closed-loop-upload-every5-hotkey-btn',
+          action: 'closed-loop-with-hotkey',
+          text: '闭环-快捷键模式+每5轮上传',
+        },
+        {
+          id: 'cgpt-closed-loop-upload-every-round-hotkey-btn',
+          action: 'closed-loop-with-hotkey-upload-every-round',
+          text: '闭环-快捷键模式+每一轮上传',
+        },
+        {
+          id: 'cgpt-closed-loop-upload-every5-btn',
+          action: 'closed-loop-without-hotkey',
+          text: '闭环-仅对话+每5轮上传',
+        },
+      ];
+      closedLoopButtons.forEach((cfg) => {
+        const btn = root.querySelector(`#${cfg.id}`);
+        if (!btn) return;
+        const text = String(btn.textContent || '').trim();
+        if (text.includes('停止闭环继续') || text.includes('停止环继续')) {
+          btn.textContent = cfg.text;
+          btn.title = cfg.text;
+          btn.disabled = false;
+          btn.dataset.action = cfg.action;
+          btn.dataset.cgptButtonAction = cfg.action;
+          btn.dataset.cgptRuntimeAction = cfg.action;
+          btn.classList.remove('cgpt-btn-busy', 'cgpt-btn-danger', 'cgpt-btn-failed');
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][RESET_STALE_STOP_BUTTON] id=${cfg.id} action=${cfg.action} oldText=${text} newText=${cfg.text} reason=${String(reason || '-')}`,
+          );
+        }
+      });
+      const allStopButtons = Array.from(root.querySelectorAll('button')).filter((btn) => {
+        const text = String(btn.textContent || '').trim();
+        return text.includes('停止闭环继续') || text.includes('停止环继续');
+      });
+      if (allStopButtons.length > 0) {
+        const detail = allStopButtons.map((btn) => {
+          const action = btn.dataset.action
+            || btn.dataset.cgptButtonAction
+            || btn.dataset.cgptRuntimeAction
+            || '-';
+          return `${btn.id || '-'}:${action}:${String(btn.textContent || '').trim()}`;
+        }).join(' | ');
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STALE_STOP_BUTTONS_REMAIN] count=${allStopButtons.length} reason=${String(reason || '-')} detail=${detail}`,
+        );
+      }
+    }
+
+    function removeOrResetOrphanClosedLoopStopButtons(reason = 'unknown') {
+      const root = rootElRef || document;
+      if (!root) return;
+      const running = !!(
+        closedLoopContinueState
+        && closedLoopContinueState.running === true
+      );
+      if (running) return;
+      const validClosedLoopIds = new Set([
+        'cgpt-closed-loop-upload-every5-hotkey-btn',
+        'cgpt-closed-loop-upload-every-round-hotkey-btn',
+        'cgpt-closed-loop-upload-every5-btn',
+      ]);
+      const normalLabels = {
+        'cgpt-upload-start': '开始上传',
+        'cgpt-send-message-once': '发送消息',
+        'cgpt-send-copy-hotkey-once': '发送+复制+快捷键',
+        'cgpt-copy-hotkey-once': '复制+快捷键',
+        'cgpt-upload-continue-once': '复制并继续',
+        'cgpt-auto-continue-once': '无限继续',
+        'cgpt-auto-continue-until-done': '无限继续直到完成',
+        'cgpt-copy-last-message-scroll-bottom': '复制最后回复',
+        'cgpt-copy-toolbox-log': '复制日志',
+        'cgpt-open-chatgpt-home': '回到首页',
+        'cgpt-copy-hotkey-continue-once': '复制+快捷键+继续',
+        'cgpt-copy-hotkey-continue-loop': '无限连续复制+快捷键+继续',
+      };
+      Array.from(root.querySelectorAll('button')).forEach((btn) => {
+        const text = String(btn.textContent || '').trim();
+        if (!text.includes('停止闭环继续') && !text.includes('停止环继续')) return;
+        const id = String(btn.id || '').trim();
+        if (validClosedLoopIds.has(id)) return;
+        const fixedText = normalLabels[id];
+        if (fixedText) {
+          btn.textContent = fixedText;
+          btn.title = fixedText;
+          btn.classList.remove('cgpt-btn-busy', 'cgpt-btn-danger', 'cgpt-btn-failed');
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][RESET_POLLUTED_STOP_BUTTON] id=${id || '-'} oldText=${text} newText=${fixedText} reason=${String(reason || '-')}`,
+          );
+          return;
+        }
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][REMOVE_ORPHAN_STOP_BUTTON] id=${id || '-'} oldText=${text} reason=${String(reason || '-')}`,
+        );
+        btn.remove();
+      });
+    }
+
+    function diagnoseDuplicateClosedLoopStopButtons(reason = 'unknown') {
+      diagnoseButtonTextPollution(reason);
+    }
+
+    function diagnoseButtonTextPollution(reason = 'unknown') {
+      const root = rootElRef || document;
+      if (!root) {
+        return;
+      }
+      const closedLoopButtonActions = typeof UploadButtonVm !== 'undefined'
+        && UploadButtonVm.CLOSED_LOOP_BUTTON_ACTIONS
+        ? UploadButtonVm.CLOSED_LOOP_BUTTON_ACTIONS
+        : new Set([
+          'closed-loop-with-hotkey',
+          'closed-loop-with-hotkey-upload-every-round',
+          'closed-loop-without-hotkey',
+        ]);
+      const closedLoopButtonIds = typeof UploadButtonVm !== 'undefined'
+        && UploadButtonVm.CLOSED_LOOP_BUTTON_IDS
+        ? UploadButtonVm.CLOSED_LOOP_BUTTON_IDS
+        : new Set([
+          'cgpt-closed-loop-upload-every5-hotkey-btn',
+          'cgpt-closed-loop-upload-every-round-hotkey-btn',
+          'cgpt-closed-loop-upload-every5-btn',
+        ]);
+      const isClosedLoopLikeText = typeof UploadButtonVm !== 'undefined'
+        && typeof UploadButtonVm.isClosedLoopLikeText === 'function'
+        ? UploadButtonVm.isClosedLoopLikeText.bind(UploadButtonVm)
+        : (text) => {
+          const t = String(text || '').trim();
+          return t.includes('闭环') || t.includes('停止环继续') || t.startsWith('环-');
+        };
+
+      const buttons = Array.from(root.querySelectorAll('button'));
+      const stopButtons = [];
+      const pollutedButtons = [];
+      buttons.forEach((btn) => {
+        const text = String(btn.textContent || '').trim();
+        const action = String(
+          btn.dataset?.action
+          || btn.dataset?.cgptButtonAction
+          || btn.dataset?.cgptRuntimeAction
+          || '',
+        ).trim();
+        const id = String(btn.id || '').trim();
+        if (text.includes('停止闭环继续') || text.includes('停止环继续')) {
+          stopButtons.push(`${id || '-'}:${action || '-'}:${text}`);
+        }
+        const isClosedLoopBtn = closedLoopButtonIds.has(id)
+          || closedLoopButtonActions.has(action);
+        if (!isClosedLoopBtn && isClosedLoopLikeText(text)) {
+          pollutedButtons.push(`${id || '-'}:${action || '-'}:${text}`);
+        }
+      });
+      if (stopButtons.length > 1) {
+        ToolboxShell.appendLog(
+          `[BUTTON_TEXT][DUP_STOP] count=${stopButtons.length} reason=${String(reason || '-')} buttons=${stopButtons.join(' | ')}`,
+        );
+      }
+      if (pollutedButtons.length > 0) {
+        ToolboxShell.appendLog(
+          `[BUTTON_TEXT][POLLUTED] count=${pollutedButtons.length} reason=${String(reason || '-')} buttons=${pollutedButtons.join(' | ')}`,
+        );
+      }
+    }
+
     function renderClosedLoopContinueButtons(snapshot = null) {
       const hotkeyBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
       const everyRoundBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND);
@@ -2101,6 +2753,21 @@
         localSnapshot.closedLoopTitle = actionDef.title;
 
         const view = UploadButtonVm.getClosedLoopContinueButtonViewState(localSnapshot, mode);
+        const ownerAction = typeof UploadButtonVm.getClosedLoopOwnerActionFromSnapshot === 'function'
+          ? UploadButtonVm.getClosedLoopOwnerActionFromSnapshot(localSnapshot)
+          : '';
+        const buttonAction = typeof UploadButtonVm.resolveActionForClosedLoopMode === 'function'
+          ? UploadButtonVm.resolveActionForClosedLoopMode(mode)
+          : (actionDef.action || '');
+        const isRunning = localSnapshot.closedLoopContinueRunning === true;
+        const isOwner = typeof UploadButtonVm.isClosedLoopOwnerAction === 'function'
+          ? UploadButtonVm.isClosedLoopOwnerAction(buttonAction, localSnapshot)
+          : (isRunning && closedLoopContinueState.mode === mode);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP_BUTTON][VIEW_DECIDE] id=${btn.id || actionDef.id || '-'} action=${buttonAction || '-'} owner=${ownerAction || '-'} isOwner=${isOwner ? 1 : 0} running=${isRunning ? 1 : 0} text=${view.text || '-'}`,
+          );
+        }
         const applied = UploadButtonVm.applyUploadButtonViewState(
           btn,
           view,
@@ -2108,8 +2775,7 @@
           { snapshot: localSnapshot, buttonName: actionDef.action },
         );
 
-        const isRunning = !!closedLoopContinueState.running;
-        const isActiveMode = isRunning && closedLoopContinueState.mode === mode;
+        const isActiveMode = isOwner;
         btn.setAttribute('aria-disabled', isRunning && !isActiveMode ? 'true' : 'false');
         return applied;
       };
@@ -2124,6 +2790,15 @@
         changed += 1;
       }
       logClosedLoopButtonHitTest('after-render-closed-loop-buttons');
+      forceResetClosedLoopStopButtonsWhenNotRunning('renderClosedLoopContinueButtons');
+      diagnoseButtonTextPollution('renderClosedLoopContinueButtons');
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.refreshClosedLoopControlPanel === 'function'
+      ) {
+        AutoQueueModule.refreshClosedLoopControlPanel('upload-closed-loop-render');
+      }
       return changed > 0;
     }
 
@@ -2194,6 +2869,7 @@
 
       clearClosedLoopRetryTimer(src);
       closedLoopContinueState.retryAttempts = 0;
+      clearClosedLoopButtonWaitState(`finish:${src}`);
 
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][FINISH_REQUEST] reason=${src} finalStatus=${finalStatus} runId=${closedLoopContinueState.runId}`,
@@ -2246,14 +2922,65 @@
       return true;
     }
 
-    function stopClosedLoopContinue(reason = 'unknown') {
-      const src = String(reason || 'unknown').trim() || 'unknown';
+    function stopClosedLoopContinue(reason = 'manual-stop') {
+      const src = String(reason || 'manual-stop').trim() || 'manual-stop';
+      const oldRunId = closedLoopContinueState.runId || 0;
 
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STOP_REQUEST] reason=${src} runningBefore=${closedLoopContinueState.running ? 1 : 0} runId=${oldRunId} mode=${closedLoopContinueState.mode || '-'}`,
+      );
+
+      closedLoopContinueState.running = false;
+      closedLoopContinueState.stopping = false;
+      closedLoopContinueState.cancelRequested = true;
+      closedLoopContinueState.cancelReason = src;
+      closedLoopContinueState.runId = oldRunId + 1;
+      closedLoopContinueState.mode = '';
+      closedLoopContinueState.phase = 'idle';
+      closedLoopContinueState.retryingCurrentRound = false;
+      closedLoopContinueState.doneVerificationRunning = false;
+      closedLoopContinueState.homeNavigationRunning = false;
+
+      clearClosedLoopStepTimer(`stop:${src}`);
+      clearClosedLoopRetryTimer(`stop:${src}`);
+      clearClosedLoopButtonWaitState(`stop:${src}`);
+
+      if (closedLoopContinueState.countdownTickTimer) {
+        clearInterval(closedLoopContinueState.countdownTickTimer);
+        closedLoopContinueState.countdownTickTimer = 0;
+      }
+      closedLoopContinueState.waitKind = 'idle';
+      closedLoopContinueState.waitStartedAt = 0;
+      closedLoopContinueState.nextStepDelayMs = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+
+      copyHotkeyUploadVerifyLoopRunning = false;
+      copyHotkeyUploadVerifyLoopStopRequested = true;
+      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+      loopTask.stopRequested = true;
+      loopTask.currentSubtask = 'manual-stopped';
+
+      setCopyHotkeyUploadVerifyLoopPhase('idle', `manual-stopped:${src}`, {
+        cycleIndex: closedLoopContinueState.round || 0,
+        currentSubtask: 'manual-stopped',
+      });
+      copyHotkeyUploadVerifyLoopStopRequested = false;
+      loopTask.stopRequested = false;
+
+      syncToolboxRunningOwner(`stop:${src}`);
+      releaseUploadActionLock('copy-hotkey-upload-verify-loop');
+      setStatus('闭环已停止', 'idle');
+      renderClosedLoopContinueButtons();
+      if (typeof renderUploadButtonsOnly === 'function') {
+        renderUploadButtonsOnly(`closed-loop-stop:${src}`);
+      }
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STOP_DONE] reason=${src} runningAfter=${closedLoopContinueState.running ? 1 : 0} oldRunId=${oldRunId} newRunId=${closedLoopContinueState.runId || '-'}`,
+      );
       ToolboxShell.appendLog(`[CLOSED_LOOP][USER_STOP] reason=${src}`);
 
-      return finishClosedLoopContinue(src, {
-        finalStatus: 'stopped',
-      });
+      return true;
     }
 
     function readComposerTextFallback() {
@@ -3473,8 +4200,22 @@
         }
         const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
         const phase = String(loopTask && loopTask.phase ? loopTask.phase : '').trim().toLowerCase();
-        if (phase === 'paused' || loopTask.currentSubtask === 'paused') {
+        const sourceText = String(source || '').trim();
+        const isExplicitResume = sourceText.includes('resume-by-button');
+        if (
+          !isExplicitResume
+          && (phase === 'paused' || loopTask.currentSubtask === 'paused')
+        ) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][USER_STOP_WHILE_PAUSED] reason=button-toggle:${normalizedMode} runId=${closedLoopContinueState.runId} round=${closedLoopContinueState.round}`,
+          );
+          stopClosedLoopContinue(`button-stop-while-paused:${normalizedMode}`);
+          return;
+        }
+        if (isExplicitResume && (phase === 'paused' || loopTask.currentSubtask === 'paused')) {
           const runId = closedLoopContinueState.runId;
+          closedLoopContinueState.cancelRequested = false;
+          closedLoopContinueState.cancelReason = '';
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][RESUME_BY_BUTTON] reason=button-toggle:${normalizedMode} runId=${runId} round=${closedLoopContinueState.round}`,
           );
@@ -3562,6 +4303,9 @@
 
       closedLoopContinueState.running = true;
       closedLoopContinueState.stopping = false;
+      closedLoopContinueState.cancelRequested = false;
+      closedLoopContinueState.cancelReason = '';
+      closedLoopContinueState.phase = 'running';
       closedLoopContinueState.runId += 1;
       closedLoopContinueState.round = 0;
       clearClosedLoopRetryTimer(`start:${src}`);
@@ -3575,6 +4319,9 @@
       closedLoopContinueState.lastHomeNavigationRound = 0;
       closedLoopContinueState.sendFailedStreak = 0;
       closedLoopContinueState.hotkeyContinueSendFailCount = 0;
+      closedLoopContinueState.lastProcessedReplyKey = '';
+      closedLoopContinueState.lastProcessedRound = 0;
+      clearClosedLoopButtonWaitState(`start:${src}`);
       copyHotkeyUploadVerifyLoopStopRequested = false;
 
       const runId = closedLoopContinueState.runId;
@@ -3784,11 +4531,11 @@
           `[CLOSED_LOOP][DONE_VERIFY_SEND_DONE] runId=${runId} round=${round}`,
         );
 
+        beginClosedLoopReplyWait(`done-verify-wait-${round}`);
         setCopyHotkeyUploadVerifyLoopPhase('waiting_next_reply', `done-verify-wait-${round}`, {
           cycleIndex: round,
           currentSubtask: 'done_verify_wait',
         });
-        renderClosedLoopContinueButton();
 
         const waited = await waitAssistantCycleAfterContinue(
           `closed-loop-final-verify-${round}`,
@@ -4114,12 +4861,34 @@
     }
 
     async function runClosedLoopContinueStep(runId, options = {}) {
+      if (shouldStopClosedLoopRun(runId)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][ABORT_BY_STOP] runId=${runId} currentRunId=${closedLoopContinueState.runId || '-'} reason=${closedLoopContinueState.cancelReason || '-'} stage=before-step`,
+        );
+        return;
+      }
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][STEP_ABORT] reason=inactive-before-step runId=${runId}`,
         );
         return;
       }
+
+      if (
+        closedLoopContinueState.waitKind === 'next-step'
+        && (closedLoopContinueState.timerId || closedLoopContinueState.nextStepTimer)
+      ) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STEP_SKIP] runId=${runId} reason=post-reply-delay-timer-active waitKind=next-step`,
+        );
+        return;
+      }
+      if (closedLoopContinueState.waitKind === 'reply') {
+        endClosedLoopReplyWait('step-active');
+      } else {
+        clearClosedLoopButtonWaitState('step-active');
+      }
+      renderClosedLoopContinueButtons();
 
       const retryCurrentRound = options && options.retryCurrentRound === true;
       closedLoopContinueState.retryingCurrentRound = retryCurrentRound;
@@ -4394,8 +5163,12 @@
               };
             } else {
               await focusComposerForClosedLoop(sourceText);
+              // 聚焦后短暂停顿；附件稳定由 sendClosedLoopContinuePrompt → runSharedComposerSendFlow 等待。
               await sleep(300);
-              const continuePromptText = getCopyHotkeyContinuePromptText(closedLoopFlowOptions);
+              const continuePromptText = getCopyHotkeyContinuePromptText({
+                ...closedLoopFlowOptions,
+                logContinuePrompt: false,
+              });
               appendClosedLoopTrace('CONTINUE_PAYLOAD_PREPARED', {
                 runId,
                 round,
@@ -4404,6 +5177,9 @@
               });
               ToolboxShell.appendLog(
                 `[CLOSED_LOOP][HOTKEY_THEN_DIRECT_CONTINUE] runId=${runId} round=${round} source=${sourceText} promptLen=${continuePromptText.length}`,
+              );
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][WAIT_ATTACHMENT_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=${sourceText} uploadEveryRound=${isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 1 : 0}`,
               );
               let sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
                 ...closedLoopFlowOptions,
@@ -4421,6 +5197,9 @@
                   resetClosedLoopOwnWaitingSendState(sourceText);
                   await focusComposerForClosedLoop(`${sourceText}:retry-after-${failReason}`);
                   await sleep(300);
+                  ToolboxShell.appendLog(
+                    `[CLOSED_LOOP][WAIT_ATTACHMENT_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=${sourceText}:retry-direct uploadEveryRound=${isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 1 : 0}`,
+                  );
                   sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
                     ...closedLoopFlowOptions,
                     source: `${sourceText}:retry-direct`,
@@ -4458,7 +5237,10 @@
             }
           }
         } else {
-          const continuePromptText = getCopyHotkeyContinuePromptText(closedLoopFlowOptions);
+          const continuePromptText = getCopyHotkeyContinuePromptText({
+            ...closedLoopFlowOptions,
+            logContinuePrompt: false,
+          });
           appendClosedLoopTrace('CONTINUE_PAYLOAD_PREPARED', {
             runId,
             round,
@@ -4476,6 +5258,9 @@
 
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][AFTER_UPLOAD_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=${stepSourceTag}`,
+          );
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][WAIT_ATTACHMENT_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=${stepSourceTag} uploadEveryRound=${isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 1 : 0}`,
           );
 
           const sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
@@ -4593,10 +5378,6 @@
       if (!result || result.ok === false) {
         const failReason = result && result.reason ? result.reason : 'once-failed';
 
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_PAUSED] reason=${failReason} runId=${runId} round=${round}`,
-        );
-
         if (failReason === 'cancelled') {
           stopClosedLoopContinue('button-toggle');
           return;
@@ -4616,6 +5397,9 @@
             },
           );
           if (confirmAfterFail && confirmAfterFail.ok === true) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][STEP_SEND_TEMP_FAILED] reason=${failReason} runId=${runId} round=${round}`,
+            );
             ToolboxShell.appendLog(
               `[CLOSED_LOOP][SEND_FALSE_NEGATIVE_ACCEPTED] runId=${runId} round=${round} reason=${confirmAfterFail.reason || '-'}`,
             );
@@ -4640,6 +5424,9 @@
             `[CLOSED_LOOP][STEP_SEND_RECOVERED] runId=${runId} round=${round} reason=send-false-negative-accepted`,
           );
         } else {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][STEP_PAUSED] reason=${failReason} runId=${runId} round=${round}`,
+          );
         if (
           useHotkey
           && (
@@ -4741,11 +5528,11 @@
         cycleIndex: round,
         currentSubtask: 'wait-next-reply',
       });
+      beginClosedLoopReplyWait(`round-${round}-wait`);
       setStatus(`第 ${round} 轮已发送，正在等待回复完成`, 'running', {
         persist: true,
         shortText: '等回复',
       });
-      renderClosedLoopContinueButton();
 
       const waitPreviousKey = isInitialSendRound
         ? previousKeyBeforeStep
@@ -4778,9 +5565,23 @@
         return;
       }
 
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][REPLY_DONE] runId=${runId} round=${round} action=prepare-next-delay`,
+      );
+      endClosedLoopReplyWait(`round-${round}-reply-done`);
+
       const stopSignalResult = detectCopyHotkeyLoopStopSignal(round);
-      if (stopSignalResult && stopSignalResult.matched) {
+      const terminalStop = !!(stopSignalResult && stopSignalResult.matched);
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][TERMINAL_STOP_CHECK] runId=${runId} round=${round} stop=${terminalStop ? 1 : 0} `
+        + `reason=${stopSignalResult && stopSignalResult.reason ? stopSignalResult.reason : '-'}`,
+      );
+
+      if (terminalStop) {
         const terminalStatus = stopSignalResult.status || 'done';
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STOP_BY_TERMINAL] runId=${runId} round=${round} status=${terminalStatus} reason=${stopSignalResult.reason || 'terminal-signal'}`,
+        );
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][STEP_TERMINAL_SIGNAL] source=after-wait-check runId=${runId} round=${round} status=${terminalStatus} reason=${stopSignalResult.reason || 'terminal-signal'}`,
         );
@@ -4825,7 +5626,20 @@
         return;
       }
 
-      scheduleClosedLoopContinueNextStep(runId, getClosedLoopNextStepDelayMs(), `round-${round}-done`);
+      const delayMs = getClosedLoopNextStepDelayMs({
+        runId,
+        round,
+        reason: 'reply-done-before-next-round',
+      });
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][POST_REPLY_DELAY_START] runId=${runId} round=${round} delayMs=${delayMs} delaySec=${Math.round(delayMs / 1000)} reason=reply-done-before-next-round`,
+      );
+      scheduleClosedLoopContinueNextStep(
+        runId,
+        delayMs,
+        `round-${round}-post-reply-delay`,
+      );
+      return;
     }
 
     function migrateLegacyClosedLoopHotkeyButton(scope) {
@@ -5478,13 +6292,59 @@
     }
 
     function getDefaultCopyHotkeyContinuePromptText() {
+      if (typeof getDefaultBatchContinuePromptText === 'function') {
+        return getDefaultBatchContinuePromptText();
+      }
       if (typeof getDefaultTaskContinuePromptText === 'function') {
         return getDefaultTaskContinuePromptText();
       }
       if (typeof getDefaultContinuePromptText === 'function') {
         return getDefaultContinuePromptText();
       }
-      return '请继续完成上一个任务。';
+      return '请继续完成当前任务。';
+    }
+
+    function readUserConfiguredContinuePromptText() {
+      const cfg = typeof getCompactUiConfig === 'function'
+        ? getCompactUiConfig()
+        : {};
+      return String(cfg.copyHotkeyContinuePromptText || '').trim();
+    }
+
+    const CANONICAL_CONTINUE_STOP_TOKEN = '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
+
+    function logContinuePromptBuild(promptText, options = {}) {
+      const source = String(options.source || options.logSource || '-').trim() || '-';
+      const text = String(promptText || '');
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][CONTINUE_PROMPT_BUILD] source=${source} len=${text.length} `
+        + `hasStopToken=${text.includes(CANONICAL_CONTINUE_STOP_TOKEN) ? 1 : 0} `
+        + `requireCursor=${text.includes('Cursor 修改指令') ? 1 : 0}`,
+      );
+    }
+
+    function buildContinuePromptPayloadVerify(promptText, doneSignal) {
+      const text = String(promptText || '');
+      const signal = String(doneSignal || CANONICAL_CONTINUE_STOP_TOKEN).trim();
+      const defaultMarkers = [
+        '请继续完成当前任务',
+        '最开始那个 Prompt',
+        'Cursor 修改指令',
+        signal,
+      ].filter((item) => item && text.includes(item));
+      if (defaultMarkers.length >= 3) {
+        return {
+          allowLenDelta: 80,
+          allowCoreContains: true,
+          requiredIncludes: defaultMarkers,
+        };
+      }
+      const userCore = text.slice(0, Math.min(48, text.length)).trim();
+      return {
+        allowLenDelta: 120,
+        allowCoreContains: true,
+        requiredIncludes: userCore ? [userCore] : [],
+      };
     }
 
     function formatContinuePromptPreview(text, maxLen = 160) {
@@ -5515,27 +6375,25 @@
     function getCopyHotkeyContinuePromptText(options = {}) {
       const overridePrompt = String(options.continuePrompt || '').trim();
       if (overridePrompt) {
+        if (options.logContinuePrompt !== false) {
+          logContinuePromptBuild(overridePrompt, options);
+        }
         return overridePrompt;
       }
 
-      const cfg = typeof getCompactUiConfig === 'function'
-        ? getCompactUiConfig()
-        : {};
-
-      const signal = getCopyHotkeyContinueStopSignal(options);
-
-      let text = String(cfg.copyHotkeyContinuePromptText || '').trim();
-
+      const userText = readUserConfiguredContinuePromptText();
+      let text = userText;
       if (!text) {
         text = getDefaultCopyHotkeyContinuePromptText();
       }
 
-      if (typeof renderContinuePromptTemplate === 'function') {
-        return renderContinuePromptTemplate(text, signal);
-      }
+      const signal = getCopyHotkeyContinueStopSignal(options);
 
-      if (!text.includes(signal)) {
-        text = [
+      let rendered = text;
+      if (typeof renderContinuePromptTemplate === 'function') {
+        rendered = renderContinuePromptTemplate(text, signal);
+      } else if (!text.includes(signal)) {
+        rendered = [
           text,
           '',
           '如果任务已经完整完成，只能回复下面这一行，不能有任何其他文字：',
@@ -5544,7 +6402,10 @@
         ].join('\n');
       }
 
-      return text;
+      if (options.logContinuePrompt !== false) {
+        logContinuePromptBuild(rendered, options);
+      }
+      return rendered;
     }
 
     function uploadAnalyzeAssistantDoneSignalText(text, options = {}) {
@@ -5824,7 +6685,14 @@
           cancelRequested: false,
           cancelable: false,
         }, `reset-upload-runtime:${reasonText}`);
-        setUploadButtonState('idle', `reset-upload-runtime:${reasonText}`);
+        if (uploadButtonRenderDepth > 0 || uploadButtonsRendering) {
+          uploadButtonRenderPendingReason = `reset-upload-runtime:${reasonText}`;
+          ToolboxShell.appendLog(
+            `[UPLOAD_STATE][RESET_RUNTIME_DEFERRED] reason=${reasonText} depth=${uploadButtonRenderDepth}`,
+          );
+        } else {
+          setUploadButtonState('idle', `reset-upload-runtime:${reasonText}`);
+        }
       }
 
       const afterCount = getLocalUploadFileCount();
@@ -11784,9 +12652,26 @@
 
       healStaleUploadRunningLockIfNeeded('switchGroup');
 
-      if (state.running) {
-        setStatus('正在上传中，不能切换分组');
+      const uploadActuallyRunning = !!(
+        (typeof isUploadRunActuallyActive === 'function' && isUploadRunActuallyActive())
+        || (typeof hasActiveUploadInProgressOnQueue === 'function' && hasActiveUploadInProgressOnQueue())
+        || state.uploadAbortController
+      );
+      if (uploadActuallyRunning) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][SWITCH_BLOCKED_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} stateRunning=${state.running ? 1 : 0} abort=${state.uploadAbortController ? 1 : 0}`,
+        );
+        setStatus('附件正在上传中，暂时不能切换分组', 'warn');
         return;
+      }
+      if (state.running) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][SWITCH_HEAL_STALE_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} reason=state-running-without-real-upload`,
+        );
+        state.running = false;
+        state.cancelled = false;
+        state.activeId = '';
+        state.uploadAbortController = null;
       }
 
       const exists = state.groups.some((g) => g.id === groupId);
@@ -11817,8 +12702,15 @@
         await loadQueueForActiveGroup();
         saveMultiUploadSelectionForActiveGroup();
 
-        render();
+        renderProjectCategoryChips();
+        renderUploadListOnly('switch-group', { force: true });
+        renderUploadButtonsOnly({
+          immediate: true,
+          force: true,
+          buttonTasksReason: 'switch-group',
+        });
         setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
+        render();
 
         syncUploadGroupAppState();
         appendUploadGroupLog('SWITCH', {
@@ -13109,9 +14001,22 @@
         ? 'cgpt-state-blocked'
         : (messageIsWarn ? 'cgpt-state-waiting' : '');
 
-      const uploadQuotaText = `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}`;
+      const panelWidthForQuotaText = (() => {
+        const panelEl = document.getElementById(APP.panelId);
+        if (!panelEl) {
+          return 0;
+        }
+        const rect = panelEl.getBoundingClientRect();
+        return Math.round(rect.width || panelEl.offsetWidth || 0);
+      })();
+      const useCompactQuotaText = panelWidthForQuotaText > 0 && panelWidthForQuotaText < 620;
+      const uploadQuotaText = useCompactQuotaText
+        ? `上传:${uploadQuota.used}/${uploadQuota.maxFiles}`
+        : `本地上传:${uploadQuota.used}/${uploadQuota.maxFiles}`;
 
-      const messageQuotaText = `本地消息:${messageQuota.used}/${messageQuota.maxMessages}`;
+      const messageQuotaText = useCompactQuotaText
+        ? `消息:${messageQuota.used}/${messageQuota.maxMessages}`
+        : `本地消息:${messageQuota.used}/${messageQuota.maxMessages}`;
 
       const uploadReleaseText = uploadQuota.remaining <= 0
         ? formatQuotaReleaseCountdown(uploadQuota.nextReleaseAt)
@@ -16765,7 +17670,8 @@
         cancelWaitingSend('copy-continue');
       }
 
-      const continuePromptText = getCopyHotkeyContinuePromptText(options);
+      const continuePromptText = getCopyHotkeyContinuePromptText({ ...options, logContinuePrompt: false });
+      logContinuePromptBuild(continuePromptText, { source: sourceText, logSource: sourceText });
       const promptPreview = formatContinuePromptPreview(continuePromptText, 160);
       const previewLine = `[UPLOAD_CONTINUE][PROMPT_PREVIEW] chars=${continuePromptText.length} preview=${promptPreview}`;
       safeAppendLog(previewLine);
@@ -16884,17 +17790,11 @@
       const shouldStop = typeof options.shouldStop === 'function'
         ? options.shouldStop
         : () => false;
-      const text = getCopyHotkeyContinuePromptText(options);
+      const text = getCopyHotkeyContinuePromptText({ ...options, logContinuePrompt: false });
       const stopSignal = getCopyHotkeyContinueStopSignal(options);
-      const continuePayloadVerify = options.payloadVerify || {
-        allowCoreContains: true,
-        allowLenDelta: 80,
-        requiredIncludes: [
-          '请继续完成上一个任务',
-          stopSignal,
-          '不要重复已经输出过的内容',
-        ],
-      };
+      logContinuePromptBuild(text, { source: sourceText, logSource: sourceText });
+      const continuePayloadVerify = options.payloadVerify
+        || buildContinuePromptPayloadVerify(text, stopSignal);
 
       if (shouldStop()) {
         return {
@@ -17951,28 +18851,22 @@
       const sourceText = String(context.source || 'closed-loop-continue').trim() || 'closed-loop-continue';
       const shouldStop = typeof context.shouldStop === 'function' ? context.shouldStop : () => false;
       const doneSignal = getCopyHotkeyContinueStopSignal(context);
-      const blockedSignal = typeof DEFAULT_BATCH_BLOCKED_SIGNAL !== 'undefined'
-        ? DEFAULT_BATCH_BLOCKED_SIGNAL
-        : '<<<XZ_TOOLBOX_BATCH_TASK_BLOCKED_NEED_INPUT_7F3B9C>>>';
+      const prompt = String(promptText || '');
+
+      logContinuePromptBuild(prompt, { source: sourceText, logSource: sourceText });
 
       return runSharedComposerSendFlow({
         source: sourceText,
-        promptText: String(promptText || ''),
+        promptText: prompt,
         uploadBeforeSend: false,
-        waitAttachmentStable: false,
-        requireAttachmentReady: false,
+        // 闭环继续发送前必须等待附件稳定，尤其是「每1轮上传」模式。
+        // 不能只依赖 ChatGPT 发送按钮是否变亮。
+        waitAttachmentStable: true,
+        requireAttachmentReady: true,
         shouldStop,
         logPrefix: 'CLOSED_LOOP',
         allowReplaceDraft: true,
-        payloadVerify: {
-          allowLenDelta: 10,
-          allowCoreContains: true,
-          requiredIncludes: [
-            '请继续完成上一个任务',
-            doneSignal,
-            blockedSignal,
-          ].filter(Boolean),
-        },
+        payloadVerify: buildContinuePromptPayloadVerify(prompt, doneSignal),
       });
     }
 
@@ -18546,6 +19440,170 @@
       }
     }
 
+
+    function hashShort(value) {
+      return hashStringTiny(value);
+    }
+
+    function getLatestAssistantTurnIdLightweight() {
+      const turns = Array.from(document.querySelectorAll(
+        '[data-testid^="conversation-turn-"], [data-message-author-role="assistant"]',
+      ));
+      for (let i = turns.length - 1; i >= 0; i -= 1) {
+        const el = turns[i];
+        if (!el) {
+          continue;
+        }
+        const testId = el.getAttribute('data-testid') || '';
+        if (testId) {
+          return testId;
+        }
+        const closestTurn = el.closest('[data-testid^="conversation-turn-"]');
+        if (closestTurn) {
+          return closestTurn.getAttribute('data-testid') || '';
+        }
+      }
+      return '';
+    }
+
+    function isAssistantBusyFromClosedLoopWaitState(busyState) {
+      if (!busyState || typeof busyState !== 'object') {
+        return false;
+      }
+      return !!(
+        busyState.assistantBusy === true
+        || busyState.detectBusy === true
+        || busyState.stopButton === true
+        || String(busyState.responseState || '').trim().toLowerCase() === 'generating'
+      );
+    }
+
+    function getAssistantBusyStateForClosedLoopWait(source) {
+      const sourceText = String(source || 'closed-loop-wait').trim() || 'closed-loop-wait';
+      let responseState = {};
+      try {
+        responseState = typeof detectComposerResponseState === 'function'
+          ? (detectComposerResponseState({ light: true }) || detectComposerResponseState() || {})
+          : {};
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[COPY_HOTKEY_CONTINUE_LOOP][busy-state-response-failed]', {
+          source: sourceText,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][busy-state-response-failed] source=${sourceText} error=${errText}`,
+          );
+        }
+        responseState = {};
+      }
+
+      const responseStateText = String(
+        responseState.response_state
+          || responseState.state
+          || responseState.reason
+          || '',
+      ).trim().toLowerCase();
+
+      let stopButton = false;
+      let composerBusy = false;
+      try {
+        stopButton = (
+          (typeof hasRealChatGPTStopGeneratingButton === 'function' && hasRealChatGPTStopGeneratingButton())
+          || (
+            typeof ComposerApi !== 'undefined'
+            && ComposerApi
+            && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+            && ComposerApi.isAssistantLikelyBusy()
+          )
+        );
+        composerBusy = stopButton;
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[COPY_HOTKEY_CONTINUE_LOOP][busy-state-composer-failed]', {
+          source: sourceText,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][busy-state-composer-failed] source=${sourceText} error=${errText}`,
+          );
+        }
+        stopButton = false;
+        composerBusy = false;
+      }
+
+      const responseGenerating = responseStateText === 'generating'
+        || String(responseState.response_state_reason || responseState.reason || '').trim().toLowerCase() === 'assistant_busy'
+        || responseState.is_responding === true
+        || responseState.responding === true
+        || responseState.busy === true;
+
+      const assistantBusy = composerBusy || responseGenerating;
+
+      return {
+        assistantBusy,
+        detectBusy: assistantBusy,
+        stopButton,
+        responseState: responseStateText,
+        composerBusy,
+        source: sourceText,
+      };
+    }
+
+    function finishClosedLoopWaitCycle(sourceText, prevKey, nextKey, doneTag) {
+      const round = Number(closedLoopContinueState.round || 0);
+      const finalKey = String(nextKey || '');
+      if (
+        closedLoopContinueState.lastProcessedRound === round
+        && closedLoopContinueState.lastProcessedReplyKey === finalKey
+        && finalKey
+      ) {
+        safeAppendLog(
+          `[CLOSED_LOOP][FINAL_REPLY_DUPLICATE_SKIP] runId=${closedLoopContinueState.runId || '-'} round=${round} finalHash=${hashShort(finalKey)}`,
+        );
+        return true;
+      }
+
+      let finalText = '';
+      try {
+        finalText = String(getLastAssistantMessageTextForStopSignal() || '').trim();
+      } catch (error) {
+        const errText = formatToolboxError(error);
+        console.error('[COPY_HOTKEY_CONTINUE_LOOP][reply-final-read-failed]', {
+          source: sourceText,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        safeAppendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][reply-final-read-failed] source=${sourceText} error=${errText}`,
+        );
+      }
+
+      const turnId = getLatestAssistantTurnIdLightweight() || '-';
+      safeAppendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][reply-final-picked] turnId=${turnId} len=${finalText.length} hash=${hashShort(finalText)} tag=${doneTag || '-'}`,
+      );
+      if (closedLoopContinueState.running) {
+        safeAppendLog(
+          `[CLOSED_LOOP][FINAL_REPLY_PROCESS] runId=${closedLoopContinueState.runId || '-'} round=${round} finalHash=${hashShort(finalKey)} finalLen=${finalText.length}`,
+        );
+      }
+
+      closedLoopContinueState.lastProcessedRound = round;
+      closedLoopContinueState.lastProcessedReplyKey = finalKey;
+
+      safeAppendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][${doneTag || 'wait-cycle-done'}] source=${sourceText} previousHash=${hashShort(prevKey)} previousLen=${String(prevKey || '').length} nextHash=${hashShort(finalKey)} nextLen=${finalKey.length}`,
+      );
+      return true;
+    }
 
     function buildAssistantMessageKeyFromRecord(record, textOverride = '') {
       const recordObj = record && typeof record === 'object' ? record : null;
@@ -19480,7 +20538,7 @@
       }
 
       const continueSource = sourceText || 'copy-hotkey-continue-once';
-      const loopContinuePromptTxt = getCopyHotkeyContinuePromptText(flowOptions);
+      const loopContinuePromptTxt = getCopyHotkeyContinuePromptText({ ...flowOptions, logContinuePrompt: false });
       safeAppendLog(`[COPY_HOTKEY_CONTINUE_LOOP][continue-prompt] index=${copyHotkeyContinueLoopCount + 1} length=${loopContinuePromptTxt.length}`);
       const continueResult = await sendContinuePromptFromUnifiedPipeline(continueSource, flowOptions);
 
@@ -19973,6 +21031,8 @@
     async function waitAssistantCycleAfterContinue(source, previousKey, options = {}) {
       const sourceText = String(source || '');
       const prevKey = String(previousKey || '');
+      const prevHash = hashShort(prevKey);
+      const prevLen = prevKey.length;
       const flowOptions = options && typeof options === 'object' ? options : {};
       const shouldStop = typeof flowOptions.shouldStop === 'function'
         ? flowOptions.shouldStop
@@ -19984,120 +21044,133 @@
         );
       const startedAt = Date.now();
       const maxWaitMs = 180000;
+      const waitPollMs = 1500;
+      const finalStableMs = 800;
       let sawBusy = false;
 
-      safeAppendLog(
-        `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-start] source=${sourceText} previousKey=${prevKey || '-'}`,
-      );
-
-      while (Date.now() - startedAt < maxWaitMs) {
-        if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
-          safeAppendLog('[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-page-navigating]');
-          return false;
-        }
-
-        if (shouldStop()) {
-          const uploadVerifyStopped = copyHotkeyUploadVerifyLoopStopRequested
-            || ensureCopyHotkeyUploadVerifyLoopTask().stopRequested;
-          safeAppendLog(
-            uploadVerifyStopped
-              ? '[CLOSED_LOOP][wait-cycle-stop-requested]'
-              : '[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-stop-requested]',
-          );
-          return false;
-        }
-
-        let busy = false;
-
-        try {
-          busy = (
-            typeof ComposerApi !== 'undefined'
-            && ComposerApi
-            && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-            && ComposerApi.isAssistantLikelyBusy()
-          );
-        } catch (error) {
-          console.error('[COPY_HOTKEY_CONTINUE_LOOP][busy-check-failed]', {
-            source: sourceText,
-            error_type: error && error.name,
-            error: error && error.message,
-            stack: error && error.stack,
-          });
-          busy = false;
-        }
-
-        if (busy) {
-          sawBusy = true;
-        }
-
-        const nextKey = getLastAssistantMessageKeySafe();
-
-        safeAppendLog(
-          `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-poll] previousKey=${prevKey || '-'} nextKey=${nextKey || '-'} same=${nextKey && nextKey === prevKey ? '1' : '0'} busy=${busy ? '1' : '0'} sawBusy=${sawBusy ? '1' : '0'}`,
-        );
-
-        if (nextKey && prevKey && nextKey !== prevKey && !busy) {
-          await sleep(600);
-          safeAppendLog(
-            `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done-by-poll] previousKey=${prevKey} nextKey=${nextKey}`,
-          );
-          return true;
-        }
-
-        if (!busy) {
-          const latestText = String(getLastAssistantMessageTextForStopSignal() || '').trim();
-          const keyChanged = !!(nextKey && prevKey && nextKey !== prevKey);
-          const keyReady = !prevKey || !nextKey || keyChanged;
-          if (
-            latestText
-            && (keyReady || sawBusy)
-          ) {
-            await sleep(800);
-            let busyAfterTextWait = false;
-            try {
-              busyAfterTextWait = (
-                typeof ComposerApi !== 'undefined'
-                && ComposerApi
-                && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-                && ComposerApi.isAssistantLikelyBusy()
-              );
-            } catch (error) {
-              console.error('[COPY_HOTKEY_CONTINUE_LOOP][busy-recheck-failed]', {
-                source: sourceText,
-                error_type: error && error.name,
-                error: error && error.message,
-                stack: error && error.stack,
-              });
-              busyAfterTextWait = false;
-            }
-            if (!busyAfterTextWait) {
-              safeAppendLog(
-                `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done-by-text] source=${sourceText} previousKey=${prevKey || '-'} nextKey=${nextKey || '-'} textLen=${latestText.length}`,
-              );
-              return true;
-            }
-          }
-        }
-
-        if (sawBusy && !busy) {
-          await sleep(800);
-          const keyAfterIdle = getLastAssistantMessageKeySafe();
-          if (!prevKey || keyAfterIdle !== prevKey) {
-            safeAppendLog(
-              `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done] previousKey=${prevKey || '-'} nextKey=${keyAfterIdle || '-'}`,
-            );
-            return true;
-          }
-        }
-
-        await sleep(1500);
+      if (typeof window !== 'undefined') {
+        window.__cgptClosedLoopWaitPollActive = true;
       }
 
-      safeAppendLog(
-        `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-timeout] source=${sourceText} previousKey=${prevKey || '-'} maxWaitMs=${maxWaitMs}`,
-      );
-      setStatus('连续复制+快捷键+继续：等待下一轮回复超时', 'warn');
-      return false;
+      try {
+        safeAppendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-start] source=${sourceText} previousHash=${prevHash} previousLen=${prevLen}`,
+        );
+
+        while (Date.now() - startedAt < maxWaitMs) {
+          if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+            safeAppendLog('[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-page-navigating]');
+            return false;
+          }
+
+          if (shouldStop()) {
+            const uploadVerifyStopped = copyHotkeyUploadVerifyLoopStopRequested
+              || ensureCopyHotkeyUploadVerifyLoopTask().stopRequested;
+            safeAppendLog(
+              uploadVerifyStopped
+                ? '[CLOSED_LOOP][wait-cycle-stop-requested]'
+                : '[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-stop-requested]',
+            );
+            return false;
+          }
+
+          const busyState = getAssistantBusyStateForClosedLoopWait(sourceText);
+          const assistantBusy = isAssistantBusyFromClosedLoopWaitState(busyState);
+
+          if (assistantBusy) {
+            sawBusy = true;
+            const latestTurnId = getLatestAssistantTurnIdLightweight() || '-';
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-poll] phase=waiting_reply busy=1 responseState=${busyState.responseState || '-'} latestTurnId=${latestTurnId} action=skip-copy-scan sawBusy=1`,
+            );
+            await sleep(waitPollMs);
+            continue;
+          }
+
+          if (sawBusy) {
+            await sleep(finalStableMs);
+            const busyAfterStable = getAssistantBusyStateForClosedLoopWait(`${sourceText}:post-stable`);
+            if (isAssistantBusyFromClosedLoopWaitState(busyAfterStable)) {
+              safeAppendLog(
+                `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-poll] phase=waiting_reply busy=1 responseState=${busyAfterStable.responseState || '-'} latestTurnId=${getLatestAssistantTurnIdLightweight() || '-'} action=skip-copy-scan-recheck sawBusy=1`,
+              );
+              await sleep(waitPollMs);
+              continue;
+            }
+          }
+
+          const nextKey = getLastAssistantMessageKeySafe();
+          const nextHash = hashShort(nextKey);
+          const nextLen = nextKey.length;
+          const keyChanged = !!(nextKey && prevKey && nextKey !== prevKey);
+          const same = !!(nextKey && prevKey && nextKey === prevKey);
+
+          if (!nextKey && sawBusy) {
+            safeAppendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][WAIT_KEY_PENDING] source=${sourceText} previousHash=${prevHash} nextKey=- action=skip-same-check sawBusy=1`,
+            );
+            await sleep(waitPollMs);
+            continue;
+          }
+
+          safeAppendLog(
+            `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-poll] phase=check_reply busy=0 previousHash=${prevHash} previousLen=${prevLen} nextHash=${nextHash || '-'} nextLen=${nextLen} same=${same ? '1' : '0'} sawBusy=${sawBusy ? '1' : '0'}`,
+          );
+
+          if (keyChanged) {
+            await sleep(600);
+            return finishClosedLoopWaitCycle(sourceText, prevKey, nextKey, 'wait-cycle-done-by-poll');
+          }
+
+          const keyReady = !prevKey || !nextKey || keyChanged;
+          if (nextKey && (keyReady || sawBusy)) {
+            let latestText = '';
+            try {
+              latestText = String(getLastAssistantMessageTextForStopSignal() || '').trim();
+            } catch (error) {
+              const errText = formatToolboxError(error);
+              console.error('[COPY_HOTKEY_CONTINUE_LOOP][wait-text-read-failed]', {
+                source: sourceText,
+                error_type: error && error.name,
+                error: errText,
+                stack: error && error.stack,
+              });
+              safeAppendLog(
+                `[COPY_HOTKEY_CONTINUE_LOOP][wait-text-read-failed] source=${sourceText} error=${errText}`,
+              );
+            }
+            if (latestText) {
+              await sleep(finalStableMs);
+              const busyAfterTextWait = getAssistantBusyStateForClosedLoopWait(`${sourceText}:post-text`);
+              if (!isAssistantBusyFromClosedLoopWaitState(busyAfterTextWait)) {
+                safeAppendLog(
+                  `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-done-by-text] source=${sourceText} previousHash=${prevHash} nextHash=${nextHash} textLen=${latestText.length}`,
+                );
+                return finishClosedLoopWaitCycle(sourceText, prevKey, nextKey || prevKey, 'wait-cycle-done-by-text');
+              }
+            }
+          }
+
+          if (sawBusy && (!prevKey || keyChanged)) {
+            const keyAfterIdle = nextKey || getLastAssistantMessageKeySafe();
+            if (!prevKey || keyAfterIdle !== prevKey) {
+              return finishClosedLoopWaitCycle(sourceText, prevKey, keyAfterIdle, 'wait-cycle-done');
+            }
+          }
+
+          await sleep(waitPollMs);
+        }
+
+        safeAppendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][wait-cycle-timeout] source=${sourceText} previousHash=${prevHash} previousLen=${prevLen} maxWaitMs=${maxWaitMs}`,
+        );
+        setStatus('连续复制+快捷键+继续：等待下一轮回复超时', 'warn');
+        return false;
+      } finally {
+        if (typeof window !== 'undefined') {
+          window.__cgptClosedLoopWaitPollActive = false;
+        }
+      }
     }
 
 
@@ -20639,7 +21712,7 @@
           }
 
           safeAppendLog(
-            `[COPY_HOTKEY_CONTINUE_LOOP][before-wait-next] index=${copyHotkeyContinueLoopCount} key=${result.assistantMessageKey || '-'} reason=${result.continueReason || '-'}`,
+            `[COPY_HOTKEY_CONTINUE_LOOP][before-wait-next] index=${copyHotkeyContinueLoopCount} keyHash=${hashShort(result.assistantMessageKey || '')} keyLen=${String(result.assistantMessageKey || '').length} reason=${result.continueReason || '-'}`,
           );
 
           setCopyHotkeyContinueLoopPhase('waiting_next_reply', `cycle-${copyHotkeyContinueLoopCount}`, {
@@ -20662,7 +21735,8 @@
             if (loopStopReason === 'wait-next-reply-failed') {
               console.warn('[COPY_HOTKEY_CONTINUE_LOOP][WAIT_NEXT_FAILED]', {
                 index: copyHotkeyContinueLoopCount,
-                previousKey: result.assistantMessageKey || '',
+                previousHash: hashShort(result.assistantMessageKey || ''),
+                previousLen: String(result.assistantMessageKey || '').length,
               });
             }
             break;
@@ -23800,12 +24874,6 @@
       }
 
       const beforeFileCount = getLocalUploadFileCount();
-      renderUploadButtonsOnly({
-        heavy: false,
-        skipCapabilityScan: true,
-        scope: 'upload-only',
-        buttonTasksReason: reasonText,
-      });
       scheduleRenderUpload(reasonText);
       assertUploadFilesNotClearedUnexpectedly(
         beforeFileCount,
@@ -24770,8 +25838,15 @@
         closedLoopContinueRunning: closedLoopContinueState.running,
         closedLoopContinueStopping: closedLoopContinueState.stopping,
         closedLoopContinueMode: closedLoopContinueState.mode,
+        closedLoopOwner: closedLoopContinueState.running
+          ? getCurrentClosedLoopOwnerAction()
+          : '',
+        closedLoopContinueOwner: closedLoopContinueState.running
+          ? getCurrentClosedLoopOwnerAction()
+          : '',
         closedLoopContinueRound: closedLoopContinueState.round,
         closedLoopRetryingCurrentRound: closedLoopContinueState.retryingCurrentRound,
+        closedLoopWaitVisual: getClosedLoopWaitVisualSnapshot(),
         runningOwner: (
           typeof window !== 'undefined' && window.__cgptToolboxRunningOwner
             ? Object.assign({}, window.__cgptToolboxRunningOwner)
@@ -25624,7 +26699,14 @@
           );
         }
         if (!isUploadRunning()) {
-          resetUploadRuntimeState(`render:${reasonText}`);
+          if (uploadButtonRenderDepth > 0 || uploadButtonsRendering) {
+            uploadButtonRenderPendingReason = `success-reset:${reasonText}`;
+            ToolboxShell.appendLog(
+              `[UPLOAD_RENDER][SUCCESS_RESET_DEFERRED] reason=${reasonText} depth=${uploadButtonRenderDepth}`,
+            );
+          } else {
+            resetUploadRuntimeState(`render:${reasonText}`);
+          }
         }
         assertUploadFilesNotClearedUnexpectedly(
           beforeCount,
@@ -27074,6 +28156,13 @@
       const uploadTask = snapshot && snapshot.uploadTask ? snapshot.uploadTask : {};
       const sendTask = snapshot && snapshot.sendTask ? snapshot.sendTask : {};
       const uploadQueue = snapshot && snapshot.uploadQueue ? snapshot.uploadQueue : {};
+      const waitVisual = snapshot && snapshot.closedLoopWaitVisual && typeof snapshot.closedLoopWaitVisual === 'object'
+        ? snapshot.closedLoopWaitVisual
+        : {};
+      const closedLoopWaitTick = closedLoopContinueState.running === true
+        && (closedLoopContinueState.waitKind === 'reply' || closedLoopContinueState.waitKind === 'next-step')
+        ? Math.floor(Date.now() / 500)
+        : 0;
       return [
         String(renderScope || 'all'),
         String(uploadTask.phase || ''),
@@ -27088,6 +28177,11 @@
         readCapabilityBool(capability, 'canSendNow', 'can_send_now') ? 1 : 0,
         readCapabilityBool(capability, 'isResponding', 'is_responding') ? 1 : 0,
         readCapabilityNumber(capability, 'attachmentCount', 'attachment_count'),
+        String(snapshot && snapshot.closedLoopContinueRunning ? 1 : 0),
+        String(waitVisual.waitKind || 'idle'),
+        String(closedLoopWaitTick),
+        String(Math.floor(Number(waitVisual.replyWaitElapsedMs || 0) / 1000)),
+        String(Math.floor(Number(waitVisual.nextStepRemainingMs || 0) / 500)),
       ].join('|');
     }
 
@@ -27635,6 +28729,10 @@
 
         applyUploadShortcutButtonTitles(rootElRef);
 
+        forceResetClosedLoopStopButtonsWhenNotRunning('renderUploadButtonsOnly');
+        removeOrResetOrphanClosedLoopStopButtons('renderUploadButtonsOnly');
+        diagnoseButtonTextPollution('renderUploadButtonsOnly');
+
         const compactStartBtns = rootElRef
           ? qsa('#cgpt-upload-start', rootElRef)
           : (startBtn ? [startBtn] : []);
@@ -27760,14 +28858,22 @@
       const reason = options && options.buttonTasksReason
         ? String(options.buttonTasksReason)
         : 'unknown';
-      if (isUploadButtonRendering()) {
+      if (uploadButtonRenderDepth > 0 || uploadButtonsRendering) {
         uploadButtonRenderPendingReason = reason;
         ToolboxShell.appendLog(
-          `[UPLOAD_RENDER][SKIP_REENTRANT] reason=${reason} depth=${uploadButtonRenderDepth}`,
+          `[BUTTON_RENDER][REENTRANT_SKIP] reason=${reason} depth=${uploadButtonRenderDepth}`,
         );
         return;
       }
-      renderUploadButtonsOnly(options);
+      try {
+        renderUploadButtonsOnly(options);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[BUTTON_RENDER][ERROR]', error);
+        ToolboxShell.appendLog(
+          `[BUTTON_RENDER][ERROR] reason=${reason} error=${errText}`,
+        );
+      }
     }
 
     function renderAllButtonStates(options = {}) {
@@ -28081,6 +29187,8 @@
             logUploadActionRowLayout(rootElRef, 'render');
           }
           groupListEl = qs('#cgpt-upload-group-list', rootElRef);
+          bindUploadGroupChipClick(rootElRef, 'render-after-ensure-group-section');
+          bindUploadGroupChipClickFallback(rootElRef, 'render');
         }
 
         refreshQueueReadableState();
@@ -28139,25 +29247,400 @@
       }
     }
 
-    function healStaleUploadRunningLockIfNeeded(context) {
-      if (!state.running) return false;
-      if (hasActiveUploadInProgressOnQueue()) return false;
-      if (state.uploadAbortController) return false;
+    function isUploadTaskRunning() {
+      const task = state.uploadTask && typeof state.uploadTask === 'object'
+        ? state.uploadTask
+        : null;
+      if (!task) {
+        return false;
+      }
+      const taskPhase = String(task.phase || 'idle').trim().toLowerCase();
+      return taskPhase === 'running'
+        || taskPhase === 'uploading'
+        || taskPhase === 'waiting'
+        || taskPhase === 'starting'
+        || taskPhase === 'preparing'
+        || taskPhase === 'verifying'
+        || taskPhase === 'cancelling';
+    }
 
-      ToolboxShell.appendLog(
-        `[UPLOAD_DIAG][heal-running-lock] ctx=${String(context || '-')} activeId=${state.activeId || '-'}`
+    function isUploadItemInProgress(item) {
+      if (!item || typeof item !== 'object') {
+        return false;
+      }
+      const status = String(item.status || item.phase || item.uploadStatus || '').trim().toLowerCase();
+      if (
+        status === 'uploading'
+        || status === 'running'
+        || status === 'starting'
+        || status === 'waiting'
+        || status === 'reading'
+        || status === 'attaching'
+      ) {
+        return true;
+      }
+      if (item.state === UploadState.ATTACHING || item.state === UploadState.READING) {
+        return true;
+      }
+      return isUploadUnfinishedState(item.state);
+    }
+
+    function isUploadItemFileReadable(item) {
+      return !!(
+        item
+        && (
+          item.file instanceof File
+          || item.blob instanceof Blob
+          || item.sourceFile instanceof File
+          || item.localFile instanceof File
+          || item.originalFile instanceof File
+          || (item.fileHandle && typeof item.fileHandle.getFile === 'function')
+          || hasReadableFreshLocalSource(item)
+          || hasAttemptableUploadSource(item)
+        )
       );
+    }
+
+    function readComposerStateForUploadHeal(source) {
+      const src = String(source || 'unknown');
+      try {
+        return getComposerAttachmentState({ reason: `upload-heal:${src}` });
+      } catch (err) {
+        console.error('[UPLOAD_MANUAL][HEAL_STALE_RUNNING][COMPOSER_STATE_FAILED]', err);
+        const errText = err && err.message ? err.message : String(err);
+        ToolboxShell.appendLog(
+          `[UPLOAD_MANUAL][HEAL_STALE_RUNNING][COMPOSER_STATE_FAILED] source=${src} error=${errText}`,
+        );
+        return null;
+      }
+    }
+
+    function summarizeComposerStateForUploadHeal(composerState) {
+      const snap = composerState && typeof composerState === 'object' ? composerState : {};
+      const composerCount = Math.max(
+        0,
+        Number(
+          snap.count != null ? snap.count
+            : (snap.fileCount != null ? snap.fileCount
+              : (snap.uniqueCount != null ? snap.uniqueCount : snap.attachmentCount)),
+        ) || 0,
+      );
+      const composerUploading = !!(
+        Number(snap.uploading || snap.uploadingCount || 0) > 0
+        || Number(snap.nativeUploading || 0) > 0
+        || snap.attachmentUploading === true
+        || snap.isUploading === true
+        || (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.isAttachmentStillUploading === 'function'
+          && ComposerApi.isAttachmentStillUploading()
+        )
+      );
+      const composerReady = !!(
+        Number(snap.ready || snap.readyCount || 0) > 0
+        || snap.hasReady === true
+      );
+      return {
+        composerCount,
+        composerUploading,
+        composerReady,
+      };
+    }
+
+    function healStaleUploadActionLockIfNeeded(source = 'unknown') {
+      const src = String(source || 'unknown');
+      const locked = (
+        typeof ActionRuntime !== 'undefined'
+        && ActionRuntime
+        && typeof ActionRuntime.isActionLocked === 'function'
+        && ActionRuntime.isActionLocked('start-upload')
+      );
+      if (!locked) {
+        return false;
+      }
+
+      const uploadActuallyRunning = !!(
+        isUploadRunActuallyActive()
+        || hasActiveUploadInProgressOnQueue()
+        || state.uploadAbortController
+      );
+      if (uploadActuallyRunning) {
+        return false;
+      }
+
+      const composerState = readComposerStateForUploadHeal(`heal-stale-action-lock:${src}`);
+      const {
+        composerCount,
+        composerUploading,
+      } = summarizeComposerStateForUploadHeal(composerState);
+      if (composerUploading || composerCount > 0) {
+        return false;
+      }
+
+      releaseUploadActionLock('start-upload');
+      ToolboxShell.appendLog(
+        `[UPLOAD_MANUAL][HEAL_STALE_ACTION_LOCK] released=1 source=${src} composerCount=${composerCount}`,
+      );
+      return true;
+    }
+
+    function healStaleUploadRunningLockIfNeeded(source = 'unknown') {
+      const src = String(source || 'unknown');
+      const now = Date.now();
+      const task = state.uploadTask && typeof state.uploadTask === 'object'
+        ? state.uploadTask
+        : null;
+      const taskPhase = task
+        ? String(task.phase || 'idle').trim().toLowerCase()
+        : 'idle';
+      const runningMs = task && Number(task.startedAt || 0) > 0
+        ? now - Number(task.startedAt || 0)
+        : 0;
+
+      const composerState = readComposerStateForUploadHeal(src);
+      const {
+        composerCount,
+        composerUploading,
+        composerReady,
+      } = summarizeComposerStateForUploadHeal(composerState);
+
+      const hasAbortController = !!state.uploadAbortController;
+      const queueItems = Array.isArray(state.queue) ? state.queue : [];
+      const activeUploadItems = queueItems.filter((item) => item && isUploadItemInProgress(item)).length;
+      const localFileCount = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles().filter(Boolean).length
+        : 0;
+
+      const internalRunning = !!state.running
+        || isUploadTaskRunning()
+        || taskPhase === 'running'
+        || taskPhase === 'uploading'
+        || taskPhase === 'waiting'
+        || taskPhase === 'starting'
+        || taskPhase === 'preparing'
+        || taskPhase === 'verifying'
+        || taskPhase === 'cancelling';
+
+      const realUploadRunning = composerUploading
+        || hasAbortController
+        || activeUploadItems > 0;
+
+      const staleByLongRunning = internalRunning
+        && !realUploadRunning
+        && runningMs > 8000;
+      const staleByManualClear = internalRunning
+        && !realUploadRunning
+        && composerCount === 0
+        && localFileCount > 0;
+
+      if (!staleByLongRunning && !staleByManualClear) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_MANUAL][HEAL_STALE_RUNNING] healed=0 source=${src} internalRunning=${internalRunning ? 1 : 0} realUploadRunning=${realUploadRunning ? 1 : 0} runningMs=${runningMs} composerCount=${composerCount} composerUploading=${composerUploading ? 1 : 0} composerReady=${composerReady ? 1 : 0} activeUploadItems=${activeUploadItems} abort=${hasAbortController ? 1 : 0} localFileCount=${localFileCount}`,
+        );
+        return false;
+      }
 
       state.running = false;
       state.cancelled = false;
       state.activeId = '';
       state.uploadAbortController = null;
-      flushPendingUploadGlobalSync('heal-running-lock');
+      state.manualUploadImmediateBusy = false;
+      state.manualUploadImmediateBusySource = '';
+      state.uploadCancelRequested = false;
 
-      if (rootElRef) {
-        renderUploadButtonsOnly();
+      if (task) {
+        setAuthoritativeUploadTaskState({
+          phase: 'idle',
+          owner: '',
+          source: '',
+          runId: '',
+          cancelRequested: false,
+          cancelable: false,
+          startedAt: 0,
+          lastError: null,
+        }, `heal-stale-upload-running:${src}`);
       }
 
+      queueItems.forEach((item) => {
+        if (!item || typeof item !== 'object') {
+          return;
+        }
+        const itemPhase = String(item.phase || item.status || item.state || '').trim().toLowerCase();
+        if (
+          itemPhase === 'uploading'
+          || itemPhase === 'running'
+          || itemPhase === 'starting'
+          || itemPhase === 'waiting'
+          || item.state === UploadState.ATTACHING
+          || item.state === UploadState.READING
+        ) {
+          item.phase = 'pending';
+          item.status = 'pending';
+          item.state = UploadState.IDLE;
+          item.error = '';
+          item.message = '';
+          item.updatedAt = now;
+        }
+      });
+
+      flushPendingUploadGlobalSync(`heal-stale-upload-running:${src}`);
+      healStaleUploadActionLockIfNeeded(src);
+
+      const healReason = staleByManualClear
+        ? 'manual-clear-composer-attachments'
+        : 'stale-long-running';
+      ToolboxShell.appendLog(
+        `[UPLOAD_MANUAL][HEAL_STALE_RUNNING] healed=1 source=${src} reason=${healReason} runningMs=${runningMs} composerCount=${composerCount} composerUploading=${composerUploading ? 1 : 0} activeUploadItems=${activeUploadItems} abort=${hasAbortController ? 1 : 0} localFileCount=${localFileCount}`,
+      );
+      setStatus('检测到页面附件已被手动清空，已重置上传状态，可重新上传', 'warn');
+      renderUploadButtonsOnly({
+        immediate: true,
+        force: true,
+        buttonTasksReason: `heal-stale-upload-running:${src}`,
+      });
+      scheduleRenderUpload(`heal-stale-upload-running:${src}`);
+      return true;
+    }
+
+    function reconcileManualComposerAttachmentClear(source = 'unknown') {
+      const src = String(source || 'unknown');
+      let composerState = null;
+      try {
+        composerState = getComposerAttachmentState({ reason: `manual-clear-reconcile:${src}` });
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[UPLOAD][MANUAL_CLEAR_RECONCILE_FAILED]', err);
+        ToolboxShell.appendLog(`[UPLOAD][MANUAL_CLEAR_RECONCILE_FAILED] source=${src} error=${errText}`);
+        return false;
+      }
+
+      const {
+        composerCount,
+        composerUploading,
+      } = summarizeComposerStateForUploadHeal(composerState);
+      const localFiles = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles().filter(Boolean)
+        : [];
+
+      if (composerCount > 0 || composerUploading || localFiles.length <= 0) {
+        return false;
+      }
+
+      let changed = 0;
+      const now = Date.now();
+      (Array.isArray(state.queue) ? state.queue : []).forEach((item) => {
+        if (!item || typeof item !== 'object') {
+          return;
+        }
+        if (!isUploadItemInActiveScope(item, getActiveGroupId())) {
+          return;
+        }
+        const status = String(item.status || item.phase || item.state || '').trim().toLowerCase();
+        const attachedLike = status === 'uploaded'
+          || status === 'ready'
+          || status === 'uploading'
+          || status === 'running'
+          || status === 'attached'
+          || item.state === UploadState.ATTACHED
+          || item.state === UploadState.ATTACHING
+          || item.state === UploadState.READING;
+        if (!attachedLike) {
+          return;
+        }
+        item.status = 'pending';
+        item.phase = 'pending';
+        item.state = UploadState.IDLE;
+        item.error = '';
+        item.message = '';
+        item.updatedAt = now;
+        item.attachedInSession = false;
+        item.persistedAttached = false;
+        changed += 1;
+      });
+
+      if (changed > 0) {
+        ToolboxShell.appendLog(
+          `[UPLOAD][MANUAL_CLEAR_RECONCILED] source=${src} changed=${changed} composerCount=${composerCount} localFiles=${localFiles.length}`,
+        );
+        setStatus('检测到输入框附件已被手动清空，已把本地文件恢复为待上传', 'warn');
+        scheduleRenderUpload(`manual-clear-reconciled:${src}`);
+        renderUploadButtonsOnly({
+          immediate: true,
+          force: true,
+          buttonTasksReason: `manual-clear-reconciled:${src}`,
+        });
+      }
+      return changed > 0;
+    }
+
+    function logUploadStartCapability(source) {
+      const src = String(source || 'manual-start-upload').trim() || 'manual-start-upload';
+      let inputable = true;
+      let sendable = false;
+      let responseState = '-';
+      let responseStateReason = '-';
+      let allowUpload = false;
+      try {
+        const response = typeof detectComposerResponseState === 'function'
+          ? detectComposerResponseState({ light: true }) || {}
+          : {};
+        inputable = response.inputable !== false;
+        sendable = response.sendable === true;
+        responseState = String(response.response_state || response.state || '-');
+        responseStateReason = String(response.response_state_reason || response.reason || '-');
+
+        const composerState = readComposerStateForUploadHeal(`start-capability:${src}`);
+        const { composerCount, composerUploading } = summarizeComposerStateForUploadHeal(composerState);
+        const hasComposer = !!(
+          (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.hasComposer === 'function' && ComposerApi.hasComposer())
+          || composerCount > 0
+        );
+        let uploadEntryReady = false;
+        if (typeof resolveChatGPTUploadEntryReadyState === 'function') {
+          const entryState = resolveChatGPTUploadEntryReadyState({ source: `start-upload-capability:${src}` });
+          uploadEntryReady = !!(entryState && entryState.ok === true);
+        }
+        allowUpload = inputable && hasComposer && (uploadEntryReady || composerUploading);
+        if (!uploadEntryReady && inputable && hasComposer) {
+          // 无附件时 sendable 常为 false（send_button_not_found），不应阻止开始上传。
+          allowUpload = true;
+        }
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[UPLOAD_START][CAPABILITY_FAILED]', err);
+        ToolboxShell.appendLog(`[UPLOAD_START][CAPABILITY_FAILED] source=${src} error=${errText}`);
+      }
+      ToolboxShell.appendLog(
+        `[UPLOAD_START][CAPABILITY] source=${src} inputable=${inputable ? 1 : 0} sendable=${sendable ? 1 : 0} response_state=${responseState || '-'} response_state_reason=${responseStateReason || '-'} allowUpload=${allowUpload ? 1 : 0}`,
+      );
+      return {
+        inputable,
+        sendable,
+        responseState,
+        responseStateReason,
+        allowUpload,
+      };
+    }
+
+    function blockManualUploadIfFilesUnreadable(source) {
+      const src = String(source || 'manual-start-upload').trim() || 'manual-start-upload';
+      const localFiles = typeof getActiveGroupFiles === 'function'
+        ? getActiveGroupFiles().filter(Boolean)
+        : [];
+      if (!localFiles.length) {
+        return false;
+      }
+      const unreadable = localFiles.filter((item) => !isUploadItemFileReadable(item));
+      if (!unreadable.length) {
+        return false;
+      }
+      const first = unreadable[0];
+      const name = String(first && (first.name || first.originalName) || 'unknown').trim() || 'unknown';
+      ToolboxShell.appendLog(
+        `[UPLOAD_START][FILE_UNREADABLE] name=${name} reason=missing-file-object count=${unreadable.length} source=${src}`,
+      );
+      setStatus('本地文件内容已失效，请重新选择文件后再上传', 'error');
       return true;
     }
 
@@ -29372,27 +30855,72 @@
       const opts = options && typeof options === 'object' ? options : {};
       const source = String(opts.source || 'button').trim() || 'button';
 
-      const healedOnly = healStaleUploadRunningLockIfNeeded('startManualUploadOnlyFlow:before-running-check');
-      ToolboxShell.appendLog(
-        `[UPLOAD_MANUAL][HEAL_STALE_RUNNING] healed=${healedOnly ? 1 : 0} source=${source}`,
-      );
+      reconcileManualComposerAttachmentClear('manual-start-upload-before-start');
+      healStaleUploadRunningLockIfNeeded('manual-start-upload-before-running-check');
+      healStaleUploadActionLockIfNeeded('manual-start-upload-before-running-check');
 
-      if (state.running) {
-        ToolboxShell.appendLog(`[UPLOAD_MANUAL][START][SKIP] reason=already-running source=${source}`);
+      const uploadActuallyRunning = !!(
+        isUploadRunActuallyActive()
+        || hasActiveUploadInProgressOnQueue()
+        || state.uploadAbortController
+      );
+      if (uploadActuallyRunning) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_MANUAL][START][SKIP] reason=task-running-real source=${source}`,
+        );
+        setStatus('已有上传任务正在进行，请等待当前上传完成', 'warn');
         return {
           ok: false,
-          reason: 'already-running',
+          reason: 'task-running-real',
           uploadedCount: 0,
           failedCount: 0,
           skippedCount: 0,
         };
       }
 
-      const uploadLock = claimUploadActionLock('start-upload', { timeoutMs: 120000 });
+      if (state.running || isUploadTaskRunning()) {
+        const healed = healStaleUploadRunningLockIfNeeded('manual-start-upload-task-running-check');
+        healStaleUploadActionLockIfNeeded('manual-start-upload-task-running-check');
+        if (!healed) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_MANUAL][START][SKIP] reason=task-running source=${source}`,
+          );
+          setStatus('已有上传任务正在进行，请等待当前上传完成', 'warn');
+          return {
+            ok: false,
+            reason: 'task-running',
+            uploadedCount: 0,
+            failedCount: 0,
+            skippedCount: 0,
+          };
+        }
+      }
+
+      if (blockManualUploadIfFilesUnreadable(source)) {
+        return {
+          ok: false,
+          reason: 'file-unreadable',
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+
+      let uploadLock = claimUploadActionLock('start-upload', { timeoutMs: 120000 });
+      if (!uploadLock.ok && uploadLock.reason === 'task-running') {
+        const healedLock = healStaleUploadRunningLockIfNeeded('manual-start-upload-action-lock');
+        const healedActionLock = healStaleUploadActionLockIfNeeded('manual-start-upload-action-lock');
+        if (healedLock || healedActionLock) {
+          uploadLock = claimUploadActionLock('start-upload', { timeoutMs: 120000 });
+        }
+      }
       if (!uploadLock.ok) {
         ToolboxShell.appendLog(
           `[UPLOAD_MANUAL][START][SKIP] reason=${uploadLock.reason} runningMs=${uploadLock.runningMs || 0} source=${source}`,
         );
+        if (uploadLock.reason === 'task-running') {
+          setStatus('已有上传任务正在进行，请等待当前上传完成', 'warn');
+        }
         return {
           ok: false,
           reason: uploadLock.reason || 'upload-action-lock',
@@ -29747,6 +31275,9 @@
       ToolboxShell.appendLog(
         `[UPLOAD][START] source=${source} groupId=${scopeGroupId || '-'} files=${beforeFileCount}`,
       );
+
+      reconcileManualComposerAttachmentClear('manual-start-upload-before-start');
+      logUploadStartCapability(source);
 
       if (beforeFileCount <= 0) {
         appendUploadLog(
@@ -34823,11 +36354,34 @@
       }
       return sourceLower.startsWith('upload-manual:')
         || sourceLower === 'manual-start-upload'
+        || sourceLower === 'button'
         || sourceLower.includes('manual-start-upload')
         || sourceLower.includes('multi-upload-start-button')
         || sourceLower.includes('start-upload')
         || sourceLower.includes('shortcut-start-upload')
         || sourceLower.includes('handle-start-upload');
+    }
+
+    function buildReconcileComposerAttachmentsOptions(uploadSource, opts, uploadOnlyMode, scopeGroupId) {
+      const reconcileOpts = {
+        source: uploadSource,
+        uploadOnly: uploadOnlyMode,
+        groupId: scopeGroupId,
+        allowProceedOnClearFailure: opts.allowProceedOnClearFailure === true,
+        clearComposerBeforeUpload: opts.clearComposerBeforeUpload === true,
+        forceFreshComposer: opts.forceFreshComposer === true,
+        freshUpload: opts.freshUpload === true,
+      };
+      if (opts.preserveComposerAttachments === true || opts.preserveComposerAttachments === false) {
+        reconcileOpts.preserveComposerAttachments = opts.preserveComposerAttachments;
+      }
+      if (
+        opts.preserveExistingComposerAttachments === true
+        || opts.preserveExistingComposerAttachments === false
+      ) {
+        reconcileOpts.preserveExistingComposerAttachments = opts.preserveExistingComposerAttachments;
+      }
+      return reconcileOpts;
     }
 
     async function reconcileComposerAttachmentsBeforeFreshUpload(files, options = {}) {
@@ -35356,6 +36910,8 @@
       }
       ToolboxShell.appendLog(`[UPLOAD_SHARED][RESET_DONE] source=${source} resetCount=${resetCount}`);
 
+      const preserveComposerAttachments = options.preserveComposerAttachments !== false;
+      const preserveExistingComposerAttachments = options.preserveExistingComposerAttachments !== false;
       const result = await startUploadFromCurrentQueue({
         ...options,
         source,
@@ -35366,6 +36922,12 @@
         forceResetDone,
         preserveAttached,
         forceReupload,
+        preserveComposerAttachments: isManualStartUploadSource(source)
+          ? preserveComposerAttachments
+          : options.preserveComposerAttachments === true,
+        preserveExistingComposerAttachments: isManualStartUploadSource(source)
+          ? preserveExistingComposerAttachments
+          : options.preserveExistingComposerAttachments === true,
       });
 
       reconcileUploadPhase(`shared-done:${source}`);
@@ -35911,17 +37473,10 @@
           });
         }
 
-        const reconcileBeforeUpload = await reconcileComposerAttachmentsBeforeFreshUpload(files, {
-          source: uploadSource,
-          uploadOnly: uploadOnlyMode,
-          groupId: scopeGroupId,
-          allowProceedOnClearFailure: opts.allowProceedOnClearFailure === true,
-          preserveComposerAttachments: opts.preserveComposerAttachments === true,
-          preserveExistingComposerAttachments: opts.preserveExistingComposerAttachments === true,
-          clearComposerBeforeUpload: opts.clearComposerBeforeUpload === true,
-          forceFreshComposer: opts.forceFreshComposer === true,
-          freshUpload: opts.freshUpload === true,
-        });
+        const reconcileBeforeUpload = await reconcileComposerAttachmentsBeforeFreshUpload(
+          files,
+          buildReconcileComposerAttachmentsOptions(uploadSource, opts, uploadOnlyMode, scopeGroupId),
+        );
         if (
           reconcileBeforeUpload
           && reconcileBeforeUpload.degraded === true
@@ -36864,10 +38419,26 @@
       }
 
       if (runtimeAction === 'start') {
+        if (
+          closedLoopContinueState.running === true
+          && isClosedLoopStartAction(baseAction || domAction)
+        ) {
+          return 'stop-closed-loop';
+        }
         return baseAction || domAction;
       }
 
+      if (runtimeAction === 'stop-closed-loop') {
+        return 'stop-closed-loop';
+      }
+
       if (runtimeAction === 'cancel' || runtimeAction === 'stop') {
+        if (
+          closedLoopContinueState.running === true
+          && isClosedLoopStartAction(baseAction || domAction)
+        ) {
+          return 'stop-closed-loop';
+        }
         if (baseAction === 'send-message') {
           return 'cancel-send';
         }
@@ -36953,6 +38524,37 @@
       if (typeof ToolboxActionDispatch !== 'undefined' && ToolboxActionDispatch && typeof ToolboxActionDispatch.registerExecutor === 'function') {
         ToolboxActionDispatch.registerExecutor((handlerAction, button, source, event) => {
           return runUploadUiAction(handlerAction, button, source, event);
+        });
+      }
+
+      if (
+        typeof ToolboxActionDispatch !== 'undefined'
+        && ToolboxActionDispatch
+        && typeof ToolboxActionDispatch.registerPayloadPrecheckBypass === 'function'
+      ) {
+        ToolboxActionDispatch.registerPayloadPrecheckBypass((action, ctx = {}) => {
+          const button = ctx.button instanceof HTMLElement ? ctx.button : null;
+          const canonical = String(action || '').trim();
+          if (canonical === 'stop-closed-loop') {
+            return true;
+          }
+          if (isCurrentClosedLoopStopClick(canonical, button)) {
+            return true;
+          }
+          if (
+            button
+            && closedLoopContinueState.running === true
+          ) {
+            const runtimeAction = String(
+              button.dataset.cgptRuntimeAction
+              || button.dataset.cgptButtonAction
+              || '',
+            ).trim().toLowerCase();
+            if (runtimeAction === 'stop' || runtimeAction === 'stop-closed-loop') {
+              return true;
+            }
+          }
+          return false;
         });
       }
 
@@ -37168,6 +38770,32 @@
             cancelSendCopyHotkey(src);
             return;
           }
+          const earlyPreflight = getSendCopyHotkeyPreflightState(src);
+          if (!earlyPreflight.ok) {
+            ToolboxShell.appendLog(
+              `[SEND_COPY_HOTKEY][BLOCKED_BEFORE_SEND] source=${src} code=${earlyPreflight.code} message=${earlyPreflight.message}`,
+            );
+            setStatus(earlyPreflight.message, 'warn');
+            setSendCopyHotkeyPhase('idle', `blocked:${earlyPreflight.code}`, {
+              runId: '',
+              lastError: null,
+            });
+            if (earlyPreflight.code === 'need-upload-first') {
+              const startUploadBtn = rootElRef ? qs(UploadSelectors.startBtn, rootElRef) : null;
+              if (startUploadBtn) {
+                startUploadBtn.classList.add('cgpt-btn-attention');
+                window.setTimeout(() => {
+                  startUploadBtn.classList.remove('cgpt-btn-attention');
+                }, 1800);
+              }
+            }
+            renderUploadButtonsOnly({
+              immediate: true,
+              force: true,
+              buttonTasksReason: `send-copy-hotkey-blocked:${earlyPreflight.code}`,
+            });
+            return;
+          }
           const runId = createUploadTaskRunId('send_copy_hotkey');
           Object.assign(task, {
             runId,
@@ -37187,72 +38815,21 @@
             setSendCopyHotkeyPhase('cancelled', 'cancelled-before-precheck', { runId });
             return;
           }
-          const ensureSendableBeforeSend = async (stageReason) => {
-            const block = getSendCopyHotkeySendBlockReason(src);
-            if (!block.blocked) {
-              return true;
-            }
-            const responseState = block.responseState || {};
+          const preflight = getSendCopyHotkeyPreflightState(src);
+          if (!preflight.ok) {
             ToolboxShell.appendLog(
-              `[SEND_COPY_HOTKEY][BLOCKED_BEFORE_SEND] source=${src || '-'} stage=${stageReason || '-'} reason=${block.reason} response_state=${responseState.response_state || responseState.state || '-'} response_state_reason=${responseState.response_state_reason || '-'} sendable=${responseState.sendable === false ? 0 : 1} inputable=${responseState.inputable === false ? 0 : 1}`,
+              `[SEND_COPY_HOTKEY][BLOCKED_BEFORE_SEND] source=${src} code=${preflight.code} message=${preflight.message}`,
             );
-            setStatus('当前正在回答，等待回复完成后再发送', 'warn');
-            setSendCopyHotkeyPhase('waiting_ready', 'wait-assistant-finish-before-send', {
-              runId,
+            setStatus(preflight.message, 'warn');
+            setSendCopyHotkeyPhase('idle', `blocked:${preflight.code}`, {
+              runId: '',
               lastError: null,
             });
-            const waitResult = await waitUntilComposerSendableForSendCopyHotkey(runId, src);
-            if (task.cancelRequested || task.runId !== runId) {
-              setSendCopyHotkeyPhase('cancelled', 'cancelled-while-waiting-ready', { runId });
-              return false;
-            }
-            if (!waitResult.ok) {
-              if (waitResult.reason === 'timeout') {
-                setStatus('等待回答完成超时，请稍后重试', 'warn');
-              }
-              setSendCopyHotkeyPhase('idle', `wait-ready-${waitResult.reason || 'aborted'}`, {
-                runId: '',
-                lastError: null,
-              });
-              return false;
-            }
-            setSendCopyHotkeyPhase('running', 'assistant-ready-resume', { runId, lastError: null });
-            return true;
-          };
-          const readyBeforePayload = await ensureSendableBeforeSend('before-payload');
-          if (!readyBeforePayload) {
-            return;
-          }
-          const payloadSnapshot = (
-            typeof CanonicalPayloadState !== 'undefined'
-            && CanonicalPayloadState
-            && typeof CanonicalPayloadState.getCanonicalPayloadState === 'function'
-          )
-            ? CanonicalPayloadState.getCanonicalPayloadState('send-copy-hotkey-precheck')
-            : null;
-          if (payloadSnapshot && !payloadSnapshot.canSendPayload) {
-            const msg = payloadSnapshot.reason === 'local_queue_no_composer_attachment'
-              ? '本地文件还没有上传到 ChatGPT 输入框，请先点击「开始上传」，上传完成后再执行「发送+复制+快捷键」。'
-              : '当前无法执行发送+复制+快捷键，请检查上传与输入框附件状态。';
-            ToolboxShell.appendLog(
-              `[UPLOAD_UI_ACTION][send-copy-hotkey:blocked] source=${src} runId=${runId} reason=${payloadSnapshot.reason || 'payload-not-ready'} localQueue=${payloadSnapshot.localQueueCount} activeLocalFiles=${payloadSnapshot.activeLocalFileCount} composerAttachments=${payloadSnapshot.composerAttachmentCount} composerTextLen=${payloadSnapshot.composerTextLen}`,
-            );
-            setStatus(msg, 'warn');
-            const startUploadBtn = rootElRef ? qs(UploadSelectors.startBtn, rootElRef) : null;
-            if (startUploadBtn && payloadSnapshot.reason === 'local_queue_no_composer_attachment') {
-              startUploadBtn.classList.add('cgpt-btn-attention');
-              window.setTimeout(() => {
-                startUploadBtn.classList.remove('cgpt-btn-attention');
-              }, 1800);
-            }
-            setSendCopyHotkeyPhase('failed', 'payload-not-ready', {
-              runId,
-              lastError: msg,
+            renderUploadButtonsOnly({
+              immediate: true,
+              force: true,
+              buttonTasksReason: `send-copy-hotkey-blocked:${preflight.code}`,
             });
-            return;
-          }
-          const readyBeforeSend = await ensureSendableBeforeSend('before-send');
-          if (!readyBeforeSend) {
             return;
           }
           setStatus('正在发送消息，随后等待回复并执行复制+快捷键', 'running');
@@ -37268,6 +38845,23 @@
             return;
           }
           if (!sent) {
+            const postCheck = getSendCopyHotkeyPreflightState('send-copy-hotkey-after-send-failed');
+            if (!postCheck.ok && (
+              postCheck.code === 'assistant-busy'
+              || postCheck.code === 'need-upload-first'
+              || postCheck.code === 'send-not-ready'
+              || postCheck.code === 'empty-composer'
+            )) {
+              ToolboxShell.appendLog(
+                `[SEND_COPY_HOTKEY][SEND_FALSE_AS_BLOCKED] source=${src} code=${postCheck.code} message=${postCheck.message}`,
+              );
+              setStatus(postCheck.message, 'warn');
+              setSendCopyHotkeyPhase('idle', `send-false-blocked:${postCheck.code}`, {
+                runId: '',
+                lastError: null,
+              });
+              return;
+            }
             const msg = '消息未发送成功';
             ToolboxShell.appendLog(
               `[UPLOAD_UI_ACTION][send-copy-hotkey:abort] source=${src} runId=${runId} reason=send-failed`,
@@ -37524,6 +39118,13 @@
 
       if (!action || !button) {
         return false;
+      }
+
+      if (tryInterceptClosedLoopStopClick(normalizedAction, button, src, event)) {
+        return true;
+      }
+      if (tryInterceptClosedLoopStopClick(action, button, src, event)) {
+        return true;
       }
 
       if (normalizedAction === 'none') {
@@ -37854,6 +39455,11 @@
         return true;
       }
 
+      if (normalizedAction === 'stop-closed-loop') {
+        stopClosedLoopContinue('button-click-stop');
+        return true;
+      }
+
       if (normalizedAction === 'stop') {
         const closedLoopMode = getClosedLoopModeFromAction(String(button.dataset.action || '').trim())
           || (
@@ -38037,18 +39643,20 @@
         return Object.freeze([]);
       }
       return Object.freeze(
-        ToolboxActionRegistry.getUploadToolbarButtonDefs().map((def) => Object.freeze({
-          key: def.key,
-          id: def.id,
-          selector: def.selector,
-          action: def.action,
-          handlerAction: def.handlerAction || def.action,
-          label: def.label,
-          className: def.className,
-          title: def.title,
-          required: def.required,
-          dataButtonRole: def.dataButtonRole,
-        })),
+        ToolboxActionRegistry.getUploadToolbarButtonDefs()
+          .filter((def) => def.visibleInUploadToolbar !== false)
+          .map((def) => Object.freeze({
+            key: def.key,
+            id: def.id,
+            selector: def.selector,
+            action: def.action,
+            handlerAction: def.handlerAction || def.action,
+            label: def.label,
+            className: def.className,
+            title: def.title,
+            required: def.required,
+            dataButtonRole: def.dataButtonRole,
+          })),
       );
     }
 
@@ -38446,6 +40054,120 @@
       });
     }
 
+    function bindUploadGroupChipClick(rootEl, reason = 'unknown') {
+      const root = rootEl || rootElRef || host || document;
+      if (!root) return false;
+
+      const groupList = qs('#cgpt-upload-group-list', root);
+      if (!groupList) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][CHIP_BIND_SKIP] reason=${String(reason || '-')} cause=group-list-missing`,
+        );
+        return false;
+      }
+
+      if (groupList.dataset.groupChipClickBound === '1') {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][CHIP_BIND_SKIP] reason=${String(reason || '-')} cause=already-bound`,
+        );
+        return true;
+      }
+
+      groupList.dataset.groupChipClickBound = '1';
+      groupList.addEventListener('click', async (e) => {
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        if (!target) return;
+
+        const btn = target.closest('.cgpt-upload-group-chip[data-group-id]');
+        if (!btn) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const groupId = String(btn.getAttribute('data-group-id') || '').trim();
+        if (!groupId) {
+          ToolboxShell.appendLog('[UPLOAD_GROUP][CHIP_CLICK_SKIP] reason=empty-group-id');
+          return;
+        }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][CHIP_CLICK] groupId=${groupId} activeGroupId=${state.activeGroupId || '-'} stateRunning=${state.running ? 1 : 0} reason=${String(reason || '-')}`,
+        );
+
+        try {
+          await switchGroup(groupId, {
+            source: 'user',
+            saveLastManual: true,
+            reason: 'user-switch-upload-group',
+          });
+        } catch (err) {
+          const errName = err && err.name ? err.name : 'Error';
+          const errText = err && err.message ? err.message : String(err);
+
+          console.error('[ChatGPT toolbox] group chip switch failed', err);
+
+          setStatus(`切换分组失败：${errText}`, 'error');
+
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][chip-switch:failed] groupId=${groupId || '-'} type=${errName} error=${errText}`,
+          );
+        }
+      });
+
+      ToolboxShell.appendLog(
+        `[UPLOAD_GROUP][CHIP_BIND_OK] reason=${String(reason || '-')} activeGroupId=${state.activeGroupId || '-'}`,
+      );
+      return true;
+    }
+
+    function bindUploadGroupChipClickFallback(rootEl, reason = 'unknown') {
+      const root = rootEl || rootElRef || host || document;
+      if (!root || root.dataset.groupChipFallbackBound === '1') return;
+
+      root.dataset.groupChipFallbackBound = '1';
+      root.addEventListener('click', async (e) => {
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        if (!target) return;
+
+        const btn = target.closest('.cgpt-upload-group-chip[data-group-id]');
+        if (!btn) return;
+
+        const groupList = btn.closest('#cgpt-upload-group-list');
+        if (!groupList) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const groupId = String(btn.getAttribute('data-group-id') || '').trim();
+        if (!groupId) return;
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][CHIP_CLICK_FALLBACK] groupId=${groupId} activeGroupId=${state.activeGroupId || '-'} reason=${String(reason || '-')}`,
+        );
+
+        try {
+          await switchGroup(groupId, {
+            source: 'user-fallback',
+            saveLastManual: true,
+            reason: 'user-switch-upload-group-fallback',
+          });
+        } catch (err) {
+          const errName = err && err.name ? err.name : 'Error';
+          const errText = err && err.message ? err.message : String(err);
+
+          console.error('[ChatGPT toolbox] group chip switch fallback failed', err);
+
+          setStatus(`切换分组失败：${errText}`, 'error');
+
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][chip-switch:failed] groupId=${groupId || '-'} type=${errName} error=${errText} source=fallback`,
+          );
+        }
+      }, true);
+
+      ToolboxShell.appendLog(`[UPLOAD_GROUP][CHIP_FALLBACK_BIND_OK] reason=${String(reason || '-')}`);
+    }
+
     function bindEvents(rootEl) {
       if (!(rootEl instanceof HTMLElement)) {
         return;
@@ -38457,6 +40179,9 @@
       if (rootEl.dataset.uploadEventsBound === '1') {
         ensureUploadActionButtons(rootEl);
         ensureUploadManageActionButtons(rootEl);
+        ensureUploadGroupSection(rootEl);
+        refreshUploadGroupDomRefs(rootEl);
+        bindUploadGroupChipClick(rootEl, 'bind-events-rebound');
 
         const reboundGroupManageBtn = qs('#cgpt-upload-group-manage', rootEl);
         if (reboundGroupManageBtn) {
@@ -38474,6 +40199,7 @@
         bindUploadCompactActionButtons(rootEl);
         rebindClosedLoopContinueUi(rootEl, 'render-upload-actions');
         applyUploadShortcutButtonTitles(rootEl);
+        bindUploadGroupChipClickFallback(rootEl, 'bind-events');
         return;
       }
 
@@ -38570,35 +40296,7 @@
 
             // Blob persistence binding removed - disabled
 
-      groupListEl.addEventListener('click', async (e) => {
-        const btn = e.target instanceof HTMLElement
-          ? e.target.closest('.cgpt-upload-group-chip[data-group-id]')
-          : null;
-
-        if (!btn) return;
-
-        const groupId = btn.getAttribute('data-group-id');
-        if (!groupId) return;
-
-        try {
-          await switchGroup(groupId, {
-            source: 'user',
-            saveLastManual: true,
-            reason: 'user-switch-upload-group',
-          });
-        } catch (err) {
-          const errName = err && err.name ? err.name : 'Error';
-          const errText = err && err.message ? err.message : String(err);
-
-          console.error('[ChatGPT toolbox] group chip switch failed', err);
-
-          setStatus(`切换分组失败：${errText}`, 'error');
-
-          ToolboxShell.appendLog(
-            `[UPLOAD_GROUP][chip-switch:failed] groupId=${groupId || '-'} type=${errName} error=${errText}`,
-          );
-        }
-      });
+      bindUploadGroupChipClick(rootEl, 'bind-events-first');
 
       if (manageGroupListEl) {
         manageGroupListEl.addEventListener('click', async (e) => {
@@ -38741,6 +40439,7 @@
       bindUploadCompactActionButtons(rootEl);
       rebindClosedLoopContinueUi(rootEl, 'mount-upload-module');
       applyUploadShortcutButtonTitles(rootEl);
+      bindUploadGroupChipClickFallback(rootEl, 'bind-events');
     }
 
     function buildUploadActionToolbarInnerHtml() {
@@ -39341,19 +41040,25 @@
           missingLog: '[UPLOAD_DOM][missing] #cgpt-copy-hotkey-continue-loop',
         },
         {
-          type: 'required',
-          selector: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
-          missingLog: `[UPLOAD_DOM][missing] #${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
+          type: 'notContains',
+          parent: '.cgpt-upload-main-action-row',
+          child: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
+          message: '闭环按钮已迁移至自动指令闭环控制面板',
+          invalidLog: '[UPLOAD_DOM][invalid] closed-loop button still in main action row',
         },
         {
-          type: 'required',
-          selector: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id}`,
-          missingLog: `[UPLOAD_DOM][missing] #${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id}`,
+          type: 'notContains',
+          parent: '.cgpt-upload-main-action-row',
+          child: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND.id}`,
+          message: '闭环按钮已迁移至自动指令闭环控制面板',
+          invalidLog: '[UPLOAD_DOM][invalid] closed-loop every-round button still in main action row',
         },
         {
-          type: 'required',
-          selector: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}`,
-          missingLog: `[UPLOAD_DOM][missing] #${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}`,
+          type: 'notContains',
+          parent: '.cgpt-upload-main-action-row',
+          child: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}`,
+          message: '闭环按钮已迁移至自动指令闭环控制面板',
+          invalidLog: '[UPLOAD_DOM][invalid] closed-loop plain button still in main action row',
         },
         {
           type: 'order',
@@ -39368,18 +41073,6 @@
           message: '连续复制+快捷键+继续按钮应位于复制+快捷键+继续按钮之后',
         },
         {
-          type: 'order',
-          before: '#cgpt-copy-hotkey-continue-loop',
-          after: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
-          message: '闭环继续+快捷键按钮应位于连续复制+快捷键+继续按钮之后',
-        },
-        {
-          type: 'order',
-          before: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY.id}`,
-          after: `#${CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY.id}`,
-          message: '闭环继续（无快捷键）按钮应位于闭环继续+快捷键按钮之后',
-        },
-        {
           type: 'notContains',
           parent: '.cgpt-upload-main-action-row',
           child: '#cgpt-send-hotkey-once',
@@ -39389,6 +41082,13 @@
       ], {
         moduleName: 'UPLOAD',
       });
+
+      const closedLoopPanel = document.getElementById('cgpt-autoq-closed-loop-panel');
+      if (closedLoopPanel) {
+        ToolboxShell.appendLog('[UPLOAD_DOM][closed-loop-moved-to-autoq] panel=ok');
+      } else {
+        ToolboxShell.appendLog('[UPLOAD_DOM][closed-loop-moved-to-autoq] panel=missing warn=autoq-closed-loop-panel-not-mounted');
+      }
     }
 
     async function applyToolboxPageState(pageState, reason = '') {
@@ -40214,6 +41914,10 @@
 
     return {
       mount,
+      dispatchClosedLoopAction,
+      renderClosedLoopContinueButtons,
+      renderClosedLoopContinueButton,
+      getClosedLoopAutomationConfig,
       applyToolboxPageState,
       getStatus: getUploadStatus,
       getUnifiedRuntimeStatus,
@@ -40358,6 +42062,8 @@
         clearStaleBusySendStateOnHomeReady(`foreground-resume:${tag}`);
         healStaleSendUiStateIfNeeded('foreground-resume');
         healStaleWaitingReplyStateIfNeeded('foreground-resume');
+        healStaleUploadRunningLockIfNeeded('foreground-resume');
+        reconcileManualComposerAttachmentClear('foreground-resume');
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
           ToolboxShell.appendLog(`[UPLOAD][FOREGROUND_RESUME] reason=${tag}`);
         }
@@ -40401,6 +42107,7 @@
           console.error('[ChatGPT toolbox] foreground send catch-up failed', err);
           ToolboxShell.appendLog(`[UPLOAD][FOREGROUND_RESUME_SEND_CATCHUP_FAILED] reason=${tag} error=${errText}`);
         }
+        forceResetClosedLoopStopButtonsWhenNotRunning('foreground-resume');
         scheduleRenderUpload(`foreground-resume:${tag}`);
         ensureActiveUploadGroupIdValid(`foreground-resume:${tag}`);
         try {
@@ -40430,6 +42137,9 @@
       uploadFromCurrentQueueShared,
       getPendingUploadItemsForStart,
       reconcileUploadPhase,
+      reconcileManualComposerAttachmentClear,
+      healStaleUploadRunningLockIfNeeded,
+      healStaleUploadActionLockIfNeeded,
       startUploadForAutoQueue,
       detectComposerHasUploadPayload,
       getComposerUploadPayloadSnapshot,

@@ -14,6 +14,7 @@ const ToolboxActionRegistry = (() => {
     CLOSED_LOOP_HOTKEY_EVERY_N: 'closed-loop-with-hotkey',
     CLOSED_LOOP_HOTKEY_EVERY_ROUND: 'closed-loop-with-hotkey-upload-every-round',
     CLOSED_LOOP_DIRECT_EVERY_N: 'closed-loop-without-hotkey',
+    STOP_CLOSED_LOOP: 'stop-closed-loop',
     COPY_ONLY: 'copy-only',
     COPY_LOG: 'copy-log',
     AUTO_CONTINUE: 'auto-continue',
@@ -111,8 +112,16 @@ const ToolboxActionRegistry = (() => {
     return CLOSED_LOOP_CANONICAL.has(normalizeAction(action));
   }
 
+  function isClosedLoopStopAction(action) {
+    return normalizeAction(action) === ACTION.STOP_CLOSED_LOOP;
+  }
+
   function actionRequiresComposerPayload(action) {
-    return SEND_PAYLOAD_ACTIONS.has(normalizeAction(action));
+    const canonical = normalizeAction(action);
+    if (canonical === ACTION.STOP_CLOSED_LOOP) {
+      return false;
+    }
+    return SEND_PAYLOAD_ACTIONS.has(canonical);
   }
 
   function buildUploadToolbarRegistry() {
@@ -291,7 +300,7 @@ const ToolboxActionRegistry = (() => {
         className: 'cgpt-btn cyan',
         title: '快捷键模式闭环',
         required: true,
-        visibleInUploadToolbar: true,
+        visibleInUploadToolbar: false,
       }),
       closedLoopWithHotkeyEveryRound: Object.freeze({
         key: 'closedLoopWithHotkeyEveryRound',
@@ -303,7 +312,7 @@ const ToolboxActionRegistry = (() => {
         className: 'cgpt-btn cyan',
         title: '快捷键模式闭环（每一轮上传）',
         required: true,
-        visibleInUploadToolbar: true,
+        visibleInUploadToolbar: false,
       }),
       closedLoopWithoutHotkey: Object.freeze({
         key: 'closedLoopWithoutHotkey',
@@ -315,7 +324,19 @@ const ToolboxActionRegistry = (() => {
         className: 'cgpt-btn cyan',
         title: '直接发送模式闭环',
         required: true,
-        visibleInUploadToolbar: true,
+        visibleInUploadToolbar: false,
+      }),
+      stopClosedLoop: Object.freeze({
+        key: 'stopClosedLoop',
+        id: '',
+        selector: '',
+        action: ACTION.STOP_CLOSED_LOOP,
+        handlerAction: ACTION.STOP_CLOSED_LOOP,
+        label: '停止闭环继续',
+        className: 'cgpt-btn danger',
+        title: '停止当前闭环任务',
+        required: false,
+        visibleInUploadToolbar: false,
       }),
     });
   }
@@ -371,6 +392,7 @@ const ToolboxActionRegistry = (() => {
     resolveHandlerAction,
     resolveActionFromButtonId,
     isClosedLoopAction,
+    isClosedLoopStopAction,
     actionRequiresComposerPayload,
     getUploadToolbarRegistry,
     getUploadToolbarButtonDefs,

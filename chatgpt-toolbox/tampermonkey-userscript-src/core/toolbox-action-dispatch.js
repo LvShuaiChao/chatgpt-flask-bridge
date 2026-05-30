@@ -4,6 +4,7 @@
 
 const ToolboxActionDispatch = (() => {
   let executor = null;
+  let payloadPrecheckBypass = null;
 
   function appendDispatchLog(line) {
     if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
@@ -20,6 +21,15 @@ const ToolboxActionDispatch = (() => {
     }
     executor = fn;
     appendDispatchLog('[ACTION_DISPATCH][EXECUTOR_REGISTERED]');
+  }
+
+  function registerPayloadPrecheckBypass(fn) {
+    if (typeof fn !== 'function') {
+      console.error('[ToolboxActionDispatch] registerPayloadPrecheckBypass expected function, got', typeof fn);
+      return;
+    }
+    payloadPrecheckBypass = fn;
+    appendDispatchLog('[ACTION_DISPATCH][PAYLOAD_PRECHECK_BYPASS_REGISTERED]');
   }
 
   function resolveCanonicalAction(action, ctx = {}) {
@@ -57,6 +67,18 @@ const ToolboxActionDispatch = (() => {
     }
     if (ctx.skipPayloadPrecheck === true) {
       return { blocked: false };
+    }
+    if (typeof payloadPrecheckBypass === 'function') {
+      try {
+        if (payloadPrecheckBypass(action, ctx) === true) {
+          return { blocked: false };
+        }
+      } catch (err) {
+        console.error('[ToolboxActionDispatch] payloadPrecheckBypass failed', err);
+        appendDispatchLog(
+          `[ACTION_DISPATCH][PAYLOAD_PRECHECK_BYPASS_ERROR] error=${err && err.message ? err.message : String(err)}`,
+        );
+      }
     }
     const source = String(ctx.source || 'unknown').trim() || 'unknown';
     const block = CanonicalPayloadState.blockSendIfPayloadNotReady(action, `dispatch:${source}`);
@@ -125,6 +147,7 @@ const ToolboxActionDispatch = (() => {
 
   return {
     registerExecutor,
+    registerPayloadPrecheckBypass,
     dispatchToolboxAction,
     resolveCanonicalAction,
   };

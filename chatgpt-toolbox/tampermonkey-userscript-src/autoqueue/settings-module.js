@@ -1,3 +1,20 @@
+  function msToSecondsForUi(ms, fallbackSec = 0) {
+    const n = Number(ms);
+    if (!Number.isFinite(n)) {
+      return fallbackSec;
+    }
+    return n / 1000;
+  }
+
+  function secondsToMsForStore(sec, fallbackSec = 0, minSec = 0, maxSec = 600) {
+    let n = Number(sec);
+    if (!Number.isFinite(n)) {
+      n = fallbackSec;
+    }
+    n = Math.max(minSec, Math.min(maxSec, n));
+    return Math.round(n * 1000);
+  }
+
   /********************************************************************
    * 5b. SettingsModule：精简模式与工具箱设置
    ********************************************************************/
@@ -16,6 +33,45 @@
         ...options,
         owner: options.owner || 'settings',
       });
+    }
+
+    function renderDefaultContinuePromptForSettings(stopSignal) {
+      const template = typeof getDefaultContinuePromptText === 'function'
+        ? getDefaultContinuePromptText()
+        : (typeof getDefaultBatchContinuePromptText === 'function'
+          ? getDefaultBatchContinuePromptText()
+          : '');
+      const signal = String(stopSignal || '').trim()
+        || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '');
+      if (typeof renderContinuePromptTemplate === 'function') {
+        return renderContinuePromptTemplate(template, signal);
+      }
+      return String(template || '').trim();
+    }
+
+    function getContinuePromptTextForSettingsDisplay(cfg) {
+      const stored = String(cfg && cfg.copyHotkeyContinuePromptText || '').trim();
+      if (stored) {
+        return stored;
+      }
+      const signal = String(cfg && cfg.copyHotkeyContinueStopSignal || '').trim()
+        || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '');
+      return renderDefaultContinuePromptForSettings(signal);
+    }
+
+    function isSettingsContinuePromptUsingBuiltinDefault(rawText, stopSignal) {
+      const trimmed = String(rawText || '').trim();
+      if (!trimmed) {
+        return true;
+      }
+      const defaultRendered = renderDefaultContinuePromptForSettings(stopSignal);
+      if (trimmed === defaultRendered) {
+        return true;
+      }
+      const defaultTemplate = typeof getDefaultContinuePromptText === 'function'
+        ? getDefaultContinuePromptText()
+        : '';
+      return !!defaultTemplate && trimmed === String(defaultTemplate || '').trim();
     }
 
     function migrateCompactContinuePromptIfNeeded(cfg, options = {}) {
@@ -285,20 +341,41 @@
         quickPromptIds,
         globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
         restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
-        continueAutomation: {
+        continueAutomation: (() => {
+          const minEl = qs('#cgpt-setting-closed-loop-next-delay-min-sec', root);
+          const maxEl = qs('#cgpt-setting-closed-loop-next-delay-max-sec', root);
+          const rawMinSec = minEl ? String(minEl.value).trim() : '';
+          const rawMaxSec = maxEl ? String(maxEl.value).trim() : '';
+          const fallbackMinMs = Number(current.continueAutomation?.closedLoopNextDelayMinMs);
+          const fallbackMaxMs = Number(current.continueAutomation?.closedLoopNextDelayMaxMs);
+          const fallbackMinSec = Number.isFinite(fallbackMinMs) ? fallbackMinMs / 1000 : 40;
+          const fallbackMaxSec = Number.isFinite(fallbackMaxMs) ? fallbackMaxMs / 1000 : 60;
+          let minSec = rawMinSec === '' ? fallbackMinSec : Number(rawMinSec);
+          let maxSec = rawMaxSec === '' ? fallbackMaxSec : Number(rawMaxSec);
+          const minMsSaved = secondsToMsForStore(minSec, 40, 1, 600);
+          const maxMsSaved = secondsToMsForStore(maxSec, 60, 1, 600);
+          minSec = Math.round(minMsSaved / 1000);
+          maxSec = Math.round(maxMsSaved / 1000);
+          if (minMsSaved > maxMsSaved) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][NEXT_DELAY_CONFIG_SAVE_SWAPPED] minSec=${minSec} maxSec=${maxSec} correctedMinMs=${maxMsSaved} correctedMaxMs=${minMsSaved}`,
+            );
+          }
+          const minMsFinal = Math.min(minMsSaved, maxMsSaved);
+          const maxMsFinal = Math.max(minMsSaved, maxMsSaved);
+          ToolboxShell.appendLog(
+            `[SETTINGS][closed-loop-next-delay-save] minSec=${Math.round(minMsFinal / 1000)} maxSec=${Math.round(maxMsFinal / 1000)} minMs=${minMsFinal} maxMs=${maxMsFinal}`,
+          );
+          return {
           autoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
           autoUploadInterval: Number(
             qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value
             || current.continueAutomation?.autoUploadInterval
             || 5,
           ),
-          closedLoopNextDelayMs: Math.round(
-            Number(
-              qs('#cgpt-setting-closed-loop-next-delay-sec', root)?.value
-              || ((Number(current.continueAutomation?.closedLoopNextDelayMs || 1200)) / 1000)
-              || 1.2,
-            ) * 1000,
-          ),
+          closedLoopNextDelayMinMs: minMsFinal,
+          closedLoopNextDelayMaxMs: maxMsFinal,
+          closedLoopNextDelayMs: minMsFinal,
           homeNavEnabled: !!(
             qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
             || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
@@ -315,19 +392,19 @@
             || current.continueAutomation?.homeNavUrl
             || 'https://chatgpt.com/',
           ).trim(),
-        },
+          };
+        })(),
         copyHotkeyContinuePromptText: (() => {
           const raw = String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim();
-          const defaultText = typeof getDefaultContinuePromptText === 'function'
-            ? getDefaultContinuePromptText()
-            : '';
-          if (defaultText && raw === defaultText) {
+          const stopSignal = String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim()
+            || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
+          if (isSettingsContinuePromptUsingBuiltinDefault(raw, stopSignal)) {
             return '';
           }
           return raw;
         })(),
         copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim()
-          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'),
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>'),
       };
     }
 
@@ -410,10 +487,25 @@
         loopAutoUploadIntervalEl.value = String(cfg.continueAutomation?.autoUploadInterval || 5);
       }
 
-      const closedLoopNextDelayEl = qs('#cgpt-setting-closed-loop-next-delay-sec', root);
-      if (closedLoopNextDelayEl) {
-        const delayMs = Number(cfg.continueAutomation?.closedLoopNextDelayMs || 1200);
-        closedLoopNextDelayEl.value = String(Math.max(0, delayMs / 1000));
+      const closedLoopNextDelayMinEl = qs('#cgpt-setting-closed-loop-next-delay-min-sec', root);
+      const closedLoopNextDelayMaxEl = qs('#cgpt-setting-closed-loop-next-delay-max-sec', root);
+      if (closedLoopNextDelayMinEl || closedLoopNextDelayMaxEl) {
+        const continueCfg = cfg.continueAutomation && typeof cfg.continueAutomation === 'object'
+          ? cfg.continueAutomation
+          : {};
+        const minMs = Number(continueCfg.closedLoopNextDelayMinMs || 40000);
+        const maxMs = Number(continueCfg.closedLoopNextDelayMaxMs || 60000);
+        const minSec = Math.max(1, Math.round(msToSecondsForUi(minMs, 40)));
+        const maxSec = Math.max(1, Math.round(msToSecondsForUi(maxMs, 60)));
+        if (closedLoopNextDelayMinEl) {
+          closedLoopNextDelayMinEl.value = String(minSec);
+        }
+        if (closedLoopNextDelayMaxEl) {
+          closedLoopNextDelayMaxEl.value = String(maxSec);
+        }
+        ToolboxShell.appendLog(
+          `[SETTINGS][closed-loop-delay-render] minMs=${minMs} maxMs=${maxMs} minSec=${minSec} maxSec=${maxSec} uiUnit=sec`,
+        );
       }
 
       const unifiedHomeNavEnabled = cfg.continueAutomation?.homeNavEnabled !== false;
@@ -441,13 +533,15 @@
       const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
       if (stopSignalEl) {
         stopSignalEl.value = cfg.copyHotkeyContinueStopSignal
-          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>');
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
       }
 
       const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
       if (promptTextEl) {
-        promptTextEl.value = String(cfg.copyHotkeyContinuePromptText || '').trim();
-        promptTextEl.placeholder = '留空则使用内置默认继续指令（不需继续时仅回复 <<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>）。';
+        const stopSignalForDisplay = cfg.copyHotkeyContinueStopSignal
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
+        promptTextEl.value = getContinuePromptTextForSettingsDisplay(cfg);
+        promptTextEl.placeholder = `内置默认继续指令（完成时仅回复 ${stopSignalForDisplay}；未完成须继续补充并给出详细 Cursor 修改指令）`;
       }
 
       const runtimeStatsCfg = getAutoQueueTaskQueueSettings();
@@ -486,7 +580,8 @@
 
       const beepDurationEl = qs('#cgpt-setting-beep-duration', root);
       if (beepDurationEl) {
-        beepDurationEl.value = String(beepCfg.durationMs);
+        const beepSec = msToSecondsForUi(beepCfg.durationMs, 1);
+        beepDurationEl.value = String(Math.round(beepSec * 100) / 100);
       }
 
       const beepFrequencyEl = qs('#cgpt-setting-beep-frequency', root);
@@ -744,10 +839,10 @@
           const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
           const defaultStop = typeof getDefaultDoneSignal === 'function'
             ? getDefaultDoneSignal()
-            : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+            : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
 
           if (promptTextEl) {
-            promptTextEl.value = '';
+            promptTextEl.value = renderDefaultContinuePromptForSettings(defaultStop);
           }
           if (stopSignalEl) {
             stopSignalEl.value = defaultStop;
@@ -767,7 +862,10 @@
         saveConfig(cfg);
         const continueCfg = cfg.continueAutomation || {};
         ToolboxShell.appendLog(
-          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${continueCfg.homeNavEnabled !== false ? 1 : 0} interval=${continueCfg.homeNavInterval || 20} url=${continueCfg.homeNavUrl || 'https://chatgpt.com/'}`,
+          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${continueCfg.homeNavEnabled !== false ? 1 : 0} interval=${continueCfg.homeNavInterval || 20} url=${continueCfg.homeNavUrl || 'https://chatgpt.com/'} closedLoopNextDelayMinSec=${Math.round((continueCfg.closedLoopNextDelayMinMs ?? 40000) / 1000)} closedLoopNextDelayMaxSec=${Math.round((continueCfg.closedLoopNextDelayMaxMs ?? 60000) / 1000)}`,
+        );
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][NEXT_DELAY_CONFIG_SAVE] minSec=${Math.round((continueCfg.closedLoopNextDelayMinMs ?? 40000) / 1000)} maxSec=${Math.round((continueCfg.closedLoopNextDelayMaxMs ?? 60000) / 1000)} minMs=${continueCfg.closedLoopNextDelayMinMs ?? 40000} maxMs=${continueCfg.closedLoopNextDelayMaxMs ?? 60000}`,
         );
         render();
       };
@@ -821,7 +919,8 @@
         '#cgpt-setting-restore-scroll-after-copy',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
         '#cgpt-setting-copy-hotkey-loop-auto-upload-interval',
-        '#cgpt-setting-closed-loop-next-delay-sec',
+        '#cgpt-setting-closed-loop-next-delay-min-sec',
+        '#cgpt-setting-closed-loop-next-delay-max-sec',
         '#cgpt-setting-unified-continue-home-nav-enabled',
         '#cgpt-setting-unified-continue-home-nav-interval',
         '#cgpt-setting-unified-continue-home-nav-url',
@@ -834,6 +933,17 @@
         bindSettingChange(root, selector, onCompactSettingChange, {
           moduleName: 'SETTINGS',
         });
+      });
+
+      [
+        '#cgpt-setting-closed-loop-next-delay-min-sec',
+        '#cgpt-setting-closed-loop-next-delay-max-sec',
+      ].forEach((selector) => {
+        const closedLoopDelaySecEl = qs(selector, root);
+        if (closedLoopDelaySecEl && typeof debounceSave === 'function') {
+          const onClosedLoopDelayInput = debounceSave(onCompactSettingChange, 300);
+          closedLoopDelaySecEl.addEventListener('input', onClosedLoopDelayInput);
+        }
       });
 
       const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
@@ -913,10 +1023,21 @@
         const frequencyEl = qs('#cgpt-setting-beep-frequency', root);
         const current = getBeepConfig();
 
+        const rawBeepSec = durationEl ? String(durationEl.value).trim() : '';
+        const fallbackBeepSec = msToSecondsForUi(current.durationMs, 1);
+        const durationMs = durationEl
+          ? secondsToMsForStore(
+            rawBeepSec === '' ? fallbackBeepSec : Number(rawBeepSec),
+            1,
+            0.03,
+            10,
+          )
+          : current.durationMs;
+
         return normalizeBeepConfig({
           ...current,
           volume: volumeEl ? Number(volumeEl.value) : current.volume,
-          durationMs: durationEl ? Number(durationEl.value) : current.durationMs,
+          durationMs,
           frequency: frequencyEl ? Number(frequencyEl.value) : current.frequency,
           type: current.type,
         });
@@ -1189,16 +1310,38 @@
             </div>
 
             <div class="cgpt-kv">
-              <label for="cgpt-setting-closed-loop-next-delay-sec" title="闭环每轮回答完成后，等待多少秒再进入下一轮。默认 1.2 秒。">闭环每轮完成后停顿时间（秒）</label>
+              <label
+                for="cgpt-setting-closed-loop-next-delay-min-sec"
+                title="闭环每轮回复完成后，进入下一轮之前的最短等待秒数。默认 40 秒。"
+              >闭环最短等待（秒）</label>
               <input
                 type="number"
                 class="cgpt-input"
-                id="cgpt-setting-closed-loop-next-delay-sec"
+                id="cgpt-setting-closed-loop-next-delay-min-sec"
                 data-no-wheel-number="1"
-                min="0"
+                min="1"
                 max="600"
-                step="0.1"
-                title="闭环每轮回答完成后，等待多少秒再进入下一轮。默认 1.2 秒。"
+                step="1"
+                placeholder="40"
+                title="单位：秒。默认 40 秒。"
+              >
+            </div>
+
+            <div class="cgpt-kv">
+              <label
+                for="cgpt-setting-closed-loop-next-delay-max-sec"
+                title="闭环每轮回复完成后，进入下一轮之前的最长等待秒数。默认 60 秒。"
+              >闭环最长等待（秒）</label>
+              <input
+                type="number"
+                class="cgpt-input"
+                id="cgpt-setting-closed-loop-next-delay-max-sec"
+                data-no-wheel-number="1"
+                min="1"
+                max="600"
+                step="1"
+                placeholder="60"
+                title="单位：秒。默认 60 秒。"
               >
             </div>
 
@@ -1296,8 +1439,8 @@
               <input type="range" class="cgpt-input" id="cgpt-setting-beep-volume" min="0.05" max="1" step="0.05">
             </div>
             <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-duration">时长 (毫秒)</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="30" max="10000" step="10">
+              <label for="cgpt-setting-beep-duration" title="单位：秒。内部仍按毫秒保存与播放。">蜂鸣时长（秒）</label>
+              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="0.03" max="10" step="0.1" title="单位：秒。默认 1 秒。">
             </div>
             <div class="cgpt-kv">
               <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
@@ -1324,11 +1467,15 @@
             </label>
 
             <div class="cgpt-kv">
-              <label for="cgpt-setting-runtime-stats-refresh-interval">计时刷新间隔</label>
-              <select class="cgpt-select" id="cgpt-setting-runtime-stats-refresh-interval">
-                <option value="1000">1000 ms</option>
-                <option value="2000">2000 ms</option>
-                <option value="5000">5000 ms</option>
+              <label for="cgpt-setting-runtime-stats-refresh-interval" title="单位：秒。内部仍按毫秒保存。">计时刷新间隔（秒）</label>
+              <select
+                class="cgpt-select"
+                id="cgpt-setting-runtime-stats-refresh-interval"
+                title="单位：秒。内部仍按毫秒保存。"
+              >
+                <option value="1000">1 秒</option>
+                <option value="2000">2 秒</option>
+                <option value="5000">5 秒</option>
               </select>
             </div>
 
