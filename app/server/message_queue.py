@@ -2150,6 +2150,20 @@ def _handle_report(body):
     event = body.get("event") or "info"
     payload = body.get("payload") or {}
     message_id = (body.get("message_id") or "").strip()
+    try:
+        from app.server.orch_bridge import handle_orch_bridge_report
+
+        if handle_orch_bridge_report(event, body, payload):
+            return {"ok": True}
+    except Exception as exc:
+        import traceback
+
+        _log(
+            "[ORCH][REPORT][FAILED] "
+            f"event={event or '-'} "
+            f"error_type={type(exc).__name__} error={exc}\n"
+            f"{traceback.format_exc()}"
+        )
     if event == "identity_change":
         page_instance_id = (
             (body.get("page_instance_id") or payload.get("page_instance_id") or "").strip()

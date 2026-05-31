@@ -804,6 +804,47 @@
 
 
 
+    function repairHeaderStatusZeroHeight(statusWrap, reason, snapshot) {
+      if (!statusWrap) {
+        return null;
+      }
+      const oldRect = statusWrap.getBoundingClientRect();
+      statusWrap.style.removeProperty('display');
+      statusWrap.style.removeProperty('height');
+      statusWrap.style.removeProperty('max-height');
+      statusWrap.style.removeProperty('overflow');
+      statusWrap.style.minHeight = '28px';
+      statusWrap.style.height = 'auto';
+      statusWrap.style.overflow = 'visible';
+      statusWrap.querySelectorAll('.cgpt-header-status-chip, .cgpt-toolbox-top-status-badge, .cgpt-status-pill').forEach((chip) => {
+        chip.style.removeProperty('display');
+        chip.style.removeProperty('height');
+        chip.style.removeProperty('max-height');
+        chip.style.removeProperty('overflow');
+        chip.style.display = 'inline-flex';
+        chip.style.alignItems = 'center';
+        chip.style.minHeight = '22px';
+        chip.style.lineHeight = '20px';
+        chip.style.overflow = 'visible';
+      });
+      const newRect = statusWrap.getBoundingClientRect();
+      appendHeaderStatusLog(
+        `[HEADER_STATUS][REPAIR_ZERO_HEIGHT] oldRect=${Math.round(oldRect.width)}x${Math.round(oldRect.height)} newRect=${Math.round(newRect.width)}x${Math.round(newRect.height)} responseState=${snapshot.responseState || '-'} waitingReply=${snapshot.waitingReply ? 1 : 0} chipCount=${snapshot.chips.length} reason=${reason || '-'}`,
+      );
+      return newRect;
+    }
+
+    function resolveHeaderStatusAuditTarget(header) {
+      if (!header) {
+        return null;
+      }
+      const pageStatusRow = header.querySelector('.cgpt-toolbox-header-status-row, .cgpt-toolbox-page-status-row, .cgpt-toolbox-top-status-row');
+      if (pageStatusRow) {
+        return pageStatusRow;
+      }
+      return header.querySelector('.cgpt-header-status-chips');
+    }
+
     function auditHeaderStatusVisibility(reason, snapshot, statusWrap) {
 
       const shouldHaveCritical = !!(
@@ -838,9 +879,12 @@
 
 
 
-      const visibleText = statusWrap ? String(statusWrap.textContent || '').trim() : '';
-
-      const rect = statusWrap ? statusWrap.getBoundingClientRect() : null;
+      const header = statusWrap
+        ? statusWrap.closest('.cgpt-toolbox-header')
+        : getToolboxRootElement()?.querySelector('.cgpt-toolbox-header');
+      const auditTarget = resolveHeaderStatusAuditTarget(header) || statusWrap;
+      const visibleText = auditTarget ? String(auditTarget.textContent || '').trim() : '';
+      const rect = auditTarget ? auditTarget.getBoundingClientRect() : null;
 
 
 
@@ -851,6 +895,10 @@
           `[HEADER_STATUS][MISSING_CRITICAL] reason=${reason || '-'} visibleText=${visibleText || '-'} rect=${rect ? `${Math.round(rect.width)}x${Math.round(rect.height)}` : '-'} responseState=${snapshot.responseState || '-'} waitingReply=${snapshot.waitingReply ? 1 : 0} sendPhase=${snapshot.sendTaskPhase || '-'} chipCount=${snapshot.chips.length}`,
 
         );
+
+        if (auditTarget && rect && rect.height <= 0) {
+          repairHeaderStatusZeroHeight(auditTarget, reason, snapshot);
+        }
 
       }
 
@@ -933,17 +981,11 @@
 
 
       const signature = [
-
+        'fixed-slots',
         width,
-
-        visibleChips.map((c) => `${c.key}:${c.text}`).join('|'),
-
         snapshot.waitingReply ? 1 : 0,
-
         snapshot.responseState,
-
         snapshot.sendTaskPhase,
-
       ].join(';');
 
 
@@ -960,33 +1002,18 @@
 
 
 
-      statusWrap.innerHTML = visibleChips.map((chip) => {
+      // 顶部状态已迁移到固定槽位行（cgpt-top-status-row），不再动态插入/删除 chip。
+      statusWrap.innerHTML = '';
 
-        const cls = [
+      statusWrap.style.display = 'none';
 
-          'cgpt-header-status-chip',
-
-          `cgpt-header-status-chip-${chip.level}`,
-
-          `cgpt-header-status-chip-${chip.key}`,
-
-        ].join(' ');
-
-        return `<span class="${cls}" data-status-key="${escapeHeaderStatusHtml(chip.key)}">${escapeHeaderStatusHtml(chip.text)}</span>`;
-
-      }).join('');
-
-
-
-      statusWrap.style.display = visibleChips.length ? '' : 'none';
-
-      root.dataset.headerStatusCount = String(visibleChips.length);
+      root.dataset.headerStatusCount = '0';
 
 
 
       appendHeaderStatusLog(
 
-        `[HEADER_STATUS][RENDER] reason=${reason || '-'} chips=${visibleChips.map((c) => `${c.key}:${c.text}`).join('|') || '-'} responseState=${snapshot.responseState || '-'} responseReason=${snapshot.responseReason || '-'} waitingReply=${snapshot.waitingReply ? 1 : 0} waitingSend=${snapshot.waitingSend ? 1 : 0} sendPhase=${snapshot.sendTaskPhase || '-'} uploadPhase=${snapshot.uploadTaskPhase || '-'} width=${width}`,
+        `[HEADER_STATUS][RENDER] reason=${reason || '-'} mode=fixed-slots responseState=${snapshot.responseState || '-'} waitingReply=${snapshot.waitingReply ? 1 : 0} sendPhase=${snapshot.sendTaskPhase || '-'} uploadPhase=${snapshot.uploadTaskPhase || '-'} width=${width}`,
 
       );
 

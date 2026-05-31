@@ -114,14 +114,31 @@ const ToolboxActionDispatch = (() => {
       }
       if (runtimeAction) {
         dispatchAction = runtimeAction;
-        if (
-          runtimeAction === 'cancel'
-          && (
+        if (runtimeAction === 'cancel' || runtimeAction === 'stop') {
+          const ownerButtonId = String(
+            button.dataset.cgptOwnerButtonId || button.id || '',
+          ).trim();
+          if (
+            ownerButtonId === 'cgpt-copy-hotkey-once'
+            || baseAction === 'cancel-copy-hotkey-once'
+          ) {
+            dispatchAction = 'copy-and-hotkey';
+          } else if (ownerButtonId === 'cgpt-send-message-once') {
+            dispatchAction = 'cancel-send';
+          } else if (ownerButtonId === 'cgpt-send-copy-hotkey-once') {
+            dispatchAction = 'cancel-send-copy-hotkey';
+          } else if (
             baseAction === 'copy-hotkey-once'
             || baseAction === 'copy-and-hotkey'
-          )
-        ) {
-          dispatchAction = 'copy-and-hotkey';
+          ) {
+            dispatchAction = 'copy-and-hotkey';
+          } else if (baseAction === 'send-message') {
+            dispatchAction = 'cancel-send';
+          } else if (!ownerButtonId) {
+            appendDispatchLog(
+              `[TOOLBOX_ACTION][CANCEL_OWNER_UNKNOWN] id=${button.id || '-'} action=${baseAction || '-'} runtime=${runtimeAction}`,
+            );
+          }
         }
       } else if (baseAction) {
         dispatchAction = baseAction;

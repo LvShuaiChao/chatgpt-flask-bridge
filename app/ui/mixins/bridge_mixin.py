@@ -34,6 +34,7 @@ from app.models import (
     default_remote_chatgpt,
     normalize_remote_chatgpt,
 )
+from app.ui.mixins.action_orchestrator_mixin import ActionOrchestratorMixin
 from app.ui.mixins.system_hotkey_gui_mixin import SystemHotkeyGuiMixin
 from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
@@ -44,7 +45,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
 
-class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
+class BridgeMixin(ActionOrchestratorMixin, SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
     @staticmethod
     def _normalize_enqueue_result(enqueue_result):
         """统一解析 enqueue_control_command 返回值（结构化 / 裸 msg / 旧 bool）。"""
@@ -2000,6 +2001,9 @@ class BridgeMixin(SystemHotkeyGuiMixin, AssistantReplyUpsertMixin):
         if route == "conversation_created":
             self._handle_conversation_created_event(item, payload)
             return
+        if route == "orch":
+            if self._handle_orch_inbound_event(item, payload):
+                return
         self._handle_bound_message_event(item, payload, kind)
 
     def _refresh_status_tick(self):

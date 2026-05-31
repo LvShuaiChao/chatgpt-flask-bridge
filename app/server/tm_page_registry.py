@@ -99,6 +99,17 @@ def _bridge_runtime_patch_for_body(body):
         patch["page_no"] = page_no
         patch["page_display_id"] = str(page_no)
     try:
+        from app.core.action_orchestrator import orch_runtime_patch_for_poll
+
+        patch.update(orch_runtime_patch_for_poll(body))
+    except Exception as error:
+        _log(
+            "[ORCH][POLL_PATCH][FAILED] "
+            f"client_id={client_id or '-'} "
+            f"error_type={type(error).__name__} error={error}\n"
+            f"{traceback.format_exc()}"
+        )
+    try:
         from app.server import upload_files as uf
 
         patch.update(uf.upload_files_patch_for_poll(body))

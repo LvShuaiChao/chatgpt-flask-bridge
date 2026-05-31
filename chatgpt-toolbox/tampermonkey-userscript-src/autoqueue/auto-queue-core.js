@@ -4336,9 +4336,9 @@ const AutoQueueModule = (() => {
             闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
           </div>
           <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
-            <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
           </div>
           <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
           <label class="cgpt-checkbox-line">
@@ -30551,8 +30551,18 @@ const AutoQueueModule = (() => {
         UploadModule.renderToolboxTopStatus({ heavy: false });
       }
 
-      const messageUsed = messageRateLimit ? Number(messageRateLimit.used) || 0 : '-';
-      const uploadUsed = uploadRateLimit ? Number(uploadRateLimit.used) || 0 : '-';
+      const globalUsage = typeof GlobalUsageStore !== 'undefined' && typeof GlobalUsageStore.readGlobalUsageStore === 'function'
+        ? GlobalUsageStore.readGlobalUsageStore()
+        : null;
+      const globalMessageUsed = globalUsage ? Number(globalUsage.messageUsed) || 0 : 0;
+      const globalUploadUsed = globalUsage ? Number(globalUsage.uploadUsed) || 0 : 0;
+      const globalMessageLimit = globalUsage
+        ? Number(globalUsage.messageLimit) || 150
+        : (messageRateLimit ? Number(messageRateLimit.max || messageRateLimit.limit) || 150 : 150);
+      const globalUploadLimit = globalUsage
+        ? Number(globalUsage.uploadLimit) || 80
+        : (uploadRateLimit ? Number(uploadRateLimit.max || uploadRateLimit.limit) || 80 : 80);
+      const globalDayKey = globalUsage ? globalUsage.dayKey : '-';
 
       const throttleStatusLogs = isAutoQueueInitialSendUiThrottleStage();
       const shouldLogStatusPanel = (now - lastStatusPanelLogAt >= 3000 || shouldForceRender)
@@ -30560,15 +30570,16 @@ const AutoQueueModule = (() => {
       if (shouldLogStatusPanel) {
         lastStatusPanelLogAt = now;
         ToolboxShell.appendLog(
-          `[STATUS][PANEL_RENDER] messageUsed=${messageUsed} uploadUsed=${uploadUsed} `
-          + `pageTurn=${pageTurnText} totalSentDialogueCount=${taskTotalSentDialogueCount} `
+          `[PAGE_STATUS][RENDER] pageTurn=${pageTurnText} totalSentDialogueCount=${taskTotalSentDialogueCount} `
           + `autoUploadCountMode=${progressSnapshot.autoUploadCountMode || 'taskItem'} `
           + `autoUploadCount=${Number(progressSnapshot.autoUploadCount) || 0} `
           + `autoUploadMessageCount=${Number(progressSnapshot.autoUploadMessageCount) || 0} `
           + `reason=${refreshReason || '-'}`,
         );
         ToolboxShell.appendLog(
-          `[STATUS][TOP_RENDER] messageUsed=${messageUsed} uploadUsed=${uploadUsed} reason=${refreshReason || '-'}`,
+          `[GLOBAL_USAGE][TOP_RENDER] reason=${refreshReason || '-'} messageUsed=${globalMessageUsed} `
+          + `messageLimit=${globalMessageLimit} uploadUsed=${globalUploadUsed} uploadLimit=${globalUploadLimit} `
+          + `dayKey=${globalDayKey}`,
         );
       }
 
@@ -32555,29 +32566,39 @@ const AutoQueueModule = (() => {
     }
 
     function computeNextReleaseAtForQuotaState(quotaState, neededCount = 1) {
-      // quotaState.records 里每条记录一般包含 ts/tsMs 和 count（count=上传文件数或1）
       const quota = quotaState || {};
-      const records = Array.isArray(quota.records) ? quota.records.slice() : [];
-      const windowMs = Math.max(0, Number(quota.windowMs) || 0);
-      if (!windowMs || !records.length) {
-        return 0;
-      }
-
       const remaining = Math.max(0, Number(quota.remaining) || 0);
       const needed = Math.max(1, Math.floor(Number(neededCount) || 1));
       if (remaining >= needed) {
         return Date.now();
       }
 
+      const configuredNextReleaseAt = Number(quota.nextReleaseAt) || 0;
+      if (configuredNextReleaseAt > Date.now()) {
+        return configuredNextReleaseAt;
+      }
+
+      // 兼容旧滑动窗口记录（ts/at + count）
+      const records = Array.isArray(quota.records) ? quota.records.slice() : [];
+      const windowMs = Math.max(0, Number(quota.windowMs) || 0);
+      if (!windowMs || !records.length) {
+        return configuredNextReleaseAt > 0 ? configuredNextReleaseAt : 0;
+      }
+
       const deficit = needed - remaining;
-      records.sort((a, b) => Number(a && a.ts) - Number(b && b.ts));
+      records.sort((a, b) => {
+        const tsA = Number(a && (a.ts != null ? a.ts : a.at)) || 0;
+        const tsB = Number(b && (b.ts != null ? b.ts : b.at)) || 0;
+        return tsA - tsB;
+      });
 
       let removed = 0;
       for (const r of records) {
         const count = Math.max(1, Number(r && r.count) || 1);
         removed += count;
         if (removed >= deficit) {
-          return Number(r.ts) + windowMs;
+          const ts = Number(r && (r.ts != null ? r.ts : r.at)) || 0;
+          return ts + windowMs;
         }
       }
 
@@ -32692,9 +32713,18 @@ const AutoQueueModule = (() => {
       }
 
       const now = Date.now();
-      const windowMs = Math.max(1000, Number(quota.windowMs) || settings.windowMinutes * 60 * 1000);
-      const oldest = records.length ? Number(records[0].ts) || now : now;
-      const waitMs = Math.max(1000, oldest + windowMs - now);
+      const nextReleaseAt = Number(quota.nextReleaseAt) || 0;
+      let waitMs = nextReleaseAt > now ? Math.max(1000, nextReleaseAt - now) : 0;
+      if (waitMs <= 0) {
+        const windowMs = Math.max(1000, Number(quota.windowMs) || settings.windowMinutes * 60 * 1000);
+        const sorted = records.slice().sort((a, b) => {
+          const tsA = Number(a && (a.ts != null ? a.ts : a.at)) || 0;
+          const tsB = Number(b && (b.ts != null ? b.ts : b.at)) || 0;
+          return tsA - tsB;
+        });
+        const oldest = sorted.length ? Number(sorted[0].ts != null ? sorted[0].ts : sorted[0].at) || now : now;
+        waitMs = Math.max(1000, oldest + windowMs - now);
+      }
 
       return {
         enabled: true,
@@ -32878,20 +32908,45 @@ const AutoQueueModule = (() => {
       }
     }
 
-    function recordTaskSendRateLimitHit(kind = 'task-message') {
+    function buildAutoQueueMessageUsageContext(context = {}) {
+      const ctx = context && typeof context === 'object' ? context : {};
+      const run = state.taskRun && typeof state.taskRun === 'object' ? state.taskRun : {};
+      const runningTask = typeof getCurrentRunningTask === 'function' ? getCurrentRunningTask() : null;
+      const text = String(
+        ctx.text
+        || ctx.prompt
+        || (runningTask && runningTask.prompt)
+        || (runningTask && runningTask.title)
+        || '',
+      );
+      return {
+        text,
+        runId: String(ctx.runId || run.runId || (runningTask && runningTask.id) || ''),
+        attachmentCount: Number(ctx.attachmentCount || 0),
+        conversationId: String(
+          ctx.conversationId
+          || (typeof getCurrentConversationIdSafe === 'function' ? getCurrentConversationIdSafe() : '')
+          || '',
+        ),
+      };
+    }
+
+    function recordTaskSendRateLimitHit(kind = 'task-message', context = {}) {
       const safeKind = String(kind || 'task-message');
+      const usageContext = buildAutoQueueMessageUsageContext(context);
 
       if (
         typeof UploadModule !== 'undefined'
         && typeof UploadModule.recordMessageSent === 'function'
       ) {
-        UploadModule.recordMessageSent();
+        UploadModule.recordMessageSent(usageContext);
       }
 
       const status = getTaskSendRateLimitStatus({ logSnapshot: true });
       ToolboxShell.appendLog(
         `[AUTOQ][TASK_SEND_RATE_LIMIT][RECORD] kind=${safeKind} used=${status.used}/${status.max} `
-        + `remaining=${status.remaining} source=${status.source || 'message-quota'}`,
+        + `remaining=${status.remaining} source=${status.source || 'global-usage'} `
+        + `runId=${usageContext.runId || '-'} textLen=${String(usageContext.text || '').length}`,
       );
     }
 
@@ -32978,9 +33033,18 @@ const AutoQueueModule = (() => {
       }
 
       const now = Date.now();
-      const windowMs = Math.max(1000, Number(quota.windowMs) || settings.windowMinutes * 60 * 1000);
-      const oldest = records.length ? Number(records[0].ts) || now : now;
-      const waitMs = Math.max(1000, oldest + windowMs - now);
+      const nextReleaseAt = Number(quota.nextReleaseAt) || 0;
+      let waitMs = nextReleaseAt > now ? Math.max(1000, nextReleaseAt - now) : 0;
+      if (waitMs <= 0) {
+        const windowMs = Math.max(1000, Number(quota.windowMs) || settings.windowMinutes * 60 * 1000);
+        const sorted = records.slice().sort((a, b) => {
+          const tsA = Number(a && (a.ts != null ? a.ts : a.at)) || 0;
+          const tsB = Number(b && (b.ts != null ? b.ts : b.at)) || 0;
+          return tsA - tsB;
+        });
+        const oldest = sorted.length ? Number(sorted[0].ts != null ? sorted[0].ts : sorted[0].at) || now : now;
+        waitMs = Math.max(1000, oldest + windowMs - now);
+      }
 
       return {
         enabled: true,
@@ -34045,7 +34109,7 @@ const AutoQueueModule = (() => {
         );
 
         if (mapped.ok) {
-          recordTaskSendRateLimitHit(source);
+          recordTaskSendRateLimitHit(source, { text: prompt, taskId, runId: taskId });
           ToolboxShell.appendLog(
             `[AUTOQ][TASK_SINGLE][INITIAL_SEND_OK] task=${taskTitle} taskId=${taskId}`,
           );
@@ -34095,7 +34159,7 @@ const AutoQueueModule = (() => {
       );
 
       if (mapped.ok) {
-        recordTaskSendRateLimitHit(source);
+        recordTaskSendRateLimitHit(source, { text: prompt, taskId, runId: taskId });
         ToolboxShell.appendLog(
           `[AUTOQ][TASK_SINGLE][INITIAL_SEND_OK] task=${taskTitle} taskId=${taskId}`,
         );
@@ -39356,9 +39420,9 @@ const AutoQueueModule = (() => {
               闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
             </div>
             <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
-              <button type="button" class="cgpt-btn cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
             </div>
             <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
             <label class="cgpt-checkbox-line">

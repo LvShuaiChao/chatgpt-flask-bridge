@@ -175,6 +175,8 @@ let sendButtonGlobalFallbackLoggedAt = 0;
 const SEND_BUTTON_GLOBAL_FALLBACK_LOG_MS = 5000;
 let sendButtonCandidatesLoggedAt = 0;
 const SEND_BUTTON_CANDIDATES_LOG_MS = 2000;
+let sendButtonSelectLoggedAt = 0;
+const SEND_BUTTON_SELECT_LOG_MS = 2000;
 
 function isDomHelperComposerDebugEnabled(options = {}) {
   if (typeof isToolboxDebugEnabled === 'function') {
@@ -256,8 +258,9 @@ function pickBestSendButtonCandidate(candidates) {
   return null;
 }
 
-const SEND_BUTTON_REJECT_LABEL_RE = /麦克风|microphone|voice|语音|upload|attach|附件|添加|浏览|browse|tools|工具|advanced|进阶|更多|more|model|模型|browse files|选择文件|停止|stop|generating/i;
-const SEND_BUTTON_REJECT_TESTID_RE = /microphone|voice|attach|upload|file-input|file-attach|tools|model|advanced|stop|composer-plus/i;
+const SEND_BUTTON_REJECT_LABEL_RE = /麦克风|microphone|voice|语音|听写|dictat|upload|attach|附件|添加|浏览|browse|tools|工具|advanced|进阶|更多|more|model|模型|browse files|选择文件|停止听写|开始听写|启动语音|停止回答|停止|stop|generating/i;
+const SEND_BUTTON_REJECT_TESTID_RE = /microphone|voice|attach|upload|file-input|file-attach|tools|model|advanced|stop|composer-plus|composer-voice|composer-mic|stop-button/i;
+const SEND_BUTTON_REJECT_ID_CLASS_RE = /composer-plus|composer-speech|composer-voice|composer-mic|stop-button/i;
 const SEND_BUTTON_POSITIVE_LABEL_RE = /(?:^|\b)(?:send(?:\s+(?:message|prompt))?|发送(?:消息|提示)?)(?:\b|$)/i;
 
 function buildSendButtonCandidateMeta(btn) {
@@ -314,6 +317,16 @@ function classifySendButtonCandidate(meta, composerRoot) {
     return meta;
   }
 
+  if (/开始听写|停止听写|启动语音功能|^语音$|听写|dictation|dictate/i.test(combined)) {
+    meta.rejectReason = 'excluded-voice-dictation';
+    return meta;
+  }
+
+  if (/停止回答|stop generating|stop-button/i.test(combined)) {
+    meta.rejectReason = 'excluded-stop-button';
+    return meta;
+  }
+
   if (SEND_BUTTON_REJECT_LABEL_RE.test(meta.ariaLabel) || SEND_BUTTON_REJECT_LABEL_RE.test(meta.title) || SEND_BUTTON_REJECT_LABEL_RE.test(meta.text)) {
     meta.rejectReason = 'excluded-control-label';
     return meta;
@@ -321,6 +334,11 @@ function classifySendButtonCandidate(meta, composerRoot) {
 
   if (SEND_BUTTON_REJECT_TESTID_RE.test(meta.dataTestId)) {
     meta.rejectReason = 'excluded-control-testid';
+    return meta;
+  }
+
+  if (SEND_BUTTON_REJECT_ID_CLASS_RE.test(meta.className) || SEND_BUTTON_REJECT_ID_CLASS_RE.test(String(meta.button.id || ''))) {
+    meta.rejectReason = 'excluded-control-id-class';
     return meta;
   }
 
@@ -380,11 +398,47 @@ function classifySendButtonCandidate(meta, composerRoot) {
 }
 
 /**
+ * Log send button selection result with composer text context.
+ */
+function logSendButtonSelect(result, composerText) {
+  if (typeof ToolboxShell === 'undefined' || typeof ToolboxShell.appendLog !== 'function') {
+    return;
+  }
+  const now = Date.now();
+  if (now - sendButtonSelectLoggedAt < SEND_BUTTON_SELECT_LOG_MS) {
+    return;
+  }
+  sendButtonSelectLoggedAt = now;
+
+  const text = String(composerText || '');
+  const textLen = text.trim().length;
+  const hasComposerText = textLen > 0 ? 1 : 0;
+  const button = result && result.button instanceof HTMLButtonElement ? result.button : null;
+  const selectedButtonId = button ? String(button.id || '-') : '-';
+  const selectedButtonAria = button ? String(button.getAttribute('aria-label') || '-') : '-';
+  let reason = String(result && result.reason ? result.reason : 'send-button-not-found');
+
+  if (!hasComposerText) {
+    reason = 'empty_composer';
+  } else if (!button && reason === 'send-button-not-found') {
+    reason = 'send_button_not_found';
+  } else if (button) {
+    reason = 'ok';
+  }
+
+  ToolboxShell.appendLog(
+    `[COMPOSER][SEND_BUTTON_SELECT] hasComposerText=${hasComposerText} composerTextLen=${textLen} `
+    + `selected=${selectedButtonId} selectedButtonAria=${selectedButtonAria} reason=${reason}`,
+  );
+}
+
+/**
  * Unified send-button detection with explicit candidate rejection reasons.
  * @param {HTMLElement|null} composerRoot
+ * @param {object} [options]
  * @returns {{ found: boolean, button: HTMLButtonElement|null, reason: string, candidates: Array<object> }}
  */
-function detectRealSendButton(composerRoot) {
+function detectRealSendButton(composerRoot, options = {}) {
   const emptyResult = {
     found: false,
     button: null,
@@ -394,11 +448,33 @@ function detectRealSendButton(composerRoot) {
 
   const scope = composerRoot instanceof HTMLElement
     ? composerRoot
-    : resolveComposerScopeForSendButton({});
+    : resolveComposerScopeForSendButton(options || {});
+
+  const composerText = typeof getChatGPTComposerText === 'function'
+    ? getChatGPTComposerText()
+    : '';
 
   if (!(scope instanceof HTMLElement)) {
     emptyResult.reason = 'composer-root-not-found';
+    logSendButtonSelect(emptyResult, composerText);
     return emptyResult;
+  }
+
+  // Priority: explicit send button selectors first.
+  for (const selector of SEND_BUTTON_SELECTORS) {
+    const priorityBtn = scope.querySelector(selector);
+    if (!(priorityBtn instanceof HTMLButtonElement) || isInsideToolbox(priorityBtn)) {
+      continue;
+    }
+    const priorityMeta = classifySendButtonCandidate(buildSendButtonCandidateMeta(priorityBtn), scope);
+    if (!priorityMeta.rejectReason && priorityMeta.button instanceof HTMLButtonElement) {
+      const btnReady = !priorityMeta.disabled && priorityBtn.getAttribute('aria-disabled') !== 'true';
+      const result = btnReady
+        ? { found: true, button: priorityBtn, reason: 'send_button_ready', candidates: [] }
+        : { found: false, button: null, reason: 'send-button-disabled', candidates: [] };
+      logSendButtonSelect(result, composerText);
+      return result;
+    }
   }
 
   const rawButtons = Array.from(scope.querySelectorAll('button'));
@@ -468,31 +544,38 @@ function detectRealSendButton(composerRoot) {
   if (best && best.button instanceof HTMLButtonElement) {
     const btnReady = !best.disabled && best.button.getAttribute('aria-disabled') !== 'true';
     if (!btnReady) {
-      return {
+      const disabledResult = {
         found: false,
         button: null,
         reason: 'send-button-disabled',
         candidates,
       };
+      logSendButtonSelect(disabledResult, composerText);
+      return disabledResult;
     }
-    return {
+    const readyResult = {
       found: true,
       button: best.button,
       reason: 'send_button_ready',
       candidates,
     };
+    logSendButtonSelect(readyResult, composerText);
+    return readyResult;
   }
 
   const disabledCandidate = candidates.find((c) => c.visible && !c.rejectReason && c.disabled);
   if (disabledCandidate) {
-    return {
+    const disabledResult = {
       found: true,
       button: null,
       reason: 'send-button-disabled',
       candidates,
     };
+    logSendButtonSelect(disabledResult, composerText);
+    return disabledResult;
   }
 
+  logSendButtonSelect(emptyResult, composerText);
   return {
     found: false,
     button: null,

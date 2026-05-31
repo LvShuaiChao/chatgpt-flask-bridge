@@ -334,6 +334,40 @@ async function executeForegroundResume(reason = '-') {
       );
     }
 
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.reconcilePendingSendTaskAfterExternalNativeSend === 'function'
+    ) {
+      try {
+        UploadModule.reconcilePendingSendTaskAfterExternalNativeSend('foreground-catch-up');
+      } catch (reconcileErr) {
+        console.error('[FOREGROUND_CATCH_UP][RECONCILE_FAILED]', reconcileErr);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            `[SEND_TASK][RECONCILE_ERROR] reason=foreground-catch-up error=${reconcileErr && reconcileErr.message ? reconcileErr.message : String(reconcileErr)}`,
+          );
+        }
+      }
+    }
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.maybeReconcileSendCopyHotkeyWaitingReply === 'function'
+    ) {
+      try {
+        UploadModule.maybeReconcileSendCopyHotkeyWaitingReply('foreground-catch-up');
+      } catch (sendCopyHotkeyReconcileErr) {
+        console.error('[FOREGROUND_CATCH_UP][SEND_COPY_HOTKEY_RECONCILE_FAILED]', sendCopyHotkeyReconcileErr);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY][RECONCILE_ERROR] reason=foreground-catch-up error=${sendCopyHotkeyReconcileErr && sendCopyHotkeyReconcileErr.message ? sendCopyHotkeyReconcileErr.message : String(sendCopyHotkeyReconcileErr)}`,
+          );
+        }
+      }
+    }
+
     if (!uploadCritical && typeof BridgeModule !== 'undefined' && typeof BridgeModule.forceCatchUp === 'function') {
       BridgeModule.forceCatchUp(`foreground-catch-up:${catchReason}`);
     }

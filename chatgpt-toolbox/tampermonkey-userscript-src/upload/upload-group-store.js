@@ -55,6 +55,145 @@
       const clearConfirmUntilRef = deps.clearConfirmUntilRef;
       const deleteConfirmUntilRef = deps.deleteConfirmUntilRef;
 
+    const UPLOAD_GROUP_LAST_SELECTED_KEY = 'cgpt_toolbox_upload_group_last_selected_v1';
+    const UPLOAD_GROUP_PAGE_SELECTED_PREFIX = 'cgpt_toolbox_upload_group_page_selected_v1:';
+
+    function getUploadGroupPageScopeKey() {
+      const pageInstanceId = String(
+        (state && state.page_instance_id)
+        || (typeof window !== 'undefined' && window.__CGPT_TOOLBOX_PAGE_INSTANCE_ID__)
+        || (typeof getToolboxPageInstanceId === 'function' ? getToolboxPageInstanceId() : '')
+        || '',
+      ).trim();
+      if (pageInstanceId) {
+        return `page:${pageInstanceId}`;
+      }
+
+      const conversationId = String(
+        (state && state.conversation_id)
+        || (typeof getCurrentConversationIdSafe === 'function' ? getCurrentConversationIdSafe() : '')
+        || '',
+      ).trim();
+      if (conversationId && conversationId !== '-') {
+        return `conversation:${conversationId}`;
+      }
+
+      return `url:${location.origin}${location.pathname}`;
+    }
+
+    function getUploadGroupPageMemoryKey() {
+      return `${UPLOAD_GROUP_PAGE_SELECTED_PREFIX}${getUploadGroupPageScopeKey()}`;
+    }
+
+    function getPageOnlySelectedUploadGroupId() {
+      const pageKey = getUploadGroupPageMemoryKey();
+      return String(localStorage.getItem(pageKey) || '').trim();
+    }
+
+    function getLastSelectedUploadGroupId() {
+      return String(localStorage.getItem(UPLOAD_GROUP_LAST_SELECTED_KEY) || '').trim();
+    }
+
+    function loadPageSelectedUploadGroupId() {
+      const pageKey = getUploadGroupPageMemoryKey();
+      const pageValue = getPageOnlySelectedUploadGroupId();
+      if (pageValue) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][PAGE_SELECTED_LOAD] key=${pageKey} groupId=${pageValue}`,
+        );
+        return pageValue;
+      }
+
+      const lastValue = getLastSelectedUploadGroupId();
+      if (lastValue) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][PAGE_SELECTED_FALLBACK_LAST] key=${pageKey} groupId=${lastValue}`,
+        );
+        return lastValue;
+      }
+
+      appendUploadLog(
+        `[UPLOAD_GROUP][PAGE_SELECTED_FALLBACK_DEFAULT] key=${pageKey}`,
+      );
+      return '';
+    }
+
+    function savePageSelectedUploadGroupId(groupId, reason = '-') {
+      const normalizedGroupId = String(groupId || '').trim();
+      const reasonText = String(reason || '-').trim() || '-';
+      if (!normalizedGroupId) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][PAGE_SELECTED_SAVE_SKIP] reason=${reasonText} groupId=-`,
+        );
+        return;
+      }
+
+      if (!state.groups.some((g) => g && g.id === normalizedGroupId)) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][PAGE_SELECTED_SAVE_SKIP] reason=${reasonText} groupId=${normalizedGroupId} exists=0`,
+        );
+        return;
+      }
+
+      const pageKey = getUploadGroupPageMemoryKey();
+      try {
+        localStorage.setItem(pageKey, normalizedGroupId);
+        localStorage.setItem(UPLOAD_GROUP_LAST_SELECTED_KEY, normalizedGroupId);
+      } catch (error) {
+        console.error('[ChatGPT toolbox] savePageSelectedUploadGroupId localStorage write failed', error);
+      }
+
+      appendUploadLog(
+        `[UPLOAD_GROUP][PAGE_SELECTED_SAVE] reason=${reasonText} key=${pageKey} groupId=${normalizedGroupId} lastSelected=1`,
+      );
+    }
+
+    function resolveInitialActiveUploadGroupId(groups, reason = '-') {
+      const reasonText = String(reason || '-').trim() || '-';
+      const groupList = Array.isArray(groups) ? groups : state.groups;
+      const pageSelectedId = loadPageSelectedUploadGroupId();
+
+      if (pageSelectedId && groupList.some((group) => group && group.id === pageSelectedId)) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][RESOLVE_ACTIVE_PAGE_MEMORY] reason=${reasonText} groupId=${pageSelectedId}`,
+        );
+        return pageSelectedId;
+      }
+
+      if (pageSelectedId) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][PAGE_MEMORY_GROUP_MISSING] reason=${reasonText} groupId=${pageSelectedId}`,
+        );
+      }
+
+      const fallbackGroup = groupList.find((group) => group && group.id) || null;
+      const fallbackId = fallbackGroup ? fallbackGroup.id : '';
+      appendUploadLog(
+        `[UPLOAD_GROUP][RESOLVE_ACTIVE_DEFAULT] reason=${reasonText} groupId=${fallbackId || '-'}`,
+      );
+      return fallbackId;
+    }
+
+    function reconcilePageActiveGroupAfterGlobalSync(groups, reason = '-') {
+      const reasonText = String(reason || '-').trim() || '-';
+      const groupList = Array.isArray(groups) ? groups : state.groups;
+      const current = String(state.activeGroupId || '').trim();
+
+      if (current && groupList.some((group) => group && group.id === current)) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][KEEP_PAGE_ACTIVE_AFTER_SYNC] reason=${reasonText} groupId=${current}`,
+        );
+        return current;
+      }
+
+      const resolved = resolveInitialActiveUploadGroupId(groupList, `after-global-sync:${reasonText}`);
+      state.activeGroupId = resolved;
+      appendUploadLog(
+        `[UPLOAD_GROUP][RESELECT_AFTER_SYNC] reason=${reasonText} old=${current || '-'} new=${resolved || '-'}`,
+      );
+      return resolved;
+    }
+
     function createDefaultGroup() {
       const group = {
         id: createId('upload_group'),
@@ -170,6 +309,8 @@
       const savedFolderKey = String(savedSelection.folderKey || '').trim();
 
       const pageGroupId = String(readToolboxStateField(pageState, 'uploadActiveGroupId', '')).trim();
+      const pageOnlySelectedGroupId = getPageOnlySelectedUploadGroupId();
+      const lastSelectedUploadGroupId = getLastSelectedUploadGroupId();
       const lastManualGroupId = getLastManualUploadGroupId();
       const globalUploadActiveGroupId = getGlobalUploadActiveGroupId();
       const uploadLastActiveGroupId = getUploadLastActiveGroupId();
@@ -193,7 +334,12 @@
       let resolvedGroupId = '';
       let reason = 'none';
 
-      if (savedProjectKey) {
+      if (isValidInGroups(pageOnlySelectedGroupId) && pageOnlySelectedGroupId !== excludeGroupId) {
+        resolvedGroupId = pageOnlySelectedGroupId;
+        reason = 'page-selected-memory';
+      }
+
+      if (!resolvedGroupId && savedProjectKey) {
         const groupIdFromSaved = findGroupIdForKey(savedProjectKey);
         if (isValidInGroups(groupIdFromSaved) && groupIdFromSaved !== excludeGroupId) {
           resolvedGroupId = groupIdFromSaved;
@@ -217,11 +363,9 @@
 
       if (!resolvedGroupId) {
         const fallthroughCandidates = [
-          { id: globalUploadActiveGroupId, reason: 'global-upload-active' },
-          { id: uploadLastActiveGroupId, reason: 'upload-last-active' },
-          { id: lastManualGroupId, reason: 'last-manual' },
-          { id: stateActiveGroupId, reason: 'state-active' },
+          { id: lastSelectedUploadGroupId, reason: 'last-selected-fallback' },
           { id: pageGroupId, reason: 'page-state-legacy' },
+          { id: stateActiveGroupId, reason: 'state-active' },
           { id: firstGroupId, reason: 'first-group' },
         ];
 
@@ -262,6 +406,8 @@
         reason,
         savedProjectKey,
         pageGroupId,
+        pageOnlySelectedGroupId,
+        lastSelectedUploadGroupId,
         globalUploadActiveGroupId,
         lastManualGroupId,
         uploadLastActiveGroupId,
@@ -276,7 +422,9 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
           `[MULTI_UPLOAD][SELECTION][RESOLVE] reason=${reason} savedProjectKey=${savedProjectKey || '-'} `
-          + `pageGroupId=${pageGroupId || '-'} globalUploadActiveGroupId=${globalUploadActiveGroupId || '-'} `
+          + `pageGroupId=${pageGroupId || '-'} pageOnlySelectedGroupId=${pageOnlySelectedGroupId || '-'} `
+          + `lastSelectedUploadGroupId=${lastSelectedUploadGroupId || '-'} `
+          + `globalUploadActiveGroupId=${globalUploadActiveGroupId || '-'} `
           + `lastManualGroupId=${lastManualGroupId || '-'} `
           + `uploadLastActiveGroupId=${uploadLastActiveGroupId || '-'} stateActiveGroupId=${stateActiveGroupId || '-'} `
           + `resolvedGroupId=${resolvedGroupId || '-'} resolvedFolderKey=${resolvedFolderKey || '-'}`,
@@ -389,15 +537,16 @@
 
     async function applyUploadGlobalSyncMessage(message, source) {
       const incomingGroupId = String(message && message.activeGroupId || '').trim();
-      if (incomingGroupId && incomingGroupId !== state.activeGroupId && !state.groups.some((g) => g.id === incomingGroupId)) {
-        await loadGroups();
+      const localGroupId = String(state.activeGroupId || '').trim();
+
+      if (incomingGroupId) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GLOBAL_SYNC][IGNORE_REMOTE_ACTIVE_GROUP] source=${source || '-'} incoming=${incomingGroupId || '-'} local=${localGroupId || '-'} pageScope=${getUploadGroupPageScopeKey()}`,
+        );
       }
-      if (incomingGroupId && incomingGroupId !== state.activeGroupId) {
-        state.activeGroupId = incomingGroupId;
-        saveGlobalUploadActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
-        saveUploadLastActiveGroupId(incomingGroupId, `sync-${source || 'unknown'}`);
-      }
+
       await loadGroups();
+      reconcilePageActiveGroupAfterGlobalSync(state.groups, source || '-');
       await loadQueueForActiveGroup();
       await refreshUploadGroupCounts();
       render();
@@ -508,18 +657,29 @@
       const prevActiveGroupId = state.activeGroupId;
       const prevActiveId = state.activeId;
       const prevQueue = state.queue.slice();
+      const reasonText = String(options.reason || 'switch-group').trim() || 'switch-group';
 
       try {
         await awaitPersistQueueBriefly('switchGroup:before', 300);
 
+        if (state.activeGroupId === groupId) {
+          appendUploadLog(
+            `[UPLOAD_GROUP][SELECT_NOOP] reason=${reasonText} groupId=${groupId}`,
+          );
+          return;
+        }
+
         state.activeGroupId = groupId;
-        saveGlobalUploadActiveGroupId(groupId, options.reason || 'switch-group');
-        saveUploadLastActiveGroupId(groupId, options.reason || 'switch-group');
+        savePageSelectedUploadGroupId(groupId, reasonText);
 
         if (options.saveLastManual !== false) {
-          saveLastManualUploadGroupId(groupId, options.reason || 'switch-group');
+          saveLastManualUploadGroupId(groupId, reasonText);
           refs.lastManualUploadGroupAt = Date.now();
         }
+
+        appendUploadLog(
+          `[UPLOAD_GROUP][SELECT_PAGE_ONLY] reason=${reasonText} old=${prevActiveGroupId || '-'} new=${groupId || '-'} pageScope=${getUploadGroupPageScopeKey()}`,
+        );
 
         await persistGroups();
         await loadQueueForActiveGroup();
@@ -624,8 +784,7 @@
         await awaitPersistQueueBriefly('createGroupInline:after-persist-groups', 300);
 
         saveLastManualUploadGroupId(group.id, 'create-group-inline');
-        saveUploadLastActiveGroupId(group.id, 'create-group-inline');
-        saveGlobalUploadActiveGroupId(group.id, 'create-group-inline');
+        savePageSelectedUploadGroupId(group.id, 'create-group-inline');
 
         if (managePanelEl && managePanelEl.classList.contains('cgpt-toolbox-hidden')) {
           managePanelEl.classList.remove('cgpt-toolbox-hidden');
@@ -987,8 +1146,7 @@
           });
         }
         saveLastManualUploadGroupId(state.activeGroupId, 'delete-group-inline');
-        saveUploadLastActiveGroupId(state.activeGroupId, 'delete-group-inline');
-        saveGlobalUploadActiveGroupId(state.activeGroupId, 'delete-group-inline');
+        savePageSelectedUploadGroupId(state.activeGroupId, 'delete-group-inline');
 
         if (!state.groups.some((g) => g.id === state.activeGroupId)) {
           console.warn('[UPLOAD_GROUP][delete-inline:active-invalid-fallback]', {
@@ -1311,8 +1469,7 @@
 
         await loadQueueForActiveGroup();
         await refreshUploadGroupCounts();
-        saveGlobalUploadActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
-        saveUploadLastActiveGroupId(state.activeGroupId, 'import-groups-and-queue');
+        savePageSelectedUploadGroupId(state.activeGroupId, 'import-groups-and-queue');
 
         ToolboxShell.appendLog(
           `[UPLOAD_GROUP][import:ok] groups=${state.groups.length} queue=${incomingQueue.length} activeGroupId=${state.activeGroupId || '-'}`,
@@ -1358,6 +1515,13 @@
       ensureUploadGroupStableKeys,
       isValidUploadGroupId,
       resolveUploadGroupSelection,
+      getUploadGroupPageScopeKey,
+      getPageOnlySelectedUploadGroupId,
+      getLastSelectedUploadGroupId,
+      loadPageSelectedUploadGroupId,
+      savePageSelectedUploadGroupId,
+      resolveInitialActiveUploadGroupId,
+      reconcilePageActiveGroupAfterGlobalSync,
       getLastManualUploadGroupId,
       saveLastManualUploadGroupId,
       saveUploadLastActiveGroupId,

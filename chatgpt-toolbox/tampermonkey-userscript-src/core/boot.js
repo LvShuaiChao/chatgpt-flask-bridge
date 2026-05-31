@@ -501,6 +501,12 @@ async function initToolbox() {
 
   await mountAllModules('init');
 
+  await safeInitStep('GlobalUsageStore.initGlobalUsageSync', () => {
+    if (typeof GlobalUsageStore !== 'undefined' && typeof GlobalUsageStore.initGlobalUsageSync === 'function') {
+      GlobalUsageStore.initGlobalUsageSync();
+    }
+  });
+
   await safeInitStep('BrowserRuntimeHealth.start', () => {
     if (typeof BrowserRuntimeHealth !== 'undefined' && typeof BrowserRuntimeHealth.start === 'function') {
       BrowserRuntimeHealth.start();

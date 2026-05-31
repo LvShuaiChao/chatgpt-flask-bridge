@@ -16,9 +16,6 @@
         if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposerRoot === 'function') {
           return ComposerApi.getComposerRoot();
         }
-        if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.getComposer === 'function') {
-          return ComposerApi.getComposer();
-        }
         const root = document.querySelector('[contenteditable="true"]');
         if (!root) {
           appendComposerLog('[COMPOSER_API][ROOT_MISSING]');

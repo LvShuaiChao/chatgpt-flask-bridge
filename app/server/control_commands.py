@@ -43,6 +43,7 @@ STRICT_TARGET_CONTROL_COMMANDS = frozenset({
     "switch_conversation",
     "sync_conversation",
     "start_upload",
+    "orch_action",
 })
 
 

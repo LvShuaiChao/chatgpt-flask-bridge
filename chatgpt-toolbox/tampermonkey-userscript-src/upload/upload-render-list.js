@@ -612,7 +612,10 @@
       const active = group.id === activeGroupId ? ' active' : '';
       const count = getUploadGroupFileCount(group.id);
       const cleanName = stripTrailingCountFromGroupName(group.name);
-      const title = `${cleanName}：${count} 个文件`;
+      const pageScopeHint = '此选择仅对当前页面生效；新页面默认使用最近一次选择。';
+      const title = group.id === activeGroupId
+        ? `当前页面选择：${cleanName}（${count} 个文件）。${pageScopeHint}`
+        : `${cleanName}：${count} 个文件。${pageScopeHint}`;
 
       return `
           <button type="button"

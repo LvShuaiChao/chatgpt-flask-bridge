@@ -44,6 +44,7 @@
       const ensureUploadGroupStableKeys = deps.ensureUploadGroupStableKeys;
       const createDefaultGroup = deps.createDefaultGroup;
       const resolveUploadGroupSelection = deps.resolveUploadGroupSelection;
+      const resolveInitialActiveUploadGroupId = deps.resolveInitialActiveUploadGroupId;
       const ensureActiveUploadGroupIdValid = deps.ensureActiveUploadGroupIdValid;
       const syncUploadGroupAppState = deps.syncUploadGroupAppState;
       const appendUploadGroupLog = deps.appendUploadGroupLog;
@@ -52,6 +53,7 @@
       const migrateLegacyUploadSelectionIfNeeded = deps.migrateLegacyUploadSelectionIfNeeded;
       const getToolboxPageState = deps.getToolboxPageState;
       const saveGlobalUploadActiveGroupId = deps.saveGlobalUploadActiveGroupId;
+      const savePageSelectedUploadGroupId = deps.savePageSelectedUploadGroupId;
       const saveUploadLastActiveGroupId = deps.saveUploadLastActiveGroupId;
       const dedupeActiveGroupQueue = deps.dedupeActiveGroupQueue;
       const migrateMissingGroupIdRows = deps.migrateMissingGroupIdRows;
@@ -101,6 +103,7 @@
         ['migrateLegacyUploadSelectionIfNeeded', migrateLegacyUploadSelectionIfNeeded],
         ['getToolboxPageState', getToolboxPageState],
         ['saveGlobalUploadActiveGroupId', saveGlobalUploadActiveGroupId],
+        ['savePageSelectedUploadGroupId', savePageSelectedUploadGroupId],
         ['saveUploadLastActiveGroupId', saveUploadLastActiveGroupId],
         ['dedupeActiveGroupQueue', dedupeActiveGroupQueue],
         ['migrateMissingGroupIdRows', migrateMissingGroupIdRows],
@@ -1476,8 +1479,7 @@
             `[UPLOAD_GROUP][CREATE_DEFAULT_GROUP] store=${APP.uploadGroupStore} activeGroupId=${state.activeGroupId || '-'}`,
           );
           await persistGroups();
-          saveGlobalUploadActiveGroupId(state.activeGroupId, 'upload-default-group-created');
-          saveUploadLastActiveGroupId(state.activeGroupId, 'upload-default-group-created');
+          savePageSelectedUploadGroupId(state.activeGroupId, 'upload-default-group-created');
           ensureActiveUploadGroupIdValid('load-groups-default-created');
           syncUploadGroupAppState();
           appendUploadGroupLog('INIT', { stage: 'loadGroups:created-default' });
@@ -1488,19 +1490,26 @@
         await ensureUploadGroupStableKeys();
         migrateLegacyUploadSelectionIfNeeded();
 
+        const currentActiveGroupId = String(state.activeGroupId || '').trim();
+        if (currentActiveGroupId && state.groups.some((group) => group && group.id === currentActiveGroupId)) {
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][active-keep] activeGroupId=${currentActiveGroupId}`,
+          );
+        } else {
+          state.activeGroupId = resolveInitialActiveUploadGroupId(state.groups, 'load-groups');
+          if (state.activeGroupId) {
+            savePageSelectedUploadGroupId(state.activeGroupId, 'load-groups-init');
+          }
+        }
+
         const pageState = getToolboxPageState();
         const resolved = resolveUploadGroupSelection({
           pageState,
           reason: 'load-groups',
         });
-        state.activeGroupId = resolved.resolvedGroupId || '';
-        if (state.activeGroupId) {
-          saveGlobalUploadActiveGroupId(state.activeGroupId, 'load-groups');
-          saveUploadLastActiveGroupId(state.activeGroupId, 'load-groups');
-        }
 
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][active-resolve] pageGroup=${resolved.pageGroupId || '-'} globalGroup=${resolved.globalUploadActiveGroupId || resolved.uploadLastActiveGroupId || '-'} active=${state.activeGroupId || '-'} source=${resolved.reason || '-'}`,
+          `[UPLOAD_GROUP][active-resolve] pageGroup=${resolved.pageGroupId || '-'} pageOnly=${resolved.pageOnlySelectedGroupId || '-'} lastSelected=${resolved.lastSelectedUploadGroupId || '-'} active=${state.activeGroupId || '-'} source=${resolved.reason || '-'}`,
         );
 
         ensureActiveUploadGroupIdValid('load-groups');

@@ -2764,6 +2764,36 @@
       if (command === 'upload_current_file') {
         return await uploadCurrentFileCommand(normalized);
       }
+      if (command === 'orch_action') {
+        const orchCmd = cmdPayload.orch && typeof cmdPayload.orch === 'object'
+          ? cmdPayload.orch
+          : cmdPayload;
+        if (
+          typeof OrchAtomicClient === 'undefined'
+          || !OrchAtomicClient
+          || typeof OrchAtomicClient.executeOrchCommand !== 'function'
+        ) {
+          await ack(messageId, false, 'OrchAtomicClient 未加载');
+          return false;
+        }
+        try {
+          await OrchAtomicClient.executeOrchCommand(orchCmd);
+          await ack(messageId, true, 'orch_action');
+          return true;
+        } catch (orchErr) {
+          const errText = orchErr && orchErr.message ? orchErr.message : String(orchErr);
+          console.error('[BRIDGE][ORCH_ACTION][FAILED]', {
+            run_id: orchCmd && orchCmd.run_id,
+            step_id: orchCmd && orchCmd.step_id,
+            action: orchCmd && orchCmd.action,
+            error_type: orchErr && orchErr.name,
+            error: errText,
+            stack: orchErr && orchErr.stack,
+          });
+          await ack(messageId, false, errText);
+          return false;
+        }
+      }
       await ack(messageId, false, `未知命令: ${command || '-'}`);
       return false;
     }

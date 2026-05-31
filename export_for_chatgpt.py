@@ -8,6 +8,7 @@
 - 常用开关：``--incremental``（本会话**首轮仍全量合并**，之后才按 mtime 仅合并变更文件）、``--include-runtime-state``、``--include-logs``、``--include-claude``。
 - 日志（仓库根 ``log.txt``、``runtime/logs/`` 等）默认**不**混入源码合并包，单独写入 ``exports/for_chatgpt/0_export_logs_for_chatgpt.txt``（过大时仅导出末尾一段）。
 - 默认缩小合并包（省略 ``runtime/`` 会话状态、``.claude/``、本脚本等）：``--include-runtime-state``、``--include-claude``、``--include-export-script`` 可逐项恢复。
+- **敏感路径始终排除**（不受 ``--include-runtime-state`` 影响）：``config/account_profiles.json``、``config/local/``、密码库、``runtime/browser_profiles/``、``runs/`` 等；导出时打印 ``[EXPORT_EXCLUDE]`` 统计。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
 - **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前可尝试 ``npm run build``；合并包只收录 ``tampermonkey-userscript-src/``，排除 ``chatgpt-toolbox/dist/client.user.js`` 与根目录 ``client.user.js`` 构建产物。
@@ -49,9 +50,18 @@ def _rel_posix_and_basename(path: Path, project_root: Path) -> tuple[str, str]:
     return rel, str(path.name or "").strip().lower()
 
 
-def should_exclude_path(path: Path, project_root: Path) -> bool:
+def should_exclude_path(
+    path: Path, project_root: Path, *, run_stats: dict | None = None
+) -> bool:
     rel, bn = _rel_posix_and_basename(path, project_root)
     if not rel:
+        return True
+    if _is_sensitive_export_path(rel, basename=bn):
+        if run_stats is not None:
+            run_stats["sensitive_excluded_count"] = int(
+                run_stats.get("sensitive_excluded_count", 0)
+            ) + 1
+            _record_sensitive_excluded_example(run_stats, rel)
         return True
     return export_should_skip_relative_path(rel, basename=bn)
 
@@ -162,8 +172,50 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         "exports",
         "dist",
         "build",
+        "runs",
     }
 )
+
+# 敏感路径：无论 --include-runtime-state 与否，一律不导出（账号、密码库、浏览器 profile 等）。
+_SENSITIVE_EXPORT_EXACT = frozenset(
+    {
+        "config/account_profiles.json",
+        "config/local/account_store.json",
+    }
+)
+_SENSITIVE_EXPORT_PREFIXES = (
+    "config/local/",
+    "runtime/browser_profiles/",
+    "app/runtime/browser_profiles/",
+    "runs/",
+)
+
+
+def _is_sensitive_export_path(rel_posix: str, *, basename: str = "") -> bool:
+    """真实账号配置、密码库、本地存储、浏览器 profile、运行目录等。"""
+    rel = str(rel_posix or "").strip().lower().replace("\\", "/")
+    if not rel:
+        return False
+    bn = (basename or rel.rsplit("/", 1)[-1]).strip().lower()
+    if rel in _SENSITIVE_EXPORT_EXACT:
+        return True
+    if any(rel.startswith(p) for p in _SENSITIVE_EXPORT_PREFIXES):
+        return True
+    if bn.endswith(".credential_vault.json") or bn == ".credential_vault.json":
+        return True
+    if ".credential_vault." in bn:
+        return True
+    if bn.endswith(".bak") or bn.endswith(".tmp"):
+        return True
+    return False
+
+
+def _record_sensitive_excluded_example(run_stats: dict, rel_posix: str) -> None:
+    examples: list[str] = run_stats.setdefault("sensitive_excluded_examples", [])
+    if len(examples) >= 30:
+        return
+    if rel_posix not in examples:
+        examples.append(rel_posix)
 
 
 def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> bool:
@@ -171,12 +223,16 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
 
     默认排除（非源码）：log.txt、*.log、runtime/、logs/、dist/、build/、
     __pycache__/、.git/、.venv/、venv/、client.user.js 及 chatgpt-toolbox/dist/client.user.js 等。
+    敏感路径（账号配置、密码库、browser profile、runs/ 等）始终排除。
     """
     rel = str(rel_posix or "").strip().lower().replace("\\", "/")
     if not rel:
         return True
     bn = (basename or rel.rsplit("/", 1)[-1]).strip().lower()
     parts = [p for p in rel.split("/") if p]
+
+    if _is_sensitive_export_path(rel, basename=bn):
+        return True
 
     if any(p in _ALWAYS_SKIP_DIR_SEGMENTS for p in parts):
         return True
@@ -425,8 +481,11 @@ IGNORE_FILE_BASENAMES = frozenset(
         ".env",
         ".env.local",
         ".env.credentials",
+        ".credential_vault.json",
         "workspace.xml",
         "log.txt",
+        "account_profiles.json",
+        "account_store.json",
     }
 )
 
@@ -792,7 +851,7 @@ def collect_all_project_files(
         kept_dirs: list[str] = []
         for d in list(dirs):
             dp = root_path / d
-            if should_exclude_path(dp, project_root):
+            if should_exclude_path(dp, project_root, run_stats=run_stats):
                 if run_stats is not None:
                     run_stats["excluded_dirs_count"] = int(run_stats.get("excluded_dirs_count", 0)) + 1
                     try:
@@ -806,7 +865,7 @@ def collect_all_project_files(
         dirs[:] = kept_dirs
         for name in files:
             fp0 = root_path / name
-            if should_exclude_path(fp0, project_root):
+            if should_exclude_path(fp0, project_root, run_stats=run_stats):
                 if run_stats is not None:
                     run_stats["excluded_files_count"] = int(run_stats.get("excluded_files_count", 0)) + 1
                     try:
@@ -2033,6 +2092,8 @@ def export_bundle(
     _RUN_STATS = {
         "excluded_files_count": 0,
         "excluded_dirs_count": 0,
+        "sensitive_excluded_count": 0,
+        "sensitive_excluded_examples": [],
         "excluded_examples": [],
         "suspicious_encoding_files": [],
         "encoding_utf8_count": 0,
@@ -2198,6 +2259,13 @@ def export_bundle(
     else:
         print("[导出前检查] 最终 token 总量: （未安装 tiktoken，无法统计）")
     print(f"[导出前检查] 被排除目录数量: {int(_RUN_STATS.get('excluded_dirs_count', 0))}")
+    sensitive_n = int(_RUN_STATS.get("sensitive_excluded_count", 0))
+    print(f"[EXPORT_EXCLUDE] 已排除敏感路径数量: {sensitive_n}")
+    sensitive_examples = list(_RUN_STATS.get("sensitive_excluded_examples", []))
+    if sensitive_examples:
+        print("[EXPORT_EXCLUDE] 敏感路径样例:")
+        for item in sensitive_examples[:10]:
+            print(f"  - {item}")
     excluded_examples = list(_RUN_STATS.get("excluded_examples", []))
     if excluded_examples:
         print("[导出前检查] 被排除典型样例:")
@@ -2542,8 +2610,8 @@ def main() -> None:
         "--include-runtime-state",
         action="store_true",
         help=(
-            "显式包含本地运行状态（例如 config/local、runs、outputs、state、runtime_profile.json）。"
-            "默认关闭以避免导出污染与潜在敏感信息。"
+            "显式包含本地运行状态（例如 runs、outputs、state、runtime_profile.json）。"
+            "默认关闭；且账号配置、密码库、browser profile 等敏感路径始终排除。"
         ),
     )
     parser.add_argument(

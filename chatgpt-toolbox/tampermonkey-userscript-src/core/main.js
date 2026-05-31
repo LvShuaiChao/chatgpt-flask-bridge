@@ -1882,6 +1882,8 @@
   let composerDetectDepth = 0;
   const MAX_COMPOSER_DETECT_DEPTH = 3;
   const composerGuardLogMap = new Map();
+  let lastKnownComposer = null;
+  let lastKnownComposerRoot = null;
 
   function logComposerRecursionGuardThrottled(scope, depth, max) {
     const now = Date.now();
@@ -1898,19 +1900,33 @@
     }
   }
 
-  function withComposerDetectGuard(scope, fallbackValue, fn) {
+  function withComposerDetectGuard(scope, fallbackValue, fn, cacheKind = '') {
     if (composerDetectDepth >= MAX_COMPOSER_DETECT_DEPTH) {
-      const fallback = fallbackValue === undefined ? null : fallbackValue;
+      const cached = cacheKind === 'composer'
+        ? lastKnownComposer
+        : cacheKind === 'composerRoot'
+          ? lastKnownComposerRoot
+          : null;
+      const fallback = cached instanceof HTMLElement
+        ? cached
+        : (fallbackValue === undefined ? null : fallbackValue);
       console.error('[ChatGPT toolbox] composer recursion guard triggered', {
         scope: String(scope || '-'),
         depth: composerDetectDepth,
         maxDepth: MAX_COMPOSER_DETECT_DEPTH,
+        cacheKind: cacheKind || '-',
+        cached: cached instanceof HTMLElement ? 1 : 0,
       });
       logComposerRecursionGuardThrottled(
         String(scope || '-'),
         composerDetectDepth,
         MAX_COMPOSER_DETECT_DEPTH,
       );
+      if (cached instanceof HTMLElement && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][RECURSION_GUARD_RETURN_CACHE] scope=${String(scope || '-')} cached=1`,
+        );
+      }
       return fallback;
     }
 
@@ -1923,6 +1939,14 @@
       ToolboxShell.appendLog(
         `[COMPOSER][DETECT_ERROR] scope=${String(scope || '-')} error=${errText}`,
       );
+      const cached = cacheKind === 'composer'
+        ? lastKnownComposer
+        : cacheKind === 'composerRoot'
+          ? lastKnownComposerRoot
+          : null;
+      if (cached instanceof HTMLElement) {
+        return cached;
+      }
       return fallbackValue;
     } finally {
       composerDetectDepth = Math.max(0, composerDetectDepth - 1);
@@ -1935,12 +1959,13 @@
         for (const sel of SELECTORS.composerTextarea) {
           const el = qs(sel);
           if (el instanceof HTMLElement && !isInToolbox(el) && isElementVisible(el)) {
+            lastKnownComposer = el;
             return el;
           }
         }
 
-        return null;
-      });
+        return lastKnownComposer instanceof HTMLElement ? lastKnownComposer : null;
+      }, 'composer');
     }
 
     function hasComposer() {
@@ -1973,21 +1998,24 @@
       return withComposerDetectGuard('ComposerApi.getComposerRoot', null, () => {
         const c = qs(SELECTORS.composer);
         if (c instanceof HTMLElement && !isInToolbox(c)) {
+          lastKnownComposerRoot = c;
           return c;
         }
 
         const unifiedForm = document.querySelector('form[data-type="unified-composer"]');
         if (unifiedForm instanceof HTMLElement && !isInToolbox(unifiedForm)) {
+          lastKnownComposerRoot = unifiedForm;
           return unifiedForm;
         }
 
         const genericForm = document.querySelector('form');
         if (genericForm instanceof HTMLElement && !isInToolbox(genericForm)) {
+          lastKnownComposerRoot = genericForm;
           return genericForm;
         }
 
-        return null;
-      });
+        return lastKnownComposerRoot instanceof HTMLElement ? lastKnownComposerRoot : null;
+      }, 'composerRoot');
     }
 
     function isButtonBelongsToComposer(btn, composer, composerRoot, composerForm) {
@@ -3501,13 +3529,17 @@
 
     function buildComposerRuntimeSnapshotLight() {
       const now = Date.now();
+      const composerRoot = getComposerRoot();
       const composer = getComposer();
-      const composerText = getComposerText();
+      const composerText = composer instanceof HTMLElement
+        ? getComposerText()
+        : '';
       const composerTextTrimmed = String(composerText || '').trim();
       const attachmentCount = countAttachmentChipsFast();
-      const hasAttachmentPayload = attachmentCount > 0;
+      const hasAttachmentPayload = attachmentCount > 0
+        || (typeof hasComposerAttachmentUnified === 'function' && hasComposerAttachmentUnified());
       const hasComposerPayload = composerTextTrimmed.length > 0 || hasAttachmentPayload;
-      const sendButton = findSendButton({ silent: true });
+      const sendButton = findSendButton({ silent: true, skipNestedComposerResolve: true });
       const realSendButtonEnabled = !!(
         sendButton instanceof HTMLButtonElement
         && isRealSendButtonShape(sendButton)
@@ -3520,15 +3552,25 @@
 
       return {
         at: now,
+        root: composerRoot,
+        composerRoot,
         composer,
         composerText,
         composerTextTrimmed,
+        composer_text_len: composerTextTrimmed.length,
+        textLen: composerTextTrimmed.length,
+        hasText: composerTextTrimmed.length > 0,
         attachmentCount,
         attachment_count: attachmentCount,
         hasAttachmentPayload,
         hasComposerPayload,
         has_composer_payload: hasComposerPayload,
         sendButton,
+        sendButtonState: {
+          found: sendButton instanceof HTMLButtonElement,
+          ready: realSendButtonEnabled,
+          button: sendButton instanceof HTMLButtonElement ? sendButton : null,
+        },
         realSendButtonEnabled,
         hasComposer,
         composerAvailable,
@@ -7061,6 +7103,7 @@
       getUniqueComposerAttachmentSnapshot,
       getComposerRuntimeSnapshotLight,
       buildComposerRuntimeSnapshotLight,
+      buildComposerSnapshot: buildComposerRuntimeSnapshotLight,
       hasComposerDraftPayload,
       hasComposerAttachmentUnified,
       getComposerAttachmentSnapshot,
@@ -7526,8 +7569,26 @@
     let hasAttachmentPayload = false;
 
     const hasComposerApi = typeof ComposerApi !== 'undefined';
+    const runtimeSnapshot = (
+      hasComposerApi
+      && typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
+    )
+      ? ComposerApi.getComposerRuntimeSnapshotLight(450)
+      : null;
 
-    if (hasComposerApi) {
+    if (runtimeSnapshot && typeof runtimeSnapshot === 'object') {
+      isResponding = !!runtimeSnapshot.isAssistantBusy;
+      hasComposer = !!runtimeSnapshot.hasComposer;
+      composerText = String(runtimeSnapshot.composerText || '');
+      attachmentCount = Number(runtimeSnapshot.attachmentCount || runtimeSnapshot.attachment_count || 0);
+      hasAttachmentPayload = !!runtimeSnapshot.hasAttachmentPayload;
+      if (!skipSendButtonSnapshot) {
+        sendButton = runtimeSnapshot.sendButton instanceof HTMLButtonElement
+          ? runtimeSnapshot.sendButton
+          : null;
+        sendButtonReady = !!runtimeSnapshot.realSendButtonEnabled;
+      }
+    } else if (hasComposerApi) {
       try {
         const composer = typeof ComposerApi.getComposer === 'function'
           ? ComposerApi.getComposer()
@@ -7726,11 +7787,12 @@
       return {
         is_responding: false,
         response_state: 'idle',
-        response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
+        response_state_reason: 'empty_composer',
         can_accept_input: canAcceptInput,
         can_send_now: false,
         has_composer: true,
         has_composer_payload: false,
+        composer_text_len: composerTextTrimmed.length,
         attachment_count: attachmentCount,
         response_state_at: now,
       };
@@ -7755,13 +7817,16 @@
       return {
         is_responding: false,
         response_state: hasAttachmentPayload ? 'attachment_processing' : 'not_ready',
-        response_state_reason: hasAttachmentPayload
-          ? 'attachment_ready_but_send_button_missing'
-          : 'payload_ready_but_send_button_missing',
+        response_state_reason: composerTextHasPayload
+          ? 'send_button_not_found'
+          : (hasAttachmentPayload
+            ? 'attachment_ready_but_send_button_missing'
+            : 'send_button_not_found'),
         can_accept_input: canAcceptInput,
         can_send_now: false,
         has_composer: true,
         has_composer_payload: true,
+        composer_text_len: composerTextTrimmed.length,
         attachment_count: attachmentCount,
         response_state_at: now,
       };
@@ -7901,32 +7966,49 @@
     }
 
     const isResponding = ComposerApi.isAssistantLikelyBusy();
-    const composerAvailable = typeof ComposerApi.canAcceptInput === 'function'
-      ? ComposerApi.canAcceptInput()
-      : (typeof ComposerApi.hasComposer === 'function'
-        ? ComposerApi.hasComposer()
-        : !!ComposerApi.getComposerText());
-    const composerText = ComposerApi.getComposerText();
-    const attachmentCount = typeof ComposerApi.countAttachmentChips === 'function'
-      ? ComposerApi.countAttachmentChips()
-      : 0;
-    const hasAttachmentPayload = typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-      ? ComposerApi.hasComposerAttachmentUnified()
-      : (
-        attachmentCount > 0
-        || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
-        || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
-          && ComposerApi.hasVisibleComposerAttachmentPayload())
-      );
+    const runtimeSnapshot = typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
+      ? ComposerApi.getComposerRuntimeSnapshotLight(450)
+      : null;
+    const composerAvailable = runtimeSnapshot
+      ? !!runtimeSnapshot.composerAvailable
+      : (typeof ComposerApi.canAcceptInput === 'function'
+        ? ComposerApi.canAcceptInput()
+        : (typeof ComposerApi.hasComposer === 'function'
+          ? ComposerApi.hasComposer()
+          : !!ComposerApi.getComposerText()));
+    const composerText = runtimeSnapshot
+      ? String(runtimeSnapshot.composerText || '')
+      : ComposerApi.getComposerText();
+    const attachmentCount = runtimeSnapshot
+      ? Number(runtimeSnapshot.attachmentCount || runtimeSnapshot.attachment_count || 0)
+      : (typeof ComposerApi.countAttachmentChips === 'function'
+        ? ComposerApi.countAttachmentChips()
+        : 0);
+    const hasAttachmentPayload = runtimeSnapshot
+      ? !!runtimeSnapshot.hasAttachmentPayload
+      : (typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+        ? ComposerApi.hasComposerAttachmentUnified()
+        : (
+          attachmentCount > 0
+          || (typeof ComposerApi.hasComposerDraftPayload === 'function' && ComposerApi.hasComposerDraftPayload())
+          || (typeof ComposerApi.hasVisibleComposerAttachmentPayload === 'function'
+            && ComposerApi.hasVisibleComposerAttachmentPayload())
+        ));
     const composerTextTrimmed = String(composerText || '').trim();
     const hasText = composerTextTrimmed.length > 0;
-    const hasRealText = typeof ComposerApi.hasRealComposerText === 'function'
-      ? ComposerApi.hasRealComposerText()
-      : hasText;
-    const hasRealBtn = typeof ComposerApi.hasRealSubmitButton === 'function'
-      ? ComposerApi.hasRealSubmitButton()
-      : false;
-    const sendButton = ComposerApi.findSendButton({ silent: true });
+    const hasRealText = runtimeSnapshot
+      ? !!runtimeSnapshot.hasText
+      : (typeof ComposerApi.hasRealComposerText === 'function'
+        ? ComposerApi.hasRealComposerText()
+        : hasText);
+    const sendButton = runtimeSnapshot && runtimeSnapshot.sendButton instanceof HTMLButtonElement
+      ? runtimeSnapshot.sendButton
+      : ComposerApi.findSendButton({ silent: true, skipNestedComposerResolve: true });
+    const hasRealBtn = runtimeSnapshot
+      ? !!runtimeSnapshot.realSendButtonEnabled
+      : (typeof ComposerApi.hasRealSubmitButton === 'function'
+        ? ComposerApi.hasRealSubmitButton()
+        : false);
     const canAcceptInput = composerAvailable && !isResponding;
     const realSendButtonEnabled = !!(
       sendButton
@@ -7976,10 +8058,11 @@
       return {
         is_responding: false,
         response_state: 'idle',
-        response_state_reason: sendButton ? 'empty_composer' : 'send_button_not_found',
+        response_state_reason: 'empty_composer',
         can_accept_input: canAcceptInput,
         can_send_now: false,
         attachment_count: attachmentCount,
+        composer_text_len: composerTextTrimmed.length,
         has_composer_payload: false,
         response_state_at: Date.now(),
       };
@@ -8033,12 +8116,15 @@
       return {
         is_responding: false,
         response_state: hasAttachmentPayload ? 'attachment_processing' : 'not_ready',
-        response_state_reason: hasAttachmentPayload
-          ? (stillUploadingText ? 'attachment_processing' : 'attachment_ready_but_send_button_missing')
-          : 'payload_ready_but_send_button_missing',
+        response_state_reason: hasRealText
+          ? 'send_button_not_found'
+          : (hasAttachmentPayload
+            ? (stillUploadingText ? 'attachment_processing' : 'attachment_ready_but_send_button_missing')
+            : 'send_button_not_found'),
         can_accept_input: canAcceptInput,
         can_send_now: false,
         attachment_count: attachmentCount,
+        composer_text_len: composerTextTrimmed.length,
         has_composer_payload: true,
         response_state_at: Date.now(),
       };
@@ -8153,24 +8239,39 @@
 
   function evaluateComposerSendability(sendButtonInput, precomputed = {}) {
     const opts = precomputed && typeof precomputed === 'object' ? precomputed : {};
+    const runtimeSnapshot = (
+      !opts.composerText
+      && typeof ComposerApi !== 'undefined'
+      && typeof ComposerApi.getComposerRuntimeSnapshotLight === 'function'
+    )
+      ? ComposerApi.getComposerRuntimeSnapshotLight(450)
+      : null;
     const composerText = opts.composerText != null
       ? String(opts.composerText || '')
-      : (typeof ComposerApi.getComposerText === 'function'
-      ? String(ComposerApi.getComposerText() || '')
-      : '');
+      : (runtimeSnapshot
+        ? String(runtimeSnapshot.composerText || '')
+        : (typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '')
+          : ''));
     const textLen = composerText.trim().length;
     const hasAttachment = opts.attachmentState && typeof opts.attachmentState === 'object'
       ? !!(opts.attachmentState.hasAny || opts.attachmentState.hasAttachment || opts.attachmentState.hasComposerPayload)
-      : (typeof ComposerApi.hasComposerAttachmentUnified === 'function'
-      ? ComposerApi.hasComposerAttachmentUnified()
-      : hasComposerAttachment());
+      : (runtimeSnapshot
+        ? !!runtimeSnapshot.hasAttachmentPayload
+        : (typeof ComposerApi.hasComposerAttachmentUnified === 'function'
+          ? ComposerApi.hasComposerAttachmentUnified()
+          : hasComposerAttachment()));
 
     const sendButton = opts.sendButton instanceof HTMLButtonElement
       ? opts.sendButton
       : (sendButtonInput instanceof HTMLButtonElement
-      ? sendButtonInput
-      : findChatGPTSendButton());
-    const realSendButtonEnabled = isRealSendButtonEnabled(sendButton);
+        ? sendButtonInput
+        : (runtimeSnapshot && runtimeSnapshot.sendButton instanceof HTMLButtonElement
+          ? runtimeSnapshot.sendButton
+          : findChatGPTSendButton()));
+    const realSendButtonEnabled = runtimeSnapshot && !opts.sendButton && !sendButtonInput
+      ? !!runtimeSnapshot.realSendButtonEnabled
+      : isRealSendButtonEnabled(sendButton);
     const hasContent = textLen > 0 || hasAttachment;
     const sendable = hasContent && realSendButtonEnabled;
     const responseState = opts.responseState && typeof opts.responseState === 'object'
@@ -8555,6 +8656,16 @@
       return;
     }
 
+    if (typeof BRIDGE_STATE !== 'undefined' && BRIDGE_STATE) {
+      if (result.orch_button_views && typeof result.orch_button_views === 'object') {
+        BRIDGE_STATE.orch_button_views = result.orch_button_views;
+      }
+      if (result.orch_active_runs && Array.isArray(result.orch_active_runs)) {
+        BRIDGE_STATE.orch_active_runs = result.orch_active_runs;
+      }
+      BRIDGE_STATE.orch_enabled = result.orch_enabled === true || result.orchEnabled === true;
+    }
+
     const nextPageDisplayId =
       result.page_display_id
       ?? result.pageDisplayId
@@ -8595,6 +8706,40 @@
     }
 
     refreshToolboxPageStatusDisplay(reason || 'bridge-poll');
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.reconcilePendingSendTaskAfterExternalNativeSend === 'function'
+    ) {
+      try {
+        UploadModule.reconcilePendingSendTaskAfterExternalNativeSend('bridge-poll');
+      } catch (reconcileErr) {
+        console.error('[ChatGPT toolbox] bridge-poll reconcile failed', reconcileErr);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[SEND_TASK][RECONCILE_ERROR] reason=bridge-poll error=${reconcileErr && reconcileErr.message ? reconcileErr.message : String(reconcileErr)}`,
+          );
+        }
+      }
+    }
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.maybeReconcileSendCopyHotkeyWaitingReply === 'function'
+    ) {
+      try {
+        UploadModule.maybeReconcileSendCopyHotkeyWaitingReply('bridge-poll');
+      } catch (sendCopyHotkeyReconcileErr) {
+        console.error('[ChatGPT toolbox] bridge-poll send-copy-hotkey reconcile failed', sendCopyHotkeyReconcileErr);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY][RECONCILE_ERROR] reason=bridge-poll error=${sendCopyHotkeyReconcileErr && sendCopyHotkeyReconcileErr.message ? sendCopyHotkeyReconcileErr.message : String(sendCopyHotkeyReconcileErr)}`,
+          );
+        }
+      }
+    }
   }
 
   function extractTurnCountFromPollResult(result) {
@@ -9616,6 +9761,38 @@
       responseStateCache.value = result;
     }
 
+    if (result && typeof result === 'object') {
+      const responseState = String(result.response_state || result.responseState || '').trim().toLowerCase();
+      const responseReason = String(result.response_state_reason || result.responseStateReason || '').trim().toLowerCase();
+      const generating = responseState === 'generating'
+        || responseState === 'responding'
+        || responseState === 'answering'
+        || responseReason === 'assistant_busy'
+        || responseReason === 'response_in_progress'
+        || result.is_responding === true
+        || result.isResponding === true;
+      if (
+        generating
+        && typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.reconcilePendingSendTaskAfterExternalNativeSend === 'function'
+      ) {
+        try {
+          UploadModule.reconcilePendingSendTaskAfterExternalNativeSend('response-state-generating', {
+            alreadyGenerating: true,
+            skipDetectComposerState: true,
+          });
+        } catch (reconcileErr) {
+          console.error('[ChatGPT toolbox] reconcilePendingSendTaskAfterExternalNativeSend failed', reconcileErr);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(
+              `[SEND_TASK][RECONCILE_ERROR] reason=response-state-generating error=${reconcileErr && reconcileErr.message ? reconcileErr.message : String(reconcileErr)}`,
+            );
+          }
+        }
+      }
+    }
+
     return result;
   }
 
@@ -10080,6 +10257,34 @@
   }
 
   function updateChatInputStateBadge() {
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.maybeReconcileSendCopyHotkeyWaitingReply === 'function'
+    ) {
+      try {
+        UploadModule.maybeReconcileSendCopyHotkeyWaitingReply('updateChatInputStateBadge');
+      } catch (reconcileErr) {
+        console.error('[ChatGPT toolbox] updateChatInputStateBadge send-copy-hotkey reconcile failed', reconcileErr);
+      }
+    }
+
+    const info = getTopMainStatus();
+    logTopMainStatusChange(info);
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.renderToolboxTopStatus === 'function'
+    ) {
+      UploadModule.renderToolboxTopStatus({
+        heavy: false,
+        force: true,
+        reason: `updateChatInputStateBadge:${info.text || '-'}`,
+      });
+      return;
+    }
+
     const badge = document.querySelector('#cgpt-page-input-state');
     if (!badge) {
       if (typeof renderToolboxHeaderStatus === 'function') {
@@ -10089,9 +10294,7 @@
     }
 
     const prevText = String(ChatInputStateRuntime.lastTopStatusText || '').trim();
-    const info = getTopMainStatus();
     const nextText = String(info.text || '').trim();
-    logTopMainStatusChange(info);
 
     badge.textContent = info.text;
     badge.title = info.title || info.text;

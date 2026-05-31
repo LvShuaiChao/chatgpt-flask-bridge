@@ -253,6 +253,65 @@
       return true;
     }
 
+    function viewGlobalUsageEventsFromUi() {
+      if (typeof GlobalUsageStore === 'undefined' || typeof GlobalUsageStore.getGlobalUsageEventsSummary !== 'function') {
+        setSettingsStatus('全局额度模块未加载', 'error');
+        return;
+      }
+
+      const summary = GlobalUsageStore.getGlobalUsageEventsSummary({ maxLines: 30 });
+      const previewLines = [
+        `今日 ${summary.dayKey}：消息 ${summary.messageUsed}/${summary.messageLimit}，上传 ${summary.uploadUsed}/${summary.uploadLimit}`,
+        `事件数：消息 ${summary.messageEventCount}，上传 ${summary.uploadEventCount}`,
+        '',
+        '最近消息事件：',
+        ...summary.messageEvents.slice(0, 8).map(({ kind, eventId, item }) => (
+          GlobalUsageStore.formatGlobalUsageEventLine(kind, eventId, item)
+        )),
+        '',
+        '最近上传事件：',
+        ...summary.uploadEvents.slice(0, 8).map(({ kind, eventId, item }) => (
+          GlobalUsageStore.formatGlobalUsageEventLine(kind, eventId, item)
+        )),
+      ];
+
+      ToolboxShell.appendLog('[GLOBAL_USAGE][VIEW] reason=settings-ui');
+      previewLines.forEach((line) => {
+        ToolboxShell.appendLog(`[GLOBAL_USAGE][VIEW] ${line}`);
+      });
+
+      window.alert(previewLines.join('\n').slice(0, 4000));
+      setSettingsStatus('已在日志中输出全局额度事件摘要', 'ok');
+    }
+
+    function exportGlobalUsageEventsFromUi() {
+      if (typeof GlobalUsageStore === 'undefined' || typeof GlobalUsageStore.exportGlobalUsageEventsText !== 'function') {
+        setSettingsStatus('全局额度模块未加载', 'error');
+        return;
+      }
+
+      const text = GlobalUsageStore.exportGlobalUsageEventsText({ maxLines: 200 });
+      ToolboxShell.appendLog('[GLOBAL_USAGE][EXPORT] reason=settings-ui');
+      text.split('\n').forEach((line) => {
+        ToolboxShell.appendLog(`[GLOBAL_USAGE][EXPORT] ${line}`);
+      });
+
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(text).then(() => {
+          setSettingsStatus('全局额度事件已写入日志并复制到剪贴板', 'ok');
+        }).catch((error) => {
+          console.error('[GLOBAL_USAGE][EXPORT_CLIPBOARD_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[GLOBAL_USAGE][EXPORT_CLIPBOARD_FAILED] error_type=${error?.name || '-'} error=${error?.message || String(error)}`,
+          );
+          setSettingsStatus('全局额度事件已写入日志（剪贴板复制失败）', 'warn');
+        });
+        return;
+      }
+
+      setSettingsStatus('全局额度事件已写入日志', 'ok');
+    }
+
     function resetQuotaStatsFromUi() {
       const uploadBefore = (
         typeof UploadModule !== 'undefined'
@@ -268,29 +327,33 @@
         : { used: 0 };
 
       const confirmed = window.confirm(
-        '确定要重置今日上传额度和消息额度统计吗？这只会重置工具箱内部统计，不会影响 ChatGPT 官方额度。',
+        '确定要重置今日全局上传额度和消息额度统计吗？这只会重置工具箱内部统计，不会影响 ChatGPT 官方额度。',
       );
       if (!confirmed) {
         return;
       }
 
-      if (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.clearUploadQuotaRecords === 'function'
-      ) {
-        UploadModule.clearUploadQuotaRecords('settings-quota-reset');
-      }
-      if (
-        typeof UploadModule !== 'undefined'
-        && typeof UploadModule.clearMessageQuotaRecords === 'function'
-      ) {
-        UploadModule.clearMessageQuotaRecords('settings-quota-reset');
+      if (typeof GlobalUsageStore !== 'undefined' && typeof GlobalUsageStore.resetGlobalUsageToday === 'function') {
+        GlobalUsageStore.resetGlobalUsageToday('settings-quota-reset');
+      } else {
+        if (
+          typeof UploadModule !== 'undefined'
+          && typeof UploadModule.clearUploadQuotaRecords === 'function'
+        ) {
+          UploadModule.clearUploadQuotaRecords('settings-quota-reset');
+        }
+        if (
+          typeof UploadModule !== 'undefined'
+          && typeof UploadModule.clearMessageQuotaRecords === 'function'
+        ) {
+          UploadModule.clearMessageQuotaRecords('settings-quota-reset');
+        }
       }
 
       ToolboxShell.appendLog(
         `[SETTINGS][QUOTA_RESET] uploadUsedBefore=${uploadBefore.used} messageUsedBefore=${messageBefore.used}`,
       );
-      setSettingsStatus('今日额度统计已重置', 'ok');
+      setSettingsStatus('今日全局额度统计已重置', 'ok');
     }
 
     function readFromUi() {
@@ -922,6 +985,20 @@
         });
       }
 
+      const viewGlobalUsageBtn = qs('#cgpt-setting-quota-view-events', root);
+      if (viewGlobalUsageBtn) {
+        viewGlobalUsageBtn.addEventListener('click', () => {
+          viewGlobalUsageEventsFromUi();
+        });
+      }
+
+      const exportGlobalUsageBtn = qs('#cgpt-setting-quota-export-events', root);
+      if (exportGlobalUsageBtn) {
+        exportGlobalUsageBtn.addEventListener('click', () => {
+          exportGlobalUsageEventsFromUi();
+        });
+      }
+
       [
         SettingsSelectors.showUploadGroups,
         SettingsSelectors.showUploadStart,
@@ -1456,6 +1533,8 @@
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save" title="修改上限后顶部「上传额度 / 消息额度」的分母会立即更新。">保存额度设置</button>
               <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置今日统计</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-view-events" title="查看今日全局上传/消息计数事件（所有标签页共享）。">查看今日事件</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-export-events" title="导出今日全局额度事件到工具箱日志，并尝试复制到剪贴板。">导出事件日志</button>
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器 / 标题提醒</div>

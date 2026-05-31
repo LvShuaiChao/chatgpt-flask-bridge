@@ -106,6 +106,8 @@ class MainWindow(QMainWindow, *_main_window_bases()):
         self._notifier = BridgeNotifier()
         self._notifier.log_signal.connect(self._append_log)
         self._init_status_scheduler()
+        if hasattr(self, "_init_action_orchestrator"):
+            self._init_action_orchestrator()
         self._notifier.status_signal.connect(self._on_bridge_status_signal)
         set_log_callback(self._notifier.log_signal.emit)
         set_status_callback(self._notifier.status_signal.emit)

@@ -179,6 +179,150 @@
       return isCurrentClosedLoopOwnerButton(action, null, snapshot);
     }
 
+    function getClosedLoopButtonIdByAction(action) {
+      const normalized = String(action || '').trim();
+      if (normalized === 'closed-loop-with-hotkey-upload-every-round') {
+        return 'cgpt-closed-loop-upload-every-round-hotkey-btn';
+      }
+      if (normalized === 'closed-loop-without-hotkey') {
+        return 'cgpt-closed-loop-upload-every5-btn';
+      }
+      if (normalized === 'closed-loop-with-hotkey') {
+        return 'cgpt-closed-loop-upload-every5-hotkey-btn';
+      }
+      return '';
+    }
+
+    function getClosedLoopStartPendingFromSnapshot(snapshot = {}) {
+      const pending = snapshot.closedLoopStartPending;
+      return pending && typeof pending === 'object' ? pending : null;
+    }
+
+    function isClosedLoopStartPendingForAction(action, snapshot = {}) {
+      const pending = getClosedLoopStartPendingFromSnapshot(snapshot);
+      if (!pending) {
+        return false;
+      }
+      const normalizedAction = String(action || '').trim();
+      const pendingAction = String(
+        pending.action || resolveActionForClosedLoopMode(pending.mode) || '',
+      ).trim();
+      return !!normalizedAction && normalizedAction === pendingAction;
+    }
+
+    function resolveCurrentToolboxOwnerInfo(snapshot = {}) {
+      if (snapshot.closedLoopContinueRunning === true) {
+        return {
+          action: getClosedLoopOwnerFromSnapshot(snapshot),
+          phase: 'running',
+          source: 'closed-loop',
+        };
+      }
+      const sendMessageTask = snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
+        ? snapshot.sendMessageTask
+        : {};
+      if (sendMessageTask.running === true) {
+        return {
+          action: String(sendMessageTask.action || 'send-message').trim() || 'send-message',
+          phase: String(sendMessageTask.phase || 'running').trim() || 'running',
+          source: 'manual-send',
+          ownerButtonId: String(sendMessageTask.ownerButtonId || '').trim(),
+        };
+      }
+      const runningOwner = getToolboxRunningOwnerFromRuntime(snapshot);
+      if (runningOwner && runningOwner.action) {
+        return {
+          action: String(runningOwner.action).trim(),
+          phase: String(runningOwner.phase || 'running').trim() || 'running',
+          source: String(runningOwner.source || 'runtime').trim() || 'runtime',
+          ownerButtonId: String(
+            runningOwner.buttonId || runningOwner.ownerButtonId || '',
+          ).trim(),
+        };
+      }
+      return null;
+    }
+
+    function isPageGeneratingForClosedLoop(snapshot = {}) {
+      if (snapshot.closedLoopContinueRunning === true) {
+        return false;
+      }
+      if (snapshot.pageGenerating === true || snapshot.assistantBusy === true) {
+        return true;
+      }
+      const cap = snapshot.capability && typeof snapshot.capability === 'object'
+        ? snapshot.capability
+        : {};
+      const responseState = String(
+        snapshot.responseState
+        || snapshot.response_state
+        || cap.response_state
+        || cap.responseState
+        || '',
+      ).trim().toLowerCase();
+      const responseReason = String(
+        snapshot.response_state_reason
+        || snapshot.responseStateReason
+        || cap.response_state_reason
+        || cap.responseStateReason
+        || '',
+      ).trim().toLowerCase();
+      if (
+        responseState === 'generating'
+        || responseState === 'responding'
+        || responseState === 'answering'
+        || responseReason.includes('assistant_busy')
+        || responseReason === 'response_in_progress'
+      ) {
+        return true;
+      }
+      const sendable = cap.sendable != null ? cap.sendable : snapshot.sendable;
+      const inputable = cap.inputable != null ? cap.inputable : snapshot.inputable;
+      if (sendable === false && inputable === false) {
+        return responseState === 'generating' || responseReason.includes('assistant_busy');
+      }
+      return false;
+    }
+
+    function buildClosedLoopWaitingReplyIdleView(action, snapshot = {}) {
+      void snapshot;
+      const normalizedAction = String(action || '').trim();
+      const ownerButtonId = getClosedLoopButtonIdByAction(normalizedAction);
+      return withClosedLoopStyleFields({
+        phase: 'waiting_reply_idle',
+        text: '等待回复后闭环',
+        title: '当前闭环任务已排队，将等待当前回复完成后启动',
+        disabled: false,
+        allowCancel: true,
+        action: normalizedAction,
+        runtimeAction: '',
+        buttonPhase: 'waiting_reply_idle',
+        taskKey: normalizedAction,
+        ownerButtonId,
+        isThisClosedLoopPending: true,
+        className: 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-waiting-reply',
+      });
+    }
+
+    function buildClosedLoopPageBusyIdleView(action, snapshot = {}) {
+      const normalizedAction = String(action || '').trim();
+      const idleText = getClosedLoopIdleTextByAction(normalizedAction, snapshot);
+      return withClosedLoopStyleFields({
+        phase: CL_PHASE.IDLE,
+        text: idleText,
+        title: '当前正在执行普通发送任务，等待回复期间暂不启动闭环',
+        disabled: false,
+        allowCancel: false,
+        action: normalizedAction,
+        runtimeAction: '',
+        buttonPhase: 'idle_page_busy',
+        taskKey: '',
+        ownerButtonId: '',
+        pageBusyButNotClosedLoop: true,
+        className: 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle',
+      });
+    }
+
     function formatClosedLoopRunningButtonWaitSuffix(snapshot = {}) {
       const waitVisual = snapshot.closedLoopWaitVisual || {};
       const closedLoopRunning = snapshot.closedLoopContinueRunning === true || waitVisual.running === true;
@@ -325,10 +469,19 @@
           disabled: true,
           allowCancel: false,
           action: currentAction,
-          buttonPhase: 'closed-loop-idle',
+          buttonPhase: 'cyan',
+          className: 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle',
           preserveBaseColorWhenDisabled: true,
           lockedByClosedLoop: true,
         });
+      }
+
+      const pageGenerating = isPageGeneratingForClosedLoop(snapshot);
+      if (pageGenerating && !running) {
+        if (isClosedLoopStartPendingForAction(currentAction, snapshot)) {
+          return buildClosedLoopWaitingReplyIdleView(currentAction, snapshot);
+        }
+        return buildClosedLoopPageBusyIdleView(currentAction, snapshot);
       }
 
       return withClosedLoopStyleFields({
@@ -338,7 +491,8 @@
         disabled: false,
         allowCancel: false,
         action: currentAction,
-        buttonPhase: 'closed-loop-idle',
+        buttonPhase: 'cyan',
+        className: 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle',
       });
     }
 
@@ -357,6 +511,13 @@
       isCurrentClosedLoopOwnerButton,
       formatClosedLoopRunningButtonWaitSuffix,
       resolveClosedLoopStopButtonText,
+      isPageGeneratingForClosedLoop,
+      buildClosedLoopWaitingReplyIdleView,
+      buildClosedLoopPageBusyIdleView,
+      getClosedLoopButtonIdByAction,
+      getClosedLoopStartPendingFromSnapshot,
+      isClosedLoopStartPendingForAction,
+      resolveCurrentToolboxOwnerInfo,
       getClosedLoopContinueButtonViewState,
       CLOSED_LOOP_BUTTON_ACTIONS,
       CLOSED_LOOP_BUTTON_IDS,

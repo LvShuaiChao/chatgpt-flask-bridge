@@ -1143,11 +1143,13 @@
         .cgpt-header-status-chips {
           flex: 1 1 auto;
           min-width: 0;
+          min-height: 28px;
+          height: auto;
           display: flex;
           align-items: center;
           justify-content: flex-end;
           gap: 4px;
-          overflow: hidden;
+          overflow: visible;
         }
 
         .cgpt-header-status-chip {
@@ -1156,10 +1158,13 @@
           padding: 2px 7px;
           border-radius: 999px;
           font-size: 12px;
-          line-height: 18px;
+          line-height: 20px;
+          min-height: 22px;
+          display: inline-flex;
+          align-items: center;
           font-weight: 700;
           white-space: nowrap;
-          overflow: hidden;
+          overflow: visible;
           text-overflow: ellipsis;
         }
 
@@ -1228,10 +1233,143 @@
           width: 100%;
           max-width: 100%;
           min-width: 0;
+          min-height: 28px;
+          height: auto;
           overflow: visible;
           box-sizing: border-box;
           padding: 0;
           gap: 4px;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row {
+          display: grid;
+          grid-template-columns: auto auto auto auto auto minmax(8px, 1fr) auto auto auto auto;
+          align-items: center;
+          gap: 6px;
+          width: 100%;
+          min-height: 28px;
+          white-space: nowrap;
+          flex-wrap: nowrap;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer {
+          min-width: 8px;
+          height: 1px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          justify-self: start;
+          width: fit-content;
+          max-width: max-content;
+          height: 22px;
+          min-width: 52px;
+          padding: 0 8px;
+          border-radius: 999px;
+          font-size: 12px;
+          line-height: 1;
+          white-space: nowrap;
+          box-sizing: border-box;
+          flex: 0 0 auto;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="page-id"] {
+          min-width: 58px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="turn-count"] {
+          min-width: 58px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="upload-usage"] {
+          min-width: 104px;
+          max-width: 128px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="message-usage"] {
+          min-width: 112px;
+          max-width: 136px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="task-state"] {
+          min-width: 64px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="attachment-state"] {
+          min-width: 64px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="compact-mode"] {
+          min-width: 48px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.is-hidden-placeholder {
+          visibility: hidden;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"].is-hidden-placeholder {
+          display: none;
+          visibility: hidden;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="ok"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-variant-ok {
+          background: #16a34a;
+          color: #ffffff;
+          border-color: rgba(74, 222, 128, 0.55);
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="danger"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-variant-danger {
+          background: #dc2626;
+          color: #ffffff;
+          border-color: rgba(248, 113, 113, 0.65);
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="warning"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-variant-warning {
+          background: #f59e0b;
+          color: #111827;
+          border-color: rgba(251, 191, 36, 0.75);
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="info"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-variant-info {
+          background: #2563eb;
+          color: #ffffff;
+          border-color: rgba(147, 197, 253, 0.65);
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="muted"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-variant-muted {
+          background: #334155;
+          color: #dbeafe;
+          border: 1px solid rgba(148, 163, 184, 0.45);
+        }
+
+        #${APP.panelId} .cgpt-top-status-compact .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-top-status-row.cgpt-top-status-compact .cgpt-top-status-badge {
+          min-width: 44px;
+          padding: 0 6px;
+          font-size: 11px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-compact .cgpt-top-status-badge[data-top-status-slot="upload-usage"],
+        #${APP.panelId} .cgpt-top-status-row.cgpt-top-status-compact .cgpt-top-status-badge[data-top-status-slot="upload-usage"] {
+          min-width: 74px;
+          max-width: 96px;
+        }
+
+        #${APP.panelId} .cgpt-top-status-compact .cgpt-top-status-badge[data-top-status-slot="message-usage"],
+        #${APP.panelId} .cgpt-top-status-row.cgpt-top-status-compact .cgpt-top-status-badge[data-top-status-slot="message-usage"] {
+          min-width: 82px;
+          max-width: 104px;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge,
@@ -2359,19 +2497,6 @@
         .cgpt-btn.cyan:disabled {
           opacity: 1 !important;
           cursor: not-allowed;
-        }
-
-        .cgpt-btn.cgpt-btn-closed-loop,
-        .cgpt-btn.cgpt-btn-closed-loop-idle {
-          background: linear-gradient(135deg, #f97316, #ea580c) !important;
-          color: #ffffff !important;
-          border: 1px solid rgba(251, 146, 60, 0.55) !important;
-        }
-
-        .cgpt-btn.cgpt-btn-closed-loop:hover:not(:disabled),
-        .cgpt-btn.cgpt-btn-closed-loop-idle:hover:not(:disabled) {
-          background: linear-gradient(135deg, #fb923c, #f97316) !important;
-          color: #ffffff !important;
         }
 
         .cgpt-btn.cgpt-btn-closed-loop.cgpt-btn-danger,
@@ -6553,6 +6678,14 @@
       if (typeof UploadModule !== 'undefined' && typeof UploadModule.refresh === 'function') {
         UploadModule.refresh();
       }
+
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.renderToolboxTopStatus === 'function') {
+        UploadModule.renderToolboxTopStatus({
+          heavy: false,
+          force: true,
+          reason: `compact-mode:${reason}`,
+        });
+      }
     }
 
     function bindCompactButton() {
@@ -6672,7 +6805,7 @@
       if (!pageStatusRowEl) {
         pageStatusRowEl = document.createElement('div');
         pageStatusRowEl.id = 'cgpt-toolbox-page-status-row';
-        pageStatusRowEl.className = 'cgpt-toolbox-header-status-row';
+        pageStatusRowEl.className = 'cgpt-toolbox-header-status-row cgpt-top-status-row';
 
         if (titleRow) {
           header.insertBefore(pageStatusRowEl, titleRow.nextElementSibling);
@@ -6680,7 +6813,7 @@
           header.appendChild(pageStatusRowEl);
         }
       } else {
-        pageStatusRowEl.className = 'cgpt-toolbox-header-status-row';
+        pageStatusRowEl.className = 'cgpt-toolbox-header-status-row cgpt-top-status-row';
         if (!header.contains(pageStatusRowEl)) {
           if (titleRow) {
             header.insertBefore(pageStatusRowEl, titleRow.nextElementSibling);
@@ -6911,7 +7044,7 @@
                 <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact">简洁</button>
               </div>
             </div>
-            <div class="cgpt-toolbox-header-status-row" id="cgpt-toolbox-page-status-row"></div>
+            <div class="cgpt-toolbox-header-status-row cgpt-top-status-row" id="cgpt-toolbox-page-status-row"></div>
           </div>
 
           <div class="cgpt-toolbox-tabs cgpt-top-tabs">
@@ -12431,6 +12564,138 @@
       badge.style.display = 'none';
     }
 
+    function isCompactMode() {
+      return !!compactMode;
+    }
+
+    function getCurrentTopAlertEntry() {
+      const top = ToolboxStatusArbiter.getTop(Date.now());
+      if (!top) {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+        };
+      }
+
+      const rawStatusText = String(top.text || '').trim();
+      if (!rawStatusText || isPromptCountStatusText(rawStatusText)) {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+        };
+      }
+
+      const statusType = String(top.statusType || '').trim().toLowerCase();
+      const opts = top.options || {};
+      const shortText = buildShortStatusText(rawStatusText, statusType, opts);
+      const isTopMainStatus = isTopMainStatusDisplayText(rawStatusText, statusType, {
+        ...opts,
+        shortText,
+      });
+
+      if (isTopMainStatus) {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+        };
+      }
+
+      if (
+        statusType === 'online'
+        || statusType === 'success'
+        || statusType === 'idle'
+        || statusType === 'running'
+        || statusType === 'offline'
+      ) {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+        };
+      }
+
+      const level = statusType;
+      const message = rawStatusText;
+      const isError = level === 'error'
+        || level === 'danger'
+        || /error|exception|failed|失败|异常|报错/i.test(message);
+      const isWarn = level === 'warn'
+        || level === 'warning'
+        || /warn|warning|警告|注意|限速|不可用|超时/i.test(message);
+
+      if (isError) {
+        return {
+          visible: true,
+          text: '报错',
+          title: message || '当前存在报错',
+          variant: 'danger',
+          level: 'error',
+        };
+      }
+
+      if (isWarn) {
+        return {
+          visible: true,
+          text: '警告',
+          title: message || '当前存在警告',
+          variant: 'warning',
+          level: 'warn',
+        };
+      }
+
+      return {
+        visible: false,
+        text: '',
+        title: '',
+        variant: 'muted',
+      };
+    }
+
+    let lastTopAlertLogSignature = '';
+
+    function logTopAlertEntry(alertEntry, reason = '-') {
+      const signature = [
+        alertEntry.visible ? '1' : '0',
+        alertEntry.level || alertEntry.variant || '',
+        alertEntry.text || '',
+        alertEntry.title || '',
+        reason,
+      ].join('|');
+      if (signature === lastTopAlertLogSignature) {
+        return;
+      }
+      lastTopAlertLogSignature = signature;
+      if (alertEntry.visible) {
+        appendLog(
+          `[TOOLBOX_TOP_ALERT][SHOW] level=${alertEntry.level || alertEntry.variant || '-'} `
+          + `text=${alertEntry.text || '-'} message=${alertEntry.title || '-'}`,
+        );
+        return;
+      }
+      appendLog(`[TOOLBOX_TOP_ALERT][HIDE] reason=no-alert trigger=${reason || '-'}`);
+    }
+
+    function refreshTopStatusAlertSlot(reason = '-') {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.renderToolboxTopStatus === 'function'
+      ) {
+        UploadModule.renderToolboxTopStatus({
+          heavy: false,
+          force: true,
+          reason: `alert-slot:${reason}`,
+        });
+      }
+    }
+
     const ToolboxStatusArbiter = {
       slots: Object.create(null),
       computePriority(owner, statusType, text, options = {}) {
@@ -12533,6 +12798,7 @@
         if (root) {
           root.setAttribute('data-status-type', 'idle');
         }
+        refreshTopStatusAlertSlot('applyTopStatusEntry:empty');
         return;
       }
 
@@ -12609,6 +12875,7 @@
       if (typeof renderToolboxHeaderStatus === 'function') {
         renderToolboxHeaderStatus(`setStatus:${opts.owner || 'ui'}`);
       }
+      refreshTopStatusAlertSlot(`applyTopStatusEntry:${opts.owner || 'ui'}`);
     }
 
     function setStatus(text, type, options) {
@@ -12663,6 +12930,7 @@
       if (typeof renderToolboxHeaderStatus === 'function') {
         renderToolboxHeaderStatus(`setStatus-entry:${owner}`);
       }
+      refreshTopStatusAlertSlot(`setStatus-entry:${owner}`);
     }
 
     function clearStatus(owner) {
@@ -12676,6 +12944,7 @@
       if (typeof renderToolboxHeaderStatus === 'function') {
         renderToolboxHeaderStatus(`clearStatus:${ownerKey}`);
       }
+      refreshTopStatusAlertSlot(`clearStatus:${ownerKey}`);
     }
 
     function refreshStatus(reason = '') {
@@ -12684,6 +12953,7 @@
       if (typeof renderToolboxHeaderStatus === 'function') {
         renderToolboxHeaderStatus(`refreshStatus:${reason || '-'}`);
       }
+      refreshTopStatusAlertSlot(`refreshStatus:${reason || '-'}`);
       if (reason) {
         appendLog(`[STATUS_ARBITER][REFRESH] reason=${reason}`);
       }
@@ -13370,6 +13640,10 @@
       purgeForbiddenStatusBadge,
       ensureToolboxHeaderPageStatusRow,
       ensureToolboxTitleRow,
+      isCompactMode,
+      getCurrentTopAlertEntry,
+      logTopAlertEntry,
+      refreshTopStatusAlertSlot,
       updateToolboxNarrowClass,
       updateToolboxResponsiveClass,
       updateToolboxStatusVisibilityClass,

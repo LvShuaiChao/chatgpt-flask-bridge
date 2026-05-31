@@ -19,6 +19,9 @@ _INBOUND_ROUTES = {
     "command_failed": "command_result",
     "conversation_snapshot": "conversation_snapshot",
     "conversation_created": "conversation_created",
+    "orch_step_result": "orch",
+    "orch_task_request": "orch",
+    "orch_task_cancel": "orch",
 }
 
 
