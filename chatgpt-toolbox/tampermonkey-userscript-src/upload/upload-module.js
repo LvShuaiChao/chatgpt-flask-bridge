@@ -2866,6 +2866,41 @@
       stopSendLikePendingWatcher(`closed-loop-pending:${reason}`);
     }
 
+    function isClosedLoopStartBlockedByUnifiedReplyState(reason = '-') {
+      const snapshot = buildUploadButtonRenderSnapshot();
+      const top = snapshot && snapshot.topReplyStatus && typeof snapshot.topReplyStatus === 'object'
+        ? snapshot.topReplyStatus
+        : {};
+      const blockedByTopStatus = !!(
+        top.answering
+        || top.waitingReply
+        || top.sending
+        || top.busy
+      );
+      const blockedByClosedLoopVm = !!(
+        typeof ClosedLoopButtonVm !== 'undefined'
+        && ClosedLoopButtonVm
+        && typeof ClosedLoopButtonVm.isPageGeneratingForClosedLoop === 'function'
+        && ClosedLoopButtonVm.isPageGeneratingForClosedLoop(snapshot)
+      );
+      if (blockedByTopStatus || blockedByClosedLoopVm) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][START_PENDING_BLOCKED_BY_UNIFIED_STATE]',
+            `reason=${reason || '-'}`,
+            `topText=${top.text || '-'}`,
+            `answering=${top.answering ? 1 : 0}`,
+            `waitingReply=${top.waitingReply ? 1 : 0}`,
+            `sending=${top.sending ? 1 : 0}`,
+            `busy=${top.busy ? 1 : 0}`,
+            `blockedByVm=${blockedByClosedLoopVm ? 1 : 0}`,
+          ].join(' '),
+        );
+        return true;
+      }
+      return false;
+    }
+
     async function flushClosedLoopStartPendingIfReady(reason = '-') {
       const pending = getClosedLoopStartPending();
       if (!pending) {
@@ -2875,7 +2910,10 @@
         clearClosedLoopStartPending('already-running');
         return;
       }
-      if (isAssistantGeneratingNow('closed-loop-start-pending-flush', { skipDetectComposerState: false })) {
+      if (
+        isClosedLoopStartBlockedByUnifiedReplyState(`flush:${reason}`)
+        || isAssistantGeneratingNow('closed-loop-start-pending-flush', { skipDetectComposerState: false })
+      ) {
         return;
       }
       const action = String(pending.action || getCurrentClosedLoopOwnerActionForMode(pending.mode)).trim();
@@ -7792,33 +7830,62 @@
       });
     }
 
-    function getClosedLoopContinueButtonElement(mode) {
+    function resolveClosedLoopContinueButtonCandidates(mode) {
       const actionDef = getClosedLoopContinueActionDef(mode);
-      const selector = actionDef.selector;
       const candidates = [];
-
-      if (rootElRef) {
-        const scoped = qs(selector, rootElRef);
-        if (scoped) {
-          candidates.push(scoped);
+      const appendCandidates = (scope, selector) => {
+        if (!scope || !selector) {
+          return;
         }
+        scope.querySelectorAll(selector).forEach((btn) => {
+          if (btn instanceof HTMLElement && !candidates.includes(btn)) {
+            candidates.push(btn);
+          }
+        });
+      };
+      const action = String(actionDef && actionDef.action ? actionDef.action : '').trim();
+      const baseSelector = actionDef && actionDef.selector ? actionDef.selector : '';
+      const selectors = [];
+      if (baseSelector) {
+        selectors.push(baseSelector);
       }
-
-      document.querySelectorAll(selector).forEach((btn) => {
-        if (!candidates.includes(btn)) {
-          candidates.push(btn);
+      if (action) {
+        selectors.push(`[data-action="${action}"]`);
+        selectors.push(`[data-cgpt-base-action="${action}"]`);
+      }
+      selectors.push('[data-closed-loop-mirror="1"]');
+      selectors.forEach((selector) => {
+        if (rootElRef) {
+          appendCandidates(rootElRef, selector);
         }
+        appendCandidates(document, selector);
       });
+      const sameActionCandidates = candidates.filter((btn) => {
+        const btnAction = String(
+          btn.dataset.action
+          || btn.dataset.cgptBaseAction
+          || btn.dataset.cgptButtonAction
+          || '',
+        ).trim();
+        if (!action) {
+          return true;
+        }
+        return btnAction === action;
+      });
+      return sameActionCandidates.length > 0 ? sameActionCandidates : candidates;
+    }
 
-      const visible = candidates.find((btn) => {
-        if (!(btn instanceof HTMLElement)) {
+    function getClosedLoopContinueButtonElement(mode) {
+      const filteredCandidates = resolveClosedLoopContinueButtonCandidates(mode);
+      const visible = filteredCandidates.find((btn) => {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
           return false;
         }
-        const rect = btn.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        const style = window.getComputedStyle(btn);
+        return style.display !== 'none' && style.visibility !== 'hidden';
       });
-
-      return visible || candidates[0] || null;
+      return visible || filteredCandidates[0] || null;
     }
 
     function forceResetClosedLoopStopButtonsWhenNotRunning(reason = 'unknown') {
@@ -8020,9 +8087,6 @@
     }
 
     function renderClosedLoopContinueButtons(snapshot = null) {
-      const hotkeyBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
-      const everyRoundBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND);
-      const plainBtn = getClosedLoopContinueButtonElement(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
       let changed = 0;
 
       const vmAvailable = typeof UploadButtonVm !== 'undefined'
@@ -8106,15 +8170,16 @@
         return applied;
       };
 
-      if (renderOne(hotkeyBtn, CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)) {
-        changed += 1;
-      }
-      if (renderOne(everyRoundBtn, CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND)) {
-        changed += 1;
-      }
-      if (renderOne(plainBtn, CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)) {
-        changed += 1;
-      }
+      const renderModeButtons = (mode) => {
+        resolveClosedLoopContinueButtonCandidates(mode).forEach((btn) => {
+          if (renderOne(btn, mode)) {
+            changed += 1;
+          }
+        });
+      };
+      renderModeButtons(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY);
+      renderModeButtons(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND);
+      renderModeButtons(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
       scheduleClosedLoopButtonHitTest('after-render-closed-loop-buttons');
       forceResetClosedLoopStopButtonsWhenNotRunning('renderClosedLoopContinueButtons');
       diagnoseButtonTextPollution('renderClosedLoopContinueButtons');
@@ -16978,6 +17043,7 @@
         || responseState === 'generating'
         || responseState === 'responding'
         || responseState === 'streaming'
+        || responseState === 'answering'
         || responseReason === 'assistant_busy'
         || responseReason === 'response_in_progress'
       );
@@ -16986,6 +17052,14 @@
         || text === '等待回复'
         || text.includes('等回复')
         || text.includes('等待回复')
+        || responseState === 'waiting_reply'
+        || responseState === 'waiting_response'
+        || responseState === 'sent_waiting_response'
+        || responseState === 'native_send_confirmed'
+        || responseReason === 'waiting_reply'
+        || responseReason === 'waiting_response'
+        || responseReason === 'sent_waiting_response'
+        || responseReason === 'native_send_confirmed'
       );
       const sending = (
         text === '发送中'
@@ -28664,11 +28738,14 @@
     const resolveAutoContinueUntilDoneButton = findAutoContinueUntilDoneButton;
 
     function getAutoContinueButtonView(autoState) {
+      const snapshot = typeof buildUploadButtonRenderSnapshot === 'function'
+        ? buildUploadButtonRenderSnapshot()
+        : {};
       if (
         typeof UploadButtonVm !== 'undefined'
         && typeof UploadButtonVm.getAutoContinueButtonViewState === 'function'
       ) {
-        return UploadButtonVm.getAutoContinueButtonViewState(autoState);
+        return UploadButtonVm.getAutoContinueButtonViewState(autoState, snapshot);
       }
 
       const running = !!(autoState && (autoState.running || autoState.waitingReply));
@@ -28758,10 +28835,10 @@
         && typeof UploadButtonVm.getAutoContinueUntilDoneButtonViewState === 'function'
         && typeof UploadButtonVm.applyUploadButtonViewState === 'function'
       ) {
-        const view = UploadButtonVm.getAutoContinueUntilDoneButtonViewState(autoState);
         const snapshot = typeof buildUploadButtonRenderSnapshot === 'function'
           ? buildUploadButtonRenderSnapshot()
           : {};
+        const view = UploadButtonVm.getAutoContinueUntilDoneButtonViewState(autoState, snapshot);
         return UploadButtonVm.applyUploadButtonViewState(button, view, reason, {
           buttonName: 'auto-continue-until-done',
           snapshot,
@@ -29227,10 +29304,21 @@
     function buildUploadOnlyButtonSnapshot() {
       syncButtonTasksFromModuleState('buildUploadOnlyButtonSnapshot');
       const runtime = getUnifiedRuntimeStatus('buildUploadOnlyButtonSnapshot');
+      const topReplyStatusForButtons = runtime.topReplyStatus && typeof runtime.topReplyStatus === 'object'
+        ? runtime.topReplyStatus
+        : {
+            text: '',
+            answering: false,
+            waitingReply: false,
+            sending: false,
+            ready: false,
+            busy: false,
+          };
 
       return {
         pageStatus: runtime.pageStatus,
         capability: runtime.capability,
+        topReplyStatus: topReplyStatusForButtons,
         uploadQueue: runtime.uploadQueue,
         legacyFlags: runtime.legacyFlags,
         uploadTask: runtime.uploadTask,
@@ -29505,6 +29593,72 @@
       };
     }
 
+    function logTopStatusButtonSnapshotConsistency(renderSnapshot = {}, reason = '') {
+      if (
+        typeof ToolboxShell === 'undefined'
+        || !ToolboxShell
+        || typeof ToolboxShell.appendLogIfChanged !== 'function'
+      ) {
+        return;
+      }
+      const snapshot = renderSnapshot && typeof renderSnapshot === 'object'
+        ? renderSnapshot
+        : {};
+      const top = snapshot.topReplyStatus && typeof snapshot.topReplyStatus === 'object'
+        ? snapshot.topReplyStatus
+        : {};
+      const cap = snapshot.capability && typeof snapshot.capability === 'object'
+        ? snapshot.capability
+        : {};
+      const sendTask = snapshot.sendTask && typeof snapshot.sendTask === 'object'
+        ? snapshot.sendTask
+        : {};
+      const uploadTask = snapshot.uploadTask && typeof snapshot.uploadTask === 'object'
+        ? snapshot.uploadTask
+        : {};
+      const sendMessageTask = snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
+        ? snapshot.sendMessageTask
+        : {};
+      const sendCopyHotkeyTask = snapshot.sendCopyHotkeyTask && typeof snapshot.sendCopyHotkeyTask === 'object'
+        ? snapshot.sendCopyHotkeyTask
+        : {};
+      const copyHotkeyContinueTask = snapshot.copyHotkeyContinueTask && typeof snapshot.copyHotkeyContinueTask === 'object'
+        ? snapshot.copyHotkeyContinueTask
+        : {};
+      const copyHotkeyContinueLoopTask = snapshot.copyHotkeyContinueLoopTask && typeof snapshot.copyHotkeyContinueLoopTask === 'object'
+        ? snapshot.copyHotkeyContinueLoopTask
+        : {};
+      const payload = {
+        reason: String(reason || '-'),
+        topText: String(top.text || '-'),
+        topReady: top.ready ? 1 : 0,
+        topAnswering: top.answering ? 1 : 0,
+        topWaitingReply: top.waitingReply ? 1 : 0,
+        topSending: top.sending ? 1 : 0,
+        topBusy: top.busy ? 1 : 0,
+        responseState: String(cap.response_state || cap.responseState || '-'),
+        responseReason: String(cap.response_state_reason || cap.responseStateReason || '-'),
+        sendTaskPhase: String(sendTask.phase || '-'),
+        uploadTaskPhase: String(uploadTask.phase || '-'),
+        sendMessagePhase: String(sendMessageTask.phase || '-'),
+        sendMessageAction: String(sendMessageTask.action || '-'),
+        sendCopyHotkeyPhase: String(sendCopyHotkeyTask.phase || '-'),
+        copyHotkeyContinuePhase: String(copyHotkeyContinueTask.phase || '-'),
+        copyHotkeyLoopPhase: String(copyHotkeyContinueLoopTask.phase || '-'),
+        closedLoopRunning: snapshot.closedLoopContinueRunning ? 1 : 0,
+        autoContinueRunning: snapshot.autoContinueRunning ? 1 : 0,
+      };
+      const value = Object.entries(payload)
+        .map(([key, val]) => `${key}=${val}`)
+        .join(' ');
+      ToolboxShell.appendLogIfChanged(
+        'TOP_BUTTON_STATE_CONSISTENCY',
+        value,
+        `[TOP_BUTTON_STATE][CONSISTENCY] ${value}`,
+        1500,
+      );
+    }
+
     function snapshotForConflictCheck(capability) {
       const snapshot = buildUploadButtonRenderSnapshot();
       if (capability && typeof capability === 'object') {
@@ -29627,7 +29781,8 @@
         const buttons = [hotkeyBtn, everyRoundBtn, plainBtn].filter(Boolean);
         const badClosedLoop = buttons.filter((btn) => {
           const cgptAction = String(btn.dataset.cgptRuntimeAction || '').trim();
-          return !btn.disabled && cgptAction !== 'stop';
+          const isStopAction = cgptAction === 'stop' || cgptAction === 'stop-closed-loop';
+          return !btn.disabled && !isStopAction;
         });
         if (badClosedLoop.length > 1) {
           warn('closed-loop-multiple-startable');
@@ -31715,6 +31870,7 @@
           ? fallbackCapability
           : (getUploadPageCapability({ heavy: useHeavy && !skipCapabilityScan }) || fallbackCapability);
         const renderSnapshot = buildUploadButtonRenderSnapshot();
+        logTopStatusButtonSnapshotConsistency(renderSnapshot, renderReason);
         const shouldRenderSendCopyHotkeyFirst = !!(
           renderSnapshot
           && (

@@ -33,6 +33,7 @@
       || responseState === 'generating'
       || responseState === 'responding'
       || responseState === 'streaming'
+      || responseState === 'answering'
       || responseReason === 'assistant_busy'
       || responseReason === 'response_in_progress'
     );
@@ -42,6 +43,14 @@
       || text === '等待回复'
       || text.includes('等回复')
       || text.includes('等待回复')
+      || responseState === 'waiting_reply'
+      || responseState === 'waiting_response'
+      || responseState === 'sent_waiting_response'
+      || responseState === 'native_send_confirmed'
+      || responseReason === 'waiting_reply'
+      || responseReason === 'waiting_response'
+      || responseReason === 'sent_waiting_response'
+      || responseReason === 'native_send_confirmed'
     );
     const sending = !!(
       status.sending
@@ -76,6 +85,41 @@
   function isTopReplyWaitingForButtons(snapshot = {}) {
     const status = getTopReplyStatusFromSnapshot(snapshot);
     return !!status.waitingReply;
+  }
+
+  function resolvePageBusyForButtons(snapshot = {}) {
+    const capability = snapshot.capability && typeof snapshot.capability === 'object'
+      ? snapshot.capability
+      : {};
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    return !!(
+      topReplyBusy
+      || snapshot.assistantBusy
+      || capability.isResponding
+      || capability.response_state === 'generating'
+      || capability.responseState === 'generating'
+    );
+  }
+
+  function decorateIdleViewWithTopReplyStatus(view, snapshot = {}, options = {}) {
+    const phase = normalizeTaskPhase(view && view.phase);
+    if (phase !== TaskPhase.IDLE) {
+      return view;
+    }
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    if (!topReplyAnswering && !topReplyWaiting) {
+      return view;
+    }
+    const statusText = String(topReplyStatus.text || '').trim() || (topReplyAnswering ? '回答中' : '等回复');
+    return {
+      ...view,
+      title: options.titleWhenBusy
+        || `当前状态：${statusText}；回复完成后再操作`,
+      forceDanger: true,
+      buttonPhase: options.buttonPhase || 'waiting_reply',
+    };
   }
 
   function logButtonViewStateGuard(buttonName, ownPhase, view, snapshot = {}, capability = {}) {
@@ -1843,6 +1887,12 @@
 
   function getUploadButtonViewState(snapshot = {}) {
     // 仅依据 uploadTask / uploadRunning / activeFilesCount，禁止读取 waitingSend / waitingReply / messageSending。
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyBusy;
     const batchUploadForbiddenReason = String(snapshot.batchUploadForbiddenReason || '').trim();
     if (batchUploadForbiddenReason) {
       const afterInitialManualForbidden = batchUploadForbiddenReason === 'batch-after-initial-manual-upload-forbidden';
@@ -1889,16 +1939,19 @@
       snapshot.sendTask && snapshot.sendTask.phase || '',
     ).trim() === 'waiting_reply';
 
-    if (legacyWaitingReply || sendPhaseWaitingReply) {
+    if (legacyWaitingReply || sendPhaseWaitingReply || topReplyWaiting || topReplyAnswering) {
       const uploadPhase = String(
         snapshot.uploadTask && snapshot.uploadTask.phase || '',
       ).trim().toLowerCase();
       const uploadTaskIdle = !uploadPhase || uploadPhase === 'idle' || uploadPhase === 'success';
+      const statusText = String(topReplyStatus.text || '').trim() || (topReplyAnswering ? '回答中' : '等回复');
       return withUploadButtonTaskKey({
         phase: uploadTaskIdle ? TaskPhase.IDLE : TaskPhase.DISABLED,
         text: '开始上传',
         title: uploadTaskIdle
-          ? '发送任务正在等待回复，上传暂不可用'
+          ? (topReplyWaiting || topReplyAnswering
+            ? `当前状态：${statusText}；发送任务正在等待回复，上传暂不可用`
+            : '发送任务正在等待回复，上传暂不可用')
           : '当前正在等待回复，禁止上传，避免打断批量任务',
         disabled: true,
         allowCancel: false,
@@ -2054,7 +2107,7 @@
         buttonPhase: 'running',
       });
     }
-    return withUploadButtonTaskKey({
+    return withUploadButtonTaskKey(decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: '开始上传',
       title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
@@ -2062,7 +2115,7 @@
       allowCancel: false,
       action: 'start-upload',
       buttonPhase: 'idle',
-    });
+    }, snapshot));
   }
 
   function tryHealStaleWaitingReplyBeforeSendButtonView(reason) {
@@ -2603,6 +2656,14 @@
   }
 
   function getCopyLastReplyButtonViewState(snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyAnswering;
+    void topReplyWaiting;
+    void topReplyBusy;
     const phase = getNormalizedCopyTaskPhase(snapshot);
     const running = phase !== TaskPhase.IDLE
       && phase !== TaskPhase.SUCCESS
@@ -2669,7 +2730,7 @@
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: '复制最后回复',
       title: '等待最后一条 assistant 回复稳定后复制到剪贴板',
@@ -2677,10 +2738,14 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
   function getCopyHotkeyOnceButtonViewState(snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
     const task = snapshot.copyHotkeyOnceTask && typeof snapshot.copyHotkeyOnceTask === 'object'
       ? snapshot.copyHotkeyOnceTask
       : {};
@@ -2757,15 +2822,25 @@
       return ownerView;
     }
 
+    const capability = snapshot.capability && typeof snapshot.capability === 'object'
+      ? snapshot.capability
+      : {};
     const responseState = String(
       snapshot.responseState
-      || (snapshot.capability && snapshot.capability.response_state)
+      || capability.response_state
+      || capability.responseState
       || '',
     ).trim().toLowerCase();
-    const pageGenerating = responseState === 'generating'
-      || (typeof isEffectiveReplyBusy === 'function' && isEffectiveReplyBusy(snapshot));
+    const pageGenerating = !!(
+      topReplyBusy
+      || snapshot.assistantBusy
+      || capability.isResponding
+      || responseState === 'generating'
+      || capability.response_state === 'generating'
+      || capability.responseState === 'generating'
+    );
 
-    const idleView = {
+    const idleView = decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: snapshot.onceLabel || '复制+快捷键',
       title: pageGenerating
@@ -2779,7 +2854,9 @@
       forceDanger: false,
       ownerButtonId: '',
       taskKey: 'copy-hotkey-once',
-    };
+    }, snapshot, {
+      titleWhenBusy: `当前状态：${topReplyStatus.text || '回答中'}；回复完成后将自动复制最后回复并发送快捷键`,
+    });
     if (pageGenerating) {
       const allowLine = `[COPY_HOTKEY_BUTTON][ALLOW_DURING_GENERATING] id=${COPY_HOTKEY_ONCE_OWNER_BUTTON_ID} responseState=${responseState || 'generating'} disabled=0`;
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
@@ -3818,6 +3895,14 @@
   }
 
   function getCopyHotkeyContinueOnceButtonViewState(snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyAnswering;
+    void topReplyWaiting;
+    void topReplyBusy;
     const task = snapshot.copyHotkeyContinueTask && typeof snapshot.copyHotkeyContinueTask === 'object'
       ? snapshot.copyHotkeyContinueTask
       : {};
@@ -3937,7 +4022,7 @@
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: snapshot.continueLabel || '复制+快捷键+继续',
       title: snapshot.continueTitle || '等待回答完成 -> 检查终止信号 -> 复制 -> 快捷键 -> 继续',
@@ -3945,12 +4030,18 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
-  function getAutoContinueButtonViewState(autoState) {
+  function getAutoContinueButtonViewState(autoState, snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyBusy;
     if (!autoState || typeof autoState !== 'object') {
-      return {
+      return decorateIdleViewWithTopReplyStatus({
         phase: TaskPhase.IDLE,
         text: '无限继续',
         title: '复用自动指令队列：循环发送“继续”；再点一次停止',
@@ -3958,7 +4049,7 @@
         allowCancel: false,
         action: 'start',
         buttonPhase: 'idle',
-      };
+      }, snapshot);
     }
 
     const autoOwner = resolveAutoQueueOwnerAction(autoState);
@@ -4010,31 +4101,41 @@
       };
     }
 
-    if (phase === TaskPhase.WAITING_REPLY || phase === 'waiting_reply' || autoState.waitingReply) {
+    if (
+      phase === TaskPhase.WAITING_REPLY
+      || phase === 'waiting_reply'
+      || autoState.waitingReply
+      || topReplyWaiting
+      || topReplyAnswering
+    ) {
       return {
         phase: TaskPhase.WAITING_REPLY,
-        text: '等待回复',
-        title: '正在等待 ChatGPT 回复完成，点击可停止',
+        text: '无限继续',
+        title: topReplyAnswering || topReplyWaiting
+          ? `当前状态：${topReplyStatus.text || '等待回复'}；自动继续正在等待 ChatGPT 回复完成，点击可停止`
+          : '正在等待 ChatGPT 回复完成，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'waiting',
+        forceDanger: !!(topReplyAnswering || topReplyWaiting),
       };
     }
 
     if (activePhases.has(phase) || autoState.running) {
       return {
         phase: TaskPhase.RUNNING,
-        text: '停止继续',
-        title: '自动继续正在运行',
+        text: '无限继续',
+        title: '自动继续正在运行，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'running',
+        forceDanger: true,
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: '无限继续',
       title: '复用自动指令队列：循环发送“继续”；再点一次停止',
@@ -4042,12 +4143,17 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
-  function getAutoContinueUntilDoneButtonViewState(autoState) {
+  function getAutoContinueUntilDoneButtonViewState(autoState, snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyBusy;
     if (!autoState || typeof autoState !== 'object') {
-      return {
+      return decorateIdleViewWithTopReplyStatus({
         phase: TaskPhase.IDLE,
         text: '无限继续直到完成',
         title: '持续自动继续，直到检测到任务完成',
@@ -4055,12 +4161,12 @@
         allowCancel: false,
         action: 'start',
         buttonPhase: 'idle',
-      };
+      }, snapshot);
     }
 
     const autoOwner = resolveAutoQueueOwnerAction(autoState);
     if (!autoOwner) {
-      return {
+      return decorateIdleViewWithTopReplyStatus({
         phase: TaskPhase.IDLE,
         text: '无限继续直到完成',
         title: '持续自动继续，直到检测到任务完成',
@@ -4068,7 +4174,7 @@
         allowCancel: false,
         action: 'start',
         buttonPhase: 'idle',
-      };
+      }, snapshot);
     }
 
     if (autoOwner !== 'auto-continue-until-done') {
@@ -4134,31 +4240,37 @@
       phase === TaskPhase.WAITING_REPLY
       || rawPhase === 'waiting_reply'
       || autoState.waitingReply
+      || topReplyWaiting
+      || topReplyAnswering
     ) {
       return {
         phase: TaskPhase.WAITING_REPLY,
-        text: '等待回复',
-        title: '智能继续正在等待 ChatGPT 回复完成，点击可停止',
+        text: '无限继续直到完成',
+        title: topReplyAnswering || topReplyWaiting
+          ? `当前状态：${topReplyStatus.text || '等待回复'}；智能继续正在等待 ChatGPT 回复完成，点击可停止`
+          : '智能继续正在等待 ChatGPT 回复完成，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'waiting',
+        forceDanger: !!(topReplyAnswering || topReplyWaiting),
       };
     }
 
     if (activePhases.has(phase) || autoState.running) {
       return {
         phase: TaskPhase.RUNNING,
-        text: '停止智能继续',
+        text: '无限继续直到完成',
         title: '智能继续正在运行，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'running',
+        forceDanger: true,
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: '无限继续直到完成',
       title: '持续自动继续，直到检测到任务完成',
@@ -4166,7 +4278,7 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
   function getActionPhaseFromSnapshot(action, snapshot = {}) {
@@ -4308,7 +4420,8 @@
     const sendPhase = getNormalizedSendTaskPhase(snapshot);
     const pageReplyStatus = getPageReplyStatus(snapshot);
     return !!(
-      sendPhase === TaskPhase.WAITING_REPLY
+      isTopReplyBusyForButtons(snapshot)
+      || sendPhase === TaskPhase.WAITING_REPLY
       || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
       || sendPhase === TaskPhase.SENDING
       || isLegacySendWaitingReply(snapshot)
@@ -4580,6 +4693,14 @@
   }
 
   function getCopyContinueButtonViewState(snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyAnswering;
+    void topReplyWaiting;
+    void topReplyBusy;
     const task = snapshot.copyContinueTask && typeof snapshot.copyContinueTask === 'object'
       ? snapshot.copyContinueTask
       : {};
@@ -4672,7 +4793,7 @@
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: '复制并继续',
       title: '先复制最后回复，再发送“继续”',
@@ -4680,7 +4801,7 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
   function getHomeButtonViewState(snapshot = {}) {
@@ -4751,6 +4872,14 @@
   }
 
   function getCopyHotkeyLoopButtonViewState(snapshot = {}) {
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
+    const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
+    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    void topReplyStatus;
+    void topReplyAnswering;
+    void topReplyWaiting;
+    void topReplyBusy;
     const task = snapshot.copyHotkeyContinueLoopTask && typeof snapshot.copyHotkeyContinueLoopTask === 'object'
       ? snapshot.copyHotkeyContinueLoopTask
       : {};
@@ -4836,7 +4965,7 @@
       };
     }
 
-    return {
+    return decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
       text: snapshot.loopLabel || '无限连续复制+快捷键+继续',
       title: snapshot.loopTitle || '循环：等待回答 -> 复制 -> 快捷键 -> 继续',
@@ -4844,7 +4973,7 @@
       allowCancel: false,
       action: 'start',
       buttonPhase: 'idle',
-    };
+    }, snapshot);
   }
 
   function mapSendMessageViewStateToToolboxOptions(view = {}, reason = '') {

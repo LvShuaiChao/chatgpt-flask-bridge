@@ -112,6 +112,27 @@
         state.postReplyDelayUntilMs = 0;
       }
 
+      function resolveClosedLoopIdleLogBase() {
+        const ownerAction = String(
+          state.ownerAction
+          || state.action
+          || 'closed-loop-with-hotkey',
+        ).trim() || 'closed-loop-with-hotkey';
+        if (
+          typeof ClosedLoopButtonVm !== 'undefined'
+          && typeof ClosedLoopButtonVm.getClosedLoopIdleTextByAction === 'function'
+        ) {
+          return ClosedLoopButtonVm.getClosedLoopIdleTextByAction(ownerAction, {});
+        }
+        if (
+          typeof UploadButtonVm !== 'undefined'
+          && typeof UploadButtonVm.getClosedLoopIdleTextByAction === 'function'
+        ) {
+          return UploadButtonVm.getClosedLoopIdleTextByAction(ownerAction, {});
+        }
+        return ownerAction;
+      }
+
       function startCountdownTick(reason = 'closed-loop-button-countdown') {
         void reason;
         if (state.countdownTickTimer) {
@@ -150,8 +171,9 @@
             log(
               `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_TICK] remainingMs=${remainingMs} runId=${state.runId || '-'} round=${state.round || 0}`,
             );
+            const idleBase = resolveClosedLoopIdleLogBase();
             log(
-              `停止闭环继续（等待 ${sec}s）`,
+              `${idleBase}（等待 ${sec}s）`,
             );
           } else if (
             state.waitKind === 'reply'
@@ -164,7 +186,8 @@
             const sec = Math.floor(elapsedMs / 1000);
             if (sec !== state.lastReplyWaitLogSec) {
               state.lastReplyWaitLogSec = sec;
-              log(`停止闭环继续（回复中 ${sec}s）`);
+              const idleBase = resolveClosedLoopIdleLogBase();
+              log(`${idleBase}（回复中 ${sec}s）`);
             }
           }
 
@@ -218,7 +241,8 @@
           `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_START] delayMs=${waitMs} runId=${runId} round=${round} reason=${src}`,
         );
         const initialSec = Math.max(0, Math.ceil(waitMs / 1000));
-        log(`停止闭环继续（等待 ${initialSec}s）`);
+        const idleBase = resolveClosedLoopIdleLogBase();
+        log(`${idleBase}（等待 ${initialSec}s）`);
         startCountdownTick(`next-step-${src}`);
         if (typeof renderClosedLoopButtons === 'function') {
           renderClosedLoopButtons();
