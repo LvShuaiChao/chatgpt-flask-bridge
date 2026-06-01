@@ -1603,7 +1603,15 @@
         return true;
       }
 
+      if (/^已思考.*(?:秒|分钟|m|s|›|>)/i.test(value)) {
+        return true;
+      }
+
       if (/^Thought for\s+\d+/i.test(value)) {
+        return true;
+      }
+
+      if (/^Thinking/i.test(value) || /^正在思考/.test(value)) {
         return true;
       }
 
@@ -3210,6 +3218,9 @@
               && typeof UploadModule.renderUploadButtonsOnly === 'function'
             ) {
               try {
+                if (typeof UploadModule.maybeHealStaleWaitingReplyState === 'function') {
+                  UploadModule.maybeHealStaleWaitingReplyState('bridge-poll-capability-change');
+                }
                 UploadModule.renderUploadButtonsOnly({
                   immediate: true,
                   force: true,

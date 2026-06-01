@@ -383,15 +383,7 @@
       }
 
       const queueHtml = buildLimitedUploadQueueListHtml(files, activeGroupId, selectedFileId);
-
-      const queueHintHtml = `
-        <div class="cgpt-upload-item empty toolbox-upload-queue-hint" data-no-row-upload="1">
-          <div class="cgpt-upload-meta">
-            本地队列 · 点击文件行上传当前文件 · 点击「开始上传」批量上传当前分组
-          </div>
-        </div>
-      `;
-      return `${queueHintHtml}${flaskHtml}${queueHtml}`;
+      return `${flaskHtml}${queueHtml}`;
     }
 
     function getUploadListItemsToRender(files) {

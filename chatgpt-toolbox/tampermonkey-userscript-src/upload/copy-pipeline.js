@@ -105,9 +105,6 @@
             if (text && !(typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(text))) {
               return { ok: true, text, reason: 'ok' };
             }
-            if (String(picked.text || '').trim()) {
-              return { ok: false, text: '', reason: 'latest_assistant_reply_invalid' };
-            }
           }
         }
 
@@ -124,9 +121,6 @@
             const recordText = finalizeAssistantCopyText(picked.record.text || '');
             if (recordText && !(typeof isInvalidAssistantReplyText === 'function' && isInvalidAssistantReplyText(recordText))) {
               return { ok: true, text: recordText, reason: 'ok' };
-            }
-            if (String(picked.record.text || '').trim()) {
-              return { ok: false, text: '', reason: 'latest_assistant_reply_invalid' };
             }
           }
         }

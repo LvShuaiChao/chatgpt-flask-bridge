@@ -11,6 +11,8 @@ const ComposerAttachments = (() => {
   let attachmentMutationObserver = null;
   let attachmentMutationObserverRoot = null;
   let lastAttachmentHeavyScanAt = 0;
+  let lastComposerAttachmentTopStatusSig = '';
+  let composerAttachmentTopStatusTimer = 0;
   let sharedEvidenceInFlight = false;
   const UPLOAD_EVIDENCE_CACHE_MS = 500;
   const UPLOAD_HEAVY_SCAN_MIN_MS = 500;
@@ -81,6 +83,86 @@ const ComposerAttachments = (() => {
     }
   }
 
+  function summarizeComposerAttachmentCountsForTopStatus(snap) {
+    const state = snap && typeof snap === 'object' ? snap : {};
+    const composerCount = Math.max(
+      0,
+      Number(
+        state.count != null ? state.count
+          : (state.fileCount != null ? state.fileCount
+            : (state.totalCount != null ? state.totalCount : state.attachmentCount)),
+      ) || 0,
+    );
+    const composerUploading = !!(
+      Number(state.uploadingCount || state.uploading || 0) > 0
+      || state.attachmentUploading === true
+      || state.stillUploading === true
+      || state.isUploading === true
+    );
+    const composerReady = !!(
+      Number(state.readyCount || state.ready || 0) > 0
+      || state.hasReady === true
+      || state.attachmentReady === true
+    );
+    return { composerCount, composerUploading, composerReady };
+  }
+
+  function notifyComposerAttachmentTopStatusChange(reason) {
+    if (composerAttachmentTopStatusTimer) {
+      return;
+    }
+    composerAttachmentTopStatusTimer = window.setTimeout(() => {
+      composerAttachmentTopStatusTimer = 0;
+      let snap = null;
+      try {
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.countAttachmentChipsFast === 'function'
+        ) {
+          const fastCount = Number(ComposerApi.countAttachmentChipsFast()) || 0;
+          snap = { count: fastCount, fileCount: fastCount, totalCount: fastCount };
+        } else if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.isAttachmentStillUploading === 'function') {
+          snap = {
+            count: 0,
+            attachmentUploading: ComposerApi.isAttachmentStillUploading(),
+          };
+        }
+      } catch (err) {
+        console.error('[ChatGPT toolbox] notifyComposerAttachmentTopStatusChange fast scan failed', err);
+        const errText = err && err.message ? err.message : String(err);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[ATTACHMENT_STATE][COMPOSER_CHANGED_SCAN_FAILED] reason=${reason || '-'} error=${errText}`,
+          );
+        }
+        return;
+      }
+      const {
+        composerCount,
+        composerUploading,
+        composerReady,
+      } = summarizeComposerAttachmentCountsForTopStatus(snap);
+      const sig = `${composerCount}|${composerUploading ? 1 : 0}|${composerReady ? 1 : 0}`;
+      if (sig === lastComposerAttachmentTopStatusSig) {
+        return;
+      }
+      lastComposerAttachmentTopStatusSig = sig;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[ATTACHMENT_STATE][COMPOSER_CHANGED] count=${composerCount} uploading=${composerUploading ? 1 : 0} ready=${composerReady ? 1 : 0} reason=${reason || '-'}`,
+        );
+      }
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.renderToolboxTopStatus === 'function'
+      ) {
+        UploadModule.renderToolboxTopStatus({ heavy: true, reason: 'composer-attachment-changed' });
+      }
+    }, 200);
+  }
+
   function ensureAttachmentMutationObserver() {
     if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') {
       return;
@@ -115,6 +197,7 @@ const ComposerAttachments = (() => {
     attachmentMutationObserverRoot = composerRoot;
     attachmentMutationObserver = new MutationObserver(() => {
       markAttachmentDirty('mutation-observer');
+      notifyComposerAttachmentTopStatusChange('mutation-observer');
     });
     attachmentMutationObserver.observe(composerRoot, {
       childList: true,

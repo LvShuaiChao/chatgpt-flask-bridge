@@ -1,5 +1,5 @@
   /********************************************************************
-   * GlobalUsageStore：跨标签页共享的上传/消息今日全局额度统计
+   * GlobalUsageStore：跨标签页共享的上传/消息滑动窗口额度统计
    ********************************************************************/
 
   const GLOBAL_USAGE_STORE_KEY = 'xz_toolbox_global_usage_v1';
@@ -8,6 +8,9 @@
 
   let globalUsageBroadcastChannel = null;
   let globalUsageSyncInitialized = false;
+  let globalUsageWindowRefreshTimer = null;
+  const lastGlobalUsageNextReleaseLogAt = { message: 0, upload: 0 };
+  const lastGlobalUsageNextReleaseValue = { message: 0, upload: 0 };
 
   function appendGlobalUsageLog(line) {
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
@@ -35,6 +38,54 @@
     const fallback = new Date();
     fallback.setHours(24, 0, 0, 0);
     return fallback.getTime();
+  }
+
+  function readGlobalUsageWindowMsFromConfig() {
+    let uploadWindowHours = 3;
+    let messageWindowHours = 3;
+
+    if (typeof getCompactUiConfig === 'function') {
+      try {
+        const cfg = getCompactUiConfig() || {};
+        const uploadHoursFromCfg = Number(cfg.uploadQuotaWindowHours);
+        const messageHoursFromCfg = Number(cfg.messageQuotaWindowHours);
+        if (Number.isFinite(uploadHoursFromCfg) && uploadHoursFromCfg > 0) {
+          uploadWindowHours = Math.floor(uploadHoursFromCfg);
+        }
+        if (Number.isFinite(messageHoursFromCfg) && messageHoursFromCfg > 0) {
+          messageWindowHours = Math.floor(messageHoursFromCfg);
+        }
+      } catch (error) {
+        console.error('[GLOBAL_USAGE][READ_WINDOW_FAILED]', error);
+        appendGlobalUsageLog(
+          `[GLOBAL_USAGE][READ_WINDOW_FAILED] error_type=${error?.name || '-'} error=${error?.message || String(error)}`,
+        );
+      }
+    } else if (typeof SettingsModule !== 'undefined' && typeof SettingsModule.getConfig === 'function') {
+      try {
+        const cfg = SettingsModule.getConfig() || {};
+        const uploadHoursFromCfg = Number(cfg.uploadQuotaWindowHours);
+        const messageHoursFromCfg = Number(cfg.messageQuotaWindowHours);
+        if (Number.isFinite(uploadHoursFromCfg) && uploadHoursFromCfg > 0) {
+          uploadWindowHours = Math.floor(uploadHoursFromCfg);
+        }
+        if (Number.isFinite(messageHoursFromCfg) && messageHoursFromCfg > 0) {
+          messageWindowHours = Math.floor(messageHoursFromCfg);
+        }
+      } catch (error) {
+        console.error('[GLOBAL_USAGE][READ_WINDOW_FAILED]', error);
+        appendGlobalUsageLog(
+          `[GLOBAL_USAGE][READ_WINDOW_FAILED] error_type=${error?.name || '-'} error=${error?.message || String(error)}`,
+        );
+      }
+    }
+
+    return {
+      uploadWindowHours,
+      messageWindowHours,
+      uploadWindowMs: uploadWindowHours * 60 * 60 * 1000,
+      messageWindowMs: messageWindowHours * 60 * 60 * 1000,
+    };
   }
 
   function readGlobalUsageLimitsFromConfig() {
@@ -97,10 +148,101 @@
     };
   }
 
-  function recomputeGlobalUsageCounts(store) {
-    store.messageUsed = Object.keys(store.events.message || {}).length;
-    store.uploadUsed = Object.keys(store.events.upload || {}).length;
+  function filterGlobalUsageEventsByWindow(events, windowMs) {
+    const now = Date.now();
+    const windowValue = Math.max(1000, Number(windowMs) || 0);
+    const source = events && typeof events === 'object' ? events : {};
+    const before = Object.keys(source).length;
+    const filtered = {};
+
+    Object.entries(source).forEach(([eventId, item]) => {
+      const at = Number(item && item.at) || 0;
+      if (at > 0 && now - at < windowValue) {
+        filtered[eventId] = item;
+      }
+    });
+
+    return {
+      filtered,
+      before,
+      after: Object.keys(filtered).length,
+    };
+  }
+
+  function pruneStoredGlobalUsageEventsByWindow(store) {
+    const windows = readGlobalUsageWindowMsFromConfig();
+    const messageResult = filterGlobalUsageEventsByWindow(store.events.message, windows.messageWindowMs);
+    const uploadResult = filterGlobalUsageEventsByWindow(store.events.upload, windows.uploadWindowMs);
+
+    if (messageResult.before !== messageResult.after) {
+      appendGlobalUsageLog(
+        `[GLOBAL_USAGE][WINDOW_PRUNE] kind=message before=${messageResult.before} after=${messageResult.after} windowMs=${windows.messageWindowMs}`,
+      );
+      store.events.message = messageResult.filtered;
+    }
+
+    if (uploadResult.before !== uploadResult.after) {
+      appendGlobalUsageLog(
+        `[GLOBAL_USAGE][WINDOW_PRUNE] kind=upload before=${uploadResult.before} after=${uploadResult.after} windowMs=${windows.uploadWindowMs}`,
+      );
+      store.events.upload = uploadResult.filtered;
+    }
+
     return store;
+  }
+
+  function recomputeGlobalUsageCounts(store) {
+    const windows = readGlobalUsageWindowMsFromConfig();
+    store.messageUsed = filterGlobalUsageEventsByWindow(store.events.message, windows.messageWindowMs).after;
+    store.uploadUsed = filterGlobalUsageEventsByWindow(store.events.upload, windows.uploadWindowMs).after;
+    return store;
+  }
+
+  function computeNextReleaseAtForWindowRecords(records, windowMs, remaining) {
+    if (Math.max(0, Number(remaining) || 0) > 0) {
+      return 0;
+    }
+
+    const windowValue = Math.max(1000, Number(windowMs) || 0);
+    const list = Array.isArray(records) ? records : [];
+    if (!list.length) {
+      return 0;
+    }
+
+    let oldestAt = Infinity;
+    list.forEach((item) => {
+      const at = Number(item && item.at) || 0;
+      if (at > 0 && at < oldestAt) {
+        oldestAt = at;
+      }
+    });
+
+    if (!Number.isFinite(oldestAt)) {
+      return 0;
+    }
+
+    return oldestAt + windowValue;
+  }
+
+  function logGlobalUsageNextRelease(kind, nextReleaseAt) {
+    const safeKind = kind === 'upload' ? 'upload' : 'message';
+    const target = Number(nextReleaseAt) || 0;
+    if (target <= 0) {
+      return;
+    }
+    const now = Date.now();
+    if (
+      lastGlobalUsageNextReleaseValue[safeKind] === target
+      && now - lastGlobalUsageNextReleaseLogAt[safeKind] < 30000
+    ) {
+      return;
+    }
+    lastGlobalUsageNextReleaseValue[safeKind] = target;
+    lastGlobalUsageNextReleaseLogAt[safeKind] = now;
+    const waitMs = Math.max(0, target - now);
+    appendGlobalUsageLog(
+      `[GLOBAL_USAGE][NEXT_RELEASE] kind=${safeKind} nextReleaseAt=${target} waitMs=${waitMs}`,
+    );
   }
 
   function pruneGlobalUsageEvents(store) {
@@ -159,13 +301,7 @@
       store = createEmptyGlobalUsageStore();
     }
 
-    const today = getTodayUsageDayKey();
-    if (store.dayKey !== today) {
-      appendGlobalUsageLog(
-        `[GLOBAL_USAGE][RESET_DAY] old=${store.dayKey || '-'} new=${today}`,
-      );
-      store = createEmptyGlobalUsageStore();
-    }
+    store.dayKey = getTodayUsageDayKey();
 
     if (!store.events) {
       store.events = { message: {}, upload: {} };
@@ -181,7 +317,30 @@
     store.messageLimit = limits.messageLimit;
     store.uploadLimit = limits.uploadLimit;
 
-    return recomputeGlobalUsageCounts(store);
+    pruneStoredGlobalUsageEventsByWindow(store);
+    recomputeGlobalUsageCounts(store);
+
+    const rawAfterRead = localStorage.getItem(GLOBAL_USAGE_STORE_KEY);
+    if (rawAfterRead) {
+      try {
+        const persisted = JSON.parse(rawAfterRead);
+        const persistedMessageCount = Object.keys(persisted.events?.message || {}).length;
+        const persistedUploadCount = Object.keys(persisted.events?.upload || {}).length;
+        const currentMessageCount = Object.keys(store.events.message || {}).length;
+        const currentUploadCount = Object.keys(store.events.upload || {}).length;
+        if (persistedMessageCount !== currentMessageCount || persistedUploadCount !== currentUploadCount) {
+          store.updatedAt = Date.now();
+          localStorage.setItem(GLOBAL_USAGE_STORE_KEY, JSON.stringify(store));
+        }
+      } catch (error) {
+        console.error('[GLOBAL_USAGE][PRUNE_PERSIST_FAILED]', error);
+        appendGlobalUsageLog(
+          `[GLOBAL_USAGE][PRUNE_PERSIST_FAILED] error_type=${error?.name || '-'} error=${error?.message || String(error)}`,
+        );
+      }
+    }
+
+    return store;
   }
 
   function broadcastGlobalUsageChanged(reason, store) {
@@ -207,6 +366,7 @@
 
     localStorage.setItem(GLOBAL_USAGE_STORE_KEY, JSON.stringify(store));
     broadcastGlobalUsageChanged(reason, store);
+    scheduleGlobalUsageWindowRefresh();
 
     appendGlobalUsageLog(
       `[GLOBAL_USAGE][SAVE] reason=${reason || '-'} messageUsed=${store.messageUsed} uploadUsed=${store.uploadUsed} dayKey=${store.dayKey}`,
@@ -373,41 +533,57 @@
 
   function getGlobalUsageQuotaSnapshot(kind = 'both') {
     const store = readGlobalUsageStore();
-    const endOfDayMs = getEndOfLocalDayMs(store.dayKey);
-    const windowMs = Math.max(1000, endOfDayMs - Date.now());
+    const windows = readGlobalUsageWindowMsFromConfig();
+    const uploadWindowMs = windows.uploadWindowMs;
+    const messageWindowMs = windows.messageWindowMs;
 
-    const uploadUsed = Number(store.uploadUsed) || 0;
-    const messageUsed = Number(store.messageUsed) || 0;
+    const uploadResult = filterGlobalUsageEventsByWindow(store.events.upload, uploadWindowMs);
+    const messageResult = filterGlobalUsageEventsByWindow(store.events.message, messageWindowMs);
+
+    const uploadRecords = Object.values(uploadResult.filtered);
+    const messageRecords = Object.values(messageResult.filtered);
+
+    const uploadUsed = uploadRecords.length;
+    const messageUsed = messageRecords.length;
     const uploadLimit = Number(store.uploadLimit) || 80;
     const messageLimit = Number(store.messageLimit) || 150;
 
     const uploadRemaining = Math.max(0, uploadLimit - uploadUsed);
     const messageRemaining = Math.max(0, messageLimit - messageUsed);
 
-    const uploadNextReleaseAt = uploadRemaining <= 0 ? endOfDayMs : 0;
-    const messageNextReleaseAt = messageRemaining <= 0 ? endOfDayMs : 0;
+    const uploadNextReleaseAt = computeNextReleaseAtForWindowRecords(uploadRecords, uploadWindowMs, uploadRemaining);
+    const messageNextReleaseAt = computeNextReleaseAtForWindowRecords(messageRecords, messageWindowMs, messageRemaining);
+
+    if (uploadRemaining <= 0 && uploadNextReleaseAt > 0) {
+      logGlobalUsageNextRelease('upload', uploadNextReleaseAt);
+    }
+    if (messageRemaining <= 0 && messageNextReleaseAt > 0) {
+      logGlobalUsageNextRelease('message', messageNextReleaseAt);
+    }
 
     const upload = {
-      windowMs,
+      windowMs: uploadWindowMs,
+      windowHours: windows.uploadWindowHours,
       maxFiles: uploadLimit,
       limit: uploadLimit,
       used: uploadUsed,
       remaining: uploadRemaining,
       canUpload: uploadRemaining > 0,
-      records: Object.values(store.events.upload || {}),
+      records: uploadRecords,
       nextReleaseAt: uploadNextReleaseAt,
       source: 'global-usage',
       dayKey: store.dayKey,
     };
 
     const message = {
-      windowMs,
+      windowMs: messageWindowMs,
+      windowHours: windows.messageWindowHours,
       maxMessages: messageLimit,
       limit: messageLimit,
       used: messageUsed,
       remaining: messageRemaining,
       canSend: messageRemaining > 0,
-      records: Object.values(store.events.message || {}),
+      records: messageRecords,
       nextReleaseAt: messageNextReleaseAt,
       source: 'global-usage',
       dayKey: store.dayKey,
@@ -436,18 +612,23 @@
 
   function getGlobalUsageEventsSummary(options = {}) {
     const store = readGlobalUsageStore();
+    const windows = readGlobalUsageWindowMsFromConfig();
     const maxLines = Math.max(1, Math.min(500, Number(options.maxLines) || 50));
-    const messageEntries = Object.entries(store.events.message || {})
+    const messageFiltered = filterGlobalUsageEventsByWindow(store.events.message, windows.messageWindowMs);
+    const uploadFiltered = filterGlobalUsageEventsByWindow(store.events.upload, windows.uploadWindowMs);
+    const messageEntries = Object.entries(messageFiltered.filtered)
       .map(([eventId, item]) => ({ kind: 'message', eventId, item, at: Number(item && item.at) || 0 }))
       .sort((a, b) => b.at - a.at);
-    const uploadEntries = Object.entries(store.events.upload || {})
+    const uploadEntries = Object.entries(uploadFiltered.filtered)
       .map(([eventId, item]) => ({ kind: 'upload', eventId, item, at: Number(item && item.at) || 0 }))
       .sort((a, b) => b.at - a.at);
 
     return {
       dayKey: store.dayKey,
-      messageUsed: store.messageUsed,
-      uploadUsed: store.uploadUsed,
+      uploadWindowHours: windows.uploadWindowHours,
+      messageWindowHours: windows.messageWindowHours,
+      messageUsed: messageEntries.length,
+      uploadUsed: uploadEntries.length,
       messageLimit: store.messageLimit,
       uploadLimit: store.uploadLimit,
       messageEvents: messageEntries.slice(0, maxLines),
@@ -460,7 +641,8 @@
   function exportGlobalUsageEventsText(options = {}) {
     const summary = getGlobalUsageEventsSummary(options);
     const lines = [
-      `[GLOBAL_USAGE][EXPORT] dayKey=${summary.dayKey} messageUsed=${summary.messageUsed}/${summary.messageLimit} uploadUsed=${summary.uploadUsed}/${summary.uploadLimit}`,
+      `[GLOBAL_USAGE][EXPORT] windowHours=upload:${summary.uploadWindowHours}/message:${summary.messageWindowHours} `
+      + `messageUsed=${summary.messageUsed}/${summary.messageLimit} uploadUsed=${summary.uploadUsed}/${summary.uploadLimit}`,
       `[GLOBAL_USAGE][EXPORT] messageEvents=${summary.messageEventCount} uploadEvents=${summary.uploadEventCount}`,
       '',
       '--- message events (newest first) ---',
@@ -521,11 +703,54 @@
     }
   }
 
+  function scheduleGlobalUsageWindowRefresh() {
+    if (globalUsageWindowRefreshTimer) {
+      clearTimeout(globalUsageWindowRefreshTimer);
+      globalUsageWindowRefreshTimer = null;
+    }
+
+    const snapshot = getGlobalUsageQuotaSnapshot();
+    const now = Date.now();
+    const windows = readGlobalUsageWindowMsFromConfig();
+    const candidates = [];
+
+    [snapshot.upload, snapshot.message].forEach((quota, index) => {
+      const windowMs = index === 0 ? windows.uploadWindowMs : windows.messageWindowMs;
+      const nextReleaseAt = Number(quota && quota.nextReleaseAt) || 0;
+      if (nextReleaseAt > now) {
+        candidates.push(nextReleaseAt);
+      }
+      (Array.isArray(quota && quota.records) ? quota.records : []).forEach((item) => {
+        const at = Number(item && item.at) || 0;
+        if (at > 0) {
+          const expiryAt = at + windowMs;
+          if (expiryAt > now) {
+            candidates.push(expiryAt);
+          }
+        }
+      });
+    });
+
+    if (!candidates.length) {
+      return;
+    }
+
+    const nextAt = Math.min(...candidates);
+    const delayMs = Math.max(250, nextAt - now + 50);
+    globalUsageWindowRefreshTimer = setTimeout(() => {
+      globalUsageWindowRefreshTimer = null;
+      notifyGlobalUsageChanged('window-expiry');
+      scheduleGlobalUsageWindowRefresh();
+    }, delayMs);
+  }
+
   function initGlobalUsageSync() {
     if (globalUsageSyncInitialized) {
       return;
     }
     globalUsageSyncInitialized = true;
+
+    scheduleGlobalUsageWindowRefresh();
 
     if ('BroadcastChannel' in window && !globalUsageBroadcastChannel) {
       globalUsageBroadcastChannel = new BroadcastChannel(GLOBAL_USAGE_CHANNEL_NAME);
@@ -558,6 +783,7 @@
     GLOBAL_USAGE_STORE_KEY,
     getTodayUsageDayKey,
     readGlobalUsageStore,
+    readGlobalUsageWindowMsFromConfig,
     writeGlobalUsageStore,
     recordGlobalMessageUsage,
     recordGlobalUploadUsage,

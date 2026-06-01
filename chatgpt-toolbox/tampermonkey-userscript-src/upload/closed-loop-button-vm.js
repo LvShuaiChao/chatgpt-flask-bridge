@@ -136,8 +136,13 @@
     function getClosedLoopIdleTextByAction(action, snapshot = {}) {
       void snapshot;
       const normalized = String(action || '').trim();
+      const everyRoundLabel = typeof ClosedLoopConfig !== 'undefined'
+        && ClosedLoopConfig
+        && ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
+        ? ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
+        : '每轮上传';
       if (normalized === 'closed-loop-with-hotkey-upload-every-round') {
-        return '闭环-快捷键模式+每一轮上传';
+        return `闭环-快捷键模式+${everyRoundLabel}`;
       }
       if (normalized === 'closed-loop-with-hotkey') {
         return '闭环-快捷键模式+每5轮上传';
@@ -358,20 +363,32 @@
 
       if (waitVisual.runningButtonText) {
         const custom = String(waitVisual.runningButtonText || '').trim();
-        const base = '停止闭环继续';
-        if (custom.startsWith(base) && custom.length > base.length) {
-          return custom.slice(base.length);
+        const ownerAction = getClosedLoopOwnerFromSnapshot(snapshot);
+        const idleBase = getClosedLoopIdleTextByAction(ownerAction, snapshot);
+        if (idleBase && custom.startsWith(idleBase) && custom.length > idleBase.length) {
+          return custom.slice(idleBase.length);
+        }
+        const legacyBase = '停止闭环继续';
+        if (custom.startsWith(legacyBase) && custom.length > legacyBase.length) {
+          return custom.slice(legacyBase.length);
         }
       }
 
       return '';
     }
 
-    function resolveClosedLoopStopButtonText(snapshot = {}, stopping = false) {
-      if (stopping) {
-        return '正在停止闭环继续';
+    function resolveClosedLoopRunningButtonText(action, snapshot = {}) {
+      const idleText = getClosedLoopIdleTextByAction(action, snapshot);
+      const suffix = formatClosedLoopRunningButtonWaitSuffix(snapshot);
+      if (!suffix) {
+        return idleText;
       }
-      return `停止闭环继续${formatClosedLoopRunningButtonWaitSuffix(snapshot)}`;
+      return `${idleText}${suffix}`;
+    }
+
+    function resolveClosedLoopStopButtonText(snapshot = {}, stopping = false, action = '') {
+      void stopping;
+      return resolveClosedLoopRunningButtonText(action, snapshot);
     }
 
     function getClosedLoopContinueButtonViewState(snapshot = {}, mode = 'with_hotkey') {
@@ -409,7 +426,7 @@
           }
           return withClosedLoopStyleFields({
             phase: 'paused',
-            text: '已暂停',
+            text: idleText,
             title: loopTask.lastError
               ? `闭环已暂停：${String(loopTask.lastError)}。点击停止当前闭环任务`
               : '闭环已暂停，点击停止当前闭环任务',
@@ -421,7 +438,7 @@
             forceDanger: true,
           });
         }
-        const stopButtonText = resolveClosedLoopStopButtonText(snapshot, stopping);
+        const stopButtonText = resolveClosedLoopStopButtonText(snapshot, stopping, currentAction);
         if (!stopping && loopPhase === 'waiting_next_reply') {
           return withClosedLoopStyleFields({
             phase: CL_PHASE.RUNNING,
@@ -510,6 +527,7 @@
       getClosedLoopIdleTextByAction,
       isCurrentClosedLoopOwnerButton,
       formatClosedLoopRunningButtonWaitSuffix,
+      resolveClosedLoopRunningButtonText,
       resolveClosedLoopStopButtonText,
       isPageGeneratingForClosedLoop,
       buildClosedLoopWaitingReplyIdleView,

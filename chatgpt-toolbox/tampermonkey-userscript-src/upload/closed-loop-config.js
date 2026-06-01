@@ -9,6 +9,15 @@
       WITHOUT_HOTKEY: 'without_hotkey',
     };
 
+    /** 每轮上传：与「每5轮上传」并列时使用，不用中文「一」或「每1轮」 */
+    const CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL = '每轮上传';
+
+    const STALE_CLOSED_LOOP_UPLOAD_INTERVAL_TEXTS = new Set([
+      '每一轮上传',
+      '每1轮上传',
+      '每一轮',
+    ]);
+
     const CLOSED_LOOP_ACTIONS = Object.freeze({
       WITH_HOTKEY: Object.freeze({
         mode: CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY,
@@ -26,7 +35,7 @@
         selector: '#cgpt-closed-loop-upload-every-round-hotkey-btn',
         toolbarKey: 'closed-loop-with-hotkey-upload-every-round',
         label: '',
-        title: '快捷键模式：等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 触发配置快捷键 -> 使用稳定直接发送链路发送继续指令；每一轮都自动重新上传代码',
+        title: '快捷键模式：等待回复完成 -> 复制最后回复 -> 判断终止信号 -> 触发配置快捷键 -> 使用稳定直接发送链路发送继续指令；每轮都自动重新上传代码',
         datasetClosedLoopMode: 'with_hotkey_every_round',
       }),
       WITHOUT_HOTKEY: Object.freeze({
@@ -95,9 +104,40 @@
       return Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 5;
     }
 
+    function normalizeClosedLoopUploadPolicyText(text) {
+      const normalized = String(text || '').trim();
+      if (STALE_CLOSED_LOOP_UPLOAD_INTERVAL_TEXTS.has(normalized)) {
+        return CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL;
+      }
+      return normalized;
+    }
+
+    function normalizeClosedLoopButtonLabel(text, expectedLabel = '') {
+      const current = String(text || '').trim();
+      const expected = String(expectedLabel || '').trim();
+      if (!current) {
+        return expected;
+      }
+      if (current.includes('停止闭环继续') || current.includes('停止环继续') || current.includes('正在停止')) {
+        return current;
+      }
+      if (expected && current === expected) {
+        return expected;
+      }
+      if (/每一轮|每1轮/.test(current) && expected.includes(CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL)) {
+        return expected;
+      }
+      const intervalPart = current.replace(/^.*\+/, '');
+      const fixedInterval = normalizeClosedLoopUploadPolicyText(intervalPart);
+      if (fixedInterval !== intervalPart && current.includes('+')) {
+        return `${current.split('+')[0]}+${fixedInterval}`;
+      }
+      return current;
+    }
+
     function getClosedLoopUploadPolicyText(mode, cfg = null) {
       const interval = getClosedLoopEffectiveUploadInterval(mode, cfg);
-      return interval <= 1 ? '每一轮上传' : `每${interval}轮上传`;
+      return interval <= 1 ? CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL : `每${interval}轮上传`;
     }
 
     function getClosedLoopStepSourcePolicyTag(mode) {
@@ -154,8 +194,11 @@
 
     return Object.freeze({
       CLOSED_LOOP_CONTINUE_MODES: Object.freeze(CLOSED_LOOP_CONTINUE_MODES),
+      CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL,
       CLOSED_LOOP_ACTIONS,
       CLOSED_LOOP_CONTINUE_ACTIONS,
+      normalizeClosedLoopUploadPolicyText,
+      normalizeClosedLoopButtonLabel,
       normalizeClosedLoopAction,
       getClosedLoopModeFromAction,
       isClosedLoopCanonicalAction,

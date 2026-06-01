@@ -378,6 +378,29 @@
     });
   }
 
+  function applyDisabledVisualOnlyState(button, disabled, reason = '') {
+    if (!button) {
+      return;
+    }
+    const isDisabled = disabled === true;
+    button.classList.remove('cgpt-btn-disabled');
+    if (isDisabled) {
+      button.classList.add('cgpt-btn-disabled-visual');
+      button.style.opacity = '0.72';
+      button.style.filter = 'none';
+      button.style.cursor = 'not-allowed';
+      if (reason) {
+        button.dataset.disabledReason = String(reason);
+      }
+    } else {
+      button.classList.remove('cgpt-btn-disabled-visual');
+      button.style.opacity = '';
+      button.style.filter = '';
+      button.style.cursor = '';
+      delete button.dataset.disabledReason;
+    }
+  }
+
   function clearButtonStateClasses(button) {
     clearButtonStateColorClasses(button);
   }
@@ -870,8 +893,6 @@
         button.classList.add('cgpt-btn-failed');
       } else if (phase === ButtonPhase.CANCELLED) {
         button.classList.add('cgpt-btn-cancelled');
-      } else if (phase === ButtonPhase.DISABLED) {
-        button.classList.add('cgpt-btn-disabled');
       }
     }
 
@@ -882,6 +903,18 @@
     }
     if (!button.disabled) {
       button.removeAttribute('disabled');
+    }
+
+    const isRunningVisual = isBusyState
+      || phase === ButtonPhase.DANGER
+      || phase === ButtonPhase.CANCELLING
+      || button.classList.contains('cgpt-btn-busy')
+      || button.classList.contains('cgpt-btn-danger')
+      || button.classList.contains('cgpt-action-running');
+    if (button.disabled && !isRunningVisual) {
+      applyDisabledVisualOnlyState(button, true, reason);
+    } else if (!button.disabled) {
+      applyDisabledVisualOnlyState(button, false);
     }
 
     if (isSendBtn) {
@@ -1084,6 +1117,113 @@
     return CANCELLABLE_UI_TEXT_MARKERS.some((marker) => normalized.includes(marker));
   }
 
+  const shortActionButtonRestoreTimers = new WeakMap();
+
+  function resolveShortActionButton(button, fallbackSelector = '') {
+    if (button instanceof HTMLElement) {
+      return button;
+    }
+    if (typeof document !== 'undefined' && fallbackSelector) {
+      const found = document.querySelector(fallbackSelector);
+      return found instanceof HTMLElement ? found : null;
+    }
+    return null;
+  }
+
+  function setShortActionButtonBusy(button, text, options = {}) {
+    const btn = resolveShortActionButton(button, options.selector || '');
+    if (!btn) {
+      return null;
+    }
+
+    const action = String(options.action || '').trim();
+    const idleText = String(
+      options.idleText
+      || btn.dataset.cgptShortActionIdleText
+      || btn.textContent
+      || '',
+    ).trim() || '操作';
+    if (!btn.dataset.cgptShortActionIdleText) {
+      btn.dataset.cgptShortActionIdleText = idleText;
+    }
+
+    const prevTimer = shortActionButtonRestoreTimers.get(btn);
+    if (prevTimer) {
+      window.clearTimeout(prevTimer);
+      shortActionButtonRestoreTimers.delete(btn);
+    }
+
+    btn.dataset.cgptShortActionBusy = '1';
+    btn.classList.add('cgpt-btn-busy', 'cgpt-btn-danger', 'cgpt-short-action-busy');
+    btn.textContent = String(text || '处理中');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+
+    const line = `[SHORT_ACTION_BUTTON][BUSY] action=${action || '-'} id=${btn.id || '-'} text=${btn.textContent}`;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+    return btn;
+  }
+
+  function restoreShortActionButton(button, options = {}) {
+    const btn = resolveShortActionButton(button, options.selector || '');
+    if (!btn) {
+      return;
+    }
+
+    const idleText = String(
+      options.idleText
+      || btn.dataset.cgptShortActionIdleText
+      || '操作',
+    ).trim() || '操作';
+
+    const prevTimer = shortActionButtonRestoreTimers.get(btn);
+    if (prevTimer) {
+      window.clearTimeout(prevTimer);
+      shortActionButtonRestoreTimers.delete(btn);
+    }
+
+    btn.classList.remove(
+      'cgpt-btn-busy',
+      'cgpt-btn-danger',
+      'cgpt-short-action-busy',
+      'cgpt-btn-failed',
+    );
+    delete btn.dataset.cgptShortActionBusy;
+    btn.textContent = idleText;
+    btn.disabled = false;
+    btn.removeAttribute('disabled');
+    btn.removeAttribute('aria-busy');
+
+    const line = `[SHORT_ACTION_BUTTON][RESTORE] id=${btn.id || '-'} text=${idleText}`;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+  }
+
+  function scheduleRestoreShortActionButton(button, delayMs, options = {}) {
+    const btn = resolveShortActionButton(button, options.selector || '');
+    if (!btn) {
+      return;
+    }
+
+    const prevTimer = shortActionButtonRestoreTimers.get(btn);
+    if (prevTimer) {
+      window.clearTimeout(prevTimer);
+    }
+
+    const timer = window.setTimeout(() => {
+      shortActionButtonRestoreTimers.delete(btn);
+      restoreShortActionButton(btn, options);
+    }, Math.max(0, Number(delayMs) || 0));
+    shortActionButtonRestoreTimers.set(btn, timer);
+  }
+
   function assertCancellableButtonConsistency(button, view, reason = '') {
     if (!button || !view) {
       return;
@@ -1124,6 +1264,7 @@
     mirrorSendButtonLegacyDataset,
     clearButtonStateClasses,
     clearButtonStateColorClasses,
+    applyDisabledVisualOnlyState,
     applySendMessageButtonColorClasses,
     logSendMessageButtonColor,
     auditButtonColorLeak,
@@ -1139,6 +1280,9 @@
     setButtonSuccess,
     setButtonCancelled,
     setButtonFailed,
+    setShortActionButtonBusy,
+    restoreShortActionButton,
+    scheduleRestoreShortActionButton,
     flashButtonThenIdle,
     logButtonStateClick,
     logButtonStateCancel,

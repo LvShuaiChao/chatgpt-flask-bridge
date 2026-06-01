@@ -366,10 +366,19 @@
   }
 
   function sendPipelineIsNativeSendButtonReady(sendSnap, capability) {
+    if (typeof isComposerReallySendReady === 'function') {
+      return isComposerReallySendReady('send-pipeline-ready');
+    }
     if (!sendSnap || sendSnap.found !== true || sendSnap.ready !== true) {
       return false;
     }
     const nativeButton = sendSnap.button;
+    if (
+      nativeButton instanceof HTMLButtonElement
+      && String(nativeButton.getAttribute('data-testid') || '').trim() !== 'send-button'
+    ) {
+      return false;
+    }
     const nativeButtonVisible = !!(
       nativeButton
       && nativeButton instanceof HTMLElement
@@ -495,27 +504,27 @@
         sendSnap = getComposerSendButtonSnapshot({ silent: true });
       }
       if (!sendSnap || sendSnap.found !== true) {
-        const fallbackButton = (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.findSendButton === 'function'
-        )
-          ? ComposerApi.findSendButton({ silent: true })
-          : null;
-        const fallbackReady = !!(
-          fallbackButton instanceof HTMLButtonElement
-          && (
-            typeof ComposerApi === 'undefined'
-            || typeof ComposerApi.isSendButtonReady !== 'function'
-            || ComposerApi.isSendButtonReady(fallbackButton)
-          )
-        );
+        let fallbackButton = null;
+        if (typeof getRealComposerSendButton === 'function') {
+          fallbackButton = getRealComposerSendButton('send-pipeline-wait-button');
+        } else {
+          const rawBtn = document.querySelector('button[data-testid="send-button"]');
+          if (
+            rawBtn instanceof HTMLButtonElement
+            && !rawBtn.disabled
+            && rawBtn.getAttribute('aria-disabled') !== 'true'
+          ) {
+            fallbackButton = rawBtn;
+          }
+        }
+        const fallbackReady = fallbackButton instanceof HTMLButtonElement;
         sendSnap = {
           found: fallbackButton instanceof HTMLButtonElement,
           ready: fallbackReady,
           button: fallbackButton instanceof HTMLButtonElement ? fallbackButton : null,
           reason: fallbackButton instanceof HTMLButtonElement
-            ? (fallbackReady ? 'send_button_ready' : 'send_button_disabled')
-            : 'button-not-found',
+            ? 'send_button_ready'
+            : 'send_button_disabled',
         };
       }
 

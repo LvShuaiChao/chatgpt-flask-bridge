@@ -138,8 +138,82 @@
       return ok;
     }
 
-    function handleCopyToolboxLog(source = 'log-module') {
-      void copyAllLogs(source).catch((err) => {
+    async function runCopyToolboxLogWithFeedback(source = 'log-module', button = null) {
+      const src = String(source || 'log-module').trim() || 'log-module';
+      const idleText = '复制日志';
+      const btn = typeof setShortActionButtonBusy === 'function'
+        ? setShortActionButtonBusy(button, '复制中', {
+          action: 'copy-log',
+          selector: '#cgpt-copy-toolbox-log',
+          idleText,
+        })
+        : (button instanceof HTMLElement ? button : null);
+
+      ToolboxShell.appendLog(`[COPY_LOG][START] source=${src}`);
+
+      if (!btn && typeof document !== 'undefined') {
+        const fallbackBtn = document.querySelector('#cgpt-copy-toolbox-log');
+        if (fallbackBtn instanceof HTMLElement && typeof setShortActionButtonBusy === 'function') {
+          setShortActionButtonBusy(fallbackBtn, '复制中', {
+            action: 'copy-log',
+            idleText,
+          });
+        }
+      }
+
+      const activeBtn = btn instanceof HTMLElement
+        ? btn
+        : (typeof document !== 'undefined'
+          ? document.querySelector('#cgpt-copy-toolbox-log')
+          : null);
+
+      try {
+        const ok = await copyAllLogs(src);
+        if (ok) {
+          if (activeBtn instanceof HTMLElement) {
+            activeBtn.classList.remove('cgpt-btn-busy');
+            activeBtn.textContent = '已复制';
+            if (typeof scheduleRestoreShortActionButton === 'function') {
+              scheduleRestoreShortActionButton(activeBtn, 800, { idleText });
+            } else if (typeof restoreShortActionButton === 'function') {
+              window.setTimeout(() => restoreShortActionButton(activeBtn, { idleText }), 800);
+            }
+          }
+          ToolboxShell.appendLog(`[COPY_LOG][ok] source=${src}`);
+          return true;
+        }
+
+        if (activeBtn instanceof HTMLElement) {
+          activeBtn.textContent = '复制失败';
+          activeBtn.classList.add('cgpt-btn-failed');
+          if (typeof scheduleRestoreShortActionButton === 'function') {
+            scheduleRestoreShortActionButton(activeBtn, 1200, { idleText });
+          } else if (typeof restoreShortActionButton === 'function') {
+            window.setTimeout(() => restoreShortActionButton(activeBtn, { idleText }), 1200);
+          }
+        }
+        ToolboxShell.appendLog(`[COPY_LOG][failed] source=${src} reason=copy-returned-false`);
+        return false;
+      } catch (err) {
+        const errText = err && err.message ? err.message : String(err);
+        console.error('[COPY_LOG][failed]', err);
+        setLogStatus(`复制日志失败：${errText}`, 'error');
+        ToolboxShell.appendLog(`[COPY_LOG][failed] source=${src} error=${errText}`);
+        if (activeBtn instanceof HTMLElement) {
+          activeBtn.textContent = '复制失败';
+          activeBtn.classList.add('cgpt-btn-failed');
+          if (typeof scheduleRestoreShortActionButton === 'function') {
+            scheduleRestoreShortActionButton(activeBtn, 1200, { idleText });
+          } else if (typeof restoreShortActionButton === 'function') {
+            window.setTimeout(() => restoreShortActionButton(activeBtn, { idleText }), 1200);
+          }
+        }
+        return false;
+      }
+    }
+
+    function handleCopyToolboxLog(source = 'log-module', button = null) {
+      void runCopyToolboxLogWithFeedback(source, button).catch((err) => {
         const errText = err && err.message ? err.message : String(err);
         console.error('[ChatGPT toolbox] copy log failed', err);
         setLogStatus(`复制日志失败：${errText}`, 'error');
@@ -147,7 +221,7 @@
       });
     }
 
-    function invokeCopyToolboxLog(source = 'manual') {
+    function invokeCopyToolboxLog(source = 'manual', button = null) {
       const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
       if (!logModule || typeof logModule.copyAllLogs !== 'function') {
         const msg = '日志模块未就绪，无法复制日志';
@@ -156,8 +230,17 @@
         ToolboxShell.appendLog(`[LOG_COPY][skip] source=${String(source || '-')} reason=log_module_not_ready`);
         return false;
       }
+      if (typeof logModule.runCopyToolboxLogWithFeedback === 'function') {
+        void logModule.runCopyToolboxLogWithFeedback(source, button).catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[ChatGPT toolbox] copy log failed', err);
+          setLogStatus(`复制日志失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[LOG_COPY][failed] source=${String(source || '-')} error=${errText}`);
+        });
+        return true;
+      }
       if (typeof logModule.handleCopyToolboxLog === 'function') {
-        logModule.handleCopyToolboxLog(source);
+        logModule.handleCopyToolboxLog(source, button);
         return true;
       }
       void logModule.copyAllLogs(source).catch((err) => {
@@ -170,8 +253,11 @@
     }
 
     function bindLogCopy(root) {
-      bindClick(root, '#cgpt-log-copy', () => {
-        handleCopyToolboxLog('log-tab-button');
+      bindClick(root, '#cgpt-log-copy', (event, el) => {
+        const btn = el instanceof HTMLElement
+          ? el
+          : (event && event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+        handleCopyToolboxLog('log-tab-button', btn);
       }, {
         moduleName: 'LogModule',
         bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-copy',
@@ -540,6 +626,7 @@
       add,
       flushDomIfNeeded,
       copyAllLogs,
+      runCopyToolboxLogWithFeedback,
       handleCopyToolboxLog,
       invokeCopyToolboxLog,
       copyErrorLogs,

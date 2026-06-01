@@ -56,6 +56,7 @@
     initializing: { phase: 'waiting', subPhase: 'initializing' },
     waiting_page_reply_to_send: { phase: 'waiting_send', subPhase: 'waiting_page_reply_to_send' },
     waiting_input: { phase: 'waiting_send', subPhase: 'waiting_input' },
+    waiting_send_ready: { phase: 'waiting_send', subPhase: 'waiting_send_ready' },
     waiting_attachment: { phase: 'waiting_send', subPhase: 'waiting_attachment' },
     copying: { phase: 'waiting', subPhase: 'copying' },
     running: { phase: 'waiting', subPhase: 'running' },
@@ -127,6 +128,8 @@
         copyHotkeyContinue: createDefaultButtonTask(),
         copyHotkeyContinueLoop: createDefaultButtonTask(),
         copyHotkeyUploadVerifyLoop: createDefaultButtonTask(),
+        sendCopyHotkey: createDefaultButtonTask(),
+        copyContinue: createDefaultButtonTask(),
         continue: createDefaultButtonTask(),
         batch: createDefaultButtonTask({
           currentIndex: -1,

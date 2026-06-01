@@ -217,7 +217,15 @@
     function normalizeUploadItem(rawItem, options = {}) {
       const item = rawItem && typeof rawItem === 'object' ? rawItem : {};
       const fallbackGroupId = String(options.groupId || options.fallbackGroupId || getActiveGroupId() || '').trim();
-      const normalizedName = String(item.name || item.filename || item.fileName || '').trim();
+      let normalizedName = String(item.name || item.filename || item.fileName || '').trim();
+      if (normalizedName.includes('|')) {
+        normalizedName = normalizedName.split('|')[0].trim();
+      }
+      normalizedName = normalizedName.replace(/\\/g, '/');
+      const nameParts = normalizedName.split('/').filter(Boolean);
+      if (nameParts.length > 0) {
+        normalizedName = nameParts[nameParts.length - 1].trim();
+      }
       const normalizedMimeType = String(item.mimeType || item.mime_type || item.type || '').trim();
       const normalizedDownloadUrl = String(item.downloadUrl || item.download_url || '').trim();
       const normalizedFlaskPath = String(item.flaskPath || '').trim();

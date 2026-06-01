@@ -2868,6 +2868,18 @@
         || (composerRoot instanceof HTMLElement ? composerRoot : null)
         || composer;
 
+      if (typeof getRealComposerSendButton === 'function') {
+        const strictBtn = getRealComposerSendButton(`findSendButton:${silent ? 'silent' : 'active'}`);
+        if (strictBtn instanceof HTMLButtonElement && !isInToolbox(strictBtn)) {
+          const hit = { btn: strictBtn, source: 'dom-helper', selector: 'getRealComposerSendButton' };
+          logSendButtonFound(hit, silent);
+          return strictBtn;
+        }
+        if (!options.debug && !isComposerDebugEnabled()) {
+          return null;
+        }
+      }
+
       if (
         typeof findRealChatGPTSendButton === 'function'
         && helperScope instanceof HTMLElement
@@ -4982,8 +4994,37 @@
       return String(s || '').replace(/\.[^.]+$/, '');
     }
 
+    function normalizeUploadComparableFileName(value) {
+      let text = String(value || '').trim();
+      if (!text) {
+        return '';
+      }
+      if (text.includes('|')) {
+        text = text.split('|')[0].trim();
+      }
+      text = text.replace(/\\/g, '/');
+      const parts = text.split('/').filter(Boolean);
+      if (parts.length > 0) {
+        text = parts[parts.length - 1].trim();
+      }
+      text = text.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
+      text = text
+        .replace(/\s+压缩归档$/i, '')
+        .replace(/\s+compressed archive$/i, '')
+        .trim();
+      return text;
+    }
+
+    function normalizeUploadComparableFileStem(value) {
+      const fileName = normalizeUploadComparableFileName(value);
+      if (!fileName) {
+        return '';
+      }
+      return fileName.replace(/\.[^.]+$/u, '').trim();
+    }
+
     function fileNameEvidence(fileName, haystack) {
-      const raw = String(fileName || '').replace(/^.*[/\\]/, '').trim();
+      const raw = normalizeUploadComparableFileName(fileName);
       if (!raw) return false;
 
       const low = String(haystack || '').toLowerCase();
@@ -5013,7 +5054,7 @@
       const names = [];
 
       const add = (value) => {
-        const text = String(value || '').replace(/^.*[/\\]/, '').trim();
+        const text = normalizeUploadComparableFileName(value);
         if (!text) return;
         if (!names.includes(text)) names.push(text);
 
@@ -5076,7 +5117,16 @@
       const displayName = typeof uploadName === 'object'
         ? String(uploadName.displayName || uploadName.name || '')
         : String(uploadName || '');
-      const canonical = canonicalFileName(originalName || displayName);
+      const expectedRawName = originalName || displayName || (names[0] || '');
+      const expectedName = normalizeUploadComparableFileName(expectedRawName);
+      const expectedStem = normalizeUploadComparableFileStem(expectedRawName);
+      const actualNames = names
+        .map((name) => normalizeUploadComparableFileName(name))
+        .filter(Boolean);
+      const actualStems = actualNames
+        .map((name) => normalizeUploadComparableFileStem(name))
+        .filter(Boolean);
+      const canonical = canonicalFileName(expectedName || originalName || displayName);
 
       ToolboxShell.appendLog(
         `[UPLOAD][MATCH] original=${originalName || '-'} display=${displayName || '-'} canonical=${canonical || '-'} matched=${ok ? 1 : 0}`,
@@ -5085,9 +5135,15 @@
         `[UPLOAD_DIAG][attachment-evidence] roots=${roots.length} ok=${ok ? 1 : 0} textPreview=${text.slice(0, 200)}`
       );
 
+      if (!ok) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_VERIFY][FILENAME_MISMATCH] expectedRaw=${String(expectedRawName || '-')} expected=${expectedName || '-'} expectedStem=${expectedStem || '-'} actual=${actualNames.join(',') || '-'} actualStem=${actualStems.join(',') || '-'}`,
+        );
+      }
+
       let reason = ok
-        ? `附件区域识别到文件名：${names.join('|')}`
-        : `未识别到附件文件名：${names.join('|')}`;
+        ? `附件区域识别到文件名：${expectedName || expectedRawName || '-'}`
+        : `未识别到附件文件名：${expectedName || expectedRawName || '-'}`;
 
       if (!ok && probe && probe.hasRemoveSignal && !probe.hasFileName) {
         ToolboxShell.appendLog('[UPLOAD_ATTACH][REMOVE_BUTTON_WITHOUT_NAME]');
@@ -7116,6 +7172,8 @@
       findAttachmentEvidence,
       fileNameEvidence,
       canonicalFileName,
+      normalizeUploadComparableFileName,
+      normalizeUploadComparableFileStem,
       isAttachmentStillUploading,
       isAttachmentUploadingInComposer,
       isAttachmentReadyInComposer,
@@ -7272,17 +7330,10 @@
       let button = null;
       let foundSource = '';
 
-      if (
-        !skipNestedComposerResolve
-        && typeof ComposerApi !== 'undefined'
-        && typeof ComposerApi.findSendButton === 'function'
-      ) {
-        button = ComposerApi.findSendButton({
-          silent: true,
-          skipNestedComposerResolve: true,
-        });
+      if (typeof getRealComposerSendButton === 'function') {
+        button = getRealComposerSendButton(`snapshot:${source}`);
         if (button instanceof HTMLButtonElement) {
-          foundSource = 'ComposerApi.findSendButton';
+          foundSource = 'getRealComposerSendButton';
         }
       }
 
@@ -7290,17 +7341,26 @@
         !(button instanceof HTMLButtonElement)
         && typeof findRealChatGPTSendButton === 'function'
       ) {
-        let helperScope = null;
-        helperScope = document.querySelector('[data-testid="composer"]')
-          || document.querySelector('form[data-type="unified-composer"]')
-          || document.querySelector('form')
-          || document.body;
+        button = findRealChatGPTSendButton({ reason: `snapshot:${source}` });
+        if (button instanceof HTMLButtonElement) {
+          foundSource = 'findRealChatGPTSendButton';
+        }
+      }
 
-        if (helperScope instanceof HTMLElement) {
-          button = findRealChatGPTSendButton({ scope: helperScope });
-          if (button instanceof HTMLButtonElement) {
-            foundSource = 'findRealChatGPTSendButton';
-          }
+      if (
+        !(button instanceof HTMLButtonElement)
+        && !skipNestedComposerResolve
+        && typeof ComposerApi !== 'undefined'
+        && typeof ComposerApi.findSendButton === 'function'
+      ) {
+        button = ComposerApi.findSendButton({
+          silent: true,
+          skipNestedComposerResolve: true,
+        });
+        if (button instanceof HTMLButtonElement && button.getAttribute('data-testid') === 'send-button') {
+          foundSource = 'ComposerApi.findSendButton';
+        } else {
+          button = null;
         }
       }
 
@@ -10260,6 +10320,18 @@
     if (
       typeof UploadModule !== 'undefined'
       && UploadModule
+      && typeof UploadModule.maybeHealStaleWaitingReplyState === 'function'
+    ) {
+      try {
+        UploadModule.maybeHealStaleWaitingReplyState('updateChatInputStateBadge');
+      } catch (healErr) {
+        console.error('[ChatGPT toolbox] updateChatInputStateBadge heal stale waiting reply failed', healErr);
+      }
+    }
+
+    if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
       && typeof UploadModule.maybeReconcileSendCopyHotkeyWaitingReply === 'function'
     ) {
       try {
@@ -10752,6 +10824,14 @@
   }
 
   function findChatGPTSendButton() {
+    if (typeof getRealComposerSendButton === 'function') {
+      const strictBtn = getRealComposerSendButton('findChatGPTSendButton');
+      if (strictBtn instanceof HTMLButtonElement) {
+        return strictBtn;
+      }
+      return null;
+    }
+
     const prioritySelectors = [
       '#composer-submit-button',
       'button[data-testid="send-button"]',
@@ -11151,6 +11231,12 @@
         textLen: diag.composer_text_len != null ? diag.composer_text_len : diag.textLen,
       });
       sendButton.focus();
+      const sendTestId = String(sendButton.getAttribute('data-testid') || '').trim();
+      if (sendTestId === 'send-button' && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND][CLICK_REAL_SEND_BUTTON] source=${String(source || '-')} aria=${sendBtnInfo.aria || '-'}`,
+        );
+      }
       sendButton.click();
       appendSendTaskStageLog(
         `[SEND_TASK][NATIVE_SEND_CLICKED] method=click source=${String(source || '-')}`,

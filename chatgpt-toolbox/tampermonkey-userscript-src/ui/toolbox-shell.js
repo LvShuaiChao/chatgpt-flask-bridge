@@ -2257,6 +2257,42 @@
           transform: translateY(1px);
         }
 
+        /* 禁止浏览器 disabled 默认灰化按钮；不可用态只降透明度 */
+        #${APP.rootId} button:disabled,
+        #${APP.rootId} .cgpt-btn:disabled,
+        #${APP.rootId} .cgpt-btn[disabled],
+        #${APP.rootId} .cgpt-btn[aria-disabled="true"] {
+          opacity: 0.72 !important;
+          filter: none !important;
+          cursor: not-allowed !important;
+          box-shadow: none !important;
+        }
+
+        #${APP.rootId} .cgpt-btn.cgpt-btn-disabled-visual,
+        #${APP.rootId} .cgpt-btn.cgpt-btn-disabled,
+        #${APP.rootId} .cgpt-btn.is-disabled,
+        #${APP.rootId} .cgpt-btn.disabled {
+          opacity: 0.72 !important;
+          filter: none !important;
+        }
+
+        #${APP.rootId} .cgpt-toolbox-hidden {
+          display: none !important;
+        }
+
+        #${APP.rootId} .cgpt-btn.gray,
+        #${APP.rootId} .cgpt-btn.grey,
+        #${APP.rootId} .cgpt-btn.dark,
+        #${APP.rootId} .cgpt-btn.black,
+        #${APP.rootId} .cgpt-btn.cgpt-btn-gray,
+        #${APP.rootId} .cgpt-btn.cgpt-btn-grey,
+        #${APP.rootId} .cgpt-btn.cgpt-btn-dark,
+        #${APP.rootId} .cgpt-btn.cgpt-btn-black {
+          background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+          border-color: rgba(147, 197, 253, 0.75) !important;
+          color: #ffffff !important;
+        }
+
         .cgpt-btn.cgpt-btn-ok {
           background: #166534 !important;
           border-color: #22c55e !important;
@@ -2312,12 +2348,18 @@
           color: var(--cgpt-btn-hover-text, var(--cgpt-btn-text));
         }
 
-        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-busy,
-        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-danger,
         #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-disabled,
-        #cgpt-copy-toolbox-log.cgpt-btn:disabled {
+        #cgpt-copy-toolbox-log.cgpt-btn.cgpt-btn-disabled-visual,
+        #cgpt-copy-toolbox-log.cgpt-btn:disabled:not(.cgpt-short-action-busy) {
           background: linear-gradient(180deg, #2563eb, #1d4ed8) !important;
           border-color: rgba(147, 197, 253, 0.45) !important;
+          color: #ffffff !important;
+          opacity: 0.72 !important;
+        }
+
+        .cgpt-btn.cgpt-short-action-busy {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
           color: #ffffff !important;
           opacity: 1 !important;
         }
@@ -2350,9 +2392,9 @@
         }
 
         .cgpt-btn.cgpt-btn-cancelled {
-          background: #6b7280 !important;
-          border-color: #9ca3af !important;
-          color: #ffffff !important;
+          opacity: 0.72 !important;
+          cursor: not-allowed;
+          filter: none !important;
         }
 
         .cgpt-btn.cgpt-btn-failed {
@@ -2361,20 +2403,17 @@
           color: #ffffff !important;
         }
 
-        .cgpt-btn.cgpt-btn-disabled {
-          background: #9ca3af !important;
-          border-color: #9ca3af !important;
-          color: #ffffff !important;
+        .cgpt-btn.cgpt-btn-disabled,
+        .cgpt-btn.cgpt-btn-disabled-visual {
           cursor: not-allowed;
-          opacity: 1 !important;
+          opacity: 0.72 !important;
+          filter: none !important;
         }
 
         .cgpt-btn.cgpt-task-running-indicator {
-          opacity: 0.75;
+          opacity: 0.72 !important;
           cursor: not-allowed;
-          background: #374151 !important;
-          border-color: #4b5563 !important;
-          color: #d1d5db !important;
+          filter: none !important;
         }
 
         .cgpt-btn.danger {
@@ -2489,13 +2528,15 @@
           background: #0e7490;
         }
 
-        .cgpt-btn.purple:disabled {
-          opacity: 1 !important;
+        .cgpt-btn.purple:disabled,
+        .cgpt-btn.purple.cgpt-btn-disabled-visual {
+          opacity: 0.72 !important;
           cursor: not-allowed;
         }
 
-        .cgpt-btn.cyan:disabled {
-          opacity: 1 !important;
+        .cgpt-btn.cyan:disabled,
+        .cgpt-btn.cyan.cgpt-btn-disabled-visual {
+          opacity: 0.72 !important;
           cursor: not-allowed;
         }
 
@@ -2508,10 +2549,8 @@
         }
 
         .cgpt-btn.cgpt-btn-closed-loop:disabled {
-          background: rgba(75, 85, 99, 0.75) !important;
-          color: rgba(255, 255, 255, 0.65) !important;
-          border-color: rgba(148, 163, 184, 0.35) !important;
-          opacity: 1 !important;
+          opacity: 0.72 !important;
+          filter: none !important;
           cursor: not-allowed;
         }
 
@@ -2531,12 +2570,12 @@
         }
 
         #cgpt-autoq-start-upload.cgpt-btn-disabled,
-        #cgpt-autoq-start-upload:disabled {
-          background: #334155 !important;
-          border-color: #64748b !important;
-          color: #cbd5e1 !important;
+        #cgpt-autoq-start-upload:disabled:not(.cgpt-btn-busy) {
+          background: #166534 !important;
+          border-color: #22c55e !important;
+          color: #ffffff !important;
           cursor: not-allowed !important;
-          opacity: 1 !important;
+          opacity: 0.72 !important;
         }
 
         #cgpt-upload-start {
@@ -2549,8 +2588,8 @@
           background: #15803d !important;
         }
 
-        #cgpt-upload-start:disabled {
-          opacity: 1 !important;
+        #cgpt-upload-start:disabled:not(.cgpt-btn-busy) {
+          opacity: 0.72 !important;
           cursor: not-allowed;
         }
 
@@ -2699,7 +2738,7 @@
 
         #cgpt-send-message-once.cgpt-send-btn-idle[disabled],
         #cgpt-send-message-btn.cgpt-send-btn-idle[disabled] {
-          opacity: 0.65;
+          opacity: 0.72;
           cursor: not-allowed;
         }
 
@@ -12374,6 +12413,37 @@
       return badge;
     }
 
+    function isRealErrorStatusMessage(statusType, text) {
+      const level = String(statusType || '').trim().toLowerCase();
+      const value = String(text || '').trim();
+      if (!value) {
+        return false;
+      }
+      if (level === 'error') {
+        return true;
+      }
+      if (
+        /失败|错误|异常|报错|崩溃|初始化失败|上传失败|发送失败|复制失败|执行失败|运行失败|解析失败|JSONDecodeError|Traceback|Exception|Error|Failed|Fatal|Crash/i.test(value)
+      ) {
+        return true;
+      }
+      if (
+        level === 'danger'
+        && /失败|错误|异常|报错|超时|无法|不可用|未找到|拒绝|中断|断开|timeout|failed|error|exception|unavailable|not found|denied/i.test(value)
+      ) {
+        return true;
+      }
+      return false;
+    }
+
+    function isNonErrorWarningStatus(statusType, text) {
+      const level = String(statusType || '').trim().toLowerCase();
+      if (level !== 'warn' && level !== 'warning') {
+        return false;
+      }
+      return !isRealErrorStatusMessage(level, text);
+    }
+
     function shouldPersistStatus(statusType, text, options) {
       const opts = options || {};
 
@@ -12387,9 +12457,12 @@
 
       const value = String(text || '');
 
+      if (isNonErrorWarningStatus(statusType, value)) {
+        return false;
+      }
+
       if (
         statusType === 'error'
-        || statusType === 'warn'
         || statusType === 'danger'
         || statusType === 'offline'
         || statusType === 'online'
@@ -12427,9 +12500,8 @@
       }
 
       if (statusType === 'warn') {
-        if (/未绑定/.test(value)) return '未绑定';
-        if (/页面异常/.test(value)) return '页面异常';
-        return '提醒';
+        if (isRealErrorStatusMessage(statusType, value)) return '报错';
+        return '';
       }
 
       if (statusType === 'danger') {
@@ -12480,6 +12552,8 @@
       '待发送',
       '附件中',
       '附件处理中',
+      '有附件',
+      '无附件',
       '不可发送',
       '不可发',
       '离线',
@@ -12568,6 +12642,19 @@
       return !!compactMode;
     }
 
+    function hasActiveTopAlertEntry(entry) {
+      if (!entry) {
+        return false;
+      }
+      const level = String(entry.level || '').trim().toLowerCase();
+      const text = String(entry.text || '').trim();
+      const message = String(entry.message || '').trim();
+      if (!level && !text && !message) {
+        return false;
+      }
+      return level === 'error';
+    }
+
     function getCurrentTopAlertEntry() {
       const top = ToolboxStatusArbiter.getTop(Date.now());
       if (!top) {
@@ -12578,7 +12665,6 @@
           variant: 'muted',
         };
       }
-
       const rawStatusText = String(top.text || '').trim();
       if (!rawStatusText || isPromptCountStatusText(rawStatusText)) {
         return {
@@ -12588,15 +12674,21 @@
           variant: 'muted',
         };
       }
-
       const statusType = String(top.statusType || '').trim().toLowerCase();
       const opts = top.options || {};
+      if (opts.hideTopAlert === true) {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+        };
+      }
       const shortText = buildShortStatusText(rawStatusText, statusType, opts);
       const isTopMainStatus = isTopMainStatusDisplayText(rawStatusText, statusType, {
         ...opts,
         shortText,
       });
-
       if (isTopMainStatus) {
         return {
           visible: false,
@@ -12605,14 +12697,7 @@
           variant: 'muted',
         };
       }
-
-      if (
-        statusType === 'online'
-        || statusType === 'success'
-        || statusType === 'idle'
-        || statusType === 'running'
-        || statusType === 'offline'
-      ) {
+      if (!isRealErrorStatusMessage(statusType, rawStatusText)) {
         return {
           visible: false,
           text: '',
@@ -12620,41 +12705,12 @@
           variant: 'muted',
         };
       }
-
-      const level = statusType;
-      const message = rawStatusText;
-      const isError = level === 'error'
-        || level === 'danger'
-        || /error|exception|failed|失败|异常|报错/i.test(message);
-      const isWarn = level === 'warn'
-        || level === 'warning'
-        || /warn|warning|警告|注意|限速|不可用|超时/i.test(message);
-
-      if (isError) {
-        return {
-          visible: true,
-          text: '报错',
-          title: message || '当前存在报错',
-          variant: 'danger',
-          level: 'error',
-        };
-      }
-
-      if (isWarn) {
-        return {
-          visible: true,
-          text: '警告',
-          title: message || '当前存在警告',
-          variant: 'warning',
-          level: 'warn',
-        };
-      }
-
       return {
-        visible: false,
-        text: '',
-        title: '',
-        variant: 'muted',
+        visible: true,
+        text: '报错',
+        title: rawStatusText || '当前存在报错',
+        variant: 'danger',
+        level: 'error',
       };
     }
 
@@ -12827,7 +12883,13 @@
         shortText,
       });
 
-      if (persistent && !isTopMainStatus) {
+      const shouldShowHeaderStatusBadge = (
+        persistent
+        && !isTopMainStatus
+        && isRealErrorStatusMessage(statusType, rawStatusText)
+        && opts.hideHeaderBadge !== true
+      );
+      if (shouldShowHeaderStatusBadge) {
         const badge = ensureStatusBadge();
 
         if (badge) {
@@ -12893,6 +12955,14 @@
       const statusType = inferStatusType(rawStatusText, type);
       const opts = options || {};
       const owner = String(opts.owner || 'ui');
+      if (isNonErrorWarningStatus(statusType, rawStatusText)) {
+        opts.persist = false;
+        if (!Number.isFinite(Number(opts.ttlMs)) || Number(opts.ttlMs) <= 0) {
+          opts.ttlMs = 2500;
+        }
+        opts.hideTopAlert = true;
+        opts.hideHeaderBadge = true;
+      }
       if (
         owner === 'upload'
         && statusType === 'error'
@@ -13641,6 +13711,7 @@
       ensureToolboxHeaderPageStatusRow,
       ensureToolboxTitleRow,
       isCompactMode,
+      hasActiveTopAlertEntry,
       getCurrentTopAlertEntry,
       logTopAlertEntry,
       refreshTopStatusAlertSlot,
@@ -13847,7 +13918,7 @@
     const afterThinkingText = extractFinalAnswerAfterThinkingText(fullTurnText);
     const cleanedAfterThinking = cleanFn(afterThinkingText);
 
-    if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
+    if (shouldUseAfterThinkingCopyText(cleanedAfterThinking)) {
       return {
         text: cleanedAfterThinking,
         contentNodeCount: contentNodes.length,
@@ -14111,6 +14182,23 @@
     return afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  function shouldUseAfterThinkingCopyText(text) {
+    const t = String(text || '').trim();
+    if (!t) {
+      return false;
+    }
+    if (typeof isThinkingUiNoiseLine === 'function' && isThinkingUiNoiseLine(t)) {
+      return false;
+    }
+    if (t.includes('<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>')) {
+      return true;
+    }
+    if (t.includes('<<<CHATGPT_TOOLBOX_DONE>>>') || t.includes('__CHATGPT_TOOLBOX_DONE__')) {
+      return true;
+    }
+    return t.length >= 2;
+  }
+
   function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
     if (
       typeof UploadCriticalRuntime !== 'undefined'
@@ -14152,7 +14240,7 @@
     const afterThinking = extractFinalAnswerAfterThinkingText(rawText);
     const cleanedAfterThinking = cleanFn(afterThinking || '');
 
-    if (cleanedAfterThinking && cleanedAfterThinking.length >= 20) {
+    if (shouldUseAfterThinkingCopyText(cleanedAfterThinking)) {
       const streaming = (
         (typeof isChatGPTActuallyBusyForTaskQueue === 'function' && isChatGPTActuallyBusyForTaskQueue())
         || (

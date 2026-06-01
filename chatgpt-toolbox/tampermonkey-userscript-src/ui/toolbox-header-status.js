@@ -442,9 +442,63 @@
 
       const isResponding = resolveRespondingFlag(capability, responseState, s);
 
-      const isAttachmentProcessing = responseState === 'attachment_processing'
+      let composerCount = 0;
 
-        || responseReason.includes('attachment');
+      let composerUploading = false;
+
+      try {
+
+        if (typeof getComposerAttachmentState === 'function') {
+
+          const attachmentSnap = getComposerAttachmentState({ reason: 'header-status-attachment-chip' });
+
+          composerCount = Math.max(
+
+            0,
+
+            Number(
+
+              attachmentSnap.count != null ? attachmentSnap.count
+
+                : (attachmentSnap.fileCount != null ? attachmentSnap.fileCount
+
+                  : (attachmentSnap.totalCount != null ? attachmentSnap.totalCount : 0)),
+
+            ) || 0,
+
+          );
+
+          composerUploading = !!(
+
+            Number(attachmentSnap.uploadingCount || attachmentSnap.uploading || 0) > 0
+
+            || attachmentSnap.attachmentUploading === true
+
+            || attachmentSnap.stillUploading === true
+
+          );
+
+        }
+
+      } catch (attachmentErr) {
+
+        console.error('[HEADER_STATUS] attachment chip composer state failed', attachmentErr);
+
+      }
+
+
+
+      const isAttachmentProcessing = (
+
+        composerUploading
+
+        || responseState === 'attachment_processing'
+
+        || responseReason === 'attachment_processing'
+
+      );
+
+      const hasMountedAttachment = composerCount > 0;
 
       const isWaitingComposer = sendTaskPhase === 'waiting_composer'
 
@@ -457,6 +511,42 @@
         || sendTaskPhase === 'waiting_ready'
 
         || waitingSend;
+
+      let realSendReadyForHeader = false;
+      try {
+        if (
+          typeof UploadModule !== 'undefined'
+          && UploadModule
+          && typeof UploadModule.maybeHealStaleWaitingReplyState === 'function'
+        ) {
+          UploadModule.maybeHealStaleWaitingReplyState('toolbox-header-status');
+        }
+        if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.findSendButton === 'function') {
+          const sendButton = ComposerApi.findSendButton({ silent: true, reason: 'toolbox-header-status' });
+          if (
+            sendButton
+            && typeof ComposerApi.isSendButtonReady === 'function'
+          ) {
+            realSendReadyForHeader = !!ComposerApi.isSendButtonReady(sendButton);
+          } else {
+            realSendReadyForHeader = !!(sendButton && sendButton.disabled !== true);
+          }
+        }
+      } catch (headerHealErr) {
+        const errText = headerHealErr && headerHealErr.message
+          ? headerHealErr.message
+          : String(headerHealErr);
+        console.error('[HEADER_STATUS][HEAL_STALE_WAITING_REPLY_FAILED]', headerHealErr);
+      }
+
+      const suppressWaitingReplyChip = waitingReply
+        && !isResponding
+        && realSendReadyForHeader
+        && (
+          isWaitingComposer
+          || responseState === 'ready'
+          || responseState === 'idle'
+        );
 
 
 
@@ -504,7 +594,7 @@
 
         });
 
-      } else if (waitingReply) {
+      } else if (waitingReply && !suppressWaitingReplyChip) {
 
         chips.push({
 
@@ -574,7 +664,7 @@
 
           key: 'attachment',
 
-          text: '附件中',
+          text: '附件处理中',
 
           level: 'warn',
 
@@ -582,11 +672,39 @@
 
         });
 
+      } else if (hasMountedAttachment) {
+
+        chips.push({
+
+          key: 'attachment',
+
+          text: '有附件',
+
+          level: 'info',
+
+          priority: 75,
+
+        });
+
       }
 
 
 
-      if (uploadTaskPhase === 'running' || uploadTaskPhase === 'uploading') {
+      if (uploadTaskPhase === 'failed' || uploadTaskPhase === 'error') {
+
+        chips.push({
+
+          key: 'upload',
+
+          text: '上传失败',
+
+          level: 'danger',
+
+          priority: 72,
+
+        });
+
+      } else if (uploadTaskPhase === 'running' || uploadTaskPhase === 'uploading') {
 
         chips.push({
 

@@ -3705,7 +3705,7 @@
     const copyHotkeyUploadVerifyLoopEveryRoundBtn = qs(UploadSelectors.closedLoopUploadEveryRoundHotkeyBtn, scope);
     if (copyHotkeyUploadVerifyLoopEveryRoundBtn) {
       const targetLabel = getCopyThenShortcutTargetLabel() || '目标快捷键';
-      copyHotkeyUploadVerifyLoopEveryRoundBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每一轮都自动重新上传代码`;
+      copyHotkeyUploadVerifyLoopEveryRoundBtn.title = `等待回复完成 -> 复制最后回复 -> 判断终止信号 -> ${targetLabel} -> 发送继续指令；每轮都自动重新上传代码`;
     }
 
     const copyHotkeyUploadVerifyLoopPlainBtn = qs(UploadSelectors.closedLoopUploadEvery5Btn, scope);

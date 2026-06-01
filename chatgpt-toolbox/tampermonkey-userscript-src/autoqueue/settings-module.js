@@ -261,7 +261,7 @@
 
       const summary = GlobalUsageStore.getGlobalUsageEventsSummary({ maxLines: 30 });
       const previewLines = [
-        `今日 ${summary.dayKey}：消息 ${summary.messageUsed}/${summary.messageLimit}，上传 ${summary.uploadUsed}/${summary.uploadLimit}`,
+        `近 ${summary.uploadWindowHours}h 上传 ${summary.uploadUsed}/${summary.uploadLimit}，近 ${summary.messageWindowHours}h 消息 ${summary.messageUsed}/${summary.messageLimit}`,
         `事件数：消息 ${summary.messageEventCount}，上传 ${summary.uploadEventCount}`,
         '',
         '最近消息事件：',
@@ -327,7 +327,7 @@
         : { used: 0 };
 
       const confirmed = window.confirm(
-        '确定要重置今日全局上传额度和消息额度统计吗？这只会重置工具箱内部统计，不会影响 ChatGPT 官方额度。',
+        '确定要重置全局上传额度和消息额度统计吗？这只会重置工具箱内部统计，不会影响 ChatGPT 官方额度。',
       );
       if (!confirmed) {
         return;
@@ -353,7 +353,7 @@
       ToolboxShell.appendLog(
         `[SETTINGS][QUOTA_RESET] uploadUsedBefore=${uploadBefore.used} messageUsedBefore=${messageBefore.used}`,
       );
-      setSettingsStatus('今日全局额度统计已重置', 'ok');
+      setSettingsStatus('全局额度统计已重置', 'ok');
     }
 
     function readFromUi() {
@@ -1532,9 +1532,9 @@
 
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save" title="修改上限后顶部「上传额度 / 消息额度」的分母会立即更新。">保存额度设置</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置今日统计</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-view-events" title="查看今日全局上传/消息计数事件（所有标签页共享）。">查看今日事件</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-export-events" title="导出今日全局额度事件到工具箱日志，并尝试复制到剪贴板。">导出事件日志</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置额度统计</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-view-events" title="查看滑动窗口内的全局上传/消息计数事件（所有标签页共享）。">查看窗口事件</button>
+              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-export-events" title="导出滑动窗口内的全局额度事件到工具箱日志，并尝试复制到剪贴板。">导出事件日志</button>
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器 / 标题提醒</div>

@@ -4337,7 +4337,7 @@ const AutoQueueModule = (() => {
           </div>
           <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
             <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每轮上传</button>
             <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
           </div>
           <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
@@ -39087,16 +39087,30 @@ const AutoQueueModule = (() => {
         }
 
         const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
-        if (!logModule || typeof logModule.invokeCopyToolboxLog !== 'function') {
+        if (!logModule || typeof logModule.runCopyToolboxLogWithFeedback !== 'function') {
           const msg = '日志模块未就绪，无法复制日志';
           console.error('[ChatGPT toolbox] copy log skipped: LogModule not ready');
           ToolboxShell.setStatus(msg, 'warn');
           ToolboxShell.appendLog('[AUTOQ][COPY_LOG][skip] reason=log_module_not_ready');
+          if (typeof setShortActionButtonBusy === 'function') {
+            setShortActionButtonBusy(copyLogBtn, '复制失败', {
+              action: 'copy-log',
+              idleText: '复制日志',
+            });
+            if (typeof scheduleRestoreShortActionButton === 'function') {
+              scheduleRestoreShortActionButton(copyLogBtn, 1200, { idleText: '复制日志' });
+            }
+          }
           return;
         }
 
         ToolboxShell.appendLog('[AUTOQ][COPY_LOG][CLICK_DELEGATED]');
-        logModule.invokeCopyToolboxLog('autoq-action-bar:delegated');
+        void logModule.runCopyToolboxLogWithFeedback('autoq-action-bar:delegated', copyLogBtn).catch((err) => {
+          const errText = err && err.message ? err.message : String(err);
+          console.error('[AUTOQ][COPY_LOG][failed]', err);
+          ToolboxShell.setStatus(`复制日志失败：${errText}`, 'error');
+          ToolboxShell.appendLog(`[AUTOQ][COPY_LOG][failed] error=${errText}`);
+        });
         return;
       }
 
@@ -39421,7 +39435,7 @@ const AutoQueueModule = (() => {
             </div>
             <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
               <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每一轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每轮上传</button>
               <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
             </div>
             <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>

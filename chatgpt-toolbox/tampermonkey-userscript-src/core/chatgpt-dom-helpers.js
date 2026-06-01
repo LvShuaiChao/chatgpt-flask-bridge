@@ -178,6 +178,140 @@ const SEND_BUTTON_CANDIDATES_LOG_MS = 2000;
 let sendButtonSelectLoggedAt = 0;
 const SEND_BUTTON_SELECT_LOG_MS = 2000;
 
+const COMPOSER_SEND_READY_SLEEP_MS_DEFAULT = 300;
+
+function composeSendReadySleep(ms) {
+  const delay = Math.max(0, Number(ms) || COMPOSER_SEND_READY_SLEEP_MS_DEFAULT);
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, delay);
+  });
+}
+
+/**
+ * Only the real ChatGPT composer submit control — never attachment/remove/voice buttons.
+ * @param {string} [reason]
+ * @returns {HTMLButtonElement|null}
+ */
+function getRealComposerSendButton(reason) {
+  const btn = document.querySelector('button[data-testid="send-button"]');
+  if (!(btn instanceof HTMLButtonElement)) {
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[COMPOSER][REAL_SEND_BUTTON_NOT_FOUND] reason=${reason || '-'}`,
+      );
+    }
+    return null;
+  }
+
+  const aria = String(btn.getAttribute('aria-label') || '');
+  const testid = String(btn.getAttribute('data-testid') || '');
+  const disabled =
+    btn.disabled
+    || btn.getAttribute('aria-disabled') === 'true'
+    || btn.classList.contains('disabled');
+
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog(
+      `[COMPOSER][REAL_SEND_BUTTON_CHECK] reason=${reason || '-'} testid=${testid} aria=${aria || '-'} disabled=${disabled ? 1 : 0}`,
+    );
+  }
+
+  if (disabled) {
+    return null;
+  }
+
+  return btn;
+}
+
+/**
+ * Hard gate before clicking send: attachment processing finished and real send-button enabled.
+ * @param {string} [reason]
+ * @returns {boolean}
+ */
+function isComposerReallySendReady(reason) {
+  const state = typeof detectComposerResponseState === 'function'
+    ? detectComposerResponseState({ reason: reason || 'send-ready-check' })
+    : null;
+  const responseState = String(
+    (state && state.response_state)
+    || (state && state.responseState)
+    || '',
+  ).trim();
+
+  const attachmentState = typeof getComposerAttachmentState === 'function'
+    ? getComposerAttachmentState({ reason: reason || 'send-ready-check' })
+    : null;
+  const attachmentCount = Number(
+    (attachmentState && (attachmentState.composer ?? attachmentState.count))
+    || 0,
+  );
+  const hasAttachment = attachmentCount > 0;
+  const uploading = Number((attachmentState && attachmentState.uploading) || 0) > 0
+    || Number((attachmentState && attachmentState.nativeUploading) || 0) > 0
+    || (attachmentState && attachmentState.isUploading === true);
+
+  if (responseState === 'attachment_processing') {
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[SEND_READY][WAIT_ATTACHMENT_PROCESSING] reason=${reason || '-'} responseState=${responseState}`,
+      );
+    }
+    return false;
+  }
+
+  if (uploading) {
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[SEND_READY][WAIT_ATTACHMENT_UPLOADING] reason=${reason || '-'} uploading=${uploading ? 1 : 0}`,
+      );
+    }
+    return false;
+  }
+
+  const sendButton = getRealComposerSendButton(reason);
+  if (!sendButton) {
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[SEND_READY][WAIT_SEND_BUTTON] reason=${reason || '-'} responseState=${responseState || '-'} hasAttachment=${hasAttachment ? 1 : 0}`,
+      );
+    }
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Poll until isComposerReallySendReady returns true or timeout.
+ * @param {object} [options]
+ * @returns {Promise<boolean>}
+ */
+async function waitComposerReallySendReady(options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const intervalMs = Number(options.intervalMs || COMPOSER_SEND_READY_SLEEP_MS_DEFAULT);
+  const startAt = Date.now();
+  const reason = options.reason || 'wait';
+
+  while (Date.now() - startAt < timeoutMs) {
+    if (isComposerReallySendReady(reason)) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND_READY][OK] reason=${reason} waitedMs=${Date.now() - startAt}`,
+        );
+      }
+      return true;
+    }
+    await composeSendReadySleep(intervalMs);
+  }
+
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog(
+      `[SEND_READY][TIMEOUT] reason=${reason} timeoutMs=${timeoutMs}`,
+    );
+  }
+  return false;
+}
+
 function isDomHelperComposerDebugEnabled(options = {}) {
   if (typeof isToolboxDebugEnabled === 'function') {
     return isToolboxDebugEnabled(options);
@@ -312,6 +446,11 @@ function classifySendButtonCandidate(meta, composerRoot) {
     return meta;
   }
 
+  if (/移除文件|删除文件|移除附件|删除附件|remove file|remove attachment/i.test(combined)) {
+    meta.rejectReason = 'remove-attachment-button';
+    return meta;
+  }
+
   if (/添加文件|选择文件|上传文件|附加文件|add file|attach file|upload file|composer-plus/i.test(combined)) {
     meta.rejectReason = 'upload-entry-button';
     return meta;
@@ -439,169 +578,55 @@ function logSendButtonSelect(result, composerText) {
  * @returns {{ found: boolean, button: HTMLButtonElement|null, reason: string, candidates: Array<object> }}
  */
 function detectRealSendButton(composerRoot, options = {}) {
-  const emptyResult = {
-    found: false,
-    button: null,
-    reason: 'send-button-not-found',
-    candidates: [],
-  };
-
-  const scope = composerRoot instanceof HTMLElement
-    ? composerRoot
-    : resolveComposerScopeForSendButton(options || {});
+  const detectReason = String(
+    (options && options.reason)
+    || (options && options.source)
+    || 'detect-real-send-button',
+  ).trim() || 'detect-real-send-button';
 
   const composerText = typeof getChatGPTComposerText === 'function'
     ? getChatGPTComposerText()
     : '';
 
-  if (!(scope instanceof HTMLElement)) {
-    emptyResult.reason = 'composer-root-not-found';
-    logSendButtonSelect(emptyResult, composerText);
-    return emptyResult;
-  }
+  const rawSendButton = document.querySelector('button[data-testid="send-button"]');
+  const sendButton = getRealComposerSendButton(detectReason);
 
-  // Priority: explicit send button selectors first.
-  for (const selector of SEND_BUTTON_SELECTORS) {
-    const priorityBtn = scope.querySelector(selector);
-    if (!(priorityBtn instanceof HTMLButtonElement) || isInsideToolbox(priorityBtn)) {
-      continue;
-    }
-    const priorityMeta = classifySendButtonCandidate(buildSendButtonCandidateMeta(priorityBtn), scope);
-    if (!priorityMeta.rejectReason && priorityMeta.button instanceof HTMLButtonElement) {
-      const btnReady = !priorityMeta.disabled && priorityBtn.getAttribute('aria-disabled') !== 'true';
-      const result = btnReady
-        ? { found: true, button: priorityBtn, reason: 'send_button_ready', candidates: [] }
-        : { found: false, button: null, reason: 'send-button-disabled', candidates: [] };
-      logSendButtonSelect(result, composerText);
-      return result;
-    }
-  }
-
-  const rawButtons = Array.from(scope.querySelectorAll('button'));
-  const selectorCandidates = [];
-  collectSendButtonCandidatesFromScope(scope, selectorCandidates);
-
-  const seen = new Set();
-  const allButtons = [];
-
-  for (const btn of selectorCandidates) {
-    if (btn instanceof HTMLButtonElement && !seen.has(btn)) {
-      seen.add(btn);
-      allButtons.push(btn);
-    }
-  }
-
-  for (const btn of rawButtons) {
-    if (btn instanceof HTMLButtonElement && !isInsideToolbox(btn) && !seen.has(btn)) {
-      seen.add(btn);
-      allButtons.push(btn);
-    }
-  }
-
-  const candidates = [];
-  let best = null;
-
-  for (const btn of allButtons) {
-    if (!btn || isInsideToolbox(btn)) {
-      continue;
-    }
-
-    const meta = classifySendButtonCandidate(buildSendButtonCandidateMeta(btn), scope);
-    candidates.push({
-      text: meta.text,
-      ariaLabel: meta.ariaLabel,
-      title: meta.title,
-      dataTestId: meta.dataTestId,
-      disabled: meta.disabled,
-      visible: meta.visible,
-      rect: meta.rect,
-      className: meta.className,
-      accept: meta.accept,
-      rejectReason: meta.rejectReason || (meta.score >= 2 ? '' : 'low-confidence-not-send'),
-      score: meta.score,
-    });
-
-    if (!meta.rejectReason && (!best || meta.score > best.score)) {
-      best = meta;
-    }
-  }
-
-  candidates.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-
-  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-    const now = Date.now();
-    if (now - sendButtonCandidatesLoggedAt >= SEND_BUTTON_CANDIDATES_LOG_MS) {
-      sendButtonCandidatesLoggedAt = now;
-      const items = candidates.slice(0, 6).map((c) => (
-        `aria=${c.ariaLabel || '-'} testid=${c.dataTestId || '-'} reject=${c.rejectReason || '-'} score=${c.score || 0}`
-      ));
-      ToolboxShell.appendLog(
-        `[COMPOSER][SEND_BUTTON_CANDIDATES] count=${candidates.length} item=${items.join(' | ')}`,
-      );
-    }
-  }
-
-  if (best && best.button instanceof HTMLButtonElement) {
-    const btnReady = !best.disabled && best.button.getAttribute('aria-disabled') !== 'true';
-    if (!btnReady) {
-      const disabledResult = {
-        found: false,
-        button: null,
-        reason: 'send-button-disabled',
-        candidates,
-      };
-      logSendButtonSelect(disabledResult, composerText);
-      return disabledResult;
-    }
+  if (sendButton instanceof HTMLButtonElement) {
     const readyResult = {
       found: true,
-      button: best.button,
+      button: sendButton,
       reason: 'send_button_ready',
-      candidates,
+      candidates: [],
     };
     logSendButtonSelect(readyResult, composerText);
     return readyResult;
   }
 
-  const disabledCandidate = candidates.find((c) => c.visible && !c.rejectReason && c.disabled);
-  if (disabledCandidate) {
-    const disabledResult = {
-      found: true,
-      button: null,
-      reason: 'send-button-disabled',
-      candidates,
-    };
-    logSendButtonSelect(disabledResult, composerText);
-    return disabledResult;
-  }
+  const disabled = rawSendButton instanceof HTMLButtonElement
+    && (
+      rawSendButton.disabled
+      || rawSendButton.getAttribute('aria-disabled') === 'true'
+      || rawSendButton.classList.contains('disabled')
+    );
 
-  logSendButtonSelect(emptyResult, composerText);
-  return {
+  const notReadyResult = {
     found: false,
     button: null,
-    reason: 'send-button-not-found',
-    candidates,
+    reason: disabled ? 'send-button-disabled' : 'send-button-not-found',
+    candidates: [],
   };
+  logSendButtonSelect(notReadyResult, composerText);
+  return notReadyResult;
 }
 
 function findRealChatGPTSendButton(options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
-  const explicitScope = opts.scope instanceof HTMLElement ? opts.scope : null;
-  const composerScope = explicitScope || resolveComposerScopeForSendButton(opts);
-
-  const detected = detectRealSendButton(composerScope);
-  if (detected.found && detected.button instanceof HTMLButtonElement) {
-    return detected.button;
+  const detectReason = String(opts.reason || opts.source || 'find-real-send-button').trim()
+    || 'find-real-send-button';
+  const btn = getRealComposerSendButton(detectReason);
+  if (btn instanceof HTMLButtonElement) {
+    return btn;
   }
-
-  if (composerScope && isDomHelperComposerDebugEnabled(opts)) {
-    logSendButtonGlobalFallbackThrottled();
-    const globalDetected = detectRealSendButton(document.body);
-    if (globalDetected.found && globalDetected.button instanceof HTMLButtonElement) {
-      return globalDetected.button;
-    }
-  }
-
   return null;
 }
 
