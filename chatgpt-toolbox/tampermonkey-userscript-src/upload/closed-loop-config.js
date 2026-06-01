@@ -9,12 +9,12 @@
       WITHOUT_HOTKEY: 'without_hotkey',
     };
 
-    /** 每轮上传：与「每5轮上传」并列时使用，不用中文「一」或「每1轮」 */
-    const CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL = '每轮上传';
+    /** 每1轮上传：与「每5轮上传」并列时的界面文案 */
+    const CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL = '每1轮上传';
 
     const STALE_CLOSED_LOOP_UPLOAD_INTERVAL_TEXTS = new Set([
+      '每轮上传',
       '每一轮上传',
-      '每1轮上传',
       '每一轮',
     ]);
 
@@ -124,7 +124,7 @@
       if (expected && current === expected) {
         return expected;
       }
-      if (/每一轮|每1轮/.test(current) && expected.includes(CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL)) {
+      if (/每一轮|每1轮|每轮上传/.test(current) && expected.includes(CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL)) {
         return expected;
       }
       const intervalPart = current.replace(/^.*\+/, '');

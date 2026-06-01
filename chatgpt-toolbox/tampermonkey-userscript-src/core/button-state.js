@@ -59,6 +59,60 @@
     '再次点击可取消',
   ]);
 
+  const STABLE_LABEL_DYNAMIC_STATUS_EXACT = new Set([
+    '停止',
+    '发送中',
+    '等待回复',
+    '等待回复...',
+    '等待回复后复制',
+    '上传中',
+    '处理中',
+    '复制中',
+    '继续中',
+    '继续中...',
+    '等待完成',
+    '停止回答',
+    '停止中',
+    '正在停止',
+    '取消中',
+    '复制失败',
+    '等待发送',
+    '检查中',
+    '执行中',
+    '流程失败',
+    '准备复制',
+    '发送快捷键',
+    '停止智能继续',
+    '停止环继续',
+    '停止闭环继续',
+    '等待回复后复制',
+    '确认剪贴板',
+    '确认剪贴板...',
+    '发送快捷键...',
+    '复制中...',
+    '停止批量任务组',
+    '正在启动/自动上传…',
+    '上传初始附件',
+    '额度等待中',
+    '等待下次发送',
+    '批量上传中',
+  ]);
+
+  const STABLE_LABEL_DYNAMIC_STATUS_INCLUDES = Object.freeze([
+    '点击停止',
+    '点击取消',
+    '再次点击停止',
+    '再次点击可取消',
+    '等待回复',
+    '发送中',
+    '上传中',
+    '处理中',
+    '复制中',
+    '继续中',
+    '停止环继续',
+    '停止闭环继续',
+  ]);
+
   const CANCELLABLE_BUTTON_ACTIONS = new Set([
     'cancel-send',
     'cancel-wait-reply',
@@ -511,10 +565,106 @@
 
   function sanitizeSendMessageButtonText(text) {
     const normalized = String(text || '').trim();
-    if (!normalized || SEND_BTN_ALLOWED_TEXTS.has(normalized)) {
-      return normalized;
+    if (!normalized || isDynamicButtonStatusText(normalized)) {
+      return '';
     }
-    return '发送消息';
+    return normalized === '发送消息' ? normalized : '';
+  }
+
+  function isStableActionButton(button) {
+    if (!button) {
+      return false;
+    }
+    if (button.hasAttribute('data-dynamic-label-allowed')) {
+      return false;
+    }
+    if (button.hasAttribute('data-stable-label')) {
+      return true;
+    }
+    if (isSendMessageToolboxButton(button) || isBatchTaskMainButton(button)) {
+      return true;
+    }
+    const className = String(button.className || '');
+    const action = String(
+      button.dataset.cgptBaseAction
+      || button.dataset.action
+      || button.getAttribute('data-action')
+      || '',
+    ).trim();
+    return (
+      className.includes('cgpt-btn')
+      || className.includes('cgpt-toolbox-small-btn')
+      || action.length > 0
+    );
+  }
+
+  function getOrInitStableButtonLabel(button, fallbackText = '') {
+    if (!button) {
+      return String(fallbackText || '').trim();
+    }
+    const saved = String(button.dataset.stableLabel || button.dataset.idleLabel || '').trim();
+    if (saved && !isDynamicButtonStatusText(saved)) {
+      if (!button.dataset.stableLabel) {
+        button.dataset.stableLabel = saved;
+      }
+      if (!button.dataset.idleLabel) {
+        button.dataset.idleLabel = saved;
+      }
+      button.dataset.keepStableLabel = '1';
+      return saved;
+    }
+    const current = String(button.textContent || '').trim();
+    const fallback = String(fallbackText || '').trim();
+    const candidate = (!isDynamicButtonStatusText(current) && current)
+      || (!isDynamicButtonStatusText(fallback) && fallback)
+      || '';
+    if (candidate) {
+      button.dataset.stableLabel = candidate;
+      button.dataset.idleLabel = candidate;
+      button.dataset.keepStableLabel = '1';
+      return candidate;
+    }
+    return saved || current || fallback;
+  }
+
+  function resolveButtonStatusText(rawTitle, rawText, phase, extra = {}) {
+    const title = String(rawTitle || '').trim();
+    if (title) {
+      return title;
+    }
+    const text = String(rawText || '').trim();
+    if (!text) {
+      return '';
+    }
+    if (isDynamicButtonStatusText(text)) {
+      return text;
+    }
+    if (isToolboxButtonActivePhase(phase, extra)) {
+      return text;
+    }
+    return '';
+  }
+
+  function applyStableActionButtonLabel(button, displayText, statusText) {
+    if (!button) {
+      return;
+    }
+    const stableText = getOrInitStableButtonLabel(button, displayText);
+    if (stableText) {
+      button.textContent = stableText;
+    } else if (displayText) {
+      button.textContent = String(displayText);
+    }
+    const normalizedStatus = String(statusText || '').trim();
+    if (normalizedStatus) {
+      button.dataset.cgptStatusText = normalizedStatus;
+      button.title = normalizedStatus;
+    } else {
+      delete button.dataset.cgptStatusText;
+      if (stableText) {
+        button.title = stableText;
+      }
+    }
   }
 
   function isButtonBusyPhase(phase, extra = {}) {
@@ -710,6 +860,74 @@
     }
   }
 
+  function isDynamicButtonStatusText(text) {
+    const normalized = String(text || '').trim();
+    if (!normalized) {
+      return false;
+    }
+    if (STABLE_LABEL_DYNAMIC_STATUS_EXACT.has(normalized)) {
+      return true;
+    }
+    return STABLE_LABEL_DYNAMIC_STATUS_INCLUDES.some((marker) => normalized.includes(marker));
+  }
+
+  function shouldAutoKeepStableButtonLabel(button) {
+    return isStableActionButton(button);
+  }
+
+  function markButtonStableLabel(button, label) {
+    if (!button) {
+      return;
+    }
+    const normalized = String(label || button.textContent || '').trim();
+    if (!normalized || isDynamicButtonStatusText(normalized)) {
+      return;
+    }
+    button.dataset.stableLabel = normalized;
+    button.dataset.idleLabel = normalized;
+    button.dataset.keepStableLabel = '1';
+  }
+
+  function getStableButtonText(button, viewState = {}) {
+    if (!button) {
+      return '';
+    }
+    if (!isStableActionButton(button)) {
+      return String(viewState && viewState.text || button.textContent || '').trim();
+    }
+    const fallback = String(viewState && viewState.text || '').trim();
+    if (fallback && !isDynamicButtonStatusText(fallback)) {
+      return getOrInitStableButtonLabel(button, fallback);
+    }
+    return getOrInitStableButtonLabel(button, button.textContent || '');
+  }
+
+  function isToolboxButtonActivePhase(phase, extra = {}) {
+    const normalized = String(phase || '').toLowerCase();
+    if (
+      normalized === ButtonPhase.RUNNING
+      || normalized === ButtonPhase.SENDING
+      || normalized === ButtonPhase.UPLOADING
+      || normalized === ButtonPhase.WAITING
+      || normalized === ButtonPhase.WAITING_SEND
+      || normalized === ButtonPhase.WAITING_REPLY
+      || normalized === ButtonPhase.COPYING
+      || normalized === ButtonPhase.CANCELLING
+      || normalized === ButtonPhase.DANGER
+      || normalized === ButtonPhase.CONTINUING
+      || normalized === ButtonPhase.CHECKING
+      || normalized === ButtonPhase.INITIALIZING
+      || normalized === ButtonPhase.WAITING_INPUT
+      || normalized === ButtonPhase.WAITING_ATTACHMENT
+      || normalized === ButtonPhase.QUOTA_WAITING
+      || normalized === ButtonPhase.STARTUP_UPLOADING
+      || normalized === ButtonPhase.NAVIGATING
+    ) {
+      return true;
+    }
+    return isButtonBusyPhase(phase, extra) || extra.busy === true;
+  }
+
   function setToolboxButtonState(button, options = {}) {
     if (!button) {
       return false;
@@ -736,27 +954,36 @@
     };
 
     const oldPhase = button.dataset.cgptButtonPhase || '-';
-    let nextText = text != null ? String(text) : '';
-    const nextTitle = title != null ? String(title) : '';
+    const rawViewText = text != null ? String(text) : '';
+    const rawViewTitle = title != null ? String(title) : '';
+    let nextText = rawViewText;
+    const nextTitle = rawViewTitle;
 
     if (isSendBtn && nextText) {
       nextText = sanitizeSendMessageButtonText(nextText);
     }
 
-    if (isBatchTaskMainButton(button) && nextText) {
+    if (
+      isStableActionButton(button)
+      && nextText
+      && !isDynamicButtonStatusText(nextText)
+      && (
+        phase === ButtonPhase.IDLE
+        || phase === ButtonPhase.SUCCESS
+        || phase === ButtonPhase.COMPLETED
+        || !button.dataset.stableLabel
+      )
+    ) {
+      markButtonStableLabel(button, nextText);
+    }
+
+    if (isBatchTaskMainButton(button) && nextText && isDynamicButtonStatusText(nextText)) {
       const attemptedText = nextText;
-      if (
-        typeof AutoQueueModule !== 'undefined'
-        && typeof AutoQueueModule.updateBatchTaskMainButton === 'function'
-      ) {
-        AutoQueueModule.updateBatchTaskMainButton(`skip-generic-button-update:${reason || '-'}`);
-      }
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[BATCH_BUTTON][GENERIC_UPDATE_BLOCKED] id=${button.id || '-'} attempted=${attemptedText} reason=${reason || '-'}`,
+          `[BATCH_BUTTON][STATUS_TEXT_REDIRECTED] id=${button.id || '-'} attempted=${attemptedText} reason=${reason || '-'}`,
         );
       }
-      nextText = String(button.textContent || '').trim();
     }
 
     const isBusyState = isSendBtn
@@ -793,13 +1020,19 @@
       }
     }
 
-    if (nextText) {
+    const statusText = resolveButtonStatusText(nextTitle, rawViewText, phase, { allowCancel, busy });
+    if (isStableActionButton(button)) {
+      applyStableActionButtonLabel(button, nextText, statusText);
+    } else if (nextText) {
       button.textContent = nextText;
+      delete button.dataset.cgptStatusText;
+      if (nextTitle || nextText) {
+        button.title = nextTitle || nextText;
+      }
     }
 
-    if (nextTitle) {
-      button.title = nextTitle;
-    }
+    const isActivePhase = isToolboxButtonActivePhase(phase, { allowCancel, busy });
+    button.classList.toggle('cgpt-action-button-active', isActivePhase && !preserveDisabledIdleColor);
 
     button.dataset.cgptButtonPhase = phase;
     if (isSendBtn) {
@@ -820,9 +1053,10 @@
     const isCancelAction =
       actionName.includes('cancel')
       || actionName.includes('stop');
+    const dangerTextProbe = rawViewText || nextText;
     const looksDangerAction =
-      nextText.includes('删除')
-      || nextText.includes('清空')
+      dangerTextProbe.includes('删除')
+      || dangerTextProbe.includes('清空')
       || allowCancel === true
       || isCancelAction
       || BUTTON_PHASE_ALLOW_CANCEL.has(phase)
@@ -1146,6 +1380,7 @@
     if (!btn.dataset.cgptShortActionIdleText) {
       btn.dataset.cgptShortActionIdleText = idleText;
     }
+    markButtonStableLabel(btn, idleText);
 
     const prevTimer = shortActionButtonRestoreTimers.get(btn);
     if (prevTimer) {
@@ -1154,8 +1389,14 @@
     }
 
     btn.dataset.cgptShortActionBusy = '1';
-    btn.classList.add('cgpt-btn-busy', 'cgpt-btn-danger', 'cgpt-short-action-busy');
-    btn.textContent = String(text || '处理中');
+    btn.classList.add('cgpt-btn-busy', 'cgpt-btn-danger', 'cgpt-short-action-busy', 'cgpt-action-button-active');
+    const busyText = String(text || '处理中');
+    if (isStableActionButton(btn)) {
+      applyStableActionButtonLabel(btn, idleText, busyText);
+    } else {
+      btn.textContent = busyText;
+      delete btn.dataset.cgptStatusText;
+    }
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
 
@@ -1191,9 +1432,11 @@
       'cgpt-btn-danger',
       'cgpt-short-action-busy',
       'cgpt-btn-failed',
+      'cgpt-action-button-active',
     );
     delete btn.dataset.cgptShortActionBusy;
-    btn.textContent = idleText;
+    delete btn.dataset.cgptStatusText;
+    btn.textContent = getStableButtonText(btn, { text: idleText }) || idleText;
     btn.disabled = false;
     btn.removeAttribute('disabled');
     btn.removeAttribute('aria-busy');
@@ -1270,6 +1513,11 @@
     auditButtonColorLeak,
     auditSendMessageButtonColorLeak,
     auditHomePageButtonColors,
+    isDynamicButtonStatusText,
+    isStableActionButton,
+    getOrInitStableButtonLabel,
+    markButtonStableLabel,
+    getStableButtonText,
     setToolboxButtonState,
     setButtonIdle,
     setButtonInitializing,

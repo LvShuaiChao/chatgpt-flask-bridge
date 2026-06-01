@@ -117,8 +117,12 @@
       ...view,
       title: options.titleWhenBusy
         || `当前状态：${statusText}；回复完成后再操作`,
-      forceDanger: true,
-      buttonPhase: options.buttonPhase || 'waiting_reply',
+      phase: TaskPhase.IDLE,
+      buttonPhase: 'idle',
+      forceDanger: false,
+      allowCancel: false,
+      pageBusyButNotOwner: true,
+      preserveBaseColorWhenDisabled: true,
     };
   }
 
@@ -323,6 +327,7 @@
       || t === '环-快捷键模式+每轮上传'
       || t === '环-快捷键模式+每一轮上传'
       || t === '环-快捷键模式+每1轮上传'
+      || t === '闭环-快捷键模式+每轮上传'
       || t === '闭环-快捷键模式+每一轮上传'
       || t === '闭环-快捷键模式+每1轮上传'
       || t === '环-仅对话+每5轮上传';
@@ -919,10 +924,28 @@
 
   function isRunningOwnerButton(buttonConfig = {}, runningOwner = null) {
     const owner = runningOwner && typeof runningOwner === 'object' ? runningOwner : {};
-    const buttonId = String(buttonConfig.id || buttonConfig.buttonId || '').trim();
-    const action = String(buttonConfig.action || '').trim();
-    const ownerId = String(owner.buttonId || '').trim();
-    const ownerAction = String(owner.action || '').trim();
+    const buttonId = String(
+      buttonConfig.id
+      || buttonConfig.buttonId
+      || '',
+    ).trim();
+    const action = String(
+      buttonConfig.action
+      || buttonConfig.owner
+      || '',
+    ).trim();
+    const ownerId = String(
+      owner.buttonId
+      || owner.ownerButtonId
+      || owner.id
+      || '',
+    ).trim();
+    const ownerAction = String(
+      owner.action
+      || owner.owner
+      || owner.visualOwnerAction
+      || '',
+    ).trim();
     return !!(
       (buttonId && ownerId && buttonId === ownerId)
       || (action && ownerAction && action === ownerAction)
@@ -1154,11 +1177,21 @@
       'cgpt-btn-stop',
       'cgpt-btn-waiting-danger',
       'cgpt-action-running',
+      'cgpt-action-button-active',
       'cgpt-btn-busy',
       'cgpt-btn-failed',
       'cgpt-btn-running',
       'cgpt-btn-waiting',
+      'cgpt-btn-uploading',
+      'cgpt-btn-sending',
+      'cgpt-btn-copying',
+      'cgpt-btn-cancelling',
       'cgpt-btn-cancel',
+      'danger',
+      'waiting',
+      'busy',
+      'success',
+      'warning',
     ];
     for (const cls of staleClasses) {
       button.classList.remove(cls);
@@ -1647,6 +1680,114 @@
       text: idleText,
       title: view.title || '当前有其他任务正在运行，暂不可用',
       suppressedWaitingReply: true,
+    };
+  }
+
+  function isRedLikeButtonView(view = {}) {
+    const phase = normalizeTaskPhase(view.phase);
+    const buttonPhase = String(view.buttonPhase || '').trim().toLowerCase();
+    const runtimeAction = String(view.runtimeAction || view.action || '').trim().toLowerCase();
+    return !!(
+      view.forceDanger === true
+      || view.allowCancel === true
+      || runtimeAction.includes('cancel')
+      || runtimeAction.includes('stop')
+      || phase === TaskPhase.RUNNING
+      || phase === TaskPhase.SENDING
+      || phase === TaskPhase.WAITING_SEND
+      || phase === TaskPhase.WAITING_REPLY
+      || phase === TaskPhase.CANCELLING
+      || phase === TaskPhase.UPLOADING
+      || buttonPhase === 'danger'
+      || buttonPhase === 'running'
+      || buttonPhase === 'waiting'
+      || buttonPhase === 'waiting_reply'
+      || buttonPhase === 'sending'
+    );
+  }
+
+  function isButtonVisualOwner(action, button, view = {}, snapshot = {}) {
+    const normalizedAction = String(action || '').trim();
+    const buttonId = String(button && button.id ? button.id : '').trim();
+    const runningOwner = getToolboxRunningOwnerFromRuntime(snapshot);
+    if (isRunningOwnerButton({ id: buttonId, action: normalizedAction }, runningOwner)) {
+      return true;
+    }
+    const viewOwnerButtonId = String(view.ownerButtonId || '').trim();
+    if (buttonId && viewOwnerButtonId && buttonId === viewOwnerButtonId) {
+      return true;
+    }
+    const snapshotOwnerButtonId = String(
+      snapshot.visualOwnerButtonId
+      || snapshot.sendMessageTask?.visualOwnerButtonId
+      || snapshot.sendCopyHotkeyOwnerButtonId
+      || '',
+    ).trim();
+    if (buttonId && snapshotOwnerButtonId && buttonId === snapshotOwnerButtonId) {
+      return true;
+    }
+    const snapshotOwnerAction = String(
+      snapshot.visualOwnerAction
+      || snapshot.sendMessageTask?.visualOwnerAction
+      || snapshot.waitingReplyOwner
+      || '',
+    ).trim();
+    if (normalizedAction && snapshotOwnerAction && normalizedAction === snapshotOwnerAction) {
+      return true;
+    }
+    return false;
+  }
+
+  function suppressNonOwnerRedView(action, view, snapshot = {}, button = null, reason = '') {
+    if (!view || typeof view !== 'object') {
+      return view;
+    }
+    if (!isRedLikeButtonView(view)) {
+      return view;
+    }
+    if (isButtonVisualOwner(action, button, view, snapshot)) {
+      return view;
+    }
+    const pageBusy = !!(
+      isTopReplyBusyForButtons(snapshot)
+      || snapshot.assistantBusy
+      || snapshot.pageGenerating
+      || snapshot.capability?.isResponding
+      || snapshot.capability?.response_state === 'generating'
+      || snapshot.capability?.responseState === 'generating'
+    );
+    const looksLikePublicReplyLeak = !!(
+      pageBusy
+      || view.pageBusyButNotOwner === true
+      || view.forceDanger === true
+      || normalizeTaskPhase(view.phase) === TaskPhase.WAITING_REPLY
+    );
+    if (!looksLikePublicReplyLeak) {
+      return view;
+    }
+    const idleText = resolveIdleBusinessTextForAction(action, snapshot);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[BUTTON_OWNER][SUPPRESS_NON_OWNER_RED] action=${action || '-'} `
+        + `buttonId=${button && button.id ? button.id : '-'} `
+        + `reason=${reason || '-'} `
+        + `pageBusy=${pageBusy ? 1 : 0} `
+        + `oldPhase=${view.phase || '-'} oldButtonPhase=${view.buttonPhase || '-'}`,
+      );
+    }
+    return {
+      ...view,
+      phase: TaskPhase.IDLE,
+      buttonPhase: 'idle',
+      text: idleText,
+      title: view.title || '当前有其他任务正在运行，本按钮不是当前任务按钮',
+      disabled: view.disabled === true,
+      allowCancel: false,
+      action: view.disabled === true ? 'none' : action,
+      runtimeAction: '',
+      forceDanger: false,
+      preserveBaseColorWhenDisabled: true,
+      suppressedNonOwnerRed: true,
     };
   }
 
@@ -3739,19 +3880,19 @@
       );
 
     if ((topReplyAnswering || topReplyWaiting) && !active && !visualOwner.owned) {
-      return finalizeSendCopyHotkeyButtonViewState(snapshot, {
-        phase: TaskPhase.WAITING_REPLY,
+      return finalizeSendCopyHotkeyButtonViewState(snapshot, decorateIdleViewWithTopReplyStatus({
+        phase: TaskPhase.IDLE,
         text: sendCopyHotkeyLabel,
         title: `当前状态：${topReplyStatus.text || '等待回复'}；回复完成后再执行发送+复制+快捷键`,
         disabled: false,
         allowCancel: false,
         action: 'send-copy-hotkey',
         runtimeAction: '',
-        buttonPhase: 'waiting_reply',
-        forceDanger: true,
+        buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
-      }, capability, {
+        ownerButtonId: '',
+      }, snapshot), capability, {
         reason: 'top-reply-status',
         topReplyText: topReplyStatus.text || '-',
       });
@@ -4105,20 +4246,16 @@
       phase === TaskPhase.WAITING_REPLY
       || phase === 'waiting_reply'
       || autoState.waitingReply
-      || topReplyWaiting
-      || topReplyAnswering
     ) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '无限继续',
-        title: topReplyAnswering || topReplyWaiting
-          ? `当前状态：${topReplyStatus.text || '等待回复'}；自动继续正在等待 ChatGPT 回复完成，点击可停止`
-          : '正在等待 ChatGPT 回复完成，点击可停止',
+        title: '正在等待 ChatGPT 回复完成，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'waiting',
-        forceDanger: !!(topReplyAnswering || topReplyWaiting),
+        forceDanger: true,
       };
     }
 
@@ -4240,20 +4377,16 @@
       phase === TaskPhase.WAITING_REPLY
       || rawPhase === 'waiting_reply'
       || autoState.waitingReply
-      || topReplyWaiting
-      || topReplyAnswering
     ) {
       return {
         phase: TaskPhase.WAITING_REPLY,
         text: '无限继续直到完成',
-        title: topReplyAnswering || topReplyWaiting
-          ? `当前状态：${topReplyStatus.text || '等待回复'}；智能继续正在等待 ChatGPT 回复完成，点击可停止`
-          : '智能继续正在等待 ChatGPT 回复完成，点击可停止',
+        title: '智能继续正在等待 ChatGPT 回复完成，点击可停止',
         disabled: false,
         allowCancel: true,
         action: 'stop',
         buttonPhase: 'waiting',
-        forceDanger: !!(topReplyAnswering || topReplyWaiting),
+        forceDanger: true,
       };
     }
 
@@ -5309,6 +5442,13 @@
       button,
       reason,
     );
+    resolvedView = suppressNonOwnerRedView(
+      action,
+      resolvedView,
+      snapshot,
+      button,
+      reason,
+    );
 
     if (action === 'copy-log' || action === 'copy-error-log') {
       resolvedView = {
@@ -5522,6 +5662,13 @@
       snapshot,
       canonicalAction,
     );
+    resolvedView = suppressNonOwnerRedView(
+      canonicalAction || action,
+      resolvedView,
+      snapshot,
+      button,
+      `${reason || '-'}:after-unified-visual`,
+    );
     if (
       snapshot.closedLoopContinueRunning === true
       && isClosedLoopActionName(canonicalAction)
@@ -5568,6 +5715,21 @@
       } else {
         delete button.dataset.cgptRuntimeAction;
         delete button.dataset.cgptButtonAction;
+      }
+    }
+
+    const resolvedIdlePhase = normalizeTaskPhase(resolvedView.phase) === TaskPhase.IDLE;
+    const resolvedIdleButtonPhase = String(resolvedView.buttonPhase || '').trim().toLowerCase() === 'idle';
+    if (resolvedIdlePhase || resolvedIdleButtonPhase) {
+      cleanupNonIdleButtonClasses(
+        button,
+        TaskPhase.IDLE,
+        `${reason || '-'}:force-idle-cleanup-before-apply`,
+      );
+      button.removeAttribute('aria-busy');
+      if (button.dataset.autoDangerEnterBlock === '1') {
+        button.removeAttribute('data-danger-enter-block');
+        delete button.dataset.autoDangerEnterBlock;
       }
     }
 
@@ -5665,9 +5827,31 @@
         busy: shouldShowClosedLoopBusy,
       });
     }
-    button.title = String(
-      resolvedView.title || resolvedView.text || button.title || '',
-    ).trim();
+    const statusTitle = String(resolvedView.title || '').trim();
+    const dynamicStatusText = (
+      typeof ButtonState !== 'undefined'
+      && typeof ButtonState.isDynamicButtonStatusText === 'function'
+      && ButtonState.isDynamicButtonStatusText(resolvedView.text)
+    )
+      ? String(resolvedView.text || '').trim()
+      : '';
+    const titleToApply = statusTitle || dynamicStatusText;
+    if (titleToApply) {
+      button.title = titleToApply;
+      if (
+        typeof ButtonState !== 'undefined'
+        && typeof ButtonState.isStableActionButton === 'function'
+        && ButtonState.isStableActionButton(button)
+      ) {
+        button.dataset.cgptStatusText = titleToApply;
+      }
+    } else if (typeof ButtonState !== 'undefined' && typeof ButtonState.getStableButtonText === 'function') {
+      const stableTitle = ButtonState.getStableButtonText(button, resolvedView);
+      if (stableTitle) {
+        button.title = stableTitle;
+        delete button.dataset.cgptStatusText;
+      }
+    }
     const debugEnabled = (
       (typeof isUploadDebugEnabled === 'function' && isUploadDebugEnabled())
       || (typeof getCompactUiConfig === 'function' && (getCompactUiConfig() || {}).debugMode === true)

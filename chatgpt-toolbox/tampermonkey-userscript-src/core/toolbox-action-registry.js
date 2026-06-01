@@ -310,7 +310,7 @@ const ToolboxActionRegistry = (() => {
         handlerAction: ACTION.CLOSED_LOOP_HOTKEY_EVERY_ROUND,
         label: '',
         className: 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round',
-        title: '快捷键模式闭环（每轮上传）',
+        title: '快捷键模式闭环（每1轮上传）',
         required: true,
         visibleInUploadToolbar: false,
       }),

@@ -1262,6 +1262,8 @@ const AutoQueueModule = (() => {
       );
     }
 
+    const BATCH_TASK_MAIN_BUTTON_LABEL = '开始批量任务组';
+
     function getBatchTaskGroupButtonViewState(stateInput = null) {
       const input = stateInput && typeof stateInput === 'object'
         ? stateInput
@@ -1275,7 +1277,7 @@ const AutoQueueModule = (() => {
           return {
             phase: 'cancelling',
             buttonPhase: 'cancelling',
-            text: '停止中',
+            text: BATCH_TASK_MAIN_BUTTON_LABEL,
             title: '正在停止列表任务',
             disabled: true,
             action: 'none',
@@ -1286,7 +1288,7 @@ const AutoQueueModule = (() => {
           return {
             phase: 'running',
             buttonPhase: 'running',
-            text: '停止批量任务组',
+            text: BATCH_TASK_MAIN_BUTTON_LABEL,
             title: '列表模式正在运行，点击停止',
             disabled: false,
             action: 'stop',
@@ -1297,7 +1299,7 @@ const AutoQueueModule = (() => {
         return {
           phase: 'idle',
           buttonPhase: 'idle',
-          text: hasRunBefore ? '重新开始批量任务组' : '开始批量任务组',
+          text: hasRunBefore ? '重新开始批量任务组' : BATCH_TASK_MAIN_BUTTON_LABEL,
           title: '开始按列表顺序执行任务',
           disabled: false,
           action: 'start',
@@ -1309,7 +1311,7 @@ const AutoQueueModule = (() => {
         return {
           phase: 'cancelling',
           buttonPhase: 'cancelling',
-          text: '停止中',
+          text: BATCH_TASK_MAIN_BUTTON_LABEL,
           title: '正在停止批量任务组',
           disabled: true,
           action: 'none',
@@ -1321,7 +1323,7 @@ const AutoQueueModule = (() => {
         return {
           phase: 'running',
           buttonPhase: 'running',
-          text: '停止批量任务组',
+          text: BATCH_TASK_MAIN_BUTTON_LABEL,
           title: '批量任务组正在运行，点击停止',
           disabled: false,
           action: 'stop',
@@ -1332,7 +1334,7 @@ const AutoQueueModule = (() => {
       return {
         phase: 'idle',
         buttonPhase: 'idle',
-        text: input.hasRunBefore ? '重新开始批量任务组' : '开始批量任务组',
+        text: input.hasRunBefore ? '重新开始批量任务组' : BATCH_TASK_MAIN_BUTTON_LABEL,
         title: '开始执行当前列表任务',
         disabled: false,
         action: 'start',
@@ -1439,6 +1441,12 @@ const AutoQueueModule = (() => {
       if (config.promptMode === 'task') {
         btn.setAttribute('data-role', 'batch-task-main-button');
         btn.setAttribute('data-fixed-label-owner', 'batch-task');
+        if (
+          typeof ButtonState !== 'undefined'
+          && typeof ButtonState.markButtonStableLabel === 'function'
+        ) {
+          ButtonState.markButtonStableLabel(btn, BATCH_TASK_MAIN_BUTTON_LABEL);
+        }
       } else {
         btn.removeAttribute('data-role');
         btn.removeAttribute('data-fixed-label-owner');
@@ -4337,7 +4345,7 @@ const AutoQueueModule = (() => {
           </div>
           <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
             <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每1轮上传</button>
             <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
           </div>
           <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
@@ -30991,6 +30999,10 @@ const AutoQueueModule = (() => {
       if (startBtn) {
         startBtn.classList.remove('cgpt-task-running-indicator');
 
+        if (isBatchTaskGroupOwnerMode()) {
+          updateBatchTaskMainButton(reason);
+        } else
+
         // 仅手动上传（uploadingFromAutoQueue）时，批量按钮保持空闲态，不与上传按钮重复「上传中」
         if (!batchRunning) {
           const assistantBusyForStart = config.promptMode === 'task'
@@ -39435,7 +39447,7 @@ const AutoQueueModule = (() => {
             </div>
             <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
               <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1">闭环-快捷键模式+每5轮上传</button>
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1">闭环-快捷键模式+每1轮上传</button>
               <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1">闭环-仅对话+每5轮上传</button>
             </div>
             <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>

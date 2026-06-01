@@ -896,7 +896,12 @@
     const btn = document.createElement('button');
 
     btn.type = 'button';
-    btn.textContent = String(text || '');
+    const buttonLabel = String(text || '');
+    btn.textContent = buttonLabel;
+    if (buttonLabel) {
+      btn.dataset.idleLabel = buttonLabel.trim();
+      btn.dataset.keepStableLabel = '1';
+    }
 
     const variant = String(options.variant || options.type || '').trim();
 

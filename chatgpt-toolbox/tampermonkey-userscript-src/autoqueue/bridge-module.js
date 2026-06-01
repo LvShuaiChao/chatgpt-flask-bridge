@@ -4057,7 +4057,7 @@
             -
           </div>
           <div class="cgpt-row" style="margin-top:6px; flex-wrap:wrap; gap:4px;">
-            <button type="button" class="cgpt-btn" id="cgpt-bridge-toggle-advanced" style="font-size:11px; padding:2px 8px;">显示高级字段</button>
+            <button type="button" class="cgpt-btn" id="cgpt-bridge-toggle-advanced" data-dynamic-label-allowed="1" style="font-size:11px; padding:2px 8px;">显示高级字段</button>
             <button type="button" class="cgpt-btn" id="cgpt-bridge-copy-diag" style="font-size:11px; padding:2px 8px;">复制诊断信息</button>
           </div>
           <div id="cgpt-bridge-capability-advanced" style="display:none; margin-top:6px;">

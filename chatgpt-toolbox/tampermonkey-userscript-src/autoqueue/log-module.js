@@ -471,7 +471,7 @@
               id: 'cgpt-log-copy-errors',
               source: 'log-tab-button',
             })}
-            <button type="button" class="cgpt-btn" id="cgpt-log-toggle">显示最近日志</button>
+            <button type="button" class="cgpt-btn" id="cgpt-log-toggle" data-dynamic-label-allowed="1">显示最近日志</button>
             <button type="button" class="cgpt-btn danger cgpt-log-clear-right" id="cgpt-log-clear">清空日志</button>
           </div>
           <div class="cgpt-log-list" id="cgpt-log-list" style="display:none;"></div>

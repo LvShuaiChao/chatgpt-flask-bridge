@@ -964,10 +964,6 @@
           display: none !important;
         }
 
-        #${APP.panelId}.cgpt-toolbox-compact #cgpt-upload-module.compact-hide-upload-start #cgpt-upload-start {
-          display: none !important;
-        }
-
         #${APP.panelId}.cgpt-toolbox-compact #cgpt-upload-module.compact-hide-file-list .cgpt-upload-list {
           display: none !important;
         }
@@ -2376,6 +2372,18 @@
           color: #ffffff !important;
         }
 
+        .cgpt-btn.cgpt-action-button-active {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+        }
+
+        .cgpt-btn.cgpt-action-button-active:hover {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+        }
+
         .cgpt-btn-attention {
           outline: 2px solid #facc15 !important;
           box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.25) !important;
@@ -2935,6 +2943,28 @@
         .cgpt-kv label {
           color: #cbd5e1;
           white-space: nowrap;
+        }
+
+        /* 闭环等待设置里的数字输入框不要占满整行 */
+        #cgpt-autoq-closed-loop-panel .cgpt-kv {
+          grid-template-columns: 170px 150px !important;
+          justify-content: start !important;
+          gap: 10px !important;
+        }
+        #cgpt-autoq-closed-loop-panel .cgpt-kv > input.cgpt-input[type="number"] {
+          width: 150px !important;
+          max-width: 150px !important;
+          min-width: 0 !important;
+          box-sizing: border-box !important;
+        }
+        @media (max-width: 620px) {
+          #cgpt-autoq-closed-loop-panel .cgpt-kv {
+            grid-template-columns: 150px 120px !important;
+          }
+          #cgpt-autoq-closed-loop-panel .cgpt-kv > input.cgpt-input[type="number"] {
+            width: 120px !important;
+            max-width: 120px !important;
+          }
         }
 
         .cgpt-checkbox-line {
@@ -6880,6 +6910,7 @@
       compactBtn.type = 'button';
       compactBtn.className = 'cgpt-toolbox-small-btn';
       compactBtn.id = 'cgpt-toolbox-compact';
+      compactBtn.setAttribute('data-dynamic-label-allowed', '1');
       compactBtn.textContent = '简洁';
       actions.insertBefore(compactBtn, actions.firstChild);
     }
@@ -7080,7 +7111,7 @@
               <div class="cgpt-toolbox-title">小张工具箱</div>
               <div class="cgpt-header-status-chips" aria-live="polite"></div>
               <div class="cgpt-toolbox-header-actions">
-                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact">简洁</button>
+                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact" data-dynamic-label-allowed="1">简洁</button>
               </div>
             </div>
             <div class="cgpt-toolbox-header-status-row cgpt-top-status-row" id="cgpt-toolbox-page-status-row"></div>

@@ -140,7 +140,7 @@
         && ClosedLoopConfig
         && ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
         ? ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
-        : '每轮上传';
+        : '每1轮上传';
       if (normalized === 'closed-loop-with-hotkey-upload-every-round') {
         return `闭环-快捷键模式+${everyRoundLabel}`;
       }
