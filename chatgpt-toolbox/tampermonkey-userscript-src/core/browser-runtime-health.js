@@ -2,6 +2,50 @@
  * 浏览器后台限速检测 + 前台恢复补偿
  ********************************************************************/
 
+function getBridgeStateSnapshotSafe(reason = '-') {
+  if (typeof BridgeState !== 'undefined' && BridgeState) {
+    return BridgeState;
+  }
+
+  if (
+    typeof window !== 'undefined'
+    && window
+    && window.BridgeState
+  ) {
+    return window.BridgeState;
+  }
+
+  if (typeof getRuntimeSnapshot === 'function') {
+    try {
+      return getRuntimeSnapshot(`bridge-state-safe:${reason || '-'}`) || {};
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[BRIDGE_STATE][SAFE_RUNTIME_SNAPSHOT_FAILED]', error);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+        ToolboxShell.appendLog(
+          `[BRIDGE_STATE][SAFE_RUNTIME_SNAPSHOT_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+      }
+      return {};
+    }
+  }
+
+  if (
+    typeof lastRuntimeSnapshot !== 'undefined'
+    && lastRuntimeSnapshot
+  ) {
+    return lastRuntimeSnapshot;
+  }
+
+  if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
+    ToolboxShell.appendLog(
+      `[BRIDGE_STATE][SAFE_EMPTY] reason=${reason || '-'} action=return-empty-object`,
+    );
+  }
+
+  return {};
+}
+
 function buildBrowserRuntimeFields(reason = '-') {
   if (typeof BrowserRuntimeHealth !== 'undefined' && BrowserRuntimeHealth.getRuntimeState) {
     const rt = BrowserRuntimeHealth.getRuntimeState(reason);

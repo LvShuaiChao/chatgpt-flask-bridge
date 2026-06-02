@@ -220,7 +220,21 @@ function shouldLogSendButtonNotFound(reason) {
  * @returns {HTMLButtonElement|null}
  */
 function getRealComposerSendButton(reason) {
-  const btn = document.querySelector('button[data-testid="send-button"]');
+  const selectors = [
+    'button#composer-submit-button',
+    'button[data-testid="send-button"]',
+    'button[data-testid="composer-send-button"]',
+    'button[aria-label="Send prompt"]',
+    'button[aria-label="发送提示"]',
+  ];
+  let btn = null;
+  for (let i = 0; i < selectors.length; i += 1) {
+    const candidate = document.querySelector(selectors[i]);
+    if (candidate instanceof HTMLButtonElement) {
+      btn = candidate;
+      break;
+    }
+  }
   if (!(btn instanceof HTMLButtonElement)) {
     if (
       shouldLogSendButtonNotFound(reason)

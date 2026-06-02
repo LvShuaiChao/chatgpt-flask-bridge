@@ -20,7 +20,61 @@
 
   const TaskPhase = buildTaskPhaseEnum();
 
+  function getToolboxAuthorityFromSnapshot(snapshot = {}) {
+    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const unified = snap.toolboxUnifiedAuthority;
+    if (unified && typeof unified === 'object' && unified.reply) {
+      return {
+        isToolboxStatusAuthoritySnapshot: true,
+        replyText: unified.reply.text || '',
+        replyAnswering: unified.reply.state === 'answering' || unified.flags.answering === true,
+        replyWaiting: unified.reply.state === 'answering'
+          || unified.composer.hasRealStopButton === true,
+        replyBusy: unified.reply.state === 'answering'
+          || unified.composer.hasRealStopButton === true,
+        replyReady: unified.flags.ready === true,
+        shouldWaitReplyByTopStatus: unified.reply.state === 'answering'
+          || unified.composer.hasRealStopButton === true,
+        canSendByTopStatus: unified.flags.canSend === true || snap.canSend === true,
+        responseState: unified.raw && unified.raw.responseState ? unified.raw.responseState : '',
+        responseReason: unified.raw && unified.raw.responseReason ? unified.raw.responseReason : '',
+        topReplyStatus: snap.topReplyStatus || {},
+      };
+    }
+    const candidates = [
+      snap.toolboxStatusAuthority,
+      snap.statusAuthority,
+      snap.topStatusAuthority,
+    ];
+    for (const item of candidates) {
+      if (
+        item
+        && typeof item === 'object'
+        && item.isToolboxStatusAuthoritySnapshot === true
+      ) {
+        return item;
+      }
+    }
+    return null;
+  }
+
   function getTopReplyStatusFromSnapshot(snapshot = {}) {
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return {
+        ...(authority.topReplyStatus || {}),
+        text: authority.replyText || '',
+        answering: authority.replyAnswering === true,
+        waitingReply: authority.replyWaiting === true,
+        sending: authority.replySending === true,
+        ready: authority.replyReady === true,
+        blocked: authority.replyBlocked === true,
+        offline: authority.replyOffline === true,
+        busy: authority.replyBusy === true,
+        responseState: authority.responseState || '',
+        responseReason: authority.responseReason || '',
+      };
+    }
     const status = snapshot.topReplyStatus && typeof snapshot.topReplyStatus === 'object'
       ? snapshot.topReplyStatus
       : {};
@@ -58,6 +112,7 @@
     );
     const ready = !!(
       status.ready
+      || text === '待发送'
       || text === '可输入'
       || text === '就绪'
     );
@@ -88,17 +143,64 @@
   }
 
   function resolvePageBusyForButtons(snapshot = {}) {
-    const capability = snapshot.capability && typeof snapshot.capability === 'object'
-      ? snapshot.capability
-      : {};
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return authority.replyBusy === true;
+    }
     const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    return !!topReplyBusy;
+  }
+
+  function isAuthorityReplyBusyForButtons(snapshot = {}) {
+    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const unified = snap.toolboxUnifiedAuthority;
+    if (unified && unified.reply) {
+      return !!(
+        unified.reply.state === 'answering'
+        || unified.composer.hasRealStopButton === true
+      );
+    }
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return !!(
+        authority.replyBusy === true
+        || authority.shouldWaitReplyByTopStatus === true
+      );
+    }
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
     return !!(
-      topReplyBusy
-      || snapshot.assistantBusy
-      || capability.isResponding
-      || capability.response_state === 'generating'
-      || capability.responseState === 'generating'
+      topReplyStatus.answering
+      || topReplyStatus.waitingReply
+      || topReplyStatus.sending
+      || topReplyStatus.busy
     );
+  }
+
+  function isAuthorityReplyAnsweringForButtons(snapshot = {}) {
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return !!(
+        authority.replyAnswering === true
+        || authority.replyBusy === true
+      );
+    }
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    return !!(
+      topReplyStatus.answering
+      || topReplyStatus.busy
+    );
+  }
+
+  function isAuthorityReplyWaitingForButtons(snapshot = {}) {
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return !!(
+        authority.replyWaiting === true
+        || authority.shouldWaitReplyByTopStatus === true
+      );
+    }
+    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
+    return !!topReplyStatus.waitingReply;
   }
 
   function decorateIdleViewWithTopReplyStatus(view, snapshot = {}, options = {}) {
@@ -1757,14 +1859,7 @@
     if (isButtonVisualOwner(action, button, view, snapshot)) {
       return view;
     }
-    const pageBusy = !!(
-      isTopReplyBusyForButtons(snapshot)
-      || snapshot.assistantBusy
-      || snapshot.pageGenerating
-      || snapshot.capability?.isResponding
-      || snapshot.capability?.response_state === 'generating'
-      || snapshot.capability?.responseState === 'generating'
-    );
+    const pageBusy = isAuthorityReplyBusyForButtons(snapshot);
     const looksLikePublicReplyLeak = !!(
       pageBusy
       || view.pageBusyButNotOwner === true
@@ -2080,28 +2175,43 @@
       });
     }
 
-    const legacyWaitingReply = !!(
-      snapshot.legacyFlags
-      && snapshot.legacyFlags.waitingReply
-    );
+    const authorityReplyBusy = isAuthorityReplyBusyForButtons(snapshot);
+    const authorityReplyAnswering = isAuthorityReplyAnsweringForButtons(snapshot);
+    const authorityReplyWaiting = isAuthorityReplyWaitingForButtons(snapshot);
 
-    const sendPhaseWaitingReply = String(
-      snapshot.sendTask && snapshot.sendTask.phase || '',
-    ).trim() === 'waiting_reply';
-
-    if (legacyWaitingReply || sendPhaseWaitingReply || topReplyWaiting || topReplyAnswering) {
+    if (authorityReplyBusy) {
       const uploadPhase = String(
         snapshot.uploadTask && snapshot.uploadTask.phase || '',
       ).trim().toLowerCase();
       const uploadTaskIdle = !uploadPhase || uploadPhase === 'idle' || uploadPhase === 'success';
-      const statusText = String(topReplyStatus.text || '').trim() || (topReplyAnswering ? '回答中' : '等回复');
+      const statusText = String(topReplyStatus.text || '').trim()
+        || (authorityReplyAnswering ? '回答中' : '等回复');
+      const authority = getToolboxAuthorityFromSnapshot(snapshot);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
+        ToolboxShell.appendLogIfChanged(
+          'UPLOAD_BUTTON_AUTHORITY_GATE',
+          [
+            `replyText=${authority && authority.replyText ? authority.replyText : '-'}`,
+            `replyBusy=${authority && authority.replyBusy ? 1 : 0}`,
+            `replyDoneStable=${authority && authority.replyDoneStable ? 1 : 0}`,
+            `canStartUploadByTopStatus=${authority && authority.canStartUploadByTopStatus ? 1 : 0}`,
+            `uploadPhase=${uploadPhase || '-'}`,
+          ].join('|'),
+          `[UPLOAD_BUTTON][AUTHORITY_GATE] replyText=${authority && authority.replyText ? authority.replyText : '-'} `
+          + `replyBusy=${authority && authority.replyBusy ? 1 : 0} `
+          + `replyDoneStable=${authority && authority.replyDoneStable ? 1 : 0} `
+          + `canStartUploadByTopStatus=${authority && authority.canStartUploadByTopStatus ? 1 : 0} `
+          + `uploadPhase=${uploadPhase || '-'}`,
+          1500,
+        );
+      }
       return withUploadButtonTaskKey({
         phase: uploadTaskIdle ? TaskPhase.IDLE : TaskPhase.DISABLED,
         text: '开始上传',
         title: uploadTaskIdle
-          ? (topReplyWaiting || topReplyAnswering
-            ? `当前状态：${statusText}；发送任务正在等待回复，上传暂不可用`
-            : '发送任务正在等待回复，上传暂不可用')
+          ? (authorityReplyWaiting || authorityReplyAnswering
+            ? `当前状态：${statusText}；左上角状态未就绪，上传暂不可用`
+            : '左上角状态未就绪，上传暂不可用')
           : '当前正在等待回复，禁止上传，避免打断批量任务',
         disabled: true,
         allowCancel: false,
@@ -2409,11 +2519,15 @@
 
     capability = capability && typeof capability === 'object' ? capability : {};
     const hasComposer = !!capability.hasComposer;
-    const isResponding = !!capability.isResponding;
+    const diagnosticCapabilityResponding = !!capability.isResponding;
+    void diagnosticCapabilityResponding;
     const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
     const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
     const topReplyWaiting = isTopReplyWaitingForButtons(snapshot);
     const topReplyBusy = isTopReplyBusyForButtons(snapshot);
+    const authorityReplyBusy = isAuthorityReplyBusyForButtons(snapshot);
+    const authorityReplyAnswering = isAuthorityReplyAnsweringForButtons(snapshot);
+    const authorityReplyWaiting = isAuthorityReplyWaitingForButtons(snapshot);
     void topReplyStatus;
     void topReplyBusy;
     const finish = (view, decideExtra = {}) => {
@@ -2450,13 +2564,7 @@
     if (isSendMessageOwner) {
       const taskPhase = String(sendMessageTask.phase || '').trim().toLowerCase();
       const action = String(sendMessageTask.action || sendMessageTask.plan?.mode || 'send-message').trim();
-      const pageGenerating = !!(
-        topReplyAnswering
-        || capability.isResponding
-        || capability.response_state === 'generating'
-        || capability.responseState === 'generating'
-        || snapshot.assistantBusy
-      );
+      const pageGenerating = authorityReplyBusy || authorityReplyAnswering || authorityReplyWaiting;
       const stopVisible = typeof document !== 'undefined'
         && !!document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
       const isWaitingReplyPhase = taskPhase === 'sent_waiting_response'
@@ -2542,7 +2650,7 @@
         || taskPhase === 'stopping_response'
         || (
           !!sendMessageTask.hasClickedNativeSend
-          && (phase === TaskPhase.WAITING_REPLY || capability.isResponding)
+          && (phase === TaskPhase.WAITING_REPLY || authorityReplyBusy)
         );
       return finish({
         phase: isStopView ? TaskPhase.WAITING_REPLY : TaskPhase.WAITING_SEND,
@@ -2600,6 +2708,28 @@
     }
 
     if (phase === TaskPhase.WAITING_SEND) {
+      const authorityCanSendFromSnapshot = !!(
+        snapshot.canSend === true
+        || snapshot.sendable === true
+        || (
+          snapshot.toolboxUnifiedAuthority
+          && snapshot.toolboxUnifiedAuthority.flags
+          && snapshot.toolboxUnifiedAuthority.flags.canSend === true
+        )
+      );
+      if (authorityCanSendFromSnapshot && !isSendMessageOwner) {
+        return finish({
+          phase: TaskPhase.IDLE,
+          text: '发送消息',
+          title: '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+          disabled: false,
+          allowCancel: false,
+          action: 'send-message',
+          runtimeAction: 'send-message',
+          buttonPhase: 'idle',
+        }, { reason: 'authority-can-send-while-stale-waiting-send-phase' });
+      }
+
       const textLen = Number(
         hints.composerTextLen
         || capability.composerTextLen
@@ -2619,16 +2749,16 @@
 
       let inferredPhase = 'waiting_send';
       if (!textLen && !hasAttachment) {
-        if (capability.isResponding || capability.response_state === 'generating') {
+        if (authorityReplyBusy) {
           inferredPhase = 'waiting_reply';
         } else {
           inferredPhase = 'waiting_input';
         }
       } else if (hasAttachment && nativeReady) {
-        inferredPhase = capability.isResponding ? 'clicking_send' : 'ready_to_click';
-      } else if (hasAttachment && (!nativeReady || capability.isResponding)) {
+        inferredPhase = authorityReplyBusy ? 'clicking_send' : 'ready_to_click';
+      } else if (hasAttachment && (!nativeReady || authorityReplyBusy)) {
         inferredPhase = 'waiting_attachment';
-      } else if (capability.isResponding) {
+      } else if (authorityReplyBusy) {
         inferredPhase = 'waiting_reply';
       }
 
@@ -2751,10 +2881,19 @@
       });
     }
 
-    const canSend = hasComposer || pendingAttachmentWaitSend || !!failureHint || !!successHint;
-    if (!canSend || !hasComposer) {
+    const authorityCanSendNow = !!(
+      snapshot.canSend === true
+      || snapshot.sendable === true
+      || (
+        snapshot.toolboxUnifiedAuthority
+        && snapshot.toolboxUnifiedAuthority.flags
+        && snapshot.toolboxUnifiedAuthority.flags.canSend === true
+      )
+    );
+    const canSend = authorityCanSendNow || hasComposer || pendingAttachmentWaitSend || !!failureHint || !!successHint;
+    if ((!canSend || !hasComposer) && !authorityCanSendNow) {
       const hint = failureHint
-        || (isResponding ? '助手正在回复，暂不可发送' : '当前页面未检测到可用输入框或发送按钮')
+        || (authorityReplyBusy ? '助手正在回复，暂不可发送' : '当前页面未检测到可用输入框或发送按钮')
         || (successHint ? '消息已发送' : '');
 
       if (failureHint) {
@@ -2795,7 +2934,7 @@
     return finish({
       phase: TaskPhase.IDLE,
       text: '发送消息',
-      title: isResponding
+      title: authorityReplyBusy
         ? '助手正在回复，请等待完成后再发送'
         : '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
       disabled: false,
@@ -2981,14 +3120,7 @@
       || capability.responseState
       || '',
     ).trim().toLowerCase();
-    const pageGenerating = !!(
-      topReplyBusy
-      || snapshot.assistantBusy
-      || capability.isResponding
-      || responseState === 'generating'
-      || capability.response_state === 'generating'
-      || capability.responseState === 'generating'
-    );
+    const pageGenerating = isAuthorityReplyBusyForButtons(snapshot);
 
     const idleView = decorateIdleViewWithTopReplyStatus({
       phase: TaskPhase.IDLE,
@@ -3614,15 +3746,7 @@
         && activePhases.has(phase)
       );
 
-    const pageGenerating = !!(
-      topReplyAnswering
-      || topReplyBusy
-      || isGenerating
-      || capability.isResponding
-      || capability.response_state === 'generating'
-      || capability.responseState === 'generating'
-      || snapshot.assistantBusy
-    );
+    const pageGenerating = isAuthorityReplyBusyForButtons(snapshot);
     void responseState;
     void responseReason;
     const pendingSendPhases = new Set([
@@ -4492,23 +4616,27 @@
   }
 
   function getPageReplyStatus(snapshot = {}) {
-    const sendPhase = getNormalizedSendTaskPhase(snapshot);
-    if (sendPhase === TaskPhase.WAITING_REPLY) {
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      if (authority.replyWaiting === true) {
+        return 'waiting_reply';
+      }
+      if (authority.replySending === true || authority.sendBusy === true) {
+        return 'sending';
+      }
+      if (authority.replyAnswering === true || authority.replyBusy === true) {
+        return 'answering';
+      }
+      return 'idle';
+    }
+    const top = getTopReplyStatusFromSnapshot(snapshot);
+    if (top.waitingReply) {
       return 'waiting_reply';
     }
-    if (sendPhase === TaskPhase.SENDING || sendPhase === TaskPhase.WAITING_SEND) {
+    if (top.sending) {
       return 'sending';
     }
-    if (sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
-      return 'answering';
-    }
-    if (isLegacySendWaitingReply(snapshot)) {
-      return 'waiting_reply';
-    }
-    if (isLegacyMessageSending(snapshot)) {
-      return 'sending';
-    }
-    if (snapshot.assistantBusy || isCapabilityResponding(snapshot.capability)) {
+    if (top.answering || top.busy) {
       return 'answering';
     }
     return 'idle';
@@ -4559,20 +4687,20 @@
   }
 
   function isEffectiveReplyBusy(snapshot = {}, capability = {}) {
-    const sendPhase = getNormalizedSendTaskPhase(snapshot);
+    void capability;
+    const authority = getToolboxAuthorityFromSnapshot(snapshot);
+    if (authority) {
+      return !!(
+        authority.replyBusy === true
+        || authority.shouldWaitReplyByTopStatus === true
+      );
+    }
     const pageReplyStatus = getPageReplyStatus(snapshot);
     return !!(
       isTopReplyBusyForButtons(snapshot)
-      || sendPhase === TaskPhase.WAITING_REPLY
-      || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
-      || sendPhase === TaskPhase.SENDING
-      || isLegacySendWaitingReply(snapshot)
-      || isLegacyMessageSending(snapshot)
-      || snapshot.assistantBusy
-      || isCapabilityResponding(capability)
-      || isCapabilityResponding(snapshot.capability)
       || pageReplyStatus === 'answering'
       || pageReplyStatus === 'waiting_reply'
+      || pageReplyStatus === 'sending'
     );
   }
 

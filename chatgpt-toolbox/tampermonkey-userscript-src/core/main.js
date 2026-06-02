@@ -10829,14 +10829,18 @@
       if (strictBtn instanceof HTMLButtonElement) {
         return strictBtn;
       }
-      return null;
     }
 
     const prioritySelectors = [
-      '#composer-submit-button',
+      'button#composer-submit-button',
       'button[data-testid="send-button"]',
+      'button[data-testid="composer-send-button"]',
       'main button[data-testid="send-button"]',
       'form button#composer-submit-button',
+      'button[aria-label="Send prompt"]',
+      'button[aria-label="发送提示"]',
+      'button[aria-label*="Send"]',
+      'button[aria-label*="发送"]',
     ];
 
     const scopes = collectComposerScopedButtonScanScopes();

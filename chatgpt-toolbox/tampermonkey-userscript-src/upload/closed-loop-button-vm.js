@@ -249,44 +249,33 @@
     }
 
     function isPageGeneratingForClosedLoop(snapshot = {}) {
-      if (snapshot.closedLoopContinueRunning === true) {
+      const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      const authority = (
+        snap.toolboxStatusAuthority
+        || snap.statusAuthority
+        || snap.topStatusAuthority
+        || null
+      );
+      if (
+        authority
+        && typeof authority === 'object'
+        && authority.isToolboxStatusAuthoritySnapshot === true
+      ) {
+        if (snap.closedLoopContinueRunning === true) {
+          return false;
+        }
+        return !!(
+          authority.replyBusy === true
+          || authority.shouldWaitReplyByTopStatus === true
+          || authority.replyAnswering === true
+          || authority.replyWaiting === true
+          || authority.replySending === true
+        );
+      }
+      if (snap.closedLoopContinueRunning === true) {
         return false;
       }
-      if (snapshot.pageGenerating === true || snapshot.assistantBusy === true) {
-        return true;
-      }
-      const cap = snapshot.capability && typeof snapshot.capability === 'object'
-        ? snapshot.capability
-        : {};
-      const responseState = String(
-        snapshot.responseState
-        || snapshot.response_state
-        || cap.response_state
-        || cap.responseState
-        || '',
-      ).trim().toLowerCase();
-      const responseReason = String(
-        snapshot.response_state_reason
-        || snapshot.responseStateReason
-        || cap.response_state_reason
-        || cap.responseStateReason
-        || '',
-      ).trim().toLowerCase();
-      if (
-        responseState === 'generating'
-        || responseState === 'responding'
-        || responseState === 'answering'
-        || responseReason.includes('assistant_busy')
-        || responseReason === 'response_in_progress'
-      ) {
-        return true;
-      }
-      const sendable = cap.sendable != null ? cap.sendable : snapshot.sendable;
-      const inputable = cap.inputable != null ? cap.inputable : snapshot.inputable;
-      if (sendable === false && inputable === false) {
-        return responseState === 'generating' || responseReason.includes('assistant_busy');
-      }
-      return false;
+      return !!(snap.pageGenerating === true || snap.assistantBusy === true);
     }
 
     function buildClosedLoopWaitingReplyIdleView(action, snapshot = {}) {

@@ -332,6 +332,46 @@
       return !lineHasRealExceptionSignal(line);
     }
 
+    function isRealToolboxErrorLogLine(line) {
+      const text = String(line || '').trim();
+      if (!text) {
+        return false;
+      }
+
+      if (
+        text.includes('[BUTTON_CLASS_CLEANUP]')
+        || text.includes('[BUTTON_COLOR]')
+        || text.includes('[BUTTON_VIEW][APPLY]')
+        || text.includes('removed=cgpt-btn-danger')
+        || (text.includes('removed=') && text.includes('cgpt-btn-failed'))
+      ) {
+        return false;
+      }
+
+      if (
+        text.includes('[TOOLBOX_TOP_ALERT][SHOW]')
+        && (
+          text.includes('level=error')
+          || text.includes('text=报错')
+        )
+      ) {
+        return true;
+      }
+
+      if (
+        /\[(ERROR|FAILED|EXCEPTION|FATAL)\]/i.test(text)
+        || /\]\[(ERROR|FAILED|EXCEPTION|FATAL)\]/i.test(text)
+        || /\b(ReferenceError|TypeError|SyntaxError|RangeError|UnhandledPromiseRejection)\b/.test(text)
+        || /\berror=/.test(text)
+        || text.includes('启动失败')
+        || text.includes('报错')
+      ) {
+        return true;
+      }
+
+      return false;
+    }
+
     function isCopyableErrorLogLine(line) {
       const text = String(line || '');
       if (!text.trim()) {
@@ -344,14 +384,7 @@
         return false;
       }
 
-      const lower = text.toLowerCase();
-      const errorKeywords = [
-        'error', 'warn', 'failed', 'fail', 'exception', 'traceback',
-        '失败', '错误', '异常', '超时', 'timeout', 'unauthorized',
-        'forbidden', 'not found', 'undefined', 'null',
-      ];
-
-      return errorKeywords.some((kw) => lower.includes(kw));
+      return isRealToolboxErrorLogLine(text);
     }
 
     function collectCopyableErrorLogLines() {
