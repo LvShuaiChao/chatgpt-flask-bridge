@@ -1099,7 +1099,12 @@
     return {
       phase: TaskPhase.IDLE,
       text: idleText,
-      title: CLOSED_LOOP_LOCKED_TITLE,
+      // 不要设置原生 title。
+      // 原生 title 会在鼠标悬停时弹出白色 tooltip，覆盖闭环红色按钮文本。
+      title: '',
+      disabledReason: CLOSED_LOOP_LOCKED_TITLE,
+      ariaLabel: `${idleText}，${CLOSED_LOOP_LOCKED_TITLE}`,
+      suppressNativeTooltip: true,
       disabled: true,
       allowCancel: false,
       action: 'none',
@@ -1295,7 +1300,11 @@
         phase: TaskPhase.IDLE,
         buttonPhase: 'idle',
         text: lockedText,
-        title: CLOSED_LOOP_LOCKED_TITLE,
+        // 不要使用原生 title，避免白色 tooltip 覆盖按钮文字。
+        title: '',
+        disabledReason: CLOSED_LOOP_LOCKED_TITLE,
+        ariaLabel: `${lockedText}，${CLOSED_LOOP_LOCKED_TITLE}`,
+        suppressNativeTooltip: true,
         disabled: true,
         allowCancel: false,
         action: 'none',
@@ -5727,6 +5736,7 @@
         `${reason || '-'}:force-idle-cleanup-before-apply`,
       );
       button.removeAttribute('aria-busy');
+      button.setAttribute('aria-busy', 'false');
       if (button.dataset.autoDangerEnterBlock === '1') {
         button.removeAttribute('data-danger-enter-block');
         delete button.dataset.autoDangerEnterBlock;
@@ -5827,29 +5837,49 @@
         busy: shouldShowClosedLoopBusy,
       });
     }
-    const statusTitle = String(resolvedView.title || '').trim();
-    const dynamicStatusText = (
-      typeof ButtonState !== 'undefined'
-      && typeof ButtonState.isDynamicButtonStatusText === 'function'
-      && ButtonState.isDynamicButtonStatusText(resolvedView.text)
-    )
-      ? String(resolvedView.text || '').trim()
-      : '';
-    const titleToApply = statusTitle || dynamicStatusText;
-    if (titleToApply) {
-      button.title = titleToApply;
-      if (
-        typeof ButtonState !== 'undefined'
-        && typeof ButtonState.isStableActionButton === 'function'
-        && ButtonState.isStableActionButton(button)
-      ) {
-        button.dataset.cgptStatusText = titleToApply;
+    const suppressNativeTooltip = resolvedView.suppressNativeTooltip === true
+      || resolvedView.lockedByClosedLoop === true;
+    if (suppressNativeTooltip) {
+      button.removeAttribute('title');
+      delete button.dataset.cgptStatusText;
+      const ariaLabel = String(
+        resolvedView.ariaLabel
+        || resolvedView.disabledReason
+        || resolvedView.text
+        || button.textContent
+        || '',
+      ).trim();
+      if (ariaLabel) {
+        button.setAttribute('aria-label', ariaLabel);
       }
-    } else if (typeof ButtonState !== 'undefined' && typeof ButtonState.getStableButtonText === 'function') {
-      const stableTitle = ButtonState.getStableButtonText(button, resolvedView);
-      if (stableTitle) {
-        button.title = stableTitle;
-        delete button.dataset.cgptStatusText;
+      if (resolvedView.disabledReason) {
+        button.dataset.disabledReason = String(resolvedView.disabledReason || '').trim();
+      }
+    } else {
+      const statusTitle = String(resolvedView.title || '').trim();
+      const dynamicStatusText = (
+        typeof ButtonState !== 'undefined'
+        && typeof ButtonState.isDynamicButtonStatusText === 'function'
+        && ButtonState.isDynamicButtonStatusText(resolvedView.text)
+      )
+        ? String(resolvedView.text || '').trim()
+        : '';
+      const titleToApply = statusTitle || dynamicStatusText;
+      if (titleToApply) {
+        button.title = titleToApply;
+        if (
+          typeof ButtonState !== 'undefined'
+          && typeof ButtonState.isStableActionButton === 'function'
+          && ButtonState.isStableActionButton(button)
+        ) {
+          button.dataset.cgptStatusText = titleToApply;
+        }
+      } else if (typeof ButtonState !== 'undefined' && typeof ButtonState.getStableButtonText === 'function') {
+        const stableTitle = ButtonState.getStableButtonText(button, resolvedView);
+        if (stableTitle) {
+          button.title = stableTitle;
+          delete button.dataset.cgptStatusText;
+        }
       }
     }
     const debugEnabled = (

@@ -111,6 +111,12 @@
     '继续中',
     '停止环继续',
     '停止闭环继续',
+    '（回复中',
+    '（等待 ',
+    '（下一轮',
+    '（确认完成）',
+    '（发送中）',
+    '（上传中）',
   ]);
 
   const CANCELLABLE_BUTTON_ACTIONS = new Set([
@@ -649,6 +655,18 @@
     if (!button) {
       return;
     }
+    const display = String(displayText || '').trim();
+    if (display && isDynamicButtonStatusText(display)) {
+      button.textContent = display;
+      const normalizedStatus = String(statusText || '').trim();
+      if (normalizedStatus) {
+        button.dataset.cgptStatusText = normalizedStatus;
+        button.title = normalizedStatus;
+      } else {
+        delete button.dataset.cgptStatusText;
+      }
+      return;
+    }
     const stableText = getOrInitStableButtonLabel(button, displayText);
     if (stableText) {
       button.textContent = stableText;
@@ -896,6 +914,9 @@
       return String(viewState && viewState.text || button.textContent || '').trim();
     }
     const fallback = String(viewState && viewState.text || '').trim();
+    if (fallback && isDynamicButtonStatusText(fallback)) {
+      return fallback;
+    }
     if (fallback && !isDynamicButtonStatusText(fallback)) {
       return getOrInitStableButtonLabel(button, fallback);
     }
@@ -991,7 +1012,13 @@
       : isButtonBusyPhase(phase, { busy });
     const usePermanentDanger = phase === ButtonPhase.DANGER && permanentDanger === true;
     const preserveDisabledIdleColor = preserveBaseColorWhenDisabled === true
-      && phase === ButtonPhase.IDLE
+      && (
+        phase === ButtonPhase.IDLE
+        || phase === ButtonPhase.INITIALIZING
+        || phase === ButtonPhase.CHECKING
+        || phase === ButtonPhase.WAITING_INPUT
+        || phase === ButtonPhase.WAITING_ATTACHMENT
+      )
       && disabled === true;
     const allowBusyClass = isBusyState && !preserveDisabledIdleColor;
 
@@ -1181,8 +1208,9 @@
       allowCancel: false,
       reason: extra.reason || 'initializing',
       title: extra.title || text,
-      ariaBusy: extra.ariaBusy != null ? extra.ariaBusy : true,
+      ariaBusy: extra.ariaBusy != null ? extra.ariaBusy : false,
       busy: false,
+      preserveBaseColorWhenDisabled: extra.preserveBaseColorWhenDisabled !== false,
       ...extra,
     });
   }

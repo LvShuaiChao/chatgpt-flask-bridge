@@ -1251,6 +1251,33 @@
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer {
           min-width: 8px;
           height: 1px;
+          background: transparent !important;
+          border-color: transparent !important;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.cgpt-top-status-empty,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge.cgpt-top-status-empty {
+          display: none !important;
+          min-width: 0 !important;
+          width: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border: 0 !important;
+          background: transparent !important;
+        }
+
+        /* 防御：spacer 绝不染成 danger/warning 等彩色块 */
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.cgpt-top-status-variant-ok,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.cgpt-top-status-variant-danger,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.cgpt-top-status-variant-warning,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.cgpt-top-status-variant-info,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.cgpt-top-status-variant-muted,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.danger,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.red,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.busy,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer.waiting {
+          background: transparent !important;
+          border-color: transparent !important;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge,
@@ -2554,6 +2581,14 @@
           background: linear-gradient(135deg, #ef4444, #dc2626) !important;
           color: #ffffff !important;
           border: 1px solid rgba(248, 113, 113, 0.65) !important;
+        }
+
+        #cgpt-closed-loop-upload-every5-btn,
+        #cgpt-closed-loop-upload-every-round-hotkey-btn,
+        #cgpt-closed-loop-upload-every5-hotkey-btn {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
         }
 
         .cgpt-btn.cgpt-btn-closed-loop:disabled {

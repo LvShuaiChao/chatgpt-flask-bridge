@@ -177,6 +177,9 @@ let sendButtonCandidatesLoggedAt = 0;
 const SEND_BUTTON_CANDIDATES_LOG_MS = 2000;
 let sendButtonSelectLoggedAt = 0;
 const SEND_BUTTON_SELECT_LOG_MS = 2000;
+let sendButtonNotFoundLoggedAt = 0;
+let sendButtonNotFoundLoggedReason = '';
+const SEND_BUTTON_NOT_FOUND_LOG_MS = 2000;
 
 const COMPOSER_SEND_READY_SLEEP_MS_DEFAULT = 300;
 
@@ -187,6 +190,30 @@ function composeSendReadySleep(ms) {
   });
 }
 
+function shouldLogSendButtonNotFound(reason) {
+  const normalizedReason = String(reason || '-').trim() || '-';
+  const now = Date.now();
+
+  // High-frequency polling paths should be heavily throttled.
+  const isHighFrequencyProbe = normalizedReason === 'findSendButton:silent'
+    || normalizedReason === 'snapshot:-'
+    || normalizedReason.startsWith('snapshot:');
+  const throttleMs = isHighFrequencyProbe
+    ? Math.max(SEND_BUTTON_NOT_FOUND_LOG_MS, 5000)
+    : SEND_BUTTON_NOT_FOUND_LOG_MS;
+
+  if (
+    normalizedReason === sendButtonNotFoundLoggedReason
+    && now - sendButtonNotFoundLoggedAt < throttleMs
+  ) {
+    return false;
+  }
+
+  sendButtonNotFoundLoggedReason = normalizedReason;
+  sendButtonNotFoundLoggedAt = now;
+  return true;
+}
+
 /**
  * Only the real ChatGPT composer submit control — never attachment/remove/voice buttons.
  * @param {string} [reason]
@@ -195,7 +222,11 @@ function composeSendReadySleep(ms) {
 function getRealComposerSendButton(reason) {
   const btn = document.querySelector('button[data-testid="send-button"]');
   if (!(btn instanceof HTMLButtonElement)) {
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    if (
+      shouldLogSendButtonNotFound(reason)
+      && typeof ToolboxShell !== 'undefined'
+      && typeof ToolboxShell.appendLog === 'function'
+    ) {
       ToolboxShell.appendLog(
         `[COMPOSER][REAL_SEND_BUTTON_NOT_FOUND] reason=${reason || '-'}`,
       );

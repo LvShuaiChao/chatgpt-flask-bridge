@@ -347,7 +347,7 @@
         return `（等待 ${sec}s）`;
       }
 
-      if (phase === 'waiting_reply' || waitKind === 'reply') {
+      if (phase === 'waiting_reply' || phase === 'wait_reply' || waitKind === 'reply') {
         const ms = Math.max(0, Number(waitVisual.replyWaitElapsedMs || 0));
         const sec = Math.floor(ms / 1000);
         return `（回复中 ${sec}s）`;
@@ -359,6 +359,10 @@
 
       if (phase === 'sending') {
         return '（发送中）';
+      }
+
+      if (phase === 'upload_before_send') {
+        return '（上传中）';
       }
 
       if (waitVisual.runningButtonText) {
