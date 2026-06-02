@@ -1911,6 +1911,22 @@
       return selectedMs;
     }
 
+    function getClosedLoopPostHotkeyDelayMs() {
+      const fromState = Number(closedLoopContinueState.postHotkeyDelayMs || 0) || 0;
+      if (fromState > 0) {
+        return fromState;
+      }
+      const fromConfig = Number(getClosedLoopNextStepDelayMs({
+        runId: closedLoopContinueState.runId || '-',
+        round: closedLoopContinueState.round || '-',
+        reason: 'post-hotkey-delay',
+      })) || 0;
+      if (fromConfig > 0) {
+        return fromConfig;
+      }
+      return 47000;
+    }
+
     function isNativeStopButtonElementForClosedLoop(btn) {
       if (!(btn instanceof HTMLElement)) {
         return false;
@@ -2531,115 +2547,57 @@
       };
     }
 
-    async function waitClosedLoopPostReplyDelay(runId, round, delayMs) {
+    async function waitClosedLoopPostHotkeyDelay(runId, round, delayMs) {
       const safeDelayMs = Math.max(0, Math.min(600000, Math.round(Number(delayMs) || 0)));
       const startMs = Date.now();
-      const endMs = startMs + safeDelayMs;
-
-      closedLoopContinueState.postReplyDelayRunning = true;
-      closedLoopContinueState.postReplyDelayStartedAtMs = startMs;
-      closedLoopContinueState.postReplyDelayUntilMs = endMs;
-      closedLoopContinueState.postReplyDelayMs = safeDelayMs;
-      closedLoopContinueState.nextStepCountdownEndAt = endMs;
+      const untilMs = startMs + safeDelayMs;
+      closedLoopContinueState.waitKind = 'post-hotkey';
+      closedLoopContinueState.postHotkeyDelayStartedAtMs = startMs;
+      closedLoopContinueState.postHotkeyDelayUntilMs = untilMs;
+      closedLoopContinueState.postHotkeyDelayMs = safeDelayMs;
+      closedLoopContinueState.nextStepCountdownEndAt = untilMs;
       closedLoopContinueState.nextStepDelayMs = safeDelayMs;
-      closedLoopContinueState.waitKind = 'next-step';
-      closedLoopContinueState.phase = CLOSED_LOOP_PHASES.POST_REPLY_DELAY;
-      setClosedLoopPhase(CLOSED_LOOP_PHASES.POST_REPLY_DELAY, {
-        reason: 'post-reply-delay-start',
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY, {
+        reason: `round-${round}-post-hotkey-delay`,
       });
-      startClosedLoopButtonCountdownTick(`post-reply-delay-round-${round}`);
-      ToolboxShell.appendLog(
-        [
-          '[CLOSED_LOOP][POST_REPLY_DELAY_START]',
-          `runId=${runId || '-'}`,
-          `round=${round || 0}`,
-          `delayMs=${safeDelayMs}`,
-          `delaySec=${Math.ceil(safeDelayMs / 1000)}`,
-        ].join(' '),
-      );
+      startClosedLoopButtonCountdownTick(`post-hotkey-delay-round-${round}`);
       renderClosedLoopContinueButtons();
-
-      while (Date.now() < endMs) {
-        if (!isClosedLoopRunActive(runId)) {
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][POST_REPLY_DELAY_ABORT] runId=${runId || '-'} round=${round || 0}`,
-          );
-          endClosedLoopNextStepWait('post-reply-delay-abort');
-          closedLoopContinueState.postReplyDelayRunning = false;
-          closedLoopContinueState.postReplyDelayUntilMs = 0;
-          closedLoopContinueState.postReplyDelayMs = 0;
-          return {
-            ok: false,
-            reason: 'inactive',
-          };
-        }
-
-        const remainingMs = Math.max(0, endMs - Date.now());
+      while (closedLoopContinueState.running && closedLoopContinueState.runId === runId) {
+        const now = Date.now();
+        const remainingMs = Math.max(0, untilMs - now);
         const remainingSec = Math.ceil(remainingMs / 1000);
-
-        closedLoopContinueState.postReplyDelayUntilMs = endMs;
-        closedLoopContinueState.nextStepCountdownEndAt = endMs;
-        closedLoopContinueState.waitKind = 'next-step';
-        closedLoopContinueState.phase = CLOSED_LOOP_PHASES.POST_REPLY_DELAY;
-
+        applyClosedLoopOwnerButtonRuntimeText({
+          closedLoopWaitVisual: {
+            phase: CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY,
+            waitKind: 'post-hotkey',
+            waitUntilMs: untilMs,
+            remainingMs,
+          },
+        }, 'post-hotkey-delay-tick');
         ToolboxShell.appendLog(
           [
-            '[CLOSED_LOOP][POST_REPLY_DELAY_TICK]',
-            `runId=${runId || '-'}`,
-            `round=${round || 0}`,
+            '[CLOSED_LOOP][POST_HOTKEY_DELAY_TICK]',
+            `runId=${runId}`,
+            `round=${round}`,
             `remainingSec=${remainingSec}`,
           ].join(' '),
         );
-        setStatus(
-          `第 ${round} 轮回复完成，等待 ${remainingSec} 秒后进入下一轮`,
-          'running',
-          {
-            persist: true,
-            shortText: `等${remainingSec}s`,
-          },
-        );
-        renderClosedLoopContinueButtons();
-        if (typeof scheduleUploadRender === 'function') {
-          scheduleUploadRender('closed-loop-post-delay-tick');
+        if (remainingMs <= 0) {
+          break;
         }
         await sleep(Math.min(1000, remainingMs));
       }
-      endClosedLoopNextStepWait('post-reply-delay-done');
-      closedLoopContinueState.postReplyDelayRunning = false;
-      closedLoopContinueState.postReplyDelayUntilMs = 0;
-      closedLoopContinueState.postReplyDelayMs = 0;
       if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
-        ToolboxShell.appendLog(
-          [
-            '[CLOSED_LOOP][POST_REPLY_DELAY_ABORTED]',
-            `runId=${runId}`,
-            `round=${round}`,
-            'reason=stopped-or-runid-changed',
-          ].join(' '),
-        );
         return {
           ok: false,
-          reason: 'stopped-or-runid-changed',
+          reason: 'closed-loop-stopped',
         };
       }
-      closedLoopContinueState.lastPostReplyDelayDoneRunId = String(runId || '');
-      closedLoopContinueState.lastPostReplyDelayDoneRound = Number(round || 0);
-      closedLoopContinueState.lastPostReplyDelayDoneAtMs = Date.now();
-
-      ToolboxShell.appendLog(
-        [
-          '[CLOSED_LOOP][POST_REPLY_DELAY_DONE]',
-          `runId=${runId}`,
-          `round=${round}`,
-          `elapsedMs=${Date.now() - startMs}`,
-          `markDoneRunId=${closedLoopContinueState.lastPostReplyDelayDoneRunId || '-'}`,
-          `markDoneRound=${closedLoopContinueState.lastPostReplyDelayDoneRound || 0}`,
-        ].join(' '),
-      );
+      closedLoopContinueState.waitKind = '';
+      closedLoopContinueState.postHotkeyDelayUntilMs = 0;
       return {
         ok: true,
-        reason: 'delay-done',
-        elapsedMs: Date.now() - startMs,
+        reason: 'post-hotkey-delay-done',
       };
     }
 
@@ -2840,6 +2798,34 @@
       }
     }
 
+    function syncClosedLoopRoundWithTurnCount(reason = '') {
+      const pageTurnCount = Math.max(
+        0,
+        Number(
+          (bridgeState && bridgeState.turn_count)
+          || (ToolboxShell && ToolboxShell.state && ToolboxShell.state.turn_count)
+          || 0,
+        ) || 0,
+      );
+      if (pageTurnCount <= 0) {
+        return false;
+      }
+      const currentRound = Math.max(0, Number(closedLoopContinueState.round || 0));
+      if (pageTurnCount > currentRound) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][ROUND_SYNC_FROM_PAGE]',
+            `oldRound=${currentRound}`,
+            `newRound=${pageTurnCount}`,
+            `reason=${reason || '-'}`,
+          ].join(' '),
+        );
+        syncClosedLoopRound(pageTurnCount, `page-turn-count:${reason || '-'}`);
+        return true;
+      }
+      return false;
+    }
+
     function buildClosedLoopContinueButtonsHtml() {
       const hotkeyDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY;
       const everyRoundDef = CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND;
@@ -2851,24 +2837,97 @@
         ? ` data-closed-loop-mode="${plainDef.datasetClosedLoopMode}"`
         : '';
       return `
-            <button type="button" class="${hotkeyDef.className}" id="${hotkeyDef.id}" data-action="${hotkeyDef.action}" title="${hotkeyDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)}</button>
-            <button type="button" class="${everyRoundDef.className}" id="${everyRoundDef.id}" data-action="${everyRoundDef.action}"${everyRoundModeAttr} title="${everyRoundDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND)}</button>
-            <button type="button" class="${plainDef.className}" id="${plainDef.id}" data-action="${plainDef.action}"${plainModeAttr} title="${plainDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)}</button>`;
+            <button type="button" class="${hotkeyDef.className}" id="${hotkeyDef.id}" data-action="${hotkeyDef.action}" data-dynamic-label-allowed="1" title="${hotkeyDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY)}</button>
+            <button type="button" class="${everyRoundDef.className}" id="${everyRoundDef.id}" data-action="${everyRoundDef.action}" data-dynamic-label-allowed="1"${everyRoundModeAttr} title="${everyRoundDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND)}</button>
+            <button type="button" class="${plainDef.className}" id="${plainDef.id}" data-action="${plainDef.action}" data-dynamic-label-allowed="1"${plainModeAttr} title="${plainDef.title}">${getClosedLoopModeLabel(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY)}</button>`;
     }
 
     function applyClosedLoopContinueButtonDef(btn, actionDef) {
       if (!(btn instanceof HTMLElement) || !actionDef) {
         return;
       }
-      btn.id = actionDef.id;
-      btn.dataset.action = actionDef.action;
-      btn.dataset.cgptBaseAction = actionDef.action;
-      const closedLoopLabel = getClosedLoopModeLabel(actionDef.mode);
-      btn.textContent = closedLoopLabel;
-      markUploadActionButtonStableLabel(btn, closedLoopLabel);
-      btn.title = actionDef.title;
+      const action = String(actionDef.action || '').trim();
+      const mode = String(actionDef.mode || '').trim();
+      const targetId = String(actionDef.id || actionDef.buttonId || '').trim();
+      const currentId = String(btn.id || '').trim();
+      const isMirrorButton = (
+        btn.dataset.closedLoopMirror === '1'
+        || currentId.startsWith('cgpt-autoq-')
+      );
+      if (targetId && !isMirrorButton && currentId !== targetId) {
+        btn.id = targetId;
+      }
+      if (action) {
+        btn.dataset.action = action;
+        btn.dataset.cgptBaseAction = action;
+      }
+      btn.dataset.cgptButtonGroup = 'closed-loop';
+      btn.setAttribute('data-dynamic-label-allowed', '1');
       if (actionDef.datasetClosedLoopMode) {
         btn.dataset.closedLoopMode = actionDef.datasetClosedLoopMode;
+      } else if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
+        btn.dataset.closedLoopMode = CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
+      } else if (mode === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND) {
+        btn.dataset.closedLoopMode = CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND;
+      } else {
+        delete btn.dataset.closedLoopMode;
+      }
+      const closedLoopLabel = getClosedLoopModeLabel(mode);
+      if (closedLoopLabel) {
+        btn.dataset.idleLabel = closedLoopLabel;
+        btn.dataset.closedLoopStaticLabel = closedLoopLabel;
+      }
+      delete btn.dataset.stableLabel;
+      delete btn.dataset.keepStableLabel;
+      if (actionDef.title) {
+        btn.title = actionDef.title;
+      } else if (closedLoopLabel) {
+        btn.title = closedLoopLabel;
+      } else {
+        btn.removeAttribute('title');
+      }
+      const running = !!(
+        closedLoopContinueState
+        && closedLoopContinueState.running === true
+      );
+      const ownerAction = running ? String(getCurrentClosedLoopOwnerAction() || '').trim() : '';
+      const isRuntimeOwner = running && action && ownerAction === action;
+      if (isRuntimeOwner) {
+        const snapshot = typeof buildUploadButtonRenderSnapshot === 'function'
+          ? buildUploadButtonRenderSnapshot()
+          : null;
+        const runtimeText = getClosedLoopButtonDisplayText(action, snapshot);
+        if (runtimeText && String(btn.textContent || '').trim() !== runtimeText) {
+          btn.textContent = runtimeText;
+          btn.setAttribute('aria-label', runtimeText);
+          btn.dataset.cgptDynamicLabel = '1';
+        }
+        btn.classList.add(
+          'cgpt-btn',
+          'cgpt-btn-closed-loop',
+          'cgpt-btn-danger',
+          'cgpt-btn-stop',
+          'cgpt-action-running',
+        );
+        btn.classList.remove(
+          'cyan',
+          'purple',
+          'teal',
+          'green',
+          'primary',
+          'warning',
+          'orange',
+          'cgpt-btn-copy-hotkey',
+          'cgpt-btn-upload',
+          'cgpt-auto-continue',
+          'cgpt-btn-closed-loop-idle',
+        );
+        return;
+      }
+      delete btn.dataset.cgptDynamicLabel;
+      if (closedLoopLabel && String(btn.textContent || '').trim() !== closedLoopLabel) {
+        btn.textContent = closedLoopLabel;
+        btn.setAttribute('aria-label', closedLoopLabel);
       }
       const CLOSED_LOOP_STRIP_CLASSES = [
         'cyan',
@@ -2887,12 +2946,17 @@
         'cgpt-btn-closed-loop-idle',
       ];
       CLOSED_LOOP_STRIP_CLASSES.forEach((cls) => btn.classList.remove(cls));
-      btn.dataset.cgptButtonGroup = 'closed-loop';
       String(actionDef.className || 'cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle')
         .split(/\s+/)
         .map((cls) => cls.trim())
         .filter(Boolean)
         .forEach((cls) => btn.classList.add(cls));
+      if (!btn.classList.contains('cgpt-btn')) {
+        btn.classList.add('cgpt-btn');
+      }
+      if (!btn.classList.contains('cgpt-btn-closed-loop')) {
+        btn.classList.add('cgpt-btn-closed-loop');
+      }
     }
 
     function isClosedLoopUserCancelledReason(reason) {
@@ -2919,6 +2983,8 @@
       COPY_REPLY: 'copy_reply',
       SEND_HOTKEY: 'send_hotkey',
       REPLY_DONE_STABLE: 'reply_done_stable',
+      COPY_HOTKEY_ACTION: 'copy_hotkey_action',
+      POST_HOTKEY_DELAY: 'post_hotkey_delay',
       POST_REPLY_DELAY: 'post_reply_delay',
       READY_NEXT_ROUND: 'ready_next_round',
       NEXT_ROUND: 'next_round',
@@ -2973,6 +3039,15 @@
       lastPostReplyDelayDoneRunId: '',
       lastPostReplyDelayDoneRound: 0,
       lastPostReplyDelayDoneAtMs: 0,
+      postHotkeyDelayStartedAtMs: 0,
+      postHotkeyDelayUntilMs: 0,
+      postHotkeyDelayMs: 0,
+      lastPostHotkeyDelayDoneRunId: '',
+      lastPostHotkeyDelayDoneRound: 0,
+      lastPostHotkeyDelayDoneAtMs: 0,
+      lastCopyHotkeyDoneRunId: '',
+      lastCopyHotkeyDoneRound: 0,
+      lastCopyHotkeyDoneAtMs: 0,
       lastScheduleReason: '',
       lastScheduleAtMs: 0,
       waitKind: 'idle',
@@ -3472,6 +3547,114 @@
       ).trim();
     }
 
+    function isClosedLoopIdleButStillRunning() {
+      const running = !!(
+        closedLoopContinueState
+        && closedLoopContinueState.running
+      );
+      if (!running) {
+        return false;
+      }
+      const phase = String(closedLoopContinueState.phase || '').trim();
+      const waitKind = String(closedLoopContinueState.waitKind || '').trim();
+      const activePhases = new Set([
+        'waiting_reply',
+        'wait_reply',
+        'reply_done_stable',
+        'copy_reply',
+        'copy_hotkey_action',
+        'send_hotkey',
+        'post_hotkey_delay',
+        'post_reply_delay',
+        'ready_next_round',
+        'next_round',
+        'send_message',
+        'sending',
+        'upload_before_send',
+        'uploading',
+        'paused_empty_composer',
+        'paused_hotkey_not_sent',
+        'failed_hotkey',
+        'stopping',
+      ]);
+      if (activePhases.has(phase)) {
+        return false;
+      }
+      if (waitKind) {
+        return false;
+      }
+      if (!phase || phase === 'idle') {
+        return true;
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][IDLE_RUNNING_RECOVER_SUPPRESSED_UNKNOWN_PHASE]',
+          `phase=${phase || '-'}`,
+          `waitKind=${waitKind || '-'}`,
+        ].join(' '),
+      );
+      return false;
+    }
+
+    function recoverClosedLoopIdleRunningState(reason = '') {
+      if (!isClosedLoopIdleButStillRunning()) {
+        return false;
+      }
+      const runId = closedLoopContinueState.runId;
+      if (!runId || !isClosedLoopRunActive(runId)) {
+        return false;
+      }
+      if (closedLoopContinueState.currentStepRunning === true) {
+        return false;
+      }
+      const now = Date.now();
+      const lastRecoverAtMs = Number(closedLoopContinueState.idleRunningRecoverAtMs || 0) || 0;
+      if (lastRecoverAtMs > 0 && now - lastRecoverAtMs < 2000) {
+        return false;
+      }
+      const round = Math.max(1, Number(closedLoopContinueState.round || 1));
+      closedLoopContinueState.idleRunningRecoverAtMs = now;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][IDLE_RUNNING_RECOVER]',
+          `runId=${runId || '-'}`,
+          `round=${round}`,
+          `phase=${closedLoopContinueState.phase || '-'}`,
+          `waitKind=${closedLoopContinueState.waitKind || '-'}`,
+          `reason=${reason || '-'}`,
+        ].join(' '),
+      );
+      const runtime = getClosedLoopComposerRuntimeState
+        ? getClosedLoopComposerRuntimeState(`idle-running-recover:${reason || '-'}`)
+        : null;
+      if (runtime && runtime.busy) {
+        setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
+          reason: `idle-running-recover-busy:${reason || '-'}`,
+        });
+        closedLoopContinueState.waitKind = 'reply';
+        beginClosedLoopReplyWait(`idle-running-recover:${reason || '-'}`);
+      } else {
+        setClosedLoopPhase(CLOSED_LOOP_PHASES.NEXT_ROUND || 'next_round', {
+          reason: `idle-running-recover-next-round:${reason || '-'}`,
+        });
+        closedLoopContinueState.waitKind = '';
+      }
+      renderClosedLoopContinueButtons();
+      Promise.resolve(runClosedLoopContinueStep(runId, {
+        source: `idle-running-recover:${reason || '-'}`,
+        retryCurrentRound: false,
+        skipHomeNavigation: true,
+        forceRetry: true,
+      })).catch((recoverErr) => {
+        const recoverErrText = recoverErr && recoverErr.message ? recoverErr.message : String(recoverErr);
+        console.error('[CLOSED_LOOP][IDLE_RUNNING_RECOVER_FAILED]', recoverErr);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][IDLE_RUNNING_RECOVER_FAILED] runId=${runId || '-'} round=${round} reason=${reason || '-'} error=${recoverErrText}`,
+        );
+      });
+      return true;
+    }
+
     function getClosedLoopRunningButtonTextForAction(action, snapshot = null) {
       const normalizedAction = String(action || '').trim();
       const idleText = getClosedLoopButtonBaseText(normalizedAction);
@@ -3521,8 +3704,11 @@
       const postReplyDelayUntilMs = getClosedLoopWaitUntilMs(snapshot);
       if (
         phase === 'post_reply_delay'
+        || phase === 'post_hotkey_delay'
         || phase === 'post_reply_wait'
         || phase === 'next_step_wait'
+        || waitKind === 'post-hotkey'
+        || waitKind === 'post_hotkey'
         || waitKind === 'next_step'
         || waitKind === 'next-step'
         || postReplyDelayUntilMs > now
@@ -3540,6 +3726,13 @@
         || waitKind === 'paused'
       ) {
         return `${idleText}（等待中）`;
+      }
+      if (
+        phase === 'copy_hotkey_action'
+        || waitKind === 'copy-hotkey'
+        || waitKind === 'copy_hotkey'
+      ) {
+        return `${idleText}（快捷键中）`;
       }
       if (phase === 'reply_done_stable' || phase === 'confirm_done') {
         return `${idleText}（确认完成）`;
@@ -3569,7 +3762,10 @@
         return baseText;
       }
       const runtimeText = getClosedLoopRunningButtonTextForAction(normalizedAction, snapshot);
-      return runtimeText || baseText;
+      if (runtimeText && runtimeText !== baseText) {
+        return runtimeText;
+      }
+      return `${baseText}（运行中）`;
     }
 
     function normalizeClosedLoopPhaseText(value) {
@@ -3852,18 +4048,33 @@
       }
       if (
         running
-        && phase === CLOSED_LOOP_PHASES.POST_REPLY_DELAY
-        && Number(closedLoopContinueState.postReplyDelayUntilMs || 0) > now
+        && (
+          phase === CLOSED_LOOP_PHASES.POST_REPLY_DELAY
+          || phase === CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY
+        )
+        && Number(
+          closedLoopContinueState.postHotkeyDelayUntilMs
+          || closedLoopContinueState.postReplyDelayUntilMs
+          || 0
+        ) > now
       ) {
-        waitKind = 'next-step';
+        waitKind = 'post-hotkey';
         postReplyDelayRemainingMs = Math.max(
           0,
-          Number(closedLoopContinueState.postReplyDelayUntilMs || 0) - now,
+          Number(
+            closedLoopContinueState.postHotkeyDelayUntilMs
+            || closedLoopContinueState.postReplyDelayUntilMs
+            || 0
+          ) - now,
         );
         nextStepRemainingMs = postReplyDelayRemainingMs;
       } else if (
         running
-        && waitKind === 'next-step'
+        && (
+          waitKind === 'next-step'
+          || waitKind === 'post-hotkey'
+          || waitKind === 'post_hotkey'
+        )
         && Number(closedLoopContinueState.nextStepCountdownEndAt || 0) > 0
       ) {
         nextStepRemainingMs = Math.max(
@@ -3891,7 +4102,7 @@
 
     function clearClosedLoopButtonWaitState(reason = 'unknown') {
       const src = String(reason || 'unknown').trim() || 'unknown';
-      if (closedLoopContinueState.waitKind === 'next-step') {
+      if (closedLoopContinueState.waitKind === 'next-step' || closedLoopContinueState.waitKind === 'post-hotkey') {
         endClosedLoopNextStepWait(`clear:${src}`);
         return;
       }
@@ -3925,13 +4136,17 @@
         if (
           closedLoopContinueState.waitKind !== 'reply'
           && closedLoopContinueState.waitKind !== 'next-step'
+          && closedLoopContinueState.waitKind !== 'post-hotkey'
         ) {
           clearInterval(closedLoopContinueState.countdownTickTimer);
           closedLoopContinueState.countdownTickTimer = 0;
           return;
         }
 
-        if (closedLoopContinueState.waitKind === 'next-step') {
+        if (
+          closedLoopContinueState.waitKind === 'next-step'
+          || closedLoopContinueState.waitKind === 'post-hotkey'
+        ) {
           const remainingMs = Math.max(
             0,
             Number(closedLoopContinueState.nextStepCountdownEndAt || 0) - Date.now(),
@@ -3992,7 +4207,10 @@
     }
 
     function endClosedLoopNextStepWait(reason = 'unknown') {
-      if (closedLoopContinueState.waitKind !== 'next-step') {
+      if (
+        closedLoopContinueState.waitKind !== 'next-step'
+        && closedLoopContinueState.waitKind !== 'post-hotkey'
+      ) {
         return;
       }
       const src = String(reason || 'unknown').trim() || 'unknown';
@@ -4020,18 +4238,19 @@
       const runId = closedLoopContinueState.runId || '-';
       const round = closedLoopContinueState.round || 0;
       const waitUntilMs = Date.now() + waitMs;
-      closedLoopContinueState.waitKind = 'next-step';
-      closedLoopContinueState.phase = CLOSED_LOOP_PHASES.POST_REPLY_DELAY;
+      closedLoopContinueState.waitKind = 'post-hotkey';
+      closedLoopContinueState.phase = CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY;
       closedLoopContinueState.waitStartedAt = Date.now();
       closedLoopContinueState.nextStepDelayMs = waitMs;
       closedLoopContinueState.nextStepCountdownEndAt = waitUntilMs;
+      closedLoopContinueState.postHotkeyDelayUntilMs = waitUntilMs;
       closedLoopContinueState.postReplyDelayUntilMs = waitUntilMs;
       closedLoopContinueState.waitUntilMs = waitUntilMs;
       closedLoopContinueState.nextStepAt = waitUntilMs;
       closedLoopContinueState.delayUntilAt = waitUntilMs;
-      setCopyHotkeyUploadVerifyLoopPhase('post_reply_delay', `next-step:${src}`, {
+      setCopyHotkeyUploadVerifyLoopPhase('post_hotkey_delay', `next-step:${src}`, {
         cycleIndex: round,
-        currentSubtask: 'post-reply-delay',
+        currentSubtask: 'post-hotkey-delay',
       });
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][WAIT_VISUAL_COUNTDOWN_START] delayMs=${waitMs} runId=${runId} round=${round} reason=${src}`,
@@ -9135,6 +9354,18 @@
         const isOwner = typeof UploadButtonVm.isClosedLoopOwnerAction === 'function'
           ? UploadButtonVm.isClosedLoopOwnerAction(buttonAction, localSnapshot)
           : (isRunning && closedLoopContinueState.mode === mode);
+        if (view && typeof view === 'object') {
+          const isClosedLoopOwner = !!(
+            closedLoopContinueState.running
+            && ownerAction
+            && buttonAction === ownerAction
+          );
+          if (isClosedLoopOwner) {
+            view.text = getClosedLoopButtonDisplayText(buttonAction, localSnapshot);
+          } else {
+            view.text = getClosedLoopButtonBaseText(buttonAction);
+          }
+        }
         const pageGenerating = isPageGeneratingForClosedLoopStart(localSnapshot) ? 1 : 0;
         const currentOwner = typeof UploadButtonVm.resolveWaitingReplyOwner === 'function'
           ? UploadButtonVm.resolveWaitingReplyOwner(localSnapshot, localSnapshot.capability)
@@ -9210,6 +9441,15 @@
       renderModeButtons(CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND);
       renderModeButtons(CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY);
       bindClosedLoopContinueButtons(rootElRef || document, 'after-render-closed-loop-buttons');
+      if (closedLoopContinueState && closedLoopContinueState.running === true) {
+        const finalSnapshot = snapshot && typeof snapshot === 'object'
+          ? snapshot
+          : buildUploadButtonRenderSnapshot();
+        applyClosedLoopOwnerButtonRuntimeText(
+          finalSnapshot,
+          'renderClosedLoopContinueButtons:after-bind-final',
+        );
+      }
       bindClosedLoopDocumentClickFallback('after-render-closed-loop-buttons');
       scheduleClosedLoopButtonHitTest('after-render-closed-loop-buttons');
       forceResetClosedLoopStopButtonsWhenNotRunning('renderClosedLoopContinueButtons');
@@ -11941,6 +12181,65 @@
       return shouldUseInitial;
     }
 
+    async function runClosedLoopNextRoundAfterHotkeyDelay(runId, previousRound, options = {}) {
+      if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][NEXT_ROUND_SKIP]',
+            'reason=runid-mismatch-or-stopped',
+            `runId=${runId || '-'}`,
+            `currentRunId=${closedLoopContinueState.runId || '-'}`,
+            `running=${closedLoopContinueState.running ? 1 : 0}`,
+          ].join(' '),
+        );
+        return;
+      }
+      const nextRound = Math.max(1, Number(previousRound || 0) + 1);
+      syncClosedLoopRound(nextRound - 1, 'post-hotkey-delay-next-round-base');
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][NEXT_ROUND_START]',
+          `runId=${runId}`,
+          `previousRound=${previousRound}`,
+          `nextRound=${nextRound}`,
+          `source=${options && options.source ? options.source : '-'}`,
+        ].join(' '),
+      );
+      const safeInterval = getClosedLoopEffectiveUploadInterval(
+        closedLoopContinueState.mode,
+        getClosedLoopAutomationConfig(),
+      );
+      const everyRoundMode = isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode);
+      const autoUploadEnabled = getClosedLoopAutomationConfig().autoUploadEnabled === true;
+      const shouldUpload = (everyRoundMode || autoUploadEnabled)
+        && shouldUploadBeforeClosedLoopSend(nextRound, safeInterval);
+      if (shouldUpload) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][NEXT_ROUND_UPLOAD_START]',
+            `runId=${runId}`,
+            `round=${nextRound}`,
+          ].join(' '),
+        );
+      }
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.SENDING || 'sending', {
+        reason: `round-${nextRound}-send-next`,
+      });
+      renderClosedLoopContinueButtons();
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][NEXT_ROUND_SEND_START]',
+          `runId=${runId}`,
+          `round=${nextRound}`,
+        ].join(' '),
+      );
+      await runClosedLoopContinueStep(runId, {
+        source: 'next-round-after-post-hotkey-delay',
+        skipHomeNavigation: true,
+        skipCopyHotkeyForCurrentRound: false,
+      });
+    }
+
     async function runClosedLoopContinueStep(runId, options = {}) {
       if (shouldStopClosedLoopRun(runId)) {
         ToolboxShell.appendLog(
@@ -11991,15 +12290,54 @@
         ].join(' '),
       );
 
-      if (closedLoopContinueState.waitKind === 'reply') {
-        endClosedLoopReplyWait('step-active');
-      } else if (closedLoopContinueState.waitKind !== 'next-step') {
-        clearClosedLoopButtonWaitState('step-active');
-      }
-      renderClosedLoopContinueButtons();
-
       try {
+        if (
+          closedLoopContinueState.phase === CLOSED_LOOP_PHASES.WAITING_REPLY
+          || closedLoopContinueState.waitKind === 'reply'
+        ) {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][STEP_BLOCKED_BY_WAITING_REPLY]',
+              `runId=${runId || '-'}`,
+              `round=${closedLoopContinueState.round || 0}`,
+              `source=${options && options.source ? options.source : '-'}`,
+            ].join(' '),
+          );
+          renderClosedLoopContinueButtons();
+          return;
+        }
+        if (
+          closedLoopContinueState.phase === CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY
+          || closedLoopContinueState.waitKind === 'post-hotkey'
+          || closedLoopContinueState.waitKind === 'post_hotkey'
+        ) {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][STEP_BLOCKED_BY_POST_HOTKEY_DELAY]',
+              `runId=${runId || '-'}`,
+              `round=${closedLoopContinueState.round || 0}`,
+              `source=${options && options.source ? options.source : '-'}`,
+            ].join(' '),
+          );
+          renderClosedLoopContinueButtons();
+          return;
+        }
+        if (
+          closedLoopContinueState.waitKind !== 'reply'
+          && closedLoopContinueState.waitKind !== 'next-step'
+          && closedLoopContinueState.waitKind !== 'post-hotkey'
+          && closedLoopContinueState.waitKind !== 'post_hotkey'
+          && closedLoopContinueState.waitKind !== 'copy-hotkey'
+          && closedLoopContinueState.waitKind !== 'copy_hotkey'
+        ) {
+          clearClosedLoopButtonWaitState('step-active');
+        }
+        renderClosedLoopContinueButtons();
+
       const retryCurrentRound = options && options.retryCurrentRound === true;
+      const skipCopyHotkeyForCurrentRound = !!(
+        options && options.skipCopyHotkeyForCurrentRound === true
+      );
       closedLoopContinueState.retryingCurrentRound = retryCurrentRound;
       let round = 0;
 
@@ -12088,6 +12426,7 @@
       const composerPayload = getComposerPayloadStateForInitialSend();
       const closedLoopMode = closedLoopContinueState.mode || CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
       const useHotkey = closedLoopMode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
+      const useHotkeyBeforeReplyStable = false;
       const stepSourceTag = getClosedLoopStepSourceTag(closedLoopMode, round);
       const activeUploadGroupId = getActiveUploadScopeGroupId();
       const activeGroupHasUploadableFiles = hasActiveScopeUploadableFiles({
@@ -12279,7 +12618,7 @@
         setClosedLoopPhase(CLOSED_LOOP_PHASES.COPY_REPLY, {
           reason: `round-${round}-copy-reply`,
         });
-        if (useHotkey) {
+        if (useHotkey && useHotkeyBeforeReplyStable) {
           const sourceText = stepSourceTag;
           const hotkeyRoundSnapshot = getClosedLoopHotkeyRoundSentSnapshot(runId, round);
           let copyHotkeyResult = null;
@@ -12764,7 +13103,7 @@
         cycleIndex: round,
         currentSubtask: 'wait-next-reply',
       });
-      setClosedLoopPhase(CLOSED_LOOP_PHASES.WAIT_REPLY, {
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
         reason: `round-${round}-sent`,
       });
       ToolboxShell.appendLog(
@@ -12804,9 +13143,19 @@
       }
 
       endClosedLoopReplyWait(`round-${round}-reply-done`);
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.REPLY_DONE_STABLE, {
+        reason: `round-${round}-reply-stable`,
+      });
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][WAIT_REPLY_DONE] runId=${runId} round=${round} action=stable-done`,
+        [
+          '[CLOSED_LOOP][WAIT_REPLY_DONE]',
+          `runId=${runId}`,
+          `round=${round}`,
+          'action=stable-done',
+          'next=copy_hotkey_now',
+        ].join(' '),
       );
+      syncClosedLoopRoundWithTurnCount('wait-reply-done');
 
       const stopSignalResult = detectCopyHotkeyLoopStopSignal(round);
       const terminalStop = !!(stopSignalResult && stopSignalResult.matched);
@@ -12859,28 +13208,154 @@
 
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][STEP_ABORT] reason=inactive-before-timer runId=${runId}`,
+          `[CLOSED_LOOP][STEP_ABORT] reason=inactive-before-copy-hotkey runId=${runId}`,
         );
         return;
       }
-
-      const delayMs = getClosedLoopNextStepDelayMs({
-        runId,
-        round,
-        reason: 'reply-stable-before-next-round',
-      });
-      const delayResult = await waitClosedLoopPostReplyDelay(runId, round, delayMs);
-      if (!delayResult.ok) {
+      if (
+        closedLoopContinueState.phase === CLOSED_LOOP_PHASES.WAITING_REPLY
+        || closedLoopContinueState.waitKind === 'reply'
+      ) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][ROUND_POST_DELAY_NOT_OK] runId=${runId} round=${round} reason=${delayResult.reason}`,
+          [
+            '[CLOSED_LOOP][STEP_BLOCKED_BY_WAITING_REPLY]',
+            `runId=${runId || '-'}`,
+            `round=${closedLoopContinueState.round || 0}`,
+            `source=${options && options.source ? options.source : '-'}`,
+          ].join(' '),
+        );
+        renderClosedLoopContinueButtons();
+        return;
+      }
+      if (useHotkey && !skipCopyHotkeyForCurrentRound) {
+        const sourceText = stepSourceTag;
+        const hotkeyRoundSnapshot = getClosedLoopHotkeyRoundSentSnapshot(runId, round);
+        let copyHotkeyResult = null;
+        if (hotkeyRoundSnapshot.matched) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][HOTKEY_SKIP_DUPLICATE_ROUND] runId=${runId} round=${round} key=${hotkeyRoundSnapshot.roundKey} source=${sourceText} copiedLen=${hotkeyRoundSnapshot.copiedText.length}`,
+          );
+          copyHotkeyResult = {
+            ok: true,
+            reason: 'duplicate-hotkey-skipped-same-round',
+            copied: true,
+            hotkeySent: false,
+            duplicateHotkeySkipped: true,
+            copied_text: hotkeyRoundSnapshot.copiedText,
+            assistantMessageKey: hotkeyRoundSnapshot.assistantKey,
+          };
+        } else {
+          setClosedLoopPhase(CLOSED_LOOP_PHASES.COPY_HOTKEY_ACTION, {
+            reason: `round-${round}-copy-hotkey-start`,
+          });
+          closedLoopContinueState.waitKind = 'copy-hotkey';
+          closedLoopContinueState.copyHotkeyStartedAtMs = Date.now();
+          renderClosedLoopContinueButtons();
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][COPY_HOTKEY_ACTION_START]',
+              `runId=${runId}`,
+              `round=${round}`,
+              `source=${sourceText}`,
+              'anchor=reply_stable_done',
+              `phase=${closedLoopContinueState.phase || '-'}`,
+              `waitKind=${closedLoopContinueState.waitKind || '-'}`,
+            ].join(' '),
+          );
+          copyHotkeyResult = await runCopyHotkeyOnceCore({
+            source: sourceText,
+            ownerAction: 'closed-loop-with-hotkey',
+            ownerTaskKey: 'copy-hotkey-continue',
+            ownerButtonId: getCurrentClosedLoopOwnerButtonId() || 'cgpt-closed-loop-upload-every5-hotkey-btn',
+            skipActionLock: true,
+            waitForCurrentReply: false,
+            shouldStop,
+            suppressOwnerMirror: true,
+          });
+          if (copyHotkeyResult && copyHotkeyResult.ok === true) {
+            const copiedTextForMark = String(copyHotkeyResult.copied_text || '');
+            const assistantKeyForMark = getLastAssistantMessageKeySafe();
+            markClosedLoopHotkeyRoundSent(runId, round, copiedTextForMark, assistantKeyForMark);
+          }
+        }
+        if (!copyHotkeyResult || copyHotkeyResult.ok !== true) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][COPY_HOTKEY_ACTION_ABORT] runId=${runId} round=${round} reason=${copyHotkeyResult && copyHotkeyResult.reason ? copyHotkeyResult.reason : '-'}`,
+          );
+          return;
+        }
+        closedLoopContinueState.lastCopyHotkeyDoneRunId = String(runId || '');
+        closedLoopContinueState.lastCopyHotkeyDoneRound = Number(round || 0);
+        closedLoopContinueState.lastCopyHotkeyDoneAtMs = Date.now();
+        closedLoopContinueState.waitKind = '';
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][COPY_HOTKEY_ACTION_DONE]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `copiedLen=${String(copyHotkeyResult.copied_text || '').length}`,
+            `hotkeySent=${copyHotkeyResult.hotkeySent === false ? 0 : 1}`,
+            'next=post_hotkey_delay',
+          ].join(' '),
+        );
+      } else if (useHotkey && skipCopyHotkeyForCurrentRound) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][COPY_HOTKEY_SKIP_NEXT_ROUND_SEND]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `source=${options && options.source ? options.source : '-'}`,
+          ].join(' '),
+        );
+      }
+      const delayMs = getClosedLoopPostHotkeyDelayMs();
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.POST_HOTKEY_DELAY, {
+        reason: `round-${round}-post-hotkey-delay-start`,
+      });
+      closedLoopContinueState.waitKind = 'post-hotkey';
+      closedLoopContinueState.postHotkeyDelayStartedAtMs = Date.now();
+      closedLoopContinueState.postHotkeyDelayUntilMs = Date.now() + delayMs;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][POST_HOTKEY_DELAY_START]',
+          `runId=${runId}`,
+          `round=${round}`,
+          `delayMs=${delayMs}`,
+          `untilMs=${closedLoopContinueState.postHotkeyDelayUntilMs}`,
+          'anchor=copy_hotkey_done',
+        ].join(' '),
+      );
+      const delayResult = await waitClosedLoopPostHotkeyDelay(runId, round, delayMs);
+      if (!delayResult || delayResult.ok !== true) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][POST_HOTKEY_DELAY_ABORT]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `reason=${delayResult && delayResult.reason ? delayResult.reason : '-'}`,
+          ].join(' '),
         );
         return;
       }
+      syncClosedLoopRoundWithTurnCount('post-hotkey-delay-done');
+      closedLoopContinueState.lastPostHotkeyDelayDoneRunId = String(runId || '');
+      closedLoopContinueState.lastPostHotkeyDelayDoneRound = Number(round || 0);
+      closedLoopContinueState.lastPostHotkeyDelayDoneAtMs = Date.now();
+      closedLoopContinueState.waitKind = '';
+      closedLoopContinueState.postHotkeyDelayUntilMs = 0;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][POST_HOTKEY_DELAY_DONE]',
+          `runId=${runId}`,
+          `round=${round}`,
+          'next=next_round_send_or_upload',
+        ].join(' '),
+      );
 
       const finalCheck = checkClosedLoopReadyForNextSend(
         runId,
         round,
-        'post-reply-delay-done',
+        'post-hotkey-delay-done',
       );
       if (!finalCheck.ok) {
         if (finalCheck.reason === 'busy') {
@@ -12888,7 +13363,7 @@
             reason: 'final-check-busy',
           });
           beginClosedLoopReplyWait('final-check-busy');
-          recoverClosedLoopContinue(runId, 'busy-after-post-delay', {
+          recoverClosedLoopContinue(runId, 'busy-after-post-hotkey-delay', {
             delayMs: 5000,
           });
         } else {
@@ -12902,17 +13377,11 @@
       setClosedLoopPhase(CLOSED_LOOP_PHASES.NEXT_ROUND, {
         reason: `round-${round}-ready-next`,
       });
-      ToolboxShell.appendLog(
-        `[CLOSED_LOOP][NEXT_ROUND] runId=${runId} round=${round} action=schedule-next-round`,
-      );
-      ToolboxShell.appendLog(
-        `[CLOSED_LOOP][REPLY_DONE] runId=${runId} round=${round} action=schedule-next-round`,
-      );
-      scheduleClosedLoopContinueNextStep(
-        runId,
-        0,
-        `round-${round}-reply-stable-delay-done`,
-      );
+      renderClosedLoopContinueButtons();
+      await runClosedLoopNextRoundAfterHotkeyDelay(runId, round, {
+        source: 'post-hotkey-delay-done',
+      });
+      return;
       } catch (error) {
         console.error('[CLOSED_LOOP][STEP_ERROR]', error);
         ToolboxShell.appendLog(
@@ -13095,7 +13564,21 @@
         );
         return false;
       }
-      applyClosedLoopContinueButtonDef(btn, actionDef);
+      const preparedAction = String(btn.dataset.closedLoopDefPreparedAction || '').trim();
+      const shouldPrepareDef = preparedAction !== action;
+      if (shouldPrepareDef) {
+        applyClosedLoopContinueButtonDef(btn, actionDef);
+        btn.dataset.closedLoopDefPrepared = '1';
+        btn.dataset.closedLoopDefPreparedAction = action;
+      } else {
+        btn.dataset.action = action;
+        btn.dataset.cgptBaseAction = action;
+        btn.dataset.cgptButtonGroup = 'closed-loop';
+        btn.setAttribute('data-dynamic-label-allowed', '1');
+        if (actionDef.datasetClosedLoopMode) {
+          btn.dataset.closedLoopMode = actionDef.datasetClosedLoopMode;
+        }
+      }
       const invokeClosedLoop = (event, clickSource = 'direct-click') => {
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][DIRECT_CLICK_ENTER] id=${btn.id || '-'} action=${action} mode=${mode} disabled=${btn.disabled ? 1 : 0} reason=${reason || '-'} source=${clickSource || '-'}`,
@@ -31352,6 +31835,7 @@
       healStaleSendCopyHotkeyLockIfNeeded('buildUploadButtonRenderSnapshot');
       reconcileSendCopyHotkeyOwnerRunningState('buildUploadButtonRenderSnapshot');
       syncToolboxRunningOwner('buildUploadButtonRenderSnapshot');
+      recoverClosedLoopIdleRunningState('buildUploadButtonRenderSnapshot');
       const runtime = getUnifiedRuntimeStatus('buildUploadButtonRenderSnapshot');
       const topReplyStatusForButtons = runtime.topReplyStatus && typeof runtime.topReplyStatus === 'object'
         ? runtime.topReplyStatus
@@ -33909,6 +34393,7 @@
         maybeHealStaleWaitingReplyState('renderUploadButtonsOnly');
         reconcilePendingSendTaskAfterExternalNativeSend('renderUploadButtonsOnly');
         maybeReconcileSendCopyHotkeyWaitingReply('renderUploadButtonsOnly');
+        recoverClosedLoopIdleRunningState('renderUploadButtonsOnly');
 
         const fallbackCapability = {
           hasComposer: false,
@@ -34382,6 +34867,7 @@
         forceResetClosedLoopStopButtonsWhenNotRunning('renderUploadButtonsOnly');
         removeOrResetOrphanClosedLoopStopButtons('renderUploadButtonsOnly');
         diagnoseButtonTextPollution('renderUploadButtonsOnly');
+        applyClosedLoopOwnerButtonRuntimeText(renderSnapshot, 'renderUploadButtonsOnly:owner-final');
 
         const compactStartBtns = rootElRef
           ? qsa('#cgpt-upload-start', rootElRef)
@@ -48982,6 +49468,8 @@
             renderToolboxPageStatusRow();
           }
           updateChatInputStateBadge();
+          syncClosedLoopRoundWithTurnCount('bridge-poll');
+          recoverClosedLoopIdleRunningState('bridge-poll');
         };
 
         Promise.resolve(uploadModuleInitPromise)
@@ -49044,6 +49532,8 @@
           reconcilePendingSendTaskAfterExternalNativeSend('updateChatInputStateBadge');
           maybeReconcileSendCopyHotkeyWaitingReply('updateChatInputStateBadge');
           updateChatInputStateBadge();
+          syncClosedLoopRoundWithTurnCount('bridge-poll');
+          recoverClosedLoopIdleRunningState('bridge-poll');
         }
         try {
           const responseState = typeof detectComposerResponseState === 'function'
