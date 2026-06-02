@@ -2987,7 +2987,45 @@
       startPending: null,
       lastClosedLoopHotkeySentAt: 0,
       lastClosedLoopHotkeyRound: 0,
+      lastClosedLoopHotkeyRunId: 0,
+      lastClosedLoopHotkeyRoundKey: '',
+      lastClosedLoopHotkeyCopiedText: '',
+      lastClosedLoopHotkeyAssistantKey: '',
     };
+
+    function buildClosedLoopHotkeyRoundKey(runId, round) {
+      const safeRunId = String(runId || '').trim();
+      const safeRound = String(Number(round) || 0);
+      return `${safeRunId}:${safeRound}`;
+    }
+
+    function markClosedLoopHotkeyRoundSent(runId, round, copiedText = '', assistantKey = '') {
+      const roundKey = buildClosedLoopHotkeyRoundKey(runId, round);
+      closedLoopContinueState.lastClosedLoopHotkeySentAt = Date.now();
+      closedLoopContinueState.lastClosedLoopHotkeyRound = Number(round) || 0;
+      closedLoopContinueState.lastClosedLoopHotkeyRunId = Number(runId) || 0;
+      closedLoopContinueState.lastClosedLoopHotkeyRoundKey = roundKey;
+      closedLoopContinueState.lastClosedLoopHotkeyCopiedText = String(copiedText || '');
+      closedLoopContinueState.lastClosedLoopHotkeyAssistantKey = String(assistantKey || '');
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][HOTKEY_ROUND_MARK_SENT] runId=${runId || '-'} round=${round || '-'} key=${roundKey} copiedLen=${String(copiedText || '').length} assistantKey=${assistantKey || '-'}`,
+      );
+    }
+
+    function getClosedLoopHotkeyRoundSentSnapshot(runId, round) {
+      const roundKey = buildClosedLoopHotkeyRoundKey(runId, round);
+      const matched = !!(
+        roundKey
+        && closedLoopContinueState.lastClosedLoopHotkeyRoundKey === roundKey
+      );
+      return {
+        matched,
+        roundKey,
+        copiedText: matched ? String(closedLoopContinueState.lastClosedLoopHotkeyCopiedText || '') : '',
+        assistantKey: matched ? String(closedLoopContinueState.lastClosedLoopHotkeyAssistantKey || '') : '',
+        sentAt: matched ? Number(closedLoopContinueState.lastClosedLoopHotkeySentAt || 0) : 0,
+      };
+    }
 
     function getClosedLoopStartPending() {
       const pending = closedLoopContinueState.startPending;
@@ -3434,37 +3472,9 @@
       ).trim();
     }
 
-    function getClosedLoopButtonDisplayText(action, snapshot = null) {
+    function getClosedLoopRunningButtonTextForAction(action, snapshot = null) {
       const normalizedAction = String(action || '').trim();
-      const baseText = getClosedLoopButtonBaseText(normalizedAction);
-      const owner = getCurrentClosedLoopOwnerActionRaw() || getCurrentClosedLoopOwnerAction();
-      const isOwner = !!normalizedAction && owner === normalizedAction;
-      const running = !!(
-        closedLoopContinueState
-        && (
-          closedLoopContinueState.running
-          || closedLoopContinueState.isRunning
-          || isClosedLoopContinueRunning()
-        )
-      );
-      const waitUntilMs = getClosedLoopWaitUntilMs(snapshot);
-      if (isOwner && running && waitUntilMs > Date.now()) {
-        const remainSeconds = Math.max(0, Math.ceil((waitUntilMs - Date.now()) / 1000));
-        return `${baseText}（等待${remainSeconds}s）`;
-      }
-      return baseText;
-    }
-
-    function normalizeClosedLoopPhaseText(value) {
-      return String(value || '')
-        .trim()
-        .toLowerCase()
-        .replace(/-/g, '_');
-    }
-
-    function getClosedLoopRunningButtonText(snapshot = null) {
-      const action = getCurrentClosedLoopOwnerAction();
-      const idleText = getClosedLoopButtonBaseText(action);
+      const idleText = getClosedLoopButtonBaseText(normalizedAction);
       const now = Date.now();
       const waitVisual = snapshot
         && snapshot.closedLoopWaitVisual
@@ -3491,30 +3501,37 @@
           || 0
         ) || 0,
       );
+      const replyWaitElapsedMs = Math.max(
+        0,
+        Number(waitVisual.replyWaitElapsedMs || 0) || 0,
+      );
       if (
-        (
-          phase === 'waiting_reply'
-          || phase === 'wait_reply'
-          || waitKind === 'reply'
-        )
-        && waitingReplySinceMs > 0
+        phase === 'waiting_reply'
+        || phase === 'wait_reply'
+        || waitKind === 'reply'
       ) {
-        const elapsedSec = Math.max(0, Math.floor((now - waitingReplySinceMs) / 1000));
+        let elapsedSec = 0;
+        if (waitingReplySinceMs > 0) {
+          elapsedSec = Math.max(0, Math.floor((now - waitingReplySinceMs) / 1000));
+        } else if (replyWaitElapsedMs > 0) {
+          elapsedSec = Math.max(0, Math.floor(replyWaitElapsedMs / 1000));
+        }
         return `${idleText}（回复中 ${elapsedSec}s）`;
       }
       const postReplyDelayUntilMs = getClosedLoopWaitUntilMs(snapshot);
       if (
-        (
-          phase === 'post_reply_delay'
-          || phase === 'post_reply_wait'
-          || phase === 'next_step_wait'
-          || waitKind === 'next_step'
-          || waitKind === 'next-step'
-        )
-        && postReplyDelayUntilMs > now
+        phase === 'post_reply_delay'
+        || phase === 'post_reply_wait'
+        || phase === 'next_step_wait'
+        || waitKind === 'next_step'
+        || waitKind === 'next-step'
+        || postReplyDelayUntilMs > now
       ) {
-        const remainingSec = Math.max(0, Math.ceil((postReplyDelayUntilMs - now) / 1000));
-        return `${idleText}（等待${remainingSec}s）`;
+        if (postReplyDelayUntilMs > now) {
+          const remainingSec = Math.max(0, Math.ceil((postReplyDelayUntilMs - now) / 1000));
+          return `${idleText}（等待 ${remainingSec}s）`;
+        }
+        return `${idleText}（等待中）`;
       }
       if (
         phase === 'paused'
@@ -3535,20 +3552,80 @@
       }
       return idleText;
     }
+    function getClosedLoopButtonDisplayText(action, snapshot = null) {
+      const normalizedAction = String(action || '').trim();
+      const baseText = getClosedLoopButtonBaseText(normalizedAction);
+      const owner = getCurrentClosedLoopOwnerActionRaw() || getCurrentClosedLoopOwnerAction();
+      const isOwner = !!normalizedAction && owner === normalizedAction;
+      const running = !!(
+        closedLoopContinueState
+        && (
+          closedLoopContinueState.running
+          || closedLoopContinueState.isRunning
+          || isClosedLoopContinueRunning()
+        )
+      );
+      if (!isOwner || !running) {
+        return baseText;
+      }
+      const runtimeText = getClosedLoopRunningButtonTextForAction(normalizedAction, snapshot);
+      return runtimeText || baseText;
+    }
 
-    function getClosedLoopOwnerButtonElement() {
+    function normalizeClosedLoopPhaseText(value) {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/-/g, '_');
+    }
+
+    function getClosedLoopRunningButtonText(snapshot = null) {
+      const action = getCurrentClosedLoopOwnerAction();
+      return getClosedLoopRunningButtonTextForAction(action, snapshot);
+    }
+
+    function getClosedLoopOwnerButtonElements() {
       const action = getCurrentClosedLoopOwnerAction();
       const normalizedAction = String(action || '').trim();
+      if (!normalizedAction) {
+        return [];
+      }
+      const ids = [];
       if (normalizedAction === 'closed-loop-with-hotkey-upload-every-round') {
-        return document.getElementById('cgpt-closed-loop-upload-every-round-hotkey-btn');
+        ids.push('cgpt-closed-loop-upload-every-round-hotkey-btn');
+        ids.push('cgpt-autoq-closed-loop-upload-every-round-hotkey-btn');
+      } else if (normalizedAction === 'closed-loop-with-hotkey') {
+        ids.push('cgpt-closed-loop-upload-every5-hotkey-btn');
+        ids.push('cgpt-autoq-closed-loop-upload-every5-hotkey-btn');
+      } else if (normalizedAction === 'closed-loop-without-hotkey') {
+        ids.push('cgpt-closed-loop-upload-every5-btn');
+        ids.push('cgpt-autoq-closed-loop-upload-every5-btn');
       }
-      if (normalizedAction === 'closed-loop-with-hotkey') {
-        return document.getElementById('cgpt-closed-loop-upload-every5-hotkey-btn');
+      const selectors = [
+        ...ids.map((id) => `#${id}`),
+        `[data-action="${normalizedAction}"]`,
+        `[data-cgpt-base-action="${normalizedAction}"]`,
+      ];
+      const roots = [];
+      if (rootElRef) {
+        roots.push(rootElRef);
       }
-      if (normalizedAction === 'closed-loop-without-hotkey') {
-        return document.getElementById('cgpt-closed-loop-upload-every5-btn');
-      }
-      return null;
+      roots.push(document);
+      const result = [];
+      roots.forEach((scope) => {
+        selectors.forEach((selector) => {
+          scope.querySelectorAll(selector).forEach((btn) => {
+            if (btn instanceof HTMLElement && !result.includes(btn)) {
+              result.push(btn);
+            }
+          });
+        });
+      });
+      return result;
+    }
+    function getClosedLoopOwnerButtonElement() {
+      const buttons = getClosedLoopOwnerButtonElements();
+      return buttons.length > 0 ? buttons[0] : null;
     }
 
     function applyClosedLoopOwnerButtonRuntimeText(snapshot = null, reason = 'unknown') {
@@ -3563,8 +3640,8 @@
       if (!running) {
         return false;
       }
-      const btn = getClosedLoopOwnerButtonElement();
-      if (!(btn instanceof HTMLElement)) {
+      const buttons = getClosedLoopOwnerButtonElements();
+      if (!buttons.length) {
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
             `[CLOSED_LOOP_BUTTON][TEXT_APPLY_SKIP] reason=no-owner-button source=${String(reason || '-')}`,
@@ -3577,15 +3654,24 @@
       if (!text) {
         return false;
       }
-      if (btn.textContent !== text) {
-        btn.textContent = text;
-      }
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+      let changedCount = 0;
+      buttons.forEach((btn) => {
+        if (btn.textContent !== text) {
+          btn.textContent = text;
+          changedCount += 1;
+        }
+      });
+      if (
+        changedCount > 0
+        && typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP_BUTTON][TEXT_APPLY] id=${btn.id || '-'} text=${text} reason=${String(reason || '-')}`,
+          `[CLOSED_LOOP_BUTTON][TEXT_APPLY] count=${buttons.length} changed=${changedCount} text=${text} reason=${String(reason || '-')}`,
         );
       }
-      return true;
+      return changedCount > 0;
     }
 
     function startClosedLoopButtonTextTimer(reason = 'unknown') {
@@ -11218,6 +11304,12 @@
       closedLoopContinueState.lastPostReplyDelayDoneRunId = '';
       closedLoopContinueState.lastPostReplyDelayDoneRound = 0;
       closedLoopContinueState.lastPostReplyDelayDoneAtMs = 0;
+      closedLoopContinueState.lastClosedLoopHotkeySentAt = 0;
+      closedLoopContinueState.lastClosedLoopHotkeyRound = 0;
+      closedLoopContinueState.lastClosedLoopHotkeyRunId = 0;
+      closedLoopContinueState.lastClosedLoopHotkeyRoundKey = '';
+      closedLoopContinueState.lastClosedLoopHotkeyCopiedText = '';
+      closedLoopContinueState.lastClosedLoopHotkeyAssistantKey = '';
       clearClosedLoopButtonWaitState(`start:${src}`);
       copyHotkeyUploadVerifyLoopStopRequested = false;
 
@@ -11515,6 +11607,7 @@
 
       const uploadEveryRound = options.uploadEveryRound === true
         || isClosedLoopEveryRoundUploadMode(options.mode || closedLoopContinueState.mode);
+      const forceReupload = uploadEveryRound || options.forceReupload === true;
       const source = useHotkey
         ? (
           round === 1
@@ -11551,6 +11644,16 @@
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][SHARED_UPLOAD_ENTER] runId=${runId || '-'} round=${round} source=${source} groupId=${scopeGroupId || '-'} groupName=${scopeGroupName || '-'}`,
       );
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][SHARED_UPLOAD_OPTIONS] `
+        + `runId=${runId || '-'} `
+        + `round=${round || '-'} `
+        + `source=${source || '-'} `
+        + `uploadEveryRound=${uploadEveryRound ? 1 : 0} `
+        + `forceReupload=${forceReupload ? 1 : 0} `
+        + `preserveFiles=1 `
+        + `groupId=${scopeGroupId || '-'}`,
+      );
 
       const closedLoopOwner = getCurrentClosedLoopOwnerAction() || 'closed-loop';
       const result = await runStartUploadButtonCore({
@@ -11563,6 +11666,8 @@
         cycleIndex: round,
         groupId: scopeGroupId,
         shouldStop,
+        preserveFiles: true,
+        forceReupload,
       });
 
       ToolboxShell.appendLog(
@@ -12006,17 +12111,38 @@
           );
         }
       } else {
-        const enabled = closedLoopCfg.autoUploadEnabled === true;
+        const everyRoundMode = isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode);
+        const autoUploadEnabled = closedLoopCfg.autoUploadEnabled === true;
+        const enabled = everyRoundMode || autoUploadEnabled;
         const completedReplyCount = Math.max(0, Number(round || 0) - 1);
         const shouldUpload = enabled && shouldUploadBeforeClosedLoopSend(round, safeInterval);
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][UPLOAD_POLICY_CHECK] runId=${runId} round=${round} completedReplyCount=${completedReplyCount} `
-          + `shouldUpload=${shouldUpload ? 1 : 0} interval=${safeInterval} reason=${shouldUpload ? policyReason : 'not-due'}`,
+          `[CLOSED_LOOP][UPLOAD_POLICY_CHECK] `
+          + `runId=${runId || '-'} `
+          + `round=${round || '-'} `
+          + `mode=${closedLoopContinueState.mode || '-'} `
+          + `everyRoundMode=${everyRoundMode ? 1 : 0} `
+          + `autoUploadEnabled=${autoUploadEnabled ? 1 : 0} `
+          + `enabled=${enabled ? 1 : 0} `
+          + `completedReplyCount=${completedReplyCount} `
+          + `shouldUpload=${shouldUpload ? 1 : 0} `
+          + `interval=${safeInterval} `
+          + `reason=${shouldUpload ? policyReason : 'not-due'}`,
         );
         if (shouldUpload) {
           needUpload = true;
         }
       }
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][UPLOAD_DECISION] `
+        + `runId=${runId || '-'} `
+        + `round=${round || '-'} `
+        + `needUpload=${needUpload ? 1 : 0} `
+        + `mode=${closedLoopContinueState.mode || '-'} `
+        + `activeGroupHasUploadableFiles=${activeGroupHasUploadableFiles ? 1 : 0} `
+        + `groupId=${activeUploadGroupId || '-'}`,
+      );
 
       if (needUpload) {
         setClosedLoopPhase(CLOSED_LOOP_PHASES.UPLOAD_BEFORE_SEND, {
@@ -12041,12 +12167,15 @@
           });
           renderClosedLoopContinueButton();
 
+          const uploadEveryRound = isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode);
           const uploadResult = await runClosedLoopSharedUpload(round, runId, {
             useHotkey,
             shouldStop,
             groupId: activeUploadGroupId,
             mode: closedLoopContinueState.mode,
-            uploadEveryRound: isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode),
+            uploadEveryRound,
+            forceReupload: uploadEveryRound,
+            preserveFiles: true,
           });
 
           if (!uploadResult || uploadResult.ok !== true) {
@@ -12152,16 +12281,38 @@
         });
         if (useHotkey) {
           const sourceText = stepSourceTag;
-          const copyHotkeyResult = await runCopyHotkeyOnceCore({
-            source: sourceText,
-            ownerAction: 'closed-loop-with-hotkey',
-            ownerTaskKey: 'copy-hotkey-continue',
-            ownerButtonId: getCurrentClosedLoopOwnerButtonId() || 'cgpt-closed-loop-upload-every5-hotkey-btn',
-            skipActionLock: true,
-            waitForCurrentReply: true,
-            shouldStop,
-            suppressOwnerMirror: true,
-          });
+          const hotkeyRoundSnapshot = getClosedLoopHotkeyRoundSentSnapshot(runId, round);
+          let copyHotkeyResult = null;
+          if (hotkeyRoundSnapshot.matched) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][HOTKEY_SKIP_DUPLICATE_ROUND] runId=${runId} round=${round} key=${hotkeyRoundSnapshot.roundKey} source=${sourceText} copiedLen=${hotkeyRoundSnapshot.copiedText.length}`,
+            );
+            copyHotkeyResult = {
+              ok: true,
+              reason: 'duplicate-hotkey-skipped-same-round',
+              copied: true,
+              hotkeySent: false,
+              duplicateHotkeySkipped: true,
+              copied_text: hotkeyRoundSnapshot.copiedText,
+              assistantMessageKey: hotkeyRoundSnapshot.assistantKey,
+            };
+          } else {
+            copyHotkeyResult = await runCopyHotkeyOnceCore({
+              source: sourceText,
+              ownerAction: 'closed-loop-with-hotkey',
+              ownerTaskKey: 'copy-hotkey-continue',
+              ownerButtonId: getCurrentClosedLoopOwnerButtonId() || 'cgpt-closed-loop-upload-every5-hotkey-btn',
+              skipActionLock: true,
+              waitForCurrentReply: true,
+              shouldStop,
+              suppressOwnerMirror: true,
+            });
+            if (copyHotkeyResult && copyHotkeyResult.ok === true) {
+              const copiedTextForMark = String(copyHotkeyResult.copied_text || '');
+              const assistantKeyForMark = getLastAssistantMessageKeySafe();
+              markClosedLoopHotkeyRoundSent(runId, round, copiedTextForMark, assistantKeyForMark);
+            }
+          }
           if (!copyHotkeyResult || copyHotkeyResult.ok !== true) {
             const failReason = copyHotkeyResult && copyHotkeyResult.reason
               ? copyHotkeyResult.reason
@@ -12178,7 +12329,11 @@
             };
           } else {
             const copiedText = String(copyHotkeyResult.copied_text || '');
-            const assistantMessageKey = getLastAssistantMessageKeySafe();
+            const assistantMessageKey = String(
+              copyHotkeyResult.assistantMessageKey
+              || getLastAssistantMessageKeySafe()
+              || '',
+            );
             const terminalResult = detectCopyHotkeyContinueTerminalAfterCopy(
               copiedText,
               sourceText,
@@ -12963,6 +13118,33 @@
           );
           return;
         }
+        const currentRunning = !!(
+          closedLoopContinueState
+          && closedLoopContinueState.running
+        );
+        const currentOwnerAction = currentRunning
+          ? String(getCurrentClosedLoopOwnerAction() || '').trim()
+          : '';
+        if (currentRunning && currentOwnerAction === action) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DIRECT_CLICK_AS_STOP_ONLY] id=${btn.id || '-'} action=${action} mode=${mode} reason=${reason || '-'} source=${clickSource || '-'}`,
+          );
+          if (event) {
+            event.cgptClosedLoopHandled = true;
+            event.cgptUploadUiActionHandled = true;
+            if (typeof event.preventDefault === 'function') {
+              event.preventDefault();
+            }
+            if (typeof event.stopPropagation === 'function') {
+              event.stopPropagation();
+            }
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          }
+          stopClosedLoopContinue(`button-stop:${action}`);
+          return;
+        }
         if (event) {
           event.cgptClosedLoopHandled = true;
           event.cgptUploadUiActionHandled = true;
@@ -13136,6 +13318,31 @@
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][DOCUMENT_CLICK_BLOCKED] reason=disabled id=${btn.id || '-'} action=${resolvedAction}`,
           );
+          return;
+        }
+        const currentRunning = !!(
+          closedLoopContinueState
+          && closedLoopContinueState.running
+        );
+        const currentOwnerAction = currentRunning
+          ? String(getCurrentClosedLoopOwnerAction() || '').trim()
+          : '';
+        if (currentRunning && currentOwnerAction === resolvedAction) {
+          event.cgptClosedLoopHandled = true;
+          event.cgptUploadUiActionHandled = true;
+          if (typeof event.preventDefault === 'function') {
+            event.preventDefault();
+          }
+          if (typeof event.stopPropagation === 'function') {
+            event.stopPropagation();
+          }
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DOCUMENT_CLICK_AS_STOP_ONLY] seq=${bindSeq} id=${btn.id || '-'} action=${resolvedAction} reason=${reason || '-'}`,
+          );
+          stopClosedLoopContinue(`document-button-stop:${resolvedAction}`);
           return;
         }
         event.cgptClosedLoopHandled = true;
