@@ -8142,9 +8142,11 @@
       const src = String(source || 'button');
       const opts = options || {};
       const ownerButtonId = String(opts.ownerButtonId || 'cgpt-send-copy-hotkey-once');
-      ToolboxShell.appendLog(
-        `[SEND_COPY_HOTKEY][SIMPLE_COMBO_START] source=${src} ownerButtonId=${ownerButtonId}`,
-      );
+
+      try {
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][SIMPLE_COMBO_START] source=${src} ownerButtonId=${ownerButtonId}`,
+        );
       const immediateSendCopyHotkeyBtn = rootElRef
         ? qs(UploadSelectors.sendCopyHotkeyBtn, rootElRef)
         : document.querySelector('#cgpt-send-copy-hotkey-once');
@@ -8176,14 +8178,170 @@
       const composerAttachmentCountForSimpleCombo = getComposerAttachmentCountForSendGuard(
         `send-copy-hotkey-simple:${src}`,
       );
+      const composerTextForSimpleCombo = (() => {
+        if (typeof getSharedComposerTextTrimmed === 'function') {
+          return String(getSharedComposerTextTrimmed() || '').trim();
+        }
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerText === 'function'
+        ) {
+          return String(ComposerApi.getComposerText() || '').trim();
+        }
+        if (typeof readComposerTextFallback === 'function') {
+          return String(readComposerTextFallback() || '').trim();
+        }
+        return '';
+      })();
+      const composerTextLenForSimpleCombo = composerTextForSimpleCombo.length;
+      let realSendReadyForSimpleCombo = 0;
+      let canSendForSimpleCombo = 0;
+      if (typeof findChatGPTSendButton === 'function') {
+        const realSendButtonForSimpleCombo = findChatGPTSendButton('send-copy-hotkey-simple:payload-check');
+        realSendReadyForSimpleCombo = realSendButtonForSimpleCombo ? 1 : 0;
+      }
+      if (composerTextLenForSimpleCombo > 0 || composerAttachmentCountForSimpleCombo > 0) {
+        canSendForSimpleCombo = 1;
+      }
       ToolboxShell.appendLog(
-        `[SEND_COPY_HOTKEY][USE_SEND_MESSAGE_CORE] source=${src} composerAttachmentCount=${composerAttachmentCountForSimpleCombo} rule=same-as-send-message`,
+        `[SEND_COPY_HOTKEY][PAYLOAD_CHECK] source=${src} `
+        + `composerTextLen=${composerTextLenForSimpleCombo} `
+        + `composerAttachmentCount=${composerAttachmentCountForSimpleCombo} `
+        + `canSend=${canSendForSimpleCombo} `
+        + `realSendReady=${realSendReadyForSimpleCombo}`,
+      );
+      if (composerTextLenForSimpleCombo <= 0 && composerAttachmentCountForSimpleCombo <= 0) {
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][NO_COMPOSER_PAYLOAD_FALLBACK_COPY_HOTKEY] source=${src} `
+          + `composerTextLen=0 composerAttachmentCount=${composerAttachmentCountForSimpleCombo} `
+          + `action=copy-hotkey-direct`,
+        );
+        setButtonTaskPhaseScoped('send-copy-hotkey', 'running', 'simple-combo:no-payload-copy-hotkey', {
+          ownerButtonId,
+          pendingText: '复制+快捷键中',
+          mode: 'simple-combo',
+        });
+        const fallbackStartedAt = Date.now();
+        let fallbackCopyHotkeyResult = null;
+        try {
+          fallbackCopyHotkeyResult = await runCopyHotkeyOnceCore({
+            source: `send-copy-hotkey-simple:${src}:no-payload-fallback`,
+            ownerAction: 'send-copy-hotkey',
+            ownerTaskKey: 'send-copy-hotkey',
+            ownerButtonId,
+            skipActionLock: true,
+            waitForCurrentReply: true,
+            suppressOwnerMirror: true,
+          });
+        } catch (error) {
+          const errorMessage = error && error.message ? error.message : String(error);
+          const errorStack = error && error.stack ? error.stack : '';
+          console.error('[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_EXCEPTION]', error);
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_EXCEPTION] `
+            + `source=${src} message=${errorMessage} stack=${errorStack || '-'}`,
+          );
+          setButtonTaskPhaseScoped('send-copy-hotkey', 'failed', 'simple-combo:no-payload-fallback-exception', {
+            ownerButtonId,
+            pendingText: '复制失败',
+            mode: 'simple-combo',
+          });
+          setStatus(`复制+快捷键异常：${errorMessage}`, 'error', {
+            owner: 'send-copy-hotkey',
+            reason: 'no-payload-fallback-exception',
+            persist: true,
+          });
+          scheduleSendCopyHotkeySimpleComboFailureReset('no-payload-fallback-exception');
+          if (typeof renderUploadButtonsOnly === 'function') {
+            renderUploadButtonsOnly('send-copy-hotkey:no-payload-fallback-exception');
+          }
+          return {
+            ok: false,
+            reason: 'no-payload-fallback-exception',
+            message: errorMessage,
+            sendResult: null,
+            copyHotkeyResult: null,
+            noPayloadFallback: true,
+          };
+        }
+        const fallbackCostMs = Date.now() - fallbackStartedAt;
+        if (!fallbackCopyHotkeyResult || fallbackCopyHotkeyResult.ok !== true) {
+          const reason = fallbackCopyHotkeyResult && fallbackCopyHotkeyResult.reason
+            ? fallbackCopyHotkeyResult.reason
+            : 'copy-hotkey-failed';
+          const message = fallbackCopyHotkeyResult && fallbackCopyHotkeyResult.message
+            ? fallbackCopyHotkeyResult.message
+            : '';
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_FAILED] `
+            + `source=${src} reason=${reason} message=${message || '-'} costMs=${fallbackCostMs}`,
+          );
+          setButtonTaskPhaseScoped('send-copy-hotkey', 'failed', `simple-combo:no-payload-fallback-failed:${reason}`, {
+            ownerButtonId,
+            pendingText: '复制失败',
+            mode: 'simple-combo',
+          });
+          setStatus(`复制+快捷键失败：${reason}`, 'error', {
+            owner: 'send-copy-hotkey',
+            reason,
+            persist: true,
+          });
+          scheduleSendCopyHotkeySimpleComboFailureReset(`no-payload-fallback-failed:${reason}`);
+          if (typeof renderUploadButtonsOnly === 'function') {
+            renderUploadButtonsOnly('send-copy-hotkey:no-payload-fallback-failed');
+          }
+          return {
+            ok: false,
+            reason,
+            message,
+            sendResult: null,
+            copyHotkeyResult: fallbackCopyHotkeyResult,
+            noPayloadFallback: true,
+          };
+        }
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_DONE] `
+          + `source=${src} `
+          + `copied=${fallbackCopyHotkeyResult.copied ? 1 : 0} `
+          + `hotkeySent=${fallbackCopyHotkeyResult.hotkeySent ? 1 : 0} `
+          + `costMs=${fallbackCostMs}`,
+        );
+        setButtonTaskPhaseScoped('send-copy-hotkey', 'idle', 'simple-combo:no-payload-fallback-done', {
+          ownerButtonId: '',
+          pendingText: '',
+          mode: '',
+        });
+        setStatus('已复制最后回复，并发送快捷键', 'success', {
+          owner: 'send-copy-hotkey',
+          persist: false,
+          ttlMs: 1800,
+        });
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly('send-copy-hotkey:no-payload-fallback-done');
+        }
+        return {
+          ok: true,
+          reason: 'no-payload-copy-hotkey-done',
+          sendResult: null,
+          copyHotkeyResult: fallbackCopyHotkeyResult,
+          noPayloadFallback: true,
+        };
+      }
+      ToolboxShell.appendLog(
+        `[SEND_COPY_HOTKEY][USE_SEND_MESSAGE_CORE] source=${src} `
+        + `composerTextLen=${composerTextLenForSimpleCombo} `
+        + `composerAttachmentCount=${composerAttachmentCountForSimpleCombo} `
+        + `canSend=${canSendForSimpleCombo} `
+        + `realSendReady=${realSendReadyForSimpleCombo} `
+        + `rule=same-as-send-message`,
       );
       setButtonTaskPhaseScoped('send-copy-hotkey', 'running', 'simple-combo:start', {
         ownerButtonId,
         pendingText: '发送中',
         mode: 'simple-combo',
       });
+      const sendStartedAt = Date.now();
       const sendResult = await sendExistingComposerBySendMessageButtonCore({
         source: `send-copy-hotkey-simple:${src}`,
         logSource: `send-copy-hotkey-simple:${src}`,
@@ -8193,33 +8351,52 @@
         ownerAction: 'send-copy-hotkey',
         ownerTaskKey: 'send-copy-hotkey',
         ownerButtonId,
+        composerAttachmentCount: composerAttachmentCountForSimpleCombo,
         skipActionLock: true,
         manualSend: true,
         skipUploadCadence: true,
         blockLocalQueueUpload: true,
       });
+      const sendCostMs = Date.now() - sendStartedAt;
       if (!sendResult || sendResult.ok !== true) {
-        const reason = sendResult && sendResult.reason ? sendResult.reason : 'send-failed';
-        const message = sendResult && sendResult.message ? sendResult.message : '';
+        const sendFailReason = sendResult && sendResult.reason
+          ? sendResult.reason
+          : 'send-message-button-core-failed';
+        const sendFailMessage = sendResult && sendResult.message
+          ? sendResult.message
+          : '';
         ToolboxShell.appendLog(
-          `[SEND_COPY_HOTKEY][SIMPLE_COMBO_SEND_FAILED] reason=${reason} message=${message || '-'}`,
+          `[SEND_COPY_HOTKEY][SEND_MESSAGE_CORE_FAILED] `
+          + `source=${src} `
+          + `reason=${sendFailReason} `
+          + `message=${sendFailMessage || '-'} `
+          + `composerTextLen=${composerTextLenForSimpleCombo} `
+          + `composerAttachmentCount=${composerAttachmentCountForSimpleCombo} `
+          + `canSend=${canSendForSimpleCombo} `
+          + `realSendReady=${realSendReadyForSimpleCombo} `
+          + `costMs=${sendCostMs}`,
         );
-        setButtonTaskPhaseScoped('send-copy-hotkey', 'failed', `simple-combo:send-failed:${reason}`, {
+        setButtonTaskPhaseScoped('send-copy-hotkey', 'failed', `simple-combo:send-failed:${sendFailReason}`, {
           ownerButtonId,
           pendingText: '发送失败',
           mode: 'simple-combo',
         });
-        setStatus(`发送失败：${reason}`, 'error', {
+        setStatus(`发送失败：${sendFailReason}`, 'error', {
           owner: 'send-copy-hotkey',
-          reason,
+          reason: sendFailReason,
           persist: true,
         });
+        scheduleSendCopyHotkeySimpleComboFailureReset(`send-message-core-failed:${sendFailReason}`);
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly('send-copy-hotkey:send-message-core-failed');
+        }
         return {
           ok: false,
-          reason,
-          message,
+          reason: sendFailReason,
+          message: sendFailMessage,
           sendResult,
           copyHotkeyResult: null,
+          noPayloadFallback: false,
         };
       }
       ToolboxShell.appendLog(
@@ -8255,6 +8432,7 @@
           reason,
           persist: true,
         });
+        scheduleSendCopyHotkeySimpleComboFailureReset(`copy-hotkey-failed:${reason}`);
         return {
           ok: false,
           reason,
@@ -8285,6 +8463,43 @@
         sendResult,
         copyHotkeyResult,
       };
+      } catch (error) {
+        const errorMessage = error && error.message ? error.message : String(error);
+        const errorStack = error && error.stack ? error.stack : '';
+
+        console.error('[SEND_COPY_HOTKEY][SIMPLE_COMBO_EXCEPTION]', error);
+
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY][SIMPLE_COMBO_EXCEPTION] `
+          + `source=${src} message=${errorMessage} stack=${errorStack || '-'}`,
+        );
+
+        setButtonTaskPhaseScoped('send-copy-hotkey', 'failed', 'simple-combo:exception', {
+          ownerButtonId,
+          pendingText: '执行失败',
+          mode: 'simple-combo',
+        });
+
+        setStatus(`发送+复制+快捷键异常：${errorMessage}`, 'error', {
+          owner: 'send-copy-hotkey',
+          reason: 'simple-combo-exception',
+          persist: true,
+        });
+
+        scheduleSendCopyHotkeySimpleComboFailureReset('simple-combo-exception');
+
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly('send-copy-hotkey:simple-combo-exception');
+        }
+
+        return {
+          ok: false,
+          reason: 'simple-combo-exception',
+          message: errorMessage,
+          sendResult: null,
+          copyHotkeyResult: null,
+        };
+      }
     }
 
     async function runSendCopyHotkeyComposed(source = 'button', options = {}) {
@@ -8341,9 +8556,11 @@
     function isSendCopyHotkeyActive() {
       const task = ensureSendCopyHotkeyTask();
       const phase = String(task.phase || 'idle').trim().toLowerCase();
+
       if (String(task.mode || '').trim() === 'simple-combo') {
-        return phase === 'running' || phase === 'failed';
+        return phase === 'running';
       }
+
       return SEND_COPY_HOTKEY_ACTIVE_PHASES.has(phase);
     }
 
@@ -8685,6 +8902,45 @@
         force: true,
         buttonTasksReason: `send-copy-hotkey-scoped:${reason || nextPhase}`,
       });
+    }
+
+    function scheduleSendCopyHotkeySimpleComboFailureReset(reason = '', delayMs = 1200) {
+      const safeReason = String(reason || 'failed-reset').trim() || 'failed-reset';
+      const safeDelayMs = Number.isFinite(Number(delayMs)) ? Math.max(0, Number(delayMs)) : 1200;
+
+      window.setTimeout(() => {
+        const task = ensureSendCopyHotkeyTask();
+        const phase = String(task.phase || 'idle').trim().toLowerCase();
+        const mode = String(task.mode || '').trim();
+
+        if (mode !== 'simple-combo') {
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY_TASK][FAILED_RESET_SKIP] reason=${safeReason} currentMode=${mode || '-'} currentPhase=${phase}`,
+          );
+          return;
+        }
+
+        if (phase !== 'failed') {
+          ToolboxShell.appendLog(
+            `[SEND_COPY_HOTKEY_TASK][FAILED_RESET_SKIP] reason=${safeReason} currentMode=${mode || '-'} currentPhase=${phase}`,
+          );
+          return;
+        }
+
+        ToolboxShell.appendLog(
+          `[SEND_COPY_HOTKEY_TASK][FAILED_RESET_TO_IDLE] reason=${safeReason} delayMs=${safeDelayMs}`,
+        );
+
+        setButtonTaskPhaseScoped('send-copy-hotkey', 'idle', `simple-combo:failed-reset:${safeReason}`, {
+          ownerButtonId: '',
+          pendingText: '',
+          mode: '',
+        });
+
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly(`send-copy-hotkey:failed-reset:${safeReason}`);
+        }
+      }, safeDelayMs);
     }
 
     function setSendCopyHotkeyPhase(phase, reason = '', patch = {}) {
