@@ -24,18 +24,17 @@
     const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
     const unified = snap.toolboxUnifiedAuthority;
     if (unified && typeof unified === 'object' && unified.reply) {
+      const replyBusy = unified.flags && unified.flags.replyBusy === true;
       return {
         isToolboxStatusAuthoritySnapshot: true,
         replyText: unified.reply.text || '',
-        replyAnswering: unified.reply.state === 'answering' || unified.flags.answering === true,
-        replyWaiting: unified.reply.state === 'answering'
-          || unified.composer.hasRealStopButton === true,
-        replyBusy: unified.reply.state === 'answering'
-          || unified.composer.hasRealStopButton === true,
+        replyAnswering: replyBusy || unified.flags.answering === true,
+        replyWaiting: replyBusy,
+        replyBusy,
         replyReady: unified.flags.ready === true,
-        shouldWaitReplyByTopStatus: unified.reply.state === 'answering'
-          || unified.composer.hasRealStopButton === true,
+        shouldWaitReplyByTopStatus: replyBusy,
         canSendByTopStatus: unified.flags.canSend === true || snap.canSend === true,
+        canStartUploadByTopStatus: unified.flags.canUpload === true,
         responseState: unified.raw && unified.raw.responseState ? unified.raw.responseState : '',
         responseReason: unified.raw && unified.raw.responseReason ? unified.raw.responseReason : '',
         topReplyStatus: snap.topReplyStatus || {},
@@ -154,11 +153,8 @@
   function isAuthorityReplyBusyForButtons(snapshot = {}) {
     const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
     const unified = snap.toolboxUnifiedAuthority;
-    if (unified && unified.reply) {
-      return !!(
-        unified.reply.state === 'answering'
-        || unified.composer.hasRealStopButton === true
-      );
+    if (unified && unified.flags) {
+      return unified.flags.replyBusy === true;
     }
     const authority = getToolboxAuthorityFromSnapshot(snapshot);
     if (authority) {

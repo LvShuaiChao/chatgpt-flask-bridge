@@ -4691,6 +4691,7 @@ const AutoQueueModule = (() => {
     ]);
 
     const BATCH_TASK_GROUP_RECOVER_DELAY_MS = 5000;
+    const BATCH_ALIGN_CLOSED_LOOP_ORDER = true;
     const TERMINAL_CONFIRM_MIN_STABLE_MS = 1200;
     const TERMINAL_CONFIRM_MAX_WAIT_MS = 15000;
     const TERMINAL_CONFIRM_STUCK_RECOVER_MS = 15000;
@@ -9935,6 +9936,141 @@ const AutoQueueModule = (() => {
       );
     }
 
+    function getBatchAlignPostHotkeyDelayMs(source = '-') {
+      const minMs = Math.max(
+        1000,
+        Number(config.closedLoopNextDelayMinMs || 40000) || 40000,
+      );
+      const maxMs = Math.max(
+        minMs,
+        Number(config.closedLoopNextDelayMaxMs || 60000) || 60000,
+      );
+      const delayMs = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_ALIGN][POST_HOTKEY_DELAY] source=${String(source || '-')} delayMs=${delayMs} minMs=${minMs} maxMs=${maxMs}`,
+      );
+      return delayMs;
+    }
+
+    async function runBatchBusinessPromptSendFlow(options = {}) {
+      const task = options.task || getCurrentRunningTask();
+      const kind = String(options.kind || 'continue');
+      const promptText = String(options.promptText || '');
+      const source = String(options.source || `autoq-batch-${kind}`);
+
+      const attachmentEvidence = getAutoQueueComposerAttachmentEvidence
+        ? getAutoQueueComposerAttachmentEvidence(`batch-send-${kind}`)
+        : null;
+
+      const hasAttachment = !!(
+        attachmentEvidence
+        && Number(attachmentEvidence.count || 0) > 0
+      );
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_SHARED_SEND][ENTER] source=${source} kind=${kind} task=${task && task.title ? task.title : '-'} hasAttachment=${hasAttachment ? 1 : 0}`,
+      );
+
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.runBusinessPromptSendFlow !== 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_SHARED_SEND][FAILED] source=${source} reason=upload-module-business-send-missing`,
+        );
+        return {
+          ok: false,
+          reason: 'upload-module-business-send-missing',
+        };
+      }
+
+      const result = await UploadModule.runBusinessPromptSendFlow({
+        source,
+        promptText,
+        logPrefix: 'AUTOQ',
+        sendKind: kind === 'initial' ? 'initial' : 'continue',
+        waitAttachmentStable: hasAttachment,
+        requireAttachmentReady: hasAttachment,
+        shouldStop: () => !state.running || (state.batchTask && state.batchTask.stopRequested === true),
+      });
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_SHARED_SEND][DONE] source=${source} kind=${kind} ok=${result && result.ok ? 1 : 0} reason=${result && result.reason ? result.reason : '-'}`,
+      );
+
+      if (result && result.ok === true) {
+        await enterAutoQueueWaitingReplyAfterConfirm({
+          sendKind: kind,
+          task,
+          taskTitle: task && task.title ? task.title : '-',
+          prompt: promptText,
+          source,
+          logTag: `[AUTOQ][BATCH_SHARED_SEND:${kind}]`,
+          submittedEvidence: result.submittedDetail,
+          timeoutMs: 3000,
+        });
+      }
+
+      return result;
+    }
+
+    async function runBatchAlignCopyHotkeyAfterReplyStable(task, replyText, resolved, profile) {
+      const round = Number(task.continueCount || 0) + 1;
+      const actualDoneSignal = typeof normalizeDoneSignal === 'function'
+        ? normalizeDoneSignal(resolved.actualDoneSignal)
+        : resolved.actualDoneSignal;
+
+      setTaskBatchStep('copy-last-reply', task, { log: false });
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_START] task=${task.title || '-'} round=${round}`,
+      );
+
+      if (
+        typeof UploadModule === 'undefined'
+        || typeof UploadModule.runCopyHotkeyOnceCore !== 'function'
+      ) {
+        failCurrentTask('upload-module-copy-hotkey-missing');
+        return { ok: false, reason: 'upload-module-copy-hotkey-missing' };
+      }
+
+      const copyResult = await UploadModule.runCopyHotkeyOnceCore({
+        source: `autoq-batch-align-copy-${task.id || round}-${round}`,
+        skipActionLock: true,
+        waitForCurrentReply: false,
+        shouldStop: () => !state.running || (state.batchTask && state.batchTask.stopRequested === true),
+      });
+
+      if (tryStopBatchOnCopyHotkeyTerminalResult(copyResult, task)) {
+        return { ok: true, reason: 'terminal-detected', terminal: true };
+      }
+
+      if (!copyResult || copyResult.ok !== true) {
+        const failReason = copyResult && copyResult.reason
+          ? String(copyResult.reason)
+          : 'copy-hotkey-failed';
+        failCurrentTask(failReason);
+        return { ok: false, reason: failReason };
+      }
+
+      const copiedChars = String(copyResult.copied_text || replyText || '').length;
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_DONE] task=${task.title || '-'} chars=${copiedChars} hotkeySent=${copyResult.hotkeySent === false ? 0 : 1}`,
+      );
+
+      const delayMs = getBatchAlignPostHotkeyDelayMs('batch-align-post-hotkey');
+      if (state.taskRun) {
+        state.taskRun.pendingSendKind = 'continue';
+      }
+      setAutoQueuePhase(AUTO_QUEUE_PHASES.RUNNING, 'batch-align-post-hotkey-delay', { force: true });
+      setTaskBatchStep('send-continue', task, { log: false });
+      scheduleNextBatchTaskStep('align-continue-after-hotkey-delay', delayMs, {
+        reason: 'batch-align-closed-loop-order',
+        doneSignal: actualDoneSignal,
+      });
+
+      return { ok: true, reason: 'copy-hotkey-scheduled-continue', scheduled: true };
+    }
+
     async function sendAutoQueueExistingComposerBySharedFlow(task, reason) {
       const currentTask = task || getCurrentRunningTask();
       const reasonText = String(reason || '-').trim() || '-';
@@ -10006,6 +10142,25 @@ const AutoQueueModule = (() => {
           }
         }
       }
+      const attachmentEvidence = getAutoQueueComposerAttachmentEvidence
+        ? getAutoQueueComposerAttachmentEvidence(`send-existing-${reasonText}`)
+        : null;
+
+      const hasAttachment = !!(attachmentEvidence && Number(attachmentEvidence.count || 0) > 0);
+      const attachmentReady = !hasAttachment || (
+        Number(attachmentEvidence.uploadingCount || 0) === 0
+        && Number(attachmentEvidence.readyCount || 0) >= Number(attachmentEvidence.count || 0)
+      );
+
+      ToolboxShell.appendLog(
+        `[AUTOQ][SEND_EXISTING][ATTACHMENT_POLICY] reason=${reasonText} hasAttachment=${hasAttachment ? 1 : 0} `
+        + `count=${attachmentEvidence ? Number(attachmentEvidence.count || 0) : 0} `
+        + `readyCount=${attachmentEvidence ? Number(attachmentEvidence.readyCount || 0) : 0} `
+        + `uploadingCount=${attachmentEvidence ? Number(attachmentEvidence.uploadingCount || 0) : 0} `
+        + `attachmentReady=${attachmentReady ? 1 : 0} waitAttachmentStable=${hasAttachment ? 1 : 0} `
+        + `requireAttachmentReady=${hasAttachment ? 1 : 0}`,
+      );
+
       let flowResult = null;
       if (typeof UploadModule.runSharedSendAndWaitEntryFlow === 'function') {
         flowResult = await UploadModule.runSharedSendAndWaitEntryFlow({
@@ -10013,10 +10168,10 @@ const AutoQueueModule = (() => {
           promptText: '',
           sendExistingComposer: true,
           promptAlreadyWritten: true,
-          attachmentAlreadyReady: true,
+          attachmentAlreadyReady: attachmentReady,
           uploadBeforeSend: false,
-          waitAttachmentStable: false,
-          requireAttachmentReady: false,
+          waitAttachmentStable: hasAttachment,
+          requireAttachmentReady: hasAttachment,
           logPrefix: 'AUTOQ',
           sendKind: sendKindForFlow,
           expectedPromptText: expectedPrompt,
@@ -10029,9 +10184,10 @@ const AutoQueueModule = (() => {
           promptText: '',
           sendExistingComposer: true,
           promptAlreadyWritten: true,
-          attachmentAlreadyReady: true,
+          attachmentAlreadyReady: attachmentReady,
           uploadBeforeSend: false,
-          waitAttachmentStable: false,
+          waitAttachmentStable: hasAttachment,
+          requireAttachmentReady: hasAttachment,
           logPrefix: 'AUTOQ',
           sendKind: sendKindForFlow,
           expectedPromptText: expectedPrompt,
@@ -25469,6 +25625,19 @@ const AutoQueueModule = (() => {
         + `phase=${String(state.phase || '-')} step=${String(run.currentStep || '-')}`,
       );
 
+      const bridgeUploaded = uploadResult && uploadResult.uploadedCount != null
+        ? Number(uploadResult.uploadedCount)
+        : (uploadResult && uploadResult.ok ? 1 : 0);
+      const bridgeSkipped = uploadResult && uploadResult.skippedCount != null
+        ? Number(uploadResult.skippedCount)
+        : 0;
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_UPLOAD_TO_SEND_BRIDGE] kind=${safeKind} `
+        + `task=${currentTask ? currentTask.title : '-'} uploadedCount=${bridgeUploaded} `
+        + `skippedCount=${bridgeSkipped} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'} `
+        + `nextSendMustWaitAttachmentStable=1 nextSendRequireAttachmentReady=1`,
+      );
+
       if (safeKind === 'continue_with_upload' && isCurrentRunAfterInitialStrict()) {
         scheduleCadenceContinuePromptWriteAfterUpload(currentTask, 'auto-upload-done');
       } else if (safeKind === 'initial') {
@@ -26742,6 +26911,13 @@ const AutoQueueModule = (() => {
         `[AUTOQ][REPLY_SETTLED] task=${title} chars=${chars} reason=${meta && meta.reason ? meta.reason : '-'}`,
       );
 
+      const replyStableRun = state.taskRun || {};
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_REPLY_STABLE][ENTER] taskId=${task && task.id ? task.id : '-'} taskTitle=${title} `
+        + `phase=${String(state.phase || '-')} currentStep=${String(replyStableRun.currentStep || '-')} `
+        + `replyTextLength=${chars} stableSource=${meta && meta.reason ? meta.reason : '-'}`,
+      );
+
       if (config.promptMode === 'task' && isChatGPTActuallyBusyForTaskQueue()) {
         if (tryScheduleTerminalBusyOverride('reply-ready-blocked-busy')) {
           return;
@@ -26783,6 +26959,19 @@ const AutoQueueModule = (() => {
         log('当前无运行中任务');
         return;
       }
+
+      const replyReadyRun = state.taskRun || {};
+      let replyReadyText = '';
+      try {
+        replyReadyText = getLastAssistantReplyText();
+      } catch (replyReadyReadErr) {
+        console.error('[ChatGPT toolbox] handleTaskReplyReady pre-read reply failed', replyReadyReadErr);
+      }
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_REPLY_STABLE][ENTER] taskId=${task.id || '-'} taskTitle=${task.title || '-'} `
+        + `phase=${String(state.phase || '-')} currentStep=${String(replyReadyRun.currentStep || '-')} `
+        + `replyTextLength=${String(replyReadyText || '').length} stableSource=handle-task-reply-ready`,
+      );
 
       if (!state.running) {
         if (!recoverOrphanedTaskBatchRuntime('handle-task-reply-ready-running-off')) {
@@ -27231,6 +27420,12 @@ const AutoQueueModule = (() => {
       ToolboxShell.appendLog(
         `[AUTOQ][TASK][DONE_SIGNAL_CHECK] matched=${matched ? 1 : 0} signal=${resolved.actualDoneSignal}`,
       );
+      ToolboxShell.appendLog(
+        `[AUTOQ][BATCH_REPLY_STABLE][TERMINAL_CHECK] taskId=${task.id || '-'} taskTitle=${task.title || '-'} `
+        + `phase=${String(state.phase || '-')} currentStep=${String((state.taskRun || {}).currentStep || '-')} `
+        + `replyTextLength=${String(replyText || '').length} stableSource=handle-task-reply-ready `
+        + `terminalDetected=${matched ? 1 : 0}`,
+      );
 
       if (!matched) {
         ToolboxShell.appendLog(
@@ -27275,7 +27470,14 @@ const AutoQueueModule = (() => {
 
       if (
         typeof UploadModule === 'undefined'
-        || typeof UploadModule.runCopyHotkeyContinueOnceForTaskQueue !== 'function'
+        || (
+          !BATCH_ALIGN_CLOSED_LOOP_ORDER
+          && typeof UploadModule.runCopyHotkeyContinueOnceForTaskQueue !== 'function'
+        )
+        || (
+          BATCH_ALIGN_CLOSED_LOOP_ORDER
+          && typeof UploadModule.runCopyHotkeyOnceCore !== 'function'
+        )
       ) {
         failCurrentTask('upload-module-missing');
         return;
@@ -27304,6 +27506,22 @@ const AutoQueueModule = (() => {
         if (typeof isCorruptedBatchSignalText === 'function' && isCorruptedBatchSignalText(actualContinuePrompt)) {
           ToolboxShell.appendLog('[AUTOQ][TASK_BATCH][FAILED] reason=corrupted-continue-prompt');
           failCurrentTask('corrupted-continue-prompt');
+          return;
+        }
+
+        if (BATCH_ALIGN_CLOSED_LOOP_ORDER) {
+          const alignResult = await runBatchAlignCopyHotkeyAfterReplyStable(
+            task,
+            replyText,
+            resolved,
+            profile,
+          );
+          ToolboxShell.appendLog(
+            `[AUTOQ][BATCH_REPLY_STABLE][DONE] taskId=${task.id || '-'} taskTitle=${task.title || '-'} `
+            + `phase=${String(state.phase || '-')} currentStep=${String((state.taskRun || {}).currentStep || '-')} `
+            + `replyTextLength=${String(replyText || '').length} stableSource=handle-task-reply-ready `
+            + `terminalDetected=0 alignOk=${alignResult && alignResult.ok ? 1 : 0} reason=${alignResult && alignResult.reason ? alignResult.reason : '-'}`,
+          );
           return;
         }
 
@@ -35769,6 +35987,15 @@ const AutoQueueModule = (() => {
         };
       }
 
+      if (BATCH_ALIGN_CLOSED_LOOP_ORDER) {
+        return runBatchBusinessPromptSendFlow({
+          task,
+          kind: 'continue',
+          promptText: text,
+          source,
+        });
+      }
+
       if (
         requireCopyHotkey
         && typeof UploadModule !== 'undefined'
@@ -36203,7 +36430,6 @@ const AutoQueueModule = (() => {
             };
           }
           promptAlreadyWritten = true;
-          attachmentAlreadyReady = true;
           setTaskBatchStep('prompt-ready', task, { log: false });
           const afterWritePayload = getAutoQueueComposerPayloadState(`after-write:${safeSendKind}`);
           syncCurrentComposerOwnerActualText(afterWritePayload.text, `after-write:${safeSendKind}`);
@@ -36266,15 +36492,83 @@ const AutoQueueModule = (() => {
           stage: 'before-send',
         });
 
+        const attachmentEvidence = getAutoQueueComposerAttachmentEvidence
+          ? getAutoQueueComposerAttachmentEvidence(`send-task-prompt-${safeSendKind}`)
+          : null;
+        const hasAttachment = !!(attachmentEvidence && Number(attachmentEvidence.count || 0) > 0);
+        const attachmentReady = !hasAttachment || (
+          Number(attachmentEvidence.uploadingCount || 0) === 0
+          && Number(attachmentEvidence.readyCount || 0) >= Number(attachmentEvidence.count || 0)
+        );
+        attachmentAlreadyReady = attachmentReady;
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][SEND_TASK_PROMPT][ATTACHMENT_POLICY] kind=${safeSendKind} task=${taskTitle} `
+          + `hasAttachment=${hasAttachment ? 1 : 0} count=${attachmentEvidence ? Number(attachmentEvidence.count || 0) : 0} `
+          + `readyCount=${attachmentEvidence ? Number(attachmentEvidence.readyCount || 0) : 0} `
+          + `uploadingCount=${attachmentEvidence ? Number(attachmentEvidence.uploadingCount || 0) : 0} `
+          + `attachmentReady=${attachmentReady ? 1 : 0} waitAttachmentStable=${hasAttachment ? 1 : 0} `
+          + `requireAttachmentReady=${hasAttachment ? 1 : 0} promptAlreadyWritten=${promptAlreadyWritten ? 1 : 0}`,
+        );
+
+        if (
+          BATCH_ALIGN_CLOSED_LOOP_ORDER
+          && (safeSendKind === 'continue' || safeSendKind === 'initial')
+          && safeSendKind !== 'verification'
+        ) {
+          const batchSendResult = await runBatchBusinessPromptSendFlow({
+            task,
+            kind: safeSendKind,
+            promptText: promptAlreadyWritten ? (expectedPromptFromRun || prompt) : prompt,
+            source,
+          });
+          if (!batchSendResult || batchSendResult.ok !== true) {
+            const reason = String((batchSendResult && batchSendResult.reason) || 'batch-shared-send-failed');
+            log(`发送失败：${reason}`);
+            ToolboxShell.appendLog(`${logTag} failed reason=${reason}`);
+            state.taskRun = run;
+            return handleAutoQueueSendFlowFailure({
+              reason,
+              sendKind: safeSendKind,
+              task,
+              taskTitle,
+              prompt,
+              source,
+              logTag,
+              flowResult: batchSendResult,
+              sendResult: batchSendResult,
+            });
+          }
+          clearRelentlessSendRetryState();
+          recordTaskSendRateLimitHit(source);
+          ToolboxShell.appendLog('[AUTO_QUEUE][BATCH_INITIAL_SEND_DONE]');
+          if (safeSendKind === 'initial') {
+            ToolboxShell.appendLog(
+              `[AUTOQ][INITIAL_SEND_CONFIRMED] task=${taskTitle} taskId=${task && task.id ? task.id : '-'}`,
+            );
+          }
+          state.batchInitialWaitLoggedAt = 0;
+          state.sentCount += 1;
+          state.currentMessageId = String(state.currentMessageId || '').trim();
+          setAutoQueuePhase(AUTO_QUEUE_PHASES.SENT, 'message accepted', { force: true });
+          state.sendingNow = false;
+          state.taskRun = run;
+          return {
+            ok: true,
+            reason: batchSendResult.reason || 'sent',
+            waitReply: !!state.waitingReply,
+          };
+        }
+
         const sharedSendOptions = {
           source,
           promptText: promptAlreadyWritten ? '' : prompt,
           sendExistingComposer: promptAlreadyWritten,
           promptAlreadyWritten,
-          attachmentAlreadyReady,
+          attachmentAlreadyReady: attachmentReady,
           uploadBeforeSend: false,
-          waitAttachmentStable: !attachmentAlreadyReady,
-          requireAttachmentReady: safeSendKind === 'initial' && !attachmentAlreadyReady,
+          waitAttachmentStable: hasAttachment,
+          requireAttachmentReady: hasAttachment,
           shouldStop: () => !state.running || state.stopRequested,
           logPrefix: 'AUTOQ',
           allowReplaceDraft: false,
@@ -37297,16 +37591,33 @@ const AutoQueueModule = (() => {
               : resolved.actualContinuePromptTemplate;
 
             const round = Number(currentTask.continueCount || 0) + 1;
-            const sendResult = await sendBatchContinueDirectlyOrCopyHotkey(actualContinuePrompt, {
-              source: 'maybe-send-next-continue',
-              requireCopyHotkey: true,
-            });
+            const sendResult = BATCH_ALIGN_CLOSED_LOOP_ORDER
+              ? await runBatchBusinessPromptSendFlow({
+                task: currentTask,
+                kind: 'continue',
+                promptText: actualContinuePrompt,
+                source: 'maybe-send-next-continue',
+              })
+              : await sendBatchContinueDirectlyOrCopyHotkey(actualContinuePrompt, {
+                source: 'maybe-send-next-continue',
+                requireCopyHotkey: true,
+              });
 
             if (sendResult && sendResult.deferred) {
               return;
             }
 
             if (sendResult && sendResult.ok) {
+              if (BATCH_ALIGN_CLOSED_LOOP_ORDER && state.waitingReply) {
+                recordTaskSendRateLimitHit('continue');
+                currentTask.continueCount = round;
+                currentTask.updatedAt = nowMs();
+                saveConfig();
+                renderTaskList();
+                renderTaskEditor();
+                clearRelentlessSendRetryState();
+                return;
+              }
               await finishBatchContinueDirectSuccess(
                 currentTask,
                 actualContinuePrompt,

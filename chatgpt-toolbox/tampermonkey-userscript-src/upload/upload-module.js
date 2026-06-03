@@ -2270,9 +2270,16 @@
         || variantBlocked
       );
 
+      const domHealsStaleLock = domContradictsStaleReplyLock(
+        readToolboxComposerEvidence(`normalizeClosedLoopTopReply:${reason || '-'}`),
+        runtimeSnapshot,
+      );
+      const effectiveWaitingReply = waitingReply && !domHealsStaleLock;
+      const effectiveAnswering = answering && !domHealsStaleLock;
+
       const replyBusy = !!(
-        answering
-        || waitingReply
+        effectiveAnswering
+        || effectiveWaitingReply
         || sending
         || detecting
         || attachmentProcessing
@@ -2281,7 +2288,6 @@
       const busy = !!(
         replyBusy
         || blocked
-        || offline
       );
 
       /*
@@ -20508,6 +20514,7 @@
 
     const TOP_STATUS_SLOT_ORDER = [
       'reply-state',
+      'page-connection',
       'page-id',
       'turn-count',
       'upload-usage',
@@ -20521,6 +20528,7 @@
 
     const TOP_STATUS_SLOT_EXTRA_CLASSES = {
       'reply-state': 'cgpt-status-pill cgpt-toolbox-status-primary-badge',
+      'page-connection': 'cgpt-toolbox-page-connection-badge cgpt-top-stat-secondary',
       'page-id': 'cgpt-toolbox-page-id-badge',
       'turn-count': 'cgpt-toolbox-turn-count-badge cgpt-toolbox-page-turn-badge cgpt-toolbox-must-show-badge cgpt-page-count-badge',
       'upload-usage': 'cgpt-toolbox-upload-quota-badge cgpt-toolbox-low-priority-badge cgpt-top-stat-secondary cgpt-local-upload-badge',
@@ -20563,6 +20571,8 @@
     let toolboxAuthorityStateCacheAt = 0;
     let toolboxAuthorityStateBuildDepth = 0;
     let healingWaitingReplyDuringAuthoritySnapshot = false;
+    let lastToolboxAuthoritySnapshotV2Sig = '';
+    let lastToolboxAuthoritySnapshotV2At = 0;
 
     function applyTopStatusSlotVariant(el, variant) {
       if (!el) {
@@ -21028,6 +21038,34 @@
       };
     }
 
+    function domContradictsStaleReplyLock(composer, runtime = null) {
+      const c = composer && typeof composer === 'object' ? composer : {};
+      const rt = runtime && typeof runtime === 'object' ? runtime : {};
+      const responseState = normalizeToolboxCompactText(
+        rt.response_state
+        || rt.responseState
+        || (rt.capability && (rt.capability.response_state || rt.capability.responseState))
+        || '',
+      ).toLowerCase();
+      const responseReason = normalizeToolboxCompactText(
+        rt.response_state_reason
+        || rt.responseReason
+        || (rt.capability && (rt.capability.response_state_reason || rt.capability.responseStateReason))
+        || '',
+      ).toLowerCase();
+      const pageOffline = isToolboxPageBridgeOffline(rt);
+      return !!(
+        !c.hasRealStopButton
+        && (c.inputable || c.realSendButtonReady || c.hasPayload)
+        && (
+          pageOffline
+          || responseState === 'offline'
+          || responseState === 'waiting_reply'
+          || isRuntimeAssistantGeneratingState(responseState, responseReason)
+        )
+      );
+    }
+
     function readToolboxRuntimeEvidence(reason = '-') {
       let runtime = null;
 
@@ -21069,15 +21107,213 @@
     function isToolboxAuthorityReplyAnswering(authority) {
       return !!(
         authority
-        && authority.reply
         && (
-          authority.reply.state === TOOLBOX_REPLY_STATES.ANSWERING
-          || authority.reply.busy === true
+          (authority.flags && authority.flags.replyBusy === true)
+          || (authority.reply && authority.reply.answering === true)
           || (
             authority.composer
             && authority.composer.hasRealStopButton === true
           )
         )
+      );
+    }
+
+    function isToolboxPageBridgeOffline(runtime) {
+      const capability = runtime && runtime.capability && typeof runtime.capability === 'object'
+        ? runtime.capability
+        : runtime && typeof runtime === 'object'
+          ? runtime
+          : {};
+      const bridgePollConnected = !!(
+        typeof BridgePollRuntime !== 'undefined'
+        && BridgePollRuntime
+        && BridgePollRuntime.bridge_connected === true
+      );
+      const bridgeConnected = !!(
+        capability.bridge_connected
+        || capability.bridgeConnected
+        || bridgePollConnected
+      );
+      const online = capability.online !== false;
+      return !bridgeConnected || !online;
+    }
+
+    function readToolboxLocalQueueEvidence(reason = '-') {
+      let localQueueCount = 0;
+      let localPendingCount = 0;
+
+      try {
+        const files = typeof getActiveGroupFiles === 'function' ? getActiveGroupFiles() : [];
+        if (Array.isArray(files)) {
+          localQueueCount = files.length;
+          localPendingCount = files.filter((item) => {
+            if (!item || typeof item !== 'object') {
+              return false;
+            }
+            const status = String(item.status || item.uploadStatus || '').trim().toLowerCase();
+            if (status === 'uploaded' || status === 'done' || status === 'success') {
+              return false;
+            }
+            return true;
+          }).length;
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[TOOLBOX_AUTHORITY][LOCAL_QUEUE_READ_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[TOOLBOX_AUTHORITY][LOCAL_QUEUE_READ_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+      }
+
+      if (localQueueCount <= 0 && typeof getLocalUploadFileCount === 'function') {
+        try {
+          localQueueCount = Number(getLocalUploadFileCount()) || 0;
+          localPendingCount = localQueueCount;
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[TOOLBOX_AUTHORITY][LOCAL_QUEUE_COUNT_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[TOOLBOX_AUTHORITY][LOCAL_QUEUE_COUNT_FAILED] reason=${reason || '-'} error=${errText}`,
+          );
+        }
+      }
+
+      if (localPendingCount <= 0 && localQueueCount > 0) {
+        localPendingCount = localQueueCount;
+      }
+
+      return {
+        localQueueCount,
+        localPendingCount,
+      };
+    }
+
+    function isRuntimeAssistantGeneratingState(responseState, responseReason) {
+      const stateText = normalizeToolboxCompactText(responseState || '').toLowerCase();
+      const reasonText = normalizeToolboxCompactText(responseReason || '').toLowerCase();
+      return (
+        stateText === 'generating'
+        || stateText === 'streaming'
+        || stateText === 'responding'
+        || stateText === 'busy'
+        || stateText === 'waiting_reply'
+        || reasonText === 'assistant_busy'
+      );
+    }
+
+    function buildToolboxAttachmentDisplay(composer, localQueue, useCompactText = false) {
+      const composerCount = Number(composer && composer.composerCount || 0);
+      const composerUploading = !!(composer && composer.composerUploading);
+      const localPendingCount = Number(localQueue && localQueue.localPendingCount || 0);
+      const localQueueCount = Number(localQueue && localQueue.localQueueCount || 0);
+      const compact = useCompactText === true;
+
+      if (composerUploading) {
+        return {
+          state: TOOLBOX_ATTACHMENT_STATES.UPLOADING,
+          text: compact ? '附件中' : '附件处理中',
+          title: `输入框附件处理中 · 本地队列:${localQueueCount}`,
+          composerAttachmentText: '附件处理中',
+          localQueueText: compact ? `队列:${localPendingCount}` : `本地队列:${localPendingCount}`,
+        };
+      }
+
+      const composerAttachmentText = compact
+        ? `附件:${composerCount}`
+        : `输入框附件:${composerCount}`;
+      const localQueueText = compact
+        ? `队列:${localPendingCount}`
+        : `本地队列:${localPendingCount}`;
+
+      let text = `${composerAttachmentText}`;
+      if (localPendingCount > 0 || composerCount > 0) {
+        text = compact
+          ? `附件:${composerCount}·队列:${localPendingCount}`
+          : `${composerAttachmentText} · ${localQueueText}`;
+      } else if (!compact) {
+        text = '附件:0';
+      }
+
+      const state = composerCount > 0
+        ? TOOLBOX_ATTACHMENT_STATES.READY
+        : TOOLBOX_ATTACHMENT_STATES.NONE;
+
+      return {
+        state,
+        text,
+        title: `${composerAttachmentText} · ${localQueueText}`,
+        composerAttachmentText,
+        localQueueText,
+      };
+    }
+
+    function logToolboxAuthoritySnapshotV2(authority, reason = '-') {
+      if (
+        typeof ToolboxShell === 'undefined'
+        || !ToolboxShell
+        || typeof ToolboxShell.appendLogIfChanged !== 'function'
+      ) {
+        return;
+      }
+
+      const composer = authority && authority.composer ? authority.composer : {};
+      const flags = authority && authority.flags ? authority.flags : {};
+      const page = authority && authority.page ? authority.page : {};
+      const localQueue = authority && authority.localQueue ? authority.localQueue : {};
+      const raw = authority && authority.raw ? authority.raw : {};
+
+      const signature = [
+        reason,
+        page.pageOffline ? 1 : 0,
+        authority && authority.reply ? authority.reply.state : '-',
+        flags.replyBusy ? 1 : 0,
+        flags.canSend ? 1 : 0,
+        flags.canUpload ? 1 : 0,
+        composer.textLen || 0,
+        composer.composerCount || 0,
+        localQueue.localPendingCount || 0,
+      ].join('|');
+
+      const now = Date.now();
+      if (signature === lastToolboxAuthoritySnapshotV2Sig && now - lastToolboxAuthoritySnapshotV2At < 1200) {
+        return;
+      }
+      lastToolboxAuthoritySnapshotV2Sig = signature;
+      lastToolboxAuthoritySnapshotV2At = now;
+
+      const line = [
+        '[TOOLBOX_AUTHORITY][SNAPSHOT_V2]',
+        `reason=${reason || '-'}`,
+        `pageOnline=${page.pageOffline ? 0 : 1}`,
+        `pageDisplayId=${page.pageDisplayId || '-'}`,
+        `replyState=${authority && authority.reply ? authority.reply.state || '-' : '-'}`,
+        `replyText=${authority && authority.reply ? authority.reply.text || '-' : '-'}`,
+        `replyBusy=${flags.replyBusy ? 1 : 0}`,
+        `taskState=${authority && authority.task ? authority.task.state || '-' : '-'}`,
+        `taskBusy=${flags.taskBusy ? 1 : 0}`,
+        `busy=${flags.busy ? 1 : 0}`,
+        `canInput=${flags.canInput ? 1 : 0}`,
+        `canSend=${flags.canSend ? 1 : 0}`,
+        `canUpload=${flags.canUpload ? 1 : 0}`,
+        `composerTextLen=${composer.textLen || 0}`,
+        `composerCount=${composer.composerCount || 0}`,
+        `composerUploading=${composer.composerUploading ? 1 : 0}`,
+        `realSendButtonFound=${composer.hasRealSendButton ? 1 : 0}`,
+        `realSendReady=${composer.realSendButtonReady ? 1 : 0}`,
+        `realStopButtonFound=${composer.hasRealStopButton ? 1 : 0}`,
+        `localQueueCount=${localQueue.localQueueCount || 0}`,
+        `localPendingCount=${localQueue.localPendingCount || 0}`,
+        `uploadTaskPhase=${authority && authority.task ? authority.task.uploadPhase || '-' : '-'}`,
+        `sendPhase=${authority && authority.task ? authority.task.sendPhase || '-' : '-'}`,
+        `responseStateRaw=${raw.responseState || '-'}`,
+        `responseReasonRaw=${raw.responseReason || '-'}`,
+      ].join(' ');
+
+      ToolboxShell.appendLogIfChanged(
+        'TOOLBOX_AUTHORITY_SNAPSHOT_V2',
+        signature,
+        line,
+        1200,
       );
     }
 
@@ -21192,33 +21428,7 @@
     }
 
     function resolveToolboxAuthorityReplyState(runtime, composer, reason = '-') {
-      const capability = runtime.capability && typeof runtime.capability === 'object'
-        ? runtime.capability
-        : runtime;
-      const bridgePollConnected = !!(
-        typeof BridgePollRuntime !== 'undefined'
-        && BridgePollRuntime
-        && BridgePollRuntime.bridge_connected === true
-      );
-      const bridgeConnected = !!(
-        capability.bridge_connected
-        || capability.bridgeConnected
-        || bridgePollConnected
-      );
-      const online = capability.online !== false;
-
-      if (!bridgeConnected || !online) {
-        return {
-          state: TOOLBOX_REPLY_STATES.OFFLINE,
-          text: '离线',
-          variant: 'muted',
-          busy: true,
-          ready: false,
-          pendingSend: false,
-          answering: false,
-          reason: 'bridge-offline',
-        };
-      }
+      const pageOffline = isToolboxPageBridgeOffline(runtime);
 
       const responseState = normalizeToolboxCompactText(
         runtime.response_state
@@ -21236,29 +21446,126 @@
       const hasStopButton = !!composer.hasRealStopButton;
       const hasPayload = !!composer.hasPayload;
       const attachmentUploading = !!composer.composerUploading;
+      const inputable = !!composer.inputable;
+      const sendReady = !!composer.realSendButtonReady;
+      const domContradictsStaleRuntime = domContradictsStaleReplyLock(composer, {
+        ...runtime,
+        response_state: responseState,
+        response_state_reason: responseReason,
+      });
 
+      if (domContradictsStaleRuntime) {
+        ToolboxShell.appendLog(
+          `[TOOLBOX_AUTHORITY][HEAL_STALE_REPLY_STATE] reason=${reason || '-'} `
+          + `pageOffline=${pageOffline ? 1 : 0} responseState=${responseState || '-'} `
+          + `responseReason=${responseReason || '-'} inputable=${inputable ? 1 : 0} `
+          + `realSendReady=${sendReady ? 1 : 0} stop=${hasStopButton ? 1 : 0}`,
+        );
+      }
+
+      // DOM 优先级 1：真实停止按钮 => 正在回答
+      if (hasStopButton) {
+        return {
+          state: TOOLBOX_REPLY_STATES.ANSWERING,
+          text: '回答中',
+          variant: 'danger',
+          busy: false,
+          ready: false,
+          pendingSend: false,
+          answering: true,
+          reason: responseReason || responseState || 'real-stop-button',
+          pageOffline,
+        };
+      }
+
+      // DOM 优先级 2：composer 附件上传中
       if (attachmentUploading) {
         return {
           state: TOOLBOX_REPLY_STATES.ATTACHMENT_PROCESSING,
           text: '附件处理中',
           variant: 'warning',
-          busy: true,
+          busy: false,
           ready: false,
           pendingSend: false,
           answering: false,
           reason: 'composer-attachment-uploading',
+          pageOffline,
         };
       }
 
+      // DOM 优先级 3：有 payload 且发送按钮可用
+      if (hasPayload && sendReady) {
+        return {
+          state: TOOLBOX_REPLY_STATES.WAITING_SEND,
+          text: '待发送',
+          variant: 'ok',
+          busy: false,
+          ready: true,
+          sendReady: true,
+          pendingSend: true,
+          answering: false,
+          reason: 'payload-ready-to-send',
+          pageOffline,
+        };
+      }
+
+      // DOM 优先级 4：有 payload 但发送按钮暂不可用
+      if (hasPayload && !sendReady) {
+        return {
+          state: TOOLBOX_REPLY_STATES.WAITING_SEND,
+          text: '待发送',
+          variant: 'warning',
+          busy: false,
+          ready: false,
+          sendReady: false,
+          pendingSend: true,
+          answering: false,
+          reason: 'payload-waiting-send-button',
+          pageOffline,
+        };
+      }
+
+      // DOM 优先级 5：输入框可编辑且无 payload => 就绪
+      if (inputable || (!attachmentUploading && !hasStopButton)) {
+        if (
+          responseState === 'not_ready'
+          && (
+            responseReason === 'send_button_not_found'
+            || responseReason === 'home_new_chat_payload_but_send_button_missing'
+          )
+        ) {
+          return {
+            state: TOOLBOX_REPLY_STATES.READY,
+            text: '可输入',
+            variant: 'ok',
+            busy: false,
+            ready: true,
+            pendingSend: false,
+            answering: false,
+            reason: 'empty-composer-send-button-missing-is-ready',
+            pageOffline,
+          };
+        }
+
+        return {
+          state: TOOLBOX_REPLY_STATES.READY,
+          text: '可输入',
+          variant: 'ok',
+          busy: false,
+          ready: true,
+          pendingSend: false,
+          answering: false,
+          reason: 'dom-ready-inputable',
+          pageOffline,
+        };
+      }
+
+      // 运行时 generating：仅在没有 DOM 矛盾且确有生成迹象时参考
       if (
-        hasStopButton
-        || responseState === 'generating'
-        || responseState === 'streaming'
-        || responseState === 'responding'
-        || responseState === 'busy'
-        || responseReason === 'assistant_busy'
+        !domContradictsStaleRuntime
+        && isRuntimeAssistantGeneratingState(responseState, responseReason)
       ) {
-        if (!hasStopButton && typeof hasAnswerContentAfterThinkingPrefix === 'function') {
+        if (typeof hasAnswerContentAfterThinkingPrefix === 'function') {
           let latestText = '';
           try {
             if (typeof getLatestAssistantTextSnapshotForWaitDone === 'function') {
@@ -21282,102 +21589,29 @@
               state: TOOLBOX_REPLY_STATES.ANSWERING,
               text: '回答中',
               variant: 'danger',
-              busy: true,
+              busy: false,
               ready: false,
               pendingSend: false,
               answering: true,
               reason: responseReason || responseState || 'assistant-generating',
+              pageOffline,
             };
           }
-        } else if (hasStopButton) {
-          return {
-            state: TOOLBOX_REPLY_STATES.ANSWERING,
-            text: '回答中',
-            variant: 'danger',
-            busy: true,
-            ready: false,
-            pendingSend: false,
-            answering: true,
-            reason: responseReason || responseState || 'assistant-generating',
-          };
-        } else if (
-          responseState === 'generating'
-          || responseState === 'streaming'
-          || responseState === 'responding'
-          || responseState === 'busy'
-          || responseReason === 'assistant_busy'
-        ) {
-          return {
-            state: TOOLBOX_REPLY_STATES.ANSWERING,
-            text: '回答中',
-            variant: 'danger',
-            busy: true,
-            ready: false,
-            pendingSend: false,
-            answering: true,
-            reason: responseReason || responseState || 'assistant-generating',
-          };
         }
       }
 
-      if (
-        responseState === 'not_ready'
-        && (
-          responseReason === 'send_button_not_found'
-          || responseReason === 'home_new_chat_payload_but_send_button_missing'
-        )
-      ) {
-        if (!hasPayload) {
-          return {
-            state: TOOLBOX_REPLY_STATES.READY,
-            text: '可输入',
-            variant: 'ok',
-            busy: false,
-            ready: true,
-            pendingSend: false,
-            answering: false,
-            reason: 'empty-composer-send-button-missing-is-ready',
-          };
-        }
-
+      // 桥接离线仅作页面连接参考，不压死回复态
+      if (pageOffline) {
         return {
-          state: TOOLBOX_REPLY_STATES.WAITING_SEND,
-          text: '待发送',
+          state: TOOLBOX_REPLY_STATES.READY,
+          text: '可输入',
           variant: 'warning',
-          busy: false,
-          ready: false,
-          sendReady: false,
-          pendingSend: true,
-          answering: false,
-          reason: 'payload-waiting-send-button',
-        };
-      }
-
-      if (hasPayload && !composer.realSendButtonReady) {
-        return {
-          state: TOOLBOX_REPLY_STATES.WAITING_SEND,
-          text: '待发送',
-          variant: 'warning',
-          busy: false,
-          ready: false,
-          sendReady: false,
-          pendingSend: true,
-          answering: false,
-          reason: 'payload-waiting-send-button',
-        };
-      }
-
-      if (hasPayload && composer.realSendButtonReady) {
-        return {
-          state: TOOLBOX_REPLY_STATES.WAITING_SEND,
-          text: '待发送',
-          variant: 'ok',
           busy: false,
           ready: true,
-          sendReady: true,
-          pendingSend: true,
+          pendingSend: false,
           answering: false,
-          reason: 'payload-ready-to-send',
+          reason: 'bridge-offline-dom-fallback-ready',
+          pageOffline: true,
         };
       }
 
@@ -21390,6 +21624,7 @@
         pendingSend: false,
         answering: false,
         reason: 'default-ready',
+        pageOffline: false,
       };
     }
 
@@ -21431,6 +21666,34 @@
       }
 
       if (sendPhase === 'waiting_reply' || state.waitingReply) {
+        const composerForTask = readToolboxComposerEvidence(`task-waiting-reply:${reason || '-'}`);
+        const domSaysNotWaiting = !!(
+          !composerForTask.hasRealStopButton
+          && (
+            composerForTask.inputable
+            || composerForTask.realSendButtonReady
+            || composerForTask.hasPayload
+            || composerForTask.hasText
+            || Number(composerForTask.textLen || 0) > 0
+          )
+        );
+        if (domSaysNotWaiting) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_AUTHORITY][HEAL_STALE_TASK_WAITING_REPLY] reason=${reason || '-'} `
+            + `sendPhase=${sendPhase || '-'} inputable=${composerForTask.inputable ? 1 : 0} `
+            + `realSendReady=${composerForTask.realSendButtonReady ? 1 : 0}`,
+          );
+          return {
+            state: TOOLBOX_TASK_STATES.IDLE,
+            text: '空闲',
+            busy: false,
+            source: 'send-task-healed',
+            sendPhase,
+            uploadPhase,
+            copyPhase,
+            closedLoopRunning,
+          };
+        }
         return {
           state: TOOLBOX_TASK_STATES.WAITING_REPLY,
           text: '等回复',
@@ -21533,8 +21796,13 @@
       try {
         const runtime = readToolboxRuntimeEvidence(reason);
         const composer = readToolboxComposerEvidence(reason);
+        const localQueue = readToolboxLocalQueueEvidence(reason);
         const reply = resolveToolboxAuthorityReplyState(runtime, composer, reason);
         const task = resolveToolboxAuthorityTaskState(reason);
+        const pageOffline = !!(
+          reply.pageOffline === true
+          || isToolboxPageBridgeOffline(runtime)
+        );
 
         const pageDisplayId = String(
           runtime.page_display_id
@@ -21584,11 +21852,12 @@
         const messageUsed = Number(messageQuota.used || 0);
         const messageLimit = Number(messageQuota.maxMessages || 0);
 
-        const attachmentState = composer.composerUploading
-          ? TOOLBOX_ATTACHMENT_STATES.UPLOADING
-          : composer.hasAttachment
-            ? TOOLBOX_ATTACHMENT_STATES.READY
-            : TOOLBOX_ATTACHMENT_STATES.NONE;
+        const attachmentDisplay = buildToolboxAttachmentDisplay(composer, localQueue, false);
+        const replyBusy = !!(
+          composer.hasRealStopButton === true
+          || reply.answering === true
+        );
+        const taskBusy = task.busy === true;
 
         const authority = {
           builtAt: now,
@@ -21598,11 +21867,14 @@
           reply,
           task,
           composer,
+          localQueue,
 
           page: {
             pageDisplayId,
             conversationId,
             turnCount,
+            pageOffline,
+            connectionText: pageOffline ? '离线' : '在线',
             text: pageDisplayId ? `页ID:${pageDisplayId}` : '页ID:-',
           },
 
@@ -21616,28 +21888,27 @@
           },
 
           attachment: {
-            state: attachmentState,
-            text: attachmentState === TOOLBOX_ATTACHMENT_STATES.UPLOADING
-              ? '附件处理中'
-              : attachmentState === TOOLBOX_ATTACHMENT_STATES.READY
-                ? '附件'
-                : '无附件',
+            state: attachmentDisplay.state,
+            text: attachmentDisplay.text,
+            title: attachmentDisplay.title,
+            composerAttachmentText: attachmentDisplay.composerAttachmentText,
+            localQueueText: attachmentDisplay.localQueueText,
           },
 
           flags: {
             ready: reply.ready === true,
-            // 只表示 ChatGPT 页面是否正在回答。
-            // 不允许混入工具箱任务状态。
-            replyBusy: reply.busy === true,
-            // 只表示工具箱任务是否正在执行。
-            taskBusy: task.busy === true,
-            // 兼容旧字段：只允许用于“总状态显示”，不要用于判断助手是否正在回答。
-            busy: reply.busy === true || task.busy === true,
+            // 只表示 ChatGPT 是否正在生成回复（真实 stop 按钮 / answering）
+            replyBusy,
+            // 只表示工具箱任务是否正在执行
+            taskBusy,
+            // 桥接/运行时连接离线，不参与 replyBusy
+            pageOffline,
+            // 兼容旧字段：总忙碌显示，不用于按钮业务判断
+            busy: replyBusy || taskBusy,
             answering: reply.answering === true,
             pendingSend: reply.pendingSend === true,
             canSend: !!(
-              !reply.answering
-              && reply.busy !== true
+              !replyBusy
               && composer.composerUploading !== true
               && composer.hasRealStopButton !== true
               && (
@@ -21671,22 +21942,22 @@
               )
             ),
             canInput: !!(
-              !reply.answering
-              && reply.busy !== true
+              !replyBusy
               && composer.composerUploading !== true
               && composer.hasRealStopButton !== true
               && (
-                reply.state === TOOLBOX_REPLY_STATES.READY
+                composer.inputable === true
+                || reply.state === TOOLBOX_REPLY_STATES.READY
                 || reply.state === TOOLBOX_REPLY_STATES.WAITING_SEND
               )
             ),
             canUpload: !!(
-              !reply.answering
-              && reply.busy !== true
+              !replyBusy
               && composer.composerUploading !== true
               && composer.hasRealStopButton !== true
               && (
-                reply.state === TOOLBOX_REPLY_STATES.READY
+                composer.inputable === true
+                || reply.state === TOOLBOX_REPLY_STATES.READY
                 || reply.state === TOOLBOX_REPLY_STATES.WAITING_SEND
               )
             ),
@@ -21707,9 +21978,12 @@
           `[TOOLBOX_AUTHORITY][UNIFIED] reason=${reason || '-'} `
           + `reply=${authority.reply.text}|state=${authority.reply.state}|ready=${authority.flags.ready ? 1 : 0}|replyBusy=${authority.flags.replyBusy ? 1 : 0}|taskBusy=${authority.flags.taskBusy ? 1 : 0}|busy=${authority.flags.busy ? 1 : 0}|answering=${authority.flags.answering ? 1 : 0}|pendingSend=${authority.flags.pendingSend ? 1 : 0} `
           + `canInput=${authority.flags.canInput ? 1 : 0}|canSend=${authority.flags.canSend ? 1 : 0}|canUpload=${authority.flags.canUpload ? 1 : 0} `
+          + `pageOffline=${authority.flags.pageOffline ? 1 : 0}|connection=${authority.page.connectionText || '-'} `
           + `task=${authority.task.text}|taskState=${authority.task.state}|sendPhase=${authority.task.sendPhase || '-'} `
-          + `attachment=${authority.attachment.text}|composerTextLen=${authority.composer.textLen || 0}|composerCount=${authority.composer.composerCount || 0}|stop=${authority.composer.hasRealStopButton ? 1 : 0}|realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
+          + `attachment=${authority.attachment.text}|composerTextLen=${authority.composer.textLen || 0}|composerCount=${authority.composer.composerCount || 0}|localQueue=${authority.localQueue.localQueueCount || 0}|localPending=${authority.localQueue.localPendingCount || 0}|stop=${authority.composer.hasRealStopButton ? 1 : 0}|realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
         );
+
+        logToolboxAuthoritySnapshotV2(authority, reason);
 
         return authority;
       } finally {
@@ -21803,13 +22077,29 @@
       );
       const online = capability.online !== false;
 
+      const composerForReplySlot = readToolboxComposerEvidence(`resolveReplyStateSlot:${reason || '-'}`);
+      const runtimeForDomHeal = {
+        capability,
+        response_state: capability.response_state || capability.responseState || '',
+        response_state_reason: capability.response_state_reason || capability.responseStateReason || '',
+      };
+
       if (!bridgeConnected || !online) {
-        return {
-          text: '离线',
-          variant: 'muted',
-          title: 'Bridge / 页面不可用或未连接',
-          stateClass: 'cgpt-state-offline',
-        };
+        if (domContradictsStaleReplyLock(composerForReplySlot, runtimeForDomHeal)) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_AUTHORITY][HEAL_STALE_REPLY_STATE] reason=resolveReplyStateSlot:bridge-offline `
+            + `inputable=${composerForReplySlot.inputable ? 1 : 0} `
+            + `realSendReady=${composerForReplySlot.realSendButtonReady ? 1 : 0} `
+            + `stop=${composerForReplySlot.hasRealStopButton ? 1 : 0}`,
+          );
+        } else {
+          return {
+            text: '离线',
+            variant: 'muted',
+            title: 'Bridge / 页面不可用或未连接（仅连接参考，不压死输入/发送）',
+            stateClass: 'cgpt-state-offline',
+          };
+        }
       }
 
       const responseState = String(
@@ -22233,12 +22523,22 @@
         || replyText === '等待回复'
       );
 
+      const replyShowsDomReady = (
+        replyText === '待发送'
+        || replyText === '可输入'
+        || replyText === '就绪'
+      );
+
       const taskOnlyRepeatsWaitingReply = (
         taskText === '等待回复'
         || taskText === '等回复'
         || taskText === '等待回复中'
         || taskText === '等待回复完成'
       );
+
+      if (replyShowsDomReady && taskOnlyRepeatsWaitingReply) {
+        return true;
+      }
 
       return replyAlreadyShowsAnswering && taskOnlyRepeatsWaitingReply;
     }
@@ -22634,8 +22934,8 @@
       const replyAnswering = unifiedAuthority.flags.answering === true
         || !!(topReplyStatus && topReplyStatus.answering);
       let pageReplyWaiting = !!(
-        unifiedAuthority.reply.state === TOOLBOX_REPLY_STATES.ANSWERING
-        || unifiedAuthority.reply.busy === true
+        unifiedAuthority.flags.replyBusy === true
+        || unifiedAuthority.reply.state === TOOLBOX_REPLY_STATES.ANSWERING
         || unifiedAuthority.composer.hasRealStopButton === true
       );
       const taskWaitingReply = unifiedAuthority.task.state === TOOLBOX_TASK_STATES.WAITING_REPLY;
@@ -22675,10 +22975,11 @@
       const replyReady = unifiedAuthority.flags.ready === true
         || !!((topReplyStatus && topReplyStatus.ready) || replyReadyByText);
       const replyBusy = !!(
-        unifiedAuthority.reply.busy === true
+        unifiedAuthority.flags.replyBusy === true
         || unifiedAuthority.flags.answering === true
         || replyAnswering
         || (topReplyStatus && topReplyStatus.answering)
+        || unifiedAuthority.composer.hasRealStopButton === true
       );
       const taskText = String(
         unifiedAuthority.task.text
@@ -22751,11 +23052,10 @@
       );
       const canSendByTopStatus = isToolboxAuthorityCanSendNow(unifiedAuthority);
       const canStartUploadByTopStatus = !!(
-        !replyBusy
+        unifiedAuthority.flags.canUpload === true
         && !sendBusy
         && !copyBusy
         && !replyBlocked
-        && !replyOffline
       );
       const costMs = Math.round(
         ((typeof performance !== 'undefined' && performance.now)
@@ -22796,7 +23096,9 @@
         shouldWaitReplyByTopStatus: shouldWaitReplyByTopStatusFinal,
         authorityReplyState: unifiedAuthority.reply.state,
         authorityReplyText: unifiedAuthority.reply.text,
-        authorityReplyBusy: unifiedAuthority.reply.busy === true,
+        authorityReplyBusy: unifiedAuthority.flags.replyBusy === true,
+        authorityPageOffline: unifiedAuthority.flags.pageOffline === true,
+        authorityCanUpload: unifiedAuthority.flags.canUpload === true,
         authorityTaskState: unifiedAuthority.task.state,
         authorityTaskBusy: unifiedAuthority.task.busy === true,
         canSendByTopStatus,
@@ -23057,7 +23359,7 @@
       const hideDuplicateWaitingReplyTaskState = shouldHideDuplicateWaitingReplyTaskState(replyState, taskState);
       const attachmentState = {
         text: authority.attachment.text,
-        title: authority.attachment.text,
+        title: authority.attachment.title || authority.attachment.text,
         variant: authority.attachment.state === TOOLBOX_ATTACHMENT_STATES.UPLOADING ? 'warning' : 'muted',
       };
       const alertState = resolveAlertStateSlot();
@@ -23112,10 +23414,11 @@
         stateClass: replyState.stateClass || '',
       });
 
+      const pageConnectionTitle = `${pageIdTitle} · 连接:${authority.page.connectionText || '在线'}`;
       updateTopStatusSlot(pageStatusRowEl, 'page-id', {
         text: authorityPageText,
-        title: pageIdTitle,
-        variant: 'ok',
+        title: pageConnectionTitle,
+        variant: authority.page.pageOffline ? 'warning' : 'ok',
       });
 
       updateTopStatusSlot(pageStatusRowEl, 'turn-count', {
@@ -28193,6 +28496,42 @@
         sendResult,
         submittedDetail: submitted,
       };
+    }
+
+    async function runBusinessPromptSendFlow(options = {}) {
+      const source = String(options.source || 'business-prompt-send').trim() || 'business-prompt-send';
+      const promptText = String(options.promptText || '');
+      const logPrefix = String(options.logPrefix || 'BUSINESS').trim() || 'BUSINESS';
+      const sendKind = String(options.sendKind || 'continue').trim() || 'continue';
+
+      try {
+        const result = await runSharedSendAndWaitEntryFlow({
+          source,
+          promptText,
+          logPrefix,
+          sendKind,
+          uploadBeforeSend: false,
+          waitAttachmentStable: options.waitAttachmentStable !== false,
+          requireAttachmentReady: options.requireAttachmentReady === true,
+          allowReplaceDraft: true,
+          requireInjectedTextBeforeClick: true,
+          confirmAfterClick: true,
+          expectedPromptText: promptText,
+          shouldStop: typeof options.shouldStop === 'function' ? options.shouldStop : undefined,
+        });
+
+        return result;
+      } catch (error) {
+        console.error(`[${logPrefix}][BUSINESS_PROMPT_SEND][ERROR]`, error);
+        const errText = error && error.message ? error.message : String(error);
+        ToolboxShell.appendLog(
+          `[${logPrefix}][BUSINESS_PROMPT_SEND][ERROR] source=${source} error=${errText}`,
+        );
+        return {
+          ok: false,
+          reason: errText || 'business-prompt-send-exception',
+        };
+      }
     }
 
     async function sendClosedLoopContinuePrompt(promptText, context = {}) {
@@ -35248,23 +35587,24 @@
         topStatusAuthority: authoritySnapshot,
         topReplyStatus: topReplyStatusForButtons,
         replyText: authorityForSnapshot.reply.text,
-        replyBusy: authorityForSnapshot.reply.busy,
+        replyBusy: authorityForSnapshot.flags.replyBusy,
         replyDoneStable: authorityForSnapshot.reply.state === TOOLBOX_REPLY_STATES.READY,
         replyDoneStableByTopStatus: authorityForSnapshot.reply.state === TOOLBOX_REPLY_STATES.READY,
         canSend: authorityCanSendNow,
         canUpload: authorityForSnapshot.flags.canUpload,
         canSendByTopStatus: authorityCanSendNow,
-        canStartUploadByTopStatus: authorityForSnapshot.flags.canUpload,
-        taskBusy: authorityForSnapshot.task.busy,
-        uploadBusy: authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.UPLOADING,
-        sendBusy: authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.SENDING
-          || authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.WAITING_REPLY,
-        attachmentText: authorityForSnapshot.attachment.text,
-        shouldWaitReplyByTopStatus: !!(
-          authorityForSnapshot.reply.state === TOOLBOX_REPLY_STATES.ANSWERING
-          || authorityForSnapshot.reply.busy === true
-          || authorityForSnapshot.composer.hasRealStopButton === true
+        canStartUploadByTopStatus: !!(
+          authorityForSnapshot.flags.canUpload
+          && (
+            Number(authorityForSnapshot.localQueue && authorityForSnapshot.localQueue.localPendingCount || 0) > 0
+            || getActiveGroupFiles().length > 0
+          )
         ),
+        taskBusy: authorityForSnapshot.flags.taskBusy,
+        uploadBusy: authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.UPLOADING,
+        sendBusy: authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.SENDING,
+        attachmentText: authorityForSnapshot.attachment.text,
+        shouldWaitReplyByTopStatus: authorityForSnapshot.flags.replyBusy === true,
         taskWaitingReply: authorityForSnapshot.task.state === TOOLBOX_TASK_STATES.WAITING_REPLY,
         pageReplyWaiting: authorityForSnapshot.reply.state === TOOLBOX_REPLY_STATES.ANSWERING,
         uploadQueue: runtime.uploadQueue,
@@ -40016,7 +40356,11 @@
       });
 
       if (
-        authority.reply.state === TOOLBOX_REPLY_STATES.READY
+        (
+          authority.reply.state === TOOLBOX_REPLY_STATES.READY
+          || authority.reply.state === TOOLBOX_REPLY_STATES.WAITING_SEND
+        )
+        && !authority.flags.replyBusy
         && !authority.composer.hasRealStopButton
         && (
           state.waitingReply
@@ -53257,6 +53601,8 @@
       isSendResultAcceptable,
       sendTextToChatGPTComposerDirectly,
       runSharedSendAndWaitEntryFlow,
+      runBusinessPromptSendFlow,
+      runCopyHotkeyOnceCore,
       confirmSharedMessageSubmitted,
       writeTextPayloadToComposerAndVerify,
       syncCopyTaskPhase,
