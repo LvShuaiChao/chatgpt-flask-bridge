@@ -1015,6 +1015,93 @@
   const SEND_MESSAGE_OWNER_BUTTON_ID = 'cgpt-send-message-once';
   const COPY_HOTKEY_ONCE_OWNER_BUTTON_ID = 'cgpt-copy-hotkey-once';
 
+  function isPlainSendMessageTask(task = {}) {
+    const ownerButtonId = String(task && task.ownerButtonId || '').trim().toLowerCase();
+    const ownerAction = String(
+      task && (
+        task.ownerAction
+        || task.action
+        || (task.plan && task.plan.mode)
+        || task.buttonAction
+        || task.runtimeAction
+        || ''
+      ),
+    ).trim().toLowerCase();
+    if (ownerAction === 'send-copy-hotkey') return false;
+    if (ownerAction === 'send-copy-hotkey-continue') return false;
+    if (ownerAction === 'copy-hotkey') return false;
+    if (ownerAction === 'closed-loop') return false;
+    if (ownerAction === 'batch-task') return false;
+    if (ownerButtonId.includes('send-copy-hotkey')) return false;
+    if (ownerButtonId.includes('copy-hotkey')) return false;
+    if (ownerButtonId.includes('closed-loop')) return false;
+    if (ownerButtonId.includes('batch')) return false;
+    return (
+      ownerAction === 'send-message'
+      || ownerAction === 'send'
+      || ownerButtonId.includes('send-message')
+      || ownerButtonId.includes('send-button')
+      || ownerButtonId === 'send'
+    );
+  }
+
+  function isPlainSendButtonDangerPhase(phase) {
+    const normalized = String(phase || '').trim().toLowerCase();
+    return (
+      normalized === 'waiting_composer'
+      || normalized === 'waiting_send'
+      || normalized === 'clicking_send'
+      || normalized === 'submitting'
+      || normalized === 'sending'
+      || normalized === 'waiting_input'
+      || normalized === 'waiting_attachment'
+      || normalized === 'writing_text'
+      || normalized === 'checking_composer'
+      || normalized === 'waiting'
+      || normalized === 'ready_to_click'
+      || normalized === 'preparing'
+      || normalized === 'auto_upload_before_send'
+    );
+  }
+
+  function logSendMessageButtonVisualDecide(task, snapshot, capability, extra = {}) {
+    const sendButtonPhase = String(task && task.phase || '').trim().toLowerCase();
+    const isPlainSend = isPlainSendMessageTask(task);
+    const sendButtonRunning = !!(task && task.running);
+    const shouldSendMessageButtonBeDanger = (
+      isPlainSend
+      && sendButtonRunning
+      && isPlainSendButtonDangerPhase(sendButtonPhase)
+    );
+    const responseState = String(
+      capability.response_state
+      || capability.responseState
+      || snapshot.responseState
+      || '-',
+    ).trim();
+    const replyBusy = isAuthorityReplyBusyForButtons(snapshot) ? 1 : 0;
+    const assistantBusy = isAuthorityReplyAnsweringForButtons(snapshot) ? 1 : 0;
+    const line = (
+      `[SEND_MESSAGE_BUTTON][VISUAL_DECIDE] `
+      + `runId=${(task && task.runId) || '-'} `
+      + `owner=${(task && task.ownerButtonId) || '-'} `
+      + `phase=${sendButtonPhase || '-'} `
+      + `plainSend=${isPlainSend ? 1 : 0} `
+      + `running=${sendButtonRunning ? 1 : 0} `
+      + `response_state=${responseState || '-'} `
+      + `replyBusy=${replyBusy} `
+      + `assistantBusy=${assistantBusy} `
+      + `danger=${shouldSendMessageButtonBeDanger ? 1 : 0} `
+      + `reason=${extra.reason || (shouldSendMessageButtonBeDanger ? 'sending-not-submitted' : 'not-owned-by-send-button-or-submitted')}`
+    );
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    } else {
+      console.log(line);
+    }
+    return shouldSendMessageButtonBeDanger;
+  }
+
   function isSendMessageButtonOwner(snapshot = {}) {
     const task = getSendFamilyTaskFromSnapshot(snapshot);
     if (!task || task.running !== true) {
@@ -3338,74 +3425,14 @@
 
     if (isSendMessageOwner) {
       const taskPhase = String(sendMessageTask.phase || '').trim().toLowerCase();
-      const action = String(sendMessageTask.action || sendMessageTask.plan?.mode || 'send-message').trim();
-      const pageGenerating = authorityReplyBusy || authorityReplyAnswering || authorityReplyWaiting;
-      const stopVisible = resolveStopVisibleFromAuthority(snapshot);
-      const isWaitingReplyPhase = taskPhase === 'sent_waiting_response'
-        || taskPhase === 'stopping_response'
-        || taskPhase === 'waiting_reply'
-        || taskPhase === 'answering'
-        || !!sendMessageTask.hasClickedNativeSend
-        || !!sendMessageTask.nativeSendClicked
-        || Number(sendMessageTask.sentAt || 0) > 0;
-      const isPendingInputPhase = (
-        taskPhase === 'waiting_composer'
-        || taskPhase === 'waiting_input'
-        || taskPhase === 'waiting_attachment'
-        || taskPhase === 'waiting_send'
-        || taskPhase === 'ready_to_click'
-        || taskPhase === 'clicking_send'
-        || taskPhase === 'writing_text'
-        || taskPhase === 'waiting'
-        || taskPhase === 'checking_composer'
-      ) && !isWaitingReplyPhase;
+      const sendButtonRunning = !!sendMessageTask.running;
+      logSendMessageButtonVisualDecide(sendMessageTask, snapshot, capability, {
+        reason: sendButtonRunning && isPlainSendButtonDangerPhase(taskPhase)
+          ? 'sending-not-submitted'
+          : 'not-owned-by-send-button-or-submitted',
+      });
 
-      if (pageGenerating && isPendingInputPhase) {
-        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(
-            `[SEND_BUTTON][INVALID_WAITING_INPUT_WHILE_GENERATING] phase=${taskPhase} responseState=${capability.response_state || capability.responseState || '-'} stopButton=${stopVisible ? 1 : 0}`,
-          );
-        }
-      }
-
-      if (isWaitingReplyPhase || pageGenerating || topReplyWaiting) {
-        if (
-          isWaitingReplyPhase
-          && !pageGenerating
-          && !topReplyWaiting
-          && tryHealStaleWaitingReplyBeforeSendButtonView('send-button-owner-waiting-reply')
-        ) {
-          return finish({
-            phase: TaskPhase.IDLE,
-            text: '发送消息',
-            title: '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
-            disabled: false,
-            allowCancel: false,
-            action: 'send-message',
-            runtimeAction: 'send-message',
-            buttonPhase: 'idle',
-            ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
-          });
-        }
-        const replyText = getSendMessageRunningTextByPhase(taskPhase);
-        const replyTitle = stopVisible
-          ? '消息已经发送，ChatGPT 正在回答；再次点击将取消本次发送流程或尝试停止回答'
-          : '消息已经发送，正在等待 ChatGPT 回复完成；再次点击将取消本次发送流程';
-        return finish({
-          phase: TaskPhase.WAITING_REPLY,
-          text: replyText,
-          title: replyTitle,
-          disabled: false,
-          allowCancel: true,
-          action: 'cancel-send',
-          runtimeAction: 'cancel',
-          buttonPhase: 'waiting_reply',
-          forceDanger: true,
-          ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
-        });
-      }
-
-      if (isPendingInputPhase) {
+      if (sendButtonRunning && isPlainSendButtonDangerPhase(taskPhase)) {
         return finish({
           phase: TaskPhase.WAITING_SEND,
           text: getSendMessageRunningTextByPhase(taskPhase),
@@ -3417,29 +3444,25 @@
           buttonPhase: 'danger',
           forceDanger: true,
           ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
-        });
+        }, { reason: 'plain-send-danger-phase' });
       }
 
-      const isStopView = taskPhase === 'sent_waiting_response'
-        || taskPhase === 'stopping_response'
-        || (
-          !!sendMessageTask.hasClickedNativeSend
-          && (phase === TaskPhase.WAITING_REPLY || authorityReplyBusy)
-        );
-      return finish({
-        phase: isStopView ? TaskPhase.WAITING_REPLY : TaskPhase.WAITING_SEND,
-        text: getSendMessageRunningTextByPhase(taskPhase),
-        title: isStopView
-          ? '消息已经发送，正在等待 ChatGPT 回复完成；再次点击将取消本次发送流程'
-          : SEND_MESSAGE_RUNNING_CANCEL_TITLE,
-        disabled: false,
-        allowCancel: true,
-        action: 'cancel-send',
-        runtimeAction: 'cancel',
-        buttonPhase: 'danger',
-        forceDanger: true,
-        ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
-      });
+      if (sendButtonRunning && !isPlainSendButtonDangerPhase(taskPhase)) {
+        return finish({
+          phase: TaskPhase.IDLE,
+          text: '发送消息',
+          title: authorityReplyBusy
+            ? '助手正在回复，请等待完成后再发送'
+            : '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+          disabled: false,
+          allowCancel: false,
+          action: 'send-message',
+          runtimeAction: 'send-message',
+          buttonPhase: 'idle',
+          forceDanger: false,
+          ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
+        }, { reason: 'plain-send-submitted-not-danger' });
+      }
     }
     if (sendMessageTask && isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'getSendMessageButtonViewState:foreign-owner') && !isSendFamilyOwner(snapshot, 'send-message')) {
       const switchable = canSwitchSendFamilyAction(snapshot, 'send-message');
@@ -3482,6 +3505,29 @@
     }
 
     if (phase === TaskPhase.WAITING_SEND) {
+      const sendTaskForWaitingSend = sendMessageTask || selectAuthoritativeSendTaskSnapshot(snapshot);
+      if (
+        isPlainSendMessageTask(sendTaskForWaitingSend)
+        && !(sendMessageTask && sendMessageTask.running === true)
+      ) {
+        logSendMessageButtonVisualDecide(sendTaskForWaitingSend, snapshot, capability, {
+          reason: 'plain-send-stale-waiting-send-idle',
+        });
+        return finish({
+          phase: TaskPhase.IDLE,
+          text: '发送消息',
+          title: authorityReplyBusy
+            ? '助手正在回复，请等待完成后再发送'
+            : '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+          disabled: false,
+          allowCancel: false,
+          action: 'send-message',
+          runtimeAction: 'send-message',
+          buttonPhase: 'idle',
+          forceDanger: false,
+        }, { reason: 'plain-send-stale-waiting-send-idle' });
+      }
+
       const authorityCanSendFromSnapshot = !!(
         snapshot.canSend === true
         || snapshot.sendable === true
@@ -3587,6 +3633,27 @@
           runtimeAction: 'send-message',
           buttonPhase: 'idle',
         });
+      }
+      const sendTaskForWaitingReply = sendMessageTask || selectAuthoritativeSendTaskSnapshot(snapshot);
+      const plainSendStaleWaitingReply = isPlainSendMessageTask(sendTaskForWaitingReply)
+        && !(sendMessageTask && sendMessageTask.running === true);
+      if (plainSendStaleWaitingReply) {
+        logSendMessageButtonVisualDecide(sendTaskForWaitingReply, snapshot, capability, {
+          reason: 'plain-send-stale-waiting-reply-idle',
+        });
+        return finish({
+          phase: TaskPhase.IDLE,
+          text: '发送消息',
+          title: authorityReplyBusy
+            ? '助手正在回复，请等待完成后再发送'
+            : '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+          disabled: false,
+          allowCancel: false,
+          action: 'send-message',
+          runtimeAction: 'send-message',
+          buttonPhase: 'idle',
+          forceDanger: false,
+        }, { reason: 'plain-send-stale-waiting-reply-idle' });
       }
       const stopVisible = resolveStopVisibleFromAuthority(snapshot);
       return finish({
@@ -4102,14 +4169,47 @@
       || capability.composerTextLen
       || 0,
     ) || 0;
-    const sendable = !!(
-      capability.sendable === true
+    const composerCount = Number(
+      snapshot.composerCount
+      || capability.composerCount
+      || 0,
+    ) || 0;
+    const composerUploading = !!(
+      snapshot.composerUploading
+      || capability.composerUploading
+    );
+    const localFileCount = Number(
+      snapshot.localFileCount
+      || snapshot.activeFilesCount
+      || 0,
+    ) || 0;
+    const hasRealComposerPayload = snapshot.hasRealComposerPayload === true
+      || Number(composerTextLen || 0) > 0
+      || Number(composerCount || 0) > 0
+      || composerUploading === true;
+    const hasLocalQueueFiles = snapshot.hasLocalQueueFiles === true
+      || Number(localFileCount || 0) > 0;
+    const sendCopyHotkeyMode = snapshot.sendCopyHotkeyMode
+      || (hasRealComposerPayload ? 'send_then_copy_hotkey' : 'copy_hotkey_only');
+    const canSendNow = !!(
+      capability.can_send_now === true
+      || capability.canSendNow === true
+      || capability.send_decision === 'allowed'
+      || capability.sendDecision === 'allowed'
+      || snapshot.can_send_now === true
+      || snapshot.canSendNow === true
+      || snapshot.sendDecision === 'allowed'
+      || capability.sendable === true
       || capability.sendable === 1
       || snapshot.sendable === true
       || snapshot.sendable === 1
     );
-    const inputable = !!(
-      capability.inputable === true
+    const canAcceptInput = !!(
+      capability.can_accept_input === true
+      || capability.canAcceptInput === true
+      || snapshot.can_accept_input === true
+      || snapshot.canAcceptInput === true
+      || capability.inputable === true
       || capability.inputable === 1
       || snapshot.inputable === true
       || snapshot.inputable === 1
@@ -4135,8 +4235,14 @@
       `visualOwned=${visualOwner.owned ? 1 : 0}`,
       `visualSource=${String(visualOwner.source || '-').trim()}`,
       `composerTextLen=${composerTextLen}`,
-      `sendable=${sendable ? 1 : 0}`,
-      `inputable=${inputable ? 1 : 0}`,
+      `sendCopyHotkeyMode=${sendCopyHotkeyMode}`,
+      `hasRealComposerPayload=${hasRealComposerPayload ? 1 : 0}`,
+      `hasLocalQueueFiles=${hasLocalQueueFiles ? 1 : 0}`,
+      `localFileIgnoredAsPayload=1`,
+      `can_send_now=${canSendNow ? 1 : 0}`,
+      `can_accept_input=${canAcceptInput ? 1 : 0}`,
+      `legacy_sendable=${(capability.sendable === true || snapshot.sendable === true) ? 1 : 0}`,
+      `legacy_inputable=${(capability.inputable === true || snapshot.inputable === true) ? 1 : 0}`,
       `finalPhase=${finalPhase}`,
       `finalColor=${finalColor}`,
     ];
@@ -4481,7 +4587,6 @@
       'copy_hotkey',
       'running',
       'cancelling',
-      'failed',
       TaskPhase.RUNNING,
       TaskPhase.WAITING_SEND,
       TaskPhase.WAITING_REPLY,
@@ -4680,6 +4785,58 @@
       return waitReplyView;
     }
 
+    const terminalPhase = String(phase || '').trim().toLowerCase();
+    if (terminalPhase === 'failed' || terminalPhase === TaskPhase.FAILED) {
+      const lastError = String(task.lastError || '').trim();
+      const failedView = {
+        phase: TaskPhase.FAILED,
+        text: sendCopyHotkeyLabel,
+        title: lastError ? `发送+复制+快捷键失败：${lastError}` : '发送+复制+快捷键失败，可重试',
+        disabled: false,
+        allowCancel: false,
+        action: 'send-copy-hotkey',
+        runtimeAction: '',
+        buttonPhase: 'failed',
+        forceDanger: true,
+        taskKey: 'send-copy-hotkey',
+        ownerButtonId: thisButtonId,
+      };
+      logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, failedView, { terminal: 'failed' });
+      return failedView;
+    }
+    if (terminalPhase === 'cancelled' || terminalPhase === 'canceled') {
+      const cancelledView = {
+        phase: TaskPhase.IDLE,
+        text: sendCopyHotkeyLabel,
+        title: '',
+        disabled: false,
+        allowCancel: false,
+        action: 'send-copy-hotkey',
+        runtimeAction: '',
+        buttonPhase: 'idle',
+        taskKey: 'send-copy-hotkey',
+        ownerButtonId: thisButtonId,
+      };
+      logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, cancelledView, { terminal: 'cancelled' });
+      return cancelledView;
+    }
+    if (terminalPhase === 'success') {
+      const successView = {
+        phase: TaskPhase.IDLE,
+        text: sendCopyHotkeyLabel,
+        title: '',
+        disabled: false,
+        allowCancel: false,
+        action: 'send-copy-hotkey',
+        runtimeAction: '',
+        buttonPhase: 'idle',
+        taskKey: 'send-copy-hotkey',
+        ownerButtonId: thisButtonId,
+      };
+      logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, successView, { terminal: 'success' });
+      return successView;
+    }
+
     if (active) {
       let title = SEND_COPY_HOTKEY_RUNNING_CANCEL_TITLE;
       if (phase === 'copying' || normalizedPhase === TaskPhase.COPYING) {
@@ -4723,16 +4880,18 @@
       if (softBlocked) {
         if (
           failReason.includes('empty-composer')
+          || failReason.includes('empty-composer-copy-hotkey-fallback')
           || lastError.includes('输入框没有可发送内容')
         ) {
           return {
-            phase: 'waiting_input',
+            phase: TaskPhase.IDLE,
             text: sendCopyHotkeyLabel,
-            title: lastError || '当前输入框没有可发送内容',
-            disabled: true,
+            title: '输入框为空；点击将直接执行复制+快捷键（不发送消息）',
+            disabled: false,
             allowCancel: false,
-            action: 'none',
-            buttonPhase: 'disabled',
+            action: 'send-copy-hotkey',
+            runtimeAction: '',
+            buttonPhase: 'idle',
             taskKey: 'send-copy-hotkey',
           };
         }
@@ -4779,13 +4938,17 @@
       || snapshot.activeFilesCount
       || 0,
     ) || 0;
-    const hasRealComposerPayload = snapshot.hasRealComposerPayload === true
-      || (
-        composerTextLen > 0
-        || composerCount > 0
-        || composerUploading
-        || localFileCount > 0
-      );
+    const hasRealComposerPayload =
+      snapshot.hasRealComposerPayload === true
+      || Number(composerTextLen || 0) > 0
+      || Number(composerCount || 0) > 0
+      || composerUploading === true;
+    const hasLocalQueueFiles =
+      snapshot.hasLocalQueueFiles === true
+      || Number(localFileCount || 0) > 0;
+    const sendCopyHotkeyMode =
+      snapshot.sendCopyHotkeyMode
+      || (hasRealComposerPayload ? 'send_then_copy_hotkey' : 'copy_hotkey_only');
 
     if ((topReplyAnswering || topReplyWaiting) && !active && !visualOwner.owned) {
       return finalizeSendCopyHotkeyButtonViewState(snapshot, decorateIdleViewWithTopReplyStatus({
@@ -4840,6 +5003,9 @@
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, needInputView, {
         reason: 'empty-composer-idle',
+        sendCopyHotkeyMode,
+        hasRealComposerPayload,
+        hasLocalQueueFiles,
       });
       return needInputView;
     }
