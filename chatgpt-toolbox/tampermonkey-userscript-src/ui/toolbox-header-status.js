@@ -210,6 +210,8 @@
 
 
 
+    // 兼容旧代码/诊断用。正常 Header 渲染禁止调用 readCapability。
+    // Header 状态必须由 readHeaderAuthority() 派生。
     function readCapability() {
 
       if (typeof getPageCapability !== 'function') {
@@ -340,6 +342,8 @@
 
 
 
+    // 兼容旧代码/诊断用。正常 Header 渲染禁止调用 resolveRespondingFlag。
+    // 回答中状态必须读取 authority.flags.replyBusy / authority.reply.state。
     function resolveRespondingFlag(capability, responseState, runtimeState) {
 
       const s = runtimeState && typeof runtimeState === 'object'
@@ -384,526 +388,163 @@
 
 
 
-    function buildToolboxHeaderStatusSnapshot(reason, runtimeState) {
-
-      const s = runtimeState && typeof runtimeState === 'object'
-
-        ? runtimeState
-
-        : getToolboxRuntimeStateSafe();
-
-      const authority = (
-
+    function readHeaderAuthority(reason = '-') {
+      if (
         typeof UploadModule !== 'undefined'
-
         && UploadModule
-
         && typeof UploadModule.getToolboxAuthorityState === 'function'
-
+      ) {
+        try {
+          return UploadModule.getToolboxAuthorityState(`header-status:${reason || '-'}`, {
+            force: true,
+            cacheTtlMs: 0,
+          });
+        } catch (error) {
+          console.error('[HEADER_STATUS][AUTHORITY_READ_FAILED]', error);
+          return null;
+        }
+      }
+      const cached = (
+        typeof window !== 'undefined'
+        && window.__cgptToolboxAuthorityCache
+        && typeof window.__cgptToolboxAuthorityCache === 'object'
+        && window.__cgptToolboxAuthorityCache.flags
       )
-
-        ? UploadModule.getToolboxAuthorityState(`header-status:${reason || '-'}`, { force: true })
-
+        ? window.__cgptToolboxAuthorityCache
         : null;
+      if (cached) {
+        console.warn('[HEADER_STATUS][AUTHORITY_CACHE_ONLY_FALLBACK]', {
+          reason: reason || '-',
+        });
+        return cached;
+      }
+      return null;
+    }
 
-      if (authority) {
+    function buildToolboxHeaderStatusSnapshot(reason, runtimeState) {
+      void runtimeState;
 
+      const authority = readHeaderAuthority(reason);
+      if (!authority) {
         appendHeaderStatusLog(
-
-          `[HEADER_STATUS][AUTHORITY_USED] reason=${reason || '-'} `
-
-          + `reply=${authority.reply.text}|state=${authority.reply.state} `
-
-          + `task=${authority.task.text}|taskState=${authority.task.state}`,
-
+          `[HEADER_STATUS][AUTHORITY_MISSING] reason=${reason || '-'}`,
         );
 
+        return {
+          reason: String(reason || ''),
+          authorityUsed: false,
+          authorityReplyText: '',
+          authorityTaskText: '',
+          authorityAttachmentText: '',
+          responseState: 'unknown',
+          responseReason: 'authority-missing',
+          waitingReply: false,
+          waitingSend: false,
+          sendTaskPhase: 'unknown',
+          uploadTaskPhase: 'unknown',
+          pageDisplayId: '-',
+          turnCount: 0,
+          chips: [],
+        };
       }
 
-      const capability = readCapability();
+      const reply = authority.reply && typeof authority.reply === 'object' ? authority.reply : {};
+      const task = authority.task && typeof authority.task === 'object' ? authority.task : {};
+      const flags = authority.flags && typeof authority.flags === 'object' ? authority.flags : {};
+      const composer = authority.composer && typeof authority.composer === 'object' ? authority.composer : {};
+      const attachment = authority.attachment && typeof authority.attachment === 'object' ? authority.attachment : {};
+      const page = authority.page && typeof authority.page === 'object' ? authority.page : {};
 
-      const responseState = authority
+      const responseState = String(
+        reply.state
+        || (authority.raw && authority.raw.responseState)
+        || 'unknown',
+      ).trim().toLowerCase();
 
-        ? String(authority.raw.responseState || '').trim().toLowerCase()
+      const responseReason = String(
+        reply.reason
+        || (authority.raw && authority.raw.responseReason)
+        || '',
+      ).trim().toLowerCase();
 
-        : String(
+      const sendTaskPhase = String(task.sendPhase || task.phase || 'idle').trim().toLowerCase();
+      const uploadTaskPhase = String(task.uploadPhase || 'idle').trim().toLowerCase();
 
-          (capability && capability.response_state)
-
-          || s.responseState
-
-          || s.response_state
-
-          || '',
-
-        ).trim().toLowerCase();
-
-      const responseReason = authority
-
-        ? String(authority.raw.responseReason || '').trim().toLowerCase()
-
-        : String(
-
-          (capability && capability.response_state_reason)
-
-          || s.responseStateReason
-
-          || s.response_state_reason
-
-          || '',
-
-        ).trim().toLowerCase();
-
-
-
-      const replyAnswering = !!(
-
-        authority
-
-          ? (
-
-            authority.reply.state === 'answering'
-
-            || authority.reply.busy === true
-
-            || authority.composer.hasRealStopButton === true
-
-          )
-
-          : resolveRespondingFlag(capability, responseState, s)
-
+      const waitingReply = !!(
+        flags.replyBusy === true
+        || reply.state === 'answering'
+        || task.state === 'waiting_reply'
+        || composer.hasRealStopButton === true
       );
-
-      const taskWaitingReply = !!(
-
-        authority
-
-          ? authority.task.state === 'waiting_reply'
-
-          : resolveWaitingReplyFlag(s)
-
-      );
-
-      const waitingReply = taskWaitingReply;
 
       const waitingSend = !!(
-
-        s.waitingSend
-
-        || s.autoSendWaiting
-
-        || s.waiting_send
-
-        || s.auto_send_waiting
-
-      );
-
-      const sendTaskPhase = authority
-
-        ? String(authority.task.sendPhase || readSendTaskPhase(s) || '').trim().toLowerCase()
-
-        : readSendTaskPhase(s);
-
-      const uploadTaskPhase = authority
-
-        ? String(authority.task.uploadPhase || readUploadTaskPhase(s) || '').trim().toLowerCase()
-
-        : readUploadTaskPhase(s);
-
-
-
-      const isResponding = replyAnswering;
-
-      let composerCount = 0;
-
-      let composerUploading = false;
-
-      if (authority && authority.composer) {
-
-        composerCount = Math.max(0, Number(authority.composer.composerCount || 0));
-
-        composerUploading = authority.attachment.state === 'uploading';
-
-      } else {
-
-        try {
-
-          if (typeof getComposerAttachmentState === 'function') {
-
-            const attachmentSnap = getComposerAttachmentState({ reason: 'header-status-attachment-chip' });
-
-            composerCount = Math.max(
-
-              0,
-
-              Number(
-
-                attachmentSnap.count != null ? attachmentSnap.count
-
-                  : (attachmentSnap.fileCount != null ? attachmentSnap.fileCount
-
-                    : (attachmentSnap.totalCount != null ? attachmentSnap.totalCount : 0)),
-
-              ) || 0,
-
-            );
-
-            composerUploading = !!(
-
-              Number(attachmentSnap.uploadingCount || attachmentSnap.uploading || 0) > 0
-
-              || attachmentSnap.attachmentUploading === true
-
-              || attachmentSnap.stillUploading === true
-
-            );
-
-          }
-
-        } catch (attachmentErr) {
-
-          console.error('[HEADER_STATUS] attachment chip composer state failed', attachmentErr);
-
-        }
-
-      }
-
-
-
-      const isAttachmentProcessing = authority
-
-        ? authority.attachment.state === 'uploading'
-
-        : (
-
-          composerUploading
-
-          || responseState === 'attachment_processing'
-
-          || responseReason === 'attachment_processing'
-
-        );
-
-      const hasMountedAttachment = authority
-
-        ? authority.attachment.state === 'ready'
-
-        : composerCount > 0;
-
-      const isWaitingComposer = sendTaskPhase === 'waiting_composer'
-
-        || sendTaskPhase === 'waiting'
-
+        flags.pendingSend === true
+        || reply.state === 'waiting_send'
         || sendTaskPhase === 'waiting_send'
-
-        || sendTaskPhase === 'waiting_page_reply_to_send'
-
-        || sendTaskPhase === 'waiting_ready'
-
-        || waitingSend;
-
-      let realSendReadyForHeader = false;
-      try {
-        if (
-          typeof UploadModule !== 'undefined'
-          && UploadModule
-          && typeof UploadModule.maybeHealStaleWaitingReplyState === 'function'
-        ) {
-          UploadModule.maybeHealStaleWaitingReplyState('toolbox-header-status');
-        }
-        if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.findSendButton === 'function') {
-          const sendButton = ComposerApi.findSendButton({ silent: true, reason: 'toolbox-header-status' });
-          if (
-            sendButton
-            && typeof ComposerApi.isSendButtonReady === 'function'
-          ) {
-            realSendReadyForHeader = !!ComposerApi.isSendButtonReady(sendButton);
-          } else {
-            realSendReadyForHeader = !!(sendButton && sendButton.disabled !== true);
-          }
-        }
-      } catch (headerHealErr) {
-        const errText = headerHealErr && headerHealErr.message
-          ? headerHealErr.message
-          : String(headerHealErr);
-        console.error('[HEADER_STATUS][HEAL_STALE_WAITING_REPLY_FAILED]', headerHealErr);
-      }
-
-      const suppressWaitingReplyChip = !!(
-        authority
-        && authority.reply.state === 'ready'
-        && !authority.composer.hasRealStopButton
-      ) || (
-        !authority
-        && taskWaitingReply
-        && !replyAnswering
-        && realSendReadyForHeader
-        && (
-          isWaitingComposer
-          || responseState === 'ready'
-          || responseState === 'idle'
-        )
       );
-
-
 
       const chips = [];
 
-
-
-      const responseDoneNotifyActive = typeof ResponseDoneNotifyModule !== 'undefined'
-
-        && typeof ResponseDoneNotifyModule.isNotifyActive === 'function'
-
-        && ResponseDoneNotifyModule.isNotifyActive();
-
-
-
-      if (responseDoneNotifyActive && !taskWaitingReply && !replyAnswering) {
-
+      if (waitingReply) {
         chips.push({
-
-          key: 'reply-done',
-
-          text: '回复完成',
-
-          level: 'danger',
-
-          priority: 102,
-
-        });
-
-      }
-
-
-
-      if (taskWaitingReply && replyAnswering) {
-
-        chips.push({
-
-          key: 'responding',
-
-          text: authority ? String(authority.reply.text || '回答中') : '回答中',
-
-          level: 'danger',
-
-          priority: 100,
-
-        });
-
-      } else if (taskWaitingReply && !suppressWaitingReplyChip) {
-
-        chips.push({
-
           key: 'reply',
-
-          text: authority ? String(authority.task.text || '等待回复') : '等待回复',
-
+          text: String(reply.text || '回答中'),
           level: 'danger',
-
           priority: 100,
-
         });
-
-      } else if (replyAnswering) {
-
-        chips.push({
-
-          key: 'responding',
-
-          text: authority ? String(authority.reply.text || '回答中') : '回答中',
-
-          level: 'danger',
-
-          priority: 95,
-
-        });
-
       }
 
-
-
-      if (isWaitingComposer && sendTaskPhase !== 'waiting_reply' && !replyAnswering) {
-
+      if (waitingSend) {
         chips.push({
-
-          key: 'send',
-
-          text: authority && authority.reply.state === 'waiting_send'
-
-            ? String(authority.reply.text || '待发送')
-
-            : '待发送',
-
-          level: 'warn',
-
+          key: 'waiting-send',
+          text: '待发送',
+          level: 'warning',
           priority: 90,
-
         });
-
-      } else if (sendTaskPhase === 'sending' || (authority && authority.task.state === 'sending')) {
-
-        chips.push({
-
-          key: 'send',
-
-          text: authority && authority.task.state === 'sending'
-
-            ? String(authority.task.text || '发送中')
-
-            : '发送中',
-
-          level: 'warn',
-
-          priority: 88,
-
-        });
-
       }
 
-
-
-      if (isAttachmentProcessing) {
-
+      if (attachment.state === 'uploading' || composer.composerUploading === true) {
         chips.push({
-
           key: 'attachment',
-
-          text: authority ? String(authority.attachment.text || '附件处理中') : '附件处理中',
-
-          level: 'warn',
-
+          text: String(attachment.text || '附件处理中'),
+          level: 'warning',
           priority: 80,
-
         });
-
-      } else if (hasMountedAttachment) {
-
-        chips.push({
-
-          key: 'attachment',
-
-          text: authority ? String(authority.attachment.text || '附件') : '有附件',
-
-          level: 'info',
-
-          priority: 75,
-
-        });
-
       }
 
-
-
-      if (uploadTaskPhase === 'failed' || uploadTaskPhase === 'error') {
-
+      if (task.state && task.state !== 'idle' && task.text) {
         chips.push({
-
-          key: 'upload',
-
-          text: '上传失败',
-
-          level: 'danger',
-
-          priority: 72,
-
-        });
-
-      } else if (uploadTaskPhase === 'running' || uploadTaskPhase === 'uploading'
-        || (authority && authority.task.state === 'uploading')) {
-
-        chips.push({
-
-          key: 'upload',
-
-          text: authority && authority.task.state === 'uploading'
-
-            ? String(authority.task.text || '上传中')
-
-            : '上传中',
-
-          level: 'warn',
-
+          key: 'task',
+          text: String(task.text),
+          level: task.busy ? 'warning' : 'muted',
           priority: 70,
-
         });
-
       }
 
-
-
-      const pageDisplayId = authority
-
-        ? String(authority.page.pageDisplayId || '-')
-
-        : (
-
-          typeof getBridgePageDisplayIdText === 'function'
-
-            ? getBridgePageDisplayIdText()
-
-            : (s.pageDisplayId || s.page_display_id || '-')
-
-        );
-
-      const turnCount = authority
-
-        ? Math.max(0, Number(authority.page.turnCount || 0))
-
-        : (
-
-          typeof getConversationTurnCount === 'function'
-
-            ? Number(getConversationTurnCount()) || 0
-
-            : Number(s.turnCount || s.turn_count || 0)
-
-        );
-
-
-
-      const deduped = chips
-
-        .sort((a, b) => b.priority - a.priority)
-
-        .filter((chip, index, arr) => arr.findIndex((x) => x.key === chip.key) === index);
-
-
+      appendHeaderStatusLog(
+        `[HEADER_STATUS][AUTHORITY_MIRROR] reason=${reason || '-'} `
+        + `reply=${reply.text || '-'} replyState=${reply.state || '-'} `
+        + `task=${task.text || '-'} taskState=${task.state || '-'} `
+        + `canSend=${flags.canSend ? 1 : 0} pendingSend=${flags.pendingSend ? 1 : 0}`,
+      );
 
       return {
-
         reason: String(reason || ''),
-
-        authorityUsed: !!authority,
-
-        authorityReplyText: authority ? String(authority.reply.text || '') : '',
-
-        authorityTaskText: authority ? String(authority.task.text || '') : '',
-
-        authorityAttachmentText: authority ? String(authority.attachment.text || '') : '',
-
+        authorityUsed: true,
+        authorityReplyText: String(reply.text || ''),
+        authorityTaskText: String(task.text || ''),
+        authorityAttachmentText: String(attachment.text || ''),
         responseState,
-
         responseReason,
-
         waitingReply,
-
         waitingSend,
-
         sendTaskPhase,
-
         uploadTaskPhase,
-
-        pageDisplayId,
-
-        turnCount,
-
-        chips: deduped,
-
+        pageDisplayId: String(page.pageDisplayId || '-'),
+        turnCount: Number(page.turnCount || 0) || 0,
+        chips,
       };
-
     }
-
 
 
     function truncateChipsForWidth(snapshot, root) {

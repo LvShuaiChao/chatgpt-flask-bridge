@@ -30767,6 +30767,17 @@ const AutoQueueModule = (() => {
       }
       button.dataset.action = 'start-upload';
       button.dataset.buttonRole = 'start-upload';
+      button.dataset.cgptBaseAction = 'start-upload';
+      button.classList.add('cgpt-btn');
+      button.classList.add('success');
+      button.classList.add('cgpt-upload-start-idle');
+      button.classList.remove('primary');
+      if (!String(button.textContent || '').trim()) {
+        button.textContent = '开始上传';
+      }
+      if (!button.title) {
+        button.title = '只上传/绑定文件，不自动发送';
+      }
       return button;
     }
 
@@ -40636,7 +40647,7 @@ const AutoQueueModule = (() => {
 
       btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'cgpt-btn cgpt-btn-idle';
+      btn.className = 'cgpt-btn success cgpt-btn-idle cgpt-upload-start-idle';
       btn.id = 'cgpt-autoq-start-upload';
       syncAutoQueueStartUploadButtonMeta(btn);
       btn.textContent = '开始上传';
@@ -40757,7 +40768,7 @@ const AutoQueueModule = (() => {
           </div>
 
           <div class="cgpt-autoq-actions">
-            <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start-upload" data-action="start-upload" data-button-role="start-upload">开始上传</button>
+            <button type="button" class="cgpt-btn success cgpt-btn-idle cgpt-upload-start-idle" id="cgpt-autoq-start-upload" data-action="start-upload" data-cgpt-base-action="start-upload" data-button-role="start-upload">开始上传</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-start"${config.promptMode === 'task' ? ' data-role="batch-task-main-button" data-fixed-label-owner="batch-task"' : ''}>${getAutoQueueStartIdleText()}</button>
             <button type="button" class="cgpt-btn primary" id="cgpt-autoq-send-once">${getAutoQueueSendOnceIdleText()}</button>
             <button type="button" class="cgpt-btn" id="cgpt-autoq-copy-log" data-action="copy-log" title="复制小张工具箱内存日志，便于排查上传、发送、等待回复等问题">复制日志</button>

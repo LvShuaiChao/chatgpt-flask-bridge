@@ -766,7 +766,37 @@
       && typeof ButtonState.getUnifiedButtonAuthoritySnapshot === 'function'
     ) {
       authority = ButtonState.getUnifiedButtonAuthoritySnapshot(source);
+    } else if (
+      typeof window !== 'undefined'
+      && window.ToolboxButtonState
+      && typeof window.ToolboxButtonState.getUnifiedButtonAuthoritySnapshot === 'function'
+    ) {
+      authority = window.ToolboxButtonState.getUnifiedButtonAuthoritySnapshot(source);
+    } else if (
+      typeof UploadModule !== 'undefined'
+      && UploadModule
+      && typeof UploadModule.getToolboxAuthorityState === 'function'
+    ) {
+      const rawAuthority = UploadModule.getToolboxAuthorityState(`composer-send-service:${source}`, {
+        force: true,
+        cacheTtlMs: 0,
+      });
+      const flags = rawAuthority && rawAuthority.flags ? rawAuthority.flags : {};
+      const reply = rawAuthority && rawAuthority.reply ? rawAuthority.reply : {};
+      authority = {
+        source,
+        responseState: String(reply.state || '').trim().toLowerCase(),
+        inputable: flags.canInput === true,
+        sendable: flags.canSend === true,
+        assistantBusy: flags.replyBusy === true,
+        canSendByHeader: flags.canSend === true && flags.replyBusy !== true,
+      };
     } else {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND_PIPELINE][BRIDGE_STATE_FALLBACK_USED] source=${source || '-'}`,
+        );
+      }
       const bridgeState = (
         typeof window !== 'undefined'
         && window.__cgptBridgeState

@@ -7,6 +7,7 @@
   const SEND_PIPELINE_MANUAL_BUTTON_WAIT_INTERVAL_MS = 150;
   const SEND_PIPELINE_MANUAL_BUTTON_DISABLED_WAIT_MS = 2500;
   const SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS = 10000;
+  const SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_HARD_LIMIT_MS = 120000;
   const SEND_PIPELINE_TEXT_REWRITE_MAX = 3;
   const SEND_PIPELINE_COMPOSER_READY_TIMEOUT_MS = 10000;
   const SEND_PIPELINE_STABLE_INTERVAL_MS = 300;
@@ -1809,4 +1810,116 @@
       result.retryable = false;
       return result;
     }
+  }
+
+  async function waitAttachmentsStableForSend(timeoutMs, shouldStop, options = {}) {
+    const rawTimeoutMs = Number(timeoutMs);
+    const safeTimeoutMs = Number.isFinite(rawTimeoutMs) && rawTimeoutMs > 0
+      ? Math.min(rawTimeoutMs, SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_HARD_LIMIT_MS)
+      : SEND_PIPELINE_MANUAL_ATTACHMENT_WAIT_MS;
+    const startedAt = Date.now();
+    const source = String(options.source || 'stable-send');
+    notifyPreSendStatus(options, '附件仍在处理中，等待发送...');
+    appendSendLog(
+      `[SEND][ATTACH_WAIT_START] source=${source} timeoutMs=${safeTimeoutMs} rawTimeoutMs=${String(timeoutMs)}`
+    );
+    while (Date.now() - startedAt < safeTimeoutMs) {
+      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
+        appendSendLog(`[SEND][ATTACH_WAIT_ABORT] source=${source} reason=page_navigating`);
+        return { ok: false, reason: 'page_navigating' };
+      }
+      if (typeof shouldStop === 'function' && shouldStop()) {
+        appendSendLog(`[SEND][ATTACH_WAIT_ABORT] source=${source} reason=cancelled`);
+        return { ok: false, reason: 'cancelled' };
+      }
+      const elapsed = Date.now() - startedAt;
+      const scan = findComposerSendButtonDetailed();
+      const attachmentProcessing = typeof ComposerApi !== 'undefined'
+        && ComposerApi
+        && typeof ComposerApi.isAttachmentStillUploading === 'function'
+        && ComposerApi.isAttachmentStillUploading();
+      const hasAttachment = !!(scan && scan.hasAttachment);
+      const hasText = typeof hasRealComposerText === 'function'
+        ? hasRealComposerText()
+        : false;
+      const sendButtonReady = !!(
+        scan
+        && scan.button
+        && !scan.disabled
+      );
+      appendSendLogFields('[SEND][ATTACH_READY]', {
+        elapsed,
+        button_selector: scan && scan.buttonSelector ? scan.buttonSelector : '-',
+        disabled: scan && scan.disabled ? 1 : 0,
+        composer_text_len: scan && Number.isFinite(Number(scan.composerTextLen)) ? Number(scan.composerTextLen) : -1,
+        has_text: hasText ? 1 : 0,
+        has_attachment: hasAttachment ? 1 : 0,
+        attachment_processing: attachmentProcessing ? 1 : 0,
+        response_state: scan && scan.responseState ? scan.responseState : '-',
+        response_state_reason: scan && scan.responseStateReason ? scan.responseStateReason : '-',
+      });
+      /*
+       * 关键修复：
+       * 1. 文件附件本身就是 payload，不要求必须有文本。
+       * 2. 附件上传完成后，附件卡片仍然会留在输入框里，所以不能用 !scan.hasAttachment 判断“附件稳定”。
+       * 3. 只要附件不再 processing，且发送按钮可点，就应该点击真实发送按钮。
+       */
+      if (!attachmentProcessing && sendButtonReady && (hasAttachment || hasText)) {
+        appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
+          elapsed,
+          button_selector: scan.buttonSelector || '-',
+          source,
+          has_text: hasText ? 1 : 0,
+          has_attachment: hasAttachment ? 1 : 0,
+          ...getComposerSendDiagnostics(),
+        });
+        const clicked = clickSendButton(scan.button, `${source}:attach_wait_ready`);
+        if (clicked && clicked.ok) {
+          appendSendLog(
+            `[SEND][ATTACH_READY_CLICK_DONE] source=${source} elapsed=${elapsed} reason=attachment-ready-button-clicked`
+          );
+          return {
+            ok: true,
+            reason: 'sent_by_attach_wait_click',
+            clicked: true,
+            hasAttachment,
+            hasText,
+          };
+        }
+        const clickReason = clicked && clicked.reason ? clicked.reason : 'click-failed';
+        appendSendLog(
+          `[SEND][ATTACH_READY_CLICK_FAILED] source=${source} elapsed=${elapsed} reason=${clickReason}`
+        );
+        await sleep(SEND_BUTTON_RETRY_INTERVAL_MS);
+        continue;
+      }
+      /*
+       * 没有附件、没有上传中，说明不需要继续等附件。
+       * 注意：这里不能要求 !scan.hasAttachment 才算完成；
+       * 因为附件上传完成后，附件卡片正常情况下仍然留在输入框里，直到真正发送后才消失。
+       */
+      if (!attachmentProcessing && !hasAttachment) {
+        appendSendLog(
+          `[SEND][ATTACH_WAIT_DONE_NO_ATTACHMENT] source=${source} elapsed=${elapsed}`
+        );
+        return {
+          ok: true,
+          reason: 'no_attachment_wait_needed',
+        };
+      }
+      appendSendLog(
+        `[SEND][ATTACH_WAIT] elapsed=${elapsed} status=${attachmentProcessing ? 'processing' : 'ready'} `
+        + `button_found=${scan && scan.button ? 1 : 0} disabled=${scan && scan.disabled ? 1 : 0} `
+        + `hasAttachment=${hasAttachment ? 1 : 0} hasText=${hasText ? 1 : 0}`
+      );
+      await sleep(SEND_BUTTON_RETRY_INTERVAL_MS);
+    }
+    appendSendLog(
+      `[SEND][ATTACH_WAIT_TIMEOUT] source=${source} timeoutMs=${safeTimeoutMs} reason=attachment_not_ready`
+    );
+    return {
+      ok: false,
+      reason: 'attachment_not_ready',
+      timeoutMs: safeTimeoutMs,
+    };
   }

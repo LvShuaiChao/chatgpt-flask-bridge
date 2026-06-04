@@ -17,14 +17,11 @@
 
     const state = {
       lines: [],
-      visible: false,
       renderLimit: DEFAULT_LOG_RENDER_LIMIT,
     };
 
     let mounted = false;
     let rootEl = null;
-    let listEl = null;
-    let toggleBtnEl = null;
     const logBuffer = [];
     const logTimers = createTimerRegistry('LOG');
     let logDomDirty = false;
@@ -274,7 +271,6 @@
         MemoryManager.remove(MemoryManager.KEYS.logPersistEnabled);
         MemoryManager.remove(MemoryManager.KEYS.logPersistLines);
         logDomDirty = false;
-        render();
         updateCopyErrorLogButtonCount(root);
         setLogStatus('已清空日志');
       }, {
@@ -282,24 +278,6 @@
         bindMissingConsole: '[ChatGPT toolbox] LogModule.bindEvents: 缺少 #cgpt-log-clear',
         bindMissingLog: '[LOG][bind-missing] #cgpt-log-clear',
       });
-    }
-
-    function bindLogToggle(root) {
-      toggleBtnEl = qs('#cgpt-log-toggle', root);
-      if (!toggleBtnEl) return;
-
-      bindOnce(toggleBtnEl, 'click', () => {
-        state.visible = !state.visible;
-        updateToggleBtn();
-        render();
-        updateCopyErrorLogButtonCount(root);
-      });
-    }
-
-    function updateToggleBtn() {
-      if (!toggleBtnEl) return;
-
-      toggleBtnEl.textContent = state.visible ? '隐藏日志' : '显示最近日志';
     }
 
     const COPY_ERROR_REAL_EXCEPTION_RE = /typeerror|referenceerror|syntaxerror|uncaught|stack=|\[error\]|\[failed\]|error=/i;
@@ -492,7 +470,6 @@
     function bindEvents(root) {
       bindLogCopy(root);
       bindLogClear(root);
-      bindLogToggle(root);
       bindLogCopyErrors(root);
     }
 
@@ -504,10 +481,8 @@
               id: 'cgpt-log-copy-errors',
               source: 'log-tab-button',
             })}
-            <button type="button" class="cgpt-btn" id="cgpt-log-toggle" data-dynamic-label-allowed="1">显示最近日志</button>
             <button type="button" class="cgpt-btn danger cgpt-log-clear-right" id="cgpt-log-clear">清空日志</button>
           </div>
-          <div class="cgpt-log-list" id="cgpt-log-list" style="display:none;"></div>
         </div>
       `;
 
@@ -520,33 +495,17 @@
         onRefs: (mountedRoot) => {
           mounted = true;
           rootEl = mountedRoot;
-          const logRefs = collectDomRefs(mountedRoot, {
-            list: '#cgpt-log-list',
-            toggle: '#cgpt-log-toggle',
-          }, {
-            moduleName: 'LOG',
-          });
-          listEl = logRefs.list;
-          toggleBtnEl = logRefs.toggle;
           MemoryManager.remove(MemoryManager.KEYS.logPersistEnabled);
           MemoryManager.remove(MemoryManager.KEYS.logPersistLines);
-          updateToggleBtn();
           updateCopyErrorLogButtonCount(mountedRoot);
         },
         onBind: (mountedRoot) => {
           bindEvents(mountedRoot);
         },
         onRender: () => {
-          // 初始化时不渲染日志内容
-          render();
           updateCopyErrorLogButtonCount(rootEl);
         },
       });
-    }
-
-    function isLogTabVisible() {
-      return typeof ToolboxShell.getActiveTab === 'function'
-        && ToolboxShell.getActiveTab() === 'log';
     }
 
     function flushLogBufferSync() {
@@ -576,10 +535,6 @@
 
     function flushLogBuffer() {
       flushLogBufferSync();
-
-      if (mounted && state.visible && isLogTabVisible()) {
-        scheduleRender();
-      }
     }
 
     function scheduleRender() {
@@ -600,10 +555,7 @@
       if (logTimers.has('log-flush')) {
         return;
       }
-
-      if (state.visible) {
-        scheduleRender();
-      }
+      logDomDirty = false;
     }
 
     function add(text) {
@@ -621,37 +573,6 @@
       if (shouldRefreshErrorLogCountNow()) {
         scheduleUpdateCopyErrorLogButtonCount(rootEl);
       }
-    }
-
-    function render() {
-      if (!listEl) return;
-
-      // 隐藏状态：不渲染日志内容
-      if (!state.visible) {
-        listEl.style.display = 'none';
-        updateCopyErrorLogButtonCount(rootEl);
-        return;
-      }
-
-      // 显示状态：渲染最近 N 条日志
-      listEl.style.display = 'block';
-
-      if (!state.lines.length) {
-        listEl.innerHTML = renderEmptyState('暂无日志', 'cgpt-log-empty cgpt-empty-state');
-        updateCopyErrorLogButtonCount(rootEl);
-        return;
-      }
-
-      const recentLines = state.lines.slice(
-        0,
-        Math.min(state.renderLimit, TOOLBOX_MAX_DOM_LOG_LINES, 100),
-      );
-      listEl.innerHTML = recentLines
-        .map((line) => `<div class="cgpt-log-line">${escapeHtml(line)}</div>`)
-        .join('');
-
-      logDomDirty = false;
-      updateCopyErrorLogButtonCount(rootEl);
     }
 
     return {

@@ -20,7 +20,6 @@ const ToolboxActionRegistry = (() => {
     AUTO_CONTINUE: 'auto-continue',
     AUTO_CONTINUE_UNTIL_DONE: 'auto-continue-until-done',
     CLICK_NEW_CHAT: 'click-new-chat',
-    DIAGNOSE_UPLOAD_ENTRY: 'diagnose-upload-entry',
     TOGGLE_UPLOAD_GROUP_MANAGE: 'toggle-upload-group-manage',
   });
 
@@ -180,18 +179,6 @@ const ToolboxActionRegistry = (() => {
         title: '复制最后回复，并发送配置的目标快捷键',
         required: true,
         shortcutConfigKey: 'copyAndHotkeyOnce',
-        visibleInUploadToolbar: true,
-      }),
-      diagnoseUploadEntry: Object.freeze({
-        key: 'diagnoseUploadEntry',
-        id: 'cgpt-upload-diagnose-entry',
-        selector: '#cgpt-upload-diagnose-entry',
-        action: ACTION.DIAGNOSE_UPLOAD_ENTRY,
-        handlerAction: ACTION.DIAGNOSE_UPLOAD_ENTRY,
-        label: '诊断上传入口',
-        className: 'cgpt-btn primary',
-        title: '输出官方上传入口/文件 input/附件状态的诊断信息',
-        required: false,
         visibleInUploadToolbar: true,
       }),
       copyContinue: Object.freeze({

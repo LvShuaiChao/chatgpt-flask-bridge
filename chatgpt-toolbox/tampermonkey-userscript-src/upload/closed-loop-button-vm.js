@@ -225,44 +225,30 @@
     }
 
     function isStaleSendMessageOwnerByPageSnapshot(snapshot = {}) {
-      const authority = (
-        snapshot.toolboxStatusAuthority
-        || snapshot.statusAuthority
-        || snapshot.topStatusAuthority
-        || snapshot.toolboxUnifiedAuthority
-        || {}
-      );
-      const replyState = String(
-        authority.replyState
-        || (authority.reply && authority.reply.state)
-        || snapshot.replyState
-        || '',
-      ).trim().toLowerCase();
-      const composerTextLen = Number(
-        authority.composerTextLen
-        || (authority.composer && authority.composer.textLen)
-        || snapshot.composerTextLen
-        || 0,
-      ) || 0;
-      const realSendButtonFound = !!(
-        authority.realSendButtonFound
-        || (authority.composer && authority.composer.hasRealSendButton)
-        || snapshot.realSendButtonFound
-      );
-      const responseState = String(
-        authority.responseState
-        || authority.responseStateRaw
-        || (authority.raw && authority.raw.responseState)
-        || snapshot.responseState
-        || '',
-      ).trim().toLowerCase();
-
-      return (
-        replyState === 'ready'
-        && composerTextLen === 0
-        && !realSendButtonFound
-        && responseState === 'idle'
-      );
+      void snapshot;
+      if (
+        window.ToolboxButtonState
+        && typeof window.ToolboxButtonState.resolveButtonAuthoritySnapshot === 'function'
+      ) {
+        const authoritySnapshot = window.ToolboxButtonState.resolveButtonAuthoritySnapshot(
+          'closed-loop:isStaleSendMessageOwner',
+        );
+        const replyState = String(authoritySnapshot.responseState || '').trim().toLowerCase();
+        const composerTextLen = Number(
+          authoritySnapshot.composerTextLen != null
+            ? authoritySnapshot.composerTextLen
+            : 0,
+        ) || 0;
+        const realSendReady = authoritySnapshot.realSendReady === true;
+        return (
+          authoritySnapshot.replyBusy !== true
+          && replyState === 'ready'
+          && composerTextLen === 0
+          && !realSendReady
+        );
+      }
+      console.warn('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_MISSING_FOR_STALE_SEND_OWNER]');
+      return false;
     }
 
     function isRealSendMessageTaskRunning(sendMessageTask, snapshot = {}, reason = '') {
@@ -329,32 +315,20 @@
 
     function isPageGeneratingForClosedLoop(snapshot = {}) {
       const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
-      const authority = (
-        snap.toolboxStatusAuthority
-        || snap.statusAuthority
-        || snap.topStatusAuthority
-        || null
-      );
-      if (
-        authority
-        && typeof authority === 'object'
-        && authority.isToolboxStatusAuthoritySnapshot === true
-      ) {
-        if (snap.closedLoopContinueRunning === true) {
-          return false;
-        }
-        return !!(
-          authority.replyBusy === true
-          || authority.shouldWaitReplyByTopStatus === true
-          || authority.replyAnswering === true
-          || authority.replyWaiting === true
-          || authority.replySending === true
-        );
-      }
       if (snap.closedLoopContinueRunning === true) {
         return false;
       }
-      return !!(snap.pageGenerating === true || snap.assistantBusy === true);
+      if (
+        window.ToolboxButtonState
+        && typeof window.ToolboxButtonState.resolveButtonAuthoritySnapshot === 'function'
+      ) {
+        const authoritySnapshot = window.ToolboxButtonState.resolveButtonAuthoritySnapshot(
+          'closed-loop:isPageGenerating',
+        );
+        return authoritySnapshot.replyBusy === true;
+      }
+      console.warn('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_MISSING_FOR_PAGE_GENERATING]');
+      return false;
     }
 
     function buildClosedLoopWaitingReplyIdleView(action, snapshot = {}) {
@@ -381,7 +355,7 @@
       void snapshot;
       const startedAt = Date.now();
       const reason = 'closed-loop-button-vm:buildClosedLoopPageBusyIdleView';
-      let authoritySnapshot;
+      let authoritySnapshot = null;
       try {
         if (
           window.ToolboxButtonState
@@ -389,38 +363,21 @@
         ) {
           authoritySnapshot = window.ToolboxButtonState.resolveButtonAuthoritySnapshot(reason);
         } else {
-          console.error('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_MISSING]', {
-            reason,
-          });
-          authoritySnapshot = {
-            replyBusy: true,
-            taskBusy: false,
-            attachmentBusy: false,
-            closedLoopRunning: false,
-            pendingSend: false,
-            sendPhase: 'authority_missing',
-            disabledReason: 'button_authority_missing',
-            buttonColorRole: 'blocked',
-            source: 'closed-loop-button-vm:fallback-authority-missing',
-            ts: Date.now(),
-          };
+          console.warn('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_MISSING]', { reason });
         }
       } catch (e) {
         console.error('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_FAILED]', {
           reason,
           error: e && e.stack ? e.stack : String(e),
         });
+      }
+      if (!authoritySnapshot) {
         authoritySnapshot = {
-          replyBusy: true,
+          replyBusy: false,
           taskBusy: false,
           attachmentBusy: false,
-          closedLoopRunning: false,
           pendingSend: false,
-          sendPhase: 'authority_error',
-          disabledReason: 'button_authority_error',
-          buttonColorRole: 'blocked',
-          source: 'closed-loop-button-vm:fallback-authority-error',
-          ts: Date.now(),
+          sendPhase: 'authority_missing',
         };
       }
       const busy = authoritySnapshot.replyBusy === true

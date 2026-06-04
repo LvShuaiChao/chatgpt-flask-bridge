@@ -348,8 +348,7 @@
     if (
       closedLoopRunning
       || batchTaskGroupRunning
-      || pendingSend === true
-      || sendPhase === 'waiting_send'
+      || anyToolboxOwnerRunning === true
     ) {
       buttonColorRole = 'running';
     }
@@ -358,8 +357,8 @@
     }
     return {
       source,
-      responseState: String(raw.responseState || '').trim().toLowerCase(),
-      responseReason: String(raw.responseReason || '').trim().toLowerCase(),
+      responseState: String(raw.responseState || reply.state || '').trim().toLowerCase(),
+      responseReason: String(raw.responseReason || reply.reason || '').trim().toLowerCase(),
       inputable: flags.canInput === true,
       sendable: flags.canSend === true,
       assistantBusy: flags.replyBusy === true,
@@ -368,6 +367,7 @@
       taskBusy: flags.taskBusy === true || batchTaskGroupRunning,
       attachmentBusy: composer.composerUploading === true,
       closedLoopRunning,
+      anyToolboxOwnerRunning,
       pendingSend,
       realSendReady: composer.realSendButtonReady === true || composer.hasRealSendButton === true,
       sendPhase,
@@ -376,6 +376,7 @@
     };
   }
 
+  // 仅 legacy debug 用。正式按钮状态禁止从 __cgptBridgeState 推导。
   function normalizeBridgeStateForButtonState(bridgeState = {}) {
     const replyFromStructured = bridgeState.reply && typeof bridgeState.reply === 'object'
       ? bridgeState.reply
@@ -466,6 +467,7 @@
   }
 
   function getUnifiedButtonAuthoritySnapshot(source = '-') {
+    const sourceText = String(source || '-').trim() || '-';
     try {
       const cached = (
         typeof window !== 'undefined'
@@ -475,102 +477,60 @@
       )
         ? window.__cgptToolboxAuthorityCache
         : null;
+
       if (cached) {
-        return mapToolboxAuthorityCacheToSnapshot(cached, source);
+        return mapToolboxAuthorityCacheToSnapshot(cached, sourceText);
+      }
+
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getToolboxAuthorityState === 'function'
+      ) {
+        const authority = UploadModule.getToolboxAuthorityState(`button-state:${sourceText}`, {
+          force: true,
+          cacheTtlMs: 0,
+        });
+        if (authority && authority.flags) {
+          console.log('[TOOLBOX_BUTTON_STATE][AUTHORITY_FORCE_BUILD]', {
+            source: sourceText,
+            replyState: authority.reply && authority.reply.state,
+            canSend: authority.flags.canSend === true,
+            canInput: authority.flags.canInput === true,
+            replyBusy: authority.flags.replyBusy === true,
+            taskBusy: authority.flags.taskBusy === true,
+          });
+          return mapToolboxAuthorityCacheToSnapshot(authority, sourceText);
+        }
       }
     } catch (e) {
-      console.error('[TOOLBOX_BUTTON_STATE][CACHE_READ_FAILED]', {
-        source,
+      console.error('[TOOLBOX_BUTTON_STATE][AUTHORITY_READ_FAILED]', {
+        source: sourceText,
         error: e && e.stack ? e.stack : String(e),
       });
     }
 
-    const bridgeState = (
-      typeof window !== 'undefined'
-      && window.__cgptBridgeState
-      && typeof window.__cgptBridgeState === 'object'
-    )
-      ? window.__cgptBridgeState
-      : {};
-
-    const normalizedBridgeState = normalizeBridgeStateForButtonState(bridgeState);
-    const responseState = normalizedBridgeState.reply.state;
-    const responseReason = normalizedBridgeState.reply.reason;
-    const assistantBusy = normalizedBridgeState.reply.busy;
-    const inputable = normalizedBridgeState.permission.canInput;
-    const sendable = normalizedBridgeState.permission.canSend;
-
-    console.log('[BUTTON_STATE][BRIDGE_NORMALIZED]', {
-      responseState,
-      responseReason,
-      isResponding: assistantBusy,
-      hasComposer: normalizedBridgeState.composer.exists,
-      canAcceptInput: normalizedBridgeState.composer.inputReady,
-      hasComposerPayload: normalizedBridgeState.composer.hasPayload,
-      canSendNow: normalizedBridgeState.composer.nativeSendReady,
-      attachmentCount: normalizedBridgeState.composer.attachmentCount,
-      canInput: normalizedBridgeState.permission.canInput,
-      canSend: normalizedBridgeState.permission.canSend,
-      canUpload: normalizedBridgeState.permission.canUpload,
+    console.warn('[TOOLBOX_BUTTON_STATE][AUTHORITY_MISSING_BLOCKED]', {
+      source: sourceText,
     });
-
-    const pendingSend = (
-      responseState === 'waiting_send'
-      || responseReason === 'waiting_send'
-      || bridgeState.pending_send === true
-      || bridgeState.pendingSend === true
-    );
-    const runningOwnerAction = String(
-      typeof window !== 'undefined'
-      && window.__cgptToolboxRunningOwner
-        ? (
-          window.__cgptToolboxRunningOwner.action
-          || window.__cgptToolboxRunningOwner.owner
-          || window.__cgptToolboxRunningOwner.taskKey
-          || ''
-        )
-        : '',
-    ).trim();
-    const closedLoopRunning = runningOwnerAction.startsWith('closed-loop');
-    const batchTaskGroupRunning = runningOwnerAction === 'batch-task-group';
-    const anyToolboxOwnerRunning = !!runningOwnerAction;
-    let disabledReason = '';
-    if (bridgeState.page_offline === true || bridgeState.pageOffline === true) {
-      disabledReason = 'page_offline';
-    } else if (assistantBusy) {
-      disabledReason = 'reply_busy';
-    }
-    const sendPhase = pendingSend ? 'waiting_send' : (assistantBusy ? 'answering' : 'unknown');
-    let buttonColorRole = 'normal';
-    if (
-      closedLoopRunning
-      || batchTaskGroupRunning
-      || pendingSend
-      || sendPhase === 'waiting_send'
-    ) {
-      buttonColorRole = 'running';
-    }
-    if (disabledReason) {
-      buttonColorRole = 'blocked';
-    }
-
     return {
-      source,
-      responseState,
-      responseReason,
-      inputable,
-      sendable,
-      assistantBusy,
-      canSendByHeader: inputable && sendable && !assistantBusy,
-      replyBusy: assistantBusy,
-      taskBusy: batchTaskGroupRunning,
-      attachmentBusy: bridgeState.uploading === true || bridgeState.attachment_uploading === true,
-      closedLoopRunning,
-      pendingSend,
-      realSendReady: sendable,
-      sendPhase,
-      disabledReason,
-      buttonColorRole,
+      source: sourceText,
+      responseState: 'unknown',
+      responseReason: 'authority_missing',
+      inputable: false,
+      sendable: false,
+      assistantBusy: true,
+      canSendByHeader: false,
+      replyBusy: true,
+      taskBusy: true,
+      attachmentBusy: false,
+      closedLoopRunning: false,
+      anyToolboxOwnerRunning: false,
+      pendingSend: false,
+      realSendReady: false,
+      sendPhase: 'authority_missing',
+      disabledReason: 'authority_missing',
+      buttonColorRole: 'blocked',
     };
   }
 
@@ -588,6 +548,9 @@
     const batchTaskGroupRunning = normalizeBooleanForButtonState(
       snapshot.batchTaskGroupRunning || snapshot.batch_task_group_running,
     );
+    const anyToolboxOwnerRunning = normalizeBooleanForButtonState(
+      snapshot.anyToolboxOwnerRunning || snapshot.any_toolbox_owner_running,
+    );
     const pendingSend = normalizeBooleanForButtonState(snapshot.pendingSend || snapshot.pending_send);
     const realSendReady = normalizeBooleanForButtonState(snapshot.realSendReady || snapshot.real_send_ready);
     const sendable = normalizeBooleanForButtonState(snapshot.sendable);
@@ -598,8 +561,7 @@
     if (
       closedLoopRunning
       || batchTaskGroupRunning
-      || pendingSend
-      || sendPhase === 'waiting_send'
+      || anyToolboxOwnerRunning === true
     ) {
       buttonColorRole = 'running';
     }
@@ -612,6 +574,7 @@
       attachmentBusy,
       closedLoopRunning,
       batchTaskGroupRunning,
+      anyToolboxOwnerRunning,
       pendingSend,
       realSendReady,
       sendable,

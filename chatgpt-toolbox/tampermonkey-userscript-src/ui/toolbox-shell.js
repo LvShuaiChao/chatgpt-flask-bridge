@@ -2943,12 +2943,18 @@
         }
 
         #cgpt-autoq-start-upload.cgpt-btn-disabled,
-        #cgpt-autoq-start-upload:disabled:not(.cgpt-btn-busy) {
+        #cgpt-autoq-start-upload.cgpt-btn-disabled-visual,
+        #cgpt-autoq-start-upload:disabled:not(.cgpt-btn-busy),
+        #cgpt-autoq-start-upload[aria-disabled="true"]:not(.cgpt-btn-busy) {
           background: #166534 !important;
           border-color: #22c55e !important;
           color: #ffffff !important;
+          opacity: 1 !important;
+          filter: none !important;
+        }
+        #cgpt-autoq-start-upload:disabled:not(.cgpt-btn-busy),
+        #cgpt-autoq-start-upload[aria-disabled="true"]:not(.cgpt-btn-busy) {
           cursor: not-allowed !important;
-          opacity: 0.72 !important;
         }
 
         #cgpt-upload-start {
@@ -3008,8 +3014,71 @@
           cursor: pointer !important;
         }
 
+        #cgpt-send-copy-hotkey-once.cgpt-btn-danger,
+        #cgpt-send-copy-hotkey-once.cgpt-btn-busy,
+        #cgpt-send-copy-hotkey-once.cgpt-action-running,
+        #cgpt-send-copy-hotkey-once.cgpt-action-button-active,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="running"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="waiting_reply"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="copy_hotkey_core"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="copying"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="sending_hotkey"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="cancelling"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+          filter: none !important;
+          cursor: pointer !important;
+        }
+
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="idle"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="success"],
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="cancelled"],
+        #cgpt-send-copy-hotkey-once[data-base-role="send-copy-hotkey"][data-color-role="send-copy-hotkey-idle"],
+        #cgpt-send-copy-hotkey-once.purple:not(.cgpt-btn-danger):not(.cgpt-btn-busy):not(.cgpt-action-running):not(.cgpt-btn-failed) {
+          background: linear-gradient(135deg, #7c3aed, #6d28d9) !important;
+          border: 1px solid rgba(255, 255, 255, 0.16) !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+          filter: none !important;
+          box-shadow: none !important;
+          cursor: pointer !important;
+        }
+
+        #cgpt-send-copy-hotkey-once[data-base-role="send-copy-hotkey"][data-color-role="send-copy-hotkey-idle"]:hover,
+        #cgpt-send-copy-hotkey-once.purple:not(.cgpt-btn-danger):not(.cgpt-btn-busy):not(.cgpt-action-running):not(.cgpt-btn-failed):hover {
+          background: linear-gradient(135deg, #8b5cf6, #7c3aed) !important;
+          color: #ffffff !important;
+        }
+
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="failed"],
+        #cgpt-send-copy-hotkey-once[data-color-role="error"].cgpt-btn-failed {
+          background: #991b1b !important;
+          border-color: #b91c1c !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+          filter: none !important;
+        }
+
+        #cgpt-send-copy-hotkey-once.cgpt-btn-danger:hover,
+        #cgpt-send-copy-hotkey-once.cgpt-btn-busy:hover,
+        #cgpt-send-copy-hotkey-once.cgpt-action-running:hover,
+        #cgpt-send-copy-hotkey-once.cgpt-action-button-active:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="running"]:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="waiting_reply"]:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="copy_hotkey_core"]:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="copying"]:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="sending_hotkey"]:hover,
+        #cgpt-send-copy-hotkey-once[data-cgpt-button-phase="cancelling"]:hover {
+          background: #b91c1c !important;
+          border-color: #f87171 !important;
+          color: #ffffff !important;
+        }
+
         #cgpt-upload-start.cgpt-task-running-indicator,
-        #cgpt-copy-hotkey-once.cgpt-task-running-indicator {
+        #cgpt-copy-hotkey-once.cgpt-task-running-indicator,
+        #cgpt-send-copy-hotkey-once.cgpt-task-running-indicator {
           opacity: 1 !important;
           filter: none !important;
         }
@@ -12879,6 +12948,8 @@
     }
 
     let lastTopAlertLogSignature = '';
+    let isRefreshingTopStatusAlertSlot = false;
+    let lastTopStatusAlertSlotSkipLogAt = 0;
 
     function logTopAlertEntry(alertEntry, reason = '-') {
       const signature = [
@@ -12886,7 +12957,6 @@
         alertEntry.level || alertEntry.variant || '',
         alertEntry.text || '',
         alertEntry.title || '',
-        reason,
       ].join('|');
       if (signature === lastTopAlertLogSignature) {
         return;
@@ -12903,16 +12973,37 @@
     }
 
     function refreshTopStatusAlertSlot(reason = '-') {
+      const reasonText = String(reason || '-');
+      if (isRefreshingTopStatusAlertSlot) {
+        const now = Date.now();
+        if (now - lastTopStatusAlertSlotSkipLogAt > 1500) {
+          lastTopStatusAlertSlotSkipLogAt = now;
+          console.warn('[TOOLBOX_TOP_ALERT][REFRESH_REENTRANT_SKIPPED]', {
+            reason: reasonText,
+          });
+        }
+        return;
+      }
       if (
-        typeof UploadModule !== 'undefined'
-        && UploadModule
-        && typeof UploadModule.renderToolboxTopStatus === 'function'
+        typeof UploadModule === 'undefined'
+        || !UploadModule
+        || typeof UploadModule.renderToolboxTopStatus !== 'function'
       ) {
+        return;
+      }
+      isRefreshingTopStatusAlertSlot = true;
+      try {
         UploadModule.renderToolboxTopStatus({
           heavy: false,
           force: true,
-          reason: `alert-slot:${reason}`,
+          reason: `alert-slot:${reasonText}`,
+          skipStatusMutation: true,
+          skipAlertRefresh: true,
         });
+      } catch (error) {
+        console.error('[TOOLBOX_TOP_ALERT][REFRESH_FAILED]', error);
+      } finally {
+        isRefreshingTopStatusAlertSlot = false;
       }
     }
 

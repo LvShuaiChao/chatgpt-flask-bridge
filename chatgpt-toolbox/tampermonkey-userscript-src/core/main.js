@@ -10439,6 +10439,106 @@
   }
 
   function getTopMainStatus() {
+    try {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getToolboxAuthorityState === 'function'
+      ) {
+        const authority = UploadModule.getToolboxAuthorityState('core-main:getTopMainStatus', {
+          force: true,
+          cacheTtlMs: 0,
+        });
+        if (authority && authority.flags && authority.reply) {
+          const flags = authority.flags || {};
+          const reply = authority.reply || {};
+          const composer = authority.composer || {};
+          if (flags.pageOffline === true) {
+            return {
+              text: '离线',
+              cls: 'cgpt-state-offline',
+              type: 'offline',
+              title: '页面离线或桥接未连接',
+              reason: 'authority_page_offline',
+              isGenerating: false,
+              isResponding: false,
+              isAnswering: false,
+              responseInProgress: false,
+            };
+          }
+          if (flags.replyBusy === true || reply.state === 'answering') {
+            return {
+              text: '回答中',
+              cls: 'cgpt-state-answering',
+              type: 'answering',
+              title: 'ChatGPT 正在生成回复',
+              reason: 'authority_reply_busy',
+              isGenerating: true,
+              isResponding: true,
+              isAnswering: true,
+              responseInProgress: true,
+            };
+          }
+          if (flags.pendingSend === true || reply.state === 'waiting_send') {
+            return {
+              text: '待发送',
+              cls: 'cgpt-state-waiting',
+              type: 'waiting_send',
+              title: '已有待发送任务',
+              reason: 'authority_pending_send',
+              isGenerating: false,
+              isResponding: false,
+              isAnswering: false,
+              responseInProgress: false,
+            };
+          }
+          if (composer.composerUploading === true) {
+            return {
+              text: '附件处理中',
+              cls: 'cgpt-state-waiting',
+              type: 'attachment_processing',
+              title: '附件仍在处理',
+              reason: 'authority_attachment_processing',
+              isGenerating: false,
+              isResponding: false,
+              isAnswering: false,
+              responseInProgress: false,
+            };
+          }
+          if (flags.canInput === true || flags.canSend === true || reply.ready === true) {
+            return {
+              text: '可输入',
+              cls: 'cgpt-state-ready',
+              type: 'ready',
+              title: '当前页面可以输入或发送',
+              reason: 'authority_ready',
+              isGenerating: false,
+              isResponding: false,
+              isAnswering: false,
+              responseInProgress: false,
+            };
+          }
+          return {
+            text: '不可发送',
+            cls: 'cgpt-state-blocked',
+            type: 'blocked',
+            title: '当前页面暂不可发送',
+            reason: 'authority_blocked',
+            isGenerating: false,
+            isResponding: false,
+            isAnswering: false,
+            responseInProgress: false,
+          };
+        }
+      }
+    } catch (err) {
+      console.error('[CORE_MAIN][AUTHORITY_TOP_STATUS_FAILED]', err);
+    }
+
+    console.warn('[CORE_MAIN][LEGACY_TOP_STATUS_FALLBACK_USED]', {
+      reason: 'authority_unavailable',
+    });
+
     if (typeof isHomeNewChatReadyToSendNow === 'function' && isHomeNewChatReadyToSendNow()) {
       const sendSnap = typeof getComposerSendButtonSnapshot === 'function'
         ? getComposerSendButtonSnapshot({ silent: true })
@@ -10646,59 +10746,23 @@
     if (
       typeof UploadModule !== 'undefined'
       && UploadModule
-      && typeof UploadModule.maybeHealStaleWaitingReplyState === 'function'
-    ) {
-      try {
-        UploadModule.maybeHealStaleWaitingReplyState('updateChatInputStateBadge');
-      } catch (healErr) {
-        console.error('[ChatGPT toolbox] updateChatInputStateBadge heal stale waiting reply failed', healErr);
-      }
-    }
-
-    if (
-      typeof UploadModule !== 'undefined'
-      && UploadModule
-      && typeof UploadModule.maybeReconcileSendCopyHotkeyWaitingReply === 'function'
-    ) {
-      try {
-        UploadModule.maybeReconcileSendCopyHotkeyWaitingReply('updateChatInputStateBadge');
-      } catch (reconcileErr) {
-        console.error('[ChatGPT toolbox] updateChatInputStateBadge send-copy-hotkey reconcile failed', reconcileErr);
-      }
-    }
-
-    const info = getTopMainStatus();
-    logTopMainStatusChange(info);
-
-    if (typeof UploadModule !== 'undefined' && UploadModule) {
-      if (typeof UploadModule.clearStaleTopErrorIfIdle === 'function') {
-        try {
-          UploadModule.clearStaleTopErrorIfIdle('updateChatInputStateBadge');
-        } catch (clearAlertErr) {
-          console.error('[ChatGPT toolbox] clearStaleTopErrorIfIdle failed', clearAlertErr);
-        }
-      }
-      if (typeof UploadModule.clearStaleActionFailedBadgeIfIdle === 'function') {
-        try {
-          UploadModule.clearStaleActionFailedBadgeIfIdle('updateChatInputStateBadge');
-        } catch (clearBadgeErr) {
-          console.error('[ChatGPT toolbox] clearStaleActionFailedBadgeIfIdle failed', clearBadgeErr);
-        }
-      }
-    }
-
-    if (
-      typeof UploadModule !== 'undefined'
-      && UploadModule
       && typeof UploadModule.renderToolboxTopStatus === 'function'
     ) {
-      UploadModule.renderToolboxTopStatus({
-        heavy: false,
-        force: true,
-        reason: `updateChatInputStateBadge:${info.text || '-'}`,
-      });
+      try {
+        UploadModule.renderToolboxTopStatus({
+          heavy: false,
+          force: false,
+          reason: 'updateChatInputStateBadge:authority-only',
+        });
+      } catch (error) {
+        console.error('[TOP_STATUS][AUTHORITY_RENDER_FAILED]', error);
+      }
       return;
     }
+
+    // fallback：仅在 UploadModule 不存在时执行旧逻辑
+    const info = getTopMainStatus();
+    logTopMainStatusChange(info);
 
     const badge = document.querySelector('#cgpt-page-input-state');
     if (!badge) {
@@ -12758,60 +12822,6 @@
     }
   }
 
-  async function waitAttachmentsStableForSend(timeoutMs, shouldStop, options = {}) {
-    const startedAt = Date.now();
-
-    notifyPreSendStatus(options, '附件仍在处理中，等待发送...');
-
-    while (Date.now() - startedAt < timeoutMs) {
-      if (typeof isToolboxPageNavigating === 'function' && isToolboxPageNavigating()) {
-        return { ok: false, reason: 'page_navigating' };
-      }
-
-      if (shouldStop()) {
-        return { ok: false, reason: 'cancelled' };
-      }
-
-      const elapsed = Date.now() - startedAt;
-      const scan = findComposerSendButtonDetailed();
-      appendSendLogFields('[SEND][ATTACH_READY]', {
-        elapsed,
-        button_selector: scan.buttonSelector || '-',
-        disabled: scan.disabled ? 1 : 0,
-        composer_text_len: scan.composerTextLen,
-        has_attachment: scan.hasAttachment ? 1 : 0,
-        response_state: scan.responseState || '-',
-        response_state_reason: scan.responseStateReason || '-',
-      });
-
-      if (scan.button && !scan.disabled && hasRealComposerText()) {
-        appendSendLogFields('[SEND][ATTACH_READY_CLICK]', {
-          elapsed,
-          button_selector: scan.buttonSelector || '-',
-          source: String(options.source || 'stable-send'),
-          ...getComposerSendDiagnostics(),
-        });
-        const clicked = clickSendButton(scan.button, `${String(options.source || 'stable-send')}:attach_wait`);
-        if (clicked.ok) {
-          return { ok: true, reason: 'sent_by_attach_wait_click' };
-        }
-      }
-
-      const attachmentProcessing = typeof ComposerApi.isAttachmentStillUploading === 'function'
-        && ComposerApi.isAttachmentStillUploading();
-      appendSendLog(
-        `[SEND][ATTACH_WAIT] elapsed=${elapsed} status=${attachmentProcessing ? 'processing' : 'ready'} button_found=${scan.button ? 1 : 0} disabled=${scan.disabled ? 1 : 0}`,
-      );
-
-      if (!attachmentProcessing && !scan.hasAttachment) {
-        return { ok: true, reason: 'attachment_stable' };
-      }
-
-      await sleep(SEND_BUTTON_RETRY_INTERVAL_MS);
-    }
-
-    return { ok: false, reason: 'attachment_not_ready' };
-  }
 
   async function waitSendButtonReadyForSend(timeoutMs, shouldStop, options = {}) {
     const startedAt = Date.now();
