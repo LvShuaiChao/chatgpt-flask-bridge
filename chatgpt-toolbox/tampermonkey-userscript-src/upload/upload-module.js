@@ -21454,7 +21454,7 @@
         el.style.textOverflow = 'ellipsis';
         return true;
       }
-      // 现在顶部状态栏尺寸统一交给 toolbox-shell.js 里的 CSS grid 控制。
+      // 现在顶部状态栏尺寸统一交给 toolbox-shell.js 里的 CSS flex-wrap 控制。
       // 这里必须清理旧版本可能留下的 inline 宽度，否则 reply-state / task-state 仍会残留 82px。
       el.style.width = '';
       el.style.minWidth = '';
