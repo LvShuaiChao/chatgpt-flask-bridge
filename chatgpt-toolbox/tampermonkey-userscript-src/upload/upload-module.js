@@ -3896,6 +3896,8 @@
       const startMs = Date.now();
       let stableCount = 0;
       let lastBusyState = null;
+      let pendingSendEmptyComposerHealDone = false;
+      let pendingSendEmptyComposerStableCount = 0;
       setClosedLoopPhase(CLOSED_LOOP_PHASES.WAITING_REPLY, {
         reason: 'wait-reply-stable-start',
       });
@@ -3989,61 +3991,133 @@
         }
 
         if (topState.pendingSend) {
+          const responseReasonText = String(topState.responseReason || '').trim().toLowerCase();
+          const topTextForPending = String(topState.text || topState.topText || '').trim();
           const pendingSendIsEmptyComposer = !!(
             composer.empty
             && Number(composer.textLen || 0) <= 0
             && !composer.hasUploadPayload
             && !topState.sendable
+            && !topState.hasStopButton
+            && !topState.answering
+            && !topState.waitingReply
+            && !topState.sending
+            && !topState.detecting
+            && !topState.attachmentProcessing
             && (
-              String(topState.responseReason || '').toLowerCase() === 'send_button_not_found'
-              || String(topState.responseReason || '').toLowerCase() === 'home_new_chat_payload_but_send_button_missing'
-              || String(topState.text || topState.topText || '').includes('待发送')
+              responseReasonText === 'empty_composer'
+              || responseReasonText === 'send_button_not_found'
+              || responseReasonText === 'home_new_chat_payload_but_send_button_missing'
+              || topTextForPending.includes('待发送')
             )
           );
-
           if (pendingSendIsEmptyComposer) {
+            pendingSendEmptyComposerStableCount += 1;
+            stableCount += 1;
+            closedLoopContinueState.replyDoneStableCount = stableCount;
+            closedLoopContinueState.lastReplyDoneCheckMs = Date.now();
+            if (!pendingSendEmptyComposerHealDone) {
+              pendingSendEmptyComposerHealDone = true;
+              if (typeof resetClosedLoopOwnWaitingSendState === 'function') {
+                resetClosedLoopOwnWaitingSendState(
+                  `pending-send-empty-composer:${runId || '-'}:${round || '-'}`,
+                );
+              }
+              if (typeof clearStaleWaitingSendWhenComposerEmpty === 'function') {
+                clearStaleWaitingSendWhenComposerEmpty(
+                  `closed-loop-pending-send-empty-composer:${runId || '-'}:${round || '-'}`,
+                );
+              }
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][WAIT_REPLY_PENDING_SEND_EMPTY_COMPOSER_HEAL_ONCE] `
+                + `runId=${runId || '-'} `
+                + `round=${round || '-'} `
+                + `topText=${topTextForPending || '-'} `
+                + `responseState=${topState.responseState || '-'} `
+                + `responseReason=${topState.responseReason || '-'} `
+                + `textLen=${composer.textLen || 0} `
+                + `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
+              );
+            }
             ToolboxShell.appendLog(
               [
-                '[CLOSED_LOOP][WAIT_REPLY_PENDING_SEND_EMPTY_COMPOSER_AS_IDLE]',
+                '[CLOSED_LOOP][WAIT_REPLY_PENDING_SEND_EMPTY_COMPOSER_COUNT_AS_STABLE]',
                 'standard=top-left-reply-state-only',
                 `runId=${runId}`,
                 `round=${round}`,
+                `stableCount=${stableCount}/${requiredStableCount}`,
+                `emptyPendingStableCount=${pendingSendEmptyComposerStableCount}`,
                 `elapsedMs=${elapsedMs}`,
-                `topText=${topState.text || '-'}`,
+                `topText=${topTextForPending || '-'}`,
                 `responseState=${topState.responseState || '-'}`,
                 `responseReason=${topState.responseReason || '-'}`,
                 `composerEmpty=${composer.empty ? 1 : 0}`,
                 `textLen=${composer.textLen || 0}`,
                 `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
-                'action=treat-as-ready',
+                'action=count-as-ready-and-continue',
               ].join(' '),
             );
-          } else {
-            stableCount = 0;
-            closedLoopContinueState.replyDoneStableCount = 0;
-            lastBusyState = topState;
-
-            ToolboxShell.appendLog(
-              [
-                '[CLOSED_LOOP][WAIT_REPLY_PENDING_SEND_NOT_UPLOAD_IDLE]',
-                'standard=top-left-reply-state-only',
-                `runId=${runId}`,
-                `round=${round}`,
-                `elapsedMs=${elapsedMs}`,
-                `topText=${topState.text || '-'}`,
-                `pendingSend=${topState.pendingSend ? 1 : 0}`,
-                `ready=${topState.ready ? 1 : 0}`,
-                `readyText=${topState.readyText ? 1 : 0}`,
-                `composerEmpty=${composer.empty ? 1 : 0}`,
-                `textLen=${composer.textLen || 0}`,
-                `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
-                'action=continue-waiting-for-real-idle',
-              ].join(' '),
-            );
-
+            if (stableCount >= requiredStableCount) {
+              if (typeof clearStaleSendWaitingReplyState === 'function') {
+                clearStaleSendWaitingReplyState(
+                  `closed-loop-empty-composer-pending-send-stable:${runId || '-'}:${round || '-'}`,
+                );
+              }
+              setClosedLoopPhase(CLOSED_LOOP_PHASES.REPLY_DONE_STABLE, {
+                reason: 'pending-send-empty-composer-treated-as-stable',
+              });
+              ToolboxShell.appendLog(
+                [
+                  '[CLOSED_LOOP][WAIT_REPLY_STABLE_DONE]',
+                  'standard=top-left-reply-state-only',
+                  `runId=${runId}`,
+                  `round=${round}`,
+                  `stableCount=${stableCount}`,
+                  `elapsedMs=${Date.now() - startMs}`,
+                  `topText=${topTextForPending || '-'}`,
+                  'reason=pending-send-empty-composer-treated-as-stable',
+                  'next=copy_hotkey_now',
+                ].join(' '),
+              );
+              return {
+                ok: true,
+                reason: 'pending-send-empty-composer-treated-as-stable',
+                stableCount,
+                elapsedMs: Date.now() - startMs,
+                lastBusyState: topState,
+              };
+            }
             await sleep(pollMs);
             continue;
           }
+          stableCount = 0;
+          pendingSendEmptyComposerStableCount = 0;
+          closedLoopContinueState.replyDoneStableCount = 0;
+          lastBusyState = topState;
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][WAIT_REPLY_PENDING_SEND_NOT_UPLOAD_IDLE]',
+              'standard=top-left-reply-state-only',
+              `runId=${runId}`,
+              `round=${round}`,
+              `elapsedMs=${elapsedMs}`,
+              `topText=${topState.text || '-'}`,
+              `pendingSend=${topState.pendingSend ? 1 : 0}`,
+              `ready=${topState.ready ? 1 : 0}`,
+              `readyText=${topState.readyText ? 1 : 0}`,
+              `composerEmpty=${composer.empty ? 1 : 0}`,
+              `textLen=${composer.textLen || 0}`,
+              `hasUploadPayload=${composer.hasUploadPayload ? 1 : 0}`,
+              `sendable=${topState.sendable ? 1 : 0}`,
+              `answering=${topState.answering ? 1 : 0}`,
+              `waitingReply=${topState.waitingReply ? 1 : 0}`,
+              `saying=${topState.sending ? 1 : 0}`,
+              `attachmentProcessing=${topState.attachmentProcessing ? 1 : 0}`,
+              'action=continue-waiting-for-real-idle',
+            ].join(' '),
+          );
+          await sleep(pollMs);
+          continue;
         }
 
         if (!isClosedLoopTopStateIdleForNextUpload(topState)) {
@@ -5691,7 +5765,7 @@
             + `replyState=${authority.reply.state} `
             + `taskState=${authority.task.state}`,
           );
-          return `${idleText}（确认完成）`;
+          return `${idleText}（点击停止）`;
         }
         if (!authorityReplyAnswering) {
           ToolboxShell.appendLog(
@@ -5703,7 +5777,7 @@
             + `replyState=${authority && authority.reply ? authority.reply.state : '-'} `
             + `taskState=${authority && authority.task ? authority.task.state : '-'}`,
           );
-          return `${idleText}（确认完成）`;
+          return `${idleText}（点击停止）`;
         }
         let elapsedSec = 0;
         if (waitingReplySinceMs > 0) {
@@ -5775,7 +5849,7 @@
         return `${idleText}（快捷键中）`;
       }
       if (phase === 'reply_done_stable' || phase === 'confirm_done') {
-        return `${idleText}（确认完成）`;
+        return `${idleText}（点击停止）`;
       }
       if (phase === 'sending' || phase === 'send') {
         return `${idleText}（发送中）`;
@@ -14804,6 +14878,47 @@
       });
       clearClosedLoopRetryTimer(`stop:${src}`);
       clearClosedLoopButtonWaitState(`stop:${src}`);
+
+      if (typeof clearClosedLoopStartPending === 'function') {
+        clearClosedLoopStartPending(`stop:${src}`);
+      }
+      state.cancelWaitingSend = true;
+      state.messageSendCancelRequested = true;
+      state.pendingSendAfterReply = false;
+      state.waitingReply = false;
+      state.messageSending = false;
+      if (typeof cancelCurrentUploadSend === 'function') {
+        cancelCurrentUploadSend(`closed-loop-stop:${src}`);
+      }
+      if (typeof cancelWaitingSend === 'function') {
+        cancelWaitingSend(`closed-loop-stop:${src}`);
+      }
+      if (typeof resetClosedLoopOwnWaitingSendState === 'function') {
+        resetClosedLoopOwnWaitingSendState(`closed-loop-stop:${src}`);
+      }
+      if (typeof resetCanonicalSendTaskState === 'function') {
+        resetCanonicalSendTaskState(`closed-loop-stop:${src}`);
+      }
+      if (typeof setAuthoritativeSendTaskState === 'function') {
+        setAuthoritativeSendTaskState(
+          {
+            phase: 'idle',
+            running: false,
+            runId: '',
+            owner: '',
+            ownerButtonId: '',
+            cancelRequested: false,
+          },
+          `closed-loop-stop:${src}`,
+        );
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STOP_FORCE_RELEASE_RUNTIME] `
+        + `reason=${src} `
+        + `oldRunId=${oldRunId} `
+        + `cancelWaitingSend=${state.cancelWaitingSend ? 1 : 0} `
+        + `messageSendCancelRequested=${state.messageSendCancelRequested ? 1 : 0}`,
+      );
 
       if (closedLoopContinueState.countdownTickTimer) {
         clearInterval(closedLoopContinueState.countdownTickTimer);
