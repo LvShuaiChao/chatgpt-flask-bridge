@@ -1597,6 +1597,201 @@
     let waitingReplyLatestAssistantTextCache = null;
     let reconciledComposerAttachmentSticky = null;
     let reconciledComposerAttachmentStickyAt = 0;
+    let composerAttachmentStateCache = null;
+    let composerAttachmentStateCacheAt = 0;
+    let composerAttachmentStateCacheKey = '';
+    let lastComposerAttachmentDomScanAt = 0;
+    let lastComposerAttachmentDomRemoveCount = 0;
+    const TOOLBOX_ATTACHMENT_DOM_SCAN_INTERVAL_MS = 700;
+    const TOOLBOX_RENDER_MIN_INTERVAL_MS = 400;
+    const TOOLBOX_RENDER_MAINTENANCE_INTERVAL_MS = 2000;
+    const TOOLBOX_WORKER_TASK_TIMEOUT_MS = 800;
+    let lastRenderUploadButtonsOnlyStartedAt = 0;
+    let lastUploadRenderMaintenanceAt = 0;
+    let lastButtonSnapshotMaintenanceAt = 0;
+    let toolboxWorkerRuntime = null;
+    let toolboxWorkerRequestId = 1;
+    const toolboxWorkerPendingTasks = new Map();
+
+    function createToolboxWorkerRuntime() {
+      if (toolboxWorkerRuntime) {
+        return toolboxWorkerRuntime;
+      }
+      if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') {
+        toolboxWorkerRuntime = {
+          available: false,
+          worker: null,
+          reason: 'worker-api-unavailable',
+        };
+        return toolboxWorkerRuntime;
+      }
+      const workerCode = `
+    const logSignatureCache = new Map();
+    function normalizeText(value) {
+      return String(value == null ? '' : value);
+    }
+    function handleDedupeLog(payload) {
+      const key = normalizeText(payload.key || '');
+      const signature = normalizeText(payload.signature || '');
+      const ttlMs = Number(payload.ttlMs || 1000);
+      const current = Date.now();
+      if (!key) {
+        return { shouldLog: true, reason: 'empty-key' };
+      }
+      const previous = logSignatureCache.get(key);
+      if (
+        previous
+        && previous.signature === signature
+        && current - Number(previous.at || 0) < ttlMs
+      ) {
+        return { shouldLog: false, reason: 'same-signature-within-ttl' };
+      }
+      logSignatureCache.set(key, {
+        signature,
+        at: current,
+      });
+      return { shouldLog: true, reason: 'changed-or-expired' };
+    }
+    function handleCompactText(payload) {
+      const text = normalizeText(payload.text || '');
+      return {
+        text: text
+          .replace(/本地上传:/g, '上传:')
+          .replace(/本地消息:/g, '消息:')
+          .replace(/输入框附件:/g, '附件:')
+          .replace(/本地队列:/g, '队列:')
+          .replace(/本地可读\\s*·\\s*/g, '')
+          .replace(/本地不可读\\s*·\\s*/g, '')
+          .replace(/\\s*·\\s*/g, '·')
+          .trim(),
+      };
+    }
+    function handleBuildSignature(payload) {
+      const parts = Array.isArray(payload.parts) ? payload.parts : [];
+      return {
+        signature: parts.map((item) => normalizeText(item)).join('|'),
+      };
+    }
+    self.onmessage = function(event) {
+      const message = event && event.data ? event.data : {};
+      const id = message.id;
+      const type = message.type;
+      const payload = message.payload || {};
+      try {
+        let result = null;
+        if (type === 'dedupe-log') {
+          result = handleDedupeLog(payload);
+        } else if (type === 'compact-text') {
+          result = handleCompactText(payload);
+        } else if (type === 'build-signature') {
+          result = handleBuildSignature(payload);
+        } else {
+          result = {
+            ok: false,
+            error: 'unknown-worker-task',
+            type,
+          };
+        }
+        self.postMessage({
+          id,
+          ok: true,
+          result,
+        });
+      } catch (error) {
+        self.postMessage({
+          id,
+          ok: false,
+          error: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? String(error.stack).slice(0, 1200) : '',
+        });
+      }
+    };
+  `;
+      try {
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        const worker = new Worker(url);
+        worker.onmessage = (event) => {
+          const message = event && event.data ? event.data : {};
+          const pending = toolboxWorkerPendingTasks.get(message.id);
+          if (!pending) {
+            return;
+          }
+          toolboxWorkerPendingTasks.delete(message.id);
+          window.clearTimeout(pending.timer);
+          if (message.ok) {
+            pending.resolve(message.result);
+          } else {
+            pending.reject(new Error(message.error || 'worker-task-failed'));
+          }
+        };
+        worker.onerror = (error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[TOOLBOX_WORKER][ERROR]', error);
+          if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[TOOLBOX_WORKER][ERROR] error=${errText}`);
+          }
+        };
+        toolboxWorkerRuntime = {
+          available: true,
+          worker,
+          url,
+          reason: 'ok',
+        };
+        return toolboxWorkerRuntime;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[TOOLBOX_WORKER][CREATE_FAILED]', error);
+        toolboxWorkerRuntime = {
+          available: false,
+          worker: null,
+          reason: errText,
+        };
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(`[TOOLBOX_WORKER][CREATE_FAILED] error=${errText}`);
+        }
+        return toolboxWorkerRuntime;
+      }
+    }
+
+    function runToolboxWorkerTask(type, payload = {}, timeoutMs = TOOLBOX_WORKER_TASK_TIMEOUT_MS) {
+      const runtime = createToolboxWorkerRuntime();
+      if (!runtime || !runtime.available || !runtime.worker) {
+        return Promise.reject(new Error(runtime && runtime.reason ? runtime.reason : 'worker-unavailable'));
+      }
+      const id = toolboxWorkerRequestId;
+      toolboxWorkerRequestId += 1;
+      return new Promise((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          toolboxWorkerPendingTasks.delete(id);
+          reject(new Error(`worker-task-timeout:${type}`));
+        }, timeoutMs);
+        toolboxWorkerPendingTasks.set(id, {
+          resolve,
+          reject,
+          timer,
+          type,
+        });
+        runtime.worker.postMessage({
+          id,
+          type,
+          payload,
+        });
+      });
+    }
+
+    function normalizeToolboxDisplayTextOnMainThread(text) {
+      return String(text == null ? '' : text)
+        .replace(/本地上传:/g, '上传:')
+        .replace(/本地消息:/g, '消息:')
+        .replace(/输入框附件:/g, '附件:')
+        .replace(/本地队列:/g, '队列:')
+        .replace(/本地可读\s*·\s*/g, '')
+        .replace(/本地不可读\s*·\s*/g, '')
+        .replace(/\s*·\s*/g, '·')
+        .trim();
+    }
+
     const RECONCILED_COMPOSER_ATTACHMENT_STICKY_MS = 15000;
     let autoQueueUploadAttachLock = {
       running: false,
@@ -19117,7 +19312,7 @@
       if (
         q.restoreState === UploadRestoreState.PERMISSION_REQUIRED
       ) {
-        return '本地不可读 · 需要重新授权';
+        return '需重新授权';
       }
       if (
         q.restoreState === UploadRestoreState.NEEDS_REBIND
@@ -19127,7 +19322,7 @@
         || q.state === UploadState.NEEDS_REBIND
         || q.attachState === UploadState.NEEDS_REBIND
       ) {
-        return '本地不可读：刷新/换电脑后需要重新绑定';
+        return '需重新绑定';
       }
       if (
         q.restoreState === UploadRestoreState.MISSING
@@ -19135,16 +19330,16 @@
         || q.sourceKind === 'missing-file'
         || q.sourceKind === 'missing-local'
       ) {
-        return '本地不可读 · 文件源失效';
+        return '文件源失效';
       }
       if (isUploadSourceCacheForbidden(q)) {
-        return '本地不可读 · 缓存快照需重新绑定';
+        return '需重新绑定';
       }
       if (
         q.state === UploadState.READING
         || q.state === UploadState.ATTACHING
       ) {
-        return '本地可读 · 上传中';
+        return '上传中';
       }
       if (
         q.state === UploadState.ATTACHED
@@ -19153,19 +19348,19 @@
       ) {
         if (q.state === UploadState.ATTACHED) {
           if (isUploadItemSentWithMessage(q)) {
-            return '本地可读 · 已发送';
+            return '已发送';
           }
           if (hasAttachmentEvidenceForItem(q)) {
-            return '本地可读 · 已添加到输入框';
+            return '已绑定';
           }
-          return '本地可读 · 已绑定';
+          return '已绑定';
         }
-        return '本地可读 · 已上传';
+        return '已上传';
       }
       if (hasReadableFreshLocalSource(q) || hasAttemptableUploadSource(q)) {
-        return '本地可读 · 待上传';
+        return '待上传';
       }
-      return '本地不可读 · 需要重新绑定';
+      return '需重新绑定';
     }
 
     function buildUploadItemTitle(q) {
@@ -20630,11 +20825,9 @@
       'turn-count',
       'upload-usage',
       'message-usage',
-      'top-status-spacer',
       'task-state',
       'attachment-state',
       'alert-state',
-      'compact-mode',
     ];
 
     const TOP_STATUS_SLOT_EXTRA_CLASSES = {
@@ -20647,7 +20840,6 @@
       'task-state': 'cgpt-top-badge cgpt-top-badge-task',
       'attachment-state': 'cgpt-top-badge-attachment',
       'alert-state': 'cgpt-top-status-alert',
-      'compact-mode': 'cgpt-top-status-compact-mode',
     };
 
     const TOOLBOX_REPLY_STATES = Object.freeze({
@@ -21312,39 +21504,26 @@
       );
     }
 
-    function buildToolboxAttachmentDisplay(composer, localQueue, useCompactText = false) {
+    function buildToolboxAttachmentDisplay(composer, localQueue, _useCompactText = false) {
       const composerCount = Number(composer && composer.composerCount || 0);
       const composerUploading = !!(composer && composer.composerUploading);
       const localPendingCount = Number(localQueue && localQueue.localPendingCount || 0);
       const localQueueCount = Number(localQueue && localQueue.localQueueCount || 0);
-      const compact = useCompactText === true;
+      const composerAttachmentText = `附件:${composerCount}`;
+      const localQueueText = `队列:${localPendingCount}`;
 
       if (composerUploading) {
+        const text = '附件处理中';
         return {
           state: TOOLBOX_ATTACHMENT_STATES.UPLOADING,
-          text: compact ? '附件中' : '附件处理中',
-          title: `输入框附件处理中 · 本地队列:${localQueueCount}`,
-          composerAttachmentText: '附件处理中',
-          localQueueText: compact ? `队列:${localPendingCount}` : `本地队列:${localPendingCount}`,
+          text,
+          title: `附件处理中·队列:${localQueueCount}`,
+          composerAttachmentText: text,
+          localQueueText,
         };
       }
 
-      const composerAttachmentText = compact
-        ? `附件:${composerCount}`
-        : `输入框附件:${composerCount}`;
-      const localQueueText = compact
-        ? `队列:${localPendingCount}`
-        : `本地队列:${localPendingCount}`;
-
-      let text = `${composerAttachmentText}`;
-      if (localPendingCount > 0 || composerCount > 0) {
-        text = compact
-          ? `附件:${composerCount}·队列:${localPendingCount}`
-          : `${composerAttachmentText} · ${localQueueText}`;
-      } else if (!compact) {
-        text = '附件:0';
-      }
-
+      const text = `附件:${composerCount}·队列:${localPendingCount}`;
       const state = composerCount > 0
         ? TOOLBOX_ATTACHMENT_STATES.READY
         : TOOLBOX_ATTACHMENT_STATES.NONE;
@@ -21352,7 +21531,7 @@
       return {
         state,
         text,
-        title: `${composerAttachmentText} · ${localQueueText}`,
+        title: text,
         composerAttachmentText,
         localQueueText,
       };
@@ -21374,7 +21553,6 @@
       const raw = authority && authority.raw ? authority.raw : {};
 
       const signature = [
-        reason,
         page.pageOffline ? 1 : 0,
         authority && authority.reply ? authority.reply.state : '-',
         flags.replyBusy ? 1 : 0,
@@ -21383,6 +21561,7 @@
         composer.textLen || 0,
         composer.composerCount || 0,
         localQueue.localPendingCount || 0,
+        authority && authority.task ? authority.task.sendPhase || '-' : '-',
       ].join('|');
 
       const now = Date.now();
@@ -21606,6 +21785,19 @@
 
       // DOM 优先级 3：有 payload 且发送按钮可用
       if (hasPayload && sendReady) {
+        if (
+          responseState === 'attachment_processing'
+          || responseReason === 'send_button_not_found'
+          || responseReason === 'attachment_ready_but_send_button_missing'
+          || responseReason === 'payload_ready_but_send_button_missing'
+        ) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_AUTHORITY][DOM_READY_OVERRIDES_STALE_RUNTIME] reason=${reason || '-'} `
+            + `responseState=${responseState || '-'} responseReason=${responseReason || '-'} `
+            + `hasPayload=${hasPayload ? 1 : 0} sendReady=${sendReady ? 1 : 0} `
+            + `uploading=${attachmentUploading ? 1 : 0} stop=${hasStopButton ? 1 : 0}`
+          );
+        }
         return {
           state: TOOLBOX_REPLY_STATES.WAITING_SEND,
           text: '待发送',
@@ -21764,6 +21956,54 @@
       }
 
       if (sendPhase === 'sending') {
+        const composerForTask = readToolboxComposerEvidence(`task-sending:${reason || '-'}`);
+        const sendTaskUpdatedAt = Number(
+          state.sendTask && state.sendTask.updatedAt
+            ? state.sendTask.updatedAt
+            : 0
+        );
+        const sendingAgeMs = sendTaskUpdatedAt > 0
+          ? Date.now() - sendTaskUpdatedAt
+          : 0;
+        const staleSendingButReadyToSend = !!(
+          sendingAgeMs > 8000
+          && composerForTask
+          && composerForTask.hasPayload === true
+          && composerForTask.realSendButtonReady === true
+          && composerForTask.composerUploading !== true
+          && composerForTask.hasRealStopButton !== true
+        );
+        if (staleSendingButReadyToSend) {
+          ToolboxShell.appendLog(
+            `[TOOLBOX_AUTHORITY][HEAL_STALE_TASK_SENDING_TO_WAITING_SEND] reason=${reason || '-'} `
+            + `ageMs=${sendingAgeMs} textLen=${composerForTask.textLen || 0} `
+            + `composerCount=${composerForTask.composerCount || 0} `
+            + `hasPayload=${composerForTask.hasPayload ? 1 : 0} `
+            + `realSendReady=${composerForTask.realSendButtonReady ? 1 : 0} `
+            + `uploading=${composerForTask.composerUploading ? 1 : 0} `
+            + `stop=${composerForTask.hasRealStopButton ? 1 : 0}`
+          );
+          setAuthoritativeSendTaskState(
+            {
+              phase: 'waiting_send',
+              runId: state.sendTask && state.sendTask.runId ? state.sendTask.runId : '',
+              cancelRequested: false,
+              subPhase: 'stale-sending-ready-to-send',
+              subphase: 'stale-sending-ready-to-send',
+            },
+            'heal-stale-task-sending-ready-to-send',
+          );
+          return {
+            state: TOOLBOX_TASK_STATES.IDLE,
+            text: '空闲',
+            busy: false,
+            source: 'send-task-healed-stale-sending',
+            sendPhase: 'waiting_send',
+            uploadPhase,
+            copyPhase,
+            closedLoopRunning,
+          };
+        }
         return {
           state: TOOLBOX_TASK_STATES.SENDING,
           text: '发送中',
@@ -22085,14 +22325,41 @@
         toolboxAuthorityStateCache = authority;
         toolboxAuthorityStateCacheAt = now;
 
-        ToolboxShell.appendLog(
-          `[TOOLBOX_AUTHORITY][UNIFIED] reason=${reason || '-'} `
-          + `reply=${authority.reply.text}|state=${authority.reply.state}|ready=${authority.flags.ready ? 1 : 0}|replyBusy=${authority.flags.replyBusy ? 1 : 0}|taskBusy=${authority.flags.taskBusy ? 1 : 0}|busy=${authority.flags.busy ? 1 : 0}|answering=${authority.flags.answering ? 1 : 0}|pendingSend=${authority.flags.pendingSend ? 1 : 0} `
-          + `canInput=${authority.flags.canInput ? 1 : 0}|canSend=${authority.flags.canSend ? 1 : 0}|canUpload=${authority.flags.canUpload ? 1 : 0} `
-          + `pageOffline=${authority.flags.pageOffline ? 1 : 0}|connection=${authority.page.connectionText || '-'} `
-          + `task=${authority.task.text}|taskState=${authority.task.state}|sendPhase=${authority.task.sendPhase || '-'} `
-          + `attachment=${authority.attachment.text}|composerTextLen=${authority.composer.textLen || 0}|composerCount=${authority.composer.composerCount || 0}|localQueue=${authority.localQueue.localQueueCount || 0}|localPending=${authority.localQueue.localPendingCount || 0}|stop=${authority.composer.hasRealStopButton ? 1 : 0}|realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
-        );
+        const authorityLogSignature = [
+          authority.reply.state,
+          authority.flags.ready ? 1 : 0,
+          authority.flags.replyBusy ? 1 : 0,
+          authority.flags.taskBusy ? 1 : 0,
+          authority.flags.canInput ? 1 : 0,
+          authority.flags.canSend ? 1 : 0,
+          authority.flags.canUpload ? 1 : 0,
+          authority.task.state,
+          authority.task.sendPhase || '-',
+          authority.attachment.text,
+          authority.composer.textLen || 0,
+          authority.composer.composerCount || 0,
+          authority.localQueue.localQueueCount || 0,
+          authority.localQueue.localPendingCount || 0,
+          authority.composer.hasRealStopButton ? 1 : 0,
+          authority.composer.realSendButtonReady ? 1 : 0,
+        ].join('|');
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLogIfChanged === 'function'
+        ) {
+          ToolboxShell.appendLogIfChanged(
+            'TOOLBOX_AUTHORITY_UNIFIED_STATE',
+            authorityLogSignature,
+            `[TOOLBOX_AUTHORITY][UNIFIED] reason=${reason || '-'} `
+              + `reply=${authority.reply.text}|state=${authority.reply.state}|ready=${authority.flags.ready ? 1 : 0}|replyBusy=${authority.flags.replyBusy ? 1 : 0}|taskBusy=${authority.flags.taskBusy ? 1 : 0}|busy=${authority.flags.busy ? 1 : 0}|answering=${authority.flags.answering ? 1 : 0}|pendingSend=${authority.flags.pendingSend ? 1 : 0} `
+              + `canInput=${authority.flags.canInput ? 1 : 0}|canSend=${authority.flags.canSend ? 1 : 0}|canUpload=${authority.flags.canUpload ? 1 : 0} `
+              + `pageOffline=${authority.flags.pageOffline ? 1 : 0}|connection=${authority.page.connectionText || '-'} `
+              + `task=${authority.task.text}|taskState=${authority.task.state}|sendPhase=${authority.task.sendPhase || '-'} `
+              + `attachment=${authority.attachment.text}|composerTextLen=${authority.composer.textLen || 0}|composerCount=${authority.composer.composerCount || 0}|localQueue=${authority.localQueue.localQueueCount || 0}|localPending=${authority.localQueue.localPendingCount || 0}|stop=${authority.composer.hasRealStopButton ? 1 : 0}|realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
+            1000,
+          );
+        }
 
         logToolboxAuthoritySnapshotV2(authority, reason);
 
@@ -22172,7 +22439,8 @@
       };
     }
 
-    function resolveReplyStateSlot(runtimeSnapshot) {
+    function resolveReplyStateSlot(runtimeSnapshot, reason = '-') {
+      const slotReason = String(reason || '-').trim() || '-';
       const capability = runtimeSnapshot.capability && typeof runtimeSnapshot.capability === 'object'
         ? runtimeSnapshot.capability
         : {};
@@ -22188,7 +22456,7 @@
       );
       const online = capability.online !== false;
 
-      const composerForReplySlot = readToolboxComposerEvidence(`resolveReplyStateSlot:${reason || '-'}`);
+      const composerForReplySlot = readToolboxComposerEvidence(`resolveReplyStateSlot:${slotReason}`);
       const runtimeForDomHeal = {
         capability,
         response_state: capability.response_state || capability.responseState || '',
@@ -22483,7 +22751,7 @@
     function resolveTopReplyStatusForButtons(runtimeSnapshot, reason = '') {
       let replyState = null;
       try {
-        replyState = resolveReplyStateSlot(runtimeSnapshot);
+        replyState = resolveReplyStateSlot(runtimeSnapshot, reason || 'resolveTopReplyStatusForButtons');
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
         console.error('[TOOLBOX_TOP_STATUS][BUTTON_STATE_RESOLVE_FAILED]', error);
@@ -22528,7 +22796,7 @@
         || taskFlags.waitingReply
         || legacyFlags.waitingReply
       ) {
-        const replySlot = resolveReplyStateSlot(runtimeSnapshot);
+        const replySlot = resolveReplyStateSlot(runtimeSnapshot, 'resolveTaskStateSlot:waiting-reply');
         const replyText = String(replySlot && replySlot.text || '').trim();
         if (
           (replyText === '待发送' || replyText === '可输入' || replyText === '就绪')
@@ -22970,7 +23238,7 @@
       let taskSlot = null;
       let attachmentSlot = null;
       try {
-        replySlot = resolveReplyStateSlot(runtimeSnapshot);
+        replySlot = resolveReplyStateSlot(runtimeSnapshot, reason || 'build-authority-status');
         topReplyStatus = normalizeTopReplyStateForButtons(replySlot, runtimeSnapshot);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
@@ -23286,7 +23554,7 @@
         + `task=${slotTexts['task-state'] || '-'}\n`
         + `attachment=${slotTexts['attachment-state'] || '-'}\n`
         + `alert=${alertSlotText}\n`
-        + `compact=${slotTexts['compact-mode'] || '-'}\n`
+        + `compact=-\n`
         + `order=${order}\n`
         + `reason=${reason || '-'}`,
       );
@@ -23447,14 +23715,15 @@
 
       const renderReason = options && options.reason ? String(options.reason) : 'renderToolboxPageStatusRow';
       const authority = getToolboxAuthorityState(`renderToolboxTopStatus:${renderReason}`, {
-        force: true,
+        force: false,
+        cacheTtlMs: 500,
       });
       const authoritySnapshot = getToolboxStatusAuthoritySnapshot('renderToolboxPageStatusRow', {
         runtimeSnapshot,
-        useCompactText: useCompactQuotaText,
+        useCompactText: true,
         pageDisplayIdOverride: pageDisplayId,
         roundCountOverride: roundCount,
-        forceAuthority: true,
+        forceAuthority: false,
       });
       const replyState = {
         text: authority.reply.text,
@@ -23474,7 +23743,6 @@
         variant: authority.attachment.state === TOOLBOX_ATTACHMENT_STATES.UPLOADING ? 'warning' : 'muted',
       };
       const alertState = resolveAlertStateSlot();
-      const compactState = resolveCompactModeStateSlot();
 
       const authorityPageText = authority.page.text || pageIdText;
       const authorityTurnText = `轮数:${authority.page.turnCount || roundCount || 0}`;
@@ -23491,7 +23759,6 @@
         hideDuplicateWaitingReplyTaskState ? '-' : authorityTaskText,
         attachmentState.text,
         alertState.hidden ? '-' : alertState.text,
-        compactState.text,
         replyState.variant,
         taskState.variant,
         attachmentState.variant,
@@ -23589,10 +23856,8 @@
         );
       }
 
-      updateTopStatusSlot(pageStatusRowEl, 'compact-mode', {
-        text: compactState.text,
-        title: compactState.title,
-        variant: compactState.variant,
+      pageStatusRowEl.querySelectorAll('[data-top-status-slot="compact-mode"], [data-top-status-slot="top-status-spacer"]').forEach((el) => {
+        el.remove();
       });
 
       reorderTopStatusSlots(pageStatusRowEl);
@@ -23641,7 +23906,6 @@
           && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
           && ToolboxShell.hasActiveTopAlertEntry(currentTopAlertEntry)
         ) ? '报错' : '-',
-        'compact-mode': compactState.text,
       };
       logTopStatusSlots(
         slotTexts,
@@ -34650,6 +34914,10 @@
       Object.assign(task, next);
       task.phase = nextPhase;
       task._authoritative = true;
+      // 记录发送任务状态更新时间，用于后续 stale sending 自愈。
+      // 注意：必须在所有 phase 写入路径统一记录，不能只在 sending 分支记录。
+      task.updatedAt = Date.now();
+      task.updatedReason = String(reason || '').trim();
       const nextSubphaseRaw = next.subPhase != null ? next.subPhase : next.subphase;
       if (nextSubphaseRaw != null) {
         const nextSubphase = nextPhase === 'waiting_page_reply_to_send'
@@ -34701,7 +34969,8 @@
           );
         }
         ToolboxShell.appendLog(
-          `[SEND_STATE][AUTHORITATIVE] old=${oldPhase} new=${nextPhase}${subLog} reason=${reason || '-'}`,
+          `[SEND_STATE][AUTHORITATIVE] old=${oldPhase} new=${nextPhase}${subLog} `
+          + `reason=${reason || '-'} updatedAt=${task.updatedAt || 0}`,
         );
         if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.setTaskPhase === 'function') {
           ButtonTasks.setTaskPhase('send', nextPhase, reason || 'authoritative', {
@@ -35599,34 +35868,75 @@
       };
     }
 
-    function buildUploadButtonRenderSnapshot() {
-      if (!recoveringStaleClosedLoopSending) {
+    function isForceUploadButtonSnapshotReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) {
+        return false;
+      }
+      /*
+       * 这里只允许真正的用户动作、关键修复、停止/中断、诊断路径触发强制快照。
+       * 禁止用泛化的 upload / send / click 匹配，否则 renderUploadButtonsOnly 这种普通刷新也会被误判为重型刷新。
+       */
+      return (
+        /(^|:)(critical|user-click|manual-click|button-click|diagnose|abort|stop)(:|$)/i.test(text)
+        || /(^|:)(send-message-click|start-upload-click|copy-hotkey-click|closed-loop-start|closed-loop-stop)(:|$)/i.test(text)
+        || /reply-stable-fast:|wait-reply-timeout-reconcile-final/i.test(text)
+      );
+    }
+
+    function buildUploadButtonRenderSnapshot(reasonOrOptions = {}) {
+      const snapshotOpts = typeof reasonOrOptions === 'string'
+        ? { reason: reasonOrOptions }
+        : (reasonOrOptions && typeof reasonOrOptions === 'object' ? reasonOrOptions : {});
+      const snapshotReason = String(
+        snapshotOpts.reason
+        || snapshotOpts.buttonTasksReason
+        || 'buildUploadButtonRenderSnapshot',
+      ).trim() || 'buildUploadButtonRenderSnapshot';
+      const forceSnapshot = !!(
+        snapshotOpts.force === true
+        || snapshotOpts.heavy === true
+        || snapshotOpts.immediate === true
+        || snapshotOpts.userAction === true
+        || snapshotOpts.critical === true
+        || isForceUploadButtonSnapshotReason(snapshotReason)
+      );
+      const nowForSnapshotMaintenance = Date.now();
+      const allowSnapshotMaintenance = !!(
+        forceSnapshot
+        || nowForSnapshotMaintenance - Number(lastButtonSnapshotMaintenanceAt || 0) > TOOLBOX_RENDER_MAINTENANCE_INTERVAL_MS
+      );
+
+      if (allowSnapshotMaintenance && !recoveringStaleClosedLoopSending) {
+        lastButtonSnapshotMaintenanceAt = nowForSnapshotMaintenance;
         recoveringStaleClosedLoopSending = true;
         try {
-          maybeRecoverStaleClosedLoopSendingPhase('buildUploadButtonRenderSnapshot');
+          maybeRecoverStaleClosedLoopSendingPhase(snapshotReason);
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
           console.error('[CLOSED_LOOP][STALE_SENDING_RECOVER_ERROR]', error);
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][STALE_SENDING_RECOVER_ERROR] reason=buildUploadButtonRenderSnapshot error=${errText}`,
+            `[CLOSED_LOOP][STALE_SENDING_RECOVER_ERROR] reason=${snapshotReason} error=${errText}`,
           );
         } finally {
           recoveringStaleClosedLoopSending = false;
         }
       }
 
-      const toolboxUnifiedAuthority = getToolboxAuthorityState('buildUploadButtonRenderSnapshot', {
-        force: true,
+      const toolboxUnifiedAuthority = getToolboxAuthorityState(snapshotReason, {
+        force: forceSnapshot,
+        cacheTtlMs: forceSnapshot ? 0 : 500,
       });
 
       if (
-        !healingWaitingReplyDuringAuthoritySnapshot
+        allowSnapshotMaintenance
+        && !healingWaitingReplyDuringAuthoritySnapshot
         && toolboxUnifiedAuthority.reply.state === TOOLBOX_REPLY_STATES.READY
         && !toolboxUnifiedAuthority.composer.hasRealStopButton
       ) {
         healingWaitingReplyDuringAuthoritySnapshot = true;
         try {
-          maybeHealStaleWaitingReplyState('buildUploadButtonRenderSnapshot:authority-ready');
+          maybeHealStaleWaitingReplyState(`${snapshotReason}:authority-ready`);
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
           console.error('[TOOLBOX_AUTHORITY][PRE_SNAPSHOT_HEAL_FAILED]', error);
@@ -35638,33 +35948,40 @@
         }
       }
 
-      if (!healingWaitingReplyDuringSnapshot) {
+      if (allowSnapshotMaintenance && !healingWaitingReplyDuringSnapshot) {
         healingWaitingReplyDuringSnapshot = true;
         try {
-          maybeHealStaleWaitingReplyState('buildUploadButtonRenderSnapshot:pre-snapshot');
+          maybeHealStaleWaitingReplyState(`${snapshotReason}:pre-snapshot`);
         } catch (error) {
           const errText = error && error.message ? error.message : String(error);
+          const errStack = error && error.stack ? error.stack : '';
           console.error('[SEND_TASK][HEAL_WAITING_REPLY_PRE_SNAPSHOT_FAILED]', error);
           ToolboxShell.appendLog(
-            `[SEND_TASK][HEAL_WAITING_REPLY_PRE_SNAPSHOT_FAILED] error=${errText}`,
+            `[SEND_TASK][HEAL_WAITING_REPLY_PRE_SNAPSHOT_FAILED] error=${errText} stack=${errStack.slice(0, 1200)}`,
           );
         } finally {
           healingWaitingReplyDuringSnapshot = false;
         }
       }
-      syncButtonTasksFromModuleState('buildUploadButtonRenderSnapshot');
-      healStaleSendCopyHotkeyLockIfNeeded('buildUploadButtonRenderSnapshot');
-      reconcileSendCopyHotkeyOwnerRunningState('buildUploadButtonRenderSnapshot');
-      syncToolboxRunningOwner('buildUploadButtonRenderSnapshot');
-      recoverClosedLoopIdleRunningState('buildUploadButtonRenderSnapshot');
-      const runtime = getUnifiedRuntimeStatus('buildUploadButtonRenderSnapshot');
-      const authoritySnapshot = getToolboxStatusAuthoritySnapshot('buildUploadButtonRenderSnapshot', {
+      if (allowSnapshotMaintenance) {
+        syncButtonTasksFromModuleState(snapshotReason);
+        healStaleSendCopyHotkeyLockIfNeeded(snapshotReason);
+        reconcileSendCopyHotkeyOwnerRunningState(snapshotReason);
+        syncToolboxRunningOwner(snapshotReason);
+        recoverClosedLoopIdleRunningState(snapshotReason);
+      }
+      const runtime = getUnifiedRuntimeStatus(snapshotReason);
+      const authoritySnapshot = getToolboxStatusAuthoritySnapshot(snapshotReason, {
         runtimeSnapshot: runtime,
-        forceAuthority: true,
+        forceAuthority: forceSnapshot,
+        useCompactText: true,
       });
       const authorityForSnapshot = toolboxUnifiedAuthority.cacheHit === false
         ? toolboxUnifiedAuthority
-        : getToolboxAuthorityState('buildUploadButtonRenderSnapshot:post-heal', { force: true });
+        : getToolboxAuthorityState(`${snapshotReason}:post-heal`, {
+          force: forceSnapshot,
+          cacheTtlMs: forceSnapshot ? 0 : 500,
+        });
       const authorityCanSendNow = isToolboxAuthorityCanSendNow(authorityForSnapshot);
       const topReplyStatusForButtons = authoritySnapshot.topReplyStatus && typeof authoritySnapshot.topReplyStatus === 'object'
         ? authoritySnapshot.topReplyStatus
@@ -35716,7 +36033,11 @@
       let composerSnapshotState = {};
       try {
         composerSnapshotState = typeof getComposerAttachmentState === 'function'
-          ? getComposerAttachmentState('build-upload-button-render-snapshot')
+          ? getComposerAttachmentState({
+            reason: `${snapshotReason}:composer-snapshot`,
+            heavy: forceSnapshot,
+            domScan: forceSnapshot,
+          })
           : {};
       } catch (composerSnapshotErr) {
         console.error('[SEND_COPY_HOTKEY][SNAPSHOT_COMPOSER_FAILED]', composerSnapshotErr);
@@ -36852,12 +37173,40 @@
     }
 
     function getComposerAttachmentState(options = {}) {
+      const normalizedOptions = options && typeof options === 'object'
+        ? options
+        : { reason: String(options || '-') };
+      const now = Date.now();
+      const heavy = normalizedOptions.heavy === true;
+      const cacheKey = heavy ? '' : 'light';
+      const domScanIntervalMs = Number.isFinite(Number(TOOLBOX_ATTACHMENT_DOM_SCAN_INTERVAL_MS))
+        ? Number(TOOLBOX_ATTACHMENT_DOM_SCAN_INTERVAL_MS)
+        : 700;
+
+      const lastDomScanAt = Number.isFinite(Number(lastComposerAttachmentDomScanAt))
+        ? Number(lastComposerAttachmentDomScanAt)
+        : 0;
+
+      const allowDomAttachmentScan = !!(
+        heavy
+        || normalizedOptions.domScan === true
+        || now - lastDomScanAt > domScanIntervalMs
+      );
+      if (
+        !heavy
+        && composerAttachmentStateCache
+        && composerAttachmentStateCacheKey === cacheKey
+        && now - composerAttachmentStateCacheAt < 300
+      ) {
+        return composerAttachmentStateCache;
+      }
+
       const stateSnapshot = (
         typeof ComposerAttachments !== 'undefined'
         && ComposerAttachments
         && typeof ComposerAttachments.getComposerAttachmentState === 'function'
       )
-        ? ComposerAttachments.getComposerAttachmentState(options)
+        ? ComposerAttachments.getComposerAttachmentState(normalizedOptions)
         : {
           attachmentCount: 0,
           hasAttachment: false,
@@ -36878,7 +37227,23 @@
       ) || 0;
       snapshot._moduleFileCount = moduleFileCount;
       snapshot._moduleCountBeforeDom = moduleFileCount;
-      const domRemoveCount = countComposerDomRemoveFileButtons();
+      let domRemoveCount = lastComposerAttachmentDomRemoveCount;
+      if (allowDomAttachmentScan) {
+        lastComposerAttachmentDomScanAt = now;
+        try {
+          domRemoveCount = countComposerDomRemoveFileButtons();
+          lastComposerAttachmentDomRemoveCount = domRemoveCount;
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[COMPOSER][DOM_REMOVE_SCAN_FAILED]', error);
+          if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(
+              `[COMPOSER][DOM_REMOVE_SCAN_FAILED] reason=${normalizedOptions.reason || '-'} error=${errText}`,
+            );
+          }
+          domRemoveCount = lastComposerAttachmentDomRemoveCount;
+        }
+      }
 
       const nativeUploading = (
         typeof ComposerApi !== 'undefined'
@@ -36914,7 +37279,9 @@
 
       reconciled = applyReconciledComposerAttachmentSticky(reconciled, domRemoveCount, nativeUploading);
 
-      const reasonText = options && options.reason ? String(options.reason) : '-';
+      const reasonText = normalizedOptions && normalizedOptions.reason
+        ? String(normalizedOptions.reason)
+        : '-';
       if (domWins && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
           `[COMPOSER][ATTACHMENT_STATE_CONFLICT] moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${reasonText}`,
@@ -36925,9 +37292,9 @@
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
         ToolboxShell.appendLogIfChanged(
           'COMPOSER:ATTACHMENT_RECONCILED',
-          `${reasonText}|${moduleFileCount}|${domRemoveCount}|${nativeUploading ? 1 : 0}|${reconciled.hasReady ? 1 : 0}|${reconciled._unified_source || '-'}`,
+          `${moduleFileCount}|${domRemoveCount}|${nativeUploading ? 1 : 0}|${reconciled.hasReady ? 1 : 0}|${reconciled._unified_source || '-'}`,
           reconciledLogLine,
-          800,
+          1500,
         );
       } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(reconciledLogLine);
@@ -36941,8 +37308,14 @@
         uploadingCount: Number(reconciled && reconciled.uploadingCount || 0),
         readyCount: Number(reconciled && reconciled.readyCount || 0),
         nativeUploading: !!(reconciled && reconciled.attachmentUploading),
-        reason: options && options.reason ? String(options.reason) : '',
+        reason: reasonText,
       }, 'getComposerAttachmentState:module');
+
+      if (!heavy) {
+        composerAttachmentStateCache = reconciled;
+        composerAttachmentStateCacheAt = Date.now();
+        composerAttachmentStateCacheKey = cacheKey;
+      }
 
       return reconciled;
     }
@@ -37145,14 +37518,20 @@
     }
 
     function getUploadPageCapability(options = {}) {
+      const capabilityOptions = options && typeof options === 'object' ? options : {};
+      const capabilityHeavy = capabilityOptions.heavy === true;
+      const capabilityCacheTtlMs = Number(capabilityOptions.cacheTtlMs || 0);
       if (
         typeof ComposerCapability !== 'undefined'
         && typeof ComposerCapability.getPageCapability === 'function'
       ) {
+        const unifiedMaxAge = capabilityCacheTtlMs > 0
+          ? capabilityCacheTtlMs
+          : (Number.isFinite(Number(capabilityOptions.maxAgeMs)) ? Number(capabilityOptions.maxAgeMs) : 500);
         const unified = ComposerCapability.getPageCapability('upload-capability', {
-          light: options.light !== false,
-          heavy: options.heavy === true,
-          maxAgeMs: Number.isFinite(Number(options.maxAgeMs)) ? Number(options.maxAgeMs) : 500,
+          light: capabilityOptions.light !== false,
+          heavy: capabilityHeavy,
+          maxAgeMs: unifiedMaxAge,
         });
         if (unified && typeof unified === 'object') {
           return {
@@ -37165,16 +37544,18 @@
           };
         }
       }
-      const forceHeavy = options && options.heavy === true;
+      const forceHeavy = capabilityHeavy;
       const cacheKey = buildUploadPageCapabilityCacheKey();
       const now = Date.now();
+      const localCacheTtlMs = capabilityCacheTtlMs > 0 ? capabilityCacheTtlMs : 500;
 
       if (
         !forceHeavy
+        && capabilityCacheTtlMs !== 0
         && uploadPageCapabilityCache.key === cacheKey
         && uploadPageCapabilityCache.light
         && uploadPageCapabilityCache.heavy
-        && now - uploadPageCapabilityCache.at < 500
+        && now - uploadPageCapabilityCache.at < localCacheTtlMs
       ) {
         return {
           ...uploadPageCapabilityCache.light,
@@ -38086,15 +38467,30 @@
     let renderUploadButtonsOnlyPendingOptions = null;
 
     function scheduleRenderUploadButtonsOnly(options = {}) {
-      const opts = options && typeof options === 'object' ? options : {};
+      const opts = typeof options === 'string'
+        ? { buttonTasksReason: options }
+        : (options && typeof options === 'object' ? options : {});
       if (opts.immediate === true) {
         renderUploadButtonsOnly(Object.assign({}, opts, { _fromSchedule: true }));
         return;
       }
-      renderUploadButtonsOnlyPendingOptions = opts;
+      renderUploadButtonsOnlyPendingOptions = Object.assign(
+        {},
+        renderUploadButtonsOnlyPendingOptions || {},
+        opts,
+      );
       if (renderUploadButtonsOnlyTimer) {
         return;
       }
+      const now = Date.now();
+      const elapsed = now - Number(lastRenderUploadButtonsOnlyStartedAt || 0);
+      const minIntervalMs = Number.isFinite(Number(TOOLBOX_RENDER_MIN_INTERVAL_MS))
+        ? Number(TOOLBOX_RENDER_MIN_INTERVAL_MS)
+        : 400;
+      const delayMs = Math.max(
+        120,
+        minIntervalMs - elapsed,
+      );
       renderUploadButtonsOnlyTimer = window.setTimeout(() => {
         renderUploadButtonsOnlyTimer = null;
         const finalOptions = Object.assign(
@@ -38115,7 +38511,7 @@
             );
           }
         }
-      }, 150);
+      }, delayMs);
     }
 
     function applyUploadButtonViewStateSafe(button, getViewState, applyReason, opts = {}) {
@@ -38165,7 +38561,10 @@
 
     function renderUploadButtonsOnly(options = {}) {
       // TODO(perf): 不要每次全量刷新所有按钮；后续应只更新 changedButtons。
-      const opts = options && typeof options === 'object' ? options : {};
+      const opts = typeof options === 'string'
+        ? { buttonTasksReason: options }
+        : (options && typeof options === 'object' ? options : {});
+      lastRenderUploadButtonsOnlyStartedAt = Date.now();
       if (!opts.immediate && !opts._fromSchedule && !opts.heavy) {
         const criticalEarly = (
           typeof UploadCriticalRuntime !== 'undefined'
@@ -38183,6 +38582,27 @@
       const renderReason = String(opts.buttonTasksReason
         ? opts.buttonTasksReason
         : 'renderUploadButtonsOnly').trim() || 'renderUploadButtonsOnly';
+
+      const activeTabName = (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.getActiveTab === 'function'
+      )
+        ? ToolboxShell.getActiveTab()
+        : '';
+      const isLogTabActive = String(activeTabName || '').toLowerCase() === 'log';
+      if (
+        isLogTabActive
+        && opts.heavy !== true
+        && opts.force !== true
+        && opts.immediate !== true
+        && !String(renderReason).includes('critical')
+      ) {
+        renderToolboxPageStatusRow({
+          reason: `log-tab-light-status:${renderReason}`,
+        });
+        return;
+      }
 
       if (uploadButtonRenderDepth > 0) {
         uploadButtonRenderPendingReason = renderReason;
@@ -38228,7 +38648,16 @@
           );
         }
 
-        if (!critical) {
+        const nowForMaintenance = Date.now();
+        const allowRenderMaintenance = !!(
+          critical
+          || useHeavy
+          || opts.force === true
+          || opts.immediate === true
+          || nowForMaintenance - Number(lastUploadRenderMaintenanceAt || 0) > TOOLBOX_RENDER_MAINTENANCE_INTERVAL_MS
+        );
+        if (!critical && allowRenderMaintenance) {
+          lastUploadRenderMaintenanceAt = nowForMaintenance;
           reconcileUploadPhase(renderReason);
           syncButtonTasksFromModuleState(renderReason);
         }
@@ -38289,12 +38718,14 @@
           return;
         }
 
-        healStaleUploadRunningLockIfNeeded('renderUploadButtonsOnly');
-        healStaleSendUiStateIfNeeded('renderUploadButtonsOnly');
-        maybeHealStaleWaitingReplyState('renderUploadButtonsOnly');
-        reconcilePendingSendTaskAfterExternalNativeSend('renderUploadButtonsOnly');
-        maybeReconcileSendCopyHotkeyWaitingReply('renderUploadButtonsOnly');
-        recoverClosedLoopIdleRunningState('renderUploadButtonsOnly');
+        if (allowRenderMaintenance) {
+          healStaleUploadRunningLockIfNeeded(renderReason);
+          healStaleSendUiStateIfNeeded(renderReason);
+          maybeHealStaleWaitingReplyState(renderReason);
+          reconcilePendingSendTaskAfterExternalNativeSend(renderReason);
+          maybeReconcileSendCopyHotkeyWaitingReply(renderReason);
+          recoverClosedLoopIdleRunningState(renderReason);
+        }
 
         const fallbackCapability = {
           hasComposer: false,
@@ -38308,8 +38739,18 @@
 
         const capability = skipCapabilityScan
           ? fallbackCapability
-          : (getUploadPageCapability({ heavy: useHeavy && !skipCapabilityScan }) || fallbackCapability);
-        const renderSnapshot = buildUploadButtonRenderSnapshot();
+          : (getUploadPageCapability({
+            heavy: useHeavy && !skipCapabilityScan,
+            cacheTtlMs: useHeavy ? 0 : 500,
+          }) || fallbackCapability);
+        const renderSnapshot = buildUploadButtonRenderSnapshot({
+          reason: renderReason,
+          heavy: useHeavy,
+          force: opts.force === true,
+          immediate: opts.immediate === true,
+          userAction: opts.userAction === true,
+          critical,
+        });
         logTopStatusButtonSnapshotConsistency(renderSnapshot, renderReason);
         const shouldRenderSendCopyHotkeyFirst = !!(
           renderSnapshot
@@ -40545,13 +40986,18 @@
       scheduleRenderUpload(`clear-stale-waiting-reply:${reasonText || '-'}`);
     }
 
+    let lastWaitingReplyHealSkipAt = 0;
+    let lastWaitingReplyHealSkipReason = '';
+
     function maybeHealStaleWaitingReplyState(reason = '-') {
       const reasonText = String(reason || '-').trim() || '-';
       const phase = readSendTaskPhaseForHeal();
       const taskWaitingReply = isSendPhaseWaitingReplyForHeal(phase);
 
+      const forceHealAuthority = isForceUploadButtonSnapshotReason(reasonText);
       const authority = getToolboxAuthorityState(`maybeHealStaleWaitingReplyState:${reasonText}`, {
-        force: true,
+        force: forceHealAuthority,
+        cacheTtlMs: forceHealAuthority ? 0 : 500,
       });
 
       if (
@@ -40611,11 +41057,20 @@
 
       const stillGenerating = readStillGeneratingForHeal();
       if (stillGenerating) {
-        ToolboxShell.appendLog(
-          `[SEND_TASK][HEAL_WAITING_REPLY_SKIP] reason=${reasonText} phase=${phase || '-'} `
-          + `cause=still-generating waitingReply=${state.waitingReply ? 1 : 0} `
-          + `topText=${topReadyForHeal.text || '-'} topReady=${topReadyForHeal.ready ? 1 : 0}`,
-        );
+        const now = Date.now();
+        const skipKey = `${phase || '-'}|${state.waitingReply ? 1 : 0}|${topReadyForHeal.text || '-'}|${topReadyForHeal.ready ? 1 : 0}`;
+        if (
+          skipKey !== lastWaitingReplyHealSkipReason
+          || now - lastWaitingReplyHealSkipAt > 3000
+        ) {
+          lastWaitingReplyHealSkipReason = skipKey;
+          lastWaitingReplyHealSkipAt = now;
+          ToolboxShell.appendLog(
+            `[SEND_TASK][HEAL_WAITING_REPLY_SKIP] reason=${reasonText} phase=${phase || '-'} `
+            + `cause=still-generating waitingReply=${state.waitingReply ? 1 : 0} `
+            + `topText=${topReadyForHeal.text || '-'} topReady=${topReadyForHeal.ready ? 1 : 0}`,
+          );
+        }
         return false;
       }
 
@@ -43919,6 +44374,7 @@
       const runId = usePresetRunId
         ? Number(presetRunId)
         : claimWaitingSendRun(source, Date.now());
+      let nativeReadyDirectClickAttempted = false;
 
       ToolboxShell.appendLog(
         `[UPLOAD_DIAG][send-message-button:click] source=${source} runId=${runId} queue=${state.queue.length} running=${state.running} manual=${isManualSend ? 1 : 0}`,
@@ -44679,23 +45135,87 @@
             || waitSendOnlyReasons.has(failReason)
           );
 
-          if (shouldSoftWaitSend && isUploadNativeSendReadyForSendNow()) {
+          if (shouldSoftWaitSend && isUploadNativeSendReadyForSendNow() && !nativeReadyDirectClickAttempted) {
+            nativeReadyDirectClickAttempted = true;
             ToolboxShell.appendLog(
-              `[SEND][NATIVE_READY_OVERRIDE] source=${source} runId=${runId} priorReason=${failReason} `
-              + `attempt=${outerAttempt} action=retry-send attachmentUploading=${attachmentUploadingNow ? 1 : 0} `
-              + `capabilityCanSendNow=${capabilityNow.canSendNow ? 1 : 0} realSendButtonEnabled=${realSendButtonEnabled ? 1 : 0}`,
+              `[SEND][NATIVE_READY_DIRECT_CLICK] source=${source} runId=${runId} priorReason=${failReason} `
+              + `attempt=${outerAttempt} attachmentUploading=${attachmentUploadingNow ? 1 : 0} `
+              + `capabilityCanSendNow=${capabilityNow.canSendNow ? 1 : 0} `
+              + `realSendButtonEnabled=${realSendButtonEnabled ? 1 : 0}`,
             );
             setWaitingRealSendButton(false);
+            if (usePanelSendTask) {
+              setSendMessageTaskPhase(SEND_MESSAGE_PHASES.CLICKING_SEND, 'native-ready-direct-click');
+            }
             setAuthoritativeSendTaskState(
               {
                 phase: 'sending',
                 runId,
                 cancelRequested: false,
-                subphase: 'native-ready-retry',
+                subPhase: 'native-ready-direct-click',
+                subphase: 'native-ready-direct-click',
               },
-              'send-message:native-ready-retry',
+              'send-message:native-ready-direct-click',
             );
-            const retried = await sleepWithWaitSendCancel(200, runId);
+            const authorityForDirectClick = typeof buildToolboxAuthorityState === 'function'
+              ? buildToolboxAuthorityState('send-message:native-ready-direct-click', {
+                  force: true,
+                  cacheTtlMs: 0,
+                })
+              : null;
+            const clicked = typeof clickNativeSendButtonFromToolboxAuthority === 'function'
+              ? clickNativeSendButtonFromToolboxAuthority(
+                  authorityForDirectClick,
+                  'send-message:native-ready-direct-click'
+                )
+              : false;
+            ToolboxShell.appendLog(
+              `[SEND][NATIVE_READY_DIRECT_CLICK_RESULT] source=${source} runId=${runId} clicked=${clicked ? 1 : 0}`,
+            );
+            if (clicked) {
+              const confirmed = await verifyMessageActuallyLeftComposerAfterSend(
+                source,
+                shouldInjectText || textAlreadyInjected ? unifiedText : '',
+                5000,
+                {
+                  beforeLatestKey,
+                  beforeConversationId,
+                  beforeTurnCount,
+                },
+              );
+              if (confirmed && confirmed.ok) {
+                ToolboxShell.appendLog(
+                  `[SEND][NATIVE_READY_DIRECT_CLICK_CONFIRMED] source=${source} runId=${runId} `
+                  + `reason=${confirmed.reason || '-'}`
+                );
+                if (usePanelSendTask) {
+                  markSendMessageNativeSendClicked(source);
+                }
+                enterUploadWaitingReplyAfterSend(runId, 'native-ready-direct-click-confirmed');
+                sendFailureHandled = true;
+                return true;
+              }
+              ToolboxShell.appendLog(
+                `[SEND][NATIVE_READY_DIRECT_CLICK_NOT_CONFIRMED] source=${source} runId=${runId} `
+                + `reason=${confirmed && confirmed.reason ? confirmed.reason : '-'}`
+              );
+            }
+            setWaitingRealSendButton(true);
+            setAuthoritativeSendTaskState(
+              {
+                phase: 'waiting_send',
+                runId,
+                cancelRequested: false,
+                subPhase: clicked ? 'direct-click-not-confirmed' : 'direct-click-failed',
+                subphase: clicked ? 'direct-click-not-confirmed' : 'direct-click-failed',
+              },
+              clicked
+                ? 'send-message:direct-click-not-confirmed'
+                : 'send-message:direct-click-failed',
+            );
+            setStatus('等待发送', 'running');
+            scheduleRenderUpload('send-message:native-ready-direct-click-fallback');
+            const retried = await sleepWithWaitSendCancel(500, runId);
             if (!retried) {
               break;
             }

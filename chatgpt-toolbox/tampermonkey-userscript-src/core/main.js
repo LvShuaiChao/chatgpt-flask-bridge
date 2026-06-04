@@ -7979,8 +7979,11 @@
         detectComposerResponseStateDepth,
         MAX_DETECT_COMPOSER_RESPONSE_STATE_DEPTH,
       );
+      // 递归保护场景下仍然允许走轻量检测，但不要再强制跳过发送按钮快照。
+      // 当前死锁问题就是 light 检测返回 attachment_processing/send_button_not_found，
+      // 而真实 DOM 已经 realSendReady=1。
       return rememberResponseState(responseCacheKey, detectComposerResponseStateLight({
-        skipSendButtonSnapshot: true,
+        skipSendButtonSnapshot: false,
       }));
     }
 
@@ -7989,8 +7992,25 @@
     try {
     if (options && options.light === true) {
       const lightResult = detectComposerResponseStateLight(Object.assign({
-        skipSendButtonSnapshot: true,
+        // light 模式不能跳过发送按钮快照。
+        // 否则会在附件已 ready、原生发送按钮已存在时继续返回 send_button_not_found。
+        skipSendButtonSnapshot: false,
       }, options || {}));
+      if (
+        lightResult
+        && lightResult.response_state === 'attachment_processing'
+        && lightResult.response_state_reason === 'send_button_not_found'
+      ) {
+        console.warn('[COMPOSER][LIGHT_DETECT_STALE_SEND_BUTTON_NOT_FOUND]', lightResult);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            '[COMPOSER][LIGHT_DETECT_STALE_SEND_BUTTON_NOT_FOUND] '
+            + `canSendNow=${lightResult.can_send_now ? 1 : 0} `
+            + `hasPayload=${lightResult.has_composer_payload ? 1 : 0} `
+            + `attachmentCount=${lightResult.attachment_count || 0}`,
+          );
+        }
+      }
       return rememberResponseState(responseCacheKey, lightResult);
     }
 

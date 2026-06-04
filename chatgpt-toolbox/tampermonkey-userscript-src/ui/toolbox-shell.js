@@ -1133,7 +1133,7 @@
           align-items: center;
           justify-content: space-between;
           min-width: 0;
-          gap: 8px;
+          gap: 4px;
         }
 
         .cgpt-header-status-chips {
@@ -1237,15 +1237,33 @@
           gap: 4px;
         }
 
-        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row {
-          display: grid;
-          grid-template-columns: auto auto auto auto auto minmax(8px, 1fr) auto auto auto auto;
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row,
+        #${APP.panelId} .cgpt-toolbox-top-status,
+        #${APP.panelId} .cgpt-top-status-row,
+        #${APP.panelId} .cgpt-toolbox-status-row {
+          display: flex;
           align-items: center;
-          gap: 6px;
+          flex-wrap: wrap;
+          justify-content: flex-start !important;
+          gap: 4px;
+          row-gap: 4px;
           width: 100%;
           min-height: 28px;
           white-space: nowrap;
-          flex-wrap: nowrap;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-toolbox-top-status-badge,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-status-badge,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge {
+          margin: 0;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row [data-top-status-slot="compact-mode"],
+        #${APP.panelId} .cgpt-top-status-row [data-top-status-slot="top-status-spacer"] {
+          display: none !important;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-spacer {
@@ -1310,13 +1328,13 @@
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="upload-usage"] {
-          min-width: 104px;
-          max-width: 128px;
+          min-width: 0;
+          max-width: none;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="message-usage"] {
-          min-width: 112px;
-          max-width: 136px;
+          min-width: 0;
+          max-width: none;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="task-state"] {
@@ -1324,11 +1342,10 @@
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="attachment-state"] {
-          min-width: 64px;
+          min-width: 0;
         }
 
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"],
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="compact-mode"] {
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"] {
           min-width: 48px;
         }
 
@@ -6727,6 +6744,7 @@
 
       const compactBtn = qs('#cgpt-toolbox-compact', root);
       if (compactBtn) {
+        markCompactModeToggleButton(compactBtn);
         compactBtn.textContent = compactMode ? '完整' : '简洁';
         compactBtn.title = compactMode ? '切换到完整模式' : '切换到简洁模式';
       }
@@ -6932,20 +6950,59 @@
       return pageStatusRowEl;
     }
 
+    function markCompactModeToggleButton(compactBtn) {
+      if (!compactBtn) {
+        return;
+      }
+      compactBtn.classList.add('cgpt-toolbox-compact-toggle');
+      compactBtn.setAttribute('data-cgpt-toolbox-action', 'compact-toggle');
+    }
+
+    function ensureSingleCompactModeButton() {
+      const buttons = Array.from(
+        document.querySelectorAll('.cgpt-toolbox-compact-toggle, [data-cgpt-toolbox-action="compact-toggle"]'),
+      );
+      const statusRow = root
+        ? root.querySelector('.cgpt-toolbox-header-status-row, .cgpt-top-status-row')
+        : null;
+      if (statusRow) {
+        statusRow.querySelectorAll('[data-top-status-slot="compact-mode"]').forEach((el) => {
+          el.remove();
+        });
+      }
+      if (buttons.length <= 1) {
+        return;
+      }
+      buttons.forEach((btn, index) => {
+        if (index === 0) {
+          return;
+        }
+        const text = String(btn.textContent || '').trim() || '-';
+        btn.remove();
+        appendLog(
+          `[TOOLBOX_UI][REMOVE_DUPLICATE_COMPACT_BUTTON] index=${index} text=${text}`,
+        );
+      });
+    }
+
     function ensureCompactButton() {
       if (!root) return;
 
       let compactBtn = qs('#cgpt-toolbox-compact', root);
-      if (compactBtn) return;
+      if (compactBtn) {
+        markCompactModeToggleButton(compactBtn);
+        return;
+      }
 
       const actions = qs('.cgpt-toolbox-header-actions', root);
       if (!actions) return;
 
       compactBtn = document.createElement('button');
       compactBtn.type = 'button';
-      compactBtn.className = 'cgpt-toolbox-small-btn';
+      compactBtn.className = 'cgpt-toolbox-small-btn cgpt-toolbox-compact-toggle';
       compactBtn.id = 'cgpt-toolbox-compact';
       compactBtn.setAttribute('data-dynamic-label-allowed', '1');
+      markCompactModeToggleButton(compactBtn);
       compactBtn.textContent = '简洁';
       actions.insertBefore(compactBtn, actions.firstChild);
     }
@@ -7146,7 +7203,7 @@
               <div class="cgpt-toolbox-title">小张工具箱</div>
               <div class="cgpt-header-status-chips" aria-live="polite"></div>
               <div class="cgpt-toolbox-header-actions">
-                <button type="button" class="cgpt-toolbox-small-btn" id="cgpt-toolbox-compact" data-dynamic-label-allowed="1">简洁</button>
+                <button type="button" class="cgpt-toolbox-small-btn cgpt-toolbox-compact-toggle" id="cgpt-toolbox-compact" data-cgpt-toolbox-action="compact-toggle" data-dynamic-label-allowed="1">简洁</button>
               </div>
             </div>
             <div class="cgpt-toolbox-header-status-row cgpt-top-status-row" id="cgpt-toolbox-page-status-row"></div>
@@ -8720,41 +8777,16 @@
           }
           // 只恢复由本函数写入的 display:none，不覆盖 CSS 正常布局。
           badge.style.display = '';
-          // 窄屏时仅缩短本地额度 badge 的展示文字，不隐藏。
-          if (
-            width > 0
-            && width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
-            && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
-          ) {
+          if (badge.classList.contains('cgpt-toolbox-upload-quota-badge')) {
             const text = String(badge.textContent || '').trim();
             if (text.startsWith('本地上传:')) {
               badge.textContent = text.replace(/^本地上传:/, '上传:');
             }
-          } else if (
-            width >= TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
-            && badge.classList.contains('cgpt-toolbox-upload-quota-badge')
-          ) {
-            const text = String(badge.textContent || '').trim();
-            if (text.startsWith('上传:')) {
-              badge.textContent = text.replace(/^上传:/, '本地上传:');
-            }
           }
-          if (
-            width > 0
-            && width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
-            && badge.classList.contains('cgpt-toolbox-message-quota-badge')
-          ) {
+          if (badge.classList.contains('cgpt-toolbox-message-quota-badge')) {
             const text = String(badge.textContent || '').trim();
             if (text.startsWith('本地消息:')) {
               badge.textContent = text.replace(/^本地消息:/, '消息:');
-            }
-          } else if (
-            width >= TOOLBOX_SIZE_LIMITS.NARROW_WIDTH
-            && badge.classList.contains('cgpt-toolbox-message-quota-badge')
-          ) {
-            const text = String(badge.textContent || '').trim();
-            if (text.startsWith('消息:')) {
-              badge.textContent = text.replace(/^消息:/, '本地消息:');
             }
           }
         });
@@ -8830,6 +8862,7 @@
           }
         }
       }
+      ensureSingleCompactModeButton();
     }
 
     function clampToolboxPanelToViewport(targetPanel, reason = '-') {
@@ -13776,6 +13809,7 @@
       purgeForbiddenStatusBadge,
       ensureToolboxHeaderPageStatusRow,
       ensureToolboxTitleRow,
+      ensureSingleCompactModeButton,
       isCompactMode,
       hasActiveTopAlertEntry,
       getCurrentTopAlertEntry,
