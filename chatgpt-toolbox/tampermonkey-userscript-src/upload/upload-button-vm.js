@@ -2039,24 +2039,102 @@
       return view;
     }
 
-    if (
+    const normalizedViewPhaseForSendCopy = String(view.phase || '').trim().toLowerCase();
+    const normalizedButtonPhaseForSendCopy = String(view.buttonPhase || '').trim().toLowerCase();
+    const normalizedRuntimeActionForSendCopy = String(view.runtimeAction || view.action || '').trim().toLowerCase();
+    const sendCopyTerminalPhasesForVisual = new Set([
+      '',
+      'idle',
+      'success',
+      'failed',
+      'cancelled',
+      'canceled',
+    ]);
+    const sendCopyActivePhasesForVisual = new Set([
+      'preparing',
+      'running',
+      'waiting',
+      'waiting_input',
+      'waiting_ready',
+      'waiting_send',
+      'waiting_send_ready',
+      'waiting_reply',
+      'waiting_response',
+      'sent_waiting_response',
+      'answering',
+      'reply_done_waiting_copy',
+      'copying',
+      'copy_hotkey',
+      'copy_hotkey_core',
+      'sending',
+      'sending_hotkey',
+      'hotkey_sending',
+      'uploading_before_send',
+      'auto_upload_before_send',
+      'cancelling',
+      'paused_background_throttled',
+      'danger',
+    ]);
+    const sendCopyRuntimeCancelLikeForVisual =
+      normalizedRuntimeActionForSendCopy === 'cancel'
+      || normalizedRuntimeActionForSendCopy === 'stop'
+      || normalizedRuntimeActionForSendCopy === 'cancel-send-copy-hotkey'
+      || normalizedRuntimeActionForSendCopy.startsWith('cancel-')
+      || normalizedRuntimeActionForSendCopy.startsWith('stop-');
+    const sendCopyPhaseActiveForVisual =
+      sendCopyActivePhasesForVisual.has(normalizedViewPhaseForSendCopy)
+      || sendCopyActivePhasesForVisual.has(normalizedButtonPhaseForSendCopy);
+    const sendCopyPhaseTerminalForVisual =
+      sendCopyTerminalPhasesForVisual.has(normalizedViewPhaseForSendCopy)
+      && !sendCopyPhaseActiveForVisual
+      && !sendCopyRuntimeCancelLikeForVisual;
+    const shouldForceSendCopyHotkeyRed =
       canonicalAction === 'send-copy-hotkey'
       && view
+      && !sendCopyPhaseTerminalForVisual
       && (
         view.forceDanger === true
-        || view.runtimeAction === 'cancel'
-        || view.ownerButtonId === 'cgpt-send-copy-hotkey-once'
-      )
-    ) {
+        || sendCopyRuntimeCancelLikeForVisual
+        || sendCopyPhaseActiveForVisual
+      );
+    if (shouldForceSendCopyHotkeyRed) {
       button.classList.add('cgpt-btn-danger');
       button.classList.add('cgpt-action-running');
       button.classList.remove('cgpt-btn-idle');
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[BUTTON_VISUAL][FORCE_SEND_COPY_HOTKEY_RED] id=${button.id || '-'} phase=${view.phase || '-'} reason=forceDanger-owner`,
+          `[BUTTON_VISUAL][FORCE_SEND_COPY_HOTKEY_RED] id=${button.id || '-'} `
+          + `phase=${view.phase || '-'} buttonPhase=${view.buttonPhase || '-'} `
+          + `runtimeAction=${view.runtimeAction || '-'} reason=active-send-copy-hotkey`,
+        );
+      } else {
+        console.warn(
+          `[BUTTON_VISUAL][FORCE_SEND_COPY_HOTKEY_RED] id=${button.id || '-'} `
+          + `phase=${view.phase || '-'} buttonPhase=${view.buttonPhase || '-'} `
+          + `runtimeAction=${view.runtimeAction || '-'} reason=active-send-copy-hotkey`,
         );
       }
       return view;
+    }
+    if (
+      canonicalAction === 'send-copy-hotkey'
+      && view
+      && String(view.ownerButtonId || '').trim() === 'cgpt-send-copy-hotkey-once'
+      && sendCopyPhaseTerminalForVisual
+    ) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_VISUAL][OWNER_ID_NOT_RUNNING] id=${button.id || '-'} `
+          + `phase=${view.phase || '-'} buttonPhase=${view.buttonPhase || '-'} `
+          + `ownerButtonId=${view.ownerButtonId || '-'} reason=idle-owner-id-not-red`,
+        );
+      } else {
+        console.warn(
+          `[BUTTON_VISUAL][OWNER_ID_NOT_RUNNING] id=${button.id || '-'} `
+          + `phase=${view.phase || '-'} buttonPhase=${view.buttonPhase || '-'} `
+          + `ownerButtonId=${view.ownerButtonId || '-'} reason=idle-owner-id-not-red`,
+        );
+      }
     }
 
     cleanupMutuallyExclusiveButtonStateClasses(button, {
@@ -4015,6 +4093,20 @@
     }, snapshot);
   }
 
+  function isCopyHotkeyTaskOwnedBySendCopyHotkey(snapshot = {}) {
+    const task = snapshot.copyHotkeyOnceTask && typeof snapshot.copyHotkeyOnceTask === 'object'
+      ? snapshot.copyHotkeyOnceTask
+      : {};
+    const ownerButtonId = String(task.ownerButtonId || '').trim();
+    const ownerAction = String(task.ownerAction || task.action || task.taskKey || '').trim();
+    return Boolean(
+      ownerButtonId === 'cgpt-send-copy-hotkey-once'
+      || ownerAction === 'send-copy-hotkey'
+      || String(task.source || '').includes('send-then-copy-hotkey')
+      || String(task.source || '').includes('send-copy-hotkey')
+    );
+  }
+
   function getCopyHotkeyOnceButtonViewState(snapshot = {}) {
     const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
     const topReplyAnswering = isTopReplyAnsweringForButtons(snapshot);
@@ -4100,6 +4192,35 @@
       return ownerView;
     }
 
+    if (onceRunning && isCopyHotkeyTaskOwnedBySendCopyHotkey(snapshot)) {
+      const comboOwnerIdleView = decorateIdleViewWithTopReplyStatus({
+        phase: TaskPhase.IDLE,
+        text: snapshot.onceLabel || '复制+快捷键',
+        title: '当前复制核心由「发送+复制+快捷键」组合按钮调用；这里只保持普通状态，不跟随变红',
+        disabled: false,
+        allowCancel: false,
+        action: 'copy-hotkey-once',
+        runtimeAction: '',
+        buttonPhase: 'idle',
+        forceDanger: false,
+        ownerButtonId: '',
+        taskKey: 'copy-hotkey-once',
+      }, snapshot);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        const comboTask = snapshot.copyHotkeyOnceTask && typeof snapshot.copyHotkeyOnceTask === 'object'
+          ? snapshot.copyHotkeyOnceTask
+          : {};
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_BUTTON][KEEP_IDLE_FOR_SEND_COPY_OWNER] `
+          + `ownerButtonId=${comboTask.ownerButtonId || '-'} `
+          + `ownerAction=${comboTask.ownerAction || comboTask.action || '-'} `
+          + `phase=${comboTask.phase || '-'}`,
+        );
+      }
+      logCopyHotkeyButtonViewDecide(COPY_HOTKEY_ONCE_OWNER_BUTTON_ID, snapshot, comboOwnerIdleView);
+      return comboOwnerIdleView;
+    }
+
     if (onceRunning) {
       let fallbackRunningText = '取消等待';
       let fallbackRunningTitle = '复制+快捷键任务正在运行；点击取消';
@@ -4182,6 +4303,48 @@
     }
     logCopyHotkeyButtonViewDecide(COPY_HOTKEY_ONCE_OWNER_BUTTON_ID, snapshot, idleView);
     return idleView;
+  }
+
+  const SEND_COPY_HOTKEY_TASK_RUNNING_PHASES = new Set([
+    'running',
+    'sending',
+    'waiting_reply',
+    'waiting_response',
+    'sent_waiting_response',
+    'answering',
+    'copy_hotkey',
+    'copy_hotkey_core',
+    'copying',
+    'hotkey',
+    'busy',
+    'waiting_send',
+    'waiting_send_ready',
+    'preparing',
+    'uploading_before_send',
+    'auto_upload_before_send',
+    'cancelling',
+    'paused_background_throttled',
+  ]);
+
+  function resolveSendCopyHotkeyTaskRunningState(snapshot = {}) {
+    const task = snapshot.sendCopyHotkeyTask && typeof snapshot.sendCopyHotkeyTask === 'object'
+      ? snapshot.sendCopyHotkeyTask
+      : {};
+    const taskPhase = String(task.phase || task.subPhase || '').trim().toLowerCase();
+    const ownerButtonId = String(task.ownerButtonId || snapshot.visualOwnerButtonId || '').trim();
+    const snapshotActive = snapshot.sendCopyHotkeyActive === true
+      || snapshot.sendCopyHotkeyRunning === true
+      || task.running === true;
+    const isRunning = Boolean(
+      snapshotActive
+      || SEND_COPY_HOTKEY_TASK_RUNNING_PHASES.has(taskPhase)
+      || ownerButtonId === 'cgpt-send-copy-hotkey-once'
+    );
+    return {
+      isRunning,
+      phase: taskPhase || (isRunning ? 'running' : 'idle'),
+      ownerButtonId,
+    };
   }
 
   function isSendCopyHotkeyVisualOwner(snapshot = {}) {
@@ -4374,10 +4537,7 @@
       || snapshot.activeFilesCount
       || 0,
     ) || 0;
-    const hasRealComposerPayload = snapshot.hasRealComposerPayload === true
-      || Number(composerTextLen || 0) > 0
-      || Number(composerCount || 0) > 0
-      || composerUploading === true;
+    const hasRealComposerPayload = snapshot.hasRealComposerPayload === true;
     const hasLocalQueueFiles = snapshot.hasLocalQueueFiles === true
       || Number(localFileCount || 0) > 0;
     const sendCopyHotkeyMode = snapshot.sendCopyHotkeyMode
@@ -4471,10 +4631,118 @@
     }
   }
 
+  function normalizeSendCopyHotkeyIdleView(view = {}, reason = '-') {
+    const base = view && typeof view === 'object' ? view : {};
+    const phase = String(base.phase || '').trim().toLowerCase();
+    const buttonPhase = String(base.buttonPhase || '').trim().toLowerCase();
+    const runtimeAction = String(base.runtimeAction || '').trim().toLowerCase();
+    const activePhases = new Set([
+      'preparing',
+      'running',
+      'waiting',
+      'waiting_input',
+      'waiting_ready',
+      'waiting_send',
+      'waiting_send_ready',
+      'waiting_reply',
+      'waiting_response',
+      'sent_waiting_response',
+      'answering',
+      'reply_done_waiting_copy',
+      'copying',
+      'copy_hotkey',
+      'copy_hotkey_core',
+      'sending',
+      'sending_hotkey',
+      'hotkey_sending',
+      'uploading_before_send',
+      'auto_upload_before_send',
+      'cancelling',
+      'paused_background_throttled',
+      'danger',
+    ]);
+    const cancelLike =
+      runtimeAction === 'cancel'
+      || runtimeAction === 'stop'
+      || runtimeAction.startsWith('cancel-')
+      || runtimeAction.startsWith('stop-');
+    const active =
+      activePhases.has(phase)
+      || activePhases.has(buttonPhase)
+      || cancelLike
+      || base.forceDanger === true;
+    if (active) {
+      return base;
+    }
+    const normalized = {
+      ...base,
+      phase: TaskPhase.IDLE,
+      buttonPhase: 'idle',
+      runtimeAction: '',
+      forceDanger: false,
+      ownerButtonId: '',
+      disabled: false,
+      allowCancel: false,
+    };
+    if (
+      String(base.ownerButtonId || '').trim()
+      || base.forceDanger === true
+      || String(base.buttonPhase || '').trim().toLowerCase() !== 'idle'
+    ) {
+      const line =
+        `[SEND_COPY_HOTKEY_BUTTON][IDLE_VIEW_NORMALIZED] `
+        + `reason=${reason || '-'} oldPhase=${base.phase || '-'} `
+        + `oldButtonPhase=${base.buttonPhase || '-'} oldOwner=${base.ownerButtonId || '-'} `
+        + `newPhase=${normalized.phase} newOwner=-`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      } else {
+        console.warn(line);
+      }
+    }
+    return normalized;
+  }
+
   function finalizeSendCopyHotkeyButtonViewState(snapshot = {}, view = {}, capability = {}, extra = {}) {
     const visualOwner = isSendCopyHotkeyVisualOwner(snapshot);
-    logSendCopyHotkeyVisualDecide(snapshot, visualOwner, view, capability, extra);
-    return view;
+    const runningState = resolveSendCopyHotkeyTaskRunningState(snapshot);
+    let resolvedView = view && typeof view === 'object' ? view : {};
+    if (runningState.isRunning) {
+      const runningPhase = runningState.phase || 'running';
+      const isWaitingReplyView =
+        runningPhase === 'waiting_reply'
+        || runningPhase === 'waiting_response'
+        || runningPhase === 'sent_waiting_response'
+        || runningPhase === 'answering';
+      resolvedView = {
+        ...resolvedView,
+        phase: isWaitingReplyView ? TaskPhase.WAITING_REPLY : TaskPhase.RUNNING,
+        text: getNormalButtonIdleLabel('send-copy-hotkey', SEND_COPY_HOTKEY_BUTTON_LABEL),
+        title: '正在执行发送+复制+快捷键；再次点击将取消后续流程',
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel-send-copy-hotkey',
+        runtimeAction: 'cancel',
+        buttonPhase: isWaitingReplyView ? 'waiting_reply' : 'danger',
+        forceDanger: true,
+        taskKey: 'send-copy-hotkey',
+        ownerButtonId: 'cgpt-send-copy-hotkey-once',
+      };
+      const forceLine =
+        `[SEND_COPY_HOTKEY_BUTTON][VISUAL_FORCE_RUNNING] `
+        + `taskPhase=${runningPhase} ownerButtonId=${runningState.ownerButtonId || '-'} `
+        + `finalPhase=${String(resolvedView.phase || '-')} finalColor=danger`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(forceLine);
+      } else {
+        console.info(forceLine);
+      }
+    }
+    const normalizedView = (visualOwner && visualOwner.owned) || runningState.isRunning
+      ? resolvedView
+      : normalizeSendCopyHotkeyIdleView(resolvedView, extra && extra.renderReason ? extra.renderReason : 'finalize');
+    logSendCopyHotkeyVisualDecide(snapshot, visualOwner, normalizedView, capability, extra);
+    return normalizedView;
   }
 
   function computeSendCopyHotkeyButtonViewState(snapshot = {}, options = {}) {
@@ -4514,7 +4782,7 @@
       }
       if (orchPhase === 'success' || orchPhase === 'failed' || orchPhase === 'cancelled') {
         const terminalView = {
-          phase: orchPhase === 'failed' ? TaskPhase.FAILED : TaskPhase.IDLE,
+          phase: TaskPhase.IDLE,
           text: sendCopyHotkeyLabel,
           title: '',
           disabled: false,
@@ -4522,8 +4790,9 @@
           action: 'send-copy-hotkey',
           runtimeAction: '',
           buttonPhase: 'idle',
+          forceDanger: false,
           taskKey: 'send-copy-hotkey',
-          ownerButtonId: 'cgpt-send-copy-hotkey-once',
+          ownerButtonId: '',
         };
         logSendButtonViewDecide(
           'cgpt-send-copy-hotkey-once',
@@ -5005,8 +5274,9 @@
         action: 'send-copy-hotkey',
         runtimeAction: '',
         buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
+        ownerButtonId: '',
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, cancelledView, { terminal: 'cancelled' });
       return cancelledView;
@@ -5021,8 +5291,9 @@
         action: 'send-copy-hotkey',
         runtimeAction: '',
         buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
+        ownerButtonId: '',
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, successView, { terminal: 'success' });
       return successView;
@@ -5129,11 +5400,7 @@
       || snapshot.activeFilesCount
       || 0,
     ) || 0;
-    const hasRealComposerPayload =
-      snapshot.hasRealComposerPayload === true
-      || Number(composerTextLen || 0) > 0
-      || Number(composerCount || 0) > 0
-      || composerUploading === true;
+    const hasRealComposerPayload = snapshot.hasRealComposerPayload === true;
     const hasLocalQueueFiles =
       snapshot.hasLocalQueueFiles === true
       || Number(localFileCount || 0) > 0;
@@ -5170,8 +5437,9 @@
         action: 'send-copy-hotkey',
         runtimeAction: '',
         buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
+        ownerButtonId: '',
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, waitGeneratingView, {
         reason: 'page-generating-empty-composer',
@@ -5189,8 +5457,9 @@
         action: 'send-copy-hotkey',
         runtimeAction: '',
         buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
+        ownerButtonId: '',
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, needInputView, {
         reason: 'empty-composer-idle',
@@ -5203,15 +5472,17 @@
 
     if (pageGenerating) {
       const pageGeneratingView = {
-        phase: TaskPhase.WAITING_REPLY,
+        phase: TaskPhase.IDLE,
         text: sendCopyHotkeyLabel,
         title: '当前 ChatGPT 正在回答。输入框有内容时点击会排队等待当前回复完成后再发送；输入框为空时请使用“复制+快捷键”。',
         disabled: false,
         allowCancel: false,
         action: 'send-copy-hotkey',
-        buttonPhase: 'waiting_reply',
+        runtimeAction: '',
+        buttonPhase: 'idle',
+        forceDanger: false,
         taskKey: 'send-copy-hotkey',
-        ownerButtonId: thisButtonId,
+        ownerButtonId: '',
       };
       logSendButtonViewDecide(thisButtonId, 'send-copy-hotkey', snapshot, pageGeneratingView, {
         reason: 'page-generating-idle-view',
@@ -7024,7 +7295,15 @@
 
     const resolvedIdlePhase = normalizeTaskPhase(resolvedView.phase) === TaskPhase.IDLE;
     const resolvedIdleButtonPhase = String(resolvedView.buttonPhase || '').trim().toLowerCase() === 'idle';
-    if (resolvedIdlePhase || resolvedIdleButtonPhase) {
+    const isSendCopyHotkeyRenderButton = button.id === 'cgpt-send-copy-hotkey-once'
+      || canonicalAction === 'send-copy-hotkey';
+    const sendCopyHotkeyRunningForCleanup = isSendCopyHotkeyRenderButton
+      ? resolveSendCopyHotkeyTaskRunningState(snapshot)
+      : { isRunning: false };
+    if (
+      (resolvedIdlePhase || resolvedIdleButtonPhase)
+      && !(isSendCopyHotkeyRenderButton && sendCopyHotkeyRunningForCleanup.isRunning)
+    ) {
       cleanupNonIdleButtonClasses(
         button,
         TaskPhase.IDLE,
@@ -7036,6 +7315,15 @@
         button.removeAttribute('data-danger-enter-block');
         delete button.dataset.autoDangerEnterBlock;
       }
+    } else if (isSendCopyHotkeyRenderButton && sendCopyHotkeyRunningForCleanup.isRunning) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_CLASS_CLEANUP][SKIP_RUNNING_SEND_COPY_HOTKEY] id=${button.id || '-'} reason=${reason || '-'}`,
+        );
+      }
+      button.classList.add('cgpt-btn-danger');
+      button.classList.add('cgpt-action-running');
+      button.classList.remove('cgpt-btn-idle');
     }
 
     button.dataset.cgptTaskPhase = resolvedView.phase || TaskPhase.IDLE;
@@ -7131,13 +7419,27 @@
       const sendCopyHotkeyVisualOwner = isSendCopyHotkeyButton
         ? isSendCopyHotkeyVisualOwner(snapshot)
         : { owned: false, source: '-', phase: 'idle' };
+      const sendCopyHotkeyOwnerPhase = String(sendCopyHotkeyVisualOwner.phase || '').trim().toLowerCase();
+      const sendCopyHotkeyOwnerTerminalPhases = new Set([
+        '',
+        'idle',
+        'success',
+        'failed',
+        'cancelled',
+        'canceled',
+      ]);
+      const sendCopyHotkeyOwnerPhaseActive =
+        sendCopyHotkeyVisualOwner.owned === true
+        && !sendCopyHotkeyOwnerTerminalPhases.has(sendCopyHotkeyOwnerPhase);
+      const sendCopyHotkeyRunningFromSnapshot = isSendCopyHotkeyButton
+        ? resolveSendCopyHotkeyTaskRunningState(snapshot)
+        : { isRunning: false };
       const skipSendCopyHotkeyIdleCleanup = isSendCopyHotkeyButton
-        && sendCopyHotkeyVisualOwner.owned
-        && String(resolvedView.phase || '').toLowerCase() === 'idle';
+        && (sendCopyHotkeyOwnerPhaseActive || sendCopyHotkeyRunningFromSnapshot.isRunning);
       if (skipSendCopyHotkeyIdleCleanup) {
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
-            `[BUTTON_CLASS_CLEANUP][SKIP_IDLE_CLEANUP_ACTIVE_SEND_COPY_HOTKEY] id=${button.id || '-'} source=${sendCopyHotkeyVisualOwner.source} phase=${sendCopyHotkeyVisualOwner.phase}`,
+            `[BUTTON_CLASS_CLEANUP][SKIP_IDLE_CLEANUP_ACTIVE_SEND_COPY_HOTKEY] id=${button.id || '-'} source=${sendCopyHotkeyVisualOwner.source} phase=${sendCopyHotkeyVisualOwner.phase} snapshotRunning=${sendCopyHotkeyRunningFromSnapshot.isRunning ? 1 : 0}`,
           );
         }
         button.classList.add('cgpt-btn-danger');
@@ -7145,7 +7447,9 @@
         button.classList.remove('cgpt-btn-idle');
         if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
           ToolboxShell.appendLog(
-            `[BUTTON_VISUAL][FORCE_SEND_COPY_HOTKEY_RED] id=${button.id || '-'} phase=${sendCopyHotkeyVisualOwner.phase || resolvedView.phase || '-'} reason=forceDanger-owner`,
+            `[BUTTON_VISUAL][FORCE_SEND_COPY_HOTKEY_RED] id=${button.id || '-'} `
+            + `phase=${sendCopyHotkeyVisualOwner.phase || resolvedView.phase || '-'} `
+            + `buttonPhase=${resolvedView.buttonPhase || '-'} reason=active-send-copy-hotkey`,
           );
         }
       } else {
@@ -7158,6 +7462,34 @@
           cleanupNonIdleButtonClasses(button, 'idle', reason || 'post-apply-idle');
         }
       }
+    }
+
+    if (
+      button
+      && button.id === 'cgpt-send-copy-hotkey-once'
+      && String(resolvedView.phase || '').trim().toLowerCase() === 'idle'
+      && (
+        button.classList.contains('cgpt-btn-danger')
+        || button.classList.contains('cgpt-action-running')
+        || button.classList.contains('cgpt-btn-busy')
+      )
+    ) {
+      const line =
+        `[BUTTON_COLOR][IDLE_SEND_COPY_HOTKEY_RED_LEAK] `
+        + `id=${button.id || '-'} phase=${resolvedView.phase || '-'} `
+        + `buttonPhase=${resolvedView.buttonPhase || '-'} `
+        + `ownerButtonId=${resolvedView.ownerButtonId || '-'} `
+        + `class=${String(button.className || '').trim()}`;
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      } else {
+        console.error(line);
+      }
+      button.classList.remove('cgpt-btn-danger');
+      button.classList.remove('cgpt-action-running');
+      button.classList.remove('cgpt-btn-busy');
+      button.classList.remove('cgpt-btn-running');
+      button.classList.remove('cgpt-btn-waiting');
     }
 
     if (isClosedLoopActionName(canonicalAction)) {

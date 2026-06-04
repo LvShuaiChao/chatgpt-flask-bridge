@@ -290,8 +290,11 @@
                 <button type="button"
                   class="cgpt-upload-file-remove"
                   data-no-row-upload="1"
+                  data-action="remove-upload-file"
+                  data-cgpt-base-action="remove-upload-file"
                   data-upload-remove-id="${escapeHtml(q.id)}"
                   title="移除"
+                  aria-label="移除文件：${escapeHtml(q.name || 'unknown')}"
                   ${removeDisabled ? 'disabled' : ''}>
                   ×
                 </button>
@@ -613,6 +616,9 @@
           <button type="button"
             class="cgpt-chip-btn cgpt-upload-group-chip${active}"
             data-group-id="${escapeHtml(group.id)}"
+            data-no-row-upload="1"
+            data-no-upload-action="1"
+            data-cgpt-group-chip="1"
             title="${escapeHtml(title)}">
             <span class="cgpt-chip-name">${escapeHtml(cleanName)}</span>
             <span class="cgpt-chip-count">${count}</span>
@@ -629,6 +635,10 @@
           <button type="button"
             class="cgpt-chip-btn cgpt-upload-group-chip active"
             data-group-id=""
+            data-no-row-upload="1"
+            data-no-upload-action="1"
+            data-cgpt-group-chip="1"
+            disabled
             title="默认：0 个文件">
             <span class="cgpt-chip-name">默认</span>
             <span class="cgpt-chip-count">0</span>

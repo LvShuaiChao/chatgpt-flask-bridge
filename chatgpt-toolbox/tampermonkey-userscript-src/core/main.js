@@ -10670,6 +10670,23 @@
     const info = getTopMainStatus();
     logTopMainStatusChange(info);
 
+    if (typeof UploadModule !== 'undefined' && UploadModule) {
+      if (typeof UploadModule.clearStaleTopErrorIfIdle === 'function') {
+        try {
+          UploadModule.clearStaleTopErrorIfIdle('updateChatInputStateBadge');
+        } catch (clearAlertErr) {
+          console.error('[ChatGPT toolbox] clearStaleTopErrorIfIdle failed', clearAlertErr);
+        }
+      }
+      if (typeof UploadModule.clearStaleActionFailedBadgeIfIdle === 'function') {
+        try {
+          UploadModule.clearStaleActionFailedBadgeIfIdle('updateChatInputStateBadge');
+        } catch (clearBadgeErr) {
+          console.error('[ChatGPT toolbox] clearStaleActionFailedBadgeIfIdle failed', clearBadgeErr);
+        }
+      }
+    }
+
     if (
       typeof UploadModule !== 'undefined'
       && UploadModule

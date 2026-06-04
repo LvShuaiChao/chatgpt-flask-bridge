@@ -27,6 +27,26 @@
     return null;
   }
 
+  function writeRawStoreOnLoadIfNeeded(store) {
+    try {
+      const raw = readRawStore();
+      const beforeCount = raw && Array.isArray(raw.lists) ? raw.lists.length : -1;
+      const afterCount = Array.isArray(store.lists) ? store.lists.length : 0;
+      const beforeLast = raw && typeof raw === 'object'
+        ? String(raw.lastSelectedListId || '').trim()
+        : '';
+      const afterLast = String(store.lastSelectedListId || '').trim();
+
+      if (beforeCount !== afterCount || beforeLast !== afterLast) {
+        writeRawStore(store);
+        return true;
+      }
+    } catch (error) {
+      console.error('[AUTOQ_LIST_STORE][LOAD_PERSIST_ERROR]', error);
+    }
+    return false;
+  }
+
   function writeRawStore(store) {
     try {
       if (typeof writeLocalJson === 'function') {
@@ -57,13 +77,86 @@
     return `autoq_list_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  function dedupeAutoqTaskLists(rawLists) {
+    const inputLists = Array.isArray(rawLists) ? rawLists : [];
+    const result = [];
+    const seenIds = new Set();
+    let hasDefault = false;
+
+    for (const item of inputLists) {
+      const normalized = normalizeListItem(item);
+      if (!normalized) {
+        continue;
+      }
+
+      const rawId = String(normalized.id || '').trim();
+      const rawName = String(normalized.name || '').trim();
+      const isDefaultById = rawId === DEFAULT_LIST_ID;
+      const isDefaultByName = rawName === DEFAULT_LIST_NAME;
+
+      if (isDefaultById || isDefaultByName) {
+        if (hasDefault) {
+          console.warn('[PROMPT_LIST][DEDUP_DEFAULT_LIST]', {
+            removedId: rawId,
+            removedName: rawName,
+          });
+          continue;
+        }
+
+        result.push({
+          ...normalized,
+          id: DEFAULT_LIST_ID,
+          name: DEFAULT_LIST_NAME,
+        });
+        seenIds.add(DEFAULT_LIST_ID);
+        hasDefault = true;
+        continue;
+      }
+
+      const id = rawId || createListId();
+      const name = rawName || '未命名列表';
+
+      if (seenIds.has(id)) {
+        console.warn('[PROMPT_LIST][DEDUP_DUPLICATE_ID]', {
+          removedId: id,
+          removedName: name,
+        });
+        continue;
+      }
+
+      result.push({
+        ...normalized,
+        id,
+        name,
+      });
+      seenIds.add(id);
+    }
+
+    if (!hasDefault) {
+      const ts = nowMs();
+      result.unshift({
+        id: DEFAULT_LIST_ID,
+        name: DEFAULT_LIST_NAME,
+        createdAt: ts,
+        updatedAt: ts,
+        text: '',
+        tasks: [],
+      });
+    }
+
+    return result;
+  }
+
   function normalizeListItem(item, fallbackText) {
     if (!item || typeof item !== 'object') {
       return null;
     }
 
-    const id = String(item.id || '').trim() || createListId();
-    const name = String(item.name || '').trim() || DEFAULT_LIST_NAME;
+    const rawId = String(item.id || '').trim();
+    const rawName = String(item.name || '').trim();
+    const isDefaultCandidate = rawId === DEFAULT_LIST_ID || rawName === DEFAULT_LIST_NAME;
+    const id = rawId || (isDefaultCandidate ? DEFAULT_LIST_ID : createListId());
+    const name = rawName || (isDefaultCandidate ? DEFAULT_LIST_NAME : '未命名列表');
     const createdAt = Number(item.createdAt) || nowMs();
     const updatedAt = Number(item.updatedAt) || createdAt;
 
@@ -102,34 +195,9 @@
       store.lists = [];
     }
 
-    const hasDefault = store.lists.some((item) => item && item.id === DEFAULT_LIST_ID);
-    if (!hasDefault) {
-      const ts = nowMs();
-      store.lists.unshift({
-        id: DEFAULT_LIST_ID,
-        name: DEFAULT_LIST_NAME,
-        createdAt: ts,
-        updatedAt: ts,
-        text: '',
-        tasks: [],
-      });
-    }
-
-    store.lists = store.lists
-      .map((item) => normalizeListItem(item))
-      .filter(Boolean);
-
-    if (!store.lists.length) {
-      const ts = nowMs();
-      store.lists.push({
-        id: DEFAULT_LIST_ID,
-        name: DEFAULT_LIST_NAME,
-        createdAt: ts,
-        updatedAt: ts,
-        text: '',
-        tasks: [],
-      });
-    }
+    store.lists = dedupeAutoqTaskLists(
+      store.lists.map((item) => normalizeListItem(item)).filter(Boolean),
+    );
 
     store.version = STORE_VERSION;
     return store;
@@ -283,7 +351,15 @@
       ensureDefaultAutoqTaskList(store);
 
       if (!store.lastSelectedListId || !store.lists.some((item) => item.id === store.lastSelectedListId)) {
-        store.lastSelectedListId = pickMostRecentlyUpdatedList(store.lists).id;
+        store.lastSelectedListId = DEFAULT_LIST_ID;
+      }
+
+      const persisted = writeRawStoreOnLoadIfNeeded(store);
+      if (persisted) {
+        console.log('[AUTOQ_LIST_STORE][LOAD_DEDUP_PERSIST]', {
+          listCount: store.lists.length,
+          lastSelectedListId: store.lastSelectedListId,
+        });
       }
 
       console.log('[AUTOQ_LIST_STORE][LOAD]', {
@@ -437,6 +513,7 @@
     getLastSelectedAutoqTaskList,
     setActiveAutoqTaskList,
     ensureDefaultAutoqTaskList,
+    dedupeAutoqTaskLists,
     migrateLegacyAutoqTaskLists,
     listStoreToConfigProfiles,
     configProfilesToListStore,

@@ -253,65 +253,6 @@
       return true;
     }
 
-    function viewGlobalUsageEventsFromUi() {
-      if (typeof GlobalUsageStore === 'undefined' || typeof GlobalUsageStore.getGlobalUsageEventsSummary !== 'function') {
-        setSettingsStatus('全局额度模块未加载', 'error');
-        return;
-      }
-
-      const summary = GlobalUsageStore.getGlobalUsageEventsSummary({ maxLines: 30 });
-      const previewLines = [
-        `近 ${summary.uploadWindowHours}h 上传 ${summary.uploadUsed}/${summary.uploadLimit}，近 ${summary.messageWindowHours}h 消息 ${summary.messageUsed}/${summary.messageLimit}`,
-        `事件数：消息 ${summary.messageEventCount}，上传 ${summary.uploadEventCount}`,
-        '',
-        '最近消息事件：',
-        ...summary.messageEvents.slice(0, 8).map(({ kind, eventId, item }) => (
-          GlobalUsageStore.formatGlobalUsageEventLine(kind, eventId, item)
-        )),
-        '',
-        '最近上传事件：',
-        ...summary.uploadEvents.slice(0, 8).map(({ kind, eventId, item }) => (
-          GlobalUsageStore.formatGlobalUsageEventLine(kind, eventId, item)
-        )),
-      ];
-
-      ToolboxShell.appendLog('[GLOBAL_USAGE][VIEW] reason=settings-ui');
-      previewLines.forEach((line) => {
-        ToolboxShell.appendLog(`[GLOBAL_USAGE][VIEW] ${line}`);
-      });
-
-      window.alert(previewLines.join('\n').slice(0, 4000));
-      setSettingsStatus('已在日志中输出全局额度事件摘要', 'ok');
-    }
-
-    function exportGlobalUsageEventsFromUi() {
-      if (typeof GlobalUsageStore === 'undefined' || typeof GlobalUsageStore.exportGlobalUsageEventsText !== 'function') {
-        setSettingsStatus('全局额度模块未加载', 'error');
-        return;
-      }
-
-      const text = GlobalUsageStore.exportGlobalUsageEventsText({ maxLines: 200 });
-      ToolboxShell.appendLog('[GLOBAL_USAGE][EXPORT] reason=settings-ui');
-      text.split('\n').forEach((line) => {
-        ToolboxShell.appendLog(`[GLOBAL_USAGE][EXPORT] ${line}`);
-      });
-
-      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        navigator.clipboard.writeText(text).then(() => {
-          setSettingsStatus('全局额度事件已写入日志并复制到剪贴板', 'ok');
-        }).catch((error) => {
-          console.error('[GLOBAL_USAGE][EXPORT_CLIPBOARD_FAILED]', error);
-          ToolboxShell.appendLog(
-            `[GLOBAL_USAGE][EXPORT_CLIPBOARD_FAILED] error_type=${error?.name || '-'} error=${error?.message || String(error)}`,
-          );
-          setSettingsStatus('全局额度事件已写入日志（剪贴板复制失败）', 'warn');
-        });
-        return;
-      }
-
-      setSettingsStatus('全局额度事件已写入日志', 'ok');
-    }
-
     function resetQuotaStatsFromUi() {
       const uploadBefore = (
         typeof UploadModule !== 'undefined'
@@ -402,9 +343,19 @@
         confirmPromptDraftOverwrite,
         quickPromptActiveCategory: current.quickPromptActiveCategory || '全部',
         quickPromptIds,
-        globalDropCaptureEnabled: !!qs('#cgpt-setting-global-drop-capture', root)?.checked,
-        restoreScrollAfterCopyLastMessage: !!qs('#cgpt-setting-restore-scroll-after-copy', root)?.checked,
         continueAutomation: (() => {
+          const hasContinueSettingsDom = !!(
+            qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)
+            || qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)
+            || qs('#cgpt-setting-closed-loop-next-delay-min-sec', root)
+            || qs('#cgpt-setting-closed-loop-next-delay-max-sec', root)
+            || qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+            || qs('#cgpt-setting-unified-continue-home-nav-interval', root)
+            || qs('#cgpt-setting-unified-continue-home-nav-url', root)
+          );
+          if (!hasContinueSettingsDom) {
+            return Object.assign({}, current.continueAutomation || {});
+          }
           const minEl = qs('#cgpt-setting-closed-loop-next-delay-min-sec', root);
           const maxEl = qs('#cgpt-setting-closed-loop-next-delay-max-sec', root);
           const rawMinSec = minEl ? String(minEl.value).trim() : '';
@@ -430,35 +381,39 @@
             `[SETTINGS][closed-loop-next-delay-save] minSec=${Math.round(minMsFinal / 1000)} maxSec=${Math.round(maxMsFinal / 1000)} minMs=${minMsFinal} maxMs=${maxMsFinal}`,
           );
           return {
-          autoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
-          autoUploadInterval: Number(
-            qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value
-            || current.continueAutomation?.autoUploadInterval
-            || 5,
-          ),
-          closedLoopNextDelayMinMs: minMsFinal,
-          closedLoopNextDelayMaxMs: maxMsFinal,
-          closedLoopNextDelayMs: minMsFinal,
-          homeNavEnabled: !!(
-            qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
-            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
-          )?.checked,
-          homeNavInterval: Number(
-            qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
-            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
-            || current.continueAutomation?.homeNavInterval
-            || 20,
-          ),
-          homeNavUrl: String(
-            qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
-            || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
-            || current.continueAutomation?.homeNavUrl
-            || 'https://chatgpt.com/',
-          ).trim(),
+            autoUploadEnabled: !!qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root)?.checked,
+            autoUploadInterval: Number(
+              qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root)?.value
+              || current.continueAutomation?.autoUploadInterval
+              || 5,
+            ),
+            closedLoopNextDelayMinMs: minMsFinal,
+            closedLoopNextDelayMaxMs: maxMsFinal,
+            closedLoopNextDelayMs: minMsFinal,
+            homeNavEnabled: !!(
+              qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
+              || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root)
+            )?.checked,
+            homeNavInterval: Number(
+              qs('#cgpt-setting-unified-continue-home-nav-interval', root)?.value
+              || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root)?.value
+              || current.continueAutomation?.homeNavInterval
+              || 20,
+            ),
+            homeNavUrl: String(
+              qs('#cgpt-setting-unified-continue-home-nav-url', root)?.value
+              || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root)?.value
+              || current.continueAutomation?.homeNavUrl
+              || 'https://chatgpt.com/',
+            ).trim(),
           };
         })(),
         copyHotkeyContinuePromptText: (() => {
-          const raw = String(qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root)?.value || '').trim();
+          const promptEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
+          if (!promptEl) {
+            return String(current.copyHotkeyContinuePromptText || '').trim();
+          }
+          const raw = String(promptEl.value || '').trim();
           const stopSignal = String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim()
             || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
           if (isSettingsContinuePromptUsingBuiltinDefault(raw, stopSignal)) {
@@ -466,8 +421,17 @@
           }
           return raw;
         })(),
-        copyHotkeyContinueStopSignal: String(qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root)?.value || '').trim()
-          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>'),
+        copyHotkeyContinueStopSignal: (() => {
+          const stopEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
+          if (!stopEl) {
+            return String(
+              current.copyHotkeyContinueStopSignal
+              || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'),
+            ).trim();
+          }
+          return String(stopEl.value || '').trim()
+            || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>');
+        })(),
       };
     }
 
@@ -475,14 +439,15 @@
       const raw = String(name || '').trim();
       const alias = {
         basic: 'toolbox',
-        ui: 'continue-task',
+        ui: 'toolbox',
+        'continue-task': 'toolbox',
+        'auto-continue': 'toolbox',
         'batch-timing': 'stats-debug',
       };
       const normalized = alias[raw] || raw;
       const allowed = new Set([
         'toolbox',
         'shortcut',
-        'continue-task',
         'quota-notify',
         'stats-debug',
       ]);
@@ -532,81 +497,6 @@
         fileListEl.disabled = false;
       }
 
-      const globalDropEl = qs('#cgpt-setting-global-drop-capture', root);
-      if (globalDropEl) globalDropEl.checked = !!cfg.globalDropCaptureEnabled;
-
-      const restoreScrollEl = qs('#cgpt-setting-restore-scroll-after-copy', root);
-      if (restoreScrollEl) {
-        restoreScrollEl.checked = cfg.restoreScrollAfterCopyLastMessage === true;
-      }
-
-      const loopAutoUploadEnabledEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-enabled', root);
-      if (loopAutoUploadEnabledEl) {
-        loopAutoUploadEnabledEl.checked = cfg.continueAutomation?.autoUploadEnabled !== false;
-      }
-
-      const loopAutoUploadIntervalEl = qs('#cgpt-setting-copy-hotkey-loop-auto-upload-interval', root);
-      if (loopAutoUploadIntervalEl) {
-        loopAutoUploadIntervalEl.value = String(cfg.continueAutomation?.autoUploadInterval || 5);
-      }
-
-      const closedLoopNextDelayMinEl = qs('#cgpt-setting-closed-loop-next-delay-min-sec', root);
-      const closedLoopNextDelayMaxEl = qs('#cgpt-setting-closed-loop-next-delay-max-sec', root);
-      if (closedLoopNextDelayMinEl || closedLoopNextDelayMaxEl) {
-        const continueCfg = cfg.continueAutomation && typeof cfg.continueAutomation === 'object'
-          ? cfg.continueAutomation
-          : {};
-        const minMs = Number(continueCfg.closedLoopNextDelayMinMs || 40000);
-        const maxMs = Number(continueCfg.closedLoopNextDelayMaxMs || 60000);
-        const minSec = Math.max(1, Math.round(msToSecondsForUi(minMs, 40)));
-        const maxSec = Math.max(1, Math.round(msToSecondsForUi(maxMs, 60)));
-        if (closedLoopNextDelayMinEl) {
-          closedLoopNextDelayMinEl.value = String(minSec);
-        }
-        if (closedLoopNextDelayMaxEl) {
-          closedLoopNextDelayMaxEl.value = String(maxSec);
-        }
-        ToolboxShell.appendLog(
-          `[SETTINGS][closed-loop-delay-render] minMs=${minMs} maxMs=${maxMs} minSec=${minSec} maxSec=${maxSec} uiUnit=sec`,
-        );
-      }
-
-      const unifiedHomeNavEnabled = cfg.continueAutomation?.homeNavEnabled !== false;
-      const unifiedHomeNavInterval = Number(cfg.continueAutomation?.homeNavInterval || 20);
-      const unifiedHomeNavUrl = cfg.continueAutomation?.homeNavUrl || 'https://chatgpt.com/';
-
-      const loopHomeNavEnabledEl = qs('#cgpt-setting-unified-continue-home-nav-enabled', root)
-        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-enabled', root);
-      if (loopHomeNavEnabledEl) {
-        loopHomeNavEnabledEl.checked = unifiedHomeNavEnabled;
-      }
-
-      const loopHomeNavIntervalEl = qs('#cgpt-setting-unified-continue-home-nav-interval', root)
-        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-interval', root);
-      if (loopHomeNavIntervalEl) {
-        loopHomeNavIntervalEl.value = String(unifiedHomeNavInterval);
-      }
-
-      const loopHomeNavUrlEl = qs('#cgpt-setting-unified-continue-home-nav-url', root)
-        || qs('#cgpt-setting-copy-hotkey-loop-home-nav-url', root);
-      if (loopHomeNavUrlEl) {
-        loopHomeNavUrlEl.value = unifiedHomeNavUrl;
-      }
-
-      const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
-      if (stopSignalEl) {
-        stopSignalEl.value = cfg.copyHotkeyContinueStopSignal
-          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
-      }
-
-      const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
-      if (promptTextEl) {
-        const stopSignalForDisplay = cfg.copyHotkeyContinueStopSignal
-          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>');
-        promptTextEl.value = getContinuePromptTextForSettingsDisplay(cfg);
-        promptTextEl.placeholder = `留空则使用内置默认继续指令。默认继续指令会要求：若任务涉及代码修改/修复/重构/Bug 定位/UI 状态/闭环控制/上传逻辑/日志排查，必须输出详细 Cursor / Claude Code 修改指令，并列出文件路径、函数名、关键代码、日志和验证步骤。完成时仅回复 ${stopSignalForDisplay}。默认继续指令已包含详细 Cursor / Claude Code 修改要求。`;
-      }
-
       const runtimeStatsCfg = getAutoQueueTaskQueueSettings();
       const runtimeStatsShowEl = qs('#cgpt-setting-runtime-stats-show', root);
       if (runtimeStatsShowEl) {
@@ -623,11 +513,6 @@
       const debugTraceEl = qs('#cgpt-setting-autoq-trace-debug', root);
       if (debugTraceEl) {
         debugTraceEl.checked = runtimeStatsCfg.debugAutoQueueTrace === true;
-      }
-
-      const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
-      if (edgeAutoHideEl) {
-        edgeAutoHideEl.checked = MemoryManager.get(MemoryManager.KEYS.edgeAutoHideEnabled, false) === true;
       }
 
       const beepCfg = getBeepConfig();
@@ -895,52 +780,9 @@
         });
       }
 
-      const resetContinuePromptBtn = qs('#cgpt-setting-copy-hotkey-continue-prompt-reset', root);
-      if (resetContinuePromptBtn) {
-        resetContinuePromptBtn.addEventListener('click', () => {
-          const promptTextEl = qs('#cgpt-setting-copy-hotkey-continue-prompt-text', root);
-          const stopSignalEl = qs('#cgpt-setting-copy-hotkey-continue-stop-signal', root);
-          const defaultStop = typeof getDefaultDoneSignal === 'function'
-            ? getDefaultDoneSignal()
-            : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
-
-          if (promptTextEl) {
-            promptTextEl.value = renderDefaultContinuePromptForSettings(defaultStop);
-          }
-          if (stopSignalEl) {
-            stopSignalEl.value = defaultStop;
-          }
-
-          const cfg = readFromUi();
-          cfg.copyHotkeyContinuePromptText = '';
-          cfg.copyHotkeyContinueStopSignal = defaultStop;
-          saveConfig(cfg);
-          render();
-          ToolboxShell.appendLog('[SETTINGS][continue-prompt-reset-defaults]');
-          const resetPreview = renderDefaultContinuePromptForSettings(defaultStop);
-          if (typeof logPromptDetailCursorBlock === 'function') {
-            logPromptDetailCursorBlock('settings-continue-prompt-reset', resetPreview);
-          } else {
-            const hasDetailed = typeof hasDetailedCursorInstructionBlock === 'function'
-              ? hasDetailedCursorInstructionBlock(resetPreview)
-              : resetPreview.includes('Cursor / Claude Code 修改指令');
-            ToolboxShell.appendLog(
-              `[PROMPT][DETAIL_CURSOR_BLOCK] source=settings-continue-prompt-reset hasDetailed=${hasDetailed ? 1 : 0} len=${resetPreview.length}`,
-            );
-          }
-        });
-      }
-
       const onCompactSettingChange = () => {
         const cfg = readFromUi();
         saveConfig(cfg);
-        const continueCfg = cfg.continueAutomation || {};
-        ToolboxShell.appendLog(
-          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=settings-save enabled=${continueCfg.homeNavEnabled !== false ? 1 : 0} interval=${continueCfg.homeNavInterval || 20} url=${continueCfg.homeNavUrl || 'https://chatgpt.com/'} closedLoopNextDelayMinSec=${Math.round((continueCfg.closedLoopNextDelayMinMs ?? 40000) / 1000)} closedLoopNextDelayMaxSec=${Math.round((continueCfg.closedLoopNextDelayMaxMs ?? 60000) / 1000)}`,
-        );
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][NEXT_DELAY_CONFIG_SAVE] minSec=${Math.round((continueCfg.closedLoopNextDelayMinMs ?? 40000) / 1000)} maxSec=${Math.round((continueCfg.closedLoopNextDelayMaxMs ?? 60000) / 1000)} minMs=${continueCfg.closedLoopNextDelayMinMs ?? 40000} maxMs=${continueCfg.closedLoopNextDelayMaxMs ?? 60000}`,
-        );
         render();
       };
 
@@ -985,73 +827,15 @@
         });
       }
 
-      const viewGlobalUsageBtn = qs('#cgpt-setting-quota-view-events', root);
-      if (viewGlobalUsageBtn) {
-        viewGlobalUsageBtn.addEventListener('click', () => {
-          viewGlobalUsageEventsFromUi();
-        });
-      }
-
-      const exportGlobalUsageBtn = qs('#cgpt-setting-quota-export-events', root);
-      if (exportGlobalUsageBtn) {
-        exportGlobalUsageBtn.addEventListener('click', () => {
-          exportGlobalUsageEventsFromUi();
-        });
-      }
-
       [
         SettingsSelectors.showUploadGroups,
         SettingsSelectors.showUploadStart,
         SettingsSelectors.showFileList,
-        '#cgpt-setting-global-drop-capture',
-        '#cgpt-setting-restore-scroll-after-copy',
-        '#cgpt-setting-copy-hotkey-loop-auto-upload-enabled',
-        '#cgpt-setting-copy-hotkey-loop-auto-upload-interval',
-        '#cgpt-setting-closed-loop-next-delay-min-sec',
-        '#cgpt-setting-closed-loop-next-delay-max-sec',
-        '#cgpt-setting-unified-continue-home-nav-enabled',
-        '#cgpt-setting-unified-continue-home-nav-interval',
-        '#cgpt-setting-unified-continue-home-nav-url',
-        '#cgpt-setting-copy-hotkey-loop-home-nav-enabled',
-        '#cgpt-setting-copy-hotkey-loop-home-nav-interval',
-        '#cgpt-setting-copy-hotkey-loop-home-nav-url',
-        '#cgpt-setting-copy-hotkey-continue-stop-signal',
-        '#cgpt-setting-copy-hotkey-continue-prompt-text',
       ].forEach((selector) => {
         bindSettingChange(root, selector, onCompactSettingChange, {
           moduleName: 'SETTINGS',
         });
       });
-
-      [
-        '#cgpt-setting-closed-loop-next-delay-min-sec',
-        '#cgpt-setting-closed-loop-next-delay-max-sec',
-      ].forEach((selector) => {
-        const closedLoopDelaySecEl = qs(selector, root);
-        if (closedLoopDelaySecEl && typeof debounceSave === 'function') {
-          const onClosedLoopDelayInput = debounceSave(onCompactSettingChange, 300);
-          closedLoopDelaySecEl.addEventListener('input', onClosedLoopDelayInput);
-        }
-      });
-
-      const edgeAutoHideEl = qs('#cgpt-setting-edge-auto-hide', root);
-
-      if (edgeAutoHideEl) {
-        edgeAutoHideEl.addEventListener('change', () => {
-          const enabled = !!edgeAutoHideEl.checked;
-
-          if (typeof ToolboxShell.setEdgeAutoHideEnabled === 'function') {
-            ToolboxShell.setEdgeAutoHideEnabled(enabled);
-          } else {
-            MemoryManager.set(MemoryManager.KEYS.edgeAutoHideEnabled, enabled);
-            ToolboxShell.appendLog(
-              `[SETTINGS][edgeAutoHide] ${enabled ? '已开启' : '已关闭'}，但 ToolboxShell.setEdgeAutoHideEnabled 不存在`,
-            );
-          }
-
-          render();
-        });
-      }
 
       const resetPosBtn = qs('#cgpt-setting-reset-toolbox-position', root);
       if (resetPosBtn) {
@@ -1084,25 +868,6 @@
 
         setSettingsStatus('已清理自动指令缓存，请刷新页面', 'ok', { ttlMs: 8000 });
         ToolboxShell.appendLog('[SETTINGS][clear-autoqueue-mojibake-cache] done — refresh page recommended');
-      });
-
-      const forceShowBtn = qs('#cgpt-setting-force-show-toolbox', root);
-      bindOnce(forceShowBtn, 'click', () => {
-          if (typeof ToolboxShell.restoreToolboxFromHiddenState === 'function') {
-            ToolboxShell.restoreToolboxFromHiddenState('settings-force-show');
-          } else if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.__cgptToolboxShow === 'function') {
-            unsafeWindow.__cgptToolboxShow();
-          } else if (typeof window.__cgptToolboxShow === 'function') {
-            window.__cgptToolboxShow();
-          } else {
-            ToolboxShell.appendLog('[SETTINGS][force-show-toolbox] restoreToolboxFromHiddenState 不存在');
-          }
-
-          if (typeof ToolboxShell.resetToolboxPosition === 'function') {
-            ToolboxShell.resetToolboxPosition();
-          }
-
-          ToolboxShell.appendLog('[SETTINGS][force-show-toolbox]');
       });
 
       function readBeepFromUi() {
@@ -1304,7 +1069,6 @@
           <div class="cgpt-settings-subtabs" id="cgpt-settings-subtabs">
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="toolbox">工具箱</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="shortcut">快捷键</button>
-            <button type="button" class="cgpt-settings-subtab" data-settings-subtab="continue-task">自动续写</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="quota-notify">额度提醒</button>
             <button type="button" class="cgpt-settings-subtab" data-settings-subtab="stats-debug">统计调试</button>
           </div>
@@ -1312,14 +1076,8 @@
           <div class="cgpt-settings-panel" data-settings-panel="toolbox">
             <div class="cgpt-section-title" style="margin-top: 4px;">工具箱显示与位置</div>
 
-            <label class="cgpt-checkbox-line" title="开启后，拖动工具箱贴住浏览器右边缘后自动收起，只保留边缘把手；只是靠近边缘不会隐藏。关闭后只保留普通拖拽，不自动隐藏。">
-              <input type="checkbox" id="cgpt-setting-edge-auto-hide">
-              工具箱贴边自动隐藏
-            </label>
-
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn" id="cgpt-setting-reset-toolbox-position" title="重置工具箱在页面中的位置">重置工具箱位置</button>
-              <button type="button" class="cgpt-btn primary" id="cgpt-setting-force-show-toolbox" title="当工具箱跑出屏幕、贴边状态异常或隐藏后找不到入口时，可先强制显示，再按需重置位置。">强制显示工具箱</button>
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">精简模式显示内容</div>
@@ -1337,18 +1095,6 @@
             <label class="cgpt-checkbox-line">
               <input type="checkbox" id="cgpt-setting-compact-show-file-list">
               显示上传文件列表
-            </label>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">拖拽上传</div>
-            <label class="cgpt-checkbox-line" title="拖到 ChatGPT 输入框仍由 ChatGPT 原生处理；拖到工具箱面板内始终加入队列。">
-              <input type="checkbox" id="cgpt-setting-global-drop-capture">
-              页面空白处拖入文件时加入工具箱队列
-            </label>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">复制回复</div>
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-restore-scroll-after-copy">
-              复制最后消息后恢复原滚动位置
             </label>
           </div>
 
@@ -1402,139 +1148,41 @@
             </div>
           </div>
 
-          <div class="cgpt-settings-panel" data-settings-panel="continue-task">
-            <div class="cgpt-section-title" style="margin-top: 4px;">连续复制+快捷键+继续（循环附加）</div>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-copy-hotkey-loop-auto-upload-enabled">
-              每隔指定轮数自动重新上传当前分组文件
-            </label>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-copy-hotkey-loop-auto-upload-interval">上传间隔轮数</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-copy-hotkey-loop-auto-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
-            </div>
-
-            <div class="cgpt-kv">
-              <label
-                for="cgpt-setting-closed-loop-next-delay-min-sec"
-                title="闭环每轮回复完成后，进入下一轮之前的最短等待秒数。默认 40 秒。"
-              >闭环最短等待（秒）</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-closed-loop-next-delay-min-sec"
-                data-no-wheel-number="1"
-                min="1"
-                max="600"
-                step="1"
-                placeholder="40"
-                title="单位：秒。默认 40 秒。"
-              >
-            </div>
-
-            <div class="cgpt-kv">
-              <label
-                for="cgpt-setting-closed-loop-next-delay-max-sec"
-                title="闭环每轮回复完成后，进入下一轮之前的最长等待秒数。默认 60 秒。"
-              >闭环最长等待（秒）</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-closed-loop-next-delay-max-sec"
-                data-no-wheel-number="1"
-                min="1"
-                max="600"
-                step="1"
-                placeholder="60"
-                title="单位：秒。默认 60 秒。"
-              >
-            </div>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">无限继续统一回首页</div>
-            <div class="cgpt-hint" style="margin-bottom: 8px;">适用于连续复制+快捷键+继续、闭环继续、自动继续、自动继续直到完成等所有无限继续模式。</div>
-
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-setting-unified-continue-home-nav-enabled">
-              启用定期回首页
-            </label>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-unified-continue-home-nav-interval" title="所有无限继续模式共用此间隔">无限继续每 N 轮回首页</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-unified-continue-home-nav-interval" data-no-wheel-number="1" min="1" max="999" step="1" title="所有无限继续模式共用此间隔">
-            </div>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-unified-continue-home-nav-url" title="默认每 5 轮重新上传一次文件（仅连续复制+快捷键+继续/闭环）。回首页间隔由上方统一参数控制。">回首页地址</label>
-              <input type="text" class="cgpt-input" id="cgpt-setting-unified-continue-home-nav-url" title="默认每 5 轮重新上传一次文件（仅连续复制+快捷键+继续/闭环）。回首页间隔由上方统一参数控制。">
-            </div>
-
-            <div class="cgpt-section-title" style="margin-top: 10px;">复制+快捷键+继续</div>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-copy-hotkey-continue-stop-signal">终止信号</label>
-              <input
-                type="text"
-                class="cgpt-input"
-                id="cgpt-setting-copy-hotkey-continue-stop-signal"
-                placeholder="<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>"
-              >
-            </div>
-
-            <div class="cgpt-kv cgpt-kv-vertical">
-              <label for="cgpt-setting-copy-hotkey-continue-prompt-text">继续指令</label>
-              <textarea
-                class="cgpt-input"
-                id="cgpt-setting-copy-hotkey-continue-prompt-text"
-                rows="12"
-                style="width: 100%; resize: vertical;"
-                placeholder="留空则使用内置默认继续指令。默认继续指令会要求：若任务涉及代码修改/修复/重构/Bug 定位/UI 状态/闭环控制/上传逻辑/日志排查，必须输出详细 Cursor / Claude Code 修改指令，并列出文件路径、函数名、关键代码、日志和验证步骤。"
-              ></textarea>
-            </div>
-
-            <div class="cgpt-row">
-              <button type="button" class="cgpt-btn" id="cgpt-setting-copy-hotkey-continue-prompt-reset" title="恢复内置默认继续指令。默认模板会强制要求涉及代码修改时输出详细 Cursor / Claude Code 修改指令。">
-                恢复默认继续指令
-              </button>
-            </div>
-          </div>
-
           <div class="cgpt-settings-panel" data-settings-panel="quota-notify">
             <div class="cgpt-section-title" style="margin-top: 4px;">额度设置</div>
 
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-upload-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">上传额度上限</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-upload-quota-limit"
-                data-no-wheel-number="1"
-                min="1"
-                max="10000"
-                step="1"
-                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
-              >
-            </div>
-
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-message-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">消息额度上限</label>
-              <input
-                type="number"
-                class="cgpt-input"
-                id="cgpt-setting-message-quota-limit"
-                data-no-wheel-number="1"
-                min="1"
-                max="10000"
-                step="1"
-                title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
-              >
+            <div class="cgpt-settings-grid cgpt-quota-limit-grid">
+              <div class="cgpt-kv">
+                <label for="cgpt-setting-upload-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">上传额度上限</label>
+                <input
+                  type="number"
+                  class="cgpt-input"
+                  id="cgpt-setting-upload-quota-limit"
+                  data-no-wheel-number="1"
+                  min="1"
+                  max="10000"
+                  step="1"
+                  title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
+                >
+              </div>
+              <div class="cgpt-kv">
+                <label for="cgpt-setting-message-quota-limit" title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。">消息额度上限</label>
+                <input
+                  type="number"
+                  class="cgpt-input"
+                  id="cgpt-setting-message-quota-limit"
+                  data-no-wheel-number="1"
+                  min="1"
+                  max="10000"
+                  step="1"
+                  title="该额度仅用于工具箱内部统计和提醒，不代表 ChatGPT 官方真实额度。"
+                >
+              </div>
             </div>
 
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-quota-save" title="修改上限后顶部「上传额度 / 消息额度」的分母会立即更新。">保存额度设置</button>
               <button type="button" class="cgpt-btn" id="cgpt-setting-quota-reset-stats" title="只清空工具箱内部已用计数，不会改动上限配置。">重置额度统计</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-view-events" title="查看滑动窗口内的全局上传/消息计数事件（所有标签页共享）。">查看窗口事件</button>
-              <button type="button" class="cgpt-btn" id="cgpt-setting-quota-export-events" title="导出滑动窗口内的全局额度事件到工具箱日志，并尝试复制到剪贴板。">导出事件日志</button>
             </div>
 
             <div class="cgpt-section-title" style="margin-top: 12px;">蜂鸣器 / 标题提醒</div>
@@ -1546,13 +1194,32 @@
               <label for="cgpt-setting-beep-volume">音量</label>
               <input type="range" class="cgpt-input" id="cgpt-setting-beep-volume" min="0.05" max="1" step="0.05">
             </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-duration" title="单位：秒。内部仍按毫秒保存与播放。">蜂鸣时长（秒）</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-beep-duration" data-no-wheel-number="1" min="0.03" max="10" step="0.1" title="单位：秒。默认 1 秒。">
-            </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
-              <input type="number" class="cgpt-input" id="cgpt-setting-beep-frequency" data-no-wheel-number="1" min="80" max="6000" step="10">
+            <div class="cgpt-settings-grid cgpt-beep-param-grid">
+              <div class="cgpt-kv">
+                <label for="cgpt-setting-beep-duration" title="单位：秒。内部仍按毫秒保存与播放。">蜂鸣时长（秒）</label>
+                <input
+                  type="number"
+                  class="cgpt-input"
+                  id="cgpt-setting-beep-duration"
+                  data-no-wheel-number="1"
+                  min="0.03"
+                  max="10"
+                  step="0.1"
+                  title="单位：秒。默认 1 秒。"
+                >
+              </div>
+              <div class="cgpt-kv">
+                <label for="cgpt-setting-beep-frequency">频率 (Hz)</label>
+                <input
+                  type="number"
+                  class="cgpt-input"
+                  id="cgpt-setting-beep-frequency"
+                  data-no-wheel-number="1"
+                  min="80"
+                  max="6000"
+                  step="10"
+                >
+              </div>
             </div>
             <div class="cgpt-row" style="margin-top: 8px;">
               <button type="button" class="cgpt-btn primary" id="cgpt-setting-test-beep" title="蜂鸣器用于复制成功提醒；浏览器可能要求先点击页面或工具箱一次后才允许播放声音。">测试蜂鸣器</button>

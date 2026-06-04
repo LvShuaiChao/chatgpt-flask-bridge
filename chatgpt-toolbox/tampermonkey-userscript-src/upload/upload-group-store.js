@@ -40,6 +40,20 @@
       }
 
       const awaitPersistQueueBriefly = deps.awaitPersistQueueBriefly;
+      const deleteUploadQueueRowById = deps.deleteUploadQueueRowById;
+      const markUploadFileDeletedTombstone = deps.markUploadFileDeletedTombstone;
+      const clearUploadFileDeletedTombstone = deps.clearUploadFileDeletedTombstone;
+      const isUploadFileDeletedByTombstone = deps.isUploadFileDeletedByTombstone;
+      [
+        ['deleteUploadQueueRowById', deleteUploadQueueRowById],
+        ['markUploadFileDeletedTombstone', markUploadFileDeletedTombstone],
+        ['clearUploadFileDeletedTombstone', clearUploadFileDeletedTombstone],
+        ['isUploadFileDeletedByTombstone', isUploadFileDeletedByTombstone],
+      ].forEach(([name, fn]) => {
+        if (typeof fn !== 'function') {
+          throw new Error(`UploadGroupStore missing dependency: ${name}`);
+        }
+      });
       const saveMultiUploadSelectionForActiveGroup = deps.saveMultiUploadSelectionForActiveGroup;
       const refreshUploadGroupCounts = deps.refreshUploadGroupCounts;
       const healStaleUploadRunningLockIfNeeded = deps.healStaleUploadRunningLockIfNeeded;
@@ -54,6 +68,14 @@
       const lastGroupNameInputValueRef = deps.lastGroupNameInputValueRef;
       const clearConfirmUntilRef = deps.clearConfirmUntilRef;
       const deleteConfirmUntilRef = deps.deleteConfirmUntilRef;
+      const clearUploadFilesByUserAction = deps.clearUploadFilesByUserAction;
+      const syncActiveGroupSelectionAfterQueueLoad = deps.syncActiveGroupSelectionAfterQueueLoad;
+      if (typeof clearUploadFilesByUserAction !== 'function') {
+        throw new Error('UploadGroupStore missing dependency: clearUploadFilesByUserAction');
+      }
+      if (typeof syncActiveGroupSelectionAfterQueueLoad !== 'function') {
+        throw new Error('UploadGroupStore missing dependency: syncActiveGroupSelectionAfterQueueLoad');
+      }
 
     const UPLOAD_GROUP_LAST_SELECTED_KEY = 'cgpt_toolbox_upload_group_last_selected_v1';
     const UPLOAD_GROUP_PAGE_SELECTED_PREFIX = 'cgpt_toolbox_upload_group_page_selected_v1:';
@@ -614,16 +636,37 @@
     }
 
     async function switchGroup(groupId, options = {}) {
-      if (!groupId) return;
-
+      const targetGroupId = String(groupId || '').trim();
+      if (!targetGroupId) {
+        ToolboxShell.appendLog('[UPLOAD_GROUP][SWITCH_SKIP] reason=empty-target');
+        return false;
+      }
+      const currentGroupId = String(state.activeGroupId || '').trim();
+      const reasonText = String(options.reason || 'switch-group').trim() || 'switch-group';
+      if (currentGroupId === targetGroupId) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][SELECT_NOOP_FAST] reason=${reasonText} groupId=${targetGroupId}`,
+        );
+        return true;
+      }
+      if (
+        state.switchingUploadGroup === true
+        && String(state.switchingUploadGroupTargetId || '').trim() === targetGroupId
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][SWITCH_SKIP] reason=in-flight target=${targetGroupId} active=${currentGroupId || '-'}`,
+        );
+        return false;
+      }
       appendUploadGroupLog('SWITCH', {
-        targetGroupId: groupId,
-        fromGroupId: getActiveGroupId() || '-',
-        reason: options.reason || '-',
+        targetGroupId,
+        fromGroupId: currentGroupId || '-',
+        reason: reasonText,
       });
-
+      const switchStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       healStaleUploadRunningLockIfNeeded('switchGroup');
-
       const uploadActuallyRunning = !!(
         (typeof isUploadRunActuallyActive === 'function' && isUploadRunActuallyActive())
         || (typeof hasActiveUploadInProgressOnQueue === 'function' && hasActiveUploadInProgressOnQueue())
@@ -631,104 +674,129 @@
       );
       if (uploadActuallyRunning) {
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][SWITCH_BLOCKED_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} stateRunning=${state.running ? 1 : 0} abort=${state.uploadAbortController ? 1 : 0}`,
+          `[UPLOAD_GROUP][SWITCH_BLOCKED_RUNNING] targetGroupId=${targetGroupId} activeGroupId=${state.activeGroupId || '-'} stateRunning=${state.running ? 1 : 0} abort=${state.uploadAbortController ? 1 : 0}`,
         );
         setStatus('附件正在上传中，暂时不能切换分组', 'warn');
-        return;
+        return false;
       }
       if (state.running) {
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][SWITCH_HEAL_STALE_RUNNING] targetGroupId=${groupId || '-'} activeGroupId=${state.activeGroupId || '-'} reason=state-running-without-real-upload`,
+          `[UPLOAD_GROUP][SWITCH_HEAL_STALE_RUNNING] targetGroupId=${targetGroupId} activeGroupId=${state.activeGroupId || '-'} reason=state-running-without-real-upload`,
         );
         state.running = false;
         state.cancelled = false;
         state.activeId = '';
         state.uploadAbortController = null;
       }
-
-      const exists = state.groups.some((g) => g.id === groupId);
+      const exists = state.groups.some((g) => g && g.id === targetGroupId);
       if (!exists) {
-        console.warn('[ChatGPT toolbox] switchGroup: 分组不存在', groupId);
-        ToolboxShell.appendLog(`[UPLOAD_GROUP][switch:missing] groupId=${groupId || '-'}`);
+        console.warn('[ChatGPT toolbox] switchGroup: 分组不存在', targetGroupId);
+        ToolboxShell.appendLog(`[UPLOAD_GROUP][switch:missing] groupId=${targetGroupId}`);
         setStatus('切换失败：分组不存在', 'error');
-        return;
+        return false;
       }
-
       const prevActiveGroupId = state.activeGroupId;
       const prevActiveId = state.activeId;
-      const prevQueue = state.queue.slice();
-      const reasonText = String(options.reason || 'switch-group').trim() || 'switch-group';
-
+      const prevQueue = Array.isArray(state.queue) ? state.queue.slice() : [];
+      const prevSelectedFileIdByGroup = {
+        ...(state.selectedFileIdByGroup || {}),
+      };
+      state.switchingUploadGroup = true;
+      state.switchingUploadGroupTargetId = targetGroupId;
       try {
-        await awaitPersistQueueBriefly('switchGroup:before', 300);
-
-        if (state.activeGroupId === groupId) {
-          appendUploadLog(
-            `[UPLOAD_GROUP][SELECT_NOOP] reason=${reasonText} groupId=${groupId}`,
-          );
-          return;
-        }
-
-        state.activeGroupId = groupId;
-        savePageSelectedUploadGroupId(groupId, reasonText);
-
+        state.activeGroupId = targetGroupId;
+        state.activeId = '';
+        savePageSelectedUploadGroupId(targetGroupId, reasonText);
         if (options.saveLastManual !== false) {
-          saveLastManualUploadGroupId(groupId, reasonText);
+          saveLastManualUploadGroupId(targetGroupId, reasonText);
           refs.lastManualUploadGroupAt = Date.now();
         }
-
         appendUploadLog(
-          `[UPLOAD_GROUP][SELECT_PAGE_ONLY] reason=${reasonText} old=${prevActiveGroupId || '-'} new=${groupId || '-'} pageScope=${getUploadGroupPageScopeKey()}`,
+          `[UPLOAD_GROUP][SELECT_PAGE_ONLY_FAST] reason=${reasonText} old=${prevActiveGroupId || '-'} new=${targetGroupId} pageScope=${getUploadGroupPageScopeKey()}`,
         );
-
-        await persistGroups();
-        await loadQueueForActiveGroup();
+        Promise.resolve(persistGroups())
+          .catch((err) => {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] persistGroups after switchGroup failed', err);
+            ToolboxShell.appendLog(
+              `[UPLOAD_GROUP][PERSIST_GROUPS_ASYNC_FAILED] target=${targetGroupId} error=${errText}`,
+            );
+          });
+        await loadQueueForActiveGroup({
+          reason: 'switch-group',
+          silentRender: true,
+          skipFullRender: true,
+          skipRender: true,
+          skipRefreshCounts: true,
+          skipMigration: true,
+        });
         saveMultiUploadSelectionForActiveGroup();
-
         renderProjectCategoryChips();
-        renderUploadListOnly('switch-group', { force: true });
+        renderUploadListOnly('switch-group:fast', { force: true });
         renderUploadButtonsOnly({
           immediate: true,
           force: true,
-          buttonTasksReason: 'switch-group',
+          buttonTasksReason: 'switch-group:fast',
         });
-        setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
-        render();
-
         syncUploadGroupAppState();
+        setStatus(`已切换到 ${getActiveGroupName()}`, 'success');
+        const costMs = ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - switchStartedAt;
         appendUploadGroupLog('SWITCH', {
           phase: 'ok',
           fromGroupId: prevActiveGroupId || '-',
-          targetGroupId: groupId || '-',
+          targetGroupId,
+          costMs: Math.round(costMs),
         });
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][switch:ok] from=${prevActiveGroupId || '-'} to=${groupId || '-'} count=${getActiveGroupFiles().length} selected=${getSelectedFileIdForActiveGroup() || '-'}`,
+          `[UPLOAD_GROUP][SWITCH_FAST_OK] from=${prevActiveGroupId || '-'} to=${targetGroupId} count=${getActiveGroupFiles().length} selected=${getSelectedFileIdForActiveGroup() || '-'} costMs=${costMs.toFixed(1)}`,
         );
+        Promise.resolve(refreshUploadGroupCounts({
+          reason: 'switch-group:background',
+          renderChips: true,
+        }))
+          .then(() => {
+            renderProjectCategoryChips();
+          })
+          .catch((err) => {
+            const errText = err && err.message ? err.message : String(err);
+            console.error('[ChatGPT toolbox] background refreshUploadGroupCounts failed after switchGroup', err);
+            ToolboxShell.appendLog(
+              `[UPLOAD_GROUP][COUNT_REFRESH_ASYNC_FAILED] target=${targetGroupId} error=${errText}`,
+            );
+          });
         broadcastUploadGlobalStateChanged('switch-group', {
-          sourceReason: options.reason || 'switch-group',
+          sourceReason: reasonText,
+          activeGroupId: targetGroupId,
         });
+        return true;
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
-
         state.activeGroupId = prevActiveGroupId;
         state.activeId = prevActiveId;
         state.queue = prevQueue;
-
-        render();
+        state.selectedFileIdByGroup = prevSelectedFileIdByGroup;
+        renderProjectCategoryChips();
+        renderUploadListOnly('switch-group:rollback', { force: true });
+        renderUploadButtonsOnly({
+          immediate: true,
+          force: true,
+          buttonTasksReason: 'switch-group:rollback',
+        });
         syncGroupManagePanel({
           force: true,
         });
-
         console.error('[ChatGPT toolbox] switchGroup failed', e);
-
         setStatus(`切换分组失败，已恢复原分组：${errText}`, 'error');
-
         ToolboxShell.appendLog(
-          `[UPLOAD_GROUP][switch:failed-rollback] from=${prevActiveGroupId || '-'} to=${groupId || '-'} type=${errName} error=${errText}`,
+          `[UPLOAD_GROUP][switch:failed-rollback] from=${prevActiveGroupId || '-'} to=${targetGroupId} type=${errName} error=${errText}`,
         );
-
         throw e;
+      } finally {
+        state.switchingUploadGroup = false;
+        state.switchingUploadGroupTargetId = '';
       }
     }
 
@@ -1201,92 +1269,102 @@
 
     async function removeFileFromCurrentGroup(id) {
       const fileId = String(id || '').trim();
-
       if (!fileId) {
         setStatus('删除失败：文件 ID 为空', 'error');
-        ToolboxShell.appendLog('[UPLOAD_DIAG][remove-file:skip] reason=empty-id');
+        ToolboxShell.appendLog('[UPLOAD_DELETE][SKIP] reason=empty-id');
         return false;
       }
-
       healStaleUploadRunningLockIfNeeded('remove-file-before-check');
-
       const uploadActuallyActive = state.running || isUploadRunActuallyActive();
-
       if (uploadActuallyActive) {
         setStatus('正在上传中，不能删除文件', 'warn');
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:skip] reason=upload-running id=${fileId} running=${state.running ? 1 : 0}`,
+          `[UPLOAD_DELETE][SKIP] reason=upload-running id=${fileId} running=${state.running ? 1 : 0}`,
         );
         return false;
       }
-
-      const q = getActiveGroupFiles().find((item) => item && item.id === fileId);
-
+      const activeGroupId = getActiveGroupId();
+      const q = getActiveGroupFiles().find((item) => item && String(item.id || '').trim() === fileId);
       if (!q) {
         setStatus('未找到要删除的文件', 'warn');
         console.warn('[ChatGPT toolbox] removeFileFromCurrentGroup: 文件不存在', fileId);
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:missing] id=${fileId} activeGroupId=${getActiveGroupId() || '-'}`,
+          `[UPLOAD_DELETE][MISSING] id=${fileId} activeGroupId=${activeGroupId || '-'}`,
         );
         return false;
       }
-
       if (!clearUploadFilesByUserAction('remove-file-from-current-group')) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_DELETE][BLOCKED] id=${fileId} reason=clearUploadFilesByUserAction-return-false`,
+        );
         return false;
       }
-
       const prevQueue = state.queue.slice();
-      const activeGroupId = getActiveGroupId();
-
+      const prevActiveId = state.activeId;
+      const prevSelectedFileIdByGroup = {
+        ...(state.selectedFileIdByGroup || {}),
+      };
       try {
-        state.queue = state.queue.filter((item) => item && item.id !== fileId);
-        syncActiveGroupSelectionAfterQueueLoad(activeGroupId);
-
-        render();
-        syncGroupManagePanel({ force: true });
-
-        setStatus(`已从界面移除：${q.name}，正在保存队列…`, 'success');
-
+        markUploadFileDeletedTombstone(fileId, activeGroupId, 'removeFileFromCurrentGroup:start');
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:ui-removed] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'}`,
+          `[UPLOAD_DELETE][START] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'} queueBefore=${state.queue.length}`,
         );
-
-        await withAllowedEmptyQueuePersist('remove-file-from-current-group', () => (
-          awaitPersistQueueBriefly('removeFileFromCurrentGroup', 300)
-        ));
-
-        render();
+        state.queue = state.queue.filter((item) => item && String(item.id || '').trim() !== fileId);
+        if (String(state.activeId || '').trim() === fileId) {
+          state.activeId = '';
+        }
+        if (
+          state.selectedFileIdByGroup
+          && activeGroupId
+          && String(state.selectedFileIdByGroup[activeGroupId] || '').trim() === fileId
+        ) {
+          delete state.selectedFileIdByGroup[activeGroupId];
+        }
+        syncActiveGroupSelectionAfterQueueLoad(activeGroupId);
+        renderUploadListOnly('remove-file:memory-removed', { force: true });
         syncGroupManagePanel({ force: true });
-
-        setStatus(`已从工具箱移除：${q.name}`, 'success');
-
+        setStatus(`已从界面移除：${q.name}，正在删除本地缓存…`, 'success');
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:ok] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'}`,
+          `[UPLOAD_DELETE][MEMORY_REMOVED] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'} queueAfter=${state.queue.length}`,
+        );
+        await deleteUploadQueueRowById(fileId, activeGroupId, {
+          reason: 'removeFileFromCurrentGroup',
+          item: q,
+        });
+        await withAllowedEmptyQueuePersist('remove-file-from-current-group', () => (
+          persistQueue('removeFileFromCurrentGroup:full-sync', {
+            mode: 'delete-file',
+          })
+        ));
+        await refreshUploadGroupCounts();
+        renderUploadListOnly('remove-file:done', { force: true });
+        syncGroupManagePanel({ force: true });
+        setStatus(`已从工具箱移除：${q.name}`, 'success');
+        ToolboxShell.appendLog(
+          `[UPLOAD_DELETE][OK] id=${fileId} name=${q.name || '-'} group=${activeGroupId || '-'} queueAfter=${state.queue.length}`,
         );
         broadcastUploadGlobalStateChanged('remove-file', {
           groupId: activeGroupId || '',
           fileId,
         });
-
         return true;
-      } catch (e) {
-        const errName = e && e.name ? e.name : 'Error';
-        const errText = e && e.message ? e.message : String(e);
-
+      } catch (error) {
+        const errName = error && error.name ? error.name : 'Error';
+        const errText = error && error.stack
+          ? error.stack
+          : (error && error.message ? error.message : String(error));
         state.queue = prevQueue;
-
-        render();
+        state.activeId = prevActiveId;
+        state.selectedFileIdByGroup = prevSelectedFileIdByGroup;
+        clearUploadFileDeletedTombstone(fileId, 'removeFileFromCurrentGroup:rollback');
+        renderUploadListOnly('remove-file:rollback', { force: true });
         syncGroupManagePanel({ force: true });
-
-        console.error('[ChatGPT toolbox] removeFileFromCurrentGroup failed', e);
-
-        setStatus(`移除文件失败，已恢复原队列：${errText}`, 'error');
-
+        console.error('[ChatGPT toolbox] removeFileFromCurrentGroup failed', error);
+        setStatus(`移除文件失败，已恢复原队列：${error && error.message ? error.message : String(error)}`, 'error');
         ToolboxShell.appendLog(
-          `[UPLOAD_DIAG][remove-file:failed-rollback] id=${fileId} name=${q.name || '-'} type=${errName} error=${errText}`,
+          `[UPLOAD_DELETE][FAILED_ROLLBACK] id=${fileId} name=${q.name || '-'} type=${errName} error=${errText}`,
         );
-
-        throw e;
+        throw error;
       }
     }
 

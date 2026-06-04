@@ -27,6 +27,7 @@
     "core/send-pipeline.js",
     "core/text-normalizer.js",
     "ui/toolbox-header-status.js",
+    "ui/toolbox-stable-geometry.js",
     "ui/toolbox-shell.js",
     "core/main.js",
     "send/composer-send-service.js",

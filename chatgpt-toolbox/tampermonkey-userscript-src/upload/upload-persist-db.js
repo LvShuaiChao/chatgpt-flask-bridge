@@ -252,6 +252,96 @@
       }
     }
 
+    async function deleteUploadQueueRowById(fileId, groupId = '', options = {}) {
+      const id = String(fileId || '').trim();
+      const gid = String(groupId || '').trim();
+      const reason = String(options && options.reason ? options.reason : 'delete-upload-file').trim();
+      if (!id) {
+        const message = 'deleteUploadQueueRowById: fileId is empty';
+        console.error('[ChatGPT toolbox]', message);
+        ToolboxShell.appendLog(`[UPLOAD_DELETE][DB_DELETE_SKIP] reason=empty-id group=${gid || '-'}`);
+        return {
+          ok: false,
+          deleted: false,
+          reason: 'empty-id',
+        };
+      }
+      let existingRow = null;
+      try {
+        const db = await openDb();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(APP.uploadStore, 'readwrite');
+          const store = tx.objectStore(APP.uploadStore);
+          const getReq = store.get(id);
+          getReq.onerror = () => {
+            reject(getReq.error || new Error(`IndexedDB get before delete failed: ${id}`));
+          };
+          getReq.onsuccess = () => {
+            existingRow = getReq.result || null;
+            if (!existingRow) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_DELETE][DB_ROW_MISSING] id=${id} group=${gid || '-'} reason=${reason}`,
+              );
+              return;
+            }
+            const rowGroupId = String(existingRow.groupId || gid || '').trim();
+            if (gid && rowGroupId && rowGroupId !== gid) {
+              ToolboxShell.appendLog(
+                `[UPLOAD_DELETE][DB_DELETE_GROUP_MISMATCH] id=${id} expected=${gid} actual=${rowGroupId} reason=${reason}`,
+              );
+              return;
+            }
+            const deleteReq = store.delete(id);
+            deleteReq.onerror = () => {
+              reject(deleteReq.error || new Error(`IndexedDB delete failed: ${id}`));
+            };
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error(`IndexedDB delete transaction failed: ${id}`));
+          tx.onabort = () => reject(tx.error || new Error(`IndexedDB delete transaction aborted: ${id}`));
+        });
+        const handleKey = String(
+          existingRow && (
+            existingRow.handleKey
+            || existingRow.fileHandleKey
+            || existingRow.uploadHandleKey
+            || ''
+          ) || '',
+        ).trim();
+        if (handleKey) {
+          const handleDeleted = await deleteUploadFileHandle(handleKey);
+          ToolboxShell.appendLog(
+            `[UPLOAD_DELETE][HANDLE_DELETE] id=${id} key=${handleKey} deleted=${handleDeleted ? 1 : 0} reason=${reason}`,
+          );
+        }
+        ToolboxShell.appendLog(
+          `[UPLOAD_DELETE][DB_DELETE_OK] id=${id} group=${gid || '-'} existed=${existingRow ? 1 : 0} reason=${reason}`,
+        );
+        if (typeof refreshUploadGroupCounts === 'function') {
+          await refreshUploadGroupCounts();
+        }
+        if (isUploadListDebugEnabled()) {
+          await debugReadBackPersistedQueue(`deleteUploadQueueRowById:${id}:after-delete`);
+        }
+        return {
+          ok: true,
+          deleted: !!existingRow,
+          existed: !!existingRow,
+          id,
+          groupId: gid,
+        };
+      } catch (error) {
+        const errText = error && error.stack
+          ? error.stack
+          : (error && error.message ? error.message : String(error));
+        console.error('[ChatGPT toolbox] deleteUploadQueueRowById failed', error);
+        ToolboxShell.appendLog(
+          `[UPLOAD_DELETE][DB_DELETE_FAILED] id=${id} group=${gid || '-'} reason=${reason} error=${errText}`,
+        );
+        throw error;
+      }
+    }
+
     function getPersistedUploadState(q) {
       if (!q) return UploadState.IDLE;
 
@@ -1541,7 +1631,17 @@
       }
     }
 
-    async function loadQueueForActiveGroup() {
+    async function loadQueueForActiveGroup(options = {}) {
+      const loadOptions = options && typeof options === 'object' ? options : {};
+      const reasonText = String(loadOptions.reason || 'load-queue').trim() || 'load-queue';
+      const silentRender = loadOptions.silentRender === true;
+      const skipRender = loadOptions.skipRender === true || silentRender;
+      const skipFullRender = loadOptions.skipFullRender === true || silentRender;
+      const skipRefreshCounts = loadOptions.skipRefreshCounts === true;
+      const skipMigration = loadOptions.skipMigration === true;
+      const loadStartedAt = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
       if (!state.activeGroupId) {
         console.warn('[ChatGPT toolbox] loadQueueForActiveGroup: activeGroupId 为空');
         setQueueRestorePhase('idle', {
@@ -1552,7 +1652,11 @@
         state.queue = [];
         setLastRestoreWarning('', { reason: 'load-queue-no-active-group' });
         clearUploadFailureStatusIndicators('load-queue-no-active-group');
-        render();
+        if (!skipFullRender) {
+          render();
+        } else if (!skipRender) {
+          renderUploadListOnly('loadQueueForActiveGroup:empty-active-group', { force: true });
+        }
         return;
       }
 
@@ -1565,7 +1669,14 @@
         ToolboxShell.appendLog(`[UPLOAD_RESTORE][START] activeGroupId=${state.activeGroupId || '-'}`);
         const db = await openDb();
 
-        const migrated = await migrateMissingGroupIdRows();
+        let migrated = true;
+        if (!skipMigration) {
+          migrated = await migrateMissingGroupIdRows();
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][load-queue:migrate-skipped-fast] groupId=${state.activeGroupId || '-'} reason=${reasonText}`,
+          );
+        }
 
         if (migrated === false) {
           ToolboxShell.appendLog(
@@ -1681,11 +1792,31 @@
         });
         refreshQueueReadableState();
         syncActiveGroupSelectionAfterQueueLoad(state.activeGroupId);
-        await refreshUploadGroupCounts();
+        if (!skipRefreshCounts) {
+          await refreshUploadGroupCounts({
+            reason: `${reasonText}:loadQueueForActiveGroup`,
+            renderChips: false,
+          });
+        } else {
+          syncActiveGroupCountInCache();
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][COUNT_REFRESH_SKIP_FAST] activeGroupId=${state.activeGroupId || '-'} reason=${reasonText}`,
+          );
+        }
         dedupeActiveGroupQueue('load-queue');
-        renderProjectCategoryChips();
-        renderUploadListOnly('loadQueueForActiveGroup:success');
-        render();
+        if (!skipRender) {
+          renderProjectCategoryChips();
+          renderUploadListOnly('loadQueueForActiveGroup:success', { force: true });
+        }
+        if (!skipFullRender) {
+          render();
+        }
+        const loadCostMs = ((typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now()) - loadStartedAt;
+        ToolboxShell.appendLog(
+          `[UPLOAD_GROUP][LOAD_QUEUE_COST] group=${state.activeGroupId || '-'} rows=${rows.length} queue=${state.queue.length} silent=${silentRender ? 1 : 0} skipRefreshCounts=${skipRefreshCounts ? 1 : 0} skipMigration=${skipMigration ? 1 : 0} costMs=${loadCostMs.toFixed(1)} reason=${reasonText}`,
+        );
         const visibleListItems = countRenderedUploadListItems(refs.listEl);
         ToolboxShell.appendLog(
           `[UPLOAD_RESTORE][DONE_RENDER_SYNC] activeGroupId=${state.activeGroupId || '-'} restored=${restoreStat.restored} visibleListItems=${visibleListItems}`,
@@ -1702,7 +1833,11 @@
           resetDirtyUploadRestoreState('invalid-restore-state', true);
           dedupeActiveGroupQueue('load-queue-invalid-restore-state');
           syncActiveGroupCountInCache();
-          render();
+          if (!skipFullRender) {
+            render();
+          } else if (!skipRender) {
+            renderUploadListOnly('loadQueueForActiveGroup:error', { force: true });
+          }
           reconcileIdleUploadFailureState('load-queue-invalid-restore-state');
           setStatus('上传队列恢复状态无效，已重置', 'warn', {
             owner: 'upload',
@@ -1759,6 +1894,7 @@
       saveUploadFileHandle,
       loadUploadFileHandle,
       deleteUploadFileHandle,
+      deleteUploadQueueRowById,
       getPersistedUploadState,
       getPersistedKindForItem,
       getRestoreStateForItem,

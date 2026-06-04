@@ -123,36 +123,129 @@ const AutoQueueModule = (() => {
       ].join('\n');
     }
 
-    function normalizeListProfiles() {
-      if (!Array.isArray(config.listProfiles)) {
-        config.listProfiles = [];
+    function getDefaultListProfileMeta() {
+      const defaultId = (typeof AutoqListStore !== 'undefined' && AutoqListStore.DEFAULT_LIST_ID)
+        ? AutoqListStore.DEFAULT_LIST_ID
+        : 'list_default';
+      const defaultName = (typeof AutoqListStore !== 'undefined' && AutoqListStore.DEFAULT_LIST_NAME)
+        ? AutoqListStore.DEFAULT_LIST_NAME
+        : '默认列表';
+
+      return { defaultId, defaultName };
+    }
+
+    function dedupeConfigListProfiles(rawProfiles) {
+      const { defaultId, defaultName } = getDefaultListProfileMeta();
+      const inputLists = Array.isArray(rawProfiles) ? rawProfiles : [];
+      const result = [];
+      const seenIds = new Set();
+      let hasDefault = false;
+
+      for (const item of inputLists) {
+        if (!item || typeof item !== 'object') {
+          continue;
+        }
+
+        const base = normalizeNamedEntity(item, {
+          prefix: 'autoq_list',
+          fallbackName: '未命名列表',
+          maxNameLength: 24,
+        });
+        const profile = {
+          ...base,
+          text: String(item.text || ''),
+        };
+
+        const rawId = String(profile.id || '').trim();
+        const rawName = String(profile.name || '').trim();
+        const isDefaultById = rawId === defaultId;
+        const isDefaultByName = rawName === defaultName;
+
+        if (isDefaultById || isDefaultByName) {
+          if (hasDefault) {
+            console.warn('[PROMPT_LIST][DEDUP_DEFAULT_LIST]', {
+              removedId: rawId,
+              removedName: rawName,
+            });
+            continue;
+          }
+
+          result.push({
+            ...profile,
+            id: defaultId,
+            name: defaultName,
+          });
+          seenIds.add(defaultId);
+          hasDefault = true;
+          continue;
+        }
+
+        const id = rawId || createId('autoq_list');
+        const name = rawName || '未命名列表';
+
+        if (seenIds.has(id)) {
+          console.warn('[PROMPT_LIST][DEDUP_DUPLICATE_ID]', {
+            removedId: id,
+            removedName: name,
+          });
+          continue;
+        }
+
+        result.push({
+          ...profile,
+          id,
+          name,
+        });
+        seenIds.add(id);
       }
 
-      config.listProfiles = config.listProfiles
-        .filter((item) => item && typeof item === 'object')
-        .map((item) => {
-          const base = normalizeNamedEntity(item, {
+      if (!hasDefault) {
+        const { defaultId: id, defaultName: name } = getDefaultListProfileMeta();
+        result.unshift({
+          ...normalizeNamedEntity({ id, name }, {
             prefix: 'autoq_list',
-            fallbackName: '未命名列表',
-            maxNameLength: 24,
-          });
-
-          return {
-            ...base,
-            text: String(item.text || ''),
-          };
-        });
-
-      if (!config.listProfiles.length) {
-        config.listProfiles.push({
-          ...normalizeNamedEntity(null, {
-            prefix: 'autoq_list',
-            fallbackName: '默认列表',
+            fallbackName: name,
             maxNameLength: 24,
           }),
           text: String(config.listPromptsText || getDefaultAutoListPromptsText()),
         });
       }
+
+      return result;
+    }
+
+    function getValidActiveListProfileId(lists) {
+      const { defaultId } = getDefaultListProfileMeta();
+      const savedActiveId = String(config.activeListProfileId || config.lastSelectedListProfileId || '').trim();
+      const hasSavedActive = lists.some((item) => item && item.id === savedActiveId);
+
+      if (hasSavedActive) {
+        return savedActiveId;
+      }
+
+      return defaultId;
+    }
+
+    function normalizeListProfiles() {
+      if (!Array.isArray(config.listProfiles)) {
+        config.listProfiles = [];
+      }
+
+      config.listProfiles = dedupeConfigListProfiles(config.listProfiles);
+
+      if (!config.listProfiles.length) {
+        const { defaultId, defaultName } = getDefaultListProfileMeta();
+        config.listProfiles.push({
+          ...normalizeNamedEntity({ id: defaultId, name: defaultName }, {
+            prefix: 'autoq_list',
+            fallbackName: defaultName,
+            maxNameLength: 24,
+          }),
+          text: String(config.listPromptsText || getDefaultAutoListPromptsText()),
+        });
+      }
+
+      config.activeListProfileId = getValidActiveListProfileId(config.listProfiles);
 
       const preferredId = String(
         config.activeListProfileId
@@ -1609,29 +1702,10 @@ const AutoQueueModule = (() => {
         : '第 - / - 个';
       const titleText = listSnap.currentTaskTitle || '-';
       const taskLineValue = `${indexText} | ${titleText}`;
-      const stepLabels = {
-        'send-current-task': '正在发送当前任务',
-        'retry-current-send': '发送失败，正在重试',
-        'waiting-reply': '等待 ChatGPT 回复',
-        'next-task': '准备下一个任务',
-        done: '任务已完成',
-        failed: '任务失败',
-        pending: '等待发送',
-      };
-      const stepText = stepLabels[listSnap.step] || listSnap.displayMessage || listSnap.step || '-';
-      const statsSuffix = listSnap.stats
-        ? ` | 已完成 ${listSnap.stats.done} | 待执行 ${listSnap.stats.pending} | 失败 ${listSnap.stats.failed}`
-        : '';
-      const metaValue = `step=${listSnap.step || '-'} | status=${listSnap.currentTaskStatus || '-'} | initialSent=${listSnap.initialSent || 0} | batchSent=${listSnap.batchSent || 0}${statsSuffix}`;
-      let html = renderAutoQueueUserStatusRow('当前任务', taskLineValue, {
+      return renderAutoQueueUserStatusRow('当前任务', taskLineValue, {
         className: 'cgpt-current-task-row',
         valueClassName: 'cgpt-current-task-value',
       });
-      html += renderAutoQueueUserStatusRow('任务步骤', `${stepText} | ${metaValue}`, {
-        className: 'cgpt-current-task-meta-row',
-        valueClassName: 'cgpt-current-task-meta-value cgpt-autoq-step cgpt-task-step cgpt-task-detail',
-      });
-      return html;
     }
 
     function buildCurrentBatchTaskSummaryHtml(source = 'render-batch-status-card') {
@@ -1653,7 +1727,6 @@ const AutoQueueModule = (() => {
         `sentCount：${info.sentCount}`,
         `continueCount：${info.continueCount}`,
       ].join('\n');
-      const metaValue = `taskId=${info.taskId} | step=${info.step} | status=${info.taskStatus} | batchSent=${info.batchTotalSentCount || 0} | taskContinue=${info.currentTaskContinueCount || 0} | initialSent=${info.currentTaskInitialSent ? 1 : 0}`;
       const businessSent = Math.max(0, Number(info.businessSentCount || info.sentCount || 0));
       let sendRoundValue = `业务发送 ${businessSent} 次`;
       if (!info.currentTaskInitialSent) {
@@ -1676,11 +1749,6 @@ const AutoQueueModule = (() => {
       let html = renderAutoQueueUserStatusRow('当前任务', taskLineValue, {
         className: 'cgpt-current-task-row',
         valueClassName: 'cgpt-current-task-value',
-        valueTitle: tooltip,
-      });
-      html += renderAutoQueueUserStatusRow('任务步骤', metaValue, {
-        className: 'cgpt-current-task-meta-row',
-        valueClassName: 'cgpt-current-task-meta-value cgpt-autoq-step cgpt-task-step cgpt-task-detail',
         valueTitle: tooltip,
       });
       if (info.batchRunning) {
@@ -4216,6 +4284,273 @@ const AutoQueueModule = (() => {
       }
     }
 
+    const XZ_CLOSED_LOOP_INNER_TAB_KEY = 'xz_toolbox_closed_loop_inner_tab_v1';
+
+    function xzGetClosedLoopInnerTab() {
+      const value = String(localStorage.getItem(XZ_CLOSED_LOOP_INNER_TAB_KEY) || 'overview').trim();
+      if (['overview', 'mode', 'settings', 'advanced'].includes(value)) {
+        return value;
+      }
+      return 'overview';
+    }
+
+    function xzSetClosedLoopInnerTab(tabName) {
+      const value = String(tabName || 'overview').trim();
+      if (!['overview', 'mode', 'settings', 'advanced'].includes(value)) {
+        console.warn('[CLOSED_LOOP_TABS][INVALID_TAB]', value);
+        return;
+      }
+      try {
+        localStorage.setItem(XZ_CLOSED_LOOP_INNER_TAB_KEY, value);
+      } catch (error) {
+        console.warn('[CLOSED_LOOP_TABS][SAVE_FAIL]', error);
+      }
+      xzRenderClosedLoopInnerTabs(value);
+    }
+
+    function xzCreateClosedLoopInnerTabs(activeTab) {
+      const safeActive = ['overview', 'mode', 'settings', 'advanced'].includes(activeTab)
+        ? activeTab
+        : 'overview';
+      return `
+        <div class="xz-closedloop-inner-tabs" data-xz-closedloop-inner-tabs="1">
+            <button type="button"
+                    class="xz-closedloop-inner-tab ${safeActive === 'overview' ? 'active' : ''}"
+                    data-xz-closedloop-tab="overview">
+                概览
+            </button>
+            <button type="button"
+                    class="xz-closedloop-inner-tab ${safeActive === 'mode' ? 'active' : ''}"
+                    data-xz-closedloop-tab="mode">
+                模式
+            </button>
+            <button type="button"
+                    class="xz-closedloop-inner-tab ${safeActive === 'settings' ? 'active' : ''}"
+                    data-xz-closedloop-tab="settings">
+                设置
+            </button>
+            <button type="button"
+                    class="xz-closedloop-inner-tab ${safeActive === 'advanced' ? 'active' : ''}"
+                    data-xz-closedloop-tab="advanced">
+                高级
+            </button>
+        </div>
+      `;
+    }
+
+    function xzRenderClosedLoopInnerTabs(activeTab) {
+      const panelRoot = document.querySelector('[data-xz-closedloop-page="1"]');
+      if (!panelRoot) {
+        console.warn('[CLOSED_LOOP_TABS][RENDER_FAIL] closed loop root not found');
+        return;
+      }
+      const safeActive = ['overview', 'mode', 'settings', 'advanced'].includes(activeTab)
+        ? activeTab
+        : 'overview';
+      const tabButtons = panelRoot.querySelectorAll('[data-xz-closedloop-tab]');
+      tabButtons.forEach((btn) => {
+        const tab = String(btn.getAttribute('data-xz-closedloop-tab') || '');
+        btn.classList.toggle('active', tab === safeActive);
+      });
+      const panels = panelRoot.querySelectorAll('[data-xz-closedloop-panel]');
+      panels.forEach((panel) => {
+        const tab = String(panel.getAttribute('data-xz-closedloop-panel') || '');
+        const isActive = tab === safeActive;
+        panel.hidden = !isActive;
+        panel.style.display = isActive ? '' : 'none';
+      });
+      console.info('[CLOSED_LOOP_TABS][SWITCH]', { activeTab: safeActive });
+    }
+
+    function xzBindClosedLoopInnerTabs(panelRoot) {
+      if (!panelRoot) {
+        console.warn('[CLOSED_LOOP_TABS][BIND_FAIL] root is empty');
+        return;
+      }
+      if (panelRoot.__xzClosedLoopInnerTabsBound) {
+        return;
+      }
+      panelRoot.__xzClosedLoopInnerTabsBound = true;
+      panelRoot.addEventListener('click', (event) => {
+        const gotoBtn = event.target instanceof HTMLElement
+          ? event.target.closest('[data-xz-closedloop-goto]')
+          : null;
+        if (gotoBtn) {
+          const gotoTab = String(gotoBtn.getAttribute('data-xz-closedloop-goto') || 'mode').trim();
+          xzSetClosedLoopInnerTab(gotoTab);
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        const btn = event.target instanceof HTMLElement
+          ? event.target.closest('[data-xz-closedloop-tab]')
+          : null;
+        if (!btn) {
+          return;
+        }
+        const tabName = String(btn.getAttribute('data-xz-closedloop-tab') || 'overview');
+        xzSetClosedLoopInnerTab(tabName);
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+      console.info('[CLOSED_LOOP_TABS][BOUND]');
+    }
+
+    function initAutoQueueClosedLoopInnerTabs() {
+      if (!root) return;
+      const panel = qs('#cgpt-autoq-closed-loop-panel', root);
+      if (!panel || !panel.hasAttribute('data-xz-closedloop-page')) return;
+      xzBindClosedLoopInnerTabs(panel);
+      xzRenderClosedLoopInnerTabs(xzGetClosedLoopInnerTab());
+    }
+
+    function renderClosedLoopOverviewSection() {
+      return `
+        <div class="xz-card xz-closedloop-overview-card">
+          <div class="xz-card-title">当前状态</div>
+          <div class="xz-card-desc">
+            上方状态面板会实时显示当前状态、建议处理、任务耗时，以及轮次 / 上传 / 消息统计。切换下方选项卡不会中断闭环，也不会清空输入内容。
+          </div>
+        </div>
+        <div class="xz-card xz-closedloop-actions-card">
+          <div class="xz-card-title">常用操作</div>
+          <div class="xz-card-desc">启动或停止闭环请在「模式」页使用对应按钮；运行中按钮会变为「停止闭环继续」。</div>
+          <div class="xz-button-wrap">
+            <button type="button" class="cgpt-btn cyan" data-xz-closedloop-goto="mode">前往模式页启动闭环</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderClosedLoopModeSection() {
+      return `
+        <div class="xz-card xz-closedloop-mode-card">
+          <div class="xz-button-wrap cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每1轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-仅对话+每5轮上传</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderClosedLoopSettingsSection() {
+      return `
+        <div class="xz-card xz-closedloop-settings-card">
+          <div class="xz-card-title">闭环等待设置</div>
+          <label class="cgpt-checkbox-line">
+            <input type="checkbox" id="cgpt-autoq-closed-loop-auto-upload-enabled">
+            每隔指定轮数自动重新上传当前分组文件
+          </label>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-upload-interval">每 N 轮上传一次</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+          </div>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-delay-min-sec">每轮完成后最短等待秒数</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-min-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+          </div>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-closed-loop-delay-max-sec">每轮完成后最长等待秒数</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-max-sec" data-no-wheel-number="1" min="1" max="600" step="1">
+          </div>
+          <div class="cgpt-hint">
+            默认随机等待 40～60 秒。每轮回复完成并确认没有终止信号后，会重新随机取一个等待时间，再进入下一轮。
+          </div>
+        </div>
+        <div class="xz-card xz-closedloop-settings-card" style="margin-top: 8px;">
+          <div class="xz-card-title">无限继续回首页</div>
+          <div class="xz-card-desc">
+            适用于闭环继续、连续复制+快捷键+继续、自动继续直到完成等无限继续模式。
+          </div>
+          <label class="cgpt-checkbox-line">
+            <input type="checkbox" id="cgpt-autoq-unified-continue-home-nav-enabled">
+            启用定期回首页
+          </label>
+          <div class="cgpt-kv">
+            <label for="cgpt-autoq-unified-continue-home-nav-interval">每 N 轮回首页</label>
+            <input type="number" class="cgpt-input" id="cgpt-autoq-unified-continue-home-nav-interval" data-no-wheel-number="1" min="1" max="999" step="1">
+          </div>
+          <div class="cgpt-kv cgpt-settings-continue-wide-kv">
+            <label for="cgpt-autoq-unified-continue-home-nav-url">回首页地址</label>
+            <input type="text" class="cgpt-input" id="cgpt-autoq-unified-continue-home-nav-url">
+          </div>
+        </div>
+        <div class="xz-card xz-closedloop-settings-card" style="margin-top: 8px;">
+          <div class="xz-card-title">自动续写相关设置</div>
+          <div class="xz-card-desc">继续指令留空则使用内置默认；终止信号与高级诊断见「高级」页。</div>
+          <div class="cgpt-kv cgpt-kv-vertical cgpt-settings-continue-text-kv">
+            <label for="cgpt-autoq-copy-hotkey-continue-prompt-text">继续指令</label>
+            <textarea
+              class="cgpt-input"
+              id="cgpt-autoq-copy-hotkey-continue-prompt-text"
+              rows="8"
+              placeholder="留空则使用内置默认继续指令。"
+            ></textarea>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderClosedLoopAdvancedSection() {
+      return `
+        <div class="xz-card xz-closedloop-advanced-card">
+          <div class="xz-card-title">高级诊断</div>
+          <div class="xz-card-desc">
+            终止信号、调试日志与详细状态字段。上方状态面板可展开「调试详情」查看诊断快照。
+          </div>
+          <div class="cgpt-section-title" style="margin-top: 4px;">终止信号与继续指令</div>
+          <div class="cgpt-kv cgpt-settings-continue-wide-kv">
+            <label for="cgpt-autoq-copy-hotkey-continue-stop-signal">终止信号</label>
+            <input type="text" class="cgpt-input" id="cgpt-autoq-copy-hotkey-continue-stop-signal" placeholder="<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>">
+          </div>
+          <div class="cgpt-row xz-button-wrap" style="margin-top: 8px;">
+            <button type="button" class="cgpt-btn" id="cgpt-autoq-copy-hotkey-continue-prompt-reset">
+              恢复默认继续指令
+            </button>
+            <button type="button" class="cgpt-btn" data-action="copy-log" title="复制小张工具箱内存日志，便于排查上传、发送、等待回复等问题">复制日志</button>
+            <button type="button" class="cgpt-btn cgpt-debug-only" data-action="advanced-debug" data-button-role="advanced-debug" title="展开或收起上方状态区的调试详情">调试详情</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function buildAutoQueueClosedLoopPanelInnerHtml(activeInnerTab) {
+      const safeActive = ['overview', 'mode', 'settings', 'advanced'].includes(activeInnerTab)
+        ? activeInnerTab
+        : 'overview';
+      const panelHidden = (tab) => (tab !== safeActive ? ' hidden' : '');
+      const panelStyle = (tab) => (tab !== safeActive ? ' style="display: none;"' : '');
+      return `
+        ${xzCreateClosedLoopInnerTabs(safeActive)}
+        <section class="xz-closedloop-panel" data-xz-closedloop-panel="overview"${panelHidden('overview')}${panelStyle('overview')}>
+          ${renderClosedLoopOverviewSection()}
+        </section>
+        <section class="xz-closedloop-panel" data-xz-closedloop-panel="mode"${panelHidden('mode')}${panelStyle('mode')}>
+          ${renderClosedLoopModeSection()}
+        </section>
+        <section class="xz-closedloop-panel" data-xz-closedloop-panel="settings"${panelHidden('settings')}${panelStyle('settings')}>
+          ${renderClosedLoopSettingsSection()}
+        </section>
+        <section class="xz-closedloop-panel" data-xz-closedloop-panel="advanced"${panelHidden('advanced')}${panelStyle('advanced')}>
+          ${renderClosedLoopAdvancedSection()}
+        </section>
+      `;
+    }
+
+    function migrateAutoQueueClosedLoopPanelToInnerTabs(panel) {
+      if (!panel || panel.hasAttribute('data-xz-closedloop-page')) {
+        return false;
+      }
+      const activeInnerTab = xzGetClosedLoopInnerTab();
+      panel.classList.add('xz-closedloop-page');
+      panel.setAttribute('data-xz-closedloop-page', '1');
+      panel.innerHTML = buildAutoQueueClosedLoopPanelInnerHtml(activeInnerTab);
+      delete panel.__xzClosedLoopInnerTabsBound;
+      ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][PANEL_MIGRATE] upgraded closed-loop panel to inner tabs');
+      return true;
+    }
+
     function getClosedLoopCompactConfigForAutoq() {
       if (
         typeof UploadModule !== 'undefined'
@@ -4233,52 +4568,91 @@ const AutoQueueModule = (() => {
     function saveAutoQueueClosedLoopSettingsFromUi() {
       const panel = root ? qs('#cgpt-autoq-closed-loop-panel', root) : null;
       if (!panel) return;
-      const enabledEl = qs('#cgpt-autoq-closed-loop-auto-upload-enabled', panel);
-      const intervalEl = qs('#cgpt-autoq-closed-loop-upload-interval', panel);
-      const minEl = qs('#cgpt-autoq-closed-loop-delay-min-sec', panel);
-      const maxEl = qs('#cgpt-autoq-closed-loop-delay-max-sec', panel);
-      const enabled = enabledEl ? !!enabledEl.checked : true;
-      let interval = Number(intervalEl ? intervalEl.value : 5);
-      if (!Number.isFinite(interval) || interval < 1) interval = 5;
-      interval = Math.max(1, Math.min(999, Math.floor(interval)));
-      let minSec = Number(minEl ? minEl.value : 40);
-      let maxSec = Number(maxEl ? maxEl.value : 60);
-      if (!Number.isFinite(minSec) || minSec <= 0) minSec = 40;
-      if (!Number.isFinite(maxSec) || maxSec <= 0) maxSec = 60;
-      minSec = Math.max(1, Math.min(600, Math.round(minSec)));
-      maxSec = Math.max(1, Math.min(600, Math.round(maxSec)));
-      if (minSec > maxSec) {
-        const tmp = minSec;
-        minSec = maxSec;
-        maxSec = tmp;
+      try {
+        const enabledEl = qs('#cgpt-autoq-closed-loop-auto-upload-enabled', panel);
+        const intervalEl = qs('#cgpt-autoq-closed-loop-upload-interval', panel);
+        const minEl = qs('#cgpt-autoq-closed-loop-delay-min-sec', panel);
+        const maxEl = qs('#cgpt-autoq-closed-loop-delay-max-sec', panel);
+        const homeNavEnabledEl = qs('#cgpt-autoq-unified-continue-home-nav-enabled', panel);
+        const homeNavIntervalEl = qs('#cgpt-autoq-unified-continue-home-nav-interval', panel);
+        const homeNavUrlEl = qs('#cgpt-autoq-unified-continue-home-nav-url', panel);
+        const stopSignalEl = qs('#cgpt-autoq-copy-hotkey-continue-stop-signal', panel);
+        const continuePromptEl = qs('#cgpt-autoq-copy-hotkey-continue-prompt-text', panel);
+        const enabled = enabledEl ? !!enabledEl.checked : true;
+        let interval = Number(intervalEl ? intervalEl.value : 5);
+        if (!Number.isFinite(interval) || interval < 1) interval = 5;
+        interval = Math.max(1, Math.min(999, Math.floor(interval)));
+        let minSec = Number(minEl ? minEl.value : 40);
+        let maxSec = Number(maxEl ? maxEl.value : 60);
+        if (!Number.isFinite(minSec) || minSec <= 0) minSec = 40;
+        if (!Number.isFinite(maxSec) || maxSec <= 0) maxSec = 60;
+        minSec = Math.max(1, Math.min(600, Math.round(minSec)));
+        maxSec = Math.max(1, Math.min(600, Math.round(maxSec)));
+        if (minSec > maxSec) {
+          const tmp = minSec;
+          minSec = maxSec;
+          maxSec = tmp;
+        }
+        let homeNavInterval = Number(homeNavIntervalEl ? homeNavIntervalEl.value : 20);
+        if (!Number.isFinite(homeNavInterval) || homeNavInterval < 1) homeNavInterval = 20;
+        homeNavInterval = Math.max(1, Math.min(999, Math.floor(homeNavInterval)));
+        const homeNavUrl = String(
+          homeNavUrlEl && homeNavUrlEl.value
+            ? homeNavUrlEl.value
+            : 'https://chatgpt.com/',
+        ).trim() || 'https://chatgpt.com/';
+        const defaultStopSignal = typeof getDefaultDoneSignal === 'function'
+          ? getDefaultDoneSignal()
+          : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+        const stopSignal = String(
+          stopSignalEl && stopSignalEl.value
+            ? stopSignalEl.value
+            : defaultStopSignal,
+        ).trim() || defaultStopSignal;
+        const continuePromptText = String(
+          continuePromptEl && continuePromptEl.value
+            ? continuePromptEl.value
+            : '',
+        ).trim();
+        const current = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
+          ? CompactUiConfigStore.get()
+          : {};
+        const nextContinueAutomation = Object.assign({}, current.continueAutomation || {}, {
+          autoUploadEnabled: enabled,
+          autoUploadInterval: interval,
+          closedLoopNextDelayMinMs: minSec * 1000,
+          closedLoopNextDelayMaxMs: maxSec * 1000,
+          closedLoopNextDelayMs: minSec * 1000,
+          homeNavEnabled: homeNavEnabledEl ? homeNavEnabledEl.checked === true : current.continueAutomation?.homeNavEnabled !== false,
+          homeNavInterval,
+          homeNavUrl,
+        });
+        const nextConfig = Object.assign({}, current, {
+          continueAutomation: nextContinueAutomation,
+          copyHotkeyContinueStopSignal: stopSignal,
+          copyHotkeyContinuePromptText: continuePromptText,
+        });
+        if (typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.save) {
+          CompactUiConfigStore.save(nextConfig);
+        } else if (typeof MemoryManager !== 'undefined' && MemoryManager.KEYS) {
+          MemoryManager.set(MemoryManager.KEYS.compactUiConfig, nextConfig);
+        } else {
+          console.error('[AUTOQ][CONTINUE_SETTINGS][SAVE_FAILED] CompactUiConfigStore 和 MemoryManager 均不可用');
+          ToolboxShell.appendLog('[AUTOQ][CONTINUE_SETTINGS][SAVE_FAILED] reason=no-store');
+          return;
+        }
+        ToolboxShell.appendLog(
+          `[AUTOQ][CONTINUE_SETTINGS][SAVE] enabled=${enabled ? 1 : 0} interval=${interval} minSec=${minSec} maxSec=${maxSec} homeNav=${nextContinueAutomation.homeNavEnabled ? 1 : 0} homeNavInterval=${homeNavInterval} homeNavUrl=${homeNavUrl} stopSignalLen=${stopSignal.length} promptLen=${continuePromptText.length}`,
+        );
+        ToolboxShell.appendLog(
+          `[AUTOQ][CLOSED_LOOP][SETTING_SAVE] enabled=${enabled ? 1 : 0} interval=${interval} minSec=${minSec} maxSec=${maxSec}`,
+        );
+        renderAutoQueueClosedLoopSettings();
+        refreshAutoQueueClosedLoopButtons('settings-save');
+      } catch (err) {
+        console.error('[AUTOQ][CONTINUE_SETTINGS][SAVE_FAILED]', err);
+        ToolboxShell.appendLog(`[AUTOQ][CONTINUE_SETTINGS][SAVE_FAILED] reason=${err && err.message ? err.message : String(err)}`);
       }
-      const current = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
-        ? CompactUiConfigStore.get()
-        : {};
-      const nextContinueAutomation = Object.assign({}, current.continueAutomation || {}, {
-        autoUploadEnabled: enabled,
-        autoUploadInterval: interval,
-        closedLoopNextDelayMinMs: minSec * 1000,
-        closedLoopNextDelayMaxMs: maxSec * 1000,
-        closedLoopNextDelayMs: minSec * 1000,
-      });
-      const nextConfig = Object.assign({}, current, {
-        continueAutomation: nextContinueAutomation,
-      });
-      if (typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.save) {
-        CompactUiConfigStore.save(nextConfig);
-      } else if (typeof MemoryManager !== 'undefined' && MemoryManager.KEYS) {
-        MemoryManager.set(MemoryManager.KEYS.compactUiConfig, nextConfig);
-      } else {
-        console.error('[AUTOQ][CLOSED_LOOP][SETTING_SAVE_FAILED] CompactUiConfigStore 和 MemoryManager 均不可用');
-        ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][SETTING_SAVE_FAILED] reason=no-store');
-        return;
-      }
-      ToolboxShell.appendLog(
-        `[AUTOQ][CLOSED_LOOP][SETTING_SAVE] enabled=${enabled ? 1 : 0} interval=${interval} minSec=${minSec} maxSec=${maxSec}`,
-      );
-      renderAutoQueueClosedLoopSettings();
-      refreshAutoQueueClosedLoopButtons('settings-save');
     }
 
     function renderAutoQueueClosedLoopSettings() {
@@ -4301,6 +4675,33 @@ const AutoQueueModule = (() => {
       const maxEl = qs('#cgpt-autoq-closed-loop-delay-max-sec', panel);
       if (maxEl) {
         maxEl.value = String(Math.max(1, Math.round(Number(cfg.closedLoopNextDelayMaxMs || 60000) / 1000)));
+      }
+      const homeNavEnabledEl = qs('#cgpt-autoq-unified-continue-home-nav-enabled', panel);
+      if (homeNavEnabledEl) {
+        homeNavEnabledEl.checked = cfg.homeNavEnabled !== false;
+      }
+      const homeNavIntervalEl = qs('#cgpt-autoq-unified-continue-home-nav-interval', panel);
+      if (homeNavIntervalEl) {
+        homeNavIntervalEl.value = String(Number(cfg.homeNavInterval || 20));
+      }
+      const homeNavUrlEl = qs('#cgpt-autoq-unified-continue-home-nav-url', panel);
+      if (homeNavUrlEl) {
+        homeNavUrlEl.value = String(cfg.homeNavUrl || 'https://chatgpt.com/');
+      }
+      const compactCfg = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
+        ? CompactUiConfigStore.get()
+        : {};
+      const stopSignalEl = qs('#cgpt-autoq-copy-hotkey-continue-stop-signal', panel);
+      if (stopSignalEl) {
+        stopSignalEl.value = String(
+          compactCfg.copyHotkeyContinueStopSignal
+          || (typeof getDefaultDoneSignal === 'function' ? getDefaultDoneSignal() : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>'),
+        );
+      }
+      const continuePromptEl = qs('#cgpt-autoq-copy-hotkey-continue-prompt-text', panel);
+      if (continuePromptEl) {
+        continuePromptEl.value = String(compactCfg.copyHotkeyContinuePromptText || '');
+        continuePromptEl.placeholder = '留空则使用内置默认继续指令。默认继续指令会要求：如果任务未完成就继续输出；如果涉及代码修改、修复、重构、UI 状态、闭环控制、上传逻辑或日志排查，必须输出详细 Cursor / Claude Code 修改指令。';
       }
     }
 
@@ -4338,6 +4739,7 @@ const AutoQueueModule = (() => {
       }
       renderAutoQueueClosedLoopSettings();
       refreshAutoQueueClosedLoopButtons('visibility-render');
+      initAutoQueueClosedLoopInnerTabs();
     }
 
     function ensureAutoQueueClosedLoopShell() {
@@ -4360,44 +4762,23 @@ const AutoQueueModule = (() => {
         const anchor = taskPanel || editorBlock;
         if (!anchor || !anchor.parentElement) return;
         const panel = document.createElement('div');
-        panel.className = `cgpt-autoq-closed-loop-panel${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}`;
+        panel.className = `cgpt-autoq-closed-loop-panel xz-closedloop-page${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}`;
         panel.id = 'cgpt-autoq-closed-loop-panel';
-        panel.innerHTML = `
-          <div class="cgpt-section-title" style="margin-top: 4px;">闭环控制模式</div>
-          <div class="cgpt-hint" style="margin-bottom: 8px;">
-            闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
-          </div>
-          <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每1轮上传</button>
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每5轮上传</button>
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-仅对话+每5轮上传</button>
-          </div>
-          <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
-          <label class="cgpt-checkbox-line">
-            <input type="checkbox" id="cgpt-autoq-closed-loop-auto-upload-enabled">
-            每隔指定轮数自动重新上传当前分组文件
-          </label>
-          <div class="cgpt-kv">
-            <label for="cgpt-autoq-closed-loop-upload-interval">每 N 轮上传一次</label>
-            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
-          </div>
-          <div class="cgpt-kv">
-            <label for="cgpt-autoq-closed-loop-delay-min-sec">每轮完成后最短等待秒数</label>
-            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-min-sec" data-no-wheel-number="1" min="1" max="600" step="1">
-          </div>
-          <div class="cgpt-kv">
-            <label for="cgpt-autoq-closed-loop-delay-max-sec">每轮完成后最长等待秒数</label>
-            <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-max-sec" data-no-wheel-number="1" min="1" max="600" step="1">
-          </div>
-          <div class="cgpt-hint">
-            默认随机等待 40～60 秒。每轮回复完成并确认没有终止信号后，会重新随机取一个等待时间，再进入下一轮。
-          </div>
-        `;
+        panel.setAttribute('data-xz-closedloop-page', '1');
+        panel.innerHTML = buildAutoQueueClosedLoopPanelInnerHtml(xzGetClosedLoopInnerTab());
         anchor.parentElement.insertBefore(panel, editorBlock || anchor.nextSibling);
         ToolboxShell.appendLog('[AUTOQ][CLOSED_LOOP][PANEL_HEAL] inserted closed-loop panel into existing autoq module');
+      } else {
+        const existingPanel = qs('#cgpt-autoq-closed-loop-panel', root);
+        if (existingPanel) {
+          migrateAutoQueueClosedLoopPanelToInnerTabs(existingPanel);
+        }
       }
       closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
       bindAutoQueueClosedLoopPanelEvents();
+      renderAutoQueueClosedLoopSettings();
+      initAutoQueueClosedLoopInnerTabs();
+      refreshAutoQueueClosedLoopButtons('closed-loop-shell-ready');
     }
 
     function bindAutoQueueClosedLoopPanelEvents() {
@@ -4438,6 +4819,11 @@ const AutoQueueModule = (() => {
         '#cgpt-autoq-closed-loop-upload-interval',
         '#cgpt-autoq-closed-loop-delay-min-sec',
         '#cgpt-autoq-closed-loop-delay-max-sec',
+        '#cgpt-autoq-unified-continue-home-nav-enabled',
+        '#cgpt-autoq-unified-continue-home-nav-interval',
+        '#cgpt-autoq-unified-continue-home-nav-url',
+        '#cgpt-autoq-copy-hotkey-continue-stop-signal',
+        '#cgpt-autoq-copy-hotkey-continue-prompt-text',
       ].forEach((selector) => {
         const el = qs(selector, panel);
         if (!el) return;
@@ -4448,6 +4834,33 @@ const AutoQueueModule = (() => {
           saveAutoQueueClosedLoopSettingsFromUi();
         }, `autoq-closed-loop-setting-input:${selector}`);
       });
+      const resetContinuePromptBtn = qs('#cgpt-autoq-copy-hotkey-continue-prompt-reset', root);
+      if (resetContinuePromptBtn) {
+        bindOnce(resetContinuePromptBtn, 'click', () => {
+          const current = typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.get
+            ? CompactUiConfigStore.get()
+            : {};
+          const defaultStopSignal = typeof getDefaultDoneSignal === 'function'
+            ? getDefaultDoneSignal()
+            : '<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>';
+          const nextConfig = Object.assign({}, current, {
+            copyHotkeyContinuePromptText: '',
+            copyHotkeyContinueStopSignal: defaultStopSignal,
+          });
+          if (typeof CompactUiConfigStore !== 'undefined' && CompactUiConfigStore.save) {
+            CompactUiConfigStore.save(nextConfig);
+          } else if (typeof MemoryManager !== 'undefined' && MemoryManager.KEYS) {
+            MemoryManager.set(MemoryManager.KEYS.compactUiConfig, nextConfig);
+          } else {
+            console.error('[AUTOQ][CONTINUE_PROMPT_RESET_FAILED] CompactUiConfigStore 和 MemoryManager 均不可用');
+            ToolboxShell.appendLog('[AUTOQ][CONTINUE_PROMPT_RESET_FAILED] reason=no-store');
+            return;
+          }
+          ToolboxShell.appendLog('[AUTOQ][CONTINUE_PROMPT_RESET] source=autoq-closed-loop-panel');
+          renderAutoQueueClosedLoopSettings();
+          updateStatus();
+        }, 'autoq-copy-hotkey-continue-prompt-reset');
+      }
     }
 
     function switchPromptMode(nextMode) {
@@ -6641,7 +7054,7 @@ const AutoQueueModule = (() => {
     let startUploadBtn = null;
     let listPanelEl = null;
     let listProfilesEl = null;
-    let listProfileSelectEl = null;
+    let listProfileCurrentNameEl = null;
     let listProfileNameEl = null;
     let listProfileDeleteConfirmUntil = 0;
     let taskPanelEl = null;
@@ -8116,7 +8529,7 @@ const AutoQueueModule = (() => {
       renderListPanelVisibility();
       renderTaskPanelVisibility();
       renderClosedLoopPanelVisibility();
-      ensureListSelectUi();
+      ensureListCurrentNameUi();
       renderListProfiles();
       renderTaskProfiles();
       renderTaskList();
@@ -8153,20 +8566,31 @@ const AutoQueueModule = (() => {
       }
     }
 
-    function ensureListSelectUi() {
+    function ensureListCurrentNameUi() {
       if (!listPanelEl) return;
 
-      listProfileSelectEl = qs('#cgpt-autoq-list-select', listPanelEl);
+      let row = qs('.cgpt-autoq-list-select-row', listPanelEl);
+      const legacySelect = qs('#cgpt-autoq-list-select', listPanelEl);
 
-      if (listProfileSelectEl) {
+      if (legacySelect) {
+        const nameEl = document.createElement('span');
+        nameEl.id = 'cgpt-autoq-list-current-name';
+        nameEl.className = 'cgpt-autoq-list-current-name';
+        nameEl.setAttribute('aria-live', 'polite');
+        legacySelect.replaceWith(nameEl);
+      }
+
+      listProfileCurrentNameEl = qs('#cgpt-autoq-list-current-name', listPanelEl);
+
+      if (listProfileCurrentNameEl) {
         return;
       }
 
-      const row = document.createElement('div');
+      row = document.createElement('div');
       row.className = 'cgpt-autoq-list-select-row';
       row.innerHTML = `
-        <label class="cgpt-autoq-label" for="cgpt-autoq-list-select">当前列表</label>
-        <select class="cgpt-input cgpt-autoq-list-select" id="cgpt-autoq-list-select" aria-label="选择自动指令列表"></select>
+        <span class="cgpt-autoq-label">当前列表</span>
+        <span class="cgpt-autoq-list-current-name" id="cgpt-autoq-list-current-name" aria-live="polite"></span>
       `;
 
       const header = qs('.cgpt-autoq-list-header', listPanelEl);
@@ -8177,21 +8601,7 @@ const AutoQueueModule = (() => {
         listPanelEl.prepend(row);
       }
 
-      listProfileSelectEl = qs('#cgpt-autoq-list-select', row);
-
-      if (listProfileSelectEl) {
-        bindOnce(listProfileSelectEl, 'change', (e) => {
-          const select = e.currentTarget;
-          const id = select && select.value ? String(select.value).trim() : '';
-
-          if (!id) {
-            console.warn('[ChatGPT toolbox] list select changed without id');
-            return;
-          }
-
-          switchListProfile(id);
-        }, 'autoq-list-select-change');
-      }
+      listProfileCurrentNameEl = qs('#cgpt-autoq-list-current-name', row);
     }
 
     function getAutoQueueModeLabel(mode) {
@@ -28217,40 +28627,30 @@ const AutoQueueModule = (() => {
     function renderListProfiles() {
       normalizeListProfiles();
       renderListPanelVisibility();
-      ensureListSelectUi();
+      ensureListCurrentNameUi();
 
       const active = getActiveListProfile();
+      const activeListId = getValidActiveListProfileId(config.listProfiles);
+      config.activeListProfileId = activeListId;
 
-      if (listProfileSelectEl) {
-        listProfileSelectEl.innerHTML = config.listProfiles.map((item) => `
-          <option value="${escapeHtml(item.id)}"${item.id === config.activeListProfileId ? ' selected' : ''}>
-            ${escapeHtml(item.name)}
-          </option>
-        `).join('');
-
-        if (active) {
-          listProfileSelectEl.value = active.id;
-        }
-
-        console.log('[AUTOQ_LIST][RENDER_SELECTOR]', {
-          listCount: config.listProfiles.length,
-          activeListId: active ? active.id : '',
-        });
+      if (listProfileCurrentNameEl) {
+        listProfileCurrentNameEl.textContent = active
+          ? (active.name || getDefaultListProfileMeta().defaultName)
+          : getDefaultListProfileMeta().defaultName;
       }
 
       if (listProfilesEl) {
-        listProfilesEl.innerHTML = config.listProfiles.map((item) => {
-          const chipActive = item.id === config.activeListProfileId ? ' active' : '';
-
-          return `
-      <button type="button"
-        class="cgpt-chip-btn cgpt-autoq-list-chip${chipActive}"
-        data-list-id="${escapeHtml(item.id)}"
-        title="${escapeHtml(item.name)}">
-        ${escapeHtml(item.name)}
-      </button>
-    `;
-        }).join('');
+        listProfilesEl.innerHTML = '';
+        config.listProfiles.forEach((item) => {
+          const chipActive = item.id === activeListId ? ' active' : '';
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `cgpt-chip-btn cgpt-autoq-list-chip${chipActive}`;
+          btn.dataset.listId = item.id;
+          btn.title = item.name;
+          btn.textContent = item.name;
+          listProfilesEl.appendChild(btn);
+        });
       }
 
       if (listProfileNameEl && active && document.activeElement !== listProfileNameEl) {
@@ -28258,8 +28658,13 @@ const AutoQueueModule = (() => {
         listProfileNameEl.value = active.name;
       }
 
-      console.log('[AUTOQ_LIST][RENDER]', {
-        activeListId: active ? active.id : '',
+      console.log('[PROMPT_LIST][RENDER]', {
+        count: config.listProfiles.length,
+        activeListId,
+        lists: config.listProfiles.map((item) => ({
+          id: item.id,
+          name: item.name,
+        })),
         taskCount: active
           ? String(active.text || '').split('\n').filter((line) => line.trim()).length
           : 0,
@@ -28396,15 +28801,23 @@ const AutoQueueModule = (() => {
         readPanelConfig(config.promptMode);
         normalizeListProfiles();
 
-        if (config.listProfiles.length <= 1) {
-          ToolboxShell.setStatus('至少保留一个列表');
-          return;
-        }
-
         const active = getActiveListProfile();
 
         if (!active) {
           ToolboxShell.setStatus('当前没有可删除的列表');
+          return;
+        }
+
+        const { defaultId } = getDefaultListProfileMeta();
+
+        if (active.id === defaultId) {
+          console.warn('[PROMPT_LIST][DELETE_DEFAULT_BLOCKED]');
+          ToolboxShell.setStatus('默认列表不可删除');
+          return;
+        }
+
+        if (config.listProfiles.length <= 1) {
+          ToolboxShell.setStatus('至少保留一个列表');
           return;
         }
 
@@ -28426,15 +28839,12 @@ const AutoQueueModule = (() => {
         const deletedName = active.name;
         const deletedId = active.id;
 
-        config.listProfiles = config.listProfiles.filter((item) => item.id !== active.id);
+        config.listProfiles = dedupeConfigListProfiles(
+          config.listProfiles.filter((item) => item.id !== active.id),
+        );
 
-        const sorted = config.listProfiles.slice().sort((a, b) => (
-          (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0)
-        ));
-        const nextProfile = sorted[0] || config.listProfiles[0] || null;
-
-        config.activeListProfileId = nextProfile ? nextProfile.id : '';
-        config.lastSelectedListProfileId = config.activeListProfileId;
+        config.activeListProfileId = defaultId;
+        config.lastSelectedListProfileId = defaultId;
 
         const next = getActiveListProfile();
 
@@ -28442,10 +28852,10 @@ const AutoQueueModule = (() => {
           config.listPromptsText = String(next.text || '');
         }
 
-        console.log('[AUTOQ_LIST][DELETE]', {
-          listId: deletedId,
-          name: deletedName,
-          nextListId: next ? next.id : '',
+        console.log('[PROMPT_LIST][DELETE]', {
+          deletedId,
+          nextActiveId: defaultId,
+          deletedName,
         });
 
         if (typeof AutoqListStore !== 'undefined') {
@@ -40162,20 +40572,6 @@ const AutoQueueModule = (() => {
         }, 'autoq-list-profiles-click');
       }
 
-      if (listProfileSelectEl) {
-        bindOnce(listProfileSelectEl, 'change', (e) => {
-          const select = e.currentTarget;
-          const id = select && select.value ? String(select.value).trim() : '';
-
-          if (!id) {
-            console.warn('[ChatGPT toolbox] list select changed without id');
-            return;
-          }
-
-          switchListProfile(id);
-        }, 'autoq-list-select-change');
-      }
-
       const newListBtn = qs('#cgpt-autoq-list-new', root);
       if (newListBtn) {
         bindOnce(newListBtn, 'click', () => {
@@ -40283,7 +40679,7 @@ const AutoQueueModule = (() => {
         bindAutoQueueDelegatedActions('mount');
         bindEvents();
         bindTaskPanelEvents();
-        ensureListSelectUi();
+        ensureListCurrentNameUi();
         renderListProfiles();
         renderTaskProfiles();
         renderTaskList();
@@ -40322,8 +40718,8 @@ const AutoQueueModule = (() => {
 
           <div class="cgpt-autoq-list-panel${config.promptMode === 'list' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-list-panel">
             <div class="cgpt-autoq-list-select-row">
-              <label class="cgpt-autoq-label" for="cgpt-autoq-list-select">当前列表</label>
-              <select class="cgpt-input cgpt-autoq-list-select" id="cgpt-autoq-list-select" aria-label="选择自动指令列表"></select>
+              <span class="cgpt-autoq-label">当前列表</span>
+              <span class="cgpt-autoq-list-current-name" id="cgpt-autoq-list-current-name" aria-live="polite"></span>
             </div>
 
             <div class="cgpt-autoq-list-header">
@@ -40348,36 +40744,8 @@ const AutoQueueModule = (() => {
             <div class="cgpt-autoq-batch-subtab-content" id="cgpt-autoq-batch-subtab-content"></div>
           </div>
 
-          <div class="cgpt-autoq-closed-loop-panel${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-closed-loop-panel">
-            <div class="cgpt-section-title" style="margin-top: 4px;">闭环控制模式</div>
-            <div class="cgpt-hint" style="margin-bottom: 8px;">
-              闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
-            </div>
-            <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每1轮上传</button>
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每5轮上传</button>
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-仅对话+每5轮上传</button>
-            </div>
-            <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
-            <label class="cgpt-checkbox-line">
-              <input type="checkbox" id="cgpt-autoq-closed-loop-auto-upload-enabled">
-              每隔指定轮数自动重新上传当前分组文件
-            </label>
-            <div class="cgpt-kv">
-              <label for="cgpt-autoq-closed-loop-upload-interval">每 N 轮上传一次</label>
-              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-upload-interval" data-no-wheel-number="1" min="1" max="999" step="1">
-            </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-autoq-closed-loop-delay-min-sec">每轮完成后最短等待秒数</label>
-              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-min-sec" data-no-wheel-number="1" min="1" max="600" step="1">
-            </div>
-            <div class="cgpt-kv">
-              <label for="cgpt-autoq-closed-loop-delay-max-sec">每轮完成后最长等待秒数</label>
-              <input type="number" class="cgpt-input" id="cgpt-autoq-closed-loop-delay-max-sec" data-no-wheel-number="1" min="1" max="600" step="1">
-            </div>
-            <div class="cgpt-hint">
-              默认随机等待 40～60 秒。每轮回复完成并确认没有终止信号后，会重新随机取一个等待时间，再进入下一轮。
-            </div>
+          <div class="cgpt-autoq-closed-loop-panel xz-closedloop-page${config.promptMode === 'closed-loop' ? '' : ' cgpt-toolbox-hidden'}" id="cgpt-autoq-closed-loop-panel" data-xz-closedloop-page="1">
+            ${buildAutoQueueClosedLoopPanelInnerHtml(xzGetClosedLoopInnerTab())}
           </div>
 
           <div class="cgpt-autoq-editor-block">
@@ -40465,7 +40833,7 @@ const AutoQueueModule = (() => {
       startUploadBtn = qs('#cgpt-autoq-start-upload', root);
       listPanelEl = qs('#cgpt-autoq-list-panel', root);
       listProfilesEl = qs('#cgpt-autoq-list-profile-chips', root);
-      listProfileSelectEl = qs('#cgpt-autoq-list-select', root);
+      listProfileCurrentNameEl = qs('#cgpt-autoq-list-current-name', root);
       listProfileNameEl = qs('#cgpt-autoq-list-name', root);
       taskPanelEl = qs('#cgpt-autoq-task-panel', root);
       closedLoopPanelEl = qs('#cgpt-autoq-closed-loop-panel', root);
@@ -40493,6 +40861,7 @@ const AutoQueueModule = (() => {
       renderTaskEditor();
       renderTaskProfileDefaults();
 
+      bindAutoQueueClosedLoopPanelEvents();
       bindAutoQueueDelegatedActions('mount');
       bindAutoQueueForegroundResumeListeners();
       bindEvents();

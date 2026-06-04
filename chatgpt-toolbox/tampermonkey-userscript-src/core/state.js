@@ -31,7 +31,6 @@
     toggleId: 'cgpt-toolbox-toggle',
     panelId: 'cgpt-toolbox-panel',
     styleId: 'cgpt-toolbox-style',
-    edgeHotzoneId: 'cgpt-toolbox-edge-hotzone',
     restoreHotzoneId: 'cgpt-toolbox-restore-hotzone',
     restoreHandleId: 'cgpt-toolbox-restore-handle',
     storagePrefix: 'cgpt_toolbox_tabs_v32:',

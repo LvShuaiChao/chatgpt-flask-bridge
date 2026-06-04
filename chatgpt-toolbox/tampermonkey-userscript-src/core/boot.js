@@ -239,7 +239,6 @@ function cleanupStaleToolboxDomBeforeInit(reason = '') {
     '#cgpt-toolbox-root',
     '#cgpt-toolbox-toggle',
     '#cgpt-toolbox-panel',
-    '#cgpt-toolbox-edge-hotzone',
     '#cgpt-toolbox-restore-hotzone',
     '#cgpt-toolbox-restore-handle',
     '#cgpt-autoq-prompt-picker-overlay',

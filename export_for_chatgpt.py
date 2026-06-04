@@ -456,8 +456,8 @@ FORBIDDEN_EXPORT_TEXT_LITERALS: tuple[str, ...] = (
 TIKTOKEN_ENCODING_NAME = "cl100k_base"
 # ChatGPT 文本/PDF/Word 等「单文档」常见上限参考（约 200 万 tokens）；用于余量与超限提示。
 CHATGPT_DOCUMENT_TOKEN_LIMIT = 2_000_000
-# 单个输出文件最大 tokens（cl100k_base）；超出则拆分为 *_partNN.txt（默认 150 万；与上方 ChatGPT 参考上限独立）。
-MAX_TOKENS_PER_OUTPUT_FILE = 1_700_000
+# 单个输出文件最大 tokens（cl100k_base）；超出则拆分为 *_partNN.txt（默认 190 万；与上方 ChatGPT 参考上限独立）。
+MAX_TOKENS_PER_OUTPUT_FILE = 1_900_000
 _TIKTOKEN_ENCODER: object | None = None
 _TIKTOKEN_IMPORT_FAILED = False
 _WARNED_TOKEN_SPLIT_UNAVAILABLE = False
@@ -546,6 +546,34 @@ def format_tokens_wan(n: int) -> str:
     if n % 10000 == 0:
         return f"{n // 10000}万"
     return f"{n / 10000.0:.2f}万"
+
+
+def _format_export_stats_suffix(
+    *,
+    total_code_lines: int,
+    source_code_tokens: int | None,
+    merged_export_tokens: int | None,
+) -> str:
+    """导出完成摘要：收录源码行数 + tokens（与合并文件头统计口径一致）。"""
+    parts = [f"代码总行数 {total_code_lines:,}"]
+    if source_code_tokens is not None:
+        parts.append(
+            f"源码合计 tokens（{TIKTOKEN_ENCODING_NAME}） {format_tokens_wan(source_code_tokens)}"
+            f"（{source_code_tokens:,}）"
+        )
+    if merged_export_tokens is not None:
+        parts.append(
+            f"合并全文 tokens {format_tokens_wan(merged_export_tokens)}（{merged_export_tokens:,}）"
+        )
+        over = merged_export_tokens - CHATGPT_DOCUMENT_TOKEN_LIMIT
+        if over > 0:
+            parts.append(
+                f"超过 ChatGPT 参考上限 {format_tokens_wan(CHATGPT_DOCUMENT_TOKEN_LIMIT)}"
+                f"（多 {format_tokens_wan(over)}）"
+            )
+    elif _get_tiktoken_encoder() is None:
+        parts.append("tokens: （需 pip install tiktoken）")
+    return " | ".join(parts)
 
 
 def _tokens_header_line_for_exported_body(
@@ -2240,6 +2268,16 @@ def _zip_export_txt_part(txt_path: Path) -> tuple[Path, ExportPartMeta | None]:
     return txt_resolved, write_and_verify_export_zip(txt_path, zip_out)
 
 
+@dataclass(frozen=True, slots=True)
+class ExportBundleResult:
+    """单轮 ``export_bundle`` 完成后的耗时与统计摘要。"""
+
+    elapsed_sec: float
+    total_code_lines: int
+    source_code_tokens: int | None
+    merged_export_tokens: int | None
+
+
 def export_bundle(
     *,
     project_root: Path,
@@ -2249,8 +2287,8 @@ def export_bundle(
     incremental: bool = False,
     export_zip: bool = True,
     workers: int = 0,
-) -> float:
-    """执行一轮导出；返回本轮总耗时（秒，含扫描/合并/写盘/压缩/日志等）。"""
+) -> ExportBundleResult:
+    """执行一轮导出；返回耗时与行数/tokens 统计（含扫描/合并/写盘/压缩/日志等）。"""
     project_root = project_root.resolve()
     _run_userscript_build(project_root)
     t_export0 = time.perf_counter()
@@ -2654,19 +2692,11 @@ def export_bundle(
         mt = _export_manifest_mtime_map(project_root, full_project_files_for_manifest, extras)
         _save_export_manifest(project_root, mt)
 
-    # 行数 / tokens 已在上方「[项目] | [时间]」一行输出；此处不再重复（除非未打印该块的调用方）。
-    done_suffix = ""
-    if loop_iteration is None:
-        done_suffix += f" | 代码总行数 {total_code_lines}"
-        if source_code_tokens is not None:
-            done_suffix += f" | 源码合计 tokens {format_tokens_wan(source_code_tokens)}"
-        if merged_export_tokens is not None:
-            done_suffix += f" | 合并全文 tokens {format_tokens_wan(merged_export_tokens)}"
-            if merged_export_tokens > CHATGPT_DOCUMENT_TOKEN_LIMIT:
-                done_suffix += (
-                    f" | 超过 ChatGPT 参考上限 {format_tokens_wan(CHATGPT_DOCUMENT_TOKEN_LIMIT)} "
-                    f"（多 {format_tokens_wan(merged_export_tokens - CHATGPT_DOCUMENT_TOKEN_LIMIT)}）"
-                )
+    stats_suffix = _format_export_stats_suffix(
+        total_code_lines=total_code_lines,
+        source_code_tokens=source_code_tokens,
+        merged_export_tokens=merged_export_tokens,
+    )
     export_total_sec = time.perf_counter() - t_export0
     project_name = project_root.resolve().name
     _print_export_timing_summary(
@@ -2682,9 +2712,14 @@ def export_bundle(
     print(
         f"[完成] 合并文件数: {len(ordered_py) + len(extras)}"
         f"（全量扫描 {len(ordered_py)} + 附加 {len(extras)}）"
-        f" | 本轮耗时 {export_total_sec:.2f}s{done_suffix}"
+        f" | 本轮耗时 {export_total_sec:.2f}s | {stats_suffix}"
     )
-    return export_total_sec
+    return ExportBundleResult(
+        elapsed_sec=export_total_sec,
+        total_code_lines=total_code_lines,
+        source_code_tokens=source_code_tokens,
+        merged_export_tokens=merged_export_tokens,
+    )
 
 
 def _format_launch_command() -> str:
@@ -2705,6 +2740,7 @@ def _print_export_cycle_separator(
     *,
     ended: bool = False,
     elapsed_sec: float | None = None,
+    export_result: ExportBundleResult | None = None,
 ) -> None:
     """循环导出时，在每轮开始或结束处打印醒目分隔线（次数编号置于分隔线中央）。"""
     line = "=" * LOOP_EXPORT_CYCLE_SEPARATOR_WIDTH
@@ -2714,7 +2750,17 @@ def _print_export_cycle_separator(
     print(line)
     print(f"第 {cycle} 次导出")
     if ended and elapsed_sec is not None:
-        print(f"  {phase} | {now_str} | 本轮耗时 {elapsed_sec:.2f}s")
+        detail = f"  {phase} | {now_str} | 本轮耗时 {elapsed_sec:.2f}s"
+        if export_result is not None:
+            detail += (
+                " | "
+                + _format_export_stats_suffix(
+                    total_code_lines=export_result.total_code_lines,
+                    source_code_tokens=export_result.source_code_tokens,
+                    merged_export_tokens=export_result.merged_export_tokens,
+                )
+            )
+        print(detail)
     else:
         print(f"  {phase} | {now_str}")
     print(line)
@@ -2891,9 +2937,9 @@ def main() -> None:
             if cycle > 1:
                 print(f"[项目] {PROJECT_ROOT.resolve().name}")
         use_incremental = bool(args.incremental) and incremental_active
-        elapsed_sec: float | None = None
+        export_result: ExportBundleResult | None = None
         try:
-            elapsed_sec = export_bundle(
+            export_result = export_bundle(
                 project_root=PROJECT_ROOT,
                 output_path=output_path,
                 extra_names=extras,
@@ -2914,8 +2960,13 @@ def main() -> None:
             traceback.print_exc()
         finally:
             if loop_mode:
-                if elapsed_sec is not None:
-                    _print_export_cycle_separator(cycle, ended=True, elapsed_sec=elapsed_sec)
+                if export_result is not None:
+                    _print_export_cycle_separator(
+                        cycle,
+                        ended=True,
+                        elapsed_sec=export_result.elapsed_sec,
+                        export_result=export_result,
+                    )
                 else:
                     _print_export_cycle_separator(cycle, ended=True, elapsed_sec=0.0)
 

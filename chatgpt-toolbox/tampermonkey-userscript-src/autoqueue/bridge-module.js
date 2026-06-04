@@ -33,7 +33,6 @@
       uploadBlockNextChatSourceMessageId: '',
       pendingReplyContext: null,
       lastReplyWatchResponding: false,
-      advancedCapabilityExpanded: false,
       bridgeWakeHooksInstalled: false,
       onBridgeWakeVisibility: null,
       onBridgeWakeFocus: null,
@@ -50,7 +49,7 @@
     const bridgeTimers = createTimerRegistry('BRIDGE');
 
     const bridgeStatus = createModuleStatus('BRIDGE', {
-      getLocalEl: () => (state.root ? qs('#cgpt-bridge-status', state.root) : null),
+      getLocalEl: () => null,
       owner: 'bridge',
       useGlobal: false,
       useLog: false,
@@ -3210,7 +3209,6 @@
               shortText: pres.shortText,
               ttlMs: 4000,
             });
-            renderBridgeCapabilityPanel(getPageCapability('bridge-poll'));
             updateChatInputStateBadge();
             if (
               typeof UploadModule !== 'undefined'
@@ -3264,7 +3262,6 @@
           shortText: pres.shortText,
           ttlMs: 4000,
         });
-        renderBridgeCapabilityPanel(getPageCapability('bridge-poll-offline'));
         updateChatInputStateBadge();
 
         logBridgeError(
@@ -3548,7 +3545,9 @@
           persist: true,
           shortText: pres.shortText,
         });
-        renderBridgeCapabilityPanel(getPageCapability('bridge-test'));
+        if (typeof updateChatInputStateBadge === 'function') {
+          updateChatInputStateBadge();
+        }
         ToolboxShell.appendLog(`[BRIDGE][TEST][OK] ${JSON.stringify(result).slice(0, 300)}`);
       } catch (error) {
         const text = error && error.message ? error.message : String(error);
@@ -3559,8 +3558,13 @@
           persist: true,
           shortText: pres.shortText,
         });
-        renderBridgeCapabilityPanel(getPageCapability('bridge-test-failed'));
-        ToolboxShell.appendLog(`[BRIDGE][TEST][ERROR] ${text}`);
+        if (typeof updateChatInputStateBadge === 'function') {
+          updateChatInputStateBadge();
+        }
+        console.error('[BRIDGE][TEST][ERROR]', error);
+        ToolboxShell.appendLog(
+          `[BRIDGE][TEST][ERROR] error=${error && error.message ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -3611,302 +3615,6 @@
       },
     ]);
 
-    const NORMAL_CAPABILITY_REASONS = new Set([
-      'composer_has_attachment',
-      'empty_composer',
-      'native_send_ready',
-      'assistant_busy',
-    ]);
-
-    const RESPONSE_STATE_LABELS = Object.freeze({
-      attachment_ready: '附件已就绪',
-      generating: '回复中',
-      composing: '输入中',
-      no_composer: '无输入框',
-      idle: '',
-      unknown: '',
-    });
-
-    function formatYesNo(value) {
-      return value ? 'yes' : 'no';
-    }
-
-    function isEmptyDiagnosticValue(value) {
-      const text = String(value ?? '').trim();
-      return !text || text === '-';
-    }
-
-    function normalizeBridgeCapabilityRecord(capability) {
-      const cap = capability && typeof capability === 'object'
-        ? capability
-        : getPageCapability('bridge-panel');
-      const identity = getPageIdentity();
-
-      const conversationId = String(cap.conversation_id || identity.conversation_id || '').trim();
-      const url = String(cap.url || identity.url || location.href || '').trim();
-      const inputable = Boolean(
-        cap.inputable !== undefined ? cap.inputable : cap.can_accept_input,
-      );
-      const sendable = Boolean(
-        cap.sendable !== undefined ? cap.sendable : cap.can_send_now,
-      );
-      const isResponding = Boolean(
-        cap.is_responding !== undefined ? cap.is_responding : cap.responding,
-      );
-      const responding = Boolean(
-        cap.responding !== undefined ? cap.responding : cap.is_responding,
-      );
-      const syncable = cap.syncable !== undefined
-        ? Boolean(cap.syncable)
-        : Boolean(conversationId);
-      const conversationSyncable = cap.conversation_syncable !== undefined
-        ? Boolean(cap.conversation_syncable)
-        : Boolean(url && conversationId);
-
-      return {
-        client_id: String(cap.client_id || identity.client_id || '').trim() || '-',
-        page_instance_id: String(cap.page_instance_id || identity.page_instance_id || '').trim() || '-',
-        conversation_id: conversationId || '-',
-        url: url || '-',
-        page_type: String(cap.page_type || identity.page_type || '-').trim() || '-',
-        online: cap.online !== false,
-        inputable,
-        sendable,
-        response_state: String(cap.response_state || '-').trim() || '-',
-        response_state_reason: String(cap.response_state_reason || '').trim() || '-',
-        bridge_connected: Boolean(cap.bridge_connected),
-        last_poll_ok: cap.last_poll_ok === null || cap.last_poll_ok === undefined
-          ? null
-          : Boolean(cap.last_poll_ok),
-        last_poll_error: String(cap.last_poll_error || '').trim(),
-        last_poll_at: Number(cap.last_poll_at || 0),
-        syncable,
-        conversation_syncable: conversationSyncable,
-        is_responding: isResponding,
-        responding,
-        visibility_state: String(
-          cap.visibility_state || document.visibilityState || '-',
-        ).trim() || '-',
-        has_focus: Boolean(
-          cap.has_focus !== undefined ? cap.has_focus : document.hasFocus(),
-        ),
-      };
-    }
-
-    function formatOnlineStatus(value) {
-      return value === false ? '离线' : '在线';
-    }
-
-    function formatInputSendStatus(inputable, sendable) {
-      if (!inputable) {
-        return '不可输入';
-      }
-
-      if (!sendable) {
-        return '不可发送';
-      }
-
-      return '可输入，可发送';
-    }
-
-    function formatBridgeStatus(bridgeConnected, lastPollOk, lastPollError) {
-      const pollError = isEmptyDiagnosticValue(lastPollError) ? '' : String(lastPollError).trim();
-
-      if (!bridgeConnected) {
-        return {
-          text: 'Bridge 未连接',
-          reason: pollError,
-        };
-      }
-
-      if (lastPollOk === false) {
-        return {
-          text: '轮询异常',
-          reason: pollError,
-        };
-      }
-
-      if (lastPollOk === true) {
-        return {
-          text: 'Bridge 正常，轮询正常',
-          reason: '',
-        };
-      }
-
-      return {
-        text: 'Bridge 正常，轮询未开始',
-        reason: '',
-      };
-    }
-
-    function formatResponseStateLabel(responseState) {
-      const key = String(responseState || '').trim();
-      return RESPONSE_STATE_LABELS[key] || '';
-    }
-
-    function shouldShowResponseStateReason(reason) {
-      const text = String(reason || '').trim();
-      if (!text || text === '-') {
-        return false;
-      }
-
-      return !NORMAL_CAPABILITY_REASONS.has(text);
-    }
-
-    function formatRespondingStatus(isResponding, responding, responseState) {
-      const busy = Boolean(isResponding || responding);
-      if (busy) {
-        return '回复中';
-      }
-
-      const stateLabel = formatResponseStateLabel(responseState);
-      if (stateLabel && stateLabel !== '未回复中') {
-        return `未回复中 · ${stateLabel}`;
-      }
-
-      return '未回复中';
-    }
-
-    function formatPollTimeSummary(lastPollAt) {
-      const ts = Number(lastPollAt || 0);
-      if (!ts || ts <= 0) {
-        return '-';
-      }
-
-      const date = new Date(ts);
-      const now = new Date();
-      const isToday = date.getFullYear() === now.getFullYear()
-        && date.getMonth() === now.getMonth()
-        && date.getDate() === now.getDate();
-
-      if (isToday) {
-        return date.toLocaleTimeString(undefined, {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        });
-      }
-
-      return date.toLocaleString();
-    }
-
-    function formatBridgeCapabilitySummaryText(record) {
-      const lines = [];
-      const bridgeStatus = formatBridgeStatus(
-        record.bridge_connected,
-        record.last_poll_ok,
-        record.last_poll_error,
-      );
-
-      lines.push(`连接状态：${bridgeStatus.text}`);
-      if (bridgeStatus.reason) {
-        lines.push(`原因：${bridgeStatus.reason}`);
-      }
-
-      lines.push(`输入发送：${formatInputSendStatus(record.inputable, record.sendable)}`);
-      lines.push(
-        `回复状态：${formatRespondingStatus(
-          record.is_responding,
-          record.responding,
-          record.response_state,
-        )}`,
-      );
-      lines.push(`页面状态：${formatOnlineStatus(record.online)}`);
-      lines.push(`最近轮询：${formatPollTimeSummary(record.last_poll_at)}`);
-
-      const pageType = String(record.page_type || '').trim();
-      if (pageType && pageType !== 'conversation') {
-        lines.push(`页面类型：${pageType}`);
-      }
-
-      const visibility = String(record.visibility_state || '').trim();
-      if (visibility && visibility !== 'visible') {
-        lines.push(`页面可见性：${visibility}`);
-      }
-
-      const pollError = String(record.last_poll_error || '').trim();
-      if (pollError && pollError !== '-' && !bridgeStatus.reason) {
-        lines.push(`轮询错误：${pollError}`);
-      }
-
-      if (shouldShowResponseStateReason(record.response_state_reason)) {
-        lines.push(`状态原因：${record.response_state_reason}`);
-      }
-
-      return lines.join('\n');
-    }
-
-    function formatBridgeCapabilityDiagnosticText(record) {
-      const pollAtText = record.last_poll_at > 0
-        ? new Date(record.last_poll_at).toLocaleString()
-        : '-';
-
-      return [
-        '[TOOLBOX_PAGE_CAPABILITY]',
-        `client_id: ${record.client_id}`,
-        `page_instance_id: ${record.page_instance_id}`,
-        `conversation_id: ${record.conversation_id}`,
-        `url: ${record.url}`,
-        `page_type: ${record.page_type}`,
-        `online: ${formatYesNo(record.online)}`,
-        `inputable: ${formatYesNo(record.inputable)}`,
-        `sendable: ${formatYesNo(record.sendable)}`,
-        `response_state: ${record.response_state}`,
-        `response_state_reason: ${record.response_state_reason}`,
-        `bridge_connected: ${formatYesNo(record.bridge_connected)}`,
-        `last_poll_ok: ${record.last_poll_ok === null || record.last_poll_ok === undefined ? '-' : formatYesNo(record.last_poll_ok)}`,
-        `last_poll_error: ${record.last_poll_error || '-'}`,
-        `last_poll_at: ${pollAtText}`,
-        `syncable: ${formatYesNo(record.syncable)}`,
-        `conversation_syncable: ${formatYesNo(record.conversation_syncable)}`,
-        `is_responding: ${formatYesNo(record.is_responding)}`,
-        `responding: ${formatYesNo(record.responding)}`,
-        `visibility_state: ${record.visibility_state}`,
-        `has_focus: ${formatYesNo(record.has_focus)}`,
-      ].join('\n');
-    }
-
-    function applyBridgeCapabilityAdvancedVisibility() {
-      if (!state.root) {
-        return;
-      }
-
-      const panel = qs('#cgpt-bridge-capability-advanced', state.root);
-      const toggleBtn = qs('#cgpt-bridge-toggle-advanced', state.root);
-
-      if (panel) {
-        panel.style.display = state.advancedCapabilityExpanded ? 'block' : 'none';
-      }
-
-      if (toggleBtn) {
-        toggleBtn.textContent = state.advancedCapabilityExpanded
-          ? '隐藏高级字段'
-          : '显示高级字段';
-      }
-    }
-
-    function renderBridgeCapabilityPanel(capability) {
-      if (!state.root) {
-        return;
-      }
-
-      const summaryEl = qs('#cgpt-bridge-capability-summary', state.root);
-      const textEl = qs('#cgpt-bridge-capability-text', state.root);
-      const record = normalizeBridgeCapabilityRecord(capability);
-
-      if (summaryEl) {
-        summaryEl.textContent = formatBridgeCapabilitySummaryText(record);
-      }
-
-      if (textEl) {
-        textEl.textContent = formatBridgeCapabilityDiagnosticText(record);
-      }
-
-      applyBridgeCapabilityAdvancedVisibility();
-      updateChatInputStateBadge();
-    }
-
     function renderBridgeConfigToUi() {
       if (!state.root) return;
 
@@ -3924,8 +3632,9 @@
         DomUtil.setValue(state.root, field.selector, displayValue, 'BRIDGE');
       });
 
-      DomUtil.setText(state.root, '#cgpt-bridge-url', getBridgeUrl(), 'BRIDGE');
-      renderBridgeCapabilityPanel();
+      if (typeof updateChatInputStateBadge === 'function') {
+        updateChatInputStateBadge();
+      }
     }
 
     function readBridgeConfigFromUi() {
@@ -3987,24 +3696,11 @@
           failedPrefix: '复制 Bridge 地址失败',
           logPrefix: 'BRIDGE_COPY_URL',
           statusOwner: 'bridge',
-        });
-      }, 'BRIDGE');
-      DomUtil.bindClick(mountRoot, '#cgpt-bridge-toggle-advanced', () => {
-        state.advancedCapabilityExpanded = !state.advancedCapabilityExpanded;
-        applyBridgeCapabilityAdvancedVisibility();
-      }, 'BRIDGE');
-      DomUtil.bindClick(mountRoot, '#cgpt-bridge-copy-diag', () => {
-        const record = normalizeBridgeCapabilityRecord(
-          getPageCapability('bridge-copy-diag'),
-        );
-        void copyWithStatus({
-          text: formatBridgeCapabilityDiagnosticText(record),
-          successText: '已复制诊断信息',
-          failedPrefix: '复制诊断信息失败',
-          logPrefix: 'BRIDGE_COPY_DIAG',
-          statusOwner: 'bridge',
         }).catch((error) => {
-          console.error('[BridgeModule] 复制诊断信息失败', error);
+          console.error('[BridgeModule] 复制 Bridge 地址失败', error);
+          ToolboxShell.appendLog(
+            `[BRIDGE][COPY_URL_FAILED] error=${error && error.message ? error.message : String(error)}`,
+          );
         });
       }, 'BRIDGE');
     }
@@ -4043,28 +3739,6 @@
             <button type="button" class="cgpt-btn" id="cgpt-bridge-test">测试连接</button>
             <button type="button" class="cgpt-btn" id="cgpt-bridge-stop">停止轮询</button>
             <button type="button" class="cgpt-btn" id="cgpt-bridge-copy-url">复制地址</button>
-          </div>
-
-          <div class="cgpt-hint" style="margin-top:10px;">
-            当前地址：<span id="cgpt-bridge-url"></span>
-          </div>
-
-          <div class="cgpt-hint" style="margin-top:6px;">
-            状态：<span id="cgpt-bridge-status">未启动</span>
-          </div>
-
-          <div class="cgpt-hint" style="margin-top:10px; font-weight:600;">
-            页面能力（当前标签页，仅展示不拦截同步）
-          </div>
-          <div id="cgpt-bridge-capability-summary" class="cgpt-hint" style="margin:4px 0 0; padding:8px; background:rgba(0,0,0,0.04); border-radius:6px; font-size:12px; line-height:1.6; white-space:pre-wrap;">
-            -
-          </div>
-          <div class="cgpt-row" style="margin-top:6px; flex-wrap:wrap; gap:4px;">
-            <button type="button" class="cgpt-btn" id="cgpt-bridge-toggle-advanced" data-dynamic-label-allowed="1" style="font-size:11px; padding:2px 8px;">显示高级字段</button>
-            <button type="button" class="cgpt-btn" id="cgpt-bridge-copy-diag" style="font-size:11px; padding:2px 8px;">复制诊断信息</button>
-          </div>
-          <div id="cgpt-bridge-capability-advanced" style="display:none; margin-top:6px;">
-            <pre id="cgpt-bridge-capability-text" class="cgpt-hint" style="margin:0; padding:8px; background:rgba(0,0,0,0.04); border-radius:6px; white-space:pre-wrap; font-family:ui-monospace,monospace; font-size:11px; line-height:1.45; max-height:260px; overflow-y:auto;">-</pre>
           </div>
         </div>
       `;

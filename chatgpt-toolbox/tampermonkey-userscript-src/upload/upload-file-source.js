@@ -239,14 +239,20 @@
         try {
           const file = await item.fileHandle.getFile();
           if (isFileLike(file)) {
-            item.file = file;
-            item.sourceFile = file;
-            item.originalFile = file;
-            item.name = item.name || file.name;
-            item.size = item.size || file.size;
-            item.type = item.type || file.type;
+            item.name = file.name || item.name;
+            item.filename = file.name || item.filename || item.name;
+            item.displayName = file.name || item.displayName || item.name;
+            item.size = Number(file.size || 0) || 0;
+            item.type = file.type || item.type || 'application/octet-stream';
+            item.mime_type = file.type || item.mime_type || item.type || 'application/octet-stream';
+            item.lastModified = Number(file.lastModified || item.lastModified || Date.now()) || Date.now();
+            item.sourceKind = 'local-handle';
+            item.readMode = 'handle';
+            clearUploadItemBrowserFileCache(item, 'ensureReusableFileForUploadItem:fresh-handle-metadata-only');
             ToolboxShell.appendLog(
-              `[UPLOAD][FILE_HANDLE_RELOAD_OK] source=${source || '-'} name=${file.name || '-'} size=${file.size || 0}`,
+              `[UPLOAD][FILE_HANDLE_RELOAD_OK] source=${source || '-'} `
+              + `name=${file.name || '-'} size=${file.size || 0} `
+              + `strictFreshRead=1 cacheStored=0`,
             );
             return true;
           }
@@ -1313,6 +1319,15 @@
     }
 
     async function pickOneLocalFileForRebind() {
+      const showOpenFilePicker = getShowOpenFilePickerFn();
+      if (!showOpenFilePicker) {
+        const err = new Error('当前浏览器不支持 File System Access API，无法保证每次从磁盘重新读取文件');
+        console.error('[UPLOAD_REBIND][NO_FILE_HANDLE_API]', err);
+        ToolboxShell.appendLog(
+          '[UPLOAD_REBIND][NO_FILE_HANDLE_API] reason=no-showOpenFilePicker strictFreshRead=1',
+        );
+        throw err;
+      }
       return pickOneLocalFileWithHandle();
     }
 
@@ -1321,30 +1336,44 @@
         return {
           ok: false,
           reason: 'not-file',
+          detail: 'newFile is not File/FileLike',
         };
       }
-      const expectedName = String(oldItem && (oldItem.name || oldItem.filename) || '').trim();
-      const actualName = String(newFile.name || '').trim();
-      if (expectedName && actualName && expectedName !== actualName) {
-        return {
-          ok: false,
-          reason: 'filename-mismatch',
-          detail: `expected=${expectedName} actual=${actualName}`,
-        };
-      }
-      const expectedSize = Number(oldItem && oldItem.size) || 0;
-      const actualSize = Number(newFile.size) || 0;
-      if (expectedSize > 0 && actualSize > 0 && expectedSize !== actualSize) {
-        return {
-          ok: false,
-          reason: 'filesize-mismatch',
-          detail: `expected=${expectedSize} actual=${actualSize}`,
-        };
-      }
+      const oldName = String(oldItem && (oldItem.name || oldItem.filename) || '').trim();
+      const newName = String(newFile.name || '').trim();
+      const oldSize = Number(oldItem && oldItem.size) || 0;
+      const newSize = Number(newFile.size) || 0;
       return {
         ok: true,
-        reason: 'ok',
+        reason: 'user-selected-file-authoritative',
+        detail:
+          `oldName=${oldName || '-'} newName=${newName || '-'} `
+          + `oldSize=${oldSize} newSize=${newSize}`,
       };
+    }
+
+    function clearUploadItemBrowserFileCache(item, reason = '') {
+      if (!item) {
+        return;
+      }
+      const hadFile = isFileLike(item.file) ? 1 : 0;
+      const hadSourceFile = isFileLike(item.sourceFile) ? 1 : 0;
+      const hadOriginalFile = isFileLike(item.originalFile) ? 1 : 0;
+      const hadBlob = isBlobLike(item.blob) ? 1 : 0;
+      const hadSourceBlob = isBlobLike(item.sourceBlob) ? 1 : 0;
+      const hadUploadFile = isFileLike(item.uploadFile) ? 1 : 0;
+      item.file = null;
+      item.sourceFile = null;
+      item.originalFile = null;
+      item.blob = null;
+      item.sourceBlob = null;
+      item.uploadFile = null;
+      ToolboxShell.appendLog(
+        `[UPLOAD_CACHE][CLEAR_BROWSER_SNAPSHOT] reason=${reason || '-'} `
+        + `name=${item.name || item.filename || '-'} `
+        + `file=${hadFile} sourceFile=${hadSourceFile} originalFile=${hadOriginalFile} `
+        + `blob=${hadBlob} sourceBlob=${hadSourceBlob} uploadFile=${hadUploadFile}`,
+      );
     }
 
     function applyReboundFile(item, file, handle) {
@@ -1352,15 +1381,32 @@
         return false;
       }
       const hasHandle = isFileHandleLike(handle);
-      item.file = file;
-      item.sourceFile = file;
-      item.originalFile = file;
-      item.blob = file;
-      item.sourceBlob = file;
-      item.name = file.name || item.name || 'unknown';
-      item.size = file.size || 0;
-      item.type = file.type || item.type || 'application/octet-stream';
-      item.lastModified = file.lastModified || Date.now();
+      if (!hasHandle) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_REBIND][FAILED] id=${item.id || '-'} name=${item.name || '-'} reason=no-file-handle strictFreshRead=1`,
+        );
+        return false;
+      }
+      const oldName = String(item.name || item.filename || '').trim();
+      const oldSize = Number(item.size || 0) || 0;
+      clearUploadItemBrowserFileCache(item, 'rebind-before-apply');
+      item.name = file.name || 'unknown';
+      item.filename = file.name || item.filename || item.name || 'unknown';
+      item.displayName = file.name || item.displayName || item.name || 'unknown';
+      item.originalName = file.name || item.originalName || item.name || 'unknown';
+      item.canonicalName = file.name || item.canonicalName || item.name || 'unknown';
+      item.size = Number(file.size || 0) || 0;
+      item.type = file.type || 'application/octet-stream';
+      item.mime_type = file.type || item.mime_type || item.type || 'application/octet-stream';
+      item.lastModified = Number(file.lastModified || Date.now()) || Date.now();
+      item.fileHandle = handle;
+      item.handle = null;
+      item.localHandle = null;
+      item.sourceKind = 'local-handle';
+      item.source = 'browser_file';
+      item.readMode = 'handle';
+      item.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
+      item.handleKey = buildUploadHandleKey(item);
       item.state = UploadState.IDLE;
       item.attachState = UploadState.IDLE;
       item.status = 'ready';
@@ -1370,27 +1416,25 @@
       item.message = '';
       item.error = '';
       item.lastError = '';
-      if (hasHandle) {
-        item.fileHandle = handle;
-        item.sourceKind = 'local-handle';
-        item.readMode = 'handle';
-        item.persistedKind = UploadPersistedKind.FILE_SYSTEM_HANDLE;
-        item.handleKey = buildUploadHandleKey(item);
-      } else {
-        item.fileHandle = null;
-        item.sourceKind = 'browser_file';
-        item.readMode = 'file';
-        item.persistedKind = UploadPersistedKind.METADATA_ONLY;
-        item.handleKey = '';
-      }
-      safeAssignRestoreState(item, UploadRestoreState.READY, 'rebind:applyReboundFile');
       item.uploadName = '';
+      item.virtualUploadName = '';
+      item.virtualUploadTimestamp = '';
+      item.originalUploadName = '';
+      item.attachedVirtualUploadName = '';
+      item.attachedUploadTimestamp = '';
+      item.attachedOriginalName = '';
+      item.uploadedFingerprint = '';
       item.persistedAttached = false;
       item.attachedInSession = false;
-      clearStaleUnreadableFlagsForReadableItem(item, 'applyReboundFile');
+      safeAssignRestoreState(item, UploadRestoreState.READY, 'rebind:user-selected-file-authoritative');
+      clearStaleUnreadableFlagsForReadableItem(item, 'applyReboundFile:user-selected-file-authoritative');
       syncUploadItemSchemaInPlace(item);
+      clearUploadItemBrowserFileCache(item, 'rebind-after-apply');
       ToolboxShell.appendLog(
-        `[UPLOAD_REBIND][OK] id=${item.id || '-'} name=${item.name || '-'} size=${item.size || 0}`,
+        `[UPLOAD_REBIND][OVERWRITE_OK] id=${item.id || '-'} `
+        + `oldName=${oldName || '-'} oldSize=${oldSize} `
+        + `newName=${item.name || '-'} newSize=${item.size || 0} `
+        + `handle=1 strictFreshRead=1 cacheCleared=1`,
       );
       return true;
     }
@@ -1423,26 +1467,20 @@
 
         const validation = validateRebindFile(q, file);
         if (!validation.ok) {
-          if (validation.reason === 'filename-mismatch') {
-            const oldName = q.name || '';
-            const ok = window.confirm(
-              `重新选择的文件名和原记录不同。\n\n原文件：${oldName}\n新文件：${file.name}\n\n是否继续绑定？`,
-            );
-            if (!ok) {
-              ToolboxShell.appendLog(
-                `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
-              );
-              setStatus('已取消重新绑定');
-              return;
-            }
-          } else {
-            ToolboxShell.appendLog(
-              `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${validation.reason} detail=${validation.detail || '-'}`,
-            );
-            setStatus(`重新绑定失败：${validation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
-            return;
-          }
+          ToolboxShell.appendLog(
+            `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} `
+            + `reason=${validation.reason || '-'} detail=${validation.detail || '-'}`,
+          );
+          setStatus('重新绑定失败：选择的对象不是有效文件');
+          return;
         }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_REBIND][USER_SELECTED] id=${id || '-'} `
+          + `oldName=${q.name || q.filename || '-'} oldSize=${Number(q.size || 0) || 0} `
+          + `selectedName=${file.name || '-'} selectedSize=${Number(file.size || 0) || 0} `
+          + `policy=overwrite-without-name-size-check`,
+        );
 
         const hasHandle = isFileHandleLike(handle);
 
@@ -1509,13 +1547,20 @@
         }
 
         const reboundValidation = validateRebindFile(q, freshFile);
-        if (!reboundValidation.ok && reboundValidation.reason !== 'filename-mismatch') {
+        if (!reboundValidation.ok) {
           ToolboxShell.appendLog(
-            `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} reason=${reboundValidation.reason} detail=${reboundValidation.detail || '-'}`,
+            `[UPLOAD_REBIND][FAILED] id=${id || '-'} name=${q.name || '-'} `
+            + `reason=${reboundValidation.reason || '-'} detail=${reboundValidation.detail || '-'}`,
           );
-          setStatus(`重新绑定失败：${reboundValidation.reason === 'filesize-mismatch' ? '文件大小不匹配' : '无效文件'}`);
+          setStatus('重新绑定失败：重新读取后不是有效文件');
           return;
         }
+
+        ToolboxShell.appendLog(
+          `[UPLOAD_REBIND][FRESH_READ_OK] id=${id || '-'} `
+          + `freshName=${freshFile.name || '-'} freshSize=${Number(freshFile.size || 0) || 0} `
+          + `lastModified=${Number(freshFile.lastModified || 0) || 0}`,
+        );
 
         applyReboundFile(q, freshFile, handle);
         ToolboxShell.appendLog(
@@ -1535,9 +1580,13 @@
           success: true,
         });
 
-        setStatus(`已重新绑定文件：${q.name}`);
-        ToolboxShell.appendLog(`[UPLOAD_REBIND][MATCH_OK] id=${id || '-'} name=${q.name || '-'} size=${q.size || 0}`);
-        ToolboxShell.appendLog(`[UPLOAD_REBIND][DONE] id=${id || '-'} source=${picked.source || '-'} handle=${hasHandle ? 1 : 0}`);
+        setStatus(`已重新绑定并覆盖为：${q.name}`);
+        ToolboxShell.appendLog(
+          `[UPLOAD_REBIND][DONE] id=${id || '-'} `
+          + `name=${q.name || '-'} size=${q.size || 0} `
+          + `source=${picked.source || '-'} handle=${hasHandle ? 1 : 0} `
+          + `policy=user-selected-overwrite strictFreshRead=1 cacheCleared=1`,
+        );
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
 
@@ -1686,18 +1735,21 @@
           const fresh = await item.fileHandle.getFile();
 
           if (fresh && fresh.size >= 0) {
-            item.file = fresh;
-            item.blob = fresh;
             item.name = fresh.name || item.name;
-            item.size = fresh.size;
+            item.filename = fresh.name || item.filename || item.name;
+            item.displayName = fresh.name || item.displayName || item.name;
+            item.size = Number(fresh.size || 0) || 0;
             item.type = fresh.type || item.type || 'application/octet-stream';
-            item.lastModified = fresh.lastModified || item.lastModified;
+            item.mime_type = fresh.type || item.mime_type || item.type || 'application/octet-stream';
+            item.lastModified = Number(fresh.lastModified || item.lastModified || Date.now()) || Date.now();
             item.sourceKind = 'local-handle';
             item.readMode = 'handle';
             item.message = '';
-
+            clearUploadItemBrowserFileCache(item, 'resolveStrictLocalUploadFile:before-return-fresh');
             ToolboxShell.appendLog(
-              `[UPLOAD_FILE][USE_FILE_HANDLE] name=${item.name || '-'} size=${item.size || 0}`,
+              `[UPLOAD_FILE][USE_FILE_HANDLE_FRESH] name=${item.name || '-'} `
+              + `size=${item.size || 0} lastModified=${item.lastModified || 0} `
+              + `strictFreshRead=1 cacheStored=0`,
             );
 
             return fresh;
@@ -1750,6 +1802,10 @@
           method: 'GET',
           credentials: 'include',
           cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache, no-store, max-age=0',
+            Pragma: 'no-cache',
+          },
         });
 
         if (!response.ok) {
@@ -1839,6 +1895,7 @@
       pickOneLocalFileWithHandle,
       pickOneLocalFileForRebind,
       validateRebindFile,
+      clearUploadItemBrowserFileCache,
       applyReboundFile,
       rebindUploadFile,
       requestUploadFilePermission,

@@ -599,67 +599,6 @@
     return { upload, message, store };
   }
 
-  function formatGlobalUsageEventLine(kind, eventId, item) {
-    const safeKind = String(kind || 'unknown');
-    const safeId = String(eventId || item?.eventId || '-');
-    const at = Number(item && item.at) || 0;
-    const atText = at > 0 ? new Date(at).toLocaleString() : '-';
-    if (safeKind === 'upload') {
-      return `[${atText}] upload eventId=${safeId} file=${item?.fileName || '-'} size=${Number(item?.fileSize || 0)} page=${item?.pageInstanceId || '-'}`;
-    }
-    return `[${atText}] message eventId=${safeId} hash=${item?.textHash || '-'} attachments=${Number(item?.attachmentCount || 0)} page=${item?.pageInstanceId || '-'}`;
-  }
-
-  function getGlobalUsageEventsSummary(options = {}) {
-    const store = readGlobalUsageStore();
-    const windows = readGlobalUsageWindowMsFromConfig();
-    const maxLines = Math.max(1, Math.min(500, Number(options.maxLines) || 50));
-    const messageFiltered = filterGlobalUsageEventsByWindow(store.events.message, windows.messageWindowMs);
-    const uploadFiltered = filterGlobalUsageEventsByWindow(store.events.upload, windows.uploadWindowMs);
-    const messageEntries = Object.entries(messageFiltered.filtered)
-      .map(([eventId, item]) => ({ kind: 'message', eventId, item, at: Number(item && item.at) || 0 }))
-      .sort((a, b) => b.at - a.at);
-    const uploadEntries = Object.entries(uploadFiltered.filtered)
-      .map(([eventId, item]) => ({ kind: 'upload', eventId, item, at: Number(item && item.at) || 0 }))
-      .sort((a, b) => b.at - a.at);
-
-    return {
-      dayKey: store.dayKey,
-      uploadWindowHours: windows.uploadWindowHours,
-      messageWindowHours: windows.messageWindowHours,
-      messageUsed: messageEntries.length,
-      uploadUsed: uploadEntries.length,
-      messageLimit: store.messageLimit,
-      uploadLimit: store.uploadLimit,
-      messageEvents: messageEntries.slice(0, maxLines),
-      uploadEvents: uploadEntries.slice(0, maxLines),
-      messageEventCount: messageEntries.length,
-      uploadEventCount: uploadEntries.length,
-    };
-  }
-
-  function exportGlobalUsageEventsText(options = {}) {
-    const summary = getGlobalUsageEventsSummary(options);
-    const lines = [
-      `[GLOBAL_USAGE][EXPORT] windowHours=upload:${summary.uploadWindowHours}/message:${summary.messageWindowHours} `
-      + `messageUsed=${summary.messageUsed}/${summary.messageLimit} uploadUsed=${summary.uploadUsed}/${summary.uploadLimit}`,
-      `[GLOBAL_USAGE][EXPORT] messageEvents=${summary.messageEventCount} uploadEvents=${summary.uploadEventCount}`,
-      '',
-      '--- message events (newest first) ---',
-    ];
-
-    summary.messageEvents.forEach(({ kind, eventId, item }) => {
-      lines.push(formatGlobalUsageEventLine(kind, eventId, item));
-    });
-
-    lines.push('', '--- upload events (newest first) ---');
-    summary.uploadEvents.forEach(({ kind, eventId, item }) => {
-      lines.push(formatGlobalUsageEventLine(kind, eventId, item));
-    });
-
-    return lines.join('\n');
-  }
-
   function resetGlobalUsageToday(reason = 'manual') {
     const store = createEmptyGlobalUsageStore();
     writeGlobalUsageStore(store, `reset:${reason}`);
@@ -795,7 +734,4 @@
     resetGlobalUsageToday,
     clearGlobalUsageKind,
     initGlobalUsageSync,
-    getGlobalUsageEventsSummary,
-    exportGlobalUsageEventsText,
-    formatGlobalUsageEventLine,
   };

@@ -936,6 +936,8 @@
     }
 
     function deletePromptById(promptId, options = {}) {
+      flushPromptDetailBeforeSwitch();
+
       const item = prompts.find((prompt) => prompt.id === promptId);
 
       if (!item) {
@@ -1187,18 +1189,36 @@
         return;
       }
 
-      const title = document.createElement('div');
-      title.className = 'cgpt-prompt-detail-title';
-      title.textContent = item.title || '未命名 Prompt';
+      const autosaveHint = document.createElement('div');
+      autosaveHint.className = 'cgpt-hint cgpt-prompt-detail-autosave-hint';
+      autosaveHint.textContent = '直接编辑，停顿后自动保存';
+
+      const title = document.createElement('input');
+      title.type = 'text';
+      title.id = 'cgpt-prompt-detail-title-input';
+      title.className = 'cgpt-prompt-detail-title cgpt-input';
+      title.dataset.promptId = String(item.id || '');
+      title.value = item.title || '未命名 Prompt';
+      title.setAttribute('aria-label', 'Prompt 标题');
+      bindOnce(title, 'input', () => {
+        onPromptDetailTitleInput(item);
+      }, `bound_prompt_detail_title_input_${item.id}`);
 
       const meta = document.createElement('div');
+      meta.id = 'cgpt-prompt-detail-meta';
       meta.className = 'cgpt-prompt-detail-meta';
       meta.textContent = `分类：${item.category || '默认'}｜字数：${String(item.content || '').length}`;
 
       const content = document.createElement('textarea');
+      content.id = 'cgpt-prompt-detail-content';
       content.className = 'cgpt-prompt-detail-content cgpt-input';
-      content.readOnly = true;
+      content.dataset.promptId = String(item.id || '');
+      content.readOnly = false;
+      content.spellcheck = true;
       content.value = String(item.content || '');
+      bindOnce(content, 'input', () => {
+        onPromptDetailContentInput(item);
+      }, `bound_prompt_detail_content_input_${item.id}`);
 
       const actions = document.createElement('div');
       actions.className = 'cgpt-prompt-detail-actions';
@@ -1253,11 +1273,6 @@
         }
       });
 
-      const editBtn = createActionButton('编辑');
-      editBtn.addEventListener('click', () => {
-        openEditor(item.id);
-      });
-
       const deleteBtn = createActionButton('删除');
       deleteBtn.classList.add('danger');
       deleteBtn.addEventListener('click', () => {
@@ -1278,15 +1293,16 @@
       actions.appendChild(fillBtn);
       actions.appendChild(sendBtn);
       actions.appendChild(copyBtn);
-      actions.appendChild(editBtn);
       actions.appendChild(deleteBtn);
       actions.appendChild(upBtn);
       actions.appendChild(downBtn);
 
+      panel.appendChild(autosaveHint);
       panel.appendChild(title);
       panel.appendChild(meta);
       panel.appendChild(content);
       panel.appendChild(actions);
+      promptDetailDirty = false;
     }
 
     function renderCategoryBar() {
@@ -1673,6 +1689,8 @@
     function render() {
       if (!listEl) return;
 
+      flushPromptDetailBeforeSwitch();
+
       syncActiveCategoryFromSharedState();
       activePromptSubtab = normalizePromptSubtab(activePromptSubtab);
       renderPromptSubtabs();
@@ -1795,6 +1813,244 @@
     }
 
     let promptAutoSaveTimer = null;
+    let promptDetailDirty = false;
+    let promptDetailDerivedRefreshTimer = null;
+    let promptDetailMetaRefreshTimer = null;
+    const PROMPT_DETAIL_AUTOSAVE_DELAY_MS = 700;
+    const PROMPT_DETAIL_DERIVED_REFRESH_DELAY_MS = 700;
+    const PROMPT_DETAIL_META_REFRESH_DELAY_MS = 500;
+
+    function readPromptDetailPanelDom() {
+      const panel = root ? qs('#cgpt-prompt-detail-panel', root) : null;
+      if (!panel) {
+        return null;
+      }
+
+      const contentEl = qs('#cgpt-prompt-detail-content', panel);
+      const titleEl = qs('#cgpt-prompt-detail-title-input', panel);
+      const promptId = contentEl
+        ? String(contentEl.dataset.promptId || '')
+        : (titleEl ? String(titleEl.dataset.promptId || '') : '');
+
+      if (!promptId) {
+        return null;
+      }
+
+      return {
+        promptId,
+        title: titleEl ? String(titleEl.value || '') : '',
+        content: contentEl ? String(contentEl.value || '') : '',
+      };
+    }
+
+    function flushPromptDetailPanelToRecord() {
+      const dom = readPromptDetailPanelDom();
+      if (!dom) {
+        return false;
+      }
+
+      const item = findPromptById(dom.promptId);
+      if (!item) {
+        return false;
+      }
+
+      let changed = false;
+      const nextTitle = String(dom.title || '').trim();
+
+      if (nextTitle && nextTitle !== String(item.title || '')) {
+        item.title = nextTitle;
+        item.updatedAt = nowMs();
+        changed = true;
+      }
+
+      const nextContent = String(dom.content || '');
+      if (nextContent !== String(item.content || '')) {
+        item.content = nextContent;
+        item.updatedAt = nowMs();
+        changed = true;
+      }
+
+      return changed;
+    }
+
+    function flushPromptDetailBeforeSwitch() {
+      if (!promptDetailDirty) {
+        return;
+      }
+
+      const changed = flushPromptDetailPanelToRecord();
+      promptDetailDirty = false;
+
+      if (promptAutoSaveTimer) {
+        clearTimeout(promptAutoSaveTimer);
+        promptAutoSaveTimer = null;
+      }
+
+      if (changed) {
+        savePromptListFromState('detail-switch-flush');
+      }
+    }
+
+    function schedulePromptDetailDerivedRefresh(recId) {
+      if (promptDetailDerivedRefreshTimer) {
+        clearTimeout(promptDetailDerivedRefreshTimer);
+      }
+
+      promptDetailDerivedRefreshTimer = setTimeout(() => {
+        promptDetailDerivedRefreshTimer = null;
+        refreshPromptDetailDerivedUiDebounced(recId);
+      }, PROMPT_DETAIL_DERIVED_REFRESH_DELAY_MS);
+    }
+
+    function refreshPromptDetailDerivedUiDebounced(recId) {
+      const activeId = String(selectedPromptId || '');
+      const expectedId = String(recId || '');
+
+      if (expectedId && activeId && expectedId !== activeId) {
+        console.log(
+          '[PROMPT_TEMPLATE][DERIVED_REFRESH_SKIP] reason=active_changed expected_id=%s active_id=%s',
+          expectedId,
+          activeId,
+        );
+        return;
+      }
+
+      const item = findPromptById(expectedId || activeId);
+      if (!item) {
+        return;
+      }
+
+      try {
+        const panel = root ? qs('#cgpt-prompt-detail-panel', root) : null;
+        const meta = panel ? qs('#cgpt-prompt-detail-meta', panel) : null;
+
+        if (meta) {
+          meta.textContent = `分类：${item.category || '默认'}｜字数：${String(item.content || '').length}`;
+        }
+
+        if (listEl && item.id) {
+          const safeId = escapeCssIdent(item.id);
+          const row = listEl.querySelector(`[data-prompt-nav-item="1"][data-id="${safeId}"]`);
+
+          if (row) {
+            const rowTitle = row.querySelector('.cgpt-prompt-nav-title');
+            const rowMeta = row.querySelector('.cgpt-prompt-nav-meta');
+
+            if (rowTitle) {
+              rowTitle.textContent = item.title || '未命名 Prompt';
+            }
+
+            if (rowMeta) {
+              rowMeta.textContent = `${item.category || '默认'}｜${String(item.content || '').length} 字`;
+            }
+          }
+        }
+
+        setStatus('Prompt 已自动保存', 'success');
+        console.log(
+          '[PROMPT_TEMPLATE][DERIVED_REFRESH_DONE] id=%s name=%s',
+          item.id,
+          item.title,
+        );
+      } catch (err) {
+        console.warn(
+          '[PROMPT_TEMPLATE][DERIVED_REFRESH_FAIL] error_type=%s error=%s',
+          (err && err.name) || 'Error',
+          (err && err.message) || String(err),
+          err,
+        );
+      }
+    }
+
+    function schedulePromptDetailMetaRefresh(recId) {
+      if (promptDetailMetaRefreshTimer) {
+        clearTimeout(promptDetailMetaRefreshTimer);
+      }
+
+      promptDetailMetaRefreshTimer = setTimeout(() => {
+        promptDetailMetaRefreshTimer = null;
+        refreshPromptDetailMetaUiDebounced(recId);
+      }, PROMPT_DETAIL_META_REFRESH_DELAY_MS);
+    }
+
+    function refreshPromptDetailMetaUiDebounced(recId) {
+      const activeId = String(selectedPromptId || '');
+      const expectedId = String(recId || '');
+
+      if (expectedId && activeId && expectedId !== activeId) {
+        console.log(
+          '[PROMPT_TEMPLATE][META_REFRESH_SKIP] reason=active_changed expected_id=%s active_id=%s',
+          expectedId,
+          activeId,
+        );
+        return;
+      }
+
+      const item = findPromptById(expectedId || activeId);
+      if (!item) {
+        return;
+      }
+
+      try {
+        if (listEl && item.id) {
+          const safeId = escapeCssIdent(item.id);
+          const row = listEl.querySelector(`[data-prompt-nav-item="1"][data-id="${safeId}"]`);
+          const rowTitle = row ? row.querySelector('.cgpt-prompt-nav-title') : null;
+
+          if (rowTitle) {
+            rowTitle.textContent = item.title || '未命名 Prompt';
+          }
+        }
+
+        console.log(
+          '[PROMPT_TEMPLATE][META_REFRESH_DONE] id=%s name=%s',
+          item.id,
+          item.title,
+        );
+      } catch (err) {
+        console.warn(
+          '[PROMPT_TEMPLATE][META_REFRESH_FAIL] error_type=%s error=%s',
+          (err && err.name) || 'Error',
+          (err && err.message) || String(err),
+          err,
+        );
+      }
+    }
+
+    function onPromptDetailContentInput(item) {
+      if (!item || !item.id) {
+        return;
+      }
+
+      flushPromptDetailPanelToRecord();
+      promptDetailDirty = true;
+      schedulePromptAutoSave('detail-content-input', { delayMs: PROMPT_DETAIL_AUTOSAVE_DELAY_MS });
+      schedulePromptDetailDerivedRefresh(item.id);
+
+      console.log(
+        '[PROMPT_TEMPLATE][EDITOR_CHANGED] id=%s name=%s content_len=%s',
+        item.id,
+        item.title,
+        String(item.content || '').length,
+      );
+    }
+
+    function onPromptDetailTitleInput(item) {
+      if (!item || !item.id) {
+        return;
+      }
+
+      flushPromptDetailPanelToRecord();
+      promptDetailDirty = true;
+      schedulePromptAutoSave('detail-title-input', { delayMs: PROMPT_DETAIL_AUTOSAVE_DELAY_MS });
+      schedulePromptDetailMetaRefresh(item.id);
+
+      console.log(
+        '[PROMPT_TEMPLATE][META_EDITED] id=%s name=%s',
+        item.id,
+        item.title,
+      );
+    }
 
     function updatePromptEditorCharCount(textarea, reason = '') {
       if (!(textarea instanceof HTMLTextAreaElement)) {
@@ -1842,7 +2098,11 @@
       return ok;
     }
 
-    function schedulePromptAutoSave(reason) {
+    function schedulePromptAutoSave(reason, options = {}) {
+      const delayMs = Number.isFinite(Number(options.delayMs))
+        ? Number(options.delayMs)
+        : 500;
+
       if (promptAutoSaveTimer) {
         clearTimeout(promptAutoSaveTimer);
       }
@@ -1850,7 +2110,7 @@
       promptAutoSaveTimer = setTimeout(() => {
         promptAutoSaveTimer = null;
         savePromptListFromState(reason || 'auto-save');
-      }, 500);
+      }, delayMs);
     }
 
     function focusMoveButtonById(itemId, actionName) {
@@ -1867,6 +2127,8 @@
     }
 
     function movePrompt(id, direction) {
+      flushPromptDetailBeforeSwitch();
+
       const index = prompts.findIndex((item) => item.id === id);
       if (index < 0) return;
 
@@ -2402,6 +2664,8 @@
     }
 
     function exportPrompts() {
+      flushPromptDetailBeforeSwitch();
+
       const data = {
         version: 4,
         exportedAt: new Date().toISOString(),
@@ -2520,6 +2784,8 @@
     }
 
     async function importPrompts(event) {
+      flushPromptDetailBeforeSwitch();
+
       if (promptImporting) {
         ToolboxShell.appendLog('[PROMPT_IMPORT][SKIP] reason=already-importing');
         return;
@@ -2615,6 +2881,8 @@
     }
 
     function resetDefaultPrompts() {
+      flushPromptDetailBeforeSwitch();
+
       const ok = confirm('确定重置为默认 Prompt 吗？当前所有自定义 Prompt 会被覆盖。');
       if (!ok) return;
 
@@ -3178,7 +3446,14 @@
               overflow: hidden;
               text-overflow: ellipsis;
             }
+            .cgpt-prompt-detail-autosave-hint {
+              font-size: 12px;
+              color: #64748b;
+              line-height: 1.35;
+            }
             .cgpt-prompt-detail-title {
+              width: 100%;
+              box-sizing: border-box;
               font-size: 16px;
               font-weight: 800;
               color: #f8fafc;

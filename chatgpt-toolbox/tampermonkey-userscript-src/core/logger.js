@@ -2019,9 +2019,6 @@
       logPersistEnabled: 'logPersistEnabled',
       logPersistLines: 'logPersistLines',
       compactUiConfig: 'compactUiConfig',
-      edgeAutoHideEnabled: 'edgeAutoHideEnabled',
-      edgeHidden: 'edgeHidden',
-      edgeSide: 'edgeSide',
       activeTab: 'activeTab',
       hiddenTitlePosition: 'hiddenTitlePosition',
       shortcutConfig: 'shortcutConfig',
@@ -2051,9 +2048,6 @@
         compactMode: !!get(KEYS.compactMode, false),
         uploadBlobPersistEnabled: !!get(KEYS.uploadBlobPersistEnabled, true),
         logPersistEnabled: !!get(KEYS.logPersistEnabled, false),
-        edgeAutoHideEnabled: get(KEYS.edgeAutoHideEnabled, false) === true,
-        edgeHidden: !!get(KEYS.edgeHidden, false),
-        edgeSide: get(KEYS.edgeSide, 'right'),
       };
     }
 
@@ -2643,8 +2637,6 @@
     quickPromptClickAction: 'send',
     quickPromptActiveCategory: '全部',
     confirmPromptDraftOverwrite: false,
-    globalDropCaptureEnabled: false,
-    restoreScrollAfterCopyLastMessage: false,
     continueAutomation: Object.freeze({
       autoUploadEnabled: true,
       autoUploadInterval: 5,
@@ -2676,6 +2668,9 @@
   function normalizeCompactUiConfig(input) {
     const raw = input && typeof input === 'object' ? input : {};
     const cfg = Object.assign({}, DEFAULT_COMPACT_UI_CONFIG, raw);
+    if (Object.prototype.hasOwnProperty.call(cfg, 'restoreScrollAfterCopyLastMessage')) {
+      delete cfg.restoreScrollAfterCopyLastMessage;
+    }
 
     if (!raw.quickPromptActionVersion && raw.quickPromptClickAction === 'fill') {
       cfg.quickPromptClickAction = 'send';
@@ -2710,7 +2705,9 @@
 
     cfg.showUploadQuickPrompts = cfg.showUploadQuickPrompts !== false;
     cfg.showCompactQuickPrompts = cfg.showCompactQuickPrompts !== false;
-    cfg.restoreScrollAfterCopyLastMessage = cfg.restoreScrollAfterCopyLastMessage === true;
+    // 旧版支持「页面空白处拖入文件时加入工具箱队列」，现在已删除。
+    // 即使旧 localStorage / GM 存储里残留 globalDropCaptureEnabled=true，也必须强制清理，避免 document 级拖拽监听重新生效。
+    delete cfg.globalDropCaptureEnabled;
 
     if (!Array.isArray(cfg.quickPromptIds)) {
       cfg.quickPromptIds = [];
@@ -3612,7 +3609,7 @@
       const targetLabel = typeof getCopyThenShortcutTargetLabel === 'function'
         ? getCopyThenShortcutTargetLabel()
         : '';
-      sendCopyHotkeyBtn.title = `触发快捷键：${triggerLabel}；流程：发送消息 -> 等待回复完成 -> 复制最后回复 -> ${targetLabel || '目标快捷键'}`;
+      sendCopyHotkeyBtn.title = `触发快捷键：${triggerLabel}；流程：发送消息 -> 等待 1 秒 -> 复制+快捷键（回复等待由复制+快捷键核心处理）-> ${targetLabel || '目标快捷键'}`;
     }
 
     const copyContinueBtn = qs(UploadSelectors.copyContinueBtn, scope);
