@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 from app.utils.page_identity import PageIdentity
+from app.utils.page_identity_proxy import PageIdentityProxyMixin
 from app.utils.page_status import PageActionPlan
 
 
@@ -21,7 +22,7 @@ class LocalTurn:
 
 
 @dataclass
-class SendPlan:
+class SendPlan(PageIdentityProxyMixin):
     """一次发送决策快照；resolve_page_action 只在此构建一次。"""
 
     turn: LocalTurn
@@ -69,30 +70,7 @@ class SendPlan:
     def identity(self) -> PageIdentity:
         if self.page_action is None:
             return PageIdentity()
-        return PageIdentity.from_mapping(
-            {
-                "client_id": self.page_action.client_id,
-                "page_instance_id": self.page_action.page_instance_id,
-                "conversation_id": self.page_action.conversation_id,
-                "url": self.page_action.url,
-            }
-        )
-
-    @property
-    def client_id(self) -> str:
-        return self.identity.client_id
-
-    @property
-    def page_instance_id(self) -> str:
-        return self.identity.page_instance_id
-
-    @property
-    def conversation_id(self) -> str:
-        return self.identity.conversation_id
-
-    @property
-    def url(self) -> str:
-        return self.identity.url
+        return self.page_action.identity
 
     @property
     def target_source(self) -> str:

@@ -1,3 +1,11 @@
+  /**
+   * REFACTOR_STATUS:
+   * 当前文件是拆分重构候选模块。
+   * 当前阶段不要默认加入 .build-order.json。
+   * 只有完成 canonical owner 切换后，才能进入 build order。
+   * 在进入 build order 前，真实运行逻辑仍以 main.js / upload-module.js 中的 legacy 实现为准。
+   */
+
   /********************************************************************
    * UploadRunner：上传执行流程（委托 upload-module 既有实现）
    ********************************************************************/
@@ -18,12 +26,12 @@
         }
       }
 
-      async function startUploadFromCurrentQueue(options) {
+      async function candidateStartUploadFromCurrentQueue(options) {
         const opts = options && typeof options === 'object' ? options : { source: options };
         const source = String(opts.source || 'button').trim() || 'button';
         const state = typeof getState === 'function' ? getState() : {};
         appendRunnerLog(
-          `[UPLOAD_RUNNER][START] source=${source} phase=${state.uploadPhase || state.uploadTask && state.uploadTask.phase || '-'}`,
+          `[UPLOAD_RUNNER][START] candidate=1 source=${source} phase=${state.uploadPhase || state.uploadTask && state.uploadTask.phase || '-'}`,
         );
 
         if (typeof legacyStartUploadFromCurrentQueue !== 'function') {
@@ -44,12 +52,12 @@
         return result;
       }
 
-      async function uploadSingleQueueItem(itemOrId, source) {
+      async function candidateUploadSingleQueueItem(itemOrId, source) {
         const itemId = itemOrId && typeof itemOrId === 'object'
           ? (itemOrId.id || itemOrId.itemId || '')
           : itemOrId;
         appendRunnerLog(
-          `[UPLOAD_RUNNER][ITEM_START] source=${source || '-'} id=${itemId || '-'}`,
+          `[UPLOAD_RUNNER][ITEM_START] candidate=1 source=${source || '-'} id=${itemId || '-'}`,
         );
 
         if (typeof legacyUploadSingleQueueItem !== 'function') {
@@ -73,8 +81,8 @@
       }
 
       return {
-        startUploadFromCurrentQueue,
-        uploadSingleQueueItem,
+        candidateStartUploadFromCurrentQueue,
+        candidateUploadSingleQueueItem,
       };
     }
 

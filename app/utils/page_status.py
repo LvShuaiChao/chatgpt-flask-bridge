@@ -14,6 +14,7 @@ from app.constants import (
 )
 from app.url_utils import parse_conversation_id
 from app.utils.page_identity import PageIdentity
+from app.utils.page_identity_proxy import PageIdentityProxyMixin
 from app.utils.time_utils import float_ts as _float_ts
 
 
@@ -830,7 +831,7 @@ class PageCapability:
 
 
 @dataclass
-class PageActionPlan:
+class PageActionPlan(PageIdentityProxyMixin):
     """统一页面动作判定（send / sync_conversation / copy_last / upload）。"""
 
     action: str
@@ -855,22 +856,6 @@ class PageActionPlan:
     @property
     def identity(self) -> PageIdentity:
         return PageIdentity.from_mapping(self.capability.to_dict())
-
-    @property
-    def client_id(self) -> str:
-        return self.identity.client_id
-
-    @property
-    def page_instance_id(self) -> str:
-        return self.identity.page_instance_id
-
-    @property
-    def conversation_id(self) -> str:
-        return self.identity.conversation_id
-
-    @property
-    def url(self) -> str:
-        return self.identity.url
 
     @property
     def online(self) -> bool:

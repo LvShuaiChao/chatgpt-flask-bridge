@@ -149,13 +149,7 @@ class BridgeClient:
         self._reconnect = ReconnectPolicy()
 
     def _headers(self, *, include_json: bool = False) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
-        if include_json:
-            headers["Content-Type"] = "application/json"
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-            headers["X-API-Key"] = self.token
-        return headers
+        return self._http.headers(include_json=include_json)
 
     @staticmethod
     def _health_payload_ok(data: dict[str, Any]) -> bool:
@@ -175,57 +169,21 @@ class BridgeClient:
         return 0
 
     def _probe_get_health(self, path: str, timeout: float = 5) -> tuple[bool, dict[str, Any], str]:
-        url = self._url(path)
-        try:
-            response = self._session.get(
-                url,
-                headers=self._headers(),
-                timeout=timeout,
-            )
-        except requests.RequestException as error:
-            print(f"[CLIENT][CHECK][ERROR] {url} -> {error}", file=sys.stderr)
-            return False, {}, str(error)
-
-        text_preview = (response.text or "")[:200]
-        try:
-            data = response.json()
-        except ValueError as error:
-            print(
-                f"[CLIENT][CHECK][ERROR] {url} JSON 解析失败：{error}；"
-                f"HTTP {response.status_code} body={text_preview}",
-                file=sys.stderr,
-            )
-            return False, {}, str(error)
+        ok, data, reason = self._http.probe_get(path, timeout=timeout)
+        if not ok:
+            return False, data if isinstance(data, dict) else {}, reason
 
         if not isinstance(data, dict):
-            print(
-                f"[CLIENT][CHECK][WARN] {url} 响应不是对象：HTTP {response.status_code} {text_preview}",
-                file=sys.stderr,
-            )
             return False, {}, "响应格式异常"
-
-        if response.status_code == 401:
-            print(
-                f"[CLIENT][CHECK][WARN] {url} HTTP 401 未授权：{text_preview}",
-                file=sys.stderr,
-            )
-            return False, data, "未授权"
-
-        if response.status_code != 200:
-            print(
-                f"[CLIENT][CHECK][WARN] {url} HTTP {response.status_code}: {text_preview}",
-                file=sys.stderr,
-            )
-            return False, data, f"HTTP {response.status_code}"
 
         if not self._health_payload_ok(data):
             print(
-                f"[CLIENT][CHECK][WARN] {url} 未通过健康判定：{data}",
+                f"[CLIENT][CHECK][WARN] {self._url(path)} 未通过健康判定：{data}",
                 file=sys.stderr,
             )
             return False, data, "健康检查未通过"
 
-        print(f"[CLIENT][CHECK] 服务可用：{url}", file=sys.stderr)
+        print(f"[CLIENT][CHECK] 服务可用：{self._url(path)}", file=sys.stderr)
         return True, data, ""
 
     def _probe_bridge(self, timeout: float = 5) -> tuple[bool, dict[str, Any]]:

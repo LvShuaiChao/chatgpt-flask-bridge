@@ -4541,6 +4541,14 @@
         || recoverReason
       );
       if (
+        phase === 'next_round'
+        || phase === 'ready_next_round'
+        || waitKind === 'next-round-ready'
+        || waitKind === 'next_round_ready'
+      ) {
+        return `${idleText}（准备下一轮）`;
+      }
+      if (
         phase === 'post_reply_delay'
         || phase === 'post_hotkey_delay'
         || phase === 'post_reply_wait'
@@ -4559,6 +4567,13 @@
             return `${idleText}（重试 ${remainingSec}s）`;
           }
           return `${idleText}（等待 ${remainingSec}s）`;
+        }
+        if (
+          waitKind === 'next_step'
+          || waitKind === 'next-step'
+          || phase === 'next_step_wait'
+        ) {
+          return `${idleText}（准备下一轮）`;
         }
         return isRecoverWait ? `${idleText}（重试中）` : `${idleText}（等待中）`;
       }
@@ -4583,7 +4598,10 @@
       if (phase === 'sending' || phase === 'send') {
         return `${idleText}（发送中）`;
       }
-      if (phase === 'upload_before_send' || phase === 'uploading' || phase === 'upload') {
+      if (phase === 'upload_before_send') {
+        return `${idleText}（准备上传）`;
+      }
+      if (phase === 'uploading' || phase === 'upload') {
         return `${idleText}（上传中）`;
       }
       return idleText;
@@ -9801,6 +9819,34 @@
       );
     }
 
+    function isClosedLoopRecoverableCopyHotkeyFailureReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) {
+        return false;
+      }
+      return (
+        text === 'timeout'
+        || text === 'copy-failed'
+        || text === 'wait-assistant-failed'
+        || text === 'empty-assistant-text'
+        || text === 'invalid-assistant-text'
+        || text === 'copy-direct-failed'
+        || text === 'latest_assistant_reply_empty'
+        || text === 'copy_pipeline_missing'
+        || text === 'read-failed'
+        || text === 'clipboard-failed'
+        || text.includes('copy-direct-failed')
+        || text.includes('latest_assistant_reply_empty')
+        || text.includes('copy_pipeline_missing')
+        || text.includes('read-failed')
+        || text.includes('clipboard-failed')
+        || text.includes('clipboard')
+        || text.includes('copy-latest')
+        || text.includes('copy-failed')
+        || text.includes('wait-assistant-failed')
+      );
+    }
+
     function shouldClosedLoopPauseAfterSendFailed(reason) {
       const text = String(reason || '').trim();
       if (!text) return false;
@@ -13700,10 +13746,32 @@
       setClosedLoopPhase(CLOSED_LOOP_PHASES.NEXT_ROUND || 'next_round', {
         reason: `round-${nextRound}-schedule-next-step`,
       });
-      closedLoopContinueState.waitKind = 'next-step';
+      /*
+       * 主动等待已经结束，这里只是切入下一轮调度。
+       * delayMs=0 的情况下不应该继续把 waitKind 标成 next-step，
+       * 否则按钮会显示“等待中”，造成“主动等待后又等待”的假象。
+       */
+      closedLoopContinueState.waitKind = 'next-round-ready';
+      closedLoopContinueState.waitUntilMs = 0;
+      closedLoopContinueState.nextStepAt = 0;
+      closedLoopContinueState.delayUntilAt = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+      closedLoopContinueState.postReplyDelayUntilMs = 0;
+      closedLoopContinueState.postHotkeyDelayUntilMs = 0;
       closedLoopContinueState.nextStepScheduledAtMs = Date.now();
       closedLoopContinueState.nextStepScheduledReason = 'post-hotkey-delay-done';
       closedLoopContinueState.nextStepScheduledRound = nextRound;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][NEXT_ROUND_READY_AFTER_ACTIVE_WAIT]',
+          `runId=${runId}`,
+          `previousRound=${previousRound}`,
+          `nextRound=${nextRound}`,
+          'waitKind=next-round-ready',
+          'delayMs=0',
+          `shouldUpload=${shouldUpload ? 1 : 0}`,
+        ].join(' '),
+      );
       renderClosedLoopContinueButtons();
       ToolboxShell.appendLog(
         [
@@ -14826,6 +14894,7 @@
             ownerButtonId: getCurrentClosedLoopOwnerButtonId() || 'cgpt-closed-loop-upload-every5-hotkey-btn',
             skipActionLock: true,
             waitForCurrentReply: false,
+            skipWaitWhenReplyAlreadyStable: true,
             shouldStop,
             suppressOwnerMirror: true,
           });
@@ -14836,9 +14905,51 @@
           }
         }
         if (!copyHotkeyResult || copyHotkeyResult.ok !== true) {
+          const failReason = copyHotkeyResult && copyHotkeyResult.reason
+            ? String(copyHotkeyResult.reason)
+            : 'copy-hotkey-failed';
           ToolboxShell.appendLog(
-            `[CLOSED_LOOP][COPY_HOTKEY_ACTION_ABORT] runId=${runId} round=${round} reason=${copyHotkeyResult && copyHotkeyResult.reason ? copyHotkeyResult.reason : '-'}`,
+            [
+              '[CLOSED_LOOP][COPY_HOTKEY_ACTION_ABORT]',
+              `runId=${runId || '-'}`,
+              `round=${round || 0}`,
+              `phase=${closedLoopContinueState.phase || '-'}`,
+              `waitKind=${closedLoopContinueState.waitKind || '-'}`,
+              `reason=${failReason}`,
+            ].join(' '),
           );
+          closedLoopContinueState.waitKind = '';
+          closedLoopContinueState.copyHotkeyStartedAtMs = 0;
+          if (isClosedLoopRecoverableCopyHotkeyFailureReason(failReason)) {
+            ToolboxShell.appendLog(
+              [
+                '[CLOSED_LOOP][COPY_HOTKEY_ACTION_RECOVERABLE]',
+                `runId=${runId || '-'}`,
+                `round=${round || 0}`,
+                `phase=${closedLoopContinueState.phase || '-'}`,
+                `waitKind=${closedLoopContinueState.waitKind || '-'}`,
+                `reason=${failReason}`,
+                'action=recover-current-round',
+                'delayMs=3000',
+              ].join(' '),
+            );
+            setStatus(
+              `闭环第 ${round} 轮复制+快捷键失败，准备重试：${failReason}`,
+              'warn',
+            );
+            recoverClosedLoopContinue(runId, `copy-hotkey-failed:${failReason}`, {
+              delayMs: 3000,
+              retryCurrentRound: true,
+              skipHomeNavigation: true,
+              forceRetry: true,
+            });
+            return;
+          }
+          pauseClosedLoopContinue(`copy-hotkey-failed:${failReason}`, {
+            level: 'warn',
+            message: `闭环第 ${round} 轮复制+快捷键失败，已暂停：${failReason}`,
+          });
+          renderClosedLoopContinueButtons();
           return;
         }
         closedLoopContinueState.lastCopyHotkeyDoneRunId = String(runId || '');
@@ -26216,7 +26327,15 @@
           const picked = getLatestAssistantReplyText({ label: reasonText, forceRefresh: true });
           if (!picked || !picked.ok) {
             const failReason = picked && picked.reason ? picked.reason : 'read-failed';
-            ToolboxShell.appendLog(`[COPY_LATEST][FAIL] label=${reasonText} reason=${failReason}`);
+            ToolboxShell.appendLog(
+              [
+                '[COPY_LATEST][FAIL]',
+                `label=${reasonText}`,
+                `reason=${failReason}`,
+                'stage=read-latest-assistant',
+                `error=${picked && picked.error ? String(picked.error) : '-'}`,
+              ].join(' '),
+            );
             setStatus('复制失败：无法读取最后回复', 'error');
             return {
               ok: false,
@@ -26237,7 +26356,16 @@
         const copied = await writeClipboardAndVerify(text, { label: reasonText });
         if (!copied || !copied.ok) {
           const failReason = copied && copied.reason ? copied.reason : 'clipboard-failed';
-          ToolboxShell.appendLog(`[COPY_LATEST][FAIL] label=${reasonText} reason=${failReason} pick=${pickReason}`);
+          ToolboxShell.appendLog(
+            [
+              '[COPY_LATEST][FAIL]',
+              `label=${reasonText}`,
+              `reason=${failReason}`,
+              `pick=${pickReason}`,
+              'stage=clipboard-write',
+              `error=${copied && copied.error ? String(copied.error) : '-'}`,
+            ].join(' '),
+          );
           setStatus('复制失败：剪贴板写入失败', 'error');
           return {
             ok: false,
@@ -26752,6 +26880,7 @@
         reason = 'copy',
         shouldStop = () => false,
       } = options;
+      const skipWaitWhenReplyAlreadyStable = options.skipWaitWhenReplyAlreadyStable === true;
 
       if (
         options
@@ -26763,6 +26892,73 @@
         ToolboxShell.appendLog(
           `[COPY_WAIT][SCROLL_OPTION_IGNORED] reason=${reason} scrollBeforeCopy=${options.scrollBeforeCopy} scrollAfterCopy=${options.scrollAfterCopy}`,
         );
+      }
+
+      if (skipWaitWhenReplyAlreadyStable === true) {
+        const authority = typeof getToolboxStatusAuthoritySnapshot === 'function'
+          ? getToolboxStatusAuthoritySnapshot('copy-direct-after-closed-loop-ready')
+          : null;
+        if (
+          authority
+          && authority.replyBusy !== true
+          && authority.shouldWaitReplyByTopStatus !== true
+        ) {
+          ToolboxShell.appendLog(
+            [
+              '[COPY_WAIT][SKIP_WAIT_REPLY_STABLE]',
+              `source=${String(source || '-')}`,
+              `reason=${String(reason || '-')}`,
+              'replyAlreadyStable=1',
+            ].join(' '),
+          );
+          const copyResult = await copyLatestAssistantReplyUnified({
+            reason,
+          });
+          if (copyResult && copyResult.ok === true && String(copyResult.text || '').trim()) {
+            return {
+              ok: true,
+              reason: 'copy-direct-after-reply-stable',
+              detail: '',
+              copied: true,
+              text: copyResult.text,
+              chars: copyResult.chars || String(copyResult.text || '').length,
+              waitResult: {
+                ok: true,
+                reason: 'skipped-wait-reply-already-stable',
+              },
+              copyResult,
+            };
+          }
+          const directFailReason = copyResult && copyResult.reason
+            ? String(copyResult.reason)
+            : 'copy-direct-failed';
+          const directFailDetail = copyResult && copyResult.error
+            ? String(copyResult.error)
+            : '';
+          ToolboxShell.appendLog(
+            [
+              '[COPY_WAIT][DIRECT_COPY_FAILED]',
+              `source=${String(source || '-')}`,
+              `reason=${directFailReason}`,
+              `detail=${directFailDetail || '-'}`,
+              'waitSkipped=1',
+              'replyAlreadyStable=1',
+            ].join(' '),
+          );
+          return {
+            ok: false,
+            reason: directFailReason,
+            detail: directFailDetail,
+            copied: false,
+            text: '',
+            chars: 0,
+            waitResult: {
+              ok: true,
+              reason: 'skipped-wait-reply-already-stable',
+            },
+            copyResult,
+          };
+        }
       }
 
       try {
@@ -29623,6 +29819,7 @@
         || COPY_HOTKEY_ONCE_ACTION;
       const ownerTaskKey = String(options.ownerTaskKey || ownerAction).trim() || ownerAction;
       const waitForCurrentReply = options.waitForCurrentReply !== false;
+      const skipWaitWhenReplyAlreadyStable = options.skipWaitWhenReplyAlreadyStable === true;
       const skipActionLock = options.skipActionLock === true;
       const suppressOwnerMirror = options.suppressOwnerMirror === true;
       const externalShouldStop = typeof options.shouldStop === 'function'
@@ -29711,6 +29908,8 @@
           source: sourceText,
           reason: `copy-hotkey-core:${sourceText}`,
           shouldStop,
+          waitForCurrentReply,
+          skipWaitWhenReplyAlreadyStable,
         });
 
         if (!waitCopyResult.ok) {

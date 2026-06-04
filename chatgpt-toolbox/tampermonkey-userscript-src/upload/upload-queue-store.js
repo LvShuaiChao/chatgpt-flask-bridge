@@ -562,6 +562,9 @@
       resolveSelectedFileIdForGroup,
       syncActiveGroupSelectionAfterQueueLoad,
       saveMultiUploadSelectionForActiveGroup,
+      isFlaskUploadGroupId,
+      getUploadItemSchemaAuditData,
+      appendUploadSchemaAuditLog,
       };
     }
 

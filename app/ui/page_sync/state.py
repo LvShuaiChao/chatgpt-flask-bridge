@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from app.utils.page_identity import PageIdentity
+from app.utils.page_identity_proxy import PageIdentityProxyMixin
 
 
 @dataclass
@@ -48,7 +49,7 @@ class PageSyncState:
 
 
 @dataclass
-class SyncPlan:
+class SyncPlan(PageIdentityProxyMixin):
     """一次 sync_conversation 的决策与入队上下文。"""
 
     session: Any
@@ -69,19 +70,3 @@ class SyncPlan:
     @property
     def identity(self) -> PageIdentity:
         return PageIdentity.from_mapping(self.target)
-
-    @property
-    def client_id(self) -> str:
-        return self.identity.client_id
-
-    @property
-    def page_instance_id(self) -> str:
-        return self.identity.page_instance_id
-
-    @property
-    def conversation_id(self) -> str:
-        return self.identity.conversation_id
-
-    @property
-    def url(self) -> str:
-        return self.identity.url

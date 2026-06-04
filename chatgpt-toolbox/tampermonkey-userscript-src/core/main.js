@@ -10094,19 +10094,26 @@
 
   function detectTopMainResponseSignals(capability, domState) {
     const domGenerating = !!(domState && domState.cls === 'cgpt-state-generating');
+    const domReady = !!(domState && domState.cls === 'cgpt-state-ready');
+    const hasStop = typeof hasRealChatGPTStopGeneratingButton === 'function'
+      && hasRealChatGPTStopGeneratingButton();
+    const domContradictsStaleGenerating = domReady && !hasStop && !domGenerating;
     const isGenerating = domGenerating
       || !!(
-        capability
+        !domContradictsStaleGenerating
+        && capability
         && capability.response_state === 'generating'
       );
-    const isResponding = !!(
-      capability
-      && (
-        capability.is_responding
-        || capability.response_state === 'responding'
-        || capability.response_state === 'generating'
-      )
-    ) || domGenerating;
+    const isResponding = domGenerating
+      || !!(
+        !domContradictsStaleGenerating
+        && capability
+        && (
+          capability.is_responding
+          || capability.response_state === 'responding'
+          || capability.response_state === 'generating'
+        )
+      );
     const isAnswering = isResponding || isGenerating;
     const responseInProgress = isAnswering;
 
@@ -10185,12 +10192,22 @@
     const bridgeOnline = !!(capability && capability.bridge_connected);
     const pageOnline = capability ? capability.online !== false : true;
 
-    if (!bridgeOnline || !pageOnline) {
+    const domContradictsOfflineLock = !!(
+      domState
+      && domState.cls === 'cgpt-state-ready'
+      && !internal.isGenerating
+      && !internal.isAnswering
+      && !internal.responseInProgress
+    );
+    const hasStopForTopStatus = typeof hasRealChatGPTStopGeneratingButton === 'function'
+      && hasRealChatGPTStopGeneratingButton();
+
+    if ((!bridgeOnline || !pageOnline) && !domContradictsOfflineLock) {
       return {
         text: '离线',
         cls: 'cgpt-state-offline',
         type: 'offline',
-        title: 'Bridge / 油猴页面不可用或未连接',
+        title: 'Bridge / 油猴页面不可用或未连接（仅连接参考）',
         reason: !bridgeOnline ? 'bridge_offline' : 'page_offline',
         ...internal,
       };
@@ -10230,6 +10247,25 @@
     }
 
     if (resolveWaitingForReply()) {
+      const domSaysReady = !!(
+        !hasStopForTopStatus
+        && domState
+        && domState.cls === 'cgpt-state-ready'
+      );
+      if (domSaysReady) {
+        ToolboxShell.appendLog(
+          `[TOOLBOX_AUTHORITY][HEAL_STALE_REPLY_STATE] reason=getTopMainStatus:waiting_reply `
+          + `dom=${domState.text || '-'} bridgeOnline=${bridgeOnline ? 1 : 0}`,
+        );
+        return {
+          text: '可输入',
+          cls: 'cgpt-state-ready',
+          type: 'ready',
+          title: '真实 DOM 显示可输入/可发送，已忽略陈旧 waiting_reply',
+          reason: 'dom-heal-waiting-reply',
+          ...internal,
+        };
+      }
       return {
         text: '等回复',
         cls: 'cgpt-state-waiting',

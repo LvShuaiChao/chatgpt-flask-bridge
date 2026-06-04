@@ -1,3 +1,11 @@
+  /**
+   * REFACTOR_STATUS:
+   * 当前文件是拆分重构候选模块。
+   * 当前阶段不要默认加入 .build-order.json。
+   * 只有完成 canonical owner 切换后，才能进入 build order。
+   * 在进入 build order 前，真实运行逻辑仍以 main.js / upload-module.js 中的 legacy 实现为准。
+   */
+
   /********************************************************************
    * ComposerApiModule：Composer 读写扩展（main.js 内 ComposerApi 仍为权威实现）
    ********************************************************************/
@@ -34,16 +42,17 @@
         return String(root.innerText || root.textContent || '');
       }
 
-      function setComposerText(text, reason) {
+      function candidateSetComposerText(text, reason) {
+        // legacy delegate: main.js ComposerApi.setComposerValue remains canonical.
         if (typeof ComposerApi !== 'undefined' && typeof ComposerApi.setComposerValue === 'function') {
           const ok = ComposerApi.setComposerValue(String(text || ''), reason);
-          appendComposerLog(`[COMPOSER_API][SET_OK] reason=${reason || '-'} len=${String(text || '').length} via=ComposerApi`);
+          appendComposerLog(`[COMPOSER_API][SET_OK] candidate=1 reason=${reason || '-'} len=${String(text || '').length} via=ComposerApi`);
           return ok;
         }
 
         const root = getComposerRoot();
         if (!root) {
-          appendComposerLog(`[COMPOSER_API][SET_FAIL] reason=${reason || '-'} detail=root_missing`);
+          appendComposerLog(`[COMPOSER_API][SET_FAIL] candidate=1 reason=${reason || '-'} detail=root_missing`);
           return false;
         }
 
@@ -55,14 +64,14 @@
           data: String(text || ''),
         }));
 
-        appendComposerLog(`[COMPOSER_API][SET_OK] reason=${reason || '-'} len=${String(text || '').length}`);
+        appendComposerLog(`[COMPOSER_API][SET_OK] candidate=1 reason=${reason || '-'} len=${String(text || '').length}`);
         return true;
       }
 
       return {
         getComposerRoot,
         getComposerText,
-        setComposerText,
+        candidateSetComposerText,
       };
     }
 

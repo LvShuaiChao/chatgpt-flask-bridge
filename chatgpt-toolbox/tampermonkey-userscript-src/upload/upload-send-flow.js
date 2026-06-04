@@ -1,3 +1,11 @@
+  /**
+   * REFACTOR_STATUS:
+   * 当前文件是拆分重构候选模块。
+   * 当前阶段不要默认加入 .build-order.json。
+   * 只有完成 canonical owner 切换后，才能进入 build order。
+   * 在进入 build order 前，真实运行逻辑仍以 main.js / upload-module.js 中的 legacy 实现为准。
+   */
+
   /********************************************************************
    * UploadSendFlow：Composer 发送流程（委托 upload-module 既有实现）
    ********************************************************************/
@@ -24,13 +32,13 @@
         }
       }
 
-      async function sendCurrentComposerMessage(sourceOrOptions) {
+      async function candidateSendCurrentComposerMessage(sourceOrOptions) {
         const options = sourceOrOptions && typeof sourceOrOptions === 'object'
           ? sourceOrOptions
           : { source: sourceOrOptions };
         const source = String(options.source || '-').trim() || '-';
 
-        appendSendLog(`[UPLOAD_SEND_FLOW][START] source=${source}`);
+        appendSendLog(`[UPLOAD_SEND_FLOW][START] candidate=1 source=${source}`);
 
         const capability = typeof getPageCapability === 'function'
           ? getPageCapability('send-flow')
@@ -120,9 +128,9 @@
         return { ok: true };
       }
 
-      async function sendTextOnlyMessage(text, source) {
+      async function candidateSendTextOnlyMessage(text, source) {
         const finalText = String(text || '');
-        appendSendLog(`[UPLOAD_SEND_FLOW][SEND_TEXT_ONLY] source=${source || '-'} len=${finalText.length}`);
+        appendSendLog(`[UPLOAD_SEND_FLOW][SEND_TEXT_ONLY] candidate=1 source=${source || '-'} len=${finalText.length}`);
 
         if (!finalText.trim()) {
           appendSendLog(`[UPLOAD_SEND_FLOW][EMPTY_TEXT_BLOCKED] source=${source || '-'}`);
@@ -136,12 +144,12 @@
         if (typeof setComposerText === 'function') {
           await setComposerText(finalText, source);
         }
-        return sendCurrentComposerMessage(source);
+        return candidateSendCurrentComposerMessage(source);
       }
 
       return {
-        sendCurrentComposerMessage,
-        sendTextOnlyMessage,
+        candidateSendCurrentComposerMessage,
+        candidateSendTextOnlyMessage,
       };
     }
 

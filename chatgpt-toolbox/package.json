@@ -6,6 +6,7 @@
     "build": "node scripts/check-encoding.mjs && node scripts/check-toolbox-header-status-no-free-vars.mjs && node build.userjs.mjs && node --check dist/client.user.js && node scripts/check-dist-no-header-free-state.mjs",
     "watch": "node scripts/check-encoding.mjs && node build.userjs.mjs --watch",
     "check:encoding": "node scripts/check-encoding.mjs",
+    "fix:encoding": "node scripts/fix-encoding.mjs",
     "check:dist": "node --check dist/client.user.js",
     "check:upload-persist-db": "node scripts/check-upload-persist-db-no-free-vars.mjs",
     "check:upload-file-source": "node scripts/check-upload-file-source-no-free-vars.mjs",
@@ -13,6 +14,8 @@
     "check:toolbox-header-status": "node scripts/check-toolbox-header-status-no-free-vars.mjs",
     "check:dist-header-state": "node scripts/check-dist-no-header-free-state.mjs",
     "check:toolbox-shell-state": "node scripts/check-toolbox-shell-no-free-state.mjs",
+    "check:refactor-duplicates": "node scripts/check-refactor-duplicates.mjs",
+    "check": "npm run check:refactor-duplicates",
     "rebuild": "npm run build"
   },
   "devDependencies": {

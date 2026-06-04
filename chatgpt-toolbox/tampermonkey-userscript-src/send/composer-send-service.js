@@ -41,12 +41,32 @@
     });
   }
 
+  function composerSendReadCapability() {
+    if (typeof getPageCapability !== 'function') {
+      return {};
+    }
+    try {
+      return getPageCapability('composer-send-audit') || {};
+    } catch (capErr) {
+      console.error('[SEND_PIPELINE][ERROR]', capErr);
+      return {};
+    }
+  }
+
   function composerSendLog(tag, fields) {
     const extra = fields && typeof fields === 'object' ? fields : {};
+    const capability = composerSendReadCapability();
     const parts = [
       String(tag || '[COMPOSER_SEND]'),
       `source=${String(extra.source || '-')}`,
-      `mode=${String(extra.mode || '-')}`,
+      `action=${String(extra.action || extra.mode || '-')}`,
+      `runId=${String(extra.runId != null ? extra.runId : (extra.taskId || '-'))}`,
+      `expectedLen=${Number(extra.expectedLen != null ? extra.expectedLen : (extra.targetTextLen != null ? extra.targetTextLen : -1))}`,
+      `actualLen=${Number(extra.actualLen != null ? extra.actualLen : (extra.composerTextLen != null ? extra.composerTextLen : -1))}`,
+      `textSynced=${extra.textSynced != null ? (extra.textSynced ? 1 : 0) : -1}`,
+      `sendReady=${extra.sendReady != null ? (extra.sendReady ? 1 : 0) : (capability.sendable != null ? (capability.sendable ? 1 : 0) : -1)}`,
+      `realSendReady=${extra.realSendReady != null ? (extra.realSendReady ? 1 : 0) : (extra.buttonFound != null ? (extra.buttonFound ? 1 : 0) : -1)}`,
+      `responseState=${String(extra.responseState || capability.response_state || '-')}`,
       `reason=${String(extra.reason || '-')}`,
     ];
     if (extra.taskId) {
@@ -54,15 +74,6 @@
     }
     if (extra.taskTitle) {
       parts.push(`taskTitle=${String(extra.taskTitle)}`);
-    }
-    if (extra.composerTextLen != null) {
-      parts.push(`composerTextLen=${Number(extra.composerTextLen)}`);
-    }
-    if (extra.targetTextLen != null) {
-      parts.push(`targetTextLen=${Number(extra.targetTextLen)}`);
-    }
-    if (extra.buttonFound != null) {
-      parts.push(`buttonFound=${extra.buttonFound ? 1 : 0}`);
     }
     if (extra.clicked != null) {
       parts.push(`clicked=${extra.clicked ? 1 : 0}`);
@@ -75,6 +86,28 @@
       ToolboxShell.appendLog(line);
     } else {
       console.log(line);
+    }
+  }
+
+  function composerSendPipelineLog(tag, fields) {
+    composerSendLog(tag, fields);
+  }
+
+  function composerSendLogError(error, fields) {
+    console.error('[SEND_PIPELINE][ERROR]', error);
+    const extra = fields && typeof fields === 'object' ? fields : {};
+    const errText = error && error.message ? error.message : String(error || '');
+    const errStack = error && error.stack ? String(error.stack).slice(0, 300) : '';
+    const line = [
+      '[SEND_PIPELINE][ERROR]',
+      `source=${String(extra.source || '-')}`,
+      `action=${String(extra.action || extra.mode || '-')}`,
+      `runId=${String(extra.runId != null ? extra.runId : (extra.taskId || '-'))}`,
+      `error=${errText}`,
+      `stack=${errStack}`,
+    ].join(' ');
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
     }
   }
 
@@ -323,12 +356,36 @@
     const allowEnterFallback = opts.allowEnterFallback !== false;
     const text = sendExistingComposer ? '' : String(opts.text || '');
 
+    const runId = String(opts.runId || opts.cancelTokenId || taskId || '-').trim() || '-';
+
     const ctx = {
       source,
       mode,
+      action: mode,
+      runId,
       taskId,
       taskTitle,
     };
+
+    if (composerSendCoreState.running) {
+      const blocked = buildComposerSendResult(ctx, {
+        ok: false,
+        reason: 'another-send-running',
+        detail: 'duplicate send blocked',
+        elapsedMs: 0,
+      });
+      composerSendPipelineLog('[SEND_PIPELINE][BLOCK_DUPLICATE]', Object.assign({}, ctx, {
+        reason: 'another-send-running',
+      }));
+      composerSendLog('[COMPOSER_SEND][FAILED]', blocked);
+      return blocked;
+    }
+
+    composerSendPipelineLog('[SEND_PIPELINE][ENTRY]', Object.assign({}, ctx, {
+      expectedLen: sendExistingComposer ? 0 : text.trim().length,
+      actualLen: sendExistingComposer ? 0 : text.trim().length,
+      reason: '-',
+    }));
 
     composerSendLog('[COMPOSER_SEND][START]', Object.assign({}, ctx, {
       targetTextLen: sendExistingComposer ? 0 : text.trim().length,
@@ -350,6 +407,10 @@
         detail: mapComposerSendReasonToChinese('empty-text'),
         elapsedMs: Date.now() - startedAt,
       });
+      composerSendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+        reason: 'empty_text',
+        textSynced: 0,
+      }));
       composerSendLog('[COMPOSER_SEND][FAILED]', fail);
       return fail;
     }
@@ -434,6 +495,14 @@
 
     if (!sendExistingComposer && text.trim()) {
       const writeResult = await composerSendWriteAndVerifyText(text, ctx);
+      composerSendPipelineLog('[SEND_PIPELINE][TEXT_SYNC_RESULT]', Object.assign({}, ctx, {
+        textSynced: writeResult.ok ? 1 : 0,
+        expectedLen: text.trim().length,
+        actualLen: typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '').trim().length
+          : 0,
+        reason: writeResult.reason || (writeResult.ok ? 'composer_text_synced' : 'composer-write-failed'),
+      }));
       if (!writeResult.ok) {
         const composerTextLen = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim().length
@@ -500,6 +569,12 @@
       shouldStop,
     });
 
+    composerSendPipelineLog('[SEND_PIPELINE][SEND_BUTTON_RESULT]', Object.assign({}, ctx, {
+      realSendReady: buttonWait.ok ? 1 : 0,
+      sendReady: buttonWait.ok ? 1 : 0,
+      reason: buttonWait.reason || (buttonWait.ok ? 'send_button_ready' : 'send-button-not-found'),
+    }));
+
     if (!buttonWait.ok) {
       const fail = buildComposerSendResult(ctx, {
         ok: false,
@@ -523,6 +598,10 @@
     composerSendLog('[COMPOSER_SEND][CLICK]', Object.assign({}, ctx, {
       buttonFound: true,
     }));
+    composerSendPipelineLog('[SEND_PIPELINE][CLICK_RESULT]', Object.assign({}, ctx, {
+      realSendReady: 1,
+      reason: 'pre_click',
+    }));
 
     if (typeof stableSendMessage === 'function') {
       const stableResult = await stableSendMessage({
@@ -536,6 +615,11 @@
       });
 
       clicked = stableResult && stableResult.ok === true;
+      composerSendPipelineLog('[SEND_PIPELINE][CLICK_RESULT]', Object.assign({}, ctx, {
+        clicked: clicked ? 1 : 0,
+        reason: String((stableResult && stableResult.reason) || (clicked ? 'clicked' : 'click-failed')),
+        realSendReady: clicked ? 1 : 0,
+      }));
       if (clicked) {
         const success = buildComposerSendResult(ctx, {
           ok: true,
@@ -552,6 +636,10 @@
           candidates: buttonWait.candidates || [],
           elapsedMs: Date.now() - startedAt,
         });
+        composerSendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+          reason: 'sent',
+          textSynced: 1,
+        }));
         composerSendLog('[COMPOSER_SEND][SUCCESS]', success);
         return success;
       }
@@ -616,14 +704,28 @@
       elapsedMs: Date.now() - startedAt,
     });
 
+    composerSendPipelineLog('[SEND_PIPELINE][CLICK_RESULT]', Object.assign({}, ctx, {
+      clicked: clicked ? 1 : 0,
+      reason: clicked ? 'clicked' : 'click-failed',
+      realSendReady: clicked ? 1 : 0,
+    }));
+
     if (clicked) {
+      composerSendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+        reason: 'sent',
+        textSynced: 1,
+      }));
       composerSendLog('[COMPOSER_SEND][SUCCESS]', success);
     } else {
+      composerSendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+        reason: success.reason || 'click-failed',
+        textSynced: 0,
+      }));
       composerSendLog('[COMPOSER_SEND][FAILED]', success);
     }
     return success;
     } catch (error) {
-      console.error('[COMPOSER_SEND][ERROR]', error, ctx);
+      composerSendLogError(error, ctx);
       const fail = buildComposerSendResult(ctx, {
         ok: false,
         reason: 'send-exception',
@@ -646,8 +748,121 @@
     }
   }
 
+  async function sendTextByUnifiedPipeline(payload, options = {}) {
+    const opts = options && typeof options === 'object' ? options : {};
+    const text = payload && typeof payload === 'object'
+      ? String(payload.text || payload.content || '')
+      : String(payload || '');
+    const source = String(
+      opts.source
+      || (payload && payload.source)
+      || 'unified-pipeline',
+    ).trim() || 'unified-pipeline';
+
+    let authority = null;
+    if (
+      typeof ButtonState !== 'undefined'
+      && ButtonState
+      && typeof ButtonState.getUnifiedButtonAuthoritySnapshot === 'function'
+    ) {
+      authority = ButtonState.getUnifiedButtonAuthoritySnapshot(source);
+    } else {
+      const bridgeState = (
+        typeof window !== 'undefined'
+        && window.__cgptBridgeState
+        && typeof window.__cgptBridgeState === 'object'
+      )
+        ? window.__cgptBridgeState
+        : {};
+      const responseState = String(
+        bridgeState.response_state || bridgeState.responseState || '',
+      ).trim().toLowerCase();
+      const inputable = bridgeState.inputable === true || bridgeState.inputable === 1;
+      const sendable = bridgeState.sendable === true || bridgeState.sendable === 1;
+      const assistantBusy = (
+        responseState === 'generating'
+        || responseState === 'responding'
+        || responseState === 'answering'
+        || responseState === 'streaming'
+      );
+      authority = {
+        source,
+        responseState,
+        inputable,
+        sendable,
+        assistantBusy,
+        canSendByHeader: inputable && sendable && !assistantBusy,
+      };
+    }
+
+    const composerResult = await sendTextThroughComposer(Object.assign({}, opts, {
+      text,
+      source,
+      sendExistingComposer: opts.sendExistingComposer === true,
+    }));
+
+    const composerTextLen = (
+      typeof ComposerApi !== 'undefined'
+      && ComposerApi
+      && typeof ComposerApi.getComposerText === 'function'
+    )
+      ? String(ComposerApi.getComposerText() || '').trim().length
+      : Number(composerResult.composerTextLen || 0);
+
+    const targetTextLen = text.trim().length;
+    const textSynced = (
+      opts.sendExistingComposer === true
+      || targetTextLen <= 0
+      || composerTextLen >= targetTextLen
+    ) ? 1 : 0;
+
+    const sendReady = authority && authority.canSendByHeader ? 1 : 0;
+    const realSendReady = (
+      composerResult.buttonFound === true
+      && (composerResult.sendable === true || sendReady === 1)
+    ) ? 1 : 0;
+
+    const unified = {
+      ok: composerResult.ok === true,
+      reason: String(composerResult.reason || ''),
+      textSynced,
+      sendReady,
+      realSendReady,
+      responseState: authority ? authority.responseState : '',
+      source,
+      detail: composerResult.detail || '',
+      clicked: composerResult.clicked === true,
+    };
+
+    const logLine = [
+      '[COMPOSER_SEND][UNIFIED_PIPELINE]',
+      `source=${source}`,
+      `ok=${unified.ok ? 1 : 0}`,
+      `reason=${unified.reason || '-'}`,
+      `textSynced=${textSynced}`,
+      `sendReady=${sendReady}`,
+      `realSendReady=${realSendReady}`,
+      `responseState=${unified.responseState || '-'}`,
+    ].join(' ');
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(logLine);
+    } else {
+      console.log(logLine);
+    }
+
+    return unified;
+  }
+
+  const ComposerSendService = Object.freeze({
+    sendTextThroughComposer,
+    sendTextByUnifiedPipeline,
+    mapComposerSendReasonToChinese,
+  });
+
   if (typeof globalThis !== 'undefined') {
     globalThis.sendTextThroughComposer = sendTextThroughComposer;
+    globalThis.sendTextByUnifiedPipeline = sendTextByUnifiedPipeline;
+    globalThis.ComposerSendService = ComposerSendService;
     globalThis.mapComposerSendReasonToChinese = mapComposerSendReasonToChinese;
   }
 })();

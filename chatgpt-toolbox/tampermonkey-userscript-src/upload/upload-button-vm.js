@@ -32,7 +32,7 @@
         replyWaiting: replyBusy,
         replyBusy,
         replyReady: unified.flags.ready === true,
-        shouldWaitReplyByTopStatus: replyBusy,
+        shouldWaitReplyByTopStatus: unified.flags.replyBusy === true,
         canSendByTopStatus: unified.flags.canSend === true || snap.canSend === true,
         canStartUploadByTopStatus: unified.flags.canUpload === true,
         responseState: unified.raw && unified.raw.responseState ? unified.raw.responseState : '',
@@ -150,7 +150,22 @@
     return !!topReplyBusy;
   }
 
+  function getButtonAuthoritySnapshot(source = 'upload-button-vm') {
+    if (
+      typeof ButtonState !== 'undefined'
+      && ButtonState
+      && typeof ButtonState.getUnifiedButtonAuthoritySnapshot === 'function'
+    ) {
+      return ButtonState.getUnifiedButtonAuthoritySnapshot(source);
+    }
+    return null;
+  }
+
   function isAuthorityReplyBusyForButtons(snapshot = {}) {
+    const headerAuthority = getButtonAuthoritySnapshot('reply-busy-check');
+    if (headerAuthority && headerAuthority.assistantBusy) {
+      return true;
+    }
     const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
     const unified = snap.toolboxUnifiedAuthority;
     if (unified && unified.flags) {
@@ -2877,8 +2892,10 @@
       });
     }
 
+    const headerAuthority = getButtonAuthoritySnapshot('send-message-idle');
     const authorityCanSendNow = !!(
-      snapshot.canSend === true
+      (headerAuthority && headerAuthority.canSendByHeader)
+      || snapshot.canSend === true
       || snapshot.sendable === true
       || (
         snapshot.toolboxUnifiedAuthority
@@ -2919,10 +2936,10 @@
       return finish({
         phase: TaskPhase.IDLE,
         text: '发送消息',
-        title: hint || '发送消息',
-        disabled: true,
+        title: hint || '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+        disabled: false,
         allowCancel: false,
-        action: 'none',
+        action: 'send-message',
         buttonPhase: 'idle',
       });
     }
@@ -4029,14 +4046,14 @@
 
     if (pageGenerating && !hasRealComposerPayload) {
       const waitGeneratingView = {
-        phase: TaskPhase.WAITING_REPLY,
+        phase: TaskPhase.IDLE,
         text: sendCopyHotkeyLabel,
-        title: '当前正在回答且输入框为空；请等待回复完成后再发送，或使用“复制+快捷键”仅复制当前回复',
-        disabled: true,
+        title: '当前正在回答且输入框为空；点击将走复制+快捷键（无输入内容不发送）',
+        disabled: false,
         allowCancel: false,
-        action: 'none',
+        action: 'send-copy-hotkey',
         runtimeAction: '',
-        buttonPhase: 'waiting_reply',
+        buttonPhase: 'idle',
         taskKey: 'send-copy-hotkey',
         ownerButtonId: thisButtonId,
       };
@@ -4048,13 +4065,14 @@
 
     if (!hasRealComposerPayload && !pageGenerating) {
       const needInputView = {
-        phase: 'waiting_input',
+        phase: TaskPhase.IDLE,
         text: sendCopyHotkeyLabel,
-        title: '输入框没有可发送的文本或附件；请先输入内容，或仅复制回复请使用“复制+快捷键”',
-        disabled: true,
+        title: '输入框为空；点击将直接执行复制+快捷键（不发送消息）',
+        disabled: false,
         allowCancel: false,
-        action: 'none',
-        buttonPhase: 'disabled',
+        action: 'send-copy-hotkey',
+        runtimeAction: '',
+        buttonPhase: 'idle',
         taskKey: 'send-copy-hotkey',
         ownerButtonId: thisButtonId,
       };

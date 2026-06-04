@@ -299,6 +299,50 @@
     '#cgpt-autoq-send-once',
   ].join(',');
 
+  function getUnifiedButtonAuthoritySnapshot(source = '-') {
+    const bridgeState = (
+      typeof window !== 'undefined'
+      && window.__cgptBridgeState
+      && typeof window.__cgptBridgeState === 'object'
+    )
+      ? window.__cgptBridgeState
+      : {};
+
+    const responseState = String(
+      bridgeState.response_state
+      || bridgeState.responseState
+      || '',
+    ).trim().toLowerCase();
+
+    const responseReason = String(
+      bridgeState.response_state_reason
+      || bridgeState.responseStateReason
+      || bridgeState.reason
+      || '',
+    ).trim().toLowerCase();
+
+    const inputable = bridgeState.inputable === true || bridgeState.inputable === 1;
+    const sendable = bridgeState.sendable === true || bridgeState.sendable === 1;
+
+    const assistantBusy = (
+      responseState === 'generating'
+      || responseState === 'responding'
+      || responseState === 'answering'
+      || responseState === 'streaming'
+      || responseReason === 'assistant_busy'
+    );
+
+    return {
+      source,
+      responseState,
+      responseReason,
+      inputable,
+      sendable,
+      assistantBusy,
+      canSendByHeader: inputable && sendable && !assistantBusy,
+    };
+  }
+
   function isButtonStateDebugEnabled() {
     if (typeof MemoryManager === 'undefined' || typeof MemoryManager.get !== 'function') {
       return false;
@@ -1525,6 +1569,7 @@
 
   const ButtonState = Object.freeze({
     Phase: ButtonPhase,
+    getUnifiedButtonAuthoritySnapshot,
     BusyPhases: BUTTON_BUSY_PHASES,
     SendMessageButtonIds: SEND_MESSAGE_BUTTON_IDS,
     SendBtnAllowedColorClasses: SEND_BTN_ALLOWED_COLOR_CLASSES,

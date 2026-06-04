@@ -77,18 +77,58 @@ function buildGeneratedNotice(buildTime) {
 }
 
 function extractHeader(mainText) {
-  const match = mainText.match(/^\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==\r?\n/);
-  if (!match) {
+  const rawText = String(mainText || '').replace(/^\uFEFF/, '');
+  const headerStart = rawText.indexOf('// ==UserScript==');
+  if (headerStart < 0) {
     throw new Error('Userscript header not found in ' + ENTRY_FILE);
+  }
+  const leadingText = rawText.slice(0, headerStart);
+  if (leadingText.trim()) {
+    throw new Error(
+      'Unexpected non-whitespace content before userscript header in ' + ENTRY_FILE,
+    );
+  }
+  if (headerStart > 0) {
+    console.warn(
+      '[BUILD][HEADER_LEADING_WHITESPACE] '
+      + 'Userscript header has leading whitespace; build will ignore it. '
+      + 'file=' + ENTRY_FILE
+      + ' leadingLength=' + headerStart,
+    );
+  }
+  const textFromHeader = rawText.slice(headerStart);
+  const match = textFromHeader.match(
+    /^\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==\n/,
+  );
+  if (!match) {
+    throw new Error('Userscript header block is incomplete in ' + ENTRY_FILE);
   }
   return {
     header: match[0].trimEnd(),
-    body: mainText.slice(match[0].length),
+    body: textFromHeader.slice(match[0].length),
   };
 }
 
+function normalizeBuildLineEndings(content, filePath) {
+  const rawText = String(content || '').replace(/^\uFEFF/, '');
+  const crcrlfCount = (rawText.match(/\r\r\n/g) || []).length;
+  if (crcrlfCount > 0) {
+    console.warn(
+      '[BUILD][LINE_ENDING_NORMALIZED] '
+      + `file=${filePath} pattern=CRCRLF count=${crcrlfCount}`,
+    );
+  }
+  return rawText
+    .replace(/\r\r\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+}
+
 function readUtf8File(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  const content = normalizeBuildLineEndings(
+    fs.readFileSync(filePath, 'utf8'),
+    filePath,
+  );
   assertNoBadControlChars(content, filePath);
   return content;
 }

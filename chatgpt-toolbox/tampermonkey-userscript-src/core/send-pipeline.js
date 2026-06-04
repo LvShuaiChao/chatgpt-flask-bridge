@@ -97,15 +97,34 @@
     return raw;
   }
 
+  function sendPipelineReadCapability() {
+    if (typeof getPageCapability !== 'function') {
+      return {};
+    }
+    try {
+      return getPageCapability('send-pipeline-audit') || {};
+    } catch (capErr) {
+      console.error('[SEND_PIPELINE][ERROR]', capErr);
+      return {};
+    }
+  }
+
   function sendPipelineLog(tag, fields) {
     const extra = fields && typeof fields === 'object' ? fields : {};
+    const capability = extra._capabilitySkip === true ? {} : sendPipelineReadCapability();
     const parts = [
       String(tag || '[SEND_PIPELINE]'),
       `source=${String(extra.source || '-')}`,
-      `mode=${String(extra.mode || '-')}`,
-      `text_len=${Number(extra.text_len != null ? extra.text_len : (extra.textLen != null ? extra.textLen : 0))}`,
-      `sendExistingComposer=${extra.sendExistingComposer ? 1 : 0}`,
+      `action=${String(extra.action || extra.mode || '-')}`,
+      `runId=${String(extra.runId != null ? extra.runId : (extra.cancelTokenId || extra.taskId || '-'))}`,
+      `expectedLen=${Number(extra.expectedLen != null ? extra.expectedLen : (extra.expected_len != null ? extra.expected_len : -1))}`,
+      `actualLen=${Number(extra.actualLen != null ? extra.actualLen : (extra.actual_len != null ? extra.actual_len : (extra.text_len != null ? extra.text_len : (extra.textLen != null ? extra.textLen : -1))))}`,
+      `textSynced=${extra.textSynced != null ? (extra.textSynced ? 1 : 0) : (extra.text_synced != null ? (extra.text_synced ? 1 : 0) : -1)}`,
+      `sendReady=${extra.sendReady != null ? (extra.sendReady ? 1 : 0) : (capability.sendable != null ? (capability.sendable ? 1 : 0) : -1)}`,
+      `realSendReady=${extra.realSendReady != null ? (extra.realSendReady ? 1 : 0) : (extra.real_send_ready != null ? (extra.real_send_ready ? 1 : 0) : -1)}`,
+      `responseState=${String(extra.responseState != null ? extra.responseState : (extra.response_state || capability.response_state || '-'))}`,
       `reason=${String(extra.reason || '-')}`,
+      `sendExistingComposer=${extra.sendExistingComposer ? 1 : 0}`,
       `retryable=${extra.retryable ? 1 : 0}`,
       `wait_send=${extra.wait_send ? 1 : 0}`,
       `wait_reply=${extra.wait_reply ? 1 : 0}`,
@@ -117,12 +136,34 @@
     if (extra.taskTitle) {
       parts.push(`taskTitle=${String(extra.taskTitle)}`);
     }
+    if (extra.attachmentUploading != null) {
+      parts.push(`attachmentUploading=${extra.attachmentUploading ? 1 : 0}`);
+    }
 
     const line = parts.join(' ');
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(line);
     } else {
       console.log(line);
+    }
+  }
+
+  function sendPipelineLogError(error, fields) {
+    console.error('[SEND_PIPELINE][ERROR]', error);
+    const extra = fields && typeof fields === 'object' ? fields : {};
+    const errText = error && error.message ? error.message : String(error || '');
+    const errStack = error && error.stack ? String(error.stack) : '';
+    const stackPreview = sendPipelinePreviewText(errStack, 300);
+    const line = [
+      '[SEND_PIPELINE][ERROR]',
+      `source=${String(extra.source || '-')}`,
+      `action=${String(extra.action || extra.mode || '-')}`,
+      `runId=${String(extra.runId != null ? extra.runId : (extra.cancelTokenId || extra.taskId || '-'))}`,
+      `error=${errText}`,
+      `stack=${stackPreview}`,
+    ].join(' ');
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
     }
   }
 
@@ -893,16 +934,21 @@
       ? Number(opts.composerReadyTimeoutMs)
       : (isSingleInitialMode ? 15000 : SEND_PIPELINE_COMPOSER_READY_TIMEOUT_MS);
 
+    const runId = String(opts.runId || opts.cancelTokenId || opts.taskId || '-').trim() || '-';
+
     const ctx = {
       source,
       mode,
+      action: mode,
+      runId,
       text_len: text.length,
+      expectedLen: sendExistingComposer ? -1 : text.length,
       sendExistingComposer,
       waitForReplyIdle,
       shouldStop,
       taskId: String(opts.taskId || '-').trim() || '-',
       taskTitle: String(opts.taskTitle || '-').trim() || '-',
-      cancelTokenId: String(opts.cancelTokenId || '-').trim() || '-',
+      cancelTokenId: String(opts.cancelTokenId || runId).trim() || runId,
       _pipelineState: pipelineState,
       _singleInitialSendLock: isSingleInitialMode,
     };
@@ -936,12 +982,37 @@
       }
     }
 
+    if (
+      typeof state !== 'undefined'
+      && state
+      && state.sendingNow === true
+      && !isSingleInitialMode
+    ) {
+      result.reason = 'another-send-running';
+      result.retryable = true;
+      sendPipelineLog('[SEND_PIPELINE][BLOCK_DUPLICATE]', Object.assign({}, ctx, {
+        reason: result.reason,
+        retryable: true,
+      }));
+      return result;
+    }
+
+    sendPipelineLog('[SEND_PIPELINE][ENTRY]', Object.assign({}, ctx, {
+      reason: manualSend ? 'manual_send=1' : '-',
+      actualLen: sendExistingComposer
+        ? (typeof ComposerApi.getComposerText === 'function'
+          ? String(ComposerApi.getComposerText() || '').trim().length
+          : 0)
+        : text.length,
+    }));
+
     sendPipelineLog('[SEND_PIPELINE][START]', {
       source,
       mode,
+      runId,
       taskId: ctx.taskId,
       taskTitle: ctx.taskTitle,
-      text_len: sendExistingComposer
+      actualLen: sendExistingComposer
         ? (typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim().length
           : 0)
@@ -1237,12 +1308,30 @@
               ? 'composer_text_not_ready'
               : lastSyncReason);
           result.retryable = true;
+          sendPipelineLog('[SEND_PIPELINE][TEXT_SYNC_RESULT]', Object.assign({}, ctx, {
+            textSynced: 0,
+            expectedLen: text.length,
+            actualLen: typeof ComposerApi.getComposerText === 'function'
+              ? String(ComposerApi.getComposerText() || '').trim().length
+              : 0,
+            reason: result.reason,
+            retryable: true,
+          }));
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason,
             retryable: true,
           }));
           return result;
         }
+
+        sendPipelineLog('[SEND_PIPELINE][TEXT_SYNC_RESULT]', Object.assign({}, ctx, {
+          textSynced: 1,
+          expectedLen: text.length,
+          actualLen: typeof ComposerApi.getComposerText === 'function'
+            ? String(ComposerApi.getComposerText() || '').trim().length
+            : text.length,
+          reason: 'composer_text_synced',
+        }));
       } else if (sendExistingComposer) {
         const existingText = typeof ComposerApi.getComposerText === 'function'
           ? String(ComposerApi.getComposerText() || '').trim()
@@ -1423,12 +1512,25 @@
 
         if (result.ok) {
           pipelineState.sendButtonReady = true;
+          sendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+            reason: result.reason || 'sent',
+            retryable: result.retryable,
+            wait_reply: result.wait_reply,
+            textSynced: 1,
+          }));
           sendPipelineLog('[SEND_PIPELINE][DONE]', Object.assign({}, ctx, {
             reason: result.reason || 'sent',
             retryable: result.retryable,
             wait_reply: result.wait_reply,
           }));
         } else {
+          sendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+            reason: result.reason || 'unknown',
+            retryable: result.retryable,
+            wait_send: result.wait_send ? 1 : 0,
+            wait_reply: result.wait_reply,
+            textSynced: 0,
+          }));
           sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
             reason: result.reason || 'unknown',
             retryable: result.retryable,
@@ -1458,6 +1560,13 @@
       }
 
       let buttonWait = await sendPipelineWaitSendButtonReady(ctx, buttonWaitOptions);
+
+      sendPipelineLog('[SEND_PIPELINE][SEND_BUTTON_RESULT]', Object.assign({}, ctx, {
+        reason: String((buttonWait && buttonWait.reason) || 'send_button_wait_done'),
+        realSendReady: buttonWait && buttonWait.ok ? 1 : 0,
+        sendReady: buttonWait && buttonWait.ok ? 1 : 0,
+        retryable: !!(buttonWait && buttonWait.retryable),
+      }));
 
       if (buttonWait.needRewriteText && text && !sendExistingComposer) {
         let rewriteOk = false;
@@ -1638,6 +1747,12 @@
           : ctx.text_len,
       }));
 
+      sendPipelineLog('[SEND_PIPELINE][CLICK_RESULT]', Object.assign({}, ctx, {
+        reason: buttonWait.reason || 'pre_stable_send',
+        realSendReady: sendPipelineNativeSendReadyNow() ? 1 : 0,
+        useEnterFallback: useEnterFallback ? 1 : 0,
+      }));
+
       const stableResult = await stableSendMessage({
         source,
         sendExistingComposer: true,
@@ -1651,17 +1766,35 @@
 
       sendPipelineApplyStableFlags(result, stableResult);
 
+      sendPipelineLog('[SEND_PIPELINE][CLICK_RESULT]', Object.assign({}, ctx, {
+        reason: String((stableResult && stableResult.reason) || (result.ok ? 'clicked' : 'click_failed')),
+        realSendReady: result.ok ? 1 : 0,
+        sendReady: result.ok ? 1 : 0,
+      }));
+
       if (!result.retryable) {
         result.retryable = sendPipelineIsRetryableReason(result.reason);
       }
 
       if (result.ok) {
+        sendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+          reason: result.reason || 'sent',
+          retryable: result.retryable,
+          wait_reply: result.wait_reply,
+          textSynced: 1,
+        }));
         sendPipelineLog('[SEND_PIPELINE][DONE]', Object.assign({}, ctx, {
           reason: result.reason || 'sent',
           retryable: result.retryable,
           wait_reply: result.wait_reply,
         }));
       } else {
+        sendPipelineLog('[SEND_PIPELINE][FINISH]', Object.assign({}, ctx, {
+          reason: result.reason || 'unknown',
+          retryable: result.retryable,
+          wait_reply: result.wait_reply,
+          textSynced: 0,
+        }));
         sendPipelineLog('[SEND_PIPELINE][FAILED]', Object.assign({}, ctx, {
           reason: result.reason || 'unknown',
           retryable: result.retryable,
@@ -1671,15 +1804,7 @@
 
       return result;
     } catch (err) {
-      const errText = err && err.message ? err.message : String(err);
-      const errStack = err && err.stack ? String(err.stack) : '';
-      console.error('[ChatGPT toolbox] sendUnifiedMessage failed', err, { source, mode });
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[SEND_PIPELINE][FAILED] source=${source} mode=${mode} reason=send_exception `
-          + `error=${errText} stack=${sendPipelinePreviewText(errStack, 300)}`,
-        );
-      }
+      sendPipelineLogError(err, ctx);
       result.reason = 'send_exception';
       result.retryable = false;
       return result;
