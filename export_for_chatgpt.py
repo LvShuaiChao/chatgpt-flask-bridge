@@ -1,7 +1,8 @@
 """
 将项目源码与配置打成文本文件，便于整段粘贴到 ChatGPT。
 
-- **全量扫描**（唯一模式）：遍历项目根下允许的扩展名，跳过无关目录；统一调用 ``export_should_skip_relative_path``。
+- **导出模式**（文件顶部 ``EXPORT_MODE``，无 argparse）：``core``（默认，运行源码+核心配置）、``debug``（+ ``chatgpt-toolbox/scripts/``）、``full``（原全量扫描，含 docs/报告/CI 等）。
+- **扫描**：遍历项目根下允许的扩展名，跳过无关目录；统一调用 ``export_should_skip_relative_path``，并按 ``EXPORT_MODE`` 额外排除审查报告、死代码文档、Prompt 备份等（``full`` 不启用该层过滤）。
 - **主输出**：仓库根目录 ``0_merged_for_chatgpt.txt`` / ``0_merged_for_chatgpt.zip``（超出 ``MAX_TOKENS_PER_OUTPUT_FILE`` 则拆分为 ``*_partNN.txt`` 及同名 zip）；``--no-export-zip`` 可关闭 zip。
 - **辅助输出**（``exports/for_chatgpt/``）：统计说明、日志副本、增量清单 ``.export_for_chatgpt_mtimes.json``，不占用根目录。
 - **循环**：默认每隔 ``LOOP_EXPORT_INTERVAL_SEC`` 秒检查一次；进程启动后**会先做一次全量合并写盘**，之后**仅当**候选文件相对上次导出的 mtime 清单有变化时才再次合并（Ctrl+C 结束）。``--loop-always-export`` 恢复「每轮必导出」。``--once`` 只跑一轮。
@@ -157,6 +158,138 @@ SLIM_SKIP_TOOLS = True
 SLIM_SKIP_SCRIPTS = True
 SLIM_SKIP_DATA_ACCOUNTS = True
 SLIM_SKIP_EXPORT_SCRIPT = True
+
+# 导出模式：core（默认）| debug | full — 改此处即可，不用 argparse
+EXPORT_MODE = "core"
+
+
+def normalize_rel_path(path_value: str | Path) -> str:
+    """统一为 posix 相对路径；勿用 lstrip('./')，否则会误删 ``.github/`` 等路径前导点。"""
+    rel = str(path_value).replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel
+
+
+def should_exclude_from_core_export(rel_path: str) -> bool:
+    rel = normalize_rel_path(rel_path)
+
+    exclude_exact = {
+        "button_state_audit_report.md",
+        "chatgpt-toolbox/package-lock.json",
+        "cursor_templates/README.md",
+        "Prompt备份/chatgpt-prompts-20260524.json",
+        ".github/pull_request_template_dead_code.md",
+        ".github/workflows/dead-code-cleanup-checks.yml",
+    }
+
+    if rel in exclude_exact:
+        return True
+
+    exclude_prefixes = (
+        "docs/dead_code_",
+        "docs/cursor_dead_code_",
+        "chatgpt-toolbox/reports/",
+        ".git/",
+        ".idea/",
+        ".vscode/",
+        "__pycache__/",
+        ".pytest_cache/",
+        "node_modules/",
+        "dist/",
+        "build/",
+        ".venv/",
+        "venv/",
+        "env/",
+    )
+
+    if rel.startswith(exclude_prefixes):
+        return True
+
+    return False
+
+
+def should_exclude_from_debug_export(rel_path: str) -> bool:
+    rel = normalize_rel_path(rel_path)
+
+    exclude_exact = {
+        "button_state_audit_report.md",
+        "chatgpt-toolbox/package-lock.json",
+        "cursor_templates/README.md",
+        "Prompt备份/chatgpt-prompts-20260524.json",
+        ".github/pull_request_template_dead_code.md",
+        ".github/workflows/dead-code-cleanup-checks.yml",
+    }
+
+    if rel in exclude_exact:
+        return True
+
+    exclude_prefixes = (
+        "docs/dead_code_",
+        "docs/cursor_dead_code_",
+        "chatgpt-toolbox/reports/",
+        ".git/",
+        ".idea/",
+        ".vscode/",
+        "__pycache__/",
+        ".pytest_cache/",
+        "node_modules/",
+        "dist/",
+        "build/",
+        ".venv/",
+        "venv/",
+        "env/",
+    )
+
+    if rel.startswith(exclude_prefixes):
+        return True
+
+    return False
+
+
+def should_exclude_by_export_mode(rel_path: str) -> bool:
+    rel = normalize_rel_path(rel_path)
+
+    if EXPORT_MODE == "full":
+        return False
+
+    if EXPORT_MODE == "debug":
+        return should_exclude_from_debug_export(rel)
+
+    if EXPORT_MODE == "core":
+        if should_exclude_from_core_export(rel):
+            return True
+
+        if rel.startswith("chatgpt-toolbox/scripts/"):
+            return True
+
+        if rel.startswith("chatgpt-toolbox/docs/"):
+            return True
+
+        if rel in {
+            "README.md",
+            "chatgpt-toolbox/README.md",
+            "AGENTS.md",
+        }:
+            return True
+
+        return False
+
+    print(f"[EXPORT][WARN] unknown EXPORT_MODE={EXPORT_MODE!r}, fallback to core")
+    if should_exclude_from_core_export(rel):
+        return True
+    if rel.startswith("chatgpt-toolbox/scripts/"):
+        return True
+    if rel.startswith("chatgpt-toolbox/docs/"):
+        return True
+    if rel in {
+        "README.md",
+        "chatgpt-toolbox/README.md",
+        "AGENTS.md",
+    }:
+        return True
+    return False
+
 
 _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
     {
@@ -890,11 +1023,23 @@ def collect_all_project_files(
                 logger.warning("[export] collect_all_export_paths resolve failed path=%s", fp, exc_info=True)
                 continue
             try:
-                rel_posix = resolved.relative_to(project_root).as_posix().lower()
+                rel_posix_raw = resolved.relative_to(project_root).as_posix()
+                rel_posix = rel_posix_raw.lower()
             except ValueError:
                 logger.warning("[export] collect_all_export_paths relative_to failed resolved=%s", resolved, exc_info=True)
                 continue
             if _is_ignored_relative_path(rel_posix):
+                continue
+            if should_exclude_by_export_mode(rel_posix_raw):
+                if run_stats is not None:
+                    run_stats["excluded_files_count"] = int(run_stats.get("excluded_files_count", 0)) + 1
+                    mode_excluded: list[str] = run_stats.setdefault(
+                        "export_mode_excluded_files", []
+                    )
+                    rel_norm = normalize_rel_path(rel_posix_raw)
+                    if rel_norm not in mode_excluded:
+                        mode_excluded.append(rel_norm)
+                    _record_excluded_example(run_stats, rel_norm)
                 continue
             if not _is_core_export_path(rel_posix):
                 if run_stats is not None:
@@ -948,17 +1093,30 @@ def build_header(
     total_code_lines: int | None = None,
     source_code_tokens: int | None = None,
     merged_export_tokens: int | None = None,
+    export_mode_excluded_files: list[str] | None = None,
 ) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     project_name = project_root.resolve().name
+    mode_label = {
+        "core": "core（运行源码 + 核心配置，默认排除 docs/报告/脚本/README 等）",
+        "debug": "debug（运行源码 + chatgpt-toolbox/scripts/，仍排除死代码文档与报告）",
+        "full": "full（全量 project scan，与改前一致）",
+    }.get(EXPORT_MODE, f"{EXPORT_MODE}（未知模式，按 core 回退过滤）")
     lines = [
         "=" * 100,
         "PROJECT EXPORT FOR CHATGPT / CURSOR",
         f"Export time: {now_str}",
         f"Project name: {project_name}",
         f"Project root: {project_root}",
-        "Export mode: full project scan",
+        f"Export mode: {EXPORT_MODE}",
+        f"Export mode 说明: {mode_label}",
     ]
+    excluded_sorted = sorted(export_mode_excluded_files or [])
+    lines.append(f"排除文件数量（按 EXPORT_MODE 过滤）: {len(excluded_sorted)}")
+    if excluded_sorted:
+        lines.append("排除文件列表:")
+        for i, rel in enumerate(excluded_sorted, 1):
+            lines.append(f"  {i}. {rel}")
     if loop_iteration is not None:
         lines.append(f"循环次数: 第 {loop_iteration} 次")
     if export_merge_sec is not None:
@@ -982,9 +1140,17 @@ def build_header(
         ]
     )
     lines.append("1. 本文件由 export_for_chatgpt.py 自动生成。")
+    scan_desc = (
+        "2. full 模式：遍历项目内允许的扩展名，将匹配文件全部写入（见下方列表）。"
+        if EXPORT_MODE == "full"
+        else (
+            f"2. {EXPORT_MODE} 模式：在常规扫描排除规则之上，额外过滤审查报告、死代码文档、"
+            "Prompt 备份、package-lock、CI 模板等（见上方排除列表）。"
+        )
+    )
     lines.extend(
         [
-            "2. 全量模式：遍历项目内允许的扩展名，将匹配文件全部写入（见下方列表）。",
+            scan_desc,
             "3. 每个文件前有分隔符、路径与「TOKENS」行（对应该块内正文，含占位符清洗后的内容）。",
             f"4. Token 计数使用 tiktoken（{TIKTOKEN_ENCODING_NAME}）；头部中的「参考上限」为 "
             f"{format_tokens_wan(CHATGPT_DOCUMENT_TOKEN_LIMIT)} tokens，与 ChatGPT 文本类文档常见上限对齐（非各产品官方保证）。",
@@ -2095,11 +2261,13 @@ def export_bundle(
         "sensitive_excluded_count": 0,
         "sensitive_excluded_examples": [],
         "excluded_examples": [],
+        "export_mode_excluded_files": [],
         "suspicious_encoding_files": [],
         "encoding_utf8_count": 0,
         "encoding_fallback_count": 0,
         "encoding_failed_count": 0,
     }
+    print(f"[导出] EXPORT_MODE={EXPORT_MODE}", flush=True)
     ordered_py = _collect_full_scanned_candidates(project_root, output_path, run_stats=_RUN_STATS)
     full_project_files_for_manifest = list(ordered_py)
 
@@ -2185,7 +2353,7 @@ def export_bundle(
         src_tokens: int | None = None,
     ) -> str:
         return build_header(
-        project_root=project_root,
+            project_root=project_root,
             discovered=ordered_py,
             extras=extras,
             loop_iteration=loop_iteration,
@@ -2193,6 +2361,9 @@ def export_bundle(
             total_code_lines=total_lines,
             source_code_tokens=src_tokens,
             merged_export_tokens=merged_tokens,
+            export_mode_excluded_files=list(
+                _RUN_STATS.get("export_mode_excluded_files", [])
+            ),
         )
 
     header = _header(
@@ -2265,6 +2436,12 @@ def export_bundle(
     if sensitive_examples:
         print("[EXPORT_EXCLUDE] 敏感路径样例:")
         for item in sensitive_examples[:10]:
+            print(f"  - {item}")
+    mode_excluded = sorted(_RUN_STATS.get("export_mode_excluded_files", []))
+    print(f"[导出前检查] EXPORT_MODE 额外排除文件数量: {len(mode_excluded)}")
+    if mode_excluded:
+        print("[导出前检查] EXPORT_MODE 排除样例（最多 15 条）:")
+        for item in mode_excluded[:15]:
             print(f"  - {item}")
     excluded_examples = list(_RUN_STATS.get("excluded_examples", []))
     if excluded_examples:
@@ -2563,6 +2740,7 @@ def _print_session_startup_banner(
                 f"[循环] 每 {LOOP_EXPORT_INTERVAL_SEC:g} 秒检查变更，有变更时才导出并覆盖写入输出路径（Ctrl+C 结束）"
             )
     print(f"[项目] {project_name}")
+    print(f"[导出模式] EXPORT_MODE={EXPORT_MODE}")
 
 
 def main() -> None:
