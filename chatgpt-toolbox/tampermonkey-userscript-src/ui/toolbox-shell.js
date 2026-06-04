@@ -241,6 +241,10 @@
     let forceShowingUntil = 0;
     let isDraggingToolbox = false;
     let isResizingToolbox = false;
+    let panelResizePendingRect = null;
+    let panelResizePendingReason = '';
+    let panelResizeRafId = 0;
+    let panelResizeMoveLogLastAt = 0;
 
     const USER_PANEL_RESIZE_PROTECT_MS = 30 * 60 * 1000;
     const USER_SIZE_LOCK_STORAGE_KEY = 'panelUserSizeLock';
@@ -5819,6 +5823,8 @@
         .cgpt-actions-row,
         .cgpt-autoq-actions,
         .cgpt-upload-actions,
+        #${APP.panelId} .cgpt-toolbox-action-row,
+        #${APP.panelId} .cgpt-upload-button-row,
         .cgpt-upload-home-actions,
         .cgpt-action-row,
         .cgpt-autoq-top-action-bar,
@@ -8253,10 +8259,47 @@
       };
     }
 
-    function applyPanelResizeRect(rect, reason = '-') {
+    function appendResizeMoveLogThrottled(message, intervalMs = 250) {
+      const now = Date.now();
+      if (now - panelResizeMoveLogLastAt < intervalMs) {
+        return;
+      }
+      panelResizeMoveLogLastAt = now;
+      appendLog(message);
+    }
+
+    function updateToolboxResponsiveClassLightweight(reason = '-') {
+      if (!panel) {
+        return;
+      }
+
+      const width = Math.round(panel.getBoundingClientRect().width || 0);
+      if (width <= 0) {
+        return;
+      }
+
+      const extraNarrow = width < 360;
+      const narrowBand = width < 460;
+      const moderateBand = width < TOOLBOX_SIZE_LIMITS.NARROW_WIDTH;
+      panel.classList.toggle('cgpt-toolbox-extra-narrow', extraNarrow);
+      panel.classList.toggle('cgpt-toolbox-narrow', moderateBand || narrowBand);
+      panel.dataset.toolboxWidth = String(width);
+      panel.dataset.toolboxWidthBand = extraNarrow
+        ? 'extra-narrow'
+        : narrowBand
+          ? 'narrow'
+          : moderateBand
+            ? 'moderate'
+            : 'normal';
+      panel.dataset.toolboxWidthReason = String(reason || '-');
+    }
+
+    function applyPanelResizeRect(rect, reason = '-', options = {}) {
       if (!panel || !rect) {
         return;
       }
+
+      const deferHeavySync = options && options.deferHeavySync === true;
 
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
@@ -8267,8 +8310,64 @@
       panel.style.setProperty('--cgpt-toolbox-width', `${rect.width}px`);
       panel.style.setProperty('--cgpt-toolbox-height', `${rect.height}px`);
 
-      updateToolboxNarrowClass(reason);
-      syncToolboxHeaderLayout(reason);
+      if (!deferHeavySync) {
+        updateToolboxNarrowClass(reason);
+        syncToolboxHeaderLayout(reason);
+      }
+    }
+
+    function scheduleApplyPanelResizeRect(rect, reason = '-') {
+      if (!rect) {
+        return;
+      }
+
+      panelResizePendingRect = rect;
+      panelResizePendingReason = reason;
+
+      if (panelResizeRafId) {
+        return;
+      }
+
+      panelResizeRafId = window.requestAnimationFrame(() => {
+        panelResizeRafId = 0;
+        const pending = panelResizePendingRect;
+        const pendingReason = panelResizePendingReason || reason;
+        panelResizePendingRect = null;
+        panelResizePendingReason = '';
+
+        if (!pending) {
+          return;
+        }
+
+        applyPanelResizeRect(pending, pendingReason, {
+          deferHeavySync: true,
+        });
+        updateToolboxResponsiveClassLightweight(`${pendingReason}:lightweight`);
+      });
+    }
+
+    function flushPanelResizePendingRect(reason = '-') {
+      if (panelResizeRafId) {
+        window.cancelAnimationFrame(panelResizeRafId);
+        panelResizeRafId = 0;
+      }
+
+      if (panelResizePendingRect) {
+        const pending = panelResizePendingRect;
+        panelResizePendingRect = null;
+        panelResizePendingReason = '';
+        applyPanelResizeRect(pending, reason, {
+          deferHeavySync: false,
+        });
+      }
+
+      if (panel) {
+        updateToolboxNarrowClass(`${reason || '-'}:final`);
+        syncToolboxHeaderLayout(`${reason || '-'}:final`);
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          renderToolboxHeaderStatus(`${reason || '-'}:final`);
+        }
+      }
     }
 
     function getPanelMaxSize() {
@@ -8657,6 +8756,8 @@
           });
         }
 
+        let leftResizeFinished = false;
+
         const onPointerMove = (moveEvent) => {
           moveEvent.preventDefault();
           moveEvent.stopPropagation();
@@ -8681,25 +8782,31 @@
             nextWidth = resizeState.startRight - nextLeft;
           }
 
-          applyPanelResizeRect({
+          scheduleApplyPanelResizeRect({
             left: Math.round(nextLeft),
             top: Math.round(resizeState.startTop),
             width: Math.round(nextWidth),
             height: Math.round(resizeState.startHeight),
           }, `left-resize:${Math.round(nextWidth)}`);
+
+          appendResizeMoveLogThrottled(
+            `[TOOLBOX_SIZE][LEFT_RESIZE_MOVE] width=${Math.round(nextWidth)} left=${Math.round(nextLeft)}`,
+          );
         };
 
         const finishLeftResize = (upEvent, endReason) => {
+          if (leftResizeFinished) {
+            return;
+          }
+          leftResizeFinished = true;
+
           upEvent.preventDefault();
           upEvent.stopPropagation();
-
-          panel.dataset.resizing = '0';
-          panel.classList.remove('cgpt-resizing');
-          isResizingToolbox = false;
 
           window.removeEventListener('pointermove', onPointerMove, true);
           window.removeEventListener('pointerup', onPointerUp, true);
           window.removeEventListener('pointercancel', onPointerCancel, true);
+          leftResizeHandle.removeEventListener('lostpointercapture', onLostPointerCapture, true);
 
           try {
             leftResizeHandle.releasePointerCapture(event.pointerId);
@@ -8710,6 +8817,12 @@
             });
           }
 
+          flushPanelResizePendingRect(endReason);
+
+          panel.dataset.resizing = '0';
+          panel.classList.remove('cgpt-resizing');
+          isResizingToolbox = false;
+
           const finalRect = panel.getBoundingClientRect();
           appendLog(
             `[TOOLBOX_SIZE][LEFT_RESIZE_DONE] left=${Math.round(finalRect.left)} width=${Math.round(finalRect.width)} height=${Math.round(finalRect.height)}`,
@@ -8719,7 +8832,6 @@
             keepPanelInViewport({ save: false, reason: endReason });
             clampRootToViewport('toolbox-left-resize-end', { save: false, allowEdgeHidden: false });
             syncToolboxFloatingLayout('toolbox-left-resize-end');
-            syncToolboxHeaderLayout(endReason);
             if (isPanelVisibleNow()) {
               savePanelPositionFromDom('toolbox-left-resize-end');
             }
@@ -8738,9 +8850,17 @@
           finishLeftResize(upEvent, 'left-resize-pointercancel');
         };
 
+        const onLostPointerCapture = (captureEvent) => {
+          if (captureEvent.pointerId !== event.pointerId) {
+            return;
+          }
+          finishLeftResize(captureEvent, 'left-resize-lostpointercapture');
+        };
+
         window.addEventListener('pointermove', onPointerMove, true);
         window.addEventListener('pointerup', onPointerUp, true);
         window.addEventListener('pointercancel', onPointerCancel, true);
+        leftResizeHandle.addEventListener('lostpointercapture', onLostPointerCapture, true);
       }, true);
     }
 
@@ -8790,6 +8910,8 @@
           });
         }
 
+        let toolboxResizeFinished = false;
+
         const onPointerMove = (moveEvent) => {
           moveEvent.preventDefault();
           moveEvent.stopPropagation();
@@ -8798,24 +8920,26 @@
           const dy = moveEvent.clientY - startY;
           const nextRect = calculateRightResizeRect(startRect, dx, dy);
 
-          appendLog(
-            `[TOOLBOX_SIZE][RESIZE_MOVE] mode=right-bottom dx=${Math.round(dx)} width=${nextRect.width} left=${nextRect.left} maxWidth=${getToolboxMaxWidth()} viewportWidth=${getToolboxViewportWidth()}`,
-          );
+          scheduleApplyPanelResizeRect(nextRect, 'toolbox-resize-handle-move');
 
-          applyPanelResizeRect(nextRect, 'toolbox-resize-handle-move');
+          appendResizeMoveLogThrottled(
+            `[TOOLBOX_SIZE][RESIZE_MOVE] mode=right-bottom dx=${Math.round(dx)} width=${nextRect.width} left=${nextRect.left}`,
+          );
         };
 
         const finishToolboxResize = (upEvent, endReason) => {
+          if (toolboxResizeFinished) {
+            return;
+          }
+          toolboxResizeFinished = true;
+
           upEvent.preventDefault();
           upEvent.stopPropagation();
-
-          panel.dataset.resizing = '0';
-          panel.classList.remove('cgpt-resizing');
-          isResizingToolbox = false;
 
           window.removeEventListener('pointermove', onPointerMove, true);
           window.removeEventListener('pointerup', onPointerUp, true);
           window.removeEventListener('pointercancel', onPointerCancel, true);
+          handle.removeEventListener('lostpointercapture', onLostPointerCapture, true);
 
           try {
             handle.releasePointerCapture(event.pointerId);
@@ -8825,6 +8949,12 @@
               stack: error && error.stack ? error.stack : '',
             });
           }
+
+          flushPanelResizePendingRect(endReason);
+
+          panel.dataset.resizing = '0';
+          panel.classList.remove('cgpt-resizing');
+          isResizingToolbox = false;
 
           schedulePostDragLayout(() => {
             keepPanelInViewport({
@@ -8836,7 +8966,6 @@
               allowEdgeHidden: false,
             });
             syncToolboxFloatingLayout('toolbox-resize-end');
-            syncToolboxHeaderLayout('toolbox-resize-handle-pointerup');
 
             if (isPanelVisibleNow()) {
               savePanelPositionFromDom('toolbox-resize-end');
@@ -8860,9 +8989,17 @@
           finishToolboxResize(upEvent, 'toolbox-resize-handle-pointercancel');
         };
 
+        const onLostPointerCapture = (captureEvent) => {
+          if (captureEvent.pointerId !== event.pointerId) {
+            return;
+          }
+          finishToolboxResize(captureEvent, 'toolbox-resize-lostpointercapture');
+        };
+
         window.addEventListener('pointermove', onPointerMove, true);
         window.addEventListener('pointerup', onPointerUp, true);
         window.addEventListener('pointercancel', onPointerCancel, true);
+        handle.addEventListener('lostpointercapture', onLostPointerCapture, true);
       }, true);
     }
 
@@ -11006,7 +11143,7 @@
         height: nextHeight,
       });
 
-      applyPanelRect(clamped);
+      scheduleApplyPanelResizeRect(clamped, 'panel-resize-handle-move');
     }
 
     function startPanelResize(e) {
@@ -11051,16 +11188,38 @@
         resizePanelByPointer(dir, start, moveEvent.clientX, moveEvent.clientY);
       };
 
+      const resizeHandleEl = e.currentTarget;
+      let panelCornerResizeFinished = false;
+
       const finishPanelResize = (upEvent, endReason) => {
         if (upEvent.pointerId !== activePointerId) return;
-
-        panel.classList.remove('cgpt-resizing');
-        panel.dataset.resizing = '0';
-        isResizingToolbox = false;
+        if (panelCornerResizeFinished) {
+          return;
+        }
+        panelCornerResizeFinished = true;
 
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onPointerUp);
         window.removeEventListener('pointercancel', onPointerCancel);
+        if (resizeHandleEl instanceof HTMLElement) {
+          resizeHandleEl.removeEventListener('lostpointercapture', onLostPointerCapture);
+        }
+
+        if (resizeHandleEl instanceof HTMLElement
+          && resizeHandleEl.hasPointerCapture
+          && resizeHandleEl.hasPointerCapture(activePointerId)) {
+          try {
+            resizeHandleEl.releasePointerCapture(activePointerId);
+          } catch (err) {
+            console.debug('[ChatGPT toolbox] resize releasePointerCapture failed', err);
+          }
+        }
+
+        flushPanelResizePendingRect(endReason);
+
+        panel.classList.remove('cgpt-resizing');
+        panel.dataset.resizing = '0';
+        isResizingToolbox = false;
 
         schedulePostDragLayout(() => {
           keepPanelInViewport({
@@ -11071,7 +11230,6 @@
             allowEdgeHidden: false,
           });
           syncToolboxFloatingLayout('panel-resize-end');
-          syncToolboxHeaderLayout('resize-handle-pointerup');
 
           if (isPanelVisibleNow()) {
             savePanelPositionFromDom('resize-end');
@@ -11093,14 +11251,6 @@
 
         rememberLastPanelVisibleRect('resize-end');
         updateRestoreHotzone('resize-end');
-
-        if (e.currentTarget.hasPointerCapture && e.currentTarget.hasPointerCapture(activePointerId)) {
-          try {
-            e.currentTarget.releasePointerCapture(activePointerId);
-          } catch (err) {
-            console.debug('[ChatGPT toolbox] resize releasePointerCapture failed', err);
-          }
-        }
       };
 
       const onPointerUp = (upEvent) => {
@@ -11111,9 +11261,20 @@
         finishPanelResize(upEvent, 'resize-pointercancel');
       };
 
+      const onLostPointerCapture = (captureEvent) => {
+        if (captureEvent.pointerId !== activePointerId) {
+          return;
+        }
+        finishPanelResize(captureEvent, 'resize-lostpointercapture');
+      };
+
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onPointerUp);
       window.addEventListener('pointercancel', onPointerCancel);
+
+      if (resizeHandleEl instanceof HTMLElement) {
+        resizeHandleEl.addEventListener('lostpointercapture', onLostPointerCapture);
+      }
 
       try {
         e.currentTarget.setPointerCapture(activePointerId);

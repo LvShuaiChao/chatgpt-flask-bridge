@@ -369,10 +369,19 @@
         lastEvidence: null,
       },
       sendTask: {
+        running: false,
         phase: 'idle',
+        subPhase: '',
+        action: '',
+        ownerButtonId: '',
         runId: '',
+        reason: '',
+        error: '',
         cancelRequested: false,
         abortController: null,
+        startedAt: 0,
+        updatedAt: Date.now(),
+        finishedAt: 0,
       },
       copyTask: {
         phase: 'idle',
@@ -515,6 +524,303 @@
       FAILED: 'failed',
     });
 
+    const CANONICAL_SEND_PHASES = Object.freeze({
+      IDLE: 'idle',
+      WAITING_SEND: 'waiting_send',
+      SENDING: 'sending',
+      WAITING_REPLY: 'waiting_reply',
+      SUCCESS: 'success',
+      FAILED: 'failed',
+      CANCELLED: 'cancelled',
+    });
+
+    function nowForTaskState() {
+      return Date.now();
+    }
+
+    function createIdleCanonicalSendTask(extra = {}) {
+      const ts = nowForTaskState();
+      return {
+        running: false,
+        phase: CANONICAL_SEND_PHASES.IDLE,
+        subPhase: '',
+        action: '',
+        ownerButtonId: '',
+        runId: '',
+        reason: '',
+        error: '',
+        cancelRequested: false,
+        abortController: null,
+        startedAt: 0,
+        updatedAt: ts,
+        finishedAt: 0,
+        ...extra,
+      };
+    }
+
+    function normalizeCanonicalSendPhase(phase) {
+      const value = String(phase || '').trim().toLowerCase();
+      if (
+        value === CANONICAL_SEND_PHASES.IDLE
+        || value === CANONICAL_SEND_PHASES.WAITING_SEND
+        || value === CANONICAL_SEND_PHASES.SENDING
+        || value === CANONICAL_SEND_PHASES.WAITING_REPLY
+        || value === CANONICAL_SEND_PHASES.SUCCESS
+        || value === CANONICAL_SEND_PHASES.FAILED
+        || value === CANONICAL_SEND_PHASES.CANCELLED
+      ) {
+        return value;
+      }
+      if (
+        value === 'waiting'
+        || value === 'waiting_input'
+        || value === 'waiting_attachment'
+        || value === 'waiting_page_reply_to_send'
+        || value === 'ready_to_click'
+        || value === 'waiting_composer'
+        || value === 'writing_text'
+        || value === 'preparing'
+        || value === 'checking_composer'
+      ) {
+        return CANONICAL_SEND_PHASES.WAITING_SEND;
+      }
+      if (
+        value === 'clicking_send'
+        || value === 'sending_hotkey'
+        || value === 'sending_continue'
+        || value === 'confirming_clipboard'
+        || value === 'copying'
+        || value === 'running'
+      ) {
+        return CANONICAL_SEND_PHASES.SENDING;
+      }
+      if (
+        value === 'sent_waiting_response'
+        || value === 'waiting_reply'
+        || value === 'stopping_response'
+      ) {
+        return CANONICAL_SEND_PHASES.WAITING_REPLY;
+      }
+      if (value === 'success' || value === 'done' || value === 'completed') {
+        return CANONICAL_SEND_PHASES.SUCCESS;
+      }
+      if (value === 'fail' || value === 'failed' || value === 'error') {
+        return CANONICAL_SEND_PHASES.FAILED;
+      }
+      if (value === 'cancel' || value === 'cancelled' || value === 'canceled') {
+        return CANONICAL_SEND_PHASES.CANCELLED;
+      }
+      return CANONICAL_SEND_PHASES.IDLE;
+    }
+
+    function normalizeCanonicalSendSubPhase(phase, subPhase) {
+      const rawSubPhase = String(subPhase || '').trim();
+      if (rawSubPhase) {
+        return rawSubPhase;
+      }
+      const rawPhase = String(phase || '').trim().toLowerCase();
+      if (!rawPhase) {
+        return '';
+      }
+      const normalizedPhase = normalizeCanonicalSendPhase(rawPhase);
+      if (rawPhase !== normalizedPhase) {
+        return rawPhase;
+      }
+      return '';
+    }
+
+    function isCanonicalSendTaskRunning(task) {
+      if (!task || typeof task !== 'object') {
+        return false;
+      }
+      const phase = normalizeCanonicalSendPhase(task.phase);
+      if (phase === CANONICAL_SEND_PHASES.IDLE) {
+        return false;
+      }
+      if (
+        phase === CANONICAL_SEND_PHASES.SUCCESS
+        || phase === CANONICAL_SEND_PHASES.FAILED
+        || phase === CANONICAL_SEND_PHASES.CANCELLED
+      ) {
+        return false;
+      }
+      return task.running === true;
+    }
+
+    function buildCanonicalSendTaskFromRaw(rawTask = {}, extra = {}) {
+      const ts = nowForTaskState();
+      const rawPhase = rawTask && typeof rawTask === 'object' ? rawTask.phase : '';
+      const rawSubPhase = rawTask && typeof rawTask === 'object' ? rawTask.subPhase : '';
+      const phase = normalizeCanonicalSendPhase(rawPhase);
+      const subPhase = normalizeCanonicalSendSubPhase(rawPhase, rawSubPhase);
+      const running = (
+        rawTask.running === true
+        || (
+          phase !== CANONICAL_SEND_PHASES.IDLE
+          && phase !== CANONICAL_SEND_PHASES.SUCCESS
+          && phase !== CANONICAL_SEND_PHASES.FAILED
+          && phase !== CANONICAL_SEND_PHASES.CANCELLED
+        )
+      );
+      return {
+        running,
+        phase,
+        subPhase,
+        action: String(rawTask.action || extra.action || ''),
+        ownerButtonId: String(rawTask.ownerButtonId || extra.ownerButtonId || ''),
+        runId: String(rawTask.runId || extra.runId || ''),
+        reason: String(rawTask.reason || extra.reason || ''),
+        error: String(rawTask.error || extra.error || ''),
+        cancelRequested: rawTask.cancelRequested === true || extra.cancelRequested === true,
+        abortController: rawTask.abortController || extra.abortController || null,
+        startedAt: Number(rawTask.startedAt || extra.startedAt || 0),
+        updatedAt: Number(rawTask.updatedAt || extra.updatedAt || ts),
+        finishedAt: Number(rawTask.finishedAt || extra.finishedAt || 0),
+      };
+    }
+
+    function getCanonicalSendTaskState() {
+      const task = state && state.sendTask && typeof state.sendTask === 'object'
+        ? state.sendTask
+        : createIdleCanonicalSendTask();
+      return buildCanonicalSendTaskFromRaw(task);
+    }
+
+    function setCanonicalSendTaskState(patch = {}, reason = '') {
+      const previous = getCanonicalSendTaskState();
+      const next = buildCanonicalSendTaskFromRaw(
+        {
+          ...previous,
+          ...patch,
+          reason: patch.reason || reason || previous.reason,
+          updatedAt: nowForTaskState(),
+        },
+      );
+      const preservedExtras = state.sendTask && typeof state.sendTask === 'object'
+        ? {
+            ownerAction: state.sendTask.ownerAction,
+            visualOwnerAction: state.sendTask.visualOwnerAction,
+            visualOwnerButtonId: state.sendTask.visualOwnerButtonId,
+            source: state.sendTask.source,
+            owner: state.sendTask.owner,
+            _authoritative: state.sendTask._authoritative,
+            updatedReason: state.sendTask.updatedReason,
+          }
+        : {};
+      state.sendTask = Object.assign({}, preservedExtras, next);
+      console.log('[SEND_TASK][SET_CANONICAL]', {
+        reason,
+        running: next.running,
+        phase: next.phase,
+        subPhase: next.subPhase,
+        action: next.action,
+        ownerButtonId: next.ownerButtonId,
+        runId: next.runId,
+        cancelRequested: next.cancelRequested,
+        error: next.error,
+        updatedAt: next.updatedAt,
+      });
+      syncLegacySendFlagsFromSendTask('[SEND_TASK][SET_CANONICAL]');
+      syncButtonTasksFromModuleState('[SEND_TASK][SET_CANONICAL]');
+      return state.sendTask;
+    }
+
+    function resetCanonicalSendTaskState(reason = '') {
+      const next = createIdleCanonicalSendTask({
+        reason,
+        updatedAt: nowForTaskState(),
+        finishedAt: nowForTaskState(),
+      });
+      const preservedExtras = state.sendTask && typeof state.sendTask === 'object'
+        ? {
+            source: state.sendTask.source,
+            owner: state.sendTask.owner,
+          }
+        : {};
+      state.sendTask = Object.assign({}, preservedExtras, next);
+      console.log('[SEND_TASK][RESET_CANONICAL]', {
+        reason,
+        phase: next.phase,
+        running: next.running,
+        updatedAt: next.updatedAt,
+        finishedAt: next.finishedAt,
+      });
+      syncLegacySendFlagsFromSendTask('[SEND_TASK][RESET_CANONICAL]');
+      syncButtonTasksFromModuleState('[SEND_TASK][RESET_CANONICAL]');
+      return state.sendTask;
+    }
+
+    function mirrorSendMessageTaskStateToCanonical(reason = '') {
+      if (!sendMessageTaskState || typeof sendMessageTaskState !== 'object') {
+        console.warn('[SEND_TASK][MIRROR_SEND_MESSAGE_SKIPPED]', {
+          reason,
+          detail: 'sendMessageTaskState missing',
+        });
+        return getCanonicalSendTaskState();
+      }
+      return setCanonicalSendTaskState({
+        running: sendMessageTaskState.running === true,
+        phase: sendMessageTaskState.phase,
+        subPhase: sendMessageTaskState.subPhase || '',
+        action: sendMessageTaskState.action || 'send-message',
+        ownerButtonId: sendMessageTaskState.ownerButtonId || '',
+        runId: sendMessageTaskState.runId || '',
+        reason,
+        error: sendMessageTaskState.error || '',
+        cancelRequested: sendMessageTaskState.cancelRequested === true,
+        abortController: sendMessageTaskState.abortController || null,
+        startedAt: sendMessageTaskState.startedAt || sendMessageTaskState.startedAtMs || 0,
+        finishedAt: sendMessageTaskState.finishedAt || 0,
+      }, reason);
+    }
+
+    function mirrorSendCopyHotkeyTaskStateToCanonical(reason = '') {
+      const task = state && state.sendCopyHotkeyTask && typeof state.sendCopyHotkeyTask === 'object'
+        ? state.sendCopyHotkeyTask
+        : null;
+      if (!task) {
+        console.warn('[SEND_TASK][MIRROR_SEND_COPY_HOTKEY_SKIPPED]', {
+          reason,
+          detail: 'state.sendCopyHotkeyTask missing',
+        });
+        return getCanonicalSendTaskState();
+      }
+      return setCanonicalSendTaskState({
+        running: task.running === true,
+        phase: task.phase || 'sending',
+        subPhase: task.subPhase || task.phase || '',
+        action: task.action || 'send-copy-hotkey',
+        ownerButtonId: task.ownerButtonId || '',
+        runId: task.runId || '',
+        reason,
+        error: task.error || '',
+        cancelRequested: task.cancelRequested === true,
+        abortController: task.abortController || null,
+        startedAt: task.startedAt || 0,
+        finishedAt: task.finishedAt || 0,
+      }, reason);
+    }
+
+    function clearRunningOwnerIfMatched(action, runId, reason = '') {
+      const current = typeof window !== 'undefined' ? window.__cgptToolboxRunningOwner : null;
+      if (!current || typeof current !== 'object') {
+        return;
+      }
+      const actionMatched = !action || current.action === action || current.owner === action;
+      const runIdMatched = !runId || current.runId === runId;
+      if (actionMatched && runIdMatched) {
+        console.log('[RUNNING_OWNER][CLEAR]', {
+          reason,
+          action,
+          runId,
+          current,
+        });
+        if (typeof window !== 'undefined') {
+          window.__cgptToolboxRunningOwner = null;
+        }
+      }
+    }
+
     const SEND_FAMILY_ACTIONS = new Set([
       'send-message',
       'send-copy-hotkey',
@@ -609,12 +915,19 @@
     const sendMessageTaskState = {
       running: false,
       phase: SEND_MESSAGE_PHASES.IDLE,
+      subPhase: '',
       action: 'send-message',
       plan: buildSendTaskPlanFromAction('send-message'),
       ownerButtonId: '',
       runId: '',
+      reason: '',
+      error: '',
+      cancelRequested: false,
       abortController: null,
+      startedAt: 0,
       startedAtMs: 0,
+      updatedAt: Date.now(),
+      finishedAt: 0,
       lastReason: '',
       hasClickedNativeSend: false,
       nativeSendClicked: false,
@@ -800,11 +1113,28 @@
       if (!sendMessageTaskState.running) {
         return;
       }
+      const fromPhase = sendMessageTaskState.phase;
+      const fromSubPhase = sendMessageTaskState.subPhase || '';
       const nextPhase = String(phase || SEND_MESSAGE_PHASES.IDLE).trim() || SEND_MESSAGE_PHASES.IDLE;
       sendMessageTaskState.phase = nextPhase;
+      sendMessageTaskState.subPhase = nextPhase;
+      sendMessageTaskState.updatedAt = Date.now();
       if (reason) {
         sendMessageTaskState.lastReason = String(reason).trim();
+        sendMessageTaskState.reason = String(reason).trim();
       }
+      mirrorSendMessageTaskStateToCanonical(reason || `send-message-phase:${nextPhase}`);
+      console.log('[SEND_TASK][PHASE_CHANGE]', {
+        action: sendMessageTaskState.action,
+        ownerButtonId: sendMessageTaskState.ownerButtonId,
+        runId: sendMessageTaskState.runId,
+        fromPhase,
+        toPhase: nextPhase,
+        fromSubPhase,
+        toSubPhase: sendMessageTaskState.subPhase,
+        reason,
+        updatedAt: sendMessageTaskState.updatedAt,
+      });
       ToolboxShell.appendLog(
         `[SEND_TASK][PHASE] runId=${sendMessageTaskState.runId || '-'} phase=${nextPhase} reason=${reason || '-'}`,
       );
@@ -875,25 +1205,40 @@
     function markSendCopyHotkeyStartedImmediately(source, buttonId) {
       const task = ensureSendCopyHotkeyTask();
       const runId = `send_copy_hotkey_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-      task.phase = 'preparing';
-      task.runId = runId;
-      task.rootRunId = runId;
-      task.ownerButtonId = buttonId || 'cgpt-send-copy-hotkey-once';
-      task.action = 'send-copy-hotkey';
-      task.cancelRequested = false;
-      task.startedAt = Date.now();
-      task.updatedAt = Date.now();
-      task.lastError = null;
-      task.source = source || 'manual-click';
-      task.pendingText = '准备中';
+      state.sendCopyHotkeyTask = {
+        ...(state.sendCopyHotkeyTask || {}),
+        running: true,
+        phase: 'preparing',
+        subPhase: 'preparing',
+        action: 'send-copy-hotkey',
+        ownerButtonId: buttonId || 'cgpt-send-copy-hotkey-once',
+        runId,
+        rootRunId: runId,
+        reason: 'send-copy-hotkey-start',
+        error: '',
+        cancelRequested: false,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: 0,
+        lastError: null,
+        source: source || 'manual-click',
+        pendingText: '准备中',
+      };
+      Object.assign(task, state.sendCopyHotkeyTask);
       sendMessageTaskState.running = true;
       sendMessageTaskState.phase = 'preparing';
+      sendMessageTaskState.subPhase = 'preparing';
       sendMessageTaskState.action = 'send-copy-hotkey';
       sendMessageTaskState.plan = buildSendTaskPlanFromAction('send-copy-hotkey');
       sendMessageTaskState.ownerButtonId = task.ownerButtonId;
       sendMessageTaskState.runId = runId;
       sendMessageTaskState.startedAtMs = Date.now();
+      sendMessageTaskState.startedAt = Date.now();
+      sendMessageTaskState.updatedAt = Date.now();
+      sendMessageTaskState.finishedAt = 0;
       sendMessageTaskState.lastReason = `send-copy-hotkey-start:${source || '-'}`;
+      sendMessageTaskState.reason = 'send-copy-hotkey-start';
+      mirrorSendCopyHotkeyTaskStateToCanonical('send-copy-hotkey-start');
       if (typeof window !== 'undefined') {
         window.__cgptToolboxRunningOwner = {
           owner: 'send-copy-hotkey',
@@ -901,10 +1246,17 @@
           ownerButtonId: task.ownerButtonId,
           phase: 'preparing',
           runId,
-          startedAt: Date.now(),
-          source: source || 'manual-click',
+          updatedAt: Date.now(),
         };
       }
+      console.log('[SEND_TASK][START]', {
+        action: 'send-copy-hotkey',
+        ownerButtonId: task.ownerButtonId,
+        runId,
+        phase: 'preparing',
+        subPhase: 'preparing',
+        startedAt: task.startedAt,
+      });
       ToolboxShell.appendLog(
         `[SEND_COPY_HOTKEY][IMMEDIATE_START] `
         + `source=${source || '-'} buttonId=${task.ownerButtonId} runId=${runId}`,
@@ -1000,6 +1352,22 @@
       sendMessageTaskState.switchSource = '';
       sendMessageTaskState.externalNativeSendDetected = false;
       sendMessageTaskState.responseStartedAt = 0;
+      sendMessageTaskState.subPhase = SEND_MESSAGE_PHASES.WAITING_COMPOSER;
+      sendMessageTaskState.reason = 'send-message-start';
+      sendMessageTaskState.error = '';
+      sendMessageTaskState.cancelRequested = false;
+      sendMessageTaskState.startedAt = Date.now();
+      sendMessageTaskState.updatedAt = Date.now();
+      sendMessageTaskState.finishedAt = 0;
+      mirrorSendMessageTaskStateToCanonical('send-message-start');
+      console.log('[SEND_TASK][START]', {
+        action: normalizedAction,
+        ownerButtonId: sendMessageTaskState.ownerButtonId,
+        runId,
+        phase: sendMessageTaskState.phase,
+        subPhase: sendMessageTaskState.subPhase,
+        startedAt: sendMessageTaskState.startedAt,
+      });
       state.waitingSendAbortController = abortController;
       let startTextLen = -1;
       let startAttachmentCount = -1;
@@ -1144,9 +1512,28 @@
       sendMessageTaskState.switchSource = '';
       sendMessageTaskState.externalNativeSendDetected = false;
       sendMessageTaskState.responseStartedAt = 0;
+      sendMessageTaskState.subPhase = result.ok ? '' : sendMessageTaskState.phase;
+      sendMessageTaskState.reason = result.reason || 'send-message-finished';
+      sendMessageTaskState.error = '';
+      sendMessageTaskState.cancelRequested = false;
+      sendMessageTaskState.updatedAt = Date.now();
+      sendMessageTaskState.finishedAt = Date.now();
       if (state.waitingSendAbortController) {
         state.waitingSendAbortController = null;
       }
+      if (result.ok) {
+        resetCanonicalSendTaskState('send-message-finished');
+      } else {
+        mirrorSendMessageTaskStateToCanonical('send-message-finished-not-ok');
+      }
+      clearRunningOwnerIfMatched('send-message', oldRunId, 'send-message-finished');
+      console.log('[SEND_TASK][FINISH]', {
+        action: sendMessageTaskState.action,
+        ownerButtonId: sendMessageTaskState.ownerButtonId,
+        runId: oldRunId,
+        success: result.ok === true,
+        finishedAt: sendMessageTaskState.finishedAt,
+      });
       ToolboxShell.appendLog(
         `[SEND_TASK][FINISH] oldRunId=${oldRunId || '-'} oldPhase=${oldPhase || '-'} ok=${result.ok ? 1 : 0} reason=${result.reason || '-'}`,
       );
@@ -6297,9 +6684,89 @@
           lastError: null,
           lastReason: '',
           abortController: null,
+          preAccepted: false,
+          preAcceptedAt: 0,
+          preAcceptedSource: '',
+          preAcceptedRunId: '',
+          coreStarted: false,
         };
       }
+      if (typeof state.copyHotkeyOnceTask.preAccepted !== 'boolean') {
+        state.copyHotkeyOnceTask.preAccepted = false;
+      }
+      if (!Number.isFinite(Number(state.copyHotkeyOnceTask.preAcceptedAt))) {
+        state.copyHotkeyOnceTask.preAcceptedAt = 0;
+      }
+      if (typeof state.copyHotkeyOnceTask.preAcceptedSource !== 'string') {
+        state.copyHotkeyOnceTask.preAcceptedSource = '';
+      }
+      if (typeof state.copyHotkeyOnceTask.preAcceptedRunId !== 'string') {
+        state.copyHotkeyOnceTask.preAcceptedRunId = '';
+      }
+      if (typeof state.copyHotkeyOnceTask.coreStarted !== 'boolean') {
+        state.copyHotkeyOnceTask.coreStarted = false;
+      }
       return state.copyHotkeyOnceTask;
+    }
+
+    const COPY_HOTKEY_ONCE_PREACCEPT_TTL_MS = 8000;
+
+    function isCopyHotkeyOnceImmediatePreAcceptedStart(task, source = '-') {
+      const t = task && typeof task === 'object'
+        ? task
+        : ensureCopyHotkeyOnceTask();
+      const phase = String(t.phase || '').trim().toLowerCase();
+      const sourceText = String(source || '-').trim() || '-';
+      const now = Date.now();
+      const preAcceptedAt = Number(t.preAcceptedAt || 0);
+      const ageMs = preAcceptedAt > 0 ? now - preAcceptedAt : Number.POSITIVE_INFINITY;
+      const ok = !!(
+        t.preAccepted === true
+        && t.coreStarted !== true
+        && t.running === true
+        && COPY_HOTKEY_ONCE_CANCELLABLE_PHASES.has(phase)
+        && ageMs >= 0
+        && ageMs <= COPY_HOTKEY_ONCE_PREACCEPT_TTL_MS
+      );
+      if (ok && typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][PREACCEPT_CONTINUE] source=${sourceText} phase=${phase} runId=${t.runId || '-'} preAcceptedRunId=${t.preAcceptedRunId || '-'} ageMs=${ageMs}`,
+        );
+      }
+      return ok;
+    }
+
+    function markCopyHotkeyOncePreAccepted(task, source = '-') {
+      const t = task && typeof task === 'object'
+        ? task
+        : ensureCopyHotkeyOnceTask();
+      const sourceText = String(source || '-').trim() || '-';
+      t.preAccepted = true;
+      t.preAcceptedAt = Date.now();
+      t.preAcceptedSource = sourceText;
+      t.preAcceptedRunId = String(t.runId || '').trim();
+      t.coreStarted = false;
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][PREACCEPT_MARK] source=${sourceText} phase=${t.phase || '-'} runId=${t.runId || '-'} preAcceptedRunId=${t.preAcceptedRunId || '-'}`,
+        );
+      }
+    }
+
+    function clearCopyHotkeyOncePreAccepted(task, reason = '-') {
+      const t = task && typeof task === 'object'
+        ? task
+        : ensureCopyHotkeyOnceTask();
+      const reasonText = String(reason || '-').trim() || '-';
+      t.preAccepted = false;
+      t.preAcceptedAt = 0;
+      t.preAcceptedSource = '';
+      t.preAcceptedRunId = '';
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][PREACCEPT_CLEAR] reason=${reasonText} phase=${t.phase || '-'} runId=${t.runId || '-'}`,
+        );
+      }
     }
 
     function setCopyHotkeyOncePhase(phase, reason = '') {
@@ -6335,6 +6802,11 @@
         task.taskKey = '';
         task.ownerButtonId = '';
         task.startedAt = 0;
+        task.coreStarted = false;
+        task.preAccepted = false;
+        task.preAcceptedAt = 0;
+        task.preAcceptedSource = '';
+        task.preAcceptedRunId = '';
         copyHotkeyOnceTaskStartedAt = 0;
       }
 
@@ -6395,6 +6867,8 @@
         return false;
       }
       task.cancelRequested = true;
+      clearCopyHotkeyOncePreAccepted(task, `cancel:${src}`);
+      task.coreStarted = true;
       if (task.abortController && typeof task.abortController.abort === 'function') {
         task.abortController.abort();
       }
@@ -6414,6 +6888,8 @@
       }
       task.abortController = null;
       task.cancelRequested = false;
+      task.coreStarted = false;
+      clearCopyHotkeyOncePreAccepted(task, `finish:${outcome || '-'}:${source || '-'}`);
       const normalized = String(outcome || 'idle').trim().toLowerCase();
       setCopyHotkeyOncePhase(normalized, source || outcome);
       const resetMs = normalized === 'cancelled'
@@ -6426,6 +6902,8 @@
           currentTask.lastError = null;
           currentTask.cancelRequested = false;
           currentTask.abortController = null;
+          currentTask.coreStarted = false;
+          clearCopyHotkeyOncePreAccepted(currentTask, 'auto-reset');
           setCopyHotkeyOncePhase('idle', 'auto-reset');
         }
       }, resetMs);
@@ -9689,13 +10167,26 @@
       const oldPhase = String(task.phase || 'idle').trim().toLowerCase();
       Object.assign(task, patch || {}, {
         phase: nextPhase,
+        subPhase: patch.subPhase || nextPhase,
         updatedAt: Date.now(),
       });
+      task.running = !(
+        nextPhase === 'idle'
+        || nextPhase === 'success'
+        || nextPhase === 'failed'
+        || nextPhase === 'cancelled'
+      );
       if (nextPhase === 'idle' || nextPhase === 'success' || nextPhase === 'failed' || nextPhase === 'cancelled') {
         task.cancelRequested = false;
       }
       if (SEND_COPY_HOTKEY_ACTIVE_PHASES.has(nextPhase)) {
         reconcileSendCopyHotkeyOwnerRunningState(`phase:${nextPhase}:${reason || '-'}`);
+      }
+      if (nextPhase === 'idle' && task.action === 'send-copy-hotkey') {
+        resetCanonicalSendTaskState(`send-copy-hotkey-phase-idle:${reason || '-'}`);
+        clearRunningOwnerIfMatched('send-copy-hotkey', task.runId, `send-copy-hotkey-idle:${reason || '-'}`);
+      } else {
+        mirrorSendCopyHotkeyTaskStateToCanonical(`send-copy-hotkey-phase:${nextPhase}:${reason || '-'}`);
       }
       ToolboxShell.appendLog(
         `[SEND_COPY_HOTKEY_TASK][PHASE] old=${oldPhase} new=${nextPhase} reason=${reason || '-'} `
@@ -21223,9 +21714,7 @@
         || (state.uploadTask && typeof state.uploadTask === 'object'
           ? state.uploadTask
           : { phase: 'idle', runId: '', cancelRequested: false });
-      const sendTaskFromModule = state.sendTask && typeof state.sendTask === 'object'
-        ? state.sendTask
-        : { phase: 'idle', runId: '', cancelRequested: false };
+      const sendTaskFromModule = getCanonicalSendTaskState();
       const copyTaskFromModule = state.copyTask && typeof state.copyTask === 'object'
         ? state.copyTask
         : { phase: 'idle', runId: '', cancelRequested: false };
@@ -21234,10 +21723,7 @@
         { phase: 'idle', runId: '', cancelRequested: false },
         uploadTaskFromModule,
       );
-      const sendTask = Object.assign(
-        { phase: 'idle', runId: '', cancelRequested: false },
-        sendTaskFromModule,
-      );
+      const sendTask = sendTaskFromModule;
       const copyTask = Object.assign(
         { phase: 'idle', runId: '', cancelRequested: false },
         copyTaskFromModule,
@@ -21362,7 +21848,7 @@
         legacyFlags,
         taskDerivedFlags,
         uploadTask: uploadTask || { phase: 'idle', runId: '', cancelRequested: false },
-        sendTask: sendTask || { phase: 'idle', runId: '', cancelRequested: false },
+        sendTask: sendTask || createIdleCanonicalSendTask(),
         copyTask: copyTask || { phase: 'idle', runId: '', cancelRequested: false },
         batchTask,
       };
@@ -28021,6 +28507,8 @@
         source = 'button',
         reason = 'copy',
         shouldStop = () => false,
+        allowVisibleAssistantFallback = false,
+        preferVisibleAssistantImmediately = false,
       } = options;
       const skipWaitWhenReplyAlreadyStable = options.skipWaitWhenReplyAlreadyStable === true;
 
@@ -28034,6 +28522,65 @@
         ToolboxShell.appendLog(
           `[COPY_WAIT][SCROLL_OPTION_IGNORED] reason=${reason} scrollBeforeCopy=${options.scrollBeforeCopy} scrollAfterCopy=${options.scrollAfterCopy}`,
         );
+      }
+
+      if (preferVisibleAssistantImmediately === true) {
+        let visibleText = '';
+        try {
+          if (
+            typeof ChatMessageExtractor !== 'undefined'
+            && ChatMessageExtractor
+            && typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+            && typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser === 'function'
+            && typeof ChatMessageExtractor.cleanMessageText === 'function'
+          ) {
+            const records = ChatMessageExtractor.getFastTailMessageRecords({ includeHidden: false });
+            const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
+            if (picked && picked.ok && picked.record) {
+              visibleText = ChatMessageExtractor.cleanMessageText(picked.record.text || '').trim();
+            }
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          const errStack = error && error.stack ? String(error.stack).slice(0, 1200) : '';
+          console.error('[COPY_WAIT][VISIBLE_TEXT_READ_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[COPY_WAIT][VISIBLE_TEXT_READ_FAILED] source=${String(source || '-')} error=${errText} stack=${errStack}`,
+          );
+        }
+        if (visibleText) {
+          const copyResult = await copyLatestAssistantReplyUnified({
+            reason,
+            prefilledText: visibleText,
+          });
+          if (copyResult && copyResult.ok === true) {
+            ToolboxShell.appendLog(
+              `[COPY_WAIT][VISIBLE_COPY_OK] source=${String(source || '-')} chars=${visibleText.length} reason=${String(reason || '-')} path=direct-visible-copy`,
+            );
+            return {
+              ok: true,
+              reason: 'visible-assistant-copy',
+              detail: '',
+              copied: true,
+              text: copyResult.text || visibleText,
+              chars: copyResult.chars || visibleText.length,
+              waitResult: {
+                ok: true,
+                reason: 'skipped-wait-visible-assistant',
+              },
+              copyResult,
+            };
+          }
+          const failReason = copyResult && copyResult.reason ? String(copyResult.reason) : 'visible-copy-failed';
+          const failDetail = copyResult && copyResult.error ? String(copyResult.error) : '';
+          ToolboxShell.appendLog(
+            `[COPY_WAIT][VISIBLE_COPY_FAILED] source=${String(source || '-')} reason=${failReason} detail=${failDetail || '-'} chars=${visibleText.length} willTryStableWait=1`,
+          );
+        } else {
+          ToolboxShell.appendLog(
+            `[COPY_WAIT][VISIBLE_TEXT_EMPTY] source=${String(source || '-')} reason=${String(reason || '-')}`,
+          );
+        }
       }
 
       if (skipWaitWhenReplyAlreadyStable === true) {
@@ -28108,6 +28655,61 @@
 
         if (!waitResult || !waitResult.ok) {
           const failReason = waitResult && waitResult.reason ? waitResult.reason : 'wait-assistant-failed';
+          if (allowVisibleAssistantFallback === true) {
+            let fallbackText = '';
+            try {
+              if (
+                typeof ChatMessageExtractor !== 'undefined'
+                && ChatMessageExtractor
+                && typeof ChatMessageExtractor.getFastTailMessageRecords === 'function'
+                && typeof ChatMessageExtractor.getLatestAssistantAfterLatestUser === 'function'
+                && typeof ChatMessageExtractor.cleanMessageText === 'function'
+              ) {
+                const records = ChatMessageExtractor.getFastTailMessageRecords({ includeHidden: false });
+                const picked = ChatMessageExtractor.getLatestAssistantAfterLatestUser(records);
+                if (picked && picked.ok && picked.record) {
+                  fallbackText = ChatMessageExtractor.cleanMessageText(picked.record.text || '').trim();
+                }
+              }
+            } catch (error) {
+              const errText = error && error.message ? error.message : String(error);
+              const errStack = error && error.stack ? String(error.stack).slice(0, 1200) : '';
+              console.error('[COPY_WAIT][FALLBACK_VISIBLE_READ_FAILED]', error);
+              ToolboxShell.appendLog(
+                `[COPY_WAIT][FALLBACK_VISIBLE_READ_FAILED] source=${String(source || '-')} error=${errText} stack=${errStack}`,
+              );
+            }
+            if (fallbackText) {
+              const fallbackCopyResult = await copyLatestAssistantReplyUnified({
+                reason,
+                prefilledText: fallbackText,
+              });
+              if (fallbackCopyResult && fallbackCopyResult.ok === true) {
+                ToolboxShell.appendLog(
+                  `[COPY_WAIT][FALLBACK_VISIBLE_COPY_OK] source=${String(source || '-')} waitReason=${failReason} chars=${fallbackText.length} path=fallback-visible-copy`,
+                );
+                return {
+                  ok: true,
+                  reason: 'fallback-visible-assistant-copy',
+                  detail: '',
+                  copied: true,
+                  text: fallbackCopyResult.text || fallbackText,
+                  chars: fallbackCopyResult.chars || fallbackText.length,
+                  waitResult,
+                  copyResult: fallbackCopyResult,
+                };
+              }
+              const fallbackCopyReason = fallbackCopyResult && fallbackCopyResult.reason
+                ? String(fallbackCopyResult.reason)
+                : 'fallback-visible-copy-failed';
+              const fallbackCopyDetail = fallbackCopyResult && fallbackCopyResult.error
+                ? String(fallbackCopyResult.error)
+                : '';
+              ToolboxShell.appendLog(
+                `[COPY_WAIT][FALLBACK_VISIBLE_COPY_FAILED] source=${String(source || '-')} waitReason=${failReason} copyReason=${fallbackCopyReason} detail=${fallbackCopyDetail || '-'} chars=${fallbackText.length}`,
+              );
+            }
+          }
           ToolboxShell.appendLog(
             `[COPY_WAIT][COPY_FAILED] reason=${failReason} stage=wait-assistant source=${String(source || '-')}`,
           );
@@ -28179,12 +28781,12 @@
         }
 
         ToolboxShell.appendLog(
-          `[COPY_WAIT][COPY_OK] chars=${copyResult.chars || 0} source=${String(source || '-')}`,
+          `[COPY_WAIT][STABLE_COPY_OK] chars=${copyResult.chars || 0} source=${String(source || '-')} path=stable-copy`,
         );
 
         return {
           ok: true,
-          reason: 'ok',
+          reason: 'stable-assistant-copy',
           detail: '',
           copied: true,
           text: copyResult.text || waitResult.text,
@@ -28471,7 +29073,7 @@
         ToolboxShell.appendLog(
           `[COPY_LAST_REPLY][start] source=${String(source || '-')}`,
         );
-        setStatus('正在等待最后回复稳定...', 'running');
+        setStatus('正在复制最后回复...', 'running');
 
         copyLastReplyTaskStatus = 'copying';
         copyLastMessageTaskStatus = 'copying';
@@ -28487,6 +29089,8 @@
         const waitCopyResult = await waitAndCopyLatestAssistant({
           source,
           reason: `copy-only:${String(source || '-')}`,
+          allowVisibleAssistantFallback: true,
+          preferVisibleAssistantImmediately: true,
         });
 
         if (!waitCopyResult.ok) {
@@ -28528,7 +29132,7 @@
         });
 
         ToolboxShell.appendLog(
-          `[COPY_LAST_REPLY][done] chars=${waitCopyResult.chars || 0}`,
+          `[COPY_LAST_REPLY][done] chars=${waitCopyResult.chars || 0} path=${String(waitCopyResult.reason || 'ok')}`,
         );
         if (typeof playCopySuccessBeepSafe === 'function') {
           void playCopySuccessBeepSafe(source || '-', 'copyLastReply');
@@ -29001,10 +29605,11 @@
       ) {
         state.cancelWaitingSend = false;
         state.messageSendCancelRequested = false;
-        state.sendTask.phase = 'idle';
-        state.sendTask.cancelRequested = false;
-        state.sendTask.source = '';
-        state.sendTask.owner = '';
+        resetCanonicalSendTaskState(sourceText);
+        if (state.sendTask && typeof state.sendTask === 'object') {
+          state.sendTask.source = '';
+          state.sendTask.owner = '';
+        }
       }
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][RESET_OWN_WAITING_SEND] source=${sourceText} oldPhase=${oldPhase} oldSource=${oldSource}`,
@@ -30806,6 +31411,13 @@
 
       const sourceText = String(source || 'button').trim() || 'button';
       const actionSource = sourceText === 'delegated-click' ? 'button' : sourceText;
+      const btn = rootElRef
+        ? qs(UploadSelectors.copyHotkeyOnceBtn, rootElRef)
+        : null;
+      markCopyHotkeyOnceAcceptedImmediately(
+        btn,
+        `trigger:${actionSource}`,
+      );
 
       if (actionSource === 'shortcut') {
         ToolboxShell.appendLog('[COPY_HOTKEY_ONCE][shortcut-trigger]');
@@ -30988,13 +31600,73 @@
       );
     }
 
+    function canImmediateRedCopyHotkeyOnce(reason = '-') {
+      const task = ensureCopyHotkeyOnceTask();
+      const phase = String(task.phase || 'idle').trim().toLowerCase();
+      if (COPY_HOTKEY_ONCE_CANCELLABLE_PHASES.has(phase) || phase === 'cancelling') {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_ONCE][IMMEDIATE_RED_SKIP] reason=${reason || '-'} phase=${phase} cause=already-running-or-cancellable`,
+          );
+        }
+        return false;
+      }
+      if (
+        typeof isCopyHotkeyContinueActive === 'function'
+        && isCopyHotkeyContinueActive()
+      ) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_ONCE][IMMEDIATE_RED_SKIP] reason=${reason || '-'} phase=${phase} cause=copy-hotkey-continue-active`,
+          );
+        }
+        return false;
+      }
+      if (
+        typeof isCopyHotkeyLoopActive === 'function'
+        && isCopyHotkeyLoopActive()
+      ) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_ONCE][IMMEDIATE_RED_SKIP] reason=${reason || '-'} phase=${phase} cause=copy-hotkey-loop-active`,
+          );
+        }
+        return false;
+      }
+      if (
+        typeof isCopyHotkeyUploadVerifyLoopActive === 'function'
+        && isCopyHotkeyUploadVerifyLoopActive()
+      ) {
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY_ONCE][IMMEDIATE_RED_SKIP] reason=${reason || '-'} phase=${phase} cause=copy-hotkey-upload-verify-loop-active`,
+          );
+        }
+        return false;
+      }
+      return true;
+    }
+
+    function markCopyHotkeyOnceAcceptedImmediately(button, source = '-') {
+      const sourceText = String(source || '-').trim() || '-';
+      if (!canImmediateRedCopyHotkeyOnce(sourceText)) {
+        return false;
+      }
+      const btn = button instanceof HTMLElement
+        ? button
+        : (
+          rootElRef
+            ? qs(UploadSelectors.copyHotkeyOnceBtn, rootElRef)
+            : null
+        );
+      const ok = paintCopyHotkeyOnceButtonRunningNow(btn, sourceText);
+      if (ok) {
+        setStatus('正在等待回答完成，然后复制并发送快捷键', 'running');
+      }
+      return ok;
+    }
+
     function paintCopyHotkeyOnceButtonRunningNow(btn, reason = '-') {
-      /*
-       * 状态统一收口：
-       * 本函数保留为兼容入口，但不再直接修改按钮 DOM。
-       * 原来的 textContent / disabled / classList / dataset phase 写法会绕过 ButtonTasks -> Snapshot -> VM -> ButtonState，
-       * 导致左上角状态正确但按钮颜色、文字、disabled 状态被污染。
-       */
       const reasonText = String(reason || '-').trim() || '-';
       const task = ensureCopyHotkeyOnceTask();
       task.phase = 'waiting_reply';
@@ -31003,10 +31675,13 @@
       task.taskKey = COPY_HOTKEY_ONCE_TASK_KEY;
       task.ownerButtonId = COPY_HOTKEY_ONCE_OWNER_BUTTON_ID;
       task.cancelRequested = false;
+      task.coreStarted = false;
+      task.lastError = null;
       task.lastReason = `immediate-state-only:${reasonText}`;
       if (!task.runId) {
         task.runId = createUploadTaskRunId('copy_hotkey_once');
       }
+      markCopyHotkeyOncePreAccepted(task, reasonText);
       if (!task.startedAt) {
         task.startedAt = Date.now();
         copyHotkeyOnceTaskStartedAt = task.startedAt;
@@ -31018,24 +31693,33 @@
         action: COPY_HOTKEY_ONCE_ACTION,
         ownerButtonId: COPY_HOTKEY_ONCE_OWNER_BUTTON_ID,
       });
-      if (btn) {
-        logManagedButtonDomBypassBlocked(
-          btn,
-          'paintCopyHotkeyOnceButtonRunningNow',
-          'state-only; DOM render delegated to UploadButtonVm.applyUploadButtonViewState',
-        );
-      }
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[COPY_HOTKEY_ONCE][IMMEDIATE_STATE_ONLY] id=${btn && btn.id ? btn.id : '-'} phase=waiting_reply reason=${reasonText}`,
+          `[COPY_HOTKEY_ONCE][IMMEDIATE_RED] id=${btn && btn.id ? btn.id : '-'} phase=waiting_reply reason=${reasonText}`,
         );
       }
-      requestManagedButtonVmRender(`copy-hotkey-once:immediate-state-only:${reasonText}`, {
-        force: true,
-        immediate: true,
-        heavy: false,
-        userAction: true,
-      });
+      if (typeof requestManagedButtonVmRender === 'function') {
+        requestManagedButtonVmRender(`copy-hotkey-once:immediate-red:${reasonText}`, {
+          force: true,
+          immediate: true,
+          heavy: false,
+          userAction: true,
+        });
+      } else if (typeof renderUploadButtonsOnly === 'function') {
+        renderUploadButtonsOnly({
+          buttonTasksReason: `copy-hotkey-once:immediate-red:${reasonText}`,
+          force: true,
+          immediate: true,
+          heavy: false,
+          userAction: true,
+        });
+      } else {
+        const line = `[COPY_HOTKEY_ONCE][IMMEDIATE_RED_RENDER_FAILED] reason=${reasonText}`;
+        console.error(line);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(line);
+        }
+      }
       return true;
     }
 
@@ -31107,7 +31791,12 @@
       task.startedAt = Date.now();
       copyHotkeyOnceTaskStartedAt = task.startedAt;
       task.running = true;
+      task.coreStarted = true;
+      clearCopyHotkeyOncePreAccepted(task, `core-start:${sourceText}`);
       copyHotkeyOnceTaskRunning = true;
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_ONCE][CORE_STARTED] source=${sourceText} runId=${runId} ownerButtonId=${ownerButtonId} ownerAction=${ownerAction}`,
+      );
 
       const shouldStop = () => externalShouldStop() || isCopyHotkeyOnceCancelled(runId);
 
@@ -31467,7 +32156,11 @@
 
       const task = ensureCopyHotkeyOnceTask();
       const currentPhase = String(task.phase || 'idle').trim().toLowerCase();
-      if (COPY_HOTKEY_ONCE_CANCELLABLE_PHASES.has(currentPhase) || currentPhase === 'cancelling') {
+      const currentPhaseCancellable = COPY_HOTKEY_ONCE_CANCELLABLE_PHASES.has(currentPhase)
+        || currentPhase === 'cancelling';
+      const isImmediatePreAcceptedStart = currentPhaseCancellable
+        && isCopyHotkeyOnceImmediatePreAcceptedStart(task, sourceText);
+      if (currentPhaseCancellable && !isImmediatePreAcceptedStart) {
         cancelCopyHotkeyOnce(sourceText);
         return {
           ok: false,
@@ -31475,6 +32168,11 @@
           copied: false,
           hotkeySent: false,
         };
+      }
+      if (isImmediatePreAcceptedStart) {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][START_AFTER_PREACCEPT] source=${sourceText} phase=${currentPhase} runId=${task.runId || '-'} reason=do-not-self-cancel`,
+        );
       }
 
       if (
@@ -31495,9 +32193,7 @@
       }
 
       const btn = rootElRef ? qs(UploadSelectors.copyHotkeyOnceBtn, rootElRef) : null;
-      if (btn) {
-        paintCopyHotkeyOnceButtonRunningNow(btn, sourceText || 'start');
-      }
+      markCopyHotkeyOnceAcceptedImmediately(btn, `run:${sourceText || 'start'}`);
       setStatus(
         isGenerating
           ? '正在等待回答完成，然后复制并发送快捷键'
@@ -31538,6 +32234,7 @@
           waitForCurrentReply,
           skipActionLock: true,
           shouldStop: externalShouldStop,
+          runId: task.runId || '',
         });
       } finally {
         releaseUploadActionLock('copy-hotkey-once');
@@ -35925,67 +36622,51 @@
     }
 
     function setAuthoritativeSendTaskState(next = {}, reason = '') {
-      if (!state.sendTask || typeof state.sendTask !== 'object') {
-        state.sendTask = { phase: 'idle', runId: '', cancelRequested: false };
-      }
-
-      const task = state.sendTask;
-      const oldPhase = String(task.phase || 'idle').trim().toLowerCase();
-      const oldSubphase = String(task.subPhase || task.subphase || '').trim();
-      let nextPhase = String(
-        next.phase != null ? next.phase : task.phase || 'idle',
-      ).trim().toLowerCase();
-      if (nextPhase === 'waiting_ready') {
-        nextPhase = 'waiting_send';
-      }
+      const previous = getCanonicalSendTaskState();
+      const oldPhase = previous.phase;
+      const oldSubphase = String(previous.subPhase || '').trim();
+      const nextPhase = normalizeCanonicalSendPhase(
+        next.phase != null ? next.phase : previous.phase,
+      );
 
       if (
         !canOverrideSendSuccess(oldPhase, nextPhase, lastSharedSendOutcome)
-        && (nextPhase === 'failed' || nextPhase === 'cancelled')
+        && (nextPhase === CANONICAL_SEND_PHASES.FAILED || nextPhase === CANONICAL_SEND_PHASES.CANCELLED)
       ) {
         const blockedResult = lastSharedSendOutcome || {};
         ToolboxShell.appendLog(
           `[SEND_STATE][OVERRIDE_BLOCKED] oldPhase=${oldPhase || '-'} newPhase=${nextPhase || '-'} `
           + `reason=already-sent verifyReason=${blockedResult.verifyReason || blockedResult.reason || '-'}`,
         );
-        return task;
+        return state.sendTask;
       }
 
-      Object.assign(task, next);
-      task.phase = nextPhase;
-      task._authoritative = true;
-      // 记录发送任务状态更新时间，用于后续 stale sending 自愈。
-      // 注意：必须在所有 phase 写入路径统一记录，不能只在 sending 分支记录。
-      task.updatedAt = Date.now();
-      task.updatedReason = String(reason || '').trim();
       const nextSubphaseRaw = next.subPhase != null ? next.subPhase : next.subphase;
-      if (nextSubphaseRaw != null) {
-        const nextSubphase = nextPhase === 'waiting_page_reply_to_send'
-          ? 'waiting_page_reply_to_send'
-          : String(nextSubphaseRaw || '').trim();
-        task.subPhase = nextSubphase;
-        task.subphase = nextSubphase;
-      } else {
-        const existingSubphase = nextPhase === 'waiting_page_reply_to_send'
-          ? 'waiting_page_reply_to_send'
-          : String(task.subPhase || task.subphase || '').trim();
-        task.subPhase = existingSubphase;
-        task.subphase = existingSubphase;
-      }
-      if (next.runId != null) {
-        task.runId = String(next.runId || '');
-      }
-      if (next.cancelRequested != null) {
-        task.cancelRequested = !!next.cancelRequested;
-      }
-      if (next.action != null) {
-        task.action = String(next.action || '').trim();
-      }
+      const patch = {
+        phase: next.phase != null ? next.phase : previous.phase,
+        subPhase: nextSubphaseRaw != null
+          ? (nextPhase === 'waiting_page_reply_to_send'
+            ? 'waiting_page_reply_to_send'
+            : String(nextSubphaseRaw || '').trim())
+          : previous.subPhase,
+        running: next.running,
+        runId: next.runId,
+        cancelRequested: next.cancelRequested,
+        action: next.action,
+        ownerButtonId: next.ownerButtonId,
+        abortController: next.abortController,
+        reason: next.reason || reason,
+        error: next.error,
+        startedAt: next.startedAt,
+        finishedAt: next.finishedAt,
+      };
+
+      setCanonicalSendTaskState(patch, reason);
+      const task = state.sendTask;
+      task._authoritative = true;
+      task.updatedReason = String(reason || '').trim();
       if (next.ownerAction != null) {
         task.ownerAction = String(next.ownerAction || '').trim();
-      }
-      if (next.ownerButtonId != null) {
-        task.ownerButtonId = String(next.ownerButtonId || '').trim();
       }
       if (next.visualOwnerAction != null) {
         task.visualOwnerAction = String(next.visualOwnerAction || '').trim();
@@ -35993,42 +36674,36 @@
       if (next.visualOwnerButtonId != null) {
         task.visualOwnerButtonId = String(next.visualOwnerButtonId || '').trim();
       }
+      if (next.source != null) {
+        task.source = String(next.source || '').trim();
+      }
+      if (next.owner != null) {
+        task.owner = String(next.owner || '').trim();
+      }
 
-      if (oldPhase !== nextPhase || oldSubphase !== String(task.subPhase || task.subphase || '').trim()) {
+      const newSubphase = String(task.subPhase || '').trim();
+      if (oldPhase !== task.phase || oldSubphase !== newSubphase) {
         const subphase = task.subPhase ? String(task.subPhase) : '';
         const subLog = subphase ? ` subphase=${subphase}` : '';
         const reasonText = String(reason || '').trim();
         if (/start-upload|upload-manual|manual-click-start|upload-task:/i.test(reasonText)) {
           console.error('[SEND_STATE][UPLOAD_REASON_ON_SEND_TASK]', {
             oldPhase,
-            nextPhase,
+            nextPhase: task.phase,
             reason: reasonText,
           });
           ToolboxShell.appendLog(
-            `[SEND_STATE][UPLOAD_REASON_ON_SEND_TASK] old=${oldPhase} new=${nextPhase}${subLog} reason=${reasonText}`,
+            `[SEND_STATE][UPLOAD_REASON_ON_SEND_TASK] old=${oldPhase} new=${task.phase}${subLog} reason=${reasonText}`,
           );
         }
         ToolboxShell.appendLog(
-          `[SEND_STATE][AUTHORITATIVE] old=${oldPhase} new=${nextPhase}${subLog} `
+          `[SEND_STATE][AUTHORITATIVE] old=${oldPhase} new=${task.phase}${subLog} `
           + `reason=${reason || '-'} updatedAt=${task.updatedAt || 0}`,
         );
-        if (typeof ButtonTasks !== 'undefined' && typeof ButtonTasks.setTaskPhase === 'function') {
-          ButtonTasks.setTaskPhase('send', nextPhase, reason || 'authoritative', {
-            runId: task.runId,
-            cancelRequested: task.cancelRequested,
-            subPhase: task.subPhase || task.subphase || '',
-            action: task.action || '',
-            ownerAction: task.ownerAction || task.action || '',
-            ownerButtonId: task.ownerButtonId || '',
-            visualOwnerAction: task.visualOwnerAction || task.ownerAction || task.action || '',
-            visualOwnerButtonId: task.visualOwnerButtonId || task.ownerButtonId || '',
-          });
-        }
-        logButtonTasksMigration('uploadSendShortcutRunning', 'send', nextPhase);
-        scheduleRenderUpload(`send-task:${nextPhase}:${reason || '-'}`);
+        logButtonTasksMigration('uploadSendShortcutRunning', 'send', task.phase);
+        scheduleRenderUpload(`send-task:${task.phase}:${reason || '-'}`);
       }
 
-      syncLegacySendFlagsFromSendTask(reason);
       return task;
     }
 
@@ -36045,37 +36720,44 @@
     }
 
     function syncLegacySendFlagsFromSendTask(reason = '') {
-      const phase = normalizeSendTaskPhaseForModule(state.sendTask || {});
+      const task = getCanonicalSendTaskState();
+      const phase = normalizeCanonicalSendPhase(task.phase);
+      const subPhase = String(task.subPhase || '').trim();
       const prevWaitingReply = !!state.waitingReply;
       const prevMessageSending = !!state.messageSending;
       const prevWaitingSend = !!state.waitingSend;
       const prevAutoSendWaiting = !!state.autoSendWaiting;
       const prevWaitingRealSendButton = !!state.waitingRealSendButton;
 
-      state.waitingReply = phase === 'waiting_reply';
-      state.messageSending = phase === 'sending';
+      state.waitingSend = task.running === true && phase === CANONICAL_SEND_PHASES.WAITING_SEND;
+      state.waitingReply = task.running === true && phase === CANONICAL_SEND_PHASES.WAITING_REPLY;
+      state.messageSending = task.running === true && phase === CANONICAL_SEND_PHASES.SENDING;
+      state.messageSendCancelRequested = task.cancelRequested === true;
+      state.autoSendWaiting = (
+        task.running === true
+        && phase === CANONICAL_SEND_PHASES.WAITING_SEND
+      );
+      state.waitingRealSendButton = (
+        task.running === true
+        && phase === CANONICAL_SEND_PHASES.WAITING_SEND
+        && (
+          subPhase === 'ready_to_click'
+          || subPhase === 'waiting_real_send_button'
+          || subPhase === 'waiting_send_button'
+        )
+      );
 
-      if (phase === 'waiting_send' || phase === 'waiting_ready') {
-        state.waitingSend = true;
-        state.autoSendWaiting = true;
-        state.waitingRealSendButton = true;
-      } else if (phase === 'waiting_page_reply_to_send') {
-        state.waitingSend = true;
-        state.autoSendWaiting = true;
-        state.waitingRealSendButton = false;
-      } else if (phase === 'sending') {
-        state.waitingSend = false;
-        state.autoSendWaiting = false;
-        state.waitingRealSendButton = false;
-      } else if (phase === 'waiting_reply') {
-        state.waitingSend = false;
-        state.autoSendWaiting = false;
-        state.waitingRealSendButton = false;
-      } else if (phase === 'idle') {
-        state.waitingSend = false;
-        state.autoSendWaiting = false;
-        state.waitingRealSendButton = false;
-      }
+      console.log('[SEND_TASK][SYNC_LEGACY_FLAGS]', {
+        reason,
+        running: task.running,
+        phase,
+        subPhase,
+        waitingSend: state.waitingSend,
+        waitingReply: state.waitingReply,
+        messageSending: state.messageSending,
+        waitingRealSendButton: state.waitingRealSendButton,
+        cancelRequested: state.messageSendCancelRequested,
+      });
 
       if (
         (
@@ -36104,16 +36786,11 @@
 
         if (typeof renderToolboxHeaderStatus === 'function') {
           let headerReason = `send-task:${phase}:${reason || '-'}`;
-          if (phase === 'waiting_reply') {
+          if (phase === CANONICAL_SEND_PHASES.WAITING_REPLY) {
             headerReason = 'send-task-waiting-reply';
-          } else if (
-            phase === 'waiting_send'
-            || phase === 'waiting_page_reply_to_send'
-            || phase === 'waiting_composer'
-            || phase === 'waiting_ready'
-          ) {
+          } else if (phase === CANONICAL_SEND_PHASES.WAITING_SEND) {
             headerReason = 'send-task-waiting-composer';
-          } else if (phase === 'idle') {
+          } else if (phase === CANONICAL_SEND_PHASES.IDLE) {
             headerReason = state.cancelled ? 'send-task-cancelled' : 'send-task-finished';
           }
           renderToolboxHeaderStatus(headerReason);
@@ -36153,12 +36830,12 @@
     function syncSendTaskFromLegacyState(options = {}) {
       const forceLegacy = !!(options && options.forceLegacy === true);
       if (!state.sendTask || typeof state.sendTask !== 'object') {
-        state.sendTask = { phase: 'idle', runId: '', cancelRequested: false };
+        resetCanonicalSendTaskState('sync-send-task-from-legacy-init');
       }
 
       const task = state.sendTask;
       if (state.messageSendCancelRequested) {
-        task.cancelRequested = true;
+        setCanonicalSendTaskState({ cancelRequested: true }, 'sync-send-task-from-legacy-cancel');
       }
       if (!forceLegacy) {
         ToolboxShell.appendLog(
@@ -36446,65 +37123,88 @@
       syncCopyTaskFromLegacyState();
       syncCopyContinueTaskFromLegacyState();
 
-      if (typeof ButtonTasks === 'undefined' || typeof ButtonTasks.mirrorTaskSnapshot !== 'function') {
+      const ButtonTasksRef = typeof ButtonTasks !== 'undefined' ? ButtonTasks : (
+        typeof window !== 'undefined' ? window.CGPT_BUTTON_TASKS : null
+      );
+      if (!ButtonTasksRef || typeof ButtonTasksRef.mirrorTaskSnapshot !== 'function') {
+        console.warn('[BUTTON_TASKS][MIRROR_SKIPPED]', {
+          reason,
+          detail: 'window.CGPT_BUTTON_TASKS.mirrorTaskSnapshot missing',
+        });
         return;
       }
 
       const upload = state.uploadTask && typeof state.uploadTask === 'object'
         ? state.uploadTask
         : { phase: 'idle', runId: '', cancelRequested: false };
-      const send = state.sendTask && typeof state.sendTask === 'object'
-        ? state.sendTask
-        : { phase: 'idle', runId: '', cancelRequested: false };
+      const canonicalSendTask = getCanonicalSendTaskState();
       const copy = state.copyTask && typeof state.copyTask === 'object'
         ? state.copyTask
         : { phase: 'idle', runId: '', cancelRequested: false };
 
-      ButtonTasks.mirrorTaskSnapshot('upload', {
-        phase: upload.phase,
-        runId: upload.runId,
-        cancelRequested: !!upload.cancelRequested,
-        stopRequested: !!upload.cancelRequested,
-        abortController: state.uploadAbortController || upload.abortController || null,
-        lastError: upload.lastError || null,
-      });
+      try {
+        if (upload && typeof upload === 'object') {
+          ButtonTasksRef.mirrorTaskSnapshot('upload', {
+            ...upload,
+            updatedAt: upload.updatedAt || Date.now(),
+          }, reason);
+        }
+        ButtonTasksRef.mirrorTaskSnapshot('send', {
+          running: canonicalSendTask.running,
+          phase: canonicalSendTask.phase,
+          subPhase: canonicalSendTask.subPhase,
+          action: canonicalSendTask.action,
+          ownerButtonId: canonicalSendTask.ownerButtonId,
+          runId: canonicalSendTask.runId || String(state.autoSendRunId || ''),
+          reason: canonicalSendTask.reason || reason,
+          error: canonicalSendTask.error,
+          cancelRequested: canonicalSendTask.cancelRequested === true,
+          stopRequested: !!(
+            state.messageSendCancelRequested
+            || state.cancelWaitingSend
+          ),
+          startedAt: canonicalSendTask.startedAt,
+          updatedAt: canonicalSendTask.updatedAt || Date.now(),
+          finishedAt: canonicalSendTask.finishedAt,
+          abortController: state.waitingSendAbortController || canonicalSendTask.abortController || null,
+        }, reason);
+        console.log('[BUTTON_TASKS][MIRRORED_FROM_MODULE]', {
+          reason,
+          sendRunning: canonicalSendTask.running,
+          sendPhase: canonicalSendTask.phase,
+          sendSubPhase: canonicalSendTask.subPhase,
+          sendAction: canonicalSendTask.action,
+          sendOwnerButtonId: canonicalSendTask.ownerButtonId,
+          sendRunId: canonicalSendTask.runId,
+        });
 
-      const sendPhase = send.phase === 'waiting_ready' ? 'waiting_send' : send.phase;
-      ButtonTasks.mirrorTaskSnapshot('send', {
-        phase: sendPhase,
-        subPhase: send.subPhase || send.subphase || '',
-        subphase: send.subPhase || send.subphase || '',
-        runId: send.runId || String(state.autoSendRunId || ''),
-        cancelRequested: !!send.cancelRequested,
-        stopRequested: !!(
-          state.messageSendCancelRequested
-          || state.cancelWaitingSend
-        ),
-        abortController: state.waitingSendAbortController || send.abortController || null,
-        lastError: send.lastError || null,
-      });
+        ButtonTasksRef.mirrorTaskSnapshot('copy', {
+          phase: copy.phase,
+          runId: copy.runId,
+          cancelRequested: !!copy.cancelRequested,
+          stopRequested: !!copyHotkeyContinueLoopStopRequested,
+          abortController: null,
+          lastError: copy.lastError || null,
+        }, reason);
 
-      ButtonTasks.mirrorTaskSnapshot('copy', {
-        phase: copy.phase,
-        runId: copy.runId,
-        cancelRequested: !!copy.cancelRequested,
-        stopRequested: !!copyHotkeyContinueLoopStopRequested,
-        abortController: null,
-        lastError: copy.lastError || null,
-      });
-
-      const syncReason = String(reason || '-').trim() || '-';
-      ToolboxShell.appendLog(
-        `[UPLOAD_TASK][SYNC] key=upload phase=${String(upload.phase || 'idle').trim() || 'idle'} `
-        + `owner=${String(upload.owner || '-').trim() || '-'} source=${String(upload.source || '-').trim() || '-'} `
-        + `runId=${String(upload.runId || '-').trim() || '-'} reason=${syncReason}`,
-      );
-      const sendPhaseText = String(sendPhase || 'idle').trim().toLowerCase() || 'idle';
-      if (sendPhaseText !== 'idle') {
+        const syncReason = String(reason || '-').trim() || '-';
         ToolboxShell.appendLog(
-          `[SEND_TASK][SYNC] key=send phase=${sendPhaseText} `
-          + `source=${String(send.source || '-').trim() || '-'} runId=${String(send.runId || '-').trim() || '-'} reason=${syncReason}`,
+          `[UPLOAD_TASK][SYNC] key=upload phase=${String(upload.phase || 'idle').trim() || 'idle'} `
+          + `owner=${String(upload.owner || '-').trim() || '-'} source=${String(upload.source || '-').trim() || '-'} `
+          + `runId=${String(upload.runId || '-').trim() || '-'} reason=${syncReason}`,
         );
+        const sendPhaseText = String(canonicalSendTask.phase || 'idle').trim().toLowerCase() || 'idle';
+        if (sendPhaseText !== 'idle') {
+          ToolboxShell.appendLog(
+            `[SEND_TASK][SYNC] key=send phase=${sendPhaseText} `
+            + `runId=${String(canonicalSendTask.runId || '-').trim() || '-'} reason=${syncReason}`,
+          );
+        }
+      } catch (error) {
+        console.error('[BUTTON_TASKS][MIRROR_FAILED]', {
+          reason,
+          error,
+        });
       }
     }
 
@@ -37140,6 +37840,25 @@
         visualOwnerButtonIdForSnapshot = 'cgpt-send-copy-hotkey-once';
       }
 
+      const canonicalSendTaskForSnapshot = getCanonicalSendTaskState();
+      const sendMessageTaskForSnapshot = {
+        running: sendMessageTaskState.running === true,
+        phase: normalizeCanonicalSendPhase(sendMessageTaskState.phase),
+        subPhase: normalizeCanonicalSendSubPhase(sendMessageTaskState.phase, sendMessageTaskState.subPhase),
+        action: sendMessageTaskState.action || sendMessageActionForSnapshot || 'send-message',
+        ownerButtonId: sendMessageTaskState.ownerButtonId || '',
+        runId: sendMessageTaskState.runId || '',
+        reason: sendMessageTaskState.reason || '',
+        error: sendMessageTaskState.error || '',
+        cancelRequested: sendMessageTaskState.cancelRequested === true,
+        startedAt: sendMessageTaskState.startedAt || sendMessageTaskState.startedAtMs || 0,
+        updatedAt: sendMessageTaskState.updatedAt || Date.now(),
+        finishedAt: sendMessageTaskState.finishedAt || 0,
+      };
+      const sendCopyHotkeyTaskForSnapshot = state.sendCopyHotkeyTask && typeof state.sendCopyHotkeyTask === 'object'
+        ? buildCanonicalSendTaskFromRaw(state.sendCopyHotkeyTask, { action: 'send-copy-hotkey' })
+        : createIdleCanonicalSendTask({ action: 'send-copy-hotkey' });
+
       return {
         pageStatus: runtime.pageStatus,
         capability: runtime.capability,
@@ -37175,16 +37894,12 @@
         moduleInitState: getUploadModuleInitState(),
         moduleInitError: String(state.moduleInitError || ''),
         ...getAutoQueueBatchRunSnapshotForUploadButtons(),
-        sendTask: runtime.sendTask,
-        sendMessageTask: {
-          running: sendMessageTaskState.running,
-          phase: sendMessageTaskState.phase,
-          action: sendMessageActionForSnapshot,
+        sendTask: canonicalSendTaskForSnapshot,
+        sendMessageTask: Object.assign(sendMessageTaskForSnapshot, {
           plan: buildSendTaskPlanFromAction(sendMessageActionForSnapshot),
-          ownerButtonId: sendMessageOwnerForSnapshot,
+          ownerButtonId: sendMessageOwnerForSnapshot || sendMessageTaskForSnapshot.ownerButtonId,
           visualOwnerAction: visualOwnerActionForSnapshot,
           visualOwnerButtonId: visualOwnerButtonIdForSnapshot,
-          runId: sendMessageTaskState.runId,
           hasClickedNativeSend: sendMessageTaskState.hasClickedNativeSend,
           nativeSendClicked: sendMessageTaskState.nativeSendClicked || sendMessageTaskState.hasClickedNativeSend,
           nativeSendClickedAt: sendMessageTaskState.nativeSendClickedAt || 0,
@@ -37193,7 +37908,7 @@
           responseStartedAt: sendMessageTaskState.responseStartedAt || 0,
           buttonText: getSendMessageButtonText(),
           sendCopyHotkeyButtonText: getSendCopyHotkeyOwnerButtonText(),
-        },
+        }),
         copyTask: runtime.copyTask,
         uploadRunning: isUploadRunActuallyActive(),
         activeFilesCount: getActiveGroupFiles().length,
@@ -37225,7 +37940,11 @@
         ),
         copyContinueTask: state.copyContinueTask,
         sendHotkeyTask: state.sendHotkeyTask,
-        sendCopyHotkeyTask: ensureSendCopyHotkeyTask(),
+        sendCopyHotkeyTask: Object.assign(
+          {},
+          ensureSendCopyHotkeyTask(),
+          sendCopyHotkeyTaskForSnapshot,
+        ),
         sendCopyHotkeyActive: isSendCopyHotkeyActive() || (
           typeof BRIDGE_STATE !== 'undefined'
           && BRIDGE_STATE.orch_enabled === true
@@ -39378,11 +40097,9 @@
         && !sendMessageTaskState.running
       ) {
         setAuthoritativeSendTaskState(
-          { phase: 'idle', cancelRequested: false, runId: '' },
+          { phase: 'idle', cancelRequested: false, runId: '', running: false },
           'send-message-button:stale-waiting-send-heal',
         );
-        state.waitingSend = false;
-        state.waitingRealSendButton = false;
       } else if (sendPhase === 'waiting_send' || sendPhase === 'waiting_ready') {
         button.dataset.action = 'send-message';
         if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
@@ -42069,17 +42786,12 @@
         });
       }
 
-      state.waitingReply = false;
-      state.messageSending = false;
-      state.waitingSend = false;
-      state.autoSendWaiting = false;
-      state.waitingRealSendButton = false;
-
       if (sendMessageTaskState) {
         sendMessageTaskState.phase = SEND_MESSAGE_PHASES.IDLE;
         sendMessageTaskState.running = false;
         sendMessageTaskState.action = 'send-message';
         sendMessageTaskState.ownerButtonId = '';
+        mirrorSendMessageTaskStateToCanonical(healReason);
       }
 
       if (
@@ -42181,14 +42893,9 @@
       sendMessageTaskState.updatedAt = Date.now();
 
       setAuthoritativeSendTaskState(
-        { phase: 'idle', runId: '', cancelRequested: false },
+        { phase: 'idle', runId: '', cancelRequested: false, running: false },
         `clear-stale-waiting-send:${reasonText}`,
       );
-
-      state.messageSending = false;
-      state.waitingSend = false;
-      state.autoSendWaiting = false;
-      state.waitingRealSendButton = false;
 
       return true;
     }
@@ -51910,12 +52617,20 @@
       'copy-and-hotkey': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
         const event = ctx ? ctx.event : null;
+        const button = ctx && ctx.button instanceof HTMLElement ? ctx.button : null;
         const actionSource = src === 'delegated-click' ? 'button' : src;
+        markCopyHotkeyOnceAcceptedImmediately(
+          button,
+          `handler:${actionSource}`,
+        );
         void handleCopyHotkeyOnceTrigger(actionSource, event).catch((err) => {
           const errText = formatToolboxError(err);
           console.error('[ChatGPT toolbox] copy hotkey once failed', err);
           setStatus(`复制+快捷键失败：${errText}`, 'error');
           ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][copy-and-hotkey:failed] source=${src} error=${errText}`);
+          const task = ensureCopyHotkeyOnceTask();
+          task.lastError = errText;
+          finishCopyHotkeyOnceTask('failed', task.runId || '', `handler:${actionSource}:exception`);
         });
         return true;
       },

@@ -2065,20 +2065,150 @@
     return getNormalButtonIdleLabel(normalized, '按钮');
   }
 
+  function normalizeButtonVmSendPhase(phase) {
+    const value = String(phase || '').trim().toLowerCase();
+    if (
+      value === 'idle'
+      || value === 'waiting_send'
+      || value === 'sending'
+      || value === 'waiting_reply'
+      || value === 'success'
+      || value === 'failed'
+      || value === 'cancelled'
+    ) {
+      return value;
+    }
+    if (
+      value === 'waiting'
+      || value === 'waiting_input'
+      || value === 'waiting_attachment'
+      || value === 'waiting_page_reply_to_send'
+      || value === 'ready_to_click'
+      || value === 'waiting_composer'
+      || value === 'preparing'
+    ) {
+      return 'waiting_send';
+    }
+    if (
+      value === 'clicking_send'
+      || value === 'writing_text'
+      || value === 'sending_hotkey'
+      || value === 'sending_continue'
+      || value === 'confirming_clipboard'
+      || value === 'copying'
+      || value === 'running'
+    ) {
+      return 'sending';
+    }
+    if (
+      value === 'sent_waiting_response'
+      || value === 'waiting_reply'
+      || value === 'stopping_response'
+    ) {
+      return 'waiting_reply';
+    }
+    if (value === 'done' || value === 'completed') {
+      return 'success';
+    }
+    if (value === 'error' || value === 'fail') {
+      return 'failed';
+    }
+    if (value === 'cancel' || value === 'canceled') {
+      return 'cancelled';
+    }
+    return 'idle';
+  }
+
+  function normalizeButtonVmSendSubPhase(phase, subPhase) {
+    const rawSubPhase = String(subPhase || '').trim();
+    if (rawSubPhase) {
+      return rawSubPhase;
+    }
+    const rawPhase = String(phase || '').trim().toLowerCase();
+    const normalizedPhase = normalizeButtonVmSendPhase(rawPhase);
+    if (rawPhase && rawPhase !== normalizedPhase) {
+      return rawPhase;
+    }
+    return '';
+  }
+
+  function isButtonVmTaskActive(task) {
+    if (!task || typeof task !== 'object') {
+      return false;
+    }
+    const phase = normalizeButtonVmSendPhase(task.phase);
+    return (
+      task.running === true
+      && phase !== 'idle'
+      && phase !== 'success'
+      && phase !== 'failed'
+      && phase !== 'cancelled'
+    );
+  }
+
+  function normalizeButtonVmSendTask(task, fallback = {}) {
+    const raw = task && typeof task === 'object' ? task : {};
+    const phase = normalizeButtonVmSendPhase(raw.phase || fallback.phase);
+    const subPhase = normalizeButtonVmSendSubPhase(raw.phase || fallback.phase, raw.subPhase || fallback.subPhase);
+    return {
+      running: raw.running === true || fallback.running === true,
+      phase,
+      subPhase,
+      action: String(raw.action || fallback.action || ''),
+      ownerButtonId: String(raw.ownerButtonId || fallback.ownerButtonId || ''),
+      runId: String(raw.runId || fallback.runId || ''),
+      reason: String(raw.reason || fallback.reason || ''),
+      error: String(raw.error || fallback.error || ''),
+      cancelRequested: raw.cancelRequested === true || fallback.cancelRequested === true,
+      startedAt: Number(raw.startedAt || fallback.startedAt || 0),
+      updatedAt: Number(raw.updatedAt || fallback.updatedAt || 0),
+      finishedAt: Number(raw.finishedAt || fallback.finishedAt || 0),
+    };
+  }
+
+  function selectAuthoritativeSendTaskSnapshot(snapshot = {}) {
+    const canonicalSendTask = normalizeButtonVmSendTask(snapshot.sendTask);
+    if (canonicalSendTask.running === true) {
+      return canonicalSendTask;
+    }
+    const sendMessageTask = normalizeButtonVmSendTask(snapshot.sendMessageTask, {
+      action: 'send-message',
+    });
+    if (isButtonVmTaskActive(sendMessageTask)) {
+      console.warn('[UPLOAD_BUTTON_VM][SEND_TASK_FALLBACK_SEND_MESSAGE_USED]', {
+        canonicalPhase: canonicalSendTask.phase,
+        canonicalRunning: canonicalSendTask.running,
+        fallbackPhase: sendMessageTask.phase,
+        fallbackSubPhase: sendMessageTask.subPhase,
+        fallbackAction: sendMessageTask.action,
+        fallbackOwnerButtonId: sendMessageTask.ownerButtonId,
+        fallbackRunId: sendMessageTask.runId,
+      });
+      return sendMessageTask;
+    }
+    const sendCopyHotkeyTask = normalizeButtonVmSendTask(snapshot.sendCopyHotkeyTask, {
+      action: 'send-copy-hotkey',
+    });
+    if (isButtonVmTaskActive(sendCopyHotkeyTask)) {
+      console.warn('[UPLOAD_BUTTON_VM][SEND_TASK_FALLBACK_SEND_COPY_HOTKEY_USED]', {
+        canonicalPhase: canonicalSendTask.phase,
+        canonicalRunning: canonicalSendTask.running,
+        fallbackPhase: sendCopyHotkeyTask.phase,
+        fallbackSubPhase: sendCopyHotkeyTask.subPhase,
+        fallbackAction: sendCopyHotkeyTask.action,
+        fallbackOwnerButtonId: sendCopyHotkeyTask.ownerButtonId,
+        fallbackRunId: sendCopyHotkeyTask.runId,
+      });
+      return sendCopyHotkeyTask;
+    }
+    return canonicalSendTask;
+  }
+
   function getNormalizedSendTaskPhase(snapshot = {}) {
-    const sendTask = snapshot.sendTask && typeof snapshot.sendTask === 'object'
-      ? snapshot.sendTask
-      : (
-        snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
-          ? snapshot.sendMessageTask
-          : {}
-      );
-    const rawPhase = String(sendTask.phase || TaskPhase.IDLE).trim().toLowerCase();
-    const rawSubPhase = String(
-      (sendTask.subPhase != null ? sendTask.subPhase : sendTask.subphase) || '',
-    ).trim().toLowerCase();
-    const normalizedPhase = normalizeTaskPhase(rawPhase === 'waiting_ready' ? 'waiting_send' : rawPhase);
-    if (normalizedPhase === TaskPhase.WAITING_SEND) {
+    const sendTask = selectAuthoritativeSendTaskSnapshot(snapshot);
+    const normalizedPhase = normalizeButtonVmSendPhase(sendTask.phase);
+    if (normalizedPhase === 'waiting_send') {
+      const rawSubPhase = normalizeButtonVmSendSubPhase(sendTask.phase, sendTask.subPhase);
       if (rawSubPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND) {
         return TaskPhase.WAITING_PAGE_REPLY_TO_SEND;
       }
@@ -2089,7 +2219,12 @@
         return TaskPhase.WAITING_ATTACHMENT;
       }
     }
-    return normalizedPhase;
+    return normalizeTaskPhase(normalizedPhase === 'waiting_send' ? 'waiting_send' : normalizedPhase);
+  }
+
+  function getNormalizedSendTaskSubPhase(snapshot = {}) {
+    const sendTask = selectAuthoritativeSendTaskSnapshot(snapshot);
+    return normalizeButtonVmSendSubPhase(sendTask.phase, sendTask.subPhase);
   }
 
   function isLegacySendPending(snapshot = {}) {
@@ -3024,9 +3159,7 @@
     const isSendMessageOwner = isSendMessageButtonOwner(snapshot);
     const copyHotkeyOnceRunning = isCopyHotkeyOnceTaskRunning(snapshot);
     const sendFamilyTaskForOwner = getSendFamilyTaskFromSnapshot(snapshot);
-    const sendTaskForOwner = snapshot.sendTask && typeof snapshot.sendTask === 'object'
-      ? snapshot.sendTask
-      : null;
+    const sendTaskForOwner = selectAuthoritativeSendTaskSnapshot(snapshot);
     const sendFamilyActionForOwner = String(
       (sendFamilyTaskForOwner && (
         sendFamilyTaskForOwner.action
@@ -3054,19 +3187,39 @@
       || snapshot.visualOwnerButtonId
       || '',
     ).trim();
-    const sendTaskPhaseForOwner = sendTaskForOwner
-      ? String(sendTaskForOwner.phase || 'idle').trim().toLowerCase()
-      : 'idle';
+    const sendTaskPhaseForOwner = normalizeButtonVmSendPhase(sendTaskForOwner.phase);
+    const sendTaskSubPhaseForOwner = normalizeButtonVmSendSubPhase(
+      sendTaskForOwner.phase,
+      sendTaskForOwner.subPhase,
+    );
     const sendTaskActiveForOwner = !!(
       sendTaskForOwner
       && sendTaskForOwner.running === true
       && sendTaskPhaseForOwner !== 'idle'
-      && sendTaskPhaseForOwner !== 'done'
+      && sendTaskPhaseForOwner !== 'success'
       && sendTaskPhaseForOwner !== 'failed'
       && sendTaskPhaseForOwner !== 'cancelled'
-      && sendTaskPhaseForOwner !== 'completed'
-      && sendTaskPhaseForOwner !== 'success'
     );
+    const sendTaskOwnedByCurrentButton = !!(
+      sendTaskActiveForOwner
+      && (
+        !sendTaskForOwner.ownerButtonId
+        || sendTaskForOwner.ownerButtonId === SEND_MESSAGE_OWNER_BUTTON_ID
+        || sendTaskForOwner.action === 'send-message'
+      )
+    );
+    console.log('[UPLOAD_BUTTON_VM][SEND_TASK_OWNER_CHECK]', {
+      buttonId: SEND_MESSAGE_OWNER_BUTTON_ID,
+      action: 'send-message',
+      running: sendTaskForOwner.running,
+      phase: sendTaskPhaseForOwner,
+      subPhase: sendTaskSubPhaseForOwner,
+      taskAction: sendTaskForOwner.action,
+      ownerButtonId: sendTaskForOwner.ownerButtonId,
+      runId: sendTaskForOwner.runId,
+      active: sendTaskActiveForOwner,
+      ownedByCurrentButton: sendTaskOwnedByCurrentButton,
+    });
     const isForeignSendFamilyOwner = !!(
       (
         sendFamilyTaskForOwner

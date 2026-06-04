@@ -1,5 +1,14 @@
   /********************************************************************
-   * ButtonTasks：全局按鈕任務 phase 單一來源（window.CGPT_BUTTON_TASKS）
+   * ButtonTasks：按钮任务镜像状态（window.CGPT_BUTTON_TASKS）
+   *
+   * 重要约束：
+   * 1. ButtonTasks 不是业务流程的权威状态源。
+   * 2. 上传/发送任务的权威状态来自 upload-module.js 内部 state.uploadTask / state.sendTask。
+   * 3. ButtonTasks 只接收 mirrorTaskSnapshot 写入，用于 UI 展示、日志与调试。
+   * 4. 不允许业务流程从 ButtonTasks 反向恢复、覆盖或推导 state.sendTask。
+   * 5. 主 phase 只允许：
+   *    idle / waiting_send / sending / waiting_reply / success / failed / cancelled
+   * 6. UI 细分阶段必须写入 subPhase，不允许直接污染主 phase。
    ********************************************************************/
 
   const BUTTON_TASK_PHASES = Object.freeze([
@@ -78,6 +87,71 @@
     danger: { phase: 'waiting', subPhase: 'danger' },
     disabled: { phase: 'idle', subPhase: 'disabled' },
   });
+
+  function normalizeButtonTaskMainPhase(phase) {
+    const value = String(phase || '').trim().toLowerCase();
+    if (
+      value === 'idle'
+      || value === 'waiting_send'
+      || value === 'sending'
+      || value === 'waiting_reply'
+      || value === 'success'
+      || value === 'failed'
+      || value === 'cancelled'
+    ) {
+      return value;
+    }
+    if (
+      value === 'waiting'
+      || value === 'waiting_input'
+      || value === 'waiting_attachment'
+      || value === 'waiting_page_reply_to_send'
+      || value === 'ready_to_click'
+    ) {
+      return 'waiting_send';
+    }
+    if (
+      value === 'copying'
+      || value === 'running'
+      || value === 'clicking_send'
+      || value === 'writing_text'
+      || value === 'sending_hotkey'
+      || value === 'sending_continue'
+      || value === 'confirming_clipboard'
+    ) {
+      return 'sending';
+    }
+    if (
+      value === 'sent_waiting_response'
+      || value === 'waiting_reply'
+      || value === 'stopping_response'
+    ) {
+      return 'waiting_reply';
+    }
+    if (value === 'done' || value === 'completed') {
+      return 'success';
+    }
+    if (value === 'error' || value === 'fail') {
+      return 'failed';
+    }
+    if (value === 'cancel' || value === 'canceled') {
+      return 'cancelled';
+    }
+    return 'idle';
+  }
+
+  function normalizeButtonTaskSubPhase(phase, subPhase) {
+    const explicitSubPhase = String(subPhase || '').trim();
+    if (explicitSubPhase) {
+      return explicitSubPhase;
+    }
+    const rawPhase = String(phase || '').trim().toLowerCase();
+    const normalizedMainPhase = normalizeButtonTaskMainPhase(rawPhase);
+    if (rawPhase && rawPhase !== normalizedMainPhase) {
+      return rawPhase;
+    }
+    return '';
+  }
 
   function canonicalizeTaskPhaseInput(phase, subPhase = '') {
     const rawPhase = String(phase || 'idle').trim().toLowerCase() || 'idle';
@@ -252,13 +326,21 @@
     logButtonTaskChange(taskName, oldPhase, 'idle', reason || 'reset', '');
   }
 
-  function mirrorTaskSnapshot(taskName, snapshot = {}) {
+  function mirrorTaskSnapshot(taskName, snapshot = {}, reason = '') {
     const task = getButtonTask(taskName);
     if (!task || !snapshot || typeof snapshot !== 'object') {
       return;
     }
 
     const keys = [
+      'running',
+      'action',
+      'ownerButtonId',
+      'reason',
+      'error',
+      'startedAt',
+      'updatedAt',
+      'finishedAt',
       'phase',
       'subPhase',
       'subphase',
@@ -277,13 +359,23 @@
       }
     });
 
-    const canonical = canonicalizeTaskPhaseInput(
-      task.phase,
-      task.subPhase != null ? task.subPhase : task.subphase,
-    );
-    task.phase = canonical.phase;
-    task.subPhase = canonical.subPhase;
-    task.subphase = canonical.subPhase;
+    const rawPhase = String(snapshot.phase || task.phase || 'idle').trim().toLowerCase();
+    const mainPhase = normalizeButtonTaskMainPhase(rawPhase);
+    const subPhase = normalizeButtonTaskSubPhase(rawPhase, snapshot.subPhase || snapshot.subphase || task.subPhase);
+    if (mainPhase === 'idle' && rawPhase && rawPhase !== 'idle') {
+      console.warn('[BUTTON_TASKS][UNKNOWN_PHASE_NORMALIZED_TO_IDLE]', {
+        rawPhase,
+        subPhase,
+        taskName,
+        snapshot,
+        reason,
+      });
+    }
+    task.running = snapshot.running === true;
+    task.phase = mainPhase;
+    task.subPhase = subPhase;
+    task.subphase = subPhase;
+    task.updatedAt = snapshot.updatedAt || Date.now();
   }
 
   function logButtonTaskClick(action, taskName, phase, runId) {

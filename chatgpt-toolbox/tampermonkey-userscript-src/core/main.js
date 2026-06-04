@@ -9860,23 +9860,73 @@
     return true;
   }
 
+  function enrichComposerResponseState(base = {}) {
+    const isResponding = base.is_responding === true || base.isResponding === true;
+    const responseState = String(base.response_state || base.responseState || '').trim().toLowerCase();
+    const responseReason = String(
+      base.response_state_reason || base.responseStateReason || '',
+    ).trim().toLowerCase();
+    const canAcceptInput = base.can_accept_input === true || base.canAcceptInput === true;
+    const canSendNow = base.can_send_now === true || base.canSendNow === true;
+    const hasComposer = base.has_composer === true || base.hasComposer === true;
+    const hasComposerPayload = base.has_composer_payload === true || base.hasComposerPayload === true;
+    const attachmentCount = Number(base.attachment_count || base.attachmentCount || 0);
+    return Object.assign({}, base, {
+      isResponding,
+      is_responding: isResponding,
+      responseState: responseState || base.responseState || '',
+      response_state: responseState || base.response_state || '',
+      responseStateReason: responseReason || base.responseStateReason || '',
+      response_state_reason: responseReason || base.response_state_reason || '',
+      canAcceptInput,
+      can_accept_input: canAcceptInput,
+      canSendNow,
+      can_send_now: canSendNow,
+      hasComposer,
+      has_composer: hasComposer,
+      hasComposerPayload,
+      has_composer_payload: hasComposerPayload,
+      attachmentCount,
+      attachment_count: attachmentCount,
+      reply: {
+        state: responseState || (isResponding ? 'generating' : 'idle'),
+        busy: isResponding,
+        reason: responseReason,
+      },
+      composer: {
+        exists: hasComposer,
+        inputReady: canAcceptInput,
+        hasPayload: hasComposerPayload,
+        nativeSendReady: canSendNow,
+        attachmentCount,
+      },
+      permission: {
+        canInput: canAcceptInput,
+        canSend: canSendNow,
+        canUpload: canAcceptInput && !isResponding && !hasComposerPayload,
+      },
+    });
+  }
+
   function rememberResponseState(cacheKey, result) {
-    if (isUsableCachedResponseState(result)) {
+    const enriched = enrichComposerResponseState(result);
+    if (isUsableCachedResponseState(enriched)) {
       responseStateCache.at = Date.now();
       responseStateCache.key = cacheKey;
-      responseStateCache.value = result;
+      responseStateCache.value = enriched;
     }
 
-    if (result && typeof result === 'object') {
-      const responseState = String(result.response_state || result.responseState || '').trim().toLowerCase();
-      const responseReason = String(result.response_state_reason || result.responseStateReason || '').trim().toLowerCase();
-      const generating = responseState === 'generating'
+    if (enriched && typeof enriched === 'object') {
+      const responseState = String(enriched.reply?.state || enriched.response_state || enriched.responseState || '').trim().toLowerCase();
+      const responseReason = String(enriched.reply?.reason || enriched.response_state_reason || enriched.responseStateReason || '').trim().toLowerCase();
+      const generating = enriched.reply?.busy === true
+        || responseState === 'generating'
         || responseState === 'responding'
         || responseState === 'answering'
         || responseReason === 'assistant_busy'
         || responseReason === 'response_in_progress'
-        || result.is_responding === true
-        || result.isResponding === true;
+        || enriched.is_responding === true
+        || enriched.isResponding === true;
       if (
         generating
         && typeof UploadModule !== 'undefined'
@@ -9899,7 +9949,7 @@
       }
     }
 
-    return result;
+    return enriched;
   }
 
   function getCachedResponseStateForReenter(reasonText) {
@@ -9965,6 +10015,9 @@
     const hasComposerPayload = Boolean(responseState.has_composer_payload);
     const composerTextLen = Number(responseState.composer_text_len || 0);
 
+    const responseStateReason = resolvePageCapabilityReason(responseState, conversationId, url);
+    const canAcceptInput = Boolean(responseState.can_accept_input || responseState.canAcceptInput);
+    const canSendNow = Boolean(responseState.can_send_now || responseState.canSendNow);
     const capability = {
       client_id: clientId,
       page_instance_id: getToolboxPageInstanceId(),
@@ -9973,11 +10026,16 @@
       page_type: conversationId ? 'conversation' : (isHomePage ? 'home' : 'unknown'),
       online: true,
       is_responding: responding,
+      isResponding: responding,
       response_state: responseState.response_state || 'unknown',
-      response_state_reason: resolvePageCapabilityReason(responseState, conversationId, url),
+      responseState: responseState.response_state || responseState.responseState || 'unknown',
+      response_state_reason: responseStateReason,
+      responseStateReason,
       bridge_connected: Boolean(BridgePollRuntime.bridge_connected),
-      can_send_now: Boolean(responseState.can_send_now),
-      can_accept_input: Boolean(responseState.can_accept_input),
+      can_send_now: canSendNow,
+      canSendNow,
+      can_accept_input: canAcceptInput,
+      canAcceptInput,
       has_composer: hasComposer,
       hasComposer,
       composer_text_len: composerTextLen,
@@ -9985,6 +10043,27 @@
       attachmentCount,
       has_composer_payload: hasComposerPayload,
       hasComposerPayload,
+      reply: {
+        state: responding ? 'generating' : (responseState.reply?.state || responseState.response_state || 'idle'),
+        busy: responding === true,
+        reason: responseStateReason || '',
+      },
+      composer: {
+        exists: hasComposer === true,
+        inputReady: canAcceptInput === true,
+        hasPayload: hasComposerPayload === true,
+        nativeSendReady: canSendNow === true,
+        attachmentCount,
+      },
+      permission: {
+        canInput: canAcceptInput === true,
+        canSend: canSendNow === true,
+        canUpload: (
+          canAcceptInput === true
+          && responding !== true
+          && hasComposerPayload !== true
+        ),
+      },
       last_poll_ok: BridgePollRuntime.last_poll_ok,
       last_poll_error: String(BridgePollRuntime.last_poll_error || '').trim(),
       last_poll_at: Number(BridgePollRuntime.last_poll_at || 0),

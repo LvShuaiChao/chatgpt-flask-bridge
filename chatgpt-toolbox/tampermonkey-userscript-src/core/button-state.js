@@ -359,6 +359,95 @@
     };
   }
 
+  function normalizeBridgeStateForButtonState(bridgeState = {}) {
+    const replyFromStructured = bridgeState.reply && typeof bridgeState.reply === 'object'
+      ? bridgeState.reply
+      : {};
+    const composerFromStructured = bridgeState.composer && typeof bridgeState.composer === 'object'
+      ? bridgeState.composer
+      : {};
+    const permissionFromStructured = bridgeState.permission && typeof bridgeState.permission === 'object'
+      ? bridgeState.permission
+      : {};
+    const responseState = String(
+      replyFromStructured.state
+      || bridgeState.responseState
+      || bridgeState.response_state
+      || '',
+    ).trim().toLowerCase();
+    const responseStateReason = String(
+      replyFromStructured.reason
+      || bridgeState.responseStateReason
+      || bridgeState.response_state_reason
+      || bridgeState.reason
+      || '',
+    ).trim().toLowerCase();
+    const isResponding = (
+      replyFromStructured.busy === true
+      || bridgeState.isResponding === true
+      || bridgeState.is_responding === true
+      || responseState === 'generating'
+      || responseState === 'answering'
+      || responseState === 'responding'
+    );
+    const composerExists = (
+      composerFromStructured.exists === true
+      || bridgeState.hasComposer === true
+      || bridgeState.has_composer === true
+    );
+    const inputReady = (
+      composerFromStructured.inputReady === true
+      || bridgeState.canAcceptInput === true
+      || bridgeState.can_accept_input === true
+      || bridgeState.inputable === true
+    );
+    const hasPayload = (
+      composerFromStructured.hasPayload === true
+      || bridgeState.hasComposerPayload === true
+      || bridgeState.has_composer_payload === true
+      || bridgeState.pendingSend === true
+      || bridgeState.pending_send === true
+    );
+    const nativeSendReady = (
+      composerFromStructured.nativeSendReady === true
+      || bridgeState.canSendNow === true
+      || bridgeState.can_send_now === true
+      || bridgeState.sendable === true
+    );
+    const attachmentCount = Number(
+      composerFromStructured.attachmentCount
+      || bridgeState.attachmentCount
+      || bridgeState.attachment_count
+      || 0,
+    );
+    const canInput = permissionFromStructured.canInput === true || inputReady === true;
+    const canSend = permissionFromStructured.canSend === true || nativeSendReady === true;
+    const canUpload = permissionFromStructured.canUpload === true || (
+      canInput === true
+      && isResponding === false
+      && hasPayload === false
+    );
+    return {
+      reply: {
+        state: responseState || (isResponding ? 'generating' : 'idle'),
+        busy: isResponding,
+        reason: responseStateReason,
+      },
+      composer: {
+        exists: composerExists,
+        inputReady,
+        hasPayload,
+        nativeSendReady,
+        attachmentCount,
+      },
+      permission: {
+        canInput,
+        canSend,
+        canUpload,
+      },
+    };
+  }
+
   function getUnifiedButtonAuthoritySnapshot(source = '-') {
     try {
       const cached = (
@@ -387,29 +476,26 @@
       ? window.__cgptBridgeState
       : {};
 
-    const responseState = String(
-      bridgeState.response_state
-      || bridgeState.responseState
-      || '',
-    ).trim().toLowerCase();
+    const normalizedBridgeState = normalizeBridgeStateForButtonState(bridgeState);
+    const responseState = normalizedBridgeState.reply.state;
+    const responseReason = normalizedBridgeState.reply.reason;
+    const assistantBusy = normalizedBridgeState.reply.busy;
+    const inputable = normalizedBridgeState.permission.canInput;
+    const sendable = normalizedBridgeState.permission.canSend;
 
-    const responseReason = String(
-      bridgeState.response_state_reason
-      || bridgeState.responseStateReason
-      || bridgeState.reason
-      || '',
-    ).trim().toLowerCase();
-
-    const inputable = bridgeState.inputable === true || bridgeState.inputable === 1;
-    const sendable = bridgeState.sendable === true || bridgeState.sendable === 1;
-
-    const assistantBusy = (
-      responseState === 'generating'
-      || responseState === 'responding'
-      || responseState === 'answering'
-      || responseState === 'streaming'
-      || responseReason === 'assistant_busy'
-    );
+    console.log('[BUTTON_STATE][BRIDGE_NORMALIZED]', {
+      responseState,
+      responseReason,
+      isResponding: assistantBusy,
+      hasComposer: normalizedBridgeState.composer.exists,
+      canAcceptInput: normalizedBridgeState.composer.inputReady,
+      hasComposerPayload: normalizedBridgeState.composer.hasPayload,
+      canSendNow: normalizedBridgeState.composer.nativeSendReady,
+      attachmentCount: normalizedBridgeState.composer.attachmentCount,
+      canInput: normalizedBridgeState.permission.canInput,
+      canSend: normalizedBridgeState.permission.canSend,
+      canUpload: normalizedBridgeState.permission.canUpload,
+    });
 
     const pendingSend = (
       responseState === 'waiting_send'
